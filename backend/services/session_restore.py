@@ -285,8 +285,8 @@ def load_authoritative_session_deal_facts(
             )
             if unresolved_close_ids:
                 warn(
-                    "[live] session risk unavailable; broker-missing positions lack close deals: %s",
-                    unresolved_close_ids,
+                    "[live] session risk unavailable; broker-missing positions "
+                    f"lack close deals: {unresolved_close_ids}"
                 )
                 return None
             completed_position_trades = [
@@ -330,9 +330,8 @@ def load_authoritative_session_deal_facts(
             conn.close()
     except Exception as exc:
         warn(
-            "[live] authoritative session trade rebuild failed for %s: %s",
-            trade_date,
-            exc,
+            "[live] authoritative session trade rebuild failed for "
+            f"{trade_date}: {exc}"
         )
         return None
 
@@ -413,6 +412,7 @@ def rebuild_session_risk_projection(
     max_consecutive_losses: int,
     max_daily_loss_pct: float,
     realized_close_legs: Sequence[Mapping[str, Any]] | None = None,
+    enforce_circuit_breaker: bool = True,
 ) -> dict[str, Any]:
     """Rebuild PnL, equity path, peak, drawdown and circuit deterministically.
 
@@ -525,16 +525,18 @@ def rebuild_session_risk_projection(
         elif pnl > 0.0:
             break
 
-    circuit_breaker = False
-    circuit_reason = ""
+    circuit_observed = False
+    circuit_observed_reason = ""
     consecutive_limit = int(max_consecutive_losses)
     drawdown_limit = float(max_daily_loss_pct)
     if consecutive_limit > 0 and consecutive_loss >= consecutive_limit:
-        circuit_breaker = True
-        circuit_reason = f"consecutive losses {consecutive_loss}"
+        circuit_observed = True
+        circuit_observed_reason = f"consecutive losses {consecutive_loss}"
     elif drawdown_limit > 0.0 and max_drawdown_pct >= drawdown_limit:
-        circuit_breaker = True
-        circuit_reason = f"daily drawdown {max_drawdown_pct:.1f}%"
+        circuit_observed = True
+        circuit_observed_reason = f"daily drawdown {max_drawdown_pct:.1f}%"
+
+    circuit_enforced = bool(enforce_circuit_breaker and circuit_observed)
 
     return {
         "trade_date": str(trade_date),
@@ -554,8 +556,13 @@ def rebuild_session_risk_projection(
             if normalized_realized
             else 0.0
         ),
-        "circuit_breaker": circuit_breaker,
-        "circuit_reason": circuit_reason,
+        "circuit_breaker": circuit_enforced,
+        "circuit_reason": circuit_observed_reason if circuit_enforced else "",
+        "session_circuit_observation": {
+            "triggered": circuit_observed,
+            "reason": circuit_observed_reason,
+            "enforced": circuit_enforced,
+        },
         "trade_equity_history": equity_path[-500:],
     }
 
@@ -568,6 +575,7 @@ def build_authoritative_session_state(
     current_balance: Any,
     max_consecutive_losses: int,
     max_daily_loss_pct: float,
+    enforce_circuit_breaker: bool = True,
 ) -> dict[str, Any]:
     """Build the complete deals-first live session projection from explicit facts."""
 
@@ -589,6 +597,7 @@ def build_authoritative_session_state(
         max_consecutive_losses=max_consecutive_losses,
         max_daily_loss_pct=max_daily_loss_pct,
         realized_close_legs=realized_legs,
+        enforce_circuit_breaker=enforce_circuit_breaker,
     )
     return {
         **projection,
@@ -612,6 +621,7 @@ def resolve_session_restore(
     max_consecutive_losses: int,
     max_daily_loss_pct: float,
     observed_at: float,
+    enforce_circuit_breaker: bool = True,
 ) -> dict[str, Any]:
     """Resolve authoritative, degraded-cache, and unavailable restore states.
 
@@ -635,6 +645,7 @@ def resolve_session_restore(
                 current_balance=current_balance,
                 max_consecutive_losses=max_consecutive_losses,
                 max_daily_loss_pct=max_daily_loss_pct,
+                enforce_circuit_breaker=enforce_circuit_breaker,
             )
         except (TypeError, ValueError, OverflowError) as exc:
             authoritative_error = f"{type(exc).__name__}:{exc}"

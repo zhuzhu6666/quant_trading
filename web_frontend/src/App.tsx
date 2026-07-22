@@ -3,6 +3,8 @@ import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
+import { useAuth } from "@/contexts/AuthContext";
+import { LiveStateProvider } from "@/hooks/useLiveState";
 const LoginPage = lazy(() => import("@/pages/LoginPage").then((module) => ({ default: module.LoginPage })));
 const OverviewPage = lazy(() => import("@/pages/OverviewPage").then((module) => ({ default: module.OverviewPage })));
 const TradingPage = lazy(() => import("@/pages/TradingPage").then((module) => ({ default: module.TradingPage })));
@@ -16,11 +18,14 @@ function RouteFallback() {
 }
 
 function ProtectedAppLayout() {
+  const { authenticated } = useAuth();
   return (
     <ProtectedRoute>
-      <ErrorBoundary>
-        <AppShell><Suspense fallback={<RouteFallback />}><Outlet /></Suspense></AppShell>
-      </ErrorBoundary>
+      <LiveStateProvider enabled={authenticated}>
+        <ErrorBoundary>
+          <AppShell><Suspense fallback={<RouteFallback />}><Outlet /></Suspense></AppShell>
+        </ErrorBoundary>
+      </LiveStateProvider>
     </ProtectedRoute>
   );
 }

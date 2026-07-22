@@ -60,6 +60,8 @@ def _runtime(
     persisted=None,
     safety_error=None,
     phase2=True,
+    circuit_breaker=False,
+    circuit_enforced=True,
 ):
     order = order if order is not None else []
     process_calls = process_calls if process_calls is not None else []
@@ -112,11 +114,12 @@ def _runtime(
         live_state_get=lambda key, default=None: {
             "trade_date": today,
             "session_state_status": "available",
-            "circuit_breaker": False,
+            "circuit_breaker": circuit_breaker,
         }.get(key, default),
         bootstrap_position_recovery=lambda *_args, **_kwargs: True,
         loop_strategy_name="factor_v4",
         restore_session_state=lambda *_args, **_kwargs: True,
+        session_circuit_breaker_enforced=lambda: circuit_enforced,
         evaluate_daily_drawdown=lambda: {"tripped": False},
         market_session_snapshot=lambda _bridge: {"status": "open_confirmed"},
         warmup_from_local_db=lambda *_args: _frame(),
@@ -236,4 +239,33 @@ def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
     assert len(process_calls) == 1
     assert process_calls[0][1]["protection_already_run"] is True
     assert plane.marked
-    assert result["wait_seconds"] == 10.0
+    assert result["wait_seconds"] == 5.0
+
+
+def test_demo_mode_ignores_observed_session_circuit_and_runs_alpha():
+    process_calls = []
+    runtime, _controller, plane = _runtime(
+        reconcile_account={
+            "account": {"balance": 10_000.0},
+            "observed_at": 100.0,
+            "reconcile_id": "account-demo",
+        },
+        process_calls=process_calls,
+        circuit_breaker=True,
+        circuit_enforced=False,
+    )
+
+    result = run_live_loop_tick_body(
+        broker="ctrader",
+        bridge_cfg=SimpleNamespace(),
+        timeframe="M5",
+        tick=5,
+        recovery_bootstrapped=True,
+        stop_requested=lambda: False,
+        log=lambda _message: None,
+        runtime=runtime,
+    )
+
+    assert len(process_calls) == 1
+    assert plane.marked
+    assert result["wait_seconds"] == 5.0

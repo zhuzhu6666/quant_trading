@@ -91,6 +91,7 @@ def test_recovery_position_store_owns_complete_persistence_lifecycle(tmp_path):
     store.merge_meta(1, {"pending_close": True})
     row = store.load(1)
     assert row["recovery_meta"]["pending_close"] is True
+    assert row["last_seen_at"] == pytest.approx(120.0)
 
     store.mark_closed(
         1,

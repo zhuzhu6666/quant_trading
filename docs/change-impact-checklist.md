@@ -135,7 +135,7 @@
 | startup barrier | broker ready、fresh account/positions、unknown intent recovery、session restore、position recovery attach、initial safety、factor warmup 是否依序完成；session restore 的 authoritative/degraded/unavailable 是否由独立纯决策函数判定且不读取 runtime globals；任一步失败是否 fail-closed |
 | safety-first 顺序 | 每轮是否严格 broker snapshot → safety → session/circuit → closed bar/factor/open；bars、factor、PG、market session 和 circuit 失败是否仍保留 close/reduce/tighten |
 | safety shadow 独立性 | V2 planner 是否纯只读、无 broker mutation；是否与 legacy 实际选中/覆盖动作做规范化 fingerprint 比较；`independent=false`、mismatch、planner exception 是否持续阻断新增风险；是否禁止把测试 match 冒充 24 小时/完整持仓生命周期观察完成 |
-| session deals-first | runtime_kv 缺失时是否仍查询 `ctrader_deals`；是否要求 broker positions 不超过 15 秒；partial close 后仍开放的 position 是否从 completed trade 排除；`session_observed_at` 是否与 account/positions 独立；unavailable/degraded_cache 是否保留最后值、阻断开仓且不归零 |
+| session deals-first | runtime_kv 缺失时是否仍查询 `ctrader_deals`；是否要求 broker positions 不超过 15 秒；partial close 后仍开放的 position 是否从 completed trade 排除；`session_observed_at` 是否与 account/positions 独立；unavailable/degraded_cache 是否保留最后值、阻断开仓且不归零；session circuit 的 Demo observation-only 是否同时校验 autonomy mode 与实际 Demo broker，非 Demo 是否继续强制熔断 |
 | heartbeat freshness | safety heartbeat 缺失是否按 unknown、超过 15 秒是否自动阻断新增风险；有仓/unknown execution 是否保持 5 秒 cadence |
 | 降风险可用性 | PostgreSQL、因子或审计失败时 close/reduce/tighten 是否继续，失败证据是否进入本地 append-only safety outbox |
 | live façade 边界 | reconcile contract、safety/startup orchestration、emergency 状态机是否留在独立无 PG 模块；`live_service` 对应入口是否仍只是无循环/无异常编排的 callback wiring |

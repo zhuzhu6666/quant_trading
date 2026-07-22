@@ -353,7 +353,7 @@
 
 - 状态: `fixed`
 - 旧理解: `risk/pre_trade.py`、`risk/circuit.py` 或旧 `execution/router.py` 可以作为 live 主链路的开仓授权/熔断事实源。
-- 当前口径: 当前 live 主链路由 `RiskPolicyService.evaluate(...)` 统一授权；账户/运行态阈值由 `RiskLimitSnapshot` 输入 `RiskGovernor`；live loop 的日内 circuit breaker 只是执行快停保护，阈值同样来自 `RiskLimitSnapshot`。
+- 当前口径: 当前 live 主链路由 `RiskPolicyService.evaluate(...)` 统一授权；账户/运行态阈值由 `RiskLimitSnapshot` 输入 `RiskGovernor`；live loop 的日内 circuit breaker 只是执行快停保护，阈值同样来自 `RiskLimitSnapshot`。只有 `demo_autonomous`/`demo_nursery` 与真实 cTrader Demo 环境同时成立时，该 session circuit 为 observation-only；实盘、非 Demo 模式和环境不可确认时仍强制执行，不能仅靠 mode 标签旁路。
 - 影响面: `risk/pre_trade.py`、`risk/circuit.py`、已移除的 legacy execution router、`backend/services/live_service.py`、`risk/policy_service.py`、测试、文档。
 - 收口方式: 旧模块已在代码注释中标为 paper/backtest/legacy；live 不新增这些模块的调用；VaR/CVaR、事件风险、模型权限和开仓/改仓/治理动作均回到 `RiskPolicyService`。
 - 验证方式: `tests/risk/test_policy_service.py`、`tests/test_live_service_circuit.py`、`tests/alpha/test_execution_gate.py`、`tests/test_live_loop_shell.py`。

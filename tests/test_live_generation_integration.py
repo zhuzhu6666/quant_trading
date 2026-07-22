@@ -134,11 +134,12 @@ def test_phase2_runs_broker_snapshot_and_safety_before_missing_bars(monkeypatch)
     assert order == ["broker_snapshot", "account_snapshot", "session", "bars"]
     assert result["safety"]["reconciliation_state"] == "fresh"
     assert result["safety"]["heartbeat_at"] > 0
-    assert result["wait_seconds"] == 10.0
+    assert result["wait_seconds"] == 5.0
 
 
 def test_phase2_circuit_blocks_alpha_only_after_safety(monkeypatch):
     _enable_phase2(monkeypatch)
+    monkeypatch.setattr(live_service, "bounded_demo_mode_active", lambda: False)
     bridge = _SnapshotBridge()
     monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(

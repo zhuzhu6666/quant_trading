@@ -53,6 +53,7 @@ def test_spot_event_still_updates_realtime_quote_after_depth_removal(monkeypatch
     assert quote["ask"] == pytest.approx(4120.7)
     assert quote["mid"] == pytest.approx(4120.6)
     assert quote["ts"] > 0
+    assert quote["source"] == "ctrader_spot"
 
 
 def test_subscribe_spots_is_idempotent_per_connection(monkeypatch):

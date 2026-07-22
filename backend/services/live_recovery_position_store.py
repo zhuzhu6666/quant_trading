@@ -70,7 +70,7 @@ class RecoveryPositionStore:
                 conn,
                 """
                 UPDATE recovery_position_state
-                SET recovery_meta_json=?, last_seen_at=?
+                SET recovery_meta_json=?
                 WHERE position_id=?
                 """,
                 (
@@ -79,7 +79,6 @@ class RecoveryPositionStore:
                         ensure_ascii=False,
                         default=str,
                     ),
-                    payload["last_seen_at"],
                     payload["position_id"],
                 ),
             )

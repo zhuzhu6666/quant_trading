@@ -197,7 +197,6 @@ export function TradingPage() {
   const statusFact = readFact(liveStatusQuery.data, "live.status.v2");
   const strategyFact = readFact(strategyStatusQuery.data, "live.strategy.v2");
   const riskFact = readFact(riskQuery.data, "risk.summary.v2");
-  const snapshotFact = readFact(snapshot, "live.state.v2");
   const accountComponentFact = readFactComponent(snapshot, "account", "live.account.v2");
   const positionsComponentFact = readFactComponent(snapshot, "positions", "live.positions.v2");
   const endpointIdentityFact = readFactNestedComponent(positionsQuery.data, ["broker_reconcile", "identity"], "live.positions.identity.v1");
@@ -291,9 +290,8 @@ export function TradingPage() {
   }, [recentTicks]);
   const executionEvents = pickArray(strategyStatus, ["execution_events"]);
   const liveExecutionSummary = { ...executionSummary, ...asRecord(pick(strategyStatus, ["execution_summary"])) };
-  const snapshotKnown = factIsKnown(snapshotFact);
   const strategyDisplayable = factHasDisplayValue(strategyFact);
-  const executionKnown = snapshotKnown && strategyKnown;
+  const executionKnown = strategyKnown;
 
   const spotKnown = factIsKnown(spotFact);
   const startFactsKnown = loopKnown
@@ -304,7 +302,7 @@ export function TradingPage() {
     && spotKnown;
   const positionsKnown = factIsKnown(positionsViewFact, positionsViewRequestFailed);
 
-  const connectionTone = connected && snapshotKnown ? "ok" : source === "polling" ? "warn" : "bad";
+  const connectionTone = connected ? "ok" : source === "polling" ? "warn" : "bad";
   const loopRunning = pickBoolean(loop, ["running", "is_running", "pipeline_active", "alive", "status"], false);
   const broker = pickString(loop, ["broker", "broker_name", "exchange"], pickString(account, ["broker"], ""));
   const strategy = pickString(loop, ["strategy_name", "strategy", "strategyName", "active_strategy"], "");

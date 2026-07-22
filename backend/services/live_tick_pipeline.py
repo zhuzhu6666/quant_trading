@@ -128,12 +128,20 @@ def resolve_closed_position_ids(
     previous_position_ids: set[int],
     current_position_ids: set[int],
     positions_snapshot_ready: bool,
+    tracked_position_ids: set[int] | None = None,
 ) -> tuple[set[int], set[int], bool]:
-    if not previous_position_ids:
+    expected_position_ids = {
+        int(item)
+        for item in (
+            set(previous_position_ids) | set(tracked_position_ids or set())
+        )
+        if int(item or 0) > 0
+    }
+    if not expected_position_ids:
         return set(), current_position_ids.copy(), False
     if not current_position_ids and not positions_snapshot_ready:
-        return set(), previous_position_ids.copy(), True
-    return previous_position_ids - current_position_ids, current_position_ids, False
+        return set(), expected_position_ids, True
+    return expected_position_ids - current_position_ids, current_position_ids, False
 
 
 def select_close_total_pnl(

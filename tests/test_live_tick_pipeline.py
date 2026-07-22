@@ -161,6 +161,12 @@ def test_position_id_and_close_detection_helpers_preserve_cache_defer_behavior()
         current_position_ids={12},
         positions_snapshot_ready=True,
     )
+    durable_closed, durable_current, durable_deferred = resolve_closed_position_ids(
+        previous_position_ids=set(),
+        tracked_position_ids={14},
+        current_position_ids=set(),
+        positions_snapshot_ready=True,
+    )
 
     assert current == {10, 12}
     assert initial_closed == set()
@@ -172,6 +178,9 @@ def test_position_id_and_close_detection_helpers_preserve_cache_defer_behavior()
     assert closed == {10}
     assert latest_current == {12}
     assert latest_deferred is False
+    assert durable_closed == {14}
+    assert durable_current == set()
+    assert durable_deferred is False
 
 
 def test_close_total_pnl_prefers_real_then_factor_then_fallback():

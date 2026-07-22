@@ -30,6 +30,7 @@ class LiveLoopTickRuntime:
     bootstrap_position_recovery: Any
     loop_strategy_name: str
     restore_session_state: Any
+    session_circuit_breaker_enforced: Any
     evaluate_daily_drawdown: Any
     market_session_snapshot: Any
     warmup_from_local_db: Any
@@ -56,6 +57,7 @@ class LegacyLiveLoopTickRuntime:
     retry_session_restore: Any
     loop_strategy_name: str
     bootstrap_position_recovery: Any
+    session_circuit_breaker_enforced: Any
     evaluate_daily_drawdown: Any
     warmup_from_local_db: Any
     ensure_decision_bars_fresh: Any
@@ -224,7 +226,8 @@ def run_legacy_live_loop_tick_body(
                 wait_seconds=5.0,
             )
 
-    if runtime.live_state_get("circuit_breaker", False):
+    circuit_enforced = bool(runtime.session_circuit_breaker_enforced())
+    if circuit_enforced and runtime.live_state_get("circuit_breaker", False):
         log(
             f"tick {tick}: circuit breaker tripped; safety completed, "
             "skip alpha"
@@ -234,7 +237,7 @@ def run_legacy_live_loop_tick_body(
             wait_seconds=wait_seconds,
         )
     drawdown = runtime.evaluate_daily_drawdown()
-    if drawdown["tripped"]:
+    if circuit_enforced and drawdown["tripped"]:
         log(
             f"tick {tick}: CIRCUIT BREAKER: daily drawdown "
             f"{drawdown['dd_pct']:.1f}%; safety completed"
@@ -276,7 +279,10 @@ def run_legacy_live_loop_tick_body(
         and not reconcile_blockers
         and str(runtime.live_state_get("session_state_status", "") or "")
         == "available"
-        and not runtime.live_state_get("circuit_breaker", False)
+        and (
+            not circuit_enforced
+            or not runtime.live_state_get("circuit_breaker", False)
+        )
         and bool(market_session.get("can_open_positions", False))
         and not runtime.no_new_risk_latched(fail_closed=True)
         and not runtime.process_shutdown_requested()
@@ -466,9 +472,11 @@ def run_live_loop_tick_body(
         return session_result["result"]
     recovery_bootstrapped = session_result["recovery_bootstrapped"]
 
-    if (
+    circuit_enforced = bool(runtime.session_circuit_breaker_enforced())
+    drawdown = runtime.evaluate_daily_drawdown()
+    if circuit_enforced and (
         runtime.live_state_get("circuit_breaker", False)
-        or runtime.evaluate_daily_drawdown()["tripped"]
+        or drawdown["tripped"]
     ):
         log(
             f"tick {tick}: session circuit blocks new risk; "
@@ -766,16 +774,12 @@ def _update_generation_blockers(
 
 
 def _safety_wait_seconds(safety: dict[str, Any]) -> float:
-    position_ids = list(safety.get("position_ids") or [])
-    unknown_count = int(safety.get("unknown_execution_count") or 0)
-    reconcile_state = str(
-        safety.get("reconciliation_state") or "unknown"
-    )
-    return (
-        5.0
-        if position_ids or unknown_count or reconcile_state != "fresh"
-        else 10.0
-    )
+    # The public account/position fact contract expires after 15 seconds.
+    # A ten-second idle wait plus two broker RPCs and scheduler jitter made a
+    # healthy empty account cross that boundary on alternating cycles. Keep
+    # the serial broker owner, but wake it every five seconds in every state.
+    del safety
+    return 5.0
 
 
 def _tick_result(

@@ -242,7 +242,10 @@ from backend.services.live_factor_state import (
     commit_ready_factor_decision as _factor_state_commit_ready_decision,
     resolve_decision_bar_progress as _factor_state_resolve_bar_progress,
 )
-from config.runtime_config import autonomy_expansion_freeze_applies
+from config.runtime_config import (
+    autonomy_expansion_freeze_applies,
+    bounded_demo_mode_active,
+)
 from backend.services.live_loop_shell import (
     acknowledge_prepared_factor_projections as _loop_ack_prepared_factor_projections,
     adaptive_weight_config as _loop_adaptive_weight_config,
@@ -2655,6 +2658,9 @@ def _session_state_snapshot(trade_date: str | None = None) -> dict:
         "session_observed_at": float(_live_state_get("session_observed_at", 0.0) or 0.0),
         "circuit_breaker": bool(_live_state_get("circuit_breaker", False)),
         "circuit_reason": str(_live_state_get("circuit_reason", "") or ""),
+        "session_circuit_observation": dict(
+            _live_state_get("session_circuit_observation", {}, clone=True) or {}
+        ),
         "trade_equity_history": list(_live_state_get("trade_equity_history", [], clone=True) or [])[-500:],
         "updated_at": time.time(),
     }
@@ -2783,6 +2789,7 @@ def _build_session_state_from_authoritative_trades(
         current_balance=float(account.get("balance", 0.0) or 0.0),
         max_consecutive_losses=int(limits.max_consecutive_losses),
         max_daily_loss_pct=float(limits.max_daily_loss_pct),
+        enforce_circuit_breaker=not bounded_demo_mode_active(),
     )
 
 
@@ -2810,6 +2817,7 @@ def _restore_session_state_for_day(
         max_consecutive_losses=int(limits.max_consecutive_losses),
         max_daily_loss_pct=float(limits.max_daily_loss_pct),
         observed_at=time.time(),
+        enforce_circuit_breaker=not bounded_demo_mode_active(),
     )
     if decision.get("authoritative_error"):
         logger.warning(
@@ -3155,6 +3163,20 @@ def _pending_close_cursor_overrides(
                 "baseline_closed_volume": float(
                     requirements.get("baseline_closed_volume") or 0.0
                 ),
+            }
+        elif pid in active_rows_by_id and str(
+            requirements.get("pending_kind") or ""
+        ) != "partial_close":
+            # A durable position that has disappeared at the broker is a
+            # final-close recovery, not a new reduction RPC.  A close deal
+            # already fetched by an earlier retry remains valid evidence; do
+            # not promote it to the retry baseline and wait for a nonexistent
+            # second close leg.  Timestamp and required-volume checks still
+            # guard against accepting an old partial close.
+            result[pid] = {
+                "baseline_cursor_available": True,
+                "baseline_deal_ids": [],
+                "baseline_closed_volume": 0.0,
             }
     return result
 
@@ -3529,6 +3551,21 @@ def _list_active_recovery_positions(broker: str) -> list[dict]:
     return _recovery_position_store().list_active(broker)
 
 
+def _active_recovery_position_ids_for_close_detection(broker: str) -> set[int]:
+    """Keep durable open rows in close detection even if memory lost the ID."""
+
+    try:
+        return _lifecycle_recovery_active_position_ids(
+            _list_active_recovery_positions(broker)
+        )
+    except Exception as exc:
+        logger.debug(
+            "[live] durable recovery IDs unavailable for close detection: %s",
+            exc,
+        )
+        return set()
+
+
 def _recovery_last_seen_by_position(position_ids: set[int]) -> dict[int, float]:
     """Return the last broker-open observation used to reject stale partial deals."""
     return _recovery_position_store().last_seen_by_position(position_ids)
@@ -3729,6 +3766,11 @@ def _reset_session_state_for_new_day() -> None:
     _live_state_update(
         circuit_breaker=False,
         circuit_reason="",
+        session_circuit_observation={
+            "triggered": False,
+            "reason": "",
+            "enforced": False,
+        },
         session_pnl=0.0,
         session_trades=0,
         session_winning=0,
@@ -3774,6 +3816,9 @@ def _repair_session_start_balance_from_account(*, persist: bool = True) -> float
 def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> dict:
     limits = risk_limits or RiskLimitSnapshot.from_runtime_config()
     session_pnl = float(_live_state_get("session_pnl", 0.0) or 0.0)
+    consecutive_loss = int(
+        _live_state_get("session_consecutive_loss", 0) or 0
+    )
     start_balance = float(_live_state_get("session_start_balance", 0.0) or 0.0)
     if start_balance <= 0:
         return {
@@ -3787,11 +3832,36 @@ def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> di
     dd_pct = abs(session_pnl) / start_balance * 100 if start_balance > 0 else 0.0
     prev_dd = float(_live_state_get("session_max_drawdown_pct", 0.0) or 0.0)
     updates = {"session_max_drawdown_pct": max(prev_dd, dd_pct)}
-    tripped = session_pnl < 0 and dd_pct >= limits.max_daily_loss_pct
-    reason = f"daily drawdown {dd_pct:.1f}%" if tripped else ""
+    consecutive_limit = int(limits.max_consecutive_losses)
+    consecutive_tripped = (
+        consecutive_limit > 0 and consecutive_loss >= consecutive_limit
+    )
+    drawdown_tripped = (
+        limits.max_daily_loss_pct > 0
+        and session_pnl < 0
+        and dd_pct >= limits.max_daily_loss_pct
+    )
+    observed_tripped = bool(consecutive_tripped or drawdown_tripped)
+    if consecutive_tripped:
+        observed_reason = f"consecutive losses {consecutive_loss}"
+    elif drawdown_tripped:
+        observed_reason = f"daily drawdown {dd_pct:.1f}%"
+    else:
+        observed_reason = ""
+    enforced = not bounded_demo_mode_active()
+    tripped = bool(observed_tripped and enforced)
+    reason = observed_reason if tripped else ""
+    updates["session_circuit_observation"] = {
+        "triggered": observed_tripped,
+        "reason": observed_reason,
+        "enforced": tripped,
+    }
     if tripped:
         updates["circuit_breaker"] = True
         updates["circuit_reason"] = reason
+    elif not enforced:
+        updates["circuit_breaker"] = False
+        updates["circuit_reason"] = ""
     _live_state_update(**updates)
     if updates:
         _persist_session_state()
@@ -3799,6 +3869,9 @@ def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> di
         "tripped": tripped,
         "dd_pct": dd_pct,
         "reason": reason,
+        "observed_tripped": observed_tripped,
+        "observed_reason": observed_reason,
+        "enforced": tripped,
         "session_pnl": session_pnl,
         "start_balance": start_balance,
         "risk_limits": limits.to_dict(),
@@ -6511,6 +6584,7 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
         bootstrap_position_recovery=_bootstrap_position_recovery,
         loop_strategy_name=str(_loop_strategy_name or "factor_v4"),
         restore_session_state=_restore_session_state_for_day,
+        session_circuit_breaker_enforced=lambda: not bounded_demo_mode_active(),
         evaluate_daily_drawdown=_evaluate_daily_drawdown,
         market_session_snapshot=_market_session_snapshot,
         warmup_from_local_db=_warmup_from_local_db,
@@ -6562,6 +6636,7 @@ def _legacy_live_loop_tick_runtime() -> LegacyLiveLoopTickRuntime:
         retry_session_restore=_retry_legacy_session_restore,
         loop_strategy_name=str(_loop_strategy_name or "factor_v4"),
         bootstrap_position_recovery=_bootstrap_position_recovery,
+        session_circuit_breaker_enforced=lambda: not bounded_demo_mode_active(),
         evaluate_daily_drawdown=_evaluate_daily_drawdown,
         warmup_from_local_db=_warmup_from_local_db,
         ensure_decision_bars_fresh=_ensure_live_decision_bars_fresh,
@@ -9259,6 +9334,9 @@ def _process_tick_existing_decision_bar(
         previous_position_ids=_prev_position_ids,
         current_position_ids=current_pids,
         positions_snapshot_ready=positions_snapshot_ready,
+        tracked_position_ids=(
+            _active_recovery_position_ids_for_close_detection(broker)
+        ),
     )
     if close_detection_deferred:
         log(f"tick {tick}: positions cache not ready, defer close detection")
@@ -9491,6 +9569,9 @@ def _process_tick_factor_pipeline(
         previous_position_ids=_prev_position_ids,
         current_position_ids=current_pids,
         positions_snapshot_ready=positions_snapshot_ready,
+        tracked_position_ids=(
+            _active_recovery_position_ids_for_close_detection(broker)
+        ),
     )
     if close_detection_deferred:
         log(f"tick {tick}: positions cache not ready, defer close detection")

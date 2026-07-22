@@ -6,8 +6,9 @@ from risk.runtime_policy import RiskLimitSnapshot
 
 
 @pytest.fixture(autouse=True)
-def _reset_state():
+def _reset_state(monkeypatch):
     """Reset circuit_breaker + session stats between tests."""
+    monkeypatch.setattr(live_service, "bounded_demo_mode_active", lambda: False)
     live_service._reset_session_state_for_new_day()
     live_service._live_state_update(session_start_balance=1000.0)
     yield
@@ -41,6 +42,51 @@ def test_circuit_breaker_uses_risk_limit_snapshot_threshold():
     assert result["tripped"] is True
     assert result["risk_limits"]["max_daily_loss_pct"] == 4.0
     assert live_service._live_state_get("circuit_breaker") is True
+
+
+def test_demo_drawdown_is_observed_without_tripping_circuit(monkeypatch):
+    monkeypatch.setattr(live_service, "bounded_demo_mode_active", lambda: True)
+    live_service._live_state_update(
+        session_pnl=-500.0,
+        session_start_balance=1000.0,
+        circuit_breaker=True,
+        circuit_reason="stale live circuit",
+    )
+
+    result = live_service._evaluate_daily_drawdown(
+        risk_limits=RiskLimitSnapshot(max_daily_loss_pct=5.0)
+    )
+
+    assert result["tripped"] is False
+    assert result["observed_tripped"] is True
+    assert result["observed_reason"] == "daily drawdown 50.0%"
+    assert live_service._live_state_get("circuit_breaker") is False
+    assert live_service._live_state_get("circuit_reason") == ""
+
+
+def test_demo_consecutive_loss_observation_survives_tick_evaluation(monkeypatch):
+    monkeypatch.setattr(live_service, "bounded_demo_mode_active", lambda: True)
+    live_service._live_state_update(
+        session_pnl=-10.0,
+        session_start_balance=1000.0,
+        session_consecutive_loss=8,
+    )
+
+    result = live_service._evaluate_daily_drawdown(
+        risk_limits=RiskLimitSnapshot(
+            max_consecutive_losses=8,
+            max_daily_loss_pct=50.0,
+        )
+    )
+
+    assert result["tripped"] is False
+    assert result["observed_tripped"] is True
+    assert result["observed_reason"] == "consecutive losses 8"
+    assert live_service._live_state_get("session_circuit_observation") == {
+        "triggered": True,
+        "reason": "consecutive losses 8",
+        "enforced": False,
+    }
 
 
 def test_circuit_breaker_does_not_trip_below_5_percent():

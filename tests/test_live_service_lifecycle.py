@@ -2470,6 +2470,29 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
     }
 
 
+def test_final_close_retry_does_not_treat_stored_deal_as_new_baseline():
+    position_id = 779
+
+    assert live_service._pending_close_cursor_overrides(
+        {position_id},
+        active_rows_by_id={
+            position_id: {
+                "position_id": position_id,
+                "volume": 100.0,
+                "recovery_meta_json": "{}",
+            }
+        },
+        pending_close_causes={},
+        broker="ctrader",
+    ) == {
+        position_id: {
+            "baseline_cursor_available": True,
+            "baseline_deal_ids": [],
+            "baseline_closed_volume": 0.0,
+        }
+    }
+
+
 def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
     class _SyncHealth:
         def snapshot(self):

@@ -1068,6 +1068,7 @@ class CTraderBridge(BaseBrokerBridge):
                 "ask": self._spot_ask,
                 "mid": self._spot_price,
                 "ts": self._spot_ts,
+                "source": "ctrader_spot",
             }
 
     def disconnect(self):

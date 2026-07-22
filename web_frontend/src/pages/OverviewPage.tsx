@@ -43,8 +43,11 @@ function useDashboardQueries() {
     health: useQuery({
       queryKey: ["health"],
       queryFn: getHealth,
-      refetchInterval: 10_000,
-      staleTime: 5_000,
+      // system.health.v2 expires after five seconds. Refresh with enough
+      // headroom that the browser never oscillates between known and stale.
+      refetchInterval: 3_000,
+      staleTime: 2_000,
+      refetchOnWindowFocus: true,
     }),
     loop: useQuery({
       queryKey: ["loop-status", "overview"],
@@ -100,7 +103,6 @@ export function OverviewPage() {
   const readiness = asRecord(queries.readiness.data);
   const logPayload = asRecord(queries.logs.data);
 
-  const snapshotFact = readFact(snapshot, "live.state.v2");
   const healthFact = readFact(queries.health.data, "system.health.v2");
   const loopFact = readFact(queries.loop.data, "live.loop.v2");
   const accountFact = readFact(queries.account.data, "live.account.v2");
@@ -140,7 +142,6 @@ export function OverviewPage() {
   const hasAccountData = factHasDisplayValue(accountFact) && pick(account, ["balance", "equity"]) !== undefined;
   const hasSessionData = factHasDisplayValue(sessionFact) && Object.keys(session).length > 0;
   const hasLoopData = factHasDisplayValue(loopFact) && Object.keys(loop).length > 0;
-  const snapshotKnown = factIsKnown(snapshotFact, snapshotRequestFailed);
   const healthKnown = factIsKnown(healthFact, healthRequestFailed);
   const loopKnown = factIsKnown(loopFact, loopRequestFailed);
   const accountKnown = factIsKnown(accountFact, accountRequestFailed);
@@ -224,7 +225,7 @@ export function OverviewPage() {
       time: serverTime ? formatTime(serverTime) : formatTime(new Date().toISOString()),
       title: connected ? "WebSocket 实时流在线" : "WebSocket 未在线",
       detail: connected ? `实时数据源 ${translateDisplayValue(source || "websocket")}` : `当前使用 ${translateDisplayValue(source || "polling")}，等待实时流恢复`,
-      tone: connected && snapshotKnown ? "ok" : "warn",
+      tone: connected ? "ok" : "warn",
     },
     {
       time: hasMeaningfulText(loopStartedAt) ? formatTime(loopStartedAt) : serverTime ? formatTime(serverTime) : "",
@@ -268,7 +269,7 @@ export function OverviewPage() {
           <p>实时状态、账户、风控和数据健康集中在这里；详细操作进入对应模块。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={connected && snapshotKnown ? "WS 实时事实" : connected ? "WS 事实未知" : "轮询/离线"} tone={connected && snapshotKnown ? "ok" : "warn"} />
+          <StatusPill status={connected ? "WS 实时连接" : "轮询/重连中"} tone={connected ? "ok" : "warn"} />
           {hasLoopData ? <StatusPill status={loopRunning ? "交易运行中" : "交易未运行"} tone={loopKnown && loopRunning ? "ok" : "warn"} /> : <StatusPill status="循环状态未知" tone="warn" />}
           <StatusPill status={healthKnown ? `接口 ${healthStatus}` : "接口状态未知"} tone={healthKnown ? toneFromStatus(healthStatus) : "warn"} />
         </div>
@@ -311,7 +312,7 @@ export function OverviewPage() {
             <MiniMetric label="持仓" value={factHasDisplayValue(positionsFact) ? formatDecimal(positionCount, 0) : "未知"} detail={factHasDisplayValue(positionsFact) ? `浮盈 ${formatMoney(positionFloating, currency)}` : "持仓事实未知"} tone={positionsKnown ? numberTone(positionFloating) : "warn"} />
             <MiniMetric label="买卖价差" value={hasSpread ? formatDecimal(spread, 2) : ""} detail={hasSpread ? `${formatDecimal(priceBid, 2)} / ${formatDecimal(priceAsk, 2)}` : "等待报价"} tone={priceKnown && hasSpread ? "ok" : "warn"} />
             <MiniMetric label="执行模式" value={executionMode || ""} detail={loopRunning ? "循环活跃" : "等待启动"} tone={loopKnown && loopRunning ? "ok" : "warn"} />
-            <MiniMetric label="数据源" value={translateDisplayValue(source || "offline")} detail={connected ? "WS 已连接" : "轮询/离线"} tone={connected && snapshotKnown ? "ok" : "warn"} />
+            <MiniMetric label="数据源" value={translateDisplayValue(source || "offline")} detail={connected ? "WS 已连接" : "轮询/重连中"} tone={connected ? "ok" : "warn"} />
           </div>
           <div className="field-list overview-field-list">
             <Field label="状态" value={loopKnown ? (loopRunning ? "运行中" : "未运行") : "未知"} tone={loopKnown && loopRunning ? "ok" : "warn"} />

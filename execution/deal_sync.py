@@ -98,6 +98,12 @@ def fetch_deals_since_result(
         )
         if raw_deals is None:
             raise RuntimeError("broker_deal_response_missing")
+        if not raw_deals and getattr(bridge, "_last_deals_fetch_ok", None) is False:
+            # CTraderBridge keeps the compatibility list API and therefore
+            # returns [] after an RPC failure.  Preserve the explicit fetch
+            # contract here so recovery cannot mistake transport failure for
+            # an authoritative empty history response.
+            raise RuntimeError("broker_deal_fetch_failed")
         deals = tuple(dict(item) for item in raw_deals)
         logger.info(
             "[DealSync] fetched %d deals (from_ts=%s)",

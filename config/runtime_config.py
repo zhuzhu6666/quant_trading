@@ -32,6 +32,25 @@ VALID_RUNTIME_INCIDENT_MODES = frozenset(
 )
 
 
+def bounded_demo_mode_active(cfg: Any | None = None) -> bool:
+    """Return whether bounded Demo execution semantics are actually active.
+
+    The autonomy-mode label alone never relaxes execution risk.  The broker
+    connection must independently resolve to the cTrader Demo environment;
+    missing or invalid broker configuration remains fail-closed.
+    """
+
+    current = cfg if cfg is not None else shared()
+    mode = str(getattr(current, "autonomy_mode", "") or "manual").strip().lower()
+    try:
+        from execution.broker_config import shared_broker_connection_config
+
+        broker_is_demo = shared_broker_connection_config().is_demo
+    except Exception:
+        broker_is_demo = False
+    return mode in DEMO_AUTONOMY_MODES and broker_is_demo
+
+
 def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
     """Return whether the expansion freeze is effective for this runtime.
 
@@ -42,14 +61,7 @@ def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
     current = cfg if cfg is not None else shared()
     if governance_expansion_is_paused(current):
         return True
-    mode = str(getattr(current, "autonomy_mode", "") or "manual").strip().lower()
-    try:
-        from execution.broker_config import shared_broker_connection_config
-
-        broker_is_demo = shared_broker_connection_config().is_demo
-    except Exception:
-        broker_is_demo = False
-    bounded_demo = mode in DEMO_AUTONOMY_MODES and broker_is_demo
+    bounded_demo = bounded_demo_mode_active(current)
     return bool(getattr(current, "autonomy_expansion_frozen", True)) and not bounded_demo
 
 

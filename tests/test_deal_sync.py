@@ -35,6 +35,21 @@ def test_explicit_deal_fetch_distinguishes_valid_empty_from_failure():
     assert failed.error_code == "broker_deal_fetch_failed"
 
 
+def test_explicit_deal_fetch_honors_ctrader_compat_failure_marker():
+    class _Bridge:
+        is_connected = True
+        _last_deals_fetch_ok = False
+
+        def get_deals(self, **_kwargs):
+            return []
+
+    failed = fetch_deals_since_result(_Bridge())
+
+    assert failed.success is False
+    assert failed.empty is False
+    assert failed.error_code == "broker_deal_fetch_failed"
+
+
 def test_close_deal_with_zero_gross_profit_still_recovers_real_pnl(tmp_path):
     db_path = tmp_path / "state.db"
     conn = _conn(db_path)

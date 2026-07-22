@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  createElement,
+  ReactNode,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { getStateSnapshot, getWsTicket, getWsUrl, SessionStats, StateSnapshot } from "@/api/client";
 import { factHasDisplayValue, readFactComponent } from "@/api/fact";
 
@@ -9,7 +18,45 @@ type LiveStateHookOptions = {
   pollIntervalMs?: number;
 };
 
-export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOptions) {
+type LiveStateValue = {
+  snapshot: StateSnapshot | null;
+  error: string | null;
+  source: SourceType;
+  connected: boolean;
+  refresh: () => Promise<boolean>;
+};
+
+const LiveStateContext = createContext<LiveStateValue | null>(null);
+
+function epochSeconds(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 1e12 ? value / 1000 : value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric > 1e12 ? numeric / 1000 : numeric;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed / 1000 : 0;
+  }
+  return 0;
+}
+
+function snapshotSequence(snapshot: StateSnapshot | null): number {
+  if (!snapshot) return 0;
+  const fact = (snapshot as { _fact?: Record<string, unknown> })._fact;
+  return epochSeconds(fact?.generated_at) || epochSeconds(snapshot.server_time);
+}
+
+export function shouldApplyLiveSnapshot(
+  current: StateSnapshot | null,
+  incoming: StateSnapshot,
+): boolean {
+  const currentSequence = snapshotSequence(current);
+  const incomingSequence = snapshotSequence(incoming);
+  return currentSequence <= 0 || incomingSequence <= 0 || incomingSequence >= currentSequence;
+}
+
+function useLiveStateConnection({ enabled, pollIntervalMs = 4000 }: LiveStateHookOptions): LiveStateValue {
   const [snapshot, setSnapshot] = useState<StateSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [source, setSource] = useState<SourceType>("offline");
@@ -20,6 +67,7 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
   const retryRef = useRef<number>(0);
   const closeRequestedRef = useRef(false);
   const connectedRef = useRef(false);
+  const hasSnapshotRef = useRef(false);
   const token = localStorage.getItem("quant.auth.token");
 
   const wsBase = useMemo(getWsUrl, []);
@@ -96,8 +144,9 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
   const applySnapshot = (incoming: StateSnapshot) => {
     const normalized = normalizeSnapshot(incoming || {});
     setSnapshot((prev) => {
-      const next = { ...(prev || {}), ...(normalized || {}) };
-      return next;
+      if (!shouldApplyLiveSnapshot(prev, normalized)) return prev;
+      hasSnapshotRef.current = true;
+      return { ...(prev || {}), ...(normalized || {}) };
     });
     setError(null);
   };
@@ -113,7 +162,7 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
       return true;
     } catch (exc: unknown) {
       const message = exc instanceof Error ? exc.message : String(exc);
-      if (!snapshot) {
+      if (!hasSnapshotRef.current) {
         setError(message);
       }
       return false;
@@ -184,11 +233,15 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
       socket.onerror = () => {
         connectedRef.current = false;
         setConnected(false);
-        setError("WebSocket 连接异常，尝试轮询");
+        if (!hasSnapshotRef.current) {
+          setError("WebSocket 连接异常，尝试轮询");
+        }
         startPolling();
       };
     } catch {
-      setError("WebSocket 创建失败，回退到轮询");
+      if (!hasSnapshotRef.current) {
+        setError("WebSocket 创建失败，回退到轮询");
+      }
       startPolling();
     }
   };
@@ -200,6 +253,7 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
       setSource("offline");
       setConnected(false);
       connectedRef.current = false;
+      hasSnapshotRef.current = false;
       setSnapshot(null);
       return;
     }
@@ -227,4 +281,21 @@ export function useLiveState({ enabled, pollIntervalMs = 4000 }: LiveStateHookOp
     connected,
     refresh: fetchSnapshot,
   };
+}
+
+export function LiveStateProvider({
+  enabled,
+  pollIntervalMs = 4000,
+  children,
+}: LiveStateHookOptions & { children: ReactNode }) {
+  const value = useLiveStateConnection({ enabled, pollIntervalMs });
+  return createElement(LiveStateContext.Provider, { value }, children);
+}
+
+export function useLiveState(_options?: LiveStateHookOptions): LiveStateValue {
+  const value = useContext(LiveStateContext);
+  if (!value) {
+    throw new Error("useLiveState must be used within LiveStateProvider");
+  }
+  return value;
 }

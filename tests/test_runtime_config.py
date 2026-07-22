@@ -22,6 +22,15 @@ def test_initial_version_is_zero() -> None:
 
 
 def test_expansion_freeze_only_applies_outside_demo_modes() -> None:
+    assert rc.bounded_demo_mode_active(
+        rc.RuntimeConfig(autonomy_mode="demo_nursery")
+    ) is True
+    assert rc.bounded_demo_mode_active(
+        rc.RuntimeConfig(autonomy_mode="demo_autonomous")
+    ) is True
+    assert rc.bounded_demo_mode_active(
+        rc.RuntimeConfig(autonomy_mode="live_candidate")
+    ) is False
     assert rc.autonomy_expansion_freeze_applies(
         rc.RuntimeConfig(autonomy_mode="demo_nursery", autonomy_expansion_frozen=True)
     ) is False
@@ -53,6 +62,9 @@ def test_demo_mode_cannot_bypass_freeze_on_effective_live_broker(monkeypatch) ->
     monkeypatch.setenv("CTRADER_HOST", "live.ctraderapi.com")
     reset_broker_connection_config_for_tests()
     try:
+        assert rc.bounded_demo_mode_active(
+            rc.RuntimeConfig(autonomy_mode="demo_autonomous")
+        ) is False
         assert rc.autonomy_expansion_freeze_applies(
             rc.RuntimeConfig(autonomy_mode="demo_autonomous", autonomy_expansion_frozen=True)
         ) is True
