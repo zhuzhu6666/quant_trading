@@ -12,6 +12,7 @@ from backend.services.live_safety_state import (
     reset_safety_state_for_tests,
     safety_outbox_path,
 )
+from config.runtime_config import release_recovered_overlay_authority_latches
 from backend.services.live_safety_watchdog import (
     LiveSafetyWatchdog,
     evaluate_safety_freshness,
@@ -186,6 +187,126 @@ def test_watchdog_recovery_releases_only_its_own_latch_cause():
         for item in no_new_risk_latch_status()["causes"]
     }
     assert causes == {("incident_control", "runtime_incident_mode")}
+
+
+def test_verified_overlay_recovery_releases_refresh_and_legacy_restore_causes():
+    activate_no_new_risk_latch(
+        reason="incident active",
+        actor="operator:test",
+        cause="incident_control",
+        cause_id="runtime_incident_mode",
+    )
+    for cause_id in (
+        "runtime_config_overlay_refresh",
+        "legacy_restore:runtime_config_overlay",
+    ):
+        activate_no_new_risk_latch(
+            reason="authority unverified",
+            actor="system:test",
+            cause="governance_authority",
+            cause_id=cause_id,
+        )
+
+    assert release_recovered_overlay_authority_latches(
+        {
+            "overlay_hash": "verified-hash",
+            "mutation_id": "mutation-1",
+            "authority": {
+                "authority": "committed_mutation",
+                "checks": {"projection_current": True},
+            },
+        }
+    )
+
+    causes = {
+        (item["cause"], item["cause_id"])
+        for item in no_new_risk_latch_status()["causes"]
+    }
+    assert causes == {("incident_control", "runtime_incident_mode")}
+
+
+def test_watchdog_releases_missing_supervisor_position_after_fresh_reconcile():
+    now = time.time()
+    activate_no_new_risk_latch(
+        reason="incident active",
+        actor="operator:test",
+        cause="incident_control",
+        cause_id="runtime_incident_mode",
+    )
+    activate_no_new_risk_latch(
+        reason="safety freshness failed",
+        actor="system:supervisor_tighten",
+        metadata={
+            "error": "amend_projection_unverified:position_missing_after_amend",
+        },
+        cause="safety_freshness",
+        cause_id="supervisor_tighten",
+    )
+    live_service._live_state_update(
+        positions_reconciled=[],
+        positions_updated_at=now,
+        positions_reconcile_id="reconcile-empty",
+        safety_failure={"source": "supervisor_tighten"},
+    )
+    result = evaluate_safety_freshness(
+        {
+            "enabled": True,
+            "running": True,
+            "started_at": now - 60.0,
+            "safety_heartbeat_at": now,
+            "account_updated_at": now,
+            "positions_updated_at": now,
+            "unknown_execution_count": 0,
+        },
+        now=now,
+    )
+
+    live_service._on_live_safety_watchdog_recovery(result)
+
+    causes = {
+        (item["cause"], item["cause_id"])
+        for item in no_new_risk_latch_status()["causes"]
+    }
+    assert causes == {("incident_control", "runtime_incident_mode")}
+    assert live_service._live_state_get("safety_failure", clone=True) == {}
+
+
+def test_watchdog_keeps_supervisor_cause_while_target_position_is_open():
+    now = time.time()
+    activate_no_new_risk_latch(
+        reason="safety freshness failed",
+        actor="system:supervisor_tighten",
+        metadata={
+            "error": "amend_projection_unverified:position_missing_after_amend",
+            "position_id": 74,
+        },
+        cause="safety_freshness",
+        cause_id="supervisor_tighten",
+    )
+    live_service._live_state_update(
+        positions_reconciled=[{"position_id": 74}],
+        positions_updated_at=now,
+        positions_reconcile_id="reconcile-open",
+    )
+    result = evaluate_safety_freshness(
+        {
+            "enabled": True,
+            "running": True,
+            "started_at": now - 60.0,
+            "safety_heartbeat_at": now,
+            "account_updated_at": now,
+            "positions_updated_at": now,
+            "unknown_execution_count": 0,
+        },
+        now=now,
+    )
+
+    live_service._on_live_safety_watchdog_recovery(result)
+
+    assert {
+        (item["cause"], item["cause_id"])
+        for item in no_new_risk_latch_status()["causes"]
+    } == {("safety_freshness", "supervisor_tighten")}
 
 
 def test_watchdog_records_its_own_cause_when_incident_latch_already_active():

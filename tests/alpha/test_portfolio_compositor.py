@@ -24,7 +24,8 @@ MACRO_CONFIG = {
 }
 
 FULL_CONFIG = {**TACTICAL_CONFIG, **MACRO_CONFIG,
-               "_tactical_alpha": 0.7, "_signal_threshold": 0.4}
+               "_tactical_alpha": 0.7, "_macro_direction_cap": 0.15,
+               "_signal_threshold": 0.4}
 
 
 # ── CompositeSignal 测试 ──────────────────────────────────
@@ -127,6 +128,44 @@ class TestCompose:
         assert result.macro_score != 0.0
         assert result.n_active_factors == 4
         assert result.direction in (1, -1, 0)
+        assert result.macro_weight == pytest.approx(0.15)
+        assert result.tactical_weight == pytest.approx(0.85)
+
+    def test_macro_direction_cap_overrides_legacy_70_30_request(self):
+        c = PortfolioCompositor(FULL_CONFIG)
+
+        result = c.compose(
+            {
+                "rsi_14": 0.68,
+                "dxy_corr_20": -0.93,
+                "cot_mm_net": 0.20,
+            },
+            {},
+        )
+
+        assert result.macro_weight == pytest.approx(0.15)
+        assert result.tactical_weight == pytest.approx(0.85)
+        assert result.score == pytest.approx(
+            0.85 * result.tactical_score + 0.15 * result.macro_score,
+            abs=1e-6,
+        )
+
+    def test_stricter_existing_tactical_weight_is_preserved(self):
+        c = PortfolioCompositor(
+            {
+                **FULL_CONFIG,
+                "_tactical_alpha": 0.95,
+                "_macro_direction_cap": 0.15,
+            }
+        )
+
+        result = c.compose(
+            {"rsi_14": 0.8, "dxy_corr_20": -0.8},
+            {},
+        )
+
+        assert result.tactical_weight == pytest.approx(0.95)
+        assert result.macro_weight == pytest.approx(0.05)
 
     def test_all_none_signals(self):
         """全部弃权时返回 NO_SIGNAL。"""

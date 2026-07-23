@@ -54,9 +54,10 @@
 
 - 状态: `fixed`
 - 旧理解: 组合分数固定按 tactical 70%、macro 30% 混合。
-- 当前口径: 只在两类 alpha 都存在时按配置混合；只有一类 alpha 时权重归一为 1。
-- 影响面: `PortfolioCompositor`、测试、账本解释。
-- 收口方式: 保留 `tactical_score/macro_score` 兼容字段，新增 `alpha_score` 真实表达方向分。
+- 当前口径: 只在两类 alpha 都存在时按配置混合，并对宏观方向份额施加合成器代码级 `_macro_direction_cap=0.15`；旧 overlay 即使仍请求 70/30，也只能得到 85/15。若现有配置比上限更严格则保持更严格值；只有一类 alpha 时仍按兼容口径归一为 1。
+- 影响面: `PortfolioCompositor`、live/hot reload、多品种 pipeline、parity replay、AWE 配置投影、测试和账本解释。
+- 收口方式: 保留 `tactical_score/macro_score` 与 `factor_tactical_alpha` 兼容字段，在合成器执行独立宏观方向上限，避免低频 held value 在每根 M5 重复取得过高方向权限。
+- 验证方式: `tests/alpha/test_portfolio_compositor.py`、`tests/test_live_factor_bootstrap.py`、`tests/test_research_parity_boundaries.py`。
 
 ### 事件和日历因子表达方向
 
@@ -640,6 +641,15 @@
 - 收口方式: 保留 `_open_trade_draining()` 布尔兼容入口，新增可审计 blocker 集合；刷新只有 fresh reconcile 成功才重新开放新增风险，失败保持 fail-closed。
 - 验证方式: `tests/test_live_new_risk_reconcile_gate.py`、`tests/test_live_legacy_safety_ordering.py::test_default_off_refreshes_stale_reconciles_before_alpha`、`tests/test_live_data_sync_schedule.py`。
 
+### 已恢复的 RuntimeConfig 与已消失仓位仍残留永久 no-new-risk cause
+
+- 状态: resolved
+- 旧理解: watchdog 只释放自己创建的 `safety_watchdog` cause 即可；RuntimeConfig startup restore 失败产生的 legacy cause 可由后续 refresh 自然覆盖；逐 cause release 返回值可继续从 `causes` 读取。
+- 当前口径: verified committed/current RuntimeConfig restore 会精确释放 `runtime_config_overlay_refresh` 与 `legacy_restore:runtime_config_overlay` 两个同权威域 cause，并从 ledger 返回的 `remaining_causes` 继续逐项处理。supervisor amend 成功但即时投影报告 `position_missing_after_amend` 时会记录 position ID；watchdog 仍要求 freshness 与 unknown=0 连续三轮，再用 fresh broker position reconcile 确认目标仓位已消失后才释放 `supervisor_tighten`。历史记录缺 ID 时只允许在 fresh 空仓事实下释放。generation tick 在认证 bridge 恢复后同步投影 `bridge_ready=true`，不再让启动 warming 阶段的旧负边永久残留在 readiness。
+- 影响面: RuntimeConfig startup/refresh、append-only safety latch replay、supervisor tighten、watchdog recovery、live readiness 与最终开仓准入；不放宽 incident、emergency、broker unknown 或其他 supervisor failure。
+- 收口方式: startup success 与 poll recovery 共用验证式 RuntimeConfig release；watchdog recovery 从只处理单一 cause 改为按 cause 独立验证，不提供 blanket clear。
+- 验证方式: `tests/test_live_safety_watchdog.py`、`tests/test_live_supervision_actions.py`、`tests/test_runtime_overlay_authority.py`、`tests/test_backend_runtime_lifecycle.py`。
+
 ### live_service 同时承载 reconcile、safety、startup 与 emergency 领域实现
 
 - 状态: `migrating`
@@ -737,6 +747,15 @@
 - 当前口径: 默认 Argon2id、15 分钟 access、7 天旋转 refresh session 和 30 秒单次 WS ticket；高风险扩张要求最近 5 分钟 step-up。`/api/auth/step-up` 以当前 active 持久会话和密码为前提，事务提交 `auth_time` 后才签发新 access；普通 refresh 继承而不刷新该时间。Web 的 start/unlock 收到 `step_up_required` 后原位要求密码并自动重试，stop/emergency 不增加密码障碍。普通 access 绑定 PostgreSQL active session；logout 撤销整个 refresh family，并在 PG 提交前 fsync 本地 append-only session/family 撤销投影，因此 backend 重启后旧 access/risk-reduction token 不会复活。stop/emergency 使用本地可验证的 risk-reduction scope和该撤销投影，PG 故障不阻断风险缩减。
 - 影响面: backend auth、Web/小程序会话、WS、live start/stop/emergency、operator thaw/unlock。
 - 收口方式: 三个 legacy 开关只在客户端迁移窗口显式开启；客户端全部迁移后关闭并删除 SHA-256、legacy access 与 URL JWT 解析。持久 logout 回归必须同时覆盖进程内缓存清空、旋转 family 旧 token 和 PostgreSQL unavailable 的 risk-reduction 路径；step-up 回归覆盖 session/family 绑定、提交失败 fail-closed、refresh 继承和 Web 仅对 start/unlock 提示密码。
+
+### Web 迟到 401 重复旋转 refresh session
+
+- 状态: `fixed`
+- 旧理解: 单个 JavaScript 模块内存在 `refreshInFlight` 就足以保证 refresh 单飞。
+- 当前口径: 请求必须记录实际发送的 access token。迟到 `401` 若发现 localStorage 已发布不同 token，直接复用新 token 重试；只有当前 token 仍失败才允许 refresh。多个同源标签页通过 Web Locks 串行 refresh，并在取得锁后再次比较 token，等待者不得重复旋转 cookie session；`storage` 事件同步其他标签页的认证状态。
+- 影响面: Web 多查询并发、React Query 重试、`/api/auth/me`、旋转 refresh family、登录跳转和 PostgreSQL `auth_session` 增长。
+- 收口方式: 保留后端严格 active-session 校验与一次性 refresh rotation，不通过放宽 JWT/session 验证掩盖客户端竞争。
+- 验证方式: `web_frontend` typecheck、build 和 `src/tests/fact-auth.test.mjs`。
 - 验证方式: `tests/test_auth_v2.py`、`tests/test_backend_live_api.py`、`web_frontend/src/tests/fact-auth.test.mjs`。
 
 ## 5. 新旧债登记模板

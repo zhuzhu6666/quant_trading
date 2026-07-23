@@ -420,6 +420,16 @@ def run_live_loop_tick_body(
             safety=safety,
         )
 
+    # A startup/warming tick may have projected bridge_ready=false.  Publish
+    # the positive edge from the same serial owner as soon as the authenticated
+    # bridge recovers; otherwise readiness remains permanently degraded even
+    # while subsequent ticks compute signals and can submit orders.
+    runtime.set_loop_diagnostic(
+        tick,
+        "bridge_ready",
+        bridge_ready=True,
+    )
+
     # The bridge can become ready just after the one-shot startup subscription
     # times out.  Retry from the serial tick owner so a missing/stale quote can
     # recover without a process restart.  Subscription failure is advisory;

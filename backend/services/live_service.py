@@ -4937,6 +4937,7 @@ def _persist_safety_fail_closed(
     blockers: list[str] | tuple[str, ...],
     source: str,
     error: str = "",
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Durably block new risk without changing any broker action result."""
 
@@ -4971,6 +4972,7 @@ def _persist_safety_fail_closed(
                     "blockers": normalized,
                     "error": str(error or "")[:1000],
                     "forced_shadow": forced_shadow,
+                    **dict(metadata or {}),
                 },
                 cause=latch_cause,
                 cause_id=latch_cause_id,
@@ -5024,32 +5026,88 @@ def _on_live_safety_watchdog_violation(result: SafetyFreshnessResult) -> None:
 
 
 def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
-    """Release only the watchdog-owned cause after sustained fresh facts."""
+    """Release freshness causes only after sustained, cause-specific recovery."""
 
-    cause = ("safety_freshness", "safety_watchdog")
     latch = no_new_risk_latch_status(fail_closed=True)
     active_causes = {
-        (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
+        (str(item.get("cause") or ""), str(item.get("cause_id") or "")): item
         for item in list(latch.get("causes") or [])
         if isinstance(item, dict)
     }
-    if cause not in active_causes:
-        return
-    released = release_no_new_risk_latch_cause(
-        cause=cause[0],
-        cause_id=cause[1],
-        reason="safety_freshness_sustained_recovery",
-        actor="system:safety_watchdog",
-        evidence={
-            "state": result.state,
-            "ages": dict(result.ages),
-            "blockers": list(result.blockers),
-            "recovery_checks": 3,
-        },
-    )
+    base_evidence = {
+        "state": result.state,
+        "ages": dict(result.ages),
+        "blockers": list(result.blockers),
+        "recovery_checks": 3,
+    }
+    released = latch
+    watchdog_cause = ("safety_freshness", "safety_watchdog")
+    if watchdog_cause in active_causes:
+        released = release_no_new_risk_latch_cause(
+            cause=watchdog_cause[0],
+            cause_id=watchdog_cause[1],
+            reason="safety_freshness_sustained_recovery",
+            actor="system:safety_watchdog",
+            evidence=base_evidence,
+        )
+
+    supervisor_cause = ("safety_freshness", "supervisor_tighten")
+    supervisor_record = active_causes.get(supervisor_cause) or {}
+    supervisor_metadata = dict(supervisor_record.get("metadata") or {})
+    supervisor_error = str(supervisor_metadata.get("error") or "")
+    if (
+        supervisor_record
+        and supervisor_error
+        == "amend_projection_unverified:position_missing_after_amend"
+    ):
+        open_position_ids = _fresh_cached_broker_open_position_ids()
+        try:
+            target_position_id = int(
+                supervisor_metadata.get("position_id") or 0
+            )
+        except (TypeError, ValueError):
+            target_position_id = 0
+        target_confirmed_absent = (
+            open_position_ids is not None
+            and (
+                target_position_id not in open_position_ids
+                if target_position_id > 0
+                else not open_position_ids
+            )
+        )
+        if target_confirmed_absent:
+            released = release_no_new_risk_latch_cause(
+                cause=supervisor_cause[0],
+                cause_id=supervisor_cause[1],
+                reason="supervisor_tighten_position_absence_confirmed",
+                actor="system:safety_watchdog",
+                evidence={
+                    **base_evidence,
+                    "position_id": target_position_id or None,
+                    "open_position_ids": sorted(open_position_ids),
+                    "positions_reconcile_id": str(
+                        _live_state_get("positions_reconcile_id", "") or ""
+                    ),
+                },
+            )
+
     safety_failure = _live_state_get("safety_failure", {}, clone=True) or {}
     updates: dict[str, Any] = {"no_new_risk_latch": released}
-    if str(safety_failure.get("source") or "") == "safety_watchdog":
+    remaining_causes = {
+        (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
+        for item in list(
+            released.get("remaining_causes") or released.get("causes") or []
+        )
+        if isinstance(item, dict)
+    }
+    failure_source = str(safety_failure.get("source") or "")
+    if (
+        failure_source == "safety_watchdog"
+        and watchdog_cause not in remaining_causes
+    ) or (
+        failure_source == "supervisor_tighten"
+        and supervisor_cause not in remaining_causes
+    ):
         updates["safety_failure"] = {}
     _live_state_update(**updates)
 

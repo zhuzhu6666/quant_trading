@@ -100,8 +100,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setState((prev) => ({ ...prev, token }));
       }
     };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== STORAGE_KEY) return;
+      const token = event.newValue || null;
+      setState((prev) => ({
+        ...prev,
+        token,
+        user: token ? prev.user : null,
+        authenticated: token ? prev.authenticated : false,
+      }));
+    };
     window.addEventListener("quant-auth-token", onToken);
-    return () => window.removeEventListener("quant-auth-token", onToken);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("quant-auth-token", onToken);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
 
   const value = useMemo<AuthContextValue>(

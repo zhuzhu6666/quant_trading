@@ -62,11 +62,15 @@ def _runtime(
     phase2=True,
     circuit_breaker=False,
     circuit_enforced=True,
+    diagnostic_calls=None,
 ):
     order = order if order is not None else []
     process_calls = process_calls if process_calls is not None else []
     state_updates = state_updates if state_updates is not None else []
     persisted = persisted if persisted is not None else []
+    diagnostic_calls = (
+        diagnostic_calls if diagnostic_calls is not None else []
+    )
     safety = safety or {
         "ok": True,
         "accepting_new_risk": True,
@@ -107,7 +111,9 @@ def _runtime(
         ),
         live_state_update=lambda **kwargs: state_updates.append(kwargs),
         loop_controller=controller,
-        set_loop_diagnostic=lambda *_args, **_kwargs: None,
+        set_loop_diagnostic=lambda *args, **kwargs: diagnostic_calls.append(
+            (args, kwargs)
+        ),
         recover_execution_outcomes=lambda **kwargs: order.append("recovery")
         or (kwargs["safety_result"], True),
         attempt_startup_barrier=lambda **_kwargs: True,
@@ -217,6 +223,7 @@ def test_account_failure_occurs_after_safety_and_blocks_alpha():
 def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
     order = []
     process_calls = []
+    diagnostics = []
     account = {
         "account": {"balance": 10_000.0},
         "observed_at": 100.0,
@@ -226,6 +233,7 @@ def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
         order=order,
         reconcile_account=account,
         process_calls=process_calls,
+        diagnostic_calls=diagnostics,
     )
 
     result = run_live_loop_tick_body(
@@ -250,6 +258,9 @@ def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
     assert process_calls[0][1]["protection_already_run"] is True
     assert plane.marked
     assert result["wait_seconds"] == 5.0
+    assert diagnostics == [
+        ((4, "bridge_ready"), {"bridge_ready": True}),
+    ]
 
 
 def test_demo_mode_ignores_observed_session_circuit_and_runs_alpha():

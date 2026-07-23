@@ -788,13 +788,17 @@ def test_tighten_accepted_rpc_requires_matching_fresh_broker_projection():
     assert not any(kwargs.get("action_applied") for _args, kwargs in calls["state"])
     assert calls["events"][0]["details"]["result"] == "failed"
     assert calls["traces"][0]["execution_reason"].endswith("stop_loss_mismatch")
-    assert calls["fail_closed"] == [
-        {
-            "blockers": ("amend_projection_unverified",),
-            "source": "supervisor_tighten",
-            "error": "amend_projection_unverified:stop_loss_mismatch",
-        }
-    ]
+    assert len(calls["fail_closed"]) == 1
+    fail_closed = calls["fail_closed"][0]
+    assert fail_closed["blockers"] == ("amend_projection_unverified",)
+    assert fail_closed["source"] == "supervisor_tighten"
+    assert fail_closed["error"] == "amend_projection_unverified:stop_loss_mismatch"
+    assert fail_closed["metadata"]["position_id"] == 74
+    assert fail_closed["metadata"]["verification"]["ok"] is False
+    assert (
+        fail_closed["metadata"]["verification"]["reason"]
+        == "stop_loss_mismatch"
+    )
     assert calls["aux"][0][0] == "supervisor_amend_projection_unverified"
     assert calls["logs"][-1].endswith(
         "supervisor tighten UNVERIFIED pos=74: amend_projection_unverified:stop_loss_mismatch"

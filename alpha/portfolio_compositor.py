@@ -85,6 +85,9 @@ class PortfolioCompositor:
         self._factor_configs: dict[str, dict] = dict(config or {})
         # 提取顶层控制参数
         self._tactical_alpha = float(self._factor_configs.get("_tactical_alpha", 0.7))
+        self._macro_direction_cap = float(
+            self._factor_configs.get("_macro_direction_cap", 0.15)
+        )
         self._signal_threshold = float(self._factor_configs.get("_signal_threshold", 0.4))
 
     # ── 核心接口 ────────────────────────────────────────
@@ -145,8 +148,18 @@ class PortfolioCompositor:
 
         # 4. 动态层权重: 缺失的一层不再固定拖低另一层。
         if tactical and macro:
-            tactical_weight = self._tactical_alpha
-            macro_weight = 1 - self._tactical_alpha
+            requested_macro_weight = max(
+                0.0,
+                min(1.0, 1.0 - self._tactical_alpha),
+            )
+            # 宏观输入按日/周/季度刷新。低频观点可以在发布间隔内保持，
+            # 但不能在每根 M5 上持续占用历史 30% 的方向权限。独立上限
+            # 也确保旧 overlay 请求的 70/30 组合不能绕过该约束。
+            macro_weight = min(
+                requested_macro_weight,
+                max(0.0, min(1.0, self._macro_direction_cap)),
+            )
+            tactical_weight = 1.0 - macro_weight
         elif tactical:
             tactical_weight = 1.0
             macro_weight = 0.0
@@ -390,4 +403,7 @@ class PortfolioCompositor:
     def reload_configs(self, config: dict[str, Any]) -> None:
         self._factor_configs = dict(config or {})
         self._tactical_alpha = float(self._factor_configs.get("_tactical_alpha", 0.7))
+        self._macro_direction_cap = float(
+            self._factor_configs.get("_macro_direction_cap", 0.15)
+        )
         self._signal_threshold = float(self._factor_configs.get("_signal_threshold", 0.4))

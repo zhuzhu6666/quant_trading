@@ -164,6 +164,17 @@ async def lifespan(app: FastAPI):
         overlay_restore = startup_restore.get("overlay") or {}
         rc = startup_restore["config"]
         if overlay_restore.get("restored"):
+            from config.runtime_config import (
+                release_recovered_overlay_authority_latches,
+            )
+
+            if not release_recovered_overlay_authority_latches(overlay_restore):
+                record_startup_issue(
+                    "runtime_config_overlay_latch_release",
+                    "critical",
+                    "verified overlay restored but authority latch release failed",
+                    blocking=True,
+                )
             _lg.info(
                 "[lifespan] RuntimeConfig autonomous overlay restored hash=%s",
                 overlay_restore.get("overlay_hash", ""),

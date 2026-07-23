@@ -729,10 +729,16 @@ def config_from_overlay(
     return RuntimeConfig.from_dict(merged)
 
 
-def _release_recovered_overlay_authority_latch(
+def release_recovered_overlay_authority_latches(
     restored: Dict[str, Any],
 ) -> bool:
-    """Release only the refresh-owned cause after authority is current again."""
+    """Release RuntimeConfig authority causes after a verified restore.
+
+    Both causes are owned by the same validated overlay projection.  The
+    refresh cause covers a transient poll failure, while the legacy-restore
+    cause covers an earlier backend startup failure.  A later successful,
+    committed/current restore is authoritative recovery evidence for both.
+    """
 
     try:
         from backend.services.live_safety_state import (
@@ -740,32 +746,42 @@ def _release_recovered_overlay_authority_latch(
             release_no_new_risk_latch_cause,
         )
 
-        cause = ("governance_authority", "runtime_config_overlay_refresh")
+        causes = (
+            ("governance_authority", "runtime_config_overlay_refresh"),
+            ("governance_authority", "legacy_restore:runtime_config_overlay"),
+        )
         status = no_new_risk_latch_status(fail_closed=True)
         active = {
             (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
             for item in list(status.get("causes") or [])
             if isinstance(item, dict)
         }
-        if cause not in active:
-            return True
-        released = release_no_new_risk_latch_cause(
-            cause=cause[0],
-            cause_id=cause[1],
-            reason="runtime_overlay_authority_recovered",
-            actor="system:runtime_config_refresh",
-            evidence={
-                "overlay_hash": str(restored.get("overlay_hash") or ""),
-                "mutation_id": str(restored.get("mutation_id") or ""),
-                "authority": dict(restored.get("authority") or {}),
-            },
-        )
-        remaining = {
-            (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
-            for item in list(released.get("causes") or [])
-            if isinstance(item, dict)
+        evidence = {
+            "overlay_hash": str(restored.get("overlay_hash") or ""),
+            "mutation_id": str(restored.get("mutation_id") or ""),
+            "authority": dict(restored.get("authority") or {}),
         }
-        return cause not in remaining
+        remaining = set(active)
+        for cause in causes:
+            if cause not in remaining:
+                continue
+            released = release_no_new_risk_latch_cause(
+                cause=cause[0],
+                cause_id=cause[1],
+                reason="runtime_overlay_authority_recovered",
+                actor="system:runtime_config_restore",
+                evidence=evidence,
+            )
+            remaining = {
+                (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
+                for item in list(
+                    released.get("remaining_causes")
+                    or released.get("causes")
+                    or []
+                )
+                if isinstance(item, dict)
+            }
+        return not any(cause in remaining for cause in causes)
     except Exception:
         logger.error(
             "RuntimeConfig overlay authority recovery latch release failed",
@@ -816,7 +832,7 @@ def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = Fal
         base = RuntimeConfig.from_dict(overlay_base_config(effective_db_path))
         restored = service.restore_on_startup(base)
         shared_holder().replace(restored["config"])
-        if _release_recovered_overlay_authority_latch(restored):
+        if release_recovered_overlay_authority_latches(restored):
             _overlay_last_hash_by_db[db_key] = overlay_hash
         return True
     except Exception as exc:  # noqa: BLE001

@@ -250,6 +250,10 @@ def execute_supervisor_tighten_action(
                         blockers=("amend_projection_unverified",),
                         source="supervisor_tighten",
                         error=failure_reason,
+                        metadata={
+                            "position_id": pid,
+                            "verification": dict(verification or {}),
+                        },
                     )
                 except Exception as exc:
                     if record_aux_failure is not None:

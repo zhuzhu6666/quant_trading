@@ -41,7 +41,7 @@
 |---|---|
 | `StreamingFactorEngine` | 因子是否被计算，生命周期是否正确 |
 | `SignalNormalizer` | 高频/低频采样是否合理 |
-| `PortfolioCompositor` | 是否只有 alpha 进入方向评分 |
+| `PortfolioCompositor` | 是否只有 alpha 进入方向评分；宏观与战术同时存在时是否执行独立宏观方向上限，旧 `factor_tactical_alpha` overlay 是否不能绕过，更严格配置是否保持 |
 | `DecisionPolicy` | 权重写入是否唯一、是否过滤 lifecycle/role |
 | `AdaptiveWeightEngine` | 是否只调整 alpha |
 | `Factor Catalog` | role、enabled、used_in_score、lifecycle 是否一致 |
@@ -94,8 +94,8 @@
 | mutation 覆盖 | 每个已生效 AWE 权重 patch 是否存在对应 `learning_application_log/effect`，历史缺口是否单独标 legacy |
 | incident/autonomy safety independence | no_new_risk/revoke 是否在 PG 前持久化本地 latch；PG、Coordinator、mutation audit 或 event ledger 失败时是否继续阻断新增风险并写 safety outbox；close/reduce/tighten/emergency 是否完全不调用治理 Coordinator |
 | latch projection recovery | local latch 生效而 configured incident 仍为 normal 时，API 是否报告 effective no_new_risk；incident cause 是否先补交 no_new_risk committed projection、再以 step-up + V16 thaw；thaw 是否只释放 incident cause，且 broker unknown、heartbeat、emergency-resume、forced-shadow 等残余 cause 继续 fail-closed |
-| watchdog autonomous recovery | watchdog 是否只有在 safety/account/positions freshness 与 unknown execution 连续三轮均 authoritative/current 后才释放精确 `safety_freshness/safety_watchdog` cause；中途一次 unsafe/idle/startup_unknown 是否重置计数；是否绝不释放 incident、emergency、broker unknown、governance 或 release cause |
-| overlay authority recovery | commit 后 projection publish 前的 pending/degraded 是否锁存精确 governance cause 且不缓存失败 hash；后续 committed/current + config/domain hash 重验成功是否只释放 `governance_authority/runtime_config_overlay_refresh`；其他 latch cause 与 release persistence failure 是否继续 fail-closed |
+| watchdog autonomous recovery | watchdog 是否只有在 safety/account/positions freshness 与 unknown execution 连续三轮均 authoritative/current 后才释放精确 `safety_freshness/safety_watchdog` cause；`supervisor_tighten position_missing_after_amend` 是否还要求 fresh reconcile 确认目标 position ID 已消失，旧记录缺 ID 时是否仅允许空仓释放；中途一次 unsafe/idle/startup_unknown 是否重置计数；是否绝不释放 incident、emergency、broker unknown、governance 或其他 supervisor cause |
+| overlay authority recovery | commit 后 projection publish 前的 pending/degraded 是否锁存精确 governance cause 且不缓存失败 hash；后续 committed/current + config/domain hash 重验成功是否释放 RuntimeConfig-owned `runtime_config_overlay_refresh` 与 `legacy_restore:runtime_config_overlay`；是否读取逐 cause release 的 `remaining_causes`；其他 latch cause 与 release persistence failure 是否继续 fail-closed |
 | Safety shadow evidence | 是否只在 full cycle 追加 fsync observation；记录是否不含账户凭据/金额等无关敏感事实；遥测失败是否不改写 broker action；24 小时/完整 lifecycle gate 是否验证 continuity、fresh reconcile、unknown=0、independent exact match、duplicate/conflict/forced-shadow 为零；CLI 与 `loop-status.safety_shadow_gate` 是否复用同一 fail-closed evaluator，ledger 缺失/损坏时是否绝不报告通过 |
 | unknown outcome resolution | broker unknown 是否按 intent/action/position 独立锁存；只有 fresh recovery/reconcile 得到 confirmed/rejected 且附 evidence 才能追加 resolution；通用 clear、incident thaw、进程重启或 PG failure 是否都不能删除 unresolved 证据 |
 | thaw/unlock/unfreeze | before/target 是否被判为扩张并要求最近 step-up + Coordinator + V16；caller `risk_reduction`、action 命名和 startup/restore 字样是否都不能绕过；收紧是否不依赖 PG session authority；mutation 未 committed 时原 freeze/latch 是否保持 |
@@ -182,7 +182,7 @@
 | auth | 未授权返回是否符合预期 |
 | Auth v2 | Argon2id/legacy flag、15 分钟 access、旋转 refresh/logout、一次性 WS ticket、5 分钟 step-up 是否闭合；step-up 是否只绑定当前 active `sid/fid`、先事务持久 `auth_time` 再发 token、refresh 是否只继承不续鲜、PG 失败是否阻断 start/unlock；logout 是否在 PG 前 fsync 持久撤销整个 session family 且重启不复活；普通 access 是否绑定 PG active session 并在 PG/撤销投影读失败时 fail-closed；stop/emergency 是否仍可仅靠本地签名 scope + durable revocation projection 执行，且撤销投影读失败不会夺走风险缩减能力 |
 | `_fact` | 是否按 `docs/api-fact-contract.md` 维护 endpoint contract/source/observed_at/stale_after；组合事实是否按各组件真实生产周期独立判断 freshness，并将任一 error/unknown/stale 向父级 fail-closed 投影；Learning 是否只用显式持久化时间且缓存不续鲜；Ops read/write/mutation 是否分别验证账本时间、durable ID+commit timestamp、committed mutation；缺失、unknown、stale、error 是否永不显示绿色；stop/emergency 是否不被 freshness gate 禁用 |
-| 401 并发 | 多个请求同时 401 是否只清理/跳转一次；非 401 是否保留 token 和最后事实 |
+| 401 并发 | 多个请求同时 401 是否只清理/跳转一次；是否按请求发送时 token 识别迟到 401 并复用已发布 token；多标签页是否以同源锁串行 refresh 且锁内重验 token；非 401 是否保留 token 和最后事实 |
 | 小程序合并 | `Promise.allSettled` 是否按来源更新；全部失败是否只推进 attempt；WS partial payload 是否不写默认零值 |
 | readiness | 运维页能看到 frontend/live execution/live alpha/autonomous mutation/release 五维阻断；frontend readiness 不得授权 control/release |
 | parity replay | additive replay API 是否保留 hash、因果、成本和 component blockers，且 runner/API 自身永不授予 governance/deploy 权限 |

@@ -31,6 +31,8 @@ const API_BASE = envBase.replace(/\/$/, "");
 let onUnauthorized: (() => void | Promise<void>) | null = null;
 let unauthorizedInFlight: Promise<void> | null = null;
 let refreshInFlight: Promise<string | null> | null = null;
+const AUTH_TOKEN_KEY = "quant.auth.token";
+const AUTH_REFRESH_LOCK = "quant.auth.refresh";
 
 export function setUnauthorizedHandler(handler: () => void | Promise<void>): void {
   onUnauthorized = handler;
@@ -90,32 +92,49 @@ function parseResponse<T>(response: Response): Promise<T> {
 }
 
 function publishAccessToken(token: string): void {
-  localStorage.setItem("quant.auth.token", token);
+  localStorage.setItem(AUTH_TOKEN_KEY, token);
   window.dispatchEvent(new CustomEvent("quant-auth-token", { detail: { token } }));
 }
 
 function clearAccessToken(): void {
-  localStorage.removeItem("quant.auth.token");
+  localStorage.removeItem(AUTH_TOKEN_KEY);
   window.dispatchEvent(new Event("quant-auth-invalidated"));
 }
 
-async function refreshAccessToken(): Promise<string | null> {
+async function requestRefreshedAccessToken(failedToken: string | null): Promise<string | null> {
+  const refresh = async (): Promise<string | null> => {
+    const currentToken = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (currentToken && currentToken !== failedToken) {
+      return currentToken;
+    }
+    const response = await fetch(buildHttpUrl("/api/auth/refresh"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      credentials: "include",
+    });
+    if (!response.ok) return null;
+    const body = await parseResponse<LoginResponse>(response);
+    const token = extractLoginToken(body);
+    if (!token) return null;
+    publishAccessToken(token);
+    resetUnauthorizedCoordinator();
+    return token;
+  };
+
+  // Module-local single-flight is insufficient when several tabs share the
+  // same rotating refresh cookie.  Web Locks serializes the refresh authority
+  // across same-origin browsing contexts; the token recheck inside the lock
+  // lets waiters reuse the winner instead of rotating the session again.
+  if (typeof navigator !== "undefined" && navigator.locks) {
+    return navigator.locks.request(AUTH_REFRESH_LOCK, refresh);
+  }
+  return refresh();
+}
+
+async function refreshAccessToken(failedToken: string | null): Promise<string | null> {
   if (!refreshInFlight) {
-    refreshInFlight = (async () => {
-      const response = await fetch(buildHttpUrl("/api/auth/refresh"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-        credentials: "include",
-      });
-      if (!response.ok) return null;
-      const body = await parseResponse<LoginResponse>(response);
-      const token = extractLoginToken(body);
-      if (!token) return null;
-      publishAccessToken(token);
-      resetUnauthorizedCoordinator();
-      return token;
-    })().catch(() => null).finally(() => {
+    refreshInFlight = requestRefreshedAccessToken(failedToken).catch(() => null).finally(() => {
       refreshInFlight = null;
     });
   }
@@ -123,7 +142,7 @@ async function refreshAccessToken(): Promise<string | null> {
 }
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
-  const token = localStorage.getItem("quant.auth.token");
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
   const headers = new Headers(init.headers || {});
   const hasBody = init.body !== undefined && init.body !== null;
 
@@ -133,6 +152,10 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}, retrie
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
+  const authorization = headers.get("Authorization") || "";
+  const requestToken = authorization.startsWith("Bearer ")
+    ? authorization.slice(7)
+    : token;
 
   const response = await fetch(buildHttpUrl(path), {
     ...init,
@@ -144,7 +167,13 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}, retrie
     const body = await parseResponse<unknown>(response);
     const authEndpoint = path.startsWith("/api/auth/login") || path.startsWith("/api/auth/refresh");
     if (!retried && !authEndpoint) {
-      const refreshedToken = await refreshAccessToken();
+      // A late 401 from a request sent with the previous token must not rotate
+      // the session again.  Reuse the token already published by another
+      // request/tab and reserve refresh for the still-current failed token.
+      const currentToken = localStorage.getItem(AUTH_TOKEN_KEY);
+      const refreshedToken = currentToken && currentToken !== requestToken
+        ? currentToken
+        : await refreshAccessToken(requestToken);
       if (refreshedToken) {
         const retryHeaders = new Headers(init.headers || {});
         retryHeaders.delete("Authorization");

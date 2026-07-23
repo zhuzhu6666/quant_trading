@@ -17,6 +17,7 @@ def merge_portfolio_configs(
     weight_config: Mapping[str, Any] | None,
     tactical_alpha: float,
     signal_threshold: float,
+    macro_direction_cap: float = 0.15,
 ) -> dict[str, Any]:
     """Project admitted factor config into ``PortfolioCompositor`` input.
 
@@ -82,6 +83,7 @@ def merge_portfolio_configs(
             ),
         }
     merged["_tactical_alpha"] = tactical_alpha
+    merged["_macro_direction_cap"] = macro_direction_cap
     merged["_signal_threshold"] = signal_threshold
     return merged
 
