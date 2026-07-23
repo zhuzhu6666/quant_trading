@@ -146,6 +146,17 @@ assert.doesNotMatch(tradingPage, /tone=\{loopRunning \? "ok" : "warn"\}/, "循�
 assert.doesNotMatch(tradingPage, /tone=\{gatePassed \? "ok" : "warn"\}/, "策略旧值不得绕过 strategy Fact 变绿");
 assert.match(tradingPage, /label="停止"[\s\S]*?disabled=\{stopBusy\}/, "Fact 未知不得禁用停止");
 assert.match(tradingPage, /label="紧急平仓"[\s\S]*?disabled=\{closeBusy\}/, "Fact 未知不得禁用紧急平仓");
+assert.match(
+  tradingPage,
+  /pickNumber\(b\.item, \["ts"\], 0\) - pickNumber\(a\.item, \["ts"\], 0\)/,
+  "最近因子信号必须按业务时间倒序，不能按进程内 tick 排序",
+);
+assert.match(tradingPage, /`ts:\$\{observedAt\}`/, "最近因子信号必须按业务时间稳定去重");
+assert.doesNotMatch(
+  tradingPage,
+  /\.sort\(\(a, b\) => pickNumber\(b, \["tick"\]/,
+  "tick 会在 backend 重启后归零，不能作为跨 generation 的排序键",
+);
 assert.match(pnlPage, /readFact\(seriesQuery\.data, "live\.realized-pnl\.v2"\)/);
 assert.match(pnlPage, /const seriesRequestFailed = seriesQuery\.isError \|\| seriesQuery\.isRefetchError/);
 assert.match(pnlPage, /\(\) => seriesDisplayable[\s\S]*?pickArray\(seriesQuery\.data/, "PnL unknown/error payload 不得作为事实值展示");

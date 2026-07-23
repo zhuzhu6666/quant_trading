@@ -6,7 +6,10 @@ import math
 from typing import Any, Mapping
 
 
-DATA_SYNC_CRON = "*/5 * * * *"
+# Keep maintenance pulls one minute behind M5 decision boundaries. Running at
+# :00/:05/... contends for the primary cTrader bridge exactly while final
+# account/position admission facts are being validated.
+DATA_SYNC_CRON = "1-56/5 * * * *"
 DATA_SYNC_INTERVAL_SECONDS = 5 * 60
 
 

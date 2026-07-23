@@ -577,3 +577,89 @@ def test_only_operator_can_resume_governance_expansion(tmp_path):
 
     assert system_resume["status"] == "operator_governance_pause_required"
     assert operator_resume["status"] == "committed"
+
+
+def test_domain_only_entry_quality_mutation_commits_atomically(tmp_path):
+    db_path = tmp_path / "state.db"
+
+    def writer(conn, mutation_id, _config):
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS entry_control "
+            "(scope_key TEXT PRIMARY KEY, mutation_id TEXT, threshold REAL)"
+        )
+        conn.execute(
+            "INSERT INTO entry_control VALUES ('weak_signal', ?, 0.5)",
+            (mutation_id,),
+        )
+        return {"scope_key": "weak_signal", "threshold": 0.5}
+
+    result = GovernanceMutationCoordinator(db_path).execute(
+        GovernanceMutationPlan(
+            patch={},
+            source="pytest_entry_quality",
+            actor="system:autonomous_learning",
+            action="activate_entry_quality_control",
+            control_surface="entry_quality",
+            scope_type="entry_quality",
+            scope_key="weak_signal",
+            domain_only=True,
+            domain_before={
+                "min_abs_signal_score": 0.0,
+                "strong_signal_override": 0.0,
+            },
+            domain_target={
+                "min_abs_signal_score": 0.5,
+                "strong_signal_override": 0.75,
+            },
+        ),
+        transaction_writer=writer,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "committed"
+    assert result["risk_classification"]["risk_class"] == "risk_tightening"
+    assert _row(db_path, "SELECT threshold FROM entry_control")["threshold"] == 0.5
+    assert _row(
+        db_path,
+        "SELECT status FROM governance_mutation_intent WHERE mutation_id=?",
+        (result["mutation_id"],),
+    )["status"] == "committed"
+    assert _row(
+        db_path,
+        "SELECT mutation_id FROM runtime_config_overlay",
+    ).get("mutation_id", "") != result["mutation_id"]
+    assert _row(
+        db_path,
+        "SELECT COUNT(*) AS n FROM runtime_config_snapshot WHERE mutation_id=?",
+        (result["mutation_id"],),
+    )["n"] == 0
+
+
+def test_domain_only_writer_failure_rolls_back_domain_fact(tmp_path):
+    db_path = tmp_path / "state.db"
+
+    def writer(conn, _mutation_id, _config):
+        conn.execute("CREATE TABLE entry_control (scope_key TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO entry_control VALUES ('weak_signal')")
+        raise RuntimeError("writer_failed")
+
+    result = GovernanceMutationCoordinator(db_path).execute(
+        GovernanceMutationPlan(
+            patch={},
+            source="pytest_entry_quality",
+            action="activate_entry_quality_control",
+            control_surface="entry_quality",
+            scope_type="entry_quality",
+            scope_key="weak_signal",
+            domain_only=True,
+            domain_before={"min_abs_signal_score": 0.0},
+            domain_target={"min_abs_signal_score": 0.5},
+        ),
+        transaction_writer=writer,
+    )
+
+    assert result["ok"] is False
+    assert _row(
+        db_path,
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='entry_control'",
+    )["n"] == 0

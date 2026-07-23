@@ -674,6 +674,24 @@ def test_entry_quality_governance_materializes_policy_suggestions(tmp_path):
         conn.close()
 
     al.repair_evidence_contracts(db_path=db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, governance_eligible,
+             governance_eligibility_version, governance_eligibility_fingerprint,
+             governance_ineligible_reason, created_at)
+            VALUES ('legacy_ineligible_weak_signal', 'entry_quality', 'weak_signal',
+                    'raise_weak_signal_threshold', 0.8, 'legacy placeholder', '{}',
+                    'proposed', 0, 'legacy', '', 'legacy_placeholder', ?)
+            """,
+            (time.time() - 100.0,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     result = al.materialize_entry_quality_governance_suggestions(db_path=db_path, min_samples=3, min_bad_rate=0.5)
 
     assert result["suggestions"] == 3
@@ -687,11 +705,31 @@ def test_entry_quality_governance_materializes_policy_suggestions(tmp_path):
             ORDER BY scope_key, action
             """
         ).fetchall()
+        legacy_status = conn.execute(
+            "SELECT status FROM policy_suggestion WHERE suggestion_id='legacy_ineligible_weak_signal'"
+        ).fetchone()[0]
+        weak = conn.execute(
+            """
+            SELECT suggestion_id, governance_eligible,
+                   governance_eligibility_fingerprint
+            FROM policy_suggestion
+            WHERE scope_type='entry_quality' AND scope_key='weak_signal'
+              AND status='proposed'
+            """
+        ).fetchone()
     finally:
         conn.close()
+    assert legacy_status == "invalidated_evidence"
+    assert weak[0] != "legacy_ineligible_weak_signal"
+    assert weak[1] == 1
+    assert weak[2]
     assert ("entry_quality", "weak_signal", "raise_weak_signal_threshold", "proposed") in suggestions
     assert ("entry_quality", "factor_conflict", "require_factor_agreement", "proposed") in suggestions
     assert ("entry_quality", "real_yield_chg", "suppress_recent_worst_factor", "proposed") in suggestions
+    repeated = al.materialize_entry_quality_governance_suggestions(
+        db_path=db_path, min_samples=3, min_bad_rate=0.5
+    )
+    assert repeated["suggestions"] == 0
 
 
 def test_event_window_governance_ignores_legacy_gradient_samples(tmp_path):

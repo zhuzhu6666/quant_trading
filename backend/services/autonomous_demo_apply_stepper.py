@@ -18,7 +18,9 @@ from backend.services.autonomous_learning import (
     _new_experiment_id,
     _sync_factor_weights_for_demo,
     ensure_autonomous_learning_tables,
+    materialize_entry_quality_governance_suggestions,
 )
+from backend.services.entry_quality_governance import EntryQualityGovernanceService
 from backend.services.evolution_ledger import finish_evolution_run, start_evolution_run
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 
@@ -27,12 +29,15 @@ class AutonomousDemoApplyStepper:
     """Explicit single-step wrapper around the existing demo apply chain."""
 
     STEP_ORDER = [
+        "entry_quality_materialize",
         "factor_pruning_materialize",
         "factor_pruning_promote",
         "factor_pruning_bridge",
         "factor_pruning_governance",
+        "dispatch_v16_delegation",
         "governor_review",
         "resolve_conflicts",
+        "apply_entry_quality_control",
         "sync_factor_weights",
         "apply_parameter_templates",
         "release_parameter_candidates",
@@ -41,12 +46,15 @@ class AutonomousDemoApplyStepper:
     ]
 
     DEFAULT_LIMITS = {
+        "entry_quality_materialize": 1,
         "factor_pruning_materialize": 1,
         "factor_pruning_promote": 1,
         "factor_pruning_bridge": 1,
         "factor_pruning_governance": 2,
+        "dispatch_v16_delegation": 1,
         "governor_review": 5,
         "resolve_conflicts": 20,
+        "apply_entry_quality_control": 1,
         "sync_factor_weights": 1,
         "apply_parameter_templates": 2,
         "release_parameter_candidates": 1,
@@ -97,9 +105,31 @@ class AutonomousDemoApplyStepper:
             "enabled": bool(_demo_autonomous_enabled()),
             "steps": steps,
             "pending": pending,
+            "entry_quality": EntryQualityGovernanceService(self.db_path).status(),
+            "v16_commands": self._v16_command_status(),
             "generated_at": time.time(),
             "boundary": self.boundary(),
         }
+
+    def _v16_command_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+            status = V16BrainOrchestratorService(self.db_path).status(limit=50)
+            return {
+                "actionable_count": int(status.get("actionable_command_count") or 0),
+                "cancelled_count": int(status.get("cancelled_command_count") or 0),
+                "oldest_actionable_age_seconds": float(
+                    status.get("oldest_actionable_age_seconds") or 0.0
+                ),
+            }
+        except Exception as exc:
+            return {
+                "actionable_count": 0,
+                "cancelled_count": 0,
+                "oldest_actionable_age_seconds": 0.0,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     def run_step(
         self,
@@ -429,12 +459,23 @@ class AutonomousDemoApplyStepper:
 
     def _execute_step(self, step: str, *, experiment_id: str, run_id: str, limit: int) -> dict[str, Any]:
         handlers: dict[str, Callable[[], dict[str, Any]]] = {
+            "entry_quality_materialize": lambda: materialize_entry_quality_governance_suggestions(
+                db_path=self.db_path,
+                limit=max(100, min(int(limit) * 1000, 5000)),
+            ),
             "factor_pruning_materialize": lambda: self._run_factor_pruning_materialize(limit=limit),
             "factor_pruning_promote": lambda: self._run_factor_pruning_promote(limit=limit),
             "factor_pruning_bridge": lambda: self._run_factor_pruning_bridge(limit=limit),
             "factor_pruning_governance": lambda: self._run_factor_pruning_governance(limit=limit),
+            "dispatch_v16_delegation": lambda: self._run_dispatch_v16_delegation(),
             "governor_review": lambda: self._run_governor_review(experiment_id=experiment_id, run_id=run_id, limit=limit),
             "resolve_conflicts": lambda: self._run_resolve_conflicts(limit=limit),
+            "apply_entry_quality_control": lambda: EntryQualityGovernanceService(
+                self.db_path
+            ).apply_next_weak_signal(
+                run_id=run_id,
+                actor="system:autonomous_demo_apply_stepper.entry_quality",
+            ),
             "sync_factor_weights": lambda: _sync_factor_weights_for_demo(experiment_id=experiment_id),
             "apply_parameter_templates": lambda: _auto_apply_parameter_template_suggestions(
                 db_path=self.db_path,
@@ -513,6 +554,80 @@ class AutonomousDemoApplyStepper:
             "bridge": bridge.get("bridge", bridge),
         }
 
+    def _run_dispatch_v16_delegation(self) -> dict[str, Any]:
+        from backend.services.brain_governance_candidate_review import (
+            BrainGovernanceCandidateReviewService,
+        )
+        from backend.services.brain_governance_candidates import (
+            BrainGovernanceCandidateService,
+        )
+
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            row = _execute(
+                conn,
+                """
+                SELECT command.command_id, command.candidate_id,
+                       command.target_agent, command.scope_type,
+                       command.scope_key, command.action
+                FROM v16_brain_command command
+                JOIN brain_governance_candidate candidate
+                  ON candidate.candidate_id=command.candidate_id
+                WHERE command.decision='delegate'
+                  AND command.claim_status='available'
+                  AND COALESCE(command.apply_count, 0)=0
+                  AND candidate.status='active'
+                ORDER BY command.created_at ASC
+                LIMIT 1
+                """,
+            ).fetchone()
+            command = dict(row) if row else {}
+        finally:
+            conn.close()
+        if not command:
+            return {
+                "ok": True,
+                "status": "skipped_no_actionable_v16_delegation",
+            }
+
+        candidate_id = str(command["candidate_id"])
+        review_result = BrainGovernanceCandidateReviewService(
+            self.db_path
+        ).review_candidate(
+            candidate_id,
+            run_llm=False,
+            llm_dry_run=True,
+            persist=True,
+        )
+        review = dict(review_result.get("review") or {})
+        if not bool(review.get("bridge_ready")):
+            return {
+                "ok": True,
+                "status": "waiting_for_candidate_evidence",
+                "command_id": command["command_id"],
+                "candidate_id": candidate_id,
+                "target_agent": command["target_agent"],
+                "review": review,
+            }
+        submitted = BrainGovernanceCandidateService(
+            self.db_path
+        ).submit_candidate_to_policy_suggestion(
+            candidate_id,
+            actor="system:autonomous_demo_apply_stepper.v16_dispatch",
+        )
+        return {
+            "ok": bool(submitted.get("ok", True)),
+            "status": str(submitted.get("status") or "routed_to_specialist"),
+            "command_id": command["command_id"],
+            "candidate_id": candidate_id,
+            "target_agent": command["target_agent"],
+            "scope_type": command["scope_type"],
+            "scope_key": command["scope_key"],
+            "action": command["action"],
+            "suggestion_id": submitted.get("suggestion_id", ""),
+            "claim_deferred_to_atomic_mutation": True,
+        }
+
     def _run_governor_review(self, *, experiment_id: str, run_id: str, limit: int) -> dict[str, Any]:
         conn = _connect(self.db_path)
         try:
@@ -583,6 +698,9 @@ class AutonomousDemoApplyStepper:
             return {step: 0 for step in self.STEP_ORDER}
         try:
             counts = {
+                "entry_quality_materialize": self._pending_entry_quality_materialize(
+                    conn
+                ),
                 "factor_pruning_materialize": 0,
                 "factor_pruning_promote": self._count_table(
                     conn,
@@ -599,8 +717,21 @@ class AutonomousDemoApplyStepper:
                     "brain_governance_candidate",
                     "source_agent='factor_pruning_governance' AND status='active' AND COALESCE(submitted_suggestion_id, '') = ''",
                 ),
+                "dispatch_v16_delegation": self._count_actionable_v16_delegations(
+                    conn
+                ),
                 "governor_review": self._count_policy(conn, "status='proposed'"),
                 "resolve_conflicts": self._count_conflict_superseded(conn),
+                "apply_entry_quality_control": self._count_policy(
+                    conn,
+                    "status='approved' AND scope_type='entry_quality' "
+                    "AND scope_key='weak_signal' "
+                    "AND action='raise_weak_signal_threshold' "
+                    "AND governance_eligible=1 "
+                    f"AND governance_eligibility_version='{GOVERNANCE_ELIGIBILITY_VERSION}' "
+                    "AND COALESCE(governance_eligibility_fingerprint, '') <> '' "
+                    "AND COALESCE(applied_mutation_id, '') = ''",
+                ),
                 "sync_factor_weights": self._count_policy(
                     conn,
                     "status='approved' AND scope_type='factor' "
@@ -619,6 +750,49 @@ class AutonomousDemoApplyStepper:
 
     def _count_policy(self, conn: Any, where: str) -> int:
         return self._count_table(conn, "policy_suggestion", where)
+
+    def _count_actionable_v16_delegations(self, conn: Any) -> int:
+        if not self._table_exists(conn, "v16_brain_command") or not self._table_exists(
+            conn, "brain_governance_candidate"
+        ):
+            return 0
+        row = _execute(
+            conn,
+            """
+            SELECT COUNT(*) AS n
+            FROM v16_brain_command command
+            JOIN brain_governance_candidate candidate
+              ON candidate.candidate_id=command.candidate_id
+            WHERE command.decision='delegate'
+              AND command.claim_status='available'
+              AND COALESCE(command.apply_count, 0)=0
+              AND candidate.status='active'
+            """,
+        ).fetchone()
+        return int((row["n"] if hasattr(row, "keys") else row[0]) or 0)
+
+    def _pending_entry_quality_materialize(self, conn: Any) -> int:
+        active = self._count_policy(
+            conn,
+            "scope_type='entry_quality' AND scope_key='weak_signal' "
+            "AND action='raise_weak_signal_threshold' "
+            "AND status IN ('proposed','approved','applied') "
+            "AND governance_eligible=1 "
+            f"AND governance_eligibility_version='{GOVERNANCE_ELIGIBILITY_VERSION}' "
+            "AND COALESCE(governance_eligibility_fingerprint, '') <> ''",
+        )
+        if active > 0:
+            return 0
+        return min(
+            1,
+            self._count_table(
+                conn,
+                "autonomous_learning_sample",
+                "sample_type='trade_review_outcome' AND label_status='matured' "
+                "AND governance_eligible=1 AND governance_effective_weight>0 "
+                f"AND governance_eligibility_version='{GOVERNANCE_ELIGIBILITY_VERSION}'",
+            ),
+        )
 
     def _count_table(self, conn: Any, table: str, where: str) -> int:
         if not self._table_exists(conn, table):
@@ -717,6 +891,11 @@ class AutonomousDemoApplyStepper:
             return int(pending.get("factor_pruning_bridge", 0) or 0) <= 0 and int(pending.get(step, 0) or 0) > 0
         if step == "factor_pruning_governance":
             return False
+        if step == "apply_entry_quality_control":
+            return (
+                int(pending.get("entry_quality_materialize", 0) or 0) <= 0
+                and int(pending.get(step, 0) or 0) > 0
+            )
         if step == "resolve_conflicts":
             return int(pending.get("governor_review", 0) or 0) > 0 or int(pending.get("resolve_conflicts", 0) or 0) > 1
         return int(pending.get(step, 0) or 0) > 0

@@ -763,12 +763,13 @@ def risk_summary_fact_payload(
     observed_at = _positive_min([health_observed_at, risk_observed_at])
     errors = health.get("errors") if isinstance(health.get("errors"), list) else []
     health_error = "; ".join(str(item) for item in errors if item) or None
+    summary_stale_after_sec = DEFAULT_STALE_AFTER_SEC["system_health"]
     components = {
         "system_health": _component(
             contract="system.runtime-health.v1",
             source="system_health" if observed_epoch(health_observed_at) > 0 else "none",
             observed_at=health_observed_at,
-            stale_after_sec=DEFAULT_STALE_AFTER_SEC["risk"],
+            stale_after_sec=DEFAULT_STALE_AFTER_SEC["system_health"],
             error=health_error,
             now=generated_at,
         ),
@@ -781,17 +782,36 @@ def risk_summary_fact_payload(
             now=generated_at,
         ),
     }
-    return dict(attach_fact(
+    result = dict(attach_fact(
         result,
         contract="risk.summary.v2",
         source="system_health+state_pg" if observed_epoch(observed_at) > 0 else "none",
         observed_at=observed_at,
-        stale_after_sec=DEFAULT_STALE_AFTER_SEC["risk"],
+        stale_after_sec=summary_stale_after_sec,
         error=risk_error or health_error,
         reason_code="risk_sources_incomplete" if observed_epoch(observed_at) <= 0 else None,
         components=components,
         now=generated_at,
     ))
+    # The two sources have different production cadences.  The parent window
+    # covers the once-per-minute system-health report, while the independently
+    # evaluated risk-input component retains its stricter 30-second contract.
+    # Conservatively project any non-known component onto the parent so the
+    # wider health window can never make stale risk inputs look current.
+    component_states = {
+        str(component.get("state") or "unknown")
+        for component in components.values()
+    }
+    projected_state = next(
+        (state for state in ("error", "unknown", "stale") if state in component_states),
+        "known",
+    )
+    parent_fact = dict(result["_fact"])
+    if projected_state != "known" and parent_fact.get("state") == "known":
+        parent_fact["state"] = projected_state
+        parent_fact["reason_code"] = f"component_{projected_state}"
+        result["_fact"] = parent_fact
+    return result
 
 
 def state_snapshot_fact_payload(

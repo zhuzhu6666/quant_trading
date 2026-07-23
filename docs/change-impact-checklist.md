@@ -66,7 +66,7 @@
 | `GovernanceMutationCoordinator` | 是否由 before/after 自动判定风险方向；intent、overlay/snapshot、领域事实和 V16 finalize 是否在同一 PG 事务；commit 后 publish 失败是否只降级 projection 并可重放 |
 | typed control plan | ParameterTemplate、position supervisor、model/policy、shadow lifecycle、incident、autonomy freeze/unlock/revoke 与 operator pause 的执行入口是否只提交 typed plan；手工与自动入口是否复用同一 transaction writer；`off` 兼容与 `dual_record/enforce` 是否都忽略调用方 `risk_reduction` |
 | 模板原子提交 | registry/active、application/effect、reservation、`policy_suggestion.applied_mutation_id` 是否与同一 committed mutation 绑定；writer 故障是否连同 overlay/snapshot 全部回滚；effect rollback 失败是否保留原控制并形成 pending 而非先改 registry |
-| V16 单次凭证 | 是否只在 Coordinator 事务 finalize 时增加 apply_count，并绑定 mutation/config/domain hash；`authority_issued_at` 是否不可变，claim/release/recovery 是否拒绝通过 `updated_at` 续期；过期 claim/停滞 intent 启动恢复是否不会产生新授权；旧 consume 是否仅处于明确兼容期 |
+| V16 单次凭证 | 是否只有 active、posterior-selected delegate 可 actionable；observe 是否只留 plan/eval；superseded/过期/失效候选的未领取命令是否转 `cancelled` 且 apply_count=0；是否只在 Coordinator 事务 finalize 时增加 apply_count，并绑定 mutation/config/domain hash；`authority_issued_at` 是否不可变 |
 | 治理证据资格 | executable governance 是否只使用 matured、full/verified recovered、非污染、model-ready、lineage 唯一完整的样本；partial/missing/contaminated 是否权重为 0；sample → stats → suggestion 的 eligibility version/fingerprint 是否一致且 Governor 只使用 effective sample count/weighted 指标 |
 | 研究证据信任边界 | legacy indicator sweep 是否被 CLI、runner、服务、job/list/report 和所有 executable governance 入口强制标记为 `diagnostic_only`；parity replay 是否绑定 config/data/code/factor-artifact manifest，要求显式匹配四类 expected hash，并把月库部分读取、代码绑定缺失、factor identity/artifact/lifecycle/显式权重缺失、非原生 bid/ask 或任一 modeled lifecycle 输入保持 diagnostic-only；parameter-template review/deploy 是否对缺失 metadata 也无条件 fail-closed；历史/手工候选是否标 `legacy_quarantined/require_revalidation` 且只能用新 parity artifact 重验；调用方自报 verdict/`live_parity/governance_eligible/deployable_candidate` 是否无法绕过中央拒绝策略 |
 | 因子稳定身份 | generated DSL factor ID 是否来自规范化 AST 的完整 SHA-256，禁止 Python `hash()`/截断摘要 |
@@ -76,6 +76,8 @@
 | `evolution_decision` | 是否记录判断和 rollback_json |
 | `learning_application_log` | 是否记录应用状态 |
 | `learning_application_effect` | 是否能支撑后验回滚 |
+| entry-quality 闭环 | 是否只消费当前版本、成熟、无污染、独立 position 的合格样本；旧占位是否 invalidated；建议 ID 是否绑定 eligibility fingerprint；weak-signal 是否每周期最多应用一个并以 domain-only committed mutation 原子落账；live loader 是否拒绝 approved-only/悬空 mutation |
+| entry-quality 效果窗口 | 是否绑定 mutation 时间/config hash；是否同时展示 raw/eligible/distinct/effective N；至少 5 笔独立平仓才判断；24h 不足继续 observing、7 天不足 inconclusive；观察期间是否禁止同 scope 再应用 |
 | 应用原子性 | `dual_record/enforce` 下权重 application/effect/reservation 是否与 overlay/snapshot、intent、V16 finalize 在同一 Coordinator 事务并绑定同一 `mutation_id`；故障是否全部回滚且不留下 `prepared`；`off` legacy prepared 是否仍能用 snapshot 幂等恢复 |
 | `runtime_config_overlay` | 重启是否可恢复 |
 | overlay authority | 非空 `mutation_id` 是否只恢复 `committed/current` 且 config/domain hash 完整绑定的 intent；空 `mutation_id` 是否要求精确 overlay hash + 全 key 的 `legacy_authority_json` operator review；悬空/缺 manifest 时是否 latch no-new-risk 并只保留只读收紧保护，绝不授权新增风险 |
@@ -118,6 +120,7 @@
 | `ContextPolicyService` | context 只影响阈值/仓位，不改方向 |
 | `live_tick_pipeline` | gate 前后的顺序是否正确 |
 | explicit reconcile | safety/startup/emergency/order recovery 是否只接受 `PositionReconcileResult` / `AccountReconcileResult` 的 fresh 全量快照；cache/event/failed 是否不会被当成空仓、零账户或零未实现 PnL |
+| final open reconcile | M5 bar 回补或因子计算令 account/positions age 超过 15 秒时，是否在 candidate 前有界刷新并重新验证；刷新失败是否保持 fail-closed；具体 `account_reconcile_*` / `positions_reconcile_*` 是否进入决策原因而非被压成 `loop_draining`；`data_sync` 是否与 M5 决策分钟错峰 |
 | empty-account composite reconcile | 是否只有 fresh immutable、明确空仓且不超过 15 秒的 `PositionReconcileResult` 能为紧随其后的 account reconcile 证明 unrealized PnL=0；account observed_at 是否继承较早 position 时间；有仓、stale、failed、cache/event 或兼容 dict 是否仍必须调用 broker PnL 且失败时 fail-closed |
 | reconcile component truth | account/position push event 是否只更新 event projection 而不刷新 reconcile 年龄；有仓时 identity/protection/price/PnL 是否分别可追到 broker reconcile、fresh spot 和 PnL RPC；未知 price/PnL 是否阻断 open 但不阻断 timeout/entry repair/close/reduce/tighten；前端是否不把未知组件归零或染绿 |
 | protection cycle ownership | timeout、entry repair、supervisor、trailing 是否由 `live_position_protection_cycle` 按固定优先级仲裁；同 position 低优先级 candidate 是否 supersede；单 stage 异常是否记录辅助失败但继续其他风险缩减；`live_service` 是否只做 callback wiring 且不重新嵌入循环/异常分支 |
@@ -178,7 +181,7 @@
 | 新字段含义 | 前端不需要自行推断 |
 | auth | 未授权返回是否符合预期 |
 | Auth v2 | Argon2id/legacy flag、15 分钟 access、旋转 refresh/logout、一次性 WS ticket、5 分钟 step-up 是否闭合；step-up 是否只绑定当前 active `sid/fid`、先事务持久 `auth_time` 再发 token、refresh 是否只继承不续鲜、PG 失败是否阻断 start/unlock；logout 是否在 PG 前 fsync 持久撤销整个 session family 且重启不复活；普通 access 是否绑定 PG active session 并在 PG/撤销投影读失败时 fail-closed；stop/emergency 是否仍可仅靠本地签名 scope + durable revocation projection 执行，且撤销投影读失败不会夺走风险缩减能力 |
-| `_fact` | 是否按 `docs/api-fact-contract.md` 维护 endpoint contract/source/observed_at/stale_after；Learning 是否只用显式持久化时间且缓存不续鲜；Ops read/write/mutation 是否分别验证账本时间、durable ID+commit timestamp、committed mutation；缺失、unknown、stale、error 是否永不显示绿色；stop/emergency 是否不被 freshness gate 禁用 |
+| `_fact` | 是否按 `docs/api-fact-contract.md` 维护 endpoint contract/source/observed_at/stale_after；组合事实是否按各组件真实生产周期独立判断 freshness，并将任一 error/unknown/stale 向父级 fail-closed 投影；Learning 是否只用显式持久化时间且缓存不续鲜；Ops read/write/mutation 是否分别验证账本时间、durable ID+commit timestamp、committed mutation；缺失、unknown、stale、error 是否永不显示绿色；stop/emergency 是否不被 freshness gate 禁用 |
 | 401 并发 | 多个请求同时 401 是否只清理/跳转一次；非 401 是否保留 token 和最后事实 |
 | 小程序合并 | `Promise.allSettled` 是否按来源更新；全部失败是否只推进 attempt；WS partial payload 是否不写默认零值 |
 | readiness | 运维页能看到 frontend/live execution/live alpha/autonomous mutation/release 五维阻断；frontend readiness 不得授权 control/release |

@@ -158,7 +158,10 @@ def test_v16_orchestrator_dispatches_without_direct_runtime_mutation(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM policy_suggestion").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM runtime_config_overlay").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM brain_governance_candidate").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 4
+        assert conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v16_brain_command WHERE decision='observe'"
+        ).fetchone()[0] == 0
     finally:
         conn.close()
 
@@ -175,6 +178,42 @@ def test_v16_orchestrator_dispatches_without_direct_runtime_mutation(tmp_path):
     try:
         assert conn.execute("SELECT COUNT(*) FROM policy_suggestion").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM brain_governance_candidate").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 4
+        assert conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_superseded_candidate_cancels_unclaimed_delegate(tmp_path):
+    db_path = tmp_path / "state.db"
+    _seed_posterior_facts(db_path, time.time())
+    service = V16BrainOrchestratorService(db_path)
+    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            "UPDATE brain_governance_candidate SET status='superseded'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = service._cancel_non_actionable_commands(persist=True)
+
+    assert result["stale_delegate_count"] == 1
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        row = conn.execute(
+            """
+            SELECT claim_status, apply_count, failure_reason
+            FROM v16_brain_command
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "cancelled"
+    assert row[1] == 0
+    assert row[2] == "candidate_not_active"
+    rerun = service.run_once(
+        readiness=_readiness(), limit=20, source="test", persist=True
+    )
+    assert rerun["delegated_count"] == 0

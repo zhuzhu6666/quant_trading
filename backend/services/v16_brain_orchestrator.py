@@ -54,6 +54,8 @@ def ensure_v16_brain_command_table(db_path: str | Path = STATE_DB) -> None:
                 posterior_fingerprint TEXT DEFAULT '',
                 evidence_fingerprint TEXT DEFAULT '',
                 last_release_reason TEXT DEFAULT '',
+                finalized_at REAL NOT NULL DEFAULT 0.0,
+                failure_reason TEXT DEFAULT '',
                 authority_issued_at REAL NOT NULL DEFAULT 0.0,
                 created_at REAL NOT NULL DEFAULT 0.0,
                 updated_at REAL NOT NULL DEFAULT 0.0
@@ -71,6 +73,8 @@ def ensure_v16_brain_command_table(db_path: str | Path = STATE_DB) -> None:
             "posterior_fingerprint": "TEXT DEFAULT ''",
             "evidence_fingerprint": "TEXT DEFAULT ''",
             "last_release_reason": "TEXT DEFAULT ''",
+            "finalized_at": "REAL NOT NULL DEFAULT 0.0",
+            "failure_reason": "TEXT DEFAULT ''",
             "authority_issued_at": "REAL NOT NULL DEFAULT 0.0",
         }
         if is_state_db_path(db_path):
@@ -179,7 +183,7 @@ class V16BrainOrchestratorService:
         plans = {str(item.get("plan_id") or ""): item for item in plans_run.get("plans") or []}
         evals = list(evals_run.get("evals") or [])
         governance = {str(item.get("eval_id") or ""): item for item in governance_run.get("items") or []}
-        raw_commands = [
+        evaluated_commands = [
             self._command_for_evaluation(
                 snapshot=snapshot,
                 plan=plans.get(str(evaluation.get("plan_id") or ""), {}),
@@ -188,6 +192,18 @@ class V16BrainOrchestratorService:
             )
             for evaluation in evals[:limit]
         ]
+        raw_commands = [
+            item for item in evaluated_commands if item.get("decision") == "delegate"
+        ]
+        if persist and raw_commands:
+            active_candidate_ids = self._active_candidate_ids(
+                [str(item.get("candidate_id") or "") for item in raw_commands]
+            )
+            raw_commands = [
+                item
+                for item in raw_commands
+                if str(item.get("candidate_id") or "") in active_candidate_ids
+            ]
         # Plan/eval tables are append-only audit ledgers.  Re-running the
         # coordinator therefore sees prior evaluations as well; the command
         # identity is deliberately posterior/scope based so the specialist
@@ -196,6 +212,7 @@ class V16BrainOrchestratorService:
         if persist:
             self._persist_commands(commands)
         superseded = self._reconcile_stale_candidates(commands=commands, persist=persist)
+        cancelled = self._cancel_non_actionable_commands(persist=persist)
         delegated = [item for item in commands if item.get("decision") == "delegate"]
         return {
             "ok": True,
@@ -207,6 +224,14 @@ class V16BrainOrchestratorService:
             "governance_count": len(governance_run.get("items") or []),
             "command_count": len(commands),
             "delegated_count": len(delegated),
+            "observation_count": len(evaluated_commands) - len(raw_commands),
+            "cancelled_command_count": int(cancelled.get("cancelled_count") or 0),
+            "cancelled_observation_count": int(
+                cancelled.get("observation_count") or 0
+            ),
+            "cancelled_stale_delegate_count": int(
+                cancelled.get("stale_delegate_count") or 0
+            ),
             "superseded_candidate_count": len(superseded),
             "superseded_candidate_ids": superseded,
             "commands": commands,
@@ -216,6 +241,89 @@ class V16BrainOrchestratorService:
             "direct_mutation": False,
             "created_at": time.time(),
         }
+
+    def _active_candidate_ids(self, candidate_ids: list[str]) -> set[str]:
+        candidate_ids = sorted({item for item in candidate_ids if item})
+        if not candidate_ids:
+            return set()
+        conn = connect(self.db_path, read_only=True)
+        try:
+            if not state_table_exists(conn, "brain_governance_candidate"):
+                return set()
+            placeholders = ",".join("?" for _ in candidate_ids)
+            rows = execute(
+                conn,
+                f"""
+                SELECT candidate_id
+                FROM brain_governance_candidate
+                WHERE status='active' AND candidate_id IN ({placeholders})
+                """,
+                tuple(candidate_ids),
+            ).fetchall()
+            return {str(row["candidate_id"] or "") for row in rows}
+        finally:
+            conn.close()
+
+    def _cancel_non_actionable_commands(self, *, persist: bool) -> dict[str, int]:
+        """Terminalize observation records and delegates whose candidate is stale."""
+        if not persist:
+            return {
+                "cancelled_count": 0,
+                "observation_count": 0,
+                "stale_delegate_count": 0,
+            }
+        conn = connect(self.db_path)
+        try:
+            if not state_table_exists(conn, "v16_brain_command"):
+                return {
+                    "cancelled_count": 0,
+                    "observation_count": 0,
+                    "stale_delegate_count": 0,
+                }
+            now = time.time()
+            observation = execute(
+                conn,
+                """
+                UPDATE v16_brain_command
+                SET claim_status='cancelled',
+                    failure_reason='observation_only_not_actionable',
+                    finalized_at=?, updated_at=?
+                WHERE decision='observe' AND claim_status='available'
+                  AND COALESCE(apply_count, 0)=0
+                """,
+                (now, now),
+            )
+            stale = execute(
+                conn,
+                """
+                UPDATE v16_brain_command
+                SET claim_status='cancelled',
+                    failure_reason='candidate_not_active',
+                    finalized_at=?, updated_at=?
+                WHERE decision='delegate' AND claim_status='available'
+                  AND COALESCE(apply_count, 0)=0
+                  AND EXISTS (
+                      SELECT 1
+                      FROM brain_governance_candidate candidate
+                      WHERE candidate.candidate_id=v16_brain_command.candidate_id
+                        AND candidate.status<>'active'
+                  )
+                """,
+                (now, now),
+            )
+            conn.commit()
+            observation_count = int(observation.rowcount or 0)
+            stale_count = int(stale.rowcount or 0)
+            return {
+                "cancelled_count": observation_count + stale_count,
+                "observation_count": observation_count,
+                "stale_delegate_count": stale_count,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _reconcile_stale_candidates(self, *, commands: list[dict[str, Any]], persist: bool) -> list[str]:
         """Close old V16 candidates that no longer have a current delegate command.
@@ -290,9 +398,29 @@ class V16BrainOrchestratorService:
                 limit=limit,
             )
             latest_cf = 0.0
+            latest_cf_updated = 0.0
             if state_table_exists(conn, "supervisor_counterfactual_review"):
-                row = execute(conn, "SELECT MAX(updated_at) AS latest FROM supervisor_counterfactual_review").fetchone()
-                latest_cf = safe_float(row["latest"] if row else 0.0)
+                row = execute(
+                    conn,
+                    """
+                    SELECT MAX(close_ts) AS latest_event,
+                           MAX(updated_at) AS latest_updated
+                    FROM supervisor_counterfactual_review
+                    """,
+                ).fetchone()
+                latest_cf = safe_float(row["latest_event"] if row else 0.0)
+                latest_cf_updated = safe_float(
+                    row["latest_updated"] if row else 0.0
+                )
+            latest_brain_snapshot = 0.0
+            if state_table_exists(conn, "brain_state_snapshot"):
+                row = execute(
+                    conn,
+                    "SELECT MAX(created_at) AS latest FROM brain_state_snapshot",
+                ).fetchone()
+                latest_brain_snapshot = safe_float(
+                    row["latest"] if row else 0.0
+                )
             # Claim lifecycle timestamps are operational only. Closure uses
             # the evidence-bound V16 authority issuance time.
             latest_command = max(
@@ -303,9 +431,29 @@ class V16BrainOrchestratorService:
                 ),
                 default=0.0,
             )
-            posterior_closed = latest_cf <= 0.0 or latest_command >= latest_cf
+            posterior_closed = (
+                latest_cf <= 0.0
+                or max(latest_command, latest_brain_snapshot) >= latest_cf
+            )
             candidate_commands = [item for item in commands if item.get("decision") == "delegate"]
             candidate_closed = all(bool(item.get("candidate_id")) for item in candidate_commands)
+            lifecycle = execute(
+                conn,
+                """
+                SELECT
+                    SUM(CASE WHEN decision='delegate' AND claim_status IN ('available','claimed')
+                             THEN 1 ELSE 0 END) AS actionable_count,
+                    SUM(CASE WHEN claim_status='cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
+                    MIN(CASE WHEN decision='delegate' AND claim_status IN ('available','claimed')
+                             THEN created_at ELSE NULL END) AS oldest_actionable_at
+                FROM v16_brain_command
+                """,
+            ).fetchone()
+            actionable_count = int((lifecycle["actionable_count"] if lifecycle else 0) or 0)
+            cancelled_count = int((lifecycle["cancelled_count"] if lifecycle else 0) or 0)
+            oldest_actionable_at = safe_float(
+                lifecycle["oldest_actionable_at"] if lifecycle else 0.0
+            )
             status = "healthy"
             if not posterior_source_available:
                 status = "posterior_source_missing"
@@ -320,8 +468,19 @@ class V16BrainOrchestratorService:
                 "status": status,
                 "command_count": len(commands),
                 "delegated_count": len(candidate_commands),
+                "actionable_command_count": actionable_count,
+                "cancelled_command_count": cancelled_count,
+                "oldest_actionable_at": oldest_actionable_at,
+                "oldest_actionable_age_seconds": (
+                    max(0.0, time.time() - oldest_actionable_at)
+                    if oldest_actionable_at > 0.0
+                    else 0.0
+                ),
                 "latest_command_created_at": latest_command,
-                "latest_counterfactual_updated_at": latest_cf,
+                "latest_counterfactual_updated_at": latest_cf_updated,
+                "latest_counterfactual_event_at": latest_cf,
+                "latest_counterfactual_ledger_updated_at": latest_cf_updated,
+                "latest_brain_snapshot_created_at": latest_brain_snapshot,
                 "posterior_source_available": posterior_source_available,
                 "posterior_to_brain_closed": posterior_closed,
                 "command_to_candidate_closed": candidate_closed,

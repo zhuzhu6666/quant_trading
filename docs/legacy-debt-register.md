@@ -25,6 +25,14 @@
 | `fixed` | 已完成修复，只保留追溯 |
 | `deprecated` | 明确废弃，不应新增依赖 |
 
+### 风险汇总复用单一 30 秒 freshness
+
+- 状态: `fixed`
+- 旧理解: `risk.summary.v2` 的运行健康快照和 PostgreSQL 风险输入统一使用 30 秒 freshness。
+- 当前口径: 每分钟产出的 `system.runtime-health.v1` 使用 75 秒窗口覆盖正常调度间隔，`risk.inputs.v1` 继续保持 30 秒；父级将任一非 known 子事实 fail-closed 投影，不能因健康窗口放宽而掩盖风险输入过期。
+- 影响面: `/api/risk/summary`、Web 总揽/风控页、`fact.v1` 契约和 freshness 回归测试。
+- 收口方式: 删除单一 TTL 假设，以组件级状态计算父级可信度；不以请求生成时间刷新任何来源观测。
+
 ### 兼容债务删除总门槛
 
 - 单测、故障注入或代码完成都不等于运行观察完成。Safety v2 必须 shadow 至少一个完整持仓生命周期且零动作差异；无仓时必须完成 24 小时 shadow 与故障矩阵。当前尚未宣称达成该门槛。
@@ -435,6 +443,18 @@
 - 状态: fixed
 - 旧理解: 近期 delegate 只做 read-only authorize，执行者自行决定何时应用，同一命令可能被重复消费。
 - 当前口径: `v16_brain_command` 记录 claim/consume 状态、token、过期时间、apply count 和 posterior/evidence fingerprint；`V16CommandGate` 原子 claim，`RuntimeConfigMutationService` 在变更尝试前 consume，单条命令最多一次。
+
+### observe 命令和失效候选制造 V16 假积压
+
+- 状态: 已收口。
+- 旧理解: observe 也可长期写成 `available` 命令，candidate superseded 或 posterior 不再选中后仍等待专员领取。
+- 当前口径: observe 只保留在 plan/eval 审计；只有 active 且仍被 posterior 选中的 delegate 才可行动。未领取的失效 delegate 转为 `cancelled`，保留历史账本与 `apply_count=0`，readiness 只把 `available/claimed` delegate 计为 actionable。
+
+### 无资格 entry-quality 占位阻塞当前合格建议
+
+- 状态: 已收口。
+- 旧理解: 同 scope/action 任意 proposed/approved/applied 历史行都能阻止重新物化，即使治理版本、资格 fingerprint 或证据已经失效。
+- 当前口径: 只有当前治理版本、相同 eligibility fingerprint、相同 scope/action 的合格建议才幂等去重；旧占位转为 `invalidated_evidence`。weak-signal 激活通过 Coordinator domain-only mutation 原子绑定 applied suggestion 与 application/effect，不新增 RuntimeConfig 假字段。
 - 影响面: V16 委派可靠性、并发 worker、后验与参数变更的时间一致性。
 - 收口方式: PostgreSQL additive migration + SQLite 兼容迁移；过期 claim 自动释放，已消费命令 fail-closed。
 - 验证方式: `tests/test_agent_coordination_fixes.py::test_v16_command_claim_is_single_use_and_evidence_bound`。
@@ -610,6 +630,15 @@
 - 影响面: live start/stop/status、backend shutdown、position protection、account/position freshness、session circuit、AutoRecovery 和前端 loop readiness。
 - 收口方式: `live_generation_controller_v2_enabled=false` 继续保留旧 generation，`live_safety_plane_v2_mode=shadow` 已开始真实观察；“stop 立即清 globals”已从默认路径删除。独立 shadow comparison 的代码和测试已具备，但仍必须实际 shadow 一个完整持仓生命周期，或在无仓时完成 24 小时观察与故障矩阵，才能随发布/重启切换 generation 与 safety enforce。稳定发布后删除其余 loop globals、并发 refresh worker 和旧 safety 尾部执行。
 - 验证方式: `tests/test_live_generation_integration.py`、`tests/test_live_loop_controller.py`、`tests/test_live_safety_plane.py`、`tests/test_live_service_lifecycle.py`。
+
+### 最终开仓准入把 reconcile 过期误报为 loop draining
+
+- 状态: resolved
+- 旧理解: final admission 的 process stop、generation、session、circuit、safety latch 和 account/positions reconcile 可以统一折叠为 `loop_draining`；后台 K 线回补也可以与 M5 决策同分钟使用主 cTrader bridge。
+- 当前口径: `loop_draining` 只属于 process/generation/stop 生命周期。account/positions 在候选生成前必须保持最近 15 秒 fresh；若同 tick K 线回补或计算令其过期，legacy tick 先执行一次有界 authoritative refresh，candidate 边界再防御性复核。刷新失败继续拒绝开仓并保留具体 reconcile blocker。后台 `data_sync` 改为 `:01/:06/...`，不再与 `:00/:05/...` 的 M5 决策正面争用 bridge。
+- 影响面: `backend.services.live_loop_tick_runtime`、`backend.services.live_service`、`backend.services.live_data_sync_helpers`、decision log 与 live loop 日志；不放宽 15 秒 freshness、不绕过 RiskPolicy、不改变实盘权限。
+- 收口方式: 保留 `_open_trade_draining()` 布尔兼容入口，新增可审计 blocker 集合；刷新只有 fresh reconcile 成功才重新开放新增风险，失败保持 fail-closed。
+- 验证方式: `tests/test_live_new_risk_reconcile_gate.py`、`tests/test_live_legacy_safety_ordering.py::test_default_off_refreshes_stale_reconciles_before_alpha`、`tests/test_live_data_sync_schedule.py`。
 
 ### live_service 同时承载 reconcile、safety、startup 与 emergency 领域实现
 

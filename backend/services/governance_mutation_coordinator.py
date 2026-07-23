@@ -280,7 +280,14 @@ def classify_governance_risk(before: Mapping[str, Any], target: Mapping[str, Any
             )
             increasing_tightens = any(
                 token in lower
-                for token in ("min_stop_distance", "safety_buffer", "evidence_min", "min_health")
+                for token in (
+                    "min_stop_distance",
+                    "safety_buffer",
+                    "evidence_min",
+                    "min_health",
+                    "min_abs_signal_score",
+                    "strong_signal_override",
+                )
             )
             if decreasing_tightens:
                 (tightening if float(new) < float(old) else expansion).append(dotted)
@@ -345,6 +352,9 @@ class GovernanceMutationPlan:
     v16_target_agent: str = ""
     v16_candidate_id: str = ""
     v16_posterior_fingerprint: str = ""
+    domain_only: bool = False
+    domain_before: Mapping[str, Any] = field(default_factory=dict)
+    domain_target: Mapping[str, Any] = field(default_factory=dict)
 
 
 Publisher = Callable[[RuntimeConfig, dict[str, Any]], Any]
@@ -470,7 +480,12 @@ class GovernanceMutationCoordinator:
 
     def reserve(self, plan: GovernanceMutationPlan) -> dict[str, Any]:
         sanitized = _sanitize_patch(dict(plan.patch or {}))
-        if not sanitized:
+        domain_before = dict(plan.domain_before or {})
+        domain_target = dict(plan.domain_target or {})
+        domain_only = bool(plan.domain_only)
+        if not sanitized and not (
+            domain_only and domain_target and _hash(domain_before) != _hash(domain_target)
+        ):
             return {"ok": False, "status": "empty_governance_patch", "boundary": self.boundary()}
         if (
             "governance_expansion_paused" in sanitized
@@ -497,6 +512,9 @@ class GovernanceMutationCoordinator:
                     "source": plan.source,
                     "run_id": plan.run_id,
                     "patch": sanitized,
+                    "domain_only": domain_only,
+                    "domain_before": domain_before,
+                    "domain_target": domain_target,
                     "evidence_fingerprint": evidence_fingerprint,
                 }
             )
@@ -535,8 +553,8 @@ class GovernanceMutationCoordinator:
             current_config = runtime_config.config_from_overlay(current_overlay, self.db_path)
             target_overlay = _deep_merge(current_overlay, sanitized)
             target_config = runtime_config.config_from_overlay(target_overlay, self.db_path)
-            before = _slice(current_config.to_dict(), keys)
-            target = _slice(target_config.to_dict(), keys)
+            before = domain_before if domain_only else _slice(current_config.to_dict(), keys)
+            target = domain_target if domain_only else _slice(target_config.to_dict(), keys)
             rollback = dict(plan.rollback or before)
             classification = classify_governance_risk(before, target)
             current_paused = bool(
@@ -870,10 +888,11 @@ class GovernanceMutationCoordinator:
             keys = sorted(patch)
             current_overlay = self._read_overlay(conn)
             current_config = runtime_config.config_from_overlay(current_overlay, self.db_path)
-            current_before = _slice(current_config.to_dict(), keys)
-            expected_before = _loads(intent.get("before_json"), {})
-            if _hash(current_before) != _hash(expected_before):
-                raise GovernanceMutationError("before_state_changed")
+            if keys:
+                current_before = _slice(current_config.to_dict(), keys)
+                expected_before = _loads(intent.get("before_json"), {})
+                if _hash(current_before) != _hash(expected_before):
+                    raise GovernanceMutationError("before_state_changed")
             target_overlay = _deep_merge(current_overlay, patch)
             effective_config = runtime_config.config_from_overlay(target_overlay, self.db_path)
             target_hash = _hash(effective_config.to_dict())
@@ -891,23 +910,69 @@ class GovernanceMutationCoordinator:
             )
             self._fault(fault_injector, "after_prepared")
             overlay_hash = _hash(target_overlay)
-            self._persist_overlay(
-                conn,
-                target_overlay,
-                overlay_hash=overlay_hash,
-                source=plan.source,
-                run_id=plan.run_id,
-                mutation_id=mutation_id,
-                updated_at=now,
-            )
-            snapshot = self._persist_snapshot(
-                conn,
-                effective_config,
-                source=plan.source,
-                run_id=plan.run_id,
-                mutation_id=mutation_id,
-                created_at=now,
-            )
+            if plan.domain_only:
+                # A domain-only mutation must not take ownership of the shared
+                # RuntimeConfig overlay.  Re-stamping an unchanged overlay with
+                # this mutation would make startup validate domain evidence as
+                # config authority and can fail closed when runtime-derived
+                # config differs from YAML+overlay reconstruction.
+                overlay_authority = conn.execute(
+                    _p(
+                        self.db_path,
+                        """SELECT mutation_id FROM runtime_config_overlay
+                           WHERE overlay_id=?""",
+                    ),
+                    (OVERLAY_ID,),
+                ).fetchone()
+                authority_id = str(
+                    _row_dict(overlay_authority).get("mutation_id") or ""
+                )
+                authority = {}
+                if authority_id:
+                    authority = _row_dict(
+                        conn.execute(
+                            _p(
+                                self.db_path,
+                                """SELECT committed_config_version,
+                                          committed_config_hash
+                                   FROM governance_mutation_intent
+                                   WHERE mutation_id=? AND status='committed'
+                                   LIMIT 1""",
+                            ),
+                            (authority_id,),
+                        ).fetchone()
+                    )
+                snapshot = {
+                    "config_version": int(
+                        authority.get("committed_config_version") or 0
+                    ),
+                    "config_hash": str(
+                        authority.get("committed_config_hash") or target_hash
+                    ),
+                    "source": "existing_runtime_config_authority",
+                    "run_id": str(plan.run_id),
+                    "mutation_id": authority_id,
+                    "created_at": now,
+                    "reused": True,
+                }
+            else:
+                self._persist_overlay(
+                    conn,
+                    target_overlay,
+                    overlay_hash=overlay_hash,
+                    source=plan.source,
+                    run_id=plan.run_id,
+                    mutation_id=mutation_id,
+                    updated_at=now,
+                )
+                snapshot = self._persist_snapshot(
+                    conn,
+                    effective_config,
+                    source=plan.source,
+                    run_id=plan.run_id,
+                    mutation_id=mutation_id,
+                    created_at=now,
+                )
             domain_result = dict(transaction_writer(conn, mutation_id, effective_config) or {}) if transaction_writer else {}
             # Bind V16 to the domain facts written by the open transaction, not
             # merely to the caller's target patch.  The writer result is a
@@ -997,6 +1062,7 @@ class GovernanceMutationCoordinator:
                 "intent": self._intent_payload(
                     {**intent, "domain_hash": committed_domain_hash}
                 ),
+                "domain_only": bool(plan.domain_only),
             }
         except Exception:
             conn.rollback()
@@ -1055,6 +1121,12 @@ class GovernanceMutationCoordinator:
 
     def _publish_committed(self, transaction: dict[str, Any]) -> dict[str, Any]:
         mutation_id = str(transaction["mutation_id"])
+        if transaction.get("domain_only"):
+            return self._record_projection(
+                mutation_id,
+                status="current",
+                error={},
+            )
         config = transaction["effective_config"]
         self.publisher(config, transaction)
         return self._record_projection(mutation_id, status="current", error={})

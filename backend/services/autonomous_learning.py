@@ -2122,7 +2122,13 @@ def materialize_entry_quality_governance_suggestions(
             """,
             (GOVERNANCE_ELIGIBILITY_VERSION, max(1, int(limit))),
         ).fetchall()
+        seen_positions: set[str] = set()
         for row in rows:
+            position_id = str(row["position_id"] or "")
+            if position_id and position_id in seen_positions:
+                continue
+            if position_id:
+                seen_positions.add(position_id)
             label = _loads(row["label_json"], {})
             features = _loads(row["features_json"], {})
             review = features.get("review") or {}
@@ -2134,7 +2140,7 @@ def materialize_entry_quality_governance_suggestions(
             base_item = {
                 "sample_id": str(row["sample_id"] or ""),
                 "review_id": str(row["source_id"] or ""),
-                "position_id": str(row["position_id"] or ""),
+                "position_id": position_id,
                 "pnl": pnl,
                 "bad": bad,
                 "entry_score": entry_score,
@@ -2212,23 +2218,54 @@ def materialize_entry_quality_governance_suggestions(
             if action == "watch":
                 skipped += 1
                 continue
-            existing = _execute(
+            eligibility_fingerprint = str(metrics["eligibility_fingerprint"])
+            existing_rows = _execute(
                 conn,
                 """
-                SELECT suggestion_id
+                SELECT suggestion_id, status, governance_eligible,
+                       governance_eligibility_version,
+                       governance_eligibility_fingerprint
                 FROM policy_suggestion
                 WHERE scope_type='entry_quality'
                   AND scope_key=?
                   AND action=?
                   AND status IN ('proposed', 'approved', 'applied')
-                LIMIT 1
+                ORDER BY created_at DESC
                 """,
                 (scope_key, action),
-            ).fetchone()
-            if existing:
+            ).fetchall()
+            current = next(
+                (
+                    row
+                    for row in existing_rows
+                    if bool(row["governance_eligible"])
+                    and str(row["governance_eligibility_version"] or "")
+                    == GOVERNANCE_ELIGIBILITY_VERSION
+                    and str(row["governance_eligibility_fingerprint"] or "")
+                    == eligibility_fingerprint
+                ),
+                None,
+            )
+            if current:
                 skipped += 1
                 continue
-            suggestion_id = "psg_entry_quality_" + hashlib.sha1(f"{scope_key}:{action}".encode("utf-8")).hexdigest()[:16]
+            stale_ids = [str(row["suggestion_id"] or "") for row in existing_rows]
+            if stale_ids:
+                placeholders = ",".join("?" for _ in stale_ids)
+                _execute(
+                    conn,
+                    f"""
+                    UPDATE policy_suggestion
+                    SET status='invalidated_evidence', reviewed_at=?,
+                        review_note='superseded_by_current_governance_eligibility'
+                    WHERE suggestion_id IN ({placeholders})
+                      AND status IN ('proposed', 'approved')
+                    """,
+                    (now, *stale_ids),
+                )
+            suggestion_id = "psg_entry_quality_" + hashlib.sha1(
+                f"{scope_key}:{action}:{eligibility_fingerprint}".encode("utf-8")
+            ).hexdigest()[:16]
             confidence = min(0.94, 0.48 + 0.05 * effective_sample_count + 0.20 * bad_rate)
             evidence = {
                 "schema_version": "entry_quality_governance_evidence.v1",
@@ -2270,7 +2307,7 @@ def materialize_entry_quality_governance_suggestions(
                     f"{scope_key} entry outcomes show weighted bad_rate={bad_rate:.2f} across effective_n={effective_sample_count:.2f}",
                     _dumps(evidence),
                     GOVERNANCE_ELIGIBILITY_VERSION,
-                    str(metrics["eligibility_fingerprint"]),
+                    eligibility_fingerprint,
                     now,
                 ),
             )

@@ -165,6 +165,15 @@ class AgentScorecardService:
         proposals = ProposalRegistryService(self.db_path).status(refresh=False)
         scorecard = self.scorecard(limit=limit)
         attribution = self.latest_trade_attributions(limit=min(20, limit), include_external_links=False)
+        try:
+            from backend.services.entry_quality_governance import EntryQualityGovernanceService
+            from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+            entry_quality = EntryQualityGovernanceService(self.db_path).status()
+            v16_commands = V16BrainOrchestratorService(self.db_path).status(limit=50)
+        except Exception as exc:
+            entry_quality = {"ok": False, "status": "error", "error": str(exc)}
+            v16_commands = {"ok": False, "status": "error", "error": str(exc)}
         score_summary = scorecard.get("summary") or {}
         proposal_count = int(proposals.get("proposal_count") or 0)
         source_ledger_count = (
@@ -201,6 +210,25 @@ class AgentScorecardService:
                 "ok": bool(attribution.get("ok")) and int((attribution.get("summary") or {}).get("lesson_count") or 0) > 0,
                 "summary": attribution.get("summary") or {},
             },
+            {
+                "component": "entry_quality_governance",
+                "status": entry_quality.get("status", "unknown"),
+                "ok": bool(entry_quality.get("ok")),
+                "funnel": entry_quality.get("funnel") or {},
+                "application_post_trade_progress": (
+                    entry_quality.get("application_post_trade_progress") or {}
+                ),
+            },
+            {
+                "component": "v16_actionable_commands",
+                "status": v16_commands.get("status", "unknown"),
+                "ok": bool(v16_commands.get("ok")),
+                "actionable_count": int(v16_commands.get("actionable_command_count") or 0),
+                "cancelled_count": int(v16_commands.get("cancelled_command_count") or 0),
+                "oldest_actionable_age_seconds": float(
+                    v16_commands.get("oldest_actionable_age_seconds") or 0.0
+                ),
+            },
         ]
         blockers = [item for item in checks if not item.get("ok")]
         status = "ok" if not blockers and bool(authority.get("ok")) else "degraded"
@@ -214,6 +242,14 @@ class AgentScorecardService:
             "proposal_registry": proposals,
             "scorecard_summary": scorecard.get("summary") or {},
             "trade_feedback_summary": attribution.get("summary") or {},
+            "entry_quality_governance": entry_quality,
+            "v16_commands": {
+                "actionable_count": int(v16_commands.get("actionable_command_count") or 0),
+                "cancelled_count": int(v16_commands.get("cancelled_command_count") or 0),
+                "oldest_actionable_age_seconds": float(
+                    v16_commands.get("oldest_actionable_age_seconds") or 0.0
+                ),
+            },
             "generated_at": time.time(),
             "boundary": self.boundary(),
         }

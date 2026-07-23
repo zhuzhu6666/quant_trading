@@ -225,7 +225,7 @@ def test_default_off_first_tick_rebuilds_session_after_safety_even_if_cache_is_a
     assert "deal_recovery" not in order
 
 
-def test_default_off_circuit_is_checked_only_after_safety(monkeypatch):
+def test_default_off_demo_circuit_observation_does_not_skip_bars(monkeypatch):
     order: list[str] = []
     _install_legacy_tick_boundary(
         monkeypatch,
@@ -249,8 +249,8 @@ def test_default_off_circuit_is_checked_only_after_safety(monkeypatch):
         "legacy_protection",
         "market_session",
         "account_refresh",
+        "bars",
     ]
-    assert "bars" not in order
     assert result["wait_seconds"] == 5.0
     assert live_service._live_state_get("accepting_new_risk") is False
 
@@ -300,6 +300,78 @@ def test_default_off_marks_tick_protection_already_run_to_avoid_duplicate_mutati
     assert order.count("legacy_protection") == 1
     assert len(process_calls) == 1
     assert process_calls[0]["protection_already_run"] is True
+    assert live_service._live_state_get("accepting_new_risk") is True
+
+
+def test_default_off_refreshes_stale_reconciles_before_alpha(
+    monkeypatch,
+):
+    order: list[str] = []
+    logs: list[str] = []
+    frame = pd.DataFrame(
+        [{"open": 3999.0, "high": 4001.0, "low": 3998.0, "close": 4000.0}],
+        index=pd.to_datetime(["2026-07-19T00:00:00Z"]),
+    )
+    bridge, _today = _install_legacy_tick_boundary(monkeypatch, order, bars=frame)
+    bridge.get_spot_quote = lambda: {
+        "bid": 3999.9,
+        "ask": 4000.1,
+        "mid": 4000.0,
+        "ts": time.time(),
+    }
+
+    def _bars_fresh(**_kwargs):
+        stale_at = time.time() - 16.0
+        live_service._live_state_update(
+            account_updated_at=stale_at,
+            positions_updated_at=stale_at,
+        )
+        return frame
+
+    def _refresh(_bridge, _broker, **_kwargs):
+        order.append("final_reconcile_refresh")
+        fresh_at = time.time()
+        live_service._live_state_update(
+            account_updated_at=fresh_at,
+            positions_updated_at=fresh_at,
+        )
+        return True
+
+    monkeypatch.setattr(
+        live_service,
+        "_ensure_live_decision_bars_fresh",
+        _bars_fresh,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_refresh_account_positions_sync",
+        _refresh,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_loop_compare_spot_quote_to_latest_bar",
+        lambda **_kwargs: {"too_far": False},
+    )
+    process_calls: list[dict] = []
+    monkeypatch.setattr(
+        live_service,
+        "_process_tick",
+        lambda *_args, **kwargs: process_calls.append(kwargs),
+    )
+
+    live_service._run_live_loop_tick_body_legacy(
+        broker="ctrader",
+        bridge_cfg=SimpleNamespace(),
+        timeframe="M5",
+        tick=341,
+        recovery_bootstrapped=True,
+        stop_requested=lambda: False,
+        log=logs.append,
+    )
+
+    assert "final_reconcile_refresh" in order
+    assert any("final open reconcile refresh requested" in item for item in logs)
+    assert len(process_calls) == 1
     assert live_service._live_state_get("accepting_new_risk") is True
 
 

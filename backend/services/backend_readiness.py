@@ -391,6 +391,11 @@ class BackendReadinessService:
             lambda: self._v16_brain_orchestration_status(),
         )
         payload["v16_brain_orchestration"] = v16_brain_orchestration
+        entry_quality_governance = self._timed_component(
+            "entry_quality_governance",
+            lambda: self._entry_quality_governance_status(),
+        )
+        payload["entry_quality_governance"] = entry_quality_governance
         candidate_generation_context_coverage = self._timed_component("candidate_generation_context_coverage", lambda: self._candidate_generation_context_coverage_status())
         payload["candidate_generation_context_coverage"] = candidate_generation_context_coverage
         factor_pruning_governance = self._timed_component("factor_pruning_governance", lambda: self._factor_pruning_governance_status())
@@ -1691,6 +1696,19 @@ class BackendReadinessService:
                     "meta_brain_command_only": True,
                     "direct_mutation": False,
                 },
+            }
+
+    def _entry_quality_governance_status(self) -> dict[str, Any]:
+        try:
+            from backend.services.entry_quality_governance import EntryQualityGovernanceService
+
+            return EntryQualityGovernanceService(self.db_path).status()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "schema_version": "entry_quality_governance_status.v1",
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
             }
 
     def _candidate_generation_context_coverage_status(self) -> dict[str, Any]:

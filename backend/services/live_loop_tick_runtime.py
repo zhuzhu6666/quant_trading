@@ -68,6 +68,7 @@ class LegacyLiveLoopTickRuntime:
     compare_spot_to_bar: Any
     quote_is_fresh: Any
     process_tick: Any
+    refresh_account_positions: Any = None
 
 
 def run_legacy_live_loop_tick_body(
@@ -275,6 +276,13 @@ def run_legacy_live_loop_tick_body(
         )
 
     reconcile_blockers = runtime.new_risk_reconciliation_blockers()
+    if reconcile_blockers and callable(runtime.refresh_account_positions):
+        log(
+            f"tick {tick}: final open reconcile refresh "
+            f"requested blockers={reconcile_blockers}"
+        )
+        runtime.refresh_account_positions(bridge, broker)
+        reconcile_blockers = runtime.new_risk_reconciliation_blockers()
     accepting_new_risk = bool(
         safety.get("accepting_new_risk", False)
         and not reconcile_blockers

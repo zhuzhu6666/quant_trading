@@ -488,7 +488,10 @@ class AutonomousEvolutionNurseryRunner:
         current_v16_delegate_ids = {
             str(item.get("candidate_id") or "")
             for item in current_v16_commands
-            if item.get("decision") == "delegate" and item.get("candidate_id")
+            if item.get("decision") == "delegate"
+            and str(item.get("claim_status") or "available")
+            in {"available", "claimed"}
+            and item.get("candidate_id")
         }
         latest_reviews: dict[str, dict[str, Any]] = {}
         for review in reviews:

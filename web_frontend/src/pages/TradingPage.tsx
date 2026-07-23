@@ -276,17 +276,27 @@ export function TradingPage() {
   const factorTicks = useMemo(() => {
     const seen = new Set<string>();
     return recentTicks
-      .map((raw) => asRecord(raw))
-      .filter((item) => pick(item, ["tactical_score"]) !== undefined || pick(item, ["macro_score"]) !== undefined)
-      .sort((a, b) => pickNumber(b, ["tick"], 0) - pickNumber(a, ["tick"], 0))
-      .filter((item) => {
-        const key = pickString(item, ["tick"], "");
+      .map((raw, sourceOrder) => ({ item: asRecord(raw), sourceOrder }))
+      .filter(({ item }) => pick(item, ["tactical_score"]) !== undefined || pick(item, ["macro_score"]) !== undefined)
+      .sort((a, b) => {
+        const timeDifference = pickNumber(b.item, ["ts"], 0) - pickNumber(a.item, ["ts"], 0);
+        return timeDifference || b.sourceOrder - a.sourceOrder;
+      })
+      .filter(({ item }) => {
+        const observedAt = pickNumber(item, ["ts"], 0);
+        const fallbackTick = pickString(item, ["tick"], "");
+        const key = observedAt > 0
+          ? `ts:${observedAt}`
+          : fallbackTick
+            ? `tick:${fallbackTick}`
+            : "";
         if (!key || seen.has(key)) {
           return false;
         }
         seen.add(key);
         return true;
-      });
+      })
+      .map(({ item }) => item);
   }, [recentTicks]);
   const executionEvents = pickArray(strategyStatus, ["execution_events"]);
   const liveExecutionSummary = { ...executionSummary, ...asRecord(pick(strategyStatus, ["execution_summary"])) };

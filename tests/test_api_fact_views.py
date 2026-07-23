@@ -427,6 +427,37 @@ def test_risk_summary_without_health_observation_is_unknown_not_green():
     assert payload["_fact"]["state"] == "unknown"
 
 
+def test_risk_summary_uses_component_specific_freshness_windows():
+    healthy_between_minute_checks = risk_summary_fact_payload(
+        {"system_health": {"ts": 50.0, "errors": []}},
+        risk_observed_at=99.0,
+        now=100.0,
+    )
+    stale_risk_inputs = risk_summary_fact_payload(
+        {"system_health": {"ts": 99.0, "errors": []}},
+        risk_observed_at=68.0,
+        now=100.0,
+    )
+    stale_system_health = risk_summary_fact_payload(
+        {"system_health": {"ts": 24.0, "errors": []}},
+        risk_observed_at=99.0,
+        now=100.0,
+    )
+
+    assert healthy_between_minute_checks["_fact"]["state"] == "known"
+    assert healthy_between_minute_checks["_fact"]["stale_after_sec"] == 75.0
+    assert healthy_between_minute_checks["_fact"]["components"]["system_health"]["state"] == "known"
+    assert healthy_between_minute_checks["_fact"]["components"]["risk_inputs"]["state"] == "known"
+
+    assert stale_risk_inputs["_fact"]["state"] == "stale"
+    assert stale_risk_inputs["_fact"]["reason_code"] == "component_stale"
+    assert stale_risk_inputs["_fact"]["components"]["risk_inputs"]["stale_after_sec"] == 30.0
+
+    assert stale_system_health["_fact"]["state"] == "stale"
+    assert stale_system_health["_fact"]["reason_code"] == "freshness_expired"
+    assert stale_system_health["_fact"]["components"]["system_health"]["stale_after_sec"] == 75.0
+
+
 def test_health_probe_adds_fact_without_removing_legacy_shape():
     payload = health_fact_payload(
         {"status": "ok", "db": "connected", "ctrader": "connected"},

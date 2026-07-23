@@ -17,6 +17,7 @@ DEFAULT_STALE_AFTER_SEC = {
     "loop": 15.0,
     "risk": 30.0,
     "session": 30.0,
+    "system_health": 75.0,
     "readiness": 180.0,
     "learning": 180.0,
     "ops": 180.0,

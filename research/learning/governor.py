@@ -1054,10 +1054,17 @@ class RuleEvolutionGovernor:
                 if prior_status == "mixed":
                     rechecked_mixed += 1
                 scope_type = str(app.get("scope_type") or "")
-                if scope_type not in {"factor", "parameter_template", "position_supervisor_template"}:
+                if scope_type not in {
+                    "factor",
+                    "parameter_template",
+                    "position_supervisor_template",
+                    "entry_quality",
+                }:
                     continue
                 scope_key_for_effect = str(app.get("scope_key") or "")
                 review_limit = max(int(observe_trades) * 5, int(observe_trades))
+                raw_post_count_override: int | None = None
+                raw_pre_count_override: int | None = None
                 next_application_row = self._execute(
                     conn,
                     """
@@ -1135,6 +1142,55 @@ class RuleEvolutionGovernor:
                         if self._has_supervisor_feedback(r)
                     ][: int(observe_trades)]
                     reward_from_review = self._supervisor_reward_from_review
+                elif scope_type == "entry_quality":
+                    post_rows = self._execute(
+                        conn,
+                        """
+                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id,
+                               r.entry_quality, r.pnl, r.mfe, r.outcome_label,
+                               r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                        FROM trade_outcome_review r
+                        WHERE r.created_at > ? AND r.created_at < ?
+                        ORDER BY r.created_at DESC LIMIT ?
+                        """,
+                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, review_limit),
+                    ).fetchall()
+                    pre_rows = self._execute(
+                        conn,
+                        """
+                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id,
+                               r.entry_quality, r.pnl, r.mfe, r.outcome_label,
+                               r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                        FROM trade_outcome_review r
+                        WHERE r.created_at <= ?
+                        ORDER BY r.created_at DESC LIMIT ?
+                        """,
+                        (float(app.get("cycle_ts") or 0.0), review_limit),
+                    ).fetchall()
+                    parsed_post = [self._parse_review_row(row) for row in post_rows]
+                    parsed_pre = [self._parse_review_row(row) for row in pre_rows]
+                    raw_post_count_override = len(parsed_post)
+                    raw_pre_count_override = len(parsed_pre)
+
+                    def distinct_positions(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                        seen: set[str] = set()
+                        result: list[dict[str, Any]] = []
+                        for item in items:
+                            identity = str(
+                                item.get("position_id")
+                                or item.get("trade_id")
+                                or item.get("review_id")
+                                or ""
+                            )
+                            if identity in seen:
+                                continue
+                            seen.add(identity)
+                            result.append(item)
+                        return result
+
+                    post_reviews = distinct_positions(parsed_post)[: int(observe_trades)]
+                    pre_reviews = distinct_positions(parsed_pre)[: int(observe_trades)]
+                    reward_from_review = self._reward_from_review
                 else:
                     factor = (
                         str(app.get("scope_key") or "")
@@ -1229,8 +1285,16 @@ class RuleEvolutionGovernor:
                     scope_key=scope_key_for_effect,
                     post_reviews=post_reviews,
                     baseline_reviews=pre_reviews,
-                    raw_post_count=len(raw_post_reviews),
-                    raw_baseline_count=len(raw_pre_reviews),
+                    raw_post_count=(
+                        raw_post_count_override
+                        if raw_post_count_override is not None
+                        else len(raw_post_reviews)
+                    ),
+                    raw_baseline_count=(
+                        raw_pre_count_override
+                        if raw_pre_count_override is not None
+                        else len(raw_pre_reviews)
+                    ),
                     excluded_contaminated_post=post_contaminated,
                     excluded_contaminated_baseline=pre_contaminated,
                     excluded_regime_mismatch_post=post_regime_mismatch,
@@ -1241,8 +1305,8 @@ class RuleEvolutionGovernor:
                     next_application=next_application,
                     observation_upper_bound=observation_upper_bound,
                     reward_from_review=reward_from_review,
-                    min_trades=min_trades,
-                    observe_trades=observe_trades,
+                    min_trades=max(5, min_trades) if scope_type == "entry_quality" else min_trades,
+                    observe_trades=max(5, observe_trades) if scope_type == "entry_quality" else observe_trades,
                     baseline_min_trades=baseline_min_trades,
                     reward_delta_for_effective=reward_delta_for_effective,
                     reward_delta_for_bad=reward_delta_for_bad,
@@ -1273,6 +1337,60 @@ class RuleEvolutionGovernor:
                         last_review_at=evaluation.last_review_at,
                     )
                 decision = evaluation.decision
+                if scope_type == "entry_quality":
+                    controls = dict((app.get("details") or {}).get("controls") or {})
+                    threshold = float(controls.get("min_abs_signal_score") or 0.0)
+
+                    def entry_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
+                        if not items:
+                            return {
+                                "distinct_positions": 0,
+                                "below_applied_threshold_open_count": 0,
+                                "weak_signal_overtraded_rate": 0.0,
+                                "avg_entry_quality": 0.0,
+                                "mfe_zero_loss_rate": 0.0,
+                            }
+                        below = 0
+                        weak = 0
+                        entry_total = 0.0
+                        zero_mfe_losses = 0
+                        losses = 0
+                        for item in items:
+                            review = item.get("review") or {}
+                            score = review.get("signal_score")
+                            if score is not None and abs(float(score or 0.0)) < threshold:
+                                below += 1
+                            tags = {str(tag) for tag in (item.get("failure_tags") or [])}
+                            weak += int("weak_signal_overtraded" in tags)
+                            entry_total += float(
+                                item.get("entry_quality")
+                                or review.get("entry_quality")
+                                or 0.0
+                            )
+                            if float(item.get("pnl") or 0.0) < 0:
+                                losses += 1
+                                zero_mfe_losses += int(float(item.get("mfe") or 0.0) <= 0.0)
+                        count = len(items)
+                        return {
+                            "distinct_positions": count,
+                            "below_applied_threshold_open_count": below,
+                            "weak_signal_overtraded_rate": round(weak / count, 6),
+                            "avg_entry_quality": round(entry_total / count, 6),
+                            "mfe_zero_loss_rate": round(
+                                zero_mfe_losses / max(losses, 1), 6
+                            ),
+                        }
+
+                    decision["entry_quality_effect"] = {
+                        "threshold": threshold,
+                        "post": entry_metrics(post_reviews),
+                        "baseline": entry_metrics(pre_reviews),
+                        "success_contract": {
+                            "below_threshold_open_count": 0,
+                            "weak_signal_overtraded_relative_reduction": 0.5,
+                            "min_post_independent_positions": int(observe_trades),
+                        },
+                    }
                 next_status = evaluation.status
                 post_reviews = post_reviews[: evaluation.post_count]
                 pre_reviews = pre_reviews[: evaluation.baseline_count]

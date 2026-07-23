@@ -1,7 +1,7 @@
 # API Fact Contract
 
 > Status: active
-> Last verified: 2026-07-19
+> Last verified: 2026-07-23
 > Scope: additive `fact.v1` provenance and freshness contract for public API and WebSocket read models.
 
 本文只定义“这个值来自哪里、观测于何时、现在是否可信”，不改变各端点原有业务字段。运行与治理权力边界仍以 `system-source-of-truth.md` 为准。
@@ -47,6 +47,7 @@
 | WS / 组合 state / spot | 5 秒 |
 | account / positions / loop | 15 秒 |
 | risk / session / 风险性治理投影 | 30 秒 |
+| system runtime health | 75 秒 |
 | auto-recovery | 75 秒 |
 | readiness / learning / ops 账本 | 180 秒 |
 
@@ -87,6 +88,8 @@ live loop 的串行 broker owner 在空仓时也必须每 5 秒醒来完成 fres
 cTrader bridge 的报价快照固定携带 `source=ctrader_spot`。有来源但超过 5 秒的最后报价必须表现为 stale 并保留数值与时间；只有从未收到报价或来源不可用时才是 unknown。
 
 Web 概览的 `system.health.v2` 轮询周期必须严格短于其 5 秒 freshness，当前固定为 3 秒；不得再次使用 10 秒轮询造成“接口正常/接口未知”周期抖动。
+
+`risk.summary.v2` 是组件级 fail-closed 组合事实：`system.runtime-health.v1` 由每分钟健康检查产出，允许 75 秒新鲜度以覆盖调度抖动；`risk.inputs.v1` 仍保持 30 秒。父级使用 75 秒自描述窗口，但任一组件为 `error/unknown/stale` 时必须投影为同类非 known 状态，不能用较宽的健康检查窗口掩盖风险输入过期。
 
 `live.positions.v2` 进一步公开 `broker_reconcile.identity/protection/price/pnl` 四个 `fact.v1` 子事实：identity/volume/SL/TP 来自全量 position reconcile；current price 只来自 15 秒内 cTrader spot；PnL 来自独立 broker PnL RPC。fresh 明确空仓不要求四个子组件并可保持 known；非空仓缺必需组件为 unknown，显式组件失败为 error；旧快照已经超过 15 秒时优先保持 stale 和原 `observed_at`。未知 price/PnL 不得用 entry price、账户差额或零值补齐，但 timeout、entry repair、close/reduce/tighten 仍可继续。
 

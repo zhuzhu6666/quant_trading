@@ -6644,6 +6644,13 @@ def _legacy_live_loop_tick_runtime() -> LegacyLiveLoopTickRuntime:
         compare_spot_to_bar=_loop_compare_spot_quote_to_latest_bar,
         quote_is_fresh=_quote_is_fresh,
         process_tick=_process_tick,
+        refresh_account_positions=lambda bridge, broker: (
+            _refresh_account_positions_sync(
+                bridge,
+                broker,
+                wait_for_lock_sec=5.0,
+            )
+        ),
     )
 
 
@@ -7062,18 +7069,29 @@ def _run_loop_body_active(
 # _run_loop 的 60s 等待期间, 兼容 worker 调显式 account/position reconcile
 # 并仅按 broker observed_at 写 _live_state。cache/event/failed 绝不刷新事实时间。
 # Phase2 safety plane 启用后不使用这个并发兼容 worker。
-def _refresh_account_positions_sync(bridge, broker: str) -> None:
+def _refresh_account_positions_sync(
+    bridge,
+    broker: str,
+    *,
+    wait_for_lock_sec: float = 0.0,
+) -> bool:
     """One-shot synchronous write to _live_state. Used by the background
     thread; tests call this directly. Best-effort: never raises.
 
     ★ v9-fix: 连接断开时立刻返回, 不做 API 调用防 timeout 风暴.
     """
-    if not _ACCOUNT_REFRESH_LOCK.acquire(blocking=False):
-        return
+    wait_seconds = max(0.0, float(wait_for_lock_sec or 0.0))
+    acquired = (
+        _ACCOUNT_REFRESH_LOCK.acquire(timeout=wait_seconds)
+        if wait_seconds > 0
+        else _ACCOUNT_REFRESH_LOCK.acquire(blocking=False)
+    )
+    if not acquired:
+        return False
     try:
         # 连接预检: 断开时不调用, 避免 10s timeout 堆积
         if hasattr(bridge, 'is_connected') and not bridge.is_connected:
-            return
+            return False
         now_ts = time.time()
         acct = _live_state_get("account", {}, clone=True) or {}
         account_updated_at = float(_live_state_get("account_updated_at") or 0.0)
@@ -7084,7 +7102,7 @@ def _refresh_account_positions_sync(bridge, broker: str) -> None:
             and (now_ts - positions_updated_at) < _POSITION_RECONCILE_MIN_INTERVAL
         )
         if account_fresh and positions_fresh:
-            return
+            return True
         if not account_fresh:
             try:
                 account_reconcile = _explicit_account_reconcile(bridge)
@@ -7140,6 +7158,7 @@ def _refresh_account_positions_sync(bridge, broker: str) -> None:
                 _mark_positions_reconcile_failed(
                     f"background_positions_reconcile_exception:{type(e).__name__}"
                 )
+        return not _new_risk_reconciliation_blockers()
     finally:
         _ACCOUNT_REFRESH_LOCK.release()
 
@@ -9165,40 +9184,70 @@ def _new_risk_reconciliation_blockers(*, now_ts: float | None = None) -> list[st
     return sorted(set(blockers))
 
 
-def _open_trade_draining(stop_requested=None) -> bool:
+def _open_trade_admission_blockers(stop_requested=None) -> tuple[str, ...]:
+    blockers: list[str] = []
     if _process_shutdown_requested:
-        return True
+        blockers.append("process_shutdown_requested")
     # The durable latch is checked again while the admission lock is held by
     # _submit_open_trade_candidate.  This linearizes emergency activation with
     # the broker open RPC and fails closed if the latch ledger is unreadable.
     if no_new_risk_latched(fail_closed=True):
-        return True
+        blockers.append("no_new_risk_latched")
     if _generation_controller_enabled():
         if not _LIVE_LOOP_CONTROLLER.accepting_new_risk(_current_generation_id()):
-            return True
+            blockers.append("generation_not_accepting_new_risk")
     if bool(_live_state_get("loop_running", False)):
         # Generation ownership and the live/session fact projection are
         # independent authorities and must both allow admission.  A controller
         # that was ready before a same-tick close cannot override a failed
         # post-close session rebuild.  Safety reductions do not use this gate.
         if not bool(_live_state_get("accepting_new_risk", False)):
-            return True
+            blockers.append("accepting_new_risk_false")
         if str(
             _live_state_get("session_state_status", "unknown") or "unknown"
         ) != "available":
-            return True
+            blockers.append("session_state_unavailable")
         if bool(_live_state_get("circuit_breaker", False)):
-            return True
+            blockers.append("session_circuit_breaker")
         reconcile_blockers = _new_risk_reconciliation_blockers()
         _live_state_update(new_risk_reconcile_blockers=reconcile_blockers)
-        if reconcile_blockers:
-            return True
-    return bool(stop_requested is not None and stop_requested())
+        blockers.extend(reconcile_blockers)
+    if bool(stop_requested is not None and stop_requested()):
+        blockers.append("loop_stop_requested")
+    return tuple(dict.fromkeys(blockers))
 
 
-def _loop_draining_gate_result(*, tick: int, stage: str, log):
-    log(f"tick {tick}: v4 open SKIP (loop_draining stage={stage})")
-    return _blocked_open_trade_gate_result("loop_draining")
+def _open_trade_draining(stop_requested=None) -> bool:
+    return bool(_open_trade_admission_blockers(stop_requested))
+
+
+def _open_admission_gate_reason(blockers: tuple[str, ...]) -> str:
+    draining = {
+        "process_shutdown_requested",
+        "generation_not_accepting_new_risk",
+        "loop_stop_requested",
+    }
+    if any(blocker in draining for blocker in blockers):
+        return "loop_draining"
+    for blocker in blockers:
+        if blocker != "accepting_new_risk_false":
+            return blocker
+    return blockers[0] if blockers else "open_admission_blocked"
+
+
+def _open_admission_gate_result(
+    *,
+    tick: int,
+    stage: str,
+    blockers: tuple[str, ...],
+    log,
+):
+    reason = _open_admission_gate_reason(blockers)
+    log(
+        f"tick {tick}: v4 open SKIP "
+        f"({reason} stage={stage} blockers={list(blockers)})"
+    )
+    return _blocked_open_trade_gate_result(reason)
 
 
 def _run_open_trade_pipeline(
@@ -9224,8 +9273,31 @@ def _run_open_trade_pipeline(
 ):
     if not (composite.direction != 0 and gate_result.passed and send):
         return gate_result
-    if _open_trade_draining(stop_requested):
-        return _loop_draining_gate_result(tick=tick, stage="before_candidate", log=log)
+    admission_blockers = _open_trade_admission_blockers(stop_requested)
+    reconcile_blockers = {
+        blocker
+        for blocker in admission_blockers
+        if blocker.startswith("account_reconcile_")
+        or blocker.startswith("positions_reconcile_")
+    }
+    if reconcile_blockers and bridge is not None:
+        log(
+            f"tick {tick}: refreshing final open reconciles "
+            f"blockers={sorted(reconcile_blockers)}"
+        )
+        _refresh_account_positions_sync(
+            bridge,
+            broker,
+            wait_for_lock_sec=5.0,
+        )
+        admission_blockers = _open_trade_admission_blockers(stop_requested)
+    if admission_blockers:
+        return _open_admission_gate_result(
+            tick=tick,
+            stage="before_candidate",
+            blockers=admission_blockers,
+            log=log,
+        )
     if pending_open_attach_ids:
         log(
             f"tick {tick}: v4 open SKIP (pending_open_attach "
