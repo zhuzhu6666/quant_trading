@@ -1655,7 +1655,7 @@ def test_ensure_live_decision_bars_suppresses_repair_during_maintenance(monkeypa
     assert snapshot["repair_status"] == "maintenance_wait"
 
 
-def test_spot_subscription_refresh_is_suppressed_during_maintenance(monkeypatch):
+def test_spot_subscription_refresh_continues_during_maintenance(monkeypatch):
     now_ts = 1_783_396_219.0
     subscribe_calls = []
 
@@ -1671,6 +1671,7 @@ def test_spot_subscription_refresh_is_suppressed_during_maintenance(monkeypatch)
             subscribe_calls.append(True)
 
     monkeypatch.setattr(live_service.time, "time", lambda: now_ts)
+    monkeypatch.setattr(live_service, "_last_spot_subscription_attempt_ts", 0.0)
     monkeypatch.setattr(
         live_service,
         "_market_session_snapshot",
@@ -1688,7 +1689,7 @@ def test_spot_subscription_refresh_is_suppressed_during_maintenance(monkeypatch)
 
     live_service._ensure_spot_subscription(_Bridge())
 
-    assert subscribe_calls == []
+    assert subscribe_calls == [True]
 
 
 def test_ensure_live_decision_bars_does_not_fallback_to_current_partial(monkeypatch):

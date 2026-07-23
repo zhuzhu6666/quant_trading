@@ -33,6 +33,7 @@ class LiveLoopTickRuntime:
     session_circuit_breaker_enforced: Any
     evaluate_daily_drawdown: Any
     market_session_snapshot: Any
+    ensure_spot_subscription: Any
     warmup_from_local_db: Any
     ensure_decision_bars_fresh: Any
     get_safety_plane: Any
@@ -410,6 +411,15 @@ def run_live_loop_tick_body(
             wait_seconds=5.0,
             safety=safety,
         )
+
+    # The bridge can become ready just after the one-shot startup subscription
+    # times out.  Retry from the serial tick owner so a missing/stale quote can
+    # recover without a process restart.  Subscription failure is advisory;
+    # safety and reconciliation must continue to run fail-closed.
+    try:
+        runtime.ensure_spot_subscription(bridge, log=log)
+    except Exception as exc:
+        log(f"tick {tick}: spot subscription refresh failed (non-fatal): {exc}")
 
     safety, execution_recovery_ready = runtime.recover_execution_outcomes(
         bridge=bridge,

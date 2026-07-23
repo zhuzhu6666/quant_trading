@@ -122,6 +122,9 @@ def _runtime(
         session_circuit_breaker_enforced=lambda: circuit_enforced,
         evaluate_daily_drawdown=lambda: {"tripped": False},
         market_session_snapshot=lambda _bridge: {"status": "open_confirmed"},
+        ensure_spot_subscription=lambda _bridge, **_kwargs: order.append(
+            "spot_subscription"
+        ),
         warmup_from_local_db=lambda *_args: _frame(),
         ensure_decision_bars_fresh=lambda **kwargs: kwargs["df_new"],
         get_safety_plane=lambda _generation_id: plane,
@@ -203,6 +206,7 @@ def test_account_failure_occurs_after_safety_and_blocks_alpha():
         "safety",
         "account",
         "account_failed:fresh_account_unavailable",
+        "spot_subscription",
         "recovery",
     ]
     assert result["wait_seconds"] == 5.0
@@ -235,7 +239,13 @@ def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
         runtime=runtime,
     )
 
-    assert order == ["positions", "safety", "account", "recovery"]
+    assert order == [
+        "positions",
+        "safety",
+        "account",
+        "spot_subscription",
+        "recovery",
+    ]
     assert len(process_calls) == 1
     assert process_calls[0][1]["protection_already_run"] is True
     assert plane.marked

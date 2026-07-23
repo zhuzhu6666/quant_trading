@@ -4465,7 +4465,14 @@ def _ensure_spot_subscription(
     log=None,
     market_session: dict[str, Any] | None = None,
 ) -> None:
+    """Restore the live spot stream whenever a connected bridge has no fresh quote.
+
+    ``market_session`` remains accepted for compatibility with the legacy tick
+    runtime, but a maintenance/open-pending classification must never suppress
+    the subscription that can produce the missing quote.
+    """
     global _last_spot_subscription_attempt_ts
+    del market_session
     if bridge is None or not getattr(bridge, "is_connected", False):
         return
     quote = {}
@@ -4481,21 +4488,6 @@ def _ensure_spot_subscription(
     )
     if not spot_needed:
         return
-    try:
-        from backend.services.market_session import maintenance_wait_evidence
-        from config.runtime_config import shared as _runtime_cfg
-
-        session = dict(market_session or _market_session_snapshot(bridge) or {})
-        maintenance = maintenance_wait_evidence(
-            session,
-            latest_market_data_ts=float((quote or {}).get("ts") or 0.0),
-            now_ts=now_ts,
-            grace_seconds=float(_runtime_cfg().market_open_pending_quote_grace_seconds),
-        )
-        if maintenance["active"]:
-            return
-    except Exception:
-        logger.debug("[market_session] spot subscription maintenance check failed", exc_info=True)
     if now_ts - _last_spot_subscription_attempt_ts < 60:
         return
     _last_spot_subscription_attempt_ts = now_ts
@@ -6590,6 +6582,7 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
         session_circuit_breaker_enforced=lambda: not bounded_demo_mode_active(),
         evaluate_daily_drawdown=_evaluate_daily_drawdown,
         market_session_snapshot=_market_session_snapshot,
+        ensure_spot_subscription=_ensure_spot_subscription,
         warmup_from_local_db=_warmup_from_local_db,
         ensure_decision_bars_fresh=_ensure_live_decision_bars_fresh,
         get_safety_plane=_get_live_safety_plane,
