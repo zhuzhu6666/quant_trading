@@ -94,13 +94,18 @@ class EvolutionKernel:
             return
 
         # 每小时: 完整自进化循环 (GP + OOS + Canary + 退役 + 权重)
-        from backend.runtime.evolution_orchestrator import scheduled_evolution_cycle
+        from backend.runtime.evolution_orchestrator import (
+            scheduled_evolution_with_governance_handoff,
+        )
         from backend.services.evolution_work_coordinator import coordinated_job
 
         sched.add_job(
             "evolution_hourly",
             "2 * * * *",
-            coordinated_job("evolution_hourly", scheduled_evolution_cycle),
+            coordinated_job(
+                "evolution_hourly",
+                scheduled_evolution_with_governance_handoff,
+            ),
         )
 
         # 15 分钟: 因子 V3 自治治理 (发现晋升、降权、禁用、退役、审计)

@@ -434,6 +434,7 @@ from backend.services.live_scheduler_jobs import (
     make_initial_ctrader_data_pull as _make_initial_ctrader_data_pull,
     register_backend_readiness_refresh_job as _register_backend_readiness_refresh_job,
     register_external_sync_jobs as _register_external_sync_jobs,
+    register_factor_selection_heartbeat_job as _register_factor_selection_heartbeat_job,
     start_initial_ctrader_data_pull as _start_initial_ctrader_data_pull,
     start_scheduler_catch_up as _start_scheduler_catch_up,
 )
@@ -5351,6 +5352,44 @@ def _scheduled_offmarket_position_quality_lightgbm(
     return run_offmarket_position_quality_job(session=session, db_path=db_path)
 
 
+def _scheduled_factor_selection_heartbeat() -> dict[str, Any]:
+    """Republish the selection loaded by this live process without config IO."""
+
+    pipeline = _factor_pipeline or {}
+    engine = pipeline.get("engine")
+    if engine is None:
+        return {
+            "ok": True,
+            "status": "skipped_pipeline_unavailable",
+        }
+    from alpha.runtime_factor_selection import select_runtime_factors
+    from backend.services.runtime_factor_selection_projection import (
+        RuntimeFactorSelectionProjectionService,
+    )
+    from config import runtime_config as _runtime_config_module
+
+    holder = _runtime_config_module.shared_holder()
+    if holder.version() <= 0:
+        return {
+            "ok": False,
+            "status": "runtime_config_snapshot_unavailable",
+        }
+    cfg = holder.get()
+    selection = select_runtime_factors(cfg.factor_signal_config)
+    current_generation = _LIVE_LOOP_CONTROLLER.current()
+    generation_id = (
+        str(current_generation.generation_id)
+        if current_generation is not None
+        else ""
+    )
+    return RuntimeFactorSelectionProjectionService().publish(
+        selection,
+        source="live_factor_pipeline_heartbeat",
+        live_generation_id=generation_id,
+        pipeline_warm=bool(getattr(engine, "is_warm", False)),
+    )
+
+
 
 def _start_live_scheduler():
     """注册并启动自进化 Scheduler (11 job). 幂等: 已运行时跳过."""
@@ -5398,6 +5437,10 @@ def _start_live_scheduler():
             market_session_snapshot=_market_session_snapshot,
         ),
     )
+    _register_factor_selection_heartbeat_job(
+        sched,
+        heartbeat=_scheduled_factor_selection_heartbeat,
+    )
     _register_external_sync_jobs(
         sched,
         repo_root=Path(__file__).resolve().parent.parent.parent,
@@ -5407,8 +5450,8 @@ def _start_live_scheduler():
     if run_heavy_jobs:
         # evolution_hourly / factor governance / system_health 由 EvolutionKernel 注册;
         # awe_adapt 始终由持有 live pipeline 的 backend 注册。
-        # Phase 3: 特征工程 (每天凌晨 3:00)
-        sched.add_job("feature_eng", "0 3 * * *", _scheduled_feature_engineering)
+        # Phase 3: 特征工程 (03:05 UTC, 避开 :00 治理和 :02 evolution)
+        sched.add_job("feature_eng", "5 3 * * *", _scheduled_feature_engineering)
         # Phase F1.1: 停盘确认窗口 LightGBM 旁路训练 (每小时检查, 非窗口只写 skip 审计)
         sched.add_job("offmarket_position_quality_lightgbm", "20 * * * *", _scheduled_offmarket_position_quality_lightgbm)
     else:

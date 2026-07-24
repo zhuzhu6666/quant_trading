@@ -27,6 +27,9 @@ class _AsyncRefreshOwner:
         self._thread: threading.Thread | None = None
         self._accepting = True
         self._generation = 0
+        self._last_started_at = 0.0
+        self._last_finished_at = 0.0
+        self._last_error = ""
 
     def open(self) -> None:
         """Allow a new lifecycle generation to schedule refresh work."""
@@ -54,14 +57,21 @@ class _AsyncRefreshOwner:
                 }
             self._generation += 1
             generation = self._generation
+            self._last_started_at = time.time()
+            self._last_error = ""
 
             def _run() -> None:
                 try:
                     target()
-                except Exception:
+                except Exception as exc:
+                    with self._lock:
+                        self._last_error = (
+                            f"{type(exc).__name__}:{exc}"
+                        )[:300]
                     logger.exception("backend readiness snapshot refresh failed")
                 finally:
                     with self._lock:
+                        self._last_finished_at = time.time()
                         if self._thread is threading.current_thread():
                             self._thread = None
 
@@ -121,6 +131,10 @@ class _AsyncRefreshOwner:
                 "accepting": self._accepting,
                 "generation": self._generation,
                 "thread_alive": alive,
+                "refresh_in_progress": alive,
+                "refresh_started_at": self._last_started_at,
+                "refresh_finished_at": self._last_finished_at,
+                "last_refresh_error": self._last_error,
             }
 
 
@@ -191,12 +205,14 @@ class BackendReadinessSnapshotService:
         except Exception:
             payload = {}
         updated_at = float(row["updated_at"] or 0.0)
+        owner = self._refresh_owner.status()
         return {
             "ok": bool(payload),
             "status": "available" if payload else "invalid",
             "payload": payload if isinstance(payload, dict) else {},
             "updated_at": updated_at,
             "age_seconds": max(0.0, time.time() - updated_at) if updated_at else None,
+            "refresh": owner,
         }
 
     def publish(self, payload: dict[str, Any]) -> dict[str, Any]:

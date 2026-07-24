@@ -559,6 +559,106 @@ class V16BrainOrchestratorService:
             self._persist_commands([command])
         return {"ok": True, "status": "delegated", "command": command, "boundary": self.boundary()}
 
+    def delegate_entry_quality_control(
+        self,
+        gate: dict[str, Any],
+        *,
+        persist: bool = True,
+    ) -> dict[str, Any]:
+        """Issue one evidence-bound Demo delegation for an unbiased v2 control."""
+
+        evidence = dict(gate.get("evidence") or {})
+        controls = dict(evidence.get("recommended_controls") or {})
+        scan = dict(evidence.get("threshold_scan") or {})
+        metrics = dict(scan.get("metrics") or {})
+        threshold = safe_float(controls.get("min_abs_signal_score"))
+        strong_override = safe_float(controls.get("strong_signal_override"))
+        fingerprint = str(gate.get("governance_eligibility_fingerprint") or "")
+        qualified = (
+            str(gate.get("status") or "") == "approved"
+            and bool(gate.get("governance_eligible"))
+            and str(evidence.get("schema_version") or "")
+            == "entry_quality_governance_evidence.v2"
+            and bool(fingerprint)
+            and 0.35 <= threshold <= 0.55
+            and strong_override == 0.70
+            and safe_float(scan.get("selected_threshold")) == threshold
+            and int(metrics.get("sample_count") or 0) >= 20
+            and int(metrics.get("bad_count") or 0) > 0
+            and int(metrics.get("win_count") or 0) > 0
+        )
+        if not qualified:
+            return {
+                "ok": False,
+                "status": "entry_quality_v2_evidence_not_ready",
+                "failed_gate": {
+                    "suggestion_status": gate.get("status"),
+                    "governance_eligible": bool(gate.get("governance_eligible")),
+                    "evidence_version": evidence.get("schema_version"),
+                    "threshold": threshold,
+                    "strong_signal_override": strong_override,
+                    "sample_count": int(metrics.get("sample_count") or 0),
+                    "bad_count": int(metrics.get("bad_count") or 0),
+                    "win_count": int(metrics.get("win_count") or 0),
+                },
+                "boundary": self.boundary(),
+            }
+        now = time.time()
+        suggestion_id = str(gate.get("suggestion_id") or "")
+        command = {
+            "command_id": (
+                "v16cmd_"
+                + hashlib.sha1(
+                    f"entry_quality|weak_signal|{fingerprint}".encode("utf-8")
+                ).hexdigest()[:20]
+            ),
+            "schema_version": "v16_brain_command.v1",
+            "snapshot_id": "",
+            "plan_id": "",
+            "eval_id": "",
+            "candidate_id": f"entryq_{fingerprint[:16]}",
+            "target_agent": "autonomous_learning",
+            "scope_type": "entry_quality",
+            "scope_key": "weak_signal",
+            "action": "activate_entry_quality_control",
+            "decision": "delegate",
+            "status": "delegated_to_specialist",
+            "evidence": {
+                "schema_version": "v16_entry_quality_control_evidence.v1",
+                "suggestion_id": suggestion_id,
+                "entry_quality_evidence": evidence,
+                "qualified_v2_population": True,
+            },
+            "delegation": {
+                "target_agent": "autonomous_learning",
+                "delegated_by": "v16_brain",
+                "specialist_must_use": [
+                    "RiskPolicyService",
+                    "GovernanceMutationCoordinator",
+                ],
+                "specialist_must_not": [
+                    "bypass_risk_policy",
+                    "write_runtime_overlay_directly",
+                    "submit_order",
+                ],
+            },
+            "posterior_fingerprint": "",
+            "evidence_fingerprint": fingerprint,
+            "max_apply_count": 1,
+            "created_at": now,
+            "updated_at": now,
+            "boundary": self.boundary(),
+        }
+        if persist:
+            ensure_v16_brain_command_table(self.db_path)
+            self._persist_commands([command])
+        return {
+            "ok": True,
+            "status": "delegated",
+            "command": command,
+            "boundary": self.boundary(),
+        }
+
     def _command_for_evaluation(
         self,
         *,

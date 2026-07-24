@@ -171,6 +171,10 @@ class EvolutionReport:
         self.weights_updated: bool = False
         self.lifecycle_executor: str = "factor_governance_autonomous"
         self.lifecycle_actions_applied: bool = False
+        self.factor_health_persisted: bool = False
+        self.factor_health_updated_at: float = 0.0
+        self.factor_health_cycle_id: str = ""
+        self.factor_governance_handoff: dict[str, Any] = {}
         self.duration_sec: float = 0.0
         self.error: str = ""
 
@@ -189,6 +193,10 @@ class EvolutionReport:
             "weights_updated": self.weights_updated,
             "lifecycle_executor": self.lifecycle_executor,
             "lifecycle_actions_applied": self.lifecycle_actions_applied,
+            "factor_health_persisted": self.factor_health_persisted,
+            "factor_health_updated_at": self.factor_health_updated_at,
+            "factor_health_cycle_id": self.factor_health_cycle_id,
+            "factor_governance_handoff": self.factor_governance_handoff,
             "duration_sec": round(self.duration_sec, 1),
             "error": self.error,
         }
@@ -331,7 +339,18 @@ def scheduled_evolution_cycle(
             report_result = evaluate_factors(df, threshold=0.04)
             out_txt = CHARTS_DIR / "factor_health_report.txt"
             out_json = CHARTS_DIR / "factor_health_report.json"
-            write_report(report_result, out_txt, out_json)
+            persistence = write_report(report_result, out_txt, out_json)
+            report.factor_health_persisted = bool(
+                (persistence or {}).get("persisted")
+            )
+            report.factor_health_updated_at = float(
+                (persistence or {}).get("updated_at") or 0.0
+            )
+            if report.factor_health_persisted:
+                report.factor_health_cycle_id = (
+                    "factor_health:"
+                    f"{int(report.factor_health_updated_at * 1000)}"
+                )
             logger.info(
                 "[Evolve] factor health report: healthy=%d watch=%d decaying=%d",
                 report_result.get("healthy", 0),
@@ -355,6 +374,51 @@ def scheduled_evolution_cycle(
     finally:
         report.duration_sec = _time.time() - t0
 
+    return report
+
+
+def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
+    """Run evolution and immediately consume a newly committed health cycle."""
+
+    report = scheduled_evolution_cycle()
+    if not report.factor_health_persisted:
+        report.factor_governance_handoff = {
+            "status": "skipped",
+            "reason": "factor_health_not_persisted",
+        }
+        return report
+    try:
+        from backend.runtime.factor_governance_orchestrator import (
+            FactorGovernanceOrchestrator,
+        )
+
+        started_at = _time.time()
+        result = FactorGovernanceOrchestrator.shared().run_cycle(
+            trigger_source=(
+                "factor_health_handoff:"
+                f"{report.factor_health_cycle_id}"
+            )
+        )
+        report.factor_governance_handoff = {
+            "status": str(result.get("status") or "unknown"),
+            "health_cycle_id": report.factor_health_cycle_id,
+            "health_updated_at": report.factor_health_updated_at,
+            "started_at": started_at,
+            "delay_seconds": max(
+                0.0,
+                started_at - report.factor_health_updated_at,
+            ),
+        }
+    except Exception as exc:
+        logger.exception(
+            "[Evolve] factor governance health handoff failed: %s",
+            exc,
+        )
+        report.factor_governance_handoff = {
+            "status": "failed",
+            "health_cycle_id": report.factor_health_cycle_id,
+            "reason": f"{type(exc).__name__}:{exc}"[:300],
+        }
     return report
 
 

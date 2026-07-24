@@ -631,19 +631,25 @@ def test_entry_quality_governance_materializes_policy_suggestions(tmp_path):
             "allowed_uses": ["audit", "explainability", "supervised_training"],
             "model_ready": True,
         }
-        for idx in range(3):
+        for idx in range(24):
+            low_score = idx < 12
+            bad = low_score or idx < 14
+            failure_tags = ["weak_signal_overtraded"] if bad else []
+            if idx < 3:
+                failure_tags.extend(
+                    [
+                        "factor_conflict",
+                        "conflicting_factor_entry",
+                    ]
+                )
             review = {
-                "entry_score": 0.43 + idx * 0.01,
-                "worst_factor": "real_yield_chg",
-                "failure_tags": [
-                    "weak_signal_overtraded",
-                    "factor_conflict",
-                    "conflicting_factor_entry",
-                ],
+                "entry_score": 0.32 if low_score else 0.60,
+                "worst_factor": "real_yield_chg" if idx < 3 else "",
+                "failure_tags": failure_tags,
             }
             label = {
-                "outcome_label": "bad_loss",
-                "pnl": -4.0 - idx,
+                "outcome_label": "bad_loss" if bad else "good_win",
+                "pnl": -4.0 - idx if bad else 5.0 + idx,
                 "failure_tags": review["failure_tags"],
             }
             conn.execute(
@@ -723,6 +729,18 @@ def test_entry_quality_governance_materializes_policy_suggestions(tmp_path):
     assert weak[0] != "legacy_ineligible_weak_signal"
     assert weak[1] == 1
     assert weak[2]
+    evidence = json.loads(
+        sqlite3.connect(str(db_path)).execute(
+            "SELECT evidence_json FROM policy_suggestion WHERE suggestion_id=?",
+            (weak[0],),
+        ).fetchone()[0]
+    )
+    assert evidence["schema_version"] == "entry_quality_governance_evidence.v2"
+    assert evidence["sample_count"] == 24
+    assert evidence["bad_count"] == 14
+    assert evidence["win_count"] == 10
+    assert evidence["recommended_controls"]["min_abs_signal_score"] == 0.35
+    assert evidence["recommended_controls"]["strong_signal_override"] == 0.70
     assert ("entry_quality", "weak_signal", "raise_weak_signal_threshold", "proposed") in suggestions
     assert ("entry_quality", "factor_conflict", "require_factor_agreement", "proposed") in suggestions
     assert ("entry_quality", "real_yield_chg", "suppress_recent_worst_factor", "proposed") in suggestions

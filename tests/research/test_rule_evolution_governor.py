@@ -1049,6 +1049,43 @@ def test_conflict_resolver_supersedes_factor_boost_when_entry_quality_suppresses
     assert rows["suppress1"] == "approved"
 
 
+def test_conflict_resolver_never_supersedes_applied_control(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, created_at)
+            VALUES
+            ('applied_old', 'entry_quality', 'weak_signal',
+             'raise_weak_signal_threshold', 0.9, 'test', '{}', 'applied', 90.0),
+            ('approved_new', 'entry_quality', 'weak_signal',
+             'raise_weak_signal_threshold', 0.95, 'test', '{}', 'approved', 100.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    gov.resolve_conflicts()
+
+    conn = _connect(db_path)
+    try:
+        rows = {
+            row["suggestion_id"]: row["status"]
+            for row in conn.execute(
+                "SELECT suggestion_id, status FROM policy_suggestion"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert rows["applied_old"] == "applied"
+    assert rows["approved_new"] == "approved"
+
+
 def test_conflict_resolver_template_switch_blocks_same_factor_weight_change(tmp_path):
     db_path = str(tmp_path / "state.db")
     gov = RuleEvolutionGovernor(db_path)

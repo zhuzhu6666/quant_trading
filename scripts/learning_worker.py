@@ -12,6 +12,7 @@ import argparse
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -30,6 +31,8 @@ from backend.services.learning_worker_capability import (
 
 
 _worker_capability = LearningWorkerCapability()
+_factor_health_catchup_stop = threading.Event()
+_factor_health_catchup_thread: threading.Thread | None = None
 
 
 def _env_enabled(name: str, default: str = "1") -> bool:
@@ -186,7 +189,9 @@ def _add_job(scheduler, name: str, cron_expr: str, fn: Callable[[], object]) -> 
 
 
 def _register_heavy_jobs(*, include_system_health: bool) -> None:
-    from backend.runtime.evolution_orchestrator import scheduled_evolution_cycle
+    from backend.runtime.evolution_orchestrator import (
+        scheduled_evolution_with_governance_handoff,
+    )
     from backend.runtime.factor_governance_orchestrator import run_autonomous_factor_governance_cycle
     from backend.runtime.scheduler import InProcessScheduler
     from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
@@ -196,13 +201,22 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
         run_feature_engineering_job,
         run_offmarket_position_quality_job,
     )
+    from backend.services.supervisor_learning_scheduler import (
+        run_supervisor_learning_cycle,
+    )
+    from backend.services.autonomous_learning import (
+        run_watermark_gated_autonomous_learning_cycle,
+    )
 
     scheduler = InProcessScheduler()
     _add_job(
         scheduler,
         "evolution_hourly",
         "2 * * * *",
-        _coordinated_mutation_job("evolution_hourly", scheduled_evolution_cycle),
+        _coordinated_mutation_job(
+            "evolution_hourly",
+            scheduled_evolution_with_governance_handoff,
+        ),
     )
     governance_cron = str(getattr(_runtime_shared(), "factor_governance_cron", "*/15 * * * *") or "*/15 * * * *")
     _add_job(
@@ -226,7 +240,7 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
                 # remains outside this path and still requires the live gate.
                 automatic_demo=True,
                 apply_when_ready=True,
-                full_learning_cycle=True,
+                full_learning_cycle=False,
                 consume_recommended_step=True,
                 recommended_step_limit=int(os.getenv("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_STEP_LIMIT", "5") or "5"),
             )
@@ -253,8 +267,30 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
     _add_job(
         scheduler,
         "feature_eng",
-        "0 3 * * *",
+        "5 3 * * *",
         coordinated_job("feature_eng", run_feature_engineering_job),
+    )
+    _add_job(
+        scheduler,
+        "supervisor_learning",
+        "9,39 * * * *",
+        coordinated_job(
+            "supervisor_learning",
+            lambda: run_supervisor_learning_cycle(limit=200),
+        ),
+    )
+    _add_job(
+        scheduler,
+        "autonomous_learning",
+        "12,42 * * * *",
+        _coordinated_mutation_job(
+            "autonomous_learning",
+            lambda: run_watermark_gated_autonomous_learning_cycle(
+                sample_limit=500,
+                recommendation_limit=20,
+                mutation_capability=_worker_capability.mutation_allowed(),
+            ),
+        ),
     )
     _add_job(
         scheduler,
@@ -279,23 +315,85 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
 
 
 def _start_learning_schedulers() -> None:
-    from backend.services.autonomous_learning import schedule_autonomous_learning
     from backend.services.learning_backfill import schedule_learning_backfill
-    from backend.services.supervisor_learning_scheduler import schedule_supervisor_learning
 
     schedule_learning_backfill(delay_sec=30.0, limit=100, allow_partial=False, rebuild_learning=True)
-    schedule_supervisor_learning(delay_sec=60.0, interval_sec=1800.0, limit=200)
-    schedule_autonomous_learning(
-        delay_sec=90.0,
-        interval_sec=1800.0,
-        sample_limit=500,
-        recommendation_limit=20,
-        mutation_capability=_worker_capability.mutation_allowed,
+    logger.info(
+        "[learning_worker] startup backfill scheduled; recurring learning "
+        "uses fixed UTC cron jobs"
     )
-    logger.info("[learning_worker] learning schedulers started")
+
+
+def _latest_factor_health_age_seconds() -> float | None:
+    from backend.core.db import get_state_pg_conn
+
+    conn = get_state_pg_conn(read_only=True)
+    try:
+        row = conn.execute(
+            "SELECT MAX(updated_at) AS updated_at FROM factor_health"
+        ).fetchone()
+        updated_at = float((row or {}).get("updated_at") or 0.0)
+        return max(0.0, time.time() - updated_at) if updated_at > 0.0 else None
+    finally:
+        conn.close()
+
+
+def _schedule_factor_health_catchup(
+    *,
+    delay_sec: float = 180.0,
+    stale_after_sec: float = 3600.0,
+) -> bool:
+    """Run one watermark-gated health/evolution catch-up after a restart."""
+
+    global _factor_health_catchup_thread
+    if (
+        _factor_health_catchup_thread is not None
+        and _factor_health_catchup_thread.is_alive()
+    ):
+        return False
+    _factor_health_catchup_stop.clear()
+
+    def _worker() -> None:
+        if _factor_health_catchup_stop.wait(max(0.0, delay_sec)):
+            return
+        try:
+            age = _latest_factor_health_age_seconds()
+            if age is not None and age <= stale_after_sec:
+                logger.info(
+                    "[learning_worker] factor health catch-up skipped: "
+                    "current age={:.1f}s",
+                    age,
+                )
+                return
+            from backend.runtime.evolution_orchestrator import (
+                scheduled_evolution_with_governance_handoff,
+            )
+
+            result = _coordinated_mutation_job(
+                "factor_health_startup_catchup",
+                scheduled_evolution_with_governance_handoff,
+            )()
+            logger.info(
+                "[learning_worker] factor health catch-up result: {}",
+                result.to_dict() if hasattr(result, "to_dict") else result,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[learning_worker] factor health catch-up failed: {}",
+                exc,
+            )
+
+    _factor_health_catchup_thread = threading.Thread(
+        target=_worker,
+        name="factor_health_startup_catchup",
+        daemon=True,
+    )
+    _factor_health_catchup_thread.start()
+    return True
 
 
 def _stop_schedulers() -> None:
+    _factor_health_catchup_stop.set()
     try:
         from backend.services.learning_backfill import stop_learning_backfill
         from backend.services.supervisor_learning_scheduler import stop_supervisor_learning
@@ -393,6 +491,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, _stop)
 
     _register_heavy_jobs(include_system_health=args.with_system_health)
+    _schedule_factor_health_catchup()
     if not args.no_learning_schedulers and _env_enabled("QUANT_WORKER_LEARNING_SCHEDULERS", "1"):
         _start_learning_schedulers()
     else:

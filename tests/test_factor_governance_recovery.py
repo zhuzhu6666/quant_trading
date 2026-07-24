@@ -133,6 +133,7 @@ def test_quarantined_builtin_alpha_requires_cooldown_fresh_health_and_cleared_mo
 def test_coordinator_off_compatibility_uses_legacy_quarantine_patch(monkeypatch):
     now = time.time()
     rc.replace(RuntimeConfig(
+        autonomy_mode="live_candidate",
         factor_signal_config={
             "pin_bar": {"enabled": True, "lifecycle_status": "ACTIVE", "role": "alpha"},
         },
@@ -174,6 +175,7 @@ def test_typed_governance_quarantines_builtin_through_lifecycle(monkeypatch):
 
     rc.replace(
         RuntimeConfig(
+            autonomy_mode="live_candidate",
             factor_signal_config={
                 "pin_bar": {
                     "enabled": True,
@@ -243,13 +245,227 @@ def test_typed_governance_quarantines_builtin_through_lifecycle(monkeypatch):
     assert rc.shared().factor_portfolio_weights["pin_bar"] == 0.0
 
 
-def test_typed_governance_never_revives_terminal_builtin(monkeypatch):
+def test_balanced_demo_requires_three_mature_disable_cycles(monkeypatch):
+    import backend.services.governance_control_plans as control_plans
+
+    now = time.time()
+    cfg = RuntimeConfig(
+        autonomy_mode="demo_autonomous",
+        factor_signal_config={
+            "pin_bar": {
+                "enabled": True,
+                "lifecycle_status": "ACTIVE",
+                "role": "alpha",
+                "source": "builtin",
+            }
+        },
+        factor_portfolio_weights={"pin_bar": 0.1},
+    )
+    rc.replace(cfg)
+    monkeypatch.setattr(rc, "bounded_demo_mode_active", lambda _cfg=None: True)
+    monkeypatch.setattr(
+        control_plans,
+        "governance_coordinator_mode",
+        lambda: "dual_record",
+    )
+    orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    profile = orchestrator._governance_profile(cfg)
+    catalog = [
+        {
+            "factor_id": "pin_bar",
+            "source": "builtin",
+            "role": "alpha",
+            "eligible_for_live": True,
+            "health_score": 15.0,
+            "health_status": "DECAYING",
+            "health_n_obs": 1000,
+            "health_updated_at": now,
+            "weight": 0.1,
+            "factor_governance_shadow": {},
+        }
+    ]
+    monkeypatch.setattr(
+        orchestrator,
+        "_advance_disable_evidence_streaks",
+        lambda candidates, **_kwargs: {
+            "pin_bar": {**candidates["pin_bar"], "streak": 2}
+        },
+    )
+    assert (
+        orchestrator._disable_weak_live_alpha(
+            catalog,
+            {"run_id": "demo-streak-2"},
+            cfg=cfg,
+            profile=profile,
+        )
+        == []
+    )
+
+    calls: list[dict] = []
+
+    class _FakeLifecycle:
+        def __init__(self, _db_path, adapter=None):
+            self.adapter = adapter
+
+        def quarantine(self, **kwargs):
+            calls.append(dict(kwargs))
+            return {"ok": True, "status": "committed"}
+
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _FakeLifecycle)
+    monkeypatch.setattr(
+        orchestrator,
+        "_advance_disable_evidence_streaks",
+        lambda candidates, **_kwargs: {
+            "pin_bar": {**candidates["pin_bar"], "streak": 3}
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_audit_action",
+        lambda *_args, **_kwargs: {"status": "applied"},
+    )
+    actions = orchestrator._disable_weak_live_alpha(
+        catalog,
+        {"run_id": "demo-streak-3"},
+        cfg=cfg,
+        profile=profile,
+    )
+    assert actions == [{"status": "applied"}]
+    assert calls[0]["evidence_refs"]["evidence_streak"] == 3
+
+
+def test_balanced_demo_small_model_sample_never_hard_quarantines(monkeypatch):
+    now = time.time()
+    cfg = RuntimeConfig(autonomy_mode="demo_autonomous")
+    monkeypatch.setattr(rc, "bounded_demo_mode_active", lambda _cfg=None: True)
+    orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        orchestrator,
+        "_advance_disable_evidence_streaks",
+        lambda candidates, **_kwargs: captured.append(candidates) or {},
+    )
+    actions = orchestrator._disable_weak_live_alpha(
+        [
+            {
+                "factor_id": "pin_bar",
+                "source": "builtin",
+                "role": "alpha",
+                "eligible_for_live": True,
+                "health_score": 50.0,
+                "health_status": "WATCH",
+                "health_n_obs": 2000,
+                "health_updated_at": now,
+                "weight": 0.1,
+                "factor_governance_shadow": {
+                    "sample_count": 6,
+                    "weak_sample_count": 6,
+                    "avg_weakness_score": 0.99,
+                },
+            }
+        ],
+        {"run_id": "demo-small-model"},
+        cfg=cfg,
+        profile=orchestrator._governance_profile(cfg),
+    )
+    assert actions == []
+    assert captured == [{}]
+
+
+def test_demo_disable_streak_advances_only_for_unique_evidence_cycles(
+    tmp_path,
+):
+    from backend.core.db import connect_sqlite
+
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    conn.execute(
+        """CREATE TABLE runtime_kv (
+           key TEXT PRIMARY KEY,
+           value_json TEXT NOT NULL DEFAULT '{}',
+           updated_at REAL NOT NULL DEFAULT 0.0
+        )"""
+    )
+    conn.commit()
+    conn.close()
+
+    orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orchestrator.overlay.db_path = db_path
+    first = {
+        "pin_bar": {
+            "reason": "persistent_severe_health",
+            "evidence_cycle_id": "health:1",
+        }
+    }
+    assert orchestrator._advance_disable_evidence_streaks(
+        first,
+        now=10.0,
+    )["pin_bar"]["streak"] == 1
+    assert orchestrator._advance_disable_evidence_streaks(
+        first,
+        now=11.0,
+    )["pin_bar"]["streak"] == 1
+    second = {
+        "pin_bar": {
+            "reason": "persistent_severe_health",
+            "evidence_cycle_id": "health:2",
+        }
+    }
+    assert orchestrator._advance_disable_evidence_streaks(
+        second,
+        now=12.0,
+    )["pin_bar"]["streak"] == 2
+    assert orchestrator._advance_disable_evidence_streaks(
+        {},
+        now=13.0,
+    ) == {}
+    third = {
+        "pin_bar": {
+            "reason": "persistent_severe_health",
+            "evidence_cycle_id": "health:3",
+        }
+    }
+    assert orchestrator._advance_disable_evidence_streaks(
+        third,
+        now=14.0,
+    )["pin_bar"]["streak"] == 1
+
+
+def test_typed_demo_governance_reenrolls_terminal_builtin_as_new_shadow(monkeypatch):
     import backend.services.governance_control_plans as control_plans
 
     now = time.time()
     rc.replace(_runtime_config(now - 8 * 86400))
     monkeypatch.setattr(control_plans, "governance_coordinator_mode", lambda: "enforce")
+    calls: list[dict] = []
+
+    class _FakeLifecycle:
+        def __init__(self, _db_path, adapter=None):
+            self.adapter = adapter
+
+        def reenroll_quarantined_builtin(self, **kwargs):
+            calls.append(dict(kwargs))
+            current = rc.shared().to_dict()
+            current["factor_signal_config"]["pin_bar"].update(
+                {"enabled": True, "lifecycle_status": "SHADOW"}
+            )
+            current["factor_portfolio_weights"]["pin_bar"] = 0.0
+            rc.replace(RuntimeConfig.from_dict(current))
+            return {
+                "ok": True,
+                "status": "committed",
+                "lifecycle_stage": "SHADOW",
+                "generation": 2,
+            }
+
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _FakeLifecycle)
     orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(orchestrator, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(
+        orchestrator,
+        "_audit_action",
+        lambda *_args, **_kwargs: {"status": "applied"},
+    )
     monkeypatch.setattr(
         orchestrator,
         "_apply_runtime_patch",
@@ -263,8 +479,11 @@ def test_typed_governance_never_revives_terminal_builtin(monkeypatch):
         {"run_id": "terminal_builtin_restore"},
     )
 
-    assert actions == []
-    assert rc.shared().factor_signal_config["pin_bar"]["enabled"] is False
+    assert actions == [{"status": "applied"}]
+    assert calls[0]["name"] == "pin_bar"
+    assert rc.shared().factor_signal_config["pin_bar"]["enabled"] is True
+    assert rc.shared().factor_signal_config["pin_bar"]["lifecycle_status"] == "SHADOW"
+    assert rc.shared().factor_portfolio_weights["pin_bar"] == 0.0
 
 
 def test_risk_policy_dispatches_factor_restore_and_honors_freeze():
@@ -355,6 +574,7 @@ def test_healthy_builtin_shadow_is_activated_with_governed_initial_weight(monkey
             "health_score": 75.0,
             "health_status": "HEALTHY",
             "health_n_obs": 1000,
+            "health_updated_at": time.time(),
             "factor_governance_shadow": {},
         }]
     first = orchestrator._activate_healthy_builtin_shadow(

@@ -2,6 +2,8 @@
 Description=Quant Trading Learning and Evolution Worker
 After=network-online.target postgresql.service quant-backend.service
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -11,7 +13,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=QUANT_LEARNING_WORKER_CPU_AFFINITY=2,3
 ExecStart=/home/ubuntu/quant_trading/.venv/bin/python /home/ubuntu/quant_trading/scripts/learning_worker.py
 Restart=always
-RestartSec=10
+RestartSec=30
 CPUAffinity=2 3
 
 [Install]

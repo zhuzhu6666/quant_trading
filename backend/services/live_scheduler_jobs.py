@@ -40,7 +40,7 @@ def make_backend_readiness_refresh_job(
     *,
     logger,
     service_factory: Callable[[], Any] = _default_readiness_snapshot_service_factory,
-    max_age_seconds: float = 90.0,
+    max_age_seconds: float = 30.0,
 ):
     """Build a single-flight refresh trigger owned by the existing scheduler."""
 
@@ -77,6 +77,20 @@ def register_backend_readiness_refresh_job(sched, *, logger) -> None:
         "backend_readiness_refresh",
         "*/2 * * * *",
         make_backend_readiness_refresh_job(logger=logger),
+    )
+
+
+def register_factor_selection_heartbeat_job(
+    sched,
+    *,
+    heartbeat: Callable[[], Any],
+) -> None:
+    """Keep the live-process factor selection projection inside its TTL."""
+
+    sched.add_job(
+        "factor_selection_heartbeat",
+        "*/5 * * * *",
+        heartbeat,
     )
 
 

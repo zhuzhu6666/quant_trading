@@ -470,11 +470,8 @@ class AutonomousDemoApplyStepper:
             "dispatch_v16_delegation": lambda: self._run_dispatch_v16_delegation(),
             "governor_review": lambda: self._run_governor_review(experiment_id=experiment_id, run_id=run_id, limit=limit),
             "resolve_conflicts": lambda: self._run_resolve_conflicts(limit=limit),
-            "apply_entry_quality_control": lambda: EntryQualityGovernanceService(
-                self.db_path
-            ).apply_next_weak_signal(
-                run_id=run_id,
-                actor="system:autonomous_demo_apply_stepper.entry_quality",
+            "apply_entry_quality_control": lambda: self._run_apply_entry_quality_control(
+                run_id=run_id
             ),
             "sync_factor_weights": lambda: _sync_factor_weights_for_demo(experiment_id=experiment_id),
             "apply_parameter_templates": lambda: _auto_apply_parameter_template_suggestions(
@@ -500,6 +497,40 @@ class AutonomousDemoApplyStepper:
             ),
         }
         return handlers[step]()
+
+    def _run_apply_entry_quality_control(self, *, run_id: str) -> dict[str, Any]:
+        service = EntryQualityGovernanceService(self.db_path)
+        suggestion = dict(service.status().get("current_suggestion") or {})
+        if suggestion:
+            suggestion["governance_eligible"] = bool(
+                str(suggestion.get("status") or "") == "approved"
+                and str(
+                    suggestion.get("governance_eligibility_fingerprint") or ""
+                )
+            )
+            from backend.services.v16_brain_orchestrator import (
+                V16BrainOrchestratorService,
+            )
+
+            delegated = V16BrainOrchestratorService(
+                self.db_path
+            ).delegate_entry_quality_control(suggestion, persist=True)
+            if not delegated.get("ok"):
+                return {
+                    "ok": False,
+                    "status": "blocked_by_v16_entry_quality_gate",
+                    "v16_delegation": delegated,
+                }
+        else:
+            delegated = {
+                "ok": True,
+                "status": "skipped_no_current_entry_quality_suggestion",
+            }
+        result = service.apply_next_weak_signal(
+            run_id=run_id,
+            actor="system:autonomous_demo_apply_stepper.entry_quality",
+        )
+        return {**result, "v16_delegation": delegated}
 
     def _factor_pruning_service(self):
         from backend.services.factor_pruning_governance import FactorPruningGovernanceService

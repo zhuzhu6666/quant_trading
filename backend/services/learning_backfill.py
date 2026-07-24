@@ -27,6 +27,8 @@ _DEFAULT_LIMIT = 100
 _DEFAULT_DELAY_SEC = 180.0
 _backfill_thread: threading.Thread | None = None
 _backfill_stop_event = threading.Event()
+_STARTUP_WATERMARK_KEY = "learning_backfill.startup_watermark.v1"
+_STARTUP_WATERMARK_VERSION = "learning_backfill.v2"
 
 
 def get_state_conn():
@@ -49,6 +51,72 @@ def _execute(conn, sql: str, params: Any = None):
     if params is None:
         return conn.execute(_sql(conn, sql))
     return conn.execute(_sql(conn, sql), params)
+
+
+def _startup_backfill_watermark() -> dict[str, Any]:
+    from backend.services.learning_cycle_watermark import (
+        LearningCycleWatermarkService,
+    )
+
+    current = LearningCycleWatermarkService().current()
+    fingerprint = hashlib.sha256(
+        (
+            _STARTUP_WATERMARK_VERSION
+            + ":"
+            + str(current.get("fingerprint") or "")
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": _STARTUP_WATERMARK_KEY,
+        "producer_version": _STARTUP_WATERMARK_VERSION,
+        "source_fingerprint": str(current.get("fingerprint") or ""),
+        "fingerprint": fingerprint,
+    }
+
+
+def _startup_backfill_is_current(
+    watermark: dict[str, Any],
+) -> bool:
+    conn = get_state_pg_conn(read_only=True)
+    try:
+        row = conn.execute(
+            "SELECT value_json FROM runtime_kv WHERE key=%s",
+            (_STARTUP_WATERMARK_KEY,),
+        ).fetchone()
+        if not row:
+            return False
+        payload = json.loads(row["value_json"] or "{}")
+        return str(payload.get("fingerprint") or "") == str(
+            watermark.get("fingerprint") or ""
+        )
+    finally:
+        conn.close()
+
+
+def _mark_startup_backfill_completed(
+    watermark: dict[str, Any],
+) -> None:
+    conn = get_state_pg_conn()
+    now = time.time()
+    try:
+        conn.execute(
+            """INSERT INTO runtime_kv (key, value_json, updated_at)
+               VALUES (%s, %s, %s)
+               ON CONFLICT(key) DO UPDATE SET
+                 value_json=excluded.value_json,
+                 updated_at=excluded.updated_at""",
+            (
+                _STARTUP_WATERMARK_KEY,
+                json.dumps(watermark, sort_keys=True),
+                now,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def new_id(prefix: str) -> str:
@@ -934,11 +1002,19 @@ def schedule_learning_backfill(
         if _backfill_stop_event.wait(max(0.0, delay_sec)):
             return
         try:
+            watermark = _startup_backfill_watermark()
+            if _startup_backfill_is_current(watermark):
+                logger.info(
+                    "[learning_backfill] scheduled run skipped: "
+                    "source watermark current"
+                )
+                return
             result = run_learning_backfill(
                 limit=limit,
                 allow_partial=allow_partial,
                 rebuild_learning=rebuild_learning,
             )
+            _mark_startup_backfill_completed(watermark)
             logger.info("[learning_backfill] scheduled run completed: %s", result)
         except Exception as exc:
             logger.warning("[learning_backfill] scheduled run failed: %s", exc)

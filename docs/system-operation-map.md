@@ -259,12 +259,12 @@ flowchart TD
 | 进程/入口 | 当前职责 | 不该承担的事 |
 |---|---|---|
 | `quant-backend.service` | FastAPI、JWT auth、WebSocket、cTrader 连接、live loop、持仓监督、轻量健康检查、数据同步入口 | 重训练和高 CPU 学习任务 |
-| `quant-learning-worker.service` | 学习 backfill、supervisor 学习、autonomous learning、hourly evolution、factor governance、AWE、feature engineering、盘外 LightGBM 任务 | cTrader live loop、broker 状态权威 |
+| `quant-learning-worker.service` | watermark-gated 学习 backfill、固定 UTC 相位的 supervisor/autonomous learning、hourly evolution + factor-health governance handoff、factor governance、feature engineering、盘外 LightGBM 任务 | cTrader live loop、broker 状态权威、依赖 live attribution 内存态的 AWE |
 | `caddy.service` | 公网 TLS、`/api/*` 和 `/ws/state` 反代到 `127.0.0.1:8000` | 策略逻辑、静态旧 Web Console 维护 |
 | `web_frontend` | 完整操作台：overview、risk、learning、models、ops、factor governance 等 | 替代后端事实源 |
 | `miniprogram_v2` | 手机轻量状态面：live、position、risk、PnL 简表 | 承载复杂治理和调试视图 |
 
-学习 worker 的 systemd unit 在 `deployment/quant-learning-worker.service`，默认 `CPUAffinity=2 3`，启动脚本是 `scripts/learning_worker.py`。
+学习 worker 的 systemd unit 在 `deployment/quant-learning-worker.service`，默认 `CPUAffinity=2 3`，启动脚本是 `scripts/learning_worker.py`。unit 采用 `RestartSec=30`、五分钟内最多五次启动，避免 RuntimeConfig/overlay 权威故障时形成 10 秒重启风暴；故障仍保持 fail-closed。
 
 ## 3. 后端启动顺序
 

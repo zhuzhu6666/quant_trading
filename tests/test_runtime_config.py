@@ -72,6 +72,25 @@ def test_demo_mode_cannot_bypass_freeze_on_effective_live_broker(monkeypatch) ->
         reset_broker_connection_config_for_tests()
 
 
+def test_bounded_demo_mode_resolution_is_pure_and_no_arg_read_does_not_refresh(
+    monkeypatch,
+) -> None:
+    class _Broker:
+        is_demo = True
+
+    cfg = rc.RuntimeConfig(autonomy_mode="demo_autonomous")
+    assert rc.resolve_bounded_demo_mode(cfg, _Broker()) is True
+    rc.replace(cfg)
+    monkeypatch.setattr(
+        rc,
+        "refresh_from_overlay",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("read-only mode resolution must not refresh overlay")
+        ),
+    )
+    assert rc.bounded_demo_mode_active() is True
+
+
 def test_replace_increments_version() -> None:
     v1 = rc.replace(rc.RuntimeConfig(shadow_vote_weight=0.1))
     assert v1 == 1

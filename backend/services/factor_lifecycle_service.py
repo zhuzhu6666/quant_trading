@@ -124,6 +124,7 @@ class FactorLifecycleMutation:
     idempotency_key: str = ""
     v16: FactorV16Binding = field(default_factory=FactorV16Binding)
     weight: float | None = None
+    new_generation: bool = False
 
 
 def _json(value: Any) -> str:
@@ -320,6 +321,56 @@ class FactorLifecycleService:
                 idempotency_key=idempotency_key,
             )
             return self._execute(mutation, current=None)
+        except Exception as exc:
+            return self._failure(exc, name=name)
+
+    def reenroll_quarantined_builtin(
+        self,
+        *,
+        name: str,
+        actor: str,
+        reason: str,
+        evidence_refs: Mapping[str, Any] | None,
+        idempotency_key: str,
+        v16: FactorV16Binding | None = None,
+    ) -> dict[str, Any]:
+        """Start a new SHADOW generation without reviving a terminal generation."""
+
+        try:
+            definition = self._definition(name, name, "")
+            if definition.origin != SOURCE_BUILTIN:
+                raise FactorLifecycleError("reenroll_builtin_required")
+            current = self.get_state(
+                factor_id=definition.factor_id,
+                factor_name=name,
+            )
+            if not current:
+                raise FactorLifecycleError("factor_lifecycle_state_missing")
+            if (
+                str(current.get("lifecycle_stage") or "")
+                != FactorLifecycleStage.QUARANTINED.value
+            ):
+                raise FactorLifecycleError("quarantined_generation_required")
+            if not self._same_definition(current, definition):
+                raise FactorLifecycleError("factor_definition_changed_since_quarantine")
+            mutation = FactorLifecycleMutation(
+                definition=definition,
+                target_stage=FactorLifecycleStage.SHADOW,
+                actor=actor,
+                reason=reason,
+                source="factor_lifecycle.reenroll_quarantined_builtin",
+                evidence_refs={
+                    **dict(evidence_refs or {}),
+                    "previous_generation": int(current.get("generation") or 1),
+                    "previous_terminal_mutation_id": str(
+                        current.get("mutation_id") or ""
+                    ),
+                },
+                idempotency_key=idempotency_key,
+                v16=v16 or FactorV16Binding(),
+                new_generation=True,
+            )
+            return self._execute(mutation, current=current)
         except Exception as exc:
             return self._failure(exc, name=name)
 
@@ -960,6 +1011,7 @@ class FactorLifecycleService:
                 "artifact_hash": mutation.definition.artifact_hash,
                 "origin": mutation.definition.origin,
                 "target_stage": mutation.target_stage.value,
+                "new_generation": mutation.new_generation,
                 "reason": mutation.reason,
             },
             evidence_fingerprint=mutation.v16.evidence_fingerprint,
@@ -1023,6 +1075,9 @@ class FactorLifecycleService:
                 "enabled": target is FactorLifecycleStage.ACTIVE or observation_enabled,
                 "committed_mutation_id": str(mutation_id),
             }
+            if mutation.new_generation:
+                entry.pop("disabled_at", None)
+                entry.pop("quarantined_at", None)
         else:
             # A restrictive operation must remain classifiable from before and
             # after facts even for a legacy factor missing RuntimeConfig data.
@@ -1070,7 +1125,16 @@ class FactorLifecycleService:
         ).fetchone()
         if name_conflict:
             raise FactorLifecycleError("factor_name_definition_conflict")
-        self._require_transition(current, mutation.target_stage)
+        if mutation.new_generation:
+            if (
+                str(current.get("origin") or "") != SOURCE_BUILTIN
+                or str(current.get("lifecycle_stage") or "")
+                != FactorLifecycleStage.QUARANTINED.value
+                or mutation.target_stage is not FactorLifecycleStage.SHADOW
+            ):
+                raise FactorLifecycleError("invalid_factor_reenrollment_transition")
+        else:
+            self._require_transition(current, mutation.target_stage)
         snapshot = conn.execute(
             _p(
                 self.db_path,
@@ -1081,8 +1145,20 @@ class FactorLifecycleService:
         ).fetchone()
         snapshot_item = _row_dict(snapshot)
         now = time.time()
-        generation = int(current.get("generation") or 1) if current else 1
-        activated_at = now if mutation.target_stage is FactorLifecycleStage.ACTIVE else float(current.get("activated_at") or 0.0)
+        generation = (
+            int(current.get("generation") or 1) + 1
+            if mutation.new_generation
+            else int(current.get("generation") or 1)
+            if current
+            else 1
+        )
+        activated_at = (
+            now
+            if mutation.target_stage is FactorLifecycleStage.ACTIVE
+            else 0.0
+            if mutation.new_generation
+            else float(current.get("activated_at") or 0.0)
+        )
         retired_at = (
             now
             if mutation.target_stage is FactorLifecycleStage.RETIRED
@@ -1109,6 +1185,13 @@ class FactorLifecycleService:
                 else "factor_dsl_ast.v1"
             ),
         }
+        if mutation.new_generation:
+            metadata["reenrolled_from"] = {
+                "generation": int(current.get("generation") or 1),
+                "lifecycle_stage": str(current.get("lifecycle_stage") or ""),
+                "mutation_id": str(current.get("mutation_id") or ""),
+                "reenrolled_at": now,
+            }
         conn.execute(
             _p(
                 self.db_path,

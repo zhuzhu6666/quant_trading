@@ -55,6 +55,23 @@ def test_classify_decision_bar_freshness_accepts_latest_closed_bar():
     assert fresh["fresh"] is True
 
 
+def test_d1_broker_session_anchor_uses_age_budget_not_utc_midnight():
+    now = pd.Timestamp("2026-07-24T06:30:00Z").timestamp()
+    latest_completed_d1 = pd.Timestamp(
+        "2026-07-22T21:00:00Z"
+    ).timestamp()
+    latest = {
+        tf: now - 1
+        for tf in BAR_FRESHNESS_THRESHOLDS
+    }
+    latest["D1"] = latest_completed_d1
+
+    result = classify_bar_freshness(latest, now=now)
+
+    assert "D1" in result["fresh_tfs"]
+    assert "D1" not in result["stale_tfs"]
+
+
 def test_dataframe_to_store_bars_matches_datastore_payload_shape():
     df = pd.DataFrame(
         [

@@ -127,7 +127,20 @@ def classify_bar_freshness(
         missing_closed_bars_by_tf[tf] = int(freshness.get("missing_closed_bars", 0) or 0)
 
         is_fresh = bool(freshness.get("fresh", False))
-        if not is_fresh and expected_ts <= 0:
+        # cTrader's XAUUSD daily bar is anchored to the broker session close
+        # (commonly 21:00/22:00 UTC), not UTC midnight.  The strict
+        # floor(now / 86400) expectation therefore labels the same completed
+        # D1 bar stale for much of every trading day.  D1 is a low-frequency
+        # context input; accept the explicit two-day age budget here while
+        # the decision-bar path remains strict for the configured timeframe.
+        if (
+            not is_fresh
+            and tf == "D1"
+            and row_ts > 0
+            and (now - row_ts) < float(max_age)
+        ):
+            is_fresh = True
+        elif not is_fresh and expected_ts <= 0:
             is_fresh = row_ts > 0 and (now - row_ts) < float(max_age)
         if is_fresh:
             fresh_tfs.append(tf)

@@ -54,6 +54,8 @@ def make_data_sync_job(
 ):
     """Build the legacy data_sync job with injectable IO dependencies."""
 
+    retry_state: dict[str, dict[str, float]] = {}
+
     def _data_sync():
         """检查 bars 新鲜度，有缺口时通过主 bridge 回补。"""
         if not lock.acquire(blocking=False):
@@ -83,11 +85,39 @@ def make_data_sync_job(
             stale_tfs = bar_freshness["stale_tfs"]
             fresh_tfs = bar_freshness["fresh_tfs"]
             observed_bar_ts_by_tf = bar_freshness["observed_bar_ts_by_tf"]
+            missing_closed_bars_by_tf = bar_freshness[
+                "missing_closed_bars_by_tf"
+            ]
+            deferred_tfs: list[str] = []
+            eligible_stale_tfs: list[str] = []
+            for tf in stale_tfs:
+                retry = retry_state.get(tf) or {}
+                same_observation = float(
+                    retry.get("observed_bar_ts") or 0.0
+                ) == float(observed_bar_ts_by_tf.get(tf) or 0.0)
+                if (
+                    same_observation
+                    and now < float(retry.get("next_retry_at") or 0.0)
+                ):
+                    deferred_tfs.append(tf)
+                else:
+                    eligible_stale_tfs.append(tf)
+            stale_tfs = eligible_stale_tfs
 
             # 2. 日志: 数据健康摘要
             bar_status = f"{len(fresh_tfs)}/{len(BAR_FRESHNESS_THRESHOLDS)} fresh"
+            if deferred_tfs:
+                logger.debug(
+                    "[data_sync] stale bars deferred by retry backoff={}",
+                    deferred_tfs,
+                )
             if stale_tfs:
                 logger.info("[data_sync] stale bars={} → pulling", stale_tfs)
+            elif deferred_tfs:
+                health.record_success(
+                    last_bar_ts_by_tf=observed_bar_ts_by_tf or None
+                )
+                return
             else:
                 logger.debug("[data_sync] all fresh ({}), skip pull", bar_status)
                 health.record_success(last_bar_ts_by_tf=observed_bar_ts_by_tf or None)
@@ -140,16 +170,56 @@ def make_data_sync_job(
                     for sym in symbols:
                         for tf in sync_tfs:
                             try:
-                                df = bridge.fetch_bars(tf, n_bars=200)
+                                fetch_count = max(
+                                    5,
+                                    min(
+                                        200,
+                                        int(
+                                            missing_closed_bars_by_tf.get(tf)
+                                            or 1
+                                        )
+                                        + 3,
+                                    ),
+                                )
+                                before_ts = float(
+                                    observed_bar_ts_by_tf.get(tf) or 0.0
+                                )
+                                df = bridge.fetch_bars(
+                                    tf,
+                                    n_bars=fetch_count,
+                                )
                                 if df is None or df.empty:
+                                    retry_state[tf] = {
+                                        "observed_bar_ts": before_ts,
+                                        "next_retry_at": now
+                                        + (3600.0 if tf == "D1" else 300.0),
+                                    }
                                     continue
                                 bars = dataframe_to_store_bars(df)
                                 data_store_factory().insert_bars(bars, sym, tf)
                                 total_bars += len(bars)
                                 if bars:
                                     observed_bar_ts_by_tf[tf] = float(bars[-1]["time"])
+                                after_ts = float(
+                                    observed_bar_ts_by_tf.get(tf) or 0.0
+                                )
+                                if after_ts <= before_ts:
+                                    retry_state[tf] = {
+                                        "observed_bar_ts": before_ts,
+                                        "next_retry_at": now
+                                        + (3600.0 if tf == "D1" else 300.0),
+                                    }
+                                else:
+                                    retry_state.pop(tf, None)
                                 logger.info("[data_sync] pulled {} {} bars: {} bars", sym, tf, len(bars))
                             except Exception as e:
+                                retry_state[tf] = {
+                                    "observed_bar_ts": float(
+                                        observed_bar_ts_by_tf.get(tf) or 0.0
+                                    ),
+                                    "next_retry_at": now
+                                    + (3600.0 if tf == "D1" else 300.0),
+                                }
                                 logger.warning("[data_sync] {} {} pull failed: {}", sym, tf, e)
 
             # 4. 记录健康状态

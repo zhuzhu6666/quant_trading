@@ -473,7 +473,7 @@ def evaluate_factors(
     }
 
 
-def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
+def write_report(result: dict, out_txt: "Path", out_json: "Path") -> dict:
     """把 evaluate_factors 结果落盘: PostgreSQL state_v1 (主) + json/txt (缓存)。"""
     import json
     from pathlib import Path as _P
@@ -509,6 +509,11 @@ def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
     out_txt.write_text("\n".join(lines), encoding="utf-8")
 
     # 写入 PostgreSQL state store (主存储)
+    persistence = {
+        "persisted": False,
+        "updated_at": 0.0,
+        "factor_count": 0,
+    }
     try:
         conn = _connect_state()
         try:
@@ -544,10 +549,17 @@ def write_report(result: dict, out_txt: "Path", out_json: "Path") -> None:
                     tuple(evaluated_names),
                 )
             conn.commit()
+            persistence = {
+                "persisted": True,
+                "updated_at": now,
+                "factor_count": len(evaluated_names),
+            }
         finally:
             conn.close()
     except Exception as e:
         logger.debug("write_report DB: %s", e)
+        persistence["error"] = f"{type(e).__name__}:{e}"[:300]
+    return persistence
 
 
 # ── 退役检查 (Phase 2.4) ──────────────────────────────────────────────

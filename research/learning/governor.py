@@ -603,7 +603,7 @@ class RuleEvolutionGovernor:
                 SELECT suggestion_id, scope_type, scope_key, action, confidence,
                        evidence_json, status, reviewed_at, created_at
                 FROM policy_suggestion
-                WHERE status IN ('proposed', 'approved', 'applied')
+                WHERE status IN ('proposed', 'approved')
                 ORDER BY created_at ASC
                 """,
             ).fetchall()
@@ -615,7 +615,7 @@ class RuleEvolutionGovernor:
                     """
                     UPDATE policy_suggestion
                     SET status='superseded', reviewed_at=?, review_note=?
-                    WHERE suggestion_id=? AND status IN ('proposed', 'approved', 'applied')
+                    WHERE suggestion_id=? AND status IN ('proposed', 'approved')
                     """,
                     (
                         now,

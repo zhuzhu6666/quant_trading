@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import time
 import uuid
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,30 @@ from config.runtime_config import RuntimeConfig
 from risk.policy_service import RiskPolicyService, RiskVerdict
 
 logger = logging.getLogger(__name__)
+
+_EVIDENCE_STREAK_KEY = "factor_governance_evidence_streak.v1"
+
+
+@dataclass(frozen=True)
+class FactorGovernanceProfile:
+    name: str
+    balanced_demo: bool
+    min_live_weight: float
+    builtin_activation_min_health_score: float
+    builtin_activation_min_n_obs: int
+    restore_cooldown_seconds: float
+    restore_min_health_score: float
+    restore_min_n_obs: int
+    restore_model_min_samples: int
+    restore_max_weakness: float
+    hard_health_score: float
+    hard_health_min_n_obs: int
+    hard_model_min_samples: int
+    hard_model_min_weak_samples: int
+    hard_model_weakness: float
+    hard_model_health_ceiling: float
+    hard_disable_streak_cycles: int
+    health_max_age_seconds: float
 
 
 def _p(sql: str) -> str:
@@ -97,6 +122,7 @@ class FactorGovernanceOrchestrator:
 
     def run_cycle(self, *, trigger_source: str = "scheduled") -> dict[str, Any]:
         cfg = runtime_config.shared()
+        profile = self._governance_profile(cfg)
         if not bool(getattr(cfg, "factor_governance_enabled", True)):
             return {"status": "disabled", "actions": []}
 
@@ -128,10 +154,14 @@ class FactorGovernanceOrchestrator:
             # V16 authorization gate. A freeze/missing delegate may stop
             # promotion, restore and template expansion, but must never defer
             # downweight, quarantine or terminal retirement.
-            actions.extend(self._downweight_weak_alpha(catalog, run))
+            actions.extend(
+                self._downweight_weak_alpha(catalog, run, cfg=cfg, profile=profile)
+            )
             if actions:
                 catalog = build_factor_catalog()
-            actions.extend(self._disable_weak_live_alpha(catalog, run))
+            actions.extend(
+                self._disable_weak_live_alpha(catalog, run, cfg=cfg, profile=profile)
+            )
             if actions:
                 catalog = build_factor_catalog()
             actions.extend(self._retire_quarantined_discovered(catalog, run))
@@ -178,7 +208,15 @@ class FactorGovernanceOrchestrator:
                         summary=summary,
                     )
                     return summary
-            actions.extend(self._restore_quarantined_builtin_alpha(catalog, run))
+            actions.extend(
+                self._restore_quarantined_builtin_alpha(
+                    catalog,
+                    run,
+                    cfg=cfg,
+                    profile=profile,
+                    v16_authority=v16_authority,
+                )
+            )
             if actions:
                 catalog = build_factor_catalog()
             actions.extend(
@@ -186,6 +224,8 @@ class FactorGovernanceOrchestrator:
                     catalog,
                     run,
                     v16_authority=v16_authority,
+                    cfg=cfg,
+                    profile=profile,
                 )
             )
             if actions:
@@ -221,6 +261,7 @@ class FactorGovernanceOrchestrator:
                 "catalog_snapshot": catalog_snapshot,
                 "redundancy_report": redundancy_report,
                 "v16_authority": v16_authority,
+                "governance_profile": profile.name,
             }
             finish_evolution_run(
                 run["run_id"],
@@ -239,6 +280,189 @@ class FactorGovernanceOrchestrator:
             return {"status": status, "error": str(exc), "actions": actions}
 
     # ── Action selection ────────────────────────────────────────────
+
+    @staticmethod
+    def _governance_profile(cfg: Any) -> FactorGovernanceProfile:
+        balanced_demo = runtime_config.bounded_demo_mode_active(cfg)
+        if balanced_demo:
+            return FactorGovernanceProfile(
+                name="balanced_demo",
+                balanced_demo=True,
+                min_live_weight=float(
+                    getattr(cfg, "factor_governance_demo_min_live_weight", 0.05)
+                    or 0.05
+                ),
+                builtin_activation_min_health_score=float(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_builtin_activation_min_health_score",
+                        60.0,
+                    )
+                    or 60.0
+                ),
+                builtin_activation_min_n_obs=int(
+                    getattr(
+                        cfg,
+                        "factor_governance_builtin_activation_min_n_obs",
+                        500,
+                    )
+                    or 500
+                ),
+                restore_cooldown_seconds=3600.0
+                * float(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_restore_cooldown_hours",
+                        24.0,
+                    )
+                    or 24.0
+                ),
+                restore_min_health_score=float(
+                    getattr(cfg, "factor_governance_restore_health_threshold", 60.0)
+                    or 60.0
+                ),
+                restore_min_n_obs=int(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_restore_min_n_obs",
+                        500,
+                    )
+                    or 500
+                ),
+                restore_model_min_samples=int(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_restore_model_min_samples",
+                        10,
+                    )
+                    or 10
+                ),
+                restore_max_weakness=float(
+                    getattr(cfg, "factor_governance_restore_max_weakness", 0.65)
+                    or 0.65
+                ),
+                hard_health_score=float(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_health_disable_score",
+                        20.0,
+                    )
+                    or 20.0
+                ),
+                hard_health_min_n_obs=int(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_health_disable_min_n_obs",
+                        500,
+                    )
+                    or 500
+                ),
+                hard_model_min_samples=int(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_model_disable_min_samples",
+                        30,
+                    )
+                    or 30
+                ),
+                hard_model_min_weak_samples=int(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_model_disable_min_weak_samples",
+                        15,
+                    )
+                    or 15
+                ),
+                hard_model_weakness=float(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_model_disable_threshold",
+                        0.90,
+                    )
+                    or 0.90
+                ),
+                hard_model_health_ceiling=float(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_disable_health_ceiling",
+                        40.0,
+                    )
+                    or 40.0
+                ),
+                hard_disable_streak_cycles=int(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_disable_streak_cycles",
+                        3,
+                    )
+                    or 3
+                ),
+                health_max_age_seconds=float(
+                    getattr(
+                        cfg,
+                        "factor_governance_demo_health_max_age_seconds",
+                        300.0,
+                    )
+                    or 300.0
+                ),
+            )
+        return FactorGovernanceProfile(
+            name="strict_live",
+            balanced_demo=False,
+            min_live_weight=0.0,
+            builtin_activation_min_health_score=float(
+                getattr(
+                    cfg,
+                    "factor_governance_builtin_activation_min_health_score",
+                    70.0,
+                )
+                or 70.0
+            ),
+            builtin_activation_min_n_obs=int(
+                getattr(
+                    cfg,
+                    "factor_governance_builtin_activation_min_n_obs",
+                    500,
+                )
+                or 500
+            ),
+            restore_cooldown_seconds=86400.0
+            * float(
+                getattr(cfg, "factor_governance_restore_cooldown_days", 7)
+                or 0.0
+            ),
+            restore_min_health_score=float(
+                getattr(cfg, "factor_governance_restore_health_threshold", 60.0)
+                or 60.0
+            ),
+            restore_min_n_obs=int(
+                getattr(cfg, "factor_health_min_n_obs", 100) or 100
+            ),
+            restore_model_min_samples=int(
+                getattr(cfg, "factor_governance_model_min_samples", 3) or 3
+            ),
+            restore_max_weakness=float(
+                getattr(cfg, "factor_governance_restore_max_weakness", 0.65)
+                or 0.65
+            ),
+            hard_health_score=float(
+                getattr(cfg, "retire_severe_threshold", 30.0) or 30.0
+            ),
+            hard_health_min_n_obs=1,
+            hard_model_min_samples=int(
+                getattr(cfg, "factor_governance_model_min_samples", 3) or 3
+            ),
+            hard_model_min_weak_samples=int(
+                getattr(cfg, "factor_governance_model_min_samples", 3) or 3
+            ),
+            hard_model_weakness=float(
+                getattr(cfg, "factor_governance_model_disable_threshold", 0.85)
+                or 0.85
+            ),
+            hard_model_health_ceiling=100.0,
+            hard_disable_streak_cycles=1,
+            health_max_age_seconds=180.0,
+        )
 
     @staticmethod
     def _autonomy_posture() -> str:
@@ -293,6 +517,101 @@ class FactorGovernanceOrchestrator:
             # isolated test/research store has no live authority and may treat
             # a missing ledger as no pending experiment.
             return bool(production_state)
+
+    def _advance_disable_evidence_streaks(
+        self,
+        candidates: dict[str, dict[str, Any]],
+        *,
+        now: float,
+    ) -> dict[str, dict[str, Any]]:
+        """Persist consecutive Demo hard-disable evidence; uncertainty resets it."""
+
+        db_path = self.overlay.db_path
+        production_state = is_state_db_path(db_path)
+        conn = None
+        try:
+            conn = (
+                get_state_pg_conn()
+                if production_state
+                else connect_sqlite(db_path)
+            )
+            if not production_state:
+                conn.row_factory = sqlite3.Row
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS runtime_kv (
+                       key TEXT PRIMARY KEY,
+                       value_json TEXT NOT NULL DEFAULT '{}',
+                       updated_at REAL NOT NULL DEFAULT 0.0
+                    )"""
+                )
+            row = conn.execute(
+                _p("SELECT value_json FROM runtime_kv WHERE key=?")
+                if production_state
+                else "SELECT value_json FROM runtime_kv WHERE key=?",
+                (_EVIDENCE_STREAK_KEY,),
+            ).fetchone()
+            previous = _loads(row["value_json"], {}) if row else {}
+            previous_factors = dict(previous.get("factors") or {})
+            factors: dict[str, dict[str, Any]] = {}
+            for factor_id, evidence in sorted(candidates.items()):
+                previous_item = dict(previous_factors.get(factor_id) or {})
+                same_reason = (
+                    str(previous_item.get("reason") or "")
+                    == str(evidence.get("reason") or "")
+                )
+                same_evidence_cycle = (
+                    same_reason
+                    and str(previous_item.get("evidence_cycle_id") or "")
+                    == str(evidence.get("evidence_cycle_id") or "")
+                )
+                factors[factor_id] = {
+                    **dict(evidence),
+                    "streak": (
+                        int(previous_item.get("streak") or 0)
+                        if same_evidence_cycle
+                        else int(previous_item.get("streak") or 0) + 1
+                        if same_reason
+                        else 1
+                    ),
+                    "last_new_evidence_at": (
+                        float(previous_item.get("last_new_evidence_at") or now)
+                        if same_evidence_cycle
+                        else now
+                    ),
+                    "updated_at": now,
+                }
+            payload = {
+                "schema_version": _EVIDENCE_STREAK_KEY,
+                "factors": factors,
+                "updated_at": now,
+            }
+            conn.execute(
+                _p(
+                    """INSERT INTO runtime_kv (key, value_json, updated_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(key) DO UPDATE SET
+                         value_json=excluded.value_json,
+                         updated_at=excluded.updated_at"""
+                )
+                if production_state
+                else """INSERT INTO runtime_kv (key, value_json, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET
+                          value_json=excluded.value_json,
+                          updated_at=excluded.updated_at""",
+                (_EVIDENCE_STREAK_KEY, _dumps(payload), now),
+            )
+            conn.commit()
+            return factors
+        except Exception:
+            logger.exception(
+                "[factor_governance] evidence streak persistence unavailable"
+            )
+            # Never convert an unpersisted observation into a hard quarantine.
+            return {}
+        finally:
+            if conn is not None:
+                conn.close()
 
     @staticmethod
     def _scoped_factor_rollback_patch(
@@ -1005,8 +1324,16 @@ class FactorGovernanceOrchestrator:
                 ))
         return actions
 
-    def _downweight_weak_alpha(self, catalog: list[dict[str, Any]], run: dict[str, Any]) -> list[dict[str, Any]]:
-        cfg = runtime_config.shared()
+    def _downweight_weak_alpha(
+        self,
+        catalog: list[dict[str, Any]],
+        run: dict[str, Any],
+        *,
+        cfg: Any | None = None,
+        profile: FactorGovernanceProfile | None = None,
+    ) -> list[dict[str, Any]]:
+        cfg = cfg or runtime_config.shared()
+        profile = profile or self._governance_profile(cfg)
         watch = float(getattr(cfg, "factor_health_watch_threshold", 40.0) or 40.0)
         max_delta = float(getattr(cfg, "awe_max_single_change", 0.15) or 0.15)
         current_weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
@@ -1029,7 +1356,12 @@ class FactorGovernanceOrchestrator:
             old_w = float(current_weights.get(name, item.get("weight", 0.0)) or 0.0)
             if old_w <= 0:
                 continue
-            target = max(0.0, old_w * (1.0 - max_delta))
+            target = max(
+                profile.min_live_weight,
+                old_w * (1.0 - max_delta),
+            )
+            if target >= old_w:
+                continue
             reason = (
                 "autonomous_model_weakness_downweight"
                 if model_weak and not health_weak
@@ -1044,6 +1376,8 @@ class FactorGovernanceOrchestrator:
                 "old_weight": old_w,
                 "target_weight": target,
                 "max_single_change": max_delta,
+                "governance_profile": profile.name,
+                "minimum_live_weight": profile.min_live_weight,
             }
         if not patches:
             return []
@@ -1135,18 +1469,124 @@ class FactorGovernanceOrchestrator:
             ))
         return actions
 
-    def _disable_weak_live_alpha(self, catalog: list[dict[str, Any]], run: dict[str, Any]) -> list[dict[str, Any]]:
-        cfg = runtime_config.shared()
+    def _disable_weak_live_alpha(
+        self,
+        catalog: list[dict[str, Any]],
+        run: dict[str, Any],
+        *,
+        cfg: Any | None = None,
+        profile: FactorGovernanceProfile | None = None,
+    ) -> list[dict[str, Any]]:
+        cfg = cfg or runtime_config.shared()
+        profile = profile or self._governance_profile(cfg)
         severe = float(getattr(cfg, "retire_severe_threshold", 30.0) or 30.0)
         max_actions = int(getattr(cfg, "factor_governance_max_disables_per_cycle", 1) or 1)
-        weak = []
+        weak: list[dict[str, Any]] = []
+        streak_candidates: dict[str, dict[str, Any]] = {}
+        now = time.time()
         for item in catalog:
             if not item.get("eligible_for_live") or item.get("role") != "alpha":
                 continue
             score = float(item.get("health_score") or 0.0)
             model_evidence = self._model_governance_evidence(item, cfg)
-            if (score > 0.0 and score < severe) or bool(model_evidence.get("weak_for_disable")):
-                weak.append(item)
+            if not profile.balanced_demo:
+                if (score > 0.0 and score < severe) or bool(
+                    model_evidence.get("weak_for_disable")
+                ):
+                    weak.append({**item, "_disable_streak": 1})
+                continue
+
+            model_weakness = max(
+                float(model_evidence.get("avg_weakness_score") or 0.0),
+                float(model_evidence.get("latest_weakness_score") or 0.0),
+            )
+            numeric_values = (
+                score,
+                model_weakness,
+                float(item.get("weight") or 0.0),
+            )
+            integrity_failure = not all(math.isfinite(value) for value in numeric_values)
+            if integrity_failure:
+                weak.append(
+                    {
+                        **item,
+                        "_disable_streak": profile.hard_disable_streak_cycles,
+                        "_disable_reason": "non_finite_factor_evidence",
+                    }
+                )
+                continue
+
+            health_status = str(item.get("health_status") or "UNKNOWN").upper()
+            health_updated_at = float(item.get("health_updated_at") or 0.0)
+            health_age = (
+                max(0.0, now - health_updated_at)
+                if health_updated_at > 0.0
+                else float("inf")
+            )
+            health_fresh = (
+                health_status not in {"", "UNKNOWN"}
+                and health_age <= profile.health_max_age_seconds
+            )
+            health_severe = (
+                health_fresh
+                and health_status == "DECAYING"
+                and score < profile.hard_health_score
+                and int(item.get("health_n_obs") or 0)
+                >= profile.hard_health_min_n_obs
+            )
+            model_severe = (
+                health_fresh
+                and score < profile.hard_model_health_ceiling
+                and int(model_evidence.get("sample_count") or 0)
+                >= profile.hard_model_min_samples
+                and int(model_evidence.get("weak_sample_count") or 0)
+                >= profile.hard_model_min_weak_samples
+                and model_weakness >= profile.hard_model_weakness
+            )
+            reason = (
+                "persistent_severe_health"
+                if health_severe
+                else "persistent_mature_model_weakness"
+                if model_severe
+                else ""
+            )
+            if reason:
+                evidence_cycle_id = (
+                    f"{health_updated_at:.6f}:"
+                    f"{int(model_evidence.get('sample_count') or 0)}:"
+                    f"{int(model_evidence.get('weak_sample_count') or 0)}:"
+                    f"{model_weakness:.8f}"
+                )
+                streak_candidates[str(item.get("factor_id") or "")] = {
+                    "reason": reason,
+                    "evidence_cycle_id": evidence_cycle_id,
+                    "health_updated_at": health_updated_at,
+                    "health_score": score,
+                    "health_status": health_status,
+                    "health_n_obs": int(item.get("health_n_obs") or 0),
+                    "health_age_seconds": health_age,
+                    "model_governance": model_evidence,
+                }
+
+        streaks = (
+            self._advance_disable_evidence_streaks(streak_candidates, now=now)
+            if profile.balanced_demo
+            else {}
+        )
+        if profile.balanced_demo:
+            for item in catalog:
+                factor_id = str(item.get("factor_id") or "")
+                streak = int((streaks.get(factor_id) or {}).get("streak") or 0)
+                if streak >= profile.hard_disable_streak_cycles:
+                    weak.append(
+                        {
+                            **item,
+                            "_disable_streak": streak,
+                            "_disable_reason": str(
+                                (streaks.get(factor_id) or {}).get("reason") or ""
+                            ),
+                        }
+                    )
         weak.sort(key=lambda item: (
             float(item.get("health_score") or 999.0),
             -float((item.get("factor_governance_shadow") or {}).get("avg_weakness_score") or item.get("model_weakness_score") or 0.0),
@@ -1159,6 +1599,10 @@ class FactorGovernanceOrchestrator:
                 "health_status": item.get("health_status"),
                 "threshold": severe,
                 "model_governance": model_evidence,
+                "governance_profile": profile.name,
+                "disable_reason": str(item.get("_disable_reason") or "strict_weakness"),
+                "evidence_streak": int(item.get("_disable_streak") or 1),
+                "required_evidence_streak": profile.hard_disable_streak_cycles,
             }
             verdict = self._risk("disable_factor_live", item, evidence)
             if not verdict.allowed:
@@ -1255,6 +1699,8 @@ class FactorGovernanceOrchestrator:
         run: dict[str, Any],
         *,
         v16_authority: dict[str, Any] | None = None,
+        cfg: Any | None = None,
+        profile: FactorGovernanceProfile | None = None,
     ) -> list[dict[str, Any]]:
         """Autonomously activate explicitly enrolled builtin shadow factors.
 
@@ -1264,17 +1710,20 @@ class FactorGovernanceOrchestrator:
         current decay, and a governed initial weight.  ``weight == 0`` plus
         ``lifecycle_status == SHADOW`` is the observation-only state.
         """
-        cfg = runtime_config.shared()
+        cfg = cfg or runtime_config.shared()
+        profile = profile or self._governance_profile(cfg)
         if not bool(getattr(cfg, "factor_governance_builtin_activation_enabled", True)):
             return []
 
-        min_score = float(getattr(cfg, "factor_governance_builtin_activation_min_health_score", 70.0) or 70.0)
-        min_n_obs = int(getattr(cfg, "factor_governance_builtin_activation_min_n_obs", 500) or 500)
+        min_score = profile.builtin_activation_min_health_score
+        min_n_obs = profile.builtin_activation_min_n_obs
         max_activations = int(getattr(cfg, "factor_governance_max_builtin_activations_per_cycle", 1) or 1)
         initial_weight = min(
             0.50,
             float(getattr(cfg, "factor_governance_builtin_activation_weight", 0.0) or 0.0),
         )
+        if profile.balanced_demo:
+            initial_weight = max(profile.min_live_weight, initial_weight)
         if initial_weight <= 0.0:
             logger.warning(
                 "[factor_governance] builtin activation disabled: explicit positive weight required"
@@ -1304,7 +1753,13 @@ class FactorGovernanceOrchestrator:
             n_obs = int(item.get("health_n_obs") or 0)
             if score < min_score or n_obs < min_n_obs:
                 continue
-            if str(item.get("health_status") or "").upper() == "DECAYING":
+            health_status = str(item.get("health_status") or "").upper()
+            health_age = time.time() - float(item.get("health_updated_at") or 0.0)
+            if (
+                health_status not in {"HEALTHY", "WATCH"}
+                or health_age < -5.0
+                or health_age > profile.health_max_age_seconds
+            ):
                 continue
             model_evidence = self._model_governance_evidence(item, cfg)
             model_samples = int(model_evidence.get("sample_count") or 0)
@@ -1341,6 +1796,7 @@ class FactorGovernanceOrchestrator:
                     "min_health_score": min_score,
                     "min_n_obs": min_n_obs,
                     "max_activations_per_cycle": max_activations,
+                    "governance_profile": profile.name,
                 },
             }
             verdict = self._risk("promote_factor", item, evidence)
@@ -1466,6 +1922,10 @@ class FactorGovernanceOrchestrator:
         self,
         catalog: list[dict[str, Any]],
         run: dict[str, Any],
+        *,
+        cfg: Any | None = None,
+        profile: FactorGovernanceProfile | None = None,
+        v16_authority: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Keep one-release restore compatibility outside typed governance.
 
@@ -1484,9 +1944,11 @@ class FactorGovernanceOrchestrator:
             governance_coordinator_mode,
         )
 
-        if governance_coordinator_mode() != "off":
+        mode = governance_coordinator_mode()
+        cfg = cfg or runtime_config.shared()
+        profile = profile or self._governance_profile(cfg)
+        if mode != "off" and not profile.balanced_demo:
             return []
-        cfg = runtime_config.shared()
         if not bool(getattr(cfg, "factor_governance_auto_restore_enabled", True)):
             return []
 
@@ -1496,17 +1958,10 @@ class FactorGovernanceOrchestrator:
         )
         if max_actions <= 0:
             return []
-        cooldown_days = max(
-            0.0,
-            float(getattr(cfg, "factor_governance_restore_cooldown_days", 7) or 0),
-        )
-        health_threshold = float(
-            getattr(cfg, "factor_governance_restore_health_threshold", 60.0) or 60.0
-        )
-        max_weakness = float(
-            getattr(cfg, "factor_governance_restore_max_weakness", 0.65) or 0.65
-        )
-        min_obs = int(getattr(cfg, "factor_health_min_n_obs", 100) or 100)
+        cooldown_seconds = max(0.0, profile.restore_cooldown_seconds)
+        health_threshold = profile.restore_min_health_score
+        max_weakness = profile.restore_max_weakness
+        min_obs = profile.restore_min_n_obs
         now = time.time()
         candidates: list[tuple[dict[str, Any], dict[str, Any], float]] = []
 
@@ -1527,10 +1982,18 @@ class FactorGovernanceOrchestrator:
                 continue
 
             disabled_at = float(signal_entry.get("disabled_at") or item.get("last_action_ts") or 0.0)
-            if disabled_at <= 0.0 or now - disabled_at < cooldown_days * 86400.0:
+            if disabled_at <= 0.0 or now - disabled_at < cooldown_seconds:
                 continue
             health_updated_at = float(item.get("health_updated_at") or 0.0)
             if health_updated_at <= disabled_at:
+                continue
+            health_age = now - health_updated_at
+            if health_age < -5.0 or health_age > profile.health_max_age_seconds:
+                continue
+            if str(item.get("health_status") or "").upper() not in {
+                "HEALTHY",
+                "WATCH",
+            }:
                 continue
             health_score = float(item.get("health_score") or 0.0)
             health_n_obs = int(item.get("health_n_obs") or 0)
@@ -1540,10 +2003,9 @@ class FactorGovernanceOrchestrator:
             model_evidence = self._model_governance_evidence(item, cfg)
             model_samples = int(model_evidence.get("sample_count") or 0)
             weak_samples = int(model_evidence.get("weak_sample_count") or 0)
-            has_model_evidence = model_samples >= int(
-                getattr(cfg, "factor_governance_model_min_samples", 3) or 3
-            ) or weak_samples >= int(
-                getattr(cfg, "factor_governance_model_min_samples", 3) or 3
+            has_model_evidence = (
+                model_samples >= profile.restore_model_min_samples
+                or weak_samples >= profile.restore_model_min_samples
             )
             observed_weakness = max(
                 float(model_evidence.get("avg_weakness_score") or 0.0),
@@ -1552,8 +2014,7 @@ class FactorGovernanceOrchestrator:
             if has_model_evidence and observed_weakness >= max_weakness:
                 continue
 
-            weight = float((cfg.factor_portfolio_weights or {}).get(factor_id, 0.0) or 0.0)
-            if weight <= 0.0:
+            if mode != "off" and self._factor_has_pending_effect(factor_id):
                 continue
             candidates.append((item, signal_entry, disabled_at))
 
@@ -1569,9 +2030,15 @@ class FactorGovernanceOrchestrator:
                 "health_n_obs": int(item.get("health_n_obs") or 0),
                 "health_updated_at": float(item.get("health_updated_at") or 0.0),
                 "disabled_at": disabled_at,
-                "cooldown_days": cooldown_days,
+                "cooldown_seconds": cooldown_seconds,
                 "restore_health_threshold": health_threshold,
                 "model_governance": self._model_governance_evidence(item, cfg),
+                "governance_profile": profile.name,
+                "target_stage": (
+                    FactorLifecycleStage.SHADOW.value
+                    if mode != "off"
+                    else FactorLifecycleStage.ACTIVE.value
+                ),
             }
             verdict = self._risk("restore_factor_live", item, evidence)
             if not verdict.allowed:
@@ -1585,11 +2052,41 @@ class FactorGovernanceOrchestrator:
             restored_entry["restored_at"] = now
             restored_entry["restored_from"] = "QUARANTINE"
             try:
-                result = self._apply_runtime_patch(
-                    {"factor_signal_config": {factor_id: restored_entry}},
-                    source="factor_governance_restore_live",
-                    run_id=str(run.get("run_id") or ""),
-                )
+                if mode != "off":
+                    authority = dict(v16_authority or {})
+                    result = FactorLifecycleService(
+                        self.overlay.db_path,
+                        adapter=RegistryAdapter.shared(),
+                    ).reenroll_quarantined_builtin(
+                        name=factor_id,
+                        actor="system:factor_governance",
+                        reason="healthy builtin starts a new Demo shadow generation",
+                        evidence_refs=evidence,
+                        idempotency_key=(
+                            f"builtin_reenroll:{factor_id}:{run.get('run_id', '')}"
+                        ),
+                        v16=FactorV16Binding(
+                            command_id=str(authority.get("command_id") or ""),
+                            claim_token=str(authority.get("claim_token") or ""),
+                            target_agent=str(
+                                authority.get("target_agent")
+                                or "factor_governance"
+                            ),
+                            candidate_id=str(authority.get("candidate_id") or ""),
+                            posterior_fingerprint=str(
+                                authority.get("posterior_fingerprint") or ""
+                            ),
+                            evidence_fingerprint=str(
+                                authority.get("evidence_fingerprint") or ""
+                            ),
+                        ),
+                    )
+                else:
+                    result = self._apply_runtime_patch(
+                        {"factor_signal_config": {factor_id: restored_entry}},
+                        source="factor_governance_restore_live",
+                        run_id=str(run.get("run_id") or ""),
+                    )
                 committed, projection_ready, mutation_status = self._mutation_commit_state(result)
                 after_cfg = runtime_config.shared().to_dict()
                 after_entry = dict(
@@ -1612,6 +2109,7 @@ class FactorGovernanceOrchestrator:
                     after={
                         "runtime_config": after_cfg,
                         "enabled": after_entry.get("enabled"),
+                        "lifecycle_status": after_entry.get("lifecycle_status"),
                         "weight": float((runtime_config.shared().factor_portfolio_weights or {}).get(factor_id, 0.0) or 0.0),
                     },
                     rollback={"runtime_config": before_cfg},

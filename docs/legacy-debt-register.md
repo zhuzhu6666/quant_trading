@@ -235,10 +235,19 @@
 
 - 状态: `fixed`
 - 旧理解: Factor Governance 可以把弱 live 因子置为 `enabled=false`，但后续只能靠人工或 AWE 恢复权重，无法重新进入 live selector。
-- 当前口径: `QUARANTINE` builtin alpha 因子满足冷却期、健康证据、样本新鲜度和模型弱势清除条件后，由 Factor Governance 在 demo 自治周期自动恢复；`RETIRED/DEAD` 和 discovered Canary 生命周期不被该入口反向复活。
+- 当前口径: typed `QUARANTINED` 是单 generation 终态，不能原地恢复。确认真实 cTrader Demo 后，builtin alpha 满足 24 小时冷却、fresh HEALTHY/WATCH、健康分/样本量和模型弱势清除条件时，由 Factor Governance 每周期最多创建一个 `generation + 1` 的新 SHADOW，再重新走 projection ack 与 canary；`RETIRED/DEAD` 和 discovered/DSL 生命周期不被该入口反向复活。
 - 影响面: Factor Catalog、runtime factor selection、Factor Governance、RiskPolicy、runtime overlay/snapshot、治理审计。
-- 收口方式: 新增 `restore_factor_live` RiskPolicy 动作和受控 runtime mutation；重复失败的 live 因子始终重新进入 `QUARANTINE`，避免恢复后状态变成不可恢复的 `ACTIVE + disabled`。
-- 验证方式: `tests/test_factor_governance_recovery.py`。
+- 收口方式: `FactorLifecycleService.reenroll_quarantined_builtin()` 在 Coordinator 事务内递增 generation、投影为 observation-only SHADOW，并把上一代 mutation 写入 metadata；重复失败仍产生新的 terminal generation，禁止 `ACTIVE + disabled` 和直接 terminal rewrite。
+- 验证方式: `tests/test_factor_governance_recovery.py`、`tests/test_factor_lifecycle_service.py`。
+
+### weak-signal 只用失败标签构造分母
+
+- 状态: `fixed`
+- 旧理解: 先筛出 `bad + weak_signal_overtraded/weak_entry_loss/avoidable_loss` 再计算坏样本率，可以代表弱信号总体质量。
+- 当前口径: 该筛选会让 `bad_rate` 接近 1.0；v2 必须以全部成熟、治理可用、position 去重交易为分母，并用分数门槛反事实切分比较低分段与保留段。
+- 影响面: autonomous learning、entry-quality suggestion、Demo apply stepper、live committed policy、readiness。
+- 收口方式: v2 使用有效样本下限、双侧结果、Wilson 下界和至少 0.10 的坏样本率改善；Demo 自动门槛不超过 0.55。旧 v1 applied control 通过 Coordinator 失效，不能直接改 overlay。
+- 验证方式: `tests/test_autonomous_learning.py`、`tests/test_entry_quality_governance.py`。
 
 ### Canary 重复消费同一 OOS 窗口
 
@@ -757,6 +766,15 @@
 - 收口方式: 保留后端严格 active-session 校验与一次性 refresh rotation，不通过放宽 JWT/session 验证掩盖客户端竞争。
 - 验证方式: `web_frontend` typecheck、build 和 `src/tests/fact-auth.test.mjs`。
 - 验证方式: `tests/test_auth_v2.py`、`tests/test_backend_live_api.py`、`web_frontend/src/tests/fact-auth.test.mjs`。
+
+### 运行调度周期与事实 TTL 各自独立，导致稳定过期和重复计算
+
+- 状态: fixed
+- 旧理解: hourly factor health、15 分钟 governance、2 分钟 readiness trigger、15 分钟 factor-selection TTL、5 分钟全周期 bar 扫描和 restart-relative learning threads 各自合理即可，不需要验证生产者完成相位、构建耗时和消费者 freshness 的闭环。
+- 当前口径: factor health 成功提交后在同一 coordinator 内立即 handoff governance，唯一 evidence cycle 才能推进 streak；readiness 每两分钟以 30 秒 max-age 提前刷新；live factor selection 每 5 分钟 heartbeat；D1 使用 broker-session age budget 和相同 timestamp 退避；Nursery 不再重复完整 learning，Supervisor/Autonomous/Feature 使用固定 UTC 错峰，startup backfill 以独立 watermark 去重。
+- 影响面: Demo builtin re-enroll/canary、readiness/factor Catalog、cTrader bar 请求、learning worker CPU/PG 负载、systemd restart recovery。
+- 收口方式: learning worker unit 使用 30 秒 RestartSec 和 5/300 秒 start-limit；旧 scheduler/sync 配置字段保留为不参与运行调度的兼容字段，避免改变已提交 RuntimeConfig 的整体哈希；所有新调度 contract 同步进入 source-of-truth 和 change-impact checklist。
+- 验证方式: `tests/test_evolution_governance_handoff.py`、`tests/test_factor_governance_recovery.py`、`tests/test_backend_readiness_snapshot.py`、`tests/test_live_scheduler_jobs.py`、`tests/test_runtime_factor_selection_projection.py`、`tests/test_live_data_sync_helpers.py`、`tests/test_factor_autonomy_hardening.py`、`tests/test_learning_cycle_watermark.py`。
 
 ## 5. 新旧债登记模板
 

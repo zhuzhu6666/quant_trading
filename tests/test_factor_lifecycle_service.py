@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -482,6 +483,28 @@ def test_builtin_lifecycle_governs_admission_without_mutating_code_registry(
         assert name in factor_registry
         assert runtime_config.shared().factor_signal_config[name]["enabled"] is False
         assert runtime_config.shared().factor_portfolio_weights[name] == 0.0
+
+        terminal_state = service.get_state(factor_name=name)
+        reenrolled = service.reenroll_quarantined_builtin(
+            name=name,
+            actor="system:test",
+            reason="fresh Demo recovery evidence",
+            evidence_refs={"health_score": 65.0, "health_n_obs": 1000},
+            idempotency_key="pytest-builtin-reenroll",
+        )
+        assert reenrolled["ok"] is True, reenrolled
+        state = service.get_state(factor_name=name)
+        assert state["lifecycle_stage"] == "SHADOW"
+        assert state["generation"] == terminal_state["generation"] + 1
+        assert runtime_config.shared().factor_signal_config[name]["enabled"] is True
+        assert runtime_config.shared().factor_signal_config[name]["lifecycle_status"] == "SHADOW"
+        assert runtime_config.shared().factor_portfolio_weights[name] == 0.0
+        metadata = json.loads(state["metadata_json"])
+        assert metadata["reenrolled_from"]["lifecycle_stage"] == "QUARANTINED"
+        assert (
+            metadata["reenrolled_from"]["mutation_id"]
+            == terminal_state["mutation_id"]
+        )
     finally:
         factor_registry._factors.pop(name, None)
 

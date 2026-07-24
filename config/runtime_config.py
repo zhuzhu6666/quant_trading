@@ -32,6 +32,13 @@ VALID_RUNTIME_INCIDENT_MODES = frozenset(
 )
 
 
+def resolve_bounded_demo_mode(cfg: Any, broker_cfg: Any) -> bool:
+    """Purely resolve bounded Demo semantics from caller-owned snapshots."""
+
+    mode = str(getattr(cfg, "autonomy_mode", "") or "manual").strip().lower()
+    return mode in DEMO_AUTONOMY_MODES and bool(getattr(broker_cfg, "is_demo", False))
+
+
 def bounded_demo_mode_active(cfg: Any | None = None) -> bool:
     """Return whether bounded Demo execution semantics are actually active.
 
@@ -40,15 +47,24 @@ def bounded_demo_mode_active(cfg: Any | None = None) -> bool:
     missing or invalid broker configuration remains fail-closed.
     """
 
-    current = cfg if cfg is not None else shared()
-    mode = str(getattr(current, "autonomy_mode", "") or "manual").strip().lower()
+    # This helper is used by readiness and diagnostic paths.  Reading the
+    # current in-process snapshot must not refresh the durable overlay or
+    # activate a safety latch.  Authoritative refresh remains owned by the
+    # backend RuntimeConfig reconciler.
+    if cfg is None:
+        holder = shared_holder()
+        if holder.version() <= 0:
+            return False
+        current = holder.get()
+    else:
+        current = cfg
     try:
         from execution.broker_config import shared_broker_connection_config
 
-        broker_is_demo = shared_broker_connection_config().is_demo
+        broker_cfg = shared_broker_connection_config()
     except Exception:
-        broker_is_demo = False
-    return mode in DEMO_AUTONOMY_MODES and broker_is_demo
+        return False
+    return resolve_bounded_demo_mode(current, broker_cfg)
 
 
 def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
@@ -134,7 +150,7 @@ class RuntimeConfig:
     retrain_min_trades_before_first: int = 100
     retrain_timeout_sec: int = 300
 
-    # --- Scheduler ---
+    # --- Scheduler (deprecated compatibility fields; runtime schedulers own cadence) ---
     scheduler_auto_discover_cron: str = "0 1 * * *"
     scheduler_promote_cron: str = "30 1 * * *"
     scheduler_drift_research_interval_min: int = 15

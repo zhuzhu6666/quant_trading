@@ -15,12 +15,15 @@ from backend.services.governance_mutation_coordinator import (
     GovernanceMutationCoordinator,
     GovernanceMutationPlan,
 )
-from config.runtime_config import shared as runtime_config
+from config import runtime_config as runtime_config_module
 from risk.policy_service import RiskPolicyService
 
 
 DEMO_AUTONOMY_MODES = frozenset({"demo_nursery", "demo_autonomous"})
 SUPPORTED_ACTION = "raise_weak_signal_threshold"
+# Compatibility seam retained for focused tests and callers that inject a
+# caller-owned RuntimeConfig snapshot.
+runtime_config = runtime_config_module.shared
 
 
 def _stable_id(prefix: str, payload: dict[str, Any]) -> str:
@@ -63,8 +66,9 @@ class EntryQualityGovernanceService:
         from research.learning.governor import RuleEvolutionGovernor
 
         RuleEvolutionGovernor(str(self.db_path))
-        mode = str(getattr(runtime_config(), "autonomy_mode", "manual") or "manual")
-        if mode not in DEMO_AUTONOMY_MODES:
+        cfg = runtime_config()
+        mode = str(getattr(cfg, "autonomy_mode", "manual") or "manual")
+        if not runtime_config_module.bounded_demo_mode_active(cfg):
             return {
                 "ok": True,
                 "status": "skipped_non_demo_mode",
@@ -74,14 +78,45 @@ class EntryQualityGovernanceService:
 
         suggestion = self._next_suggestion()
         if not suggestion:
+            legacy_reconciliation = self.invalidate_legacy_applied_control(
+                run_id=run_id,
+                actor=actor,
+            )
+            if not legacy_reconciliation.get("ok", True):
+                return {
+                    **legacy_reconciliation,
+                    "boundary": self.boundary(),
+                }
             return {
                 "ok": True,
                 "status": "skipped_no_eligible_weak_signal_suggestion",
                 "mode": mode,
                 "boundary": self.boundary(),
             }
+        legacy_rows = self._legacy_applied_controls()
+        legacy_ids = [str(item["suggestion_id"]) for item in legacy_rows]
+        legacy_controls = (
+            dict(legacy_rows[0].get("recommended_controls") or {})
+            if legacy_rows
+            else {}
+        )
+        legacy_threshold = float(
+            legacy_controls.get("min_abs_signal_score") or 0.0
+        )
+        legacy_override = float(
+            legacy_controls.get("strong_signal_override") or 0.0
+        )
+        legacy_reconciliation = {
+            "ok": True,
+            "status": (
+                "pending_atomic_v2_replacement"
+                if legacy_ids
+                else "no_legacy_applied_control"
+            ),
+            "invalidated_suggestion_ids": legacy_ids,
+        }
         active = self._active_application()
-        if active:
+        if active and not legacy_ids:
             return {
                 "ok": True,
                 "status": "skipped_active_entry_quality_experiment",
@@ -93,7 +128,7 @@ class EntryQualityGovernanceService:
         controls = dict(evidence.get("recommended_controls") or {})
         threshold = float(controls.get("min_abs_signal_score") or 0.0)
         strong_override = float(controls.get("strong_signal_override") or 0.0)
-        if not (0.5 <= threshold <= 0.68 and 0.75 <= strong_override <= 1.0):
+        if not (0.35 <= threshold <= 0.55 and 0.70 <= strong_override <= 1.0):
             return {
                 "ok": False,
                 "status": "rejected_invalid_entry_quality_controls",
@@ -186,7 +221,41 @@ class EntryQualityGovernanceService:
                 """,
             ).fetchone()
             if competing and str(competing["application_id"] or "") != application_id:
-                raise RuntimeError("entry_quality_experiment_already_active")
+                if not legacy_ids:
+                    raise RuntimeError("entry_quality_experiment_already_active")
+
+            if legacy_ids:
+                placeholders = ",".join("?" for _ in legacy_ids)
+                execute(
+                    conn,
+                    f"""
+                    UPDATE policy_suggestion
+                    SET status='invalidated_evidence', reviewed_at=?,
+                        review_note='entry_quality_v1_population_bias'
+                    WHERE suggestion_id IN ({placeholders})
+                      AND status='applied'
+                    """,
+                    (now, *legacy_ids),
+                )
+                execute(
+                    conn,
+                    """
+                    UPDATE learning_application_log
+                    SET status='superseded'
+                    WHERE scope_type='entry_quality' AND scope_key='weak_signal'
+                      AND status IN ('prepared','applied','observing','effective')
+                    """,
+                )
+                execute(
+                    conn,
+                    """
+                    UPDATE learning_application_effect
+                    SET status='superseded', updated_at=?
+                    WHERE scope_type='entry_quality' AND scope_key='weak_signal'
+                      AND status IN ('observing','applied','effective')
+                    """,
+                    (now,),
+                )
 
             execute(
                 conn,
@@ -271,21 +340,27 @@ class EntryQualityGovernanceService:
                 scope_type="entry_quality",
                 scope_key="weak_signal",
                 rollback={
-                    "min_abs_signal_score": 0.0,
-                    "strong_signal_override": 0.0,
+                    "min_abs_signal_score": legacy_threshold,
+                    "strong_signal_override": legacy_override,
                 },
                 evidence_refs={
                     "suggestion_id": suggestion_id,
+                    "invalidated_legacy_suggestion_ids": legacy_ids,
                     "eligibility_fingerprint": fingerprint,
                     "controls": controls,
                 },
                 evidence_fingerprint=fingerprint,
-                idempotency_key=f"entry-quality:{suggestion_id}:{fingerprint}",
+                # A V16 claim may legitimately be unavailable on the first
+                # attempt. Keep each audited release attempt idempotent while
+                # allowing a later evidence-bound delegation to retry.
+                idempotency_key=(
+                    f"entry-quality:{suggestion_id}:{fingerprint}:{run_id}"
+                ),
                 v16_target_agent="autonomous_learning",
                 domain_only=True,
                 domain_before={
-                    "min_abs_signal_score": 0.0,
-                    "strong_signal_override": 0.0,
+                    "min_abs_signal_score": legacy_threshold,
+                    "strong_signal_override": legacy_override,
                 },
                 domain_target={
                     "min_abs_signal_score": threshold,
@@ -303,6 +378,155 @@ class EntryQualityGovernanceService:
             "risk_verdict": risk_verdict,
             "mutation": mutation,
             "boundary": self.boundary(),
+            "legacy_reconciliation": legacy_reconciliation,
+        }
+
+    def _legacy_applied_controls(self) -> list[dict[str, Any]]:
+        conn = connect(self.db_path, read_only=True)
+        try:
+            rows = execute(
+                conn,
+                """
+                SELECT suggestion_id, evidence_json
+                FROM policy_suggestion
+                WHERE scope_type='entry_quality'
+                  AND scope_key='weak_signal'
+                  AND action='raise_weak_signal_threshold'
+                  AND status='applied'
+                ORDER BY created_at DESC
+                """,
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            {
+                "suggestion_id": str(row["suggestion_id"] or ""),
+                "evidence": loads(row["evidence_json"], {}),
+                "recommended_controls": dict(
+                    loads(row["evidence_json"], {}).get(
+                        "recommended_controls"
+                    )
+                    or {}
+                ),
+            }
+            for row in rows
+            if str(
+                loads(row["evidence_json"], {}).get("schema_version") or ""
+            )
+            != "entry_quality_governance_evidence.v2"
+        ]
+
+    def invalidate_legacy_applied_control(
+        self,
+        *,
+        run_id: str,
+        actor: str = "system:entry_quality_governance",
+    ) -> dict[str, Any]:
+        """Atomically remove applied v1 weak-signal evidence from live policy."""
+
+        legacy = self._legacy_applied_controls()
+        if not legacy:
+            return {"ok": True, "status": "no_legacy_applied_control"}
+
+        legacy_ids = [item["suggestion_id"] for item in legacy]
+        controls = dict(legacy[0]["evidence"].get("recommended_controls") or {})
+        old_threshold = float(controls.get("min_abs_signal_score") or 0.0)
+        old_override = float(controls.get("strong_signal_override") or 0.0)
+        base_threshold = float(
+            getattr(runtime_config(), "factor_signal_threshold", 0.30)
+            or 0.30
+        )
+        now = time.time()
+
+        def transaction_writer(conn: Any, mutation_id: str, _effective_config: Any):
+            placeholders = ",".join("?" for _ in legacy_ids)
+            locked = execute(
+                conn,
+                f"""
+                SELECT suggestion_id, status
+                FROM policy_suggestion
+                WHERE suggestion_id IN ({placeholders})
+                """,
+                tuple(legacy_ids),
+            ).fetchall()
+            if not any(str(row["status"] or "") == "applied" for row in locked):
+                raise RuntimeError("legacy_entry_quality_control_changed")
+            execute(
+                conn,
+                f"""
+                UPDATE policy_suggestion
+                SET status='invalidated_evidence', reviewed_at=?,
+                    review_note='entry_quality_v1_population_bias'
+                WHERE suggestion_id IN ({placeholders})
+                  AND status='applied'
+                """,
+                (now, *legacy_ids),
+            )
+            execute(
+                conn,
+                """
+                UPDATE learning_application_log
+                SET status='superseded'
+                WHERE scope_type='entry_quality' AND scope_key='weak_signal'
+                  AND status IN ('prepared','applied','observing','effective')
+                """,
+            )
+            execute(
+                conn,
+                """
+                UPDATE learning_application_effect
+                SET status='superseded', updated_at=?
+                WHERE scope_type='entry_quality' AND scope_key='weak_signal'
+                  AND status IN ('observing','applied','effective')
+                """,
+                (now,),
+            )
+            return {
+                "invalidated_suggestion_ids": legacy_ids,
+                "base_threshold": base_threshold,
+            }
+
+        mutation = GovernanceMutationCoordinator(self.db_path).execute(
+            GovernanceMutationPlan(
+                patch={},
+                source="entry_quality_governance_v1_invalidation",
+                actor=actor,
+                action="invalidate_entry_quality_control",
+                run_id=run_id,
+                reason="v1 weak-signal denominator was adverse-outcome selected",
+                control_surface="entry_quality",
+                scope_type="entry_quality",
+                scope_key="weak_signal",
+                rollback={
+                    "min_abs_signal_score": old_threshold,
+                    "strong_signal_override": old_override,
+                },
+                evidence_refs={
+                    "invalidated_suggestion_ids": legacy_ids,
+                    "invalid_reason": "entry_quality_v1_population_bias",
+                },
+                v16_target_agent="autonomous_learning",
+                idempotency_key=(
+                    "entry-quality-v1-invalidation:" + ":".join(legacy_ids)
+                ),
+                domain_only=True,
+                domain_before={
+                    "min_abs_signal_score": old_threshold,
+                    "strong_signal_override": old_override,
+                },
+                domain_target={
+                    "min_abs_signal_score": base_threshold,
+                    "strong_signal_override": 0.0,
+                },
+            ),
+            transaction_writer=transaction_writer,
+        )
+        return {
+            "ok": bool(mutation.get("ok")),
+            "status": str(mutation.get("status") or "mutation_failed"),
+            "mutation": mutation,
+            "invalidated_suggestion_ids": legacy_ids,
+            "base_threshold": base_threshold,
         }
 
     def status(self) -> dict[str, Any]:

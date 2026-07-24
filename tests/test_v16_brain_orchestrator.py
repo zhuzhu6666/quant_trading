@@ -217,3 +217,47 @@ def test_superseded_candidate_cancels_unclaimed_delegate(tmp_path):
         readiness=_readiness(), limit=20, source="test", persist=True
     )
     assert rerun["delegated_count"] == 0
+
+
+def test_v16_delegates_only_qualified_entry_quality_v2_evidence(tmp_path):
+    db_path = tmp_path / "state.db"
+    service = V16BrainOrchestratorService(db_path)
+    gate = {
+        "suggestion_id": "entry-v2",
+        "status": "approved",
+        "governance_eligible": True,
+        "governance_eligibility_fingerprint": "f" * 64,
+        "evidence": {
+            "schema_version": "entry_quality_governance_evidence.v2",
+            "recommended_controls": {
+                "min_abs_signal_score": 0.4,
+                "strong_signal_override": 0.7,
+            },
+            "threshold_scan": {
+                "selected_threshold": 0.4,
+                "metrics": {
+                    "sample_count": 20,
+                    "bad_count": 12,
+                    "win_count": 8,
+                },
+            },
+        },
+    }
+
+    delegated = service.delegate_entry_quality_control(gate, persist=True)
+
+    assert delegated["ok"] is True
+    assert delegated["command"]["target_agent"] == "autonomous_learning"
+    assert delegated["command"]["scope_type"] == "entry_quality"
+    assert delegated["command"]["evidence_fingerprint"] == "f" * 64
+    rejected = service.delegate_entry_quality_control(
+        {
+            **gate,
+            "evidence": {
+                **gate["evidence"],
+                "schema_version": "entry_quality_governance_evidence.v1",
+            },
+        },
+        persist=False,
+    )
+    assert rejected["status"] == "entry_quality_v2_evidence_not_ready"

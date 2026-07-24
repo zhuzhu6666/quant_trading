@@ -8,6 +8,7 @@ from backend.services.live_scheduler_jobs import (
     make_events_sync_job,
     make_external_data_sync_job,
     register_external_sync_jobs,
+    register_factor_selection_heartbeat_job,
     register_backend_readiness_refresh_job,
     start_initial_ctrader_data_pull,
     start_scheduler_catch_up,
@@ -67,9 +68,20 @@ def test_backend_readiness_refresh_job_is_periodic_and_single_flight_owned():
     register_backend_readiness_refresh_job(sched, logger=logger)
 
     assert result["status"] == "refresh_started"
-    assert calls == [("open", None), ("refresh", 90.0)]
+    assert calls == [("open", None), ("refresh", 30.0)]
     assert [(name, cron) for name, cron, _func in sched.jobs] == [
         ("backend_readiness_refresh", "*/2 * * * *")
+    ]
+
+
+def test_factor_selection_heartbeat_is_registered_every_five_minutes():
+    sched = _FakeScheduler()
+    heartbeat = lambda: {"ok": True}
+
+    register_factor_selection_heartbeat_job(sched, heartbeat=heartbeat)
+
+    assert sched.jobs == [
+        ("factor_selection_heartbeat", "*/5 * * * *", heartbeat)
     ]
 
 

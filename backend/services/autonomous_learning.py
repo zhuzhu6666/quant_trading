@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -1606,6 +1607,103 @@ def _governance_bucket_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _weighted_bad_rate(items: list[dict[str, Any]]) -> tuple[float, float]:
+    effective_n = sum(
+        float(item.get("governance_weight") or 0.0) for item in items
+    )
+    weighted_bad = sum(
+        float(item.get("governance_weight") or 0.0)
+        for item in items
+        if item.get("bad")
+    )
+    return (
+        weighted_bad / effective_n if effective_n > 0.0 else 0.0,
+        effective_n,
+    )
+
+
+def _wilson_lower_bound(rate: float, effective_n: float) -> float:
+    if effective_n <= 0.0:
+        return 0.0
+    z = 1.959963984540054
+    denominator = 1.0 + z * z / effective_n
+    centre = rate + z * z / (2.0 * effective_n)
+    margin = z * math.sqrt(
+        max(0.0, rate * (1.0 - rate) / effective_n + z * z / (4.0 * effective_n**2))
+    )
+    return max(0.0, (centre - margin) / denominator)
+
+
+def _weak_signal_threshold_scan(
+    items: list[dict[str, Any]],
+    *,
+    base_threshold: float,
+    cap_threshold: float,
+) -> dict[str, Any]:
+    """Choose the smallest threshold with a measurable counterfactual benefit."""
+
+    metrics = _governance_bucket_metrics(items)
+    base = max(0.0, float(base_threshold))
+    cap = max(base, float(cap_threshold))
+    candidates: list[dict[str, Any]] = []
+    threshold = base + 0.05
+    while threshold <= cap + 1e-9:
+        rounded = round(threshold, 4)
+        excluded = [
+            item
+            for item in items
+            if base <= float(item.get("entry_score") or 0.0) < rounded
+        ]
+        retained = [
+            item for item in items if float(item.get("entry_score") or 0.0) >= rounded
+        ]
+        excluded_bad_rate, excluded_n = _weighted_bad_rate(excluded)
+        retained_bad_rate, retained_n = _weighted_bad_rate(retained)
+        wilson_lower = _wilson_lower_bound(excluded_bad_rate, excluded_n)
+        qualifies = bool(
+            float(metrics["effective_sample_count"]) >= 20.0
+            and int(metrics["bad_count"]) > 0
+            and int(metrics["win_count"]) > 0
+            and excluded_n >= 8.0
+            and retained_n >= 8.0
+            and excluded_bad_rate >= 0.65
+            and wilson_lower > 0.50
+            and retained_bad_rate <= excluded_bad_rate - 0.10
+        )
+        candidates.append(
+            {
+                "threshold": rounded,
+                "excluded_effective_n": round(excluded_n, 6),
+                "retained_effective_n": round(retained_n, 6),
+                "excluded_bad_rate": round(excluded_bad_rate, 6),
+                "retained_bad_rate": round(retained_bad_rate, 6),
+                "excluded_bad_rate_wilson_lower": round(wilson_lower, 6),
+                "qualifies": qualifies,
+            }
+        )
+        threshold += 0.05
+    selected = next(
+        (item for item in candidates if bool(item.get("qualifies"))),
+        None,
+    )
+    valid_scores = [
+        float(item.get("entry_score") or 0.0)
+        for item in items
+        if math.isfinite(float(item.get("entry_score") or 0.0))
+    ]
+    return {
+        "selected_threshold": (
+            float(selected["threshold"]) if selected is not None else 0.0
+        ),
+        "base_threshold": base,
+        "cap_threshold": cap,
+        "entry_score_min": min(valid_scores) if valid_scores else 0.0,
+        "entry_score_max": max(valid_scores) if valid_scores else 0.0,
+        "candidates": candidates,
+        "metrics": metrics,
+    }
+
+
 def _upsert_governance_pattern_stats(
     conn: Any,
     *,
@@ -2105,7 +2203,16 @@ def materialize_entry_quality_governance_suggestions(
     suggestions = 0
     stats_upserted = 0
     skipped = 0
+    invalidated_v1 = 0
     try:
+        from config import runtime_config as runtime_config_module
+
+        cfg = runtime_config_module.shared()
+        base_signal_threshold = float(
+            getattr(cfg, "factor_signal_threshold", 0.30) or 0.30
+        )
+        balanced_demo = runtime_config_module.bounded_demo_mode_active(cfg)
+        weak_signal_cap = 0.55 if balanced_demo else 0.68
         rows = _execute(
             conn,
             """
@@ -2122,6 +2229,39 @@ def materialize_entry_quality_governance_suggestions(
             """,
             (GOVERNANCE_ELIGIBILITY_VERSION, max(1, int(limit))),
         ).fetchall()
+        legacy_weak_rows = _execute(
+            conn,
+            """
+            SELECT suggestion_id, evidence_json
+            FROM policy_suggestion
+            WHERE scope_type='entry_quality'
+              AND scope_key='weak_signal'
+              AND action='raise_weak_signal_threshold'
+              AND status IN ('proposed', 'approved')
+            """,
+        ).fetchall()
+        legacy_weak_ids = [
+            str(row["suggestion_id"] or "")
+            for row in legacy_weak_rows
+            if str(
+                _loads(row["evidence_json"], {}).get("schema_version") or ""
+            )
+            != "entry_quality_governance_evidence.v2"
+        ]
+        if legacy_weak_ids:
+            placeholders = ",".join("?" for _ in legacy_weak_ids)
+            _execute(
+                conn,
+                f"""
+                UPDATE policy_suggestion
+                SET status='invalidated_evidence', reviewed_at=?,
+                    review_note='entry_quality_v1_population_bias'
+                WHERE suggestion_id IN ({placeholders})
+                  AND status IN ('proposed', 'approved')
+                """,
+                (time.time(), *legacy_weak_ids),
+            )
+            invalidated_v1 = len(legacy_weak_ids)
         seen_positions: set[str] = set()
         for row in rows:
             position_id = str(row["position_id"] or "")
@@ -2149,7 +2289,7 @@ def materialize_entry_quality_governance_suggestions(
                 "governance_weight": float(row["governance_effective_weight"] or 0.0),
                 "governance_eligibility_fingerprint": str(row["governance_eligibility_fingerprint"] or ""),
             }
-            if bad and failure_tags.intersection({"weak_signal_overtraded", "weak_entry_loss", "avoidable_loss"}):
+            if math.isfinite(entry_score) and entry_score > 0.0:
                 buckets.setdefault("weak_signal", []).append(dict(base_item))
             if bad and failure_tags.intersection({"factor_conflict", "conflicting_factor_entry", "conflict_entry_loss"}):
                 buckets.setdefault("factor_conflict", []).append(dict(base_item))
@@ -2159,6 +2299,29 @@ def materialize_entry_quality_governance_suggestions(
         now = time.time()
         for bucket, items in sorted(buckets.items()):
             metrics = _governance_bucket_metrics(items)
+            weak_scan = (
+                _weak_signal_threshold_scan(
+                    items,
+                    base_threshold=base_signal_threshold,
+                    cap_threshold=weak_signal_cap,
+                )
+                if bucket == "weak_signal"
+                else {}
+            )
+            eligibility_fingerprint = str(metrics["eligibility_fingerprint"])
+            if bucket == "weak_signal":
+                eligibility_fingerprint = hashlib.sha256(
+                    _dumps(
+                        {
+                            "schema_version": "entry_quality_governance_evidence.v2",
+                            "eligibility_binding_version": (
+                                "entry_quality_governance_evidence_binding.v1"
+                            ),
+                            "sample_fingerprint": eligibility_fingerprint,
+                            "threshold_scan": weak_scan,
+                        }
+                    ).encode("utf-8")
+                ).hexdigest()
             sample_count = int(metrics["sample_count"])
             effective_sample_count = float(metrics["effective_sample_count"])
             bad_count = int(metrics["bad_count"])
@@ -2179,16 +2342,22 @@ def materialize_entry_quality_governance_suggestions(
             action = "watch"
             scope_key = bucket
             recommended_controls: dict[str, Any] = {"advisory_only": False}
-            if effective_sample_count >= float(min_samples) and bad_rate >= float(min_bad_rate):
-                if bucket == "weak_signal":
+            if bucket == "weak_signal":
+                selected_threshold = float(
+                    weak_scan.get("selected_threshold") or 0.0
+                )
+                if selected_threshold > 0.0:
                     action = "raise_weak_signal_threshold"
                     recommended_controls.update(
                         {
-                            "min_abs_signal_score": round(max(0.50, min(0.68, avg_entry_score + 0.08)), 4),
-                            "strong_signal_override": 0.75,
+                            "min_abs_signal_score": round(selected_threshold, 4),
+                            "strong_signal_override": 0.70
+                            if balanced_demo
+                            else 0.75,
                         }
                     )
-                elif bucket == "factor_conflict":
+            elif effective_sample_count >= float(min_samples) and bad_rate >= float(min_bad_rate):
+                if bucket == "factor_conflict":
                     action = "require_factor_agreement"
                     recommended_controls.update(
                         {
@@ -2209,7 +2378,10 @@ def materialize_entry_quality_governance_suggestions(
                 conn,
                 scope_type="entry_quality",
                 scope_key=scope_key,
-                metrics=metrics,
+                metrics={
+                    **metrics,
+                    "eligibility_fingerprint": eligibility_fingerprint,
+                },
                 last_outcome_label="bad_loss" if bad_count else "",
                 recommended_action=action,
                 now=now,
@@ -2218,7 +2390,6 @@ def materialize_entry_quality_governance_suggestions(
             if action == "watch":
                 skipped += 1
                 continue
-            eligibility_fingerprint = str(metrics["eligibility_fingerprint"])
             existing_rows = _execute(
                 conn,
                 """
@@ -2268,7 +2439,11 @@ def materialize_entry_quality_governance_suggestions(
             ).hexdigest()[:16]
             confidence = min(0.94, 0.48 + 0.05 * effective_sample_count + 0.20 * bad_rate)
             evidence = {
-                "schema_version": "entry_quality_governance_evidence.v1",
+                "schema_version": (
+                    "entry_quality_governance_evidence.v2"
+                    if bucket == "weak_signal"
+                    else "entry_quality_governance_evidence.v1"
+                ),
                 "bucket": bucket,
                 "scope_key": scope_key,
                 **_governance_evidence_metrics(metrics),
@@ -2278,6 +2453,23 @@ def materialize_entry_quality_governance_suggestions(
                 "position_ids": [item["position_id"] for item in items[:20]],
                 "recommended_controls": recommended_controls,
             }
+            if bucket == "weak_signal":
+                evidence.update(
+                    {
+                        "population_contract": {
+                            "all_matured_governance_eligible_positions": True,
+                            "deduplicated_by_position": True,
+                            "failure_tags_are_explanatory_only": True,
+                        },
+                        "threshold_scan": weak_scan,
+                        "governance_profile": (
+                            "balanced_demo" if balanced_demo else "strict_live"
+                        ),
+                        "governance_eligibility_fingerprint": (
+                            eligibility_fingerprint
+                        ),
+                    }
+                )
             evidence = attach_policy_suggestion_agent_context(
                 evidence,
                 source_agent="autonomous_learning",
@@ -2297,7 +2489,19 @@ def materialize_entry_quality_governance_suggestions(
                  governance_eligibility_version, governance_eligibility_fingerprint,
                  governance_ineligible_reason, created_at)
                 VALUES (?, 'entry_quality', ?, ?, ?, ?, ?, 'proposed', 1, ?, ?, '', ?)
-                ON CONFLICT(suggestion_id) DO NOTHING
+                ON CONFLICT(suggestion_id) DO UPDATE SET
+                    confidence=excluded.confidence,
+                    reason=excluded.reason,
+                    evidence_json=excluded.evidence_json,
+                    status='proposed',
+                    governance_eligible=1,
+                    governance_eligibility_version=excluded.governance_eligibility_version,
+                    governance_eligibility_fingerprint=excluded.governance_eligibility_fingerprint,
+                    governance_ineligible_reason='',
+                    reviewed_at=0.0,
+                    review_note=''
+                WHERE policy_suggestion.status='rejected'
+                  AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
                 """,
                 (
                     suggestion_id,
@@ -2313,12 +2517,18 @@ def materialize_entry_quality_governance_suggestions(
             )
             suggestions += 1
         payload = {
-            "schema_version": "entry_quality_governance.v1",
+            "schema_version": "entry_quality_governance.v2",
             "evolution_run_id": str(run.get("run_id") or ""),
             "bucket_count": len(buckets),
             "stats_upserted": stats_upserted,
             "suggestions": suggestions,
             "skipped": skipped,
+            "invalidated_v1_suggestions": invalidated_v1,
+            "weak_signal_base_threshold": base_signal_threshold,
+            "weak_signal_cap_threshold": weak_signal_cap,
+            "governance_profile": (
+                "balanced_demo" if balanced_demo else "strict_live"
+            ),
             "limit": int(limit),
         }
         _insert_evolution_event(conn, "entry_quality_governance", payload)
@@ -4836,6 +5046,44 @@ def run_autonomous_learning_cycle(
         conn.close()
 
 
+def run_watermark_gated_autonomous_learning_cycle(
+    *,
+    db_path: str | Path = STATE_DB,
+    sample_limit: int = 500,
+    recommendation_limit: int = 20,
+    submit_offline_deep: bool = True,
+    mutation_capability: bool = True,
+) -> dict[str, Any]:
+    """Run one fixed-schedule cycle only when source facts advanced."""
+
+    from backend.services.learning_cycle_watermark import (
+        LearningCycleWatermarkService,
+    )
+
+    watermark_service = LearningCycleWatermarkService(db_path=db_path)
+    gate = watermark_service.evaluate()
+    if not gate.get("should_run"):
+        return {
+            "ok": True,
+            "status": "skipped_no_new_facts",
+            "watermark": gate,
+        }
+    result = run_autonomous_learning_cycle(
+        db_path=db_path,
+        sample_limit=sample_limit,
+        recommendation_limit=recommendation_limit,
+        submit_offline_deep=submit_offline_deep,
+        mutation_capability=mutation_capability,
+    )
+    watermark_service.mark_completed(gate["current"])
+    return {
+        **dict(result or {}),
+        "ok": True,
+        "status": str((result or {}).get("status") or "completed"),
+        "watermark": gate,
+    }
+
+
 def schedule_autonomous_learning(
     *,
     delay_sec: float = 420.0,
@@ -4882,20 +5130,11 @@ def schedule_autonomous_learning(
         }
 
     def _worker() -> None:
-        from backend.services.learning_cycle_watermark import LearningCycleWatermarkService
-
         if _stop_event.wait(max(0.0, delay_sec)):
             return
         while not _stop_event.is_set():
             try:
-                watermark_service = LearningCycleWatermarkService()
-                gate = watermark_service.evaluate()
-                if not gate.get("should_run"):
-                    logger.info("[autonomous_learning] scheduled run skipped: no new source facts")
-                    if _stop_event.wait(max(60.0, interval_sec)):
-                        return
-                    continue
-                result = run_autonomous_learning_cycle(
+                result = run_watermark_gated_autonomous_learning_cycle(
                     sample_limit=sample_limit,
                     recommendation_limit=recommendation_limit,
                     submit_offline_deep=submit_offline_deep,
@@ -4905,8 +5144,10 @@ def schedule_autonomous_learning(
                         else True
                     ),
                 )
-                watermark_service.mark_completed(gate["current"])
-                logger.info("[autonomous_learning] scheduled run completed: {}", _log_summary(result))
+                if result.get("status") == "skipped_no_new_facts":
+                    logger.info("[autonomous_learning] scheduled run skipped: no new source facts")
+                else:
+                    logger.info("[autonomous_learning] scheduled run completed: {}", _log_summary(result))
             except Exception as exc:
                 logger.warning("[autonomous_learning] scheduled run failed: {}", exc)
             if _stop_event.wait(max(60.0, interval_sec)):

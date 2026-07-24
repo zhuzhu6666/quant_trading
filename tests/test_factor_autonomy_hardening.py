@@ -484,8 +484,71 @@ def test_learning_worker_registers_factor_governance_job(monkeypatch):
         "2 * * * *",
         "coordinated_evolution_hourly",
     ) in registered
+    assert any(
+        name == "feature_eng" and cron == "5 3 * * *"
+        for name, cron, _fn in registered
+    )
+    assert any(
+        name == "supervisor_learning" and cron == "9,39 * * * *"
+        for name, cron, _fn in registered
+    )
+    assert any(
+        name == "autonomous_learning" and cron == "12,42 * * * *"
+        for name, cron, _fn in registered
+    )
     assert worker.__file__
     assert "backend.services.live_service" not in Path(worker.__file__).read_text(encoding="utf-8")
+
+
+def test_learning_worker_nursery_does_not_repeat_full_learning_cycle(
+    monkeypatch,
+):
+    import scripts.learning_worker as worker
+
+    jobs = {}
+    captured = []
+
+    class _FakeScheduler:
+        def add_job(self, name, _cron_expr, fn):
+            jobs[name] = fn
+            return True
+
+        def start(self):
+            return None
+
+    class _Nursery:
+        def run_once(self, **kwargs):
+            captured.append(kwargs)
+            return {
+                "status": "completed",
+                "initial_cycle": {},
+                "repaired_cycle": {},
+                "final_cycle": {},
+                "actions": [],
+            }
+
+    monkeypatch.setattr(
+        "backend.runtime.scheduler.InProcessScheduler",
+        lambda: _FakeScheduler(),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_coordinated_mutation_job",
+        lambda _name, fn: fn,
+    )
+    monkeypatch.setattr(
+        "backend.services.evolution_work_coordinator.coordinated_job",
+        lambda _name, fn: fn,
+    )
+    monkeypatch.setattr(
+        "backend.services.autonomous_evolution_runner.AutonomousEvolutionNurseryRunner",
+        _Nursery,
+    )
+
+    worker._register_heavy_jobs(include_system_health=False)
+    jobs["autonomous_evolution_nursery"]()
+
+    assert captured[0]["full_learning_cycle"] is False
 
 
 def test_factor_catalog_snapshot_round_trips_full_catalog_json(tmp_path):

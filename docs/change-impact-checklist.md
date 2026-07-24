@@ -85,6 +85,9 @@
 | 跨进程刷新 | 是否由 YAML base + 完整 overlay 重建；空 overlay/删除 key 是否能传播 |
 | `factor_catalog_snapshot` | 每轮治理是否留痕 |
 | 生命周期单写者 | Evolution 是否只产候选；实际 promote/rollback/retire 是否只由 FactorGovernance 执行 |
+| Demo 因子治理档位 | 是否同时确认 autonomy mode 与实际 Demo broker；小样本是否只降权/Shadow；硬隔离是否要求 fresh 成熟证据连续三轮；非 Demo 是否保持 strict |
+| typed builtin 重新准入 | QUARANTINED 是否保持单代终态；恢复是否创建 generation+1 SHADOW、保留 terminal mutation、每周期最多一个且重新要求 loaded ack/health |
+| weak-signal 分母 | 是否使用全部 matured governance-eligible 独立 position；failure tag 是否只解释不筛分母；v2 是否验证双侧样本、Wilson 下界和保留段改善；Demo cap 是否为 0.55；降低现有 gate 时 V16 delegation 与 Coordinator intent 的 evidence fingerprint 是否一致并 finalized |
 | Canary 证据 | evidence/dataset hash 是否变化；stage 是否累计足够 fresh bars，是否拒绝重复窗口 |
 | 效果证据质量 | 是否优先精确 regime 并过滤污染；精确基线不足时是否只有前后都达到完整 observation window 才允许 `unstratified_bounded`；其余是否保持 observing/inconclusive；并发 application 是否关闭旧窗口而不伪归因 |
 | 效果闭环 SLO | bounded window 是否归档终态；inconclusive 重试是否要求终态后的新证据且无更新 application |
@@ -96,12 +99,17 @@
 | latch projection recovery | local latch 生效而 configured incident 仍为 normal 时，API 是否报告 effective no_new_risk；incident cause 是否先补交 no_new_risk committed projection、再以 step-up + V16 thaw；thaw 是否只释放 incident cause，且 broker unknown、heartbeat、emergency-resume、forced-shadow 等残余 cause 继续 fail-closed |
 | watchdog autonomous recovery | watchdog 是否只有在 safety/account/positions freshness 与 unknown execution 连续三轮均 authoritative/current 后才释放精确 `safety_freshness/safety_watchdog` cause；`supervisor_tighten position_missing_after_amend` 是否还要求 fresh reconcile 确认目标 position ID 已消失，旧记录缺 ID 时是否仅允许空仓释放；中途一次 unsafe/idle/startup_unknown 是否重置计数；是否绝不释放 incident、emergency、broker unknown、governance 或其他 supervisor cause |
 | overlay authority recovery | commit 后 projection publish 前的 pending/degraded 是否锁存精确 governance cause 且不缓存失败 hash；后续 committed/current + config/domain hash 重验成功是否释放 RuntimeConfig-owned `runtime_config_overlay_refresh` 与 `legacy_restore:runtime_config_overlay`；是否读取逐 cause release 的 `remaining_causes`；其他 latch cause 与 release persistence failure 是否继续 fail-closed |
+| RuntimeConfig 只读解析 | mode/readiness/diagnostic 是否只读 caller-owned 或进程内已加载 snapshot；是否只有权威 reconciler 可以刷新 overlay 或激活/释放 `runtime_config_overlay_refresh` latch；未初始化 snapshot 是否 fail-closed |
 | Safety shadow evidence | 是否只在 full cycle 追加 fsync observation；记录是否不含账户凭据/金额等无关敏感事实；遥测失败是否不改写 broker action；24 小时/完整 lifecycle gate 是否验证 continuity、fresh reconcile、unknown=0、independent exact match、duplicate/conflict/forced-shadow 为零；CLI 与 `loop-status.safety_shadow_gate` 是否复用同一 fail-closed evaluator，ledger 缺失/损坏时是否绝不报告通过 |
 | unknown outcome resolution | broker unknown 是否按 intent/action/position 独立锁存；只有 fresh recovery/reconcile 得到 confirmed/rejected 且附 evidence 才能追加 resolution；通用 clear、incident thaw、进程重启或 PG failure 是否都不能删除 unresolved 证据 |
 | thaw/unlock/unfreeze | before/target 是否被判为扩张并要求最近 step-up + Coordinator + V16；caller `risk_reduction`、action 命名和 startup/restore 字样是否都不能绕过；收紧是否不依赖 PG session authority；mutation 未 committed 时原 freeze/latch 是否保持 |
 | operator expansion pause | `governance_expansion_paused` 是否对所有 mode 生效、自治服务不可修改；pause 是否免 V16、resume 是否要求 step-up + confirm + V16，且 rollback/retire/quarantine/downweight/tighten 仍可执行 |
 | worker 能力隔离 | DB/schema/YAML/overlay/recovery 启动失败是否非零退出；三次 mutation 依赖失败是否只打开 mutation circuit 而 observation/research 继续 |
-| readiness 自主刷新 | backend readiness persistent snapshot 是否由受管理 scheduler 每两分钟触发；是否复用 single-flight owner、90 秒 max-age 与 lifecycle drain/join；无人访问 API 时是否仍保持 180 秒 freshness，失败时是否保留旧值但 readiness/release preflight fail-closed |
+| readiness 自主刷新 | backend readiness persistent snapshot 是否由受管理 scheduler 每两分钟触发；是否复用 single-flight owner、30 秒 max-age 与 lifecycle drain/join；完整构建 p99 加调度间隔是否仍低于 180 秒 freshness，失败时是否保留旧值但 readiness/release preflight fail-closed |
+| 因子健康治理 handoff | factor health 是否先提交再携带唯一 cycle fingerprint 立即调用 governance；同一证据是否不重复增加 streak；健康失败/过期是否禁止 re-enroll/activation |
+| 因子选择 heartbeat | live pipeline 是否每 5 分钟发布 boot/generation/config/selection fingerprint；过期 fallback 是否明确 degraded 且不冒充 live 事实 |
+| 学习调度相位 | Nursery 是否保持 `full_learning_cycle=false`；Supervisor/Autonomous/Feature/Evolution 是否使用固定 UTC 错峰并统一 coordinator；重启 backfill 是否受独立 watermark 约束 |
+| 高周期 bar 边界 | D1 是否按 broker session/age budget 而非 UTC 午夜判断；同一未推进 timestamp 是否退避；M5 决策闭合门是否保持严格 |
 | worker 配置一致性 | readiness 是否校验 75 秒 heartbeat、boot/config/overlay hash，分歧时 autonomous mutation 是否 fail-closed |
 | live policy authority | live 风险策略、持仓监督与 Evolution 权重 bias 是否都拒绝 approved/auto-approved；supervisor 候选 shadow 是否只在 learning worker closed-position observation 路径生成并绑定 suggestion ID，旧 live `canary_shadow` 是否不能授权 readiness/auto-unfreeze；enforce 是否只接受 applied + committed mutation；legacy applied 是否仅在 off/dual 标记 quarantined 且只允许显式 tightening 子集 |
 | 单一权重用例 | AWE、Factor Governance、Evolution/manual govern 是否都调用 `FactorWeightChangeService`，没有 DecisionPolicy/mutation 之间的旁路 |
