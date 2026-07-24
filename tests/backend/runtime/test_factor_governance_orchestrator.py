@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import backend.runtime.factor_governance_orchestrator as governance_module
@@ -16,6 +17,11 @@ class _AllowRisk:
             audit_payload={"action": action},
             to_dict=lambda: {"allowed": True, "reason": "ok", "action": action},
         )
+
+
+def _strict_profile(orch):
+    profile = orch._governance_profile(rc.shared())
+    return replace(profile, name="strict_live", balanced_demo=False)
 
 
 def test_orchestrator_prepares_eligible_shadow_through_lifecycle_service(monkeypatch, tmp_path):
@@ -205,12 +211,12 @@ def test_run_cycle_executes_tightening_before_expansion_freeze(monkeypatch):
     monkeypatch.setattr(
         orch,
         "_downweight_weak_alpha",
-        lambda *_args: [{"action": "downweight", "status": "applied"}],
+        lambda *_args, **_kwargs: [{"action": "downweight", "status": "applied"}],
     )
     monkeypatch.setattr(
         orch,
         "_disable_weak_live_alpha",
-        lambda *_args: [{"action": "quarantine", "status": "applied"}],
+        lambda *_args, **_kwargs: [{"action": "quarantine", "status": "applied"}],
     )
     monkeypatch.setattr(
         orch,
@@ -493,6 +499,7 @@ def test_discovered_disable_uses_lifecycle_coordinator_in_enforce(
             "health_status": "DECAYING",
         }],
         {"run_id": "disable-run"},
+        profile=_strict_profile(orch),
     )
 
     assert len(quarantined) == 1
@@ -537,6 +544,7 @@ def test_failed_disable_is_never_audited_as_applied(monkeypatch, tmp_path):
             "health_status": "DECAYING",
         }],
         {"run_id": "blocked-disable"},
+        profile=_strict_profile(orch),
     )
 
     assert actions[0]["status"] == "blocked_by_evidence"

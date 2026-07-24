@@ -7,6 +7,7 @@ from backend.services.proposal_registry import ProposalRegistryService, ensure_p
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.brain_governance_candidates import ensure_brain_governance_candidate_table
 from backend.services.brain_action_planner import ensure_brain_action_plan_table
+from backend.services.autonomous_learning import ensure_autonomous_learning_tables
 from backend.core.db import connect_sqlite
 
 
@@ -288,6 +289,7 @@ def test_proposal_registry_status_reports_duplicate_and_conflict_groups(tmp_path
 def test_proposal_registry_repairs_required_generation_context_with_current_notice(tmp_path):
     db_path = tmp_path / "state.db"
     ensure_proposal_registry_table(db_path)
+    ensure_autonomous_learning_tables(db_path)
     conn = connect_sqlite(db_path)
     try:
         conn.execute(
@@ -514,6 +516,7 @@ def test_proposal_generation_context_coverage_separates_required_and_legacy(tmp_
 def test_proposal_registry_reliability_gate_requires_evidence_for_negative_agent_history(tmp_path):
     db_path = tmp_path / "state.db"
     ensure_proposal_registry_table(db_path)
+    ensure_autonomous_learning_tables(db_path)
     now = time.time()
     conn = connect_sqlite(db_path)
     try:

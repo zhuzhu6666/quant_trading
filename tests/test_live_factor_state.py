@@ -73,6 +73,8 @@ def test_commit_ready_factor_decision_updates_state_and_snapshot_contract():
         "direction": 1,
         "role": "alpha",
         "used_in_score": True,
+        "available": True,
+        "abstained": False,
     }
     assert votes["volatility"]["direction"] == 0
     assert summary["ts"] == 999.0
