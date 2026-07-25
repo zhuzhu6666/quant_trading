@@ -1,75 +1,133 @@
-# Documentation Index
+# 项目总览与当前状态
 
-> Status: active
-> Last verified: 2026-07-24
-> Scope: maintained documentation entry points and documentation governance.
+> Status: canonical
+> Last verified: 2026-07-26
+> Scope: 新对话、实施、排障和发布的唯一文档入口。
 
-当前文档集只保留正在维护的主入口。后续如无特殊需要，不再为同一主题新增平行蓝图文档，避免路线分叉。
+读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读后面的对应合同。
 
-## 文档治理入口
+## 1. 当前结论
 
-- [documentation-governance.md](documentation-governance.md) - 文档状态、权威入口、更新规则和新增文档准入
-- [system-source-of-truth.md](system-source-of-truth.md) - 配置、因子、风控、学习、数据、API 的事实源索引
-- [legacy-debt-register.md](legacy-debt-register.md) - 历史残留、废弃路径、迁移状态和防复活记录
-- [change-impact-checklist.md](change-impact-checklist.md) - 每次改代码前后的影响面检查清单
+- 当前分支：`main`；本文核对时 HEAD 为 `471ea6d`，工作区有未提交的文档收敛改动。
+- P0 已完成。
+- P1 代码和历史污染修复已完成；仍等待新的真实 broker deal 与完整持仓生命周期运行验收。
+- P2 代码和合同已完成，schema 已到 v12；当前处于运行观察期，不进入 P3。
+- P3 未开始。P2 运行验收未通过前禁止推进。
+- 当前保持 `no_new_risk`。不得因服务在线、市场重新开盘或文档完成而清锁。
+- Safety、Generation、Execution Outcome、Governance、PG Job Queue 的静态发布开关不得随普通修复切换。
+- 最近已知全量基线：`2452 passed, 9 skipped`。日常小批默认只跑针对性测试；阶段/发布验收才跑全量。
 
-## 主文档
+2026-07-26 运行只读核对：
 
-- [../README.md](../README.md) - 项目总览与快速入口
-- [../AGENTS.md](../AGENTS.md) - 当前工作区规则与防误操作提醒
-- [system-operation-map.md](system-operation-map.md) - 当前真实运行架构、启动顺序、live tick 链路、worker 自治治理、状态库和 API 入口
-- [autonomous-governance-architecture.md](autonomous-governance-architecture.md) - 自治治理架构、分层模块、权力边界、控制面和复杂度收敛路线
-- [rule-driven-intelligence-inventory.md](rule-driven-intelligence-inventory.md) - 规则驱动智能、影子模型、链路审计数据和精度语义总账
-- [architecture.md](architecture.md) - 当前系统状态、目标完全体、分层定义、完整开发路线
-- [factor-card-schema.md](factor-card-schema.md) - 因子解释卡片与治理展示 schema
-- [../TODO.md](../TODO.md) - 当前工作面板，只保留当前主线、下一步和活跃缺口
-- [development-workflow.md](development-workflow.md) - 本地前端 / 服务器后端的协作规则
-- [server-backend-sop.md](server-backend-sop.md) - 服务器后端日常操作 SOP
-- [startup.md](startup.md) - 后端、小程序和常用脚本启动方式
-- [state-postgres-store.md](state-postgres-store.md) - PostgreSQL `state_v1` 运行态状态库和旧 SQLite 边界
-- [web-frontend-upgrade-plan.md](web-frontend-upgrade-plan.md) - 当前 Web 操作台职责、路由和后续扩展边界
-- [CTRADER_INTEGRATION.md](CTRADER_INTEGRATION.md) - cTrader 执行通道说明
-- [position-supervisor-contract.md](position-supervisor-contract.md) - 持仓监督、trace、反事实成熟化与模板治理 contract
-- [learning-evidence-contract.md](learning-evidence-contract.md) - 学习样本证据契约、训练准入与模型追溯语义
-- [parameter-template-contract.md](parameter-template-contract.md) - 参数模板治理 contract
-- [parameter-tuning-boundary.md](parameter-tuning-boundary.md) - 在线轻调 / 离线深调边界
-- [../miniprogram_v2/README.md](../miniprogram_v2/README.md) - 当前微信小程序前端
+- `quant-backend.service`、`quant-learning-worker.service`、`caddy.service` active；
+- `quant-job-worker.service` inactive，与 PG Job Queue 静态开关默认关闭一致；
+- `/api/health` 为 `db=connected`、`ctrader=connected`；
+- PostgreSQL `state_v1` migration `current=minimum=latest=12`，无 mismatch；
+- `risk_metrics_snapshot.v2` 与 `backend_readiness_snapshot.v1` 正常刷新；
+- readiness：frontend 可读；live execution、live alpha、autonomous mutation、release 均未授权；
+- live loop 运行但不接受新风险，blocker 为 `market_session_blocks_open` 与 `no_new_risk_latched`；
+- broker reconcile fresh、unknown execution 为 0、当前空仓；
+- risk snapshot 为 closed-bar M5 500 样本，包含 current/candidate/forward notional 合同；空仓时 VaR/CVaR 为 0 是计算结果，不是缺失值兜底；
+- Safety shadow 仍只处于 observing，尚未满足完整持仓生命周期或 24 小时无仓观察门槛。
 
-## 辅助规划文档
+这些是带时间的运行快照，不是永久事实。每次实施或回答“现在能否交易/发布”前必须重新查询。
 
-- [planning/self-evolving-upgrade-plan.md](planning/self-evolving-upgrade-plan.md) - 历史升级计划索引；主路线现已并入 `architecture.md`
-- [planning/multi-symbol-pipeline.md](planning/multi-symbol-pipeline.md) - 多品种扩展专项规划
-- [planning/v15-autonomous-runtime-platform.md](planning/v15-autonomous-runtime-platform.md) - V15 自治运行内核大版本设计入口
-- [planning/v16-autonomous-intelligence-brain.md](planning/v16-autonomous-intelligence-brain.md) - V16 自治交易大脑、世界模型、记忆、假设、模拟和自我批判设计
-- [planning/production-autonomy-repair-optimization-plan.md](planning/production-autonomy-repair-optimization-plan.md) - 2026-07-24 全链路审查后的成交事实、风险、记忆、V16 调度、复杂度收敛与生产自治毕业修复总方案；20项 operator 决策已记录，P0-P1 正在分批实施
+## 2. 当前生产结构
 
-## 文档使用规则
+```text
+cTrader spot/account/positions/execution
+  -> serial live loop
+     -> closed-bar factors and signal
+     -> canonical RiskPolicy / RiskGovernor
+     -> broker execution intent and reconcile
+     -> position protection / emergency reduction
+  -> PostgreSQL state_v1
+     -> canonical runtime snapshots
+     -> read-only readiness and fact.v1 APIs
+     -> Web full console / mini-program status surface
 
-- 文档治理规则、状态字段、新增文档准入：写入 `docs/documentation-governance.md`
-- 系统事实源、冲突处理优先级：写入 `docs/system-source-of-truth.md`
-- 历史残留、废弃路径、旧理解迁移：写入 `docs/legacy-debt-register.md`
-- 代码改动影响面、验证顺序、文档收口：写入 `docs/change-impact-checklist.md`
-- 长期架构、完全体定义、系统角色边界：写入 `docs/architecture.md`
-- 近期开发动作和当前主线：写入 `TODO.md`
-- 技术债、旧理解、废弃路径：写入 `docs/legacy-debt-register.md`
-- 因子数据事实来源、PIT 外部数据、discovery 默认门禁：优先写入 `docs/system-source-of-truth.md` / `docs/architecture.md`
-- 持仓监督、学习证据、参数模板这类稳定接口：写入对应 contract 文档
-- 模型清单、训练准入、open outcome 和数据质量健康：优先写入 `learning-evidence-contract.md`
-- 规则智能数量、执行链路、每步审计数据和精度口径：写入 `docs/rule-driven-intelligence-inventory.md`
-- 多智能体/模型/大脑如何协作、每层模块位置、控制面和权力边界：写入 `docs/autonomous-governance-architecture.md`
-- 涉及三端开发、发布、同步规则：写入 `docs/development-workflow.md`
-- 不再把同主题内容拆成多份并行主文档
+learning worker
+  -> observation, learning, factor and governance evidence
+  -> typed governance mutation path
+  -> committed runtime projection
+```
 
-## 当前推荐阅读顺序
+唯一权力边界：
 
-1. [../README.md](../README.md)
-2. [system-operation-map.md](system-operation-map.md)
-3. [autonomous-governance-architecture.md](autonomous-governance-architecture.md)
-4. [rule-driven-intelligence-inventory.md](rule-driven-intelligence-inventory.md)
-5. [documentation-governance.md](documentation-governance.md)
-6. [system-source-of-truth.md](system-source-of-truth.md)
-7. [architecture.md](architecture.md)
-8. [change-impact-checklist.md](change-impact-checklist.md)
-9. [legacy-debt-register.md](legacy-debt-register.md)
-10. [development-workflow.md](development-workflow.md)
-11. [server-backend-sop.md](server-backend-sop.md)
+| 领域 | 唯一事实或执行权 |
+|---|---|
+| broker 账户、仓位、成交 | cTrader 权威响应 + fresh reconcile |
+| 运行态、恢复、学习审计 | PostgreSQL `state_v1` |
+| 开仓/改仓/治理风险裁决 | `RiskPolicyService` / canonical risk calculator |
+| Safety | serial safety plane；旧链只在发布观察期做只读比较 |
+| RuntimeConfig 变更 | typed governance mutation + committed projection |
+| readiness/API/frontend | 只读 canonical snapshot，不重新计算授权事实 |
+| K 线 | `data/bars_monthly/bars_YYYY_MM.duckdb` |
+| 外部 PIT 数据 | `data/external_data.duckdb` |
+| 经济事件 | `data/events.duckdb` |
+
+历史 tick、L2、SQLite `data/state.db`、旧 Web Console/H5、MT5 并行执行路线均已退役，不得恢复。
+
+## 3. 当前主线
+
+当前只做 P1/P2 运行验收与兼容删除：
+
+1. 等待并核对新的真实 broker deal、开仓、保护、平仓、同步、复盘与学习生命周期；
+2. 完成 Safety shadow 的完整生命周期或 24 小时无仓观察与故障矩阵；
+3. 对每条仍在迁移的兼容路径收集退出证据，同批删除旧 authority、旧重算、旧字段回退或无意义 wrapper；
+4. P2 全部门槛满足后，才可提出进入 P3。
+
+实施细节见 [planning/production-autonomy-repair-optimization-plan.md](planning/production-autonomy-repair-optimization-plan.md)，实际进度见 [phased-repair-rollout-status.md](phased-repair-rollout-status.md)，门槛见 [phased-repair-acceptance-matrix.md](phased-repair-acceptance-matrix.md)。
+
+## 4. 最小工作流
+
+```text
+读本页
+  -> 查 system-source-of-truth
+  -> 查 active legacy debt
+  -> 按 change-impact-checklist 确认调用链和影响面
+  -> 最小修改，并同步删除被替代路径
+  -> 针对性测试 + migration check + OpenAPI check
+  -> 必要时受控重启
+  -> 服务 / PostgreSQL / runtime_kv / 日志只读验收
+  -> 更新本页状态、rollout status、acceptance matrix
+```
+
+硬规则：
+
+- 一个事实一个计算者，一个状态一个写入者；
+- 不新增 `RiskMetricsService`、线程、调度器、数据库表或阈值，除非现有合同无法表达且证据充分；
+- unknown/warming_up/stale/error 保持真实语义，禁止默认零、兼容值或猜测值；
+- readiness、API、Web、小程序不得复制 Safety、风险和授权计算；
+- 新路径若未删除被替代路径，阶段不得标为完成；
+- 不提交、不推送、不切换生产开关、不清锁，除非用户明确要求。
+
+## 5. 文档地图
+
+### 每次系统级修改必读
+
+1. 本页；
+2. [system-source-of-truth.md](system-source-of-truth.md)；
+3. [legacy-debt-register.md](legacy-debt-register.md)；
+4. [change-impact-checklist.md](change-impact-checklist.md)。
+
+### 当前工程收口
+
+- [planning/production-autonomy-repair-optimization-plan.md](planning/production-autonomy-repair-optimization-plan.md)：唯一活动实施计划；
+- [phased-repair-rollout-status.md](phased-repair-rollout-status.md)：已完成、观察中、阻塞项；
+- [phased-repair-acceptance-matrix.md](phased-repair-acceptance-matrix.md)：阶段门和发布证据。
+
+### 领域合同，按需读取
+
+- [api-fact-contract.md](api-fact-contract.md)：`fact.v1`、freshness、unknown 和前端展示语义；
+- [learning-evidence-contract.md](learning-evidence-contract.md)：学习样本、污染、资格和权重；
+- [position-supervisor-contract.md](position-supervisor-contract.md)：持仓监督器输入、候选和执行边界；
+- [factor-card-schema.md](factor-card-schema.md)：因子卡片/目录展示合同；
+- [parameter-template-contract.md](parameter-template-contract.md)：参数模板及 online/offline 变更边界；
+- [server-backend-sop.md](server-backend-sop.md)：启动、日志、数据库、cTrader、重启和运行验收。
+
+### 文档维护
+
+- [documentation-governance.md](documentation-governance.md)：文档职责、更新和删除规则。
+
+未列出的历史设计、版本计划和完成流水已删除；需要追溯时使用 Git 历史，不恢复为活动文档。

@@ -3,7 +3,7 @@
 在每个已有因子值 + OHLCV 原始数据上施加数学变换，
 自动膨胀候选特征池到 200+。
 
-设计文档: docs/architecture.md
+设计事实源: docs/system-source-of-truth.md
 """
 from __future__ import annotations
 

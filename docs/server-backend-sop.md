@@ -1,8 +1,8 @@
 # Server Backend SOP
 
 > Status: active
-> Last verified: 2026-07-06
-> Scope: Linux server backend daily operations.
+> Last verified: 2026-07-26
+> Scope: Linux unified workspace startup, logs, PostgreSQL, cTrader, frontend build, restart, and runtime acceptance.
 
 这份文档只服务一个目标：
 把服务器上的后端日常操作标准化，减少临场判断和误操作。
@@ -17,11 +17,7 @@
 - `.env` / systemd / 日志 / 数据库问题
 - 服务器热修
 
-这份 SOP 不适用于：
-
-- 小程序页面开发
-- 本地 UI 调整
-- 微信开发者工具操作
+Web 和小程序源码也可在 Linux 统一工作区修改；微信开发者工具与 Windows 浏览器只承担平台专属补充验证。
 
 ## 2. 基础信息
 
@@ -448,3 +444,48 @@ codex login status
 ```text
 先看日志，再看接口，再改代码，最后重启验证。
 ```
+
+## 15. 启动、依赖与数据速查
+
+后端和测试只使用仓库虚拟环境：
+
+```bash
+cd /home/ubuntu/quant_trading
+./.venv/bin/python -m backend
+./.venv/bin/pytest <targeted-nodeids>
+```
+
+`ctrader-open-api==0.9.2` 当前绑定 `protobuf==3.20.1`。升级任一依赖前必须验证 connect/auth、protobuf parse、open/close/reduce 和 SL/TP amend。
+
+PostgreSQL state：
+
+```bash
+./.venv/bin/python scripts/state_schema_migrate.py --check
+./.venv/bin/python scripts/state_query.py --sql "SELECT key, updated_at FROM runtime_kv ORDER BY updated_at DESC LIMIT 20"
+```
+
+schema 写入只能由显式 migration 执行：
+
+```bash
+./.venv/bin/python scripts/state_schema_migrate.py --apply
+```
+
+cTrader 常用入口：
+
+```bash
+./.venv/bin/python scripts/validate_ctrader_token.py
+./.venv/bin/python scripts/backfill_ctrader_deals.py
+```
+
+执行价格保持 broker 原值；commission/gross/swap/balance 等 money 字段才按各自 moneyDigits 转换。unknown broker outcome 禁止猜测成功或重发。
+
+Web：
+
+```bash
+cd web_frontend
+npm test
+npm run typecheck
+npm run build
+```
+
+小程序由 `miniprogram_v2/` 维护，平台行为最终用微信开发者工具验证。任何客户端都只消费 `fact.v1`/canonical snapshot，不重算风控或 readiness。

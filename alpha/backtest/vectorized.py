@@ -5,7 +5,7 @@
 
 输出完整的 equity_curve + 交易明细 + 统计指标。
 
-设计文档: docs/architecture.md
+设计事实源: docs/system-source-of-truth.md
 """
 from __future__ import annotations
 

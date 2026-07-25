@@ -51,10 +51,28 @@ Windows 仅在需要平台工具时用于补充验证：
 
 ```text
 统一工作区确认事实源和影响面
+  -> 确认唯一生产 authority 和待删除旧路径
   -> 直接修改前端或后端
   -> 运行对应的最小测试/构建
+  -> 删除被替代实现、兼容字段和实现耦合测试
   -> 按领域做服务、浏览器或平台工具验证
 ```
+
+### 3.0.1 强制架构收敛规则
+
+所有修复和功能批次都必须遵守：
+
+1. 一个事实只能有一个生产计算者和一个写入者；API、readiness、replay 和前端只能复用或只读投影。
+2. 新实现必须声明替代对象和删除清单；不能回答“删除什么”的新 service、wrapper、adapter、表、线程、调度器、阈值或兼容字段默认不准新增。
+3. 涉及开仓和风险事实时，Safety、Readiness、Risk sizing 三层权力不得互相重算：
+   - Safety 只负责必须立即禁止新增风险的硬事实；
+   - Readiness 只读判断当前事实是否足够；
+   - Risk sizing 只负责风险计算和最终仓位。
+4. 同一 blocker 只能在一个 owner 中计算一次，其他位置复用稳定 reason code，不再叠加同义门控。
+5. canonical 路径验证通过但旧路径未删除，批次仍视为未完成；不得以“兼容”为由无限期双轨。
+6. 新抽象只有在立即删除重复实现、隔离真实变化源或服务多个真实调用方时才允许；单调用方转发层和假想扩展点直接内联。
+7. 每批先跑针对性测试；全量测试只在阶段收口、发布门或改动影响面无法可靠界定时运行。
+8. 不以拆文件、增加 schema 或新增状态投影代替架构收敛；验收以生产 authority 数量、调用链和净删除结果为准。
 
 ## 3.1 当前分支/工作区约定
 
@@ -136,14 +154,18 @@ Windows 仅在需要平台工具时用于补充验证：
 1. 先看 [docs/system-source-of-truth.md](docs/system-source-of-truth.md)，确认当前事实源和权力边界。
 2. 再看 [docs/legacy-debt-register.md](docs/legacy-debt-register.md)，确认有没有历史残留或废弃口径。
 3. 再按 [docs/change-impact-checklist.md](docs/change-impact-checklist.md) 扫 live、shadow、learning、readiness、frontend contract 和回滚影响。
-4. 改动完成后，如果事实源、链路、契约或旧债状态变化，同步更新对应文档。
+4. 在修改前写清本批 canonical authority、被替代路径、删除清单和不新增项。
+5. 改动完成后先删除旧路径，再同步事实源、旧债、验收矩阵和当前状态。
 
 历史 planning 文档和旧代码注释只能作为背景，不能单独作为实现依据。
 
-## 6. 详细规则
+## 6. 新对话与文档入口
 
-完整说明见：
+用户要求“读一遍文档”或“确认当前项目状态”时，不再逐份读取历史设计：
 
-- [docs/documentation-governance.md](docs/documentation-governance.md)
-- [docs/development-workflow.md](docs/development-workflow.md)
-- [docs/server-backend-sop.md](docs/server-backend-sop.md)
+1. 读 [docs/README.md](docs/README.md)，获取阶段、运行姿态、当前主线和文档路由。
+2. 系统级修改再依次读事实源、活跃旧债和影响面清单。
+3. 只按任务读取对应领域合同或 [docs/server-backend-sop.md](docs/server-backend-sop.md)。
+4. 用代码、服务、PostgreSQL `state_v1`、`runtime_kv`、日志和测试刷新易变事实。
+
+完整文档治理规则见 [docs/documentation-governance.md](docs/documentation-governance.md)。

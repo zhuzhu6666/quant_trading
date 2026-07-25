@@ -3,7 +3,7 @@
 取代 FactorEngine 的 batch 模式，改为每根 bar 增量计算。
 所有因子计算失败时独立处理，不互相影响。
 
-设计文档: docs/architecture.md
+设计事实源: docs/system-source-of-truth.md
 """
 
 import logging

@@ -8,7 +8,7 @@
 
 输出: selected_features: list[str]
 
-设计文档: docs/architecture.md
+设计事实源: docs/system-source-of-truth.md
 """
 from __future__ import annotations
 

@@ -1,167 +1,173 @@
 # 分期修复故障与验收矩阵
 
-> Superseded evidence notice: 本文保留 2026-07-19 的测试证据，但不代表
-> 2026-07-24 当前验收状态。新修复窗口为 `AUTONOMY-REPAIR-20260724-01`。
->
-> Status: active release evidence
+> Status: active acceptance index
 > Snapshot: 2026-07-26
-> Scope: Phase 0-5 fault injection, governance, frontend, and remaining live gates
+> Scope: reproducible acceptance evidence and unresolved live evidence
 
-本文只记录可重复执行的证据映射。单元/集成测试证明故障语义；真实
-broker freshness、shadow continuity 和完整持仓生命周期必须由生产 observation
-ledger 证明，二者不能互相替代。
+本文只记录“如何证明”。架构事实见 `system-source-of-truth.md`，实施阶段见
+`planning/production-autonomy-repair-optimization-plan.md`，当前状态见
+`phased-repair-rollout-status.md`。
 
-## 1. 执行与 Safety 故障矩阵
+## 1. 通用批次验收
 
-| 计划场景 | 权威测试证据 | 必须保持的结果 |
-| --- | --- | --- |
-| closed bars 缺失、factor 异常、circuit open | `test_phase2_runs_broker_snapshot_and_safety_before_missing_bars`、`test_phase2_circuit_blocks_alpha_only_after_safety`、`test_merge_portfolio_configs_fails_closed_when_factor_admission_raises` | alpha 阻断，safety 先执行 |
-| PostgreSQL 启动/运行失败 | `test_close_context_postgres_failure_records_outbox_and_continues`、`test_close_v2_pg_intent_failure_does_not_block_risk_reduction`、`test_latch_and_outbox_persistence_failure_still_allows_emergency_close` | 新风险 fail-closed，close/reduce/emergency 继续 |
-| account/positions reconcile 失败 | `test_account_reconcile_failure_blocks_alpha_but_safety_still_runs_first`、`test_reconcile_failure_blocks_new_risk_without_suppressing_future_safety`、`test_final_open_admission_blocks_stale_or_newer_failed_reconcile` | 不把失败编码为空仓或新鲜账户 |
-| spot stale | `test_final_open_admission_fails_closed_for_each_authority[postgres2-session2-quote2-spot_quote_stale]` | 最终 open admission 拒绝 |
-| order timeout、延迟回执、未知 protobuf | `test_timeout_does_not_guess_existing_same_direction_position`、`test_loop_recovers_delayed_fill_and_runs_safety_before_alpha`、`test_v2_unknown_protobuf_with_position_shaped_fields_is_not_a_broker_receipt` | outcome=unknown，禁止重发和新增风险 |
-| amend accepted 但 broker 未更新 | `test_amend_v2_requires_fresh_sltp_projection_ack`、`test_tighten_accepted_rpc_requires_matching_fresh_broker_projection` | 不报告 confirmed |
-| emergency pre/post reconcile 失败 | `test_emergency_requires_fresh_pre_reconcile`、`test_emergency_post_reconcile_failure_never_reports_success` | 不报告 completed/no_positions |
-| stop 与 open RPC 并发、draining start | `test_stop_waits_for_admitted_open_rpc_then_keeps_generation_draining`、`test_draining_generation_keeps_thread_ownership_and_rejects_replacement` | 单 generation ownership |
-| runtime_kv 缺失、损坏、跨日 | `test_invalid_cache_never_zeros_last_known_risk_or_opens_new_risk` 三个参数实例 | session 不归零，不开放新风险 |
-| partial close 后 position 仍开放 | `test_partial_close_legs_aggregate_by_position_and_open_position_is_excluded`、`test_recovery_requires_fresh_expected_partial_close_volume` | completed trade 排除仍开放 position |
-| audit/outbox 写入失败 | `test_safety_outbox_failure_never_changes_risk_reduction_result`、`test_close_broker_success_survives_all_post_broker_audit_failures` | broker 风险缩减结果不被审计失败改写 |
-| safety heartbeat 超过 15 秒 | `test_stale_safety_heartbeat_degrades_generation_and_blocks_new_risk`、`test_watchdog_violation_durably_latches_no_new_risk` | 持久化 no_new_risk，保护继续 |
+每批必须同时给出：
 
-## 2. 治理与 Worker 矩阵
-
-| 计划场景 | 权威测试证据 |
-| --- | --- |
-| reserved/prepared/事务内故障 | `test_fault_before_commit_aborts_without_overlay_change` 的三个故障点 |
-| 双 worker 同 scope | `test_concurrent_scope_reservation_has_one_owner` |
-| commit 后 publish 前失败与恢复 | `test_publish_failure_is_degraded_and_replayable_without_recommit` |
-| V16 只 finalize 一次 | `test_v16_apply_count_increments_only_once_at_finalize` |
-| live 不消费 approved | `test_live_never_consumes_approved_and_dual_mode_quarantines_legacy` |
-| ACTIVE factor 完整证据 | `test_activation_requires_fresh_bound_projection_and_health`、`test_discovered_factor_without_explicit_weight_never_gets_implicit_default` |
-| contaminated/partial eligibility 为零 | `test_sample_upsert_persists_full_recovered_and_contaminated_eligibility`、`test_governor_rejects_missing_contract_and_uses_weighted_metrics` |
-| legacy backtest 不进入治理 | `test_legacy_evidence_is_zero_weight_even_if_flags_are_spoofed`、`test_legacy_parameter_candidate_cannot_be_approved_or_deployed` |
-| PG job claim/lease/concurrency/retry | `tests/integration/test_postgres_job_queue.py` 六项真实 PostgreSQL 隔离 schema 测试 |
-
-## 3. Frontend/Auth 矩阵
-
-- Web `_fact` unknown/stale/error、非绿色、stop/emergency escape hatch：
-  `web_frontend/src/tests/fact-behavior.test.mjs`、`fact-auth.test.mjs`。
-- canonical 风险只读消费：`web_frontend/src/api/riskSnapshot.ts` 只解析
-  `risk.summary.v2.snapshot.schema_version=risk_metrics_snapshot.v2` 和
-  `snapshot.components`；`OverviewPage`、`TradingPage`、`RiskPage`、
-  `V15CockpitPage` 分别绑定 `risk.inputs.v1` component fact，不从旧顶层
-  `var/kelly/stress/concentration` 或旧字段别名回退。known 零敞口和缺失字段行为由
-  `fact-behavior.test.mjs` 验证，旧字段不复活由 `architecture.test.mjs` 验证。
-- 并发 401 单次注销与 WS/cache 清理：`fact-auth.test.mjs`。
-- recovery 未注册为 unknown：
-  `test_readiness_warming_and_unregistered_recovery_are_explicitly_unknown`、
-  `test_ops_recovery_route_marks_unregistered_monitor_unknown`。
-- 小程序 all-failed 不推进 `lastSuccessAt`：
-  `tests/miniprogram_store_reducer.test.mjs`。
-- emergency 不增加二次密码阻碍：
-  `test_expired_access_can_emergency_when_pg_audit_is_unavailable`。
-
-## 4. 当前执行结果
-
-- 2026-07-19 14:12 CST，执行/Safety/治理/研究/worker 显式矩阵：
-  `269 passed`。
-- spot/factor/fact/auth 补充矩阵：`81 passed`。
-- PostgreSQL job queue 隔离 schema：`6 passed`，未以 SQLite 替代。
-- 本轮全量非 PostgreSQL 发布门：`2257 passed, 10 deselected`。
-- 本轮显式 opt-in 的真实 PostgreSQL integration：`10 passed`；使用独立临时
-  schema/事务清理，未以 SQLite 替代。
-- 空仓 composite account reconcile 与 overlay authority 瞬态恢复新增组合回归分别
-  纳入执行/Safety 与 governance 门禁；生产侧已观察到 latch 精确自动恢复。
-
-## 5. 不能由测试替代的剩余证据
-
-P1 broker price contract 的代码验收现固定覆盖：
-
-- protobuf buy/sell deal、raw/filled/closed volume、timestamp、`moneyDigits`
-  0/2/4、money 字段和 raw price；
-- 同持仓 entry/deal 数量级不一致必须 quarantine；
-- protobuf deal 经 SQLite contract、deal sync 到 restart replay 的价格/金额保持精确；
-- unknown close price 只保留金额恢复，不写正常价格 ledger，不进入 attribution、
-  review、experience 和 suggestion；
-- Execution Outcome price-integrity 与既有执行故障合并为 9 类/20 个固定用例，
-  每个 nodeid 必须显式 `PASSED`。
-
-测试仍不能替代新的真实 broker deal、进程重启后的 replay，以及完整
-`open -> protection -> close -> deal sync -> review -> sample` 生命周期。三项证据
-未取得前，P1 保持 active，`no_new_risk` 和后续发布顺序不变。
-
-## 2026-07-24 / 2026-07-26 P2 canonical risk snapshot 与 D16-A
-
-| 合同 | 固定验证 |
+| 维度 | 证据 |
 |---|---|
-| clean review 与 position notional 输入 | `tests/test_live_risk_metrics_snapshot.py::test_risk_inputs_use_clean_reviews_and_position_notional` |
-| broker facts stale 不续鲜 | `tests/test_live_risk_metrics_snapshot.py::test_stale_broker_facts_replace_previous_known_snapshot` |
-| VaR/CVaR warm-up 不伪装零风险 | `tests/risk/test_backend_risk_metrics.py::test_var_warmup_is_not_reported_as_zero_risk` |
-| closed-bar returns + final candidate notional | `tests/risk/test_backend_risk_metrics.py::test_forward_var_uses_closed_bar_returns_and_candidate_notional` |
-| 当前与候选 signed notional 合并 | `tests/risk/test_backend_risk_metrics.py::test_forward_var_projects_current_and_final_candidate_notional` |
-| 95% hard input / 99% shadow 双算 | `tests/risk/test_backend_risk_metrics.py::test_forward_var_projects_current_and_final_candidate_notional` |
-| stress 使用 direction/notional | `tests/risk/test_backend_risk_metrics.py::test_stress_uses_position_direction_and_notional` |
-| 未知 position price 不伪装零敞口 | `tests/risk/test_backend_risk_metrics.py::test_snapshot_does_not_turn_unknown_position_price_into_zero_exposure` |
-| Kelly 复用既有样本数和 bound | `tests/risk/test_backend_risk_metrics.py::test_snapshot_kelly_uses_configured_sample_and_bound` |
-| Policy 不把 warm-up/stale 当零 | `tests/risk/test_policy_service.py::test_open_trade_blocks_unknown_var_instead_of_treating_it_as_zero`、`test_open_trade_blocks_stale_v2_snapshot_even_with_previous_known_var` |
-| Policy audit 保存 candidate forward evidence | `tests/risk/test_policy_service.py::test_open_trade_does_not_deadlock_on_kelly_only_warmup` |
-| live/replay 复用冻结风险输入与 lifecycle builder | `tests/test_research_parity_boundaries.py::test_parity_replay_freezes_closed_bar_returns_for_candidate_var` |
-| readiness 只读投影 canonical snapshot | `tests/test_backend_readiness_contract.py::test_readiness_projects_canonical_forward_var_snapshot`、`tests/test_readiness_dimensions_v2.py::test_unknown_canonical_var_is_projected_as_live_readiness_blocker` |
-| API 只读 canonical snapshot | `tests/test_risk_summary_inputs.py::test_risk_summary_uses_canonical_snapshot` |
+| Problem fact | 日志、API、PostgreSQL、`runtime_kv`、broker 或失败测试 |
+| Call chain | `search_graph -> trace_path -> get_code_snippet`，不足时补动态入口扫描 |
+| Canonical authority | 唯一计算者、writer 和公开 contract |
+| Deletion | 被替代代码、fallback、配置、测试和文档已删除 |
+| Targeted tests | 覆盖真实行为 seam，不只验证 wrapper |
+| Contract | 必要的 migration、OpenAPI、frontend decoder/build |
+| Runtime | 受控重启后的日志、API、PG、`runtime_kv` 和 broker 只读事实 |
+| Unknown semantics | unknown/warming_up/stale/error 未被默认值转换 |
+| Remaining compatibility | 真实调用方、退出条件和最晚删除阶段 |
+| Rollback | 代码、配置、schema、数据的可执行恢复方式 |
 
-本批不解除 D01-A，也不新增 Demo 风控阈值。D16-A、risk-specific live/replay
-冻结输入、readiness 同源、真实进程快照和 Web canonical 消费均已验收，P2 完成。
-本批未进入 P3。
+以下任一存在，批次不能标记 complete：
 
-生产验证（2026-07-24）：
+- 同一事实仍有第二个生产计算者或 writer；
+- canonical 路径已通过但旧路径没有删除；
+- readiness/API/frontend 仍自行推导；
+- 兼容层没有真实调用方或退出条件；
+- 只有单测，没有必要的运行态验证；
+- unknown/stale/warming_up 被补零或假定安全。
 
-- schema v12 current/latest/minimum 一致，migration mismatch=0；
-- backend/learning worker PID=`1724515`/`1724518`，unit 均 active；
-- canonical snapshot 使用 fresh reconcile，Kelly 181 条干净样本为 `known`；
-- closed M5 input 为 500 returns，window
-  `2026-07-23T02:15:00+00:00` 至 `2026-07-24T20:55:00+00:00`；
-  current empty portfolio 的 95%/99% VaR/CVaR 为真实已知零，
-  candidate projection 的构造样本为非零且携带 final notional；
-- readiness 投影 `ok=true/var_status=known`，schema v12 与 OpenAPI check 通过；
-- D16 相关最终针对性批次 `275 passed`，未运行全量测试；上一轮全量基线仍为
-  `2452 passed, 9 skipped`。
-- Web `npm test`、`npm run typecheck`、`npm run build` 通过；公网
-  `https://www.zhuzhu666.icu` 已返回本批构建的 index 与 `riskSnapshot` bundle。
+## 2. Safety 与执行不变量
 
-`scripts/safety_shadow_gate.py --required-hours 24` 必须最终满足以下二选一：
+| 场景 | 必须保持 |
+|---|---|
+| bars/factor/session 失败 | safety 先执行，alpha 阻断 |
+| PostgreSQL/audit 失败 | 新风险 fail-closed；close/reduce/tighten/emergency 继续 |
+| account/positions reconcile 非 fresh | 不解释为空仓或零账户 |
+| spot stale | final open admission 拒绝 |
+| order timeout/延迟/未知 protobuf | outcome unknown，禁止重发并 latch |
+| amend 无 fresh projection ack | 不报告 confirmed |
+| emergency pre/post reconcile 失败 | 不报告 completed |
+| stop 与 open 并发 | 单 generation ownership；已准入 RPC 完成保护/恢复 |
+| session cache 缺失/损坏 | 不归零、不开放新风险 |
+| partial close | 仍开放 position 不计 completed trade |
+| safety heartbeat stale | 持久化 no-new-risk，保护继续 |
 
-1. 连续 24 小时 broker-confirmed 空仓 shadow observation；或
-2. 至少一个完整 broker position lifecycle。
-
-窗口内每条记录都必须同时满足 fresh reconcile、account/positions age 不超过
-15 秒、unknown execution 为零、independent exact match、无 duplicate/conflict、
-无 forced shadow，且相邻 full-cycle 间隔不超过 75 秒。门未通过前 Safety 保持
-`shadow`，Generation/Execution outcome/PG job queue 不推进。
-
-阶段切换前还必须执行：
-
-```bash
-.venv/bin/python scripts/phased_repair_release_gate.py --target safety_enforce
-```
-
-该命令必须以 0 退出，并同时证明静态 flags 仍处于预期前态、两个服务 active、
-latch cleared、本地/PG unresolved intent 均为 0、持久化 readiness 新鲜、
-release/autonomous mutation ready、worker config/overlay hash 一致。快照过期或任一
-事实不可读都返回非零；该脚本本身不会修改开关或重启服务。
-
-无持仓 24 小时路径还必须先执行：
+权威固定测试由以下 runner 管理：
 
 ```bash
 .venv/bin/python scripts/safety_fault_matrix.py
+.venv/bin/python scripts/execution_outcome_fault_matrix.py
 ```
 
-它固定运行 12 类 Safety 故障注入并把通过结果以 append-only、fsync、record hash
-和当前 Safety source/test binding hash 写入本地 ledger。release preflight 会重算
-binding；场景/nodeid 缺失、最近一次失败、记录被改写或 Safety 代码变化都会新增
-`safety_fault_matrix_incomplete` blocker。完整真实持仓 lifecycle 可独立满足 shadow
-观察门，不以合成矩阵替代真实 broker lifecycle。
+源码或绑定测试变化后旧 attestation 自动失效，必须重跑；矩阵不能替代真实 broker
+lifecycle。
 
-后续阶段使用同一只读门禁，并严格按以下 target 顺序执行：
+## 3. P1 broker 成交事实
+
+代码合同必须覆盖：
+
+- `executionPrice`/`entryPrice` 不使用 `moneyDigits`；
+- commission/gross/swap/balance 按各自 money contract；
+- buy/sell、volume、timestamp 不因修复变化；
+- deal/entry 数量级不一致时 quarantine；
+- unknown close price 不进入 attribution、review、experience、counterfactual 或 governance；
+- restart replay 不猜测价格或 position identity。
+
+数据合同必须证明：
+
+- correction manifest 行数和更新行数一致；
+- realized PnL、commission、swap 修复前后不变量一致；
+- 污染样本治理 effective weight 为零；
+- 无污染 suggestion/effect/mutation 泄漏。
+
+仍未满足的运行证据：
+
+- post-repair 新 broker deal；
+- restart replay；
+- 完整 `open -> protection -> close -> deal sync -> review -> sample`。
+
+三项未完成前 P1 状态保持 `runtime acceptance`。
+
+## 4. P2 canonical risk
+
+| 合同 | 固定验证 |
+|---|---|
+| clean review + position notional | `tests/test_live_risk_metrics_snapshot.py::test_risk_inputs_use_clean_reviews_and_position_notional` |
+| stale broker facts 不续鲜 | `tests/test_live_risk_metrics_snapshot.py::test_stale_broker_facts_replace_previous_known_snapshot` |
+| warm-up 不伪装零风险 | `tests/risk/test_backend_risk_metrics.py::test_var_warmup_is_not_reported_as_zero_risk` |
+| closed-bar returns + final candidate | `tests/risk/test_backend_risk_metrics.py::test_forward_var_uses_closed_bar_returns_and_candidate_notional` |
+| current/final signed notional | `tests/risk/test_backend_risk_metrics.py::test_forward_var_projects_current_and_final_candidate_notional` |
+| unknown price 不变零敞口 | `tests/risk/test_backend_risk_metrics.py::test_snapshot_does_not_turn_unknown_position_price_into_zero_exposure` |
+| Policy 不把 unknown/stale 当零 | `tests/risk/test_policy_service.py::test_open_trade_blocks_unknown_var_instead_of_treating_it_as_zero` |
+| live/replay 同输入 | `tests/test_research_parity_boundaries.py::test_parity_replay_freezes_closed_bar_returns_for_candidate_var` |
+| readiness 只读投影 | `tests/test_backend_readiness_contract.py::test_readiness_projects_canonical_forward_var_snapshot` |
+| API 只读 canonical | `tests/test_risk_summary_inputs.py::test_risk_summary_uses_canonical_snapshot` |
+| frontend 无旧字段 fallback | `web_frontend/src/tests/fact-behavior.test.mjs`、`architecture.test.mjs` |
+
+最后结果：
+
+- D16/risk/policy/live/parity/readiness/replay/API：`275 passed`；
+- 补充模块：`236 passed`、`163 passed`；
+- Web test/typecheck/build：通过；
+- schema v12、OpenAPI：通过；
+- P2 complete。
+
+P2 complete 不授权清锁或切换静态 flag。
+
+## 5. P3 证据/记忆/effect 准入矩阵
+
+P3 首批在写代码前必须完成：
+
+| 检查 | 通过条件 |
+|---|---|
+| writer inventory | review/counterfactual/memory/sample/application/effect 全部生产 writer 可追踪 |
+| identity | account/position/deal/review/scope/version/source hash 稳定 |
+| duplicate authority | 每类 current projection 选择一个现有 canonical writer |
+| contamination | partial/missing/contaminated 治理权重为零 |
+| effect | 同 scope 最多一个 active，terminal/bounded 才能形成 prior |
+| deletion | 每新增或修改一个 canonical 入口，同批删除平行 writer/reader |
+| schema | 只有现有 schema 无法表达必要 lineage/revision 时才允许 additive migration |
+
+P3 禁止以“先搭平台”为理由新增：
+
+- `ExperienceMemoryService/Writer`；
+- 新 scheduler/worker；
+- 第二套 evidence store；
+- pgvector；
+- compatibility shadow writer。
+
+如确实无法复用，必须先在状态文档记录不可复用的代码和运行证据。
+
+## 6. P4 V16 闭环矩阵
+
+必须验证：
+
+- 多交易 fixture 不产生 cross-trade posterior；
+- 同交易不同 causal scope 独立；
+- readiness actionable 与 Gate 实际可 claim 完全一致；
+- expired/superseded 队首不阻塞；
+- claim/release/recovery 不延长授权；
+- 一条命令最多一个 committed mutation；
+- transaction failure 不增加 apply count；
+- scope→agent→required gates 只有一个 authority；
+- 三条 lane 均覆盖 success/noop/reject/retry/rollback/effect。
+
+不得新增第二套 command queue、actionable predicate 或 readiness verdict。
+
+## 7. 删除验收
+
+删除模块、字段或兼容层时至少执行：
+
+1. 代码图谱 inbound/outbound trace。
+2. `rg` 检查 import、字符串、动态入口、CLI、systemd、cron 和文档。
+3. 检查 schema/JSON 是否持久化 fully-qualified name。
+4. import/startup/相关 contract smoke。
+5. 删除对应配置、导出、测试和文档。
+6. `git diff --check` 和生产代码净变化核对。
+
+静态零引用不足以证明可删；完成上述扫描后也不需要额外等待固定 30 天。
+
+## 8. 发布和运行验收
+
+阶段切换顺序固定：
 
 ```text
 safety_enforce
@@ -172,46 +178,38 @@ safety_enforce
   -> pg_job_queue_verify
 ```
 
-每个 target 都要求静态 flags 精确处于上一阶段的完成态；跳过 predecessor、提前
-开启后续 flag 或当前值未知时必须以非零退出。Safety shadow continuity/lifecycle
-只在 `safety_enforce` target 强制要求，后续阶段仍持续校验 service、latch、execution
-intent、release/autonomous readiness 与 worker config/overlay hash。
-
-在运行 `execution_outcome_enable` 预检前必须先执行：
+每个 target 前运行：
 
 ```bash
-.venv/bin/python scripts/execution_outcome_fault_matrix.py
+.venv/bin/python scripts/phased_repair_release_gate.py --target <target>
 ```
 
-它固定运行 timeout、延迟回执恢复、未知 protobuf、amend 未实际更新、重启防重复、
-intent 提交/恢复边界、PG 故障下风险缩减七类共 11 个用例，并追加
-`execution_outcome_fault_matrix.v1` fsync attestation。随后
-`scripts/phased_repair_release_gate.py --target execution_outcome_enable` 会重算
-execution source/test binding；缺记录、最近失败、场景/nodeid 不全、record hash 无效
-或相关代码变化都会以 `execution_outcome_fault_matrix_incomplete` 非零阻断。
+必须同时证明：
 
-从 `generation_enable` 开始，门禁还必须输出
-`backend_process_static_flags.ok=true`：新鲜 readiness 中由 backend 进程投影的五项
-static flags、SHA-256、PID 与 process-start timestamp 必须完整，且 values 精确等于
-CLI 所见 predecessor flags。只修改发布配置但未完成受控重启时必须 fail-closed。
-`governance_enforce` 及之后还要求
-`learning_worker_process_static_flags.ok=true`；只重启 backend、未重启 learning
-worker 时必须以 `learning_worker_process_static_flags_unconfirmed` 阻断。
+- predecessor flags 精确；
+- required systemd services active；
+- process-loaded flags、PID、start time 和 fingerprint 新鲜；
+- latch/unknown execution/reconcile 状态明确；
+- readiness 和 worker config/overlay hash 一致；
+- required fault matrix 当前代码绑定通过；
+- governance/queue 专项 preflight 通过。
 
-`governance_enforce` 及之后的 target 还必须输出
-`governance_preflight.ok=true`：账本中不得存在 reserved/prepared mutation，所有
-committed projection 必须 current 且带完整 config/domain hash；risk-expanding
-mutation 必须关联 finalized V16，并精确匹配 mutation/config/domain 三个绑定。
-risk-tightening 继续允许免 V16，但不能免 hash 或 projection 检查。
+该命令只读，不修改 flag、不重启服务、不 claim job。
 
-`pg_job_queue_enable` 还必须输出 `job_worker_preflight.ok=true`，证明 canonical
-settings、state schema 最低版本、八类 production heavy-job handler 完整一致，且
-PostgreSQL 中不存在无法处理的 v1 runnable kind 或开启前仍有效的 active lease。
-预检不得 claim、cancel 或修改任何 job。
+Safety enforce 之前还必须满足二选一：
 
-开启 queue flag、受控启动 `quant-job-worker.service` 后，必须再运行
-`pg_job_queue_verify`。它不是新的 flag mutation，而是要求 service active、
-`runtime_kv[persistent_job_worker.capability.v1]` 心跳不超过 30 秒、worker/boot/PID
-身份完整、handler 集合与 JobManager 八类生产任务精确一致，并证明该进程实际加载
-queue=true 的最终五项静态 flags。缺记录、过期、handler 漂移或 unit 仍以旧 flag
-启动时均非零退出。
+1. 连续 24 小时 broker-confirmed 空仓 shadow；或
+2. 一个完整 broker position lifecycle。
+
+## 9. 全量测试策略
+
+针对性测试是每批默认要求。全量测试只在：
+
+- P1/P2/P3/P4 阶段收口；
+- 静态发布门；
+- 公共 authority 或大范围 dead-code 删除；
+- 影响面无法可靠隔离；
+- operator 明确要求。
+
+运行全量测试时记录 commit/worktree fingerprint、命令、passed/skipped/deselected 和
+PostgreSQL isolation。旧全量结果只能作为基线，不能证明后续源码。

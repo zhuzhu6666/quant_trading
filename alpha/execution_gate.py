@@ -2,7 +2,7 @@
 
 组合了信号强度/冷却期/事件过滤器。
 
-设计文档: docs/architecture.md
+设计事实源: docs/system-source-of-truth.md
 """
 
 from __future__ import annotations

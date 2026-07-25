@@ -1,8 +1,8 @@
 # Parameter Template Contract
 
 > Status: active
-> Last verified: 2026-07-06
-> Scope: parameter template schema, runtime application boundary, and autonomous governance entry.
+> Last verified: 2026-07-26
+> Scope: parameter template schema, runtime application boundary, autonomous governance entry, and online/offline tuning boundary.
 
 本文定义 `parameter_template.v1`。参数模板已经从只读派生对象进入运行时治理链路；当前主路径是自治建议、风控裁决、overlay/snapshot 写入和后验回滚。人工入口只作为覆盖和审计，不是日常必要步骤。
 
@@ -142,3 +142,21 @@ E2 第一版先固定三类模板角色：
 2. regime-aware 模板推荐策略
 3. 更强的 replay / walk-forward 验证
 4. 模板切换后的后验效果解释和回滚报告
+
+## 8. Online / Offline 变更边界
+
+`online_light` 可以进入现有自治治理链，但不能绕过 `policy_suggestion`、typed governance mutation、`RiskPolicyService`、committed overlay/snapshot 和后验回滚。只允许：
+
+- formula 与 factor family 不变；
+- 已有 default/conservative/aggressive 模板之间的有限数值变更；
+- 当前已接入 runtime parameter override 的 factor；
+- 参数相对变化不超过合同既有限制。
+
+以下一律属于 `offline_deep`，不能直接进入 live：
+
+- 公式、特征族、窗口结构或信号方向变化；
+- 新因子或新数据源；
+- 超出轻量范围的参数搜索；
+- 缺少 PIT、parity、成本和稳定性证据的候选。
+
+offline 结果只能先成为 diagnostic/shadow evidence；是否进入治理仍由现有 research evidence、factor lifecycle 和 RiskPolicy 合同决定，调用方不能用自报字段提升权限。

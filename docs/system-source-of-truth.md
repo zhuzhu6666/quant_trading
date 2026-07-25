@@ -13,6 +13,24 @@
 3. 当前服务入口优先于旧脚本。
 4. `RiskPolicyService` 和 `DecisionPolicy` 的权力边界优先于旧自动化路径。
 5. 文档只描述事实，不替代运行态审计。
+6. 一个事实只能有一个生产计算者和一个写入者；其他模块只能消费或投影。
+7. canonical authority 建立后，旧计算、旧写入口、旧字段回退和实现耦合测试必须在同一阶段删除。
+8. `unknown`、`warming_up`、`stale`、`error` 保持原语义，任何层都不得通过默认值把它们转换为 known/safe。
+
+### 1.1 三层生产权力
+
+生产开仓链只保留三层权力：
+
+| 层 | 负责 | 不负责 |
+|---|---|---|
+| Safety | broker/account/positions/spot、unknown execution、本地 latch、emergency 等必须立即禁止新增风险的硬事实 | 不计算 alpha、VaR/CVaR 或最终仓位 |
+| Readiness | 只读检查 canonical 事实是否存在、新鲜、可用，并投影 blocker | 不重新计算风险、不写控制状态、不清理 latch |
+| Risk sizing | 基于冻结输入计算 exposure、VaR/CVaR、stress、concentration 和最终 candidate volume | 不拥有发布开关、进程健康或前端展示判断 |
+
+同一 blocker 只能由其权威 owner 计算一次，并发布稳定 reason code。API、readiness、
+release preflight 和前端只能复用该结果，不得通过再次读取原始输入形成第二个裁决。
+新增聚合对象只有在能够立即替换并删除多个现有终局判断时才允许；不得为了“统一”
+再建立第四套门控或写入口。
 
 ## 2. 配置事实源
 
@@ -182,7 +200,7 @@
 | 自治健康 | `backend.services.autonomy_health` + `/api/ops/backend-readiness` + PostgreSQL `autonomy_health_snapshot` | 只读 score/posture/trend，不参与下单或配置裁决；scope recommendation 只可作为收紧证据 |
 | 自治 scope approval | PostgreSQL `autonomy_scope_approval_event` + `backend.services.autonomy_health` | V15 health scope recommendation 的审批审计事件；`applied=false`，不写 runtime 权限 |
 | 自治 scope enforcement | PostgreSQL `autonomy_scope_enforcement_event` + `RuntimeIncidentControlService` | V15 health scope recommendation 的显式收紧执行事件；只允许更严格 incident mode，必须走 `RiskPolicyService` + runtime overlay/snapshot |
-| release checklist | `docs/v15-release-checklist.md` | V15 发布、验证、回滚和文档标记清单 |
+| release / phase gate | `docs/phased-repair-acceptance-matrix.md` | 当前发布、验证、回滚与阶段门 |
 | release run ledger | PostgreSQL `release_run` + `backend.services.release_control` | V15 发布运行审计账本，记录 snapshot、replay、incident、readiness、tests、rollback ref；nursery watchdog 会把超过 `QUANT_RELEASE_STARTED_MAX_AGE_SEC` 的孤立 `started` run 收口为 `cancelled` 并写审批审计事件，不创建替代发布 |
 | release approval trail | PostgreSQL `release_approval_event` + `backend.services.release_control` | V15 发布审批事件流，记录 actor、decision、reason、evidence refs 和审计边界；不授权执行动作 |
 | incident playbook run | PostgreSQL `incident_playbook_run` + `backend.services.incident_controls` | V15 事故 playbook 计划账本，记录 scenario/severity、target mode、步骤、RiskPolicy 预检和边界；不直接切换 incident mode |
@@ -216,15 +234,14 @@
 | 实验存储 | `data/experiments.db` canonical structured experiments/model schema + `backend.core.db.validate_experiments_db_schema` | 未接线的 `EvolutionExperimentRegistry` 适配层已移除；backend/worker 构造器只读校验，完整 schema 与旧 JSON blob 原位迁移只由显式 `scripts/experiments_schema_migrate.py --apply` 执行（`db_doctor --repair` 为 broader 兼容入口），不再维护第二套同名表 schema |
 | 应用日志 | `learning_application_log` | 动作应用状态 |
 | 建议/审计状态 | `policy_suggestion` + normalized status | `proposed/auto_approved/applied/rolled_back/blocked_by_risk/superseded`；live 风险策略、持仓监督和 Evolution 权重 bias 都绝不消费 `approved/auto_approved`，这些状态只进入 observation/learning 汇总。Supervisor 候选的非执行观察由 learning worker 基于已平仓 outcome + 成熟 counterfactual 重建，固定写 `position_supervisor_trace.stage=learning_shadow`、`execution_status=observation_only`、`trace_integrity=recovered`，并绑定 suggestion ID；它不在 live loop 中执行、不调用 broker，旧 `canary_shadow` 不再满足 readiness/auto-unfreeze。Coordinator `enforce` 时只消费 `status=applied` 且 `applied_mutation_id` 指向 committed `governance_mutation_intent` 的控制；off/dual 兼容期只额外保留已 applied 的保守旧控制并标记 `legacy_quarantined`，混合 action 集必须显式声明 legacy tightening 子集。带悬空/未 committed mutation 的记录始终 fail-closed |
-| 智能单元总账 | `docs/rule-driven-intelligence-inventory.md` | 规则智能、影子模型、审计数据和精度口径 |
-| 自治治理架构 | `docs/autonomous-governance-architecture.md` | 多智能体、模型、自治大脑、控制面和权力边界分层；不替代具体事实表 |
-| 最终自治交易大纲 | `docs/autonomous-trading-final-blueprint.md` | demo nursery、多智能体权责、统一提案、统一审查、单一路径执行、记忆成长和偏离检查的最终目标；后续治理推进必须能映射到该大纲 |
+| 当前阶段和主线 | `docs/README.md` | 当前运行姿态、阶段、下一步和按需文档入口 |
+| 自治治理实施 | `docs/planning/production-autonomy-repair-optimization-plan.md` | 当前唯一活动实施计划 |
 
 判断原则：
 
 - 模型输出默认 advisory/shadow。只有 PIT v2 工件通过显式门槛并持有近期 V16 delegate 后，才可在 `demo_nursery`/`demo_autonomous` 进入 `demo_canary`/`demo_active`；模型不能放宽规则、增加仓位、改变方向、修改硬风控或直接调用 broker。
 - meta LightGBM 进入治理候选前除最终时间顺序 holdout 外，还必须通过 expanding walk-forward 稳定性和 train/holdout 泛化差距门；不通过仍可保存 shadow artifact，但 `model_ready_for_governance=false`。
-- 后续自治治理推进必须先对照 `docs/autonomous-trading-final-blueprint.md` 的 deviation guard；不能说明服务于大纲的改动不应自动推进。
+- 后续自治治理推进必须能映射到当前 production plan 和 acceptance matrix；不能证明减少 authority、闭合风险或完成验收的改动不应自动推进。
 - 智能体链路以 `AgentAuthorityRegistryService` 为权责合同事实源；新增 source agent 或控制面前，必须先声明 allowed writes、required gates、authority state 和 forbidden actions。
 - agent 生成治理候选前必须把 `agent_generation_context` 写入 lineage；该上下文包含 authority verdict、scorecard、近期负反馈和 review rules，只用于审查/复盘，不授权执行。
 - 新提案若声明 `agent_context_required=true` 或来自需要 review 的 governance bridge，必须在 evidence 或 lineage 中携带 `agent_generation_context`；直接写 `policy_suggestion` 的新路径应复用 `backend.services.policy_suggestion_context.attach_policy_suggestion_agent_context()` 生成同一上下文；candidate bridge 写入 `policy_suggestion` 时同时在 evidence 顶层和 lineage 写标准 `agent_generation_context`；readiness `proposal_generation_context_coverage` 只读审计该覆盖率，缺新上下文 degraded，历史旧提案只标 legacy。
@@ -292,8 +309,8 @@
 | 外部研究数据 | `data/external_data.duckdb` | COT/ETF/FRED/央行黄金/宏观，必须按 `release_at` 做 PIT；CB 由 WGC 季度序列、ETF 日线由 Yahoo chart、持仓由 SEC EDGAR 刷新 |
 | 经济事件 | `data/events.duckdb` | 风控事件缩放读取 |
 | 运行态状态 | PostgreSQL `state_v1` | 不再使用 `data/state.db` |
-| 状态库运维边界 | `docs/state-postgres-store.md` | PostgreSQL state store、迁移留痕和旧 SQLite 禁用边界 |
-| 状态 schema 版本 | PostgreSQL `state_schema_migration` + `backend.core.state_schema_migrations` + `scripts/state_schema_migrate.py` | forward DDL 只由显式 `--apply` 的 migration connection 执行，并在 advisory lock 下与 checksum ledger 同事务提交；v4 物化 backend/worker shadow audit、model influence 和 off-market audit 对象，v7 为 V16 委派新增不可变 `authority_issued_at`，v8 接管 `runtime_kv`、factor `canary_state`、旧动态补列及正确的 experience append-source 索引，v9 为 runtime overlay 增加 hash-bound `legacy_authority_json` 和 mutation 查询索引，v10 用新的显式 `DESC` 索引名恢复 proposal source-ref 契约且保留漂移的旧索引，v11 为 cTrader deal 增加 raw price/contract/quality/repair run 字段并建立通用 data repair ledger。当前最低版本为 11。高频 worker/model/readiness ensure 显式调用只读 catalog validator；普通 `get_state_pg_conn()` connection/cursor 继续禁止实际 CREATE/ALTER/DROP/INDEX，并把其余历史 idempotent ensure 转换为 assertion。缺对象时提示先迁移并 fail-closed。backend/learning/job worker 启动只校验代码声明的最低版本；外部 SQLite restore 脚本只导入数据，不再建表、建索引或 drop schema |
+| 状态库运维边界 | `docs/server-backend-sop.md` | PostgreSQL state store、migration、查询和旧 SQLite 禁用边界 |
+| 状态 schema 版本 | PostgreSQL `state_schema_migration` + `backend.core.state_schema_migrations` + `scripts/state_schema_migrate.py` | forward DDL 只由显式 `--apply` 的 migration connection 执行，并在 advisory lock 下与 checksum ledger 同事务提交；v9 增加 runtime overlay authority，v10 修复 proposal source-ref 索引契约，v11 增加 cTrader deal 原始价格与 repair ledger，v12 增加 canonical daily-equity/risk 历史输入。当前最低版本为 12。普通业务连接禁止 CREATE/ALTER/DROP/INDEX；缺对象时提示先迁移并 fail-closed。backend/learning/job worker 只校验代码声明的最低版本；SQLite restore 只导入数据，不建 schema。 |
 
 判断原则：
 
@@ -344,7 +361,7 @@
 | Meta Governance Web page | `/v16` + `web_frontend/src/pages/V16BrainPage.tsx` | Web 展示元治理大脑、提案总线、实盘自治状态、shadow action plans、posterior evaluations、P3 executions、P4 governance candidate/review 和 P5 guardrails；运行按钮只触发后端白名单/候选生成/候选审查/护栏评估/收紧/提案审查/解锁 API，不在前端推断或执行动作 |
 | 因子治理展示 | `/api/v4/catalog` | 实时 Catalog；支持 latest snapshot |
 | 因子卡片 | `factor-card-schema.md` + Factor Cards API | 前端解释展示 |
-| 前端职责 | `development-workflow.md` | Linux 统一工作区可直接修改小程序/Web/后端；Windows 仅承担微信开发者工具和浏览器兼容性等平台补充验证，不再按机器分工 |
+| 前端职责 | `docs/README.md` / `AGENTS.md` | Linux 统一工作区可直接修改小程序/Web/后端；Windows 仅承担平台补充验证 |
 
 判断原则：
 
@@ -375,7 +392,7 @@
 
 1. 当前运行中的服务和数据库审计事实。
 2. 当前代码入口和测试契约。
-3. `docs/system-source-of-truth.md`、`docs/architecture.md`、对应 contract。
+3. `docs/system-source-of-truth.md`、`docs/README.md`、对应 contract。
 4. `docs/legacy-debt-register.md` 中的迁移说明。
 5. 历史 planning 文档和旧注释。
 
