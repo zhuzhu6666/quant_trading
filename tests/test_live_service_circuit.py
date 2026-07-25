@@ -140,25 +140,6 @@ def test_breaker_resets_on_new_day():
 
 
 
-def test_append_trade_equity_keeps_recent_window():
-    live_service._live_state_update(trade_equity_history=list(range(1000)))
-
-    result = live_service._append_trade_equity(1000.0)
-
-    assert len(result) == 500
-    assert result[0] == 501
-    assert result[-1] == 1000.0
-
-
-def test_set_risk_metric_updates_copy_of_risk_state():
-    live_service._set_risk_metric("var", {"var_pct": 1.2})
-    live_service._set_risk_metric("kelly", {"kelly_fraction": 0.3})
-
-    risk = live_service._get_risk_state()
-    assert risk["var"]["var_pct"] == 1.2
-    assert risk["kelly"]["kelly_fraction"] == 0.3
-
-
 def test_set_factor_snapshot_writes_both_views():
     votes = {"rsi_14": {"signal": 0.2, "direction": 1}}
     composite = {"direction": 1, "score": 0.8}

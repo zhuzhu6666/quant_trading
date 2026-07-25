@@ -913,8 +913,11 @@ class AutonomyHealthService:
             rows = _execute(
                 conn,
                 """
-                SELECT integrity, label_status, train_weight
+                SELECT integrity, label_status, governance_effective_weight
                 FROM autonomous_learning_sample
+                WHERE COALESCE(system_contaminated, 0)=0
+                  AND COALESCE(governance_eligible, 0)=1
+                  AND COALESCE(governance_effective_weight, 0)>0
                 ORDER BY event_ts DESC
                 LIMIT 500
                 """
@@ -927,10 +930,13 @@ class AutonomyHealthService:
             for row in rows:
                 integrity = str(row["integrity"] or "missing")
                 label_status = str(row["label_status"] or "")
-                train_weight = max(0.0, min(1.0, _safe_float(row["train_weight"])))
-                score = 0.65 * integrity_weight.get(integrity, 0.25) + 0.35 * train_weight
+                evidence_weight = max(
+                    0.0,
+                    min(1.0, _safe_float(row["governance_effective_weight"])),
+                )
+                score = 0.65 * integrity_weight.get(integrity, 0.25) + 0.35 * evidence_weight
                 total += score
-                if label_status == "matured" and train_weight > 0:
+                if label_status == "matured" and evidence_weight > 0:
                     ready += 1
             return {
                 "sample_count": len(rows),

@@ -1,5 +1,9 @@
 # 全项目分期修复发布状态
 
+> Superseded evidence notice: 本文是 2026-07-19 发布快照。2026-07-24 已进入
+> `AUTONOMY-REPAIR-20260724-01` 修复窗口；当前运行事实与验收以
+> `planning/production-autonomy-repair-optimization-plan.md` 及新基线为准。
+>
 > Status: production rollout active; governance dual-record and Safety shadow healthy
 > Snapshot: 2026-07-19 15:31 CST
 > Scope: Phase 0-5 compatibility implementation, migrations, verification, and remaining live evidence gates
@@ -247,6 +251,106 @@ execution 仍为 0、latch cleared、服务未重启。该故障按 gate 规则�
 从恢复后的首个安全 observation 重新计时，历史 unsafe 记录继续保留。
 
 ## 6. 下一次发布的固定顺序
+
+### 2026-07-24 P1 broker price contract 收口
+
+- deal 原始价格、money amount、spot/trendbar relative price 已拆成独立 parser；
+  `executionPrice` 和 `closePositionDetail.entryPrice` 不再套用 `moneyDigits`。
+- 新 deal 以同持仓 entry price 做单一数量级一致性检查；无法确认的价格保留 raw
+  审计并标记 `unknown`，不猜测修正值。
+- close 的金额权威和价格权威已分离：unknown price 仍允许 session PnL、风险缩减
+  恢复和本地状态清理，但不再进入 attribution、decision/position price ledger、
+  review、experience、counterfactual 或 policy suggestion。
+- restart replay 只接受 `broker_reported` / `broker_reconciled` close price；缺失或
+  unknown 不再回退 open/bar/spot price 伪造正常平仓价格。
+- Execution Outcome fault matrix 增加 broker-close price-integrity 场景，并对每个
+  固定 nodeid 强制确认 `PASSED`，避免依赖缺失导致整组 skip 后误判成功。当前为
+  9 类/21 个固定用例；全量回归为 `2452 passed, 9 skipped`。
+- 本批保持 `no_new_risk`，未切换 Safety/Generation/Execution/Governance/queue
+  任何发布开关。P1 代码验收完成后仍需新的 broker deal 和完整 restart/lifecycle
+  运行证据；没有 operator 明确授权，不主动制造 Demo 仓位。
+- 最终源码于 20:37 CST 受控重启后 backend PID=`446758`、learning worker
+  PID=`446759`；
+  readiness 已由新 backend PID 刷新。cTrader connected、system health 1.00、空仓、
+  启动期 unknown execution 自主由 1 恢复为 0、release ready=true；live execution 仍仅由
+  `no_new_risk_latched` 阻断。库内仍为修复后的 1,150 条历史 deal，尚无新的
+  post-repair broker deal，因此不把本次重启当成 P1 lifecycle 验收。
+
+### 2026-07-24 P2 风险指标平面第一批
+
+- 正常 v2 tick 的风险投影已移到 tick-specific wait 之前，不再因 `wait_seconds`
+  使 updater 永久不可达。
+- 删除 live 内联 VaR/Kelly/Stress/Concentration 统计体和 API 独立 realized-PnL
+  重算；统一为 `backend/risk` 纯计算内核与薄
+  `runtime_kv[risk_metrics_snapshot.v2]` 投影，没有新增常驻 service、线程或调度器。
+- PostgreSQL schema v12 新增唯一一张 `risk_daily_equity` 小表，
+  `(account_key, risk_date)` 幂等更新，60 秒 tick、reconnect 和进程重启不会增加同日
+  return 样本。生产迁移 runner 为 `AUTONOMY-REPAIR-P2-20260724-01`，v12 check
+  已通过。
+- VaR/CVaR 使用日级 equity，统一同时输出 fraction 与百分点；不足样本为
+  `warming_up` 且数值为 null。Kelly 只读取有界、去重、无系统污染的 closed review；
+  stress 使用 position direction/notional；concentration 缺输入不再返回 safe。
+- `RiskPolicyService` 在 VaR 启用但快照非 `known` 时显式阻断，不再用默认 0 放行。
+  D01-A 的 `no_new_risk` 与 D03-B Demo profile 均未放宽。
+- 最终源码已受控重启：backend PID=`563657`、learning worker PID=`563660`，
+  两个 unit 均 active；learning capability 为 ready/available。生产 schema
+  current/latest/minimum 均为 v12，migration mismatch 为 0。
+- 生产 `risk_metrics_snapshot.v2` 已发布：fresh account/positions reconcile，
+  Kelly `known` 且使用 181 条干净 closed review；空仓 stress/concentration
+  `known=0`；日权益表按当日只保留 1 行，因此 VaR 样本为 0 个日收益并诚实
+  `warming_up`。历史序列只读取已完成 UTC 日期，当前盘中权益不会冒充日终样本；
+  snapshot fingerprint 已覆盖 account equity。该状态没有新增 Demo 阈值，也没有
+  把缺失历史伪装成安全。
+- 本轮全量回归为 `2452 passed, 9 skipped`；Execution Outcome fault matrix
+  为 9 类/21 个固定 nodeid 全部通过，binding
+  `27822ad1dcc02cb5b0fca7bb0f7974ca838271f7add42ef684382341d2d0dd2a`。
+- 当前变更的生产 Python/SQL 按工作树统计为新增 1,733 行、删除 2,082 行，
+  净减少 349 行。体量增加主要来自回归测试净增约 2,025 行和 1,229 行实施规划，
+  不是新增运行时服务或阈值网络。
+- 截至第一批，candidate notional、risk-specific live/replay parity 和
+  readiness/frontend 同源尚未完成；下述 2026-07-26 批次已收口前三项，
+  随后的前端批次已收口最后一项。任何单批证据均不得用于解除 D01-A。
+
+### 2026-07-26 P2 D16-A candidate forward VaR/CVaR
+
+- `risk_metrics_snapshot.v2` 的 VaR 主输入已从日权益序列切换为冻结
+  `forward_var_input.v1`：来源是同一 symbol/timeframe 的已闭合 bar，
+  包含 source window、return count 和 fingerprint；`risk_daily_equity`
+  v12 表保留为既有审计结构，但不再参与开仓 VaR/CVaR 裁决。
+- live current snapshot 使用 fresh reconciled positions 的 direction/notional；
+  最终开仓 candidate 在既有 lifecycle payload builder 内使用 sizing 完成后的
+  API volume、current price 和 RuntimeConfig contract size 形成 candidate
+  notional，再和当前净 notional 合并计算 forward distribution。缺 price、
+  contract、direction、equity、position 或 return input 均保持
+  `unknown/warming_up/error`，不使用零或兼容值补齐。
+- 95% 结果继续进入既有 `RiskPolicyService` VaR/CVaR 阈值；99% 只作为
+  `var_shadow_99` 双算，没有新增阈值。Policy verdict audit 保存 candidate
+  notional、forward net notional、input fingerprint 和 95%/99% 结果，供 ledger
+  replay 使用。
+- parity replay 的决策窗口仍严格为 `history[:i+1]`，并调用与 live 完全相同的
+  closed-bar freeze、current/candidate projection 和 lifecycle payload builder；
+  code binding 同步加入 canonical metrics/var 源文件。readiness 新增只读
+  `risk_metrics` 投影，只消费 `runtime_kv[risk_metrics_snapshot.v2]`，不重算风险。
+- 没有新增 service、线程、scheduler、表或阈值；schema 仍为 v12，OpenAPI
+  snapshot 未变化。
+- 针对性验收：D16/risk/policy/live lifecycle/parity/readiness/replay/API 共
+  `275 passed`；补充模块批次 `236 passed`、`163 passed`，失败项修复后定点
+  `21 passed`、`9 passed`。未运行全量测试。
+- backend/learning worker 已重启为 PID `1724515` / `1724518`。生产 snapshot
+  使用 fresh reconcile 和 500 个 closed M5 returns，horizon 为
+  `one_closed_bar`；空仓当前 95%/99% VaR/CVaR 为事实上的已知零，Kelly 181 条
+  干净 closed review 为 `known`。readiness 只读投影
+  `ok=true/var_status=known`；启动日志只有 scheduled market closed 下的旧 bar
+  advisory warning，没有 risk calculation 或 service error。
+- Web 前端已在统一工作区完成消费收口：`OverviewPage`、`TradingPage`、
+  `RiskPage`、`V15CockpitPage` 只通过 `decodeCanonicalRiskSnapshot()` 消费
+  `risk_metrics_snapshot.v2`，并分别绑定 `risk.inputs.v1` 与
+  `system.runtime-health.v1` component fact。旧 `var_95/value/limit`、旧集中度和
+  stress 字段回退已删除；known 空仓零敞口可见，unknown/warming_up/error 不补零。
+  `npm test`、`npm run typecheck`、`npm run build` 均通过，Caddy 公网入口已加载
+  新 `riskSnapshot` bundle。
+- P2 至此完成并收口；本批未进入 P3。`no_new_risk` 和五项静态开关保持原值。
+  P1 仍等待新的真实 broker deal 和完整持仓 lifecycle。
 
 2026-07-22 收口补充：live loop 的显式 Stop 曾将 desired state 持久化为 disabled，
 并因 generation exit 无条件停止进程内 Scheduler，造成 backend 仍 active 但 readiness、

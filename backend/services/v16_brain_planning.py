@@ -31,6 +31,7 @@ from backend.services._brain_helpers import (
     safe_float,
     text,
 )
+from backend.services.review_contract import review_has_system_contamination
 from backend.services.v16_brain_snapshot import (
     BrainMemoryService,
     BrainStateService,
@@ -469,10 +470,18 @@ class BrainActionPlanEvaluatorService:
                 replay = dict(row) if row else {}
             else:
                 source_gaps.append("missing_replay_report")
-            trade_reviews = self._fetch_table(conn, "trade_outcome_review", limit,
+            trade_reviews = self._fetch_table(conn, "trade_outcome_review", None,
                                               cols=["review_id", "trade_id", "position_id", "pnl",
                                                     "outcome_label", "failure_tags_json",
                                                     "summary_text", "review_json", "created_at"])
+            trade_reviews = [
+                row
+                for row in trade_reviews
+                if not review_has_system_contamination(loads(row.get("review_json"), {}))
+            ][:limit]
+            clean_review_ids = {
+                str(row.get("review_id") or "") for row in trade_reviews
+            }
             learning_effects = self._fetch_table(conn, "learning_application_effect", limit,
                                                   cols=["application_id", "scope_type", "scope_key",
                                                         "action", "status", "observed_trade_count",
@@ -487,11 +496,22 @@ class BrainActionPlanEvaluatorService:
                                                          "risk_reason", "execution_status",
                                                          "trace_integrity", "event_ts", "created_at"],
                                                    order_col="event_ts")
-            counterfactuals = self._fetch_table(conn, "supervisor_counterfactual_review", limit,
+            counterfactuals = self._fetch_table(conn, "supervisor_counterfactual_review", None,
                                                  cols=["counterfactual_id", "review_id", "trade_id", "position_id",
                                                        "close_ts", "label", "confidence", "horizons_json",
                                                        "evidence_json", "updated_at", "created_at"],
                                                  order_col="updated_at")
+            counterfactuals = [
+                row
+                for row in counterfactuals
+                if str(row.get("review_id") or "") in clean_review_ids
+                and not bool(loads(row.get("evidence_json"), {}).get("evidence_invalidated"))
+                and bool(
+                    (loads(row.get("evidence_json"), {}).get("maturity") or {}).get(
+                        "governance_eligible"
+                    )
+                )
+            ][:limit]
             return {"replay_report": replay, "trade_outcome_review": trade_reviews,
                     "learning_application_effect": learning_effects,
                     "position_supervisor_trace": supervisor_traces,
@@ -500,14 +520,15 @@ class BrainActionPlanEvaluatorService:
         finally:
             conn.close()
 
-    def _fetch_table(self, conn, table: str, limit: int, *, cols: list[str],
+    def _fetch_table(self, conn, table: str, limit: int | None, *, cols: list[str],
                      order_col: str | None = None) -> list[dict[str, Any]]:
         if not state_table_exists(conn, table):
             return []
         available = state_table_columns(conn, table)
         select = [c for c in cols if c in available] or [sorted(available)[0]]
         orc = order_col if order_col in available else ("created_at" if "created_at" in available else select[0])
-        rows = execute(conn, f"SELECT {', '.join(select)} FROM {table} ORDER BY {orc} DESC LIMIT ?", (limit,)).fetchall()
+        sql = f"SELECT {', '.join(select)} FROM {table} ORDER BY {orc} DESC"
+        rows = execute(conn, sql if limit is None else f"{sql} LIMIT ?", None if limit is None else (limit,)).fetchall()
         return [dict(r) for r in rows]
 
     def _evaluate_plan(self, *, plan: dict[str, Any], evidence: dict[str, Any], now: float) -> dict[str, Any]:

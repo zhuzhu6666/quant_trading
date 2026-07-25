@@ -14,6 +14,7 @@ from backend.services.agent_authority import (
 from backend.services._brain_helpers import connect as _connect, execute as _execute
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.proposal_registry import ProposalRegistryService
+from backend.services.review_contract import review_has_system_contamination
 
 
 def _loads(raw: Any, default: Any) -> Any:
@@ -133,14 +134,13 @@ class AgentScorecardService:
                        review_json, created_at
                 FROM trade_outcome_review
                 ORDER BY created_at DESC
-                LIMIT ?
                 """,
-                (limit,),
             ).fetchall()
             items = [
                 self._trade_attribution(conn, row, include_external_links=include_external_links)
                 for row in rows
-            ]
+                if not review_has_system_contamination(_loads(row["review_json"], {}))
+            ][:limit]
         finally:
             conn.close()
         linked = [item for item in items if item["participants"]]
@@ -493,15 +493,20 @@ class AgentScorecardService:
         rows = _execute(
             conn,
             """
-            SELECT experience_id, source_table, source_id, append_source,
-                   decision_context_json, recommended_action, created_at
-            FROM experience_memory
-            ORDER BY created_at DESC
-            LIMIT ?
+            SELECT e.experience_id, e.source_table, e.source_id, e.append_source,
+                   e.decision_context_json, e.recommended_action, e.created_at,
+                   r.review_id AS source_review_id, r.review_json AS source_review_json
+            FROM experience_memory e
+            LEFT JOIN trade_outcome_review r ON r.review_id=e.source_id
+            ORDER BY e.created_at DESC
             """,
-            (limit,),
         ).fetchall()
+        accepted = 0
         for row in rows:
+            if _text(row["append_source"]) in {"live_review", "trade_lesson_memory.v1"}:
+                source_review = _loads(row["source_review_json"], {})
+                if not _text(row["source_review_id"]) or review_has_system_contamination(source_review):
+                    continue
             context = _loads(row["decision_context_json"], {})
             agents = []
             if isinstance(context, dict):
@@ -516,6 +521,9 @@ class AgentScorecardService:
                 metric["trade_lesson_feedback_count"] += 1
                 _status_inc(metric["recommended_actions"], row["recommended_action"])
                 self._touch(metric, row["created_at"])
+            accepted += 1
+            if accepted >= limit:
+                break
 
     def _advisory_shadow_metrics(self, conn: Any, metrics: dict[str, dict[str, Any]], limit: int, gaps: list[str]) -> None:
         specs = [
@@ -709,39 +717,70 @@ class AgentScorecardService:
             return []
         rows = _execute(
             conn,
-            """SELECT counterfactual_id, updated_at
-               FROM supervisor_counterfactual_review
-               WHERE (review_id=? AND review_id <> '') OR position_id=?
-               ORDER BY updated_at DESC LIMIT 10""",
+            """SELECT c.counterfactual_id, c.updated_at, c.evidence_json,
+                      r.review_id AS source_review_id,
+                      r.review_json AS source_review_json
+               FROM supervisor_counterfactual_review c
+               LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
+               WHERE (c.review_id=? AND c.review_id <> '') OR c.position_id=?
+               ORDER BY c.updated_at DESC""",
             (review_id, position_id),
         ).fetchall()
-        return [
-            {
+        links: list[dict[str, Any]] = []
+        for row in rows:
+            evidence = _loads(row["evidence_json"], {})
+            if (
+                not _text(row["source_review_id"])
+                or review_has_system_contamination(_loads(row["source_review_json"], {}))
+                or bool(evidence.get("evidence_invalidated"))
+            ):
+                continue
+            links.append({
                 "source_agent": "autonomous_learning",
                 "source_ref_type": "supervisor_counterfactual_review",
                 "source_ref_id": _text(row["counterfactual_id"]),
                 "role": "posterior_counterfactual",
                 "created_at": _safe_float(row["updated_at"]),
-            }
-            for row in rows
-        ]
+            })
+            if len(links) >= 10:
+                break
+        return links
 
     def _posterior_arbitration(self, conn: Any, *, review_id: str, position_id: str, review: Any) -> dict[str, Any]:
         try:
             from backend.services.v16_brain_snapshot import build_posterior_arbitration
 
+            if review_has_system_contamination(_loads(review["review_json"], {})):
+                return {
+                    "schema_version": "posterior_arbitration.v1",
+                    "status": "excluded_system_contamination",
+                    "counterfactuals": [],
+                }
             counterfactuals = []
             if state_table_exists(conn, "supervisor_counterfactual_review"):
                 rows = _execute(
                     conn,
-                    """SELECT counterfactual_id, review_id, trade_id, position_id, label,
-                       confidence, horizons_json, evidence_json, updated_at
-                       FROM supervisor_counterfactual_review
-                       WHERE (review_id=? AND review_id <> '') OR position_id=?
-                       ORDER BY updated_at DESC LIMIT 10""",
+                    """SELECT c.counterfactual_id, c.review_id, c.trade_id,
+                       c.position_id, c.label, c.confidence, c.horizons_json,
+                       c.evidence_json, c.updated_at,
+                       r.review_id AS source_review_id,
+                       r.review_json AS source_review_json
+                       FROM supervisor_counterfactual_review c
+                       LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
+                       WHERE (c.review_id=? AND c.review_id <> '') OR c.position_id=?
+                       ORDER BY c.updated_at DESC""",
                     (review_id, position_id),
                 ).fetchall()
                 for row in rows:
+                    evidence = _loads(row["evidence_json"], {})
+                    if (
+                        not _text(row["source_review_id"])
+                        or review_has_system_contamination(
+                            _loads(row["source_review_json"], {})
+                        )
+                        or bool(evidence.get("evidence_invalidated"))
+                    ):
+                        continue
                     counterfactuals.append(
                         {
                             "counterfactual_id": _text(row["counterfactual_id"]),
@@ -751,9 +790,11 @@ class AgentScorecardService:
                             "label": _text(row["label"]),
                             "confidence": _safe_float(row["confidence"]),
                             "horizons": _loads(row["horizons_json"], []),
-                            "evidence": _loads(row["evidence_json"], {}),
+                            "evidence": evidence,
                         }
                     )
+                    if len(counterfactuals) >= 10:
+                        break
             review_dict = dict(review)
             review_dict["review_json"] = review_dict.get("review_json")
             return build_posterior_arbitration(trade_reviews=[review_dict], counterfactuals=counterfactuals) | {

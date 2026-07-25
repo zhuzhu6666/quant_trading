@@ -2,6 +2,7 @@ import json
 import sqlite3
 
 from backend.services.position_supervisor_governance import (
+    _counterfactual_summary,
     build_position_supervisor_advisories,
     replay_position_supervisor_templates,
 )
@@ -143,6 +144,58 @@ def test_replay_position_supervisor_templates_compares_default_and_candidate(tmp
     assert result["comparison"]["small_loss_closes_reduced"] == 0
 
 
+def test_replay_and_advisory_filter_contamination_before_effective_limit(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    contaminated = {
+        "position_id": "contaminated",
+        "close_ts": 1782439100.0,
+        "mfe": 4.0,
+        "mae": 1.0,
+        "giveback_ratio": 0.96,
+        "profit_capture_ratio": 0.02,
+        "close_price": 2999.0,
+        "real_pnl": {"gross": -1.0, "net": -1.0, "entry_price": 3000.0},
+        "system_issue_context": {
+            "system_contaminated": True,
+            "contaminates_learning": True,
+        },
+    }
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, pnl, mae, mfe, outcome_label,
+             failure_tags_json, summary_text, review_json, created_at)
+            VALUES ('rev_contaminated', 'contaminated', 'contaminated',
+                    -1.0, 1.0, 4.0, 'bad_loss', '[]',
+                    'contaminated capture failure', ?, 1782439100.0)
+            """,
+            (json.dumps(contaminated),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    replay = replay_position_supervisor_templates(
+        day="2026-06-26",
+        db_path=db_path,
+        limit=1,
+    )
+    advisory = build_position_supervisor_advisories(
+        day="2026-06-26",
+        db_path=db_path,
+    )
+
+    assert replay["sample_count"] == 1
+    assert [sample["review_id"] for sample in replay["samples"]] == ["rev_1"]
+    assert advisory["replay_summary"]["capture_failure_summary"]["capture_failed_count"] == 0
+    actions = {item["action"] for item in advisory["items"]}
+    assert "switch_position_supervisor_template" not in actions
+    assert "tighten_mfe_capture_protection" not in actions
+
+
 def test_position_supervisor_advisories_are_advisory_only_and_materializable(tmp_path):
     db_path = tmp_path / "state.db"
     _create_db(db_path)
@@ -171,6 +224,43 @@ def test_position_supervisor_advisories_are_advisory_only_and_materializable(tmp
     assert evidence["source_agent"] == "autonomous_learning"
     assert evidence["schema_version"] == "position_supervisor_advisory_evidence.v1"
     assert evidence["agent_context"]["schema_version"] == "agent_generation_context.v1"
+
+
+def test_counterfactual_summary_excludes_contaminated_source_review(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """
+            UPDATE supervisor_counterfactual_review
+            SET evidence_json=?
+            WHERE counterfactual_id='cf_1'
+            """,
+            (json.dumps({"maturity": {"governance_eligible": True}}),),
+        )
+        conn.commit()
+        assert _counterfactual_summary(conn, day="2026-06-26")["total"] == 1
+
+        review = json.loads(
+            conn.execute(
+                "SELECT review_json FROM trade_outcome_review WHERE review_id='rev_1'"
+            ).fetchone()[0]
+        )
+        review["system_issue_context"] = {
+            "system_contaminated": True,
+            "contaminates_learning": True,
+        }
+        conn.execute(
+            "UPDATE trade_outcome_review SET review_json=? WHERE review_id='rev_1'",
+            (json.dumps(review),),
+        )
+        conn.commit()
+
+        assert _counterfactual_summary(conn, day="2026-06-26")["total"] == 0
+    finally:
+        conn.close()
 
 
 def test_position_supervisor_advisories_materialize_mfe_capture_failure_template(tmp_path):

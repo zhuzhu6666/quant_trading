@@ -14,6 +14,7 @@ from backend.core.state_store import (
 )
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
+from backend.services.review_contract import review_has_system_contamination
 
 
 MODEL_TYPE = "position_quality_lightgbm"
@@ -257,22 +258,25 @@ class PositionQualityLightGBMService:
         try:
             rows = self._execute(conn,
                 """
-                SELECT * FROM (
-                    SELECT t.trace_id, t.position_id, t.trade_id, t.event_ts,
-                           t.verdict_json, t.context_json, t.template_id,
-                           t.template_version, t.config_version, t.config_hash,
-                           r.review_id, r.pnl, r.outcome_label, r.failure_tags_json,
-                           r.review_json, r.created_at AS review_created_at
-                    FROM position_supervisor_trace t
-                    JOIN trade_outcome_review r ON CAST(r.position_id AS TEXT)=CAST(t.position_id AS TEXT)
-                    WHERE t.stage='evaluated' AND COALESCE(t.trace_integrity, 'full')='full'
-                    ORDER BY t.event_ts DESC
-                    LIMIT ?
-                ) recent_traces ORDER BY event_ts ASC
+                SELECT t.trace_id, t.position_id, t.trade_id, t.event_ts,
+                       t.verdict_json, t.context_json, t.template_id,
+                       t.template_version, t.config_version, t.config_hash,
+                       r.review_id, r.pnl, r.outcome_label, r.failure_tags_json,
+                       r.review_json, r.created_at AS review_created_at
+                FROM position_supervisor_trace t
+                JOIN trade_outcome_review r ON CAST(r.position_id AS TEXT)=CAST(t.position_id AS TEXT)
+                WHERE t.stage='evaluated' AND COALESCE(t.trace_integrity, 'full')='full'
+                ORDER BY t.event_ts DESC
                 """,
-                (max(int(limit) * 4, int(limit)),),
             ).fetchall()
-            items = [dict(row) for row in rows]
+            candidate_count = len(rows)
+            clean_items = [
+                dict(row)
+                for row in rows
+                if not review_has_system_contamination(_loads(row["review_json"], {}))
+            ]
+            items = clean_items[: max(int(limit) * 4, int(limit))]
+            items.reverse()
             latest_template_version = str(items[-1].get("template_version") or "") if items else ""
             lineage_items = [
                 item for item in items
@@ -352,6 +356,7 @@ class PositionQualityLightGBMService:
                 "horizon_minutes": int(horizon_minutes),
                 "pnl_tolerance": float(pnl_tolerance),
                 "excluded_other_lineage_count": len(items) - len(lineage_items),
+                "excluded_system_contaminated_count": candidate_count - len(clean_items),
             }
             return samples
         finally:

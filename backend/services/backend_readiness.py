@@ -22,6 +22,7 @@ from backend.services.agent_governance import AgentBriefingContextService, Agent
 from backend.services.autonomous_evolution_cycle import AutonomousEvolutionCycleService
 from backend.services.meta_governance import MetaGovernanceService
 from backend.services.proposal_registry import ProposalRegistryService
+from backend.services.review_contract import review_has_system_contamination
 from backend.services.stability import measure, record_timing, timing_snapshot
 from research.meta_model_lightgbm import MetaModelLightGBMService
 
@@ -99,6 +100,10 @@ class BackendReadinessService:
         market_session = dict(live_status.get("market_session") or {})
         system_health = self._timed_component("system_health", self._system_health)
         metrics = self._timed_component("metrics", self._metrics_status)
+        risk_metrics = self._timed_component(
+            "risk_metrics",
+            self._risk_metrics_status,
+        )
         model_status = self._timed_component("model_status", self._model_status)
         high_load = self._timed_component("high_load", lambda: self._high_load_status(market_session))
         governance = self._timed_component("governance", self._governance_status)
@@ -244,6 +249,7 @@ class BackendReadinessService:
             replay=replay,
             stability=stability,
             learning_worker=learning_worker,
+            risk_metrics=risk_metrics,
         )
         payload = {
             "ok": True,
@@ -258,6 +264,7 @@ class BackendReadinessService:
             "backend_service": self._service_status(),
             "system_health": system_health,
             "metrics": metrics,
+            "risk_metrics": risk_metrics,
             "market_session": market_session,
             "live": {
                 "ctrader": live_status.get("ctrader") or {},
@@ -297,6 +304,7 @@ class BackendReadinessService:
                         "loop": live_status.get("loop") or {},
                         "readiness": live_status.get("readiness") or {},
                     },
+                    "risk_metrics": risk_metrics,
                 },
                 "overlay": stability.get("runtime_config_overlay") or {},
                 "snapshot": stability.get("runtime_config_snapshot") or {},
@@ -547,10 +555,20 @@ class BackendReadinessService:
             return {**result, "ok": False, "reason": f"state_unavailable:{exc}"}
         try:
             maturity_rows = []
-            if _table_exists(conn, "supervisor_counterfactual_review"):
+            if (
+                _table_exists(conn, "supervisor_counterfactual_review")
+                and _table_exists(conn, "trade_outcome_review")
+            ):
                 maturity_rows = _execute(
                     conn,
-                    "SELECT position_id, close_ts, evidence_json FROM supervisor_counterfactual_review ORDER BY updated_at DESC LIMIT 5000",
+                    """
+                    SELECT c.position_id, c.close_ts, c.evidence_json,
+                           r.review_id AS source_review_id,
+                           r.review_json AS source_review_json
+                    FROM supervisor_counterfactual_review c
+                    LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
+                    ORDER BY c.updated_at DESC
+                    """,
                 ).fetchall()
             canary_started_at = 0.0
             canary_suggestion_id = ""
@@ -602,6 +620,12 @@ class BackendReadinessService:
                 close_ts = _safe_float(item.get("close_ts"))
                 eligible = bool(maturity.get("governance_eligible"))
                 counterfactual_invalidated = bool((evidence or {}).get("evidence_invalidated"))
+                source_review_invalid = (
+                    not str(item.get("source_review_id") or "")
+                    or review_has_system_contamination(
+                        _loads(item.get("source_review_json"), {})
+                    )
+                )
                 if counterfactual_invalidated:
                     invalidated_counterfactuals += 1
                 position_id = str(item.get("position_id") or "")
@@ -610,9 +634,12 @@ class BackendReadinessService:
                     and close_ts >= canary_started_at
                     and position_id in shadow_position_ids
                 )
+                if source_review_invalid or counterfactual_invalidated:
+                    if in_current_canary:
+                        invalid_evidence += 1
+                    continue
                 overdue_immature = (
                     not eligible
-                    and not counterfactual_invalidated
                     and close_ts <= now - result["governance_horizon_minutes"] * 60
                 )
                 if in_current_canary:
@@ -1324,6 +1351,7 @@ class BackendReadinessService:
         replay: dict[str, Any],
         stability: dict[str, Any],
         learning_worker: dict[str, Any],
+        risk_metrics: dict[str, Any],
     ) -> dict[str, Any]:
         """Build independent authorization-oriented readiness dimensions."""
 
@@ -1353,6 +1381,17 @@ class BackendReadinessService:
             )
         if bool(loop.get("running")) and loop.get("accepting_new_risk") is False:
             execution_blockers.append(blocker("live_loop", "not_accepting_new_risk"))
+        if is_runtime_state_db and risk_metrics.get("ok") is not True:
+            execution_blockers.append(
+                blocker(
+                    "risk_metrics",
+                    "canonical_forward_var_not_ready",
+                    status=str(risk_metrics.get("status") or "unknown"),
+                    var_status=str(
+                        risk_metrics.get("var_status") or "unknown"
+                    ),
+                )
+            )
 
         live_alpha_blockers = list(execution_blockers)
         if runtime_weight_integrity.get("ok") is not True:
@@ -2261,6 +2300,77 @@ class BackendReadinessService:
                 "prometheus_available": False,
                 "error": f"{type(exc).__name__}: {exc}",
             }
+
+    def _risk_metrics_status(self) -> dict[str, Any]:
+        from backend.risk.metrics_snapshot import SNAPSHOT_KEY
+
+        try:
+            conn = _connect_state(self.db_path)
+            try:
+                if not _table_exists(conn, "runtime_kv"):
+                    return {
+                        "ok": False,
+                        "status": "missing",
+                        "var_status": "unknown",
+                        "source": f"runtime_kv:{SNAPSHOT_KEY}",
+                    }
+                row = _execute(
+                    conn,
+                    "SELECT value_json FROM runtime_kv WHERE key=? LIMIT 1",
+                    (SNAPSHOT_KEY,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": "error",
+                "var_status": "unknown",
+                "source": f"runtime_kv:{SNAPSHOT_KEY}",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        if not row:
+            return {
+                "ok": False,
+                "status": "missing",
+                "var_status": "unknown",
+                "source": f"runtime_kv:{SNAPSHOT_KEY}",
+            }
+        try:
+            raw = row["value_json"]
+        except (KeyError, TypeError):
+            raw = row[0]
+        snapshot = _loads(raw, {})
+        components = dict(snapshot.get("components") or {})
+        var = dict(components.get("var") or {})
+        status = str(snapshot.get("status") or "unknown")
+        var_status = str(var.get("status") or "unknown")
+        contract_ok = snapshot.get("schema_version") == SNAPSHOT_KEY
+        return {
+            "ok": bool(
+                contract_ok
+                and status not in {"unknown", "stale", "error"}
+                and var_status == "known"
+            ),
+            "status": status,
+            "var_status": var_status,
+            "schema_version": str(snapshot.get("schema_version") or ""),
+            "as_of": snapshot.get("as_of"),
+            "input_fingerprint": str(
+                snapshot.get("input_fingerprint") or ""
+            ),
+            "source_window_start": str(
+                snapshot.get("source_window_start") or ""
+            ),
+            "source_window_end": str(
+                snapshot.get("source_window_end") or ""
+            ),
+            "sample_count": int(snapshot.get("sample_count") or 0),
+            "current_var": var,
+            "shadow_var_99": dict(components.get("var_shadow_99") or {}),
+            "source": f"runtime_kv:{SNAPSHOT_KEY}",
+            "read_only": True,
+        }
 
     @staticmethod
     def _latest_system_health_line() -> str:

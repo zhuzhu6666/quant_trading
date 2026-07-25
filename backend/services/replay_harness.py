@@ -20,6 +20,7 @@ from backend.core.state_store import (
     validate_runtime_state_schema,
 )
 from backend.services.evolution_ledger import current_runtime_config_snapshot
+from backend.services.review_contract import review_has_system_contamination
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -983,7 +984,13 @@ class ReplayHarnessService:
 
         matured_samples = [
             item for item in samples
-            if str(item.get("label_status") or "") == "matured" and str(item.get("integrity") or "") == "full" and _safe_float(item.get("train_weight")) > 0
+            if (
+                str(item.get("label_status") or "") == "matured"
+                and str(item.get("integrity") or "") == "full"
+                and not bool(item.get("system_contaminated"))
+                and bool(item.get("governance_eligible"))
+                and _safe_float(item.get("governance_effective_weight")) > 0
+            )
         ]
         if outcome_status == "no_trade":
             learning_status = "not_applicable_no_trade"
@@ -1262,7 +1269,10 @@ class ReplayHarnessService:
             has_positions = state_table_exists(conn, "position_lifecycle_event")
             has_supervisor = state_table_exists(conn, "position_supervisor_trace")
             has_deals = state_table_exists(conn, "ctrader_deals")
-            has_counterfactuals = state_table_exists(conn, "supervisor_counterfactual_review")
+            has_counterfactuals = (
+                state_table_exists(conn, "supervisor_counterfactual_review")
+                and state_table_exists(conn, "trade_outcome_review")
+            )
             orders: dict[str, list[dict[str, Any]]] = {}
             positions: dict[str, list[dict[str, Any]]] = {}
             supervisor: dict[str, list[dict[str, Any]]] = {}
@@ -1343,18 +1353,35 @@ class ReplayHarnessService:
                     cf_rows = _execute(
                         conn,
                         """
-                        SELECT counterfactual_id, review_id, trade_id, position_id,
-                               close_ts, close_reason, supervisor_event_type,
-                               supervisor_reason, label, confidence, horizons_json,
-                               evidence_json, created_at, updated_at
-                        FROM supervisor_counterfactual_review
-                        WHERE (? <> '' AND position_id = ?)
-                           OR (? <> '' AND trade_id = ?)
-                        ORDER BY close_ts ASC, counterfactual_id ASC
+                        SELECT c.counterfactual_id, c.review_id, c.trade_id,
+                               c.position_id, c.close_ts, c.close_reason,
+                               c.supervisor_event_type, c.supervisor_reason,
+                               c.label, c.confidence, c.horizons_json,
+                               c.evidence_json, c.created_at, c.updated_at,
+                               r.review_id AS source_review_id,
+                               r.review_json AS source_review_json
+                        FROM supervisor_counterfactual_review c
+                        LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
+                        WHERE (? <> '' AND c.position_id = ?)
+                           OR (? <> '' AND c.trade_id = ?)
+                        ORDER BY c.close_ts ASC, c.counterfactual_id ASC
                         """,
                         (position_id, position_id, trade_id, trade_id),
                     ).fetchall()
-                    counterfactuals[decision_id] = [dict(item) for item in cf_rows]
+                    valid_counterfactuals = []
+                    for item in cf_rows:
+                        value = dict(item)
+                        evidence = _loads(value.get("evidence_json"), {})
+                        if (
+                            not str(value.pop("source_review_id", "") or "")
+                            or review_has_system_contamination(
+                                _loads(value.pop("source_review_json", None), {})
+                            )
+                            or bool(evidence.get("evidence_invalidated"))
+                        ):
+                            continue
+                        valid_counterfactuals.append(value)
+                    counterfactuals[decision_id] = valid_counterfactuals
             return {
                 "orders": orders,
                 "positions": positions,
@@ -2378,6 +2405,22 @@ class ReplayHarnessService:
             or getattr(cfg, "runtime_incident_mode", "normal")
             or "normal"
         )
+        recorded_var = (
+            audit.get("candidate_forward_var")
+            if isinstance(audit.get("candidate_forward_var"), dict)
+            else risk_state.get("var")
+            if isinstance(risk_state.get("var"), dict)
+            else {}
+        )
+        replay_risk_state = dict(risk_state)
+        if recorded_var:
+            replay_risk_state["var"] = recorded_var
+        recorded_shadow_var = audit.get("candidate_forward_var_shadow_99")
+        if isinstance(recorded_shadow_var, dict):
+            replay_risk_state["var_shadow_99"] = recorded_shadow_var
+        var_replayable = bool(recorded_var.get("status"))
+        if bool(getattr(cfg, "var_enabled", False)) and not var_replayable:
+            gaps.append("missing_recorded_risk_metrics_snapshot")
         context = {
             "trade": {
                 "symbol": str(row.get("symbol") or trade.get("symbol") or "XAUUSD"),
@@ -2397,9 +2440,12 @@ class ReplayHarnessService:
                 "drawdown_pct": _safe_float(portfolio.get("drawdown_pct")),
                 "circuit_breaker": bool(portfolio.get("circuit_breaker", False)),
             },
-            "risk_snapshot": risk_state,
+            "risk_snapshot": replay_risk_state,
             "var": {
-                "enabled": bool(getattr(cfg, "var_enabled", False)),
+                "enabled": (
+                    bool(getattr(cfg, "var_enabled", False))
+                    and var_replayable
+                ),
                 "threshold_pct": float(getattr(cfg, "var_cvar_threshold", 0.02) or 0.02) * 100.0,
             },
             "open_position_count": _safe_int(portfolio.get("n_positions"), _safe_int(audit_state.get("open_position_count"))),

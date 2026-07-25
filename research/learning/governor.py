@@ -12,6 +12,7 @@ from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.review_contract import review_has_system_contamination
 from research.learning.effect_reconciliation import EffectEvaluation, evaluate_application_effect
 from research.learning.governance_conflicts import GovernanceConflictResolver
 
@@ -172,7 +173,8 @@ class RuleEvolutionGovernor:
         context_integrity = str(review.get("context_integrity") or "full")
         attribution_integrity = str(review.get("attribution_integrity") or "full")
         return bool(
-            context_integrity != "full"
+            review_has_system_contamination(review)
+            or context_integrity != "full"
             or attribution_integrity == "missing"
             or close_reason in {"emergency_close", "restart_replay", "manual_close"}
             or tags & {"manual_intervention", "partial_context", "attribution_missing", "restart_replay"}

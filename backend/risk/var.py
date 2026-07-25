@@ -1,67 +1,109 @@
-"""VaR / CVaR calculation for the trading portfolio."""
+"""Historical forward VaR/CVaR over a frozen closed-bar return distribution."""
 from __future__ import annotations
 
-import numpy as np
 from typing import Any
-from loguru import logger
+
+import numpy as np
 
 
 class VaRCalculator:
-    """Calculate Value at Risk and Conditional VaR."""
+    def __init__(self, confidence: float = 0.95, min_returns: int = 10):
+        if not 0 < confidence < 1:
+            raise ValueError("confidence must be between 0 and 1")
+        self.confidence = float(confidence)
+        self.min_returns = max(1, int(min_returns))
 
-    def __init__(self, confidence: float = 0.95):
-        self.confidence = confidence
+    def calculate_forward(
+        self,
+        returns: list[float] | np.ndarray,
+        *,
+        net_notional_usd: float,
+        current_equity: float,
+        lookback: int = 500,
+        timeframe: str = "",
+    ) -> dict[str, Any]:
+        try:
+            values = np.asarray(returns, dtype=float)
+            notional = float(net_notional_usd)
+            equity = float(current_equity)
+        except (TypeError, ValueError, OverflowError):
+            return self._empty("error", "invalid_forward_var_inputs", timeframe=timeframe)
+        if (
+            values.ndim != 1
+            or not np.all(np.isfinite(values))
+            or not np.isfinite(notional)
+            or not np.isfinite(equity)
+            or equity <= 0
+        ):
+            return self._empty("error", "invalid_forward_var_inputs", timeframe=timeframe)
 
-    def calculate(self, equity_series: list[float] | np.ndarray, lookback: int = 100) -> dict[str, Any]:
-        """
-        Calculate VaR and CVaR from equity curve.
+        values = values[-max(1, int(lookback)) :]
+        if len(values) < self.min_returns:
+            return self._empty(
+                "warming_up",
+                "insufficient_closed_bar_returns",
+                sample_count=len(values),
+                current_equity=equity,
+                net_notional_usd=notional,
+                timeframe=timeframe,
+            )
 
-        Parameters
-        ----------
-        equity_series : list[float] | np.ndarray
-            Equity curve (or PnL series).
-        lookback : int
-            Number of recent points to use (default 100).
-
-        Returns
-        -------
-        dict with keys: var, cvar, var_pct, confidence, lookback, current_equity
-        """
-        if len(equity_series) < 2:
-            return {"var": 0.0, "cvar": 0.0, "var_pct": 0.0, "confidence": self.confidence,
-                    "lookback": lookback, "current_equity": 0.0, "error": "insufficient data"}
-
-        arr = np.asarray(equity_series, dtype=float)
-        if len(arr) > lookback:
-            arr = arr[-lookback:]
-
-        # Daily returns
-        returns = np.diff(arr) / arr[:-1]
-        if len(returns) == 0:
-            return {"var": 0.0, "cvar": 0.0, "var_pct": 0.0, "confidence": self.confidence,
-                    "lookback": lookback, "current_equity": float(arr[-1]), "error": "insufficient returns"}
-
-        var = np.percentile(returns, (1 - self.confidence) * 100)
-        cvar = returns[returns <= var].mean() if any(returns <= var) else var
-
-        current_equity = float(arr[-1])
-        var_dollar = abs(var * current_equity)
-        cvar_dollar = abs(cvar * current_equity)
-
+        pnl_samples = values * notional
+        threshold = float(
+            np.percentile(pnl_samples, (1 - self.confidence) * 100)
+        )
+        tail = pnl_samples[pnl_samples <= threshold]
+        var_usd = max(0.0, -threshold)
+        cvar_usd = max(
+            var_usd,
+            max(0.0, -float(tail.mean() if len(tail) else threshold)),
+        )
+        var_fraction = var_usd / equity
+        cvar_fraction = cvar_usd / equity
         return {
-            "var": round(var_dollar, 2),
-            "cvar": round(cvar_dollar, 2),
-            "var_pct": round(abs(var) * 100, 2),
-            "confidence": self.confidence,
-            "lookback": int(len(returns)),
-            "current_equity": current_equity,
+            "status": "known",
+            "method": "historical",
+            "alpha": self.confidence,
+            "horizon": "one_closed_bar",
+            "timeframe": str(timeframe or ""),
+            "sample_count": len(values),
+            "current_equity": equity,
+            "net_notional_usd": round(notional, 8),
+            "var_usd": round(var_usd, 2),
+            "cvar_usd": round(cvar_usd, 2),
+            "var_fraction": round(var_fraction, 8),
+            "cvar_fraction": round(cvar_fraction, 8),
+            "var_pct": round(var_fraction * 100, 6),
+            "cvar_pct": round(cvar_fraction * 100, 6),
         }
 
-    def get_status(self, equity_series: list[float] | None = None) -> dict[str, Any]:
-        """Return VaR status for the API. If no equity provided, return empty structure."""
-        if equity_series is None:
-            return {"var": 0.0, "cvar": 0.0, "var_pct": 0.0, "confidence": self.confidence,
-                    "lookback": 0, "current_equity": 0.0, "status": "no data"}
-        result = self.calculate(equity_series)
-        result["status"] = "ok"
-        return result
+    def get_status(self) -> dict[str, Any]:
+        return self._empty("unknown", "missing_forward_var_input")
+
+    def _empty(
+        self,
+        status: str,
+        reason: str,
+        *,
+        sample_count: int = 0,
+        current_equity: float | None = None,
+        net_notional_usd: float | None = None,
+        timeframe: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "reason": reason,
+            "method": "historical",
+            "alpha": self.confidence,
+            "horizon": "one_closed_bar",
+            "timeframe": str(timeframe or ""),
+            "sample_count": int(sample_count),
+            "current_equity": current_equity,
+            "net_notional_usd": net_notional_usd,
+            "var_usd": None,
+            "cvar_usd": None,
+            "var_fraction": None,
+            "cvar_fraction": None,
+            "var_pct": None,
+            "cvar_pct": None,
+        }

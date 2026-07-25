@@ -81,6 +81,43 @@ def test_replay_never_releases_cursor_before_projection_commit():
     assert order == ["projection"]
 
 
+def test_replay_unknown_price_skips_audit_and_learning_but_commits_recovery():
+    order = []
+
+    class _Ledger:
+        def log_decision(self, **_kwargs):
+            order.append("ledger")
+
+    class _Reviewer:
+        def review_closed_trade(self, **_kwargs):
+            order.append("review")
+
+    result = replay_recovered_close(
+        broker="ctrader",
+        position_id=9,
+        position_state={"position_id": 9},
+        real_pnl={
+            "net": -4.0,
+            "exec_price": 4125.0,
+            "price_quality": "unknown",
+        },
+        strategy_name="factor_v4",
+        runtime=_replay_runtime(
+            mark_recovery_closed=lambda *_args, **_kwargs: order.append(
+                "recovery"
+            ),
+            release_close_latch=lambda *_args: order.append("release"),
+            ledger=_Ledger(),
+            trade_reviewer=_Reviewer(),
+            experience_builder=object(),
+            policy_suggester=object(),
+        ),
+    )
+
+    assert result is True
+    assert order == ["recovery", "release"]
+
+
 class _Connection:
     def __init__(self):
         self.closed = False

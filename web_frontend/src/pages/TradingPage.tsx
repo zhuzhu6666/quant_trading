@@ -35,6 +35,7 @@ import {
   pickString,
 } from "@/lib/compat";
 import { translateDisplayValue } from "@/lib/display";
+import { decodeCanonicalRiskSnapshot, knownMetric } from "@/api/riskSnapshot";
 
 type PositionRow = {
   symbol: string;
@@ -196,7 +197,8 @@ export function TradingPage() {
   const positionsFact = readFact(positionsQuery.data, "live.positions.v2");
   const statusFact = readFact(liveStatusQuery.data, "live.status.v2");
   const strategyFact = readFact(strategyStatusQuery.data, "live.strategy.v2");
-  const riskFact = readFact(riskQuery.data, "risk.summary.v2");
+  const riskInputsFact = readFactComponent(riskQuery.data, "risk_inputs", "risk.inputs.v1");
+  const riskHealthFact = readFactComponent(riskQuery.data, "system_health", "system.runtime-health.v1");
   const accountComponentFact = readFactComponent(snapshot, "account", "live.account.v2");
   const positionsComponentFact = readFactComponent(snapshot, "positions", "live.positions.v2");
   const endpointIdentityFact = readFactNestedComponent(positionsQuery.data, ["broker_reconcile", "identity"], "live.positions.identity.v1");
@@ -220,7 +222,12 @@ export function TradingPage() {
   const positionsComponentKnown = factIsKnown(positionsComponentFact);
   const statusKnown = factIsKnown(statusFact, statusRequestFailed);
   const strategyKnown = factIsKnown(strategyFact, strategyRequestFailed);
-  const riskKnown = factIsKnown(riskFact, riskQuery.isError || riskQuery.isRefetchError);
+  const riskRequestFailed = riskQuery.isError || riskQuery.isRefetchError;
+  const canonicalRisk = decodeCanonicalRiskSnapshot(riskQuery.data);
+  const riskKnown = factIsKnown(riskInputsFact, riskRequestFailed)
+    && canonicalRisk.contractKnown
+    && knownMetric(canonicalRisk.var95.status);
+  const riskHealthKnown = factIsKnown(riskHealthFact, riskRequestFailed);
 
   const loop = asRecord(loopQuery.data);
   const useEndpointAccount = accountEndpointKnown
@@ -309,6 +316,7 @@ export function TradingPage() {
     && positionsEndpointKnown
     && statusKnown
     && riskKnown
+    && riskHealthKnown
     && spotKnown;
   const positionsKnown = factIsKnown(positionsViewFact, positionsViewRequestFailed);
 
@@ -344,11 +352,9 @@ export function TradingPage() {
 
   const session = asRecord(pick(snapshot, ["session_stats", "daily", "session"]));
   const sessionPnl = pickNumber(session, ["pnl_today", "pnl", "session_pnl"], 0);
-  const riskDisplayable = factHasDisplayValue(riskFact);
   const riskSystemHealth = asRecord(pick(risk, ["system_health"]));
-  const riskVar = asRecord(pick(risk, ["var"]));
-  const totalRisk = riskDisplayable ? pickNumber(riskVar, ["var", "var_pct", "value", "var_95"], 0) : 0;
-  const circuitBreaker = riskDisplayable && pickBoolean(riskSystemHealth, ["trading_blocked", "blocked"], false);
+  const totalRisk = riskKnown ? canonicalRisk.var95.varPct : null;
+  const circuitBreaker = riskHealthKnown && pickBoolean(riskSystemHealth, ["trading_blocked"], false);
   const consecutiveLoss = pickNumber(session, ["consecutive_loss", "session_consecutive_loss"], 0);
   const attempts = pickNumber(liveExecutionSummary, ["attempts", "attempt_count"], 0);
   const successes = pickNumber(liveExecutionSummary, ["successes", "success", "wire_sends"], 0);
@@ -520,13 +526,14 @@ export function TradingPage() {
             <div className="trading-status-head">
               <h3>风控与执行</h3>
               <StatusPill
-                status={riskKnown ? (circuitBreaker ? "已触发" : "未触发") : "状态未知"}
-                tone={circuitBreaker ? "bad" : riskKnown ? "ok" : "warn"}
+                status={riskHealthKnown ? (circuitBreaker ? "健康面阻断" : riskKnown ? "风险输入已知" : "风险输入未知") : "状态未知"}
+                tone={circuitBreaker ? "bad" : riskHealthKnown && riskKnown ? "ok" : "warn"}
               />
             </div>
             <div className="field-list trading-compact-fields">
               <Field label="连续亏损" value={formatDecimal(consecutiveLoss, 0)} tone={consecutiveLoss >= 3 ? "warn" : "mute"} />
-              <Field label="风险值" value={riskDisplayable ? formatDecimal(totalRisk, 4) : "未知"} tone={riskKnown ? "mute" : "warn"} />
+              <Field label="前瞻 VaR 95%" value={totalRisk === null ? "未知" : `${formatDecimal(totalRisk, 4)}%`} tone={riskKnown ? "mute" : "warn"} />
+              <Field label="前瞻 CVaR 95%" value={riskKnown && canonicalRisk.var95.cvarPct !== null ? `${formatDecimal(canonicalRisk.var95.cvarPct, 4)}%` : "未知"} tone={riskKnown ? "mute" : "warn"} />
               <Field label="执行尝试" value={formatDecimal(attempts, 0)} />
               <Field label="下单成功" value={formatDecimal(successes, 0)} tone={executionKnown && successes > 0 ? "ok" : successes > 0 ? "warn" : "mute"} />
               <Field label="失败" value={formatDecimal(failures, 0)} tone={failures > 0 ? "bad" : executionKnown ? "ok" : "warn"} />

@@ -198,10 +198,12 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
             INSERT INTO autonomous_learning_sample
             (sample_id, sample_type, source_table, source_id, decision_id,
              trade_id, position_id, symbol, timeframe, event_ts,
-             label_status, integrity, train_weight, created_at, updated_at)
+             label_status, integrity, train_weight, system_contaminated,
+             governance_eligible, governance_effective_weight,
+             created_at, updated_at)
             VALUES ('als_trade_1', 'trade_review_outcome', 'trade_outcome_review',
                     'review_1', 'dec_bar_1', 'trade_1', '1001', 'XAUUSD+', 'M5',
-                    ?, 'matured', 'full', 1.0, ?, ?)
+                    ?, 'matured', 'full', 1.0, 0, 1, 1.0, ?, ?)
             """,
             (now - 8.0, now - 8.0, now - 8.0),
         )
@@ -319,9 +321,13 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
     assert gate_metrics["agreement_count"] == 1
     assert gate_metrics["disagreement_count"] == 0
     assert risk_metrics["schema_version"] == "risk_policy_recompute_metrics.v1"
-    assert risk_metrics["attempted_count"] == 1
-    assert risk_metrics["agreement_count"] == 1
+    assert risk_metrics["attempted_count"] == 0
+    assert risk_metrics["agreement_count"] == 0
     assert risk_metrics["disagreement_count"] == 0
+    assert risk_metrics["input_gap_count"] == 1
+    assert "missing_recorded_risk_metrics_snapshot" in (
+        risk_metrics["input_gap_examples"][0]["issues"]
+    )
     assert order_metrics["schema_version"] == "order_lifecycle_replay_metrics.v1"
     assert order_metrics["expected_order_decision_count"] == 1
     assert order_metrics["covered_order_decision_count"] == 1
@@ -383,6 +389,32 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
     assert selected_outcome["items"][0]["direction_label"] == "direction_long"
     assert selected_outcome["items"][0]["outcome"]["pnl"] == -1.25
     assert selected_outcome["items"][0]["learning"]["status"] == "learning_sample_ready"
+
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE autonomous_learning_sample
+            SET system_contaminated=1, governance_eligible=0,
+                governance_effective_weight=0.0
+            WHERE sample_id='als_trade_1'
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    contaminated_preview = service.run_bar_window_preview(
+        lookback_days=1,
+        limit=1,
+        warmup_bars=2,
+        post_bars=1,
+        decision_id="dec_bar_1",
+    )
+    contaminated_learning = contaminated_preview["metric_summary"][
+        "trade_outcome_learning_preview"
+    ]["items"][0]["learning"]
+    assert contaminated_learning["status"] == "learning_sample_observe"
+    assert contaminated_learning["matured_sample_count"] == 0
     assert Path(report["artifact_path"]).exists()
 
 
@@ -510,6 +542,55 @@ def test_autonomy_health_v1_is_machine_readable_and_read_only(tmp_path):
     assert approval["boundary"]["decision_policy_required_for_weight_writes"] is True
     assert approval["boundary"]["runtime_overlay_snapshot_required_for_config_changes"] is True
     assert latest_approval["event_id"] == "scope_approval_test"
+
+
+def test_autonomy_health_filters_before_limit_and_uses_governance_weight(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO autonomous_learning_sample
+            (sample_id, sample_type, source_table, source_id, event_ts,
+             label_status, integrity, train_weight, system_contaminated,
+             governance_eligible, governance_effective_weight,
+             created_at, updated_at)
+            VALUES ('clean_sample', 'trade_review_outcome',
+                    'trade_outcome_review', 'clean_review', 1.0,
+                    'matured', 'full', 0.0, 0, 1, 0.8, 1.0, 1.0)
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO autonomous_learning_sample
+            (sample_id, sample_type, source_table, source_id, event_ts,
+             label_status, integrity, train_weight, system_contaminated,
+             governance_eligible, governance_effective_weight,
+             created_at, updated_at)
+            VALUES (?, 'trade_review_outcome', 'trade_outcome_review', ?,
+                    ?, 'matured', 'full', 1.0, 1, 1, 1.0, ?, ?)
+            """,
+            [
+                (
+                    f"contaminated_{index}",
+                    f"contaminated_review_{index}",
+                    1000.0 + index,
+                    1000.0 + index,
+                    1000.0 + index,
+                )
+                for index in range(500)
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    stats = AutonomyHealthService(db_path)._evidence_integrity_stats()
+
+    assert stats["sample_count"] == 1
+    assert stats["ready_sample_count"] == 1
+    assert round(stats["evidence_integrity"], 6) == 0.93
 
 
 def test_autonomy_health_enforcement_tightens_scope_through_incident_control(tmp_path):

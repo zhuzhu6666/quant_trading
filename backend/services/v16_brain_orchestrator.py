@@ -16,6 +16,7 @@ from typing import Any
 
 from backend.core.db import STATE_DB, is_state_db_path, state_table_columns, state_table_exists
 from backend.services._brain_helpers import connect, dumps, execute, loads, safe_float
+from backend.services.review_contract import review_has_system_contamination
 from backend.services.v16_brain_planning import (
     BrainActionPlanEvaluatorService,
     BrainActionPlannerService,
@@ -399,18 +400,38 @@ class V16BrainOrchestratorService:
             )
             latest_cf = 0.0
             latest_cf_updated = 0.0
-            if state_table_exists(conn, "supervisor_counterfactual_review"):
-                row = execute(
+            if (
+                state_table_exists(conn, "supervisor_counterfactual_review")
+                and state_table_exists(conn, "trade_outcome_review")
+            ):
+                rows = execute(
                     conn,
                     """
-                    SELECT MAX(close_ts) AS latest_event,
-                           MAX(updated_at) AS latest_updated
-                    FROM supervisor_counterfactual_review
+                    SELECT c.close_ts, c.updated_at, c.evidence_json,
+                           r.review_id AS source_review_id,
+                           r.review_json AS source_review_json
+                    FROM supervisor_counterfactual_review c
+                    LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
                     """,
-                ).fetchone()
-                latest_cf = safe_float(row["latest_event"] if row else 0.0)
-                latest_cf_updated = safe_float(
-                    row["latest_updated"] if row else 0.0
+                ).fetchall()
+                valid_rows = [
+                    row
+                    for row in rows
+                    if str(row["source_review_id"] or "")
+                    and not review_has_system_contamination(
+                        loads(row["source_review_json"], {})
+                    )
+                    and not bool(
+                        loads(row["evidence_json"], {}).get("evidence_invalidated")
+                    )
+                ]
+                latest_cf = max(
+                    (safe_float(row["close_ts"]) for row in valid_rows),
+                    default=0.0,
+                )
+                latest_cf_updated = max(
+                    (safe_float(row["updated_at"]) for row in valid_rows),
+                    default=0.0,
                 )
             latest_brain_snapshot = 0.0
             if state_table_exists(conn, "brain_state_snapshot"):

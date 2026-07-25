@@ -12,6 +12,7 @@ import {
 } from "../api/fact.ts";
 import { authStateAfterMeFailure } from "../contexts/authState.ts";
 import { pick, pickArray } from "../lib/compat.ts";
+import { decodeCanonicalRiskSnapshot, knownMetric } from "../api/riskSnapshot.ts";
 
 const now = Date.now() / 1000;
 const envelope = (contract, source = "ctrader", observedAt = now, staleAfter = 30, components = {}) => ({
@@ -32,6 +33,44 @@ assert.equal(readFact(genericState, "live.state.v2").state, "known");
 assert.equal(missingRisk.state, "unknown", "generic live state must not turn a failed risk endpoint green");
 assert.equal(factAllowsNewRisk(missingRisk), false);
 assert.equal(factIsKnown(readFact({ _fact: envelope("risk.summary.v2") }, "risk.summary.v2"), true), false, "request errors must suppress a cached green risk fact");
+
+const canonicalRisk = decodeCanonicalRiskSnapshot({
+  snapshot: {
+    schema_version: "risk_metrics_snapshot.v2",
+    status: "known",
+    sample_count: 500,
+    components: {
+      var: {
+        status: "known",
+        alpha: 0.95,
+        horizon: "one_closed_bar",
+        timeframe: "M5",
+        sample_count: 500,
+        current_equity: 371.5,
+        current_net_notional_usd: 0,
+        var_usd: 0,
+        cvar_usd: 0,
+        var_pct: 0,
+        cvar_pct: 0,
+      },
+      var_shadow_99: { status: "known", alpha: 0.99, var_pct: 0, cvar_pct: 0 },
+      kelly: { status: "known", kelly_fraction: 0, closed_trades: 181 },
+      stress: { status: "known", stress_loss_pct: 0, distinct_position_count: 0 },
+      concentration: { status: "known", concentration_pct: 0, applicable: false, is_safe: true },
+    },
+  },
+  var: { status: "known", var_pct: 99 },
+});
+assert.equal(canonicalRisk.contractKnown, true);
+assert.equal(knownMetric(canonicalRisk.var95.status), true);
+assert.equal(canonicalRisk.var95.varPct, 0, "known zero exposure must remain a displayable fact");
+assert.equal(canonicalRisk.var99.alpha, 0.99);
+assert.equal(canonicalRisk.kelly.closedTrades, 181);
+assert.equal(
+  decodeCanonicalRiskSnapshot({ var: { status: "known", var_pct: 99 } }).contractKnown,
+  false,
+  "legacy top-level risk fields must not masquerade as the canonical snapshot",
+);
 
 const retainedHealthy = {
   status: "healthy",

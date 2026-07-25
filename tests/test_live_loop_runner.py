@@ -138,7 +138,7 @@ def test_normal_tick_updates_risk_metrics_before_sixty_second_wait():
     assert result["exit_reason"] == "stop_during_alpha_wait"
 
 
-def test_tick_specific_wait_skips_legacy_risk_update_and_alpha_wait():
+def test_tick_specific_wait_updates_risk_before_wait():
     risk_updates = []
     stop_flag = _StopFlag(wait_results=[True])
 
@@ -160,5 +160,6 @@ def test_tick_specific_wait_skips_legacy_risk_update_and_alpha_wait():
     )
 
     assert stop_flag.wait_calls == [10.0]
-    assert risk_updates == []
+    assert len(risk_updates) == 1
+    assert risk_updates[0]["tick"] == 1
     assert result["exit_reason"] == "stop_during_tick_wait"

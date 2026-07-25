@@ -25,6 +25,7 @@ from backend.services.position_supervisor_templates import (
     get_position_supervisor_template,
     list_position_supervisor_templates,
 )
+from backend.services.review_contract import review_has_system_contamination
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
@@ -380,7 +381,7 @@ def _load_review_rows(
     limit: int,
 ) -> list[sqlite3.Row]:
     start_ts, end_ts = _day_bounds(day)
-    return _execute(
+    rows = _execute(
         conn,
         """
         SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
@@ -390,10 +391,15 @@ def _load_review_rows(
         WHERE created_at >= ? AND created_at < ?
           AND ABS(COALESCE(pnl, 0.0)) <= ?
         ORDER BY created_at ASC
-        LIMIT ?
         """,
-        (start_ts, end_ts, float(small_abs_pnl), int(limit)),
+        (start_ts, end_ts, float(small_abs_pnl)),
     ).fetchall()
+    clean_rows = [
+        row
+        for row in rows
+        if not review_has_system_contamination(_loads(row["review_json"], {}))
+    ]
+    return clean_rows[: max(0, int(limit))]
 
 
 def _amend_issue_count(conn: sqlite3.Connection, *, day: str) -> dict[str, int]:
@@ -418,9 +424,11 @@ def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, 
         rows = _execute(
             conn,
             """
-            SELECT label, supervisor_event_type, evidence_json
-            FROM supervisor_counterfactual_review
-            WHERE close_ts >= ? AND close_ts < ?
+            SELECT cf.label, cf.supervisor_event_type, cf.evidence_json,
+                   tr.review_json AS source_review_json
+            FROM supervisor_counterfactual_review cf
+            JOIN trade_outcome_review tr ON tr.review_id=cf.review_id
+            WHERE cf.close_ts >= ? AND cf.close_ts < ?
             """,
             (start_ts, end_ts),
         ).fetchall()
@@ -429,6 +437,10 @@ def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, 
     labels: dict[str, int] = {}
     events: dict[str, int] = {}
     for row in rows:
+        if review_has_system_contamination(
+            _loads(row["source_review_json"], {})
+        ):
+            continue
         label = str(row["label"] or "")
         event_type = str(row["supervisor_event_type"] or "")
         evidence = row["evidence_json"] or {}
@@ -437,7 +449,10 @@ def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, 
                 evidence = json.loads(evidence or "{}")
             except Exception:
                 evidence = {}
-        if not bool(((evidence or {}).get("maturity") or {}).get("governance_eligible")):
+        if (
+            bool((evidence or {}).get("evidence_invalidated"))
+            or not bool(((evidence or {}).get("maturity") or {}).get("governance_eligible"))
+        ):
             continue
         labels[label] = labels.get(label, 0) + 1
         events[event_type] = events.get(event_type, 0) + 1
@@ -525,12 +540,11 @@ def materialize_position_supervisor_candidate_observations(
                        tr.failure_tags_json, tr.summary_text,
                        tr.review_json, tr.created_at
                 FROM supervisor_counterfactual_review cf
-                JOIN trade_outcome_review tr ON tr.position_id=cf.position_id
+                JOIN trade_outcome_review tr ON tr.review_id=cf.review_id
                 WHERE cf.close_ts>=?
                 ORDER BY cf.close_ts ASC, tr.created_at DESC
-                LIMIT ?
                 """,
-                (candidate_created_at, min(remaining * 4, 5000)),
+                (candidate_created_at,),
             ).fetchall()
             seen_positions: set[str] = set()
             candidate_inserted = 0
@@ -538,10 +552,13 @@ def materialize_position_supervisor_candidate_observations(
             candidate_evaluated = 0
             for row in rows:
                 item = dict(row)
+                if review_has_system_contamination(
+                    _loads(item.get("review_json"), {})
+                ):
+                    continue
                 position_id = str(item.get("position_id") or "")
                 if not position_id or position_id in seen_positions:
                     continue
-                seen_positions.add(position_id)
                 counterfactual_evidence = _loads(
                     item.get("counterfactual_evidence_json"), {}
                 )
@@ -551,6 +568,7 @@ def materialize_position_supervisor_candidate_observations(
                     or bool((counterfactual_evidence or {}).get("evidence_invalidated"))
                 ):
                     continue
+                seen_positions.add(position_id)
                 close_ts = _safe_float(item.get("close_ts"))
                 trace_id = "psvobs_" + hashlib.sha256(
                     f"{suggestion_id}|{position_id}|{close_ts:.6f}".encode("utf-8")

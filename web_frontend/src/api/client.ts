@@ -346,6 +346,7 @@ export type RealizedPnlSeries = {
 };
 
 export type RiskSummary = {
+  snapshot?: Record<string, unknown>;
   policy?: Record<string, unknown>;
   concentration?: Record<string, unknown>;
   var?: Record<string, unknown>;

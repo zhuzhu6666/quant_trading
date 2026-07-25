@@ -119,9 +119,11 @@ def _create_meta_signal_tables(path):
         """
         CREATE TABLE supervisor_counterfactual_review (
             counterfactual_id TEXT PRIMARY KEY,
+            review_id TEXT DEFAULT '',
             position_id TEXT NOT NULL,
             close_ts REAL DEFAULT 0.0,
-            label TEXT DEFAULT ''
+            label TEXT DEFAULT '',
+            evidence_json TEXT DEFAULT '{}'
         )
         """
     )
@@ -161,7 +163,13 @@ def _create_meta_signal_tables(path):
         "INSERT INTO factor_governance_shadow_audit VALUES ('fg1', 0, ?, 1006.0)",
         (json.dumps({"prediction_label": "weak_factor_contribution"}),),
     )
-    conn.execute("INSERT INTO supervisor_counterfactual_review VALUES ('cf1', 'pos_1', 1006.0, 'premature_tighten')")
+    conn.execute(
+        """
+        INSERT INTO supervisor_counterfactual_review
+        (counterfactual_id, review_id, position_id, close_ts, label, evidence_json)
+        VALUES ('cf1', 'review_6', 'pos_1', 1006.0, 'premature_tighten', '{}')
+        """
+    )
     conn.execute("INSERT INTO llm_advisory_audit VALUES ('llm1', 'error', 1006.0)")
     conn.execute("INSERT INTO model_permission_audit VALUES ('mpa1', 'blocked', 1006.0)")
     conn.commit()
@@ -278,3 +286,53 @@ def test_meta_model_lightgbm_v2_features_include_risk_and_shadow_signals(tmp_pat
     assert features["llm_error_rate"] == 1.0
     assert features["permission_block_rate"] == 1.0
     assert enriched["future_window"]["count"] == 3
+
+
+def test_meta_model_counterfactual_rates_exclude_invalidated_and_contaminated_lineage(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_reviews(db_path)
+    _create_meta_signal_tables(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, pnl, outcome_label, review_json, created_at)
+            VALUES ('review_contaminated', 'trade_bad', 'pos_bad', -1.0, 'bad_loss', ?, 1006.0)
+            """,
+            (
+                json.dumps(
+                    {
+                        "system_issue_context": {
+                            "contaminates_learning": True,
+                            "labels": ["price_fact_unrecoverable"],
+                        }
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO supervisor_counterfactual_review
+            (counterfactual_id, review_id, position_id, close_ts, label, evidence_json)
+            VALUES ('cf_contaminated', 'review_contaminated', 'pos_bad', 1006.0,
+                    'correct_stop', '{}'),
+                   ('cf_invalidated', 'review_6', 'pos_1', 1006.0,
+                    'protection_too_tight', '{"evidence_invalidated":true}')
+            """
+        )
+        conn.commit()
+        conn.row_factory = sqlite3.Row
+        rates = MetaModelLightGBMService._counterfactual_rates(
+            conn,
+            start_ts=1000.0,
+            end_ts=1010.0,
+        )
+    finally:
+        conn.close()
+
+    assert rates == {
+        "counterfactual_premature_rate": 1.0,
+        "counterfactual_protection_tight_rate": 0.0,
+        "counterfactual_correct_stop_rate": 0.0,
+    }

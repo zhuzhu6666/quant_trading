@@ -11,6 +11,7 @@ AUTONOMOUS_STATUSES = {
     "rolled_back",
     "blocked_by_risk",
     "superseded",
+    "invalidated_evidence",
 }
 
 

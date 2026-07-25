@@ -28,6 +28,7 @@ from backend.services._brain_helpers import (
     safe_float,
     text,
 )
+from backend.services.review_contract import review_has_system_contamination
 
 
 # ---------------------------------------------------------------------------
@@ -1079,12 +1080,20 @@ class BrainMemoryService:
         if not state_table_exists(conn, "experience_memory"):
             gaps.append("experience_memory")
             return []
-        rows = execute(conn, """SELECT experience_id, trade_id, source_table, source_id, regime_id,
-            decision_context_json, outcome_label, reward_score, failure_tags_json,
-            recommended_action, evidence_strength, append_source, artifact_version, created_at
-            FROM experience_memory ORDER BY created_at DESC LIMIT 50""").fetchall()
+        rows = execute(conn, """SELECT e.experience_id, e.trade_id, e.source_table, e.source_id,
+            e.regime_id, e.decision_context_json, e.outcome_label, e.reward_score,
+            e.failure_tags_json, e.recommended_action, e.evidence_strength,
+            e.append_source, e.artifact_version, e.created_at,
+            r.review_id AS source_review_id, r.review_json AS source_review_json
+            FROM experience_memory e
+            LEFT JOIN trade_outcome_review r ON r.review_id=e.source_id
+            WHERE e.append_source IN ('live_review', 'trade_lesson_memory.v1')
+            ORDER BY e.created_at DESC""").fetchall()
         items = []
         for row in rows:
+            source_review = loads(row["source_review_json"], {})
+            if not str(row["source_review_id"] or "") or review_has_system_contamination(source_review):
+                continue
             tags = loads(row["failure_tags_json"], [])
             context = loads(row["decision_context_json"], {})
             lesson = context.get("lesson") if isinstance(context, dict) else {}
@@ -1116,6 +1125,8 @@ class BrainMemoryService:
                 polarity=polarity, created_at=safe_float(row["created_at"]), terms=terms,
                 regime=str(row["regime_id"] or ""),
             ))
+            if len(items) >= 50:
+                break
         return items
 
     def _trade_outcome_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
@@ -1124,10 +1135,13 @@ class BrainMemoryService:
             return []
         rows = execute(conn, """SELECT review_id, trade_id, position_id, entry_decision_id, pnl,
             outcome_label, failure_tags_json, summary_text, review_json, created_at
-            FROM trade_outcome_review ORDER BY created_at DESC LIMIT 50""").fetchall()
+            FROM trade_outcome_review ORDER BY created_at DESC""").fetchall()
         items = []
         for row in rows:
             tags = loads(row["failure_tags_json"], [])
+            review = loads(row["review_json"], {})
+            if review_has_system_contamination(review):
+                continue
             pnl = safe_float(row["pnl"])
             outcome_label = str(row["outcome_label"] or "")
             polarity = (
@@ -1145,28 +1159,40 @@ class BrainMemoryService:
                             "trade_id": row["trade_id"], "position_id": row["position_id"],
                             "entry_decision_id": row["entry_decision_id"], "pnl": pnl,
                             "outcome_label": outcome_label, "failure_tags": tags,
-                            "review": loads(row["review_json"], {}),
+                            "review": review,
                             "created_at": safe_float(row["created_at"])},
                 evidence_score=0.75, polarity=polarity,
                 created_at=safe_float(row["created_at"]), terms=terms,
             ))
+            if len(items) >= 50:
+                break
         return items
 
     def _counterfactual_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
         if not state_table_exists(conn, "supervisor_counterfactual_review"):
             gaps.append("supervisor_counterfactual_review")
             return []
-        rows = execute(conn, """SELECT counterfactual_id, review_id, trade_id, position_id,
-            close_ts, close_reason, supervisor_event_type, supervisor_reason, label,
-            confidence, horizons_json, evidence_json, created_at, updated_at
+        rows = execute(conn, """SELECT c.counterfactual_id, c.review_id, c.trade_id, c.position_id,
+            c.close_ts, c.close_reason, c.supervisor_event_type, c.supervisor_reason, c.label,
+            c.confidence, c.horizons_json, c.evidence_json, c.created_at, c.updated_at,
+            r.review_id AS source_review_id, r.review_json AS source_review_json
             -- close_ts is the event-time ordering.  updated_at is only the
             -- batch/recompute timestamp and must not decide which posterior
             -- enters the brain's bounded evidence window.
-            FROM supervisor_counterfactual_review ORDER BY close_ts DESC, updated_at DESC LIMIT 50""").fetchall()
+            FROM supervisor_counterfactual_review c
+            LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
+            ORDER BY c.close_ts DESC, c.updated_at DESC""").fetchall()
         items = []
         for row in rows:
+            if (
+                not str(row["source_review_id"] or "")
+                or review_has_system_contamination(loads(row["source_review_json"], {}))
+            ):
+                continue
             horizons = loads(row["horizons_json"], [])
             evidence = loads(row["evidence_json"], {})
+            if bool(evidence.get("evidence_invalidated")):
+                continue
             label = str(row["label"] or "")
             confidence = safe_float(row["confidence"])
             mapped = _SUPERVISOR_COUNTERFACTUAL_ACTIONS.get(label)
@@ -1205,6 +1231,8 @@ class BrainMemoryService:
                 created_at=safe_float(row["updated_at"] or row["created_at"]),
                 terms=terms,
             ))
+            if len(items) >= 50:
+                break
         return items
 
     def _policy_suggestion_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
@@ -1214,7 +1242,10 @@ class BrainMemoryService:
         rows = execute(conn, """SELECT suggestion_id, scope_type, scope_key, action, confidence,
             reason, evidence_json, status, created_at
             FROM policy_suggestion
-            WHERE status NOT IN ('superseded', 'rejected', 'failed', 'blocked_by_evidence')
+            WHERE status NOT IN (
+                'superseded', 'rejected', 'failed', 'blocked_by_evidence',
+                'invalidated_evidence'
+            )
             ORDER BY created_at DESC LIMIT 50""").fetchall()
         items = []
         for row in rows:

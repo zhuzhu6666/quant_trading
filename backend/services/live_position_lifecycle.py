@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, MutableMapping
 
 from backend.services.market_regime import resolve_market_regime
+from backend.services.review_contract import trusted_broker_close_price
 from risk.runtime_policy import RiskLimitSnapshot
 
 
@@ -783,6 +784,38 @@ def build_open_trade_risk_context_payload(
     event_filter_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     risk_limits = RiskLimitSnapshot.from_runtime_config(cfg)
+    var_enabled = bool(getattr(cfg, "var_enabled", False))
+    projected_risk_snapshot = dict(risk_snapshot or {})
+    if var_enabled:
+        from backend.risk.metrics_snapshot import (
+            project_candidate_risk_snapshot,
+        )
+
+        contract_sizes = {
+            str(name): dict(settings or {}).get("contract_size")
+            for name, settings in dict(
+                getattr(cfg, "multi_symbol_config", {}) or {}
+            ).items()
+        }
+        projected_risk_snapshot = project_candidate_risk_snapshot(
+            projected_risk_snapshot,
+            positions=positions,
+            account=acct,
+            candidate={
+                "symbol": symbol,
+                "direction": direction,
+                "current_price": current_price,
+                "requested_api_volume": requested_api_volume,
+            },
+            contract_sizes=contract_sizes,
+            var_confidence=float(getattr(cfg, "var_alpha", 0.95) or 0.95),
+            var_lookback=max(
+                2,
+                int(getattr(cfg, "var_window", 500) or 500),
+            ),
+        )
+    else:
+        projected_risk_snapshot.pop("_forward_var_input", None)
     return {
         "trade": {
             "symbol": str(symbol or "XAUUSD"),
@@ -799,10 +832,10 @@ def build_open_trade_risk_context_payload(
             "drawdown_pct": float(session_state.get("drawdown_pct", 0.0) or 0.0),
             "circuit_breaker": bool(session_state.get("circuit_breaker", False)),
         },
-        "risk_snapshot": risk_snapshot or {},
+        "risk_snapshot": projected_risk_snapshot,
         "risk_limits": risk_limits.to_dict(),
         "var": {
-            "enabled": bool(getattr(cfg, "var_enabled", False)),
+            "enabled": var_enabled,
             "threshold_pct": risk_limits.var_threshold_pct,
             "cvar_threshold_pct": risk_limits.cvar_threshold_pct,
         },
@@ -1494,7 +1527,7 @@ def build_replayed_close_payloads(
     state = position_state or {}
     pnl_payload = real_pnl or {}
     total_pnl = float(pnl_payload.get("net", state.get("close_pnl", 0.0)) or 0.0)
-    close_price = float(pnl_payload.get("exec_price", state.get("open_price", 0.0)) or 0.0)
+    close_price = trusted_broker_close_price(pnl_payload) or 0.0
     close_ts = float(pnl_payload.get("exec_timestamp", now_ts) or now_ts)
     context_integrity = str(state.get("context_integrity") or context_integrity_default or "")
     symbol = str(state.get("symbol") or "XAUUSD+")

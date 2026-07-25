@@ -17,7 +17,10 @@ from backend.core.state_store import (
 from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.position_metrics import update_position_path_metrics
-from backend.services.review_contract import normalize_trade_review_contract
+from backend.services.review_contract import (
+    normalize_trade_review_contract,
+    review_has_system_contamination,
+)
 from backend.services.trade_lesson_memory import upsert_trade_lesson_memory
 
 
@@ -606,6 +609,8 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
 
     for row in reviews:
         review_json = json.loads(row["review_json"] or "{}")
+        if review_has_system_contamination(review_json):
+            continue
         failure_tags = list(json.loads(row["failure_tags_json"] or "[]"))
         outcome_label = str(row["outcome_label"] or "")
         pnl = float(row["pnl"] or 0.0)

@@ -44,6 +44,14 @@ REQUIRED_SCENARIOS: dict[str, tuple[str, ...]] = {
         "tests/test_live_open_submission.py::test_confirmed_open_post_fill_and_reconcile_failure_stays_fail_closed",
         "tests/test_live_open_processing.py::test_amend_failure_latches_before_recovery_and_audit",
     ),
+    "broker_close_price_integrity": (
+        "tests/test_ctrader_close_position.py::test_broker_deal_price_reaches_restart_payload_without_money_scaling",
+        "tests/test_ctrader_close_position.py::test_get_deals_quarantines_same_position_price_scale_mismatch",
+        "tests/test_live_closed_position_cycle.py::test_unknown_price_skips_price_audit_and_learning_but_keeps_recovery",
+        "tests/test_live_recovery_close.py::test_replay_unknown_price_skips_audit_and_learning_but_commits_recovery",
+        "tests/test_trade_reviewer.py::test_trade_reviewer_rejects_unknown_execution_price",
+        "tests/research/test_rule_learning_pipeline.py::test_policy_suggester_cannot_refresh_clean_suggestion_from_contaminated_experience",
+    ),
 }
 
 
@@ -67,12 +75,20 @@ def binding_paths(*, root: Path | None = None) -> tuple[Path, ...]:
     root = root or repository_root()
     paths = {
         root / "execution/ctrader_bridge.py",
-        root / "execution/broker_contract.py",
+        root / "execution/deal_sync.py",
+        root / "backend/services/review_contract.py",
         root / "backend/services/broker_execution_intent.py",
         root / "backend/services/live_execution_recovery.py",
         root / "backend/services/live_open_submission.py",
         root / "backend/services/live_open_protection.py",
         root / "backend/services/live_open_processing.py",
+        root / "backend/services/live_closed_position_processing.py",
+        root / "backend/services/live_closed_position_cycle.py",
+        root / "backend/services/live_position_lifecycle.py",
+        root / "backend/services/live_recovery_close.py",
+        root / "alpha/attribution_engine.py",
+        root / "alpha/reflection/reviewer.py",
+        root / "research/learning/policy_suggester.py",
         root / "backend/services/live_safety_state.py",
         root / "backend/services/live_service.py",
         root / "backend/services/phased_repair_release_gate.py",
@@ -136,19 +152,29 @@ def run_fault_matrix(
     root = (root or repository_root()).resolve()
     started_at = time.time()
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", *required_nodeids()],
+        [sys.executable, "-m", "pytest", "-vv", *required_nodeids()],
         cwd=root,
         check=False,
         capture_output=True,
         text=True,
     )
     output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    missing_passes = [
+        nodeid
+        for nodeid in required_nodeids()
+        if not any(
+            line.startswith(f"{nodeid} ") and " PASSED" in line
+            for line in output.splitlines()
+        )
+    ]
+    passed = result.returncode == 0 and not missing_passes
     record = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": time.time(),
         "duration_sec": time.time() - started_at,
-        "status": "passed" if result.returncode == 0 else "failed",
-        "pytest_exit_code": int(result.returncode),
+        "status": "passed" if passed else "failed",
+        "pytest_exit_code": int(result.returncode if result.returncode else bool(missing_passes)),
+        "missing_passes": missing_passes,
         "scenario_names": sorted(REQUIRED_SCENARIOS),
         "nodeids": list(required_nodeids()),
         "binding_hash": binding_hash(root=root),

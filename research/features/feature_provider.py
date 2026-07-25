@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.services.review_contract import review_has_system_contamination
 from research.features.evidence_contract import build_evidence_contract
 
 
@@ -316,14 +317,20 @@ class LearningFeatureProvider:
                 placeholders = ",".join(p for _ in chunk)
                 rows = conn.execute(
                     f"""
-                    SELECT *
-                    FROM experience_memory
-                    WHERE trade_id IN ({placeholders})
-                    ORDER BY trade_id ASC, created_at DESC
+                    SELECT e.*, r.review_json AS source_review_json
+                    FROM experience_memory e
+                    JOIN trade_outcome_review r
+                      ON e.source_table='trade_outcome_review'
+                     AND r.review_id=e.source_id
+                    WHERE e.append_source='live_review'
+                      AND e.trade_id IN ({placeholders})
+                    ORDER BY e.trade_id ASC, e.created_at DESC
                     """,
                     tuple(chunk),
                 ).fetchall()
                 for row in rows:
+                    if review_has_system_contamination(_loads(row["source_review_json"], {})):
+                        continue
                     trade_id = str(row["trade_id"] or "")
                     if trade_id and trade_id not in found:
                         found[trade_id] = self._parse_experience(row)
@@ -1008,17 +1015,22 @@ class LearningFeatureProvider:
             return None
         with self._conn() as conn:
             p = self._p()
-            row = conn.execute(
+            rows = conn.execute(
                 f"""
-                SELECT *
-                FROM experience_memory
-                WHERE trade_id={p}
-                ORDER BY created_at DESC
-                LIMIT 1
+                SELECT e.*, r.review_json AS source_review_json
+                FROM experience_memory e
+                JOIN trade_outcome_review r
+                  ON e.source_table='trade_outcome_review'
+                 AND r.review_id=e.source_id
+                WHERE e.append_source='live_review' AND e.trade_id={p}
+                ORDER BY e.created_at DESC
                 """,
                 (trade_id,),
-            ).fetchone()
-        return self._parse_experience(row) if row else None
+            ).fetchall()
+        for row in rows:
+            if not review_has_system_contamination(_loads(row["source_review_json"], {})):
+                return self._parse_experience(row)
+        return None
 
     def _application_context(self, factors: list[dict], review_created_at: float) -> list[dict]:
         names = [f["factor"] for f in factors if f.get("factor")]

@@ -212,6 +212,93 @@ def _create_sample_db(path):
     conn.close()
 
 
+def _seed_unusable_counterfactuals_ahead_of_clean_evidence(path):
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+             pnl, review_json, created_at)
+            VALUES ('rev_contaminated', 'p1', 'p1', 'dec_open', 'dec_sup',
+                    -1.2, ?, 180.0)
+            """,
+            (
+                json.dumps(
+                    {
+                        "close_ts": 180.0,
+                        "system_issue_context": {
+                            "contaminates_learning": True,
+                            "labels": ["market_data_stale"],
+                        },
+                    }
+                ),
+            ),
+        )
+        rows = [
+            (
+                "scf_missing_review",
+                "rev_missing",
+                "correct_stop",
+                json.dumps(
+                    {
+                        "maturity": {
+                            "status": "governance_ready",
+                            "governance_eligible": True,
+                        }
+                    }
+                ),
+                600.0,
+            ),
+            (
+                "scf_contaminated",
+                "rev_contaminated",
+                "correct_stop",
+                json.dumps(
+                    {
+                        "maturity": {
+                            "status": "governance_ready",
+                            "governance_eligible": True,
+                        }
+                    }
+                ),
+                500.0,
+            ),
+            (
+                "scf_invalidated",
+                "rev1",
+                "correct_stop",
+                json.dumps(
+                    {
+                        "evidence_invalidated": True,
+                        "invalidation_reason": "late_evidence_rejected",
+                        "maturity": {
+                            "status": "governance_ready",
+                            "governance_eligible": True,
+                        },
+                    }
+                ),
+                400.0,
+            ),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO supervisor_counterfactual_review
+            (counterfactual_id, review_id, trade_id, position_id, close_ts,
+             close_reason, supervisor_event_type, supervisor_reason, label,
+             confidence, horizons_json, evidence_json, created_at, updated_at)
+            VALUES (?, ?, 'p1', 'p1', 180.0, 'broker_close',
+                    'supervisor_tighten', 'thesis_weakening', ?, 0.95,
+                    '[]', ?, ?, ?)
+            """,
+            [(counterfactual_id, review_id, label, evidence, updated_at, updated_at)
+             for counterfactual_id, review_id, label, evidence, updated_at in rows],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path):
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)
@@ -306,6 +393,89 @@ def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path
     assert stale_count == 0
     assert ("autonomous_learning_samples",) in events
     assert ("autonomous_learning_samples", "completed") in runs
+
+
+def test_counterfactual_materialization_filters_before_limit(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    _seed_unusable_counterfactuals_ahead_of_clean_evidence(db_path)
+
+    result = al.materialize_autonomous_learning_samples(db_path=db_path, limit=1)
+
+    assert result["counts"]["post_close_counterfactual"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            """
+            SELECT source_id
+            FROM autonomous_learning_sample
+            WHERE sample_type='post_close_counterfactual'
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [("scf1",)]
+
+
+def test_supervisor_trace_uses_one_canonical_review_and_missing_review_fails_closed(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, review_json, created_at)
+            VALUES ('rev_old_contaminated', 'p1', 'p1', ?, 100.0)
+            """,
+            (
+                json.dumps(
+                    {
+                        "system_issue_context": {
+                            "contaminates_learning": True,
+                            "labels": ["market_data_stale"],
+                        }
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_supervisor_trace
+            (trace_id, position_id, trade_id, event_ts, action, outcome,
+             verdict_json, created_at)
+            VALUES ('trace_missing_review', 'p_missing', 'p_missing', 130.0,
+                    'close', 'executed', '{"action":"close"}', 130.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    materialized = al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
+    assert materialized["counts"]["supervisor_execution_trace"] == 2
+
+    matured = al.mature_position_supervisor_traces(db_path=db_path, limit=20)
+    assert matured["pending"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                """
+                    SELECT source_id, train_weight, features_json, trace_json
+                FROM autonomous_learning_sample
+                WHERE sample_type='supervisor_execution_trace'
+                """
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert json.loads(rows["trace1"][2])["source_review_id"] == "rev1"
+    assert rows["trace_missing_review"][0] == 0.0
+    contamination = json.loads(rows["trace_missing_review"][1])["system_contamination"]
+    assert contamination["contaminated"] is True
+    assert contamination["reason"] == "canonical_source_review_missing"
 
 
 def test_expire_stale_evolution_runs_marks_only_old_running_rows(tmp_path):
@@ -1092,7 +1262,7 @@ def test_system_contaminated_trade_review_materializes_partial_learning_samples(
             SELECT sample_type, integrity, train_weight, evidence_contract_json,
                    verdict_json, label_json
             FROM autonomous_learning_sample
-            WHERE source_id IN ('rev1', 'dec_open')
+            WHERE source_id IN ('rev1', 'dec_open', 'dec_sup')
                OR (sample_type='shadow_open_decision' AND position_id='p1')
             ORDER BY sample_type
             """
@@ -1116,6 +1286,14 @@ def test_system_contaminated_trade_review_materializes_partial_learning_samples(
     assert open_contract["model_ready"] is False
     assert "supervised_training" not in open_contract["allowed_uses"]
     assert json.loads(open_sample[5])["system_contamination"]["contaminated"] is True
+
+    trajectory = by_type["supervisor_trajectory"]
+    assert trajectory[1] == "partial"
+    assert trajectory[2] == 0.25
+    trajectory_contract = json.loads(trajectory[3])
+    assert trajectory_contract["model_ready"] is False
+    assert "supervised_training" not in trajectory_contract["allowed_uses"]
+    assert json.loads(trajectory[4])["system_contamination"]["contaminated"] is True
 
 
 def test_trade_review_minimal_integrity_materializes_as_missing(tmp_path):
@@ -1197,6 +1375,29 @@ def test_position_supervisor_trace_maturation_labels_over_protection(tmp_path):
     assert contract["model_ready"] is True
     assert "supervised_training" in contract["allowed_uses"]
     assert decision == ("mature_traces", "completed")
+
+
+def test_position_supervisor_trace_maturation_uses_latest_clean_counterfactual(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    _seed_unusable_counterfactuals_ahead_of_clean_evidence(db_path)
+
+    result = al.mature_position_supervisor_traces(db_path=db_path, limit=20)
+
+    assert result["matured"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            """
+            SELECT label_json, trace_json
+            FROM autonomous_learning_sample
+            WHERE sample_type='supervisor_execution_trace' AND source_id='trace1'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert json.loads(row[0])["label"] == "over_protected"
+    assert json.loads(row[1])["counterfactual_id"] == "scf1"
 
 
 def test_materialization_does_not_downgrade_matured_supervisor_trace(tmp_path):
@@ -1476,6 +1677,147 @@ def test_auto_apply_position_supervisor_template_requires_matching_shadow_trace(
             db_path=db_path,
             experiment_id="demoauto_shadow_scope",
             run_id="evorun_shadow_scope",
+        )
+    finally:
+        rc.reset_for_tests()
+
+    assert result["applied"] == []
+    assert result["skipped"][0]["reason"] == "supervisor_canary_not_ready"
+    assert result["skipped"][0]["mature_trade_count"] == 0
+
+
+def test_auto_apply_position_supervisor_template_excludes_unusable_canary_evidence(tmp_path):
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    created_at = time.time() - 7200
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, reviewed_at, created_at)
+            VALUES ('psv_unusable_canary', 'position_supervisor_template',
+                    'position_supervisor:conservative.v1', 'increase_min_hold_window',
+                    0.82, 'canonical evidence test', '{}', 'approved', ?, ?)
+            """,
+            (time.time(), created_at),
+        )
+        conn.executemany(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, review_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "review_contaminated_canary",
+                    "position_contaminated_canary",
+                    "position_contaminated_canary",
+                    json.dumps(
+                        {
+                            "system_issue_context": {
+                                "contaminates_learning": True,
+                                "labels": ["market_data_stale"],
+                            }
+                        }
+                    ),
+                    created_at + 3600,
+                ),
+                (
+                    "review_invalidated_canary",
+                    "position_invalidated_canary",
+                    "position_invalidated_canary",
+                    "{}",
+                    created_at + 7200,
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO supervisor_counterfactual_review
+            (counterfactual_id, review_id, trade_id, position_id, close_ts,
+             evidence_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "cf_contaminated_canary",
+                    "review_contaminated_canary",
+                    "position_contaminated_canary",
+                    "position_contaminated_canary",
+                    created_at + 3600,
+                    json.dumps(
+                        {
+                            "regime": "trend",
+                            "maturity": {"governance_eligible": True},
+                        }
+                    ),
+                    time.time(),
+                    time.time(),
+                ),
+                (
+                    "cf_invalidated_canary",
+                    "review_invalidated_canary",
+                    "position_invalidated_canary",
+                    "position_invalidated_canary",
+                    created_at + 7200,
+                    json.dumps(
+                        {
+                            "regime": "range",
+                            "evidence_invalidated": True,
+                            "maturity": {"governance_eligible": True},
+                        }
+                    ),
+                    time.time(),
+                    time.time(),
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO position_supervisor_trace
+            (trace_id, position_id, trade_id, event_ts, template_id, stage,
+             execution_status, execution_reason, trace_integrity, created_at)
+            VALUES (?, ?, ?, ?, 'position_supervisor:conservative.v1',
+                    'learning_shadow', 'observation_only',
+                    'learning_worker_candidate_replay:psv_unusable_canary',
+                    'recovered', ?)
+            """,
+            [
+                (
+                    "trace_contaminated_canary",
+                    "position_contaminated_canary",
+                    "position_contaminated_canary",
+                    created_at + 3500,
+                    created_at + 3500,
+                ),
+                (
+                    "trace_invalidated_canary",
+                    "position_invalidated_canary",
+                    "position_invalidated_canary",
+                    created_at + 7100,
+                    created_at + 7100,
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rc.replace(
+        rc.RuntimeConfig(
+            autonomy_mode="live_candidate",
+            autonomy_expansion_frozen=False,
+            supervisor_canary_mature_trade_count=1,
+        )
+    )
+    try:
+        result = al._auto_apply_position_supervisor_template_suggestions(
+            db_path=db_path,
+            experiment_id="demoauto_unusable_canary",
+            run_id="evorun_unusable_canary",
         )
     finally:
         rc.reset_for_tests()

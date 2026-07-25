@@ -1,65 +1,52 @@
 # Development Workflow
 
 > Status: active
-> Last verified: 2026-07-06
-> Scope: local frontend (Web console + mini-program status surface) + Linux server backend workflow.
+> Last verified: 2026-07-26
+> Scope: unified frontend/backend workspace with platform-specific verification.
 
 本文用来固化当前项目的唯一推荐协作方式，目标只有一个：
-避免 Windows 本地副本和 Linux 服务器运行代码长期分叉。
+在同一主分支和事实源下完成前后端改动，避免按机器分工造成长期分叉。
 
 ## 1. 核心原则
 
-1. 本地 Windows 负责前端：Web 操作台和微信小程序轻量状态面。
-2. Linux 服务器是后端、策略、执行、配置、日志的唯一真实工作区。
-3. 实盘相关代码不再采用“本地修改后再手工同步服务器”的方式。
-4. 后端问题以服务器复现、服务器修改、服务器验证为准。
-5. 小程序问题以本地微信开发者工具验证为准；Web 问题以本地浏览器和 Playwright 验证为准。
-6. 系统级改动先查文档事实源、旧债登记和影响面清单，再动代码。
+1. Linux `/home/ubuntu/quant_trading` 是前端、后端和运行事实的统一工作区。
+2. Web、小程序、后端、策略和文档都可在统一工作区直接修改，不再按机器分工。
+3. 生产运行、数据库、配置、日志和 systemd 仍以 Linux 服务器事实为准。
+4. 微信开发者工具和 Windows 浏览器只承担平台专属补充验证，不限制代码修改位置。
+5. 所有系统级改动先查文档事实源、旧债登记和影响面清单，再动代码。
 
 ## 2. 角色边界
 
-### 本地 Windows
+### Linux 统一工作区
 
-本地只负责这些内容：
+服务器工作区负责：
 
-- `miniprogram_v2`
-- `web_frontend`
-- 前端交互、展示、登录态跳转
-- 小程序页面验证
-- Web 页面验证
-- 文档整理
-
-本地默认不再承担这些工作：
-
-- `backend`
-- `execution`
-- `alpha`
-- `risk`
-- `monitor`
-- `.env` / systemd / cTrader / 数据库 / 实盘日志
-
-### Linux 服务器
-
-服务器负责这些内容：
-
+- `miniprogram_v2` 与 `web_frontend` 源码；
 - 后端接口
 - 交易循环
 - 风控逻辑
 - cTrader 连接与执行
 - 数据库、日志、环境变量、systemd
 - 所有实盘相关验证
+- Web 构建、静态发布和公网验证
+
+### Windows 补充验证
+
+仅在需要平台工具时使用：
+
+- 微信开发者工具验证；
+- Windows 浏览器兼容性验证。
 
 ### Git
 
 Git 仍然保留，但用途要更明确：
 
-- 前端改动：本地 Windows 的 `main` 提交
-- 后端改动：Linux 服务器的 `main` 提交
-- 不再要求“后端先在本地改，再推服务器”
+- 前端、后端和文档统一进入 `main`；
+- 不再要求按 Windows/Linux 拆分提交或交接。
 
 ### 当前分支和工作区
 
-本地 Windows 当前约定：
+Windows 可选 sparse checkout：
 
 ```text
 branch: main
@@ -72,47 +59,38 @@ sparse checkout:
   .gitignore
 ```
 
-服务器当前约定：
+Linux 统一工作区：
 
 ```text
 branch: main
 workspace: /home/ubuntu/quant_trading
-scope: backend / execution / alpha / risk / monitor / scripts / data / logs / systemd
+scope: miniprogram_v2 / web_frontend / backend / execution / alpha / risk / monitor / scripts / docs / tests
 ```
 
 注意：
 
-- 本地 `main` 通过 sparse checkout 只作为小程序和文档工作区使用。
-- 服务器 `main` 是后端和运行态真实工作区。
+- Windows sparse checkout 只是可选的验证工作区，不拥有独占修改权。
+- Linux `main` 是统一源码和运行态真实工作区。
 - 文档/协作规则统一推送到 `main`。
 - 本地旧后端残留已归档到 `C:\Users\zhu\quant_trading_local_archive_20260629_191212`，不再作为工作区使用。
 
 ## 3. 目录约定
 
-### 本地主要目录
+### 统一源码目录
 
 ```text
 miniprogram_v2/
 web_frontend/
 docs/
-AGENTS.md
-README.md
-.gitignore
-```
-
-### 服务器主要目录
-
-```text
 backend/
 execution/
 alpha/
 risk/
 monitor/
 config/
-data/
-logs/
 scripts/
 tests/
+AGENTS.md
 ```
 
 ### 服务器运行数据
@@ -165,8 +143,9 @@ https://www.zhuzhu666.icu -> caddy.service -> 127.0.0.1:8000
 ### 小程序开发流程
 
 ```text
-本地修改 miniprogram_v2
-  -> 微信开发者工具验证
+在统一工作区修改 miniprogram_v2
+  -> 运行静态检查
+  -> 需要时用微信开发者工具补充验证
   -> 如接口异常，再去服务器排查后端
   -> 前端确认稳定后提交
 ```
@@ -174,8 +153,9 @@ https://www.zhuzhu666.icu -> caddy.service -> 127.0.0.1:8000
 ### Web 前端开发流程
 
 ```text
-本地修改 web_frontend
-  -> 浏览器 / Playwright 验证
+在统一工作区修改 web_frontend
+  -> npm test / typecheck / build
+  -> 部署静态产物并做浏览器/公网验证
   -> 如接口异常，再去服务器排查后端或 Caddy
   -> 前端确认稳定后提交
 ```
@@ -272,8 +252,8 @@ codex login status
 
 当前约定：
 
-- 本地 Codex：负责前端、小程序、文档、总控协作
-- 服务器 Codex：负责后端、实盘、日志、配置、热修
+- 服务器 Codex 在统一工作区负责前端、后端、小程序、文档和运行态排查；
+- Windows 只补充平台专属验证，不再作为前端修改的必经交接点。
 
 服务器 Codex 适合：
 
@@ -282,17 +262,14 @@ codex login status
 - systemd / `.env` / 数据库 / 权限问题
 - 小范围后端改动和验证
 
-服务器 Codex 不适合：
-
-- 改小程序页面
-- 本地 UI 联调
-- 长期在服务器堆积未整理改动
+服务器 Codex 不应长期堆积未整理改动；需要微信开发者工具或 Windows 浏览器
+才能确认的行为，应明确记录为平台补充验收。
 
 ## 7. 提交规则
 
 ### 前端提交
 
-前端改动在本地 Windows 的 `main` 提交。
+前端改动与后端一致，在当前统一工作区的 `main` 提交。
 
 示例：
 
@@ -338,7 +315,7 @@ git pull --ff-only
 
 - 在本地修改后端代码，再手工 `scp` 整批覆盖服务器
 - 不确认服务器当前代码状态，就直接从本地覆盖
-- 后端同时在本地和服务器两边并行修改
+- 同一文件在 Windows 和 Linux 两边无协调并行修改
 - 服务器保留长期未提交热修
 - 看到异常先猜代码，再看日志
 
@@ -353,7 +330,7 @@ git pull --ff-only
 ## 9. 每次后端改动后的检查清单
 
 ```text
-[ ] 改动发生在服务器
+[ ] 改动发生在统一工作区
 [ ] 已查看 git diff
 [ ] 已做最小接口验证
 [ ] 已查看最新 journalctl
@@ -384,5 +361,5 @@ git pull --ff-only
 当前项目从现在开始按这条规则执行：
 
 ```text
-本地做前端（小程序 + Web），服务器做后端和运行态。
+统一工作区直接修改前端和后端；Linux 验证运行态，平台工具只做补充验收。
 ```

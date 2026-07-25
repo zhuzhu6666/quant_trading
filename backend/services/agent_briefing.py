@@ -9,6 +9,7 @@ from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services._brain_helpers import connect as _connect, execute as _execute, loads as _loads
+from backend.services.review_contract import review_has_system_contamination
 
 
 class AgentBriefingContextService:
@@ -192,22 +193,27 @@ class AgentBriefingContextService:
             if scope_type == "factor" and scope_key:
                 where = "WHERE decision_context_json LIKE ?"
                 params.append(f'%"primary_factor": "{scope_key}"%')
-            params.append(limit)
             rows = _execute(
                 conn,
                 f"""
-                SELECT experience_id, trade_id, regime_id, outcome_label,
-                       reward_score, failure_tags_json, recommended_action,
-                       evidence_strength, decision_context_json, created_at
-                FROM experience_memory
-                {where}
-                ORDER BY evidence_strength DESC, created_at DESC
-                LIMIT ?
+                SELECT e.experience_id, e.trade_id, e.regime_id, e.outcome_label,
+                       e.reward_score, e.failure_tags_json, e.recommended_action,
+                       e.evidence_strength, e.decision_context_json, e.created_at,
+                       r.review_json AS source_review_json
+                FROM experience_memory e
+                JOIN trade_outcome_review r
+                  ON e.source_table='trade_outcome_review'
+                 AND r.review_id=e.source_id
+                WHERE e.append_source='live_review'
+                {"AND " + where[6:] if where else ""}
+                ORDER BY e.evidence_strength DESC, e.created_at DESC
                 """,
                 tuple(params),
             ).fetchall()
             result = []
             for row in rows:
+                if review_has_system_contamination(_loads(row["source_review_json"], {})):
+                    continue
                 context = _loads(row["decision_context_json"], {})
                 result.append({
                     "experience_id": str(row["experience_id"] or ""),
@@ -222,7 +228,7 @@ class AgentBriefingContextService:
                     "summary_text": str(context.get("summary_text") or ""),
                     "created_at": float(row["created_at"] or 0.0),
                 })
-            return result
+            return result[:limit]
         except Exception:
             return []
         finally:

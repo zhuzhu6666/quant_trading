@@ -16,6 +16,7 @@ from backend.core.state_store import (
 from backend.ledger.service import DecisionLedger
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
+from backend.services.review_contract import review_has_system_contamination
 from research.features.evidence_contract import stable_hash
 
 
@@ -275,19 +276,19 @@ class MetaModelLightGBMService:
         try:
             rows = _execute(conn,
                 """
-                SELECT *
-                FROM (
-                    SELECT review_id, trade_id, position_id, pnl, mae, mfe,
-                           outcome_label, review_json, created_at
-                    FROM trade_outcome_review
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                ) recent_reviews
-                ORDER BY created_at ASC
+                SELECT review_id, trade_id, position_id, pnl, mae, mfe,
+                       outcome_label, review_json, created_at
+                FROM trade_outcome_review
+                ORDER BY created_at DESC
                 """,
-                (int(limit),),
             ).fetchall()
-            return [_review_item(row) for row in rows]
+            clean = [
+                _review_item(row)
+                for row in rows
+                if not review_has_system_contamination(_loads(row["review_json"], {}))
+            ][: max(0, int(limit))]
+            clean.reverse()
+            return clean
         finally:
             conn.close()
 
@@ -483,15 +484,25 @@ class MetaModelLightGBMService:
             return out
         rows = _execute(conn,
             """
-            SELECT label
-            FROM supervisor_counterfactual_review
-            WHERE close_ts >= ? AND close_ts <= ?
+            SELECT c.label, c.evidence_json,
+                   r.review_id AS source_review_id,
+                   r.review_json AS source_review_json
+            FROM supervisor_counterfactual_review c
+            LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
+            WHERE c.close_ts >= ? AND c.close_ts <= ?
             """,
             (float(start_ts), float(end_ts)),
         ).fetchall()
-        if not rows:
+        clean_rows = [
+            row
+            for row in rows
+            if str(row["source_review_id"] or "")
+            and not review_has_system_contamination(_loads(row["source_review_json"], {}))
+            and not bool(_loads(row["evidence_json"], {}).get("evidence_invalidated"))
+        ]
+        if not clean_rows:
             return out
-        labels = [str(row["label"] or "") for row in rows]
+        labels = [str(row["label"] or "") for row in clean_rows]
         n = max(len(labels), 1)
         out["counterfactual_premature_rate"] = sum(1 for label in labels if label in {"premature_tighten", "noise_stopout"}) / n
         out["counterfactual_protection_tight_rate"] = sum(1 for label in labels if label == "protection_too_tight") / n

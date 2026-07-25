@@ -57,6 +57,57 @@ def test_readiness_exposes_mutation_policy_and_audit_health():
     assert "ok" in audit
 
 
+def test_readiness_projects_canonical_forward_var_snapshot(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        snapshot = {
+            "schema_version": "risk_metrics_snapshot.v2",
+            "status": "known",
+            "as_of": 100.0,
+            "source_window_start": "2026-07-20T00:00:00+00:00",
+            "source_window_end": "2026-07-21T00:00:00+00:00",
+            "sample_count": 500,
+            "input_fingerprint": "risk-input-hash",
+            "components": {
+                "var": {
+                    "status": "known",
+                    "alpha": 0.95,
+                    "horizon": "one_closed_bar",
+                    "var_pct": 0.8,
+                    "cvar_pct": 1.2,
+                },
+                "var_shadow_99": {
+                    "status": "known",
+                    "alpha": 0.99,
+                    "horizon": "one_closed_bar",
+                    "var_pct": 1.4,
+                    "cvar_pct": 1.7,
+                },
+            },
+        }
+        conn.execute(
+            """
+            INSERT INTO runtime_kv (key, value_json, updated_at)
+            VALUES ('risk_metrics_snapshot.v2', ?, 100.0)
+            """,
+            (json.dumps(snapshot),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    status = BackendReadinessService(db_path=db_path)._risk_metrics_status()
+
+    assert status["ok"] is True
+    assert status["read_only"] is True
+    assert status["source"] == "runtime_kv:risk_metrics_snapshot.v2"
+    assert status["var_status"] == "known"
+    assert status["current_var"]["horizon"] == "one_closed_bar"
+    assert status["shadow_var_99"]["alpha"] == 0.99
+
+
 def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
     db_path = tmp_path / "state.db"
     candidate_started_at = 1_700_000_000.0
@@ -80,6 +131,15 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
             ("historical_incomplete", candidate_started_at - 86400, False, "legacy", False),
         ]
         for index, (position_id, close_ts, eligible, regime, has_shadow) in enumerate(rows):
+            review_id = f"review_{index}"
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, position_id, review_json, created_at)
+                VALUES (?, ?, ?, '{}', ?)
+                """,
+                (review_id, f"trade_{index}", position_id, close_ts),
+            )
             if has_shadow:
                 conn.execute(
                     """
@@ -103,10 +163,19 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
             conn.execute(
                 """
                 INSERT INTO supervisor_counterfactual_review
-                (counterfactual_id, position_id, close_ts, evidence_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (counterfactual_id, review_id, position_id, close_ts,
+                 evidence_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (f"cf_{index}", position_id, close_ts, json.dumps(evidence), now, now),
+                (
+                    f"cf_{index}",
+                    review_id,
+                    position_id,
+                    close_ts,
+                    json.dumps(evidence),
+                    now,
+                    now,
+                ),
             )
         conn.commit()
     finally:
@@ -277,6 +346,7 @@ def test_policy_suggestion_status_normalization_separates_legacy_and_autonomous(
     ) == "auto_approved"
     assert normalize_policy_suggestion_status({"status": "approved", "action": "manual_review"}) == "legacy_approved"
     assert normalize_policy_suggestion_status({"status": "pending_review"}) == "proposed"
+    assert normalize_policy_suggestion_status({"status": "invalidated_evidence"}) == "invalidated_evidence"
 
 
 def test_governance_status_exposes_raw_and_normalized_policy_counts(tmp_path):

@@ -12,6 +12,7 @@ from backend.core.state_store import (
     is_state_schema_write_sql,
     validate_runtime_state_schema,
 )
+from backend.services.review_contract import review_has_system_contamination
 
 
 DEFAULT_HORIZONS_MINUTES = [5, 15, 30, 60, 120]
@@ -452,28 +453,49 @@ def evaluate_counterfactuals(
     limit: int = 100,
     horizons_minutes: list[int] | None = None,
     materialize: bool = True,
+    review_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     ensure_counterfactual_table(db_path)
     horizons_minutes = list(horizons_minutes or DEFAULT_HORIZONS_MINUTES)
     conn = _connect(db_path)
     try:
-        rows = _execute(
-            conn,
-            """
-            SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                   pnl, review_json, created_at
-            FROM trade_outcome_review
-            WHERE created_at > 0
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (int(limit),),
-        ).fetchall()
+        target_review_ids = sorted({str(item) for item in (review_ids or []) if str(item)})
+        if review_ids is not None:
+            if target_review_ids:
+                placeholders = ",".join("?" for _ in target_review_ids)
+                rows = _execute(
+                    conn,
+                    f"""
+                    SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+                           pnl, review_json, created_at
+                    FROM trade_outcome_review
+                    WHERE created_at > 0 AND review_id IN ({placeholders})
+                    ORDER BY created_at DESC
+                    """,
+                    tuple(target_review_ids),
+                ).fetchall()
+            else:
+                rows = []
+        else:
+            rows = _execute(
+                conn,
+                """
+                SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+                       pnl, review_json, created_at
+                FROM trade_outcome_review
+                WHERE created_at > 0
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
         if _conn_is_pg(conn):
             conn.commit()
         candidates = []
         for row in rows:
             review = _loads(row["review_json"], {})
+            if review_has_system_contamination(review):
+                continue
             close_reason = str(review.get("close_reason") or "")
             if close_reason not in {
                 "broker_close",
@@ -718,6 +740,7 @@ def evaluate_counterfactuals(
             "count": len(items),
             "candidate_count": len(candidates),
             "bar_cache_groups": len(bar_cache),
+            "requested_review_count": len(target_review_ids) if review_ids is not None else None,
         }
     finally:
         conn.close()

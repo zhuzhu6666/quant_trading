@@ -311,6 +311,17 @@ def test_proposal_registry_source_ref_contract_migration_is_additive() -> None:
     assert "DROP " not in sql.upper()
 
 
+def test_execution_price_repair_migration_is_additive() -> None:
+    sql = STATE_SCHEMA_MIGRATIONS[10].sql()
+
+    assert "ALTER TABLE ctrader_deals" in sql
+    assert "ADD COLUMN IF NOT EXISTS raw_execution_price" in sql
+    assert "ADD COLUMN IF NOT EXISTS price_contract" in sql
+    assert "CREATE TABLE IF NOT EXISTS data_repair_run" in sql
+    assert "CREATE TABLE IF NOT EXISTS data_repair_item" in sql
+    assert "DROP " not in sql.upper()
+
+
 def test_schema_status_fails_closed_without_ledger() -> None:
     conn = _FakePgConn()
 

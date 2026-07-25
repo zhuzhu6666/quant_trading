@@ -2,6 +2,23 @@ import json
 
 from backend.api import learning as learning_api
 from backend.api import risk as risk_api
+from backend.services.review_contract import build_system_issue_context
+
+
+def test_unknown_broker_close_price_contaminates_learning_without_hiding_money_pnl():
+    issue = build_system_issue_context(
+        {
+            "real_pnl": {
+                "net": -2.5,
+                "price_contract": "legacy_unknown",
+                "price_quality": "unknown",
+            }
+        }
+    )
+
+    assert issue["contaminates_learning"] is True
+    assert "broker_close_price_unknown" in issue["labels"]
+    assert issue["evidence"]["broker_close_price"]["price_quality"] == "unknown"
 
 
 def test_learning_parse_review_row_normalizes_phase_d_contract_fields():

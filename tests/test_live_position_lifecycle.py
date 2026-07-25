@@ -646,7 +646,12 @@ def test_build_open_trade_risk_context_payload_preserves_live_shape():
     }
     assert payload["account"] == {"equity": 10000.0}
     assert payload["session"]["pnl"] == -10.0
-    assert payload["risk_snapshot"] == {"daily_loss": 1.0}
+    assert payload["risk_snapshot"]["daily_loss"] == 1.0
+    assert payload["risk_snapshot"]["var"]["status"] == "unknown"
+    assert (
+        payload["risk_snapshot"]["var"]["reason"]
+        == "missing_closed_bar_prices"
+    )
     assert payload["risk_limits"]["schema_version"] == "risk_limit_snapshot.v1"
     assert payload["risk_limits"]["max_daily_loss_pct"] == 5.0
     assert payload["var"] == {"enabled": True, "threshold_pct": 3.0, "cvar_threshold_pct": 3.0}
@@ -1512,7 +1517,12 @@ def test_build_replayed_close_payloads_prefers_real_pnl_and_preserves_contracts(
             "close_pnl": -5.0,
             "context_integrity": "complete",
         },
-        real_pnl={"net": 12.5, "exec_price": 1.2345, "exec_timestamp": 456.7},
+        real_pnl={
+            "net": 12.5,
+            "exec_price": 1.2345,
+            "exec_timestamp": 456.7,
+            "price_quality": "broker_reported",
+        },
         strategy_name="factor_v4",
         now_ts=999.0,
         context_integrity_default="partial",
@@ -1537,7 +1547,12 @@ def test_build_replayed_close_payloads_prefers_real_pnl_and_preserves_contracts(
             "position_id": 301,
             "replayed": True,
             "close_reason": "restart_replay",
-            "real_pnl": {"net": 12.5, "exec_price": 1.2345, "exec_timestamp": 456.7},
+            "real_pnl": {
+                "net": 12.5,
+                "exec_price": 1.2345,
+                "exec_timestamp": 456.7,
+                "price_quality": "broker_reported",
+            },
         },
     }
     assert payload["position_event"] == {
@@ -1550,7 +1565,12 @@ def test_build_replayed_close_payloads_prefers_real_pnl_and_preserves_contracts(
         "details": {
             "replayed": True,
             "close_reason": "restart_replay",
-            "real_pnl": {"net": 12.5, "exec_price": 1.2345, "exec_timestamp": 456.7},
+            "real_pnl": {
+                "net": 12.5,
+                "exec_price": 1.2345,
+                "exec_timestamp": 456.7,
+                "price_quality": "broker_reported",
+            },
         },
         "event_ts": 456.7,
     }
@@ -1560,7 +1580,12 @@ def test_build_replayed_close_payloads_prefers_real_pnl_and_preserves_contracts(
         "close_price": 1.2345,
         "close_ts": 456.7,
         "contributions": {},
-        "real_pnl": {"net": 12.5, "exec_price": 1.2345, "exec_timestamp": 456.7},
+        "real_pnl": {
+            "net": 12.5,
+            "exec_price": 1.2345,
+            "exec_timestamp": 456.7,
+            "price_quality": "broker_reported",
+        },
         "close_reason": "restart_replay",
         "context_integrity": "complete",
     }
@@ -1578,7 +1603,7 @@ def test_build_replayed_close_payloads_falls_back_to_recovery_state():
 
     assert payload["symbol"] == "XAUUSD+"
     assert payload["total_pnl"] == -7.25
-    assert payload["close_price"] == 2301.5
+    assert payload["close_price"] == 0.0
     assert payload["close_ts"] == 123.0
     assert payload["context_integrity"] == "partial"
     assert payload["decision"]["action_json"]["real_pnl"] == {}

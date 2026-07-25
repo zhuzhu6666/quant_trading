@@ -30,6 +30,7 @@ STATE_SCHEMA_BASELINE_TABLES: Final[tuple[str, ...]] = (
     "brain_governance_candidate_review",
     "brain_medium_impact_governance",
     "brain_state_snapshot",
+    "ctrader_deals",
     "decision_ledger",
     "experience_memory",
     "experience_pattern_stats",
@@ -120,8 +121,10 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(8, "phase5_runtime_schema_contract_completion", "0008_phase5_runtime_schema_contract_completion.sql"),
     StateSchemaMigration(9, "phase3_runtime_overlay_authority", "0009_phase3_runtime_overlay_authority.sql"),
     StateSchemaMigration(10, "proposal_registry_source_ref_contract", "0010_proposal_registry_source_ref_contract.sql"),
+    StateSchemaMigration(11, "execution_price_repair_ledger", "0011_execution_price_repair_ledger.sql"),
+    StateSchemaMigration(12, "risk_daily_equity", "0012_risk_daily_equity.sql"),
 )
-STATE_SCHEMA_MIN_VERSION: Final[int] = 10
+STATE_SCHEMA_MIN_VERSION: Final[int] = 12
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
 
 

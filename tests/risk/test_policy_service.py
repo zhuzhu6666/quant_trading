@@ -8,6 +8,16 @@ def _service() -> RiskPolicyService:
     return RiskPolicyService.shared()
 
 
+def _risk_snapshot(var: dict, status: str = "known") -> dict:
+    return {
+        "snapshot": {
+            "schema_version": "risk_metrics_snapshot.v2",
+            "status": status,
+        },
+        "var": var,
+    }
+
+
 def test_open_trade_allowed_with_clean_context():
     service = _service()
 
@@ -50,7 +60,7 @@ def test_open_trade_blocks_var_threshold():
     verdict = service.evaluate(
         "open_trade",
         {
-            "risk_snapshot": {"var": {"var_pct": 3.5}},
+            "risk_snapshot": _risk_snapshot({"status": "known", "var_pct": 3.5, "cvar_pct": 4.0}),
             "var": {"enabled": True, "threshold_pct": 2.0},
         },
     )
@@ -58,6 +68,102 @@ def test_open_trade_blocks_var_threshold():
     assert verdict.allowed is False
     assert verdict.reason == "var_gate: VaR=3.5% > 2.0%"
     assert verdict.audit_payload["source"] == "var_gate"
+
+
+def test_open_trade_blocks_unknown_var_instead_of_treating_it_as_zero():
+    verdict = _service().evaluate(
+        "open_trade",
+        {
+            "risk_snapshot": _risk_snapshot(
+                {"status": "warming_up"},
+                status="warming_up",
+            ),
+            "var": {"enabled": True, "threshold_pct": 2.0},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "var_metrics_warming_up"
+
+
+def test_open_trade_requires_v2_risk_snapshot_contract():
+    verdict = _service().evaluate(
+        "open_trade",
+        {
+            "risk_snapshot": {
+                "var": {
+                    "status": "known",
+                    "var_pct": 0.5,
+                    "cvar_pct": 0.7,
+                },
+            },
+            "var": {"enabled": True, "threshold_pct": 2.0},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "risk_metrics_contract_missing"
+
+
+def test_open_trade_blocks_stale_v2_snapshot_even_with_previous_known_var():
+    verdict = _service().evaluate(
+        "open_trade",
+        {
+            "risk_snapshot": {
+                "snapshot": {
+                    "schema_version": "risk_metrics_snapshot.v2",
+                    "status": "stale",
+                },
+                "var": {"status": "known", "var_pct": 0.5},
+            },
+            "var": {"enabled": True, "threshold_pct": 2.0},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "risk_metrics_stale"
+
+
+def test_open_trade_does_not_deadlock_on_kelly_only_warmup():
+    verdict = _service().evaluate(
+        "open_trade",
+        {
+            "risk_snapshot": {
+                "snapshot": {
+                    "schema_version": "risk_metrics_snapshot.v2",
+                    "status": "warming_up",
+                },
+                "var": {
+                    "status": "known",
+                    "var_pct": 0.5,
+                    "cvar_pct": 0.7,
+                },
+            },
+            "var": {"enabled": True, "threshold_pct": 2.0},
+        },
+    )
+
+    assert verdict.allowed is True
+    assert verdict.audit_payload["candidate_forward_var"]["var_pct"] == 0.5
+
+
+def test_open_trade_blocks_invalid_known_var_values():
+    verdict = _service().evaluate(
+        "open_trade",
+        {
+            "risk_snapshot": _risk_snapshot(
+                {
+                    "status": "known",
+                    "var_pct": float("nan"),
+                    "cvar_pct": 1.0,
+                },
+            ),
+            "var": {"enabled": True, "threshold_pct": 2.0},
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "var_metrics_invalid"
 
 
 def test_open_trade_uses_risk_limit_snapshot_for_governor_thresholds():
@@ -103,7 +209,7 @@ def test_open_trade_uses_risk_limit_snapshot_for_var_thresholds():
     verdict = service.evaluate(
         "open_trade",
         {
-            "risk_snapshot": {"var": {"var_pct": 1.6}},
+            "risk_snapshot": _risk_snapshot({"status": "known", "var_pct": 1.6, "cvar_pct": 1.8}),
             "var": {"enabled": True},
             "risk_limits": {"var_threshold_pct": 1.5},
         },
@@ -119,7 +225,7 @@ def test_open_trade_blocks_cvar_threshold_from_risk_limits():
     verdict = service.evaluate(
         "open_trade",
         {
-            "risk_snapshot": {"var": {"var_pct": 0.5, "cvar_pct": 2.4}},
+            "risk_snapshot": _risk_snapshot({"status": "known", "var_pct": 0.5, "cvar_pct": 2.4}),
             "var": {"enabled": True},
             "risk_limits": {"var_threshold_pct": 2.0, "cvar_threshold_pct": 2.0},
         },
@@ -137,7 +243,7 @@ def test_open_trade_demo_nursery_observes_var_cvar_and_allows():
         "open_trade",
         {
             "autonomy_mode": "demo_nursery",
-            "risk_snapshot": {"var": {"var_pct": 3.5, "cvar_pct": 4.5}},
+            "risk_snapshot": _risk_snapshot({"status": "known", "var_pct": 3.5, "cvar_pct": 4.5}),
             "var": {"enabled": True, "threshold_pct": 2.0, "cvar_threshold_pct": 2.0},
             "requested_api_volume": 100,
             "max_position_api_volume": 1000,
@@ -693,7 +799,7 @@ def test_open_trade_demo_nursery_keeps_position_limit_hard_after_observation():
         "open_trade",
         {
             "autonomy_mode": "demo_nursery",
-            "risk_snapshot": {"var": {"var_pct": 3.5}},
+            "risk_snapshot": _risk_snapshot({"status": "known", "var_pct": 3.5, "cvar_pct": 4.0}),
             "var": {"enabled": True, "threshold_pct": 2.0},
             "open_position_count": 3,
             "max_position_count": 3,

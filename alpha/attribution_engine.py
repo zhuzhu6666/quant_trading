@@ -562,6 +562,13 @@ class AttributionEngine:
             return "missing"
         return str(getattr(attrib, "attribution_integrity", "") or "full")
 
+    def discard_open(self, position_id: int) -> bool:
+        """Drop attribution state when a close price is not authoritative."""
+        pid = int(position_id)
+        removed = self._open_trades.pop(pid, None) is not None
+        self._partial_closes.pop(pid, None)
+        return removed
+
     # ── 平仓 ────────────────────────────────────────────
 
     def record_close(

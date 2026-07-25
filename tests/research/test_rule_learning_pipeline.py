@@ -1318,6 +1318,61 @@ def test_policy_suggester_downweights_after_repeated_bad_losses(tmp_path):
     assert stats["governance_eligibility_version"] == "governance_eligibility.v1"
 
 
+def test_policy_suggester_cannot_refresh_clean_suggestion_from_contaminated_experience(
+    tmp_path,
+):
+    db_path = str(tmp_path / "state.db")
+    suggester = PolicySuggester(db_path)
+    for idx in range(3):
+        suggester.suggest_from_experience(
+            {
+                "experience_id": f"clean_exp_{idx}",
+                "source_table": "trade_outcome_review",
+                "source_id": f"clean_review_{idx}",
+                "primary_factor": "guarded_factor",
+                "outcome_label": "bad_loss",
+                "reward_score": -0.8,
+                "failure_tags": ["bad_loss"],
+                "decision_context_json": {
+                    "context_integrity": "full",
+                    "attribution_integrity": "full",
+                },
+            }
+        )
+    before = _rows(
+        db_path,
+        "SELECT * FROM policy_suggestion WHERE scope_key='guarded_factor'",
+    )[0]
+
+    result = suggester.suggest_from_experience(
+        {
+            "experience_id": "contaminated_exp",
+            "source_table": "trade_outcome_review",
+            "source_id": "unknown_price_review",
+            "primary_factor": "guarded_factor",
+            "outcome_label": "bad_loss",
+            "reward_score": -0.9,
+            "failure_tags": ["bad_loss", "system_contaminated"],
+            "decision_context_json": {
+                "context_integrity": "full",
+                "attribution_integrity": "full",
+                "review_json": {
+                    "system_issue_context": {"contaminates_learning": True}
+                },
+            },
+        }
+    )
+    after = _rows(
+        db_path,
+        "SELECT * FROM policy_suggestion WHERE scope_key='guarded_factor'",
+    )[0]
+
+    assert result is None
+    assert after["suggestion_id"] == before["suggestion_id"]
+    assert after["evidence_json"] == before["evidence_json"]
+    assert after["created_at"] == before["created_at"]
+
+
 def test_policy_suggester_skips_watch_and_promotes_fast_positive_factor(tmp_path):
     db_path = str(tmp_path / "state.db")
     suggester = PolicySuggester(db_path)
@@ -1405,7 +1460,11 @@ def test_rule_learning_pipeline_deweights_recovery_replay_samples(tmp_path):
         close_ts=1_100_000.0,
         contributions={"dsl_auto_factor": 42.0},
         exit_decision_id="dec_close_202",
-        real_pnl={"net": 42.0},
+        real_pnl={
+            "net": 42.0,
+            "exec_price": 3322.0,
+            "price_quality": "broker_reported",
+        },
         close_reason="restart_replay",
         context_integrity="partial",
     )

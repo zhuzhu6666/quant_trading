@@ -1,7 +1,10 @@
 # 分期修复故障与验收矩阵
 
+> Superseded evidence notice: 本文保留 2026-07-19 的测试证据，但不代表
+> 2026-07-24 当前验收状态。新修复窗口为 `AUTONOMY-REPAIR-20260724-01`。
+>
 > Status: active release evidence
-> Snapshot: 2026-07-19 15:31 CST
+> Snapshot: 2026-07-26
 > Scope: Phase 0-5 fault injection, governance, frontend, and remaining live gates
 
 本文只记录可重复执行的证据映射。单元/集成测试证明故障语义；真实
@@ -43,6 +46,12 @@ ledger 证明，二者不能互相替代。
 
 - Web `_fact` unknown/stale/error、非绿色、stop/emergency escape hatch：
   `web_frontend/src/tests/fact-behavior.test.mjs`、`fact-auth.test.mjs`。
+- canonical 风险只读消费：`web_frontend/src/api/riskSnapshot.ts` 只解析
+  `risk.summary.v2.snapshot.schema_version=risk_metrics_snapshot.v2` 和
+  `snapshot.components`；`OverviewPage`、`TradingPage`、`RiskPage`、
+  `V15CockpitPage` 分别绑定 `risk.inputs.v1` component fact，不从旧顶层
+  `var/kelly/stress/concentration` 或旧字段别名回退。known 零敞口和缺失字段行为由
+  `fact-behavior.test.mjs` 验证，旧字段不复活由 `architecture.test.mjs` 验证。
 - 并发 401 单次注销与 WS/cache 清理：`fact-auth.test.mjs`。
 - recovery 未注册为 unknown：
   `test_readiness_warming_and_unregistered_recovery_are_explicitly_unknown`、
@@ -65,6 +74,59 @@ ledger 证明，二者不能互相替代。
   纳入执行/Safety 与 governance 门禁；生产侧已观察到 latch 精确自动恢复。
 
 ## 5. 不能由测试替代的剩余证据
+
+P1 broker price contract 的代码验收现固定覆盖：
+
+- protobuf buy/sell deal、raw/filled/closed volume、timestamp、`moneyDigits`
+  0/2/4、money 字段和 raw price；
+- 同持仓 entry/deal 数量级不一致必须 quarantine；
+- protobuf deal 经 SQLite contract、deal sync 到 restart replay 的价格/金额保持精确；
+- unknown close price 只保留金额恢复，不写正常价格 ledger，不进入 attribution、
+  review、experience 和 suggestion；
+- Execution Outcome price-integrity 与既有执行故障合并为 9 类/20 个固定用例，
+  每个 nodeid 必须显式 `PASSED`。
+
+测试仍不能替代新的真实 broker deal、进程重启后的 replay，以及完整
+`open -> protection -> close -> deal sync -> review -> sample` 生命周期。三项证据
+未取得前，P1 保持 active，`no_new_risk` 和后续发布顺序不变。
+
+## 2026-07-24 / 2026-07-26 P2 canonical risk snapshot 与 D16-A
+
+| 合同 | 固定验证 |
+|---|---|
+| clean review 与 position notional 输入 | `tests/test_live_risk_metrics_snapshot.py::test_risk_inputs_use_clean_reviews_and_position_notional` |
+| broker facts stale 不续鲜 | `tests/test_live_risk_metrics_snapshot.py::test_stale_broker_facts_replace_previous_known_snapshot` |
+| VaR/CVaR warm-up 不伪装零风险 | `tests/risk/test_backend_risk_metrics.py::test_var_warmup_is_not_reported_as_zero_risk` |
+| closed-bar returns + final candidate notional | `tests/risk/test_backend_risk_metrics.py::test_forward_var_uses_closed_bar_returns_and_candidate_notional` |
+| 当前与候选 signed notional 合并 | `tests/risk/test_backend_risk_metrics.py::test_forward_var_projects_current_and_final_candidate_notional` |
+| 95% hard input / 99% shadow 双算 | `tests/risk/test_backend_risk_metrics.py::test_forward_var_projects_current_and_final_candidate_notional` |
+| stress 使用 direction/notional | `tests/risk/test_backend_risk_metrics.py::test_stress_uses_position_direction_and_notional` |
+| 未知 position price 不伪装零敞口 | `tests/risk/test_backend_risk_metrics.py::test_snapshot_does_not_turn_unknown_position_price_into_zero_exposure` |
+| Kelly 复用既有样本数和 bound | `tests/risk/test_backend_risk_metrics.py::test_snapshot_kelly_uses_configured_sample_and_bound` |
+| Policy 不把 warm-up/stale 当零 | `tests/risk/test_policy_service.py::test_open_trade_blocks_unknown_var_instead_of_treating_it_as_zero`、`test_open_trade_blocks_stale_v2_snapshot_even_with_previous_known_var` |
+| Policy audit 保存 candidate forward evidence | `tests/risk/test_policy_service.py::test_open_trade_does_not_deadlock_on_kelly_only_warmup` |
+| live/replay 复用冻结风险输入与 lifecycle builder | `tests/test_research_parity_boundaries.py::test_parity_replay_freezes_closed_bar_returns_for_candidate_var` |
+| readiness 只读投影 canonical snapshot | `tests/test_backend_readiness_contract.py::test_readiness_projects_canonical_forward_var_snapshot`、`tests/test_readiness_dimensions_v2.py::test_unknown_canonical_var_is_projected_as_live_readiness_blocker` |
+| API 只读 canonical snapshot | `tests/test_risk_summary_inputs.py::test_risk_summary_uses_canonical_snapshot` |
+
+本批不解除 D01-A，也不新增 Demo 风控阈值。D16-A、risk-specific live/replay
+冻结输入、readiness 同源、真实进程快照和 Web canonical 消费均已验收，P2 完成。
+本批未进入 P3。
+
+生产验证（2026-07-24）：
+
+- schema v12 current/latest/minimum 一致，migration mismatch=0；
+- backend/learning worker PID=`1724515`/`1724518`，unit 均 active；
+- canonical snapshot 使用 fresh reconcile，Kelly 181 条干净样本为 `known`；
+- closed M5 input 为 500 returns，window
+  `2026-07-23T02:15:00+00:00` 至 `2026-07-24T20:55:00+00:00`；
+  current empty portfolio 的 95%/99% VaR/CVaR 为真实已知零，
+  candidate projection 的构造样本为非零且携带 final notional；
+- readiness 投影 `ok=true/var_status=known`，schema v12 与 OpenAPI check 通过；
+- D16 相关最终针对性批次 `275 passed`，未运行全量测试；上一轮全量基线仍为
+  `2452 passed, 9 skipped`。
+- Web `npm test`、`npm run typecheck`、`npm run build` 通过；公网
+  `https://www.zhuzhu666.icu` 已返回本批构建的 index 与 `riskSnapshot` bundle。
 
 `scripts/safety_shadow_gate.py --required-hours 24` 必须最终满足以下二选一：
 

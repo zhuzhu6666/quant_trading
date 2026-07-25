@@ -1,50 +1,54 @@
-import pytest
-
 from backend.api import risk
 
 
-def test_risk_summary_uses_realized_pnl_inputs(monkeypatch):
+def test_risk_summary_uses_canonical_snapshot(monkeypatch):
+    snapshot = {
+        "schema_version": "risk_metrics_snapshot.v2",
+        "status": "known",
+        "as_of": 100.0,
+        "components": {
+            "var": {"status": "known", "var_pct": 1.2, "cvar_pct": 1.8},
+            "kelly": {"status": "known", "kelly_fraction": 0.2},
+            "stress": {"status": "known", "stress_loss_pct": 2.5},
+            "concentration": {
+                "status": "known",
+                "concentration_pct": 50.0,
+            },
+        },
+    }
+    monkeypatch.setattr(risk, "_risk_metrics_snapshot", lambda: snapshot)
     monkeypatch.setattr(
         risk,
-        "get_realized_pnl_series",
-        lambda scope="30d": {
-            "ok": True,
-            "points": [
-                {"pnl": 1.2, "cumulative": 1.2, "balance": 0.0},
-                {"pnl": -0.8, "cumulative": 0.4, "balance": 0.0},
-                {"pnl": 2.0, "cumulative": 2.4, "balance": 0.0},
-                {"pnl": -1.4, "cumulative": 1.0, "balance": 0.0},
-            ],
-        },
+        "_system_health_summary",
+        lambda: {"overall": "healthy"},
     )
-    monkeypatch.setattr(risk, "_current_account_equity", lambda: 10_001.0)
-    monkeypatch.setattr(risk, "_system_health_summary", lambda: {"overall": "healthy"})
     monkeypatch.setattr(
         risk,
         "_recent_policy_verdicts",
-        lambda limit=25: {
-            "limit": limit,
-            "total": 4,
-            "counts": {"allowed": 1, "blocked": 3},
-            "by_reason": {"daily_trade_limit": 3, "ok": 1},
-            "by_action": {},
-            "items": [],
-        },
+        lambda limit=25: {"limit": limit, "items": []},
     )
 
     summary = risk.get_risk_summary("zhu")
 
-    assert summary["var"]["status"] == "ok"
-    assert summary["var"]["source"] == "realized_pnl_30d"
-    assert summary["var"]["lookback"] == 3
-    assert summary["var"]["limit"] == pytest.approx(200.02)
-    assert summary["kelly"]["status"] == "ok"
-    assert summary["kelly"]["source"] == "realized_pnl_30d"
-    assert summary["kelly"]["trades"] == 4
-    assert summary["kelly"]["win_rate"] == pytest.approx(0.5)
-    assert summary["stress"]["status"] == "ok"
-    assert summary["stress"]["source"] == "realized_pnl_30d"
-    assert summary["stress"]["stress_var"] >= 0
-    assert summary["concentration"]["status"] in {"ok", "alert"}
-    assert summary["concentration"]["source"] == "policy_reason_distribution"
-    assert summary["_fact"]["state"] == "unknown"
+    assert summary["snapshot"] == snapshot
+    assert summary["var"]["cvar_pct"] == 1.8
+    assert summary["stress"]["stress_loss_pct"] == 2.5
+
+
+def test_component_status_carries_snapshot_freshness(monkeypatch):
+    monkeypatch.setattr(
+        risk,
+        "_risk_metrics_snapshot",
+        lambda: {
+            "status": "stale",
+            "as_of": 90.0,
+            "components": {"var": {"status": "known", "var_pct": 1.0}},
+        },
+    )
+
+    result = risk.get_var_status("zhu")
+
+    assert result["status"] == "stale"
+    assert result["metric_status"] == "known"
+    assert result["snapshot_status"] == "stale"
+    assert result["as_of"] == 90.0

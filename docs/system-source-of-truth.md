@@ -1,7 +1,7 @@
 # System Source Of Truth
 
 > Status: active
-> Last verified: 2026-07-23
+> Last verified: 2026-07-26
 > Scope: authoritative sources for runtime state, configuration, governance, data, and frontend contracts.
 
 本文回答一个问题：当文档、注释、接口、数据库和历史理解冲突时，到底以哪里为准。
@@ -96,6 +96,7 @@
 - `autonomous_learning_sample` 的 eligibility version/fingerprint/weight 是 durable fact；entry cluster、event window、entry quality materializer 只消费当前 version 且 weight > 0 的样本。`PolicySuggester` 的 factor experience 路径也必须按同一 eligibility contract 写 `experience_pattern_stats` 的 raw/effective/weighted 指标，并把当前 version/fingerprint 原样绑定到 `policy_suggestion`；不完整、污染或 lineage 缺失的经验只增加 raw 观察，不得生成可执行建议。Governor 遇到 suggestion/stats fingerprint 缺失或不一致必须拒绝，不能回退使用 raw count。
 - entry-quality 的 `weak_signal` 控制只允许当前治理版本、当前 eligibility fingerprint、成熟且无污染的独立 position 样本生成；旧的无资格、旧版本或 fingerprint 失效建议保留审计并转为 `invalidated_evidence`，不能占用当前 scope/action。建议 ID 必须包含 eligibility fingerprint。
 - `activate_entry_quality_control` 是 `entry_quality` control surface 的 typed domain-only mutation：Coordinator 不伪造 RuntimeConfig 字段，在同一事务内提交 suggestion=`applied`、`learning_application_log/effect` 和 committed mutation。Demo 每周期最多应用一个 weak-signal 控制；激活属于风险收紧，删除、降低阈值或放宽仍按扩张经过 V16、DecisionPolicy 与 RiskPolicy。live loader 只读取 `applied + committed mutation`。
+- 污染证据导致的 entry-quality 回滚必须复用同一 Coordinator：以原 mutation 的 `rollback_json` 和 predecessor lineage 为唯一目标，在一个事务内终止污染 suggestion/application/effect、恢复 predecessor suggestion 并绑定新的 committed risk-tightening mutation，随后将原 mutation 标为 `rolled_back`。禁止直接改 RuntimeConfig，也禁止只改状态后退回静态基础阈值。
 - disabled/DEAD 因子应被 engine、compositor、AWE、readiness 一致排除。
 - 因子组合体检只能产生 `issues` 和 `recommendations`；默认 `build()` / readiness 使用 Factor Catalog `used_in_score=true` 统计当前实际参与评分的 alpha，显式传入 runtime config 的测试/分析可保留配置全量口径；后续 pruning、降权、禁用或晋升仍必须走 `DecisionPolicy`、`RiskPolicyService`、runtime overlay/snapshot 和治理审计。
 - 因子裁剪候选只能作为多智能体复盘、反证和治理提案草稿输入；任何实际权重变更仍必须先形成受控提案，再经过 `DecisionPolicy` 和 `RiskPolicyService`。没有近期 `decision_factor_snapshot` 参与记录、或近期平均贡献接近 0 的因子不能占用 demo governance 桥接名额；`dsl_auto` / `pca` 若不在 runtime config 但曾在真实决策快照中以非零权重/贡献参与，只能保留 snapshot-only research 观察，不能物化/晋级为可执行 downweight 候选。已经从当前 RuntimeConfig 权重事实源移除或权重为 0 的因子，其旧候选和旧建议必须 supersede，不能借历史权重重新启用。
@@ -109,6 +110,7 @@
 |---|---|---|
 | 动作裁决 | `RiskPolicyService.evaluate(...)` | 风控统一裁决入口 |
 | 风险阈值快照 | `risk.runtime_policy.RiskLimitSnapshot` + `RuntimeConfig` / runtime overlay | 日内亏损、回撤、交易次数、数据延迟、磁盘、VaR/CVaR 等阈值的统一输入口径 |
+| 风险指标快照 | `runtime_kv[risk_metrics_snapshot.v2]` + `backend.risk.metrics_snapshot` + `backend.risk.var` | live 每个正常 tick 只投递 fresh account/positions，并从月库冻结同 symbol/timeframe 的已闭合 bar returns 为 `forward_var_input.v1`；current snapshot 使用当前 signed position notional，开仓 lifecycle payload 对 sizing 链最终 candidate API volume、current price、contract size 和 account equity 投影前瞻历史 VaR/CVaR。95% 进入既有 RiskPolicy 阈值，99% 只 shadow 双算；Policy verdict audit 保存 candidate 结果。parity replay 复用同一 freeze/projection，API/readiness/Web 只读消费 canonical snapshot，不平行重算；Web 只接受 `risk.summary.v2.snapshot.schema_version=risk_metrics_snapshot.v2`，按 `risk.inputs.v1` component fact 判断新鲜度，不回退旧顶层风险字段。`unknown/warming_up/error` 不得解释为零风险。schema v12 的 `risk_daily_equity` 仅保留既有审计结构，不再作为开仓 VaR/CVaR 输入 |
 | 运行健康快照 | `risk.runtime_policy.RuntimeHealthSnapshot` + `monitor.system_health` / live runtime context | loop、bridge、data lag、disk 等运行态统一输入口径；`open_pending_quote` 或 `broker_connected_market_data_stale` 仅在 API/连接证据健康时按 RuntimeConfig 的75分钟上限标记 `maintenance_wait`，到期仍无行情必须恢复 critical；市场快照必须复用最新 spot quote，不能因调用方未传 bridge 丢失实时状态 |
 | 跨进程运行健康投影 | PostgreSQL `runtime_kv[runtime_health_projection.v1]` + `backend.services.runtime_health_projection` | live 进程发布 market session、cTrader 连接和 loop 状态；`/api/health`、readiness、learning worker 只消费同一只读投影，不重复推测 broker 状态；该投影不授权交易 |
 | broker 账户/仓位对账 | `execution.base.AccountReconcileResult` / `PositionReconcileResult` + cTrader bridge | `fresh` 才是权威全量 broker 快照；`cache`、`event`、`failed` 必须保留来源、reconcile ID、观测时间和错误，不得解释为空仓、零账户或零未实现盈亏。safety/startup/emergency/order recovery 只能调显式 reconcile API；`refresh_positions()` / `refresh_account_info()` 仅保留兼容读取 |
@@ -166,6 +168,7 @@
 | 学习样本统一表 | PostgreSQL `autonomous_learning_sample` | features、label、trace、evidence_contract、config hash |
 | 样本来源事实 | `decision_ledger` / `position_supervisor_trace` / `trade_outcome_review` / `supervisor_counterfactual_review` / `factor_contribution_review` | 不能从模型输出反推原始事实 |
 | 交易复盘时间与系统污染 | `trade_outcome_review.review_json.entry_timing_context` / `decision_freshness_context` / `system_issue_context` + `order_lifecycle_event` | `entry_ts` 以实际成交时间优先；信号 K 线时间保留为 `signal_bar_ts`。数据时效、信号到成交延迟等系统污染样本只能审计/弱用，不能满权重训练因子或开仓模板 |
+| cTrader 成交价格 | `ProtoOADeal.executionPrice` / `closePositionDetail.entryPrice` → PostgreSQL `ctrader_deals.raw_execution_price/exec_price` | 两个字段都是 broker 原始价格，不使用 `moneyDigits`；只有 commission/gross/swap/balance 等金额字段按各自 `moneyDigits` 转换。新同步行必须写 `price_contract=ctrader.deal.execution_price.raw.v1` 与 `price_quality=broker_reported`；价格缺失或非正时保持 `unknown`，不得进入平仓价格、复盘或学习链 |
 | 数据集就绪 | `/api/learning/dataset/readiness` | trade/decision schema、required fields、ready 样本数 |
 | 数据精度健康 | `/api/learning/dataset/quality-health` | evidence contract 自洽性和 open context 覆盖率 |
 | 模型权限 | `model_permission_audit` / `backend.services.model_permissions` | 模型本身不拥有 broker/runtime 写权限；PIT v2 工件只有经过 `ModelInfluenceGovernanceService` 证据门、V16 `model_stage` 委派、`RiskPolicyService` 和 runtime overlay/snapshot 后，才可在 demo 进入有界影响态 |
@@ -237,8 +240,8 @@
 - 历史缺失字段只能标 degraded/partial/missing，不能补造实时上下文。
 - 交易复盘必须区分 `signal_bar_ts`、`decision_evaluated_at`、`order_submitted_at`、`fill_ts` 和 `close_ts`；用信号 K 线时间替代实际入场时间会污染持仓学习。
 - 执行质量延迟只允许使用可比较的 broker submit wall-clock 与 fill-receipt wall-clock；bar 时间不能当 signal wall-clock，负值或超过 5 分钟的混合基准样本不得进入延迟统计。
-- `system_issue_context.contaminates_learning=true` 的样本必须降为 `integrity=partial` 或更低权重；`factor_contribution_review` 只能保留审计，不可作为高置信因子治理训练样本。
-- `supervisor_counterfactual_review` 复用已有 post-close counterfactual 链路，覆盖 `supervisor_close`、`supervisor_reduce` 和保护类平仓；优先用 M1 后续 K 线判断原 SL/TP 谁先触发、是否 `correct_stop` 或 `protection_too_tight`，结果作为 advisory/counterfactual evidence，不直接授权下一笔交易。
+- `system_issue_context.contaminates_learning=true` 的 review 及其派生 sample、experience、counterfactual、模型特征和 policy suggestion 只能保留审计，治理 eligibility/weight 必须为零；所有当前消费者必须回查 canonical `trade_outcome_review`，不能只信旧派生 JSON 的局部 marker。
+- `supervisor_counterfactual_review` 复用已有 post-close counterfactual 链路，覆盖 `supervisor_close`、`supervisor_reduce` 和保护类平仓；优先用 M1 后续 K 线判断原 SL/TP 谁先触发、是否 `correct_stop` 或 `protection_too_tight`。`evidence_invalidated=true`、源 review 污染或源 review 缺失的记录不得进入 memory、模型、专员候选、readiness 或治理；其余结果仍只作 advisory/counterfactual evidence，不直接授权下一笔交易。
 - 强治理必须有证据等级、样本数量、风控通过和回滚点。
 - 回滚只能使用当时 decision 的 rollback JSON，不临场猜测。
 - replay v1 校验 ledger 中已有 factor、gate、`RiskPolicyService` verdict 锚点；不能替代 live 风控裁决。
@@ -255,7 +258,7 @@
 - V15 Phase 0 completion gate 只读，不替代 `RiskPolicyService`、`DecisionPolicy` 或 release run ledger。
 - V16 Phase 1 brain state 只读：`brain_state_snapshot` 是认知层审计事实，不是执行授权。`BrainStateService` 只能生成 world model、memory retrieval、observe-only hypotheses 和 Critic 限制；任何未来 action plan 必须重新回到 `RiskPolicyService`、`DecisionPolicy`、runtime overlay/snapshot、model permissions 和 replay/release 证据边界。
 - V16 memory retrieval 不替代原始表，不生成训练标签，不授权治理动作。检索先按 `trade_outcome_review` 的结构化来源锚点去重，同一复盘产生的 `experience_memory` 与原始复盘只计一个 evidence unit；无法建立来源锚点的记录不强行合并。文本匹配使用 token 级匹配，避免通用子串把无关记录误算为证据。negative / positive 证据按 evidence score 与相似度加权平衡，只有达到最小样本数且负证据显著占优时才收紧 Critic scope；其余只标记 mixed/insufficient observation，positive counter-evidence 保留为反证展示。
-- V16 记忆必须区分“原始后验事实”和“最终仲裁记忆”：`supervisor_counterfactual_review` 按 `close_ts` 事件时间进入窗口，不能按批量重算的 `updated_at` 取代事件顺序；成熟监督后验与交易复盘冲突时保留两者但写入 `memory_posterior_reconciliation.v1` 的因果范围、owner 和 evidence eligibility，不能把原始 entry recommendation 当作全局结论。`posterior_arbitration` 是最终记忆投影；`superseded/rejected/failed/blocked_by_evidence` 的 policy suggestion 不得进入当前记忆索引，`good_loss` 默认只作中性观察，不能直接作为降权证据。
+- V16 记忆必须区分“原始后验事实”和“最终仲裁记忆”：`supervisor_counterfactual_review` 按 `close_ts` 事件时间进入窗口，不能按批量重算的 `updated_at` 取代事件顺序；成熟监督后验与交易复盘冲突时保留两者但写入 `memory_posterior_reconciliation.v1` 的因果范围、owner 和 evidence eligibility，不能把原始 entry recommendation 当作全局结论。`posterior_arbitration` 是最终记忆投影；`superseded/rejected/failed/blocked_by_evidence/invalidated_evidence` 的 policy suggestion 不得进入当前记忆索引，`good_loss` 默认只作中性观察，不能直接作为降权证据。
 - V16 world model 必须分开表达 `replay_evidence_posture`、`performance_evidence_posture`、`factor_governance_posture`、`factor_performance_posture` 和 `execution_evidence_posture`；`replay_validated` 不等于已经证明策略盈利，运行态缺失时 execution posture 必须是 `unknown`，不能默认成 `broker_ok`。复盘中的 `factor_attribution` 和 `summary_consistency` 都是 observational/audit 证据，不能单独升级为因果责任或策略结论。
 - V16 Phase 2 shadow action plan 仍是只读审计事实：`brain_action_plan` 只记录候选动作、Critic verdict、validation refs、所需服务和 future rollback 要求。它不能调用 live mutation、不能写 runtime overlay/snapshot、不能改权重/模板、不能下单、不能写学习样本；任何 future execution 都必须重新经过 `RiskPolicyService`、`DecisionPolicy`（权重相关）、runtime snapshot/rollback 和 replay/release 证据。
 - V16 Phase 2 shadow action evaluation 也是只读审计事实：`brain_action_plan_eval` 只比较已存在的 replay/后验/学习效果/supervisor trace 证据，不改变 action plan 状态，不生成学习标签，不触发 governance 或 live mutation。后验仲裁先分因果范围：`trade_outcome_review` 只判断入场/交易论点，成熟 `supervisor_counterfactual_review` 判断持仓监督干预；两者同时存在时保留冲突为“已分离”，按证据强度把命令发给对应专员。
@@ -290,7 +293,7 @@
 | 经济事件 | `data/events.duckdb` | 风控事件缩放读取 |
 | 运行态状态 | PostgreSQL `state_v1` | 不再使用 `data/state.db` |
 | 状态库运维边界 | `docs/state-postgres-store.md` | PostgreSQL state store、迁移留痕和旧 SQLite 禁用边界 |
-| 状态 schema 版本 | PostgreSQL `state_schema_migration` + `backend.core.state_schema_migrations` + `scripts/state_schema_migrate.py` | forward DDL 只由显式 `--apply` 的 migration connection 执行，并在 advisory lock 下与 checksum ledger 同事务提交；v4 物化 backend/worker shadow audit、model influence 和 off-market audit 对象，v7 为 V16 委派新增不可变 `authority_issued_at`，v8 接管 `runtime_kv`、factor `canary_state`、旧动态补列及正确的 experience append-source 索引，v9 为 runtime overlay 增加 hash-bound `legacy_authority_json` 和 mutation 查询索引，v10 用新的显式 `DESC` 索引名恢复 proposal source-ref 契约且保留漂移的旧索引。当前最低版本为 10。高频 worker/model/readiness ensure 显式调用只读 catalog validator；普通 `get_state_pg_conn()` connection/cursor 继续禁止实际 CREATE/ALTER/DROP/INDEX，并把其余历史 idempotent ensure 转换为 assertion。缺对象时提示先迁移并 fail-closed。backend/learning/job worker 启动只校验代码声明的最低版本；外部 SQLite restore 脚本只导入数据，不再建表、建索引或 drop schema |
+| 状态 schema 版本 | PostgreSQL `state_schema_migration` + `backend.core.state_schema_migrations` + `scripts/state_schema_migrate.py` | forward DDL 只由显式 `--apply` 的 migration connection 执行，并在 advisory lock 下与 checksum ledger 同事务提交；v4 物化 backend/worker shadow audit、model influence 和 off-market audit 对象，v7 为 V16 委派新增不可变 `authority_issued_at`，v8 接管 `runtime_kv`、factor `canary_state`、旧动态补列及正确的 experience append-source 索引，v9 为 runtime overlay 增加 hash-bound `legacy_authority_json` 和 mutation 查询索引，v10 用新的显式 `DESC` 索引名恢复 proposal source-ref 契约且保留漂移的旧索引，v11 为 cTrader deal 增加 raw price/contract/quality/repair run 字段并建立通用 data repair ledger。当前最低版本为 11。高频 worker/model/readiness ensure 显式调用只读 catalog validator；普通 `get_state_pg_conn()` connection/cursor 继续禁止实际 CREATE/ALTER/DROP/INDEX，并把其余历史 idempotent ensure 转换为 assertion。缺对象时提示先迁移并 fail-closed。backend/learning/job worker 启动只校验代码声明的最低版本；外部 SQLite restore 脚本只导入数据，不再建表、建索引或 drop schema |
 
 判断原则：
 
@@ -341,7 +344,7 @@
 | Meta Governance Web page | `/v16` + `web_frontend/src/pages/V16BrainPage.tsx` | Web 展示元治理大脑、提案总线、实盘自治状态、shadow action plans、posterior evaluations、P3 executions、P4 governance candidate/review 和 P5 guardrails；运行按钮只触发后端白名单/候选生成/候选审查/护栏评估/收紧/提案审查/解锁 API，不在前端推断或执行动作 |
 | 因子治理展示 | `/api/v4/catalog` | 实时 Catalog；支持 latest snapshot |
 | 因子卡片 | `factor-card-schema.md` + Factor Cards API | 前端解释展示 |
-| 前端职责 | `development-workflow.md` | 本地 Windows 负责小程序/Web 展示 |
+| 前端职责 | `development-workflow.md` | Linux 统一工作区可直接修改小程序/Web/后端；Windows 仅承担微信开发者工具和浏览器兼容性等平台补充验证，不再按机器分工 |
 
 判断原则：
 

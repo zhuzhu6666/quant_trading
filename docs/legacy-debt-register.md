@@ -1,7 +1,7 @@
 # Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-07-19
+> Last verified: 2026-07-24
 > Scope: known legacy concepts, deprecated paths, migration state, and cleanup rules.
 
 本文登记历史残留。目的不是列 TODO，而是防止旧概念在新实现里反复复活。
@@ -385,6 +385,14 @@
 - 收口方式: 旧模块已在代码注释中标为 paper/backtest/legacy；live 不新增这些模块的调用；VaR/CVaR、事件风险、模型权限和开仓/改仓/治理动作均回到 `RiskPolicyService`。
 - 验证方式: `tests/risk/test_policy_service.py`、`tests/test_live_service_circuit.py`、`tests/alpha/test_execution_gate.py`、`tests/test_live_loop_shell.py`。
 
+### 重复风险计算栈与高频 equity 假 VaR
+
+- 状态: `fixed`
+- 旧理解: `risk/var.py`、`risk/kelly.py`、`risk/stress_test.py`、`risk/concentration.py` 与 `backend/risk/*` 可同时保留；live heartbeat equity 可直接作为 VaR 日收益，压力测试可对 equity 曲线套价格冲击，无输入 concentration 可视为安全。
+- 当前口径: `backend/risk/*` 是唯一纯计算内核；`risk_metrics_snapshot.v2` 是 live/API/Policy/readiness/Web 的统一风险指标事实。VaR/CVaR 只使用冻结 closed-bar return distribution，并按 fresh current positions 与 sizing 后最终 candidate notional 投影资本损失；95% 为既有硬闸输入，99% 只 shadow。日权益 heartbeat/当日行不再构造 VaR return，schema v12 的 `risk_daily_equity` 只保留为既有审计结构。样本不足显式 `warming_up`，stress 只接收 fresh position direction/notional，缺失 concentration 为 unknown 且不安全。Web 只解析 canonical snapshot 和 `risk.inputs.v1` fact，不从旧顶层风险字段或别名回退。
+- 收口方式: D08-B 图扫描、动态 import、CLI/systemd/cron 字符串扫描和风险回归通过后，删除四个零生产引用旧模块及旧导出；同时删除 live 内联四套统计与 API 的 realized-PnL 独立重算。D16-A 再删除 daily-equity VaR 生产读取，live/parity 统一调用 `forward_var_input.v1` freeze 与 candidate projection；readiness 仅投影 runtime snapshot；Web 四个风险消费页面统一经 `decodeCanonicalRiskSnapshot()` 读取。
+- 验证方式: `tests/risk/test_backend_risk_metrics.py`、`tests/test_live_risk_metrics_snapshot.py`、`tests/risk/test_policy_service.py`、`tests/test_risk_summary_inputs.py`、`tests/test_research_parity_boundaries.py::test_parity_replay_freezes_closed_bar_returns_for_candidate_var`、`tests/test_backend_readiness_contract.py::test_readiness_projects_canonical_forward_var_snapshot`、`web_frontend/src/tests/fact-behavior.test.mjs`、`web_frontend/src/tests/architecture.test.mjs`。
+
 ### live 决策使用过旧或未闭合 K 线
 
 - 状态: `fixed`
@@ -632,6 +640,16 @@
 - 收口方式: `ctrader_execution_outcome_v2_enabled=false` 当前默认保留兼容路径；timeout/延迟回执/未知 protobuf/amend 未落地/重启防重复/intent 边界/PG-independent reduction/confirmed-open post-fill fail-closed 已进入 `execution_outcome_fault_matrix.v1` 的代码绑定持久证明。binding 同时覆盖独立 open submission/open protection/open processing state machine 与 `live_service` façade wiring；amend accepted 但 fresh projection 未确认 SL/TP，以及 failure 先 latch 再 recovery/audit 的 façade 语义均有固定 nodeid，避免真实 authority 迁移后旧 attestation 被误认为仍有效。`execution_outcome_enable` 缺当前 passed attestation 时 fail-closed。仍需按阶段顺序完成受控 demo 观察后才随发布配置切换。稳定发布后才删除 PID 猜测和旧 result 兼容分支；unknown 禁止假成功/重发的语义不得回滚。
 - 验证方式: `scripts/execution_outcome_fault_matrix.py`、`tests/test_execution_outcome_fault_matrix.py`、`tests/test_ctrader_execution_outcome.py`、`tests/test_broker_execution_intent.py`、`tests/test_live_execution_recovery_gate.py`。
 
+### cTrader deal 成交价格被当作 money 字段重复缩放
+
+- 状态: migrating
+- 旧理解: `ProtoOADeal.executionPrice` 与 commission/gross/swap/balance 一样，需要按 `moneyDigits` 再除一次。
+- 当前口径: `executionPrice` 和 `closePositionDetail.entryPrice` 是价格事实，保持 broker 原值；只有 commission/gross/swap/balance 等金额字段按各自 `moneyDigits` 转换。
+- 影响面: `execution.ctrader_bridge.get_deals()`、deal 同步、restart recovered-close、trade review、MFE/MAE、experience、learning sample、policy effect 和 V16 后验。
+- 收口方式: 先在 `no_new_risk` 修复新读取，再以 `AUTONOMY-REPAIR-20260724-01` 保存全库备份和污染 lineage；可由 broker 权威事实恢复的行版本化更正，无法恢复的行只保留审计并将治理权重归零。禁止用固定金价阈值猜测真实价格。
+- 验证方式: protobuf contract test、broker deal 抽样对账、correction manifest、修复前后 realized PnL/commission/swap 不变量和 restart replay。
+- 2026-07-24 进度: 新读取与 deal sync 已改为保持并标注 broker 原始价格，未知价格不会进入 close review。broker 40 日重拉覆盖 1,150/1,150 历史行且价格比值全部为 100，repair run `drepair_d8acd1c6b73246ffa30f29ccc7941488` 已完成精确更正。10,800 条直接关联学习样本已置为不可治理且权重为零。D17 lineage 唯一污染扩张 mutation `gmut_e7cba57522aa44fd8d36d4d370cd1f08` 已由 `gmut_deddadacb3b849d2bd5da975c53530cd` 原子回滚，live entry-quality 控制恢复为 `0.6389 / 0.75`。D19-A/D20-A repair run `drepair_d3d0aa43fb604200b13e336867769d15` 已完成：保留并隔离 12 条不可恢复 quote、归档 61 条旧 CF、失效 48 条污染 CF、重建 13 条干净 CF；历史 canonical 污染 CF 289/289 已终态失效，统一切断污染 review 在 memory、模型、专员和治理读取端的消费，治理泄漏为 0。本批代码、数据库与受控重启验收已完成；P1 仍需新的 broker deal/完整平仓生命周期和其余阶段验收后才可把本项改为 resolved。
+
 ### live loop 单例 globals 会在旧线程退出前释放所有权
 
 - 状态: migrating
@@ -652,12 +670,13 @@
 
 ### 已恢复的 RuntimeConfig 与已消失仓位仍残留永久 no-new-risk cause
 
-- 状态: resolved
+- 状态: regressed
 - 旧理解: watchdog 只释放自己创建的 `safety_watchdog` cause 即可；RuntimeConfig startup restore 失败产生的 legacy cause 可由后续 refresh 自然覆盖；逐 cause release 返回值可继续从 `causes` 读取。
 - 当前口径: verified committed/current RuntimeConfig restore 会精确释放 `runtime_config_overlay_refresh` 与 `legacy_restore:runtime_config_overlay` 两个同权威域 cause，并从 ledger 返回的 `remaining_causes` 继续逐项处理。supervisor amend 成功但即时投影报告 `position_missing_after_amend` 时会记录 position ID；watchdog 仍要求 freshness 与 unknown=0 连续三轮，再用 fresh broker position reconcile 确认目标仓位已消失后才释放 `supervisor_tighten`。历史记录缺 ID 时只允许在 fresh 空仓事实下释放。generation tick 在认证 bridge 恢复后同步投影 `bridge_ready=true`，不再让启动 warming 阶段的旧负边永久残留在 readiness。
 - 影响面: RuntimeConfig startup/refresh、append-only safety latch replay、supervisor tighten、watchdog recovery、live readiness 与最终开仓准入；不放宽 incident、emergency、broker unknown 或其他 supervisor failure。
 - 收口方式: startup success 与 poll recovery 共用验证式 RuntimeConfig release；watchdog recovery 从只处理单一 cause 改为按 cause 独立验证，不提供 blanket clear。
 - 验证方式: `tests/test_live_safety_watchdog.py`、`tests/test_live_supervision_actions.py`、`tests/test_runtime_overlay_authority.py`、`tests/test_backend_runtime_lifecycle.py`。
+- 2026-07-24 复现: 最新 committed/current mutation 的 `target_hash_bound=false`、`committed_hash_bound=false`，refresh 报 `committed_mutation_unverified` 并重新锁存 `governance_authority/runtime_config_overlay_refresh`。修复窗口继续保持该 cause，待精确定位 hash 绑定漂移后再改回 resolved。
 
 ### live_service 同时承载 reconcile、safety、startup 与 emergency 领域实现
 

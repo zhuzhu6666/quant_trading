@@ -721,9 +721,89 @@ class RiskPolicyService:
         risk_snapshot = context.get("risk_snapshot") or {}
         risk_limits = RiskLimitSnapshot.from_context(context)
         var_cfg = context.get("var") or {}
+        forward_var_audit: dict[str, Any] = {}
         if bool(var_cfg.get("enabled", False)):
+            snapshot_meta = risk_snapshot.get("snapshot") or {}
+            if (
+                snapshot_meta.get("schema_version")
+                != "risk_metrics_snapshot.v2"
+            ):
+                return self._attach_demo_nursery_observations(RiskVerdict(
+                    allowed=False,
+                    reason="risk_metrics_contract_missing",
+                    severity="error",
+                    audit_payload={
+                        "action": "open_trade",
+                        "source": "risk_metrics_snapshot.v2",
+                        "blocked_by": "risk_metrics_snapshot_contract",
+                        "temporal_context": context.get("temporal_context") or {},
+                    },
+                ), demo_nursery_observations)
+            snapshot_status = str(snapshot_meta.get("status") or "")
+            if (
+                snapshot_meta.get("schema_version")
+                == "risk_metrics_snapshot.v2"
+                and snapshot_status in {"unknown", "stale", "error"}
+            ):
+                return self._attach_demo_nursery_observations(RiskVerdict(
+                    allowed=False,
+                    reason=f"risk_metrics_{snapshot_status or 'unknown'}",
+                    severity="error",
+                    audit_payload={
+                        "action": "open_trade",
+                        "source": "risk_metrics_snapshot.v2",
+                        "blocked_by": "risk_metrics_snapshot_status",
+                        "snapshot_status": snapshot_status or "unknown",
+                        "temporal_context": context.get("temporal_context") or {},
+                    },
+                ), demo_nursery_observations)
             var_data = risk_snapshot.get("var") or {}
-            var_pct = float(var_data.get("var_pct", 0.0) or 0.0)
+            forward_var_audit = {
+                "candidate_forward_var": var_data,
+                "candidate_forward_var_shadow_99": (
+                    risk_snapshot.get("var_shadow_99") or {}
+                ),
+            }
+            var_status = str(var_data.get("status") or "unknown")
+            if var_status != "known":
+                return self._attach_demo_nursery_observations(RiskVerdict(
+                    allowed=False,
+                    reason=f"var_metrics_{var_status}",
+                    severity="error",
+                    audit_payload={
+                        "action": "open_trade",
+                        "source": "risk_metrics_snapshot.v2",
+                        "blocked_by": "var_metrics_status",
+                        "var_status": var_status,
+                        **forward_var_audit,
+                        "temporal_context": context.get("temporal_context") or {},
+                    },
+                ), demo_nursery_observations)
+            try:
+                var_pct = float(var_data.get("var_pct"))
+                cvar_pct = float(var_data.get("cvar_pct"))
+                valid_var = (
+                    math.isfinite(var_pct)
+                    and math.isfinite(cvar_pct)
+                    and var_pct >= 0
+                    and cvar_pct >= var_pct
+                )
+            except (TypeError, ValueError, OverflowError):
+                valid_var = False
+                var_pct = cvar_pct = 0.0
+            if not valid_var:
+                return self._attach_demo_nursery_observations(RiskVerdict(
+                    allowed=False,
+                    reason="var_metrics_invalid",
+                    severity="error",
+                    audit_payload={
+                        "action": "open_trade",
+                        "source": "risk_metrics_snapshot.v2",
+                        "blocked_by": "var_metrics_values",
+                        **forward_var_audit,
+                        "temporal_context": context.get("temporal_context") or {},
+                    },
+                ), demo_nursery_observations)
             threshold_pct = float(var_cfg.get("threshold_pct", risk_limits.var_threshold_pct) or 0.0)
             if threshold_pct > 0 and var_pct > threshold_pct:
                 verdict = RiskVerdict(
@@ -735,13 +815,13 @@ class RiskPolicyService:
                         "source": "var_gate",
                         "var_pct": var_pct,
                         "threshold_pct": threshold_pct,
+                        **forward_var_audit,
                         "temporal_context": context.get("temporal_context") or {},
                     },
                 )
                 observed = self._observe_or_return_demo_nursery(context, verdict, demo_nursery_observations)
                 if observed is not None:
                     return observed
-            cvar_pct = float(var_data.get("cvar_pct", 0.0) or 0.0)
             cvar_threshold_pct = float(var_cfg.get("cvar_threshold_pct", risk_limits.cvar_threshold_pct) or 0.0)
             if cvar_threshold_pct > 0 and cvar_pct > cvar_threshold_pct:
                 verdict = RiskVerdict(
@@ -754,6 +834,7 @@ class RiskPolicyService:
                         "cvar_pct": cvar_pct,
                         "threshold_pct": cvar_threshold_pct,
                         "risk_limits": risk_limits.to_dict(),
+                        **forward_var_audit,
                         "temporal_context": context.get("temporal_context") or {},
                     },
                 )
@@ -890,6 +971,7 @@ class RiskPolicyService:
                 "max_position_api_volume": max_api_volume,
                 "event_sizing": event_sizing,
                 "risk_limits": risk_limits.to_dict(),
+                **forward_var_audit,
                 "state": state.extra,
                 "temporal_context": context.get("temporal_context") or {},
                 "decision_freshness": context.get("decision_freshness") or {},

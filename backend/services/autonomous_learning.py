@@ -697,6 +697,17 @@ def _review_system_contamination(review_json: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _counterfactual_source_is_clean(row: Any) -> bool:
+    source_review_id = str(_row_value(row, "source_review_id", "") or "")
+    if not source_review_id:
+        return False
+    source_review = _loads(_row_value(row, "source_review_json", ""), {})
+    if review_has_system_contamination(source_review):
+        return False
+    evidence = _loads(_row_value(row, "evidence_json", ""), {})
+    return not bool(evidence.get("evidence_invalidated"))
+
+
 def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | None = None) -> dict[str, Any]:
     action_json = _loads(row["action_json"], {})
     risk_state = _loads(row["risk_state_json"], {})
@@ -708,6 +719,14 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
     )
     label_status = "pending"
     train_weight = 0.5
+    review_backed_sample = (
+        outcome_review is not None
+        and sample_type in {"shadow_open_decision", "supervisor_trajectory"}
+    )
+    outcome_review_json = (
+        _loads(outcome_review["review_json"], {}) if review_backed_sample else {}
+    )
+    outcome_contamination = _review_system_contamination(outcome_review_json)
     label = {
         "event_type": str(row["event_type"] or ""),
         "action_reason": str(row["action_reason"] or ""),
@@ -728,8 +747,8 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
             review_json = {}
             contamination = _review_system_contamination(review_json)
             if outcome_review is not None:
-                review_json = _loads(outcome_review["review_json"], {})
-                contamination = _review_system_contamination(review_json)
+                review_json = outcome_review_json
+                contamination = outcome_contamination
                 integrity, train_weight = _review_integrity_for_training(review_json)
                 label_status = "matured"
                 label.update(
@@ -770,6 +789,7 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
                     "mfe": float(outcome_review["mfe"] or 0.0),
                     "primary_responsibility": str(review_json.get("primary_responsibility") or ""),
                     "close_ts": float(review_json.get("close_ts") or outcome_review["created_at"] or 0.0),
+                    "system_contamination": outcome_contamination,
                 }
             )
     return {
@@ -786,7 +806,7 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
         "executable_governance_allowed": sample_type in EXECUTABLE_GOVERNANCE_SAMPLE_TYPES,
         "integrity": (
             _review_integrity_for_training(_loads(outcome_review["review_json"], {}))[0]
-            if sample_type == "shadow_open_decision" and outcome_review is not None
+            if review_backed_sample
             else ("full" if risk_verdict or action_json else "partial")
         ),
         "train_weight": train_weight,
@@ -815,12 +835,12 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
             "event_type": str(row["event_type"] or ""),
             "outcome_review_id": (
                 str(outcome_review["review_id"] or "")
-                if sample_type == "shadow_open_decision" and outcome_review is not None
+                if review_backed_sample
                 else ""
             ),
             "system_contamination": (
-                _review_system_contamination(_loads(outcome_review["review_json"], {}))
-                if sample_type == "shadow_open_decision" and outcome_review is not None
+                outcome_contamination
+                if review_backed_sample
                 else {"schema_version": "learning_system_contamination.v1", "contaminated": False}
             ),
         },
@@ -831,7 +851,7 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
             "trade_id": str(row["trade_id"] or ""),
             "review_id": (
                 str(outcome_review["review_id"] or "")
-                if sample_type == "shadow_open_decision" and outcome_review is not None
+                if review_backed_sample
                 else ""
             ),
         },
@@ -894,9 +914,27 @@ def _sample_from_counterfactual(row: Any) -> dict[str, Any]:
     label = str(row["label"] or "")
     confidence = float(row["confidence"] or 0.0)
     evidence = _loads(row["evidence_json"], {})
+    source_review_id = str(_row_value(row, "source_review_id", "") or "")
+    if source_review_id:
+        source_contamination = _review_system_contamination(
+            _loads(_row_value(row, "source_review_json", ""), {})
+        )
+    else:
+        source_contamination = {
+            "schema_version": "learning_system_contamination.v1",
+            "contaminated": True,
+            "reason": "canonical_source_review_missing",
+        }
+    if bool(evidence.get("evidence_invalidated")):
+        source_contamination = {
+            "schema_version": "learning_system_contamination.v1",
+            "contaminated": True,
+            "reason": str(evidence.get("invalidation_reason") or "evidence_invalidated"),
+        }
+    contaminated = bool(source_contamination.get("contaminated"))
     maturity = evidence.get("maturity") or {}
     maturity_status = str(maturity.get("status") or "")
-    governance_eligible = bool(maturity.get("governance_eligible"))
+    governance_eligible = bool(maturity.get("governance_eligible")) and not contaminated
     label_status = "matured" if governance_eligible else (
         "partially_matured" if maturity_status == "partially_matured" else "pending"
     )
@@ -910,9 +948,9 @@ def _sample_from_counterfactual(row: Any) -> dict[str, Any]:
         "position_id": str(row["position_id"] or ""),
         "event_ts": float(row["close_ts"] or row["updated_at"] or 0.0),
         "label_status": label_status,
-        "executable_governance_allowed": True,
-        "integrity": "full" if label_status == "matured" else "partial",
-        "train_weight": max(0.0, min(1.0, confidence)),
+        "executable_governance_allowed": not contaminated,
+        "integrity": "full" if label_status == "matured" and not contaminated else "partial",
+        "train_weight": 0.0 if contaminated else max(0.0, min(1.0, confidence)),
         "causal_level": "counterfactual",
         "features": {
             "close_reason": str(row["close_reason"] or ""),
@@ -925,6 +963,7 @@ def _sample_from_counterfactual(row: Any) -> dict[str, Any]:
         "verdict": {
             "counterfactual_label": label,
             "confidence": confidence,
+            "system_contamination": source_contamination,
         },
         "label": {
             "label": label,
@@ -1056,11 +1095,28 @@ def _sample_from_entry_supervisor_feedback(row: Any) -> dict[str, Any] | None:
     }
 
 
-def _sample_from_supervisor_trace(row: Any) -> dict[str, Any]:
+def _sample_from_supervisor_trace(
+    row: Any,
+    *,
+    source_review_row: Any | None = None,
+) -> dict[str, Any]:
     verdict = _loads(row["verdict_json"], {})
     context = _loads(row["context_json"], {})
     risk_verdict = _loads(row["risk_verdict_json"], {})
     execution = _loads(row["execution_json"], {})
+    review_row = source_review_row if source_review_row is not None else row
+    source_review_id = str(_row_value(review_row, "source_review_id", "") or "")
+    if source_review_id:
+        source_contamination = _review_system_contamination(
+            _loads(_row_value(review_row, "source_review_json", ""), {})
+        )
+    else:
+        source_contamination = {
+            "schema_version": "learning_system_contamination.v1",
+            "contaminated": True,
+            "reason": "canonical_source_review_missing",
+        }
+    contaminated = bool(source_contamination.get("contaminated"))
     outcome = str(row["outcome"] or "")
     execution_status = str(row["execution_status"] or "")
     label_status = "pending"
@@ -1080,9 +1136,9 @@ def _sample_from_supervisor_trace(row: Any) -> dict[str, Any]:
         "timeframe": str(row["timeframe"] or ""),
         "event_ts": float(row["event_ts"] or row["created_at"] or 0.0),
         "label_status": label_status,
-        "executable_governance_allowed": True,
-        "integrity": "full" if verdict else "partial",
-        "train_weight": train_weight,
+        "executable_governance_allowed": not contaminated,
+        "integrity": "full" if verdict and not contaminated else "partial",
+        "train_weight": 0.0 if contaminated else train_weight,
         "causal_level": "intervention_observed",
         "features": {
             "context": context,
@@ -1100,6 +1156,7 @@ def _sample_from_supervisor_trace(row: Any) -> dict[str, Any]:
             "risk_allowed": bool(row["risk_allowed"]),
             "risk_reason": str(row["risk_reason"] or ""),
             "execution_status": execution_status,
+            "system_contamination": source_contamination,
             "execution_reason": str(row["execution_reason"] or ""),
         },
         "verdict": {
@@ -1118,6 +1175,7 @@ def _sample_from_supervisor_trace(row: Any) -> dict[str, Any]:
             "decision_id": str(row["decision_id"] or ""),
             "position_id": str(row["position_id"] or ""),
             "trade_id": str(row["trade_id"] or ""),
+            "source_review_id": source_review_id,
         },
     }
 
@@ -1172,7 +1230,7 @@ def _dynamic_tpsl_labels(base: dict[str, Any], cf_label: str) -> list[str]:
 
 
 def _matured_sample_from_supervisor_trace(row: Any, cf_row: Any | None, *, run_context: dict[str, Any]) -> dict[str, Any]:
-    base = _sample_from_supervisor_trace(row)
+    base = _sample_from_supervisor_trace(row, source_review_row=cf_row)
     cf_label = str(cf_row["label"] or "") if cf_row is not None else ""
     label_status, unified_label, recommended_action, weight = _supervisor_label_from_counterfactual(cf_label)
     protection_labels = _dynamic_tpsl_labels(base, cf_label)
@@ -1182,6 +1240,12 @@ def _matured_sample_from_supervisor_trace(row: Any, cf_row: Any | None, *, run_c
         weight = 0.0
     elif integrity in {"partial", "recovered"}:
         weight *= 0.5
+    if bool(
+        ((base.get("features") or {}).get("system_contamination") or {}).get(
+            "contaminated"
+        )
+    ):
+        weight = 0.0
     base.update(
         {
             "label_status": label_status,
@@ -1343,18 +1407,27 @@ def mature_position_supervisor_traces(
             (max(1, int(limit)),),
         ).fetchall()
         for trace in traces:
-            cf = _execute(
+            cf_rows = _execute(
                 conn,
                 """
-                SELECT *
-                FROM supervisor_counterfactual_review
-                WHERE position_id=?
-                  AND close_ts >= ?
-                ORDER BY updated_at DESC, close_ts ASC
-                LIMIT 1
+                SELECT cf.*, r.review_id AS source_review_id,
+                       r.review_json AS source_review_json
+                FROM supervisor_counterfactual_review cf
+                JOIN trade_outcome_review r ON r.review_id=cf.review_id
+                WHERE cf.position_id=?
+                  AND cf.close_ts >= ?
+                ORDER BY cf.updated_at DESC, cf.close_ts ASC
                 """,
                 (str(trace["position_id"] or ""), float(trace["event_ts"] or 0.0)),
-            ).fetchone()
+            ).fetchall()
+            cf = next(
+                (
+                    candidate
+                    for candidate in cf_rows
+                    if _counterfactual_source_is_clean(candidate)
+                ),
+                None,
+            )
             item = _matured_sample_from_supervisor_trace(trace, cf, run_context=run_context)
             if _upsert_sample(conn, item):
                 if item["label_status"] == "matured":
@@ -1449,9 +1522,18 @@ def materialize_autonomous_learning_samples(
             traces = _execute(
                 conn,
                 """
-                SELECT *
-                FROM position_supervisor_trace
-                ORDER BY event_ts DESC, created_at DESC
+                SELECT t.*, r.review_id AS source_review_id,
+                       r.review_json AS source_review_json
+                FROM position_supervisor_trace t
+                LEFT JOIN trade_outcome_review r
+                  ON r.review_id = (
+                      SELECT r2.review_id
+                      FROM trade_outcome_review r2
+                      WHERE r2.position_id=t.position_id
+                      ORDER BY r2.created_at DESC, r2.review_id DESC
+                      LIMIT 1
+                  )
+                ORDER BY t.event_ts DESC, t.created_at DESC
                 LIMIT ?
                 """,
                 (int(limit),),
@@ -1494,16 +1576,22 @@ def materialize_autonomous_learning_samples(
             cfs = _execute(
                 conn,
                 """
-                SELECT *
-                FROM supervisor_counterfactual_review
-                ORDER BY updated_at DESC
-                LIMIT ?
+                SELECT cf.*, r.review_id AS source_review_id,
+                       r.review_json AS source_review_json
+                FROM supervisor_counterfactual_review cf
+                JOIN trade_outcome_review r ON r.review_id=cf.review_id
+                ORDER BY cf.updated_at DESC
                 """,
-                (int(limit),),
             ).fetchall()
+            accepted_counterfactuals = 0
             for row in cfs:
+                if not _counterfactual_source_is_clean(row):
+                    continue
+                accepted_counterfactuals += 1
                 if _upsert_sample(conn, {**_sample_from_counterfactual(row), **sample_context}):
                     counts["post_close_counterfactual"] += 1
+                if accepted_counterfactuals >= max(1, int(limit)):
+                    break
 
         payload = {
             "schema_version": "autonomous_learning_samples.v1",
@@ -4269,7 +4357,15 @@ def _auto_apply_position_supervisor_template_suggestions(
             canary_required = max(1, int(getattr(cfg, "supervisor_canary_mature_trade_count", 50) or 50))
             cf_rows = _execute(
                 conn,
-                "SELECT position_id, close_ts, evidence_json FROM supervisor_counterfactual_review WHERE close_ts>=? ORDER BY close_ts DESC LIMIT 2000",
+                """
+                SELECT cf.position_id, cf.close_ts, cf.evidence_json,
+                       r.review_id AS source_review_id,
+                       r.review_json AS source_review_json
+                FROM supervisor_counterfactual_review cf
+                JOIN trade_outcome_review r ON r.review_id=cf.review_id
+                WHERE cf.close_ts>=?
+                ORDER BY cf.close_ts DESC
+                """,
                 (float(row["created_at"] or 0.0),),
             ).fetchall()
             shadow_rows = _execute(
@@ -4294,19 +4390,25 @@ def _auto_apply_position_supervisor_template_suggestions(
             mature_positions: set[str] = set()
             mature_sessions: set[str] = set()
             mature_regimes: set[str] = set()
+            accepted_counterfactuals = 0
             for cf_row in cf_rows:
+                if not _counterfactual_source_is_clean(cf_row):
+                    continue
                 position_id = str(cf_row["position_id"] or "")
                 if position_id not in shadow_position_ids:
                     continue
                 cf_evidence = _loads(cf_row["evidence_json"], {})
                 if not bool((cf_evidence.get("maturity") or {}).get("governance_eligible")):
                     continue
+                accepted_counterfactuals += 1
                 mature_positions.add(position_id)
                 close_hour = time.gmtime(float(cf_row["close_ts"] or 0.0)).tm_hour
                 mature_sessions.add("asia" if close_hour < 7 else "europe" if close_hour < 13 else "us")
                 regime = str(cf_evidence.get("regime") or "")
                 if regime and regime != "unknown":
                     mature_regimes.add(regime)
+                if accepted_counterfactuals >= 2000:
+                    break
             evidence_ready = (
                 len(mature_positions) >= canary_required
                 and len(mature_sessions) >= 2

@@ -1,7 +1,7 @@
 # Documentation Index
 
 > Status: active
-> Last verified: 2026-07-06
+> Last verified: 2026-07-24
 > Scope: maintained documentation entry points and documentation governance.
 
 当前文档集只保留正在维护的主入口。后续如无特殊需要，不再为同一主题新增平行蓝图文档，避免路线分叉。
@@ -41,6 +41,7 @@
 - [planning/multi-symbol-pipeline.md](planning/multi-symbol-pipeline.md) - 多品种扩展专项规划
 - [planning/v15-autonomous-runtime-platform.md](planning/v15-autonomous-runtime-platform.md) - V15 自治运行内核大版本设计入口
 - [planning/v16-autonomous-intelligence-brain.md](planning/v16-autonomous-intelligence-brain.md) - V16 自治交易大脑、世界模型、记忆、假设、模拟和自我批判设计
+- [planning/production-autonomy-repair-optimization-plan.md](planning/production-autonomy-repair-optimization-plan.md) - 2026-07-24 全链路审查后的成交事实、风险、记忆、V16 调度、复杂度收敛与生产自治毕业修复总方案；20项 operator 决策已记录，P0-P1 正在分批实施
 
 ## 文档使用规则
 

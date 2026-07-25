@@ -219,9 +219,11 @@ def test_brain_memory_retrieves_negative_memory_and_counter_evidence(tmp_path):
         conn.execute(
             """
             INSERT INTO experience_memory
-            (experience_id, trade_id, regime_id, outcome_label, reward_score,
+            (experience_id, trade_id, source_table, source_id, append_source,
+             regime_id, outcome_label, reward_score,
              failure_tags_json, recommended_action, evidence_strength, created_at)
-            VALUES ('exp_loss_1', 'trade_1', 'defensive', 'loss', -0.8,
+            VALUES ('exp_loss_1', 'trade_1', 'trade_outcome_review', 'review_loss_1',
+                    'live_review', 'defensive', 'loss', -0.8,
                     '["simulation_gap"]', 'observe_only', 0.9, ?)
             """,
             (now - 30.0,),
@@ -231,9 +233,11 @@ def test_brain_memory_retrieves_negative_memory_and_counter_evidence(tmp_path):
             INSERT INTO trade_outcome_review
             (review_id, trade_id, position_id, pnl, outcome_label, summary_text, created_at)
             VALUES ('review_win_1', 'trade_2', 'pos_2', 120.0, 'win',
-                    'defensive setup recovered after replay evidence improved', ?)
+                    'defensive setup recovered after replay evidence improved', ?),
+                   ('review_loss_1', 'trade_1', 'pos_1', -80.0, 'loss',
+                    'defensive setup failed', ?)
             """,
-            (now - 20.0,),
+            (now - 20.0, now - 30.0),
         )
         conn.execute(
             """
@@ -286,6 +290,85 @@ def test_brain_memory_retrieves_negative_memory_and_counter_evidence(tmp_path):
 def test_brain_memory_uses_token_matching_not_generic_substrings():
     assert BrainMemoryService._similarity("factorization instability", {"factor"}) == 0.0
     assert BrainMemoryService._similarity("factor instability", {"factor"}) > 0.0
+
+
+def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    contaminated = {
+        "summary": "contaminated review",
+        "system_issue_context": {
+            "contaminates_learning": True,
+            "labels": ["market_data_stale"],
+        },
+    }
+    clean = {"summary": "clean review"}
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """INSERT INTO trade_outcome_review
+               (review_id, trade_id, position_id, pnl, outcome_label, review_json, created_at)
+               VALUES ('review_bad', 'trade_bad', 'position_bad', -1, 'loss', ?, 20),
+                      ('review_clean', 'trade_clean', 'position_clean', 1, 'win', ?, 10)""",
+            (json.dumps(contaminated), json.dumps(clean)),
+        )
+        conn.execute(
+            """INSERT INTO experience_memory
+               (experience_id, trade_id, source_table, source_id, decision_context_json,
+                append_source, outcome_label, reward_score, evidence_strength, created_at)
+               VALUES ('experience_bad', 'trade_bad', 'trade_outcome_review', 'review_bad', ?,
+                       'live_review',
+                       'loss', -1, 1, 20),
+                      ('experience_clean', 'trade_clean', 'trade_outcome_review', 'review_clean', ?,
+                       'live_review',
+                       'win', 1, 1, 10)""",
+            (
+                json.dumps({"review_json": contaminated}),
+                json.dumps({"review_json": clean}),
+            ),
+        )
+        conn.execute(
+            """INSERT INTO supervisor_counterfactual_review
+               (counterfactual_id, review_id, trade_id, position_id, close_ts, label,
+                confidence, horizons_json, evidence_json, created_at, updated_at)
+               VALUES ('cf_bad', 'review_bad', 'trade_bad', 'position_bad', 20,
+                       'premature_tighten', 0.9, '[{}]', '{}', 20, 20),
+                      ('cf_clean', 'review_clean', 'trade_clean', 'position_clean', 10,
+                       'premature_tighten', 0.9, '[{}]',
+                       '{"maturity":{"governance_eligible":true}}', 10, 10),
+                      ('cf_invalidated', 'review_clean', 'trade_clean', 'position_clean', 9,
+                       'premature_tighten', 0.9, '[{}]',
+                       '{"evidence_invalidated":true,"maturity":{"governance_eligible":false}}',
+                       9, 9)"""
+        )
+        conn.execute(
+            """INSERT INTO policy_suggestion
+               (suggestion_id, scope_type, scope_key, action, confidence, reason,
+                evidence_json, status, created_at)
+               VALUES ('suggestion_invalidated', 'factor', 'rsi_14', 'downweight',
+                       0.9, 'stale lineage', '{}', 'invalidated_evidence', 30)"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = BrainMemoryService(db_path).retrieve(persist=False, limit=50)
+    source_ids = {item["source_id"] for item in result["items"]}
+
+    # Trade review and experience memory share the same trade lineage and may
+    # be deduplicated into one current memory item.
+    assert {"experience_clean", "cf_clean"} <= source_ids
+    assert not {"review_bad", "experience_bad", "cf_bad"} & source_ids
+    assert "suggestion_invalidated" not in source_ids
+
+    planning_evidence = BrainActionPlanEvaluatorService(db_path)._load_evidence(limit=50)
+    assert {
+        item["review_id"] for item in planning_evidence["trade_outcome_review"]
+    } == {"review_clean"}
+    assert {
+        item["counterfactual_id"]
+        for item in planning_evidence["supervisor_counterfactual_review"]
+    } == {"cf_clean"}
 
 
 def test_brain_action_planner_records_shadow_only_action_plans(tmp_path):

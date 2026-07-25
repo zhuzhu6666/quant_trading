@@ -57,6 +57,7 @@ def run_serial_live_ticks(
             if tick_result["break_loop"]:
                 exit_reason = "tick_requested_break"
                 break
+            runtime.update_risk_metrics(tick=tick, log=log)
             wait_seconds = tick_result.get("wait_seconds")
             if wait_seconds is not None:
                 if stop_flag.wait(float(wait_seconds)):
@@ -75,7 +76,6 @@ def run_serial_live_ticks(
                     break
                 continue
 
-        runtime.update_risk_metrics(tick=tick, log=log)
         if stop_flag.wait(60.0):
             exit_reason = "stop_during_alpha_wait"
             break

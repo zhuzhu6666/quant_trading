@@ -3622,27 +3622,32 @@
       },
       "StressRequest": {
         "properties": {
-          "equity_series": {
+          "account": {
+            "title": "Account",
+            "type": "object"
+          },
+          "positions": {
+            "items": {
+              "type": "object"
+            },
+            "title": "Positions",
+            "type": "array"
+          },
+          "shocks": {
+            "default": [
+              -0.05,
+              0.05
+            ],
             "items": {
               "type": "number"
             },
-            "title": "Equity Series",
+            "title": "Shocks",
             "type": "array"
-          },
-          "initial_equity": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Initial Equity"
           }
         },
         "required": [
-          "equity_series"
+          "positions",
+          "account"
         ],
         "title": "StressRequest",
         "type": "object"
@@ -18051,7 +18056,6 @@
     },
     "/api/risk/concentration": {
       "get": {
-        "description": "获取集中度状态 (无数据时)。",
         "operationId": "get_concentration_status_api_risk_concentration_get",
         "parameters": [
           {
@@ -18171,7 +18175,6 @@
     },
     "/api/risk/kelly": {
       "get": {
-        "description": "获取 Kelly 状态概览 (无数据时)。",
         "operationId": "get_kelly_status_api_risk_kelly_get",
         "parameters": [
           {
@@ -18342,7 +18345,6 @@
     },
     "/api/risk/stress": {
       "get": {
-        "description": "获取压力测试状态 (无数据时)。",
         "operationId": "get_stress_status_api_risk_stress_get",
         "parameters": [
           {
@@ -18648,7 +18650,6 @@
     },
     "/api/risk/var": {
       "get": {
-        "description": "获取当前 VaR 状态 (无权益数据时返回空结构)。",
         "operationId": "get_var_status_api_risk_var_get",
         "parameters": [
           {

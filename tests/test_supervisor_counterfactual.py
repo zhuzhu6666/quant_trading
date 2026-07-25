@@ -146,6 +146,113 @@ def test_counterfactual_labels_premature_tighten_when_future_recovers(monkeypatc
     assert stored["items"][0]["evidence"]["advisory_only"] is True
 
 
+def test_counterfactual_skips_system_contaminated_review(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        review = json.loads(
+            conn.execute(
+                "SELECT review_json FROM trade_outcome_review WHERE review_id='r1'"
+            ).fetchone()[0]
+        )
+        review["system_issue_context"] = {
+            "contaminates_learning": True,
+            "labels": ["market_data_stale"],
+        }
+        conn.execute(
+            "UPDATE trade_outcome_review SET review_json=? WHERE review_id='r1'",
+            (json.dumps(review),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: _complete_m1_bars())
+
+    result = scf.evaluate_counterfactuals(db_path=db_path, limit=10, materialize=True)
+
+    assert result["candidate_count"] == 0
+    assert result["items"] == []
+    assert scf.list_counterfactuals(db_path=db_path)["items"] == []
+
+
+def test_counterfactual_can_target_review_ids_without_limit_window(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: _complete_m1_bars())
+
+    selected = scf.evaluate_counterfactuals(
+        db_path=db_path,
+        limit=0,
+        review_ids=["r1"],
+        materialize=False,
+    )
+    missing = scf.evaluate_counterfactuals(
+        db_path=db_path,
+        limit=10,
+        review_ids=[],
+        materialize=False,
+    )
+
+    assert selected["requested_review_count"] == 1
+    assert selected["count"] == 1
+    assert missing["requested_review_count"] == 0
+    assert missing["items"] == []
+
+
+def test_counterfactual_terminal_invalidation_cannot_be_rematerialized(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: _complete_m1_bars())
+
+    first = scf.evaluate_counterfactuals(
+        db_path=db_path,
+        review_ids=["r1"],
+        materialize=True,
+    )
+    counterfactual_id = first["items"][0]["counterfactual_id"]
+    invalidated = {
+        **first["items"][0]["evidence"],
+        "evidence_invalidated": True,
+        "invalidation_reason": "broker_execution_price_scale_repair_v1",
+        "maturity": {
+            **dict(first["items"][0]["evidence"].get("maturity") or {}),
+            "governance_eligible": False,
+        },
+    }
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            UPDATE supervisor_counterfactual_review
+            SET evidence_json=?
+            WHERE counterfactual_id=?
+            """,
+            (json.dumps(invalidated), counterfactual_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    repeated = scf.evaluate_counterfactuals(
+        db_path=db_path,
+        review_ids=["r1"],
+        materialize=True,
+    )
+    stored = scf.list_counterfactuals(db_path=db_path)
+
+    assert repeated["items"][0]["counterfactual_id"] == counterfactual_id
+    assert stored["count"] == 1
+    evidence = stored["items"][0]["evidence"]
+    assert evidence["evidence_invalidated"] is True
+    assert evidence["invalidation_reason"] == (
+        "broker_execution_price_scale_repair_v1"
+    )
+    assert evidence["maturity"]["governance_eligible"] is False
+
+
 def test_counterfactual_sparse_future_bars_are_not_governance_ready(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     _create_db(db_path)

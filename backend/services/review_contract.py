@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
 SYSTEM_CONTAMINATION_LABELS = {
     "bar_data_degraded",
+    "broker_close_price_unknown",
     "data_quality_issue",
     "decision_bar_stale",
     "market_data_stale",
@@ -12,6 +14,20 @@ SYSTEM_CONTAMINATION_LABELS = {
 }
 
 ADVISORY_ONLY_HEALTH_COMPONENTS: set[str] = set()
+
+
+def trusted_broker_close_price(payload: dict[str, Any] | None) -> float | None:
+    value = payload or {}
+    if str(value.get("price_quality") or "").strip().lower() not in {
+        "broker_reported",
+        "broker_reconciled",
+    }:
+        return None
+    try:
+        price = float(value.get("exec_price") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return price if math.isfinite(price) and price > 0.0 else None
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -195,6 +211,7 @@ def build_system_issue_context(review_payload: dict[str, Any] | None) -> dict[st
     data_quality = _as_dict(review.get("data_quality_context"))
     market_session = _as_dict(review.get("market_session"))
     runtime_health = _as_dict(data_quality.get("runtime_health"))
+    real_pnl = _as_dict(review.get("real_pnl"))
     system_health = _as_dict(runtime_health.get("system_health"))
     sync_health = _first_nonempty_dict(
         freshness.get("sync_health"),
@@ -205,6 +222,14 @@ def build_system_issue_context(review_payload: dict[str, Any] | None) -> dict[st
         timeframe_seconds(review.get("timeframe")),
     )
     stale_threshold = max(180.0, timeframe_sec * 1.5 if timeframe_sec > 0 else 0.0)
+
+    price_quality = str(real_pnl.get("price_quality") or "").strip().lower()
+    if price_quality == "unknown":
+        _append_label(labels, "broker_close_price_unknown")
+        evidence["broker_close_price"] = {
+            "price_contract": str(real_pnl.get("price_contract") or "legacy_unknown"),
+            "price_quality": "unknown",
+        }
 
     if data_quality and not _safe_bool(data_quality.get("quote_fresh"), True):
         _append_label(labels, "data_quality_issue")

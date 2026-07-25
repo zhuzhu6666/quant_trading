@@ -16,6 +16,7 @@ from backend.services.review_contract import (
     build_entry_timing_context,
     extract_decision_freshness_context,
     normalize_trade_review_contract,
+    trusted_broker_close_price,
 )
 
 
@@ -228,10 +229,17 @@ class TradeReviewer:
     ) -> tuple[bool, str]:
         payload = real_pnl or {}
         has_net = isinstance(payload, dict) and payload.get("net") is not None
+        broker_close = close_reason in {
+            "broker_close",
+            "restart_replay",
+            "emergency_close",
+        }
+        if (
+            broker_close or "price_quality" in payload
+        ) and trusted_broker_close_price(payload) is None:
+            return False, "unknown_execution_price"
         if has_net:
             return True, ""
-        if close_reason in {"broker_close", "restart_replay", "emergency_close"}:
-            return False, "missing_real_pnl"
         if context_integrity != "full":
             return False, "partial_context"
         return False, "missing_real_pnl"

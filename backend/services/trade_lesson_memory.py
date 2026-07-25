@@ -172,6 +172,7 @@ def build_trade_lesson(row: Any) -> dict[str, Any]:
     reusable_lesson = str(_row_get(row, "summary_text", "") or outcome_label or "trade lesson")
     context = {
         "schema_version": ARTIFACT_VERSION,
+        "review_json": review,
         "market_state": {
             "regime": review.get("regime") or review.get("regime_id") or "",
             "market_session": review.get("market_session") or {},

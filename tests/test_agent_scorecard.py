@@ -217,6 +217,93 @@ def test_trade_attribution_counts_lesson_memory_participants_as_linked(tmp_path)
     assert "autonomous_learning" in item["feedback_targets"]
 
 
+def test_posterior_arbitration_filters_canonical_evidence_before_limit(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = _setup_state(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, pnl, outcome_label,
+             failure_tags_json, summary_text, review_json, created_at)
+            VALUES ('review_clean', 'trade_clean', 'position_shared', -1.0,
+                    'good_loss', '[]', 'clean review',
+                    '{"system_issue_context":{"contaminates_learning":false}}',
+                    100.0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, pnl, outcome_label,
+             failure_tags_json, summary_text, review_json, created_at)
+            VALUES ('review_dirty', 'trade_dirty', 'position_shared', -1.0,
+                    'bad_loss', '[]', 'dirty review',
+                    '{"system_issue_context":{"contaminates_learning":true}}',
+                    99.0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO supervisor_counterfactual_review
+            (counterfactual_id, review_id, trade_id, position_id, close_ts,
+             label, confidence, horizons_json, evidence_json, created_at, updated_at)
+            VALUES ('cf_valid', 'review_clean', 'trade_clean', 'position_shared',
+                    100.0, 'correct_stop', 0.8, '[{"horizon_minutes":30}]',
+                    '{}', 100.0, 100.0)
+            """
+        )
+        for index in range(10):
+            conn.execute(
+                """
+                INSERT INTO supervisor_counterfactual_review
+                (counterfactual_id, review_id, trade_id, position_id, close_ts,
+                 label, confidence, horizons_json, evidence_json,
+                 created_at, updated_at)
+                VALUES (?, 'review_clean', 'trade_clean', 'position_shared',
+                        ?, 'correct_stop', 0.9, '[]',
+                        '{"evidence_invalidated":true}', ?, ?)
+                """,
+                (
+                    f"cf_invalidated_{index}",
+                    200.0 + index,
+                    200.0 + index,
+                    200.0 + index,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO supervisor_counterfactual_review
+            (counterfactual_id, review_id, trade_id, position_id, close_ts,
+             label, confidence, horizons_json, evidence_json, created_at, updated_at)
+            VALUES ('cf_dirty', 'review_dirty', 'trade_dirty', 'position_shared',
+                    400.0, 'correct_stop', 0.9, '[]', '{}', 400.0, 400.0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO supervisor_counterfactual_review
+            (counterfactual_id, review_id, trade_id, position_id, close_ts,
+             label, confidence, horizons_json, evidence_json, created_at, updated_at)
+            VALUES ('cf_orphan', 'missing_review', 'trade_orphan', 'position_shared',
+                    500.0, 'correct_stop', 0.9, '[]', '{}', 500.0, 500.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    attribution = AgentScorecardService(db_path).latest_trade_attributions(
+        limit=1,
+        include_external_links=False,
+    )
+
+    assert [
+        item["counterfactual_id"]
+        for item in attribution["items"][0]["counterfactuals"]
+    ] == ["cf_valid"]
+
+
 def test_agent_briefing_includes_governance_coverage(tmp_path):
     db_path = tmp_path / "state.db"
     conn = _setup_state(db_path)
@@ -268,18 +355,30 @@ def test_agent_generation_context_includes_scope_relevant_experience(tmp_path):
     conn = _setup_state(db_path)
     try:
         for factor, reward in (("rsi_14", -0.6), ("macd", 0.4)):
+            review_id = f"review_{factor}"
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, position_id, review_json, created_at)
+                VALUES (?, ?, ?, '{}', ?)
+                """,
+                (review_id, f"trade_{factor}", f"position_{factor}", time.time()),
+            )
             conn.execute(
                 """
                 INSERT INTO experience_memory
-                (experience_id, trade_id, regime_id, setup_hash, decision_context_json,
+                (experience_id, trade_id, source_table, source_id, append_source,
+                 regime_id, setup_hash, decision_context_json,
                  outcome_label, reward_score, failure_tags_json, recommended_action,
                  evidence_strength, artifact_version, created_at)
-                VALUES (?, ?, 'range', ?, ?, 'bad_loss', ?, '["weak_entry_signal"]',
+                VALUES (?, ?, 'trade_outcome_review', ?, 'live_review',
+                        'range', ?, ?, 'bad_loss', ?, '["weak_entry_signal"]',
                         'downweight', 0.9, 'v1', ?)
                 """,
                 (
                     f"exp_{factor}",
                     f"trade_{factor}",
+                    review_id,
                     f"setup_{factor}",
                     json.dumps({"primary_factor": factor, "summary_text": f"lesson for {factor}"}),
                     reward,

@@ -3,7 +3,12 @@ import sqlite3
 import pytest
 
 from backend.core.db import STATE_DB_DDL
-from execution.deal_sync import fetch_deals_since_result, sync_close_deals_batch
+from execution.deal_sync import (
+    fetch_deals_since_result,
+    find_close_deal,
+    store_deals,
+    sync_close_deals_batch,
+)
 
 
 def _conn(db_path):
@@ -48,6 +53,147 @@ def test_explicit_deal_fetch_honors_ctrader_compat_failure_marker():
     assert failed.success is False
     assert failed.empty is False
     assert failed.error_code == "broker_deal_fetch_failed"
+
+
+def test_store_deals_records_raw_price_contract_and_unknown_fails_closed(tmp_path):
+    conn = _conn(tmp_path / "state.db")
+    try:
+        conn.executescript(STATE_DB_DDL)
+        store_deals(
+            conn,
+            [
+                {
+                    "deal_id": 1,
+                    "position_id": 10,
+                    "execution_price": 4050.25,
+                    "price_quality": "broker_reported",
+                    "close_detail": {"gross_profit": 1.0, "closed_volume": 100},
+                },
+                {
+                    "deal_id": 2,
+                    "position_id": 20,
+                    "execution_price": 0.0,
+                    "close_detail": {"gross_profit": 1.0, "closed_volume": 100},
+                },
+            ],
+        )
+        rows = {
+            row["deal_id"]: row
+            for row in conn.execute(
+                "SELECT * FROM ctrader_deals ORDER BY deal_id"
+            ).fetchall()
+        }
+        assert rows[1]["raw_execution_price"] == pytest.approx(4050.25)
+        assert rows[1]["price_contract"] == "ctrader.deal.execution_price.raw.v1"
+        assert rows[1]["price_quality"] == "broker_reported"
+        assert rows[2]["price_quality"] == "unknown"
+
+        class _Bridge:
+            is_connected = False
+
+        assert sync_close_deals_batch(_Bridge(), conn, {10})[10]["exec_price"] == pytest.approx(4050.25)
+        unknown_price = sync_close_deals_batch(_Bridge(), conn, {20})[20]
+        assert unknown_price["net"] == pytest.approx(1.0)
+        assert unknown_price["exec_price"] == 0.0
+        assert unknown_price["price_quality"] == "unknown"
+    finally:
+        conn.close()
+
+
+def test_store_deals_preserves_explicit_unknown_price_quality(tmp_path):
+    conn = _conn(tmp_path / "state.db")
+    try:
+        conn.executescript(STATE_DB_DDL)
+        store_deals(
+            conn,
+            [
+                {
+                    "deal_id": 12,
+                    "position_id": 103,
+                    "execution_price": 4125.0,
+                    "price_contract": "legacy_unknown",
+                    "price_quality": "unknown",
+                    "close_detail": {
+                        "gross_profit": 1.0,
+                        "balance": 101.0,
+                        "closed_volume": 100,
+                    },
+                }
+            ],
+        )
+
+        row = conn.execute(
+            """
+            SELECT exec_price, raw_execution_price, price_contract, price_quality
+            FROM ctrader_deals WHERE deal_id=12
+            """
+        ).fetchone()
+        assert row["exec_price"] == 0.0
+        assert row["raw_execution_price"] == pytest.approx(4125.0)
+        assert row["price_contract"] == "legacy_unknown"
+        assert row["price_quality"] == "unknown"
+        close = find_close_deal(conn, 103)
+        assert close is not None
+        assert close["price_quality"] == "unknown"
+    finally:
+        conn.close()
+
+
+def test_store_deals_can_promote_unknown_price_from_new_broker_evidence(tmp_path):
+    conn = _conn(tmp_path / "state.db")
+    try:
+        conn.executescript(STATE_DB_DDL)
+        base = {
+            "deal_id": 13,
+            "position_id": 104,
+            "execution_price": 41.25,
+            "price_contract": "legacy_unknown",
+            "price_quality": "unknown",
+            "close_detail": {
+                "gross_profit": 1.0,
+                "balance": 101.0,
+                "closed_volume": 100,
+            },
+        }
+        store_deals(conn, [base])
+        store_deals(
+            conn,
+            [
+                {
+                    **base,
+                    "price_contract": "ctrader.deal.execution_price.raw.v1",
+                    "price_quality": "broker_reported",
+                }
+            ],
+        )
+        still_unknown = conn.execute(
+            "SELECT exec_price, price_quality FROM ctrader_deals WHERE deal_id=13"
+        ).fetchone()
+        assert still_unknown["exec_price"] == 0.0
+        assert still_unknown["price_quality"] == "unknown"
+        store_deals(
+            conn,
+            [
+                {
+                    **base,
+                    "execution_price": 4125.0,
+                    "price_contract": "ctrader.deal.execution_price.raw.v1",
+                    "price_quality": "broker_reconciled",
+                }
+            ],
+        )
+
+        row = conn.execute(
+            """
+            SELECT exec_price, raw_execution_price, price_contract, price_quality
+            FROM ctrader_deals WHERE deal_id=13
+            """
+        ).fetchone()
+        assert row["exec_price"] == pytest.approx(4125.0)
+        assert row["raw_execution_price"] == pytest.approx(4125.0)
+        assert row["price_quality"] == "broker_reconciled"
+    finally:
+        conn.close()
 
 
 def test_close_deal_with_zero_gross_profit_still_recovers_real_pnl(tmp_path):

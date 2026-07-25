@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import math
 import sqlite3
 import time
 from typing import Any, Mapping, MutableMapping
@@ -172,6 +173,16 @@ def store_deals(
     now = time.time()
     for d in deals:
         cd = d.get("close_detail", {}) or {}
+        try:
+            execution_price = float(d.get("execution_price", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            execution_price = 0.0
+        reported_quality = str(d.get("price_quality") or "").strip().lower()
+        price_known = (
+            math.isfinite(execution_price)
+            and execution_price > 0.0
+            and reported_quality in {"broker_reported", "broker_reconciled"}
+        )
         # 判断是否为平仓腿: 有余额更新说明是真实平仓
         _is_close = 0
         if cd and (cd.get("balance", 0) != 0 or cd.get("gross_profit", 0) != 0):
@@ -184,14 +195,22 @@ def store_deals(
                  deal_status, exec_timestamp, commission,
                  entry_price, gross_profit, swap,
                  close_commission, balance, closed_volume,
-                 is_close, fetched_at)
+                 is_close, fetched_at, raw_execution_price,
+                 price_contract, price_quality, repair_run_id)
                 VALUES (?, ?, ?, ?,
                         ?, ?, ?, ?,
                         ?, ?, ?,
                         ?, ?, ?,
                         ?, ?, ?,
-                        ?, ?)
-                ON CONFLICT(deal_id) DO NOTHING
+                        ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(deal_id) DO UPDATE SET
+                    exec_price=excluded.exec_price,
+                    raw_execution_price=excluded.raw_execution_price,
+                    price_contract=excluded.price_contract,
+                    price_quality=excluded.price_quality,
+                    fetched_at=excluded.fetched_at
+                WHERE ctrader_deals.price_quality='unknown'
+                  AND excluded.price_quality='broker_reconciled'
             """, [
                 d["deal_id"],
                 d.get("position_id", 0),
@@ -199,7 +218,7 @@ def store_deals(
                 d.get("symbol_id", 0),
                 d.get("volume", 0),
                 d.get("filled_volume", 0),
-                d.get("execution_price", 0.0),
+                execution_price if price_known else 0.0,
                 d.get("trade_side", ""),
                 d.get("deal_status", 0),
                 d.get("execution_timestamp", 0.0),
@@ -212,6 +231,17 @@ def store_deals(
                 cd.get("closed_volume", 0),
                 _is_close,
                 now,
+                float(d.get("raw_execution_price", execution_price) or 0.0),
+                str(
+                    d.get("price_contract")
+                    or "ctrader.deal.execution_price.raw.v1"
+                ),
+                (
+                    reported_quality or "broker_reported"
+                    if price_known
+                    else "unknown"
+                ),
+                "",
             ])
             count += 1
         except Exception as e:
@@ -276,6 +306,8 @@ def _aggregate_close_details(rows: list[sqlite3.Row]) -> dict:
         "balance": latest["balance"],
         "entry_price": latest["entry_price"],
         "exec_price": latest["exec_price"],
+        "price_contract": latest["price_contract"],
+        "price_quality": latest["price_quality"],
         "volume": sum(float(row["volume"] or 0.0) for row in rows),
         "closed_volume": sum(float(row["closed_volume"] or 0.0) for row in rows),
         "exec_timestamp": latest["exec_timestamp"],
@@ -504,6 +536,8 @@ def _cd_to_real_pnl(cd: dict) -> dict:
         "net": gross + swap + commission,
         "entry_price": cd.get("entry_price", 0.0),
         "exec_price": cd.get("exec_price", 0.0),
+        "price_contract": cd.get("price_contract", "legacy_unknown"),
+        "price_quality": cd.get("price_quality", "unknown"),
         "exec_timestamp": cd.get("exec_timestamp", 0.0),
         "balance": cd.get("balance", 0.0),
         "closed_volume": cd.get("closed_volume", 0),

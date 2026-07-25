@@ -127,3 +127,32 @@ def test_position_quality_lightgbm_trains_or_reports_missing_dependency(tmp_path
     audits = service.list_audits(limit=20)
     assert audits["count"] == 8
     assert audits["items"][0]["result"]["capabilities"]["shadow_only"] is True
+
+
+def test_position_quality_lightgbm_excludes_system_contaminated_reviews(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_reviews(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT review_json FROM trade_outcome_review WHERE review_id='rev_0'"
+        ).fetchone()
+        review = json.loads(row[0])
+        review["system_issue_context"] = {
+            "system_contaminated": True,
+            "contaminates_learning": True,
+        }
+        conn.execute(
+            "UPDATE trade_outcome_review SET review_json=? WHERE review_id='rev_0'",
+            (json.dumps(review),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    samples = PositionQualityLightGBMService(
+        db_path=db_path,
+        artifact_dir=tmp_path / "artifacts",
+    ).load_samples(limit=20)
+
+    assert "rev_0" not in {sample["review_id"] for sample in samples}

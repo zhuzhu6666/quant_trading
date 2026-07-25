@@ -134,6 +134,7 @@ def test_closed_position_handler_preserves_close_source_mapping(monkeypatch):
             "attribution_integrity": "full",
             "factor_contributions": {"trend": -1.0},
             "close_source": close_source,
+            "close_price": 3330.0,
             "total_pnl": -1.0,
         },
     )
@@ -160,10 +161,11 @@ def test_closed_position_handler_preserves_close_source_mapping(monkeypatch):
                 "deal_id": 9001,
                 "close_deals_count": 1,
                 "source": "ctrader_deals",
+                "exec_price": 3330.0,
+                "price_quality": "broker_reported",
             }
         },
         attr_engine=None,
-        current_price=3330.0,
         bar={"time": 1230.0},
         cfg=SimpleNamespace(timeframe="M5"),
         acct={},
@@ -200,7 +202,6 @@ def test_closed_position_without_deal_blocks_session_and_defers_all_consumers(mo
         closed_pids={124},
         real_pnls={},
         attr_engine=None,
-        current_price=3330.0,
         bar={"time": 1230.0},
         cfg=SimpleNamespace(timeframe="M5"),
         acct={},
@@ -278,7 +279,6 @@ def test_close_aux_failure_cannot_skip_same_tick_session_rebuild(monkeypatch):
             }
         },
         attr_engine=None,
-        current_price=3330.0,
         bar={"time": now},
         cfg=SimpleNamespace(timeframe="M5"),
         acct={},

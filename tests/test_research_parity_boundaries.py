@@ -1133,6 +1133,84 @@ def test_parity_replay_uses_live_open_trade_risk_context_builder(monkeypatch):
     assert payload["historical_context"] == "reconstructed"
 
 
+def test_parity_replay_freezes_closed_bar_returns_for_candidate_var(monkeypatch):
+    from backend.services.parity_replay import _default_risk_evaluator
+    from risk.policy_service import RiskPolicyService
+
+    captured: dict[str, object] = {}
+
+    class Policy:
+        def evaluate(self, action, payload):
+            captured["action"] = action
+            captured["payload"] = payload
+            return {"allowed": True, "reason": "captured"}
+
+    monkeypatch.setattr(RiskPolicyService, "shared", lambda: Policy())
+    config = SimpleNamespace(
+        autonomy_mode="demo_autonomous",
+        runtime_incident_mode="normal",
+        max_position_count=3,
+        max_position_api_volume=1_000.0,
+        risk_cooldown_bars=3,
+        var_enabled=True,
+        var_alpha=0.95,
+        var_window=500,
+        multi_symbol_config={"XAUUSD+": {"contract_size": 100}},
+    )
+    evaluator = _default_risk_evaluator(
+        config,
+        ParityReplayRequest(
+            symbol="XAUUSD+",
+            timeframe="M5",
+            initial_equity=10_000.0,
+            volume_lots=0.01,
+            persist_artifact=False,
+        ),
+    )
+    closes = [
+        100.0,
+        99.0,
+        101.0,
+        98.0,
+        102.0,
+        97.0,
+        103.0,
+        96.0,
+        104.0,
+        95.0,
+        105.0,
+        94.0,
+    ]
+
+    evaluator(
+        {
+            "symbol": "XAUUSD+",
+            "timeframe": "M5",
+            "direction": 1,
+            "decision_ts": 1_900.0,
+            "decision_bar_index": 11,
+            "current_price": 2_000.0,
+            "atr_price": 3.5,
+            "account": {"balance": 10_000.0, "equity": 10_000.0},
+            "session_state": {},
+            "candidate": {"score": 0.8},
+            "closed_bar_prices": closes,
+            "closed_bar_timestamps": list(range(len(closes))),
+        }
+    )
+
+    assert captured["action"] == "open_trade"
+    payload = captured["payload"]
+    assert payload["risk_snapshot"]["var"]["status"] == "known"
+    assert (
+        payload["risk_snapshot"]["var"]["candidate_notional_usd"]
+        == 2_000.0
+    )
+    assert payload["risk_snapshot"]["var"]["sample_count"] == 11
+    assert payload["risk_snapshot"]["var_shadow_99"]["alpha"] == 0.99
+    assert "_forward_var_input" not in payload["risk_snapshot"]
+
+
 def test_parity_hash_binding_detects_data_change_and_expected_hash_mismatch():
     first = _runner(bars=_bars())
     changed_bars = _bars()

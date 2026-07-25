@@ -1446,7 +1446,11 @@ CREATE TABLE IF NOT EXISTS ctrader_deals (
     balance      REAL DEFAULT 0.0,
     closed_volume INTEGER DEFAULT 0,
     is_close     INTEGER DEFAULT 0,
-    fetched_at   REAL NOT NULL DEFAULT 0.0
+    fetched_at   REAL NOT NULL DEFAULT 0.0,
+    raw_execution_price REAL DEFAULT 0.0,
+    price_contract TEXT NOT NULL DEFAULT 'legacy_unknown',
+    price_quality TEXT NOT NULL DEFAULT 'unknown',
+    repair_run_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_ctrader_deals_pos ON ctrader_deals(position_id);
 CREATE INDEX IF NOT EXISTS idx_ctrader_deals_ts  ON ctrader_deals(exec_timestamp);

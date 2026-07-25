@@ -33,7 +33,6 @@ def handle_closed_positions_after_tick(
     closed_pids: set[int],
     real_pnls: dict[int, dict[str, Any]],
     attr_engine: Any,
-    current_price: float,
     bar: dict[str, Any],
     cfg: Any,
     account: dict[str, Any],
@@ -88,7 +87,6 @@ def handle_closed_positions_after_tick(
                 cpid=pid,
                 real_pnl=real_pnl,
                 attr_engine=attr_engine,
-                current_price=current_price,
                 tick=tick,
                 log=log,
             )
@@ -101,50 +99,53 @@ def handle_closed_positions_after_tick(
                 close_payload["attribution_integrity"]
             )
             factor_contributions = close_payload["factor_contributions"]
-            runtime.write_close_decision_log(
-                cpid=pid,
-                bar=bar,
-                total_pnl=total_pnl,
-                current_price=current_price,
-                tick=tick,
-            )
+            canonical_close_price = close_payload["close_price"]
             context_integrity = runtime.lookup_context_integrity(
                 pid,
                 runtime.full_context,
             )
-            exit_decision_id, context_integrity = (
-                runtime.log_closed_position_ledger(
+            exit_decision_id = ""
+            if canonical_close_price is not None:
+                runtime.write_close_decision_log(
                     cpid=pid,
-                    broker=broker,
+                    bar=bar,
+                    total_pnl=total_pnl,
+                    current_price=canonical_close_price,
+                    tick=tick,
+                )
+                exit_decision_id, context_integrity = (
+                    runtime.log_closed_position_ledger(
+                        cpid=pid,
+                        broker=broker,
+                        close_ts=close_ts,
+                        current_price=canonical_close_price,
+                        real_pnl=real_pnl,
+                        close_reason=close_reason,
+                        context_integrity=context_integrity,
+                        cfg=cfg,
+                        bar=bar,
+                        acct=account,
+                        total_pnl=total_pnl,
+                        tick=tick,
+                        close_source=close_source,
+                        attribution_integrity=attribution_integrity,
+                        close_verdict=close_verdict,
+                        factor_contributions=factor_contributions,
+                    )
+                )
+                runtime.run_closed_position_learning(
+                    cpid=pid,
+                    total_pnl=total_pnl,
+                    current_price=canonical_close_price,
                     close_ts=close_ts,
-                    current_price=current_price,
+                    factor_contributions=factor_contributions,
+                    exit_decision_id=exit_decision_id,
                     real_pnl=real_pnl,
                     close_reason=close_reason,
                     context_integrity=context_integrity,
-                    cfg=cfg,
-                    bar=bar,
-                    acct=account,
-                    total_pnl=total_pnl,
-                    tick=tick,
-                    close_source=close_source,
                     attribution_integrity=attribution_integrity,
-                    close_verdict=close_verdict,
-                    factor_contributions=factor_contributions,
+                    close_source=close_source,
                 )
-            )
-            runtime.run_closed_position_learning(
-                cpid=pid,
-                total_pnl=total_pnl,
-                current_price=current_price,
-                close_ts=close_ts,
-                factor_contributions=factor_contributions,
-                exit_decision_id=exit_decision_id,
-                real_pnl=real_pnl,
-                close_reason=close_reason,
-                context_integrity=context_integrity,
-                attribution_integrity=attribution_integrity,
-                close_source=close_source,
-            )
             projection_ready = runtime.cleanup_closed_position(
                 cpid=pid,
                 close_reason=close_reason,

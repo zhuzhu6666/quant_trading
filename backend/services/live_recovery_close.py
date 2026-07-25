@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from backend.services.review_contract import trusted_broker_close_price
 
 @dataclass(frozen=True)
 class RecoveredCloseReplayRuntime:
@@ -72,6 +73,7 @@ def replay_recovered_close(
     )
     total_pnl = float(payloads["total_pnl"])
     close_ts = float(payloads["close_ts"])
+    close_price = trusted_broker_close_price(real_pnl)
 
     # Session risk is rebuilt from deals.  This projection is recovery/audit
     # state only and must commit before its original pre-fetch cursor is freed.
@@ -85,7 +87,7 @@ def replay_recovered_close(
     runtime.release_close_latch(int(position_id), real_pnl)
 
     exit_decision_id = ""
-    if runtime.ledger:
+    if runtime.ledger and close_price is not None:
         try:
             decision = dict(payloads["decision"])
             exit_decision_id = runtime.ledger.log_decision(
@@ -110,6 +112,8 @@ def replay_recovered_close(
             )
 
     if (
+        close_price is not None
+        and
         runtime.trade_reviewer
         and runtime.experience_builder
         and runtime.policy_suggester

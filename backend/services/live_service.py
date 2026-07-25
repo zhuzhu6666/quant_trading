@@ -3958,24 +3958,6 @@ def _record_session_trade(
     }
 
 
-def _append_trade_equity(equity: float) -> list[float]:
-    with _LIVE_STATE_LOCK:
-        history = list(_live_state.get("trade_equity_history", []))
-        history.append(float(equity))
-        if len(history) > 1000:
-            history = history[-500:]
-        _live_state["trade_equity_history"] = history
-    _persist_session_state()
-    return list(history)
-
-
-def _set_risk_metric(name: str, value: dict) -> None:
-    with _LIVE_STATE_LOCK:
-        risk_state = dict(_live_state.get("risk", {}))
-        risk_state[name] = value
-        _live_state["risk"] = risk_state
-
-
 def _get_risk_state() -> dict:
     return _live_state_get("risk", {}, clone=True) or {}
 
@@ -6777,71 +6759,246 @@ def _run_live_loop_tick_body_legacy(
     )
 
 
+def _risk_metric_inputs(
+    positions: list[dict[str, Any]] | None,
+) -> tuple[
+    list[float],
+    list[dict[str, Any]] | None,
+]:
+    from backend.services.review_contract import review_has_system_contamination
+    from config.runtime_config import shared as runtime_config
+
+    cfg = runtime_config()
+    if str(getattr(cfg, "var_method", "historical")) != "historical":
+        raise ValueError("risk_metrics_snapshot.v2 requires historical VaR")
+    conn = _get_state_pg_conn()
+    try:
+        review_rows = _state_execute(
+            conn,
+            """
+            SELECT position_id, pnl, review_json
+            FROM trade_outcome_review
+            ORDER BY created_at DESC
+            LIMIT 200
+            """,
+        ).fetchall()
+        conn.commit()
+    finally:
+        conn.close()
+
+    clean_pnls: list[float] = []
+    seen_positions: set[str] = set()
+    for row in review_rows:
+        position_id = str(row["position_id"] or "")
+        try:
+            review = json.loads(row["review_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if position_id in seen_positions or review_has_system_contamination(review):
+            continue
+        seen_positions.add(position_id)
+        clean_pnls.append(float(row["pnl"] or 0.0))
+
+    normalized_positions = [] if positions is not None else None
+    for index, position in enumerate(positions or []):
+        symbol = str(position.get("symbol") or "XAUUSD+")
+        instrument = dict((cfg.multi_symbol_config or {}).get(symbol) or {})
+        if not instrument:
+            symbol_key = symbol.upper().rstrip("+")
+            instrument = next(
+                (
+                    dict(value or {})
+                    for name, value in (cfg.multi_symbol_config or {}).items()
+                    if str(name).upper().rstrip("+") == symbol_key
+                ),
+                {},
+            )
+        price = float(
+            position.get("current_price")
+            or position.get("price_current")
+            or 0.0
+        )
+        api_volume = float(position.get("volume") or 0.0)
+        normalized = {
+            "position_id": position.get("position_id") or index,
+            "symbol": symbol,
+            "direction": position.get("direction", position.get("side")),
+        }
+        contract_size = float(instrument.get("contract_size") or 0.0)
+        if price > 0 and api_volume >= 0 and contract_size > 0:
+            normalized["notional_usd"] = (
+                    price
+                    * api_volume
+                    / 10_000.0
+                    * contract_size
+            )
+        normalized_positions.append(normalized)
+    return clean_pnls, normalized_positions
+
+
+def _closed_bar_forward_var_input(*, cfg, observed_at: float):
+    from backend.risk.metrics_snapshot import freeze_closed_bar_returns
+
+    symbol = str((getattr(cfg, "enabled_symbols", None) or ["XAUUSD+"])[0])
+    timeframe = str(getattr(cfg, "timeframe", "M5") or "M5")
+    lookback = max(2, int(getattr(cfg, "var_window", 500) or 500))
+    try:
+        frame = _warmup_from_local_db(symbol, timeframe, lookback + 1)
+        frame = _closed_decision_bar_frame(
+            frame,
+            timeframe=timeframe,
+            now_ts=time.time(),
+        )
+        closes = (
+            list(frame["close"].tolist())
+            if frame is not None and len(frame) > 0
+            else []
+        )
+        timestamps = (
+            [
+                index.isoformat()
+                if hasattr(index, "isoformat")
+                else str(index)
+                for index in frame.index
+            ]
+            if frame is not None and len(frame) > 0
+            else []
+        )
+        return freeze_closed_bar_returns(
+            closes,
+            timestamps=timestamps,
+            symbol=symbol,
+            timeframe=timeframe,
+            as_of=observed_at,
+            lookback=lookback,
+        )
+    except Exception as exc:
+        return freeze_closed_bar_returns(
+            [],
+            symbol=symbol,
+            timeframe=timeframe,
+            as_of=observed_at,
+            lookback=lookback,
+            invalid_reason=(
+                f"closed_bar_return_input_error:{type(exc).__name__}"
+            ),
+        )
+
+
 def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
     try:
-        acct = _live_state_get("account_reconciled", {}, clone=True) or {}
-        _repair_session_start_balance_from_account()
-        equity = float(acct.get("equity") or 0.0)
-        eq_hist = _live_state_get("trade_equity_history", [], clone=True) or []
-        if equity > 0:
-            eq_hist = _append_trade_equity(equity)
+        from backend.risk.metrics_snapshot import (
+            SNAPSHOT_KEY,
+            attach_internal_forward_var_input,
+            build_risk_metrics_snapshot,
+        )
+        from config.runtime_config import shared as runtime_config
 
-        from backend.risk.var import VaRCalculator as _VaRCalc
-        _var_calc = _VaRCalc(confidence=0.95)
-        if len(eq_hist) >= 10:
-            _set_risk_metric("var", _var_calc.calculate(eq_hist))
-        else:
-            _set_risk_metric("var", _var_calc.get_status(eq_hist))
-
-        from backend.risk.kelly import KellyCriterion as _KellyCalc
-        _kelly_calc = _KellyCalc()
-        sw = int(_live_state_get("session_winning", 0))
-        sl = int(_live_state_get("session_losing", 0))
-        total = sw + sl
-        trade_pnls = [
-            float(x)
-            for x in (_live_state_get("session_trade_pnls", [], clone=True) or [])
-            if float(x or 0.0) != 0.0
-        ]
-        wins = [x for x in trade_pnls if x > 0]
-        losses = [-x for x in trade_pnls if x < 0]
-        if wins or losses:
-            kelly_total = len(wins) + len(losses)
-            win_rate = len(wins) / kelly_total if kelly_total > 0 else 0.0
-            avg_win = sum(wins) / len(wins) if wins else 0.0
-            avg_loss = sum(losses) / len(losses) if losses else 0.01
-            kelly_status = _kelly_calc.calculate(win_rate, avg_win, max(avg_loss, 0.01))
-            kelly_status["closed_trades"] = kelly_total
-            _set_risk_metric("kelly", kelly_status)
-        elif total > 0:
-            win_rate = sw / total
-            session_pnl = float(_live_state_get("session_pnl", 0.0))
-            if sw > 0 and sl > 0 and session_pnl != 0:
-                avg_win = (session_pnl / total) * (1 + win_rate)
-                avg_loss = abs((session_pnl / total) * (1 - win_rate)) if win_rate < 1 else 0.01
-                avg_loss = max(avg_loss, 0.01)
-            else:
-                avg_win = 0.0
-                avg_loss = 0.01
-            kelly_status = _kelly_calc.calculate(win_rate, avg_win, avg_loss)
-            kelly_status["closed_trades"] = total
-            _set_risk_metric("kelly", kelly_status)
-        else:
-            kelly_status = _kelly_calc.get_status()
-            kelly_status["closed_trades"] = 0
-            _set_risk_metric("kelly", kelly_status)
-
-        from backend.risk.stress_test import StressTest as _StressTest
-        _stress = _StressTest()
-        if len(eq_hist) >= 10:
-            _set_risk_metric("stress", _stress.run(eq_hist))
-        else:
-            _set_risk_metric("stress", _stress.get_status())
-
-        from backend.risk.concentration import ConcentrationChecker as _ConcCheck
-        _conc = _ConcCheck()
-        _set_risk_metric("concentration", _conc.check())
+        account = _live_state_get("account_reconciled", {}, clone=True) or {}
+        positions = _live_state_get("positions_reconciled", [], clone=True)
+        account_id = str(_live_state_get("account_reconcile_id", "") or "")
+        positions_id = str(
+            _live_state_get("positions_reconcile_id", "") or ""
+        )
+        account_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
+        positions_at = float(
+            _live_state_get("positions_updated_at", 0.0) or 0.0
+        )
+        account_failed_at = float(
+            _live_state_get("account_reconcile_failed_at", 0.0) or 0.0
+        )
+        positions_failed_at = float(
+            _live_state_get("positions_reconcile_failed_at", 0.0) or 0.0
+        )
+        facts_fresh = (
+            bool(account_id)
+            and bool(positions_id)
+            and _fresh_observation_timestamp(account_at)
+            and _fresh_observation_timestamp(positions_at)
+            and account_failed_at <= account_at
+            and positions_failed_at <= positions_at
+        )
+        if not facts_fresh:
+            previous = _runtime_kv_get(SNAPSHOT_KEY, {}) or {}
+            snapshot = {
+                **previous,
+                "schema_version": SNAPSHOT_KEY,
+                "status": "stale",
+                "as_of": min(
+                    value for value in (account_at, positions_at) if value > 0
+                ) if account_at > 0 or positions_at > 0 else 0.0,
+                "blockers": ["broker_risk_facts_stale"],
+            }
+            _live_state_update(
+                risk={
+                    **dict(previous.get("components") or {}),
+                    "snapshot": snapshot,
+                }
+            )
+            _runtime_kv_set(SNAPSHOT_KEY, snapshot)
+            return
+        observed_at = min(account_at, positions_at)
+        clean_pnls, normalized_positions = _risk_metric_inputs(
+            positions,
+        )
+        cfg = runtime_config()
+        forward_var_input = _closed_bar_forward_var_input(
+            cfg=cfg,
+            observed_at=observed_at,
+        )
+        snapshot = build_risk_metrics_snapshot(
+            forward_var_input=forward_var_input,
+            clean_trade_pnls=clean_pnls,
+            positions=normalized_positions,
+            account=account,
+            account_reconcile_id=account_id,
+            positions_reconcile_id=positions_id,
+            as_of=observed_at,
+            kelly_min_closed_trades=int(
+                getattr(cfg, "kelly_min_closed_trades", 20)
+                or 20
+            ),
+            kelly_multiplier=float(
+                getattr(cfg, "kelly_fraction", 0.5) or 0.5
+            ),
+            kelly_max_fraction=float(
+                getattr(cfg, "kelly_max_pct", 0.25) or 0.25
+            ),
+            var_confidence=float(
+                getattr(cfg, "var_alpha", 0.95) or 0.95
+            ),
+            var_lookback=max(
+                2,
+                int(getattr(cfg, "var_window", 500) or 500),
+            ),
+        ).to_dict()
+        _live_state_update(
+            risk=attach_internal_forward_var_input(
+                {**snapshot["components"], "snapshot": snapshot},
+                forward_var_input,
+            )
+        )
+        _runtime_kv_set(SNAPSHOT_KEY, snapshot)
     except Exception as risk_e:
+        try:
+            from backend.risk.metrics_snapshot import SNAPSHOT_KEY
+
+            previous = _runtime_kv_get(SNAPSHOT_KEY, {}) or {}
+            error_snapshot = {
+                **previous,
+                "schema_version": SNAPSHOT_KEY,
+                "status": "error",
+                "blockers": ["risk_metrics_calculation_error"],
+            }
+            _live_state_update(
+                risk={
+                    **dict(previous.get("components") or {}),
+                    "snapshot": error_snapshot,
+                }
+            )
+            _runtime_kv_set(SNAPSHOT_KEY, error_snapshot)
+        except Exception:
+            pass
         log(f"tick {tick}: risk calculation error (non-fatal): {risk_e}")
 
 
@@ -7763,7 +7920,6 @@ def _closed_position_processing_runtime() -> ClosedPositionProcessingRuntime:
         consume_close_reason=_consume_close_reason,
         consume_close_verdict=_consume_close_verdict,
         classify_close_source=_classify_close_source,
-        estimate_close_pnl=_estimate_close_pnl_from_cached_state,
         select_close_total_pnl=_tick_select_close_total_pnl,
         open_api_volumes=_pos_open_api_volume,
         decision_log=_DECISION_LOG,
@@ -7798,7 +7954,6 @@ def _collect_closed_position_attribution(
     cpid: int,
     real_pnl: dict | None,
     attr_engine: Any,
-    current_price: float,
     tick: int,
     log,
 ) -> dict[str, Any]:
@@ -7806,7 +7961,6 @@ def _collect_closed_position_attribution(
         position_id=cpid,
         real_pnl=real_pnl,
         attr_engine=attr_engine,
-        current_price=current_price,
         tick=tick,
         log=log,
         runtime=_closed_position_processing_runtime(),
@@ -7926,7 +8080,6 @@ def _handle_closed_positions_after_tick(
     closed_pids: set[int],
     real_pnls: dict[int, dict],
     attr_engine: Any,
-    current_price: float,
     bar: dict,
     cfg: Any,
     acct: dict,
@@ -7941,7 +8094,6 @@ def _handle_closed_positions_after_tick(
         closed_pids=closed_pids,
         real_pnls=real_pnls,
         attr_engine=attr_engine,
-        current_price=current_price,
         bar=bar,
         cfg=cfg,
         account=acct,
@@ -9543,7 +9695,6 @@ def _process_tick_existing_decision_bar(
         closed_pids=closed_pids,
         real_pnls=real_pnls,
         attr_engine=attr_engine,
-        current_price=current_price,
         bar=bar,
         cfg=cfg,
         acct=acct,
@@ -9778,7 +9929,6 @@ def _process_tick_factor_pipeline(
         closed_pids=closed_pids,
         real_pnls=_real_pnls,
         attr_engine=attr_engine,
-        current_price=current_price,
         bar=bar,
         cfg=cfg,
         acct=acct,

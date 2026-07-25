@@ -1,10 +1,14 @@
 from types import SimpleNamespace
+import sqlite3
 
 import pytest
 
+from backend.core.db import STATE_DB_DDL
+from backend.services.live_position_lifecycle import build_replayed_close_payloads
 from execution.base import PositionInfo, PositionReconcileResult
 from execution import ctrader_bridge as ctrader_module
 from execution.ctrader_bridge import CTraderBridge
+from execution.deal_sync import sync_close_deals_batch
 
 pytestmark = pytest.mark.skipif(not ctrader_module.HAS_CTRADER, reason="ctrader-open-api not installed")
 
@@ -43,8 +47,8 @@ def test_spot_event_still_updates_realtime_quote_after_depth_removal(monkeypatch
     bridge = _bridge(monkeypatch)
     bridge._symbol_meta = {"digits": 2, "pip_position": 2}
     event = ProtoOASpotEvent()
-    event.bid = 412050
-    event.ask = 412070
+    event.bid = 412_050_000
+    event.ask = 412_070_000
 
     bridge._handle_spot_event(event)
 
@@ -76,6 +80,181 @@ def test_subscribe_spots_treats_already_subscribed_as_success(monkeypatch):
 
     assert bridge.subscribe_spots() is True
     assert bridge._symbol_id in bridge._spot_subscribed_symbol_ids
+
+
+def test_get_deals_keeps_price_raw_and_scales_only_money(monkeypatch):
+    from ctrader_open_api.messages import OpenApiMessages_pb2 as TradeMsg
+
+    bridge = _bridge(monkeypatch)
+    response = TradeMsg.ProtoOADealListRes()
+    fixtures = (
+        (7001, 2, -125, "BUY", 100, 90, 1_724_000_000_000),
+        (7002, 4, -125, "SELL", 200, 150, 1_724_000_001_000),
+    )
+    for deal_id, money_digits, commission, side, volume, filled, timestamp in fixtures:
+        deal = response.deal.add()
+        deal.dealId = deal_id
+        deal.orderId = 8000 + deal_id
+        deal.positionId = 269
+        deal.symbolId = 41
+        deal.volume = volume
+        deal.filledVolume = filled
+        deal.executionPrice = 4048.25
+        deal.tradeSide = ctrader_module.TRADE_SIDE[side]
+        deal.dealStatus = 2
+        deal.executionTimestamp = timestamp
+        deal.commission = commission
+        deal.moneyDigits = money_digits
+    for index, multiplier in ((0, 100), (1, 10_000)):
+        detail = response.deal[index].closePositionDetail
+        detail.entryPrice = 4050.5
+        detail.grossProfit = int(-2.5 * multiplier)
+        detail.swap = int(-0.25 * multiplier)
+        detail.commission = int(-0.5 * multiplier)
+        detail.balance = int(1_000 * multiplier)
+        detail.closedVolume = response.deal[index].filledVolume
+        detail.moneyDigits = 2 if index == 0 else 4
+    monkeypatch.setattr(bridge, "_send", lambda req, timeout=None: response)
+
+    deals = bridge.get_deals()
+
+    assert [deal["execution_price"] for deal in deals] == [4048.25, 4048.25]
+    assert [deal["commission"] for deal in deals] == [-1.25, -0.0125]
+    assert [deal["close_detail"]["entry_price"] for deal in deals] == [4050.5, 4050.5]
+    assert [deal["close_detail"]["gross_profit"] for deal in deals] == [-2.5, -2.5]
+    assert [deal["close_detail"]["swap"] for deal in deals] == [-0.25, -0.25]
+    assert [deal["close_detail"]["commission"] for deal in deals] == [-0.5, -0.5]
+    assert [deal["close_detail"]["balance"] for deal in deals] == [1000.0, 1000.0]
+    assert [deal["close_detail"]["closed_volume"] for deal in deals] == [90, 150]
+    assert [deal["trade_side"] for deal in deals] == ["buy", "sell"]
+    assert [deal["volume"] for deal in deals] == [100, 200]
+    assert [deal["filled_volume"] for deal in deals] == [90, 150]
+    assert [deal["execution_timestamp"] for deal in deals] == [
+        1_724_000_000,
+        1_724_000_001,
+    ]
+
+
+def test_get_deals_keeps_zero_money_digits_and_marks_invalid_price_unknown(monkeypatch):
+    from ctrader_open_api.messages import OpenApiMessages_pb2 as TradeMsg
+
+    bridge = _bridge(monkeypatch)
+    response = TradeMsg.ProtoOADealListRes()
+    deal = response.deal.add()
+    deal.dealId = 7101
+    deal.positionId = 270
+    deal.symbolId = 41
+    deal.executionPrice = 0.0
+    deal.commission = -3
+    deal.moneyDigits = 0
+    monkeypatch.setattr(bridge, "_send", lambda req, timeout=None: response)
+
+    result = bridge.get_deals()[0]
+
+    assert result["execution_price"] == 0.0
+    assert result["price_contract"] == "legacy_unknown"
+    assert result["price_quality"] == "unknown"
+    assert result["commission"] == -3.0
+
+
+def test_get_deals_quarantines_same_position_price_scale_mismatch(monkeypatch):
+    from ctrader_open_api.messages import OpenApiMessages_pb2 as TradeMsg
+
+    bridge = _bridge(monkeypatch)
+    response = TradeMsg.ProtoOADealListRes()
+    deal = response.deal.add()
+    deal.dealId = 7102
+    deal.positionId = 271
+    deal.symbolId = 41
+    deal.executionPrice = 40.4825
+    deal.executionTimestamp = 1_724_000_001_000
+    detail = deal.closePositionDetail
+    detail.entryPrice = 4050.5
+    detail.grossProfit = -250
+    detail.balance = 100_000
+    detail.moneyDigits = 2
+    monkeypatch.setattr(bridge, "_send", lambda req, timeout=None: response)
+
+    result = bridge.get_deals()[0]
+
+    assert result["execution_price"] == 0.0
+    assert result["raw_execution_price"] == pytest.approx(40.4825)
+    assert result["price_quality"] == "unknown"
+
+
+def test_spot_relative_price_uses_symbol_metadata_without_value_threshold(monkeypatch):
+    from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
+
+    bridge = _bridge(monkeypatch)
+    bridge._symbol_meta = {"digits": 2, "pip_position": 2}
+    event = ProtoOASpotEvent()
+    event.bid = 1_250_000
+    event.ask = 1_251_000
+
+    bridge._handle_spot_event(event)
+
+    quote = bridge.get_spot_quote()
+    assert quote["bid"] == pytest.approx(12.5)
+    assert quote["ask"] == pytest.approx(12.51)
+
+
+def test_broker_deal_price_reaches_restart_payload_without_money_scaling(
+    monkeypatch,
+    tmp_path,
+):
+    from ctrader_open_api.messages import OpenApiMessages_pb2 as TradeMsg
+
+    bridge = _bridge(monkeypatch)
+    response = TradeMsg.ProtoOADealListRes()
+    deal = response.deal.add()
+    deal.dealId = 7201
+    deal.positionId = 269
+    deal.symbolId = 41
+    deal.volume = 100
+    deal.filledVolume = 100
+    deal.executionPrice = 4048.25
+    deal.executionTimestamp = 1_724_000_001_000
+    deal.tradeSide = ctrader_module.TRADE_SIDE["SELL"]
+    deal.moneyDigits = 2
+    detail = deal.closePositionDetail
+    detail.entryPrice = 4050.5
+    detail.grossProfit = -250
+    detail.swap = -25
+    detail.commission = -50
+    detail.balance = 100_000
+    detail.closedVolume = 100
+    detail.moneyDigits = 2
+    monkeypatch.setattr(bridge, "_send", lambda req, timeout=None: response)
+
+    conn = sqlite3.connect(str(tmp_path / "state.db"))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(STATE_DB_DDL)
+        realized = sync_close_deals_batch(
+            bridge,
+            conn,
+            {269},
+            from_ts=1_724_000_000,
+            to_ts=1_724_000_002,
+        )[269]
+    finally:
+        conn.close()
+
+    payload = build_replayed_close_payloads(
+        position_id=269,
+        position_state={"symbol": "XAUUSD+"},
+        real_pnl=realized,
+        strategy_name="factor_pipeline_v4",
+        now_ts=1_724_000_010.0,
+        context_integrity_default="partial",
+    )
+
+    assert realized["exec_price"] == 4048.25
+    assert realized["entry_price"] == 4050.5
+    assert realized["price_quality"] == "broker_reported"
+    assert realized["net"] == pytest.approx(-3.25)
+    assert payload["close_price"] == 4048.25
+    assert payload["total_pnl"] == pytest.approx(-3.25)
 
 
 def test_close_position_refreshes_for_full_close_and_rejects_order_error(monkeypatch):

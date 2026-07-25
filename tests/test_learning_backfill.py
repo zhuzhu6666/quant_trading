@@ -246,6 +246,47 @@ def test_rebuild_learning_state_preserves_non_factor_policy_suggestions(tmp_path
     assert old_backfill is None
 
 
+def test_rebuild_learning_state_excludes_contaminated_review_lineage(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        contaminated = {
+            "worst_factor": "rsi_14",
+            "system_issue_context": {
+                "contaminates_learning": True,
+                "labels": ["price_fact_invalid"],
+            },
+        }
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, pnl, outcome_label,
+             failure_tags_json, review_json, created_at)
+            VALUES ('review_bad', 'trade_bad', 'position_bad', -1.0, 'bad_loss',
+                    '[]', ?, 10.0),
+                   ('review_clean', 'trade_clean', 'position_clean', 1.0, 'good_win',
+                    '[]', '{"worst_factor":"adx"}', 20.0)
+            """,
+            (json.dumps(contaminated),),
+        )
+
+        learning_backfill.rebuild_learning_state(conn)
+
+        bad = conn.execute(
+            "SELECT 1 FROM experience_memory WHERE source_id='review_bad'"
+        ).fetchall()
+        clean = conn.execute(
+            "SELECT 1 FROM experience_memory WHERE source_id='review_clean'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert bad == []
+    assert clean
+
+
 def test_learning_backfill_refreshes_trade_lesson_memory_without_new_reviews(monkeypatch, tmp_path):
     db_path = str(tmp_path / "state.db")
     _init_db(db_path)

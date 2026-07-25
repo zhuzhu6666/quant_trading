@@ -23,6 +23,7 @@ import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickString } from "
 import { translateDisplayValue } from "@/lib/display";
 import { formatDecimal, formatMoney, formatTime } from "@/lib/format";
 import { factHasDisplayValue, factIsKnown, readFact, readFactComponent } from "@/api/fact";
+import { decodeCanonicalRiskSnapshot, knownMetric } from "@/api/riskSnapshot";
 
 function hasMeaningfulText(value: unknown): boolean {
   if (value === undefined || value === null) {
@@ -99,15 +100,19 @@ export function OverviewPage() {
   const account = asRecord(queries.account.data);
   const session = asRecord(queries.session.data);
   const risk = asRecord(queries.risk.data);
+  const canonicalRisk = decodeCanonicalRiskSnapshot(queries.risk.data);
   const db = asRecord(queries.db.data);
   const readiness = asRecord(queries.readiness.data);
+  const readinessDimensions = asRecord(readiness.readiness_dimensions);
+  const readinessBlockers = asRecord(readinessDimensions.blockers);
   const logPayload = asRecord(queries.logs.data);
 
   const healthFact = readFact(queries.health.data, "system.health.v2");
   const loopFact = readFact(queries.loop.data, "live.loop.v2");
   const accountFact = readFact(queries.account.data, "live.account.v2");
   const sessionFact = readFact(queries.session.data, "live.session-risk.v2");
-  const riskFact = readFact(queries.risk.data, "risk.summary.v2");
+  const riskInputsFact = readFactComponent(queries.risk.data, "risk_inputs", "risk.inputs.v1");
+  const riskHealthFact = readFactComponent(queries.risk.data, "system_health", "system.runtime-health.v1");
   const positionsFact = readFactComponent(snapshot, "positions", "live.positions.v2");
   const spotFact = readFactComponent(snapshot, "spot", "live.spot-quote.v1");
   const dbFact = readFact(queries.db.data, "system.db-health.v2");
@@ -146,7 +151,11 @@ export function OverviewPage() {
   const loopKnown = factIsKnown(loopFact, loopRequestFailed);
   const accountKnown = factIsKnown(accountFact, accountRequestFailed);
   const sessionKnown = factIsKnown(sessionFact, sessionRequestFailed);
-  const riskKnown = factIsKnown(riskFact, riskRequestFailed);
+  const riskKnown = factIsKnown(riskInputsFact, riskRequestFailed)
+    && canonicalRisk.contractKnown
+    && knownMetric(canonicalRisk.var95.status);
+  const riskHealthKnown = factIsKnown(riskHealthFact, riskRequestFailed);
+  const riskOverallKnown = riskKnown && riskHealthKnown;
   const positionsKnown = factIsKnown(positionsFact, snapshotRequestFailed);
   const priceKnown = factIsKnown(spotFact, snapshotRequestFailed);
   const dbKnown = factIsKnown(dbFact, dbRequestFailed);
@@ -175,21 +184,16 @@ export function OverviewPage() {
     return sum + pickNumber(row, ["unrealized", "unrealized_pnl", "unrealized_profit", "pnl", "profit"], 0);
   }, 0);
 
-  const circuitBreaker = pickBoolean(risk, ["circuit_breaker"], false);
-  const consecutiveLoss = pickNumber(risk, ["consecutive_loss"], losses);
-  const varSummary = asRecord(pick(risk, ["var"]));
-  const kellySummary = asRecord(pick(risk, ["kelly"]));
-  const varStatus = pickString(varSummary, ["status"], "");
-  const kellyStatus = pickString(kellySummary, ["status"], "");
-  const normalizedVarStatus = varStatus.trim().toLowerCase();
-  const normalizedKellyStatus = kellyStatus.trim().toLowerCase();
-  const varValue = pickNumber(varSummary, ["var_pct", "var", "value"], 0);
-  const varConfidence = pickNumber(varSummary, ["confidence"], 0);
-  const hasVarData = Boolean(normalizedVarStatus && normalizedVarStatus !== "no data") || pickNumber(varSummary, ["current_equity"], 0) > 0;
-  const hasKellyData = Boolean(normalizedKellyStatus && normalizedKellyStatus !== "no data");
-  const kelly = pickNumber(kellySummary, ["kelly_fraction", "value"], 0);
+  const riskSystemHealth = asRecord(risk.system_health);
+  const circuitBreaker = riskHealthKnown && pickBoolean(riskSystemHealth, ["trading_blocked"], false);
+  const consecutiveLoss = losses;
+  const hasVarData = riskKnown && canonicalRisk.var95.varPct !== null;
+  const hasKellyData = factIsKnown(riskInputsFact, riskRequestFailed)
+    && canonicalRisk.contractKnown
+    && knownMetric(canonicalRisk.kelly.status)
+    && canonicalRisk.kelly.fraction !== null;
   const readinessOk = readinessKnown && pickBoolean(readiness, ["ready_for_frontend", "ready", "ok"], false);
-  const blockers = pickArray(readiness, ["blockers"]);
+  const blockers = pickArray(readinessBlockers, ["live_execution"]);
   const dbList = pickArray(db, ["databases", "items", "rows"]);
   const problemDatabases = dbList.filter((item) => {
     const freshness = pickString(item, ["freshness", "status", "state"], "");
@@ -241,9 +245,9 @@ export function OverviewPage() {
     },
     {
       time: serverTime ? formatTime(serverTime) : "",
-      title: riskKnown ? (circuitBreaker ? "风控熔断触发" : "风控检查正常") : "风控状态未知",
-      detail: riskKnown ? `连续亏损 ${formatDecimal(consecutiveLoss, 0)} · 回撤 ${formatDecimal(drawdown, 2)}%` : "等待 risk.summary.v2 权威事实",
-      tone: circuitBreaker ? "bad" : !riskKnown || consecutiveLoss >= 3 ? "warn" : "ok",
+      title: riskOverallKnown ? (circuitBreaker ? "健康面阻断交易" : "Canonical 风险已知") : "风控状态未知",
+      detail: riskKnown ? `95% VaR ${formatDecimal(canonicalRisk.var95.varPct ?? 0, 4)}% · 样本 ${formatDecimal(canonicalRisk.var95.sampleCount ?? 0, 0)}` : "等待 risk_metrics_snapshot.v2",
+      tone: circuitBreaker ? "bad" : !riskOverallKnown ? "warn" : "ok",
     },
     {
       time: serverTime ? formatTime(serverTime) : "",
@@ -300,9 +304,9 @@ export function OverviewPage() {
         <StatTile
           icon={ShieldCheck}
           label="风控状态"
-          value={riskKnown ? (circuitBreaker ? "熔断触发" : "正常") : "未知"}
-          detail={`连续亏损 ${formatDecimal(consecutiveLoss, 0)} · DD ${formatDecimal(drawdown, 2)}%`}
-          tone={circuitBreaker ? "bad" : !riskKnown || consecutiveLoss >= 3 ? "warn" : "ok"}
+          value={riskOverallKnown ? (circuitBreaker ? "健康面阻断" : "风险输入已知") : "未知"}
+          detail={riskKnown ? `95% VaR ${formatDecimal(canonicalRisk.var95.varPct ?? 0, 4)}% · CVaR ${formatDecimal(canonicalRisk.var95.cvarPct ?? 0, 4)}%` : "等待 canonical 风险快照"}
+          tone={circuitBreaker ? "bad" : !riskOverallKnown ? "warn" : "ok"}
         />
       </div>
 
@@ -349,14 +353,14 @@ export function OverviewPage() {
             {hasMarginData ? <Field label="已用保证金" value={formatMoney(margin, currency)} /> : null}
             {hasMarginData ? <Field label="可用保证金" value={formatMoney(marginFree, currency)} /> : null}
             {hasLeverageData ? <Field label="杠杆" value={leverage} /> : null}
-            <Field label="熔断器" value={riskKnown ? (circuitBreaker ? "触发" : "未触发") : "未知"} tone={circuitBreaker ? "bad" : riskKnown ? "ok" : "warn"} />
+            <Field label="健康面交易阻断" value={riskHealthKnown ? (circuitBreaker ? "是" : "否") : "未知"} tone={circuitBreaker ? "bad" : riskHealthKnown ? "ok" : "warn"} />
             {hasVarData ? (
               <Field
-                label={varConfidence > 0 ? `VaR ${formatDecimal(varConfidence * 100, 0)}%` : "VaR"}
-                value={`${formatDecimal(varValue, 2)}%`}
+                label="前瞻 VaR / CVaR 95%"
+                value={`${formatDecimal(canonicalRisk.var95.varPct ?? 0, 4)}% / ${formatDecimal(canonicalRisk.var95.cvarPct ?? 0, 4)}%`}
               />
             ) : null}
-            {hasKellyData ? <Field label="Kelly" value={formatDecimal(kelly, 4)} /> : null}
+            {hasKellyData ? <Field label="Kelly" value={formatDecimal(canonicalRisk.kelly.fraction ?? 0, 4)} /> : null}
             {consecutiveLoss > 0 ? <Field label="连续亏损" value={formatDecimal(consecutiveLoss, 0)} /> : null}
             {drawdown > 0 ? <Field label="回撤" value={`${formatDecimal(drawdown, 2)}%`} /> : null}
             {showDataHealth ? <Field label="数据库" value={dbStatus} tone={dbKnown ? toneFromStatus(dbStatus) : "warn"} /> : null}
@@ -365,10 +369,10 @@ export function OverviewPage() {
             {blockers.length ? <Field label="阻断项" value={`${blockers.length} 项`} tone="bad" /> : null}
           </div>
           <div className="overview-chip-row">
-            <span className={`data-badge ${circuitBreaker ? "data-badge-bad" : riskKnown ? "data-badge-ok" : "data-badge-warn"}`}>熔断 {riskKnown ? (circuitBreaker ? "触发" : "未触发") : "未知"}</span>
+            <span className={`data-badge ${circuitBreaker ? "data-badge-bad" : riskHealthKnown ? "data-badge-ok" : "data-badge-warn"}`}>健康阻断 {riskHealthKnown ? (circuitBreaker ? "是" : "否") : "未知"}</span>
             <span className={`data-badge ${drawdown > 0 ? "data-badge-warn" : ""}`}>回撤 {formatDecimal(drawdown, 2)}%</span>
-            {hasVarData ? <span className="data-badge">VaR {formatDecimal(varValue, 2)}%</span> : null}
-            {hasKellyData ? <span className="data-badge">Kelly {formatDecimal(kelly, 4)}</span> : null}
+            {hasVarData ? <span className="data-badge">VaR95 {formatDecimal(canonicalRisk.var95.varPct ?? 0, 4)}%</span> : null}
+            {hasKellyData ? <span className="data-badge">Kelly {formatDecimal(canonicalRisk.kelly.fraction ?? 0, 4)}</span> : null}
             {healthBadges.map((item, index) => (
               <span className="data-badge data-badge-warn" key={`${item}-${index}`}>{item}</span>
             ))}

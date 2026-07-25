@@ -23,6 +23,7 @@ const opsPage = read("src/pages/OpsPage.tsx");
 const riskPage = read("src/pages/RiskPage.tsx");
 const v15Page = read("src/pages/V15CockpitPage.tsx");
 const autonomyDecoder = read("src/api/fact.ts");
+const riskDecoder = read("src/api/riskSnapshot.ts");
 const presentationSources = pages.join("\n") + tradingPage + read("src/pages/PnlPage.tsx") + workspaces;
 
 assert.equal((app.match(/<ProtectedAppLayout/g) ?? []).length, 1, "受保护页面应共用一个布局壳");
@@ -139,6 +140,8 @@ assert.doesNotMatch(pages[5], /Object\.values\(value\)/, "因子目录必须按�
 assert.match(pages[5], /Array\.isArray\(endpoint\.items\)/);
 assert.match(autonomyDecoder, /export function factBoundTone/);
 assert.match(tradingPage, /readFact\(strategyStatusQuery\.data, "live\.strategy\.v2"\)/);
+assert.match(tradingPage, /readFactComponent\(riskQuery\.data, "risk_inputs", "risk\.inputs\.v1"\)/);
+assert.match(tradingPage, /decodeCanonicalRiskSnapshot\(riskQuery\.data\)/);
 assert.match(tradingPage, /const loopKnown = factIsKnown\(loopFact, loopRequestFailed\)/);
 assert.match(tradingPage, /const positionsKnown = factIsKnown\(positionsViewFact, positionsViewRequestFailed\)/);
 assert.match(tradingPage, /tone=\{factBoundTone\(strategyFact, gatePassed \? "ok" : "warn", strategyRequestFailed\)\}/);
@@ -162,10 +165,12 @@ assert.match(pnlPage, /const seriesRequestFailed = seriesQuery\.isError \|\| ser
 assert.match(pnlPage, /\(\) => seriesDisplayable[\s\S]*?pickArray\(seriesQuery\.data/, "PnL unknown/error payload 不得作为事实值展示");
 assert.match(pnlPage, /tone=\{factBoundTone\(seriesFact, numberTone\(realized\), seriesRequestFailed\)\}/);
 assert.match(pnlPage, /seriesKnown \? "status-ok" : "status-warn"/, "收益 retained data 不得继续显示绿色行");
-for (const endpoint of ["health", "loop", "account", "session", "risk", "db", "readiness"]) {
+for (const endpoint of ["health", "loop", "account", "session", "db", "readiness"]) {
   assert.match(overviewPage, new RegExp(`const ${endpoint}RequestFailed = queries\\.${endpoint}\\.isError \\|\\| queries\\.${endpoint}\\.isRefetchError`));
   assert.match(overviewPage, new RegExp(`const ${endpoint}Known = factIsKnown\\(${endpoint}Fact, ${endpoint}RequestFailed\\)`));
 }
+assert.match(overviewPage, /readFactComponent\(queries\.risk\.data, "risk_inputs", "risk\.inputs\.v1"\)/);
+assert.match(overviewPage, /decodeCanonicalRiskSnapshot\(queries\.risk\.data\)/);
 assert.match(overviewPage, /const positionsKnown = factIsKnown\(positionsFact, snapshotRequestFailed\)/);
 assert.match(overviewPage, /const priceKnown = factIsKnown\(spotFact, snapshotRequestFailed\)/);
 assert.doesNotMatch(overviewPage, /Fact\.state === "known"/, "Overview 绿灯不得绕过 request failure 边界");
@@ -180,9 +185,17 @@ assert.doesNotMatch(opsPage, /tone=\{externalStale \? "warn" : "ok"\}/, "外部�
 assert.match(opsPage, /readFact\(syncQuery\.data, "ops\.sync-status\.v2"\)/);
 assert.match(opsPage, /readFact\(tokenQuery\.data, "ops\.ctrader-token-status\.v2"\)/);
 assert.match(opsPage, /readFact\(externalQuery\.data, "ops\.external-data-status\.v2"\)/);
-for (const endpoint of ["risk", "db", "readiness", "trace"]) {
+for (const endpoint of ["db", "readiness", "trace"]) {
   assert.match(riskPage, new RegExp(`const ${endpoint}Known = factIsKnown\\(${endpoint}Fact`), `Risk ${endpoint} 绿灯必须绑定 endpoint Fact`);
 }
+assert.match(riskPage, /const riskKnown = factIsKnown\(riskInputsFact, riskRequestFailed\)/);
+assert.match(riskPage, /decodeCanonicalRiskSnapshot\(riskQuery\.data\)/);
+assert.match(riskPage, /readFactComponent\(riskQuery\.data, "risk_inputs", "risk\.inputs\.v1"\)/);
+assert.match(riskPage, /readFactComponent\(riskQuery\.data, "system_health", "system\.runtime-health\.v1"\)/);
+assert.doesNotMatch(riskPage, /var_95|value_limit|var_limit|max_single_weight|max_sector_weight|stress_var/, "Risk 页面不得继续消费旧风险字段");
+assert.match(riskDecoder, /schemaVersion === "risk_metrics_snapshot\.v2"/);
+assert.match(riskDecoder, /components\.var_shadow_99/);
+assert.doesNotMatch(riskDecoder, /root\.var|root\.kelly|root\.stress|root\.concentration/, "canonical decoder 不得回退到顶层兼容字段");
 assert.match(riskPage, /tone=\{factBoundTone\(policyFact, blocked \? "warn" : "ok", policyRequestFailed\)\}/);
 assert.match(riskPage, /tone=\{factBoundTone\(dbFact, dbErrorCount \? "bad" : toneFromStatus\(dbStatus\), dbRequestFailed\)\}/);
 assert.doesNotMatch(riskPage, /dbQuery\.isError \|\| dbErrorCount \? "bad" : toneFromStatus\(dbStatus\)/, "DB retained payload 不得在 refetch error 后假绿");
@@ -192,11 +205,11 @@ assert.doesNotMatch(riskPage, /pickRecord\(risk, \["policy"\]\)/, "risk.summary 
 assert.match(v15Page, /const readinessRequestFailed = readinessQuery\.isError \|\| readinessQuery\.isRefetchError/);
 assert.match(v15Page, /const riskRequestFailed = riskQuery\.isError \|\| riskQuery\.isRefetchError/);
 assert.match(v15Page, /readFact\(readinessQuery\.data, "ops\.backend-readiness\.v2"\)/);
-assert.match(v15Page, /readFact\(riskQuery\.data, "risk\.summary\.v2"\)/);
+assert.match(v15Page, /readFactComponent\(riskQuery\.data, "risk_inputs", "risk\.inputs\.v1"\)/);
 assert.match(v15Page, /const readinessKnown = factIsKnown\(readinessFact, readinessRequestFailed\)/);
-assert.match(v15Page, /const riskKnown = factIsKnown\(riskFact, riskRequestFailed\)/);
+assert.match(v15Page, /const riskKnown = factIsKnown\(riskInputsFact, riskRequestFailed\)/);
 assert.match(v15Page, /tone=\{factBoundTone\(readinessFact, readyForFrontend \? "ok" : "warn", readinessRequestFailed\)\}/);
-assert.match(v15Page, /tone=\{factBoundTone\(riskFact, toneFromStatus/);
+assert.match(v15Page, /tone=\{factBoundTone\(riskInputsFact, riskKnown \? "ok" : "warn", riskRequestFailed\)\}/);
 assert.match(v15Page, /function unverifiedTone\(tone: Tone\): Tone/);
 assert.match(v15Page, /端点事实按来源独立校验/);
 assert.doesNotMatch(v15Page, /自治链路已收口/);

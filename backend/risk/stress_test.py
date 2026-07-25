@@ -1,77 +1,102 @@
-"""Stress test scenarios for portfolio risk."""
+"""Position-based portfolio stress calculation."""
 from __future__ import annotations
 
-import numpy as np
+import math
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 
+def _number(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _direction(position: Mapping[str, Any]) -> int:
+    value = position.get("direction", position.get("side"))
+    if isinstance(value, (int, float)):
+        return 1 if value > 0 else -1 if value < 0 else 0
+    text = str(value or "").strip().lower()
+    if text in {"buy", "long", "bull"}:
+        return 1
+    if text in {"sell", "short", "bear"}:
+        return -1
+    return 0
+
+
+def _notional(position: Mapping[str, Any]) -> float | None:
+    explicit = _number(position.get("notional_usd"))
+    if explicit is not None:
+        return explicit if explicit >= 0 else None
+    price = _number(position.get("current_price"))
+    lots = _number(position.get("volume_lots"))
+    contract = _number(position.get("contract_size"))
+    if None in {price, lots, contract}:
+        return None
+    result = float(price) * float(lots) * float(contract)
+    return result if result >= 0 else None
+
+
 class StressTest:
-    """Run stress test scenarios on equity curve."""
+    """Apply configured two-sided price shocks to fresh positions."""
 
-    SCENARIOS = [
-        {"name": "Flash crash -20%", "shock_pct": -0.20},
-        {"name": "Moderate drop -10%", "shock_pct": -0.10},
-        {"name": "Volatility spike +50%", "vol_multiplier": 1.50},
-        {"name": "Recovery +15%", "shock_pct": 0.15},
-    ]
+    def run(
+        self,
+        positions: Sequence[Mapping[str, Any]] | None,
+        account: Mapping[str, Any] | None,
+        shocks: Sequence[float] = (-0.05, 0.05),
+    ) -> dict[str, Any]:
+        equity = _number((account or {}).get("equity"))
+        if positions is None or equity is None or equity <= 0:
+            return self.get_status()
 
-    def run(self, equity_series: list[float] | np.ndarray, initial_equity: float | None = None) -> dict[str, Any]:
-        """Run all stress scenarios on the given equity curve."""
-        if len(equity_series) < 2:
-            return {"status": "no data", "scenarios": []}
+        normalized: list[tuple[int, float]] = []
+        for position in positions:
+            direction = _direction(position)
+            notional = _notional(position)
+            if direction == 0 or notional is None:
+                return self.get_status(reason="invalid_position_input")
+            normalized.append((direction, notional))
 
-        arr = np.asarray(equity_series, dtype=float)
-        current = float(arr[-1])
-        initial = initial_equity if initial_equity is not None else float(arr[0])
-        max_dd = self._max_drawdown(arr)
+        normalized_shocks = [_number(value) for value in shocks]
+        if (
+            not normalized_shocks
+            or any(value is None for value in normalized_shocks)
+            or min(normalized_shocks) >= 0
+            or max(normalized_shocks) <= 0
+        ):
+            return self.get_status(reason="invalid_shocks")
+        scenarios = []
+        for shock in normalized_shocks:
+            pnl = sum(direction * notional * shock for direction, notional in normalized)
+            loss = max(0.0, -pnl)
+            scenarios.append(
+                {
+                    "shock_fraction": shock,
+                    "pnl_usd": round(pnl, 2),
+                    "loss_usd": round(loss, 2),
+                    "loss_pct": round(loss / equity * 100.0, 6),
+                }
+            )
 
-        results = []
-        for sc in self.SCENARIOS:
-            name = sc["name"]
-            if "shock_pct" in sc:
-                shock = current * sc["shock_pct"]
-                new_equity = current + shock
-                dd = (new_equity - initial) / initial * 100 if initial > 0 else 0.0
-                results.append({
-                    "name": name,
-                    "shock_pct": sc["shock_pct"],
-                    "current_equity": round(current, 2),
-                    "new_equity": round(new_equity, 2),
-                    "drawdown_pct": round(dd, 2),
-                    "survives": new_equity > initial * 0.5,
-                })
-            elif "vol_multiplier" in sc:
-                # Simulate higher volatility by scaling daily returns
-                returns = np.diff(arr) / arr[:-1]
-                scaled_returns = returns * sc["vol_multiplier"]
-                # Project equity forward 20 days
-                projected = current
-                for r in scaled_returns[-20:]:
-                    projected *= (1 + r)
-                dd = (projected - initial) / initial * 100 if initial > 0 else 0.0
-                results.append({
-                    "name": name,
-                    "vol_multiplier": sc["vol_multiplier"],
-                    "current_equity": round(current, 2),
-                    "projected_equity": round(projected, 2),
-                    "drawdown_pct": round(dd, 2),
-                    "survives": projected > initial * 0.5,
-                })
-
+        worst = max(scenarios, key=lambda item: item["loss_usd"], default=None)
         return {
-            "status": "ok",
-            "current_equity": round(current, 2),
-            "initial_equity": round(initial, 2),
-            "max_drawdown_pct": round(max_dd * 100, 2),
-            "scenarios": results,
+            "status": "known",
+            "distinct_position_count": len(normalized),
+            "stress_loss_usd": worst["loss_usd"] if worst else 0.0,
+            "stress_loss_pct": worst["loss_pct"] if worst else 0.0,
+            "scenarios": scenarios,
         }
 
     @staticmethod
-    def _max_drawdown(arr: np.ndarray) -> float:
-        """Calculate max drawdown as fraction."""
-        peak = np.maximum.accumulate(arr)
-        drawdown = (peak - arr) / peak
-        return float(np.max(drawdown)) if len(drawdown) > 0 else 0.0
-
-    def get_status(self) -> dict[str, Any]:
-        return {"status": "no data", "scenarios": [], "current_equity": 0.0, "initial_equity": 0.0}
+    def get_status(reason: str = "missing_inputs") -> dict[str, Any]:
+        return {
+            "status": "unknown",
+            "reason": reason,
+            "distinct_position_count": 0,
+            "stress_loss_usd": None,
+            "stress_loss_pct": None,
+            "scenarios": [],
+        }

@@ -65,6 +65,8 @@ _CODE_BINDING_PATHS = (
     "backend/services/position_metrics.py",
     "backend/services/position_supervisor.py",
     "backend/services/position_supervisor_templates.py",
+    "backend/risk/metrics_snapshot.py",
+    "backend/risk/var.py",
     "data/factor_frame.py",
     "alpha/runtime_factor_selection.py",
     "alpha/streaming_factor_engine.py",
@@ -603,6 +605,11 @@ class LiveComponentDecisionAdapter:
 
 def _default_risk_evaluator(cfg: Any, request: ParityReplayRequest) -> RiskEvaluator:
     def evaluate(context: Mapping[str, Any]) -> Mapping[str, Any]:
+        from backend.risk.metrics_snapshot import (
+            attach_internal_forward_var_input,
+            build_risk_metrics_snapshot,
+            freeze_closed_bar_returns,
+        )
         from backend.services.live_position_lifecycle import (
             build_entry_cluster_context,
             build_open_trade_risk_context_payload,
@@ -629,6 +636,56 @@ def _default_risk_evaluator(cfg: Any, request: ParityReplayRequest) -> RiskEvalu
             "balance": request.initial_equity,
             "equity": request.initial_equity,
         }
+        var_lookback = max(
+            2,
+            int(getattr(cfg, "var_window", 500) or 500),
+        )
+        frozen_var_input = freeze_closed_bar_returns(
+            list(replay_context.get("closed_bar_prices") or []),
+            timestamps=list(
+                replay_context.get("closed_bar_timestamps") or []
+            ),
+            symbol=str(replay_context.get("symbol") or request.symbol),
+            timeframe=str(
+                replay_context.get("timeframe") or request.timeframe
+            ),
+            as_of=decision_ts,
+            lookback=var_lookback,
+        )
+        risk_snapshot_payload = build_risk_metrics_snapshot(
+            forward_var_input=frozen_var_input,
+            clean_trade_pnls=list(
+                replay_context.get("clean_trade_pnls") or []
+            ),
+            positions=[],
+            account=account,
+            account_reconcile_id="parity-replay-account",
+            positions_reconcile_id="parity-replay-positions",
+            as_of=decision_ts,
+            kelly_min_closed_trades=int(
+                getattr(cfg, "kelly_min_closed_trades", 20) or 20
+            ),
+            kelly_multiplier=float(
+                getattr(cfg, "kelly_fraction", 0.5) or 0.5
+            ),
+            kelly_max_fraction=float(
+                getattr(cfg, "kelly_max_pct", 0.25) or 0.25
+            ),
+            var_confidence=float(
+                getattr(cfg, "var_alpha", 0.95) or 0.95
+            ),
+            var_lookback=var_lookback,
+        ).to_dict()
+        replay_risk_snapshot = attach_internal_forward_var_input(
+            {
+                **risk_snapshot_payload["components"],
+                "snapshot": risk_snapshot_payload,
+                "state": "reconstructed",
+                "source": "parity_replay",
+                "replay_read_only": True,
+            },
+            frozen_var_input,
+        )
         decision_freshness = {
             "schema_version": "decision_bar_freshness.v1",
             "fresh": True,
@@ -654,11 +711,7 @@ def _default_risk_evaluator(cfg: Any, request: ParityReplayRequest) -> RiskEvalu
             direction=direction,
             current_price=current_price,
             atr_price=atr_price,
-            risk_snapshot={
-                "state": "reconstructed",
-                "source": "parity_replay",
-                "replay_read_only": True,
-            },
+            risk_snapshot=replay_risk_snapshot,
             session_state=session_state,
             total_api_volume=0.0,
             event_sizing_context={"enabled": False, "multiplier": 1.0},
@@ -1342,6 +1395,48 @@ class ParityReplayRunner:
                     "drawdown_pct": max_drawdown_pct,
                     "circuit_breaker": False,
                 },
+                "closed_bar_prices": [
+                    _safe_float(value)
+                    for value in history["close"].iloc[
+                        -(
+                            max(
+                                2,
+                                int(
+                                    getattr(
+                                        self.config,
+                                        "var_window",
+                                        500,
+                                    )
+                                    or 500
+                                ),
+                            )
+                            + 1
+                        ):
+                    ].tolist()
+                ],
+                "closed_bar_timestamps": [
+                    str(value)
+                    for value in history["time"].iloc[
+                        -(
+                            max(
+                                2,
+                                int(
+                                    getattr(
+                                        self.config,
+                                        "var_window",
+                                        500,
+                                    )
+                                    or 500
+                                ),
+                            )
+                            + 1
+                        ):
+                    ].tolist()
+                ],
+                "clean_trade_pnls": [
+                    _safe_float(item.get("net_pnl"))
+                    for item in trades
+                ],
                 "candidate": candidate,
             }
             try:

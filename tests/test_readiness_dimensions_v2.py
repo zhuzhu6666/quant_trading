@@ -32,6 +32,11 @@ def _dimensions(**overrides):
             "ok": True,
             "mutation_capability": {"available": True, "status": "available"},
         },
+        "risk_metrics": {
+            "ok": True,
+            "status": "known",
+            "var_status": "known",
+        },
     }
     payload.update(overrides)
     return BackendReadinessService._build_readiness_dimensions(**payload)
@@ -86,6 +91,29 @@ def test_worker_mutation_circuit_only_blocks_autonomous_mutation() -> None:
     assert result["ready_for_live_alpha"] is True
     assert result["ready_for_autonomous_mutation"] is False
     assert result["ready_for_release"] is True
+
+
+def test_unknown_canonical_var_is_projected_as_live_readiness_blocker() -> None:
+    rc.reset_for_tests()
+    try:
+        result = _dimensions(
+            risk_metrics={
+                "ok": False,
+                "status": "warming_up",
+                "var_status": "warming_up",
+            }
+        )
+    finally:
+        rc.reset_for_tests()
+
+    assert result["ready_for_frontend"] is True
+    assert result["ready_for_live_execution"] is False
+    assert result["ready_for_live_alpha"] is False
+    assert result["ready_for_autonomous_mutation"] is True
+    reasons = {
+        item["reason"] for item in result["blockers"]["live_execution"]
+    }
+    assert "canonical_forward_var_not_ready" in reasons
 
 
 def test_global_operator_pause_blocks_all_mode_autonomous_expansion() -> None:

@@ -29,7 +29,13 @@ def test_trade_reviewer_uses_broker_close_ts_for_created_at(tmp_path):
         pnl=-0.84,
         close_price=3388.12,
         close_ts=close_ts,
-        real_pnl={"deal_id": 323453066, "net": -0.84, "exec_timestamp": close_ts},
+        real_pnl={
+            "deal_id": 323453066,
+            "net": -0.84,
+            "exec_price": 3388.12,
+            "price_quality": "broker_reported",
+            "exec_timestamp": close_ts,
+        },
         close_reason="broker_close",
         close_reason_source="supervisor_tighten_stopout",
     )
@@ -48,11 +54,39 @@ def test_trade_reviewer_uses_broker_close_ts_for_created_at(tmp_path):
     assert "signal_score_missing" in payload["failure_taxonomy"]["evidence_gaps"]
 
 
+def test_trade_reviewer_rejects_unknown_execution_price(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    reviewer = TradeReviewer(db_path)
+
+    result = reviewer.review_closed_trade(
+        position_id="unknown_price",
+        pnl=-2.5,
+        close_price=0.0,
+        close_ts=100.0,
+        real_pnl={
+            "deal_id": 55,
+            "net": -2.5,
+            "price_contract": "legacy_unknown",
+            "price_quality": "unknown",
+        },
+        close_reason="restart_replay",
+    )
+
+    assert result["accepted"] is False
+    assert result["skip_reason"] == "unknown_execution_price"
+
+
 def test_trade_reviewer_deduplicates_same_broker_deal(tmp_path):
     db_path = str(tmp_path / "state.db")
     reviewer = TradeReviewer(db_path)
     close_ts = 1_782_750_916.0
-    real_pnl = {"deal_id": 323453242, "net": -0.27, "exec_timestamp": close_ts}
+    real_pnl = {
+        "deal_id": 323453242,
+        "net": -0.27,
+        "exec_price": 3387.4,
+        "price_quality": "broker_reported",
+        "exec_timestamp": close_ts,
+    }
 
     first = reviewer.review_closed_trade(
         position_id="269481301",
@@ -109,7 +143,13 @@ def test_trade_reviewer_uses_path_quality_for_good_win(monkeypatch, tmp_path):
         close_price=4098.58,
         close_ts=10_000.0,
         contributions={"trend": 1.0, "noise": -2.0},
-        real_pnl={"deal_id": 99, "net": 6.18, "exec_timestamp": 10_000.0},
+        real_pnl={
+            "deal_id": 99,
+            "net": 6.18,
+            "exec_price": 4098.58,
+            "price_quality": "broker_reported",
+            "exec_timestamp": 10_000.0,
+        },
         close_reason="broker_close",
     )
 
@@ -142,7 +182,13 @@ def test_trade_reviewer_assigns_full_giveback_loss_to_exit(monkeypatch, tmp_path
         close_price=4104.0,
         close_ts=11_000.0,
         contributions={"trend": -0.1},
-        real_pnl={"deal_id": 100, "net": -0.2, "exec_timestamp": 11_000.0},
+        real_pnl={
+            "deal_id": 100,
+            "net": -0.2,
+            "exec_price": 4104.0,
+            "price_quality": "broker_reported",
+            "exec_timestamp": 11_000.0,
+        },
         close_reason="broker_close",
     )
 

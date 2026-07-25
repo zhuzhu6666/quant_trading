@@ -52,13 +52,27 @@ def test_counterfactual_window_uses_event_time_not_recompute_time(tmp_path):
     for index in range(60):
         conn.execute(
             """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, review_json, created_at)
+            VALUES (?, ?, ?, '{}', ?)
+            """,
+            (
+                f"review-{index}",
+                f"trade-{index}",
+                f"position-{index}",
+                1000.0 + index,
+            ),
+        )
+        conn.execute(
+            """
             INSERT INTO supervisor_counterfactual_review
-            (counterfactual_id, trade_id, position_id, close_ts, label,
+            (counterfactual_id, review_id, trade_id, position_id, close_ts, label,
              confidence, horizons_json, evidence_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'correct_stop', 0.8, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, 'correct_stop', 0.8, ?, ?, ?, ?)
             """,
             (
                 f"cf-{index}",
+                f"review-{index}",
                 f"trade-{index}",
                 f"position-{index}",
                 1000.0 + index,
@@ -68,6 +82,32 @@ def test_counterfactual_window_uses_event_time_not_recompute_time(tmp_path):
                 10000.0 + (59 - index),
             ),
         )
+    conn.execute(
+        """
+        INSERT INTO trade_outcome_review
+        (review_id, trade_id, position_id, review_json, created_at)
+        VALUES ('review-contaminated', 'trade-contaminated',
+                'position-contaminated',
+                '{"system_issue_context":{"contaminates_learning":true}}',
+                9000.0)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO supervisor_counterfactual_review
+        (counterfactual_id, review_id, trade_id, position_id, close_ts, label,
+         confidence, horizons_json, evidence_json, created_at, updated_at)
+        VALUES
+        ('cf-orphan', 'review-missing', 'trade-orphan', 'position-orphan',
+         9002.0, 'correct_stop', 0.9, '[]', '{}', 9002.0, 9002.0),
+        ('cf-contaminated', 'review-contaminated', 'trade-contaminated',
+         'position-contaminated', 9001.0, 'correct_stop', 0.9, '[]', '{}',
+         9001.0, 9001.0),
+        ('cf-invalidated', 'review-59', 'trade-invalidated',
+         'position-invalidated', 9000.0, 'correct_stop', 0.9, '[]',
+         '{"evidence_invalidated":true}', 9000.0, 9000.0)
+        """
+    )
     conn.commit()
 
     items = BrainMemoryService(db_path)._counterfactual_memories(conn, set(), [])

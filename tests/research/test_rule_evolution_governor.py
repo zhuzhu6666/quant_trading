@@ -1206,6 +1206,14 @@ def test_effect_reconciliation_filters_contaminated_and_wrong_regime_reviews():
             "review": {"regime_id": "range", "context_integrity": "partial"},
             "failure_tags": ["partial_context"],
         },
+        {
+            "review": {
+                "regime_id": "range",
+                "context_integrity": "full",
+                "system_issue_context": {"contaminates_learning": True},
+            },
+            "failure_tags": [],
+        },
     ]
 
     comparable, contaminated, mismatched = RuleEvolutionGovernor._comparable_reviews(
@@ -1214,7 +1222,7 @@ def test_effect_reconciliation_filters_contaminated_and_wrong_regime_reviews():
     )
 
     assert len(comparable) == 1
-    assert contaminated == 1
+    assert contaminated == 2
     assert mismatched == 1
 
 

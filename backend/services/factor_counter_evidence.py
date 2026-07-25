@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.services._brain_helpers import loads
+from backend.services.review_contract import review_has_system_contamination
 
 
 KEEP_BLOCK_THRESHOLD = 0.65
@@ -208,12 +210,16 @@ class FactorCounterEvidenceService:
         rows = _execute(
             conn,
             """
-            SELECT reward_score, recommended_action, failure_tags_json, decision_context_json, created_at
-            FROM experience_memory
-            WHERE decision_context_json LIKE ?
-               OR recommended_action LIKE ?
-            ORDER BY created_at DESC
-            LIMIT 50
+            SELECT e.reward_score, e.recommended_action, e.failure_tags_json,
+                   e.decision_context_json, e.created_at,
+                   r.review_json AS source_review_json
+            FROM experience_memory e
+            JOIN trade_outcome_review r
+              ON e.source_table='trade_outcome_review'
+             AND r.review_id=e.source_id
+            WHERE e.append_source='live_review'
+              AND (e.decision_context_json LIKE ? OR e.recommended_action LIKE ?)
+            ORDER BY e.created_at DESC
             """,
             (like, like),
         ).fetchall()
@@ -223,14 +229,19 @@ class FactorCounterEvidenceService:
         prune = 0.0
         positive = 0
         negative = 0
+        sample_count = 0
         for row in rows:
+            if review_has_system_contamination(loads(row["source_review_json"], {})):
+                continue
+            if sample_count >= 50:
+                break
+            sample_count += 1
             reward = _safe_float(row["reward_score"])
             action = str(row["recommended_action"] or "").lower()
             if reward >= 0.15 and "downweight" not in action:
                 positive += 1
             if reward <= -0.15 or "downweight" in action:
                 negative += 1
-        sample_count = len(rows)
         if sample_count >= 2 and positive / max(sample_count, 1) >= 0.5:
             keep += 0.25
         if sample_count >= 2 and negative / max(sample_count, 1) >= 0.5:

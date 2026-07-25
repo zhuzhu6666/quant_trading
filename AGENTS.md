@@ -1,37 +1,34 @@
 # Workspace Rules
 
 > Status: active
-> Last updated: 2026-07-06
-> Scope: workspace collaboration rules and backend/frontend ownership boundaries.
+> Last updated: 2026-07-26
+> Scope: unified workspace collaboration rules and platform-specific verification boundaries.
 
 这个仓库从现在开始按下面的规则协作：
 
-## 1. 本地 Windows
+## 1. 统一开发工作区
 
-本地默认只做这些内容：
+`/home/ubuntu/quant_trading` 是前后端统一开发与运行事实工作区，可直接修改：
 
 - `miniprogram_v2`
 - `web_frontend`
-- 小程序页面、交互、展示
-- Web 前端页面、交互、展示
-- 微信开发者工具验证
-- 文档
-
-本地默认不要改这些内容：
-
 - `backend`
 - `execution`
 - `alpha`
 - `risk`
 - `monitor`
-- `.env`
 - `config`
-- `data`
-- `logs`
+- 文档与测试
 
-## 2. Linux 服务器
+不再按“Windows 只做前端、Linux 只做后端”分工。改动仍需遵守各领域事实源、
+安全边界和针对性验证要求。
 
-服务器默认负责这些内容：
+`.env`、运行数据、日志、数据库和 systemd 仍只在任务明确涉及且完成只读确认后
+按服务器 SOP 操作；统一开发不扩大运行态变更授权。
+
+## 2. 平台专属验证
+
+Linux 服务器继续负责生产运行验证：
 
 - 后端接口
 - 交易循环
@@ -41,32 +38,37 @@
 - systemd
 - 数据库
 - 日志排查
+- Web 前端构建、静态发布和公网验证
 
-服务器默认不做这些内容：
+Windows 仅在需要平台工具时用于补充验证：
 
-- 小程序页面开发
-- 微信开发者工具联调
+- 微信开发者工具联调；
+- Windows/浏览器兼容性检查。
+
+平台工具限制不再限制源代码修改位置。
 
 ## 3. 默认工作流
 
 ```text
-本地做前端（小程序 + Web）
-服务器只做后端
+统一工作区确认事实源和影响面
+  -> 直接修改前端或后端
+  -> 运行对应的最小测试/构建
+  -> 按领域做服务、浏览器或平台工具验证
 ```
 
 ## 3.1 当前分支/工作区约定
 
-- 本地 Windows 和 Linux 服务器统一使用 `main` 分支。
-- 本地 Windows 已启用 sparse checkout，默认只保留：
+- 所有工作区统一使用 `main` 分支。
+- Windows 可继续使用 sparse checkout，默认保留：
   - `miniprogram_v2/`
   - `web_frontend/`
   - `docs/`
   - `AGENTS.md`
   - `README.md`
   - `.gitignore`
-- 后端、交易、数据库、systemd、日志相关改动一律在服务器 `main` 上完成。
-- 小程序和 Web 前端改动一律在本地 Windows 的 `main` 上完成。
-- 文档/规则类改动统一提交到 `main`，本地和服务器都从 `main` 拉取。
+- 前端、后端、文档和规则均可在 Linux 统一工作区直接修改。
+- 运行态、数据库、systemd 和日志验证仍以 Linux 服务器为准。
+- Windows 平台验证产生的必要修正也提交到同一 `main`，不得形成长期分叉。
 
 ## 3.2 当前数据约定
 

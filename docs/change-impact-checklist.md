@@ -1,7 +1,7 @@
 # Change Impact Checklist
 
 > Status: active
-> Last verified: 2026-07-19
+> Last verified: 2026-07-26
 > Scope: pre-change and post-change checklist for backend, factor, governance, risk, data, and frontend contract work.
 
 本文是每次动代码前后的检查清单。目标是先扩大影响面，再把改动收口，避免只修眼前一个点却破坏其他链路。
@@ -125,6 +125,7 @@
 |---|---|
 | `ExecutionGate` | 信号阈值、冷却、NFP/GVZ 等硬门槛是否保留 |
 | `RiskPolicyService` | 新动作是否统一裁决 |
+| forward VaR/CVaR | 是否只使用同 symbol/timeframe 的已闭合 bar returns；current positions 与 sizing 后最终 candidate API volume 是否在同一冻结 `forward_var_input.v1` 上投影；direction/current price/contract size/equity 任一缺失时是否保持 unknown；95% hard input 与 99% shadow 是否共用输入且不新增第二阈值 |
 | `ContextPolicyService` | context 只影响阈值/仓位，不改方向 |
 | `live_tick_pipeline` | gate 前后的顺序是否正确 |
 | explicit reconcile | safety/startup/emergency/order recovery 是否只接受 `PositionReconcileResult` / `AccountReconcileResult` 的 fresh 全量快照；cache/event/failed 是否不会被当成空仓、零账户或零未实现 PnL |
@@ -166,6 +167,7 @@
 | monthly DuckDB | 当前月链接是否正确 |
 | parity hash binding | replay 是否绑定 committed config、实际选中 PIT rows、逐代码文件和逐 factor artifact 的 SHA-256；是否必须显式提供并匹配 config/data/code/artifact 四类 expected hash 才能标 verified；缺失或不一致是否 fail-closed |
 | replay 时间因果 | 是否只消费已闭合 bar、决策窗口严格为 `history[:i+1]`、成交只使用 next-bar 原生 bid/ask 并计入 spread/slippage/commission |
+| replay 风险输入 | live/parity 是否调用同一 closed-bar freeze、current/candidate notional projection 与 lifecycle payload builder；Policy/ledger 是否保存 candidate input fingerprint 和 95%/99% 结果；历史窗口是否绝不读取决策 bar 之后的数据 |
 | replay 生命周期 | factor frame/selector/normalizer/compositor、RiskPolicy、position metrics、safety arbitration、supervisor/trailing/protection plan 是否分别记录“共享原语 exact”和“历史输入 verified”；selector 输出是否进入 artifact 且历史 factor projection ack/health/Registry generation 是否单独验证；broker receipt/reconcile/partial fill、tick 内路径、5 秒 cadence/AWE、account/session/runtime、真实 deal cost/swap、projection ack 或原生 bid/ask 任一缺失时是否只能输出 `diagnostic_only` |
 | PostgreSQL state | 是否避免新增 SQLite state 写入 |
 | schema writer | 新 state_v1 DDL 是否只进入版本化 migration；当前 backend/learning/job worker 是否只启动校验最低 schema version 10；高频 worker/model/readiness ensure 是否显式调用 catalog validation；普通 connection/cursor 是否继续把其余旧 ensure 降为 assertion 并阻断其他 schema write；canonical `experiments.db` 是否只读校验且只允许 `db_doctor --repair` 写 schema；外部 SQLite restore 是否只导入已迁移表；migration connection 是否在 advisory lock 下可重复执行且 checksum ledger 一致 |
@@ -192,7 +194,8 @@
 | `_fact` | 是否按 `docs/api-fact-contract.md` 维护 endpoint contract/source/observed_at/stale_after；组合事实是否按各组件真实生产周期独立判断 freshness，并将任一 error/unknown/stale 向父级 fail-closed 投影；Learning 是否只用显式持久化时间且缓存不续鲜；Ops read/write/mutation 是否分别验证账本时间、durable ID+commit timestamp、committed mutation；缺失、unknown、stale、error 是否永不显示绿色；stop/emergency 是否不被 freshness gate 禁用 |
 | 401 并发 | 多个请求同时 401 是否只清理/跳转一次；是否按请求发送时 token 识别迟到 401 并复用已发布 token；多标签页是否以同源锁串行 refresh 且锁内重验 token；非 401 是否保留 token 和最后事实 |
 | 小程序合并 | `Promise.allSettled` 是否按来源更新；全部失败是否只推进 attempt；WS partial payload 是否不写默认零值 |
-| readiness | 运维页能看到 frontend/live execution/live alpha/autonomous mutation/release 五维阻断；frontend readiness 不得授权 control/release |
+| readiness | 运维页能看到 frontend/live execution/live alpha/autonomous mutation/release 五维阻断；canonical risk 是否只读投影 `risk_metrics_snapshot.v2` 且 var unknown/stale/error 如实进入 live readiness；frontend readiness 不得授权 control/release |
+| Web risk | 是否只解析 `risk.summary.v2.snapshot[risk_metrics_snapshot.v2]` 和 `risk.inputs.v1` component fact；known 零敞口是否可见；旧顶层 `var/kelly/stress/concentration`、字段别名或缺失默认零是否已禁止 |
 | parity replay | additive replay API 是否保留 hash、因果、成本和 component blockers，且 runner/API 自身永不授予 governance/deploy 权限 |
 | Factor Cards | 与 Catalog 语义一致 |
 | 文档 | schema/contract 是否更新 |

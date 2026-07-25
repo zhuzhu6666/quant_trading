@@ -41,7 +41,7 @@ import {
   startReleaseRun,
 } from "@/api/client";
 import { ActionButton } from "@/components/ActionButton";
-import { factBoundTone, factHasDisplayValue, factIsKnown, readFact, type FactEnvelope } from "@/api/fact";
+import { factBoundTone, factHasDisplayValue, factIsKnown, readFact, readFactComponent, type FactEnvelope } from "@/api/fact";
 import { MetricCard } from "@/components/Card";
 import { CompactMetric, Field, ProgressMetric, SectionHead, StatTile, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { JsonBlock } from "@/components/JsonBlock";
@@ -51,6 +51,7 @@ import { queryKeys } from "@/api/queryKeys";
 import { asRecord, isRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickString } from "@/lib/compat";
 import { translateDisplayValue, translateReasonText } from "@/lib/display";
 import { formatDecimal, formatTime } from "@/lib/format";
+import { decodeCanonicalRiskSnapshot, knownMetric } from "@/api/riskSnapshot";
 
 type TabKey = "runtime" | "factors" | "governance" | "replay" | "risk" | "learning" | "incidents" | "release";
 
@@ -697,7 +698,7 @@ export function V15CockpitPage() {
   const replayChoicesFact = readFact(replayChoicesQuery.data, "ops.replay-bar-decisions.v2");
   const catalogFact = readFact(catalogQuery.data, "factor.catalog.v4");
   const catalogSnapshotFact = readFact(catalogSnapshotQuery.data, "factor.catalog.v4");
-  const riskFact = readFact(riskQuery.data, "risk.summary.v2");
+  const riskInputsFact = readFactComponent(riskQuery.data, "risk_inputs", "risk.inputs.v1");
   const learningSummaryFact = readFact(learningSummaryQuery.data, "learning.summary.v2");
   const learningApplicationsFact = readFact(learningApplicationsQuery.data, "learning.applications.v2");
   const learningSamplesFact = readFact(learningSamplesQuery.data, "learning.autonomous-samples.v2");
@@ -710,7 +711,10 @@ export function V15CockpitPage() {
   const releaseApprovalsFact = readFact(releaseApprovalsQuery.data, "ops.release-approval-trail.v2");
   const readinessKnown = factIsKnown(readinessFact, readinessRequestFailed);
   const phase0Known = factIsKnown(phase0Fact, phase0RequestFailed);
-  const riskKnown = factIsKnown(riskFact, riskRequestFailed);
+  const canonicalRisk = decodeCanonicalRiskSnapshot(riskQuery.data);
+  const riskKnown = factIsKnown(riskInputsFact, riskRequestFailed)
+    && canonicalRisk.contractKnown
+    && knownMetric(canonicalRisk.var95.status);
   const incidentControlKnown = factIsKnown(incidentControlFact, incidentControlRequestFailed);
 
   const refreshAll = () => {
@@ -793,7 +797,6 @@ export function V15CockpitPage() {
     const filtered = catalogItems.filter(isOperationalFactor);
     return filtered.length ? filtered : catalogItems;
   }, [catalogItems]);
-  const risk = asRecord(riskQuery.data);
   const learningSummary = asRecord(learningSummaryQuery.data);
   const latestPlaybook = asRecord(pick(incidentPlaybookQuery.data, ["playbook"]));
   const latestScopeApproval = asRecord(pick(scopeApprovalQuery.data, ["approval_event"]));
@@ -991,7 +994,8 @@ export function V15CockpitPage() {
           <MetricCard title="风控与事故边界">
             <div className="field-list">
               <Field label="事故模式" value={translateDisplayValue(incidentMode)} tone={factBoundTone(incidentControlFact, incidentMode === "normal" ? "ok" : "warn", incidentControlRequestFailed)} />
-              <Field label="风控摘要" value={`${safeLabel(pick(risk, ["status", "overall", "system_health.status"]))}${riskKnown ? "" : "（待确认）"}`} tone={factBoundTone(riskFact, toneFromStatus(safeLabel(pick(risk, ["status", "overall", "system_health.status"]))), riskRequestFailed)} />
+              <Field label="Canonical 风险" value={riskKnown ? `${canonicalRisk.schemaVersion} · ${canonicalRisk.var95.timeframe}` : "未知"} tone={factBoundTone(riskInputsFact, riskKnown ? "ok" : "warn", riskRequestFailed)} />
+              <Field label="前瞻 VaR / CVaR 95%" value={riskKnown && canonicalRisk.var95.varPct !== null && canonicalRisk.var95.cvarPct !== null ? `${formatDecimal(canonicalRisk.var95.varPct, 4)}% / ${formatDecimal(canonicalRisk.var95.cvarPct, 4)}%` : "未知"} tone={factBoundTone(riskInputsFact, riskKnown ? "mute" : "warn", riskRequestFailed)} />
               <Field label="运行闸门" value={pickBoolean(v15, ["control_plane_boundaries.risk_policy_service_required"], false) ? "RiskPolicyService" : "未知"} tone={factBoundTone(readinessFact, pickBoolean(v15, ["control_plane_boundaries.risk_policy_service_required"], false) ? "ok" : "bad", readinessRequestFailed)} />
             </div>
           </MetricCard>

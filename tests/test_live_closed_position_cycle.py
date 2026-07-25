@@ -21,6 +21,7 @@ def _runtime(calls, **overrides):
             "close_verdict": {},
             "attribution_integrity": "full",
             "factor_contributions": {"trend": 0.4},
+            "close_price": 2399.5,
         },
         "write_close_decision_log": lambda **_kwargs: None,
         "lookup_context_integrity": lambda _pid, default: default,
@@ -73,7 +74,6 @@ def test_close_without_authoritative_deal_defers_every_consumer():
         closed_pids={7},
         real_pnls={},
         attr_engine=object(),
-        current_price=2400.0,
         bar={},
         cfg=object(),
         account={},
@@ -103,7 +103,6 @@ def test_confirmed_close_rebuilds_session_before_releasing_cursor():
         closed_pids={8},
         real_pnls={8: real_pnl},
         attr_engine=object(),
-        current_price=2400.0,
         bar={},
         cfg=object(),
         account={},
@@ -130,7 +129,6 @@ def test_uncommitted_recovery_projection_stays_deferred_after_session_restore():
         closed_pids={9},
         real_pnls={9: real_pnl},
         attr_engine=object(),
-        current_price=2400.0,
         bar={},
         cfg=object(),
         account={},
@@ -159,3 +157,50 @@ def test_uncommitted_recovery_projection_stays_deferred_after_session_restore():
     assert calls["aux"][-1][0] == (
         "post_close_session_projection_unavailable",
     )
+
+
+def test_unknown_price_skips_price_audit_and_learning_but_keeps_recovery():
+    calls = _calls()
+    downstream = []
+    runtime = _runtime(
+        calls,
+        collect_attribution=lambda **_kwargs: {
+            "total_pnl": -2.5,
+            "close_ts": 100.0,
+            "close_reason": "broker_close",
+            "close_source": "broker",
+            "close_verdict": {},
+            "attribution_integrity": "missing",
+            "factor_contributions": {},
+            "close_price": None,
+        },
+        write_close_decision_log=lambda **_kwargs: downstream.append("decision"),
+        log_closed_position_ledger=lambda **_kwargs: downstream.append("ledger"),
+        run_closed_position_learning=lambda **_kwargs: downstream.append("learning"),
+        cleanup_closed_position=lambda **_kwargs: downstream.append("cleanup") or True,
+    )
+
+    handle_closed_positions_after_tick(
+        closed_pids={10},
+        real_pnls={
+            10: {
+                "net": -2.5,
+                "deal_ids": [90],
+                "exec_timestamp": 100.0,
+                "price_quality": "unknown",
+            }
+        },
+        attr_engine=object(),
+        bar={},
+        cfg=object(),
+        account={},
+        broker="ctrader",
+        tick=8,
+        log=lambda _message: None,
+        runtime=runtime,
+        broker_open_position_ids=set(),
+        bridge=object(),
+    )
+
+    assert downstream == ["cleanup"]
+    assert calls["released"]

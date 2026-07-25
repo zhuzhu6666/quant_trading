@@ -241,7 +241,7 @@ class PolicySuggester:
                 ),
             )
 
-            if action == "watch":
+            if not eligibility.eligible or action == "watch":
                 return None
 
             payload = {

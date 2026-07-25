@@ -17,52 +17,17 @@ import {
   pickArray,
   pickBoolean,
   pickNumber,
-  pickRecord,
   pickString,
 } from "@/lib/compat";
 import { translateDisplayValue, translateReasonText } from "@/lib/display";
 import { formatDecimal, formatTime } from "@/lib/format";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
-import { factBoundTone, factHasDisplayValue, factIsKnown, readFact } from "@/api/fact";
+import { factBoundTone, factHasDisplayValue, factIsKnown, readFact, readFactComponent } from "@/api/fact";
+import { decodeCanonicalRiskSnapshot, knownMetric } from "@/api/riskSnapshot";
 
 function itemLabel(value: unknown): string {
   const item = asRecord(value);
   return translateDisplayValue(pickString(item, ["name", "component", "id", "key"], typeof value === "string" ? value : ""));
-}
-
-function percentTone(value: number): "ok" | "warn" | "bad" | "mute" {
-  if (!Number.isFinite(value) || value <= 0) return "mute";
-  if (value >= 100) return "bad";
-  if (value >= 70) return "warn";
-  return "ok";
-}
-
-function RiskBar({
-  label,
-  value,
-  valueLabel,
-  detail,
-  tone,
-}: {
-  label: string;
-  value: number;
-  valueLabel?: string;
-  detail: string;
-  tone: "ok" | "warn" | "bad" | "mute";
-}) {
-  const width = Math.min(Math.max(value, 0), 100);
-  return (
-    <div className={`risk-bar risk-bar-${tone}`}>
-      <div className="risk-bar-head">
-        <span>{label}</span>
-        <strong>{valueLabel ?? `${formatDecimal(value, 1)}%`}</strong>
-      </div>
-      <div className="risk-bar-track" aria-label={`${label} ${valueLabel ?? `${formatDecimal(value, 1)}%`}`}>
-        <i style={{ width: `${width}%` }} />
-      </div>
-      <small>{detail}</small>
-    </div>
-  );
 }
 
 function compactId(value: string): string {
@@ -89,6 +54,10 @@ function pnlTone(value: string): "ok" | "bad" | "mute" {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed === 0) return "mute";
   return parsed > 0 ? "ok" : "bad";
+}
+
+function metricValue(value: number | null, digits = 4, suffix = ""): string {
+  return value === null ? "未知" : `${formatDecimal(value, digits)}${suffix}`;
 }
 
 export function RiskPage() {
@@ -119,16 +88,18 @@ export function RiskPage() {
   });
 
   const risk = asRecord(riskQuery.data);
-  const varSummary = pickRecord(risk, ["var"]) || {};
-  const kellySummary = pickRecord(risk, ["kelly"]) || {};
-  const stressSummary = pickRecord(risk, ["stress"]) || {};
-  const concentrationSummary = pickRecord(risk, ["concentration"]) || {};
+  const canonicalRisk = decodeCanonicalRiskSnapshot(riskQuery.data);
   // The dedicated policy endpoint is the only source for this panel. Falling
   // back to risk.summary would bind one endpoint's data to another endpoint's
   // freshness and could turn an old nested projection green.
   const policy = asRecord(policyQuery.data);
-  const systemHealth = pickRecord(risk, ["system_health"]) || {};
-  const riskFact = readFact(riskQuery.data, "risk.summary.v2");
+  const systemHealth = asRecord(risk.system_health);
+  const readiness = asRecord(readinessQuery.data);
+  const readinessDimensions = asRecord(readiness.readiness_dimensions);
+  const readinessBlockers = asRecord(readinessDimensions.blockers);
+  const readinessRisk = asRecord(readiness.risk_metrics);
+  const riskInputsFact = readFactComponent(riskQuery.data, "risk_inputs", "risk.inputs.v1");
+  const systemHealthFact = readFactComponent(riskQuery.data, "system_health", "system.runtime-health.v1");
   const dbFact = readFact(dbQuery.data, "system.db-health.v2");
   const readinessFact = readFact(readinessQuery.data, "ops.backend-readiness.v2");
   const policyFact = readFact(policyQuery.data, "risk.policy-verdicts.v2");
@@ -138,35 +109,22 @@ export function RiskPage() {
   const readinessRequestFailed = readinessQuery.isError || readinessQuery.isRefetchError;
   const policyRequestFailed = policyQuery.isError || policyQuery.isRefetchError;
   const traceRequestFailed = tradeTracesQuery.isError || tradeTracesQuery.isRefetchError;
-  const riskKnown = factIsKnown(riskFact, riskRequestFailed);
+  const riskKnown = factIsKnown(riskInputsFact, riskRequestFailed) && canonicalRisk.contractKnown;
+  const healthKnown = factIsKnown(systemHealthFact, riskRequestFailed);
   const dbKnown = factIsKnown(dbFact, dbRequestFailed);
   const readinessKnown = factIsKnown(readinessFact, readinessRequestFailed);
   const traceKnown = factIsKnown(traceFact, traceRequestFailed);
-  const riskDisplayable = factHasDisplayValue(riskFact);
+  const riskDisplayable = factHasDisplayValue(riskInputsFact) && canonicalRisk.contractKnown;
+  const healthDisplayable = factHasDisplayValue(systemHealthFact);
   const dbDisplayable = factHasDisplayValue(dbFact);
   const readinessDisplayable = factHasDisplayValue(readinessFact);
+  const varKnown = riskKnown && knownMetric(canonicalRisk.var95.status);
+  const var99Known = riskKnown && knownMetric(canonicalRisk.var99.status);
+  const kellyKnown = riskKnown && knownMetric(canonicalRisk.kelly.status);
+  const stressKnown = riskKnown && knownMetric(canonicalRisk.stress.status);
+  const concentrationKnown = riskKnown && knownMetric(canonicalRisk.concentration.status);
 
-  const varValue = pickNumber(varSummary, ["var", "var_pct", "value", "var_95"], 0);
-  const varBudget = pickNumber(varSummary, ["limit", "max", "value_limit", "var_limit"], 0);
-  const kellyFraction = pickNumber(kellySummary, ["kelly_fraction", "fraction", "value"], 0);
-  const kellyBudget = pickNumber(kellySummary, ["position_fraction", "max_fraction", "position_budget", "half_kelly", "quarter_kelly"], 0);
-  const stressVaR = pickNumber(stressSummary, ["var", "value", "stress_var"], 0);
-  const stressDrop = pickNumber(stressSummary, ["max_drawdown_pct", "max_drawdown", "drawdown", "stress"], 0);
-  const concentrationMax = pickNumber(concentrationSummary, ["max_single_weight", "max_weight", "concentration"], 0);
-  const concentrationSector = pickNumber(concentrationSummary, ["max_sector_weight", "sector_weight"], 0);
-  const varUsage = varBudget > 0 ? (varValue / varBudget) * 100 : 0;
-  const kellyUsage = kellyBudget > 0 ? (kellyFraction / kellyBudget) * 100 : 0;
-  const concentrationUsage = Math.max(concentrationMax, concentrationSector) * 100;
-  const varStatus = pickString(varSummary, ["status"], "");
-  const kellyStatus = pickString(kellySummary, ["status"], "");
-  const stressStatus = pickString(stressSummary, ["status"], "");
-  const concentrationStatus = pickString(concentrationSummary, ["status"], "");
-  const varHasData = varStatus !== "no data" && (varValue > 0 || varBudget > 0 || pickNumber(varSummary, ["lookback"], 0) > 0);
-  const kellyHasData = kellyStatus !== "no data" && (kellyFraction > 0 || pickNumber(kellySummary, ["win_rate"], 0) > 0 || pickNumber(kellySummary, ["avg_loss"], 0) > 0);
-  const stressHasData = stressStatus !== "no data" && (stressDrop > 0 || stressVaR > 0 || pickArray(stressSummary, ["scenarios"]).length > 0);
-  const concentrationHasData = concentrationStatus !== "no data" && (concentrationMax > 0 || concentrationSector > 0);
-
-  const policyCounts = pickRecord(policy, ["counts"]) || {};
+  const policyCounts = asRecord(policy.counts);
   const allowed = pickNumber(policyCounts, ["allowed"], 0);
   const blocked = pickNumber(policyCounts, ["blocked"], 0);
   const totalVerdicts = allowed + blocked;
@@ -174,14 +132,16 @@ export function RiskPage() {
   const policyItems = useMemo(() => pickArray(policy, ["items", "recent_items", "decisions", "history"]), [policy]);
   const tradeTraces = useMemo(() => pickArray(tradeTracesQuery.data, ["items", "traces", "rows"]), [tradeTracesQuery.data]);
 
-  const riskHealth = pickString(systemHealth, ["overall", "status", "state"], "");
+  const riskHealth = pickString(systemHealth, ["overall"], "");
   const riskBlocked = pickBoolean(systemHealth, ["trading_blocked", "blocked"], false);
   const critical = pickArray(systemHealth, ["critical_components", "blocking_components"]);
   const degraded = pickArray(systemHealth, ["degraded_components"]);
   const impact = pickString(systemHealth, ["impact_summary", "status", "summary"], "");
-  const readinessReadyReported = pickBoolean(readinessQuery.data, ["ready_for_frontend", "ready", "ok"], false);
-  const schema = pickString(readinessQuery.data, ["schema_version", "version"], "");
-  const blockers = pickArray(readinessQuery.data, ["blockers"]);
+  const readinessReadyReported = pickBoolean(readiness, ["ready_for_frontend"], false);
+  const schema = pickString(readiness, ["schema_version"], "");
+  const blockers = pickArray(readinessBlockers, ["live_execution"]);
+  const readinessRiskKnown = pickBoolean(readinessRisk, ["ok"], false)
+    && pickString(readinessRisk, ["var_status"], "") === "known";
 
   const dbList = pickArray(dbQuery.data, ["databases", "database_list", "items"]);
   const dbErrorCount = dbList.reduce<number>((acc, item) => {
@@ -199,7 +159,7 @@ export function RiskPage() {
   const latestPolicyReason = policyItems.length ? translateReasonText(pickString(latestPolicy, ["reason", "message"], "")) : "";
   const latestTraceOutcome = tradeTraces.length ? translateDisplayValue(pickString(latestTrace, ["outcome_label"], "")) : "";
   const hasSystemQueryError = riskRequestFailed || dbRequestFailed || readinessRequestFailed;
-  const systemFactsKnown = riskKnown && dbKnown && readinessKnown;
+  const systemFactsKnown = healthKnown && riskKnown && dbKnown && readinessKnown;
 
   return (
     <section className="dashboard risk-dashboard">
@@ -207,28 +167,28 @@ export function RiskPage() {
         <div>
           <div className="eyebrow">风控审计</div>
           <h1>风控审计</h1>
-          <p>展示风险引擎状态、限额占用、策略裁决和阻断组件。</p>
+          <p>展示 canonical 前瞻风险分布、策略裁决和运行阻断，不在浏览器重算风险。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={riskDisplayable ? `风险 ${riskHealth}` : "风险状态未知"} tone={factBoundTone(riskFact, toneFromStatus(riskHealth), riskRequestFailed)} />
-          <StatusPill status={riskDisplayable ? (riskBlocked ? "交易阻断" : "交易可行") : "交易许可未知"} tone={factBoundTone(riskFact, riskBlocked ? "bad" : "ok", riskRequestFailed)} />
+          <StatusPill status={riskDisplayable ? `风险 ${translateDisplayValue(canonicalRisk.status)}` : "风险状态未知"} tone={factBoundTone(riskInputsFact, varKnown ? "ok" : "warn", riskRequestFailed)} />
+          <StatusPill status={healthDisplayable ? (riskBlocked ? "交易阻断" : "健康面未阻断") : "交易许可未知"} tone={factBoundTone(systemHealthFact, riskBlocked ? "bad" : "ok", riskRequestFailed)} />
           <StatusPill status={readinessDisplayable ? (readinessReadyReported ? "后端就绪" : "后端受限") : "后端就绪状态未知"} tone={factBoundTone(readinessFact, readinessReadyReported ? "ok" : "warn", readinessRequestFailed)} />
         </div>
       </div>
 
       <div className="stat-grid">
-        <StatTile icon={ShieldCheck} label="系统健康" value={riskDisplayable ? translateDisplayValue(riskHealth) : "未知"} detail={translateDisplayValue(impact)} tone={factBoundTone(riskFact, toneFromStatus(riskHealth), riskRequestFailed)} />
+        <StatTile icon={ShieldCheck} label="系统健康" value={healthDisplayable ? translateDisplayValue(riskHealth) : "未知"} detail={translateDisplayValue(impact)} tone={factBoundTone(systemHealthFact, toneFromStatus(riskHealth), riskRequestFailed)} />
         <StatTile icon={ShieldAlert} label="策略拦截" value={formatDecimal(blocked, 0)} detail={`允许 ${formatDecimal(allowed, 0)} · 通过率 ${formatDecimal(allowedRate, 1)}%`} tone={factBoundTone(policyFact, blocked ? "warn" : "ok", policyRequestFailed)} />
-        {varHasData ? <StatTile icon={Gauge} label="VaR" value={formatDecimal(varValue, 4)} detail={varBudget ? `限额 ${formatDecimal(varBudget, 4)}` : undefined} tone={varBudget && varValue > varBudget ? "bad" : "mute"} /> : null}
+        <StatTile icon={Gauge} label="前瞻 VaR 95%" value={varKnown ? metricValue(canonicalRisk.var95.varPct, 4, "%") : translateDisplayValue(canonicalRisk.var95.status || "unknown")} detail={varKnown ? `CVaR ${metricValue(canonicalRisk.var95.cvarPct, 4, "%")} · ${canonicalRisk.var95.timeframe}` : "等待 canonical 风险输入"} tone={factBoundTone(riskInputsFact, varKnown ? "mute" : "warn", riskRequestFailed)} />
         <StatTile icon={AlertTriangle} label="阻断组件" value={formatDecimal(critical.length + blockers.length, 0)} detail={`退化 ${formatDecimal(degraded.length, 0)} · DB 异常 ${formatDecimal(dbErrorCount, 0)}`} tone={!systemFactsKnown ? "warn" : critical.length || blockers.length ? "bad" : degraded.length || dbErrorCount ? "warn" : "ok"} />
       </div>
 
       <div className="dashboard-grid">
-        <MetricCard title="风险控制面板" className="wide-panel risk-control-overview">
+        <MetricCard title="Canonical 风险快照" className="wide-panel risk-control-overview">
           <div className="risk-mini-grid">
-            <RiskMiniMetric label="交易闸门" value={riskDisplayable ? (riskBlocked ? "阻断" : "放行") : "未知"} detail={translateDisplayValue(impact)} tone={factBoundTone(riskFact, riskBlocked ? "bad" : "ok", riskRequestFailed)} />
-            {varHasData ? <RiskMiniMetric label="VaR 占用" value={varBudget ? `${formatDecimal(varUsage, 1)}%` : formatDecimal(varValue, 4)} detail={varBudget ? `${formatDecimal(varValue, 4)} / ${formatDecimal(varBudget, 4)}` : undefined} tone={riskKnown ? percentTone(varUsage) : "warn"} /> : null}
-            {kellyHasData ? <RiskMiniMetric label="Kelly 占用" value={kellyBudget ? `${formatDecimal(kellyUsage, 1)}%` : formatDecimal(kellyFraction, 4)} detail={kellyBudget ? `预算 ${formatDecimal(kellyBudget, 4)}` : undefined} tone={riskKnown ? percentTone(kellyUsage) : "warn"} /> : null}
+            <RiskMiniMetric label="95% VaR / CVaR" value={varKnown ? `${metricValue(canonicalRisk.var95.varPct, 4, "%")} / ${metricValue(canonicalRisk.var95.cvarPct, 4, "%")}` : translateDisplayValue(canonicalRisk.var95.status || "unknown")} detail={varKnown ? `${metricValue(canonicalRisk.var95.varUsd, 2, " USD")} / ${metricValue(canonicalRisk.var95.cvarUsd, 2, " USD")}` : "未形成可裁决分布"} tone={factBoundTone(riskInputsFact, varKnown ? "mute" : "warn", riskRequestFailed)} />
+            <RiskMiniMetric label="99% Shadow" value={var99Known ? `${metricValue(canonicalRisk.var99.varPct, 4, "%")} / ${metricValue(canonicalRisk.var99.cvarPct, 4, "%")}` : translateDisplayValue(canonicalRisk.var99.status || "unknown")} detail="只读双算，不增加阈值" tone={factBoundTone(riskInputsFact, var99Known ? "mute" : "warn", riskRequestFailed)} />
+            <RiskMiniMetric label="Kelly" value={kellyKnown ? metricValue(canonicalRisk.kelly.fraction, 4) : translateDisplayValue(canonicalRisk.kelly.status || "unknown")} detail={kellyKnown ? `样本 ${metricValue(canonicalRisk.kelly.closedTrades, 0)} · 胜率 ${metricValue(canonicalRisk.kelly.winRate === null ? null : canonicalRisk.kelly.winRate * 100, 1, "%")}` : "等待已闭合交易样本"} tone={factBoundTone(riskInputsFact, kellyKnown ? "mute" : "warn", riskRequestFailed)} />
             <RiskMiniMetric label="策略通过率" value={`${formatDecimal(allowedRate, 1)}%`} detail={`允许 ${formatDecimal(allowed, 0)} / 拦截 ${formatDecimal(blocked, 0)}`} tone={factBoundTone(policyFact, blocked ? "warn" : "ok", policyRequestFailed)} />
             <RiskMiniMetric label="组件异常" value={formatDecimal(riskBlockers.length + degraded.length, 0)} detail={`阻断 ${formatDecimal(riskBlockers.length, 0)} · 退化 ${formatDecimal(degraded.length, 0)}`} tone={!systemFactsKnown ? "warn" : riskBlockers.length ? "bad" : degraded.length ? "warn" : "ok"} />
             <RiskMiniMetric label="数据健康" value={!dbDisplayable ? "未知" : dbErrorCount ? `${formatDecimal(dbErrorCount, 0)} 异常` : translateDisplayValue(dbStatus)} detail={`库 ${formatDecimal(dbList.length, 0)} · 合约 ${schema}${dbRequestFailed ? " · 接口异常" : ""}`} tone={factBoundTone(dbFact, dbErrorCount ? "bad" : toneFromStatus(dbStatus), dbRequestFailed)} />
@@ -237,24 +197,31 @@ export function RiskPage() {
           <div className="risk-control-grid">
             <section className="risk-control-section">
               <div className="risk-section-head">
-                <h3>限额占用</h3>
-                <StatusPill status={riskKnown && (varHasData || kellyHasData || concentrationHasData) ? (varUsage >= 100 || kellyUsage >= 100 ? "超限" : "正常") : "未确认"} tone={!riskKnown ? "warn" : varHasData || kellyHasData || concentrationHasData ? (varUsage >= 100 || kellyUsage >= 100 ? "bad" : "ok") : "mute"} />
+                <h3>前瞻分布</h3>
+                <StatusPill status={varKnown ? "已冻结" : translateDisplayValue(canonicalRisk.var95.status || "unknown")} tone={factBoundTone(riskInputsFact, varKnown ? "ok" : "warn", riskRequestFailed)} />
               </div>
-              {varHasData && varBudget ? <RiskBar label="VaR" value={varUsage} detail={`当前 ${formatDecimal(varValue, 4)} · 限额 ${formatDecimal(varBudget, 4)}`} tone={riskKnown ? percentTone(varUsage) : "warn"} /> : null}
-              {kellyHasData && kellyBudget ? <RiskBar label="Kelly" value={kellyUsage} detail={`当前 ${formatDecimal(kellyFraction, 4)} · 预算 ${formatDecimal(kellyBudget, 4)}`} tone={riskKnown ? percentTone(kellyUsage) : "warn"} /> : null}
-              {concentrationHasData ? <RiskBar label="集中度" value={concentrationUsage} detail={`单品种 ${formatDecimal(concentrationMax, 4)} · 行业 ${formatDecimal(concentrationSector, 4)}`} tone={riskKnown ? percentTone(concentrationUsage) : "warn"} /> : null}
+              <div className="field-list risk-compact-fields">
+                <Field label="周期" value={varKnown ? `${canonicalRisk.var95.horizon} · ${canonicalRisk.var95.timeframe}` : "未知"} />
+                <Field label="收益样本" value={varKnown ? metricValue(canonicalRisk.var95.sampleCount, 0) : "未知"} />
+                <Field label="当前权益" value={varKnown ? metricValue(canonicalRisk.var95.currentEquity, 2, " USD") : "未知"} />
+                <Field label="当前净名义敞口" value={varKnown ? metricValue(canonicalRisk.var95.currentNetNotionalUsd, 2, " USD") : "未知"} />
+                <Field label="数据窗口" value={varKnown ? `${formatTime(canonicalRisk.sourceWindowStart)} → ${formatTime(canonicalRisk.sourceWindowEnd)}` : "未知"} />
+                <Field label="输入指纹" value={canonicalRisk.inputFingerprint ? compactId(canonicalRisk.inputFingerprint) : "未知"} />
+              </div>
             </section>
 
             <section className="risk-control-section">
               <div className="risk-section-head">
                 <h3>压力与集中</h3>
-                <StatusPill status={riskKnown ? (stressHasData ? "有数据" : "未接入") : "未确认"} tone={!riskKnown ? "warn" : stressHasData ? "ok" : "mute"} />
+                <StatusPill status={stressKnown && concentrationKnown ? "已知" : "未确认"} tone={factBoundTone(riskInputsFact, stressKnown && concentrationKnown ? "ok" : "warn", riskRequestFailed)} />
               </div>
               <div className="field-list risk-compact-fields">
-                {stressHasData ? <Field label="压力 VaR" value={formatDecimal(stressVaR, 4)} /> : null}
-                {stressHasData ? <Field label="压力回撤" value={formatDecimal(stressDrop, 4)} /> : null}
-                <Field label="单品种权重" value={concentrationHasData ? formatDecimal(concentrationMax, 4) : "等待权重"} />
-                <Field label="行业集中度" value={concentrationHasData ? formatDecimal(concentrationSector, 4) : "等待权重"} />
+                <Field label="压力损失" value={stressKnown ? metricValue(canonicalRisk.stress.lossPct, 4, "%") : "未知"} />
+                <Field label="压力损失金额" value={stressKnown ? metricValue(canonicalRisk.stress.lossUsd, 2, " USD") : "未知"} />
+                <Field label="压力持仓数" value={stressKnown ? metricValue(canonicalRisk.stress.positionCount, 0) : "未知"} />
+                <Field label="集中度" value={concentrationKnown ? metricValue(canonicalRisk.concentration.pct, 4, "%") : "未知"} />
+                <Field label="最大集中品种" value={concentrationKnown ? canonicalRisk.concentration.maxSingleName || "当前无持仓" : "未知"} />
+                <Field label="适用状态" value={concentrationKnown ? (canonicalRisk.concentration.applicable ? canonicalRisk.concentration.safe ? "适用且安全" : "适用且超限" : "空仓不适用") : "未知"} />
               </div>
             </section>
 
@@ -265,7 +232,8 @@ export function RiskPage() {
               </div>
               <div className="field-list risk-compact-fields">
                 <Field label="后端就绪" value={readinessDisplayable ? (readinessReadyReported ? "是" : "否") : "未知"} tone={factBoundTone(readinessFact, readinessReadyReported ? "ok" : "warn", readinessRequestFailed)} />
-                <Field label="风险接口" value={riskRequestFailed ? "异常" : riskDisplayable ? "有事实" : "未知"} tone={riskRequestFailed ? "bad" : riskKnown ? "ok" : "warn"} />
+                <Field label="Canonical 风险" value={riskRequestFailed ? "异常" : riskDisplayable ? canonicalRisk.schemaVersion : "未知"} tone={riskRequestFailed ? "bad" : riskKnown ? "ok" : "warn"} />
+                <Field label="Readiness 风险投影" value={readinessDisplayable ? readinessRiskKnown ? "known" : pickString(readinessRisk, ["var_status"], "unknown") : "未知"} tone={factBoundTone(readinessFact, readinessRiskKnown ? "ok" : "warn", readinessRequestFailed)} />
                 <Field label="就绪接口" value={readinessRequestFailed ? "异常" : readinessDisplayable ? "有事实" : "未知"} tone={readinessRequestFailed ? "bad" : readinessKnown ? "ok" : "warn"} />
                 <Field label="数据库状态" value={dbDisplayable ? dbStatus : "未知"} tone={factBoundTone(dbFact, toneFromStatus(dbStatus), dbRequestFailed)} />
                 <Field label="数据库总数" value={formatDecimal(dbList.length, 0)} />

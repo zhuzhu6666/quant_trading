@@ -17,7 +17,6 @@ from backend.services.api_fact_views import (
     trade_traces_fact_payload,
 )
 from backend.services.parameter_templates import ParameterTemplateService
-from backend.services.realized_pnl import get_realized_pnl_series
 from backend.services.review_contract import normalize_trade_review_contract
 
 router = APIRouter(prefix="/api/risk", tags=["risk"])
@@ -26,7 +25,7 @@ router = APIRouter(prefix="/api/risk", tags=["risk"])
 _var_calc = VaRCalculator(confidence=0.95)
 _kelly = KellyCriterion()
 _stress = StressTest()
-_conc = ConcentrationChecker(max_single_weight=0.40, max_sector_weight=0.60)
+_conc = ConcentrationChecker(max_single_weight=0.40)
 _CANDIDATE_ID_RE = re.compile(r"(ptrc_[0-9a-f]{16})")
 _STATE_SQL_DIALECT = "postgres"
 
@@ -292,108 +291,40 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _current_account_equity() -> float:
-    try:
-        from backend.services.live_service import get_account
+def _risk_metrics_snapshot() -> dict[str, Any]:
+    from backend.risk.metrics_snapshot import SNAPSHOT_KEY
 
-        account = get_account("ctrader")
+    conn = _state_conn()
+    try:
+        row = conn.execute(
+            _state_sql(
+                "SELECT value_json FROM runtime_kv WHERE key=? LIMIT 1"
+            ),
+            (SNAPSHOT_KEY,),
+        ).fetchone()
     except Exception:
-        return 0.0
-    return _safe_float(account.get("equity") or account.get("balance"))
-
-
-def _var_limit_usd(current_equity: float) -> float:
-    if current_equity <= 0:
-        return 0.0
+        return {}
+    finally:
+        conn.close()
+    if not row:
+        return {}
     try:
-        from config.runtime_config import shared as _runtime_cfg
-
-        threshold = _safe_float(getattr(_runtime_cfg(), "var_cvar_threshold", 0.02), 0.02)
-    except Exception:
-        threshold = 0.02
-    return round(current_equity * threshold, 6) if threshold > 0 else 0.0
+        raw = row["value_json"]
+    except (KeyError, TypeError):
+        raw = row[0]
+    return _loads_json(raw, {})
 
 
-def _equity_series_from_realized_points(points: list[dict[str, Any]], *, current_equity: float) -> list[float]:
-    if not points:
-        return []
-
-    final_cumulative = _safe_float(points[-1].get("cumulative"))
-    inferred_start = 0.0
-    for point in points:
-        balance = _safe_float(point.get("balance"))
-        if balance > 0:
-            inferred_start = balance - _safe_float(point.get("cumulative"))
-            break
-    start_equity = current_equity - final_cumulative if current_equity > 0 else inferred_start
-    if start_equity <= 0:
-        return []
-
-    series: list[float] = []
-    for point in points:
-        balance = _safe_float(point.get("balance"))
-        equity = balance if balance > 0 else start_equity + _safe_float(point.get("cumulative"))
-        if equity > 0:
-            series.append(equity)
-
-    if len(series) == 1:
-        first_pnl = _safe_float(points[0].get("pnl"))
-        previous = series[0] - first_pnl
-        if previous > 0:
-            series.insert(0, previous)
-    return series
-
-
-def _kelly_from_realized_points(points: list[dict[str, Any]]) -> dict[str, Any]:
-    wins = [_safe_float(point.get("pnl")) for point in points if _safe_float(point.get("pnl")) > 0]
-    losses = [abs(_safe_float(point.get("pnl"))) for point in points if _safe_float(point.get("pnl")) < 0]
-    total = len(wins) + len(losses)
-    if total <= 0 or not wins or not losses:
-        return _kelly.get_status()
-
-    result = _kelly.calculate(
-        win_rate=len(wins) / total,
-        avg_win=sum(wins) / len(wins),
-        avg_loss=sum(losses) / len(losses),
-    )
-    result.update({"status": "ok", "source": "realized_pnl_30d", "trades": total})
+def _risk_component(name: str, fallback: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _risk_metrics_snapshot()
+    result = dict((snapshot.get("components") or {}).get(name) or fallback)
+    snapshot_status = snapshot.get("status") or "unknown"
+    result["metric_status"] = result.get("status") or "unknown"
+    if snapshot_status in {"unknown", "stale", "error"}:
+        result["status"] = snapshot_status
+    result["snapshot_status"] = snapshot_status
+    result["as_of"] = snapshot.get("as_of")
     return result
-
-
-def _concentration_from_policy(policy: dict[str, Any]) -> dict[str, Any]:
-    by_reason = policy.get("by_reason") if isinstance(policy, dict) else None
-    if not isinstance(by_reason, dict) or not by_reason:
-        return _conc.get_status()
-    weights = {str(key): _safe_float(value) for key, value in by_reason.items() if _safe_float(value) > 0}
-    if not weights:
-        return _conc.get_status()
-    result = _conc.check(weights)
-    result.update({"source": "policy_reason_distribution"})
-    return result
-
-
-def _summary_risk_inputs() -> tuple[list[float], list[dict[str, Any]], dict[str, Any]]:
-    try:
-        realized = get_realized_pnl_series(scope="30d")
-    except Exception as exc:
-        return [], [], {
-            "ok": False,
-            "observed_at": None,
-            "error": f"{type(exc).__name__}: {exc}"[:300],
-        }
-    points = realized.get("points") if isinstance(realized, dict) else []
-    if not isinstance(points, list):
-        return [], [], {
-            "ok": False,
-            "observed_at": None,
-            "error": "realized_pnl_points_invalid",
-        }
-    equity_series = _equity_series_from_realized_points(points, current_equity=_current_account_equity())
-    return equity_series, points, {
-        "ok": True,
-        "observed_at": float(realized.get("to_ts") or time.time()),
-        "error": None,
-    }
 
 
 def _parse_review_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -2124,12 +2055,9 @@ class KellyRequest(BaseModel):
 
 
 class StressRequest(BaseModel):
-    equity_series: list[float]
-    initial_equity: float | None = None
-
-
-class ConcentrationRequest(BaseModel):
-    weights: list[float]
+    positions: list[dict[str, Any]]
+    account: dict[str, Any]
+    shocks: list[float] = [-0.05, 0.05]
 
 
 @router.get("/summary")
@@ -2138,27 +2066,23 @@ def get_risk_summary(_user: RequireUser) -> dict[str, Any]:
     获取风控指标概览: VaR, Kelly, stress, concentration.
     """
     policy = _recent_policy_verdicts(limit=25)
-    equity_series, realized_points, risk_input_fact = _summary_risk_inputs()
-    var = _var_calc.get_status(equity_series) if len(equity_series) >= 2 else _var_calc.get_status()
-    if len(equity_series) >= 2:
-        var.update({"source": "realized_pnl_30d", "limit": _var_limit_usd(_safe_float(var.get("current_equity")))})
-    kelly = _kelly_from_realized_points(realized_points)
-    stress = _stress.run(equity_series) if len(equity_series) >= 2 else _stress.get_status()
-    if len(equity_series) >= 2:
-        stress.update({"source": "realized_pnl_30d", "stress_var": abs(_safe_float(stress.get("max_drawdown_pct")))})
-    conc = _concentration_from_policy(policy)
+    snapshot = _risk_metrics_snapshot()
+    components = snapshot.get("components") or {}
     payload = {
-        "var": _json_safe(var),
-        "kelly": _json_safe(kelly),
-        "stress": _json_safe(stress),
-        "concentration": _json_safe(conc),
+        "snapshot": snapshot,
+        "var": _json_safe(components.get("var") or _var_calc.get_status()),
+        "kelly": _json_safe(components.get("kelly") or _kelly.get_status()),
+        "stress": _json_safe(components.get("stress") or _stress.get_status()),
+        "concentration": _json_safe(
+            components.get("concentration") or _conc.get_status()
+        ),
         "policy": policy,
         "system_health": _system_health_summary(),
     }
     return risk_summary_fact_payload(
         payload,
-        risk_observed_at=risk_input_fact.get("observed_at"),
-        risk_error=risk_input_fact.get("error"),
+        risk_observed_at=snapshot.get("as_of"),
+        risk_error=None if snapshot else "risk_metrics_snapshot_missing",
     )
 
 
@@ -2198,8 +2122,7 @@ def calc_var(_user: RequireUser, req: VarRequest) -> dict[str, Any]:
 
 @router.get("/var")
 def get_var_status(_user: RequireUser) -> dict[str, Any]:
-    """获取当前 VaR 状态 (无权益数据时返回空结构)。"""
-    return _var_calc.get_status()
+    return _risk_component("var", _var_calc.get_status())
 
 
 @router.post("/kelly")
@@ -2212,8 +2135,7 @@ def calc_kelly(_user: RequireUser, req: KellyRequest) -> dict[str, Any]:
 
 @router.get("/kelly")
 def get_kelly_status(_user: RequireUser) -> dict[str, Any]:
-    """获取 Kelly 状态概览 (无数据时)。"""
-    return _kelly.get_status()
+    return _risk_component("kelly", _kelly.get_status())
 
 
 @router.post("/stress/run")
@@ -2221,13 +2143,12 @@ def run_stress(_user: RequireUser, req: StressRequest) -> dict[str, Any]:
     """
     运行压力测试场景。
     """
-    return _stress.run(req.equity_series, req.initial_equity)
+    return _stress.run(req.positions, req.account, req.shocks)
 
 
 @router.get("/stress")
 def get_stress_status(_user: RequireUser) -> dict[str, Any]:
-    """获取压力测试状态 (无数据时)。"""
-    return _stress.get_status()
+    return _risk_component("stress", _stress.get_status())
 
 
 @router.post("/concentration")
@@ -2244,5 +2165,4 @@ def check_concentration(
 
 @router.get("/concentration")
 def get_concentration_status(_user: RequireUser) -> dict[str, Any]:
-    """获取集中度状态 (无数据时)。"""
-    return _conc.get_status()
+    return _risk_component("concentration", _conc.get_status())

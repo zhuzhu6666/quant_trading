@@ -16,7 +16,6 @@ def _runtime(**overrides):
         "consume_close_reason": lambda _pid, default: default,
         "consume_close_verdict": lambda _pid, reason: {"reason": reason},
         "classify_close_source": lambda *_args: "broker",
-        "estimate_close_pnl": lambda _pid, _price: 0.0,
         "select_close_total_pnl": lambda **kwargs: float(
             (kwargs.get("real_pnl") or {}).get("net") or kwargs["fallback_pnl"]
         ),
@@ -65,9 +64,13 @@ def test_collect_attribution_consumes_close_context_and_original_volume():
 
     result = collect_closed_position_attribution(
         position_id=7,
-        real_pnl={"net": 4.25, "exec_timestamp": 90.0},
+        real_pnl={
+            "net": 4.25,
+            "exec_price": 2399.5,
+            "exec_timestamp": 90.0,
+            "price_quality": "broker_reported",
+        },
         attr_engine=engine,
-        current_price=2400.0,
         tick=3,
         log=logs.append,
         runtime=_runtime(
@@ -82,9 +85,39 @@ def test_collect_attribution_consumes_close_context_and_original_volume():
     assert result["attribution_integrity"] == "full"
     assert result["factor_contributions"] == {"trend": 0.5}
     assert result["close_source"] == {"source": "supervisor"}
+    assert result["close_price"] == 2399.5
     assert calls[0][0] == (7,)
+    assert calls[0][1]["close_price"] == 2399.5
     assert 7 not in volumes
     assert "factors=1" in logs[-1]
+
+
+def test_unknown_close_price_keeps_money_pnl_but_discards_factor_attribution():
+    calls = []
+    engine = SimpleNamespace(
+        open_integrity=lambda _pid: "full",
+        record_close=lambda *_args, **_kwargs: calls.append("record"),
+        discard_open=lambda pid: calls.append(("discard", pid)),
+    )
+
+    result = collect_closed_position_attribution(
+        position_id=8,
+        real_pnl={
+            "net": -2.5,
+            "exec_timestamp": 90.0,
+            "price_quality": "unknown",
+        },
+        attr_engine=engine,
+        tick=3,
+        log=lambda _message: None,
+        runtime=_runtime(),
+    )
+
+    assert result["total_pnl"] == -2.5
+    assert result["factor_contributions"] == {}
+    assert result["attribution_integrity"] == "missing"
+    assert result["close_price"] is None
+    assert calls == [("discard", 8)]
 
 
 class _Ledger:

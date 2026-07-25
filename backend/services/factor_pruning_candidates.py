@@ -4,7 +4,9 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.services._brain_helpers import loads
 from backend.services.factor_blend_health import DEFAULT_LOW_WEIGHT_THRESHOLD, FactorBlendHealthService
+from backend.services.review_contract import review_has_system_contamination
 
 
 DEFAULT_MAX_CANDIDATES = 50
@@ -198,25 +200,37 @@ class FactorPruningCandidateService:
         try:
             if not state_table_exists(conn, "trade_outcome_review") or not state_table_exists(conn, "decision_factor_snapshot"):
                 return []
-            rows = _execute(
+            review_rows = _execute(
                 conn,
                 """
+                SELECT review_id, review_json
+                FROM trade_outcome_review
+                WHERE COALESCE(entry_decision_id, '') <> ''
+                ORDER BY created_at DESC
+                """,
+            ).fetchall()
+            clean_review_ids = [
+                str(row["review_id"])
+                for row in review_rows
+                if not review_has_system_contamination(loads(row["review_json"], {}))
+            ][:DEFAULT_RECENT_REVIEW_LIMIT]
+            if not clean_review_ids:
+                return []
+            placeholders = ",".join("?" for _ in clean_review_ids)
+            rows = _execute(
+                conn,
+                f"""
                 SELECT dfs.factor,
                        AVG(dfs.policy_weight) AS avg_policy_weight,
                        AVG(ABS(dfs.contribution_score)) AS avg_abs_contribution,
                        COUNT(DISTINCT r.review_id) AS decision_review_count,
                        MAX(COALESCE(dfs.source, '')) AS source
-                FROM (
-                    SELECT review_id, entry_decision_id, created_at
-                    FROM trade_outcome_review
-                    WHERE COALESCE(entry_decision_id, '') <> ''
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                ) r
+                FROM trade_outcome_review r
                 JOIN decision_factor_snapshot dfs ON dfs.decision_id = r.entry_decision_id
+                WHERE r.review_id IN ({placeholders})
                 GROUP BY dfs.factor
                 """,
-                (DEFAULT_RECENT_REVIEW_LIMIT,),
+                tuple(clean_review_ids),
             ).fetchall()
         except Exception:
             return []
@@ -292,9 +306,26 @@ class FactorPruningCandidateService:
         try:
             if not state_table_exists(conn, "trade_outcome_review") or not state_table_exists(conn, "decision_factor_snapshot"):
                 return {}
-            rows = _execute(
+            review_rows = _execute(
                 conn,
                 """
+                SELECT review_id, review_json
+                FROM trade_outcome_review
+                WHERE COALESCE(entry_decision_id, '') <> ''
+                ORDER BY created_at DESC
+                """,
+            ).fetchall()
+            clean_review_ids = [
+                str(row["review_id"])
+                for row in review_rows
+                if not review_has_system_contamination(loads(row["review_json"], {}))
+            ][: max(1, int(review_limit or DEFAULT_RECENT_REVIEW_LIMIT))]
+            if not clean_review_ids:
+                return {}
+            placeholders = ",".join("?" for _ in clean_review_ids)
+            rows = _execute(
+                conn,
+                f"""
                 SELECT dfs.factor,
                        COUNT(DISTINCT r.review_id) AS decision_review_count,
                        SUM(CASE WHEN r.pnl <= 0 THEN 1 ELSE 0 END) AS loss_review_count,
@@ -308,17 +339,12 @@ class FactorPruningCandidateService:
                        SUM(CASE WHEN r.failure_tags_json LIKE '%market_data_stale%' THEN 1 ELSE 0 END) AS market_data_stale_count,
                        SUM(CASE WHEN r.failure_tags_json LIKE '%signal_execution_delay%' THEN 1 ELSE 0 END) AS signal_execution_delay_count,
                        MAX(r.created_at) AS latest_review_at
-                FROM (
-                    SELECT review_id, entry_decision_id, pnl, failure_tags_json, created_at
-                    FROM trade_outcome_review
-                    WHERE COALESCE(entry_decision_id, '') <> ''
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                ) r
+                FROM trade_outcome_review r
                 JOIN decision_factor_snapshot dfs ON dfs.decision_id = r.entry_decision_id
+                WHERE r.review_id IN ({placeholders})
                 GROUP BY dfs.factor
                 """,
-                (max(1, int(review_limit or DEFAULT_RECENT_REVIEW_LIMIT)),),
+                tuple(clean_review_ids),
             ).fetchall()
         except Exception:
             return {}

@@ -6,13 +6,14 @@ from dataclasses import dataclass
 import time
 from typing import Any
 
+from backend.services.review_contract import trusted_broker_close_price
+
 
 @dataclass(frozen=True)
 class ClosedPositionProcessingRuntime:
     consume_close_reason: Callable[[int, str], str]
     consume_close_verdict: Callable[[int, str], dict[str, Any]]
     classify_close_source: Callable[..., Any]
-    estimate_close_pnl: Callable[[int, float], float]
     select_close_total_pnl: Callable[..., float]
     open_api_volumes: MutableMapping[int, float]
     decision_log: Any
@@ -46,7 +47,6 @@ def collect_closed_position_attribution(
     position_id: int,
     real_pnl: dict[str, Any] | None,
     attr_engine: Any,
-    current_price: float,
     tick: int,
     log: Callable[[str], Any],
     runtime: ClosedPositionProcessingRuntime,
@@ -60,12 +60,19 @@ def collect_closed_position_attribution(
         if attr_engine is not None and hasattr(attr_engine, "open_integrity")
         else "missing"
     )
-    contributions = attr_engine.record_close(
-        pid,
-        close_price=current_price,
-        close_ts=close_ts,
-        real_pnl=real_pnl,
-    )
+    close_price = trusted_broker_close_price(real_pnl)
+    if close_price is None:
+        if attr_engine is not None and hasattr(attr_engine, "discard_open"):
+            attr_engine.discard_open(pid)
+        contributions = {}
+        attribution_integrity = "missing"
+    else:
+        contributions = attr_engine.record_close(
+            pid,
+            close_price=close_price,
+            close_ts=close_ts,
+            real_pnl=real_pnl,
+        )
     if not contributions:
         attribution_integrity = "missing"
     close_source = runtime.classify_close_source(
@@ -73,19 +80,10 @@ def collect_closed_position_attribution(
         close_reason,
         close_ts,
     )
-    fallback_pnl = 0.0
-    if not real_pnl and not contributions:
-        try:
-            fallback_pnl = runtime.estimate_close_pnl(pid, float(current_price))
-        except Exception as exc:
-            log(
-                f"tick {tick}: attribution close pos={pid} "
-                f"PnL fallback error: {exc}"
-            )
     total_pnl = runtime.select_close_total_pnl(
         real_pnl=real_pnl,
         factor_contributions=contributions,
-        fallback_pnl=fallback_pnl,
+        fallback_pnl=0.0,
     )
     log(
         f"tick {tick}: attribution close pos={pid} "
@@ -99,6 +97,7 @@ def collect_closed_position_attribution(
         "attribution_integrity": attribution_integrity,
         "factor_contributions": contributions,
         "close_source": close_source,
+        "close_price": close_price,
         "total_pnl": total_pnl,
     }
 

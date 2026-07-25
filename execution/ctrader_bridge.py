@@ -67,6 +67,56 @@ _RISK_REDUCTION_ACTIONS = frozenset({
 _POSITION_SPOT_COMPONENT_MAX_AGE_SECONDS = 15.0
 
 
+def _parse_broker_raw_price(value: Any) -> float:
+    """Parse protobuf double price fields without applying money scaling."""
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return price if math.isfinite(price) and price > 0.0 else 0.0
+
+
+def _parse_broker_money_amount(value: Any, money_digits: Any, *, default_digits: int = 2) -> float:
+    """Parse protobuf monetary integers using their own moneyDigits field."""
+    try:
+        digits = default_digits if money_digits is None else int(money_digits)
+        amount = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if digits < 0 or not math.isfinite(amount):
+        return 0.0
+    return amount / (10.0 ** digits)
+
+
+def _parse_broker_relative_price(value: Any, symbol_digits: Any) -> float:
+    """Parse spot/trendbar relative integers; never use this for deal prices."""
+    try:
+        digits = int(symbol_digits)
+        raw = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if digits < 0 or not math.isfinite(raw) or raw <= 0.0:
+        return 0.0
+    return round(raw / 100_000.0, digits)
+
+
+def _classify_broker_deal_price(
+    execution_price: Any,
+    *,
+    entry_price: Any = None,
+) -> tuple[float, str]:
+    """Keep raw deal prices only when their same-position scale is plausible."""
+    price = _parse_broker_raw_price(execution_price)
+    if price <= 0.0:
+        return 0.0, "unknown"
+    reference = _parse_broker_raw_price(entry_price)
+    if reference > 0.0:
+        ratio = price / reference
+        if ratio < 0.1 or ratio > 10.0:
+            return price, "unknown"
+    return price, "broker_reported"
+
+
 @dataclass(frozen=True)
 class _BlockedRiskReductionIntent:
     intent_id: str
@@ -916,22 +966,9 @@ class CTraderBridge(BaseBrokerBridge):
             raw_ask = payload.ask or 0
             meta = getattr(self, '_symbol_meta', None) or {}
             digits = meta.get('digits', 2)
-            pip_pos = meta.get('pip_position', digits)
-            price_digits = max(digits, pip_pos)
-            divisor = 10 ** price_digits
-            bid = raw_bid / divisor if raw_bid else 0
-            ask = raw_ask / divisor if raw_ask else 0
-            # 自动修正: cTrader demo 的 symbol meta 经常少报精度
-            max_val = max(bid, ask)
-            for _ in range(5):
-                if max_val < 10000:
-                    break
-                price_digits += 1
-                divisor = 10 ** price_digits
-                bid = raw_bid / divisor if raw_bid else 0
-                ask = raw_ask / divisor if raw_ask else 0
-                max_val = max(bid, ask)
-            logger.debug(f"spot raw: bid={raw_bid} ask={raw_ask} digits={price_digits} → bid={bid:.2f} ask={ask:.2f}")
+            bid = _parse_broker_relative_price(raw_bid, digits)
+            ask = _parse_broker_relative_price(raw_ask, digits)
+            logger.debug(f"spot raw: bid={raw_bid} ask={raw_ask} digits={digits} → bid={bid:.2f} ask={ask:.2f}")
             with self._spot_lock:
                 if bid > 0:
                     self._spot_bid = bid
@@ -3623,22 +3660,39 @@ class CTraderBridge(BaseBrokerBridge):
             resp = self._send(req, timeout=15.0)
             results = []
             for d in resp.deal:
-                money_digits = getattr(d, 'moneyDigits', 2) or 2
-                divisor = 10 ** money_digits
+                money_digits = getattr(d, 'moneyDigits', None)
                 # ── Close detail (平仓盈亏) ──
                 cpd = d.closePositionDetail
                 close_detail = {}
                 # cpd.Descriptor 存在且至少有一个非默认字段 → 有真实平仓数据
                 if cpd and (cpd.balance != 0 or cpd.grossProfit != 0):
-                    cd_divisor = 10 ** (getattr(cpd, 'moneyDigits', 2) or 2)
                     close_detail = {
-                        "entry_price": cpd.entryPrice,
-                        "gross_profit": cpd.grossProfit / cd_divisor,
-                        "swap": cpd.swap / cd_divisor,
-                        "commission": cpd.commission / cd_divisor,
-                        "balance": cpd.balance / cd_divisor,
+                        "entry_price": _parse_broker_raw_price(cpd.entryPrice),
+                        "gross_profit": _parse_broker_money_amount(
+                            cpd.grossProfit, getattr(cpd, 'moneyDigits', None)
+                        ),
+                        "swap": _parse_broker_money_amount(
+                            cpd.swap, getattr(cpd, 'moneyDigits', None)
+                        ),
+                        "commission": _parse_broker_money_amount(
+                            cpd.commission, getattr(cpd, 'moneyDigits', None)
+                        ),
+                        "balance": _parse_broker_money_amount(
+                            cpd.balance, getattr(cpd, 'moneyDigits', None)
+                        ),
                         "closed_volume": cpd.closedVolume,
                     }
+                raw_execution_price, price_quality = (
+                    _classify_broker_deal_price(
+                        d.executionPrice,
+                        entry_price=close_detail.get("entry_price"),
+                    )
+                )
+                execution_price = (
+                    raw_execution_price
+                    if price_quality == "broker_reported"
+                    else 0.0
+                )
                 results.append({
                     "deal_id": d.dealId,
                     "order_id": d.orderId,
@@ -3646,11 +3700,18 @@ class CTraderBridge(BaseBrokerBridge):
                     "symbol_id": d.symbolId,
                     "volume": d.volume,
                     "filled_volume": d.filledVolume,
-                    "execution_price": d.executionPrice / divisor,
+                    "execution_price": execution_price,
+                    "raw_execution_price": raw_execution_price,
+                    "price_contract": (
+                        "ctrader.deal.execution_price.raw.v1"
+                        if execution_price > 0.0
+                        else "legacy_unknown"
+                    ),
+                    "price_quality": price_quality,
                     "trade_side": "buy" if d.tradeSide == TRADE_SIDE["BUY"] else "sell",
                     "deal_status": d.dealStatus,
                     "execution_timestamp": d.executionTimestamp / 1000.0,
-                    "commission": d.commission / divisor,
+                    "commission": _parse_broker_money_amount(d.commission, money_digits),
                     "close_detail": close_detail,
                 })
             logger.info("[cTrader] get_deals: %d deals returned (from=%s to=%s max=%d)",

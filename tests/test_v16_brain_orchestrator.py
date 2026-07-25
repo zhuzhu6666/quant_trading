@@ -96,7 +96,12 @@ def _seed_posterior_facts(db_path, now: float) -> None:
             (
                 now - 15.0,
                 json.dumps([{"horizon_minutes": 30, "future_pnl": 9.7}]),
-                json.dumps({"tags": ["future_bars_complete"]}),
+                json.dumps(
+                    {
+                        "tags": ["future_bars_complete"],
+                        "maturity": {"governance_eligible": True},
+                    }
+                ),
                 now - 5.0,
                 now - 5.0,
             ),
