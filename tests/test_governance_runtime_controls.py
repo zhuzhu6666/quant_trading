@@ -18,6 +18,8 @@ from backend.services.governance_expansion_control import (
     GovernanceExpansionControlService,
 )
 from backend.services.governance_mutation_coordinator import (
+    GovernanceMutationCoordinator,
+    GovernanceMutationPlan,
     classify_governance_risk,
 )
 from config import runtime_config
@@ -171,6 +173,33 @@ def test_operator_pause_is_typed_and_resume_requires_confirmation(
     assert resumed["ok"] is True
     assert resumed["mutation"]["risk_classification"]["risk_class"] == "risk_expanding"
     assert runtime_config.shared().governance_expansion_paused is False
+
+
+def test_bounded_demo_operator_control_is_v16_exempt_in_production(
+    tmp_path, monkeypatch
+) -> None:
+    coordinator = GovernanceMutationCoordinator(tmp_path / "state.db")
+    monkeypatch.setattr(
+        GovernanceMutationCoordinator,
+        "production_state",
+        property(lambda _self: True),
+    )
+    plan = GovernanceMutationPlan(
+        patch={"runtime_incident_mode": "normal"},
+        source="operator_incident_control",
+        actor="operator:pytest",
+    )
+
+    claim = coordinator._claim_v16(
+        plan,
+        {
+            "risk_classification": {"risk_class": "risk_expanding"},
+            "operator_bounded_demo_control_exempt": True,
+        },
+    )
+
+    assert claim["allowed"] is True
+    assert claim["status"] == "operator_bounded_demo_control_exempt"
 
 
 def test_persisted_operator_pause_blocks_stale_process_expansion(

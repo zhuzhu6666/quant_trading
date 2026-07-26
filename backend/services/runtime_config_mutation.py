@@ -147,7 +147,10 @@ class RuntimeConfigMutationService:
             "classification_source": "not_governance",
             "v16_required": False,
         }
-        governance_paused_before = runtime_config.governance_expansion_is_paused()
+        current_config = runtime_config.shared()
+        governance_paused_before = runtime_config.governance_expansion_is_paused(
+            current_config
+        )
         if governance_surface:
             try:
                 _refresh_yaml_overlay_base(self.db_path)
@@ -177,6 +180,11 @@ class RuntimeConfigMutationService:
                     "mutation_source": source,
                     "mutation_action": action or source,
                 }
+        operator_demo_control = runtime_config.operator_bounded_demo_control_exempt(
+            actor=actor,
+            patch=patch,
+            cfg=current_config,
+        )
         operator_pause_resume = (
             set(patch or {}) == {"governance_expansion_paused"}
             and not str(actor or "").startswith("system:")
@@ -186,6 +194,7 @@ class RuntimeConfigMutationService:
             and governance_paused_before
             and risk_classification.get("risk_class") == "risk_expanding"
             and not operator_pause_resume
+            and not operator_demo_control
         ):
             return {
                 "ok": False,
@@ -240,6 +249,7 @@ class RuntimeConfigMutationService:
             (
                 governance_surface
                 and risk_classification.get("risk_class") == "risk_expanding"
+                and not operator_demo_control
             )
             or (not governance_surface and require_v16_command)
         )
@@ -342,6 +352,7 @@ class RuntimeConfigMutationService:
             "mutation_action": action or source,
             "v16_authority": v16_authority,
             "risk_classification": risk_classification,
+            "operator_bounded_demo_control_exempt": operator_demo_control,
             "caller_risk_reduction_ignored": bool(risk_reduction),
             "mutated_at": time.time(),
         }

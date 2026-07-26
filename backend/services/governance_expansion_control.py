@@ -17,7 +17,8 @@ class GovernanceExpansionControlService:
     Pausing is risk tightening and is therefore V16-exempt.  Resuming is
     expansionary and must be classified and authorized by the coordinator (or
     the compatibility mutation boundary while the coordinator flag is off).
-    Autonomous/system actors are never allowed to own this switch.
+    An explicit operator may resume directly in the bounded Demo sandbox;
+    autonomous/system actors are never allowed to own this switch.
     """
 
     def __init__(self, db_path: str | Path = STATE_DB):
@@ -32,7 +33,7 @@ class GovernanceExpansionControlService:
             "autonomous_mutation_forbidden": True,
             "pause_is_risk_tightening": True,
             "resume_requires_confirmation": True,
-            "resume_requires_v16": True,
+            "resume_requires_v16_outside_bounded_demo": True,
             "does_not_submit_orders": True,
             "does_not_block_observation_or_research": True,
         }

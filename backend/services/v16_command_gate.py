@@ -55,6 +55,7 @@ class V16CommandGate:
             "specialist_is_execution_owner": True,
             "requires_recent_delegate": True,
             "command_claim_is_single_use": True,
+            "single_actionable_predicate": True,
             "command_state_machine": ["available", "claimed", "finalized"],
             "apply_count_increments_on_finalize_only": True,
             "evidence_binding_supported": True,
@@ -63,6 +64,33 @@ class V16CommandGate:
             "does_not_submit_orders": True,
             "risk_reduction_may_use_existing_rollback_path": True,
         }
+
+    @classmethod
+    def is_actionable(
+        cls,
+        item: dict[str, Any],
+        *,
+        now: float | None = None,
+        max_age_seconds: float | None = None,
+    ) -> bool:
+        checked_at = float(now if now is not None else time.time())
+        age_limit = max(
+            60.0,
+            float(
+                max_age_seconds
+                if max_age_seconds is not None
+                else cls._max_age_seconds()
+            ),
+        )
+        authority_issued_at = cls._authority_issued_at(item)
+        return bool(
+            str(item.get("decision") or "") == "delegate"
+            and str(item.get("claim_status") or "available") == "available"
+            and authority_issued_at > 0.0
+            and checked_at - authority_issued_at <= age_limit
+            and int(item.get("apply_count") or 0)
+            < max(1, int(item.get("max_apply_count") or 1))
+        )
 
     @classmethod
     def authorize(
@@ -91,15 +119,14 @@ class V16CommandGate:
                 "boundary": cls.boundary(),
             }
 
-        try:
-            age_limit = float(
+        age_limit = max(
+            60.0,
+            float(
                 max_age_seconds
                 if max_age_seconds is not None
-                else os.getenv("QUANT_V16_COMMAND_MAX_AGE_SECONDS", "1800")
-            )
-        except Exception:
-            age_limit = 1800.0
-        age_limit = max(60.0, age_limit)
+                else cls._max_age_seconds()
+            ),
+        )
 
         try:
             cls.ensure_finalize_schema(db_path)
@@ -134,16 +161,25 @@ class V16CommandGate:
                        authority_issued_at, created_at, updated_at
                 FROM v16_brain_command
                 WHERE target_agent=? AND decision='delegate'
+                  AND authority_issued_at>=?
                 ORDER BY authority_issued_at DESC, created_at DESC
-                LIMIT 200
             """
             if is_state_db_path(db_path):
                 sql = sql.replace("?", "%s")
-            rows = conn.execute(sql, (str(target_agent),)).fetchall()
+            rows = conn.execute(
+                sql,
+                (str(target_agent), now - age_limit),
+            ).fetchall()
             requested_id = str(command_id or "")
             for row in rows:
                 item = {key: row[key] for key in row.keys()} if hasattr(row, "keys") else dict(row)
                 if requested_id and str(item.get("command_id") or "") != requested_id:
+                    continue
+                if not cls.is_actionable(
+                    item,
+                    now=now,
+                    max_age_seconds=age_limit,
+                ):
                     continue
                 if not cls._scope_matches(item, scope_type=scope_type, scope_key=scope_key):
                     continue
@@ -155,17 +191,7 @@ class V16CommandGate:
                     if command_scope not in {"factor_weight", "parameter_template", "context_policy", "supervisor_template"}:
                         continue
                 authority_issued_at = cls._authority_issued_at(item)
-                age = (
-                    max(0.0, now - authority_issued_at)
-                    if authority_issued_at
-                    else float("inf")
-                )
-                if age > age_limit:
-                    continue
-                if str(item.get("claim_status") or "available") in {"consumed", "finalized"}:
-                    continue
-                if safe_float(item.get("apply_count")) >= max(1, int(item.get("max_apply_count") or 1)):
-                    continue
+                age = max(0.0, now - authority_issued_at)
                 return {
                     "ok": True,
                     "allowed": True,
@@ -275,11 +301,13 @@ class V16CommandGate:
                     FROM v16_brain_command
                     WHERE {where}
                     ORDER BY authority_issued_at DESC, created_at DESC
-                    LIMIT 200""",
+                    """,
                 tuple(params),
             ).fetchall()
             for row in rows:
                 item = {key: row[key] for key in row.keys()} if hasattr(row, "keys") else dict(row)
+                if not cls.is_actionable(item, now=now):
+                    continue
                 if not cls._scope_matches(item, scope_type=scope_type, scope_key=scope_key):
                     continue
                 if action and not cls._action_matches(item, action):
@@ -290,16 +318,8 @@ class V16CommandGate:
                     continue
                 if evidence_fingerprint and str(item.get("evidence_fingerprint") or "") != str(evidence_fingerprint):
                     continue
-                claim_state = str(item.get("claim_status") or "available")
-                claim_expires_at = safe_float(item.get("claim_expires_at"))
-                if claim_state in {"consumed", "finalized"}:
-                    continue
-                if claim_state == "claimed" and claim_expires_at > now:
-                    continue
                 apply_count = int(item.get("apply_count") or 0)
                 max_apply_count = max(1, int(item.get("max_apply_count") or 1))
-                if apply_count >= max_apply_count:
-                    continue
                 token = f"v16claim_{uuid.uuid4().hex}"
                 claimed_until = now + ttl
                 claimed = execute(

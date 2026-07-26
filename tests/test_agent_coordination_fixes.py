@@ -127,6 +127,62 @@ def test_v16_command_claim_is_single_use_and_evidence_bound(tmp_path):
     assert third["allowed"] is False
 
 
+def test_v16_gate_scope_match_is_not_blocked_by_other_fresh_commands(tmp_path):
+    db_path = _db(tmp_path)
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO v16_brain_command
+               (command_id, candidate_id, target_agent, scope_type, scope_key,
+                action, decision, status, created_at, updated_at)
+               VALUES ('cmd-target', 'candidate-target', 'factor_governance',
+                       'factor_weight', 'target_factor', 'update_weight',
+                       'delegate', 'delegated_to_specialist', ?, ?)""",
+            (now - 10.0, now - 10.0),
+        )
+        conn.executemany(
+            """INSERT INTO v16_brain_command
+               (command_id, candidate_id, target_agent, scope_type, scope_key,
+                action, decision, status, created_at, updated_at)
+               VALUES (?, ?, 'factor_governance', 'factor_weight', ?,
+                       'update_weight', 'delegate', 'delegated_to_specialist', ?, ?)""",
+            [
+                (
+                    f"cmd-noise-{index}",
+                    f"candidate-noise-{index}",
+                    f"other_factor_{index}",
+                    now - index / 1000.0,
+                    now - index / 1000.0,
+                )
+                for index in range(205)
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    authorized = V16CommandGate.authorize(
+        db_path,
+        target_agent="factor_governance",
+        scope_type="factor_weight",
+        scope_key="target_factor",
+        action="update_weight",
+    )
+    assert authorized["allowed"] is True
+    assert authorized["command_id"] == "cmd-target"
+
+    claimed = V16CommandGate.claim(
+        db_path,
+        target_agent="factor_governance",
+        scope_type="factor_weight",
+        scope_key="target_factor",
+        action="update_weight",
+    )
+    assert claimed["allowed"] is True
+    assert claimed["command_id"] == "cmd-target"
+
+
 def test_factor_weight_batch_reservation_respects_global_budget(tmp_path, monkeypatch):
     db_path = _db(tmp_path)
     service = FactorWeightChangeService(db_path)

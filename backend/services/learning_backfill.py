@@ -585,14 +585,8 @@ def _ensure_experience_memory_source_columns(conn: sqlite3.Connection) -> None:
     )
 
 
-def _stable_experience_id(append_source: str, source_table: str, source_id: str) -> str:
-    digest = hashlib.sha1(f"{append_source}:{source_table}:{source_id}".encode("utf-8")).hexdigest()[:18]
-    return f"exp_{digest}"
-
-
 def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
     _ensure_experience_memory_source_columns(conn)
-    _execute(conn, "DELETE FROM experience_memory WHERE append_source='learning_backfill.v1'")
     _execute(conn, "DELETE FROM experience_pattern_stats WHERE scope_type='factor'")
     reviews = _execute(conn,
         """
@@ -658,68 +652,11 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
         evidence_strength = min(1.0, max(0.15, abs(reward_score) + 0.20 * len(failure_tags)))
         evidence_strength = max(0.05, evidence_strength * evidence_scale)
 
-        setup_hash = hashlib.sha1(f"|{primary_factor}|{outcome_label}".encode("utf-8")).hexdigest()[:16]
-        source_table = "trade_outcome_review"
-        source_id = str(row["review_id"] or row["trade_id"] or row["position_id"] or "")
-        append_source = "learning_backfill.v1"
-        experience_id = _stable_experience_id(append_source, source_table, source_id)
-        context = {
-            "position_id": str(row["position_id"] or ""),
-            "trade_id": str(row["trade_id"] or ""),
-            "experience_source": {
-                "source_table": source_table,
-                "source_id": source_id,
-                "append_source": append_source,
-            },
-            "primary_factor": primary_factor,
-            "failure_tags": failure_tags,
-            "close_reason": close_reason,
-            "context_integrity": context_integrity,
-            "summary_text": str(row["summary_text"] or ""),
-            "review_json": review_json,
-        }
-        _execute(conn,
-            """
-            INSERT INTO experience_memory
-            (experience_id, trade_id, source_table, source_id, append_source,
-             regime_id, setup_hash, decision_context_json,
-             outcome_label, reward_score, failure_tags_json, recommended_action,
-             evidence_strength, artifact_version, evolution_run_id, created_at)
-            VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 'v1', '', ?)
-            ON CONFLICT(experience_id) DO UPDATE SET
-                trade_id=excluded.trade_id,
-                source_table=excluded.source_table,
-                source_id=excluded.source_id,
-                append_source=excluded.append_source,
-                regime_id=excluded.regime_id,
-                setup_hash=excluded.setup_hash,
-                decision_context_json=excluded.decision_context_json,
-                outcome_label=excluded.outcome_label,
-                reward_score=excluded.reward_score,
-                failure_tags_json=excluded.failure_tags_json,
-                recommended_action=excluded.recommended_action,
-                evidence_strength=excluded.evidence_strength,
-                artifact_version=excluded.artifact_version,
-                evolution_run_id=excluded.evolution_run_id,
-                created_at=excluded.created_at
-            """,
-            (
-                experience_id,
-                str(row["trade_id"] or ""),
-                source_table,
-                source_id,
-                append_source,
-                setup_hash,
-                json.dumps(context, ensure_ascii=False),
-                outcome_label,
-                round(reward_score, 6),
-                json.dumps(failure_tags, ensure_ascii=False),
-                recommended_action,
-                round(evidence_strength, 6),
-                now,
-            ),
-        )
-        upsert_trade_lesson_memory(conn, row)
+        lesson = upsert_trade_lesson_memory(conn, row)
+        source_table = str(lesson["source_table"])
+        source_id = str(lesson["source_id"])
+        append_source = str(lesson["append_source"])
+        experience_id = str(lesson["experience_id"])
         rebuilt += 1
 
         if not primary_factor:

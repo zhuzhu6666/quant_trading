@@ -204,7 +204,7 @@ class AgentBriefingContextService:
                 JOIN trade_outcome_review r
                   ON e.source_table='trade_outcome_review'
                  AND r.review_id=e.source_id
-                WHERE e.append_source='live_review'
+                WHERE e.append_source='trade_lesson_memory.v1'
                 {"AND " + where[6:] if where else ""}
                 ORDER BY e.evidence_strength DESC, e.created_at DESC
                 """,

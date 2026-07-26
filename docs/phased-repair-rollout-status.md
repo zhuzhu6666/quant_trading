@@ -16,18 +16,20 @@
 | P0 保护现场 | complete | 无 |
 | P1 broker 成交事实 | runtime acceptance | 新 broker deal、restart replay、完整持仓生命周期 |
 | P2 风险指标平面 | complete | 继续观察，不新增平行风险路径 |
-| P3 证据/记忆/effect | not started | 先扫描真实 writer、identity、消费者和删除对象 |
-| P4 V16 因果调度 | not started | 等 P3 canonical evidence |
+| P3 证据/记忆/effect | complete | canonical memory 与 active application/effect identity 已收敛 |
+| P4 V16 因果调度 | complete | causal grouping、单一 actionable/authority、单次 mutation 与三条 lane 已收口 |
 | P5 架构收敛 | continuous | 每个 P3/P4 小批同步删除，不再单独堆大重构 |
 | P6 Demo 观察/毕业 | blocked | 等前置正确性和真实样本 |
 
-当前安全约束：
+当前运行姿态：
 
-- `no_new_risk` 保持；
+- 有界 Demo incident 已由 operator 显式恢复 `normal`，governance pause 已解除，
+  no-new-risk latch 为 cleared；
 - Safety 保持 `shadow`；
 - Generation、Execution Outcome、PG Job Queue 保持 disabled；
 - Governance 保持 `dual_record`；
-- 不自动清锁、不自动切 flag、不进入 `live_autonomous`。
+- 不自动切 flag、不进入 `live_autonomous`；开仓继续服从市场时段、canonical RiskPolicy、
+  fresh reconcile 和 cause-specific safety latch。
 
 上述值必须在下一批开始前从 process-loaded flags 和运行事实重新验证，不能只相信本文。
 
@@ -84,22 +86,105 @@ closed-bar forward_var_input.v1
 - 上一轮全量基线：`2452 passed, 9 skipped`；
 - 本批按 operator 要求未重新运行全量。
 
-## 3. 当前唯一下一批
+## 3. P3 第一批：writer/identity 收敛
 
-P3 第一批只做 writer/identity 收敛，不先建新平台。
+已完成 writer 盘点：
 
-必须先输出：
+| 事实 | 当前生产 writer | authority / identity |
+|---|---|---|
+| trade review | `TradeReviewer.review_closed_trade()`；历史 backfill `insert_review()` | `trade_outcome_review.review_id` |
+| supervisor counterfactual | `evaluate_counterfactuals()` | `supervisor_counterfactual_review.counterfactual_id` + review/position/close_ts |
+| experience memory | `ExperienceBuilder.build_from_review()` 计算 rich lesson，并统一调用 `upsert_trade_lesson_memory()` 写入；受控历史脚本复用同一 upsert | `trade_lesson:{review_id}`，source anchor 为 `trade_outcome_review.review_id` |
+| learning sample | `autonomous_learning._upsert_sample()` | sample type + source table/source ID + contract fingerprint |
+| application/effect | `LearningApplicationStateService` / `RuleEvolutionGovernor`；typed domain transaction writers | application ID + scope/action + committed mutation |
 
-1. review、counterfactual、memory、sample、application/effect 的全部生产 writer。
-2. 每个 writer 的调用方、authority、identity 和持久化目标。
-3. 重复、冲突、污染或无法归因的运行证据。
-4. 选择复用的 canonical writer。
-5. 本批立即删除和后续退出的旧路径。
-6. 不新增 service、表、scheduler、阈值和兼容字段的证明；如确实无法复用，再单独说明。
+运行证据与本批删除：
 
-未完成这六项前，不修改 P3 schema 或创建新 `ExperienceMemoryService/Writer`。
+- 576 条 review 均同时存在 `live_review` 与 `trade_lesson_memory.v1`；
+- 260 条又被 `learning_backfill.v1` 重复写入，部分历史 source anchor 达 4–6 份；
+- 删除 `rebuild_learning_state()` 内 `learning_backfill.v1` INSERT 和专用 ID 生成器；
+- 6 条 suggestion evidence 已迁移到 canonical `trade_lesson_memory.v1` ID；
+- PostgreSQL 已删除 260 条重复 projection，残留与悬空引用均为 0；
+- 未新增 service、表、scheduler、worker、阈值、schema 或兼容字段。
 
-## 4. 仍需真实运行证明
+第二小批已完成：
+
+- `ExperienceBuilder` 保留原有 rich lesson 计算，但删除自身 SQL writer，统一调用现有
+  `upsert_trade_lesson_memory()`；
+- feature provider、agent briefing、factor counter-evidence、scorecard 和 V16 memory
+  均只读 `trade_lesson_memory.v1`，旧 `live_review` reader 分支已删除；
+- 576 条 canonical lesson 已合并原 live rich context，并保留 lesson/agent attribution；
+- 189 条 suggestion evidence 完成 2,373 个旧 experience ID 精确替换；
+- PostgreSQL 已删除 576 条 `live_review` projection，重启后残留、格式异常和悬空引用均为 0；
+- 针对性测试：`64 passed`；删除最后两个 reader 分支后补充 `27 passed`。
+
+第三小批已完成：
+
+- 157 条 `legacy_experience_migrated.v1`、8 条
+  `controlled_close_learning_backfill.v1`、5 条 `experience_builder.legacy_repaired` 均已证明
+  存在 canonical lesson，且 canonical context 全部更完整；
+- 删除 `ExperienceBuilder` 启动时 legacy source/timestamp 修复 writer；
+- controlled-close 历史工具删除专用 ID 和 SQL writer，改为复用
+  `upsert_trade_lesson_memory()`；
+- 11 条 suggestion evidence 完成 35 个旧 ID 精确替换，170 条历史兼容 projection 已删除，
+  残留与悬空引用均为 0；
+- application/effect 审计为 3,423 个唯一 application ID、3,368 个唯一 effect、0 orphan
+  effect；55 个无 effect application 全部是 `blocked_by_evidence` 或 `failed` 终态；
+- 当前 16 个 active application/effect 对应 16 个不同 scope，无重复 active scope；
+- memory、application/effect 与三类 domain writer 针对性测试：`80 passed`。
+
+P3 完成。
+
+## 4. P4：V16 因果调度与专员闭环
+
+- `V16CommandGate.is_actionable()` 是 readiness、stepper、authorize 和 claim 共用的唯一
+  actionable predicate；只允许授权未过期、仍为 `available` 且尚未达到 apply 上限的
+  delegate command。
+- stepper 从候选窗口按该 predicate 选择，过期队首不再阻塞后续有效命令；claimed
+  command 不再被重复视为可授权。
+- authority freshness 只读不可变 `authority_issued_at`；claim/release/recovery 不续期。
+- orchestrator 使用同一既有最大授权年龄终态取消过期 available command，不新增队列、
+  readiness verdict、阈值或恢复 authority。
+- posterior 仲裁先选择 supervisor 证据，再只在相同 `review_id`，缺失时依次按
+  `trade_id`、`position_id` 匹配 entry review；复用 position 的另一笔交易不会混入。
+- 运行库原唯一过期 available command 已取消为 `authority_expired`，`apply_count=0`；
+  重启后新生成的 fresh command 在 orchestrator、stepper 和 Gate 三处一致为 actionable。
+- P4 闭环针对性测试 `36 passed`，三类 specialist/Coordinator 补充批次 `57 passed`。
+
+第二小批已完成：
+
+- 删除 planner 与 orchestrator 内两套 `scope_type -> target_agent` 硬编码；
+- `AgentAuthorityRegistryService.execution_owner()` 现在从既有 agent contract 的
+  `execution_owner` 字段返回唯一执行 owner；
+- V16 command 的 `specialist_must_use` 直接复用
+  `AgentAuthorityRegistryService.required_gate()`，不再把三种 lane 一律标成同一组 gate；
+- supervisor contract 补齐既有 `position_supervisor_template` execution owner 声明；
+- V16 contract 内重复的静态 `required_gates` 描述已删除，未新增表、服务、队列、阈值或
+  readiness；
+- Gate 的 authorize/claim 删除固定 200 行候选截断，并在 SQL 层只读取既有授权时间窗；
+  大量同 agent 其他 scope 的新命令不再遮挡目标 scope；
+- 服务器恢复后仅运行低优先级针对性测试，最终合并验证 `23 passed`。
+
+最终收口：
+
+- `entry_quality` 已补入 autonomous learning 的 Agent Authority control surface、
+  execution owner 和 RiskPolicy gate；专用 V16 delegation 删除最后一套硬编码 target/gate。
+- autonomous learning、factor governance、position supervisor governance 三条 lane 均已验证
+  success、noop/reject、失败释放后 retry、rollback 和 effect 终态。
+- bounded runtime trace 已核对：
+  `v16cmd_7be9876b49138e64e726 -> autonomous_learning ->
+  psg_entry_quality_92771bd6472259f1 ->
+  gmut_e7cba57522aa44fd8d36d4d370cd1f08 ->
+  lapp_a2b661abfcc25d2ee724/effect`；原 mutation 为 `rolled_back`，并明确指向 committed
+  rollback mutation `gmut_deddadacb3b849d2bd5da975c53530cd`。
+- P4 分批低优先级最终验证：lane `20 + 28 + 3 + 5 passed`，V16/Authority/Coordinator
+  `52 passed`，最后 authority 补充回归 `23 passed`；合计 131 个测试执行，全部通过。
+- 未新增 service、queue、table、scheduler、worker、阈值或 readiness verdict。
+
+P4 完成。后续只保留 P1 真实成交/完整生命周期验收、Safety shadow 运行证据和 P6 Demo
+观察，不再继续扩展 V16 调度层。
+
+## 5. 仍需真实运行证明
 
 以下不能由测试替代：
 
@@ -115,9 +200,10 @@ P3 第一批只做 writer/identity 收敛，不先建新平台。
 - P1 保持 runtime acceptance；
 - Safety 不从 shadow 切 enforce；
 - 后续静态开关不推进；
-- `no_new_risk` 不释放。
+- 不阻止有界 Demo 在现有 legacy-authoritative 开仓链产生验收交易；不得用 Safety
+  enforce 的观察时长重新制造 operator incident 锁。
 
-## 5. 每批状态更新格式
+## 6. 每批状态更新格式
 
 以后本文件只追加或替换以下当前信息，不保留逐时流水：
 

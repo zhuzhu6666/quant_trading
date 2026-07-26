@@ -14,7 +14,10 @@ from backend.core.db import (
     get_state_pg_conn,
     is_state_db_path,
 )
-from backend.services.trade_lesson_memory import ensure_trade_lesson_memory_schema
+from backend.services.trade_lesson_memory import (
+    ensure_trade_lesson_memory_schema,
+    upsert_trade_lesson_memory,
+)
 
 
 class ExperienceBuilder:
@@ -51,111 +54,6 @@ class ExperienceBuilder:
             if not self._use_pg():
                 conn.executescript(STATE_DB_DDL)
             ensure_trade_lesson_memory_schema(conn)
-        with self._conn() as conn:
-            self._backfill_legacy_experience_sources(conn)
-            self._repair_experience_event_timestamps(conn)
-
-    def _backfill_legacy_experience_sources(self, conn) -> None:
-        p = self._p()
-        try:
-            rows = conn.execute(
-                """
-                SELECT experience_id, trade_id, decision_context_json
-                FROM experience_memory
-                WHERE COALESCE(source_table, '')=''
-                  AND COALESCE(source_id, '')=''
-                  AND COALESCE(trade_id, '')!=''
-                LIMIT 10000
-                """
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return
-        for row in rows:
-            review = conn.execute(
-                f"""
-                SELECT review_id, created_at
-                FROM trade_outcome_review
-                WHERE trade_id={p}
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (str(row["trade_id"] or ""),),
-            ).fetchone()
-            if not review:
-                continue
-            try:
-                context = json.loads(row["decision_context_json"] or "{}")
-            except Exception:
-                context = {}
-            context["experience_source"] = {
-                "source_table": "trade_outcome_review",
-                "source_id": str(review["review_id"] or ""),
-                "append_source": "legacy_experience_migrated.v1",
-                "event_ts": float(review["created_at"] or 0.0),
-            }
-            conn.execute(
-                f"""
-                UPDATE experience_memory
-                SET source_table='trade_outcome_review',
-                    source_id={p},
-                    append_source='legacy_experience_migrated.v1',
-                    decision_context_json={p},
-                    created_at=CASE
-                        WHEN {p} > 0 THEN {p}
-                        ELSE created_at
-                    END
-                WHERE experience_id={p}
-                """,
-                (
-                    str(review["review_id"] or ""),
-                    json.dumps(context, ensure_ascii=False, default=str),
-                    float(review["created_at"] or 0.0),
-                    float(review["created_at"] or 0.0),
-                    str(row["experience_id"] or ""),
-                ),
-            )
-
-    def _repair_experience_event_timestamps(self, conn) -> None:
-        p = self._p()
-        try:
-            rows = conn.execute(
-                """
-                SELECT e.experience_id, e.decision_context_json, r.created_at AS review_created_at
-                FROM experience_memory e
-                JOIN trade_outcome_review r
-                  ON e.source_table='trade_outcome_review'
-                 AND e.source_id = r.review_id
-                WHERE ABS(COALESCE(e.created_at, 0) - COALESCE(r.created_at, 0)) > 5.0
-                LIMIT 10000
-                """
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return
-        for row in rows:
-            try:
-                context = json.loads(row["decision_context_json"] or "{}")
-            except Exception:
-                context = {}
-            source = context.get("experience_source") if isinstance(context.get("experience_source"), dict) else {}
-            source["event_ts"] = float(row["review_created_at"] or 0.0)
-            context["experience_source"] = source
-            conn.execute(
-                f"""
-                UPDATE experience_memory
-                SET created_at={p}, decision_context_json={p}
-                WHERE experience_id={p}
-                """,
-                (
-                    float(row["review_created_at"] or 0.0),
-                    json.dumps(context, ensure_ascii=False, default=str),
-                    str(row["experience_id"] or ""),
-                ),
-            )
-
-    @staticmethod
-    def _stable_experience_id(append_source: str, source_table: str, source_id: str) -> str:
-        digest = hashlib.sha1(f"{append_source}:{source_table}:{source_id}".encode("utf-8")).hexdigest()[:18]
-        return f"exp_{digest}"
 
     @staticmethod
     def _review_event_ts(review: dict, review_json: dict) -> float:
@@ -346,8 +244,8 @@ class ExperienceBuilder:
         }
         source_table = "trade_outcome_review"
         source_id = str(review.get("review_id") or review_json.get("review_id") or review.get("trade_id") or "")
-        append_source = "live_review"
-        experience_id = self._stable_experience_id(append_source, source_table, source_id) if source_id else f"exp_{hashlib.sha1(str(time.time()).encode('utf-8')).hexdigest()[:18]}"
+        append_source = "trade_lesson_memory.v1"
+        experience_id = f"trade_lesson:{source_id}"
         event_ts = self._review_event_ts(review, review_json)
         context["experience_source"] = {
             "source_table": source_table,
@@ -355,50 +253,28 @@ class ExperienceBuilder:
             "append_source": append_source,
             "event_ts": event_ts,
         }
+        lesson = {
+            "experience_id": experience_id,
+            "trade_id": str(review.get("trade_id", "")),
+            "source_table": source_table,
+            "source_id": source_id,
+            "append_source": append_source,
+            "regime_id": str(review.get("regime_id", "") or ""),
+            "setup_hash": setup_hash,
+            "decision_context_json": json.dumps(
+                context, ensure_ascii=False, default=str
+            ),
+            "outcome_label": str(review.get("outcome_label", "")),
+            "reward_score": round(reward_score, 6),
+            "failure_tags_json": json.dumps(failure_tags, ensure_ascii=False),
+            "recommended_action": recommended_action,
+            "evidence_strength": round(evidence_strength, 6),
+            "artifact_version": "trade_lesson.v1",
+            "evolution_run_id": "",
+            "created_at": event_ts,
+        }
         with self._conn() as conn:
-            p = self._p()
-            conn.execute(
-                f"""
-                INSERT INTO experience_memory
-                (experience_id, trade_id, source_table, source_id, append_source,
-                 regime_id, setup_hash, decision_context_json,
-                 outcome_label, reward_score, failure_tags_json, recommended_action,
-                 evidence_strength, artifact_version, evolution_run_id, created_at)
-                VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, 'v1', '', {p})
-                ON CONFLICT(experience_id) DO UPDATE SET
-                    trade_id=excluded.trade_id,
-                    source_table=excluded.source_table,
-                    source_id=excluded.source_id,
-                    append_source=excluded.append_source,
-                    regime_id=excluded.regime_id,
-                    setup_hash=excluded.setup_hash,
-                    decision_context_json=excluded.decision_context_json,
-                    outcome_label=excluded.outcome_label,
-                    reward_score=excluded.reward_score,
-                    failure_tags_json=excluded.failure_tags_json,
-                    recommended_action=excluded.recommended_action,
-                    evidence_strength=excluded.evidence_strength,
-                    artifact_version=excluded.artifact_version,
-                    evolution_run_id=excluded.evolution_run_id,
-                    created_at=excluded.created_at
-                """,
-                (
-                    experience_id,
-                    str(review.get("trade_id", "")),
-                    source_table,
-                    source_id,
-                    append_source,
-                    str(review.get("regime_id", "") or ""),
-                    setup_hash,
-                    json.dumps(context, ensure_ascii=False, default=str),
-                    str(review.get("outcome_label", "")),
-                    round(reward_score, 6),
-                    json.dumps(failure_tags, ensure_ascii=False),
-                    recommended_action,
-                    round(evidence_strength, 6),
-                    event_ts,
-                ),
-            )
+            upsert_trade_lesson_memory(conn, review, lesson=lesson)
 
         return {
             "experience_id": experience_id,

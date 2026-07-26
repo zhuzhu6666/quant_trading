@@ -23,7 +23,7 @@ AGENTS: dict[str, dict[str, Any]] = {
         "allowed_writes": ["brain_action_plan", "brain_action_plan_eval",
                            "brain_governance_candidate", "brain_medium_impact_governance", "brain_memory",
                            "brain_state_snapshot", "v16_brain_command"],
-        "control_surfaces": ["proposal_governance", "factor_weight", "parameter_template",
+        "control_surfaces": ["proposal_governance", "entry_quality", "factor_weight", "parameter_template",
                              "position_supervisor_template", "context_policy", "replay", "memory"],
         # V16 can select and route a candidate, but the policy queue remains a
         # governed bridge owned by the downstream system.  Keeping this field
@@ -33,18 +33,15 @@ AGENTS: dict[str, dict[str, Any]] = {
         "bridge_mode": "governed_system_bridge",
         "delegation_targets": {
             "autonomous_learning": {
-                "owns": ["entry_parameters", "context_policy", "learning_application"],
-                "required_gates": ["RiskPolicyService", "DecisionPolicy", "RuntimeConfigMutationService"],
+                "owns": ["entry_quality", "entry_parameters", "context_policy", "learning_application"],
             },
             "factor_governance": {
                 "owns": ["factor_weight", "factor_catalog_governance"],
                 "delegates_execution": ["parameter_template", "context_policy"],
                 "delegated_execution_owner": "autonomous_learning",
-                "required_gates": ["RiskPolicyService", "DecisionPolicy", "RuntimeConfigMutationService"],
             },
             "position_supervisor_governance": {
                 "owns": ["position_supervisor_template", "supervisor_protection_policy"],
-                "required_gates": ["RiskPolicyService", "RuntimeConfigMutationService"],
             },
         },
         "authority_state": "requires_control_gate",
@@ -54,8 +51,8 @@ AGENTS: dict[str, dict[str, Any]] = {
         "source_kind": "rule_evolution_governor",
         "capability_scope": "legacy_policy_governance",
         "allowed_writes": ["policy_suggestion", "evolution_run", "learning_application_log", "experience_memory"],
-        "control_surfaces": ["factor_weight", "parameter_template", "context_policy", "memory"],
-        "execution_owner": ["parameter_template", "context_policy", "learning_application"],
+        "control_surfaces": ["entry_quality", "factor_weight", "parameter_template", "context_policy", "memory"],
+        "execution_owner": ["entry_quality", "parameter_template", "context_policy", "learning_application"],
         "receives_handoffs_from": ["factor_governance", "v16_brain"],
         "policy_suggestion_write": "native",
         "requires_v16_command": True,
@@ -83,6 +80,7 @@ AGENTS: dict[str, dict[str, Any]] = {
         "allowed_writes": ["runtime_config_overlay", "runtime_config_snapshot",
                            "learning_application_log", "evolution_decision"],
         "control_surfaces": ["position_supervisor_template"],
+        "execution_owner": ["position_supervisor_template"],
         "policy_suggestion_write": "native_governed",
         "requires_v16_command": True,
         "risk_reduction_exception": "rollback_or_reduce_only",
@@ -185,12 +183,20 @@ def required_gate(control_surface_name: str, action: str, source_agent: str) -> 
         return ["advisory_only"]
     if surface == "factor_weight":
         return ["DecisionPolicy", "RiskPolicyService"]
-    if surface in {"parameter_template", "position_supervisor_template", "context_policy",
+    if surface in {"entry_quality", "parameter_template", "position_supervisor_template", "context_policy",
                    "incident_control", "model_stage", "replay"}:
         return ["RiskPolicyService"]
     if surface in {"trade_execution", "position_sizing", "broker_order"}:
         return ["RiskPolicyService", "ExecutionGate"]
     return ["review"]
+
+
+def execution_owner(control_surface_name: str) -> str:
+    surface = text(control_surface_name, "unknown")
+    for source_agent, contract in AGENTS.items():
+        if surface in set(contract.get("execution_owner") or []):
+            return source_agent
+    return ""
 
 
 def authority_state(*, source_agent: str, status: str = "", required_gate_list: list[str] | None = None,
@@ -324,6 +330,10 @@ class AgentAuthorityRegistryService:
     @classmethod
     def required_gate(cls, control_surface_name: str, action: str, source_agent: str) -> list[str]:
         return required_gate(control_surface_name, action, source_agent)
+
+    @classmethod
+    def execution_owner(cls, control_surface_name: str) -> str:
+        return execution_owner(control_surface_name)
 
     @classmethod
     def authority_state(cls, *, source_agent: str, status: str = "", required_gate: list[str] | None = None,

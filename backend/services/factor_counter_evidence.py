@@ -217,7 +217,7 @@ class FactorCounterEvidenceService:
             JOIN trade_outcome_review r
               ON e.source_table='trade_outcome_review'
              AND r.review_id=e.source_id
-            WHERE e.append_source='live_review'
+            WHERE e.append_source='trade_lesson_memory.v1'
               AND (e.decision_context_json LIKE ? OR e.recommended_action LIKE ?)
             ORDER BY e.created_at DESC
             """,

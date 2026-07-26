@@ -105,11 +105,11 @@ def test_controlled_close_learning_backfill_dry_run_and_apply(monkeypatch, tmp_p
     applied = backfill.run_backfill(position_ids=[123], apply=True, db_path=db_path)
     assert applied["applied"][0]["exit_decision_id"].startswith("dec_backfill_")
     assert applied["applied"][0]["review_id"].startswith("review_")
-    assert applied["applied"][0]["experience_id"].startswith("exp_")
+    assert applied["applied"][0]["experience_id"].startswith("trade_lesson:")
     assert _scalar(db_path, "SELECT COUNT(*) FROM decision_ledger WHERE event_type='close'") == 1
     assert _scalar(db_path, "SELECT COUNT(*) FROM position_lifecycle_event WHERE event_type='closed'") == 1
     assert _scalar(db_path, "SELECT COUNT(*) FROM trade_outcome_review") == 1
-    assert _scalar(db_path, "SELECT COUNT(*) FROM experience_memory WHERE append_source='controlled_close_learning_backfill.v1'") == 1
+    assert _scalar(db_path, "SELECT COUNT(*) FROM experience_memory WHERE append_source='trade_lesson_memory.v1'") == 1
 
     conn = sqlite3.connect(db_path)
     try:

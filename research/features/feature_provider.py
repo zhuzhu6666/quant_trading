@@ -322,7 +322,7 @@ class LearningFeatureProvider:
                     JOIN trade_outcome_review r
                       ON e.source_table='trade_outcome_review'
                      AND r.review_id=e.source_id
-                    WHERE e.append_source='live_review'
+                    WHERE e.append_source='trade_lesson_memory.v1'
                       AND e.trade_id IN ({placeholders})
                     ORDER BY e.trade_id ASC, e.created_at DESC
                     """,
@@ -1022,7 +1022,7 @@ class LearningFeatureProvider:
                 JOIN trade_outcome_review r
                   ON e.source_table='trade_outcome_review'
                  AND r.review_id=e.source_id
-                WHERE e.append_source='live_review' AND e.trade_id={p}
+                WHERE e.append_source='trade_lesson_memory.v1' AND e.trade_id={p}
                 ORDER BY e.created_at DESC
                 """,
                 (trade_id,),

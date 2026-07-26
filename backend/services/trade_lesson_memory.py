@@ -245,9 +245,14 @@ def build_trade_lesson(row: Any) -> dict[str, Any]:
     }
 
 
-def upsert_trade_lesson_memory(conn: Any, row: Any) -> dict[str, Any]:
+def upsert_trade_lesson_memory(
+    conn: Any,
+    row: Any,
+    *,
+    lesson: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     ensure_trade_lesson_memory_schema(conn)
-    lesson = build_trade_lesson(row)
+    lesson = dict(lesson or build_trade_lesson(row))
     if not lesson["source_id"]:
         raise ValueError("trade lesson requires review_id")
     context = _loads(lesson["decision_context_json"], {})

@@ -16,6 +16,7 @@ from typing import Any
 
 from backend.core.db import STATE_DB, is_state_db_path, state_table_columns, state_table_exists
 from backend.services._brain_helpers import connect, dumps, execute, loads, safe_float
+from backend.services.agent_authority import control_surface, execution_owner, required_gate
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.v16_brain_planning import (
     BrainActionPlanEvaluatorService,
@@ -23,6 +24,7 @@ from backend.services.v16_brain_planning import (
     BrainMediumImpactGovernanceService,
 )
 from backend.services.v16_brain_snapshot import BrainStateService
+from backend.services.v16_command_gate import V16CommandGate
 
 
 def ensure_v16_brain_command_table(db_path: str | Path = STATE_DB) -> None:
@@ -113,6 +115,14 @@ class V16BrainOrchestratorService:
 
     @staticmethod
     def boundary() -> dict[str, Any]:
+        surfaces = [
+            "entry_quality",
+            "factor_weight",
+            "parameter_template",
+            "context_policy",
+            "position_supervisor_template",
+            "model_stage",
+        ]
         return {
             "schema_version": "v16_brain_orchestrator_boundary.v1",
             "role": "meta_brain_command_and_delegation",
@@ -137,16 +147,14 @@ class V16BrainOrchestratorService:
             ],
             "command_owner": "v16_brain",
             "execution_owner": "downstream_specialist_agent_and_governor",
-            "delegation_targets": [
-                "autonomous_learning",
-                "factor_governance",
-                "position_supervisor_governance",
-            ],
+            "delegation_targets": sorted(
+                {execution_owner(surface) for surface in surfaces if execution_owner(surface)}
+            ),
             "delegation_authority_source": "AgentAuthorityRegistryService.v16_brain.delegation_targets",
             "specialist_mutation_gate": "V16CommandGate",
             "specialist_mutations_require_recent_command": True,
             "risk_reduction_exception": "rollback_or_reduce_only",
-            "requires_downstream_gates": ["RiskPolicyService", "DecisionPolicy", "RuntimeConfigMutationService"],
+            "required_gate_authority": "AgentAuthorityRegistryService.required_gate",
             "demo_bridge_owner": "AutonomousEvolutionNurseryRunner",
             "human_approval_required_in_demo": False,
             "human_approval_required_for_live_mutation": True,
@@ -272,6 +280,7 @@ class V16BrainOrchestratorService:
                 "cancelled_count": 0,
                 "observation_count": 0,
                 "stale_delegate_count": 0,
+                "expired_delegate_count": 0,
             }
         conn = connect(self.db_path)
         try:
@@ -280,6 +289,7 @@ class V16BrainOrchestratorService:
                     "cancelled_count": 0,
                     "observation_count": 0,
                     "stale_delegate_count": 0,
+                    "expired_delegate_count": 0,
                 }
             now = time.time()
             observation = execute(
@@ -312,13 +322,28 @@ class V16BrainOrchestratorService:
                 """,
                 (now, now),
             )
+            expired = execute(
+                conn,
+                """
+                UPDATE v16_brain_command
+                SET claim_status='cancelled',
+                    failure_reason='authority_expired',
+                    finalized_at=?, updated_at=?
+                WHERE decision='delegate' AND claim_status='available'
+                  AND COALESCE(apply_count, 0)<COALESCE(max_apply_count, 1)
+                  AND authority_issued_at<?
+                """,
+                (now, now, now - V16CommandGate._max_age_seconds()),
+            )
             conn.commit()
             observation_count = int(observation.rowcount or 0)
             stale_count = int(stale.rowcount or 0)
+            expired_count = int(expired.rowcount or 0)
             return {
-                "cancelled_count": observation_count + stale_count,
+                "cancelled_count": observation_count + stale_count + expired_count,
                 "observation_count": observation_count,
                 "stale_delegate_count": stale_count,
+                "expired_delegate_count": expired_count,
             }
         except Exception:
             conn.rollback()
@@ -458,22 +483,33 @@ class V16BrainOrchestratorService:
             )
             candidate_commands = [item for item in commands if item.get("decision") == "delegate"]
             candidate_closed = all(bool(item.get("candidate_id")) for item in candidate_commands)
-            lifecycle = execute(
+            lifecycle_rows = execute(
                 conn,
                 """
-                SELECT
-                    SUM(CASE WHEN decision='delegate' AND claim_status IN ('available','claimed')
-                             THEN 1 ELSE 0 END) AS actionable_count,
-                    SUM(CASE WHEN claim_status='cancelled' THEN 1 ELSE 0 END) AS cancelled_count,
-                    MIN(CASE WHEN decision='delegate' AND claim_status IN ('available','claimed')
-                             THEN created_at ELSE NULL END) AS oldest_actionable_at
+                SELECT command_id, decision, claim_status, apply_count, max_apply_count,
+                       authority_issued_at, created_at
                 FROM v16_brain_command
                 """,
-            ).fetchone()
-            actionable_count = int((lifecycle["actionable_count"] if lifecycle else 0) or 0)
-            cancelled_count = int((lifecycle["cancelled_count"] if lifecycle else 0) or 0)
-            oldest_actionable_at = safe_float(
-                lifecycle["oldest_actionable_at"] if lifecycle else 0.0
+            ).fetchall()
+            lifecycle_items = [
+                {key: row[key] for key in row.keys()} if hasattr(row, "keys") else dict(row)
+                for row in lifecycle_rows
+            ]
+            actionable_items = [
+                item for item in lifecycle_items
+                if V16CommandGate.is_actionable(item)
+            ]
+            actionable_count = len(actionable_items)
+            cancelled_count = sum(
+                1 for item in lifecycle_items
+                if str(item.get("claim_status") or "") == "cancelled"
+            )
+            oldest_actionable_at = min(
+                (
+                    safe_float(item.get("authority_issued_at"))
+                    for item in actionable_items
+                ),
+                default=0.0,
             )
             status = "healthy"
             if not posterior_source_available:
@@ -626,6 +662,8 @@ class V16BrainOrchestratorService:
             }
         now = time.time()
         suggestion_id = str(gate.get("suggestion_id") or "")
+        target_agent = self._target_agent("entry_quality")
+        action = "activate_entry_quality_control"
         command = {
             "command_id": (
                 "v16cmd_"
@@ -638,10 +676,10 @@ class V16BrainOrchestratorService:
             "plan_id": "",
             "eval_id": "",
             "candidate_id": f"entryq_{fingerprint[:16]}",
-            "target_agent": "autonomous_learning",
+            "target_agent": target_agent,
             "scope_type": "entry_quality",
             "scope_key": "weak_signal",
-            "action": "activate_entry_quality_control",
+            "action": action,
             "decision": "delegate",
             "status": "delegated_to_specialist",
             "evidence": {
@@ -651,12 +689,13 @@ class V16BrainOrchestratorService:
                 "qualified_v2_population": True,
             },
             "delegation": {
-                "target_agent": "autonomous_learning",
+                "target_agent": target_agent,
                 "delegated_by": "v16_brain",
-                "specialist_must_use": [
-                    "RiskPolicyService",
-                    "GovernanceMutationCoordinator",
-                ],
+                "specialist_must_use": required_gate(
+                    "entry_quality",
+                    action,
+                    target_agent,
+                ),
                 "specialist_must_not": [
                     "bypass_risk_policy",
                     "write_runtime_overlay_directly",
@@ -690,7 +729,6 @@ class V16BrainOrchestratorService:
     ) -> dict[str, Any]:
         scope = dict(plan.get("scope") or {})
         delegation = dict(scope.get("delegation") or {})
-        target_agent = str(delegation.get("target_agent") or self._target_agent(str(evaluation.get("scope_type") or "")))
         posterior = dict((evaluation.get("comparison") or {}).get("posterior_arbitration") or {})
         candidate_id = str(governance.get("candidate_id") or "")
         decision = "delegate" if candidate_id and governance.get("status") == "candidate_materialized" else "observe"
@@ -699,6 +737,12 @@ class V16BrainOrchestratorService:
         posterior_fingerprint = str(posterior.get("fingerprint") or "")
         command_scope_type = str(governance.get("scope_type") or evaluation.get("scope_type") or "")
         command_scope_key = str(governance.get("scope_key") or scope.get("scope_key") or "")
+        target_agent = self._target_agent(command_scope_type)
+        required_gates = required_gate(
+            control_surface(command_scope_type, action),
+            action,
+            target_agent,
+        )
         # IDs and timestamps are audit coordinates, not new evidence. Hash only
         # the substantive verdict so a periodic rerun updates one command
         # instead of manufacturing a new command for the same posterior.
@@ -754,7 +798,7 @@ class V16BrainOrchestratorService:
                 **delegation,
                 "target_agent": target_agent,
                 "delegated_by": "v16_brain",
-                "specialist_must_use": ["RiskPolicyService", "DecisionPolicy", "RuntimeConfigMutationService"],
+                "specialist_must_use": required_gates,
                 "specialist_must_not": ["bypass_risk_policy", "bypass_decision_policy", "write_broker_directly"],
             },
             "posterior_fingerprint": posterior_fingerprint,
@@ -767,13 +811,7 @@ class V16BrainOrchestratorService:
 
     @staticmethod
     def _target_agent(scope_type: str) -> str:
-        return {
-            "factor_weight": "factor_governance",
-            "parameter_template": "autonomous_learning",
-            "context_policy": "autonomous_learning",
-            "supervisor_template": "position_supervisor_governance",
-            "model_stage": "factor_governance",
-        }.get(scope_type, "autonomous_learning")
+        return execution_owner(control_surface(scope_type, ""))
 
     @staticmethod
     def _dedupe_command_surfaces(commands: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:

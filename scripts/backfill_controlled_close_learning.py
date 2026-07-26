@@ -9,7 +9,6 @@ suggestions, runtime overlay updates, or trading actions.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sqlite3
 import sys
@@ -24,6 +23,7 @@ if str(ROOT) not in sys.path:
 
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services import learning_backfill
+from backend.services.trade_lesson_memory import upsert_trade_lesson_memory
 from backend.services.live_position_lifecycle import classify_close_source_from_evidence
 
 BACKFILL_SOURCE = "controlled_close_learning_backfill.v1"
@@ -81,11 +81,6 @@ def _normalize_deal_price(*, entry_price: float, exec_price: float) -> float:
         if 50.0 <= ratio <= 150.0:
             return round(price * 100.0, 6)
     return price
-
-
-def _stable_experience_id(source_table: str, source_id: str) -> str:
-    digest = hashlib.sha1(f"{BACKFILL_SOURCE}:{source_table}:{source_id}".encode("utf-8")).hexdigest()[:18]
-    return f"exp_{digest}"
 
 
 def fetch_backfill_rows(conn, position_ids: list[int]) -> list[dict[str, Any]]:
@@ -340,86 +335,8 @@ def _insert_closed_event(conn, row: dict[str, Any], *, close_price: float) -> st
     return event_id
 
 
-def _insert_experience(conn, review: dict[str, Any], *, now: float) -> str:
-    learning_backfill._ensure_experience_memory_source_columns(conn)
-    review_json = _loads(review.get("review_json"), {})
-    failure_tags = _loads(review.get("failure_tags_json"), [])
-    if not isinstance(failure_tags, list):
-        failure_tags = []
-    pnl = _safe_float(review.get("pnl"))
-    reward_score = 0.0
-    if pnl > 0:
-        reward_score = min(1.0, pnl / max(abs(pnl), 50.0))
-    elif pnl < 0:
-        reward_score = -min(1.0, abs(pnl) / max(abs(pnl), 50.0))
-    if review_json.get("inferred_close_supervisor") and pnl <= 0:
-        reward_score = min(reward_score, -0.12)
-    reward_score *= 0.5
-    evidence_strength = max(0.05, min(1.0, abs(reward_score) + 0.20 * len(failure_tags)) * 0.25)
-    source_table = "trade_outcome_review"
-    source_id = str(review.get("review_id") or "")
-    experience_id = _stable_experience_id(source_table, source_id)
-    context = {
-        "position_id": str(review.get("position_id") or ""),
-        "trade_id": str(review.get("trade_id") or ""),
-        "primary_factor": "",
-        "failure_tags": failure_tags,
-        "close_reason": str(review_json.get("close_reason") or ""),
-        "close_reason_source": str(review_json.get("close_reason_source") or ""),
-        "context_integrity": str(review_json.get("context_integrity") or "full"),
-        "attribution_integrity": "missing",
-        "summary_text": str(review.get("summary_text") or ""),
-        "review_json": review_json,
-        "experience_source": {
-            "source_table": source_table,
-            "source_id": source_id,
-            "append_source": BACKFILL_SOURCE,
-            "event_ts": _safe_float(review.get("created_at")),
-        },
-    }
-    _execute(
-        conn,
-        """
-        INSERT INTO experience_memory
-        (experience_id, trade_id, source_table, source_id, append_source,
-         regime_id, setup_hash, decision_context_json,
-         outcome_label, reward_score, failure_tags_json, recommended_action,
-         evidence_strength, artifact_version, evolution_run_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'watch', ?, 'v1', '', ?)
-        ON CONFLICT(experience_id) DO UPDATE SET
-            trade_id=excluded.trade_id,
-            source_table=excluded.source_table,
-            source_id=excluded.source_id,
-            append_source=excluded.append_source,
-            regime_id=excluded.regime_id,
-            setup_hash=excluded.setup_hash,
-            decision_context_json=excluded.decision_context_json,
-            outcome_label=excluded.outcome_label,
-            reward_score=excluded.reward_score,
-            failure_tags_json=excluded.failure_tags_json,
-            recommended_action=excluded.recommended_action,
-            evidence_strength=excluded.evidence_strength,
-            artifact_version=excluded.artifact_version,
-            evolution_run_id=excluded.evolution_run_id,
-            created_at=excluded.created_at
-        """,
-        (
-            experience_id,
-            str(review.get("trade_id") or ""),
-            source_table,
-            source_id,
-            BACKFILL_SOURCE,
-            str(review.get("regime_id") or ""),
-            hashlib.sha1(f"|controlled|{review.get('outcome_label', '')}".encode("utf-8")).hexdigest()[:16],
-            _dump(context),
-            str(review.get("outcome_label") or ""),
-            round(reward_score, 6),
-            _dump(failure_tags),
-            round(evidence_strength, 6),
-            _safe_float(review.get("created_at")) or now,
-        ),
-    )
-    return experience_id
+def _insert_experience(conn, review: dict[str, Any]) -> str:
+    return str(upsert_trade_lesson_memory(conn, review)["experience_id"])
 
 
 def _planned_action(row: dict[str, Any]) -> dict[str, Any]:
@@ -475,7 +392,7 @@ def run_backfill(*, position_ids: list[int], apply: bool, db_path: str | Path = 
                 record = _amend_review_record(record, row, exit_decision_id=exit_decision_id, close_price=close_price)
                 learning_backfill.insert_review(conn, record)
                 review_id = str(record["review_id"])
-                experience_id = _insert_experience(conn, record, now=now)
+                experience_id = _insert_experience(conn, record)
             result["applied"].append(
                 {
                     "position_id": str(row["position_id"]),

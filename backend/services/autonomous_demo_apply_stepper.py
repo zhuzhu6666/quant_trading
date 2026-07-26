@@ -23,6 +23,7 @@ from backend.services.autonomous_learning import (
 from backend.services.entry_quality_governance import EntryQualityGovernanceService
 from backend.services.evolution_ledger import finish_evolution_run, start_evolution_run
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
+from backend.services.v16_command_gate import V16CommandGate
 
 
 class AutonomousDemoApplyStepper:
@@ -595,24 +596,31 @@ class AutonomousDemoApplyStepper:
 
         conn = _connect(self.db_path, read_only=True)
         try:
-            row = _execute(
+            rows = _execute(
                 conn,
                 """
                 SELECT command.command_id, command.candidate_id,
                        command.target_agent, command.scope_type,
-                       command.scope_key, command.action
+                       command.scope_key, command.action, command.decision,
+                       command.claim_status, command.apply_count,
+                       command.max_apply_count, command.authority_issued_at
                 FROM v16_brain_command command
                 JOIN brain_governance_candidate candidate
                   ON candidate.candidate_id=command.candidate_id
                 WHERE command.decision='delegate'
                   AND command.claim_status='available'
-                  AND COALESCE(command.apply_count, 0)=0
                   AND candidate.status='active'
                 ORDER BY command.created_at ASC
-                LIMIT 1
                 """,
-            ).fetchone()
-            command = dict(row) if row else {}
+            ).fetchall()
+            command = next(
+                (
+                    dict(row)
+                    for row in rows
+                    if V16CommandGate.is_actionable(dict(row))
+                ),
+                {},
+            )
         finally:
             conn.close()
         if not command:
@@ -787,20 +795,25 @@ class AutonomousDemoApplyStepper:
             conn, "brain_governance_candidate"
         ):
             return 0
-        row = _execute(
+        rows = _execute(
             conn,
             """
-            SELECT COUNT(*) AS n
+            SELECT command.command_id, command.decision, command.claim_status,
+                   command.apply_count, command.max_apply_count,
+                   command.authority_issued_at
             FROM v16_brain_command command
             JOIN brain_governance_candidate candidate
               ON candidate.candidate_id=command.candidate_id
             WHERE command.decision='delegate'
               AND command.claim_status='available'
-              AND COALESCE(command.apply_count, 0)=0
               AND candidate.status='active'
             """,
-        ).fetchone()
-        return int((row["n"] if hasattr(row, "keys") else row[0]) or 0)
+        ).fetchall()
+        return sum(
+            1
+            for row in rows
+            if V16CommandGate.is_actionable(dict(row))
+        )
 
     def _pending_entry_quality_materialize(self, conn: Any) -> int:
         active = self._count_policy(

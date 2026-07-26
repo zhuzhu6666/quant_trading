@@ -212,6 +212,36 @@ def test_runtime_refresh_latches_and_keeps_legacy_overlay_read_only(
     )
 
 
+def test_production_overlay_base_uses_yaml_before_runtime_bootstrap(
+    tmp_path, monkeypatch
+):
+    from backend.core import db
+    from backend.services import runtime_config_startup
+
+    db_path = tmp_path / "production-state.db"
+    yaml_base = RuntimeConfig(
+        ctrader_send_orders=True,
+        runtime_incident_mode="normal",
+    )
+    runtime_config.replace(
+        RuntimeConfig(
+            ctrader_send_orders=False,
+            runtime_incident_mode="frozen",
+        )
+    )
+    monkeypatch.setattr(db, "is_state_db_path", lambda path: path == db_path)
+    monkeypatch.setattr(
+        runtime_config_startup,
+        "load_yaml_runtime_config",
+        lambda: (yaml_base, {}),
+    )
+
+    loaded = runtime_config.overlay_base_config(db_path)
+
+    assert loaded == yaml_base.to_dict()
+    assert loaded != runtime_config.shared_holder().get().to_dict()
+
+
 def test_runtime_refresh_retries_transient_projection_and_releases_exact_cause(
     tmp_path, monkeypatch
 ):

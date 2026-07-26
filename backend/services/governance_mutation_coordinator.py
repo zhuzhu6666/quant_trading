@@ -566,10 +566,18 @@ class GovernanceMutationCoordinator:
                 and target.get("governance_expansion_paused") is False
                 and not str(plan.actor or "").startswith("system:")
             )
+            operator_demo_control = (
+                runtime_config.operator_bounded_demo_control_exempt(
+                    actor=plan.actor,
+                    patch=sanitized,
+                    cfg=current_config,
+                )
+            )
             if (
                 current_paused
                 and classification.risk_class == "risk_expanding"
                 and not operator_pause_resume
+                and not operator_demo_control
             ):
                 conn.rollback()
                 return {
@@ -646,6 +654,7 @@ class GovernanceMutationCoordinator:
                 "target_config_hash": target_hash,
                 "domain_hash": domain_hash,
                 "risk_classification": classification.to_dict(),
+                "operator_bounded_demo_control_exempt": operator_demo_control,
             }
         except Exception:
             conn.rollback()
@@ -1080,6 +1089,12 @@ class GovernanceMutationCoordinator:
             }
         if not self.production_state:
             return {"ok": True, "allowed": True, "status": "isolated_test_state"}
+        if reserved.get("operator_bounded_demo_control_exempt"):
+            return {
+                "ok": True,
+                "allowed": True,
+                "status": "operator_bounded_demo_control_exempt",
+            }
         if plan.v16_command_id and plan.v16_claim_token:
             return {
                 "ok": True,

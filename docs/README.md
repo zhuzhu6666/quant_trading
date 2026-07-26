@@ -8,12 +8,18 @@
 
 ## 1. 当前结论
 
-- 当前分支：`main`；本文核对时 HEAD 为 `471ea6d`，工作区有未提交的文档收敛改动。
+- 当前分支：`main`；本文核对时 HEAD 为 `471ea6d`，工作区有未提交的代码、测试和文档改动。
 - P0 已完成。
 - P1 代码和历史污染修复已完成；仍等待新的真实 broker deal 与完整持仓生命周期运行验收。
-- P2 代码和合同已完成，schema 已到 v12；当前处于运行观察期，不进入 P3。
-- P3 未开始。P2 运行验收未通过前禁止推进。
-- 当前保持 `no_new_risk`。不得因服务在线、市场重新开盘或文档完成而清锁。
+- P2 代码和合同已完成，schema 已到 v12；运行验收仍继续，静态发布顺序不推进。
+- P3 writer/identity 收敛已完成：current 与历史 review memory 均只保留
+  `trade_lesson_memory.v1` canonical projection；application/effect 当前 16 个 active scope
+  一一对应，无 scope 冲突或 orphan effect。此结果不扩大运行权限。
+- P4 V16 因果调度已完成：同交易 causal grouping、唯一 actionable predicate、唯一 Agent
+  Authority owner/gate、单命令单 mutation 和三条 deterministic lane 均已收口。
+- 有界 Demo 已由 operator 显式恢复 `runtime_incident_mode=normal`，治理扩张暂停已解除，本地
+  no-new-risk latch 已清空；Demo 开仓不再等待 P1/P2 观察时长，但仍服从 market session、
+  canonical RiskPolicy、fresh reconcile 和真实 safety cause。
 - Safety、Generation、Execution Outcome、Governance、PG Job Queue 的静态发布开关不得随普通修复切换。
 - 最近已知全量基线：`2452 passed, 9 skipped`。日常小批默认只跑针对性测试；阶段/发布验收才跑全量。
 
@@ -24,8 +30,10 @@
 - `/api/health` 为 `db=connected`、`ctrader=connected`；
 - PostgreSQL `state_v1` migration `current=minimum=latest=12`，无 mismatch；
 - `risk_metrics_snapshot.v2` 与 `backend_readiness_snapshot.v1` 正常刷新；
-- readiness：frontend 可读；live execution、live alpha、autonomous mutation、release 均未授权；
-- live loop 运行但不接受新风险，blocker 为 `market_session_blocks_open` 与 `no_new_risk_latched`；
+- readiness 已刷新：frontend 可读；live execution/live alpha 当前只因市场关闭而不授权，
+  不再包含 incident 或 `no_new_risk_latched` blocker；
+- live loop 运行；当前市场关闭，因此不接受新风险的有效原因是
+  `market_session_blocks_open`，不是 operator 锁仓；
 - broker reconcile fresh、unknown execution 为 0、当前空仓；
 - risk snapshot 为 closed-bar M5 500 样本，包含 current/candidate/forward notional 合同；空仓时 VaR/CVaR 为 0 是计算结果，不是缺失值兜底；
 - Safety shadow 仍只处于 observing，尚未满足完整持仓生命周期或 24 小时无仓观察门槛。
@@ -70,12 +78,12 @@ learning worker
 
 ## 3. 当前主线
 
-当前只做 P1/P2 运行验收与兼容删除：
+当前只做 P1/P2 运行验收与兼容删除；有界 Demo 可直接产生验收交易：
 
 1. 等待并核对新的真实 broker deal、开仓、保护、平仓、同步、复盘与学习生命周期；
 2. 完成 Safety shadow 的完整生命周期或 24 小时无仓观察与故障矩阵；
 3. 对每条仍在迁移的兼容路径收集退出证据，同批删除旧 authority、旧重算、旧字段回退或无意义 wrapper；
-4. P2 全部门槛满足后，才可提出进入 P3。
+4. P4 已完成，不再扩展 V16 调度层；下一步只处理真实运行验收与 P6 Demo 观察。
 
 实施细节见 [planning/production-autonomy-repair-optimization-plan.md](planning/production-autonomy-repair-optimization-plan.md)，实际进度见 [phased-repair-rollout-status.md](phased-repair-rollout-status.md)，门槛见 [phased-repair-acceptance-matrix.md](phased-repair-acceptance-matrix.md)。
 

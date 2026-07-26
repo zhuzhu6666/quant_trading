@@ -1,6 +1,6 @@
 # 生产自治修复与架构收敛总方案
 
-> Status: implementation active — P0 complete, P1 runtime acceptance active, P2 complete, P3 not started
+> Status: implementation active — P0 complete, P1 runtime acceptance active, P2/P3/P4 complete
 > Last verified: 2026-07-26
 > Scope: production correctness repair, authority convergence, legacy deletion, runtime acceptance, and autonomy graduation
 > Source of truth: 本文只定义阶段、流程和退出条件；当前生产事实以 `docs/system-source-of-truth.md`、代码、PostgreSQL 和运行服务为准
@@ -19,14 +19,15 @@
 | P0 保护现场 | complete | incident、备份、污染 cohort 和 `no_new_risk` 姿态已建立 |
 | P1 broker 成交事实 | runtime acceptance | 代码和历史修复完成，等待 post-repair 新 broker deal 与完整持仓生命周期 |
 | P2 风险指标平面 | complete | live/replay/Policy/readiness/API/Web 已收敛到 canonical snapshot |
-| P3 学习证据与记忆 | not started | 不得在未确认调用链、writer 和删除对象前增加新存储或 service |
-| P4 V16 因果调度 | not started | 只修真实闭环缺口，不增加新的调度平面 |
+| P3 学习证据与记忆 | complete | current/history memory 单 projection；application/effect active scope 唯一 |
+| P4 V16 因果调度 | complete | causal grouping、单一 actionable/authority、单次 mutation 与三条 lane 已收口 |
 | P5 持续架构收敛 | active discipline | 不再作为最后才做的“大重构”；每个 P3/P4 批次同时执行删除 |
 | P6 Demo 观察与毕业 | blocked | 等待前置阶段和真实运行证据 |
 
 持续约束：
 
-- 保持 `no_new_risk`，不得擅自清锁。
+- 有界 Demo 可由显式 operator 直接恢复 normal 并清除 operator-owned cause，不等待
+  Safety shadow 观察时长；真实 safety cause 仍按各自 owner 精确释放。
 - 不切换 Safety、Generation、Execution Outcome、Governance、PG Job Queue 静态发布开关。
 - close/reduce/tighten/rollback 和只读观察继续。
 - 未经 operator 明确授权，不进入 `live_autonomous`。
@@ -192,7 +193,8 @@ release preflight 管理，自治扩张由 V16/专员/Coordinator 管理，均�
 ### 5.1 P0
 
 - incident：`AUTONOMY-REPAIR-20260724-01`。
-- 保持 `no_new_risk` 和治理扩张暂停。
+- P0 当时建立了 `no_new_risk` 和治理扩张暂停；2026-07-26 operator 已在有界 Demo
+  验证修复后显式解除，两者不再作为运行验收等待门。
 - 建立备份、污染 cohort、repair ledger 和修复不变量。
 
 ### 5.2 P1 代码与数据
@@ -233,7 +235,8 @@ canonical authority：
 - `unknown/warming_up/error` 不补零；known 空仓零敞口保持真实零。
 - schema v12 已应用；`risk_daily_equity` 仅保留审计，不参与开仓 VaR。
 
-P2 完成不授权清除 `no_new_risk`、推进 P1 runtime acceptance 或切换静态 flag。
+P2 完成本身不授权清除 `no_new_risk` 或切换静态 flag；本次有界 Demo 恢复来自
+operator 显式指令和运行事实核验，不把 P2 测试结果当作解锁依据。
 
 ## 6. P3：证据、记忆和效果归因
 
@@ -359,7 +362,7 @@ Demo 恢复仍采用已确认 profile：
 
 ### 10.2 一票否决
 
-出现任一情况立即停止推进并保持 `no_new_risk`：
+出现任一情况立即停止推进，并由对应 owner 激活 cause-specific `no_new_risk`：
 
 - broker 事实单位或 identity 不可确认；
 - 污染样本重新获得治理资格；
@@ -390,7 +393,7 @@ Demo 恢复仍采用已确认 profile：
 
 | ID | 已选约束 |
 |---|---|
-| D01-A | 修复和运行验收期间保持 `no_new_risk` |
+| D01-B | 有界 Demo 修复后直接恢复 normal，不以观察时长锁仓；真实 safety cause 仍按 owner 处理 |
 | D02-A | correction manifest；可恢复者重建，无法恢复者 quarantine |
 | D03-B | Demo profile 0.50% / 2% / 8% / 10 |
 | D04-B | LLM 仅 research/shadow proposal/read-only replay |

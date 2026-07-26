@@ -88,6 +88,33 @@ def test_factor_governance_can_propose_but_not_bypass_control_gates():
     assert verdict["required_gate"] == ["DecisionPolicy", "RiskPolicyService"]
 
 
+def test_agent_authority_is_single_execution_owner_and_gate_source():
+    registry = AgentAuthorityRegistryService()
+
+    assert registry.execution_owner("factor_weight") == "factor_governance"
+    assert registry.execution_owner("model_stage") == "factor_governance"
+    assert registry.execution_owner("entry_quality") == "autonomous_learning"
+    assert registry.execution_owner("parameter_template") == "autonomous_learning"
+    assert registry.execution_owner("context_policy") == "autonomous_learning"
+    assert (
+        registry.execution_owner("position_supervisor_template")
+        == "position_supervisor_governance"
+    )
+    assert registry.required_gate(
+        "factor_weight", "update_weight", "factor_governance"
+    ) == ["DecisionPolicy", "RiskPolicyService"]
+    assert registry.required_gate(
+        "entry_quality",
+        "activate_entry_quality_control",
+        "autonomous_learning",
+    ) == ["RiskPolicyService"]
+    assert registry.required_gate(
+        "position_supervisor_template",
+        "switch_position_supervisor_template",
+        "position_supervisor_governance",
+    ) == ["RiskPolicyService"]
+
+
 def test_agent_authority_status_reports_unknown_sources(tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)

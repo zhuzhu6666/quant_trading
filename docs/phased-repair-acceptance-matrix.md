@@ -136,7 +136,26 @@ P3 禁止以“先搭平台”为理由新增：
 
 如确实无法复用，必须先在状态文档记录不可复用的代码和运行证据。
 
-## 6. P4 V16 闭环矩阵
+首批证据（2026-07-26）：
+
+- writer inventory 已覆盖 review/counterfactual/memory/sample/application/effect；
+- `learning_backfill.v1` 重复 memory writer 已删除，生产代码净删除；
+- 260 条重复 projection 已删除，6 条 evidence 引用已迁移，0 残留、0 悬空；
+- canonical source anchor 继续使用 `trade_outcome_review.review_id`，未修改 schema。
+- live rich lesson 计算已复用现有 `upsert_trade_lesson_memory()` 单 writer，旧 SQL writer
+  和所有 `live_review` reader 分支已删除；
+- 576 条 `live_review` projection 已合并到 canonical lesson 后删除；189 条 suggestion
+  evidence 的 2,373 个旧 ID 已迁移，重启后 0 残留、0 格式异常、0 悬空；
+- 第二小批针对性验证为 `64 passed`，reader 删除补充验证为 `27 passed`。
+- 170 条历史兼容 projection 均有更完整 canonical lesson；11 条 suggestion evidence 的
+  35 个旧 ID 已迁移，旧 projection 与两个启动/脚本 writer 已删除，0 残留、0 悬空；
+- application/effect 为 3,423 个唯一 application ID、3,368 个唯一 effect、0 orphan
+  effect；55 个无 effect application 均为 blocked/failed 终态；
+- 当前 16 个 active application/effect 对应 16 个唯一 scope，符合单 scope 单 active；
+- 第三小批 memory、application/effect 与 domain writer 针对性验证为 `80 passed`，
+  P3 writer/identity 准入完成。
+
+## 6. P4 V16 闭环矩阵（complete）
 
 必须验证：
 
@@ -151,6 +170,46 @@ P3 禁止以“先搭平台”为理由新增：
 - 三条 lane 均覆盖 success/noop/reject/retry/rollback/effect。
 
 不得新增第二套 command queue、actionable predicate 或 readiness verdict。
+
+当前证据：
+
+- 多交易且复用同一 `position_id` 的 fixture 已证明 supervisor/entry 只在同一
+  `review_id`/`trade_id` lineage 内组合；同交易 entry 与 supervisor scope 仍独立保留。
+- `V16CommandGate.is_actionable()` 已替代 orchestrator status 和 stepper 的平行判断；
+  stale head、claimed command、authorize、claim 的结果一致。
+- 运行库过期队首已终态为 `cancelled/authority_expired`，`apply_count=0`；重启后 fresh
+  command 在 orchestrator、stepper 和 Gate 三处分别为 1/1/allowed。
+- claim 单次绑定、release/recovery 不续期、transaction failure 不增加 apply count 的既有
+  contract 与本批回归共 `36 passed`；specialist/Coordinator 回归 `57 passed`。
+- planner、command 与 specialist gate 已删除各自硬编码，统一只读 Agent Authority 的
+  `execution_owner` 与 `required_gate`。
+- authorize/claim 删除固定 200 行截断，并用既有 authority freshness 先缩小读取范围；
+  205 条其他 scope 新命令不会阻塞目标命令。低负载合并验证 `23 passed`。
+- `entry_quality` 已纳入 autonomous learning 的唯一 execution owner / RiskPolicy gate，
+  专用 delegation 不再硬编码 target 或 gate。
+
+三条 lane 终态证据：
+
+| lane | success | noop/reject | retry | rollback | effect |
+|---|---|---|---|---|---|
+| autonomous learning | entry-quality/parameter-template atomic commit | manual/no eligible/eligibility reject | transaction abort 后无残留，可由原 suggestion 重试 | v1 invalidation 与 parameter effect rollback | observing/terminal effect + new-evidence retry |
+| factor governance | atomic weight mutation | replay/admission/V16 block | mutation/risk failure 释放 reservation | domain fault/runtime target rollback | observing/ineffective effect |
+| position supervisor governance | atomic template switch | missing evidence/illegal stop/rolled-back application ignored | domain fault 后 suggestion 保持 approved、reservation released | ineffective supervisor effect rollback | observing -> ineffective terminal effect |
+
+bounded runtime trace：
+
+```text
+v16cmd_7be9876b49138e64e726
+  -> autonomous_learning
+  -> psg_entry_quality_92771bd6472259f1
+  -> gmut_e7cba57522aa44fd8d36d4d370cd1f08
+  -> lapp_a2b661abfcc25d2ee724 / learning_application_effect
+  -> gmut_deddadacb3b849d2bd5da975c53530cd (committed rollback)
+```
+
+原 command `apply_count=1`，原 mutation 明确记录 `rolled_back` 与
+`rollback_mutation_id`；rollback 不复用或增加原 command apply count。P4 最终分批低优先级
+验证共执行 131 个测试，全部通过。
 
 ## 7. 删除验收
 
@@ -200,6 +259,9 @@ Safety enforce 之前还必须满足二选一：
 
 1. 连续 24 小时 broker-confirmed 空仓 shadow；或
 2. 一个完整 broker position lifecycle。
+
+该二选一只授权静态 Safety v2 从 shadow 切到 enforce，不是有界 Demo
+`runtime_incident_mode=normal` 或开仓的等待锁。
 
 ## 9. 全量测试策略
 

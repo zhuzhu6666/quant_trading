@@ -143,6 +143,48 @@ def test_posterior_arbitration_separates_entry_and_supervisor_causality():
     assert result["authority"]["v16_role"] == "judge_and_dispatch_only"
 
 
+def test_posterior_arbitration_keeps_scopes_on_same_trade_lineage():
+    result = build_posterior_arbitration(
+        trade_reviews=[
+            {
+                "review_id": "review-a",
+                "trade_id": "trade-a",
+                "position_id": "reused-position",
+                "created_at": 10.0,
+                "pnl": -10.0,
+                "outcome_label": "loss",
+                "review": {"primary_responsibility": "entry"},
+            },
+            {
+                "review_id": "review-b",
+                "trade_id": "trade-b",
+                "position_id": "reused-position",
+                "created_at": 20.0,
+                "pnl": -20.0,
+                "outcome_label": "loss",
+                "review": {"primary_responsibility": "entry"},
+            },
+        ],
+        counterfactuals=[
+            {
+                "counterfactual_id": "cf-a",
+                "review_id": "review-a",
+                "trade_id": "trade-a",
+                "position_id": "reused-position",
+                "label": "premature_tighten",
+                "confidence": 0.8,
+                "horizons": [{"horizon_minutes": 30, "future_pnl": 9.7}],
+                "evidence": {"tags": ["future_bars_complete"]},
+            }
+        ],
+    )
+
+    assert result["selected_scope"] == "supervisor"
+    assert result["supervisor_conclusion"]["review_id"] == "review-a"
+    assert result["entry_conclusion"]["source_ref_id"] == "review-a"
+    assert result["entry_conclusion"]["trade_id"] == "trade-a"
+
+
 def test_v16_orchestrator_dispatches_without_direct_runtime_mutation(tmp_path):
     db_path = tmp_path / "state.db"
     _seed_posterior_facts(db_path, time.time())
@@ -157,6 +199,7 @@ def test_v16_orchestrator_dispatches_without_direct_runtime_mutation(tmp_path):
     assert command["candidate_id"]
     assert command["boundary"]["does_not_write"][0] == "policy_suggestion"
     assert command["delegation"]["execution_owner"] == "position_supervisor_governance"
+    assert command["delegation"]["specialist_must_use"] == ["RiskPolicyService"]
 
     conn = connect_sqlite(db_path, read_only=True)
     try:
@@ -255,6 +298,9 @@ def test_v16_delegates_only_qualified_entry_quality_v2_evidence(tmp_path):
     assert delegated["command"]["target_agent"] == "autonomous_learning"
     assert delegated["command"]["scope_type"] == "entry_quality"
     assert delegated["command"]["evidence_fingerprint"] == "f" * 64
+    assert delegated["command"]["delegation"]["specialist_must_use"] == [
+        "RiskPolicyService"
+    ]
     rejected = service.delegate_entry_quality_control(
         {
             **gate,

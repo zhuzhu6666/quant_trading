@@ -371,7 +371,7 @@ def test_agent_generation_context_includes_scope_relevant_experience(tmp_path):
                  regime_id, setup_hash, decision_context_json,
                  outcome_label, reward_score, failure_tags_json, recommended_action,
                  evidence_strength, artifact_version, created_at)
-                VALUES (?, ?, 'trade_outcome_review', ?, 'live_review',
+                    VALUES (?, ?, 'trade_outcome_review', ?, 'trade_lesson_memory.v1',
                         'range', ?, ?, 'bad_loss', ?, '["weak_entry_signal"]',
                         'downweight', 0.9, 'v1', ?)
                 """,

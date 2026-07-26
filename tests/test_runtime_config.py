@@ -91,6 +91,27 @@ def test_bounded_demo_mode_resolution_is_pure_and_no_arg_read_does_not_refresh(
     assert rc.bounded_demo_mode_active() is True
 
 
+def test_operator_bounded_demo_control_exemption_is_narrow(monkeypatch) -> None:
+    monkeypatch.setattr(rc, "bounded_demo_mode_active", lambda _cfg: True)
+    cfg = rc.RuntimeConfig(autonomy_mode="demo_autonomous")
+
+    assert rc.operator_bounded_demo_control_exempt(
+        actor="operator:pytest",
+        patch={"runtime_incident_mode": "normal"},
+        cfg=cfg,
+    )
+    assert not rc.operator_bounded_demo_control_exempt(
+        actor="system:pytest",
+        patch={"runtime_incident_mode": "normal"},
+        cfg=cfg,
+    )
+    assert not rc.operator_bounded_demo_control_exempt(
+        actor="operator:pytest",
+        patch={"max_risk_per_trade": 0.02},
+        cfg=cfg,
+    )
+
+
 def test_replace_increments_version() -> None:
     v1 = rc.replace(rc.RuntimeConfig(shadow_vote_weight=0.1))
     assert v1 == 1

@@ -222,8 +222,8 @@ def test_brain_memory_retrieves_negative_memory_and_counter_evidence(tmp_path):
             (experience_id, trade_id, source_table, source_id, append_source,
              regime_id, outcome_label, reward_score,
              failure_tags_json, recommended_action, evidence_strength, created_at)
-            VALUES ('exp_loss_1', 'trade_1', 'trade_outcome_review', 'review_loss_1',
-                    'live_review', 'defensive', 'loss', -0.8,
+            VALUES ('trade_lesson:review_loss_1', 'trade_1', 'trade_outcome_review', 'review_loss_1',
+                    'trade_lesson_memory.v1', 'defensive', 'loss', -0.8,
                     '["simulation_gap"]', 'observe_only', 0.9, ?)
             """,
             (now - 30.0,),
@@ -316,11 +316,11 @@ def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path):
             """INSERT INTO experience_memory
                (experience_id, trade_id, source_table, source_id, decision_context_json,
                 append_source, outcome_label, reward_score, evidence_strength, created_at)
-               VALUES ('experience_bad', 'trade_bad', 'trade_outcome_review', 'review_bad', ?,
-                       'live_review',
+               VALUES ('trade_lesson:review_bad', 'trade_bad', 'trade_outcome_review', 'review_bad', ?,
+                       'trade_lesson_memory.v1',
                        'loss', -1, 1, 20),
-                      ('experience_clean', 'trade_clean', 'trade_outcome_review', 'review_clean', ?,
-                       'live_review',
+                      ('trade_lesson:review_clean', 'trade_clean', 'trade_outcome_review', 'review_clean', ?,
+                       'trade_lesson_memory.v1',
                        'win', 1, 1, 10)""",
             (
                 json.dumps({"review_json": contaminated}),
@@ -357,8 +357,8 @@ def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path):
 
     # Trade review and experience memory share the same trade lineage and may
     # be deduplicated into one current memory item.
-    assert {"experience_clean", "cf_clean"} <= source_ids
-    assert not {"review_bad", "experience_bad", "cf_bad"} & source_ids
+    assert {"trade_lesson:review_clean", "cf_clean"} <= source_ids
+    assert not {"review_bad", "trade_lesson:review_bad", "cf_bad"} & source_ids
     assert "suggestion_invalidated" not in source_ids
 
     planning_evidence = BrainActionPlanEvaluatorService(db_path)._load_evidence(limit=50)

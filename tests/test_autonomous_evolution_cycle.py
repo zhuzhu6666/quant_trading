@@ -10,6 +10,8 @@ from backend.services.brain_governance_candidate_review import ensure_brain_gove
 from backend.services.brain_governance_candidates import ensure_brain_governance_candidate_table
 from backend.services.proposal_registry import ensure_proposal_registry_table
 from backend.services.replay_harness import ReplayHarnessService
+from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+from backend.services.v16_command_gate import V16CommandGate
 
 
 def _readiness(*, replay_status: str = "fresh", release_status: str = "completed", posture: str = "full") -> dict:
@@ -549,6 +551,90 @@ def test_autonomous_demo_apply_plan_excludes_legacy_factor_approvals(tmp_path, m
     plan = AutonomousDemoApplyStepper(db_path).plan()
 
     assert plan["pending"]["sync_factor_weights"] == 1
+
+
+def test_v16_actionable_predicate_skips_stale_head_and_claimed_command(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    monkeypatch.setenv("QUANT_V16_COMMAND_MAX_AGE_SECONDS", "60")
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.executemany(
+            """
+            INSERT INTO brain_governance_candidate
+            (candidate_id, status, created_at, updated_at)
+            VALUES (?, 'active', ?, ?)
+            """,
+            [
+                ("candidate-stale", now - 120.0, now - 120.0),
+                ("candidate-fresh", now - 10.0, now - 10.0),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO v16_brain_command
+            (command_id, candidate_id, target_agent, scope_type, scope_key,
+             action, decision, status, claim_status, authority_issued_at,
+             created_at, updated_at)
+            VALUES (?, ?, 'position_supervisor_governance',
+                    'supervisor_template', 'position_supervisor',
+                    'switch_position_supervisor_template', 'delegate',
+                    'delegated_to_specialist', 'available', ?, ?, ?)
+            """,
+            [
+                ("command-stale", "candidate-stale", now - 120.0, now - 120.0, now - 120.0),
+                ("command-fresh", "candidate-fresh", now - 10.0, now - 10.0, now - 10.0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    stepper = AutonomousDemoApplyStepper(db_path)
+    assert stepper.plan()["pending"]["dispatch_v16_delegation"] == 1
+    assert V16BrainOrchestratorService(db_path).status()["actionable_command_count"] == 1
+    assert V16CommandGate.authorize(
+        db_path,
+        command_id="command-stale",
+        target_agent="position_supervisor_governance",
+        scope_type="supervisor_template",
+        scope_key="position_supervisor",
+        action="switch_position_supervisor_template",
+    )["allowed"] is False
+    cancelled = V16BrainOrchestratorService(
+        db_path
+    )._cancel_non_actionable_commands(persist=True)
+    assert cancelled["expired_delegate_count"] == 1
+    assert stepper.plan()["pending"]["dispatch_v16_delegation"] == 1
+
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE v16_brain_command
+            SET claim_status='claimed', claim_token='other-worker',
+                claimed_at=?, claim_expires_at=?
+            WHERE command_id='command-fresh'
+            """,
+            (now, now + 30.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert stepper.plan()["pending"]["dispatch_v16_delegation"] == 0
+    assert V16BrainOrchestratorService(db_path).status()["actionable_command_count"] == 0
+    assert V16CommandGate.authorize(
+        db_path,
+        command_id="command-fresh",
+        target_agent="position_supervisor_governance",
+        scope_type="supervisor_template",
+        scope_key="position_supervisor",
+        action="switch_position_supervisor_template",
+    )["allowed"] is False
 
 
 def test_autonomous_demo_apply_stepper_limits_conflict_resolution(tmp_path, monkeypatch):

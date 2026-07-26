@@ -503,7 +503,7 @@ class AgentScorecardService:
         ).fetchall()
         accepted = 0
         for row in rows:
-            if _text(row["append_source"]) in {"live_review", "trade_lesson_memory.v1"}:
+            if _text(row["append_source"]) == "trade_lesson_memory.v1":
                 source_review = _loads(row["source_review_json"], {})
                 if not _text(row["source_review_id"]) or review_has_system_contamination(source_review):
                     continue

@@ -182,7 +182,7 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
     assert "primary_responsibility" in experience["decision_context_json"]
     assert experience["source_table"] == "trade_outcome_review"
     assert experience["source_id"] == review["review_id"]
-    assert experience["append_source"] == "live_review"
+    assert experience["append_source"] == "trade_lesson_memory.v1"
     assert "overweight_noise_factor" in review["failure_tags"]
     assert experience["recommended_action"] == "downweight"
     assert suggestion is None
@@ -195,7 +195,7 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
     stored_experience = _rows(db_path, "SELECT * FROM experience_memory")[0]
     assert stored_experience["source_table"] == "trade_outcome_review"
     assert stored_experience["source_id"] == review["review_id"]
-    assert stored_experience["append_source"] == "live_review"
+    assert stored_experience["append_source"] == "trade_lesson_memory.v1"
     assert stored_experience["created_at"] == pytest.approx(1_000_000.0)
     assert len(_rows(db_path, "SELECT * FROM policy_suggestion")) == 0
 
@@ -237,51 +237,6 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
 
     ready = provider.build_training_samples(model_ready_only=True)
     assert len(ready) == 1
-
-
-def test_experience_builder_migrates_legacy_experience_sources(tmp_path):
-    db_path = str(tmp_path / "state.db")
-    ExperienceBuilder(db_path)
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, outcome_label, review_json, created_at)
-            VALUES ('review_legacy', 'legacy_trade', 'legacy_pos', 'good_win', '{}', 100.0)
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO experience_memory
-            (experience_id, trade_id, regime_id, setup_hash, decision_context_json,
-             outcome_label, reward_score, failure_tags_json, recommended_action,
-             evidence_strength, artifact_version, created_at)
-            VALUES ('exp_legacy', 'legacy_trade', '', 'legacy_hash', '{}',
-                    'good_win', 0.3, '[]', 'watch', 0.5, 'v1', 101.0)
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    ExperienceBuilder(db_path)
-
-    row = _rows(
-        db_path,
-        """
-        SELECT source_table, source_id, append_source, decision_context_json, created_at
-        FROM experience_memory
-        WHERE experience_id='exp_legacy'
-        """,
-    )[0]
-    context = json.loads(row["decision_context_json"])
-    assert row["source_table"] == "trade_outcome_review"
-    assert row["source_id"] == "review_legacy"
-    assert row["append_source"] == "legacy_experience_migrated.v1"
-    assert row["created_at"] == pytest.approx(100.0)
-    assert context["experience_source"]["source_id"] == "review_legacy"
-    assert context["experience_source"]["event_ts"] == pytest.approx(100.0)
 
 
 def test_feature_provider_exports_explainable_skip_decision_samples(tmp_path):

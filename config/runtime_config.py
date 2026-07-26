@@ -30,6 +30,9 @@ DEMO_AUTONOMY_MODES = frozenset({"demo_autonomous", "demo_nursery"})
 VALID_RUNTIME_INCIDENT_MODES = frozenset(
     {"normal", "shadow_only", "no_new_risk", "only_close", "frozen"}
 )
+OPERATOR_BOUNDED_DEMO_CONTROL_KEYS = frozenset(
+    {"governance_expansion_paused", "runtime_incident_mode"}
+)
 
 
 def resolve_bounded_demo_mode(cfg: Any, broker_cfg: Any) -> bool:
@@ -65,6 +68,27 @@ def bounded_demo_mode_active(cfg: Any | None = None) -> bool:
     except Exception:
         return False
     return resolve_bounded_demo_mode(current, broker_cfg)
+
+
+def operator_bounded_demo_control_exempt(
+    *,
+    actor: str,
+    patch: Any,
+    cfg: Any,
+) -> bool:
+    """Allow explicit operator control changes in the bounded Demo sandbox.
+
+    This exemption is deliberately narrow: it does not apply to autonomous
+    actors, live accounts, trading parameters, or static release flags.
+    """
+
+    keys = set(dict(patch or {}))
+    return bool(
+        str(actor or "").startswith("operator:")
+        and keys
+        and keys <= OPERATOR_BOUNDED_DEMO_CONTROL_KEYS
+        and bounded_demo_mode_active(cfg)
+    )
 
 
 def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
@@ -730,8 +754,30 @@ def overlay_base_config(db_path: str | Path | None = None) -> Dict[str, Any]:
         registered = _overlay_base_config_by_db.get(key)
         if registered is not None:
             return copy.deepcopy(registered)
+    try:
+        from backend.core.db import STATE_DB, is_state_db_path
+
+        effective_db_path = db_path if db_path is not None else STATE_DB
+        production_state = is_state_db_path(effective_db_path)
+    except Exception:  # noqa: BLE001
+        production_state = False
+    if production_state:
+        # A short-lived production caller may reach RuntimeConfig before the
+        # backend/worker bootstrap has registered its immutable YAML layer.
+        # Rebuilding a durable overlay on the holder's dataclass defaults can
+        # invent a config-hash mismatch and persist a false no-new-risk latch.
+        from backend.services.runtime_config_startup import load_yaml_runtime_config
+
+        yaml_base, _yaml_payload = load_yaml_runtime_config()
+        register_overlay_base(
+            yaml_base,
+            effective_db_path,
+            replace_existing=False,
+        )
+        return yaml_base.to_dict()
     # Compatibility for callers that mutate an overlay before the explicit
-    # startup restore path has run (mostly tools/tests).  Capture once only.
+    # startup restore path has run in isolated state (mostly tests).  Capture
+    # once only; production state must always rebuild from its YAML authority.
     fallback = shared_holder().get().to_dict()
     register_overlay_base(fallback, db_path, replace_existing=False)
     return copy.deepcopy(fallback)

@@ -31,6 +31,7 @@ from backend.services._brain_helpers import (
     safe_float,
     text,
 )
+from backend.services.agent_authority import control_surface, execution_owner
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.v16_brain_snapshot import (
     BrainMemoryService,
@@ -261,12 +262,9 @@ class BrainActionPlannerService:
         validation_refs = self._validation_refs(snapshot_id, hypothesis, memory)
         posterior = dict(memory.get("posterior_arbitration") or {})
         selected = dict(posterior.get("selected_conclusion") or {})
-        delegated_agent = {
-            "factor_weight": "factor_governance",
-            "parameter_template": "autonomous_learning",
-            "context_policy": "autonomous_learning",
-            "supervisor_template": "position_supervisor_governance",
-        }.get(action["scope_type"], "autonomous_learning")
+        delegated_agent = execution_owner(
+            control_surface(action["scope_type"], action["action_type"])
+        )
         delegation = {
             "schema_version": "v16_agent_delegation.v1",
             "target_agent": delegated_agent,
@@ -1004,7 +1002,9 @@ class BrainMediumImpactGovernanceService:
             status = "blocked_by_risk"
         else:
             delegation = dict((plan.get("scope") or {}).get("delegation") or {})
-            target_agent = str(delegation.get("target_agent") or "autonomous_learning")
+            target_agent = execution_owner(
+                control_surface(mapped["scope_type"], mapped["policy_action"])
+            )
             candidate = BrainGovernanceCandidateService(self.db_path).create_candidate(
                 candidate_id=self._candidate_id(evaluation=evaluation, mapped=mapped),
                 source_agent="v16_brain", source_kind="brain_medium_impact_governance",

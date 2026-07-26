@@ -68,13 +68,6 @@
 - 当前：Safety 为 shadow，尚未满足完整持仓生命周期或 24 小时无仓观察；Generation 开关不变。
 - 退出：观察与故障矩阵通过、受控发布稳定后删除 loop globals、旧 safety 尾部执行和并发 refresh 兼容。
 
-### no-new-risk cause 恢复回归
-
-- 状态：`regressed`
-- 事实：最新 committed/current RuntimeConfig mutation 曾出现 target/committed hash binding 不完整，触发 `runtime_config_overlay_refresh` cause。
-- 当前：保持 latch，不允许 blanket clear。
-- 退出：定位 hash 漂移，verified restore 后只由对应 owner 精确释放对应 cause，并完成回归与运行验证。
-
 ### live_service 领域重力
 
 - 状态：`migrating`

@@ -201,18 +201,6 @@ def test_rebuild_learning_state_preserves_non_factor_policy_suggestions(tmp_path
                     '{}', 'good_win', 0.4, '[]', 'watch', 0.7, 'v1', 100.0)
             """
         )
-        conn.execute(
-            """
-            INSERT INTO experience_memory
-            (experience_id, trade_id, source_table, source_id, append_source,
-             regime_id, setup_hash, decision_context_json, outcome_label,
-             reward_score, failure_tags_json, recommended_action,
-             evidence_strength, artifact_version, created_at)
-            VALUES ('exp_old_backfill', 'old_trade', 'trade_outcome_review',
-                    'review_old_backfill', 'learning_backfill.v1', '', 'old_hash',
-                    '{}', 'bad_loss', -0.4, '[]', 'downweight', 0.7, 'v1', 90.0)
-            """
-        )
         learning_backfill.rebuild_learning_state(conn)
         kept = conn.execute(
             """
@@ -232,8 +220,8 @@ def test_rebuild_learning_state_preserves_non_factor_policy_suggestions(tmp_path
         live_exp = conn.execute(
             "SELECT append_source FROM experience_memory WHERE experience_id='exp_live_keep'"
         ).fetchone()
-        old_backfill = conn.execute(
-            "SELECT 1 FROM experience_memory WHERE experience_id='exp_old_backfill'"
+        duplicate_backfill = conn.execute(
+            "SELECT 1 FROM experience_memory WHERE append_source='learning_backfill.v1'"
         ).fetchone()
     finally:
         conn.close()
@@ -243,7 +231,7 @@ def test_rebuild_learning_state_preserves_non_factor_policy_suggestions(tmp_path
     assert kept["status"] == "approved"
     assert template_stat["sample_count"] == 3
     assert live_exp["append_source"] == "live_review"
-    assert old_backfill is None
+    assert duplicate_backfill is None
 
 
 def test_rebuild_learning_state_excludes_contaminated_review_lineage(tmp_path):

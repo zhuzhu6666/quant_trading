@@ -102,13 +102,36 @@ def build_posterior_arbitration(
             "source_ref_id": str(item.get("counterfactual_id") or ""),
             "position_id": str(item.get("position_id") or ""),
             "review_id": str(item.get("review_id") or ""),
+            "trade_id": str(item.get("trade_id") or ""),
             "evidence_tags": tags,
         })
     supervisor = max(supervisor_items, key=lambda item: item["evidence_score"]) if supervisor_items else {}
 
     entry = {}
-    if reviews:
-        review = max(reviews, key=lambda item: safe_float(item.get("created_at")))
+    related_reviews = reviews
+    if supervisor:
+        review_id = str(supervisor.get("review_id") or "")
+        trade_id = str(supervisor.get("trade_id") or "")
+        position_id = str(supervisor.get("position_id") or "")
+        if review_id:
+            related_reviews = [
+                item for item in reviews
+                if str(item.get("review_id") or item.get("source_id") or "") == review_id
+            ]
+        elif trade_id:
+            related_reviews = [
+                item for item in reviews
+                if str(item.get("trade_id") or "") == trade_id
+            ]
+        elif position_id:
+            related_reviews = [
+                item for item in reviews
+                if str(item.get("position_id") or "") == position_id
+            ]
+        else:
+            related_reviews = []
+    if related_reviews:
+        review = max(related_reviews, key=lambda item: safe_float(item.get("created_at")))
         review_json = review.get("review") if isinstance(review.get("review"), dict) else review.get("review_json")
         if isinstance(review_json, str):
             try:
@@ -147,6 +170,7 @@ def build_posterior_arbitration(
                 "source_ref_type": "trade_outcome_review",
                 "source_ref_id": str(review.get("review_id") or ""),
                 "position_id": str(review.get("position_id") or ""),
+                "trade_id": str(review.get("trade_id") or ""),
             }
 
     # A successful/neutral trade review is useful context but is not an entry
@@ -1087,7 +1111,7 @@ class BrainMemoryService:
             r.review_id AS source_review_id, r.review_json AS source_review_json
             FROM experience_memory e
             LEFT JOIN trade_outcome_review r ON r.review_id=e.source_id
-            WHERE e.append_source IN ('live_review', 'trade_lesson_memory.v1')
+            WHERE e.append_source='trade_lesson_memory.v1'
             ORDER BY e.created_at DESC""").fetchall()
         items = []
         for row in rows:
