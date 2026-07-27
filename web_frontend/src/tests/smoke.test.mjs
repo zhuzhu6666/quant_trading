@@ -19,7 +19,7 @@ const requiredFiles = [
   "src/pages/OpsPage.tsx",
   "src/pages/LearningPage.tsx",
   "src/pages/ModelsPage.tsx",
-  "src/pages/V15CockpitPage.tsx",
+  "src/pages/EvidencePage.tsx",
   "src/pages/V16BrainPage.tsx",
   "src/pages/WorkspacePages.tsx",
   "src/styles/console.css",
@@ -59,8 +59,9 @@ assert.match(appSource, /path="\/v15"/);
 assert.match(appSource, /path="\/v16"/);
 assert.match(appSource, /lazy\(\(\) => import/);
 
-const v15Source = fs.readFileSync(path.join(process.cwd(), "src/pages/V15CockpitPage.tsx"), "utf8");
-assert.match(v15Source, /order_outcome_causality_replay/);
-assert.match(v15Source, /supervisor_counterfactual_replay/);
+const evidenceSource = fs.readFileSync(path.join(process.cwd(), "src/pages/EvidencePage.tsx"), "utf8");
+assert.match(evidenceSource, /enabled: activeTab === "replay"/);
+assert.match(evidenceSource, /enabled: activeTab === "incident"/);
+assert.match(evidenceSource, /enabled: activeTab === "release"/);
 
 console.log("web_frontend smoke test: ok");

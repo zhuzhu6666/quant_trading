@@ -883,3 +883,28 @@ export async function emergencyClose(confirmed = false): Promise<Record<string, 
     body: JSON.stringify({ broker: "ctrader", symbol: null }),
   });
 }
+
+export type BacktestRequest = {
+  symbol: string;
+  timeframe: string;
+  start?: string;
+  end?: string;
+  max_bars: number;
+  warmup_bars: number;
+  initial_equity: number;
+  volume_lots: number;
+  commission_per_lot_round_turn: number;
+  slippage_bps: number;
+};
+
+export async function startHistoricalBacktest(
+  payload: BacktestRequest,
+): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>("/api/backtest/run", payload);
+}
+
+export async function getHistoricalBacktestJob(
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>(`/api/backtest/${encodeURIComponent(jobId)}`);
+}

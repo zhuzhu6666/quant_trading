@@ -444,11 +444,6 @@ class BackendReadinessService:
         payload["agent_chain_health"] = agent_chain_health
         live_autonomy = self._timed_component("live_autonomy", lambda: self._live_autonomy_status(payload))
         payload["live_autonomy"] = live_autonomy
-        autonomous_evolution_cycle = self._timed_component(
-            "autonomous_evolution_cycle",
-            lambda: self._autonomous_evolution_cycle_status(payload),
-        )
-        payload["autonomous_evolution_cycle"] = autonomous_evolution_cycle
         payload["v16"] = {
             "schema_version": "v16_readiness_contract.v1",
             "phase": "phase5_live_ready_guardrails",
@@ -475,7 +470,6 @@ class BackendReadinessService:
             "agent_briefing": agent_briefing,
             "agent_chain_health": agent_chain_health,
             "live_autonomy": live_autonomy,
-            "autonomous_evolution_cycle": autonomous_evolution_cycle,
             "control_plane_boundaries": {
                 "read_only": True,
                 "affects_trading": False,
@@ -518,6 +512,12 @@ class BackendReadinessService:
                 "autonomous_evolution_cycle_read_only": True,
             },
         }
+        autonomous_evolution_cycle = self._timed_component(
+            "autonomous_evolution_cycle",
+            lambda: self._autonomous_evolution_cycle_status(payload),
+        )
+        payload["autonomous_evolution_cycle"] = autonomous_evolution_cycle
+        payload["v16"]["autonomous_evolution_cycle"] = autonomous_evolution_cycle
         autonomous_blueprint = self._timed_component("autonomous_blueprint", lambda: self._autonomous_blueprint_status(payload))
         payload["autonomous_blueprint"] = autonomous_blueprint
         payload["v16"]["autonomous_blueprint"] = autonomous_blueprint
@@ -1945,12 +1945,22 @@ class BackendReadinessService:
     def _agent_scorecard_status(self) -> dict[str, Any]:
         try:
             scorecard = AgentScorecardService(self.db_path).scorecard(limit=300)
+            scorecard_by_agent = {
+                str(item.get("source_agent") or ""): item
+                for item in scorecard.get("items") or []
+            }
+            registered_sources = AgentAuthorityRegistryService().list_agents().get("sources") or []
+            agents = [
+                scorecard_by_agent[str(source.get("source_agent") or "")]
+                for source in registered_sources
+                if str(source.get("source_agent") or "") in scorecard_by_agent
+            ]
             return {
                 "ok": bool(scorecard.get("ok")),
                 "schema_version": "agent_scorecard_readiness.v1",
                 "status": "available" if scorecard.get("items") else "empty",
                 "summary": scorecard.get("summary") or {},
-                "top_agents": (scorecard.get("items") or [])[:6],
+                "agents": agents,
                 "boundary": scorecard.get("boundary") or AgentScorecardService.boundary(),
             }
         except Exception as exc:

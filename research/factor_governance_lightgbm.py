@@ -354,12 +354,23 @@ class FactorGovernanceLightGBMService:
         from sklearn.metrics import accuracy_score, balanced_accuracy_score, recall_score, roc_auc_score
 
         samples = self.load_samples(limit=limit)
+        from backend.services.parity_replay import load_parity_learning_samples
+
+        replay_samples = load_parity_learning_samples("factor")
         distinct_trade_ids = {
             str(item.get("trade_id") or item.get("review_id") or "")
             for item in samples
             if str(item.get("trade_id") or item.get("review_id") or "")
         }
-        if len(distinct_trade_ids) < int(min_samples):
+        replay_trade_ids = {
+            str(item.get("trade_id") or item.get("review_id") or "")
+            for item in replay_samples
+            if str(item.get("trade_id") or item.get("review_id") or "")
+        }
+        if (
+            len(distinct_trade_ids) < 2
+            or len(distinct_trade_ids | replay_trade_ids) < int(min_samples)
+        ):
             return {
                 "ok": False,
                 "model_type": MODEL_TYPE,
@@ -367,6 +378,7 @@ class FactorGovernanceLightGBMService:
                 "feature_schema_version": FEATURE_SCHEMA_VERSION,
                 "sample_count": len(samples),
                 "distinct_trade_count": len(distinct_trade_ids),
+                "replay_distinct_trade_count": len(replay_trade_ids),
                 "data_quality": dict(self.last_data_quality),
                 "error": "insufficient_distinct_factor_trades",
             }
@@ -393,38 +405,8 @@ class FactorGovernanceLightGBMService:
         if not train_samples or not holdout_samples:
             return {"ok": False, "model_type": MODEL_TYPE, "error": "grouped_time_split_empty"}
 
-        x_train = pd.DataFrame([item["features"] for item in train_samples], columns=FEATURE_NAMES)
-        y_train = [int(item["label"]) for item in train_samples]
         x_holdout = pd.DataFrame([item["features"] for item in holdout_samples], columns=FEATURE_NAMES)
         y_holdout = [int(item["label"]) for item in holdout_samples]
-        trade_counts: dict[str, int] = {}
-        for item in train_samples:
-            key = str(item.get("trade_id") or item.get("review_id") or "")
-            trade_counts[key] = trade_counts.get(key, 0) + 1
-        newest_train_ts = max((_safe_float(item.get("created_at")) for item in train_samples), default=0.0)
-        train_weights = []
-        for item in train_samples:
-            key = str(item.get("trade_id") or item.get("review_id") or "")
-            age_days = max(0.0, newest_train_ts - _safe_float(item.get("created_at"))) / 86400.0
-            recency_weight = math.exp(-math.log(2.0) * age_days / 14.0)
-            train_weights.append(recency_weight / max(1, trade_counts.get(key, 1)))
-
-        model = lgb.LGBMClassifier(
-            objective="binary",
-            n_estimators=140,
-            learning_rate=0.04,
-            num_leaves=15,
-            min_child_samples=max(1, min(20, len(train_samples) // 4)),
-            subsample=0.9,
-            colsample_bytree=0.9,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=1,
-            verbosity=-1,
-        )
-        model.fit(x_train, y_train, sample_weight=train_weights)
-        train_prob = model.predict_proba(x_train)[:, 1]
-        holdout_prob = model.predict_proba(x_holdout)[:, 1]
 
         def _metrics(y_true: list[int], probs: Any) -> dict[str, Any]:
             preds = [1 if float(x) >= 0.5 else 0 for x in probs]
@@ -450,6 +432,80 @@ class FactorGovernanceLightGBMService:
                 "majority_class": majority_label,
             }
 
+        def _weights(items: list[dict[str, Any]], replay_scale: float = 1.0) -> list[float]:
+            counts: dict[str, int] = {}
+            for item in items:
+                key = str(item.get("trade_id") or item.get("review_id") or "")
+                counts[key] = counts.get(key, 0) + 1
+            newest = max((_safe_float(item.get("created_at")) for item in items), default=0.0)
+            return [
+                (
+                    math.exp(
+                        -math.log(2.0)
+                        * max(0.0, newest - _safe_float(item.get("created_at")))
+                        / 86400.0
+                        / 14.0
+                    )
+                    / max(1, counts.get(str(item.get("trade_id") or item.get("review_id") or ""), 1))
+                    * replay_scale
+                )
+                for item in items
+            ]
+
+        def _fit(training: list[dict[str, Any]], weights: list[float]):
+            fitted = lgb.LGBMClassifier(
+                objective="binary",
+                n_estimators=140,
+                learning_rate=0.04,
+                num_leaves=15,
+                min_child_samples=max(1, min(20, len(training) // 4)),
+                subsample=0.9,
+                colsample_bytree=0.9,
+                class_weight="balanced",
+                random_state=42,
+                n_jobs=1,
+                verbosity=-1,
+            )
+            x = pd.DataFrame([item["features"] for item in training], columns=FEATURE_NAMES)
+            fitted.fit(x, [int(item["label"]) for item in training], sample_weight=weights)
+            return fitted, x
+
+        real_weights = _weights(train_samples)
+        baseline_model, baseline_x = _fit(train_samples, real_weights)
+        baseline_holdout = _metrics(
+            y_holdout, baseline_model.predict_proba(x_holdout)[:, 1]
+        )
+        replay_raw_weights = _weights(replay_samples)
+        replay_scale = min(
+            1.0,
+            sum(real_weights) / max(sum(replay_raw_weights), 1e-12),
+        )
+        augmented_samples = train_samples + replay_samples
+        augmented_model, augmented_x = _fit(
+            augmented_samples,
+            real_weights + [weight * replay_scale for weight in replay_raw_weights],
+        )
+        augmented_holdout = _metrics(
+            y_holdout, augmented_model.predict_proba(x_holdout)[:, 1]
+        )
+        compare_names = ("accuracy", "balanced_accuracy", "auc")
+        comparable = [
+            name for name in compare_names
+            if baseline_holdout.get(name) is not None and augmented_holdout.get(name) is not None
+        ]
+        use_augmented = bool(replay_samples) and bool(comparable) and all(
+            float(augmented_holdout[name]) >= float(baseline_holdout[name])
+            for name in comparable
+        ) and any(
+            float(augmented_holdout[name]) > float(baseline_holdout[name])
+            for name in comparable
+        )
+        model = augmented_model if use_augmented else baseline_model
+        selected_train = augmented_samples if use_augmented else train_samples
+        selected_x = augmented_x if use_augmented else baseline_x
+        train_prob = model.predict_proba(selected_x)[:, 1]
+        holdout_prob = model.predict_proba(x_holdout)[:, 1]
+
         feature_importance = [
             {"feature": name, "importance": int(value)}
             for name, value in sorted(
@@ -458,10 +514,24 @@ class FactorGovernanceLightGBMService:
             )
         ]
         metrics = {
-            "train": _metrics(y_train, train_prob),
+            "train": _metrics([int(item["label"]) for item in selected_train], train_prob),
             "holdout": _metrics(y_holdout, holdout_prob),
             "sample_count": len(samples),
             "distinct_trade_count": len(ordered_trades),
+            "replay_sample_count": len(replay_samples),
+            "replay_distinct_trade_count": len(replay_trade_ids),
+            "real_holdout_count": len(holdout_samples),
+            "training_sources": {
+                "real_train_samples": len(train_samples),
+                "historical_replay_samples": len(replay_samples),
+                "historical_replay_weight_scale": replay_scale,
+                "selected": "real_plus_replay" if use_augmented else "real_baseline",
+            },
+            "augmentation_comparison": {
+                "baseline_real_holdout": baseline_holdout,
+                "augmented_real_holdout": augmented_holdout,
+                "selected": "augmented" if use_augmented else "baseline",
+            },
             "train_trade_count": len(set(ordered_trades) - holdout_trade_ids),
             "holdout_trade_count": len(holdout_trade_ids),
             "feature_count": len(FEATURE_NAMES),

@@ -174,6 +174,17 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["v16"]["control_plane_boundaries"]["agent_scorecard_read_only"] is True
     assert result["v16"]["control_plane_boundaries"]["agent_briefing_read_only"] is True
     assert result["v16"]["control_plane_boundaries"]["agent_trade_feedback_read_only"] is True
+    apply_step = next(
+        step
+        for step in result["autonomous_evolution_cycle"]["steps"]
+        if step["step"] == "single_apply_boundary"
+    )
+    assert apply_step == {
+        "step": "single_apply_boundary",
+        "status": "ok",
+        "ok": True,
+    }
+    assert result["v16"]["autonomous_evolution_cycle"] is result["autonomous_evolution_cycle"]
     assert result["brain_state"]["ok"] is True
     assert result["brain_state"]["latest_snapshot"]["affects_trading"] is False
     assert result["brain_action_plans"]["schema_version"] == "brain_action_plan_readiness.v1"
@@ -203,6 +214,17 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     assert result["agent_authority"]["registered_agents"] == 7
     assert result["v16"]["agent_authority"]["status"] == "ok"
     assert result["agent_scorecard"]["schema_version"] == "agent_scorecard_readiness.v1"
+    assert len(result["agent_scorecard"]["agents"]) == 7
+    assert {item["source_agent"] for item in result["agent_scorecard"]["agents"]} == {
+        "autonomous_learning",
+        "factor_governance",
+        "factor_pruning_governance",
+        "lightgbm_shadow_models",
+        "llm_advisory",
+        "position_supervisor_governance",
+        "v16_brain",
+    }
+    assert "top_agents" not in result["agent_scorecard"]
     assert result["agent_briefing"]["schema_version"] == "agent_briefing_readiness.v1"
     assert result["agent_chain_health"]["schema_version"] == "agent_chain_health.v1"
     assert result["autonomous_blueprint"]["schema_version"] == "autonomous_trading_blueprint_status.v1"

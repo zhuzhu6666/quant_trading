@@ -247,13 +247,23 @@
       },
       "BacktestRequest": {
         "properties": {
-          "enable_circuit": {
-            "default": false,
-            "title": "Enable Circuit",
-            "type": "boolean"
+          "commission_per_lot_round_turn": {
+            "default": 6.0,
+            "minimum": 0.0,
+            "title": "Commission Per Lot Round Turn",
+            "type": "number"
           },
-          "risk_per_trade_pct": {
+          "contract_size": {
+            "default": 100.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Contract Size",
+            "type": "number"
+          },
+          "end": {
             "anyOf": [
+              {
+                "type": "string"
+              },
               {
                 "type": "number"
               },
@@ -261,7 +271,40 @@
                 "type": "null"
               }
             ],
-            "title": "Risk Per Trade Pct"
+            "title": "End"
+          },
+          "initial_equity": {
+            "default": 10000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Initial Equity",
+            "type": "number"
+          },
+          "max_bars": {
+            "default": 5000,
+            "maximum": 20000.0,
+            "minimum": 2.0,
+            "title": "Max Bars",
+            "type": "integer"
+          },
+          "slippage_bps": {
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Slippage Bps",
+            "type": "number"
+          },
+          "start": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start"
           },
           "symbol": {
             "default": "XAUUSD+",
@@ -269,9 +312,22 @@
             "type": "string"
           },
           "timeframe": {
-            "default": "M15",
+            "default": "M5",
             "title": "Timeframe",
             "type": "string"
+          },
+          "volume_lots": {
+            "default": 0.01,
+            "exclusiveMinimum": 0.0,
+            "title": "Volume Lots",
+            "type": "number"
+          },
+          "warmup_bars": {
+            "default": 150,
+            "maximum": 1000.0,
+            "minimum": 0.0,
+            "title": "Warmup Bars",
+            "type": "integer"
           }
         },
         "title": "BacktestRequest",
@@ -2962,117 +3018,6 @@
         "title": "ParameterTemplateUpsertRequest",
         "type": "object"
       },
-      "ParityReplayRunRequest": {
-        "properties": {
-          "as_of": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "As Of"
-          },
-          "commission_per_lot_round_turn": {
-            "default": 6.0,
-            "minimum": 0.0,
-            "title": "Commission Per Lot Round Turn",
-            "type": "number"
-          },
-          "contract_size": {
-            "default": 100.0,
-            "exclusiveMinimum": 0.0,
-            "title": "Contract Size",
-            "type": "number"
-          },
-          "end": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "End"
-          },
-          "expected_bindings": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Expected Bindings",
-            "type": "object"
-          },
-          "initial_equity": {
-            "default": 10000.0,
-            "exclusiveMinimum": 0.0,
-            "title": "Initial Equity",
-            "type": "number"
-          },
-          "max_bars": {
-            "default": 500,
-            "maximum": 5000.0,
-            "minimum": 2.0,
-            "title": "Max Bars",
-            "type": "integer"
-          },
-          "persist_artifact": {
-            "default": true,
-            "title": "Persist Artifact",
-            "type": "boolean"
-          },
-          "slippage_bps": {
-            "default": 0.0,
-            "minimum": 0.0,
-            "title": "Slippage Bps",
-            "type": "number"
-          },
-          "start": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Start"
-          },
-          "symbol": {
-            "default": "XAUUSD+",
-            "title": "Symbol",
-            "type": "string"
-          },
-          "timeframe": {
-            "default": "M15",
-            "title": "Timeframe",
-            "type": "string"
-          },
-          "volume_lots": {
-            "default": 0.01,
-            "exclusiveMinimum": 0.0,
-            "title": "Volume Lots",
-            "type": "number"
-          },
-          "warmup_bars": {
-            "default": 150,
-            "maximum": 1000.0,
-            "minimum": 0.0,
-            "title": "Warmup Bars",
-            "type": "integer"
-          }
-        },
-        "title": "ParityReplayRunRequest",
-        "type": "object"
-      },
       "PositionQualityLightGBMShadowRequest": {
         "properties": {
           "artifact_dir": {
@@ -4504,7 +4449,6 @@
     },
     "/api/backtest/report/latest": {
       "get": {
-        "description": "Fetch the most recent backtest report.",
         "operationId": "get_latest_report_api_backtest_report_latest_get",
         "parameters": [
           {
@@ -4555,7 +4499,6 @@
     },
     "/api/backtest/run": {
       "post": {
-        "description": "Submit a backtest job. Returns 202 with job_id (sync API for now).",
         "operationId": "run_api_backtest_run_post",
         "parameters": [
           {
@@ -4673,9 +4616,67 @@
         ]
       }
     },
+    "/api/backtest/{job_id}/cancel": {
+      "post": {
+        "operationId": "cancel_job_api_backtest__job_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Cancel Job Api Backtest  Job Id  Cancel Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Job",
+        "tags": [
+          "backtest"
+        ]
+      }
+    },
     "/api/backtest/{job_id}/report": {
       "get": {
-        "description": "Fetch backtest report for a completed job.",
         "operationId": "get_job_report_api_backtest__job_id__report_get",
         "parameters": [
           {
@@ -17390,67 +17391,6 @@
           }
         },
         "summary": "Get Latest Replay Report",
-        "tags": [
-          "ops"
-        ]
-      }
-    },
-    "/api/ops/replay/parity-run": {
-      "post": {
-        "description": "Run the causal parity assessment without granting governance authority.",
-        "operationId": "run_parity_replay_harness_api_ops_replay_parity_run_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ParityReplayRunRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response Run Parity Replay Harness Api Ops Replay Parity Run Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Run Parity Replay Harness",
         "tags": [
           "ops"
         ]

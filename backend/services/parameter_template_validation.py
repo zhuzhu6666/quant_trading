@@ -26,8 +26,8 @@ from backend.core.db import (
     state_pg_enabled,
 )
 from backend.jobs.progress import ProgressCB
-from backend.services.backtest_runner import _load_bars
 from backend.services.backtest_service import run_backtest
+from backend.services.parity_replay import MonthlyPITBarLoader, ParityReplayRequest
 from backend.services.factor_cards import clear_factor_card_cache
 from backend.services.parameter_templates import (
     ParameterTemplateService,
@@ -955,7 +955,7 @@ def build_offline_validation_plan(boundary: dict[str, Any]) -> list[dict[str, An
             "note": "offline_deep required before runtime switch",
         },
         {
-            "stage": "backtest_sweep",
+            "stage": "parity_backtest",
             "status": "queued",
             "kind": "backtest",
             "note": "run parameter-template candidate against existing backtest sweep entry",
@@ -1193,9 +1193,17 @@ def run_parameter_template_offline_validation(
     progress_cb("planning", 5, f"planning offline validation for {factor_id}")
     backtest_params = {
         "symbol": params.get("symbol", "XAUUSD+"),
-        "timeframe": params.get("timeframe", "M15"),
-        "risk_per_trade_pct": params.get("risk_per_trade_pct"),
-        "enable_circuit": bool(params.get("enable_circuit", False)),
+        "timeframe": params.get("timeframe", "M5"),
+        "start": params.get("start"),
+        "end": params.get("end"),
+        "max_bars": min(20_000, int(params.get("max_bars") or 5000)),
+        "warmup_bars": int(params.get("warmup_bars") or 150),
+        "initial_equity": float(params.get("initial_equity") or 10_000.0),
+        "volume_lots": float(params.get("volume_lots") or 0.01),
+        "commission_per_lot_round_turn": float(
+            params.get("commission_per_lot_round_turn") or 6.0
+        ),
+        "slippage_bps": float(params.get("slippage_bps") or 0.0),
     }
     backtest_result = run_backtest(backtest_params, progress_cb)
     plan[1]["status"] = "completed"
@@ -1203,9 +1211,8 @@ def run_parameter_template_offline_validation(
     progress_cb("walk_forward", 93, f"running purged walk-forward for {factor_id}")
     target_template = boundary.get("target_template") or {}
     current_template = boundary.get("current_template") or {}
-    base_df = _load_bars(
-        str(backtest_params.get("symbol") or "XAUUSD+"),
-        str(backtest_params.get("timeframe") or "M15"),
+    base_df, _data_source = MonthlyPITBarLoader().load(
+        ParityReplayRequest.from_mapping(backtest_params)
     )
     walk_forward = _evaluate_factor_template(
         factor_id=factor_id,
@@ -1269,7 +1276,7 @@ def run_parameter_template_offline_validation(
         "release_candidate": release_candidate,
         "report_path": report_path,
         "note": (
-            "legacy sweep is diagnostic_only; candidate cannot be approved or deployed"
+            "Parity 回测仅作模拟研究；候选仍需真实证据后才能批准或部署"
             if release_status == "diagnostic_only"
             else "research metadata is missing; candidate requires revalidation before review or deploy"
             if release_status == "legacy_quarantined"

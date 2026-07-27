@@ -195,7 +195,7 @@ session 只有 `source` 为权威 `ctrader_deals*` 时才可 known；`degraded_c
 | `GET /api/ops/replay/latest` | `ops.replay-latest.v2` | `replay_report.created_at` |
 | `POST /api/ops/replay/run` | `ops.replay-run.v2` | durable replay report ID + 时间 |
 | `POST /api/ops/replay/bar-run` | `ops.replay-bar-run.v2` | durable replay report ID + 时间 |
-| `POST /api/ops/replay/parity-run` | `ops.parity-replay-run.v2` | replay ID + artifact path/hash + 时间 |
+| `POST /api/backtest/run` | 无 `fact.v1`；返回持久任务 ID | 唯一 Parity 历史回测入口；任务结果只返回指标、样本计数与工件位置，完整交易/事件/训练样本保存在已校验回放工件 |
 | `POST /api/ops/replay/bar-preview` | `ops.replay-bar-preview.v2` | 明确不持久化，兼容 unknown |
 | `GET /api/ops/replay/bar-decisions` | `ops.replay-bar-decisions.v2` | `decision_ledger.decision_ts` |
 | `POST /api/ops/incident-playbook/run` | `ops.incident-playbook-run.v2` | durable playbook ID + 时间 |

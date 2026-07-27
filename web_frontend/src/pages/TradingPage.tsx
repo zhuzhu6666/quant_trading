@@ -36,6 +36,7 @@ import {
 } from "@/lib/compat";
 import { translateDisplayValue } from "@/lib/display";
 import { decodeCanonicalRiskSnapshot, knownMetric } from "@/api/riskSnapshot";
+import { queryKeys } from "@/api/queryKeys";
 
 type PositionRow = {
   symbol: string;
@@ -127,7 +128,7 @@ export function TradingPage() {
   const queryClient = useQueryClient();
 
   const loopQuery = useQuery({
-    queryKey: ["loop-status", "trading"],
+    queryKey: queryKeys.loopStatus,
     queryFn: getLoopStatus,
     refetchInterval: 2500,
     staleTime: 1500,
@@ -135,7 +136,7 @@ export function TradingPage() {
   });
 
   const accountQuery = useQuery({
-    queryKey: ["account", "trading"],
+    queryKey: queryKeys.account,
     queryFn: getAccount,
     refetchInterval: 2500,
     staleTime: 1500,
@@ -164,7 +165,7 @@ export function TradingPage() {
     enabled: authenticated,
   });
   const riskQuery = useQuery({
-    queryKey: ["risk-summary", "trading"],
+    queryKey: queryKeys.riskSummary,
     queryFn: getRiskSummary,
     refetchInterval: 10_000,
     staleTime: 5_000,
@@ -374,12 +375,12 @@ export function TradingPage() {
 
   const refreshAll = async () => {
     await refresh();
-    await queryClient.invalidateQueries({ queryKey: ["loop-status", "trading"] });
-    await queryClient.invalidateQueries({ queryKey: ["account", "trading"] });
+    await queryClient.invalidateQueries({ queryKey: queryKeys.loopStatus });
+    await queryClient.invalidateQueries({ queryKey: queryKeys.account });
     await queryClient.invalidateQueries({ queryKey: ["positions", "trading"] });
     await queryClient.invalidateQueries({ queryKey: ["live-status", "trading"] });
     await queryClient.invalidateQueries({ queryKey: ["strategy-status", "trading"] });
-    await queryClient.invalidateQueries({ queryKey: ["risk-summary", "trading"] });
+    await queryClient.invalidateQueries({ queryKey: queryKeys.riskSummary });
     await queryClient.invalidateQueries({ queryKey: ["factor-v4-stats", "trading"] });
     await queryClient.invalidateQueries({ queryKey: ["factor-v4-recent-ticks", "trading"] });
   };
@@ -495,7 +496,7 @@ export function TradingPage() {
               <Field label="执行模式" value={translateDisplayValue(pickString(strategyStatus, ["execution_mode", "mode"], loopMode))} />
               <Field label="当前方向" value={translateDisplayValue(signalDirection)} />
               <Field label="综合分" value={formatDecimal(signalScore, 4)} />
-              <Field label="闸门原因" value={translateDisplayValue(gateReason)} />
+              <Field label="决策条件原因" value={translateDisplayValue(gateReason)} />
             </div>
           </section>
 
@@ -509,7 +510,7 @@ export function TradingPage() {
               <Field label="活跃因子" value={formatDecimal(pickNumber(lastComposite, ["n_active"], 0), 0)} />
               <Field label="弃权因子" value={formatDecimal(pickNumber(lastComposite, ["n_abstain"], 0), 0)} />
               <Field label="归因样本" value={formatDecimal(attributedTrades, 0)} />
-              <Field label="AWE 置信" value={formatDecimal(aweConviction * 100, 1) + "%"} />
+              <Field label="自适应综合置信度" value={formatDecimal(aweConviction * 100, 1) + "%"} />
               <Field label="归因胜率" value={overallWinRate ? `${formatDecimal(overallWinRate * 100, 1)}%` : ""} />
             </div>
             <div className="compact-list trading-inline-badges">
@@ -535,8 +536,8 @@ export function TradingPage() {
               <Field label="前瞻 VaR 95%" value={totalRisk === null ? "未知" : `${formatDecimal(totalRisk, 4)}%`} tone={riskKnown ? "mute" : "warn"} />
               <Field label="前瞻 CVaR 95%" value={riskKnown && canonicalRisk.var95.cvarPct !== null ? `${formatDecimal(canonicalRisk.var95.cvarPct, 4)}%` : "未知"} tone={riskKnown ? "mute" : "warn"} />
               <Field label="执行尝试" value={formatDecimal(attempts, 0)} />
-              <Field label="下单成功" value={formatDecimal(successes, 0)} tone={executionKnown && successes > 0 ? "ok" : successes > 0 ? "warn" : "mute"} />
-              <Field label="失败" value={formatDecimal(failures, 0)} tone={failures > 0 ? "bad" : executionKnown ? "ok" : "warn"} />
+              <Field label="下单成功" value={formatDecimal(successes, 0)} tone={executionKnown && successes > 0 ? "ok" : successes > 0 ? "pending" : "mute"} />
+              <Field label="失败" value={formatDecimal(failures, 0)} tone={failures > 0 ? "bad" : executionKnown ? "ok" : "pending"} />
               <Field label="最近执行" value={translateDisplayValue(pickString(liveExecutionSummary, ["last_reason", "last_reason_text", "lastReason"], ""))} />
             </div>
             <div className="compact-list trading-inline-badges">
@@ -565,7 +566,7 @@ export function TradingPage() {
                 <th scope="col">宏观分</th>
                 <th scope="col">活跃因子</th>
                 <th scope="col">弃权</th>
-                <th scope="col">闸门原因</th>
+                <th scope="col">决策条件原因</th>
               </tr>
             </thead>
             <tbody>

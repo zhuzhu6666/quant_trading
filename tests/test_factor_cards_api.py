@@ -1241,16 +1241,14 @@ def test_parameter_template_offline_validation_runs_backtest_and_returns_plan(tm
         "backend.services.parameter_template_validation.run_backtest",
         lambda params, cb: {
             **_valid_parameter_template_research_evidence(),
-            "rows": [],
-            "total_runs": 12,
-            "elapsed_seconds": 0.01,
-            "report_path": None,
+            "engine": "live_parity_replay_v1",
+            "metrics": {"bar_count": 260, "independent_trade_count": 4},
             "note": f"mocked {params['symbol']} {params['timeframe']}",
         },
     )
     monkeypatch.setattr(
-        "backend.services.parameter_template_validation._load_bars",
-        lambda symbol, timeframe: pd.DataFrame(
+        "backend.services.parameter_template_validation.MonthlyPITBarLoader.load",
+        lambda _self, _request: (pd.DataFrame(
             {
                 "open": [100 + i for i in range(260)],
                 "high": [101 + i for i in range(260)],
@@ -1258,7 +1256,7 @@ def test_parameter_template_offline_validation_runs_backtest_and_returns_plan(tm
                 "close": [100 + i + (0.3 if i % 2 == 0 else -0.1) for i in range(260)],
                 "volume": [1.0] * 260,
             }
-        ),
+        ), {"source": "fixture"}),
     )
 
     service = BoundParameterTemplateService()
@@ -1303,13 +1301,13 @@ def test_parameter_template_offline_validation_runs_backtest_and_returns_plan(tm
     assert result["mode"] == "offline_deep"
     assert result["boundary"]["recommended_scope"] == "offline_deep"
     assert "unsupported_template_role" in result["boundary"]["reasons"]
-    assert result["validation_plan"][1]["stage"] == "backtest_sweep"
+    assert result["validation_plan"][1]["stage"] == "parity_backtest"
     assert result["validation_plan"][1]["status"] == "completed"
     assert result["validation_plan"][2]["stage"] == "walk_forward_review"
     assert result["validation_plan"][2]["status"] == "completed"
     assert result["validation_plan"][3]["stage"] == "gray_release_review"
     assert result["validation_plan"][3]["status"] == "completed"
-    assert result["backtest"]["total_runs"] == 12
+    assert result["backtest"]["metrics"]["bar_count"] == 260
     assert "candidate_summary" in result["walk_forward"]
     assert result["release_candidate"]["status"] == "pending_review"
     assert result["release_candidate"]["validation_summary"]["recommendation_source"]["recommendation_id"] == "ptr_test_bb_width"

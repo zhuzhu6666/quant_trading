@@ -91,6 +91,13 @@
 - 权限：固定 `diagnostic_only`、治理数量为零；runner 永不自授权。
 - 退出：只有独立 certification 重验完整 live lifecycle 后才能讨论 live-parity evidence。
 
+### 历史参数扫描回测
+
+- 状态：`retired`
+- canonical：`ParityReplayRunner` 经 `/api/backtest/run`、CLI 和参数模板离线验证统一调用。
+- 已删除：12 组参数扫描、旧文本报告解析、`strategy/backtest.py`、`alpha/backtest/vectorized.py` 和重复 `/api/ops/replay/parity-run` 执行入口。
+- 边界：回测工件只提供隔离模拟训练样本，不写真实学习/后验/治理账本，也不计入模型晋级。
+
 ### API/frontend 旧事实字段
 
 - 状态：`migrating`

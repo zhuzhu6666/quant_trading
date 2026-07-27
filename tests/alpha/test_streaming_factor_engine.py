@@ -131,6 +131,33 @@ class TestAppendBar:
         snapshot = engine.get_snapshot()
         assert snapshot == last_result
 
+    def test_batch_snapshots_match_causal_streaming_results(self):
+        bars = [
+            _make_bar(
+                close=4500.0 + i * 0.2 + math.sin(i / 3.0),
+                open_=4500.0 + i * 0.2,
+                high=4502.0 + i * 0.2,
+                low=4498.0 + i * 0.2,
+                volume=100.0 + i,
+                t=1_000.0 + i * 300.0,
+            )
+            for i in range(80)
+        ]
+        streaming = StreamingFactorEngine(max_buffer=200, factor_ids=TEST_FACTORS)
+        streamed = [streaming.append_bar(bar) for bar in bars]
+        batched = StreamingFactorEngine(max_buffer=200, factor_ids=TEST_FACTORS)
+        snapshots = batched.warmup_bars(bars)
+
+        assert len(snapshots) == len(bars)
+        for index in range(49, len(bars)):
+            for factor_id in TEST_FACTORS:
+                expected = streamed[index].get(factor_id)
+                actual = snapshots[index].get(factor_id)
+                if expected is None:
+                    assert actual is None
+                else:
+                    assert actual == pytest.approx(expected)
+
     def test_duplicate_or_older_bar_does_not_pollute_buffer(self):
         engine = StreamingFactorEngine(factor_ids=TEST_FACTORS)
         bars = [_make_bar(close=4500 + i, t=1_000 + i * 900) for i in range(55)]

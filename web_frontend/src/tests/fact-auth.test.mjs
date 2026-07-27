@@ -43,7 +43,7 @@ assert.match(liveHook, /LiveStateContext\.Provider/);
 assert.match(app, /<LiveStateProvider enabled=\{authenticated\}>/);
 assert.match(overview, /connected \? "WS 实时连接" : "轮询\/重连中"/);
 assert.doesNotMatch(overview, /WS 事实未知/);
-assert.match(overview, /queryKey: \["health"\][\s\S]*?refetchInterval: 3_000/);
+assert.match(overview, /queryKey: queryKeys\.health[\s\S]*?refetchInterval: 3_000/);
 assert.match(trading, /const connectionTone = connected \? "ok"/);
 
 assert.match(fact, /missing_fact_envelope/);

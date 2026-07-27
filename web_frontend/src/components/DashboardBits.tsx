@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import { StatusPill } from "@/components/StatusPill";
 
-export type Tone = "ok" | "warn" | "bad" | "mute";
+export type Tone = "ok" | "warn" | "bad" | "mute" | "pending";
 
 export function hasDisplayValue(value: ReactNode): boolean {
   if (value === null || value === undefined || value === false) return false;
@@ -45,7 +45,7 @@ export function StatTile({
         <span>{label}</span>
       </div>
       <div className="stat-value">{value}</div>
-      {hasDisplayValue(detail) ? <div className="stat-detail">{detail}</div> : null}
+      {hasDisplayValue(detail) || tone === "pending" ? <div className="stat-detail">{detail}{hasDisplayValue(detail) && tone === "pending" ? " · " : null}{tone === "pending" ? "数据待确认" : null}</div> : null}
     </div>
   );
 }
@@ -78,7 +78,7 @@ export function CompactMetric({
     <div className={`compact-metric compact-metric-${tone} ${className}`.trim()}>
       <span>{label}</span>
       <strong>{value}</strong>
-      {hasDisplayValue(detail) ? <small>{detail}</small> : null}
+      {hasDisplayValue(detail) || tone === "pending" ? <small>{detail}{hasDisplayValue(detail) && tone === "pending" ? " · " : null}{tone === "pending" ? "数据待确认" : null}</small> : null}
     </div>
   );
 }
@@ -99,7 +99,7 @@ export function ProgressMetric({
     <div className={`progress-metric progress-${tone}`}>
       <div><span>{label}</span><strong>{safeValue.toFixed(0)}%</strong></div>
       <i aria-hidden="true"><b style={{ width: `${safeValue}%` }} /></i>
-      {detail ? <small>{detail}</small> : null}
+      {detail || tone === "pending" ? <small>{detail}{detail && tone === "pending" ? " · " : null}{tone === "pending" ? "数据待确认" : null}</small> : null}
     </div>
   );
 }

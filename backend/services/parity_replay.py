@@ -17,6 +17,7 @@ verified rather than optimistically treating shared code as live parity.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -181,6 +182,257 @@ def _to_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _aggregate_independent_trades(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse partial closes into one causal trade outcome."""
+
+    grouped: dict[int, dict[str, Any]] = {}
+    for raw in trades:
+        item = dict(raw)
+        decision_index = int(item.get("decision_index") or 0)
+        current = grouped.get(decision_index)
+        if current is None:
+            current = dict(item)
+            grouped[decision_index] = current
+            continue
+        for name in (
+            "gross_pnl",
+            "commission_cost",
+            "spread_cost",
+            "slippage_cost",
+            "net_pnl",
+            "closed_fraction",
+            "volume_lots",
+        ):
+            current[name] = _safe_float(current.get(name)) + _safe_float(item.get(name))
+        current["exit_index"] = item.get("exit_index")
+        current["exit_ts"] = item.get("exit_ts")
+        current["exit_price"] = item.get("exit_price")
+        current["raw_exit_price"] = item.get("raw_exit_price")
+        current["reason"] = item.get("reason")
+    return [grouped[key] for key in sorted(grouped)]
+
+
+def _sample_id(binding_hash: str, decision_index: int, factor_id: str = "") -> str:
+    return hashlib.sha256(
+        f"{binding_hash}:{int(decision_index)}:{factor_id}".encode("utf-8")
+    ).hexdigest()
+
+
+def _factor_contribution(value: Any) -> tuple[float, float]:
+    item = _to_dict(value)
+    if item:
+        contribution = _safe_float(
+            item.get("contribution"),
+            _safe_float(item.get("normalized"), _safe_float(item.get("value"))),
+        )
+        confidence = _safe_float(item.get("confidence"), 1.0)
+        return contribution, confidence
+    return _safe_float(value), 1.0
+
+
+def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
+    """Build deterministic, filesystem-only training rows from replay outcomes."""
+
+    bindings = dict(report.get("bindings") or {})
+    binding_hash = str(bindings.get("binding_hash") or "")
+    causality = dict(report.get("causality") or {})
+    data_source = dict(report.get("data_source") or {})
+    manifest = dict(report.get("artifact_manifest") or {})
+    selected_factor_ids = [
+        str(item) for item in list(manifest.get("selected_factor_ids") or []) if str(item)
+    ]
+    blockers: list[str] = []
+    if not binding_hash:
+        blockers.append("binding_missing")
+    if not bool(data_source.get("point_in_time")):
+        blockers.append("point_in_time_data_unverified")
+    if not bool(causality.get("closed_bar_only")):
+        blockers.append("closed_bar_contract_failed")
+    if not bool(causality.get("next_bar_execution")):
+        blockers.append("next_bar_execution_contract_failed")
+    if not bool(causality.get("executable_bid_ask", causality.get("native_bid_ask"))):
+        blockers.append("executable_bid_ask_missing")
+    if not selected_factor_ids or len(selected_factor_ids) > 64:
+        blockers.append("current_bounded_factor_generation_unverified")
+    fatal_prefixes = (
+        "binding_mismatch:",
+        "monthly_pit_",
+        "runtime_config_snapshot_",
+        "committed_runtime_config_",
+        "selected_factor_identity_",
+        "selected_factor_definition_",
+        "selected_factor_not_active:",
+        "selected_factor_explicit_",
+        "selected_factor_artifact_",
+        "bar_time_order_",
+        "closed_bar_window_",
+        "future_data_",
+        "unclosed_bar_",
+    )
+    for reason in list(report.get("diagnostic_reasons") or []):
+        text = str(reason)
+        if text.startswith(fatal_prefixes):
+            blockers.append(text)
+
+    independent = _aggregate_independent_trades(
+        [dict(item) for item in list(report.get("trades") or []) if isinstance(item, Mapping)]
+    )
+    open_samples: list[dict[str, Any]] = []
+    factor_rows: dict[str, list[dict[str, Any]]] = {}
+    try:
+        from research.open_quality_lightgbm import (
+            FEATURE_NAMES as OPEN_FEATURE_NAMES,
+            _features_from_sample,
+            _rule_baseline_label,
+        )
+
+        for trade in independent:
+            candidate = dict(trade.get("decision_candidate") or {})
+            bar = dict(trade.get("decision_bar") or {})
+            decision_index = int(trade.get("decision_index") or 0)
+            pnl = _safe_float(trade.get("net_pnl"))
+            signals = dict(candidate.get("signals") or {})
+            factor_values = dict(candidate.get("factor_values") or {})
+            action = {
+                **candidate,
+                "factor_roles": {factor_id: "alpha" for factor_id in selected_factor_ids},
+                "composer_version": "live_parity_replay_v1",
+                "n_active_factors": len(selected_factor_ids),
+                "n_active_alpha_factors": len(selected_factor_ids),
+                "n_abstain_factors": max(0, len(selected_factor_ids) - len(signals)),
+            }
+            decision_quality = {
+                "schema_version": "decision_quality_context.v1",
+                "n_active_factors": len(selected_factor_ids),
+                "n_active_alpha_factors": len(selected_factor_ids),
+                "factor_roles": action["factor_roles"],
+            }
+            learning_context = dict(trade.get("open_learning_context") or {})
+            row = {
+                "features_json": {
+                    **learning_context,
+                    "action_score": _safe_float(candidate.get("score")),
+                    "action": action,
+                    "decision_quality_context": (
+                        learning_context.get("decision_quality_context") or decision_quality
+                    ),
+                    "bar_context": learning_context.get("bar_context") or {
+                        "schema_version": "closed_bar.v1",
+                        "complete": True,
+                        "body_ratio": (
+                            abs(_safe_float(bar.get("close")) - _safe_float(bar.get("open")))
+                            / max(abs(_safe_float(bar.get("high")) - _safe_float(bar.get("low"))), 1e-12)
+                        ),
+                        "close_location": (
+                            (_safe_float(bar.get("close")) - _safe_float(bar.get("low")))
+                            / max(_safe_float(bar.get("high")) - _safe_float(bar.get("low")), 1e-12)
+                        ),
+                        "range_points": abs(_safe_float(bar.get("high")) - _safe_float(bar.get("low"))),
+                    },
+                    "market_micro_context": learning_context.get("market_micro_context") or {
+                        "spread": max(
+                            0.0,
+                            _safe_float(bar.get("ask_close")) - _safe_float(bar.get("bid_close")),
+                        ),
+                        "quote_fresh": True,
+                        "quote_age_seconds": 0.0,
+                    },
+                }
+            }
+            features = _features_from_sample(row)
+            trade_id = f"{binding_hash}:{decision_index}"
+            open_samples.append({
+                "sample_id": _sample_id(binding_hash, decision_index),
+                "decision_id": trade_id,
+                "trade_id": trade_id,
+                "position_id": trade_id,
+                "created_at": _safe_float(trade.get("exit_ts")),
+                "outcome_label": "good_win" if pnl > 0.0 else "bad_loss",
+                "pnl": pnl,
+                "label": 1 if pnl > 0.0 else 0,
+                "rule_label": _rule_baseline_label(features),
+                "features": {name: _safe_float(features.get(name)) for name in OPEN_FEATURE_NAMES},
+                "source": "historical_replay",
+                "binding_hash": binding_hash,
+                "feature_schema_version": "pit.v2.open_lineage",
+            })
+            for factor_id in selected_factor_ids:
+                contribution, confidence = _factor_contribution(
+                    signals.get(factor_id, factor_values.get(factor_id))
+                )
+                factor_rows.setdefault(factor_id, []).append({
+                    "review_id": trade_id,
+                    "trade_id": trade_id,
+                    "position_id": trade_id,
+                    "factor": factor_id,
+                    "entry_contribution": contribution,
+                    "hold_contribution": 0.0,
+                    "exit_contribution": 0.0,
+                    "net_contribution": contribution * (1.0 if pnl >= 0.0 else -1.0),
+                    "confidence": confidence,
+                    "entry_quality": 1.0 if pnl > 0.0 else 0.0,
+                    "hold_quality": 1.0 if pnl > 0.0 else 0.0,
+                    "exit_quality": 1.0 if pnl > 0.0 else 0.0,
+                    "pnl": pnl,
+                    "mae": 0.0,
+                    "mfe": 0.0,
+                    "outcome_label": "good_win" if pnl > 0.0 else "bad_loss",
+                    "created_at": _safe_float(trade.get("exit_ts")),
+                    "decision_index": decision_index,
+                })
+    except Exception as exc:
+        blockers.append(f"learning_schema_build_error:{type(exc).__name__}")
+        open_samples = []
+        factor_rows = {}
+
+    factor_samples: list[dict[str, Any]] = []
+    if not blockers:
+        from research.factor_governance_lightgbm import _current_row_label, _sample_from_row
+
+        for factor_id, rows in sorted(factor_rows.items()):
+            for index, row in enumerate(rows[:-1]):
+                if index < 2:
+                    continue
+                sample = _sample_from_row(
+                    row,
+                    label=_current_row_label(rows[index + 1]),
+                    label_source="next_same_factor_outcome_from_replay_history",
+                    rolling_history=rows[max(0, index - 4):index + 1],
+                )
+                sample["sample_id"] = _sample_id(
+                    binding_hash,
+                    int(row.get("decision_index") or 0),
+                    factor_id,
+                )
+                sample["source"] = "historical_replay"
+                sample["binding_hash"] = binding_hash
+                sample["feature_schema_version"] = "pit.v2.factor_rolling_lineage"
+                factor_samples.append(sample)
+
+    trainable = not blockers and bool(independent)
+    if not independent:
+        blockers.append("no_closed_independent_trades")
+        trainable = False
+    return {
+        "schema_version": "parity_learning_bundle.v1",
+        "source": "historical_replay",
+        "causal_level": "simulated",
+        "governance_eligible": False,
+        "trainable": trainable,
+        "blockers": list(dict.fromkeys(blockers)),
+        "bindings": bindings,
+        "feature_schemas": {
+            "open": "pit.v2.open_lineage",
+            "factor": "pit.v2.factor_rolling_lineage",
+        },
+        "independent_trade_count": len(independent),
+        "open_sample_count": len(open_samples),
+        "factor_sample_count": len(factor_samples),
+        "open_samples": open_samples if trainable else [],
+        "factor_samples": factor_samples if trainable else [],
+    }
+
+
 def _timeframe_seconds(timeframe: str) -> int:
     text = str(timeframe or "M15").strip().upper()
     if len(text) < 2:
@@ -300,6 +552,14 @@ def _normalize_bars(
     if not frame["time"].is_monotonic_increasing or frame["time"].duplicated().any():
         blockers.append("bar_time_order_invalid")
     missing_quotes = [name for name in _BID_ASK_COLUMNS if name not in frame.columns]
+    if missing_quotes and "spread" in frame.columns:
+        spread = pd.to_numeric(frame["spread"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        for price_name in ("open", "high", "low", "close"):
+            mid = pd.to_numeric(frame[price_name], errors="coerce")
+            frame[f"bid_{price_name}"] = mid - spread / 2.0
+            frame[f"ask_{price_name}"] = mid + spread / 2.0
+        missing_quotes = []
+        blockers.append("native_bid_ask_modeled_from_recorded_spread")
     if missing_quotes:
         blockers.append(f"native_bid_ask_missing:{','.join(missing_quotes)}")
     elif frame[list(_BID_ASK_COLUMNS)].isna().any().any():
@@ -310,11 +570,11 @@ def _normalize_bars(
 @dataclass(frozen=True)
 class ParityReplayRequest:
     symbol: str = "XAUUSD+"
-    timeframe: str = "M15"
+    timeframe: str = "M5"
     start: str | float | None = None
     end: str | float | None = None
     as_of: float | None = None
-    max_bars: int = 2000
+    max_bars: int = 5000
     warmup_bars: int = 150
     initial_equity: float = 10_000.0
     volume_lots: float = 0.01
@@ -329,11 +589,11 @@ class ParityReplayRequest:
         item = dict(value or {})
         return cls(
             symbol=str(item.get("symbol") or "XAUUSD+"),
-            timeframe=str(item.get("timeframe") or "M15").upper(),
+            timeframe=str(item.get("timeframe") or "M5").upper(),
             start=item.get("start"),
             end=item.get("end"),
             as_of=_safe_float(item.get("as_of"), 0.0) or None,
-            max_bars=max(2, min(int(item.get("max_bars") or 2000), 100_000)),
+            max_bars=max(2, min(int(item.get("max_bars") or 5000), 20_000)),
             warmup_bars=max(0, min(int(item.get("warmup_bars") or 150), 10_000)),
             initial_equity=max(0.01, _safe_float(item.get("initial_equity"), 10_000.0)),
             volume_lots=max(0.0001, _safe_float(item.get("volume_lots"), 0.01)),
@@ -364,51 +624,83 @@ class MonthlyPITBarLoader:
             }
         start_ts = _epoch(request.start) if request.start is not None else 0.0
         end_ts = _epoch(request.end) if request.end is not None else 0.0
-        query_paths = list(reversed(paths)) if not start_ts and not end_ts else paths
-        remaining = request.max_bars if not start_ts and not end_ts else None
-        frames: list[pd.DataFrame] = []
-        used: list[str] = []
+        query_paths = list(reversed(paths))
+        used: set[str] = set()
         errors: list[str] = []
-        for path in query_paths:
-            if remaining is not None and remaining <= 0:
-                break
-            try:
-                with duckdb_readonly_connection(path, snapshot_on_lock=True) as conn:
-                    query = "SELECT * FROM bars WHERE symbol=? AND timeframe=?"
-                    params: list[Any] = [request.symbol, request.timeframe]
-                    if start_ts:
-                        query += " AND time>=?"
-                        params.append(start_ts)
-                    if end_ts:
-                        query += " AND time<=?"
-                        params.append(end_ts)
-                    if remaining is not None:
+
+        def read_window(
+            *,
+            lower: float = 0.0,
+            upper: float = 0.0,
+            upper_exclusive: bool = False,
+            limit: int,
+        ) -> pd.DataFrame:
+            frames: list[pd.DataFrame] = []
+            remaining = max(0, int(limit))
+            for path in query_paths:
+                if remaining <= 0:
+                    break
+                try:
+                    with duckdb_readonly_connection(path, snapshot_on_lock=True) as conn:
+                        query = "SELECT * FROM bars WHERE symbol=? AND timeframe=?"
+                        params: list[Any] = [request.symbol, request.timeframe]
+                        if lower:
+                            query += " AND time>=?"
+                            params.append(lower)
+                        if upper:
+                            query += " AND time<?" if upper_exclusive else " AND time<=?"
+                            params.append(upper)
                         query += " ORDER BY time DESC LIMIT ?"
                         params.append(remaining)
-                    else:
-                        query += " ORDER BY time ASC"
-                    part = conn.execute(query, params).df()
-            except Exception as exc:
-                errors.append(f"{path.name}:{type(exc).__name__}:{exc}")
-                continue
-            if part.empty:
-                continue
-            frames.append(part)
-            used.append(str(path.resolve()))
-            if remaining is not None:
+                        part = conn.execute(query, params).df()
+                except Exception as exc:
+                    errors.append(f"{path.name}:{type(exc).__name__}:{exc}")
+                    continue
+                if part.empty:
+                    continue
+                frames.append(part)
+                used.add(str(path.resolve()))
                 remaining -= len(part)
-        if not frames:
+            if not frames:
+                return pd.DataFrame()
+            return (
+                pd.concat(frames, ignore_index=True)
+                .sort_values("time")
+                .drop_duplicates(subset=["time"], keep="last")
+                .tail(limit)
+                .reset_index(drop=True)
+            )
+
+        target = read_window(
+            lower=start_ts,
+            upper=end_ts,
+            limit=request.max_bars,
+        )
+        if target.empty:
             return pd.DataFrame(), {
                 "source": "monthly_pit_bars",
-                "source_files": used,
+                "source_files": sorted(used),
                 "errors": errors,
                 "error": "monthly_bar_window_empty",
             }
-        frame = pd.concat(frames, ignore_index=True)
+        target_start_ts = _safe_float(target.iloc[0].get("time"), 0.0)
+        warmup = (
+            read_window(
+                upper=target_start_ts,
+                upper_exclusive=True,
+                limit=request.warmup_bars,
+            )
+            if request.warmup_bars > 0 and target_start_ts > 0
+            else pd.DataFrame()
+        )
+        frame = pd.concat([warmup, target], ignore_index=True)
         return frame, {
             "source": "monthly_pit_bars",
             "source_files": sorted(used),
             "errors": errors,
+            "target_start_ts": target_start_ts,
+            "target_bar_count": len(target),
+            "warmup_bar_count": len(warmup),
         }
 
 
@@ -552,6 +844,22 @@ class LiveComponentDecisionAdapter:
         self.last_composite: dict[str, Any] = {}
         self.last_atr_price = 0.0
         self.last_conviction = 0.0
+        self._prepared_snapshots: list[dict[str, Any]] | None = None
+
+    def prepare(self, bars: pd.DataFrame) -> None:
+        records = [
+            {str(key): _finite_or_none(value) for key, value in row.items()}
+            for row in bars.to_dict(orient="records")
+        ]
+        snapshots = self.engine.warmup_bars(records)
+        if snapshots:
+            minimum = int(getattr(self.engine, "MIN_BARS", 50) or 50)
+            self._prepared_snapshots = [
+                dict(values) if index >= minimum - 1 else {}
+                for index, values in enumerate(snapshots)
+            ]
+        else:
+            self._prepared_snapshots = [{} for _ in records]
 
     def __call__(
         self,
@@ -559,9 +867,14 @@ class LiveComponentDecisionAdapter:
         bar: Mapping[str, Any],
         index: int,
     ) -> Mapping[str, Any] | None:
-        del history, index
+        del history
         from backend.services.live_decision_pipeline import run_live_decision_pipeline
 
+        prepared = (
+            self._prepared_snapshots[index]
+            if self._prepared_snapshots is not None and index < len(self._prepared_snapshots)
+            else None
+        )
         decision = run_live_decision_pipeline(
             engine=self.engine,
             normalizer=self.normalizer,
@@ -569,6 +882,7 @@ class LiveComponentDecisionAdapter:
             gate=self.gate,
             bar=dict(bar),
             cfg=self.cfg,
+            factor_values_override=prepared,
         )
         self.last_factor_values = dict(decision.factor_values or {})
         composite_payload = _to_dict(decision.composite)
@@ -600,6 +914,7 @@ class LiveComponentDecisionAdapter:
             "factor_values": factor_values,
             "signals": dict(decision.signals or {}),
             "context_policy": dict(decision.context_policy or {}),
+            "composite": composite_payload,
         }
 
 
@@ -739,6 +1054,10 @@ def _default_risk_evaluator(cfg: Any, request: ParityReplayRequest) -> RiskEvalu
                 decision_ts=decision_ts,
                 timeframe=request.timeframe,
                 evaluated_at_ts=decision_ts,
+                session_last_trade_ts=_safe_float(
+                    replay_context.get("session_last_trade_ts"),
+                    0.0,
+                ),
             ),
             decision_freshness=decision_freshness,
             supervisor_reentry_block={},
@@ -874,6 +1193,7 @@ class ParityReplayRunner:
         decision_provider: DecisionProvider | None = None,
         risk_evaluator: RiskEvaluator | None = None,
         supervisor_evaluator: SupervisorEvaluator | None = None,
+        progress_cb: Callable[[str, float, str], None] | None = None,
     ):
         self.request = request
         self.config = config
@@ -884,6 +1204,7 @@ class ParityReplayRunner:
         self.decision_provider = decision_provider
         self.risk_evaluator = risk_evaluator or _default_risk_evaluator(config, request)
         self.supervisor_evaluator = supervisor_evaluator or _default_supervisor_evaluator
+        self.progress_cb = progress_cb
         self._adapter_error = ""
         self._path_state: dict[int, dict[str, Any]] = {}
         self._trailing_state: dict[int, dict[str, Any]] = {}
@@ -913,8 +1234,24 @@ class ParityReplayRunner:
             bars,
             timeframe=self.request.timeframe,
             as_of=as_of,
-            max_bars=self.request.max_bars,
+            max_bars=self.request.max_bars + self.request.warmup_bars,
         )
+        if self.request.end is not None and _epoch(self.request.end) > as_of:
+            input_blockers.append("future_data_requested")
+        if bars is not None and not bars.empty:
+            raw_incomplete = (
+                "complete" in bars.columns
+                and not bool(bars["complete"].fillna(False).astype(bool).all())
+            )
+            raw_open_bar = (
+                "time" in bars.columns
+                and any(
+                    _epoch(value) + _timeframe_seconds(self.request.timeframe) > as_of
+                    for value in bars["time"].tolist()
+                )
+            )
+            if raw_incomplete or raw_open_bar:
+                input_blockers.append("unclosed_bar_present_in_requested_window")
         config_payload = (
             self.config.to_dict()
             if hasattr(self.config, "to_dict")
@@ -929,6 +1266,19 @@ class ParityReplayRunner:
                 f"code_binding_path_missing:{path}" for path in missing_code_paths
             )
         source_metadata = dict(data_source or {})
+        target_start_ts = _safe_float(source_metadata.get("target_start_ts"), 0.0)
+        decision_start_index = (
+            int(frame["time"].searchsorted(target_start_ts, side="left"))
+            if target_start_ts > 0.0 and not frame.empty
+            else 0
+        )
+        if isinstance(self.decision_provider, LiveComponentDecisionAdapter) and not frame.empty:
+            try:
+                self.decision_provider.prepare(frame)
+            except Exception as exc:
+                input_blockers.append(
+                    f"live_component_prepare_error:{type(exc).__name__}:{exc}"
+                )
         source_name = str(source_metadata.get("source") or "")
         raw_source_files = source_metadata.get("source_files") or []
         source_files = (
@@ -997,12 +1347,9 @@ class ParityReplayRunner:
             or str(expected or "").lower() != str(bindings[name]).lower()
         ]
         expected_bindings = dict(self.request.expected_bindings or {})
-        missing_expected_bindings = [
-            name for name in _BASE_BINDING_NAMES if not str(expected_bindings.get(name) or "")
-        ]
-        input_blockers.extend(
-            f"binding_precondition_missing:{name}" for name in missing_expected_bindings
-        )
+        # The task owns the binding freeze.  Callers may optionally provide a
+        # previous binding to reproduce a run, but are not required to build it.
+        missing_expected_bindings: list[str] = []
         committed_hash = str(self.config_snapshot.get("config_hash") or "")
         committed_version = int(self.config_snapshot.get("config_version") or 0)
         if not committed_hash:
@@ -1019,10 +1366,19 @@ class ParityReplayRunner:
         native_bid_ask = not any(
             blocker.startswith("native_bid_ask_") for blocker in input_blockers
         )
+        executable_bid_ask = not any(
+            blocker.startswith("native_bid_ask_missing")
+            or blocker.startswith("native_bid_ask_contains_null")
+            for blocker in input_blockers
+        )
         if binding_mismatches or frame.empty:
             simulation = self._empty_simulation()
         else:
-            simulation = self._simulate(frame, native_bid_ask=native_bid_ask)
+            simulation = self._simulate(
+                frame,
+                native_bid_ask=executable_bid_ask,
+                decision_start_index=decision_start_index,
+            )
 
         causality_violations = list(simulation["causality_violations"])
         closed_bar_only = not any(
@@ -1034,6 +1390,14 @@ class ParityReplayRunner:
             "closed_bar_only": closed_bar_only,
             "next_bar_execution": not causality_violations,
             "native_bid_ask": native_bid_ask,
+            "executable_bid_ask": executable_bid_ask,
+            "quote_model": (
+                "native_bid_ask"
+                if native_bid_ask
+                else "recorded_spread_around_ohlc_mid"
+                if executable_bid_ask
+                else "unavailable"
+            ),
             "decision_history_boundary": "history.iloc[:bar_index+1]",
             "violations": causality_violations,
         }
@@ -1087,7 +1451,9 @@ class ParityReplayRunner:
                 **source_metadata,
                 "source": source_name or "unknown",
                 "source_file_manifest": source_file_manifest,
-                "bar_count": len(frame),
+                "bar_count": max(0, len(frame) - decision_start_index),
+                "loaded_bar_count": len(frame),
+                "warmup_bar_count": decision_start_index,
                 "first_bar_ts": _safe_float(frame.iloc[0]["time"]) if not frame.empty else 0.0,
                 "last_bar_ts": _safe_float(frame.iloc[-1]["time"]) if not frame.empty else 0.0,
                 "point_in_time": bool(
@@ -1103,7 +1469,11 @@ class ParityReplayRunner:
             "execution_model": {
                 "entry": "next_bar_ask_open_for_long_bid_open_for_short",
                 "exit": "executable_side_bid_for_long_ask_for_short",
-                "spread": "native_bid_ask_embedded",
+                "spread": (
+                    "native_bid_ask_embedded"
+                    if native_bid_ask
+                    else "recorded_spread_around_ohlc_mid"
+                ),
                 "commission_per_lot_round_turn": self.request.commission_per_lot_round_turn,
                 "slippage_bps_each_fill": self.request.slippage_bps,
                 "same_bar_sl_tp_policy": "pessimistic_stop_first_and_flagged",
@@ -1137,6 +1507,7 @@ class ParityReplayRunner:
             "artifact_path": "",
             "report_artifact_hash": "",
         }
+        report["learning_bundle"] = _build_learning_bundle(report)
         return report
 
     def _empty_simulation(self) -> dict[str, Any]:
@@ -1158,7 +1529,13 @@ class ParityReplayRunner:
             "causality_violations": [],
         }
 
-    def _simulate(self, frame: pd.DataFrame, *, native_bid_ask: bool) -> dict[str, Any]:
+    def _simulate(
+        self,
+        frame: pd.DataFrame,
+        *,
+        native_bid_ask: bool,
+        decision_start_index: int = 0,
+    ) -> dict[str, Any]:
         self._path_state.clear()
         self._trailing_state.clear()
         self._latest_atr_price = 0.0
@@ -1174,6 +1551,14 @@ class ParityReplayRunner:
         decision_count = 0
 
         for index in range(len(frame)):
+            if self.progress_cb is not None and (
+                index == 0 or index % max(25, len(frame) // 100) == 0
+            ):
+                self.progress_cb(
+                    "replaying",
+                    10.0 + (80.0 * index / max(len(frame), 1)),
+                    f"回放 {index}/{len(frame)} 根K线",
+                )
             row = {str(key): _finite_or_none(value) for key, value in frame.iloc[index].to_dict().items()}
             ts = _safe_float(row.get("time"), 0.0)
 
@@ -1317,7 +1702,7 @@ class ParityReplayRunner:
                                 events=events,
                             )
 
-            history = frame.iloc[: index + 1].copy()
+            history = frame.iloc[: index + 1]
             try:
                 candidate = _to_dict(self.decision_provider(history, row, index))
             except Exception as exc:
@@ -1329,6 +1714,8 @@ class ParityReplayRunner:
                 })
                 candidate = {}
             self._remember_live_decision_state(candidate, row=row)
+            if index < decision_start_index:
+                continue
             direction = int(_safe_float(candidate.get("direction"), 0.0))
             if direction not in {-1, 1}:
                 continue
@@ -1348,12 +1735,32 @@ class ParityReplayRunner:
                     "reason": "position_or_open_pending",
                 })
                 continue
-            net_pnl = sum(_safe_float(item.get("net_pnl"), 0.0) for item in trades)
+            risk_day = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+            daily_trades = [
+                item
+                for item in trades
+                if datetime.fromtimestamp(
+                    _safe_float(item.get("exit_ts"), 0.0),
+                    tz=timezone.utc,
+                ).date()
+                == risk_day
+            ]
+            daily_independent = _aggregate_independent_trades(daily_trades)
+            session_pnl = sum(
+                _safe_float(item.get("net_pnl"), 0.0) for item in daily_trades
+            )
             consecutive_losses = 0
-            for trade in reversed(trades):
+            for trade in reversed(daily_independent):
                 if _safe_float(trade.get("net_pnl"), 0.0) >= 0.0:
                     break
                 consecutive_losses += 1
+            session_last_trade_ts = max(
+                (
+                    _safe_float(item.get("exit_ts"), 0.0)
+                    for item in daily_trades
+                ),
+                default=0.0,
+            )
             replay_balance = self.request.initial_equity
             replay_peak = self.request.initial_equity
             max_drawdown_pct = 0.0
@@ -1388,13 +1795,14 @@ class ParityReplayRunner:
                     "equity": replay_balance,
                 },
                 "session_state": {
-                    "pnl": net_pnl,
+                    "pnl": session_pnl,
                     "start_balance": self.request.initial_equity,
-                    "trades": len(trades),
+                    "trades": len(daily_independent),
                     "consecutive_losses": consecutive_losses,
                     "drawdown_pct": max_drawdown_pct,
                     "circuit_breaker": False,
                 },
+                "session_last_trade_ts": session_last_trade_ts,
                 "closed_bar_prices": [
                     _safe_float(value)
                     for value in history["close"].iloc[
@@ -1479,6 +1887,7 @@ class ParityReplayRunner:
                     ),
                 ),
                 "candidate": candidate,
+                "decision_bar": row,
             }
 
         if pending_open is not None:
@@ -1506,9 +1915,22 @@ class ParityReplayRunner:
         spread = sum(_safe_float(item.get("spread_cost")) for item in trades)
         slippage = sum(_safe_float(item.get("slippage_cost")) for item in trades)
         net = sum(_safe_float(item.get("net_pnl")) for item in trades)
+        independent = _aggregate_independent_trades(trades)
+        wins = sum(_safe_float(item.get("net_pnl")) > 0.0 for item in independent)
+        long_count = sum(int(item.get("direction") or 0) > 0 for item in independent)
+        short_count = sum(int(item.get("direction") or 0) < 0 for item in independent)
+        balance = self.request.initial_equity
+        peak = balance
+        max_drawdown_pct = 0.0
+        for trade in independent:
+            balance += _safe_float(trade.get("net_pnl"))
+            peak = max(peak, balance)
+            if peak > 0.0:
+                max_drawdown_pct = max(max_drawdown_pct, (peak - balance) / peak * 100.0)
         return {
             "metrics": {
-                "bar_count": len(frame),
+                "bar_count": max(0, len(frame) - decision_start_index),
+                "warmup_bar_count": min(len(frame), decision_start_index),
                 "decision_count": decision_count,
                 "trade_count": len(trades),
                 "gross_pnl": round(gross, 8),
@@ -1517,6 +1939,13 @@ class ParityReplayRunner:
                 "commission_cost": round(commission, 8),
                 "spread_cost": round(spread, 8),
                 "slippage_cost": round(slippage, 8),
+                "independent_trade_count": len(independent),
+                "long_trade_count": long_count,
+                "short_trade_count": short_count,
+                "winning_trade_count": wins,
+                "losing_trade_count": len(independent) - wins,
+                "win_rate": round(wins / len(independent), 6) if independent else 0.0,
+                "max_drawdown_pct": round(max_drawdown_pct, 6),
                 "open_position_at_end": position is not None,
                 "legacy_governance_candidate_count": 0,
             },
@@ -1879,8 +2308,12 @@ class ParityReplayRunner:
         ts: float,
     ) -> dict[str, Any]:
         from backend.services.live_position_lifecycle import (
+            build_entry_cluster_context,
             build_entry_protection_plan_payload,
+            build_market_micro_context_payload,
+            build_open_learning_context_payload,
         )
+        from types import SimpleNamespace
 
         direction = int(pending["direction"])
         raw = _safe_float(row["ask_open"] if direction > 0 else row["bid_open"])
@@ -1907,6 +2340,86 @@ class ParityReplayRunner:
             status="applied",
             source="parity_replay_modeled_fill",
         )
+        candidate = _to_dict(pending.get("candidate"))
+        decision_bar = {
+            **_to_dict(pending.get("decision_bar")),
+            "complete": True,
+            "timeframe": self.request.timeframe,
+        }
+        signal_values = {
+            str(name): _factor_contribution(value)[0]
+            for name, value in _to_dict(candidate.get("signals")).items()
+        }
+        composite_payload = _to_dict(candidate.get("composite"))
+        composite_payload.setdefault("score", _safe_float(candidate.get("score")))
+        composite_payload.setdefault("factor_signals", signal_values)
+        composite_payload.setdefault(
+            "factor_roles",
+            {name: "alpha" for name in signal_values},
+        )
+        composite_payload.setdefault(
+            "active_weights",
+            {name: 1.0 for name in signal_values},
+        )
+        composite = SimpleNamespace(**composite_payload)
+        entry_cluster = build_entry_cluster_context(
+            positions_before=[],
+            direction=direction,
+            symbol=self.request.symbol,
+            now_ts=_safe_float(pending.get("decision_ts")),
+            new_position_id=position_id,
+            new_api_volume=self.request.volume_lots * 10_000.0,
+        )
+        decision_bid = _safe_float(
+            decision_bar.get("bid_close"),
+            _safe_float(decision_bar.get("close")),
+        )
+        decision_ask = _safe_float(
+            decision_bar.get("ask_close"),
+            _safe_float(decision_bar.get("close")),
+        )
+        market_micro = build_market_micro_context_payload(
+            quote={
+                "bid": decision_bid,
+                "ask": decision_ask,
+                "mid": (decision_bid + decision_ask) / 2.0,
+                "ts": _safe_float(pending.get("decision_ts")),
+            },
+            current_price=_safe_float(decision_bar.get("close")),
+            fill_price=entry,
+            direction=direction,
+            quote_age_seconds=0.0,
+            quote_fresh=True,
+        )
+        open_learning_context = build_open_learning_context_payload(
+            entry_cluster=entry_cluster,
+            market_micro=market_micro,
+            bar=decision_bar,
+            composite=composite,
+            total_api_volume_before=0.0,
+            actual_api_volume=self.request.volume_lots * 10_000.0,
+            requested_volume=self.request.volume_lots * 10_000.0,
+            base_requested_volume=self.request.volume_lots * 10_000.0,
+            current_price=_safe_float(decision_bar.get("close")),
+            fill_price=entry,
+            sl_price=stop_loss,
+            tp_price=take_profit,
+            sl_dist=sl_distance,
+            tp_dist=tp_distance,
+            sizing_trace={
+                "source": "parity_replay",
+                "volume_lots": self.request.volume_lots,
+            },
+            event_sizing_context={"enabled": False, "multiplier": 1.0},
+            runtime_health={"state": "reconstructed", "source": "parity_replay"},
+            market_session={},
+            decision_freshness={
+                "schema_version": "decision_bar_freshness.v1",
+                "fresh": True,
+                "age_seconds": 0.0,
+            },
+            entry_timing_context={"source": "next_bar_open"},
+        )
         return {
             "position_id": position_id,
             "symbol": self.request.symbol,
@@ -1928,6 +2441,9 @@ class ParityReplayRunner:
                 self._latest_atr_price,
             ),
             "entry_regime": self._latest_regime,
+            "decision_candidate": _to_dict(pending.get("candidate")),
+            "decision_bar": _to_dict(pending.get("decision_bar")),
+            "open_learning_context": open_learning_context,
             "entry_protection_plan": entry_plan,
             "digits": 2,
         }
@@ -2024,6 +2540,10 @@ class ParityReplayRunner:
             "spread_cost": round(spread_cost, 8),
             "slippage_cost": round(slippage_cost, 8),
             "net_pnl": round(net, 8),
+            "decision_candidate": _to_dict(position.get("decision_candidate")),
+            "decision_bar": _to_dict(position.get("decision_bar")),
+            "open_learning_context": _to_dict(position.get("open_learning_context")),
+            "entry_regime": str(position.get("entry_regime") or ""),
         }
         trades.append(trade)
         self._realized_net_pnl += _safe_float(trade.get("net_pnl"), 0.0)
@@ -2167,7 +2687,11 @@ class ParityReplayService:
         self.bar_loader = bar_loader or MonthlyPITBarLoader()
         self.artifact_dir = Path(artifact_dir)
 
-    def run(self, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def run(
+        self,
+        params: Mapping[str, Any] | None = None,
+        progress_cb: Callable[[str, float, str], None] | None = None,
+    ) -> dict[str, Any]:
         request = ParityReplayRequest.from_mapping(params)
         from config.runtime_config import shared
 
@@ -2186,16 +2710,77 @@ class ParityReplayService:
                 "source": "",
                 "error": f"{type(exc).__name__}:{exc}",
             }
+        if progress_cb is not None:
+            progress_cb("loading", 7, "读取冻结的月度历史K线")
         bars, data_source = self.bar_loader.load(request)
         runner = ParityReplayRunner(
             request=request,
             config=cfg,
             config_snapshot=snapshot,
+            progress_cb=progress_cb,
         )
         report = runner.run(bars, data_source=data_source)
+        report = self._verify_frozen_inputs(report)
         if request.persist_artifact:
             report = self._persist_artifact(report)
         return report
+
+    def _verify_frozen_inputs(self, report: Mapping[str, Any]) -> dict[str, Any]:
+        """Reject training when files or bound code changed during the task."""
+
+        payload = dict(report)
+        before = dict(payload.get("bindings") or {})
+        from config.runtime_config import shared
+
+        current_config = shared()
+        current_config_payload = (
+            current_config.to_dict()
+            if hasattr(current_config, "to_dict")
+            else dict(current_config) if isinstance(current_config, Mapping) else {}
+        )
+        after_code_hash = _sha256_files(_CODE_BINDING_PATHS)
+        source_files = [
+            str(item.get("path") or "")
+            for item in list(
+                dict(payload.get("data_source") or {}).get("source_file_manifest") or []
+            )
+            if isinstance(item, Mapping) and str(item.get("path") or "")
+        ]
+        after_manifest, after_errors = _source_file_manifest(source_files)
+        before_manifest = list(
+            dict(payload.get("data_source") or {}).get("source_file_manifest") or []
+        )
+        changed: list[str] = []
+        if str(before.get("code_hash") or "") != after_code_hash:
+            changed.append("code_changed_during_replay")
+        if str(before.get("config_hash") or "") != _runtime_config_hash(current_config_payload):
+            changed.append("config_changed_during_replay")
+        artifact_manifest = dict(payload.get("artifact_manifest") or {})
+        selected_ids = list(artifact_manifest.get("selected_factor_ids") or [])
+        if dict(artifact_manifest.get("selected_factor_artifacts") or {}) != dict(
+            _selected_factor_artifact_manifest(current_config, selected_ids)
+        ):
+            changed.append("factor_artifacts_changed_during_replay")
+        if after_errors or after_manifest != before_manifest:
+            changed.append("data_files_changed_during_replay")
+        if changed:
+            reasons = list(payload.get("diagnostic_reasons") or [])
+            payload["diagnostic_reasons"] = list(dict.fromkeys(reasons + changed))
+            bundle = dict(payload.get("learning_bundle") or {})
+            bundle["trainable"] = False
+            bundle["blockers"] = list(
+                dict.fromkeys(list(bundle.get("blockers") or []) + changed)
+            )
+            bundle["open_samples"] = []
+            bundle["factor_samples"] = []
+            payload["learning_bundle"] = bundle
+        payload["binding_postcheck"] = {
+            "verified": not changed,
+            "blockers": changed,
+            "code_hash": after_code_hash,
+            "source_file_manifest": after_manifest,
+        }
+        return payload
 
     def _persist_artifact(self, report: Mapping[str, Any]) -> dict[str, Any]:
         payload = dict(report)
@@ -2213,6 +2798,54 @@ class ParityReplayService:
         return payload
 
 
+def load_parity_learning_samples(
+    sample_kind: str,
+    *,
+    artifact_dir: str | Path = DEFAULT_PARITY_ARTIFACT_DIR,
+) -> list[dict[str, Any]]:
+    """Read verified replay samples without touching runtime learning tables."""
+
+    key = "open_samples" if sample_kind == "open" else "factor_samples"
+    expected_schema = (
+        "pit.v2.open_lineage"
+        if sample_kind == "open"
+        else "pit.v2.factor_rolling_lineage"
+    )
+    samples: dict[str, dict[str, Any]] = {}
+    for path in sorted(Path(artifact_dir).glob("parity_*.json")):
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+            bundle = dict(report.get("learning_bundle") or {})
+            if (
+                report.get("schema_version") != PARITY_REPLAY_SCHEMA_VERSION
+                or bundle.get("schema_version") != "parity_learning_bundle.v1"
+                or not bool(bundle.get("trainable"))
+                or not bool(dict(report.get("binding_postcheck") or {}).get("verified"))
+                or str(dict(bundle.get("feature_schemas") or {}).get(sample_kind) or "")
+                != expected_schema
+            ):
+                continue
+            hashed = dict(report)
+            expected_hash = str(hashed.get("report_artifact_hash") or "")
+            hashed["artifact_path"] = ""
+            hashed["report_artifact_hash"] = ""
+            if not expected_hash or _sha256_json(hashed) != expected_hash:
+                continue
+            for raw in list(bundle.get(key) or []):
+                if not isinstance(raw, Mapping):
+                    continue
+                item = dict(raw)
+                sample_id = str(item.get("sample_id") or "")
+                if sample_id:
+                    samples[sample_id] = item
+        except Exception:
+            continue
+    return sorted(
+        samples.values(),
+        key=lambda item: (_safe_float(item.get("created_at")), str(item.get("sample_id") or "")),
+    )
+
+
 __all__ = [
     "DEFAULT_PARITY_ARTIFACT_DIR",
     "MonthlyPITBarLoader",
@@ -2221,4 +2854,5 @@ __all__ = [
     "ParityReplayRequest",
     "ParityReplayRunner",
     "ParityReplayService",
+    "load_parity_learning_samples",
 ]

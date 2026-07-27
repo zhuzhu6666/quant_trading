@@ -359,11 +359,15 @@ class OpenQualityLightGBMService:
         from sklearn.metrics import accuracy_score, balanced_accuracy_score, recall_score, roc_auc_score
 
         samples = self.load_samples(limit=limit)
-        if len(samples) < int(min_samples):
+        from backend.services.parity_replay import load_parity_learning_samples
+
+        replay_samples = load_parity_learning_samples("open")
+        if len(samples) < 2 or len(samples) + len(replay_samples) < int(min_samples):
             return {
                 "ok": False, "model_type": MODEL_TYPE, "model_version": MODEL_VERSION,
                 "feature_schema_version": FEATURE_SCHEMA_VERSION,
-                "sample_count": len(samples), "data_quality": dict(self.last_data_quality),
+                "sample_count": len(samples), "replay_sample_count": len(replay_samples),
+                "data_quality": dict(self.last_data_quality),
                 "error": "insufficient_open_outcome_samples",
             }
         labels = [int(item["label"]) for item in samples]
@@ -375,27 +379,8 @@ class OpenQualityLightGBMService:
         train_samples = samples[:-holdout_count]
         holdout_samples = samples[-holdout_count:]
 
-        x_train = pd.DataFrame([item["features"] for item in train_samples], columns=FEATURE_NAMES)
-        y_train = [int(item["label"]) for item in train_samples]
         x_holdout = pd.DataFrame([item["features"] for item in holdout_samples], columns=FEATURE_NAMES)
         y_holdout = [int(item["label"]) for item in holdout_samples]
-
-        model = lgb.LGBMClassifier(
-            objective="binary",
-            n_estimators=140,
-            learning_rate=0.04,
-            num_leaves=15,
-            min_child_samples=max(1, min(20, len(train_samples) // 4)),
-            subsample=0.9,
-            colsample_bytree=0.9,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=1,
-            verbosity=-1,
-        )
-        model.fit(x_train, y_train)
-        train_prob = model.predict_proba(x_train)[:, 1]
-        holdout_prob = model.predict_proba(x_holdout)[:, 1]
 
         def _metrics(items: list[dict[str, Any]], y_true: list[int], probs: Any) -> dict[str, Any]:
             preds = [1 if float(x) >= 0.5 else 0 for x in probs]
@@ -425,16 +410,89 @@ class OpenQualityLightGBMService:
                 "positive_rate": round(sum(y_true) / max(len(y_true), 1), 6),
             }
 
+        def _fit(
+            training: list[dict[str, Any]],
+            weights: list[float] | None = None,
+        ):
+            fitted = lgb.LGBMClassifier(
+                objective="binary",
+                n_estimators=140,
+                learning_rate=0.04,
+                num_leaves=15,
+                min_child_samples=max(1, min(20, len(training) // 4)),
+                subsample=0.9,
+                colsample_bytree=0.9,
+                class_weight="balanced",
+                random_state=42,
+                n_jobs=1,
+                verbosity=-1,
+            )
+            x = pd.DataFrame([item["features"] for item in training], columns=FEATURE_NAMES)
+            fitted.fit(x, [int(item["label"]) for item in training], sample_weight=weights)
+            return fitted, x
+
+        baseline_model, baseline_x = _fit(train_samples)
+        baseline_holdout = _metrics(
+            holdout_samples,
+            y_holdout,
+            baseline_model.predict_proba(x_holdout)[:, 1],
+        )
+        replay_weight = min(1.0, len(train_samples) / max(1, len(replay_samples)))
+        augmented_samples = train_samples + replay_samples
+        augmented_model, augmented_x = _fit(
+            augmented_samples,
+            [1.0] * len(train_samples) + [replay_weight] * len(replay_samples),
+        )
+        augmented_holdout = _metrics(
+            holdout_samples,
+            y_holdout,
+            augmented_model.predict_proba(x_holdout)[:, 1],
+        )
+        compare_names = ("accuracy", "balanced_accuracy", "auc")
+        comparable = [
+            name for name in compare_names
+            if baseline_holdout.get(name) is not None and augmented_holdout.get(name) is not None
+        ]
+        use_augmented = bool(replay_samples) and bool(comparable) and all(
+            float(augmented_holdout[name]) >= float(baseline_holdout[name])
+            for name in comparable
+        ) and any(
+            float(augmented_holdout[name]) > float(baseline_holdout[name])
+            for name in comparable
+        )
+        model = augmented_model if use_augmented else baseline_model
+        selected_train = augmented_samples if use_augmented else train_samples
+        selected_x = augmented_x if use_augmented else baseline_x
+        train_prob = model.predict_proba(selected_x)[:, 1]
+        holdout_prob = model.predict_proba(x_holdout)[:, 1]
+
         feature_importance = [
             {"feature": name, "importance": int(value)}
             for name, value in sorted(zip(FEATURE_NAMES, model.feature_importances_), key=lambda item: (-int(item[1]), item[0]))
         ]
         metrics = {
-            "train": _metrics(train_samples, y_train, train_prob),
+            "train": _metrics(
+                selected_train,
+                [int(item["label"]) for item in selected_train],
+                train_prob,
+            ),
             "holdout": _metrics(holdout_samples, y_holdout, holdout_prob),
             "split": "time_ordered_grouped_purged",
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "sample_count": len(samples),
+            "replay_sample_count": len(replay_samples),
+            "real_holdout_count": len(holdout_samples),
+            "training_sources": {
+                "real_train_samples": len(train_samples),
+                "historical_replay_samples": len(replay_samples),
+                "historical_replay_weight": replay_weight,
+                "selected": "real_plus_replay" if use_augmented else "real_baseline",
+            },
+            "augmentation_comparison": {
+                "baseline_real_holdout": baseline_holdout,
+                "augmented_real_holdout": augmented_holdout,
+                "selected": "augmented" if use_augmented else "baseline",
+            },
             "feature_count": len(FEATURE_NAMES),
             "label_distribution": {"negative": labels.count(0), "positive": labels.count(1)},
             "safe_for_live_trading": False,

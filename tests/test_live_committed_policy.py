@@ -163,3 +163,31 @@ def test_dual_mode_legacy_compatibility_accepts_only_declared_tightening(tmp_pat
 
     assert [item["suggestion_id"] for item in controls] == ["legacy_down"]
     assert controls[0]["governance_authority"] == "legacy_quarantined"
+
+
+def test_terminal_application_cannot_leave_applied_control_live(tmp_path) -> None:
+    conn = _connection(tmp_path)
+    conn.executescript(
+        """
+        CREATE TABLE learning_application_log (
+            application_id TEXT PRIMARY KEY,
+            scope_type TEXT,
+            suggestion_ids_json TEXT,
+            status TEXT
+        );
+        INSERT INTO learning_application_log VALUES
+        ('app_old', 'entry_quality', '["committed_applied"]', 'superseded');
+        """
+    )
+    try:
+        controls = load_live_policy_controls(
+            conn,
+            scope_type="entry_quality",
+            allowed_actions={"raise_weak_signal_threshold"},
+            limit=20,
+            coordinator_mode="enforce",
+        )
+    finally:
+        conn.close()
+
+    assert controls == []

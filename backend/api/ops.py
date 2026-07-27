@@ -45,7 +45,6 @@ from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.live_autonomy import LiveAutonomyService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.release_control import ReleaseControlService
-from backend.services.parity_replay import ParityReplayService
 from backend.services.replay_harness import ReplayHarnessService
 from backend.services.stability import TimedCache
 from backend.services.v15_phase0 import V15Phase0CompletionService
@@ -237,23 +236,6 @@ class GovernanceExpansionControlRequest(BaseModel):
     confirm_resume: bool = False
     v16_command_id: str = ""
     v16_claim_token: str = ""
-
-
-class ParityReplayRunRequest(BaseModel):
-    symbol: str = "XAUUSD+"
-    timeframe: str = "M15"
-    start: str | float | None = None
-    end: str | float | None = None
-    as_of: float | None = None
-    max_bars: int = Field(default=500, ge=2, le=5000)
-    warmup_bars: int = Field(default=150, ge=0, le=1000)
-    initial_equity: float = Field(default=10_000.0, gt=0)
-    volume_lots: float = Field(default=0.01, gt=0)
-    contract_size: float = Field(default=100.0, gt=0)
-    commission_per_lot_round_turn: float = Field(default=6.0, ge=0)
-    slippage_bps: float = Field(default=0.0, ge=0)
-    persist_artifact: bool = True
-    expected_bindings: dict[str, str] = Field(default_factory=dict)
 
 
 def _get_auto_recovery() -> AutoRecovery:
@@ -1347,28 +1329,6 @@ def run_bar_replay_harness(
        record_path=("report",),
        id_fields=("replay_run_id",),
        observed_paths=(("created_at",),))
-
-
-@router.post("/replay/parity-run")
-def run_parity_replay_harness(
-    req: ParityReplayRunRequest,
-    _user: RequireUser,
-) -> dict[str, Any]:
-    """Run the causal parity assessment without granting governance authority."""
-    report = ParityReplayService().run(req.model_dump())
-    return persisted_record_fact_payload({
-        "ok": str(report.get("status") or "") not in {"failed", "failed_binding"},
-        "schema_version": "ops_parity_replay_run.v1",
-        "live_parity": bool(report.get("live_parity")),
-        "governance_eligible": bool(report.get("governance_eligible")),
-        "deployable_candidate": bool(report.get("deployable_candidate")),
-        "report": report,
-    }, contract="ops.parity-replay-run.v2",
-       source="filesystem:parity-replay-artifact",
-       record_path=("report",),
-       id_fields=("replay_run_id",),
-       observed_paths=(("created_at",),),
-       required_fields=("artifact_path", "report_artifact_hash"))
 
 
 @router.post("/replay/bar-preview")

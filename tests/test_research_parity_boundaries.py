@@ -6,19 +6,17 @@ from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
+import duckdb
 import pandas as pd
 import pytest
 
-from backend.services import backtest_runner
 from backend.services import parity_replay as parity_replay_module
-from backend.services.backtest_service import run_backtest
 from backend.services.governance_eligibility import evaluate_governance_eligibility
 from backend.services.model_influence_governance import ModelInfluenceGovernanceService
 from backend.services.parameter_template_validation import ParameterTemplateValidationService
 from backend.services.parity_replay import ParityReplayRequest, ParityReplayRunner
 from backend.services.research_evidence import (
     ResearchEvidenceRejected,
-    enforce_legacy_backtest_contract,
     legacy_backtest_contract,
     require_executable_research_evidence,
 )
@@ -128,6 +126,150 @@ def _bars(*, include_bid_ask: bool = True) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _learning_report() -> dict:
+    trades = []
+    for index, pnl in enumerate((5.0, -2.0, 4.0, 3.0)):
+        trades.append({
+            "decision_index": index,
+            "decision_ts": 1000.0 + index * 300,
+            "entry_index": index + 1,
+            "entry_ts": 1300.0 + index * 300,
+            "exit_index": index + 2,
+            "exit_ts": 1600.0 + index * 300,
+            "direction": 1 if index % 2 == 0 else -1,
+            "net_pnl": pnl,
+            "decision_candidate": {
+                "direction": 1 if index % 2 == 0 else -1,
+                "score": 0.7,
+                "signals": {"rsi_14": {"contribution": 0.4, "confidence": 0.8}},
+                "factor_values": {},
+            },
+            "decision_bar": {
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5,
+                "bid_close": 100.4,
+                "ask_close": 100.6,
+            },
+        })
+    return {
+        "bindings": {"binding_hash": "a" * 64},
+        "causality": {
+            "closed_bar_only": True,
+            "next_bar_execution": True,
+            "native_bid_ask": True,
+        },
+        "data_source": {"point_in_time": True},
+        "artifact_manifest": {"selected_factor_ids": ["rsi_14"]},
+        "diagnostic_reasons": [],
+        "trades": trades,
+    }
+
+
+def test_replay_learning_bundle_has_deterministic_ids_and_current_schemas():
+    first = parity_replay_module._build_learning_bundle(_learning_report())
+    second = parity_replay_module._build_learning_bundle(_learning_report())
+    assert first["trainable"] is True
+    assert first["feature_schemas"] == {
+        "open": "pit.v2.open_lineage",
+        "factor": "pit.v2.factor_rolling_lineage",
+    }
+    assert [item["sample_id"] for item in first["open_samples"]] == [
+        item["sample_id"] for item in second["open_samples"]
+    ]
+    assert first["independent_trade_count"] == 4
+    assert first["open_sample_count"] == 4
+    assert first["factor_sample_count"] == 1
+
+
+def test_replay_learning_blocker_prevents_training_rows():
+    report = _learning_report()
+    report["causality"]["closed_bar_only"] = False
+    bundle = parity_replay_module._build_learning_bundle(report)
+    assert bundle["trainable"] is False
+    assert "closed_bar_contract_failed" in bundle["blockers"]
+    assert bundle["open_samples"] == []
+    assert bundle["factor_samples"] == []
+
+
+def test_recorded_spread_builds_simulated_executable_quotes_without_claiming_native():
+    bars = _bars(include_bid_ask=False)
+    bars["spread"] = 0.2
+    report = _runner(bars=bars)
+    assert report["causality"]["native_bid_ask"] is False
+    assert report["causality"]["executable_bid_ask"] is True
+    assert report["causality"]["quote_model"] == "recorded_spread_around_ohlc_mid"
+    assert report["metrics"]["independent_trade_count"] == 1
+
+
+def test_unclosed_requested_bar_is_reported_and_cannot_train():
+    bars = _bars()
+    bars.loc[len(bars)] = {**bars.iloc[-1].to_dict(), "time": 4500.0}
+    report = _runner(bars=bars)
+    assert "unclosed_bar_present_in_requested_window" in report["diagnostic_reasons"]
+    assert report["learning_bundle"]["trainable"] is False
+
+
+def test_monthly_loader_caps_target_in_sql_and_loads_only_preceding_warmup(tmp_path):
+    path = tmp_path / "bars_2026_07.duckdb"
+    conn = duckdb.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE bars AS
+        SELECT
+            'XAUUSD+'::VARCHAR AS symbol,
+            'M5'::VARCHAR AS timeframe,
+            (1000 + i * 300)::DOUBLE AS time,
+            (100 + i)::DOUBLE AS open,
+            (101 + i)::DOUBLE AS high,
+            (99 + i)::DOUBLE AS low,
+            (100.5 + i)::DOUBLE AS close,
+            TRUE AS complete
+        FROM range(10) AS t(i)
+        """
+    )
+    conn.close()
+
+    bars, metadata = parity_replay_module.MonthlyPITBarLoader(tmp_path).load(
+        ParityReplayRequest(
+            start=1000.0,
+            end=5000.0,
+            max_bars=3,
+            warmup_bars=2,
+        )
+    )
+
+    assert bars["time"].tolist() == [2500.0, 2800.0, 3100.0, 3400.0, 3700.0]
+    assert metadata["target_bar_count"] == 3
+    assert metadata["warmup_bar_count"] == 2
+    assert metadata["target_start_ts"] == 3100.0
+
+
+def test_replay_warmup_bars_prime_state_without_creating_trades():
+    def provider(_history, _bar, _index):
+        return {"direction": 1, "sl_distance": 5.0, "tp_distance": 1.0}
+
+    report = _runner(
+        bars=_bars(),
+        provider=provider,
+        data_source={
+            "source": "monthly_pit_bars",
+            "source_files": ["fixture"],
+            "target_start_ts": 2800.0,
+            "target_bar_count": 2,
+            "warmup_bar_count": 2,
+        },
+    )
+
+    decisions = [
+        event for event in report["events"] if event["event"] == "closed_bar_decision"
+    ]
+    assert decisions[0]["bar_index"] == 2
+    assert report["metrics"]["bar_count"] == 2
+    assert report["metrics"]["warmup_bar_count"] == 2
+
+
 def _runner(
     *,
     bars: pd.DataFrame,
@@ -180,65 +322,89 @@ def _runner(
     return report
 
 
-def test_legacy_backtest_service_forces_contract_even_when_runner_spoofs(monkeypatch):
-    monkeypatch.setattr(
-        backtest_runner,
-        "run_backtest_sweep",
-        lambda **_kwargs: {
-            "engine": "modern",
-            "evidence_class": "live_parity",
-            "live_parity": True,
-            "governance_eligible": True,
-            "deployable_candidate": True,
-        },
+def test_parity_replay_risk_context_advances_from_last_completed_trade():
+    risk_contexts: list[dict] = []
+
+    def provider(_history, _bar, index):
+        if index in {0, 3}:
+            return {"direction": 1, "sl_distance": 5.0, "tp_distance": 1.0}
+        return {}
+
+    def evaluate_risk(context):
+        risk_contexts.append(dict(context))
+        return {"allowed": True, "reason": "test"}
+
+    config = SimpleNamespace(
+        risk_max_holding_bars=288,
+        position_supervisor_template_id="position_supervisor:default.v1",
     )
-    result = run_backtest({}, lambda *_args: None)
-    assert result == enforce_legacy_backtest_contract(result)
-    assert result["engine"] == "legacy_indicator_sweep"
-    assert result["evidence_class"] == "diagnostic_only"
-    assert result["live_parity"] is False
-    assert result["governance_eligible"] is False
-    assert result["deployable_candidate"] is False
+    report = ParityReplayRunner(
+        request=ParityReplayRequest(
+            timeframe="M15",
+            as_of=5000.0,
+            max_bars=100,
+            warmup_bars=0,
+            initial_equity=10_000.0,
+            volume_lots=0.01,
+            contract_size=100.0,
+            commission_per_lot_round_turn=6.0,
+            slippage_bps=0.0,
+            persist_artifact=False,
+        ),
+        config=config,
+        config_snapshot={"config_version": 7, "config_hash": _hash({}), "source": "test"},
+        decision_provider=provider,
+        risk_evaluator=evaluate_risk,
+        supervisor_evaluator=lambda _context: {"action": "hold", "reason": "test"},
+    ).run(
+        _bars(),
+        data_source={"source": "monthly_pit_bars", "source_files": ["fixture"]},
+    )
+
+    assert report["metrics"]["independent_trade_count"] == 1
+    assert [context["session_last_trade_ts"] for context in risk_contexts] == [
+        0.0,
+        2800.0,
+    ]
 
 
-def test_legacy_report_writes_all_trust_boundary_fields(tmp_path, monkeypatch):
-    bars = pd.DataFrame(
-        {
-            "open": [1.0] * 10,
-            "high": [1.1] * 10,
-            "low": [0.9] * 10,
-            "close": [1.0] * 10,
-            "volume": [1.0] * 10,
-        },
-        index=pd.date_range("2026-01-01", periods=10, freq="15min"),
+def test_parity_replay_resets_session_trade_state_at_utc_day_boundary():
+    bars = _bars()
+    bars.loc[3, "time"] = 90_000.0
+    risk_contexts: list[dict] = []
+
+    def provider(_history, _bar, index):
+        if index in {0, 3}:
+            return {"direction": 1, "sl_distance": 5.0, "tp_distance": 1.0}
+        return {}
+
+    config = SimpleNamespace(
+        risk_max_holding_bars=288,
+        position_supervisor_template_id="position_supervisor:default.v1",
     )
-    monkeypatch.setattr(backtest_runner, "CHARTS_DIR", tmp_path)
-    monkeypatch.setattr(backtest_runner, "_load_bars", lambda *_args: bars)
-    monkeypatch.setattr(
-        backtest_runner,
-        "_run_single_backtrader_pass",
-        lambda _df, sl_atr, tp_atr, cooldown_bars, **_kwargs: {
-            "sl_atr": sl_atr,
-            "tp_atr": tp_atr,
-            "cooldown_bars": cooldown_bars,
-            "trades": 0,
-            "win_rate": 0.0,
-            "net_pnl": 0.0,
-            "total_return": 0.0,
-            "sharpe": 0.0,
-            "max_drawdown": 0.0,
-            "total_return_test": 0.0,
-            "trades_test": 0,
-            "decay": 0.0,
-        },
+    ParityReplayRunner(
+        request=ParityReplayRequest(
+            timeframe="M15",
+            as_of=100_000.0,
+            warmup_bars=0,
+            persist_artifact=False,
+        ),
+        config=config,
+        config_snapshot={"config_version": 7, "config_hash": _hash({}), "source": "test"},
+        decision_provider=provider,
+        risk_evaluator=lambda context: (
+            risk_contexts.append(dict(context))
+            or {"allowed": True, "reason": "test"}
+        ),
+        supervisor_evaluator=lambda _context: {"action": "hold", "reason": "test"},
+    ).run(
+        bars,
+        data_source={"source": "monthly_pit_bars", "source_files": ["fixture"]},
     )
-    result = backtest_runner.run_backtest_sweep()
-    report = Path(result["report_path"]).read_text(encoding="utf-8")
-    assert "# engine: legacy_indicator_sweep" in report
-    assert "# evidence_class: diagnostic_only" in report
-    assert "# live_parity: false" in report
-    assert "# governance_eligible: false" in report
-    assert "# deployable_candidate: false" in report
+
+    assert risk_contexts[1]["session_last_trade_ts"] == 0.0
+    assert risk_contexts[1]["session_state"]["trades"] == 0
+    assert risk_contexts[1]["session_state"]["pnl"] == 0.0
 
 
 def test_legacy_evidence_is_zero_weight_even_if_flags_are_spoofed():
@@ -294,33 +460,6 @@ def test_legacy_outer_envelope_cannot_be_hidden_by_nested_parity_claims():
     with pytest.raises(ResearchEvidenceRejected) as exc:
         require_executable_research_evidence(evidence, executable_use="deploy")
     assert "legacy_indicator_sweep_diagnostic_only" in exc.value.verdict.blockers
-
-
-def test_backtest_api_sanitizes_job_and_nested_json_report_contract():
-    from backend.api.backtest import _legacy_job_payload, _legacy_report_payload
-
-    class Job:
-        def to_dict(self):
-            return {
-                "status": "done",
-                "engine": "spoofed",
-                "governance_eligible": True,
-                "result": {
-                    "engine": "spoofed",
-                    "live_parity": True,
-                    "deployable_candidate": True,
-                },
-            }
-
-    job = _legacy_job_payload(Job())
-    report = _legacy_report_payload({
-        "kind": "json",
-        "content": {"engine": "spoofed", "governance_eligible": True},
-    })
-    assert job == enforce_legacy_backtest_contract(job)
-    assert job["result"] == enforce_legacy_backtest_contract(job["result"])
-    assert report == enforce_legacy_backtest_contract(report)
-    assert report["content"] == enforce_legacy_backtest_contract(report["content"])
 
 
 def test_legacy_parameter_candidate_cannot_be_approved_or_deployed(tmp_path):
@@ -675,15 +814,10 @@ def test_parity_replay_binds_live_lifecycle_primitives_without_claiming_exactnes
     assert report["governance_eligible"] is False
 
 
-def test_parity_binding_requires_explicit_config_data_code_and_artifact_preconditions():
+def test_parity_task_freezes_bindings_without_caller_preconditions():
     first = _runner(bars=_bars())
-    assert first["binding_verification"]["verified"] is False
-    assert first["binding_verification"]["missing_expected"] == [
-        "config_hash",
-        "data_hash",
-        "code_hash",
-        "artifact_hash",
-    ]
+    assert first["binding_verification"]["verified"] is True
+    assert first["binding_verification"]["missing_expected"] == []
 
     expected = {
         name: first["bindings"][name]
@@ -1110,6 +1244,7 @@ def test_parity_replay_uses_live_open_trade_risk_context_builder(monkeypatch):
             "drawdown_pct": 0.1,
             "circuit_breaker": False,
         },
+        "session_last_trade_ts": 1_000.0,
         "candidate": {"score": 0.8},
     })
 
@@ -1128,6 +1263,8 @@ def test_parity_replay_uses_live_open_trade_risk_context_builder(monkeypatch):
     assert payload["entry_cluster"]["schema_version"] == "entry_cluster_context.v1"
     assert payload["requested_api_volume"] == 100.0
     assert payload["temporal_context"]["decision_ts"] == 1_900.0
+    assert payload["temporal_context"]["seconds_since_last_trade"] == 900.0
+    assert payload["temporal_context"]["bars_since_last_trade"] == 1.0
     assert payload["decision_freshness"]["fresh"] is True
     assert payload["replay_read_only"] is True
     assert payload["historical_context"] == "reconstructed"
@@ -1271,31 +1408,7 @@ def test_parity_replay_missing_bound_code_path_fails_closed(monkeypatch):
     assert report["deployable_candidate"] is False
 
 
-def test_parity_replay_api_is_additive_and_never_self_authorizes(monkeypatch):
-    from backend.api import ops as ops_api
-
-    class Service:
-        def run(self, _params):
-            return {
-                "status": "diagnostic_only",
-                "live_parity": False,
-                "governance_eligible": False,
-                "deployable_candidate": False,
-            }
-
-    monkeypatch.setattr(ops_api, "ParityReplayService", Service)
-    body = ops_api.run_parity_replay_harness(
-        ops_api.ParityReplayRunRequest(persist_artifact=False, max_bars=100),
-        _user=None,
-    )
-    assert body["schema_version"] == "ops_parity_replay_run.v1"
-    assert body["ok"] is True
-    assert body["live_parity"] is False
-    assert body["governance_eligible"] is False
-    assert body["deployable_candidate"] is False
-
-
-def test_legacy_backtest_has_one_guarded_path_into_promotion_architecture():
+def test_parity_backtest_has_one_guarded_path_into_promotion_architecture():
     root = Path(__file__).resolve().parent.parent
     sources = {}
     for path in (root / "backend" / "services").glob("*.py"):

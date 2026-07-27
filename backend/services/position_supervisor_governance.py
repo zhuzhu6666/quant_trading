@@ -933,38 +933,73 @@ def build_position_supervisor_advisories(
 
     capture_failed_count = int(capture_failure_summary.get("capture_failed_count") or 0)
     mfe_then_loss_count = int(capture_failure_summary.get("mfe_then_loss_count") or 0)
+    counterfactual_labels = dict(counterfactual_summary.get("labels") or {})
+    over_protection_count = sum(
+        int(counterfactual_labels.get(label) or 0)
+        for label in ("protection_too_tight", "premature_tighten", "noise_stopout")
+    )
+    correct_stop_count = int(counterfactual_labels.get("correct_stop") or 0)
+    protection_can_tighten = over_protection_count <= correct_stop_count
     if capture_failed_count >= 2 or (
         capture_failed_count >= 1 and _safe_float(capture_failure_summary.get("avg_failed_giveback_ratio")) >= 0.85
     ):
-        generated_template = _generated_tpsl_template()
-        if generated_template:
+        if protection_can_tighten:
+            generated_template = _generated_tpsl_template()
+            if generated_template:
+                _add(
+                    "switch_position_supervisor_template",
+                    min(0.86, 0.70 + 0.03 * capture_failed_count),
+                    "generated dynamic TP/SL template from MFE capture failure replay",
+                    {
+                        "day": day,
+                        "candidate_template_id": generated_template["template_id"],
+                        "candidate_template": generated_template,
+                        "base_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
+                        "generation_reason": "mfe_capture_failure",
+                        "capture_failure_examples": capture_failure_summary.get("examples") or [],
+                    },
+                    target_template_id=generated_template["template_id"],
+                )
             _add(
-                "switch_position_supervisor_template",
-                min(0.86, 0.70 + 0.03 * capture_failed_count),
-                "generated dynamic TP/SL template from MFE capture failure replay",
+                "tighten_mfe_capture_protection",
+                min(0.82, 0.66 + 0.03 * capture_failed_count),
+                "closed losses had positive MFE but very low profit capture and high giveback",
                 {
                     "day": day,
-                    "candidate_template_id": generated_template["template_id"],
-                    "candidate_template": generated_template,
-                    "base_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
-                    "generation_reason": "mfe_capture_failure",
+                    "mfe_then_loss_count": mfe_then_loss_count,
+                    "capture_failed_count": capture_failed_count,
+                    "candidate_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
+                    "candidate_actions": profit_summary.get("actions") or {},
                     "capture_failure_examples": capture_failure_summary.get("examples") or [],
                 },
-                target_template_id=generated_template["template_id"],
+                target_template_id=PROFIT_PROTECTION_TEMPLATE_ID,
             )
+        else:
+            skipped.append(
+                {
+                    "action": "tighten_mfe_capture_protection",
+                    "reason": "counterfactual evidence shows protection is already too aggressive",
+                    "evidence": {
+                        "day": day,
+                        "capture_failed_count": capture_failed_count,
+                        "over_protection_count": over_protection_count,
+                        "correct_stop_count": correct_stop_count,
+                    },
+                }
+            )
+
+    if over_protection_count > correct_stop_count:
         _add(
-            "tighten_mfe_capture_protection",
-            min(0.82, 0.66 + 0.03 * capture_failed_count),
-            "closed losses had positive MFE but very low profit capture and high giveback",
+            "switch_position_supervisor_template",
+            min(0.82, 0.66 + 0.02 * (over_protection_count - correct_stop_count)),
+            "counterfactual review shows profit protection exits are too aggressive",
             {
                 "day": day,
-                "mfe_then_loss_count": mfe_then_loss_count,
-                "capture_failed_count": capture_failed_count,
-                "candidate_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
-                "candidate_actions": profit_summary.get("actions") or {},
-                "capture_failure_examples": capture_failure_summary.get("examples") or [],
+                "over_protection_count": over_protection_count,
+                "correct_stop_count": correct_stop_count,
+                "candidate_template_id": CONSERVATIVE_TEMPLATE_ID,
             },
-            target_template_id=PROFIT_PROTECTION_TEMPLATE_ID,
+            target_template_id=CONSERVATIVE_TEMPLATE_ID,
         )
 
     if int(replay["comparison"].get("small_loss_closes_reduced") or 0) > 0:
@@ -979,7 +1014,10 @@ def build_position_supervisor_advisories(
                 "candidate_template_id": CONSERVATIVE_TEMPLATE_ID,
             },
         )
-    if int(default_summary.get("actions", {}).get("tighten", 0) or 0) > 0:
+    if (
+        protection_can_tighten
+        and int(default_summary.get("actions", {}).get("tighten", 0) or 0) > 0
+    ):
         _add(
             "tighten_profit_protection",
             0.68,

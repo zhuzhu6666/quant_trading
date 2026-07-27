@@ -78,8 +78,8 @@ export function displayStage(value: string): string {
   const normalized = value.toLowerCase();
   const labels: Record<string, string> = {
     phase5_live_ready_guardrails: "实盘护栏",
-    v16_phase1_read_only_brain: "只读认知",
-    v16_phase2_shadow_brain: "影子规划",
+    v16_phase1_read_only_brain: "系统态势只读汇总",
+    v16_phase2_shadow_brain: "只观察计划",
     v16_phase2_shadow_brain_eval: "后验评价",
     v16_phase3_low_impact_autonomous_brain: "低影响执行",
     v16_phase4_medium_impact_governance: "治理候选",
@@ -90,15 +90,15 @@ export function displayStage(value: string): string {
 
 export function displayAction(value: string): string {
   const labels: Record<string, string> = {
-    shadow_supervisor_template_review: "Supervisor 模板复核",
+    shadow_supervisor_template_review: "持仓监督模板复核",
     shadow_factor_weight_review: "因子权重复核",
-    shadow_context_policy_review: "Context Policy 复核",
+    shadow_context_policy_review: "场景策略复核",
     shadow_parameter_template_review: "参数模板复核",
     run_replay_job: "只读回放",
     update_weight: "权重候选",
     switch_parameter_template: "参数模板候选",
-    enable_context_policy: "Context Policy 候选",
-    switch_position_supervisor_template: "Supervisor 模板候选",
+    enable_context_policy: "场景策略候选",
+    switch_position_supervisor_template: "持仓监督模板候选",
     observe: "观察",
     tighten_to_no_new_risk: "收紧到不增风险",
     tighten_to_only_close: "收紧到仅平仓",
@@ -115,7 +115,7 @@ export function displayValue(value: string): string {
     active: "活跃",
     block: "阻断",
     blocked: "已阻断",
-    bridge_ready: "可桥接",
+    bridge_ready: "可交接",
     candidate_materialized: "候选已生成",
     caution: "谨慎",
     divergent: "有偏差",
@@ -140,9 +140,9 @@ export function displayValue(value: string): string {
     negative: "负面",
     needs_evidence: "缺证据",
     neutral: "中性",
-    not_bridge_compatible: "暂不可桥接",
+    not_bridge_compatible: "暂不可交接",
     no_new_risk: "不增风险",
-    none_shadow_only: "仅影子无影响",
+    none_shadow_only: "只观察，不影响交易",
     normal: "正常",
     observation_only: "仅观察",
     ok: "正常",
@@ -150,7 +150,7 @@ export function displayValue(value: string): string {
     pass: "通过",
     positive: "正面",
     posterior: "后验",
-    proposal_registry: "提案总线",
+    proposal_registry: "治理提案总线",
     partial: "部分对齐",
     request_review: "请求审查",
     request_replay: "请求回放",
@@ -158,8 +158,8 @@ export function displayValue(value: string): string {
     reject: "拒绝",
     revoked: "已撤销",
     reviewed: "已审查",
-    shadow: "影子",
-    shadow_recorded: "影子已记录",
+    shadow: "只观察",
+    shadow_recorded: "只观察记录已保存",
     stale: "过期",
     stale_evidence: "证据过期",
     submit_governance: "提交治理",
@@ -171,24 +171,34 @@ export function displayValue(value: string): string {
     unlocked: "已解锁",
     suggestion_materialized: "建议已生成",
     demo_autonomous: "Demo 自治",
-    demo_nursery: "Demo 育苗",
+    demo_nursery: "Demo 自动演化",
     advisory_only: "只建议",
     review_only: "只审查",
+    requires_control_gate: "需通过治理审核",
+    no_execution_authority: "无执行权限",
     blocked_by_agent_authority: "权限阻断",
-    v16_brain: "V16 大脑",
+    world_model: "系统态势摘要",
+    critic: "证据审查",
+    agent_authority: "智能体权限",
+    risk_policy: "风险策略",
+    decision_policy: "决策规则",
+    runtime_config: "运行配置",
+    coordinator: "治理事务提交器",
+    v16_brain: "自治治理中枢",
     autonomous_learning: "自主学习",
     factor_governance: "因子治理",
     factor_pruning_governance: "因子裁剪治理",
+    position_supervisor_governance: "持仓监督治理",
     llm_advisory: "LLM 建议",
-    lightgbm_shadow_models: "LightGBM 影子",
-    demo_nursery_learning_scope: "Demo 育苗范围",
-    agent_authority_contract: "Agent 权责合同",
+    lightgbm_shadow_models: "LightGBM 只观察模型",
+    demo_nursery_learning_scope: "Demo 自动学习范围",
+    agent_authority_contract: "智能体权限规则",
     proposal_generation_context: "提案上下文",
     candidate_generation_context: "候选上下文",
-    candidate_bridge_review: "候选桥接审查",
-    proposal_registry_read_model: "提案读模型",
+    candidate_bridge_review: "候选交接审查",
+    proposal_registry_read_model: "治理提案汇总",
     memory_and_scorecard_feedback: "记忆与评分反馈",
-    single_execution_boundary: "单执行边界",
+    single_execution_boundary: "唯一执行边界",
     live_ready_guardrails: "实盘护栏",
     unknown: "未知",
     warn: "注意",
@@ -200,28 +210,28 @@ export function displayContract(value: string): string {
   const normalized = value.toLowerCase();
   const labels: Record<string, string> = {
     backend_readiness: "后端就绪契约",
-    v15_readiness_contract: "运行中枢就绪契约",
-    v16_readiness_contract: "自治大脑就绪契约",
-    brain_state_snapshot: "大脑状态快照",
-    brain_memory_retrieval: "记忆检索契约",
-    brain_action_plan_run: "影子计划契约",
+    v15_readiness_contract: "运行治理就绪契约",
+    v16_readiness_contract: "自治治理就绪契约",
+    brain_state_snapshot: "自治状态快照",
+    brain_memory_retrieval: "证据记忆检索",
+    brain_action_plan_run: "只观察计划",
     brain_action_plan_eval_run: "后验评价契约",
     brain_low_impact_execution_run: "低影响执行契约",
     brain_medium_impact_governance_run: "治理候选契约",
     brain_governance_candidate_review_list: "候选审查契约",
     brain_governance_candidate_review_run: "候选审查契约",
     brain_live_ready_guardrail: "实盘护栏契约",
-    proposal_registry_list: "提案总线契约",
-    proposal_registry_status: "提案总线状态",
+    proposal_registry_list: "治理提案列表",
+    proposal_registry_status: "治理提案状态",
     live_autonomy_status: "实盘自治契约",
     autonomous_trading_blueprint_status: "自治大纲状态契约",
-    agent_authority_status: "Agent 权责状态契约",
-    agent_scorecard_readiness: "Agent 评分契约",
-    agent_briefing_readiness: "Agent 简报契约",
-    agent_chain_health: "Agent 链路健康契约",
+    agent_authority_status: "智能体权限状态",
+    agent_scorecard_readiness: "智能体质量评分",
+    agent_briefing_readiness: "智能体运行简报",
+    agent_chain_health: "智能体链路健康",
     proposal_generation_context_coverage: "提案上下文覆盖契约",
     candidate_generation_context_coverage: "候选上下文覆盖契约",
-    candidate_bridge_review_coverage: "候选桥接审查契约",
+    candidate_bridge_review_coverage: "候选交接审查",
   };
   const base = normalized.replace(/\.\d+$/, "").replace(/\.v\d+$/, "");
   return labels[base] || value.replace(/^v\d+_/, "").replace(/\.v\d+$/, "").replaceAll("_", " ");
@@ -308,15 +318,15 @@ export function BlueprintOverview({
         <CompactMetric label="智能体" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={`${countOf(pick(agentAuthority, ["unknown_sources"]))} 未知 / ${countOf(pick(agentAuthority, ["contract_violations"]))} 违规`} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
         <CompactMetric label="提案上下文" value={displayValue(pickString(proposalContext, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(proposalContext, ["status"], ""))} />
         <CompactMetric label="候选上下文" value={displayValue(pickString(candidateContext, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(candidateContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(candidateContext, ["status"], ""))} />
-        <CompactMetric label="桥接审查" value={displayValue(pickString(candidateReview, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(candidateReview, ["missing_required_review_count"], 0), 0)}`} tone={statusTone(pickString(candidateReview, ["status"], ""))} />
+        <CompactMetric label="交接审查" value={displayValue(pickString(candidateReview, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(candidateReview, ["missing_required_review_count"], 0), 0)}`} tone={statusTone(pickString(candidateReview, ["status"], ""))} />
         <CompactMetric label="反馈" value={displayValue(pickString(chainHealth, ["status"], ""))} detail={`检查 ${chainChecks.length}`} tone={statusTone(pickString(chainHealth, ["status"], ""))} />
       </div>
 
       <div className="v16-chain-map" aria-label="自治治理链路">
         <ChainStep icon={UsersRound} label="智能体" status={pickString(agentAuthority, ["status"], "")} detail={`已登记 ${formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)}`} />
         <ChainStep icon={Route} label="提案" status={pickString(proposalContext, ["status"], "")} detail={`缺失 ${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)}`} />
-        <ChainStep icon={ListChecks} label="候选" status={pickString(candidateReview, ["status"], "")} detail={`桥接 ${formatDecimal(pickNumber(candidateReview, ["candidate_bridge_count"], 0), 0)}`} />
-        <ChainStep icon={ShieldCheck} label="策略闸门" status={pickString(blueprint, ["status"], "")} detail={pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false) ? "保留风控与决策边界" : "闸门需关注"} />
+        <ChainStep icon={ListChecks} label="候选" status={pickString(candidateReview, ["status"], "")} detail={`可交接 ${formatDecimal(pickNumber(candidateReview, ["candidate_bridge_count"], 0), 0)}`} />
+        <ChainStep icon={ShieldCheck} label="风险与决策检查" status={pickString(blueprint, ["status"], "")} detail={pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false) ? "保留风控与决策边界" : "决策检查需关注"} />
         <ChainStep icon={Activity} label="执行" status={pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false) ? "ok" : "attention"} detail={pickString(liveAutonomy, ["autonomy_mode"], "manual")} />
         <ChainStep icon={BookOpenCheck} label="记忆" status={pickString(chainHealth, ["status"], "")} detail={`经验 ${formatDecimal(pickNumber(chainHealth, ["trade_feedback_summary.lesson_count"], 0), 0)}`} />
       </div>
@@ -333,17 +343,17 @@ export function BlueprintOverview({
                 <strong>{displayValue(component)}</strong>
                 <span>{displayValue(pickString(item, ["status"], ok ? "ok" : "attention"))}</span>
               </div>
-              <StatusPill status={ok ? "OK" : "Attention"} tone={ok ? "ok" : "warn"} />
+              <StatusPill status={ok ? "正常" : "需关注"} tone={ok ? "ok" : "warn"} />
             </div>
           );
         })}
       </div>
 
       <div className="v16-boundary v16-boundary-tight">
-        <Field label="不扩权" value={pickBoolean(deviationGuard, ["does_not_expand_agent_authority"], false) ? "true" : "false"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_expand_agent_authority"], false))} />
-        <Field label="不绕风控" value={pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false) ? "true" : "false"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false))} />
-        <Field label="不建第二执行路" value={pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false) ? "true" : "false"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false))} />
-        <Field label="只读对齐" value={pickBoolean(boundary, ["read_only_alignment_status"], false) ? "true" : "false"} tone={boolTone(pickBoolean(boundary, ["read_only_alignment_status"], false))} />
+        <Field label="权限未扩大" value={pickBoolean(deviationGuard, ["does_not_expand_agent_authority"], false) ? "是" : "否"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_expand_agent_authority"], false))} />
+        <Field label="风控未绕过" value={pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false) ? "是" : "否"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false))} />
+        <Field label="唯一执行路径" value={pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false) ? "是" : "否"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false))} />
+        <Field label="只读状态已对齐" value={pickBoolean(boundary, ["read_only_alignment_status"], false) ? "是" : "否"} tone={boolTone(pickBoolean(boundary, ["read_only_alignment_status"], false))} />
       </div>
     </>
   );
@@ -362,48 +372,54 @@ export function AgentAuthorityPanel({
 }) {
   const unknownSources = pickArray(agentAuthority, ["unknown_sources"]);
   const contractViolations = pickArray(agentAuthority, ["contract_violations"]);
-  const topAgents = pickArray(agentScorecard, ["top_agents"]);
+  const agents = pickArray(agentScorecard, ["agents"]);
   const summary = asRecord(pick(agentScorecard, ["summary"]));
   const reviewRules = asRecord(pick(agentBriefing, ["review_rules"]));
   return (
     <>
       <div className="v16-agent-strip">
-        <CompactMetric label="登记 Agent" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={displayContract(pickString(agentAuthority, ["schema_version"], ""))} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
+        <CompactMetric label="登记智能体" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={displayContract(pickString(agentAuthority, ["schema_version"], ""))} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
         <CompactMetric label="未知来源" value={formatDecimal(unknownSources.length, 0)} detail="仅供审查" tone={unknownSources.length ? "warn" : "ok"} />
-        <CompactMetric label="合同违规" value={formatDecimal(contractViolations.length, 0)} detail={displayValue(pickString(chainHealth, ["status"], ""))} tone={contractViolations.length ? "bad" : "ok"} />
-        <CompactMetric label="提案流" value={formatDecimal(pickNumber(summary, ["proposal_count"], 0), 0)} detail={`候选 ${formatDecimal(pickNumber(summary, ["candidate_count"], 0), 0)}`} tone={pickNumber(summary, ["proposal_count"], 0) || pickNumber(summary, ["candidate_count"], 0) ? "ok" : "warn"} />
+        <CompactMetric label="权限违规" value={formatDecimal(contractViolations.length, 0)} detail={displayValue(pickString(chainHealth, ["status"], ""))} tone={contractViolations.length ? "bad" : "ok"} />
+        <CompactMetric label="近期治理记录" value={formatDecimal(pickNumber(summary, ["proposal_count"], 0), 0)} detail={`候选 ${formatDecimal(pickNumber(summary, ["candidate_count"], 0), 0)} · 最多统计最近 300 条`} tone={pickNumber(summary, ["proposal_count"], 0) || pickNumber(summary, ["candidate_count"], 0) ? "ok" : "warn"} />
       </div>
 
       <div className="v16-agent-list">
-        {(topAgents.length ? topAgents : [
-          { source_agent: "v16_brain", authority_state: "review_only" },
-          { source_agent: "autonomous_learning", authority_state: "review_only" },
-          { source_agent: "factor_governance", authority_state: "review_only" },
-          { source_agent: "factor_pruning_governance", authority_state: "review_only" },
-          { source_agent: "llm_advisory", authority_state: "advisory_only" },
-          { source_agent: "lightgbm_shadow_models", authority_state: "review_only" },
-        ]).slice(0, 6).map((raw, index) => {
+        {agents.map((raw, index) => {
           const item = asRecord(raw);
           const sourceAgent = pickString(item, ["source_agent"], `agent_${index}`);
-          const applied = pickNumber(item, ["applied_count"], pickNumber(item, ["application_count"], 0));
           const proposals = pickNumber(item, ["proposal_count"], 0);
+          const candidates = pickNumber(item, ["candidate_count"], 0);
+          const suggestions = pickNumber(item, ["policy_suggestion_count"], 0);
+          const observations = pickNumber(item, ["advisory_shadow_count"], 0);
+          const applications = pickNumber(item, ["application_count"], 0);
+          const applied = pickNumber(item, ["applied_application_count"], 0);
+          const activity = [
+            proposals ? `治理提案 ${formatDecimal(proposals, 0)}` : "",
+            candidates ? `候选 ${formatDecimal(candidates, 0)}` : "",
+            suggestions ? `策略建议 ${formatDecimal(suggestions, 0)}` : "",
+            observations ? `观察记录 ${formatDecimal(observations, 0)}` : "",
+            applications ? `治理处理 ${formatDecimal(applications, 0)}` : "",
+            applied ? `实际应用 ${formatDecimal(applied, 0)}` : "",
+          ].filter(Boolean);
           const state = pickString(item, ["authority_state"], pickString(item, ["required_gate"], "review_only"));
           return (
             <div className="v16-agent-row" key={`${sourceAgent}-${index}`}>
               <UsersRound size={16} aria-hidden="true" />
               <div>
                 <strong>{displayValue(sourceAgent)}</strong>
-                <span>{formatDecimal(proposals, 0)} proposals / {formatDecimal(applied, 0)} applied</span>
+                <span>{activity.length ? activity.join(" · ") : "尚未触发治理任务"}</span>
               </div>
               <StatusPill status={displayValue(state)} tone={state === "advisory_only" ? "warn" : state.includes("blocked") ? "bad" : "mute"} />
             </div>
           );
         })}
+        {!agents.length ? <div className="empty-state">暂无智能体运行统计</div> : null}
       </div>
 
       <div className="v16-boundary v16-boundary-tight">
-        <Field label="高影响需审查" value={pickBoolean(reviewRules, ["high_impact_requires_review"], true) ? "true" : "false"} tone={boolTone(pickBoolean(reviewRules, ["high_impact_requires_review"], true))} />
-        <Field label="低可靠加严" value={pickBoolean(reviewRules, ["low_reliability_requires_extra_evidence"], true) ? "true" : "false"} tone={boolTone(pickBoolean(reviewRules, ["low_reliability_requires_extra_evidence"], true))} />
+        <Field label="高影响需审查" value={pickBoolean(reviewRules, ["high_impact_requires_review"], true) ? "是" : "否"} tone={boolTone(pickBoolean(reviewRules, ["high_impact_requires_review"], true))} />
+        <Field label="低可靠需补证据" value={pickBoolean(reviewRules, ["low_reliability_requires_extra_evidence"], true) ? "是" : "否"} tone={boolTone(pickBoolean(reviewRules, ["low_reliability_requires_extra_evidence"], true))} />
         <Field label="链路" value={displayValue(pickString(chainHealth, ["status"], ""))} tone={statusTone(pickString(chainHealth, ["status"], ""))} />
         <Field label="契约" value={displayContract(pickString(agentBriefing, ["schema_version"], ""))} />
       </div>
@@ -423,7 +439,7 @@ export function CoveragePanel({
   const items = [
     { key: "proposal", label: "提案上下文", record: proposalContext, missing: "missing_required_context_count", legacy: "legacy_missing_context_count", total: "policy_suggestion_count" },
     { key: "candidate", label: "候选上下文", record: candidateContext, missing: "missing_required_context_count", legacy: "legacy_missing_context_count", total: "candidate_count" },
-    { key: "bridge", label: "桥接审查", record: candidateReview, missing: "missing_required_review_count", legacy: "legacy_unreviewed_count", total: "candidate_bridge_count" },
+    { key: "bridge", label: "交接审查", record: candidateReview, missing: "missing_required_review_count", legacy: "legacy_unreviewed_count", total: "candidate_bridge_count" },
   ];
   return (
     <div className="v16-coverage-list">
@@ -451,16 +467,16 @@ export function CoveragePanel({
 export function MemoryList({ items, empty }: { items: unknown[]; empty: string }) {
   if (!items.length) return <div className="empty-state-small">{empty}</div>;
   return (
-    <div className="v15-list">
+    <div className="brain-list">
       {items.slice(0, 8).map((raw, index) => {
         const item = asRecord(raw);
         const source = pickString(item, ["source_table"], "memory");
         const sourceId = pickString(item, ["source_id"], "");
         const polarity = pickString(item, ["polarity"], "neutral");
         const summary = pickString(item, ["text_summary"], source);
-        const meta = `${source} · evidence ${formatDecimal(pickNumber(item, ["evidence_score"], 0), 2)} · similarity ${formatDecimal(pickNumber(item, ["similarity_score"], 0), 2)}`;
+        const meta = `${source} · 证据分 ${formatDecimal(pickNumber(item, ["evidence_score"], 0), 2)} · 相似度 ${formatDecimal(pickNumber(item, ["similarity_score"], 0), 2)}`;
         return (
-          <div className="v15-list-row brain-memory-row" key={`${source}-${sourceId}-${index}`}>
+          <div className="brain-list-row brain-memory-row" key={`${source}-${sourceId}-${index}`}>
             <div>
               <strong title={summary}>{summary}</strong>
               <span title={meta}>{meta}</span>
@@ -489,10 +505,10 @@ export function HypothesisList({ items }: { items: unknown[] }) {
               </div>
               <StatusPill status={displayValue(risk)} tone={riskTone(risk)} />
             </div>
-            <div className="v15-mini-grid v15-mini-grid-tight">
+            <div className="brain-mini-grid brain-mini-grid-tight">
               <CompactMetric label="置信度" value={`${formatDecimal(scorePct(pickNumber(item, ["confidence"], 0)), 1)}%`} tone="mute" />
               <CompactMetric label="证据分" value={`${formatDecimal(scorePct(pickNumber(item, ["evidence_score"], 0)), 1)}%`} tone={pickNumber(item, ["evidence_score"], 0) >= 0.5 ? "ok" : "warn"} />
-              <CompactMetric label="动作范围" value={pickString(item, ["action_scope"], "observe_only")} tone="warn" />
+              <CompactMetric label="动作范围" value={displayValue(pickString(item, ["action_scope"], "observe_only"))} tone="warn" />
             </div>
             <div className="brain-ref-row">
               <span>证据 {Object.keys(asRecord(pick(item, ["evidence_refs"]))).length}</span>
@@ -506,7 +522,7 @@ export function HypothesisList({ items }: { items: unknown[] }) {
 }
 
 export function ActionPlanList({ items }: { items: unknown[] }) {
-  if (!items.length) return <div className="empty-state-small">暂无影子计划</div>;
+  if (!items.length) return <div className="empty-state-small">暂无只观察计划</div>;
   return (
     <div className="brain-action-plan-list">
       {items.slice(0, 8).map((raw, index) => {
@@ -528,7 +544,7 @@ export function ActionPlanList({ items }: { items: unknown[] }) {
               <StatusPill status={displayValue(status)} tone={status === "shadow_recorded" ? "ok" : "warn"} />
             </div>
             <CompactFacts facts={[
-              { label: "Critic", value: displayValue(verdict), tone: verdict === "pass" ? "ok" : verdict === "reject" ? "bad" : "warn" },
+              { label: "证据审查", value: displayValue(verdict), tone: verdict === "pass" ? "ok" : verdict === "reject" ? "bad" : "warn" },
               { label: "风险", value: displayValue(risk), tone: riskTone(risk) },
               { label: "影响", value: displayValue(pickString(item, ["max_impact"], "none_shadow_only")), tone: "ok" },
             ]} />
@@ -565,14 +581,14 @@ export function EvaluationList({ items }: { items: unknown[] }) {
             </div>
             <CompactFacts facts={[
               { label: "覆盖", value: `${formatDecimal(coverage, 1)}%`, tone: coverage >= 50 ? "ok" : "warn" },
-              { label: "Replay", value: pickBoolean(presence, ["replay_report"], false) ? "yes" : "no", tone: boolTone(pickBoolean(presence, ["replay_report"], false)) },
-              { label: "Outcome", value: pickBoolean(presence, ["trade_outcome_review"], false) ? "yes" : "no", tone: boolTone(pickBoolean(presence, ["trade_outcome_review"], false)) },
-              { label: "Supervisor", value: pickBoolean(presence, ["position_supervisor_trace"], false) ? "yes" : "no", tone: boolTone(pickBoolean(presence, ["position_supervisor_trace"], false)) },
+              { label: "交易回放", value: pickBoolean(presence, ["replay_report"], false) ? "有" : "无", tone: boolTone(pickBoolean(presence, ["replay_report"], false)) },
+              { label: "交易结果", value: pickBoolean(presence, ["trade_outcome_review"], false) ? "有" : "无", tone: boolTone(pickBoolean(presence, ["trade_outcome_review"], false)) },
+              { label: "持仓监督", value: pickBoolean(presence, ["position_supervisor_trace"], false) ? "有" : "无", tone: boolTone(pickBoolean(presence, ["position_supervisor_trace"], false)) },
             ]} />
             <div className="brain-ref-row">
-              <span>delta {formatDecimal(pickNumber(comparison, ["learning_effects.avg_delta_reward"], 0), 3)}</span>
-              <span>avg pnl {formatDecimal(pickNumber(comparison, ["trade_outcomes.avg_pnl"], 0), 2)}</span>
-              <span>agreement {formatDecimal(scorePct(pickNumber(comparison, ["replay.agreement"], 0)), 1)}%</span>
+              <span>奖励变化 {formatDecimal(pickNumber(comparison, ["learning_effects.avg_delta_reward"], 0), 3)}</span>
+              <span>平均盈亏 {formatDecimal(pickNumber(comparison, ["trade_outcomes.avg_pnl"], 0), 2)}</span>
+              <span>回放一致率 {formatDecimal(scorePct(pickNumber(comparison, ["replay.agreement"], 0)), 1)}%</span>
             </div>
           </article>
         );
@@ -602,13 +618,13 @@ export function ExecutionList({ items }: { items: unknown[] }) {
             </div>
             <CompactFacts facts={[
               { label: "证据", value: `${formatDecimal(scorePct(pickNumber(item, ["evidence_score"], 0)), 1)}%`, tone: "ok" },
-              { label: "RiskPolicy", value: displayValue(pickBoolean(riskVerdict, ["allowed"], false) ? "allow" : "block"), tone: boolTone(pickBoolean(riskVerdict, ["allowed"], false)) },
-              { label: "Critic", value: displayValue(pickString(item, ["critic_verdict"], "")), tone: pickString(item, ["critic_verdict"], "") === "reject" ? "bad" : "warn" },
+              { label: "风险检查", value: displayValue(pickBoolean(riskVerdict, ["allowed"], false) ? "allow" : "block"), tone: boolTone(pickBoolean(riskVerdict, ["allowed"], false)) },
+              { label: "证据审查", value: displayValue(pickString(item, ["critic_verdict"], "")), tone: pickString(item, ["critic_verdict"], "") === "reject" ? "bad" : "warn" },
               { label: "后验", value: displayValue(pickString(item, ["comparison_verdict"], "")), tone: pickString(item, ["comparison_verdict"], "") === "caution" ? "warn" : "ok" },
             ]} />
             <div className="brain-ref-row">
-              <span>{pickString(result, ["replay_run_id"], "no replay")}</span>
-              <span>bad posterior {pickBoolean(posterior, ["bad_posterior"], false) ? "yes" : "no"}</span>
+              <span>{pickString(result, ["replay_run_id"], "暂无回放")}</span>
+              <span>后验异常 {pickBoolean(posterior, ["bad_posterior"], false) ? "是" : "否"}</span>
               <span>{pickString(riskVerdict, ["reason"], "")}</span>
             </div>
           </article>
@@ -638,15 +654,15 @@ export function GovernanceList({ items }: { items: unknown[] }) {
             </div>
             <CompactFacts facts={[
               { label: "证据", value: `${formatDecimal(scorePct(pickNumber(item, ["evidence_score"], 0)), 1)}%`, tone: "ok" },
-              { label: "RiskPolicy", value: displayValue(pickBoolean(riskVerdict, ["allowed"], false) ? "allow" : "block"), tone: boolTone(pickBoolean(riskVerdict, ["allowed"], false)) },
-              { label: "DecisionPolicy", value: pickBoolean(decisionPolicy, ["required"], false) ? "preview" : "n/a", tone: "mute" },
+              { label: "风险检查", value: displayValue(pickBoolean(riskVerdict, ["allowed"], false) ? "allow" : "block"), tone: boolTone(pickBoolean(riskVerdict, ["allowed"], false)) },
+              { label: "决策检查", value: pickBoolean(decisionPolicy, ["required"], false) ? "需要预审" : "不适用", tone: "mute" },
               { label: "候选", value: pickString(item, ["candidate_id"], ""), tone: pickString(item, ["candidate_id"], "") ? "ok" : "mute" },
               { label: "建议", value: pickString(item, ["suggestion_id"], ""), tone: pickString(item, ["suggestion_id"], "") ? "ok" : "mute" },
             ]} />
             <div className="brain-ref-row">
               <span>{displayValue(pickString(item, ["comparison_verdict"], ""))}</span>
               <span>{pickString(riskVerdict, ["reason"], "")}</span>
-              <span>runtime mutation {pickBoolean(item, ["rollback_plan.runtime_mutation"], false) ? "yes" : "no"}</span>
+              <span>会修改运行配置 {pickBoolean(item, ["rollback_plan.runtime_mutation"], false) ? "是" : "否"}</span>
             </div>
           </article>
         );
@@ -677,15 +693,15 @@ export function CandidateReviewList({ items }: { items: unknown[] }) {
               <StatusPill status={displayValue(status)} tone={tone} />
             </div>
             <CompactFacts facts={[
-              { label: "桥接", value: bridgeReady ? "ready" : "blocked", tone: bridgeReady ? "ok" : "warn" },
+              { label: "交接", value: bridgeReady ? "就绪" : "受阻", tone: bridgeReady ? "ok" : "warn" },
               { label: "缺口", value: `${gaps.length}`, tone: gaps.length ? "warn" : "ok" },
-              { label: "冲突", value: pickBoolean(conflict, ["has_conflict"], false) ? "yes" : "no", tone: pickBoolean(conflict, ["has_conflict"], false) ? "bad" : "ok" },
-              { label: "LLM", value: pickBoolean(item, ["llm_advisory.enabled"], false) ? pickString(item, ["llm_advisory.status"], "enabled") : "off", tone: "mute" },
+              { label: "冲突", value: pickBoolean(conflict, ["has_conflict"], false) ? "有" : "无", tone: pickBoolean(conflict, ["has_conflict"], false) ? "bad" : "ok" },
+              { label: "LLM 顾问", value: pickBoolean(item, ["llm_advisory.enabled"], false) ? displayValue(pickString(item, ["llm_advisory.status"], "enabled")) : "未启用", tone: "mute" },
             ]} />
             <div className="brain-ref-row">
               <span>{pickString(conflict, ["surface"], "")}</span>
               <span>{pickString(bridgePreview, ["reason"], pickString(item, ["bridge_reason"], ""))}</span>
-              <span>{gaps.slice(0, 2).map(String).join(", ") || "evidence ok"}</span>
+              <span>{gaps.slice(0, 2).map(String).join(", ") || "证据齐全"}</span>
             </div>
           </article>
         );

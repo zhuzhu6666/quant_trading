@@ -5435,7 +5435,16 @@ def _start_live_scheduler():
         # Phase 3: 特征工程 (03:05 UTC, 避开 :00 治理和 :02 evolution)
         sched.add_job("feature_eng", "5 3 * * *", _scheduled_feature_engineering)
         # Phase F1.1: 停盘确认窗口 LightGBM 旁路训练 (每小时检查, 非窗口只写 skip 审计)
-        sched.add_job("offmarket_position_quality_lightgbm", "20 * * * *", _scheduled_offmarket_position_quality_lightgbm)
+        from backend.services.evolution_work_coordinator import coordinated_job
+
+        sched.add_job(
+            "offmarket_position_quality_lightgbm",
+            "20 * * * *",
+            coordinated_job(
+                "offmarket_position_quality_lightgbm",
+                _scheduled_offmarket_position_quality_lightgbm,
+            ),
+        )
     else:
         logger.info("[live] heavy jobs delegated; set QUANT_BACKEND_HEAVY_JOBS=1 to run them in backend")
     # ★ system_health 已由 EvolutionKernel 注册

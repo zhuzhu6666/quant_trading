@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 const read = (relative) => fs.readFileSync(path.join(process.cwd(), relative), "utf8");
 const app = read("src/App.tsx");
 const workspaces = read("src/pages/WorkspacePages.tsx");
-const pages = ["OverviewPage", "LearningPage", "ModelsPage", "RiskPage", "OpsPage", "V15CockpitPage", "V16BrainPage"]
+const pages = ["OverviewPage", "LearningPage", "ModelsPage", "RiskPage", "OpsPage", "EvidencePage", "V16BrainPage"]
   .map((name) => read(`src/pages/${name}.tsx`));
 const dashboardBits = read("src/components/DashboardBits.tsx");
 const cssEntry = read("src/main.css");
@@ -16,15 +16,17 @@ const systemApi = read("src/api/domains/system.ts");
 const learningPage = read("src/pages/LearningPage.tsx");
 const modelsPage = read("src/pages/ModelsPage.tsx");
 const v16Page = read("src/pages/V16BrainPage.tsx");
+const v16Views = read("src/features/v16/V16BrainViews.tsx");
 const tradingPage = read("src/pages/TradingPage.tsx");
 const overviewPage = read("src/pages/OverviewPage.tsx");
 const pnlPage = read("src/pages/PnlPage.tsx");
 const opsPage = read("src/pages/OpsPage.tsx");
 const riskPage = read("src/pages/RiskPage.tsx");
-const v15Page = read("src/pages/V15CockpitPage.tsx");
+const evidencePage = read("src/pages/EvidencePage.tsx");
+const queryErrorList = read("src/components/QueryErrorList.tsx");
 const autonomyDecoder = read("src/api/fact.ts");
 const riskDecoder = read("src/api/riskSnapshot.ts");
-const presentationSources = pages.join("\n") + tradingPage + read("src/pages/PnlPage.tsx") + workspaces;
+const presentationSources = pages.join("\n") + v16Views + tradingPage + read("src/pages/PnlPage.tsx") + workspaces;
 
 assert.equal((app.match(/<ProtectedAppLayout/g) ?? []).length, 1, "受保护页面应共用一个布局壳");
 assert.ok((app.match(/lazy\(\(\) => import/g) ?? []).length >= 6, "一级页面应按路由懒加载");
@@ -40,7 +42,7 @@ assert.doesNotMatch(pages.join("\n"), /\["backend-readiness",|\["ops-backend-rea
 assert.equal((tokens.match(/:root\s*\{/g) ?? []).length, 1, "设计 token 必须只有一个事实源");
 assert.equal((cssEntry.match(/@import/g) ?? []).length, 7, "样式入口应只负责编排分层样式");
 assert.match(cssEntry, /console\.css/);
-for (const metricGrid of ["learning-mini-grid", "model-mini-grid", "risk-mini-grid", "overview-mini-grid", "ops-mini-grid", "v15-mini-grid"]) {
+for (const metricGrid of ["learning-mini-grid", "model-mini-grid", "risk-mini-grid", "overview-mini-grid", "ops-mini-grid", "brain-mini-grid"]) {
   assert.match(consoleCss, new RegExp(`\\.${metricGrid}`), `${metricGrid} 必须受紧凑网格基线约束`);
 }
 assert.match(consoleCss, /grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(168px,\s*1fr\)\)/);
@@ -49,7 +51,7 @@ assert.match(consoleCss, /align-items:\s*start/);
 assert.doesNotMatch(apiClient, /export (async function|const) get(SystemLoad|SystemDbHealth|OpsAlerts)/);
 assert.match(systemApi, /getSystemLoad/);
 assert.match(learningPage, /learning_effect_quality/);
-assert.match(learningPage, /重试资格只在出现新复盘证据/);
+assert.match(learningPage, /只有出现新的复盘证据/);
 assert.match(learningPage, /看板不会自动改权重、参数或智能体权限/);
 assert.match(learningPage, /experience_prior/);
 assert.match(learningPage, /awe_mutation_coverage/);
@@ -65,21 +67,29 @@ for (const contract of [
   "learning.lifecycle.v2",
   "learning.reviews.v2",
   "learning.autonomous-samples.v2",
-  "learning.model-meta-lightgbm-shadow-report.v2",
-  "learning.model-permission-audits.v2",
 ]) {
   assert.match(learningPage, new RegExp(`readFact\\([^)]*"${contract.replaceAll(".", "\\.")}"`), `Learning ${contract} 必须按端点契约校验`);
 }
-assert.match(learningPage, /learning-dashboard \$\{learningFactsKnown \? "" : "fact-unverified"\}/);
-assert.match(learningPage, /学习事实未接入/);
+assert.match(learningPage, /className="dashboard learning-dashboard"/);
+assert.doesNotMatch(learningPage, /learning-dashboard \$\{learningFactsKnown \? "" : "fact-unverified"\}/, "单个学习接口不得把整页正常卡片染黄");
+assert.match(learningPage, /部分数据更新中/);
+assert.match(learningPage, /部分数据待确认/);
+for (const queryName of ["lifecycle", "reviews", "samples", "backend-readiness"]) {
+  assert.match(learningPage, new RegExp(`label: "${queryName}"`), `Learning ${queryName} 错误必须可见`);
+}
 assert.match(modelsPage, /readFact\(readinessQuery\.data, "ops\.backend-readiness\.v2"\)/);
 assert.match(modelsPage, /const readinessRequestFailed = readinessQuery\.isError \|\| readinessQuery\.isRefetchError/);
 assert.match(modelsPage, /const hasError = modelQueries\.some\(\(query\) => query\.isError \|\| query\.isRefetchError\)/);
 assert.match(modelsPage, /const modelFactsKnown = readinessKnown && \[/);
-assert.match(modelsPage, /models-dashboard \$\{modelFactsKnown \? "" : "fact-unverified"\}/);
-assert.match(modelsPage, /模型事实未接入/);
+assert.match(modelsPage, /className="dashboard models-dashboard"/);
+assert.doesNotMatch(modelsPage, /models-dashboard \$\{modelFactsKnown \? "" : "fact-unverified"\}/, "单个模型接口不得把整页正常卡片染黄");
+assert.match(modelsPage, /部分数据更新中/);
+assert.match(modelsPage, /部分数据待确认/);
 for (const queryName of ["factorAdvisories", "metaAdvisories", "highLoadAudits"]) {
   assert.match(modelsPage, new RegExp(`${queryName}Query,`), `Models ${queryName} 也必须参与事实与错误边界`);
+}
+for (const queryName of ["position-quality/audits", "open-quality/audits", "canary-reviews", "inference-audits", "dataset-quality"]) {
+  assert.match(modelsPage, new RegExp(`label: "${queryName}"`), `Models ${queryName} 错误必须可见`);
 }
 for (const contract of [
   "learning.dataset-readiness.v2",
@@ -105,7 +115,7 @@ assert.match(v16Page, /<FactBoundary fact=\{liveAutonomyView\.fact\}/);
 assert.match(v16Page, /readFact\(readinessQuery\.data, "ops\.backend-readiness\.v2"\)/);
 assert.match(v16Page, /const readinessRequestFailed = readinessQuery\.isError \|\| readinessQuery\.isRefetchError/);
 assert.match(v16Page, /liveAutonomyQuery\.isError \|\| liveAutonomyQuery\.isRefetchError/);
-assert.match(v16Page, /label="实盘自治"[\s\S]*?factBoundTone\(liveAutonomyView\.fact/, "V16 boundary 外实盘自治汇总也必须绑定 Fact");
+assert.match(v16Page, /<MetricCard title="实盘自治"[\s\S]*?<FactBoundary fact=\{liveAutonomyView\.fact\}/, "实盘自治控制必须位于 Fact 边界内");
 assert.match(v16Page, /className=\{proposalRegistryKnown \? "" : "fact-unverified"\}/);
 assert.match(v16Page, /className=\{liveReadyGuardrailKnown \? "" : "fact-unverified"\}/);
 assert.doesNotMatch(
@@ -126,9 +136,17 @@ for (const contract of [
 ]) {
   assert.match(v16Page, new RegExp(`readFact\\([^)]*"${contract.replaceAll(".", "\\.")}"`), `V16 ${contract} 必须按端点契约校验`);
 }
-assert.match(consoleCss, /\.fact-boundary-stale \.status-ok/);
-assert.match(consoleCss, /\.fact-unverified \.status-ok/);
+assert.doesNotMatch(consoleCss, /\.fact-boundary-stale \.status-ok/, "过期事实不得静默篡改业务状态颜色");
+assert.doesNotMatch(consoleCss, /\.fact-unverified \.status-ok/, "待确认事实不得静默把正常状态改成黄色");
+assert.match(consoleCss, /\.status-pending/);
+assert.match(dashboardBits, /tone === "pending" \? "数据待确认"/);
+assert.match(queryErrorList, /query\.isError \|\| query\.isRefetchError/);
+assert.match(queryErrorList, /query\.isRefetchError \? "刷新失败，当前显示缓存数据" : "请求失败"/);
+assert.match(opsPage, /const logsRequestFailed = logsQuery\.isError \|\| logsQuery\.isRefetchError/);
+assert.match(opsPage, /\{ label: "logs", query: logsQuery \}/);
 assert.doesNotMatch(v16Page, /tone="ok"/, "V16 固定绿灯必须改为事实绑定");
+assert.match(v16Views, /requires_control_gate:\s*"需通过治理审核"/);
+assert.match(v16Views, /no_execution_authority:\s*"无执行权限"/);
 assert.match(v16Page, /label="一次解锁"[\s\S]*?disabled=\{liveUnlockMutation\.isPending \|\| !unlockAllowed\}/);
 assert.match(v16Page, /label="撤销自治"[\s\S]*?disabled=\{liveRevokeMutation\.isPending\}/);
 assert.doesNotMatch(v16Page, /pickBoolean\(liveAutonomyEvaluation, \["ok"\]/);
@@ -136,8 +154,6 @@ assert.doesNotMatch(v16Page, /readinessLiveAutonomy/);
 assert.match(autonomyDecoder, /LIVE_AUTONOMY_STATUS_CONTRACT/);
 assert.match(autonomyDecoder, /factIsKnown\(fact, requestFailed\)/);
 assert.doesNotMatch(autonomyDecoder, /pick\(|pickValue|WRAPPER_KEYS/);
-assert.doesNotMatch(pages[5], /Object\.values\(value\)/, "因子目录必须按端点级 items 契约解析");
-assert.match(pages[5], /Array\.isArray\(endpoint\.items\)/);
 assert.match(autonomyDecoder, /export function factBoundTone/);
 assert.match(tradingPage, /readFact\(strategyStatusQuery\.data, "live\.strategy\.v2"\)/);
 assert.match(tradingPage, /readFactComponent\(riskQuery\.data, "risk_inputs", "risk\.inputs\.v1"\)/);
@@ -170,6 +186,26 @@ for (const endpoint of ["health", "loop", "account", "session", "db", "readiness
   assert.match(overviewPage, new RegExp(`const ${endpoint}Known = factIsKnown\\(${endpoint}Fact, ${endpoint}RequestFailed\\)`));
 }
 assert.match(overviewPage, /readFactComponent\(queries\.risk\.data, "risk_inputs", "risk\.inputs\.v1"\)/);
+assert.match(overviewPage, /系统数据流与智能体自治闭环/);
+assert.match(overviewPage, /Demo 自动演化协调器/);
+assert.match(overviewPage, /后台学习任务定时驱动/);
+assert.match(overviewPage, /已登记 7 个智能体与权限/);
+for (const flowLabel of [
+  "报价 / K线 / 账户 / 持仓",
+  "闭合K线 + 实时上下文",
+  "方向 / 置信度 / 决策条件",
+  "允许 / 拒绝 + 仓位",
+  "回放 + 后验 + 反事实",
+  "样本 / 记忆 / 质量评分",
+  "候选 + 来源链路 + 证据",
+  "审查结果 + 单次授权",
+]) {
+  assert.ok(overviewPage.includes(flowLabel), `系统图必须展示数据流：${flowLabel}`);
+}
+for (const obsoleteLabel of ["世界模型与 Critic", "刷新大脑", 'label="Critic"', "AWE 置信", "99% Shadow"]) {
+  assert.ok(!presentationSources.includes(obsoleteLabel), `前端不得继续展示内部术语：${obsoleteLabel}`);
+}
+assert.doesNotMatch(overviewPage, /function TopologyNode|runtime-node-track/, "旧卡片式拓扑必须删除");
 assert.match(overviewPage, /decodeCanonicalRiskSnapshot\(queries\.risk\.data\)/);
 assert.match(overviewPage, /const positionsKnown = factIsKnown\(positionsFact, snapshotRequestFailed\)/);
 assert.match(overviewPage, /const priceKnown = factIsKnown\(spotFact, snapshotRequestFailed\)/);
@@ -202,47 +238,39 @@ assert.doesNotMatch(riskPage, /dbQuery\.isError \|\| dbErrorCount \? "bad" : ton
 assert.match(riskPage, /readFact\(tradeTracesQuery\.data, "risk\.trade-trace-recent\.v2"\)/);
 assert.match(riskPage, /const policy = asRecord\(policyQuery\.data\)/, "策略裁决必须只消费专用端点");
 assert.doesNotMatch(riskPage, /pickRecord\(risk, \["policy"\]\)/, "risk.summary 投影不得冒充 policy endpoint 数据");
-assert.match(v15Page, /const readinessRequestFailed = readinessQuery\.isError \|\| readinessQuery\.isRefetchError/);
-assert.match(v15Page, /const riskRequestFailed = riskQuery\.isError \|\| riskQuery\.isRefetchError/);
-assert.match(v15Page, /readFact\(readinessQuery\.data, "ops\.backend-readiness\.v2"\)/);
-assert.match(v15Page, /readFactComponent\(riskQuery\.data, "risk_inputs", "risk\.inputs\.v1"\)/);
-assert.match(v15Page, /const readinessKnown = factIsKnown\(readinessFact, readinessRequestFailed\)/);
-assert.match(v15Page, /const riskKnown = factIsKnown\(riskInputsFact, riskRequestFailed\)/);
-assert.match(v15Page, /tone=\{factBoundTone\(readinessFact, readyForFrontend \? "ok" : "warn", readinessRequestFailed\)\}/);
-assert.match(v15Page, /tone=\{factBoundTone\(riskInputsFact, riskKnown \? "ok" : "warn", riskRequestFailed\)\}/);
-assert.match(v15Page, /function unverifiedTone\(tone: Tone\): Tone/);
-assert.match(v15Page, /端点事实按来源独立校验/);
-assert.doesNotMatch(v15Page, /自治链路已收口/);
-assert.doesNotMatch(v15Page, /tone="ok"/, "V15 无 Fact 的专用端点不得直接渲染绿色");
+assert.match(evidencePage, /type EvidenceTab = "replay" \| "incident" \| "release"/);
+assert.doesNotMatch(evidencePage, /tone="ok"/, "运行证据页不得绕过端点 Fact 直接渲染绿色");
 for (const [queryName, contract] of Object.entries({
-  phase0: "ops.v15-phase0-completion.v2",
   replay: "ops.replay-latest.v2",
   replayChoices: "ops.replay-bar-decisions.v2",
-  catalog: "factor.catalog.v4",
-  catalogSnapshot: "factor.catalog.v4",
-  learningSummary: "learning.summary.v2",
-  learningApplications: "learning.applications.v2",
-  learningSamples: "learning.autonomous-samples.v2",
-  activeTemplates: "learning.parameter-templates-active.v2",
-  incidentControl: "ops.incident-control.v2",
-  incidentPlaybook: "ops.incident-playbook-latest.v2",
-  scopeApproval: "ops.autonomy-scope-approval-latest.v2",
-  scopeEnforcement: "ops.autonomy-scope-enforcement-latest.v2",
+  incident: "ops.incident-control.v2",
+  playbook: "ops.incident-playbook-latest.v2",
+  enforcement: "ops.autonomy-scope-enforcement-latest.v2",
   release: "ops.release-latest.v2",
   releaseApprovals: "ops.release-approval-trail.v2",
 })) {
   assert.match(
-    v15Page,
+    evidencePage,
     new RegExp(`readFact\\(${queryName}Query\\.data, "${contract.replaceAll(".", "\\.")}"\\)`),
-    `V15 ${queryName} 必须消费自己的 endpoint fact`,
+    `Evidence ${queryName} 必须消费自己的 endpoint fact`,
   );
 }
-assert.match(v15Page, /readFact\(runReplayMutation\.data, "ops\.replay-bar-preview\.v2"\)/);
-assert.match(v15Page, /const replayDisplayFact = hasReplayRunReport \? replayPreviewFact : replayFact/);
-assert.match(v15Page, /const catalogDisplayFact = liveCatalogDisplayable \? catalogFact : snapshotCatalogDisplayable \? catalogSnapshotFact : catalogFact/);
-assert.match(v15Page, /disabled=\{mode === "normal" && !incidentControlKnown\}/, "事故事实未知时不得解除风险收紧");
-for (const queryName of ["evolution", "templateLogs"]) {
-  assert.doesNotMatch(v15Page, new RegExp(`readFact\\(${queryName}Query\\.data`), `V15 ${queryName} 尚无 _fact 时不得猜测事实`);
+assert.match(evidencePage, /readFact\(replayPreviewData, "ops\.replay-bar-preview\.v2"\)/);
+assert.match(evidencePage, /const hasReplayPreview = Object\.keys\(previewReport\)\.length > 0/);
+assert.match(evidencePage, /const replayDisplayFact = hasReplayPreview \? replayPreviewFact : replayFact/);
+assert.match(evidencePage, /onSuccess: setReplayPreviewData/);
+assert.doesNotMatch(evidencePage, /label="生成回放"/, "只读回放不应经过通用确认弹层");
+assert.match(evidencePage, /function KlineWindowPreview/);
+assert.match(evidencePage, /pick\(replayMetrics, \["bar_window_preview"\]\)/);
+assert.match(evidencePage, /<KlineWindowPreview preview=\{barWindowPreview\}/);
+assert.match(evidencePage, /pick\(replayMetrics, \["trade_outcome_learning_preview"\]\)/);
+assert.match(evidencePage, /title="交易结果与学习"/);
+assert.match(evidencePage, /实际盈亏/);
+assert.match(evidencePage, /开仓方向/);
+assert.match(evidencePage, /disabled=\{mode === "normal" && !incidentKnown\}/, "事故事实未知时不得解除风险收紧");
+for (const tab of ["replay", "incident", "release"]) {
+  assert.match(evidencePage, new RegExp(`enabled: activeTab === "${tab}"`), `${tab} 分区只能在打开时请求`);
 }
+assert.match(evidencePage, /invalidateQueries\(\{ queryKey: \["evidence"\] \}\)/);
 
 console.log("web_frontend architecture test: ok");

@@ -140,17 +140,22 @@ class StreamingFactorEngine:
         every warmup bar repeatedly recomputes all factors and can pin a CPU
         core for minutes when external factors are enabled.
         """
+        source_bars = list(bars)
         self.reset()
-        for bar in bars[-self._buffer.maxlen:]:
-            self._buffer.append(bar)
-            bar_ts = self._bar_ts(bar)
-            if bar_ts > 0:
-                self._last_bar_ts = bar_ts
-        if len(self._buffer) < self.MIN_BARS:
+        if len(source_bars) < self.MIN_BARS:
+            for bar in source_bars:
+                self._buffer.append(bar)
             return []
 
-        self._warm = True
-        df = self._to_dataframe()
+        raw = pd.DataFrame(source_bars)
+        if self._needs_external_enrichment():
+            try:
+                df = self._factor_frame_builder.enrich_bars(raw)
+            except Exception as exc:
+                logger.warning("Factor frame enrichment failed, using raw bars: %s", exc)
+                df = FactorFrameBuilder._normalize_bar_frame(raw)
+        else:
+            df = FactorFrameBuilder._normalize_bar_frame(raw)
         n = len(df)
         snapshots: list[dict[str, float | None]] = [dict() for _ in range(n)]
 
@@ -189,6 +194,15 @@ class StreamingFactorEngine:
                 logger.warning("Factor '%s' warmup calculation failed: %s", name, e)
                 self._factor_cache[name] = None
 
+        latest_cache = dict(self._factor_cache)
+        self.reset()
+        for bar in source_bars[-self._buffer.maxlen:]:
+            self._buffer.append(bar)
+            bar_ts = self._bar_ts(bar)
+            if bar_ts > 0:
+                self._last_bar_ts = bar_ts
+        self._factor_cache = latest_cache
+        self._warm = len(self._buffer) >= self.MIN_BARS
         return snapshots
 
     def get_snapshot(self) -> dict[str, float | None]:

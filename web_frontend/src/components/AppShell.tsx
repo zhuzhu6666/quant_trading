@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, Navigate, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { LogOut, LayoutDashboard, Activity, ShieldAlert, Settings2, BrainCircuit, Cpu, Menu, X, Gauge } from "lucide-react";
+import { LogOut, Network, Activity, ShieldAlert, Settings2, BrainCircuit, Cpu, Menu, X } from "lucide-react";
 import { getSystemLoad } from "@/api/domains/system";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDecimal } from "@/lib/format";
@@ -9,16 +9,15 @@ import { queryKeys } from "@/api/queryKeys";
 
 const navGroups = [
   { label: "交易", items: [
-    { to: "/overview", match: "/overview", label: "总览", icon: LayoutDashboard },
+    { to: "/overview", match: "/overview", label: "运行地图", icon: Network },
     { to: "/trading", match: "/trading", label: "交易", icon: Activity },
     { to: "/performance/pnl", match: "/performance", label: "收益风控", icon: ShieldAlert },
   ] },
   { label: "治理", items: [
-    { to: "/governance/learning", match: "/governance", label: "学习模型", icon: BrainCircuit },
-    { to: "/autonomy/runtime", match: "/autonomy", label: "自治中枢", icon: Gauge },
+    { to: "/autonomy/chain", match: "/autonomy", label: "智能系统", icon: BrainCircuit },
   ] },
   { label: "系统", items: [
-    { to: "/ops", match: "/ops", label: "运维", icon: Settings2 },
+    { to: "/ops/health", match: "/ops", label: "系统运维", icon: Settings2 },
   ] },
 ];
 const navItems = navGroups.flatMap((group) => group.items);

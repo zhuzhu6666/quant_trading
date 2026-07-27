@@ -700,8 +700,203 @@ body::before {
   font-variant-numeric: tabular-nums;
 }
 
+.historical-backtest-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.72fr) minmax(0, 1.8fr);
+  gap: 14px;
+}
+
+.historical-backtest-form,
+.historical-backtest-result {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  padding: 12px;
+}
+
+.historical-backtest-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  align-content: start;
+}
+
+.historical-backtest-form label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.historical-backtest-form label:nth-child(3),
+.historical-backtest-action {
+  grid-column: 1 / -1;
+}
+
+.historical-backtest-form input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 9px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.historical-backtest-form input:focus-visible,
+.historical-backtest-form button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.historical-backtest-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.historical-backtest-action span,
+.historical-backtest-reason,
+.historical-backtest-ready,
+.historical-backtest-error {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.historical-backtest-metrics {
+  margin-top: 10px;
+}
+
+.historical-backtest-reason,
+.historical-backtest-ready,
+.historical-backtest-error {
+  margin: 10px 0 0;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line);
+  overflow-wrap: anywhere;
+}
+
+.historical-backtest-ready {
+  color: var(--green);
+}
+
+.historical-backtest-error {
+  color: var(--red);
+}
+
 .model-control-panel {
   overflow: hidden;
+}
+
+.model-capability-panel {
+  overflow: hidden;
+}
+
+.model-participation-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(110px, 0.45fr)) minmax(280px, 2fr);
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.model-participation-summary > div,
+.model-participation-summary > p {
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(203, 213, 225, 0.78);
+  border-radius: 8px;
+  background: rgba(248, 250, 252, 0.82);
+}
+
+.model-participation-summary > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.model-participation-summary span,
+.model-participation-summary p {
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.model-participation-summary strong {
+  color: var(--ink);
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-capability-table {
+  table-layout: fixed;
+}
+
+.model-capability-table th:nth-child(1) {
+  width: 24%;
+}
+
+.model-capability-table th:nth-child(2) {
+  width: 16%;
+}
+
+.model-capability-table th:nth-child(3) {
+  width: 19%;
+}
+
+.model-capability-table th:nth-child(4) {
+  width: 26%;
+}
+
+.model-capability-table th:nth-child(5) {
+  width: 15%;
+}
+
+.model-capability-table td {
+  vertical-align: top;
+}
+
+.model-capability-table td,
+.model-capability-name {
+  min-width: 0;
+}
+
+.model-capability-table td > span,
+.model-capability-table td > b,
+.model-capability-table td > small,
+.model-capability-name > strong {
+  display: block;
+}
+
+.model-capability-table td {
+  gap: 5px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.model-capability-table b,
+.model-capability-name strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.model-capability-table small {
+  margin-top: 5px;
+  color: #64748b;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-capability-name strong {
+  font-size: 13px;
 }
 
 .model-control-grid {
@@ -1408,6 +1603,10 @@ td.status-mute {
 }
 
 @media (max-width: 980px) {
+  .historical-backtest-layout {
+    grid-template-columns: 1fr;
+  }
+
   .dashboard-header {
     display: grid;
   }
@@ -1449,6 +1648,15 @@ td.status-mute {
   .performance-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .model-participation-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .model-participation-summary > p {
+    grid-column: 1 / -1;
+  }
+
 }
 
 @media (max-width: 560px) {
@@ -1473,6 +1681,14 @@ td.status-mute {
     grid-template-columns: 1fr;
     gap: 2px;
     padding-bottom: 6px;
+  }
+
+  .model-participation-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .model-participation-summary > p {
+    grid-column: auto;
   }
 }
 

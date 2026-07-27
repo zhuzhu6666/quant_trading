@@ -108,7 +108,7 @@ def _create_factor_reviews(path):
     conn.close()
 
 
-def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_path):
+def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     artifact_dir = tmp_path / "artifacts"
     _create_factor_reviews(db_path)
@@ -119,6 +119,20 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
     assert {sample["label_source"] for sample in samples} == {
         "next_same_factor_outcome_from_rolling_history"
     }
+    replay_samples = [
+        {
+            **sample,
+            "sample_id": f"replay-{sample['sample_id']}",
+            "trade_id": f"replay-{sample['trade_id']}",
+            "review_id": f"replay-{sample['review_id']}",
+            "source": "historical_replay",
+        }
+        for sample in samples[:6]
+    ]
+    monkeypatch.setattr(
+        "backend.services.parity_replay.load_parity_learning_samples",
+        lambda kind: replay_samples if kind == "factor" else [],
+    )
 
     result = service.train(limit=20, min_samples=6, register=False)
 
@@ -132,6 +146,19 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
     assert result["metrics"]["train_trade_count"] + result["metrics"]["holdout_trade_count"] == 12
     assert result["metrics"]["holdout"]["majority_baseline_accuracy"] is not None
     assert result["metrics"]["holdout"]["balanced_accuracy"] is not None
+    assert result["metrics"]["replay_sample_count"] == 6
+    assert result["metrics"]["real_holdout_count"] == result["metrics"]["holdout"]["count"]
+    assert result["metrics"]["distinct_trade_count"] == 12
+    comparison = result["metrics"]["augmentation_comparison"]
+    if comparison["selected"] == "augmented":
+        baseline = comparison["baseline_real_holdout"]
+        augmented = comparison["augmented_real_holdout"]
+        comparable = [
+            key for key in ("accuracy", "balanced_accuracy", "auc")
+            if baseline[key] is not None and augmented[key] is not None
+        ]
+        assert all(augmented[key] >= baseline[key] for key in comparable)
+        assert any(augmented[key] > baseline[key] for key in comparable)
     assert result["capabilities"]["live_trading"] is False
     assert result["capabilities"]["can_change_factor_weights"] is False
     shadow = service.score_samples(

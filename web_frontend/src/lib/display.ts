@@ -62,7 +62,7 @@ const DISPLAY_TRANSLATIONS: Record<string, string> = {
   manual: "人工",
   demo_autonomous: "演示自治",
   advisory_only: "仅建议",
-  shadow_only: "仅影子",
+  shadow_only: "只观察",
   normal: "正常",
   no_new_risk: "不新增风险",
   only_close: "只允许平仓",
@@ -132,7 +132,7 @@ const DISPLAY_TRANSLATIONS: Record<string, string> = {
   watch: "继续观察",
   switch_parameter_template: "切换参数模板",
   risk_policy: "风控策略",
-  var_gate: "VaR 闸门",
+  var_gate: "VaR 风险条件",
   supervisor_tighten: "监督收紧",
   broker_close: "经纪商平仓",
   demo_autonomy_apply: "演示自治应用",
@@ -171,8 +171,8 @@ const DISPLAY_TRANSLATIONS: Record<string, string> = {
   promote: "提升",
   demote: "降级",
   review_only: "仅复核",
-  manual_shadow_after_train: "训练后人工影子",
-  offmarket_shadow_after_train: "闭市训练后影子",
+  manual_shadow_after_train: "训练后人工观察",
+  offmarket_shadow_after_train: "闭市训练后观察",
 
   "position_supervisor:conservative.v1": "持仓监督:保守版.v1",
   supervisor_tighten_sltp: "监督止盈止损修复",
@@ -236,7 +236,7 @@ export function translateReasonText(value: unknown): string {
 
   const varGate = text.match(/^var_gate:\s*VaR=(.+)$/i);
   if (varGate) {
-    return `VaR 闸门：VaR=${varGate[1]}`;
+    return `VaR 风险条件：VaR=${varGate[1]}`;
   }
 
   return translateDisplayValue(text);

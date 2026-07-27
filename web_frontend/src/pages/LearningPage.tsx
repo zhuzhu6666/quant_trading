@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { BrainCircuit, FileCheck2, GitBranch, GraduationCap, Layers3, ShieldCheck } from "lucide-react";
+import { BrainCircuit, FileCheck2, GitBranch, GraduationCap, Layers3 } from "lucide-react";
 import { MetricCard } from "@/components/Card";
 import { CompactMetric as LearningMiniMetric, Field, StatTile, numberTone, toneFromStatus } from "@/components/DashboardBits";
+import { QueryErrorList } from "@/components/QueryErrorList";
 import { StatusPill } from "@/components/StatusPill";
 import {
   getAutonomousLearningSamples,
@@ -10,8 +11,6 @@ import {
   getLearningReviews,
   getLearningSummary,
   getLearningSuggestions,
-  getMetaLightgbmShadowReport,
-  getModelPermissionAudits,
 } from "@/api/client";
 import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickString } from "@/lib/compat";
 import { translateDisplayValue, translateReasonText, translateScopeLabel } from "@/lib/display";
@@ -51,7 +50,7 @@ function shortId(value: string): string {
   return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-4)}` : value;
 }
 
-export function LearningPage() {
+export function LearningPage({ embedded = false }: { embedded?: boolean }) {
   const summaryQuery = useQuery({
     queryKey: ["learning-summary"],
     queryFn: getLearningSummary,
@@ -88,18 +87,6 @@ export function LearningPage() {
     refetchInterval: 30_000,
     staleTime: 10_000,
   });
-  const metaReportQuery = useQuery({
-    queryKey: ["learning-meta-lightgbm-report"],
-    queryFn: () => getMetaLightgbmShadowReport(80),
-    refetchInterval: 60_000,
-    staleTime: 20_000,
-  });
-  const permissionQuery = useQuery({
-    queryKey: ["learning-model-permissions"],
-    queryFn: () => getModelPermissionAudits(10),
-    refetchInterval: 60_000,
-    staleTime: 20_000,
-  });
   const readinessQuery = useBackendReadinessQuery(30_000);
 
   const summary = asRecord(summaryQuery.data);
@@ -118,9 +105,6 @@ export function LearningPage() {
   const factorData = asRecord(pick(readiness, ["factor_data"]));
   const factorState = asRecord(pick(factorData, ["state"]));
   const factorHealth = asRecord(pick(factorState, ["factor_health_by_status"]));
-  const models = asRecord(pick(readiness, ["models"]));
-  const metaLightgbm = asRecord(pick(models, ["meta_lightgbm"]));
-  const promotionGate = asRecord(pick(metaLightgbm, ["promotion_gate"]));
   const highLoad = asRecord(pick(readiness, ["high_load"]));
   const effectQuality = asRecord(pick(readiness, ["learning_effect_quality"]));
   const effectStatuses = asRecord(pick(effectQuality, ["status_counts"]));
@@ -140,9 +124,6 @@ export function LearningPage() {
   const lifecycle = pickArray(lifecycleQuery.data, ["items"]);
   const reviews = pickArray(reviewsQuery.data, ["items"]);
   const samples = pickArray(samplesQuery.data, ["items"]);
-  const permissions = pickArray(permissionQuery.data, ["items"]);
-  const metaReport = asRecord(metaReportQuery.data);
-
   const proposed = countFrom(suggestionCounts, "proposed");
   const approved = countFrom(suggestionCounts, "approved");
   const applied = countFrom(suggestionCounts, "applied");
@@ -153,9 +134,6 @@ export function LearningPage() {
   const totalFactors = pickNumber(factorState, ["factor_health_total"], 0);
   const healthyFactors = countFrom(factorHealth, "HEALTHY");
   const watchFactors = countFrom(factorHealth, "WATCH");
-  const modelAccuracy = pickNumber(metaReport, ["accuracy"], pickNumber(metaLightgbm, ["report.accuracy"], 0));
-  const evaluatedCount = pickNumber(metaReport, ["evaluated_count"], pickNumber(metaLightgbm, ["report.evaluated_count"], 0));
-  const modelEligible = pickBoolean(promotionGate, ["eligible_for_live", "eligible_for_governor_review"], false);
   const automaticExecution = pickBoolean(governance, ["automatic_execution_enabled"], false);
   const autonomyMode = pickString(governance, ["autonomy_mode"], "");
   const latestFactorUpdate = asRecord(pick(factorData, ["last_enrichment"]));
@@ -168,11 +146,10 @@ export function LearningPage() {
     lifecycleQuery,
     reviewsQuery,
     samplesQuery,
-    metaReportQuery,
-    permissionQuery,
     readinessQuery,
   ];
   const hasError = learningQueries.some((query) => query.isError || query.isRefetchError);
+  const isRefreshing = learningQueries.some((query) => query.isFetching);
   const learningFactsKnown = readinessKnown && [
     factIsKnown(readFact(summaryQuery.data, "learning.summary.v2"), summaryQuery.isError || summaryQuery.isRefetchError),
     factIsKnown(readFact(suggestionsQuery.data, "learning.suggestions.v2"), suggestionsQuery.isError || suggestionsQuery.isRefetchError),
@@ -180,29 +157,27 @@ export function LearningPage() {
     factIsKnown(readFact(lifecycleQuery.data, "learning.lifecycle.v2"), lifecycleQuery.isError || lifecycleQuery.isRefetchError),
     factIsKnown(readFact(reviewsQuery.data, "learning.reviews.v2"), reviewsQuery.isError || reviewsQuery.isRefetchError),
     factIsKnown(readFact(samplesQuery.data, "learning.autonomous-samples.v2"), samplesQuery.isError || samplesQuery.isRefetchError),
-    factIsKnown(readFact(metaReportQuery.data, "learning.model-meta-lightgbm-shadow-report.v2"), metaReportQuery.isError || metaReportQuery.isRefetchError),
-    factIsKnown(readFact(permissionQuery.data, "learning.model-permission-audits.v2"), permissionQuery.isError || permissionQuery.isRefetchError),
   ].every(Boolean);
 
   return (
-    <section className={`dashboard learning-dashboard ${learningFactsKnown ? "" : "fact-unverified"}`.trim()}>
-      <div className="dashboard-header">
+    <section className="dashboard learning-dashboard">
+      {!embedded ? <div className="dashboard-header">
         <div>
           <div className="eyebrow">学习闭环</div>
           <h1>学习与治理</h1>
-          <p>复盘、样本、策略建议、参数治理和影子模型统一在这里观察。</p>
+          <p>复盘、样本、策略建议、参数治理和只观察模型统一在这里查看。</p>
         </div>
         <div className="header-status">
           <StatusPill status={readinessKnown ? (automaticExecution ? "自动应用已开" : "人工审核") : "治理状态待确认"} tone={factBoundTone(readinessFact, automaticExecution ? "warn" : "ok", readinessRequestFailed)} />
           <StatusPill status={`模式 ${translateDisplayValue(autonomyMode)}`} tone="mute" />
-          <StatusPill status={hasError ? "接口异常" : learningFactsKnown ? "学习链路在线" : "学习事实未接入"} tone={hasError ? "bad" : learningFactsKnown ? "ok" : "warn"} />
+          <StatusPill status={hasError ? "接口异常" : learningFactsKnown ? "学习链路在线" : isRefreshing ? "部分数据更新中" : "部分数据待确认"} tone={hasError ? "bad" : learningFactsKnown ? "ok" : "warn"} />
         </div>
-      </div>
+      </div> : null}
 
-      <div className="stat-grid">
+      {!embedded ? <div className="stat-grid">
         <StatTile
           icon={BrainCircuit}
-          label="待治理建议"
+          label="待治理建议（前端汇总）"
           value={formatDecimal(proposed + pendingCandidates, 0)}
           detail={`建议 ${formatDecimal(proposed, 0)} · 候选 ${formatDecimal(pendingCandidates, 0)}`}
           tone={proposed + pendingCandidates > 0 ? "warn" : "ok"}
@@ -221,17 +196,10 @@ export function LearningPage() {
           detail={`健康 ${formatDecimal(healthyFactors, 0)} · 观察 ${formatDecimal(watchFactors, 0)}`}
           tone={healthyFactors > 0 ? "ok" : "warn"}
         />
-        <StatTile
-          icon={ShieldCheck}
-          label="影子模型"
-          value={formatPct(modelAccuracy)}
-          detail={`${formatDecimal(evaluatedCount, 0)} 条评估 · ${modelEligible ? "可审" : "仅观察"}`}
-          tone={numberTone(modelAccuracy - 0.5)}
-        />
-      </div>
+      </div> : null}
 
       <div className="dashboard-grid">
-        <MetricCard title="学习闭环质量 SLO" className="wide-panel learning-control-panel">
+        <MetricCard title="学习闭环质量" className="wide-panel learning-control-panel">
           <div className="learning-mini-grid">
             <LearningMiniMetric label="闭环率" value={formatPct(effectClosure)} detail={`终态 ${pickNumber(effectQuality, ["terminal_count"], 0)}`} tone={effectClosure >= 0.7 ? "ok" : "warn"} />
             <LearningMiniMetric label="开放窗口" value={formatDecimal(effectActive, 0)} detail={`观察 ${pickNumber(effectStatuses, ["observing"], 0)} · 混合 ${pickNumber(effectStatuses, ["mixed"], 0)}`} tone={effectActive ? "warn" : "ok"} />
@@ -239,11 +207,11 @@ export function LearningPage() {
             <LearningMiniMetric label="证据不足" value={formatDecimal(pickNumber(effectStatuses, ["inconclusive"], 0), 0)} detail={`受控重试候选 ${retryCandidates}`} tone={retryCandidates ? "warn" : "mute"} />
             <LearningMiniMetric label="已强化" value={formatDecimal(pickNumber(effectStatuses, ["reinforced"], 0), 0)} detail={`无效 ${pickNumber(effectStatuses, ["ineffective"], 0)}`} tone={pickNumber(effectStatuses, ["reinforced"], 0) ? "ok" : "mute"} />
             <LearningMiniMetric label="经验先验" value={formatDecimal(pickNumber(effectPrior, ["eligible_count"], 0), 0)} detail={`有界因子 ${pickNumber(effectPrior, ["bounded_factor_count"], 0)}`} tone={pickNumber(effectPrior, ["eligible_count"], 0) ? "ok" : "warn"} />
-            <LearningMiniMetric label="AWE 账本" value={aweCoverageEnforced ? formatPct(pickNumber(aweMutationCoverage, ["coverage_ratio"], 0)) : "待新周期"} detail={`历史缺口 ${pickNumber(aweMutationCoverage, ["legacy_missing_count"], 0)}`} tone={aweCoverageEnforced ? toneFromStatus(pickString(aweMutationCoverage, ["status"], "")) : "mute"} />
+            <LearningMiniMetric label="权重自适应记录" value={aweCoverageEnforced ? formatPct(pickNumber(aweMutationCoverage, ["coverage_ratio"], 0)) : "待新周期"} detail={`历史缺口 ${pickNumber(aweMutationCoverage, ["legacy_missing_count"], 0)}`} tone={aweCoverageEnforced ? toneFromStatus(pickString(aweMutationCoverage, ["status"], "")) : "mute"} />
             <LearningMiniMetric label="生产因子" value={formatDecimal(pickNumber(runtimeFactorBudget, ["selected_count"], 0), 0)} detail={`冷尾部 ${pickNumber(runtimeFactorBudget, ["budget_excluded_count"], 0)}`} tone={pickBoolean(runtimeFactorBudget, ["ok"], false) ? "ok" : "warn"} />
-            <LearningMiniMetric label="SLO" value={translateDisplayValue(pickString(effectSlo, ["status"], pickString(effectQuality, ["status"], "")))} detail="只读质量门" tone={toneFromStatus(pickString(effectSlo, ["status"], ""))} />
+            <LearningMiniMetric label="效果评估" value={translateDisplayValue(pickString(effectSlo, ["status"], pickString(effectQuality, ["status"], "")))} detail="只读质量检查" tone={toneFromStatus(pickString(effectSlo, ["status"], ""))} />
           </div>
-          <div className="learning-note">重试资格只在出现新复盘证据且没有更新 application 时开放；看板不会自动改权重、参数或智能体权限。</div>
+          <div className="learning-note">只有出现新的复盘证据，并且期间没有新的配置应用时，系统才会重新评估；看板不会自动改权重、参数或智能体权限。</div>
         </MetricCard>
 
         <MetricCard title="学习控制台" className="wide-panel learning-control-panel">
@@ -251,9 +219,7 @@ export function LearningPage() {
             <LearningMiniMetric label="治理待办" value={formatDecimal(proposed + pendingCandidates, 0)} detail={`建议 ${proposed} · 候选 ${pendingCandidates}`} tone={proposed + pendingCandidates > 0 ? "warn" : "ok"} />
             <LearningMiniMetric label="建议流转" value={`${formatDecimal(applied, 0)} 应用`} detail={`批准 ${approved} · 回滚 ${rolledBack}`} tone={rolledBack > 0 ? "warn" : applied > 0 ? "ok" : "mute"} />
             <LearningMiniMetric label="样本池" value={formatDecimal(sampleCount, 0)} detail={`复盘 ${reviews.length} · 应用 ${applicationsCount}`} tone={sampleCount > 0 ? "ok" : "mute"} />
-            <LearningMiniMetric label="模型精度" value={formatPct(modelAccuracy)} detail={`${formatDecimal(evaluatedCount, 0)} 条评估`} tone={numberTone(modelAccuracy - 0.5)} />
             <LearningMiniMetric label="因子健康" value={`${healthyFactors}/${totalFactors || ""}`} detail={`观察 ${watchFactors}`} tone={watchFactors > 0 ? "warn" : healthyFactors > 0 ? "ok" : "mute"} />
-            <LearningMiniMetric label="权限审计" value={formatDecimal(permissions.length, 0)} detail={modelEligible ? "可进入治理审查" : "影子/顾问模式"} tone={modelEligible ? "ok" : "mute"} />
           </div>
 
           <div className="learning-control-grid">
@@ -272,12 +238,11 @@ export function LearningPage() {
 
             <section className="learning-control-section">
               <div className="learning-section-head">
-                <h3>模型状态</h3>
-                <StatusPill status={modelEligible ? "可审" : "观察"} tone={modelEligible ? "ok" : "mute"} />
+                <h3>训练与因子数据</h3>
+                <StatusPill status={translateDisplayValue(highLoadProfile)} tone={toneFromStatus(highLoadProfile)} />
               </div>
               <div className="field-list learning-compact-fields">
-                <Field label="Meta LightGBM" value={`${formatPct(modelAccuracy)} · ${formatDecimal(evaluatedCount, 0)} 条`} tone={modelAccuracy >= 0.6 ? "ok" : "warn"} />
-                <Field label="高负载训练" value={translateDisplayValue(highLoadProfile)} tone={toneFromStatus(highLoadProfile)} />
+                <Field label="盘外训练任务" value={translateDisplayValue(highLoadProfile)} tone={toneFromStatus(highLoadProfile)} />
                 <Field label="因子更新" value={formatTime(pick(latestFactorUpdate, ["updated_at", "ts"]))} tone={pickBoolean(latestFactorUpdate, ["ok"], true) ? "ok" : "bad"} />
               </div>
             </section>
@@ -412,12 +377,15 @@ export function LearningPage() {
 
         {hasError ? (
           <MetricCard title="学习接口异常" className="wide-panel">
-            <ul className="error-list">
-              {summaryQuery.isError ? <li>summary：{summaryQuery.error instanceof Error ? summaryQuery.error.message : "请求失败"}</li> : null}
-              {suggestionsQuery.isError ? <li>suggestions：{suggestionsQuery.error instanceof Error ? suggestionsQuery.error.message : "请求失败"}</li> : null}
-              {applicationsQuery.isError ? <li>applications：{applicationsQuery.error instanceof Error ? applicationsQuery.error.message : "请求失败"}</li> : null}
-              {metaReportQuery.isError ? <li>meta-lightgbm：{metaReportQuery.error instanceof Error ? metaReportQuery.error.message : "请求失败"}</li> : null}
-            </ul>
+            <QueryErrorList queries={[
+              { label: "summary", query: summaryQuery },
+              { label: "suggestions", query: suggestionsQuery },
+              { label: "applications", query: applicationsQuery },
+              { label: "lifecycle", query: lifecycleQuery },
+              { label: "reviews", query: reviewsQuery },
+              { label: "samples", query: samplesQuery },
+              { label: "backend-readiness", query: readinessQuery },
+            ]} />
           </MetricCard>
         ) : null}
       </div>

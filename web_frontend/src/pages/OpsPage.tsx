@@ -5,6 +5,7 @@ import {
   getCtraderTokenStatus,
   getExternalDataStatus,
   getHealth,
+  getLogTail,
   getOpsAlerts,
   getOpsRecovery,
   getSyncStatus,
@@ -12,12 +13,14 @@ import {
 } from "@/api/domains/system";
 import { MetricCard } from "@/components/Card";
 import { CompactMetric as OpsMiniMetric, Field, toneFromStatus } from "@/components/DashboardBits";
+import { QueryErrorList } from "@/components/QueryErrorList";
 import { StatusPill } from "@/components/StatusPill";
 import { formatTime } from "@/lib/format";
 import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickString } from "@/lib/compat";
 import { translateDisplayValue } from "@/lib/display";
 import { factBoundTone, factHasDisplayValue, factIsKnown, readFact } from "@/api/fact";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
+import { queryKeys } from "@/api/queryKeys";
 
 function dbFreshness(data: unknown): "ok" | "warn" | "bad" {
   const overall = pickString(data, ["overall", "status", "state"], "");
@@ -83,13 +86,13 @@ function summarizeIssues(raw: string): { short: string; full: string; count: num
 
 export function OpsPage() {
   const healthQuery = useQuery({
-    queryKey: ["ops-health"],
+    queryKey: queryKeys.health,
     queryFn: getHealth,
     refetchInterval: 10_000,
     staleTime: 5_000,
   });
   const dbQuery = useQuery({
-    queryKey: ["ops-db-health"],
+    queryKey: queryKeys.dbHealth,
     queryFn: getSystemDbHealth,
     refetchInterval: 15_000,
     staleTime: 5_000,
@@ -125,6 +128,12 @@ export function OpsPage() {
     refetchInterval: 60_000,
     staleTime: 20_000,
   });
+  const logsQuery = useQuery({
+    queryKey: queryKeys.logs(60),
+    queryFn: () => getLogTail(60),
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  });
 
   const health = asRecord(healthQuery.data);
   const healthFact = readFact(healthQuery.data, "system.health.v2");
@@ -143,6 +152,7 @@ export function OpsPage() {
   const syncRequestFailed = syncQuery.isError || syncQuery.isRefetchError;
   const tokenRequestFailed = tokenQuery.isError || tokenQuery.isRefetchError;
   const externalRequestFailed = externalQuery.isError || externalQuery.isRefetchError;
+  const logsRequestFailed = logsQuery.isError || logsQuery.isRefetchError;
   const healthKnown = factIsKnown(healthFact, healthRequestFailed);
   const dbKnown = factIsKnown(dbFact, dbRequestFailed);
   const readinessKnown = factIsKnown(readinessFact, readinessRequestFailed);
@@ -195,6 +205,7 @@ export function OpsPage() {
   const tokenHours = pickNumber(tokenStatus, ["remaining_hours"], 0);
   const externalSources = pickArray(externalQuery.data, ["sources"]);
   const externalStale = externalSources.filter((item) => pickBoolean(item, ["stale"], false) || pickString(item, ["status"], "") === "error").length;
+  const logLines = pickArray(logsQuery.data, ["lines"]).map(String).filter((line) => line.trim()).slice(-60).reverse();
 
   const dbStatus = pickString(dbQuery.data, ["overall", "status"], "");
   const dbChecked = pick(dbQuery.data, ["checked_at", "checkedAt", "updated_at"]);
@@ -223,7 +234,7 @@ export function OpsPage() {
   }, [dbQuery.data]);
 
   const dbProblemCount = dbList.filter((db) => !db.exists || db.issues.count > 0 || ["missing", "stale", "old", "error"].includes(db.freshness)).length;
-  const hasError = healthRequestFailed || dbRequestFailed || readinessRequestFailed || alertsRequestFailed || recoveryRequestFailed || syncRequestFailed || tokenRequestFailed || externalRequestFailed;
+  const hasError = healthRequestFailed || dbRequestFailed || readinessRequestFailed || alertsRequestFailed || recoveryRequestFailed || syncRequestFailed || tokenRequestFailed || externalRequestFailed || logsRequestFailed;
   const allOpsFactsKnown = healthKnown && dbKnown && readinessKnown && alertsKnown && recoveryKnown && syncKnown && tokenKnown && externalKnown;
 
   const refreshAll = () => {
@@ -235,6 +246,7 @@ export function OpsPage() {
     void syncQuery.refetch();
     void tokenQuery.refetch();
     void externalQuery.refetch();
+    void logsQuery.refetch();
   };
 
   return (
@@ -264,7 +276,12 @@ export function OpsPage() {
             <OpsMiniMetric label="前端就绪" value={factHasDisplayValue(readinessFact) ? (backendReadyReported ? "已就绪" : "受限") : "未知"} detail={`阻断项 ${blockers.length} · ${translateDisplayValue(liveReadinessState)}`} tone={factBoundTone(readinessFact, backendReadyReported ? "ok" : blockers.length ? "bad" : "warn", readinessRequestFailed)} />
             <OpsMiniMetric label="高负载" value={factHasDisplayValue(readinessFact) ? (cpuHigh || memoryHigh ? "有提示" : "正常") : "未知"} detail={`CPU ${cpuHigh ? "高" : "正常"} · MEM ${memoryHigh ? "高" : "正常"}`} tone={factBoundTone(readinessFact, cpuHigh || memoryHigh ? "warn" : "ok", readinessRequestFailed)} />
             <OpsMiniMetric label="告警恢复" value={factHasDisplayValue(alertsFact) ? (alertRules ? `${alertRules} 规则` : "无规则") : "未知"} detail={recoveryRegisteredVisible ? `失败 ${recoveryFailures} · 守护 ${recoveryRunning ? "运行" : "待命"}` : "AutoRecovery 未注册或状态未知"} tone={recoveryFailures ? "bad" : "warn"} />
-            <OpsMiniMetric label="外部数据" value={`${externalSources.length} 源`} detail={`异常/过期 ${externalStale} · TF ${syncTfCount}`} tone={externalStale ? "warn" : externalKnown && syncKnown ? "ok" : "warn"} />
+            <OpsMiniMetric
+              label="外部数据"
+              value={externalKnown ? `${externalSources.length} 源` : "未知"}
+              detail={externalKnown && syncKnown ? `异常/过期 ${externalStale} · TF ${syncTfCount}` : "等待后端事实"}
+              tone={externalStale ? "warn" : externalKnown && syncKnown ? "ok" : "warn"}
+            />
           </div>
 
           <div className="ops-control-grid">
@@ -324,12 +341,12 @@ export function OpsPage() {
                 <Field
                   label="循环健康"
                   value={!recoveryRegisteredVisible ? "未知" : loopHealthy ? "正常" : "异常"}
-                  tone={!recoveryRegisteredVisible ? "warn" : loopHealthy && recoveryKnown ? "ok" : loopHealthy ? "warn" : "bad"}
+                  tone={!recoveryRegisteredVisible ? "warn" : loopHealthy && recoveryKnown ? "ok" : loopHealthy ? "pending" : "bad"}
                 />
                 <Field
                   label="调度健康"
                   value={!recoveryRegisteredVisible ? "未知" : schedulerHealthy ? "正常" : "异常"}
-                  tone={!recoveryRegisteredVisible ? "warn" : schedulerHealthy && recoveryKnown ? "ok" : schedulerHealthy ? "warn" : "bad"}
+                  tone={!recoveryRegisteredVisible ? "warn" : schedulerHealthy && recoveryKnown ? "ok" : schedulerHealthy ? "pending" : "bad"}
                 />
                 <Field
                   label="失败次数"
@@ -371,10 +388,10 @@ export function OpsPage() {
         <MetricCard title="数据库资产" className="wide-panel ops-db-panel">
           <div className="ops-db-summary">
             <OpsMiniMetric label="数据库总数" value={String(dbTotal || dbList.length)} detail={`检查 ${formatTime(dbChecked)}`} tone={factBoundTone(dbFact, dbFresh, dbRequestFailed)} />
-            <OpsMiniMetric label="新鲜" value={String(dbFreshCount)} detail={translateDisplayValue(dbStatus)} tone={dbKnown ? "ok" : "warn"} />
-            <OpsMiniMetric label="过期" value={String(dbStale)} detail="需要关注 freshness" tone={dbStale ? "warn" : dbKnown ? "ok" : "warn"} />
-            <OpsMiniMetric label="缺失" value={String(dbMissing)} detail="文件或注册缺失" tone={dbMissing ? "bad" : dbKnown ? "ok" : "warn"} />
-            <OpsMiniMetric label="异常数据库" value={String(dbProblemCount)} detail="缺失/过期/错误" tone={dbProblemCount ? "bad" : dbKnown ? "ok" : "warn"} />
+            <OpsMiniMetric label="新鲜" value={String(dbFreshCount)} detail={translateDisplayValue(dbStatus)} tone={dbKnown ? "ok" : "pending"} />
+            <OpsMiniMetric label="过期" value={String(dbStale)} detail="需要关注 freshness" tone={dbStale ? "warn" : dbKnown ? "ok" : "pending"} />
+            <OpsMiniMetric label="缺失" value={String(dbMissing)} detail="文件或注册缺失" tone={dbMissing ? "bad" : dbKnown ? "ok" : "pending"} />
+            <OpsMiniMetric label="异常数据库（前端汇总）" value={dbKnown ? String(dbProblemCount) : "未知"} detail="缺失/过期/错误" tone={dbProblemCount ? "bad" : dbKnown ? "ok" : "pending"} />
           </div>
 
           <div className="ops-db-card-grid">
@@ -398,20 +415,26 @@ export function OpsPage() {
             ))}
           </div>
         </MetricCard>
+
+        <details className="detail-disclosure wide-panel">
+          <summary>实时日志 · 最近 {logLines.length} 行</summary>
+          <pre className="overview-log-scroll">{logLines.join("\n") || (logsQuery.isError ? "日志读取失败" : "暂无日志")}</pre>
+        </details>
       </div>
 
       {hasError ? (
         <MetricCard title="接口异常">
-          <ul className="error-list">
-            {healthQuery.isError ? <li>health：{healthQuery.error instanceof Error ? healthQuery.error.message : "请求失败"}</li> : null}
-            {dbQuery.isError ? <li>db-health：{dbQuery.error instanceof Error ? dbQuery.error.message : "请求失败"}</li> : null}
-            {readinessQuery.isError ? <li>backend-readiness：{readinessQuery.error instanceof Error ? readinessQuery.error.message : "请求失败"}</li> : null}
-            {alertsQuery.isError ? <li>alerts：{alertsQuery.error instanceof Error ? alertsQuery.error.message : "请求失败"}</li> : null}
-            {recoveryQuery.isError ? <li>recovery：{recoveryQuery.error instanceof Error ? recoveryQuery.error.message : "请求失败"}</li> : null}
-            {syncQuery.isError ? <li>sync：{syncQuery.error instanceof Error ? syncQuery.error.message : "请求失败"}</li> : null}
-            {tokenQuery.isError ? <li>ctrader-token：{tokenQuery.error instanceof Error ? tokenQuery.error.message : "请求失败"}</li> : null}
-            {externalQuery.isError ? <li>external-data：{externalQuery.error instanceof Error ? externalQuery.error.message : "请求失败"}</li> : null}
-          </ul>
+          <QueryErrorList queries={[
+            { label: "health", query: healthQuery },
+            { label: "db-health", query: dbQuery },
+            { label: "backend-readiness", query: readinessQuery },
+            { label: "alerts", query: alertsQuery },
+            { label: "recovery", query: recoveryQuery },
+            { label: "sync", query: syncQuery },
+            { label: "ctrader-token", query: tokenQuery },
+            { label: "external-data", query: externalQuery },
+            { label: "logs", query: logsQuery },
+          ]} />
         </MetricCard>
       ) : null}
     </section>

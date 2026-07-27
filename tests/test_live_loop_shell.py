@@ -316,7 +316,7 @@ def test_build_warmup_feed_applies_min_and_runtime_limits():
     assert len(capped["warmup_bars"]) == 10
 
 
-def test_execution_gate_and_awe_configs_preserve_runtime_fields():
+def test_execution_gate_does_not_start_cooldown_before_final_admission():
     cfg = SimpleNamespace(
         factor_signal_threshold=0.33,
         strategy_cooldown_bars=4,
@@ -337,7 +337,7 @@ def test_execution_gate_and_awe_configs_preserve_runtime_fields():
 
     assert execution_gate_config(cfg) == {
         "signal_threshold": 0.33,
-        "cooldown_bars": 4,
+        "cooldown_bars": 0,
         "event_filter_authority": "risk_policy",
         "risk_enable_nfp_skip": True,
         "risk_enable_gvz_gate": False,
@@ -470,7 +470,7 @@ def test_build_extra_symbol_factor_pipelines_reuses_primary_and_shared_component
         "gate",
         {
             "signal_threshold": 0.4,
-            "cooldown_bars": 3,
+            "cooldown_bars": 0,
             "event_filter_authority": "risk_policy",
             "risk_enable_nfp_skip": False,
             "risk_enable_gvz_gate": False,

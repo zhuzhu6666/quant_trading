@@ -112,10 +112,23 @@ def _init_db(path):
     conn.close()
 
 
-def test_open_quality_lightgbm_trains_or_reports_dependency(tmp_path):
+def test_open_quality_lightgbm_trains_or_reports_dependency(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     _init_db(db_path)
     service = OpenQualityLightGBMService(db_path=db_path, artifact_dir=tmp_path / "artifacts")
+    replay_samples = [
+        {
+            **sample,
+            "sample_id": f"replay-{sample['sample_id']}",
+            "trade_id": f"replay-{sample['trade_id']}",
+            "source": "historical_replay",
+        }
+        for sample in service.load_samples(limit=20)[:6]
+    ]
+    monkeypatch.setattr(
+        "backend.services.parity_replay.load_parity_learning_samples",
+        lambda kind: replay_samples if kind == "open" else [],
+    )
 
     result = service.train(limit=20, min_samples=6, holdout_ratio=0.25, register=False)
 
@@ -128,6 +141,19 @@ def test_open_quality_lightgbm_trains_or_reports_dependency(tmp_path):
     assert result["metrics"]["holdout"]["rule_accuracy"] is not None
     assert result["metrics"]["holdout"]["majority_baseline_accuracy"] is not None
     assert "model_lift_vs_rule" in result["metrics"]["holdout"]
+    assert result["metrics"]["sample_count"] == 12
+    assert result["metrics"]["replay_sample_count"] == 6
+    assert result["metrics"]["real_holdout_count"] == result["metrics"]["holdout"]["count"]
+    comparison = result["metrics"]["augmentation_comparison"]
+    if comparison["selected"] == "augmented":
+        baseline = comparison["baseline_real_holdout"]
+        augmented = comparison["augmented_real_holdout"]
+        comparable = [
+            key for key in ("accuracy", "balanced_accuracy", "auc")
+            if baseline[key] is not None and augmented[key] is not None
+        ]
+        assert all(augmented[key] >= baseline[key] for key in comparable)
+        assert any(augmented[key] > baseline[key] for key in comparable)
 
     shadow = service.score_samples(artifact_path=result["artifact_path"], limit=5)
     assert shadow["ok"] is True

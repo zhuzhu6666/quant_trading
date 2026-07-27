@@ -8,10 +8,9 @@ import { LiveStateProvider } from "@/hooks/useLiveState";
 const LoginPage = lazy(() => import("@/pages/LoginPage").then((module) => ({ default: module.LoginPage })));
 const OverviewPage = lazy(() => import("@/pages/OverviewPage").then((module) => ({ default: module.OverviewPage })));
 const TradingPage = lazy(() => import("@/pages/TradingPage").then((module) => ({ default: module.TradingPage })));
-const OpsPage = lazy(() => import("@/pages/OpsPage").then((module) => ({ default: module.OpsPage })));
 const PerformanceWorkspace = lazy(() => import("@/pages/WorkspacePages").then((module) => ({ default: module.PerformanceWorkspace })));
-const GovernanceWorkspace = lazy(() => import("@/pages/WorkspacePages").then((module) => ({ default: module.GovernanceWorkspace })));
 const AutonomyWorkspace = lazy(() => import("@/pages/WorkspacePages").then((module) => ({ default: module.AutonomyWorkspace })));
+const SystemWorkspace = lazy(() => import("@/pages/WorkspacePages").then((module) => ({ default: module.SystemWorkspace })));
 
 function RouteFallback() {
   return <div className="route-loading" role="status" aria-live="polite"><span />正在加载控制台…</div>;
@@ -42,15 +41,16 @@ export function App() {
           <Route path="/overview" element={<OverviewPage />} />
           <Route path="/trading" element={<TradingPage />} />
           <Route path="/performance/:section" element={<PerformanceWorkspace />} />
-          <Route path="/governance/:section" element={<GovernanceWorkspace />} />
           <Route path="/autonomy/:section" element={<AutonomyWorkspace />} />
+          <Route path="/ops/:section" element={<SystemWorkspace />} />
           <Route path="/pnl" element={<Navigate to="/performance/pnl" replace />} />
           <Route path="/risk" element={<Navigate to="/performance/risk" replace />} />
-          <Route path="/learning" element={<Navigate to="/governance/learning" replace />} />
-          <Route path="/models" element={<Navigate to="/governance/models" replace />} />
-          <Route path="/v15" element={<Navigate to="/autonomy/runtime" replace />} />
+          <Route path="/learning" element={<Navigate to="/autonomy/learning" replace />} />
+          <Route path="/models" element={<Navigate to="/autonomy/models" replace />} />
+          <Route path="/governance/:section" element={<Navigate to="/autonomy/learning" replace />} />
+          <Route path="/v15" element={<Navigate to="/ops/evidence" replace />} />
           <Route path="/v16" element={<Navigate to="/autonomy/chain" replace />} />
-          <Route path="/ops" element={<OpsPage />} />
+          <Route path="/ops" element={<Navigate to="/ops/health" replace />} />
         </Route>
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Routes>

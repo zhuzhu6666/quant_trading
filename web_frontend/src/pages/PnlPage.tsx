@@ -117,7 +117,7 @@ export function PnlPage() {
       <div className="stat-grid">
         {hasSummaryData || hasData ? <StatTile icon={realized >= 0 ? TrendingUp : TrendingDown} label="已实现盈亏" value={formatMoney(realized, currency)} detail={lastPoint ? `最新 ${formatMoney(lastPoint.pnl, currency)}` : undefined} tone={factBoundTone(seriesFact, numberTone(realized), seriesRequestFailed)} /> : null}
         {hasSummaryData || hasData ? <StatTile icon={ListChecks} label="交易数" value={formatDecimal(trades, 0)} detail={trades ? `胜 ${formatDecimal(wins, 0)} / 负 ${formatDecimal(losses, 0)}` : undefined} tone={factBoundTone(seriesFact, trades ? "ok" : "mute", seriesRequestFailed)} /> : null}
-        {trades > 0 ? <StatTile icon={Percent} label="胜率" value={`${formatDecimal(winRate, 1)}%`} detail={`均值 ${formatMoney(avgTrade, currency)}`} tone={factBoundTone(seriesFact, winRate >= 50 ? "ok" : "warn", seriesRequestFailed)} /> : null}
+        {trades > 0 ? <StatTile icon={Percent} label="胜率（窗口计算）" value={`${formatDecimal(winRate, 1)}%`} detail={`均值 ${formatMoney(avgTrade, currency)}`} tone={factBoundTone(seriesFact, winRate >= 50 ? "ok" : "warn", seriesRequestFailed)} /> : null}
         <StatTile icon={CalendarClock} label="数据窗口" value={fromTs ? formatTime(fromTs) : ""} detail={toTs ? `至 ${formatTime(toTs)}` : "等待数据"} tone={factBoundTone(seriesFact, hasData ? "ok" : "mute", seriesRequestFailed)} />
       </div>
 
@@ -130,9 +130,9 @@ export function PnlPage() {
           {!seriesDisplayable && !seriesRequestFailed ? <p className="loading-state">收益事实未知，等待权威数据。</p> : null}
           <div className="pnl-window-summary" aria-label="窗口摘要">
             <Field label="币种" value={currency} />
-            <Field label="最佳单笔" value={formatMoney(bestTrade, currency)} tone={factBoundTone(seriesFact, bestTrade > 0 ? "ok" : "mute", seriesRequestFailed)} />
-            <Field label="最差单笔" value={formatMoney(worstTrade, currency)} tone={worstTrade < 0 ? "bad" : "mute"} />
-            <Field label="平均单笔" value={formatMoney(avgTrade, currency)} tone={factBoundTone(seriesFact, numberTone(avgTrade), seriesRequestFailed)} />
+            <Field label="最佳单笔（窗口计算）" value={formatMoney(bestTrade, currency)} tone={factBoundTone(seriesFact, bestTrade > 0 ? "ok" : "mute", seriesRequestFailed)} />
+            <Field label="最差单笔（窗口计算）" value={formatMoney(worstTrade, currency)} tone={worstTrade < 0 ? "bad" : "mute"} />
+            <Field label="平均单笔（窗口计算）" value={formatMoney(avgTrade, currency)} tone={factBoundTone(seriesFact, numberTone(avgTrade), seriesRequestFailed)} />
             <Field label="首条成交" value={firstTs ? formatTime(firstTs) : ""} />
             <Field label="末条成交" value={lastTs ? formatTime(lastTs) : ""} />
           </div>

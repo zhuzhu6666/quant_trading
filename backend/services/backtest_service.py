@@ -1,49 +1,45 @@
-"""Backtest service — in-process via backtest_runner (was subprocess to main.py).
-
-Phase 4.7: dropped the subprocess shim. main.py:run_backtest is preserved
-(spec §1.1) for the CLI path; this service uses the parallel importable
-runner in backtest_runner.py.
-"""
+"""Canonical historical backtest task backed by the live-parity replay runner."""
 from __future__ import annotations
 
 from typing import Any
 
-from loguru import logger
-
 from backend.jobs.progress import ProgressCB
-from backend.services.backtest_runner import legacy_backtest_provenance
-from backend.services.research_evidence import enforce_legacy_backtest_contract
+from backend.services.parity_replay import ParityReplayService
 
 
-def run_backtest(params: dict[str, Any], progress_cb: ProgressCB) -> dict:
-    """Execute a backtest sweep in-process. Progress emitted via callback.
+def _job_result_summary(report: dict[str, Any]) -> dict[str, Any]:
+    """Keep task state compact; the full auditable report remains on disk."""
 
-    Returns dict matching the JobState.result schema.
-    """
-    from backend.services.backtest_runner import run_backtest_sweep
+    result = dict(report)
+    result.pop("trades", None)
+    result.pop("events", None)
+    bundle = dict(result.get("learning_bundle") or {})
+    bundle.pop("open_samples", None)
+    bundle.pop("factor_samples", None)
+    result["learning_bundle"] = bundle
+    return result
 
-    progress_cb("starting", 0, f"starting backtest {params.get('symbol')} {params.get('timeframe')}")
-    result = run_backtest_sweep(
-        symbol=params.get("symbol", "XAUUSD+"),
-        timeframe=params.get("timeframe", "M15"),
-        risk_pct=params.get("risk_per_trade_pct"),
-        enable_circuit=bool(params.get("enable_circuit", False)),
-        progress_cb=progress_cb,
+
+def run_backtest(params: dict[str, Any], progress_cb: ProgressCB) -> dict[str, Any]:
+    progress_cb("freezing", 5, "冻结历史数据、代码、配置和因子版本")
+    from backend.services.evolution_work_coordinator import EvolutionWorkCoordinator
+
+    report = EvolutionWorkCoordinator().run(
+        "historical_backtest",
+        lambda: ParityReplayService().run(
+            {**params, "persist_artifact": True},
+            progress_cb=progress_cb,
+        ),
     )
-    # The legacy runner is diagnostic even if a mocked/old runner returns
-    # optimistic trust flags.  Enforce at the service boundary as well as in
-    # the runner so every job result carries the same immutable contract.
-    return enforce_legacy_backtest_contract(result)
-
-
-def legacy_backtest_contract() -> dict[str, Any]:
-    """Public contract used by API/job callers before a job has completed."""
-
-    return legacy_backtest_provenance()
-
-
-def _find_latest_backtest_report():
-    """Backwards-compat alias used by some tests."""
-    from backend.services.backtest_runner import find_latest_backtest_report
-
-    return find_latest_backtest_report()
+    if str(dict(report or {}).get("status") or "") == "skipped_busy":
+        raise RuntimeError("heavy_research_job_already_running")
+    metrics = dict(report.get("metrics") or {})
+    progress_cb(
+        "completed",
+        100,
+        (
+            f"完成 {int(metrics.get('bar_count') or 0)} 根K线、"
+            f"{int(metrics.get('independent_trade_count') or 0)} 笔独立交易"
+        ),
+    )
+    return _job_result_summary(report)

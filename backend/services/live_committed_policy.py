@@ -1,6 +1,7 @@
 """Read-only projection of policy controls that live is allowed to consume."""
 from __future__ import annotations
 
+import json
 from typing import Any, Iterable
 
 from backend.core.db import state_table_columns, state_table_exists
@@ -87,6 +88,33 @@ def load_live_policy_controls(
         else {str(item) for item in legacy_tightening_actions} & actions
     )
     candidates = [dict(row) for row in rows if str(dict(row).get("action") or "") in actions]
+    application_statuses: dict[str, set[str]] = {}
+    if candidates and state_table_exists(conn, "learning_application_log"):
+        application_columns = state_table_columns(conn, "learning_application_log")
+        if {"scope_type", "suggestion_ids_json", "status"} <= application_columns:
+            application_rows = conn.execute(
+                _sql(
+                    conn,
+                    """
+                    SELECT suggestion_ids_json, status
+                    FROM learning_application_log
+                    WHERE scope_type=?
+                    """,
+                ),
+                (str(scope_type),),
+            ).fetchall()
+            for application in application_rows:
+                payload = dict(application).get("suggestion_ids_json") or []
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload or "[]")
+                    except (TypeError, ValueError):
+                        payload = []
+                if not isinstance(payload, list):
+                    continue
+                status = str(dict(application).get("status") or "")
+                for suggestion_id in payload:
+                    application_statuses.setdefault(str(suggestion_id), set()).add(status)
     mutation_ids = sorted(
         {
             str(row.get("applied_mutation_id") or "")
@@ -117,6 +145,11 @@ def load_live_policy_controls(
 
     accepted: list[dict[str, Any]] = []
     for row in candidates:
+        binding_statuses = application_statuses.get(str(row.get("suggestion_id") or ""))
+        if binding_statuses and not binding_statuses.intersection(
+            {"prepared", "applied", "observing", "effective", "mixed"}
+        ):
+            continue
         mutation_id = str(row.get("applied_mutation_id") or "")
         if mutation_id:
             if mutation_id not in committed:

@@ -1,13 +1,29 @@
 import {
   Activity,
+  ArrowRight,
+  BookOpenCheck,
+  Bot,
+  BrainCircuit,
+  CandlestickChart,
+  ChevronRight,
+  Database,
+  GitBranch,
+  RefreshCcw,
+  Route,
+  Scale,
+  ServerCog,
   ShieldCheck,
+  SlidersHorizontal,
   TrendingDown,
   TrendingUp,
   Wallet,
+  Workflow,
+  type LucideIcon,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { MetricCard } from "@/components/Card";
-import { CompactMetric as MiniMetric, Field, StatTile, numberTone, toneFromStatus, type Tone } from "@/components/DashboardBits";
+import { StatTile, numberTone, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLiveState } from "@/hooks/useLiveState";
@@ -18,11 +34,12 @@ import {
   getRiskSummary,
   getSessionStats,
 } from "@/api/client";
-import { getHealth, getLogTail, getSystemDbHealth } from "@/api/domains/system";
+import { getHealth, getSystemDbHealth } from "@/api/domains/system";
 import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickString } from "@/lib/compat";
 import { translateDisplayValue } from "@/lib/display";
 import { formatDecimal, formatMoney, formatTime } from "@/lib/format";
 import { factHasDisplayValue, factIsKnown, readFact, readFactComponent } from "@/api/fact";
+import { queryKeys } from "@/api/queryKeys";
 import { decodeCanonicalRiskSnapshot, knownMetric } from "@/api/riskSnapshot";
 
 function hasMeaningfulText(value: unknown): boolean {
@@ -38,11 +55,63 @@ function translatedText(value: unknown): string {
   return text === "" ? "" : text;
 }
 
+type FlowNodeProps = {
+  icon: LucideIcon;
+  role: string;
+  title: string;
+  status: string;
+  detail: string;
+  io: string;
+  tone: Tone;
+  to: string;
+  kind?: "source" | "process" | "agent" | "authority" | "execution";
+};
+
+function FlowNode({ icon: Icon, role, title, status, detail, io, tone, to, kind = "process" }: FlowNodeProps) {
+  return (
+    <Link
+      className={`system-flow-node system-flow-node-${kind} system-flow-node-${tone}`}
+      to={to}
+      aria-label={`${title}，${detail}，状态：${status}`}
+    >
+      <span className="system-flow-node-head">
+        <span className="system-flow-node-icon"><Icon size={17} aria-hidden="true" /></span>
+        <span className="system-flow-node-role">{role}</span>
+        <StatusPill status={status} tone={tone} />
+      </span>
+      <strong>{title}</strong>
+      <span className="system-flow-node-detail">{detail}</span>
+      <span className="system-flow-node-io">{io}</span>
+    </Link>
+  );
+}
+
+function FlowConnector({ label }: { label: string }) {
+  return (
+    <div className="system-flow-connector">
+      <span>{label}</span>
+      <ArrowRight size={20} aria-hidden="true" />
+    </div>
+  );
+}
+
+function statusTone(ok: boolean, known = true): Tone {
+  if (!known) return "warn";
+  return ok ? "ok" : "bad";
+}
+
+function blockerText(value: unknown): string {
+  const item = asRecord(value);
+  return translateDisplayValue(
+    pickString(item, ["reason", "component", "status", "message"], typeof value === "string" ? value : ""),
+  );
+}
+
 function useDashboardQueries() {
   const readiness = useBackendReadinessQuery();
   return {
     health: useQuery({
-      queryKey: ["health"],
+      queryKey: queryKeys.health,
       queryFn: getHealth,
       // system.health.v2 expires after five seconds. Refresh with enough
       // headroom that the browser never oscillates between known and stale.
@@ -51,42 +120,36 @@ function useDashboardQueries() {
       refetchOnWindowFocus: true,
     }),
     loop: useQuery({
-      queryKey: ["loop-status", "overview"],
+      queryKey: queryKeys.loopStatus,
       queryFn: getLoopStatus,
       refetchInterval: 3_000,
       staleTime: 2_000,
     }),
     account: useQuery({
-      queryKey: ["account", "overview"],
+      queryKey: queryKeys.account,
       queryFn: getAccount,
       refetchInterval: 3_000,
       staleTime: 2_000,
     }),
     session: useQuery({
-      queryKey: ["session-stats", "overview"],
+      queryKey: queryKeys.sessionStats,
       queryFn: getSessionStats,
       refetchInterval: 3_000,
       staleTime: 2_000,
     }),
     risk: useQuery({
-      queryKey: ["risk-summary", "overview"],
+      queryKey: queryKeys.riskSummary,
       queryFn: getRiskSummary,
       refetchInterval: 10_000,
       staleTime: 5_000,
     }),
     db: useQuery({
-      queryKey: ["db-health", "overview"],
+      queryKey: queryKeys.dbHealth,
       queryFn: getSystemDbHealth,
       refetchInterval: 15_000,
       staleTime: 5_000,
     }),
     readiness,
-    logs: useQuery({
-      queryKey: ["logs-tail", "overview"],
-      queryFn: () => getLogTail(24),
-      refetchInterval: 5_000,
-      staleTime: 2_000,
-    }),
   };
 }
 
@@ -105,7 +168,6 @@ export function OverviewPage() {
   const readiness = asRecord(queries.readiness.data);
   const readinessDimensions = asRecord(readiness.readiness_dimensions);
   const readinessBlockers = asRecord(readinessDimensions.blockers);
-  const logPayload = asRecord(queries.logs.data);
 
   const healthFact = readFact(queries.health.data, "system.health.v2");
   const loopFact = readFact(queries.loop.data, "live.loop.v2");
@@ -211,7 +273,27 @@ export function OverviewPage() {
     }),
     ...blockers.slice(0, 4).map((item) => translateDisplayValue(item)),
   ].filter((item) => hasMeaningfulText(item));
-  const showDataHealth = dbProblems > 0 || blockers.length > 0 || !readinessOk || toneFromStatus(dbStatus) !== "ok";
+  const factorHealth = asRecord(pick(readiness, ["factor_blend_health"]));
+  const factorStatus = pickString(factorHealth, ["status"], "");
+  const factorOk = pickBoolean(factorHealth, ["ok"], false);
+  const agentChain = asRecord(pick(readiness, ["agent_chain_health", "v16.agent_chain_health"]));
+  const agentChainStatus = pickString(agentChain, ["status"], "");
+  const agentChainOk = pickBoolean(agentChain, ["ok"], false);
+  const evolution = asRecord(pick(readiness, ["autonomous_evolution_cycle", "v16.autonomous_evolution_cycle"]));
+  const evolutionSteps = pickArray(evolution, ["steps"]).map(asRecord);
+  const nextActions = pickArray(evolution, ["next_actions"]);
+  const cycleStep = (name: string) => evolutionSteps.find((item) => pickString(item, ["step"], "") === name) || {};
+  const evidenceStep = cycleStep("collect_evidence");
+  const proposalStep = cycleStep("refresh_proposals");
+  const candidateStep = cycleStep("review_candidates");
+  const applyStep = cycleStep("single_apply_boundary");
+  const effectStep = cycleStep("monitor_effect");
+  const readyForLiveExecution = readinessKnown && pickBoolean(readiness, ["ready_for_live_execution"], false);
+  const acceptingNewRisk = readinessKnown && pickBoolean(readiness, ["accepting_new_risk"], false);
+  const activeBlockers = [
+    ...blockers.map(blockerText),
+    ...healthBadges,
+  ].filter(Boolean).filter((item, index, all) => all.indexOf(item) === index).slice(0, 8);
   const apiErrors = [
     ["WS", wsError],
     ["健康接口", queries.health.error],
@@ -221,56 +303,15 @@ export function OverviewPage() {
     ["风控接口", queries.risk.error],
     ["数据库接口", queries.db.error],
     ["就绪接口", queries.readiness.error],
-    ["日志接口", queries.logs.error],
   ].filter(([, err]) => Boolean(err));
-  const backendLogLines = pickArray(logPayload, ["lines"]).map((line) => String(line)).filter((line) => line.trim()).slice(-80).reverse();
-  const fallbackLogs = [
-    {
-      time: serverTime ? formatTime(serverTime) : formatTime(new Date().toISOString()),
-      title: connected ? "WebSocket 实时流在线" : "WebSocket 未在线",
-      detail: connected ? `实时数据源 ${translateDisplayValue(source || "websocket")}` : `当前使用 ${translateDisplayValue(source || "polling")}，等待实时流恢复`,
-      tone: connected ? "ok" : "warn",
-    },
-    {
-      time: hasMeaningfulText(loopStartedAt) ? formatTime(loopStartedAt) : serverTime ? formatTime(serverTime) : "",
-      title: loopRunning ? "交易循环运行中" : "交易循环未运行",
-      detail: `${broker} · ${strategy}${executionMode ? ` · ${executionMode}` : ""}${loopReason ? ` · ${loopReason}` : ""}`,
-      tone: loopKnown && loopRunning ? "ok" : "warn",
-    },
-    {
-      time: serverTime ? formatTime(serverTime) : "",
-      title: priceKnown ? "行情报价已更新" : spotFact.state === "stale" ? "行情报价已过期" : "行情状态未知",
-      detail: currentPrice > 0 ? `XAU ${formatDecimal(currentPrice, 2)}${hasSpread ? ` · spread ${formatDecimal(spread, 2)}` : ""}${priceObservedAt ? ` · ${priceObservedAt}` : ""}` : "暂无有效现价",
-      tone: priceKnown && currentPrice > 0 ? "ok" : "warn",
-    },
-    {
-      time: serverTime ? formatTime(serverTime) : "",
-      title: riskOverallKnown ? (circuitBreaker ? "健康面阻断交易" : "Canonical 风险已知") : "风控状态未知",
-      detail: riskKnown ? `95% VaR ${formatDecimal(canonicalRisk.var95.varPct ?? 0, 4)}% · 样本 ${formatDecimal(canonicalRisk.var95.sampleCount ?? 0, 0)}` : "等待 risk_metrics_snapshot.v2",
-      tone: circuitBreaker ? "bad" : !riskOverallKnown ? "warn" : "ok",
-    },
-    {
-      time: serverTime ? formatTime(serverTime) : "",
-      title: readinessOk ? "后端就绪检查通过" : "后端就绪受限",
-      detail: blockers.length ? `阻断项 ${blockers.length}：${blockers.slice(0, 2).map((item) => translateDisplayValue(item)).join("；")}` : readinessText,
-      tone: readinessOk ? "ok" : blockers.length ? "bad" : "warn",
-    },
-    {
-      time: serverTime ? formatTime(serverTime) : "",
-      title: dbProblems > 0 ? "数据库健康存在异常" : "数据库健康正常",
-      detail: `状态 ${translateDisplayValue(dbStatus)} · 数据库 ${formatDecimal(dbList.length, 0)} · 异常 ${dbProblems}`,
-      tone: dbProblems > 0 ? "warn" : dbKnown ? toneFromStatus(dbStatus) : "warn",
-    },
-  ] satisfies Array<{ time: string; title: string; detail: string; tone: Tone }>;
-  const realtimeLogs = backendLogLines.length ? backendLogLines : fallbackLogs.map((item) => `[${item.time}] ${item.title} - ${item.detail}`).reverse();
 
   return (
     <section className="dashboard overview-dashboard">
       <div className="dashboard-header">
         <div>
           <div className="eyebrow">实时控制台</div>
-          <h1>交易运行驾驶舱</h1>
-          <p>实时状态、账户、风控和数据健康集中在这里；详细操作进入对应模块。</p>
+          <h1>系统运行地图</h1>
+          <p>先看数据、交易、风控和自治链路走到哪里，再按节点进入详细页面。</p>
         </div>
         <div className="header-status">
           <StatusPill status={connected ? "WS 实时连接" : "轮询/重连中"} tone={connected ? "ok" : "warn"} />
@@ -285,97 +326,246 @@ export function OverviewPage() {
           label="账户权益"
           value={formatMoney(equity, currency)}
           detail={`余额 ${formatMoney(balance, currency)} · ${currency}`}
-          tone={accountKnown && equity > 0 ? "ok" : accountFact.state === "stale" ? "warn" : "mute"}
+          tone={accountKnown && equity > 0 ? "ok" : accountFact.state === "stale" && equity > 0 ? "pending" : "mute"}
         /> : null}
         {hasSessionData ? <StatTile
           icon={pnl >= 0 ? TrendingUp : TrendingDown}
           label="会话盈亏"
           value={formatMoney(pnl, currency)}
-          detail={trades > 0 ? `${formatDecimal(trades, 0)} 笔 · 胜率 ${formatDecimal(winRate, 1)}%` : "今日暂无成交"}
-          tone={sessionKnown ? numberTone(pnl) : "warn"}
+          detail={trades > 0 ? `${formatDecimal(trades, 0)} 笔 · 胜率（前端计算）${formatDecimal(winRate, 1)}%` : "今日暂无成交"}
+          tone={sessionKnown ? numberTone(pnl) : "pending"}
         /> : null}
         <StatTile
           icon={Activity}
           label="XAU 实时价"
           value={currentPrice > 0 ? formatDecimal(currentPrice, 2) : "暂无"}
           detail={hasSpread ? `买 ${formatDecimal(priceBid, 2)} · 卖 ${formatDecimal(priceAsk, 2)}${priceObservedAt ? ` · ${priceObservedAt}` : ""}` : currentPrice > 0 ? `XAUUSD+${priceObservedAt ? ` · ${priceObservedAt}` : ""}` : "等待行情推送"}
-          tone={priceKnown && currentPrice > 0 ? "ok" : "warn"}
+          tone={priceKnown && currentPrice > 0 ? "ok" : currentPrice > 0 ? "pending" : "warn"}
         />
         <StatTile
           icon={ShieldCheck}
           label="风控状态"
           value={riskOverallKnown ? (circuitBreaker ? "健康面阻断" : "风险输入已知") : "未知"}
-          detail={riskKnown ? `95% VaR ${formatDecimal(canonicalRisk.var95.varPct ?? 0, 4)}% · CVaR ${formatDecimal(canonicalRisk.var95.cvarPct ?? 0, 4)}%` : "等待 canonical 风险快照"}
+          detail={riskKnown ? `95% VaR ${formatDecimal(canonicalRisk.var95.varPct ?? 0, 4)}% · CVaR ${formatDecimal(canonicalRisk.var95.cvarPct ?? 0, 4)}%` : "等待权威风险快照"}
           tone={circuitBreaker ? "bad" : !riskOverallKnown ? "warn" : "ok"}
         />
       </div>
 
-      <div className="dashboard-grid">
-        <MetricCard title="运行与行情">
-          <div className="overview-mini-grid">
-            <MiniMetric label="持仓" value={factHasDisplayValue(positionsFact) ? formatDecimal(positionCount, 0) : "未知"} detail={factHasDisplayValue(positionsFact) ? `浮盈 ${formatMoney(positionFloating, currency)}` : "持仓事实未知"} tone={positionsKnown ? numberTone(positionFloating) : "warn"} />
-            <MiniMetric label="买卖价差" value={hasSpread ? formatDecimal(spread, 2) : ""} detail={hasSpread ? `${formatDecimal(priceBid, 2)} / ${formatDecimal(priceAsk, 2)}` : "等待报价"} tone={priceKnown && hasSpread ? "ok" : "warn"} />
-            <MiniMetric label="执行模式" value={executionMode || ""} detail={loopRunning ? "循环活跃" : "等待启动"} tone={loopKnown && loopRunning ? "ok" : "warn"} />
-            <MiniMetric label="数据源" value={translateDisplayValue(source || "offline")} detail={connected ? "WS 已连接" : "轮询/重连中"} tone={connected ? "ok" : "warn"} />
+      <section className="system-flow-map wide-panel" aria-labelledby="system-flow-title">
+        <header className="system-flow-header">
+          <div>
+            <span className="system-flow-kicker">后端事实驱动 · 前端只读投影</span>
+            <h2 id="system-flow-title">系统数据流与智能体自治闭环</h2>
+            <p>上层负责实时交易，下层由智能体自动复盘、生成候选并受控写回；箭头文字就是实际传递的数据。</p>
           </div>
-          <div className="field-list overview-field-list">
-            <Field label="状态" value={loopKnown ? (loopRunning ? "运行中" : "未运行") : "未知"} tone={loopKnown && loopRunning ? "ok" : "warn"} />
-            {hasMeaningfulText(broker) ? <Field label="经纪商" value={broker} /> : null}
-            {hasMeaningfulText(strategy) ? <Field label="策略" value={strategy} /> : null}
-            {executionMode ? <Field label="执行模式" value={executionMode} /> : null}
-            {loopReason ? <Field label="原因" value={loopReason} /> : null}
-            {hasMeaningfulText(loopStartedAt) ? <Field label="启动时间" value={formatTime(loopStartedAt)} /> : null}
-            <Field label="现价" value={priceDisplayable && currentPrice > 0 ? formatDecimal(currentPrice, 2) : priceKnown ? "暂无" : "未知"} tone={priceKnown && currentPrice > 0 ? "ok" : "warn"} />
-            {priceBid > 0 ? <Field label="买价" value={formatDecimal(priceBid, 2)} /> : null}
-            {priceAsk > 0 ? <Field label="卖价" value={formatDecimal(priceAsk, 2)} /> : null}
-            <Field label="行情状态" value={priceStatus} tone={priceKnown && currentPrice > 0 ? "ok" : "warn"} />
-            {hasMeaningfulText(priceSource) ? <Field label="行情来源" value={translateDisplayValue(priceSource)} /> : null}
-            <Field label="行情观测时间" value={priceObservedAt || "未知"} tone={priceKnown ? "ok" : "warn"} />
+          <div className="system-flow-legend" aria-label="状态图例">
+            <span><i className="legend-dot legend-ok" />正常</span>
+            <span><i className="legend-dot legend-warn" />待确认</span>
+            <span><i className="legend-dot legend-bad" />阻断</span>
           </div>
-          <div className="overview-chip-row">
-            <span className="data-badge">持仓 {formatDecimal(positionCount, 0)}</span>
-            <span className={`data-badge ${priceKnown && currentPrice > 0 ? "data-badge-ok" : "data-badge-warn"}`}>行情 {priceStatus}</span>
-            <span className={`data-badge ${loopKnown && loopRunning ? "data-badge-ok" : "data-badge-warn"}`}>循环 {loopKnown ? (loopRunning ? "运行" : "停止") : "未知"}</span>
-            {loopReason ? <span className="data-badge">{loopReason}</span> : null}
+        </header>
+
+        <div className="system-flow-section">
+          <div className="system-flow-section-title">
+            <span><Activity size={17} aria-hidden="true" />实时交易执行链</span>
+            <strong>{acceptingNewRisk ? "当前允许新增风险" : "当前不新增风险"}</strong>
+          </div>
+          <div className="system-flow-track system-flow-track-live">
+            <FlowNode
+              icon={CandlestickChart}
+              role="外部事实源"
+              title="cTrader + K线库"
+              detail="提供报价、闭合K线、账户与持仓"
+              io={`当前：${currentPrice > 0 ? `XAU ${formatDecimal(currentPrice, 2)}` : "等待报价"} · ${broker || "broker 未知"}`}
+              status={priceStatus}
+              tone={statusTone(priceKnown && currentPrice > 0, priceKnown)}
+              to="/trading"
+              kind="source"
+            />
+            <FlowConnector label="报价 / K线 / 账户 / 持仓" />
+            <FlowNode
+              icon={ServerCog}
+              role="实时事实层"
+              title="实时交易状态与快照"
+              detail="对齐行情、账户、仓位和市场状态"
+              io={loopReason || executionMode || "向决策链提供同一时点事实"}
+              status={loopKnown ? (loopRunning ? "运行中" : "已停止") : "未知"}
+              tone={statusTone(loopRunning, loopKnown)}
+              to="/trading"
+            />
+            <FlowConnector label="闭合K线 + 实时上下文" />
+            <FlowNode
+              icon={BrainCircuit}
+              role="决策计算"
+              title="因子组合 + 决策规则"
+              detail="生成方向、置信度、场景与决策门"
+              io={strategy || "因子组合 · 历史经验只做有限修正"}
+              status={translateDisplayValue(factorStatus || "unknown")}
+              tone={statusTone(factorOk, readinessKnown && Boolean(factorStatus))}
+              to="/trading"
+            />
+            <FlowConnector label="方向 / 置信度 / 决策条件" />
+            <FlowNode
+              icon={Scale}
+              role="唯一风险裁决"
+              title="风险策略"
+              detail="检查硬阻断、风险预算并计算仓位"
+              io={riskKnown ? `VaR95 ${formatDecimal(canonicalRisk.var95.varPct ?? 0, 4)}%` : "等待权威风险输入"}
+              status={riskOverallKnown ? (circuitBreaker ? "已阻断" : "风险已知") : "未知"}
+              tone={circuitBreaker ? "bad" : statusTone(riskOverallKnown, riskOverallKnown)}
+              to="/performance/risk"
+              kind="authority"
+            />
+            <FlowConnector label="允许 / 拒绝 + 仓位" />
+            <FlowNode
+              icon={Route}
+              role="唯一交易执行"
+              title="实时交易循环 → cTrader"
+              detail="下单、成交对账、持仓保护与退出"
+              io={`持仓 ${formatDecimal(positionCount, 0)} · 浮盈 ${formatMoney(positionFloating, currency)}`}
+              status={readyForLiveExecution ? "执行就绪" : "执行受限"}
+              tone={statusTone(readyForLiveExecution, readinessKnown && positionsKnown)}
+              to="/trading"
+              kind="execution"
+            />
+          </div>
+        </div>
+
+        <div className="system-feedback-bridge">
+          <span><RefreshCcw size={17} aria-hidden="true" />订单、成交、持仓、盈亏与反事实证据自动回流</span>
+          <ArrowRight size={22} aria-hidden="true" />
+        </div>
+
+        <div className="agent-core">
+          <header className="agent-core-header">
+            <span className="agent-core-icon"><Bot size={23} aria-hidden="true" /></span>
+            <div>
+              <span>自动协调器</span>
+              <strong>Demo 自动演化协调器</strong>
+              <small>后台学习任务定时驱动复盘、审查、交接、受控应用和效果核对；不等待页面点击。</small>
+            </div>
+            <StatusPill status={translateDisplayValue(pickString(evolution, ["status"], "unknown"))} tone={statusTone(agentChainOk, readinessKnown && Boolean(agentChainStatus))} />
+          </header>
+
+          <div className="agent-roster" aria-label="已登记的智能体权限">
+            <strong>已登记 7 个智能体与权限</strong>
+            <span>自治治理中枢</span>
+            <span>自主学习</span>
+            <span>因子治理</span>
+            <span>仓位监督治理</span>
+            <span>因子修剪治理</span>
+            <span className="agent-roster-observer">LightGBM 只观察模型</span>
+            <span className="agent-roster-observer">LLM 顾问</span>
+          </div>
+
+          <div className="system-flow-track system-flow-track-agent">
+            <FlowNode
+              icon={BookOpenCheck}
+              role="证据与复盘服务"
+              title="交易回放与复盘"
+              detail="还原决策、成交、盈亏与监督器反事实"
+              io="输出：回放证据 + 后验责任"
+              status={translateDisplayValue(pickString(evidenceStep, ["status"], "unknown"))}
+              tone={statusTone(pickBoolean(evidenceStep, ["ok"], false), readinessKnown && Boolean(Object.keys(evidenceStep).length))}
+              to="/ops/evidence"
+              kind="agent"
+            />
+            <FlowConnector label="回放 + 后验 + 反事实" />
+            <FlowNode
+              icon={Database}
+              role="自主学习智能体"
+              title="学习与经验记忆"
+              detail="构建样本、经验记忆与智能体质量评分"
+              io="输出：经验先验 + 智能体质量"
+              status={translateDisplayValue(agentChainStatus || "unknown")}
+              tone={statusTone(agentChainOk, readinessKnown && Boolean(agentChainStatus))}
+              to="/autonomy/learning"
+              kind="agent"
+            />
+            <FlowConnector label="样本 / 记忆 / 质量评分" />
+            <FlowNode
+              icon={Workflow}
+              role="智能体提案总线"
+              title="治理专员 → 提案总线"
+              detail="自治中枢、学习、因子、仓位监督器生成候选"
+              io="输出：候选动作 + 证据引用 + 来源身份"
+              status={translateDisplayValue(pickString(proposalStep, ["status"], "unknown"))}
+              tone={statusTone(pickBoolean(proposalStep, ["ok"], false), readinessKnown && Boolean(Object.keys(proposalStep).length))}
+              to="/autonomy/chain"
+              kind="agent"
+            />
+            <FlowConnector label="候选 + 来源链路 + 证据" />
+            <FlowNode
+              icon={ShieldCheck}
+              role="自治中枢 + 权限规则"
+              title="证据审查 + 智能体权限"
+              detail="判断责任归属、候选证据和允许写入范围"
+              io={`候选审查：${translateDisplayValue(pickString(candidateStep, ["status"], "unknown"))}`}
+              status={translateDisplayValue(pickString(candidateStep, ["status"], "unknown"))}
+              tone={statusTone(pickBoolean(candidateStep, ["ok"], false), readinessKnown && Boolean(Object.keys(candidateStep).length))}
+              to="/autonomy/chain"
+              kind="authority"
+            />
+            <FlowConnector label="审查结果 + 单次授权" />
+            <FlowNode
+              icon={SlidersHorizontal}
+              role="受控写回"
+              title="风险/决策检查 + 运行配置"
+              detail="风险策略、决策规则与事务提交器共同提交变更"
+              io="输出：已提交运行配置 → 下一交易周期"
+              status={translateDisplayValue(pickString(applyStep, ["status"], "unknown"))}
+              tone={statusTone(pickBoolean(applyStep, ["ok"], false), readinessKnown && Boolean(Object.keys(applyStep).length))}
+              to="/autonomy/chain"
+              kind="authority"
+            />
+          </div>
+
+          <div className="agent-effect-loop">
+            <RefreshCcw size={17} aria-hidden="true" />
+            <span><strong>效果监控持续核对：</strong>新策略表现 → 学习应用效果 → 强化、收紧或自动回滚 → 再进入记忆和提案。</span>
+            <StatusPill
+              status={translateDisplayValue(pickString(effectStep, ["status"], "unknown"))}
+              tone={statusTone(pickBoolean(effectStep, ["ok"], false), readinessKnown && Boolean(Object.keys(effectStep).length))}
+            />
+          </div>
+        </div>
+
+        <footer className="system-authority-strip">
+          <span><strong>前端</strong>只读观察与受控请求，不生成交易决定</span>
+          <ArrowRight size={17} aria-hidden="true" />
+          <span><strong>智能体</strong>自动复盘、提案、审查与协调</span>
+          <ArrowRight size={17} aria-hidden="true" />
+          <span><strong>执行权</strong>始终归风险策略、决策规则、运行配置和实时交易循环</span>
+        </footer>
+      </section>
+
+      <div className="runtime-attention-grid">
+        <MetricCard title="当前阻断">
+          <div className="attention-list">
+            {activeBlockers.length ? activeBlockers.map((item, index) => (
+              <div className="attention-row attention-row-bad" key={`${item}-${index}`}>
+                <ShieldCheck size={15} aria-hidden="true" /><span>{item}</span>
+              </div>
+            )) : (
+              <div className="attention-row attention-row-ok"><ShieldCheck size={15} aria-hidden="true" /><span>当前没有已知运行阻断</span></div>
+            )}
           </div>
         </MetricCard>
-
-        <MetricCard title="账户与风控">
-          <div className="overview-mini-grid">
-            <MiniMetric label="保证金使用" value={hasAccountData && hasMarginData ? `${formatDecimal(marginUsage, 1)}%` : ""} detail={hasAccountData && hasMarginData ? `${formatMoney(margin, currency)} / ${formatMoney(marginBase, currency)}` : hasAccountData ? "暂无保证金数据" : "账户事实未知"} tone={!accountKnown ? "warn" : marginUsage >= 70 ? "warn" : "ok"} />
-            <MiniMetric label="今日交易" value={formatDecimal(trades, 0)} detail={`胜 ${formatDecimal(wins, 0)} / 负 ${formatDecimal(losses, 0)}`} tone={sessionKnown && trades > 0 ? "ok" : sessionKnown ? "mute" : "warn"} />
-            <MiniMetric label="胜率" value={`${formatDecimal(winRate, 1)}%`} detail={`PnL ${formatMoney(pnl, currency)}`} tone={sessionKnown && winRate >= 50 ? "ok" : sessionKnown && trades > 0 ? "warn" : "mute"} />
-            <MiniMetric label="数据健康" value={dbKnown ? (dbProblems > 0 ? `${dbProblems} 异常` : readinessText) : "未知"} detail={`库 ${formatDecimal(dbList.length, 0)} · ${dbStatus}`} tone={dbKnown && !dbProblems && readinessOk ? "ok" : "warn"} />
-          </div>
-          <div className="field-list overview-field-list">
-            <Field label="余额" value={hasAccountData ? formatMoney(balance, currency) : "未知"} tone={accountKnown ? "mute" : "warn"} />
-            <Field label="权益" value={hasAccountData ? formatMoney(equity, currency) : "未知"} tone={accountKnown ? "mute" : "warn"} />
-            {hasMarginData ? <Field label="已用保证金" value={formatMoney(margin, currency)} /> : null}
-            {hasMarginData ? <Field label="可用保证金" value={formatMoney(marginFree, currency)} /> : null}
-            {hasLeverageData ? <Field label="杠杆" value={leverage} /> : null}
-            <Field label="健康面交易阻断" value={riskHealthKnown ? (circuitBreaker ? "是" : "否") : "未知"} tone={circuitBreaker ? "bad" : riskHealthKnown ? "ok" : "warn"} />
-            {hasVarData ? (
-              <Field
-                label="前瞻 VaR / CVaR 95%"
-                value={`${formatDecimal(canonicalRisk.var95.varPct ?? 0, 4)}% / ${formatDecimal(canonicalRisk.var95.cvarPct ?? 0, 4)}%`}
-              />
-            ) : null}
-            {hasKellyData ? <Field label="Kelly" value={formatDecimal(canonicalRisk.kelly.fraction ?? 0, 4)} /> : null}
-            {consecutiveLoss > 0 ? <Field label="连续亏损" value={formatDecimal(consecutiveLoss, 0)} /> : null}
-            {drawdown > 0 ? <Field label="回撤" value={`${formatDecimal(drawdown, 2)}%`} /> : null}
-            {showDataHealth ? <Field label="数据库" value={dbStatus} tone={dbKnown ? toneFromStatus(dbStatus) : "warn"} /> : null}
-            {dbProblems > 0 ? <Field label="数据库异常项" value={`${dbProblems}`} tone="bad" /> : null}
-            {!readinessOk ? <Field label="后端就绪" value="否" tone="warn" /> : null}
-            {blockers.length ? <Field label="阻断项" value={`${blockers.length} 项`} tone="bad" /> : null}
-          </div>
-          <div className="overview-chip-row">
-            <span className={`data-badge ${circuitBreaker ? "data-badge-bad" : riskHealthKnown ? "data-badge-ok" : "data-badge-warn"}`}>健康阻断 {riskHealthKnown ? (circuitBreaker ? "是" : "否") : "未知"}</span>
-            <span className={`data-badge ${drawdown > 0 ? "data-badge-warn" : ""}`}>回撤 {formatDecimal(drawdown, 2)}%</span>
-            {hasVarData ? <span className="data-badge">VaR95 {formatDecimal(canonicalRisk.var95.varPct ?? 0, 4)}%</span> : null}
-            {hasKellyData ? <span className="data-badge">Kelly {formatDecimal(canonicalRisk.kelly.fraction ?? 0, 4)}</span> : null}
-            {healthBadges.map((item, index) => (
-              <span className="data-badge data-badge-warn" key={`${item}-${index}`}>{item}</span>
-            ))}
+        <MetricCard title="自治下一步">
+          <div className="attention-list">
+            {nextActions.length ? nextActions.slice(0, 6).map((raw, index) => {
+              const item = asRecord(raw);
+              const action = pickString(item, ["action"], `action_${index}`);
+              return (
+                <Link className="attention-row" to="/autonomy/chain" key={`${action}-${index}`}>
+                  <GitBranch size={15} aria-hidden="true" />
+                  <span><strong>{translateDisplayValue(action)}</strong>{translateDisplayValue(pickString(item, ["reason"], ""))}</span>
+                  <ChevronRight size={15} aria-hidden="true" />
+                </Link>
+              );
+            }) : (
+              <div className="attention-row attention-row-ok"><ShieldCheck size={15} aria-hidden="true" /><span>自治链暂无待处理动作</span></div>
+            )}
           </div>
         </MetricCard>
       </div>
@@ -390,12 +580,8 @@ export function OverviewPage() {
         </MetricCard>
       ) : null}
 
-      <MetricCard title="实时日志" className="wide-panel overview-log-panel">
-        <pre className="overview-log-scroll">{realtimeLogs.join("\n") || "暂无日志"}</pre>
-      </MetricCard>
-
       <div className="dashboard-footnote">
-        数据源：{translateDisplayValue(source || "offline")} · 页面已改为结构化展示；需要排查请进入运维页查看详情。
+        数据源：{translateDisplayValue(source || "offline")} · 完整日志、回放和发布证据请进入系统运维。
       </div>
     </section>
   );

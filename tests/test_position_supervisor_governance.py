@@ -358,6 +358,101 @@ def test_position_supervisor_advisories_materialize_mfe_capture_failure_template
     assert templates[generated["scope_key"]]["source"] == "generated_from_supervisor_learning"
 
 
+def test_counterfactual_overprotection_blocks_tighter_generated_template(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        base_ts = 1782439300.0
+        for idx in range(2):
+            position_id = f"overprotected_{idx}"
+            review = {
+                "position_id": position_id,
+                "entry_ts": base_ts + idx - 90,
+                "close_ts": base_ts + idx,
+                "holding_seconds": 90.0,
+                "mfe": 2.0,
+                "mae": 1.0,
+                "giveback_ratio": 0.96,
+                "profit_capture_ratio": 0.02,
+                "close_price": 2999.0,
+                "real_pnl": {"gross": -1.0, "net": -1.0, "entry_price": 3000.0},
+            }
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, position_id, pnl, mae, mfe, outcome_label,
+                 failure_tags_json, summary_text, review_json, created_at)
+                VALUES (?, ?, ?, -1.0, 1.0, 2.0, 'bad_loss',
+                        '[]', 'capture failed', ?, ?)
+                """,
+                (
+                    f"overprotected_rev_{idx}",
+                    position_id,
+                    position_id,
+                    json.dumps(review),
+                    base_ts + idx,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO position_lifecycle_event
+                (event_id, position_id, trade_id, symbol, event_type, event_ts, details_json)
+                VALUES (?, ?, ?, 'XAUUSD+', 'opened', ?, ?)
+                """,
+                (
+                    f"overprotected_open_{idx}",
+                    position_id,
+                    position_id,
+                    base_ts + idx - 90,
+                    json.dumps({"sl": 2980.0, "tp": 3040.0}),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO supervisor_counterfactual_review
+                (counterfactual_id, review_id, trade_id, position_id, close_ts,
+                 close_reason, supervisor_event_type, supervisor_reason, label,
+                 confidence, horizons_json, evidence_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'stopout', 'supervisor_tighten',
+                        'profit_giveback_after_mfe', 'protection_too_tight',
+                        0.8, '[]', ?, ?, ?)
+                """,
+                (
+                    f"overprotected_cf_{idx}",
+                    f"overprotected_rev_{idx}",
+                    position_id,
+                    position_id,
+                    base_ts + idx,
+                    json.dumps({"maturity": {"governance_eligible": True}}),
+                    base_ts + idx,
+                    base_ts + idx,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = build_position_supervisor_advisories(
+        day="2026-06-26",
+        db_path=db_path,
+    )
+
+    switch_items = [
+        item for item in result["items"]
+        if item["action"] == "switch_position_supervisor_template"
+    ]
+    assert [item["scope_key"] for item in switch_items] == [CONSERVATIVE_TEMPLATE_ID]
+    assert all(
+        item["action"] != "tighten_mfe_capture_protection"
+        for item in result["items"]
+    )
+    assert any(
+        item["reason"] == "counterfactual evidence shows protection is already too aggressive"
+        for item in result["skipped"]
+    )
+
+
 def test_position_supervisor_advisories_skip_unexecutable_stop_legality(tmp_path):
     db_path = tmp_path / "state.db"
     _create_db(db_path)

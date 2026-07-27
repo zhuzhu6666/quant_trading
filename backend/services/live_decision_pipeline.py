@@ -8,12 +8,31 @@ orders.
 from __future__ import annotations
 
 import time
+import threading
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
 ContextPolicyEvaluator = Callable[[dict[str, Any], Any], Any]
+_CALIBRATOR_CACHE: dict[str, tuple[int, int, Any]] = {}
+_CALIBRATOR_CACHE_LOCK = threading.Lock()
+
+
+def _load_probability_calibrator(path: str | Path) -> Any:
+    from alpha.probability_calibrator import ProbabilityCalibrator
+
+    resolved = Path(path).resolve()
+    stat = resolved.stat()
+    key = str(resolved)
+    fingerprint = (int(stat.st_mtime_ns), int(stat.st_size))
+    with _CALIBRATOR_CACHE_LOCK:
+        cached = _CALIBRATOR_CACHE.get(key)
+        if cached is not None and cached[:2] == fingerprint:
+            return cached[2]
+        calibrator = ProbabilityCalibrator.load(key)
+        _CALIBRATOR_CACHE[key] = (*fingerprint, calibrator)
+        return calibrator
 
 
 def calibrated_signal_confidence(score: float, *, path: str | Path = "data/charts/calibrator_bucket.json") -> dict[str, Any]:
@@ -24,9 +43,7 @@ def calibrated_signal_confidence(score: float, *, path: str | Path = "data/chart
     """
     raw_probability = max(0.5, min(0.999, 0.5 + 0.5 * abs(float(score or 0.0))))
     try:
-        from alpha.probability_calibrator import ProbabilityCalibrator
-
-        calibrator = ProbabilityCalibrator.load(str(path))
+        calibrator = _load_probability_calibrator(path)
         calibrated = float(calibrator.calibrate(raw_probability))
         source = "probability_calibrator"
     except Exception:
@@ -124,11 +141,17 @@ def run_live_decision_pipeline(
     bar: dict[str, Any],
     cfg: Any,
     context_policy_evaluator: ContextPolicyEvaluator | None = None,
+    factor_values_override: dict[str, Any] | None = None,
 ) -> LiveDecisionFrame:
     """Run factor -> composite -> context policy -> gate for one complete bar."""
-    engine.refresh_factor_list()
-    factor_values = dict(engine.append_bar(bar) or {})
-    if not factor_values or not bool(getattr(engine, "is_warm", False)):
+    if factor_values_override is None:
+        engine.refresh_factor_list()
+        factor_values = dict(engine.append_bar(bar) or {})
+        factor_engine_ready = bool(getattr(engine, "is_warm", False))
+    else:
+        factor_values = dict(factor_values_override or {})
+        factor_engine_ready = bool(factor_values)
+    if not factor_values or not factor_engine_ready:
         gate.tick()
         return LiveDecisionFrame(
             ready=False,
