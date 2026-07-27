@@ -16,7 +16,7 @@ verified rather than optimistically treating shared code as live parity.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -174,6 +174,8 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 def _to_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return dict(asdict(value))
     if hasattr(value, "to_dict"):
         try:
             return dict(value.to_dict() or {})
@@ -209,6 +211,10 @@ def _aggregate_independent_trades(trades: list[dict[str, Any]]) -> list[dict[str
         current["exit_price"] = item.get("exit_price")
         current["raw_exit_price"] = item.get("raw_exit_price")
         current["reason"] = item.get("reason")
+        current["same_bar_sl_tp_path_ambiguous"] = bool(
+            current.get("same_bar_sl_tp_path_ambiguous")
+            or item.get("same_bar_sl_tp_path_ambiguous")
+        )
     return [grouped[key] for key in sorted(grouped)]
 
 
@@ -273,10 +279,18 @@ def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
         text = str(reason)
         if text.startswith(fatal_prefixes):
             blockers.append(text)
+        if text == "live_safety_planner_execution_error":
+            blockers.append(text)
 
     independent = _aggregate_independent_trades(
         [dict(item) for item in list(report.get("trades") or []) if isinstance(item, Mapping)]
     )
+    eligible_independent = [
+        trade
+        for trade in independent
+        if not bool(trade.get("same_bar_sl_tp_path_ambiguous"))
+    ]
+    excluded_trade_count = len(independent) - len(eligible_independent)
     open_samples: list[dict[str, Any]] = []
     factor_rows: dict[str, list[dict[str, Any]]] = {}
     try:
@@ -286,7 +300,7 @@ def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
             _rule_baseline_label,
         )
 
-        for trade in independent:
+        for trade in eligible_independent:
             candidate = dict(trade.get("decision_candidate") or {})
             bar = dict(trade.get("decision_bar") or {})
             decision_index = int(trade.get("decision_index") or 0)
@@ -385,8 +399,8 @@ def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
         open_samples = []
         factor_rows = {}
 
-    factor_samples: list[dict[str, Any]] = []
-    if not blockers:
+    factor_candidates: list[dict[str, Any]] = []
+    if factor_rows:
         from research.factor_governance_lightgbm import _current_row_label, _sample_from_row
 
         for factor_id, rows in sorted(factor_rows.items()):
@@ -407,12 +421,17 @@ def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
                 sample["source"] = "historical_replay"
                 sample["binding_hash"] = binding_hash
                 sample["feature_schema_version"] = "pit.v2.factor_rolling_lineage"
-                factor_samples.append(sample)
+                factor_candidates.append(sample)
 
-    trainable = not blockers and bool(independent)
+    trainable = not blockers and bool(eligible_independent)
     if not independent:
         blockers.append("no_closed_independent_trades")
         trainable = False
+    elif not eligible_independent:
+        blockers.append("all_trades_have_ambiguous_same_bar_exit")
+        trainable = False
+    usable_open_samples = open_samples if trainable else []
+    usable_factor_samples = factor_candidates if trainable else []
     return {
         "schema_version": "parity_learning_bundle.v1",
         "source": "historical_replay",
@@ -426,10 +445,13 @@ def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
             "factor": "pit.v2.factor_rolling_lineage",
         },
         "independent_trade_count": len(independent),
-        "open_sample_count": len(open_samples),
-        "factor_sample_count": len(factor_samples),
-        "open_samples": open_samples if trainable else [],
-        "factor_samples": factor_samples if trainable else [],
+        "excluded_trade_count": excluded_trade_count,
+        "candidate_open_sample_count": len(open_samples),
+        "candidate_factor_sample_count": len(factor_candidates),
+        "open_sample_count": len(usable_open_samples),
+        "factor_sample_count": len(usable_factor_samples),
+        "open_samples": usable_open_samples,
+        "factor_samples": usable_factor_samples,
     }
 
 
@@ -560,6 +582,8 @@ def _normalize_bars(
             frame[f"ask_{price_name}"] = mid + spread / 2.0
         missing_quotes = []
         blockers.append("native_bid_ask_modeled_from_recorded_spread")
+        if not bool((spread > 0.0).any()):
+            blockers.append("recorded_spread_non_positive")
     if missing_quotes:
         blockers.append(f"native_bid_ask_missing:{','.join(missing_quotes)}")
     elif frame[list(_BID_ASK_COLUMNS)].isna().any().any():
@@ -579,8 +603,8 @@ class ParityReplayRequest:
     initial_equity: float = 10_000.0
     volume_lots: float = 0.01
     contract_size: float = 100.0
-    commission_per_lot_round_turn: float = 6.0
-    slippage_bps: float = 0.0
+    commission_per_lot_round_turn: float = 18.0
+    slippage_price_each_fill: float = 0.035
     persist_artifact: bool = True
     expected_bindings: Mapping[str, str] | None = None
 
@@ -600,9 +624,12 @@ class ParityReplayRequest:
             contract_size=max(0.0001, _safe_float(item.get("contract_size"), 100.0)),
             commission_per_lot_round_turn=max(
                 0.0,
-                _safe_float(item.get("commission_per_lot_round_turn"), 6.0),
+                _safe_float(item.get("commission_per_lot_round_turn"), 18.0),
             ),
-            slippage_bps=max(0.0, _safe_float(item.get("slippage_bps"), 0.0)),
+            slippage_price_each_fill=max(
+                0.0,
+                _safe_float(item.get("slippage_price_each_fill"), 0.035),
+            ),
             persist_artifact=bool(item.get("persist_artifact", True)),
             expected_bindings=dict(item.get("expected_bindings") or {}),
         )
@@ -757,10 +784,17 @@ def _runtime_selection_manifest(decision_provider: Any) -> dict[str, Any]:
     """Bind the selector output while keeping its historical authority explicit."""
 
     selection = getattr(decision_provider, "selection", None)
+    excluded_factor_ids = list(getattr(selection, "excluded_factor_ids", []) or [])
+    reason_excluded = dict(getattr(selection, "reason_excluded", {}) or {})
+    reason_counts: dict[str, int] = {}
+    for reason in reason_excluded.values():
+        key = str(reason or "unknown")
+        reason_counts[key] = reason_counts.get(key, 0) + 1
     return {
         "selected_factor_ids": list(getattr(selection, "selected_factor_ids", []) or []),
-        "excluded_factor_ids": list(getattr(selection, "excluded_factor_ids", []) or []),
-        "reason_excluded": dict(getattr(selection, "reason_excluded", {}) or {}),
+        "excluded_factor_count": len(excluded_factor_ids),
+        "excluded_factor_ids_hash": _sha256_json(sorted(str(item) for item in excluded_factor_ids)),
+        "reason_counts": reason_counts,
         "historical_projection_verified": False,
     }
 
@@ -860,6 +894,14 @@ class LiveComponentDecisionAdapter:
             ]
         else:
             self._prepared_snapshots = [{} for _ in records]
+
+    def release(self) -> None:
+        """Drop replay-only buffers as soon as the report has been assembled."""
+
+        self._prepared_snapshots = None
+        self.last_factor_values.clear()
+        self.last_composite.clear()
+        self.engine.reset()
 
     def __call__(
         self,
@@ -1388,12 +1430,17 @@ class ParityReplayRunner:
         causality = {
             "schema_version": "parity_replay_causality.v1",
             "closed_bar_only": closed_bar_only,
-            "next_bar_execution": not causality_violations,
+            "next_bar_execution": not any(
+                reason == "entry_not_strictly_after_decision_bar"
+                for reason in causality_violations
+            ),
             "native_bid_ask": native_bid_ask,
             "executable_bid_ask": executable_bid_ask,
             "quote_model": (
                 "native_bid_ask"
                 if native_bid_ask
+                else "mid_only_with_modeled_slippage"
+                if "recorded_spread_non_positive" in input_blockers
                 else "recorded_spread_around_ohlc_mid"
                 if executable_bid_ask
                 else "unavailable"
@@ -1472,10 +1519,12 @@ class ParityReplayRunner:
                 "spread": (
                     "native_bid_ask_embedded"
                     if native_bid_ask
+                    else "unavailable_recorded_spread_with_modeled_slippage"
+                    if "recorded_spread_non_positive" in input_blockers
                     else "recorded_spread_around_ohlc_mid"
                 ),
                 "commission_per_lot_round_turn": self.request.commission_per_lot_round_turn,
-                "slippage_bps_each_fill": self.request.slippage_bps,
+                "slippage_price_each_fill": self.request.slippage_price_each_fill,
                 "same_bar_sl_tp_policy": "pessimistic_stop_first_and_flagged",
             },
             "lifecycle_contract": {
@@ -1616,6 +1665,7 @@ class ParityReplayRunner:
                 exit_reason, raw_exit, ambiguous = self._protective_exit(position, row)
                 if ambiguous:
                     violations.append("same_bar_sl_tp_path_ambiguous")
+                    position["same_bar_sl_tp_path_ambiguous"] = True
                 if exit_reason:
                     self._close_position(
                         position,
@@ -2317,7 +2367,7 @@ class ParityReplayRunner:
 
         direction = int(pending["direction"])
         raw = _safe_float(row["ask_open"] if direction > 0 else row["bid_open"])
-        slip = raw * self.request.slippage_bps / 10_000.0
+        slip = self.request.slippage_price_each_fill
         entry = raw + slip if direction > 0 else raw - slip
         sl_distance = _safe_float(pending["sl_distance"])
         tp_distance = _safe_float(pending["tp_distance"])
@@ -2499,7 +2549,7 @@ class ParityReplayRunner:
             raw_exit = _safe_float(explicit_raw_price)
         else:
             raw_exit = _safe_float(row["bid_open"] if direction > 0 else row["ask_open"])
-        slip = raw_exit * self.request.slippage_bps / 10_000.0
+        slip = self.request.slippage_price_each_fill
         exit_price = raw_exit - slip if direction > 0 else raw_exit + slip
         volume = self.request.volume_lots * closed_fraction
         scale = self.request.contract_size * volume
@@ -2544,6 +2594,9 @@ class ParityReplayRunner:
             "decision_bar": _to_dict(position.get("decision_bar")),
             "open_learning_context": _to_dict(position.get("open_learning_context")),
             "entry_regime": str(position.get("entry_regime") or ""),
+            "same_bar_sl_tp_path_ambiguous": bool(
+                position.get("same_bar_sl_tp_path_ambiguous")
+            ),
         }
         trades.append(trade)
         self._realized_net_pnl += _safe_float(trade.get("net_pnl"), 0.0)
@@ -2719,7 +2772,12 @@ class ParityReplayService:
             config_snapshot=snapshot,
             progress_cb=progress_cb,
         )
-        report = runner.run(bars, data_source=data_source)
+        try:
+            report = runner.run(bars, data_source=data_source)
+        finally:
+            adapter = runner.decision_provider
+            if isinstance(adapter, LiveComponentDecisionAdapter):
+                adapter.release()
         report = self._verify_frozen_inputs(report)
         if request.persist_artifact:
             report = self._persist_artifact(report)

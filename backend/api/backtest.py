@@ -23,8 +23,8 @@ class BacktestRequest(BaseModel):
     initial_equity: float = Field(default=10_000.0, gt=0)
     volume_lots: float = Field(default=0.01, gt=0)
     contract_size: float = Field(default=100.0, gt=0)
-    commission_per_lot_round_turn: float = Field(default=6.0, ge=0)
-    slippage_bps: float = Field(default=0.0, ge=0)
+    commission_per_lot_round_turn: float = Field(default=18.0, ge=0)
+    slippage_price_each_fill: float = Field(default=0.035, ge=0)
 
 
 def _job_payload(job: Any) -> dict[str, Any]:

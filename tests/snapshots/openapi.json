@@ -248,7 +248,7 @@
       "BacktestRequest": {
         "properties": {
           "commission_per_lot_round_turn": {
-            "default": 6.0,
+            "default": 18.0,
             "minimum": 0.0,
             "title": "Commission Per Lot Round Turn",
             "type": "number"
@@ -286,10 +286,10 @@
             "title": "Max Bars",
             "type": "integer"
           },
-          "slippage_bps": {
-            "default": 0.0,
+          "slippage_price_each_fill": {
+            "default": 0.035,
             "minimum": 0.0,
-            "title": "Slippage Bps",
+            "title": "Slippage Price Each Fill",
             "type": "number"
           },
           "start": {

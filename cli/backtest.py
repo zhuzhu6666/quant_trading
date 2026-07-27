@@ -20,9 +20,11 @@ def run_backtest(args):
         "initial_equity": float(getattr(args, "initial_equity", 10_000.0) or 10_000.0),
         "volume_lots": float(getattr(args, "volume_lots", 0.01) or 0.01),
         "commission_per_lot_round_turn": float(
-            getattr(args, "commission_per_lot_round_turn", 6.0) or 6.0
+            getattr(args, "commission_per_lot_round_turn", 18.0) or 18.0
         ),
-        "slippage_bps": float(getattr(args, "slippage_bps", 0.0) or 0.0),
+        "slippage_price_each_fill": float(
+            getattr(args, "slippage_price_each_fill", 0.035) or 0.035
+        ),
         "persist_artifact": True,
     }
     report = ParityReplayService().run(params)

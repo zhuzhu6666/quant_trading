@@ -81,6 +81,8 @@ def test_job_result_keeps_counts_but_not_full_trade_or_sample_payloads():
         **REPORT,
         "trades": [{"trade_id": "one"}],
         "events": [{"event": "opened"}],
+        "artifact_manifest": {"selected_factor_ids": ["factor"]},
+        "components": {"factor_engine": {"verified": True}},
         "learning_bundle": {
             "trainable": True,
             "open_sample_count": 1,
@@ -92,6 +94,8 @@ def test_job_result_keeps_counts_but_not_full_trade_or_sample_payloads():
 
     assert "trades" not in summary
     assert "events" not in summary
+    assert "artifact_manifest" not in summary
+    assert "components" not in summary
     assert summary["learning_bundle"]["open_sample_count"] == 1
     assert "open_samples" not in summary["learning_bundle"]
     assert "factor_samples" not in summary["learning_bundle"]

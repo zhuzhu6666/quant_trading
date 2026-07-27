@@ -221,8 +221,8 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
       warmup_bars: 150,
       initial_equity: 10_000,
       volume_lots: 0.01,
-      commission_per_lot_round_turn: 6,
-      slippage_bps: 0,
+      commission_per_lot_round_turn: 18,
+      slippage_price_each_fill: 0.035,
     }),
     onSuccess: (payload) => setBacktestJobId(pickString(payload, ["job_id"], "")),
   });
@@ -534,9 +534,9 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
                 <ModelMiniMetric label="进度" value={`${formatDecimal(pickNumber(backtestJob, ["progress_pct"], 0), 0)}%`} detail={pickString(backtestJob, ["current_step"], "")} tone={backtestStatus === "done" ? "ok" : "mute"} />
                 <ModelMiniMetric label="K线" value={formatDecimal(pickNumber(backtestMetrics, ["bar_count"], 0), 0)} detail="闭合K线" />
                 <ModelMiniMetric label="独立交易" value={formatDecimal(pickNumber(backtestMetrics, ["independent_trade_count"], 0), 0)} detail={`多 ${formatDecimal(pickNumber(backtestMetrics, ["long_trade_count"], 0), 0)} · 空 ${formatDecimal(pickNumber(backtestMetrics, ["short_trade_count"], 0), 0)}`} />
-                <ModelMiniMetric label="净盈亏" value={formatDecimal(pickNumber(backtestMetrics, ["net_pnl"], 0), 2)} detail={`成本 ${formatDecimal(pickNumber(backtestMetrics, ["total_cost"], 0), 2)}`} tone={numberTone(pickNumber(backtestMetrics, ["net_pnl"], 0))} />
+                <ModelMiniMetric label="净盈亏" value={formatDecimal(pickNumber(backtestMetrics, ["net_pnl"], 0), 2)} detail={`成本 ${formatDecimal(pickNumber(backtestMetrics, ["total_cost"], 0), 2)}（点差 ${formatDecimal(pickNumber(backtestMetrics, ["spread_cost"], 0), 2)} · 滑点 ${formatDecimal(pickNumber(backtestMetrics, ["slippage_cost"], 0), 2)}）`} tone={numberTone(pickNumber(backtestMetrics, ["net_pnl"], 0))} />
                 <ModelMiniMetric label="胜率" value={formatPct(pickNumber(backtestMetrics, ["win_rate"], 0))} detail={`最大回撤 ${formatDecimal(pickNumber(backtestMetrics, ["max_drawdown_pct"], 0), 2)}%`} />
-                <ModelMiniMetric label="可训练样本" value={`${formatDecimal(pickNumber(learningBundle, ["open_sample_count"], 0), 0)} / ${formatDecimal(pickNumber(learningBundle, ["factor_sample_count"], 0), 0)}`} detail="开仓 / 因子" tone={pickBoolean(learningBundle, ["trainable"], false) ? "ok" : "warn"} />
+                <ModelMiniMetric label="可训练样本" value={`${formatDecimal(pickNumber(learningBundle, ["open_sample_count"], 0), 0)} / ${formatDecimal(pickNumber(learningBundle, ["factor_sample_count"], 0), 0)}`} detail={`开仓 / 因子 · 候选 ${formatDecimal(pickNumber(learningBundle, ["candidate_open_sample_count"], 0), 0)} · 排除 ${formatDecimal(pickNumber(learningBundle, ["excluded_trade_count"], 0), 0)}`} tone={pickBoolean(learningBundle, ["trainable"], false) ? "ok" : "warn"} />
               </div>
               {learningBlockers.length ? (
                 <p className="historical-backtest-reason">

@@ -1201,9 +1201,11 @@ def run_parameter_template_offline_validation(
         "initial_equity": float(params.get("initial_equity") or 10_000.0),
         "volume_lots": float(params.get("volume_lots") or 0.01),
         "commission_per_lot_round_turn": float(
-            params.get("commission_per_lot_round_turn") or 6.0
+            params.get("commission_per_lot_round_turn") or 18.0
         ),
-        "slippage_bps": float(params.get("slippage_bps") or 0.0),
+        "slippage_price_each_fill": float(
+            params.get("slippage_price_each_fill") or 0.035
+        ),
     }
     backtest_result = run_backtest(backtest_params, progress_cb)
     plan[1]["status"] = "completed"

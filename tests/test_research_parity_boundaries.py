@@ -189,8 +189,27 @@ def test_replay_learning_blocker_prevents_training_rows():
     bundle = parity_replay_module._build_learning_bundle(report)
     assert bundle["trainable"] is False
     assert "closed_bar_contract_failed" in bundle["blockers"]
+    assert bundle["candidate_open_sample_count"] == 4
+    assert bundle["open_sample_count"] == 0
     assert bundle["open_samples"] == []
     assert bundle["factor_samples"] == []
+
+
+def test_same_bar_exit_ambiguity_excludes_only_affected_trade():
+    report = _learning_report()
+    report["trades"][0]["same_bar_sl_tp_path_ambiguous"] = True
+    report["diagnostic_reasons"] = ["same_bar_sl_tp_path_ambiguous"]
+    bundle = parity_replay_module._build_learning_bundle(report)
+    assert bundle["trainable"] is True
+    assert bundle["independent_trade_count"] == 4
+    assert bundle["excluded_trade_count"] == 1
+    assert bundle["open_sample_count"] == 3
+
+
+def test_non_timing_diagnostic_does_not_break_next_bar_contract():
+    report = _runner(bars=_bars())
+    report["causality"]["violations"] = ["same_bar_sl_tp_path_ambiguous"]
+    assert report["causality"]["next_bar_execution"] is True
 
 
 def test_recorded_spread_builds_simulated_executable_quotes_without_claiming_native():
@@ -201,6 +220,14 @@ def test_recorded_spread_builds_simulated_executable_quotes_without_claiming_nat
     assert report["causality"]["executable_bid_ask"] is True
     assert report["causality"]["quote_model"] == "recorded_spread_around_ohlc_mid"
     assert report["metrics"]["independent_trade_count"] == 1
+
+
+def test_zero_recorded_spread_is_reported_as_modeled_cost_input():
+    bars = _bars(include_bid_ask=False)
+    bars["spread"] = 0.0
+    report = _runner(bars=bars)
+    assert "recorded_spread_non_positive" in report["diagnostic_reasons"]
+    assert report["causality"]["quote_model"] == "mid_only_with_modeled_slippage"
 
 
 def test_unclosed_requested_bar_is_reported_and_cannot_train():
@@ -276,6 +303,8 @@ def _runner(
     expected_bindings=None,
     provider=None,
     data_source=None,
+    commission_per_lot_round_turn=6.0,
+    slippage_price_each_fill=0.0,
 ) -> dict:
     config = SimpleNamespace(
         risk_max_holding_bars=288,
@@ -289,8 +318,8 @@ def _runner(
         initial_equity=10_000.0,
         volume_lots=0.01,
         contract_size=100.0,
-        commission_per_lot_round_turn=6.0,
-        slippage_bps=0.0,
+        commission_per_lot_round_turn=commission_per_lot_round_turn,
+        slippage_price_each_fill=slippage_price_each_fill,
         persist_artifact=False,
         expected_bindings=expected_bindings or {},
     )
@@ -348,7 +377,7 @@ def test_parity_replay_risk_context_advances_from_last_completed_trade():
             volume_lots=0.01,
             contract_size=100.0,
             commission_per_lot_round_turn=6.0,
-            slippage_bps=0.0,
+            slippage_price_each_fill=0.0,
             persist_artifact=False,
         ),
         config=config,
@@ -688,6 +717,22 @@ def test_parity_replay_is_closed_bar_causal_and_uses_next_bar_bid_ask_costs():
     assert all(len(report["bindings"][name]) == 64 for name in (
         "config_hash", "data_hash", "code_hash", "artifact_hash", "binding_hash"
     ))
+
+
+def test_parity_replay_uses_demo_deal_calibrated_default_costs():
+    request = ParityReplayRequest.from_mapping({})
+    assert request.commission_per_lot_round_turn == pytest.approx(18.0)
+    assert request.slippage_price_each_fill == pytest.approx(0.035)
+    assert not hasattr(request, "slippage_bps")
+
+    report = _runner(
+        bars=_bars(),
+        commission_per_lot_round_turn=18.0,
+        slippage_price_each_fill=0.035,
+    )
+    trade = report["trades"][0]
+    assert trade["commission_cost"] == pytest.approx(0.18)
+    assert trade["slippage_cost"] == pytest.approx(0.07)
 
 
 def test_parity_replay_uses_the_same_portfolio_wiring_as_live(monkeypatch):

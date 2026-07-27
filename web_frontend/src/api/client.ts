@@ -894,7 +894,7 @@ export type BacktestRequest = {
   initial_equity: number;
   volume_lots: number;
   commission_per_lot_round_turn: number;
-  slippage_bps: number;
+  slippage_price_each_fill: number;
 };
 
 export async function startHistoricalBacktest(

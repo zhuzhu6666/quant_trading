@@ -1,6 +1,8 @@
 """Canonical historical backtest task backed by the live-parity replay runner."""
 from __future__ import annotations
 
+import ctypes
+import gc
 from typing import Any
 
 from backend.jobs.progress import ProgressCB
@@ -13,6 +15,14 @@ def _job_result_summary(report: dict[str, Any]) -> dict[str, Any]:
     result = dict(report)
     result.pop("trades", None)
     result.pop("events", None)
+    for key in (
+        "artifact_manifest",
+        "code_binding",
+        "components",
+        "config_snapshot",
+        "lifecycle_contract",
+    ):
+        result.pop(key, None)
     bundle = dict(result.get("learning_bundle") or {})
     bundle.pop("open_samples", None)
     bundle.pop("factor_samples", None)
@@ -24,22 +34,31 @@ def run_backtest(params: dict[str, Any], progress_cb: ProgressCB) -> dict[str, A
     progress_cb("freezing", 5, "冻结历史数据、代码、配置和因子版本")
     from backend.services.evolution_work_coordinator import EvolutionWorkCoordinator
 
-    report = EvolutionWorkCoordinator().run(
-        "historical_backtest",
-        lambda: ParityReplayService().run(
-            {**params, "persist_artifact": True},
-            progress_cb=progress_cb,
-        ),
-    )
-    if str(dict(report or {}).get("status") or "") == "skipped_busy":
-        raise RuntimeError("heavy_research_job_already_running")
-    metrics = dict(report.get("metrics") or {})
-    progress_cb(
-        "completed",
-        100,
-        (
-            f"完成 {int(metrics.get('bar_count') or 0)} 根K线、"
-            f"{int(metrics.get('independent_trade_count') or 0)} 笔独立交易"
-        ),
-    )
-    return _job_result_summary(report)
+    report: dict[str, Any] | None = None
+    try:
+        report = EvolutionWorkCoordinator().run(
+            "historical_backtest",
+            lambda: ParityReplayService().run(
+                {**params, "persist_artifact": True},
+                progress_cb=progress_cb,
+            ),
+        )
+        if str(dict(report or {}).get("status") or "") == "skipped_busy":
+            raise RuntimeError("heavy_research_job_already_running")
+        metrics = dict(report.get("metrics") or {})
+        progress_cb(
+            "completed",
+            100,
+            (
+                f"完成 {int(metrics.get('bar_count') or 0)} 根K线、"
+                f"{int(metrics.get('independent_trade_count') or 0)} 笔独立交易"
+            ),
+        )
+        return _job_result_summary(report)
+    finally:
+        report = None
+        gc.collect()
+        try:
+            ctypes.CDLL(None).malloc_trim(0)
+        except (AttributeError, OSError):
+            pass
