@@ -1237,6 +1237,37 @@ def test_dataset_readiness_reports_missing_model_data(tmp_path):
     assert report["blockers"][0]["code"] == "insufficient_model_ready_trades"
 
 
+def test_dataset_readiness_bounds_issue_details_without_losing_count():
+    readiness = LearningDatasetReadiness()
+
+    class _Provider:
+        @staticmethod
+        def build_training_samples(*, limit):
+            return [{} for _ in range(limit)]
+
+        @staticmethod
+        def build_decision_samples(*, limit):
+            return [{} for _ in range(limit)]
+
+    readiness.provider = _Provider()
+    report = readiness.analyze(
+        trade_limit=10,
+        decision_limit=10,
+        min_ready_trades=0,
+        min_ready_decisions=0,
+    )
+
+    assert report["schema_issue_count"] > 50
+    assert len(report["schema_issues"]) == 50
+    assert report["blockers"] == [
+        {
+            "code": "schema_contract_issues",
+            "required": 0,
+            "actual": report["schema_issue_count"],
+        }
+    ]
+
+
 def test_policy_suggester_downweights_after_repeated_bad_losses(tmp_path):
     db_path = str(tmp_path / "state.db")
     suggester = PolicySuggester(db_path)

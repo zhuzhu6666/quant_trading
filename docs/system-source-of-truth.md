@@ -187,7 +187,7 @@ release preflight 和前端只能复用该结果，不得通过再次读取原�
 | 样本来源事实 | `decision_ledger` / `position_supervisor_trace` / `trade_outcome_review` / `supervisor_counterfactual_review` / `factor_contribution_review` | 不能从模型输出反推原始事实 |
 | 交易复盘时间与系统污染 | `trade_outcome_review.review_json.entry_timing_context` / `decision_freshness_context` / `system_issue_context` + `order_lifecycle_event` | `entry_ts` 以实际成交时间优先；信号 K 线时间保留为 `signal_bar_ts`。数据时效、信号到成交延迟等系统污染样本只能审计/弱用，不能满权重训练因子或开仓模板 |
 | cTrader 成交价格 | `ProtoOADeal.executionPrice` / `closePositionDetail.entryPrice` → PostgreSQL `ctrader_deals.raw_execution_price/exec_price` | 两个字段都是 broker 原始价格，不使用 `moneyDigits`；只有 commission/gross/swap/balance 等金额字段按各自 `moneyDigits` 转换。新同步行必须写 `price_contract=ctrader.deal.execution_price.raw.v1` 与 `price_quality=broker_reported`；价格缺失或非正时保持 `unknown`，不得进入平仓价格、复盘或学习链 |
-| 数据集就绪 | `/api/learning/dataset/readiness` | trade/decision schema、required fields、ready 样本数 |
+| 数据集就绪 | `/api/learning/dataset/readiness` | 对最近有界 trade/decision 样本检查 schema、required fields 和 ready 数量；Web 只在进入模型页时读取，不周期性重建完整样本 |
 | 数据精度健康 | `/api/learning/dataset/quality-health` | evidence contract 自洽性和 open context 覆盖率 |
 | 模型权限 | `model_permission_audit` / `backend.services.model_permissions` | 模型本身不拥有 broker/runtime 写权限；PIT v2 工件只有经过 `ModelInfluenceGovernanceService` 证据门、V16 `model_stage` 委派、`RiskPolicyService` 和 runtime overlay/snapshot 后，才可在 demo 进入有界影响态 |
 | shadow 模型审计 | `*_shadow_audit` 表 | open、position、factor、meta 的 shadow inference 事实 |

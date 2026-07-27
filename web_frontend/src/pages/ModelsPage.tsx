@@ -239,7 +239,6 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
   const datasetQuery = useQuery({
     queryKey: ["learning-dataset-readiness"],
     queryFn: getLearningDatasetReadiness,
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
   const metaReportQuery = useQuery({

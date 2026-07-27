@@ -6994,7 +6994,7 @@
             "name": "trade_limit",
             "required": false,
             "schema": {
-              "default": 1000,
+              "default": 200,
               "maximum": 10000,
               "minimum": 1,
               "title": "Trade Limit",
@@ -7006,7 +7006,7 @@
             "name": "decision_limit",
             "required": false,
             "schema": {
-              "default": 5000,
+              "default": 500,
               "maximum": 50000,
               "minimum": 1,
               "title": "Decision Limit",

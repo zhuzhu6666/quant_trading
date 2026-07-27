@@ -133,30 +133,34 @@ class LearningDatasetReadiness:
         max_schema_issues: int = 0,
     ) -> dict:
         trade_samples = self.provider.build_training_samples(limit=trade_limit)
-        decision_samples = self.provider.build_decision_samples(limit=decision_limit)
-
         trade_quality = _quality_summary(trade_samples)
-        decision_quality = _quality_summary(decision_samples)
-
         schema_issues: list[dict] = []
+        schema_issue_count = 0
         for item in trade_samples:
-            schema_issues.extend(
-                self._validate_item(
-                    item,
-                    expected_schema=SCHEMA_VERSION,
-                    required_fields=TRADE_REQUIRED_FIELDS,
-                    kind="trade",
-                )
+            issues = self._validate_item(
+                item,
+                expected_schema=SCHEMA_VERSION,
+                required_fields=TRADE_REQUIRED_FIELDS,
+                kind="trade",
             )
+            schema_issue_count += len(issues)
+            if len(schema_issues) < 50:
+                schema_issues.extend(issues[: 50 - len(schema_issues)])
+        del trade_samples
+
+        decision_samples = self.provider.build_decision_samples(limit=decision_limit)
+        decision_quality = _quality_summary(decision_samples)
         for item in decision_samples:
-            schema_issues.extend(
-                self._validate_item(
-                    item,
-                    expected_schema=DECISION_SCHEMA_VERSION,
-                    required_fields=DECISION_REQUIRED_FIELDS,
-                    kind="decision",
-                )
+            issues = self._validate_item(
+                item,
+                expected_schema=DECISION_SCHEMA_VERSION,
+                required_fields=DECISION_REQUIRED_FIELDS,
+                kind="decision",
             )
+            schema_issue_count += len(issues)
+            if len(schema_issues) < 50:
+                schema_issues.extend(issues[: 50 - len(schema_issues)])
+        del decision_samples
 
         blockers = []
         warnings = []
@@ -176,12 +180,12 @@ class LearningDatasetReadiness:
                     "actual": int(decision_quality["model_ready"]),
                 }
             )
-        if len(schema_issues) > max_schema_issues:
+        if schema_issue_count > max_schema_issues:
             blockers.append(
                 {
                     "code": "schema_contract_issues",
                     "required": int(max_schema_issues),
-                    "actual": len(schema_issues),
+                    "actual": schema_issue_count,
                 }
             )
         if trade_quality["missing"]:
@@ -191,7 +195,7 @@ class LearningDatasetReadiness:
 
         has_any_ready = trade_quality["model_ready"] > 0 or decision_quality["model_ready"] > 0
         ready = not blockers
-        level = "ready" if ready else "warming_up" if has_any_ready and len(schema_issues) <= max_schema_issues else "not_ready"
+        level = "ready" if ready else "warming_up" if has_any_ready and schema_issue_count <= max_schema_issues else "not_ready"
         return {
             "ready": ready,
             "level": level,
@@ -212,8 +216,8 @@ class LearningDatasetReadiness:
                 "trade": trade_quality,
                 "decision": decision_quality,
             },
-            "schema_issues": schema_issues[:50],
-            "schema_issue_count": len(schema_issues),
+            "schema_issues": schema_issues,
+            "schema_issue_count": schema_issue_count,
             "blockers": blockers,
             "warnings": warnings,
         }

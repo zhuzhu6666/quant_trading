@@ -278,7 +278,13 @@ def _learning_compute_lock(key: str) -> threading.Lock:
         return lock
 
 
-def _learning_cached_read(cache_key: str, compute, *, timing_name: str = "") -> dict:
+def _learning_cached_read(
+    cache_key: str,
+    compute,
+    *,
+    timing_name: str = "",
+    ttl_sec: float = _LEARNING_CACHE_TTL_SEC,
+) -> dict:
     cached = _learning_cache_get(cache_key)
     if cached is not None:
         return cached
@@ -293,7 +299,7 @@ def _learning_cached_read(cache_key: str, compute, *, timing_name: str = "") -> 
             else:
                 payload = compute()
             _learning_last_good_set(cache_key, payload)
-            return _learning_cache_set(cache_key, payload)
+            return _learning_cache_set(cache_key, payload, ttl_sec=ttl_sec)
         except Exception:
             fallback = _learning_last_good_get(cache_key)
             if fallback:
@@ -3522,23 +3528,36 @@ def export_learning_dataset(_user: RequireUser, req: DatasetExportRequest) -> di
 @router.get("/dataset/readiness")
 def get_learning_dataset_readiness(
     _user: RequireUser,
-    trade_limit: int = Query(default=1000, ge=1, le=10000),
-    decision_limit: int = Query(default=5000, ge=1, le=50000),
+    trade_limit: int = Query(default=200, ge=1, le=10000),
+    decision_limit: int = Query(default=500, ge=1, le=50000),
     min_ready_trades: int = Query(default=50, ge=0, le=10000),
     min_ready_decisions: int = Query(default=200, ge=0, le=50000),
 ) -> dict:
-    readiness = LearningDatasetReadiness()
-    payload = readiness.analyze(
-        trade_limit=trade_limit,
-        decision_limit=decision_limit,
-        min_ready_trades=min_ready_trades,
-        min_ready_decisions=min_ready_decisions,
+    cache_key = (
+        f"dataset_readiness:{trade_limit}:{decision_limit}:"
+        f"{min_ready_trades}:{min_ready_decisions}"
     )
-    observation = observe_learning_dataset_source(
-        _state_db_path(),
-        include_trade_reviews=True,
+
+    def _compute() -> dict:
+        readiness = LearningDatasetReadiness()
+        payload = readiness.analyze(
+            trade_limit=trade_limit,
+            decision_limit=decision_limit,
+            min_ready_trades=min_ready_trades,
+            min_ready_decisions=min_ready_decisions,
+        )
+        observation = observe_learning_dataset_source(
+            _state_db_path(),
+            include_trade_reviews=True,
+        )
+        return dataset_readiness_fact_payload(payload, observation=observation)
+
+    return _learning_cached_read(
+        cache_key,
+        _compute,
+        timing_name="api.learning.dataset_readiness",
+        ttl_sec=120.0,
     )
-    return dataset_readiness_fact_payload(payload, observation=observation)
 
 
 @router.get("/dataset/quality-health")

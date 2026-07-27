@@ -1503,23 +1503,45 @@ class LearningFeatureProvider:
         ]
         order_events = self._order_events_for_decisions(decision_ids=decision_ids, trade_ids=position_ids)
         position_events = self._position_events_for_positions(position_ids=position_ids, trade_ids=position_ids)
+        orders_by_decision: dict[str, list[tuple[int, dict]]] = {}
+        orders_by_trade: dict[str, list[tuple[int, dict]]] = {}
+        for index, item in enumerate(order_events):
+            decision_id = str(item.get("decision_id") or "")
+            trade_id = str(item.get("trade_id") or "")
+            if decision_id:
+                orders_by_decision.setdefault(decision_id, []).append((index, item))
+            if trade_id:
+                orders_by_trade.setdefault(trade_id, []).append((index, item))
+        positions_by_position: dict[str, list[tuple[int, dict]]] = {}
+        positions_by_trade: dict[str, list[tuple[int, dict]]] = {}
+        for index, item in enumerate(position_events):
+            position_id = str(item.get("position_id") or "")
+            trade_id = str(item.get("trade_id") or "")
+            if position_id:
+                positions_by_position.setdefault(position_id, []).append((index, item))
+            if trade_id:
+                positions_by_trade.setdefault(trade_id, []).append((index, item))
         samples = []
         for decision in decisions:
             decision_id = str(decision.get("decision_id") or "")
             action = decision.get("action") if isinstance(decision.get("action"), dict) else {}
             position_id = str(action.get("position_id") or "")
-            sample_orders = [
-                item for item in order_events
-                if str(item.get("decision_id") or "") == decision_id
-                or (position_id and str(item.get("trade_id") or "") == position_id)
-            ]
-            sample_positions = [
-                item for item in position_events
-                if position_id and (
-                    str(item.get("position_id") or "") == position_id
-                    or str(item.get("trade_id") or "") == position_id
+            indexed_orders = {
+                index: item
+                for index, item in (
+                    orders_by_decision.get(decision_id, [])
+                    + (orders_by_trade.get(position_id, []) if position_id else [])
                 )
-            ]
+            }
+            sample_orders = [indexed_orders[index] for index in sorted(indexed_orders)]
+            indexed_positions = {
+                index: item
+                for index, item in (
+                    positions_by_position.get(position_id, [])
+                    + positions_by_trade.get(position_id, [])
+                )
+            } if position_id else {}
+            sample_positions = [indexed_positions[index] for index in sorted(indexed_positions)]
             samples.append(
                 self._decision_sample_from_features(
                     decision,
