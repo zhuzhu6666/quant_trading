@@ -22,6 +22,16 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
             risk_state_json TEXT DEFAULT '{}',
             created_at REAL NOT NULL DEFAULT 0.0
         );
+        CREATE TABLE position_supervisor_trace (
+            trace_id TEXT PRIMARY KEY,
+            decision_id TEXT DEFAULT '',
+            stage TEXT DEFAULT '',
+            outcome TEXT DEFAULT '',
+            execution_status TEXT DEFAULT '',
+            execution_reason TEXT DEFAULT '',
+            event_ts REAL NOT NULL DEFAULT 0.0,
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
         """
     )
     conn.executemany(
@@ -41,6 +51,15 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
                 200.0,
             ),
             (
+                "dec_skipped",
+                "supervisor_reduce",
+                150.0,
+                "risk_reducing_action",
+                json.dumps({"risk_verdict": {"allowed": True, "reason": "risk_reducing_action", "audit_payload": {"action": "reduce_position"}}}),
+                "{}",
+                150.0,
+            ),
+            (
                 "dec_blocked",
                 "skip",
                 100.0,
@@ -48,6 +67,36 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
                 "{}",
                 json.dumps({"policy_verdict": {"allowed": False, "reason": "仓位上限: 3/3", "audit_payload": {"action": "open_trade"}}}),
                 100.0,
+            ),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO position_supervisor_trace
+        (trace_id, decision_id, stage, outcome, execution_status,
+         execution_reason, event_ts, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "trace-applied",
+                "dec_allowed",
+                "executed",
+                "applied",
+                "applied",
+                "broker_confirmed",
+                200.0,
+                200.0,
+            ),
+            (
+                "trace-skipped",
+                "dec_skipped",
+                "no_op_suppressed",
+                "skipped",
+                "no_op",
+                "invalid_reduce_volume",
+                150.0,
+                150.0,
             ),
         ],
     )
@@ -63,11 +112,22 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
 
     result = risk_api._recent_policy_verdicts(limit=10)
 
-    assert result["total"] == 2
-    assert result["counts"] == {"allowed": 1, "blocked": 1}
-    assert result["by_action"] == {"open_trade": 2}
+    assert result["total"] == 3
+    assert result["counts"] == {"allowed": 2, "blocked": 1}
+    assert result["execution_counts"] == {
+        "applied": 1,
+        "skipped": 1,
+        "blocked": 0,
+        "failed": 0,
+        "unknown": 1,
+    }
+    assert result["by_action"] == {"open_trade": 2, "reduce_position": 1}
     assert result["by_reason"]["ok"] == 1
     assert result["items"][0]["decision_id"] == "dec_allowed"
+    assert result["items"][0]["execution_applied"] is True
+    assert result["items"][1]["decision_id"] == "dec_skipped"
+    assert result["items"][1]["execution_category"] == "skipped"
+    assert result["items"][1]["execution_reason"] == "invalid_reduce_volume"
 
 
 def test_system_health_summary_serializes_latest_report(monkeypatch):

@@ -141,6 +141,10 @@ def preview_legacy_safety_candidates(
         verdict = dict(
             runtime.evaluate_supervisor(position, rows, cfg, account, now_ts) or {}
         )
+        if runtime.normalize_supervisor_action is not None:
+            verdict = dict(
+                runtime.normalize_supervisor_action(position, verdict) or verdict
+            )
         action = str(verdict.get("action") or "hold").strip().lower()
         if action not in {"close", "reduce", "tighten"}:
             continue

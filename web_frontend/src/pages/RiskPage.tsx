@@ -126,10 +126,13 @@ export function RiskPage() {
   const concentrationKnown = riskKnown && knownMetric(canonicalRisk.concentration.status);
 
   const policyCounts = asRecord(policy.counts);
+  const executionCounts = asRecord(policy.execution_counts);
   const allowed = pickNumber(policyCounts, ["allowed"], 0);
   const blocked = pickNumber(policyCounts, ["blocked"], 0);
+  const executionApplied = pickNumber(executionCounts, ["applied"], 0);
+  const executionSkipped = pickNumber(executionCounts, ["skipped"], 0);
   const totalVerdicts = allowed + blocked;
-  const allowedRate = totalVerdicts ? (allowed / totalVerdicts) * 100 : 0;
+  const policyAllowedRate = totalVerdicts ? (allowed / totalVerdicts) * 100 : 0;
   const policyItems = useMemo(() => pickArray(policy, ["items", "recent_items", "decisions", "history"]), [policy]);
   const tradeTraces = useMemo(() => pickArray(tradeTracesQuery.data, ["items", "traces", "rows"]), [tradeTracesQuery.data]);
 
@@ -179,7 +182,7 @@ export function RiskPage() {
 
       <div className="stat-grid">
         <StatTile icon={ShieldCheck} label="系统健康" value={healthDisplayable ? translateDisplayValue(riskHealth) : "未知"} detail={translateDisplayValue(impact)} tone={factBoundTone(systemHealthFact, toneFromStatus(riskHealth), riskRequestFailed)} />
-        <StatTile icon={ShieldAlert} label="策略拦截" value={formatDecimal(blocked, 0)} detail={`允许 ${formatDecimal(allowed, 0)} · 通过率 ${formatDecimal(allowedRate, 1)}%`} tone={factBoundTone(policyFact, blocked ? "warn" : "ok", policyRequestFailed)} />
+        <StatTile icon={ShieldAlert} label="策略拦截" value={formatDecimal(blocked, 0)} detail={`政策允许 ${formatDecimal(allowed, 0)} · 许可率 ${formatDecimal(policyAllowedRate, 1)}%`} tone={factBoundTone(policyFact, blocked ? "warn" : "ok", policyRequestFailed)} />
         <StatTile icon={Gauge} label="前瞻 VaR 95%" value={varKnown ? metricValue(canonicalRisk.var95.varPct, 4, "%") : translateDisplayValue(canonicalRisk.var95.status || "unknown")} detail={varKnown ? `CVaR ${metricValue(canonicalRisk.var95.cvarPct, 4, "%")} · ${canonicalRisk.var95.timeframe}` : "等待权威风险输入"} tone={factBoundTone(riskInputsFact, varKnown ? "mute" : "warn", riskRequestFailed)} />
         <StatTile icon={AlertTriangle} label="阻断组件" value={formatDecimal(critical.length + blockers.length, 0)} detail={`退化 ${formatDecimal(degraded.length, 0)} · DB 异常 ${formatDecimal(dbErrorCount, 0)}`} tone={!systemFactsKnown ? "pending" : critical.length || blockers.length ? "bad" : degraded.length || dbErrorCount ? "warn" : "ok"} />
       </div>
@@ -190,7 +193,7 @@ export function RiskPage() {
             <RiskMiniMetric label="95% VaR / CVaR" value={varKnown ? `${metricValue(canonicalRisk.var95.varPct, 4, "%")} / ${metricValue(canonicalRisk.var95.cvarPct, 4, "%")}` : translateDisplayValue(canonicalRisk.var95.status || "unknown")} detail={varKnown ? `${metricValue(canonicalRisk.var95.varUsd, 2, " USD")} / ${metricValue(canonicalRisk.var95.cvarUsd, 2, " USD")}` : "未形成可裁决分布"} tone={factBoundTone(riskInputsFact, varKnown ? "mute" : "warn", riskRequestFailed)} />
             <RiskMiniMetric label="99% 只读对照" value={var99Known ? `${metricValue(canonicalRisk.var99.varPct, 4, "%")} / ${metricValue(canonicalRisk.var99.cvarPct, 4, "%")}` : translateDisplayValue(canonicalRisk.var99.status || "unknown")} detail="只做对照，不增加风险阈值" tone={factBoundTone(riskInputsFact, var99Known ? "mute" : "warn", riskRequestFailed)} />
             <RiskMiniMetric label="凯利仓位系数" value={kellyKnown ? metricValue(canonicalRisk.kelly.fraction, 4) : translateDisplayValue(canonicalRisk.kelly.status || "unknown")} detail={kellyKnown ? `样本 ${metricValue(canonicalRisk.kelly.closedTrades, 0)} · 胜率 ${metricValue(canonicalRisk.kelly.winRate === null ? null : canonicalRisk.kelly.winRate * 100, 1, "%")}` : "等待已闭合交易样本"} tone={factBoundTone(riskInputsFact, kellyKnown ? "mute" : "warn", riskRequestFailed)} />
-            <RiskMiniMetric label="策略通过率（前端计算）" value={`${formatDecimal(allowedRate, 1)}%`} detail={`允许 ${formatDecimal(allowed, 0)} / 拦截 ${formatDecimal(blocked, 0)}`} tone={factBoundTone(policyFact, blocked ? "warn" : "ok", policyRequestFailed)} />
+            <RiskMiniMetric label="政策许可率（前端计算）" value={`${formatDecimal(policyAllowedRate, 1)}%`} detail={`政策允许 ${formatDecimal(allowed, 0)} / 政策拦截 ${formatDecimal(blocked, 0)}`} tone={factBoundTone(policyFact, blocked ? "warn" : "ok", policyRequestFailed)} />
             <RiskMiniMetric label="组件异常" value={formatDecimal(riskBlockers.length + degraded.length, 0)} detail={`阻断 ${formatDecimal(riskBlockers.length, 0)} · 退化 ${formatDecimal(degraded.length, 0)}`} tone={!systemFactsKnown ? "pending" : riskBlockers.length ? "bad" : degraded.length ? "warn" : "ok"} />
             <RiskMiniMetric label="数据健康" value={!dbDisplayable ? "未知" : dbErrorCount ? `${formatDecimal(dbErrorCount, 0)} 异常` : translateDisplayValue(dbStatus)} detail={`库 ${formatDecimal(dbList.length, 0)} · 合约 ${schema}${dbRequestFailed ? " · 接口异常" : ""}`} tone={factBoundTone(dbFact, dbErrorCount ? "bad" : toneFromStatus(dbStatus), dbRequestFailed)} />
           </div>
@@ -274,10 +277,10 @@ export function RiskPage() {
 
         <MetricCard title="策略裁决" className="wide-panel">
           <div className="policy-summary-strip">
-            <span><b>{formatDecimal(allowed, 0)}</b> 允许</span>
-            <span className={blocked ? "policy-summary-bad" : ""}><b>{formatDecimal(blocked, 0)}</b> 拦截</span>
-            <span><b>{formatDecimal(totalVerdicts, 0)}</b> 总计</span>
-            <span><b>{formatDecimal(allowedRate, 1)}%</b> 通过率</span>
+            <span><b>{formatDecimal(allowed, 0)}</b> 政策允许</span>
+            <span className={blocked ? "policy-summary-bad" : ""}><b>{formatDecimal(blocked, 0)}</b> 政策拦截</span>
+            <span><b>{formatDecimal(executionApplied, 0)}</b> 真实执行</span>
+            <span><b>{formatDecimal(executionSkipped, 0)}</b> 未执行</span>
           </div>
 
           {!policyItems.length ? (
@@ -290,7 +293,22 @@ export function RiskPage() {
                 const decisionId = pickString(item, ["decision_id", "id"], "");
                 const action = translateDisplayValue(pickString(item, ["action", "type"], "policy"));
                 const direction = translateDisplayValue(formatDirection(pick(item, ["direction", "side"])));
-                const reason = translateReasonText(pickString(item, ["reason", "message"], ""));
+                const executionCategory = pickString(item, ["execution_category"], "unknown");
+                const executionReason = pickString(item, ["execution_reason"], "");
+                const reason = translateReasonText(
+                  executionReason || pickString(item, ["reason", "message"], ""),
+                );
+                const status = executionCategory === "applied"
+                  ? { label: "已执行", tone: "ok" as const }
+                  : executionCategory === "skipped"
+                    ? { label: "未执行", tone: "warn" as const }
+                    : executionCategory === "failed"
+                      ? { label: "执行失败", tone: "bad" as const }
+                      : executionCategory === "blocked"
+                        ? { label: "执行拦截", tone: "bad" as const }
+                        : itemAllowed
+                          ? { label: "政策允许", tone: "mute" as const }
+                          : { label: "政策拦截", tone: "bad" as const };
 
                 return (
                   <article className="policy-item" key={`${decisionId}-${index}`}>
@@ -299,7 +317,7 @@ export function RiskPage() {
                       <span>{compactId(decisionId)}</span>
                     </div>
                     <div className="policy-item-action">
-                      <StatusPill status={itemAllowed ? "允许" : "拦截"} tone={factBoundTone(policyFact, itemAllowed ? "ok" : "bad", policyRequestFailed)} />
+                      <StatusPill status={status.label} tone={factBoundTone(policyFact, status.tone, policyRequestFailed)} />
                       <span>{action} · {direction}</span>
                     </div>
                     <div className="policy-item-reason">{reason}</div>

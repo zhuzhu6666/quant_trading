@@ -3178,6 +3178,98 @@ def test_supervisor_tighten_noop_is_deduplicated_before_risk_policy(monkeypatch)
     assert traces[0]["execution"]["is_real_execution"] is False
 
 
+def test_supervisor_minimum_position_reduce_is_deduplicated_before_policy(monkeypatch):
+    traces = []
+    remembered = set()
+
+    class _Ledger:
+        def log_decision(self, **_kwargs):
+            raise AssertionError("untradeable reduce must not enter decision ledger")
+
+        def log_position_supervisor_trace(self, **kwargs):
+            traces.append(kwargs)
+            return "trace_min_reduce_noop"
+
+    class _Policy:
+        def evaluate(self, _action, _context):
+            raise AssertionError("untradeable reduce must not enter RiskPolicy")
+
+    class _Bridge:
+        is_connected = True
+        _symbol_meta = {"api_min_volume": 100.0, "api_step_volume": 100.0}
+
+        def close_position(self, *_args, **_kwargs):
+            raise AssertionError("untradeable reduce must not touch broker")
+
+    verdict = {
+        "position_id": "707",
+        "decision_ts": time.time(),
+        "action": "reduce",
+        "confidence": 0.72,
+        "summary_reason": "profit_giveback_after_mfe",
+        "evidence": {
+            "thesis_status": "weakening",
+            "giveback_ratio": 0.75,
+            "current_pnl": 2.0,
+            "stop_loss_progress": 0.4,
+            "trigger_tags": ["profit_giveback_after_mfe"],
+        },
+        "recommended_controls": {"reduce_fraction": 0.5},
+        "supervisor_template": {
+            "thresholds": {"near_stop_loss_progress": 0.85},
+        },
+    }
+    monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(
+        live_service,
+        "_evaluate_position_supervisor_for_position",
+        lambda *args, **kwargs: verdict,
+    )
+    monkeypatch.setattr(
+        live_service, "_supervisor_recently_applied", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_supervisor_noop_fingerprint_seen",
+        lambda _pid, fingerprint: fingerprint in remembered,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_remember_supervisor_noop",
+        lambda _position, _verdict, *, fingerprint, reason: remembered.add(
+            fingerprint
+        ),
+    )
+    position = {
+        "position_id": 707,
+        "symbol": "XAUUSD+",
+        "direction": -1,
+        "entry_price": 4000.0,
+        "current_price": 4002.0,
+        "sl": 4010.0,
+        "tp": 3980.0,
+        "volume": 100.0,
+    }
+
+    for tick in (10, 11):
+        assert live_service._run_position_supervision(
+            _Bridge(),
+            [position],
+            cfg=SimpleNamespace(timeframe="M5"),
+            acct={"balance": 10000.0, "equity": 10000.0},
+            tick=tick,
+            log=lambda _msg: None,
+        ) == {707}
+
+    assert len(traces) == 1
+    assert traces[0]["stage"] == "no_op_suppressed"
+    assert traces[0]["execution_reason"] == "invalid_reduce_volume"
+    assert traces[0]["execution"]["effective_action"] == "hold"
+    assert traces[0]["execution"]["reason"] == "risk_evidence_not_strong_enough"
+    assert traces[0]["execution"]["is_real_execution"] is False
+
+
 def test_supervisor_dynamic_tpsl_sends_extended_take_profit(monkeypatch):
     amend_calls = []
     traces = []

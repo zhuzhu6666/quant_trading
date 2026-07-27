@@ -1,7 +1,10 @@
 import time
 from types import SimpleNamespace
 
-from backend.services.live_risk_sizing import floor_api_volume_to_step
+from backend.services.live_risk_sizing import (
+    floor_api_volume_to_step,
+    should_full_close_untradeable_reduce,
+)
 from backend.services.live_position_lifecycle import (
     build_supervisor_tighten_result_payloads,
 )
@@ -9,6 +12,8 @@ from backend.services.live_supervision_actions import (
     execute_supervisor_close_action,
     execute_supervisor_reduce_action,
     execute_supervisor_tighten_action,
+    normalize_supervisor_reduce_verdict,
+    plan_supervisor_reduce_action,
 )
 
 
@@ -35,6 +40,25 @@ def _deps(calls):
     }
 
 
+def _execute_reduce(**kwargs):
+    floor = kwargs.pop("floor_api_volume_to_step")
+    should_close = kwargs.pop("should_full_close_untradeable_reduce")
+    kwargs.pop("build_close_position_risk_context")
+    kwargs.pop("risk_policy_evaluate")
+    execution_plan = plan_supervisor_reduce_action(
+        bridge=kwargs["bridge"],
+        position=kwargs["position"],
+        verdict=kwargs["verdict"],
+        controls=kwargs["controls"],
+        floor_api_volume_to_step=floor,
+        should_full_close_untradeable_reduce=should_close,
+    )
+    execute_supervisor_reduce_action(
+        **kwargs,
+        execution_plan=execution_plan,
+    )
+
+
 def test_execute_supervisor_reduce_action_partial_success_logs_reduced_event():
     calls = {
         "traces": [],
@@ -59,7 +83,7 @@ def test_execute_supervisor_reduce_action_partial_success_logs_reduced_event():
         def log_position_event(self, **kwargs):
             calls["ledger_events"].append(kwargs)
 
-    execute_supervisor_reduce_action(
+    _execute_reduce(
         bridge=_Bridge(),
         position={"position_id": 7, "symbol": "XAUUSD+", "volume": 100.0, "current_price": 4010.0},
         verdict={"summary_reason": "trim_risk"},
@@ -116,7 +140,7 @@ def test_reduce_captures_deal_cursor_before_broker_rpc_and_passes_it_to_sync():
         "baseline_closed_volume": 25.0,
     }
 
-    execute_supervisor_reduce_action(
+    _execute_reduce(
         bridge=_Bridge(),
         position={"position_id": 7, "symbol": "XAUUSD+", "volume": 100.0},
         verdict={"summary_reason": "trim_risk"},
@@ -143,7 +167,7 @@ def test_reduce_captures_deal_cursor_before_broker_rpc_and_passes_it_to_sync():
     assert calls["traces"][0]["execution"]["session_fact_recorded"] is True
 
 
-def test_execute_supervisor_reduce_action_invalid_volume_skips_when_not_upgradeable():
+def test_plan_supervisor_reduce_action_suppresses_untradeable_volume():
     calls = {
         "traces": [],
         "supervisor_state": [],
@@ -160,29 +184,73 @@ def test_execute_supervisor_reduce_action_invalid_volume_skips_when_not_upgradea
         def close_position(self, *_args, **_kwargs):
             raise AssertionError("close should not be called")
 
-    execute_supervisor_reduce_action(
+    plan = plan_supervisor_reduce_action(
         bridge=_Bridge(),
         position={"position_id": 7, "volume": 100.0},
         verdict={"summary_reason": "trim_risk"},
-        risk_action="reduce_position",
-        risk_verdict={"allowed": True, "reason": "ok"},
-        decision_id="decision-1",
-        cfg=SimpleNamespace(),
-        tick=9,
-        acct=None,
         controls={"reduce_fraction": 0.1},
-        log=lambda msg: calls["logs"].append(msg),
-        ledger=None,
-        **_deps(calls),
+        floor_api_volume_to_step=_deps(calls)["floor_api_volume_to_step"],
+        should_full_close_untradeable_reduce=(
+            _deps(calls)["should_full_close_untradeable_reduce"]
+        ),
     )
 
-    assert calls["traces"][0]["stage"] == "execution_skipped"
-    assert calls["traces"][0]["execution_reason"] == "invalid_reduce_volume"
-    assert calls["traces"][0]["execution"]["fallback_skip_reason"] == "not_upgradeable"
+    assert plan["effective_action"] == "hold"
+    assert plan["reason"] == "not_upgradeable"
+    assert plan["reduce_volume"] == 0.0
     assert calls["logs"] == []
 
 
-def test_execute_supervisor_reduce_action_resolves_meta_before_partial_close():
+def test_minimum_reduce_upgrades_only_at_supervisor_near_stop_threshold():
+    class _Bridge:
+        _symbol_meta = {"api_min_volume": 100.0, "api_step_volume": 100.0}
+
+    verdict = {
+        "action": "reduce",
+        "summary_reason": "profit_giveback_after_mfe",
+        "evidence": {
+            "current_pnl": -0.2,
+            "giveback_ratio": 1.0,
+            "stop_loss_progress": 0.82,
+            "trigger_tags": ["profit_giveback_after_mfe"],
+        },
+        "recommended_controls": {"reduce_fraction": 0.5},
+        "supervisor_template": {
+            "thresholds": {"near_stop_loss_progress": 0.85},
+        },
+    }
+    kwargs = {
+        "bridge": _Bridge(),
+        "position": {"position_id": 8, "symbol": "XAUUSD+", "volume": 100.0},
+        "controls": verdict["recommended_controls"],
+        "floor_api_volume_to_step": floor_api_volume_to_step,
+        "should_full_close_untradeable_reduce": (
+            should_full_close_untradeable_reduce
+        ),
+    }
+
+    below_threshold = plan_supervisor_reduce_action(verdict=verdict, **kwargs)
+    above_verdict = {
+        **verdict,
+        "evidence": {**verdict["evidence"], "stop_loss_progress": 0.86},
+    }
+    above_threshold = plan_supervisor_reduce_action(
+        verdict=above_verdict,
+        **kwargs,
+    )
+    normalized = normalize_supervisor_reduce_verdict(
+        above_verdict,
+        above_threshold,
+    )
+
+    assert below_threshold["effective_action"] == "hold"
+    assert above_threshold["effective_action"] == "close"
+    assert normalized["action"] == "close"
+    assert normalized["recommended_controls"]["original_action"] == "reduce"
+    assert normalized["recommended_controls"]["protection_mode"] == "full_exit"
+
+
+def test_plan_supervisor_reduce_action_resolves_meta_before_partial_close():
     calls = {
         "traces": [],
         "supervisor_state": [],
@@ -204,27 +272,21 @@ def test_execute_supervisor_reduce_action_resolves_meta_before_partial_close():
         def close_position(self, *_args, **_kwargs):
             raise AssertionError("below-min partial close should not be sent")
 
-    execute_supervisor_reduce_action(
+    plan = plan_supervisor_reduce_action(
         bridge=_Bridge(),
         position={"position_id": 7, "symbol": "XAUUSD", "volume": 200.0},
         verdict={"summary_reason": "trim_risk"},
-        risk_action="reduce_position",
-        risk_verdict={"allowed": True, "reason": "ok"},
-        decision_id="decision-1",
-        cfg=SimpleNamespace(),
-        tick=9,
-        acct=None,
         controls={"reduce_fraction": 0.25},
-        log=lambda msg: calls["logs"].append(msg),
-        ledger=None,
         floor_api_volume_to_step=floor_api_volume_to_step,
-        **{k: v for k, v in _deps(calls).items() if k != "floor_api_volume_to_step"},
+        should_full_close_untradeable_reduce=(
+            _deps(calls)["should_full_close_untradeable_reduce"]
+        ),
     )
 
     assert calls["resolved"] is True
-    assert calls["traces"][0]["stage"] == "execution_skipped"
-    assert calls["traces"][0]["execution"]["min_volume"] == 100.0
-    assert calls["traces"][0]["execution"]["reduce_volume"] == 0.0
+    assert plan["effective_action"] == "hold"
+    assert plan["min_volume"] == 100.0
+    assert plan["reduce_volume"] == 0.0
     assert calls["logs"] == []
 
 
@@ -246,7 +308,7 @@ def test_execute_supervisor_reduce_action_floors_partial_close_to_broker_step():
             calls["close_call"] = (pid, volume)
             return SimpleNamespace(success=True)
 
-    execute_supervisor_reduce_action(
+    _execute_reduce(
         bridge=_Bridge(),
         position={"position_id": 7, "symbol": "XAUUSD", "volume": 250.0},
         verdict={"summary_reason": "trim_risk"},
@@ -592,7 +654,7 @@ def test_reduce_broker_success_survives_accounting_ledger_and_state_failures():
         RuntimeError("trace unavailable")
     )
 
-    execute_supervisor_reduce_action(
+    _execute_reduce(
         bridge=_Bridge(),
         position={"position_id": 72, "symbol": "XAUUSD+", "volume": 100.0, "current_price": 4010.0},
         verdict={"summary_reason": "trim_risk"},

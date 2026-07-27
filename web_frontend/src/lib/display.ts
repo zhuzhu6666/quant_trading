@@ -117,6 +117,12 @@ const DISPLAY_TRANSLATIONS: Record<string, string> = {
   position_supervisor_template: "持仓监督模板",
   supervisor_execution_trace: "监督执行轨迹",
   risk_reducing_action: "降低风险动作",
+  invalid_reduce_volume: "当前仓位已是最小量，无法减仓",
+  partial_close_success: "部分平仓已成交",
+  risk_evidence_not_strong_enough: "风险证据不足，不升级为全平",
+  minimum_position_thesis_broken: "最小仓位且交易假设已确认失效",
+  minimum_position_full_giveback_near_stop: "最小仓位、盈利完全回吐且接近原止损",
+  minimum_position_profit_giveback_near_stop: "最小仓位、盈利回吐且接近原止损",
 
   open_trade: "开仓",
   tighten_position: "收紧保护",

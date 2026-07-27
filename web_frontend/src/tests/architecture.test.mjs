@@ -250,6 +250,10 @@ assert.doesNotMatch(riskPage, /dbQuery\.isError \|\| dbErrorCount \? "bad" : ton
 assert.match(riskPage, /readFact\(tradeTracesQuery\.data, "risk\.trade-trace-recent\.v2"\)/);
 assert.match(riskPage, /const policy = asRecord\(policyQuery\.data\)/, "策略裁决必须只消费专用端点");
 assert.doesNotMatch(riskPage, /pickRecord\(risk, \["policy"\]\)/, "risk.summary 投影不得冒充 policy endpoint 数据");
+assert.match(riskPage, /const executionCounts = asRecord\(policy\.execution_counts\)/, "策略裁决必须区分政策许可与执行结果");
+assert.match(riskPage, /executionCategory === "applied"/, "策略裁决行必须使用后端执行状态");
+assert.match(riskPage, /真实执行/);
+assert.match(riskPage, /未执行/);
 assert.match(evidencePage, /type EvidenceTab = "replay" \| "incident" \| "release"/);
 assert.doesNotMatch(evidencePage, /tone="ok"/, "运行证据页不得绕过端点 Fact 直接渲染绿色");
 for (const [queryName, contract] of Object.entries({

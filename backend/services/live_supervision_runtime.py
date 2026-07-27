@@ -48,9 +48,8 @@ class LiveSupervisionRuntime:
     verify_protection_projection: Any
     publish_fresh_positions: Any
     persist_safety_fail_closed: Any
-    floor_api_volume_to_step: Any
-    should_full_close_untradeable_reduce: Any
-    build_close_position_risk_context: Any
+    plan_reduce: Any
+    normalize_reduce: Any
     remember_close_reason: Any
     remember_close_verdict: Any
     capture_partial_close_session_cursor: Any
@@ -375,7 +374,61 @@ def run_position_supervision(
             )
             continue
 
-        controls = verdict.get("recommended_controls") or {}
+        controls = dict(verdict.get("recommended_controls") or {})
+        reduce_execution_plan: dict[str, Any] = {}
+        if action == "reduce":
+            reduce_execution_plan = dict(
+                runtime.plan_reduce(
+                    bridge=bridge,
+                    position=position,
+                    verdict=verdict,
+                    controls=controls,
+                )
+                or {}
+            )
+            effective_action = str(
+                reduce_execution_plan.get("effective_action") or "hold"
+            ).strip().lower()
+            if effective_action == "hold":
+                handled.add(position_id)
+                fingerprint = runtime.build_action_fingerprint(
+                    position_id=position_id,
+                    action="reduce_untradeable",
+                    direction=int(position.get("direction", 0) or 0),
+                    controls=controls,
+                )
+                if not runtime.noop_fingerprint_seen(position_id, fingerprint):
+                    runtime.log_trace(
+                        position=position,
+                        verdict=verdict,
+                        cfg=cfg,
+                        tick=tick,
+                        stage="no_op_suppressed",
+                        outcome="skipped",
+                        execution_status="no_op",
+                        execution_reason="invalid_reduce_volume",
+                        execution={
+                            **reduce_execution_plan,
+                            "action_fingerprint": fingerprint,
+                            "applied_controls": controls,
+                        },
+                        acct=account,
+                    )
+                    runtime.remember_noop(
+                        position,
+                        verdict,
+                        fingerprint=fingerprint,
+                        reason=str(
+                            reduce_execution_plan.get("reason")
+                            or "invalid_reduce_volume"
+                        ),
+                    )
+                continue
+            if effective_action == "close":
+                action = "close"
+                verdict = runtime.normalize_reduce(verdict, reduce_execution_plan)
+                controls = dict(verdict.get("recommended_controls") or {})
+
         if action in {"close", "reduce", "tighten"} and candidate_recorder is not None:
             try:
                 candidate_recorder(
@@ -598,14 +651,7 @@ def run_position_supervision(
                 runtime.execute_reduce(
                     **common,
                     ledger=runtime.ledger,
-                    floor_api_volume_to_step=runtime.floor_api_volume_to_step,
-                    should_full_close_untradeable_reduce=(
-                        runtime.should_full_close_untradeable_reduce
-                    ),
-                    build_close_position_risk_context=(
-                        runtime.build_close_position_risk_context
-                    ),
-                    risk_policy_evaluate=runtime.evaluate_risk_policy,
+                    execution_plan=reduce_execution_plan,
                     log_supervisor_trace=runtime.log_trace,
                     remember_supervisor_state=runtime.remember_state,
                     remember_supervisor_reentry_block=runtime.remember_reentry_block,

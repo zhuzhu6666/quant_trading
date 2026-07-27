@@ -232,6 +232,22 @@ P4 完成。后续只保留 P1 真实成交/完整生命周期验收、Safety sh
 - 因子治理、lifecycle、catalog、recovery 和 cards 针对性验证 `115 passed`；另有
   V16/Coordinator 交接回归集 `46 passed`。
 
+2026-07-28 最小仓位监督动作收敛：
+
+- canonical authority 保持为 `PositionSupervisor`；同一执行链新增的是既有 supervisor
+  action 的 broker 可执行性预检，不新增 service、table、thread、配置或阈值；
+- broker 最小/步进 volume 在 RiskPolicy 前把 reduce 归一为可成交 reduce、强证据
+  close 或去重 no-op。弱证据最小仓位不再每轮产生“政策允许减仓”记录，也不触达 broker；
+- 删除 reduce executor 内第二次 risk evaluation 和 reduce-to-close 改判。close 升级复用
+  supervisor template 现有 `near_stop_loss_progress`（默认 0.85），不再使用独立硬编码
+  0.8；
+- Safety V2 planner 与 legacy preview 消费同一动作归一结果，避免 shadow 比较因最小仓位
+  产生伪 mismatch；
+- `/api/risk/policy/verdicts` 只读关联 `position_supervisor_trace`，Web 风险页分别显示
+  “政策允许/政策拦截”和“真实执行/未执行”，历史 allowed-but-skipped 不再被显示成成交；
+- supervisor sizing/action/lifecycle/API 针对性验证通过，Web production build 通过；
+  仍需发布后观察新的最小仓位 MFE 回吐周期，确认运行日志不再连续产生不可交易 reduce。
+
 ## 5. 仍需真实运行证明
 
 以下不能由测试替代：

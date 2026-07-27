@@ -99,6 +99,9 @@ lifecycle。
 | Policy 不把 unknown/stale 当零 | `tests/risk/test_policy_service.py::test_open_trade_blocks_unknown_var_instead_of_treating_it_as_zero` |
 | 最小仓位不被失真 CVaR 上限永久锁死 | `tests/risk/test_policy_service.py::test_open_trade_allows_recent_min_volume_cvar_below_adjusted_limit` |
 | 调整后仍保留 CVaR 硬上限 | `tests/risk/test_policy_service.py::test_open_trade_keeps_cvar_hard_limit_above_adjusted_limit` |
+| 最小仓位不可交易 reduce 在 Policy 前成为去重 no-op | `tests/test_live_service_lifecycle.py::test_supervisor_minimum_position_reduce_is_deduplicated_before_policy` |
+| reduce-to-close 复用 supervisor 临近止损阈值 | `tests/test_live_supervision_actions.py::test_minimum_reduce_upgrades_only_at_supervisor_near_stop_threshold` |
+| 风险 API/前端区分政策许可与真实执行 | `tests/risk/test_risk_api_policy.py::test_recent_policy_verdicts_summarizes_decision_ledger`、`web_frontend/src/tests/architecture.test.mjs` |
 | live/replay 同输入 | `tests/test_research_parity_boundaries.py::test_parity_replay_freezes_closed_bar_returns_for_candidate_var` |
 | readiness 只读投影 | `tests/test_backend_readiness_contract.py::test_readiness_projects_canonical_forward_var_snapshot` |
 | API 只读 canonical | `tests/test_risk_summary_inputs.py::test_risk_summary_uses_canonical_snapshot` |

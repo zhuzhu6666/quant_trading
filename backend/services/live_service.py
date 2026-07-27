@@ -279,6 +279,8 @@ from backend.services.live_supervision_actions import (
     execute_supervisor_close_action as _execute_supervisor_close_action,
     execute_supervisor_reduce_action as _execute_supervisor_reduce_action,
     execute_supervisor_tighten_action as _execute_supervisor_tighten_action,
+    normalize_supervisor_reduce_verdict as _normalize_supervisor_reduce_verdict,
+    plan_supervisor_reduce_action as _plan_supervisor_reduce_action,
 )
 from backend.services.live_supervision_runtime import (
     LiveSupervisionRuntime,
@@ -2191,9 +2193,14 @@ def _run_position_supervision(
             broker="ctrader",
         ),
         persist_safety_fail_closed=_persist_safety_fail_closed,
-        floor_api_volume_to_step=_floor_api_volume_to_step,
-        should_full_close_untradeable_reduce=_should_full_close_untradeable_reduce,
-        build_close_position_risk_context=_build_close_position_risk_context,
+        plan_reduce=lambda **kwargs: _plan_supervisor_reduce_action(
+            **kwargs,
+            floor_api_volume_to_step=_floor_api_volume_to_step,
+            should_full_close_untradeable_reduce=(
+                _should_full_close_untradeable_reduce
+            ),
+        ),
+        normalize_reduce=_normalize_supervisor_reduce_verdict,
         remember_close_reason=_remember_close_reason,
         remember_close_verdict=_remember_close_verdict,
         capture_partial_close_session_cursor=lambda **kwargs: (
@@ -6414,6 +6421,23 @@ def _live_safety_planner_runtime() -> SafetyPlannerRuntime:
             config_hash=str(anchor.get("config_hash") or ""),
         )
 
+    def normalize_supervisor_action(position, verdict):
+        payload = dict(verdict or {})
+        if str(payload.get("action") or "").strip().lower() != "reduce":
+            return payload
+        controls = dict(payload.get("recommended_controls") or {})
+        execution_plan = _plan_supervisor_reduce_action(
+            bridge=_ctrader_bridge,
+            position=dict(position or {}),
+            verdict=payload,
+            controls=controls,
+            floor_api_volume_to_step=_floor_api_volume_to_step,
+            should_full_close_untradeable_reduce=(
+                _should_full_close_untradeable_reduce
+            ),
+        )
+        return _normalize_supervisor_reduce_verdict(payload, execution_plan)
+
     pipeline = _factor_pipeline or {}
     awe = pipeline.get("awe")
 
@@ -6426,6 +6450,7 @@ def _live_safety_planner_runtime() -> SafetyPlannerRuntime:
         composite_conviction=(
             awe.composite_conviction if awe is not None else lambda: 0.0
         ),
+        normalize_supervisor_action=normalize_supervisor_action,
     )
 
 

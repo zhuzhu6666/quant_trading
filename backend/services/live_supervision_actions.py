@@ -82,6 +82,82 @@ def _resolve_bridge_volume_meta(bridge: Any, position: dict[str, Any]) -> dict[s
     return dict(meta or {})
 
 
+def plan_supervisor_reduce_action(
+    *,
+    bridge: Any,
+    position: dict[str, Any],
+    verdict: dict[str, Any],
+    controls: dict[str, Any],
+    floor_api_volume_to_step: Callable[[float, dict[str, Any]], float],
+    should_full_close_untradeable_reduce: Callable[..., tuple[bool, str]],
+) -> dict[str, Any]:
+    """Resolve a reduce intent into one broker-executable canonical action."""
+
+    current_volume = float(
+        position.get("volume", position.get("api_volume", 0.0)) or 0.0
+    )
+    reduce_fraction = float((controls or {}).get("reduce_fraction", 0.0) or 0.0)
+    raw_reduce_volume = current_volume * reduce_fraction
+    bridge_meta = _resolve_bridge_volume_meta(bridge, position)
+    min_volume = float(bridge_meta.get("api_min_volume") or 1.0)
+    step_volume = float(bridge_meta.get("api_step_volume") or 1.0)
+    reduce_volume = floor_api_volume_to_step(raw_reduce_volume, bridge_meta)
+    payload = {
+        "current_volume": current_volume,
+        "reduce_fraction": reduce_fraction,
+        "raw_reduce_volume": raw_reduce_volume,
+        "reduce_volume": reduce_volume,
+        "min_volume": min_volume,
+        "step_volume": step_volume,
+    }
+    if reduce_volume >= min_volume and current_volume - reduce_volume >= min_volume:
+        return {**payload, "effective_action": "reduce", "reason": "partial_close_tradeable"}
+
+    upgrade_to_close, reason = should_full_close_untradeable_reduce(
+        current_volume=current_volume,
+        raw_reduce_volume=raw_reduce_volume,
+        reduce_volume=reduce_volume,
+        min_volume=min_volume,
+        verdict=verdict,
+    )
+    if upgrade_to_close:
+        return {**payload, "effective_action": "close", "reason": str(reason)}
+    return {**payload, "effective_action": "hold", "reason": str(reason)}
+
+
+def normalize_supervisor_reduce_verdict(
+    verdict: dict[str, Any],
+    execution_plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Project an evaluated reduce verdict to its canonical executable action."""
+
+    normalized = dict(verdict or {})
+    effective_action = str(
+        (execution_plan or {}).get("effective_action") or "hold"
+    ).strip().lower()
+    if effective_action == "reduce":
+        return normalized
+    original_reason = str(normalized.get("summary_reason") or "")
+    controls = dict(normalized.get("recommended_controls") or {})
+    normalized["action"] = effective_action
+    normalized["reduce_execution_plan"] = dict(execution_plan or {})
+    if effective_action == "close":
+        close_reason = str(
+            (execution_plan or {}).get("reason")
+            or "minimum_position_reduce_full_close"
+        )
+        normalized["summary_reason"] = close_reason
+        normalized["recommended_controls"] = {
+            **controls,
+            "reduce_fraction": 0.0,
+            "close_reason": close_reason,
+            "protection_mode": "full_exit",
+            "original_action": "reduce",
+            "original_summary_reason": original_reason,
+        }
+    return normalized
+
+
 def execute_supervisor_tighten_action(
     *,
     bridge: Any,
@@ -626,10 +702,7 @@ def execute_supervisor_reduce_action(
     ledger: Any = None,
     broker: str = "ctrader",
     strategy_name: str = "factor_v4",
-    floor_api_volume_to_step: Callable[[float, dict[str, Any]], float],
-    should_full_close_untradeable_reduce: Callable[..., tuple[bool, str]],
-    build_close_position_risk_context: Callable[..., dict[str, Any]],
-    risk_policy_evaluate: Callable[[str, dict[str, Any]], Any],
+    execution_plan: dict[str, Any],
     log_supervisor_trace: Callable[..., Any],
     remember_supervisor_state: Callable[..., Any],
     remember_supervisor_reentry_block: Callable[..., Any],
@@ -643,15 +716,10 @@ def execute_supervisor_reduce_action(
     record_aux_failure: Callable[..., Any] | None = None,
 ) -> None:
     pid = int(position.get("position_id") or position.get("ticket") or 0)
-    current_volume = float(position.get("volume", position.get("api_volume", 0.0)) or 0.0)
-    reduce_fraction = float((controls or {}).get("reduce_fraction", 0.0) or 0.0)
-    raw_reduce_volume = current_volume * reduce_fraction
-    bridge_meta = _resolve_bridge_volume_meta(bridge, position)
-    min_volume = float(bridge_meta.get("api_min_volume") or 1.0)
-    step_volume = float(bridge_meta.get("api_step_volume") or 1.0)
-    reduce_volume = floor_api_volume_to_step(raw_reduce_volume, bridge_meta)
+    current_volume = float((execution_plan or {}).get("current_volume") or 0.0)
+    reduce_volume = float((execution_plan or {}).get("reduce_volume") or 0.0)
 
-    if reduce_volume >= min_volume and current_volume - reduce_volume >= min_volume:
+    if str((execution_plan or {}).get("effective_action") or "") == "reduce":
         deal_cursor: dict[str, Any] = {
             "status": "unavailable",
             "baseline_cursor_available": False,
@@ -830,192 +898,4 @@ def execute_supervisor_reduce_action(
             )
         return
 
-    invalid_reduce_execution = {
-        "current_volume": current_volume,
-        "reduce_fraction": reduce_fraction,
-        "raw_reduce_volume": raw_reduce_volume,
-        "reduce_volume": reduce_volume,
-        "min_volume": min_volume,
-        "step_volume": step_volume,
-    }
-    upgrade_to_close, upgrade_reason = should_full_close_untradeable_reduce(
-        current_volume=current_volume,
-        raw_reduce_volume=raw_reduce_volume,
-        reduce_volume=reduce_volume,
-        min_volume=min_volume,
-        verdict=verdict,
-    )
-    if not upgrade_to_close:
-        log_supervisor_trace(
-            position=position,
-            verdict=verdict,
-            cfg=cfg,
-            tick=tick,
-            stage="execution_skipped",
-            outcome="skipped",
-            decision_id=decision_id,
-            risk_action=risk_action,
-            risk_verdict=risk_verdict,
-            execution_status="skipped",
-            execution_reason="invalid_reduce_volume",
-            execution={**invalid_reduce_execution, "fallback_skip_reason": upgrade_reason},
-            acct=acct,
-        )
-        return
-
-    close_reason = str(
-        (controls or {}).get("close_reason")
-        or verdict.get("summary_reason")
-        or "minimum_position_reduce_full_close"
-    )
-    close_context = build_close_position_risk_context(
-        position_id=pid,
-        close_reason=close_reason,
-        mode="live",
-        broker=broker,
-        symbol=str(position.get("symbol") or "XAUUSD+"),
-        position=position,
-        cfg=cfg,
-        decision_ts=float(verdict.get("decision_ts") or time.time()),
-    )
-    close_context.update(
-        {
-            "supervisor_action": "reduce_to_close",
-            "supervisor_confidence": verdict.get("confidence"),
-            "supervisor_reason": verdict.get("summary_reason"),
-            "supervisor_evidence": verdict.get("evidence") or {},
-            "supervisor_decision_ts": verdict.get("decision_ts"),
-            "recommended_controls": {
-                **(controls or {}),
-                "original_action": "reduce",
-                "fallback_action": "close",
-                "fallback_reason": upgrade_reason,
-            },
-        }
-    )
-    close_verdict = risk_policy_evaluate("close_position", close_context).to_dict()
-    fallback_execution = {
-        **invalid_reduce_execution,
-        "fallback_action": "close",
-        "fallback_reason": upgrade_reason,
-        "applied_controls": controls,
-    }
-    if not close_verdict.get("allowed", False):
-        log_supervisor_trace(
-            position=position,
-            verdict=verdict,
-            cfg=cfg,
-            tick=tick,
-            stage="risk_rejected",
-            outcome="blocked",
-            decision_id=decision_id,
-            risk_action="close_position",
-            risk_verdict=close_verdict,
-            execution_status="blocked",
-            execution_reason=str(close_verdict.get("reason") or "fallback_close_blocked"),
-            execution=fallback_execution,
-            acct=acct,
-        )
-        remember_supervisor_state(position, verdict, broker=broker, strategy_name=strategy_name)
-        return
-
-    # The fresh broker position supplied to the safety cycle already carries
-    # the executable API volume.  Passing it keeps the close-only escape hatch
-    # available when the bridge's auxiliary pre-reconcile is temporarily
-    # unavailable; PostgreSQL/audit state is never needed for this value.
-    result = bridge.close_position(pid, volume=current_volume)
-    if getattr(result, "success", False):
-        _best_effort_post_broker_effect(
-            lambda: remember_close_reason(pid, close_reason),
-            position_id=pid,
-            action="close_position",
-            stage="close_reason",
-            record_aux_failure=record_aux_failure,
-            log=log,
-        )
-        _best_effort_post_broker_effect(
-            lambda: remember_close_verdict(pid, MappingVerdictProxy(close_verdict)),
-            position_id=pid,
-            action="close_position",
-            stage="close_verdict",
-            record_aux_failure=record_aux_failure,
-            log=log,
-        )
-        _best_effort_post_broker_effect(
-            lambda: remember_supervisor_state(
-                position,
-                verdict,
-                action_applied="close",
-                broker=broker,
-                strategy_name=strategy_name,
-            ),
-            position_id=pid,
-            action="close_position",
-            stage="supervisor_state",
-            record_aux_failure=record_aux_failure,
-            log=log,
-        )
-        _best_effort_post_broker_effect(
-            lambda: remember_supervisor_reentry_block(
-                position=position,
-                action="close",
-                reason=close_reason,
-                cfg=cfg,
-                current_price=float(position.get("current_price", position.get("price_current", 0.0)) or 0.0),
-                tick=tick,
-            ),
-            position_id=pid,
-            action="close_position",
-            stage="reentry_block",
-            record_aux_failure=record_aux_failure,
-            log=log,
-        )
-        _best_effort_post_broker_effect(
-            lambda: log_supervisor_trace(
-                position=position,
-                verdict=verdict,
-                cfg=cfg,
-                tick=tick,
-                stage="executed",
-                outcome="applied",
-                decision_id=decision_id,
-                risk_action="close_position",
-                risk_verdict=close_verdict,
-                execution_status="applied",
-                execution_reason="minimum_position_reduce_full_close_success",
-                execution=fallback_execution,
-                acct=acct,
-            ),
-            position_id=pid,
-            action="close_position",
-            stage="supervisor_trace",
-            record_aux_failure=record_aux_failure,
-            log=log,
-        )
-        if result_is_position_not_found(result):
-            retire_broker_missing_position(
-                bridge,
-                pid,
-                broker=broker,
-                strategy_name=strategy_name,
-                reason=close_reason,
-                log=log,
-            )
-        log(f"tick {tick}: supervisor reduce->close sent pos={pid} reason={upgrade_reason}")
-    else:
-        reason = str(getattr(result, "comment", "") or getattr(result, "error", "") or "fallback_close_failed")
-        log_supervisor_trace(
-            position=position,
-            verdict=verdict,
-            cfg=cfg,
-            tick=tick,
-            stage="execution_failed",
-            outcome="failed",
-            decision_id=decision_id,
-            risk_action="close_position",
-            risk_verdict=close_verdict,
-            execution_status="failed",
-            execution_reason=reason,
-            execution=fallback_execution,
-            acct=acct,
-        )
+    raise ValueError("supervisor_reduce_execution_plan_not_tradeable")

@@ -335,6 +335,16 @@ def should_full_close_untradeable_reduce(
         reduce_fraction = float(controls.get("reduce_fraction", 0.0) or 0.0)
     except (TypeError, ValueError):
         reduce_fraction = 0.0
+    try:
+        near_stop_loss_progress = float(
+            (
+                ((verdict or {}).get("supervisor_template") or {}).get("thresholds")
+                or {}
+            ).get("near_stop_loss_progress", 0.85)
+            or 0.85
+        )
+    except (TypeError, ValueError):
+        near_stop_loss_progress = 0.85
 
     thesis_break_confirmed = bool(evidence.get("thesis_break_confirmed"))
     try:
@@ -348,18 +358,22 @@ def should_full_close_untradeable_reduce(
             thesis_break_confirmed
             or thesis_broken_confirmations >= 2
             or signal_reversal
-            or stop_loss_progress >= 0.8
+            or stop_loss_progress >= near_stop_loss_progress
         )
     ):
         return True, "minimum_position_thesis_broken"
-    if giveback_ratio >= 1.0 and current_pnl <= 0 and stop_loss_progress >= 0.8:
+    if (
+        giveback_ratio >= 1.0
+        and current_pnl <= 0
+        and stop_loss_progress >= near_stop_loss_progress
+    ):
         return True, "minimum_position_full_giveback_near_stop"
     if (
         summary_reason == "profit_giveback_after_mfe"
         and "profit_giveback_after_mfe" in trigger_tags
         and current_pnl <= 0
         and reduce_fraction > 0
-        and stop_loss_progress >= 0.8
+        and stop_loss_progress >= near_stop_loss_progress
     ):
         return True, "minimum_position_profit_giveback_near_stop"
     return False, "risk_evidence_not_strong_enough"

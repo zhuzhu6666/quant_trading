@@ -215,6 +215,34 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
                 position_ids.add(position_id)
             parsed.append((row, risk_state, action_json, verdict, direction, position_id))
 
+        trace_by_decision: dict[str, dict[str, Any]] = {}
+        decision_ids = {
+            str(row["decision_id"] or "")
+            for row, *_rest in parsed
+            if str(row["decision_id"] or "")
+        }
+        if decision_ids:
+            placeholders = ",".join("?" for _ in decision_ids)
+            try:
+                trace_rows = conn.execute(
+                    _state_sql(f"""
+                    SELECT decision_id, stage, outcome, execution_status,
+                           execution_reason, event_ts
+                    FROM position_supervisor_trace
+                    WHERE decision_id IN ({placeholders})
+                    ORDER BY event_ts DESC, created_at DESC
+                    """),
+                    tuple(decision_ids),
+                ).fetchall()
+                for trace_row in trace_rows:
+                    decision_id = str(trace_row["decision_id"] or "")
+                    trace_by_decision.setdefault(decision_id, dict(trace_row))
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
         position_directions: dict[str, int] = {}
         if position_ids:
             placeholders = ",".join("?" for _ in position_ids)
@@ -235,6 +263,13 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
 
     items: list[dict[str, Any]] = []
     counts: dict[str, int] = {"allowed": 0, "blocked": 0}
+    execution_counts: dict[str, int] = {
+        "applied": 0,
+        "skipped": 0,
+        "blocked": 0,
+        "failed": 0,
+        "unknown": 0,
+    }
     by_reason: dict[str, int] = {}
     by_action: dict[str, int] = {}
 
@@ -244,7 +279,31 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
         allowed = bool(verdict.get("allowed", False))
         reason = str(verdict.get("reason") or row["action_reason"] or "unknown")
         action = str((verdict.get("audit_payload") or {}).get("action") or _action_json.get("skip_stage") or row["event_type"])
+        execution = trace_by_decision.get(str(row["decision_id"] or ""), {})
+        execution_stage = str(execution.get("stage") or "")
+        execution_outcome = str(execution.get("outcome") or "")
+        execution_status = str(execution.get("execution_status") or "")
+        execution_reason = str(execution.get("execution_reason") or "")
+        execution_applied = (
+            execution_stage == "executed" and execution_outcome == "applied"
+        )
+        if execution_applied:
+            execution_category = "applied"
+        elif execution_outcome == "blocked" or execution_status == "blocked":
+            execution_category = "blocked"
+        elif execution_outcome == "failed" or execution_status in {"failed", "exception"}:
+            execution_category = "failed"
+        elif execution_outcome in {"skipped", "hold"} or execution_status in {
+            "skipped",
+            "no_op",
+            "cooldown",
+            "not_required",
+        }:
+            execution_category = "skipped"
+        else:
+            execution_category = "unknown"
         counts["allowed" if allowed else "blocked"] += 1
+        execution_counts[execution_category] += 1
         by_reason[reason] = by_reason.get(reason, 0) + 1
         by_action[action] = by_action.get(action, 0) + 1
         items.append({
@@ -259,12 +318,19 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
             "action": action,
             "direction": direction,
             "risk_verdict": verdict,
+            "execution_stage": execution_stage,
+            "execution_outcome": execution_outcome,
+            "execution_status": execution_status,
+            "execution_reason": execution_reason,
+            "execution_applied": execution_applied,
+            "execution_category": execution_category,
         })
 
     return {
         "limit": limit,
         "total": len(items),
         "counts": counts,
+        "execution_counts": execution_counts,
         "by_reason": by_reason,
         "by_action": by_action,
         "items": items,

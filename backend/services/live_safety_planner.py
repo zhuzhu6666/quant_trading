@@ -168,6 +168,9 @@ class SafetyPlannerRuntime:
     ]
     trailing_state: Callable[[int], Mapping[str, Any] | None]
     composite_conviction: Callable[[], float]
+    normalize_supervisor_action: Callable[
+        [Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]
+    ] | None = None
     clock: Callable[[], float] = time.time
 
 
@@ -301,6 +304,10 @@ def plan_live_safety_candidates(
             runtime.evaluate_supervisor(position, normalized_positions, cfg, account, now_ts)
             or {}
         )
+        if runtime.normalize_supervisor_action is not None:
+            verdict = dict(
+                runtime.normalize_supervisor_action(position, verdict) or verdict
+            )
         action = str(verdict.get("action") or "hold").strip().lower()
         if action not in {"close", "reduce", "tighten"}:
             continue

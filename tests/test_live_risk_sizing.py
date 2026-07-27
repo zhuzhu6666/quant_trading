@@ -448,7 +448,7 @@ def test_should_full_close_untradeable_reduce_handles_giveback_and_tradeable_red
         raw_reduce_volume=50.0,
         reduce_volume=0.0,
         min_volume=100.0,
-        verdict={"evidence": {"giveback_ratio": 1.0, "current_pnl": -0.01, "stop_loss_progress": 0.81}},
+        verdict={"evidence": {"giveback_ratio": 1.0, "current_pnl": -0.01, "stop_loss_progress": 0.86}},
     )
     profit_giveback = should_full_close_untradeable_reduce(
         current_volume=100.0,
@@ -457,7 +457,7 @@ def test_should_full_close_untradeable_reduce_handles_giveback_and_tradeable_red
         min_volume=100.0,
         verdict={
             "summary_reason": "profit_giveback_after_mfe",
-            "evidence": {"current_pnl": 0.0, "trigger_tags": "profit_giveback_after_mfe", "stop_loss_progress": 0.82},
+                "evidence": {"current_pnl": 0.0, "trigger_tags": "profit_giveback_after_mfe", "stop_loss_progress": 0.86},
             "recommended_controls": {"reduce_fraction": 0.5},
         },
     )
