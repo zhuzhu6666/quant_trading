@@ -175,6 +175,78 @@ def test_prepare_uses_canonical_sha256_and_never_promotes_registry(lifecycle):
     ]
 
 
+def test_coordinator_projection_uses_stable_identity_and_prunes_pid_rows(
+    lifecycle,
+):
+    service, _adapter, name, _expression = lifecycle
+    assert service.prepare_promotion(name=name)["ok"] is True
+    state = service.get_state(factor_name=name)
+    conn = sqlite3.connect(service.db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO factor_runtime_projection
+            (projection_id, factor_id, factor_name, process_role, process_id,
+             boot_id, generation, artifact_hash, mutation_id, config_version,
+             config_hash, loaded, status, error_message, heartbeat_at,
+             loaded_at, created_at, updated_at)
+            VALUES ('legacy-pid-row', ?, ?, 'governance_coordinator',
+                    '12345', 'process', ?, ?, ?, 0, '', 0, 'current', '',
+                    1, 0, 1, 1)
+            """,
+            (
+                state["factor_id"],
+                state["factor_name"],
+                state["generation"],
+                state["artifact_hash"],
+                state["mutation_id"],
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_runtime_projection
+            (projection_id, factor_id, factor_name, process_role, process_id,
+             boot_id, generation, artifact_hash, mutation_id, config_version,
+             config_hash, loaded, status, error_message, heartbeat_at,
+             loaded_at, created_at, updated_at)
+            VALUES ('other-legacy-pid-row', 'dsl:other', 'other',
+                    'governance_coordinator', '67890', 'process', 1, '',
+                    '', 0, '', 0, 'current', '', 1, 0, 1, 1)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    service._record_projection_result(
+        state,
+        loaded=False,
+        status="current",
+        error_message="",
+    )
+
+    rows = sqlite3.connect(service.db_path).execute(
+        """
+        SELECT process_id, boot_id, status
+        FROM factor_runtime_projection
+        WHERE factor_id=? AND process_role='governance_coordinator'
+        """,
+        (state["factor_id"],),
+    ).fetchall()
+    assert rows == [("factor_lifecycle_service", "canonical", "current")]
+    assert service._prune_legacy_coordinator_projections() == 1
+    coordinator_rows = sqlite3.connect(service.db_path).execute(
+        """
+        SELECT process_id, boot_id
+        FROM factor_runtime_projection
+        WHERE process_role='governance_coordinator'
+        """
+    ).fetchall()
+    assert coordinator_rows == [
+        ("factor_lifecycle_service", "canonical")
+    ]
+
+
 def test_activation_fails_closed_without_projection_health_or_explicit_weight(lifecycle):
     service, _adapter, name, _expression = lifecycle
     prepared = service.prepare_promotion(name=name)

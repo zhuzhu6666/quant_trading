@@ -32,6 +32,11 @@ class V16CommandGate:
         "update_weight": {"update_weight", "downweight", "boost_small", "boost"},
         "downweight": {"update_weight", "downweight"},
         "promote_factor": {"promote_factor", "update_weight", "factor_governance_cycle"},
+        "register_shadow_factor": {
+            "register_shadow_factor",
+            "promote_factor",
+            "factor_governance_cycle",
+        },
         "retire_factor": {"retire_factor", "factor_governance_cycle"},
         "factor_governance_cycle": {
             "factor_governance_cycle",

@@ -6279,7 +6279,7 @@ def _publish_fresh_position_reconcile(result: Any, *, broker: str) -> list[dict[
             positions,
             cfg=_rc(),
             now_ts=observed_at,
-            persist=False,
+            persist=True,
             broker=broker,
             strategy_name=str(_loop_strategy_name or "factor_v4"),
             account=_live_state_get("account", {}, clone=True) or {},
@@ -6678,6 +6678,7 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
         warmup_from_local_db=_warmup_from_local_db,
         ensure_decision_bars_fresh=_ensure_live_decision_bars_fresh,
         get_safety_plane=_get_live_safety_plane,
+        retry_pending_open=_retry_pending_open_trade,
         process_tick=_process_tick,
     )
 
@@ -9497,6 +9498,49 @@ def _open_admission_gate_reason(blockers: tuple[str, ...]) -> str:
     return blockers[0] if blockers else "open_admission_blocked"
 
 
+def _watchdog_freshness_retry_eligible(
+    blockers: tuple[str, ...],
+    *,
+    latch_status: dict[str, Any] | None = None,
+) -> bool:
+    """Allow one same-bar retry only for the watchdog's stale fact snapshots."""
+
+    if set(blockers) - {"no_new_risk_latched", "accepting_new_risk_false"}:
+        return False
+    unknown_raw = _live_safety_watchdog_probe().get("unknown_execution_count")
+    try:
+        if unknown_raw is None or int(unknown_raw) != 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    latch = (
+        dict(latch_status)
+        if latch_status is not None
+        else no_new_risk_latch_status(fail_closed=True)
+    )
+    causes = list(latch.get("causes") or [])
+    if not bool(latch.get("active")) or len(causes) != 1:
+        return False
+    cause = causes[0] if isinstance(causes[0], dict) else {}
+    if (
+        str(cause.get("cause") or "") != "safety_freshness"
+        or str(cause.get("cause_id") or "") != "safety_watchdog"
+    ):
+        return False
+    freshness_blockers = set(
+        (cause.get("metadata") or {}).get("blockers") or []
+    )
+    allowed = {
+        "safety_freshness_stale",
+        "safety_freshness_unknown",
+        "account_freshness_stale",
+        "account_freshness_unknown",
+        "positions_freshness_stale",
+        "positions_freshness_unknown",
+    }
+    return bool(freshness_blockers) and freshness_blockers <= allowed
+
+
 def _open_admission_gate_result(
     *,
     tick: int,
@@ -9509,7 +9553,12 @@ def _open_admission_gate_result(
         f"tick {tick}: v4 open SKIP "
         f"({reason} stage={stage} blockers={list(blockers)})"
     )
-    return _blocked_open_trade_gate_result(reason)
+    result = _blocked_open_trade_gate_result(reason)
+    result.retryable_watchdog_freshness = (
+        reason == "no_new_risk_latched"
+        and _watchdog_freshness_retry_eligible(blockers)
+    )
+    return result
 
 
 def _run_open_trade_pipeline(
@@ -9613,6 +9662,120 @@ def _run_open_trade_pipeline(
     if not admitted:
         return _blocked_open_trade_gate_result("loop_draining")
     return gate_result
+
+
+def _remember_or_clear_pending_open_retry(
+    *,
+    pipeline: dict,
+    bar: dict[str, Any],
+    factor_values: dict[str, Any],
+    composite: Any,
+    signal_gate_result: Any,
+    open_result: Any,
+) -> None:
+    if bool(getattr(open_result, "retryable_watchdog_freshness", False)):
+        pipeline["pending_open_retry"] = {
+            "bar": dict(bar),
+            "factor_values": dict(factor_values),
+            "composite": composite,
+            "gate_result": signal_gate_result,
+        }
+        return
+    pipeline.pop("pending_open_retry", None)
+
+
+def _retry_pending_open_trade(
+    *,
+    bridge: Any,
+    frame: Any,
+    last_bar: Any,
+    broker: str,
+    tick: int,
+    log,
+    stop_requested=None,
+) -> None:
+    """Retry a same-bar signal after the canonical watchdog latch recovers."""
+
+    pipeline = _factor_pipeline
+    if pipeline is None:
+        return
+    pending = pipeline.get("pending_open_retry")
+    if not isinstance(pending, dict):
+        return
+
+    bar = dict(pending.get("bar") or {})
+    current_bar = _tick_build_factor_bar(
+        last_bar,
+        frame,
+        str(bar.get("timeframe") or "M5"),
+    )
+    if float(current_bar.get("time") or 0.0) != float(bar.get("time") or 0.0):
+        pipeline.pop("pending_open_retry", None)
+        log(f"tick {tick}: discarded stale pending open retry")
+        return
+
+    acct = _live_state_get("account", {}, clone=True) or {}
+    positions_payload = _live_state_get("positions", [], clone=True) or []
+    positions_probe = (
+        (positions_payload.get("positions", []) or [])
+        if isinstance(positions_payload, dict)
+        else positions_payload
+    )
+    if positions_probe and not isinstance(positions_probe[0], dict):
+        from backend.ws.endpoints import _position_to_dict
+    else:
+        _position_to_dict = None
+    positions = _tick_normalize_live_positions_payload(
+        positions_payload,
+        position_to_dict=_position_to_dict,
+    )
+    current_price = float(last_bar["close"])
+    if bridge is not None and hasattr(bridge, "get_spot_quote"):
+        price_guard = _tick_guard_current_price_with_spot_quote(
+            current_price=current_price,
+            get_spot_quote=bridge.get_spot_quote,
+            quote_is_fresh=_quote_is_fresh,
+        )
+        current_price = float(price_guard["current_price"])
+
+    factor_values = dict(pending.get("factor_values") or {})
+    atr_ratio = factor_values.get("atr_ratio", 0)
+    atr_price = (
+        float(atr_ratio) * current_price
+        if atr_ratio and float(atr_ratio) > 0
+        else 0.0
+    )
+    current_pids = _tick_collect_position_ids(positions)
+    try:
+        from config.runtime_config import shared as _runtime_config
+
+        cfg = _runtime_config()
+    except Exception:
+        cfg = None
+    result = _run_open_trade_pipeline(
+        bridge=bridge,
+        pipeline=pipeline,
+        broker=broker,
+        cfg=cfg,
+        bar=bar,
+        factor_values=factor_values,
+        composite=pending["composite"],
+        gate_result=pending["gate_result"],
+        account=acct,
+        positions=positions,
+        attr_engine=pipeline.get("attribution"),
+        current_price=current_price,
+        atr_price=atr_price,
+        pending_open_attach_ids=_active_pending_open_attach_ids(current_pids),
+        send=_should_send_orders(broker),
+        tick=tick,
+        log=log,
+        stop_requested=stop_requested,
+    )
+    if bool(getattr(result, "retryable_watchdog_freshness", False)):
+        return
+    pipeline.pop("pending_open_retry", None)
+    log(f"tick {tick}: completed pending open retry for bar={bar.get('time')}")
 
 
 def _process_tick_existing_decision_bar(
@@ -9983,6 +10146,7 @@ def _process_tick_factor_pipeline(
     # ── 开仓执行流水线: candidate -> risk verdict -> broker order -> post-fill audit.
     atr_val = factor_values.get("atr_ratio", 0)
     atr_price = atr_val * current_price if atr_val and atr_val > 0 else 0
+    signal_gate_result = gate_result
     gate_result = _run_open_trade_pipeline(
         bridge=bridge,
         pipeline=pipeline,
@@ -10002,6 +10166,14 @@ def _process_tick_factor_pipeline(
         tick=tick,
         log=log,
         stop_requested=stop_requested,
+    )
+    _remember_or_clear_pending_open_retry(
+        pipeline=pipeline,
+        bar=bar,
+        factor_values=factor_values,
+        composite=composite,
+        signal_gate_result=signal_gate_result,
+        open_result=gate_result,
     )
 
     # ── 日志 ──

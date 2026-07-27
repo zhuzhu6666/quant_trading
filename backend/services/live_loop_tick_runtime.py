@@ -37,6 +37,7 @@ class LiveLoopTickRuntime:
     warmup_from_local_db: Any
     ensure_decision_bars_fresh: Any
     get_safety_plane: Any
+    retry_pending_open: Any
     process_tick: Any
 
 
@@ -556,6 +557,18 @@ def run_live_loop_tick_body(
         if hasattr(last_index, "isoformat")
         else last_index
     )
+    try:
+        runtime.retry_pending_open(
+            bridge=bridge,
+            frame=frame,
+            last_bar=frame.iloc[-1],
+            broker=broker,
+            tick=tick,
+            log=log,
+            stop_requested=stop_requested,
+        )
+    except Exception as exc:
+        log(f"tick {tick}: pending open retry failed safely: {exc}")
     if not plane.alpha_due(closed_bar_id=closed_bar_id):
         return _tick_result(
             recovery_bootstrapped=recovery_bootstrapped,

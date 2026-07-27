@@ -48,6 +48,7 @@ DEFAULT_FACTOR_ROLES = {
     "adx": "context",
     "atr_ratio": "context",
     "bb_width": "context",
+    "dxy_corr_20": "context",
     "keltner_width": "context",
     "hours_to_fomc": "gate",
     "hours_to_nfp": "gate",

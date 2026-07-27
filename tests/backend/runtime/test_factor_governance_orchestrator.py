@@ -1,5 +1,6 @@
 from dataclasses import replace
 from types import SimpleNamespace
+import time
 
 import backend.runtime.factor_governance_orchestrator as governance_module
 from backend.runtime.factor_governance_orchestrator import FactorGovernanceOrchestrator
@@ -188,6 +189,53 @@ def test_orchestrator_does_not_promote_shadow_without_evidence():
     assert orch._promote_shadow_candidates(catalog, {"run_id": "test-run"}) == []
 
 
+def test_v16_delegates_only_concrete_factor_expansion_preflight(tmp_path):
+    from backend.services.v16_brain_orchestrator import (
+        V16BrainOrchestratorService,
+    )
+
+    service = V16BrainOrchestratorService(db_path=tmp_path / "state.db")
+    missing = service.delegate_factor_governance_cycle(
+        {
+            "snapshot_id": "brain-1",
+            "expansion_preflight": {
+                "required": False,
+                "candidate_count": 0,
+            },
+        },
+        persist=False,
+    )
+    delegated = service.delegate_factor_governance_cycle(
+        {
+            "snapshot_id": "brain-1",
+            "health_cycle_id": "factor_health:1",
+            "expansion_preflight": {
+                "required": True,
+                "candidate_count": 1,
+                "reasons": {"shadow_promotion": ["shadow-alpha"]},
+            },
+        },
+        persist=False,
+    )
+
+    assert missing["status"] == "factor_expansion_evidence_not_ready"
+    assert delegated["status"] == "delegated"
+    command = delegated["command"]
+    assert command["decision"] == "delegate"
+    assert command["target_agent"] == "factor_governance"
+    assert command["action"] == "factor_governance_cycle"
+    assert command["evidence"]["expansion_preflight"]["candidate_count"] == 1
+
+
+def test_factor_governance_cycle_authorizes_shadow_enrollment_step():
+    from backend.services.v16_command_gate import V16CommandGate
+
+    assert V16CommandGate._action_matches(
+        {"action": "factor_governance_cycle"},
+        "register_shadow_factor",
+    )
+
+
 def test_run_cycle_executes_tightening_before_expansion_freeze(monkeypatch):
     import backend.services.evolution_ledger as evolution_ledger
 
@@ -240,6 +288,111 @@ def test_run_cycle_executes_tightening_before_expansion_freeze(monkeypatch):
         "quarantine",
         "retire",
     ]
+
+
+def test_run_cycle_does_not_claim_v16_without_expansion_work(monkeypatch):
+    import backend.services.evolution_ledger as evolution_ledger
+    import backend.services.v16_command_gate as v16_gate
+
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(
+        evolution_ledger,
+        "start_evolution_run",
+        lambda **_kwargs: {"run_id": "idle-no-expansion"},
+    )
+    finished = []
+    monkeypatch.setattr(
+        evolution_ledger,
+        "finish_evolution_run",
+        lambda *args, **kwargs: finished.append((args, kwargs)),
+    )
+    monkeypatch.setattr(governance_module, "build_factor_catalog", lambda: [])
+    monkeypatch.setattr(
+        governance_module,
+        "persist_factor_catalog_snapshot",
+        lambda *_args, **_kwargs: {"snapshot_id": "snapshot-idle"},
+    )
+    monkeypatch.setattr(orch, "_rollback_failed_actions", lambda *_args: [])
+    monkeypatch.setattr(orch, "_rollback_canary_regressions", lambda *_args: [])
+    monkeypatch.setattr(orch, "_downweight_weak_alpha", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(orch, "_disable_weak_live_alpha", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(orch, "_retire_quarantined_discovered", lambda *_args: [])
+    monkeypatch.setattr(orch, "_autonomy_posture", lambda: "ready")
+    monkeypatch.setattr(
+        governance_module.runtime_config,
+        "autonomy_expansion_freeze_applies",
+        lambda _cfg: False,
+    )
+    monkeypatch.setattr(
+        governance_module.RedundancyDetector,
+        "build_report",
+        lambda *_args, **_kwargs: {"group_count": 0, "groups": []},
+    )
+    monkeypatch.setattr(orch, "_apply_parameter_template_actions", lambda *_args: [])
+    monkeypatch.setattr(
+        v16_gate.V16CommandGate,
+        "authorize",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("idle cycle must not claim V16 authority")
+        ),
+    )
+
+    result = orch.run_cycle(trigger_source="pytest")
+
+    assert result["status"] == "idle_no_expansion_action"
+    assert result["reason"] == "no_factor_expansion_actionable"
+    assert result["expansion_preflight"]["required"] is False
+    assert finished[-1][1]["status"] == "completed"
+
+
+def test_expansion_preflight_finds_fresh_builtin_activation(monkeypatch):
+    rc.reset_for_tests()
+    rc.patch(
+        {
+            "factor_signal_config": {
+                "fresh_shadow": {
+                    "enabled": True,
+                    "role": "alpha",
+                    "autonomous_activation": True,
+                }
+            },
+            "factor_portfolio_weights": {"fresh_shadow": 0.0},
+            "factor_governance_builtin_activation_weight": 0.1,
+        }
+    )
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    profile = replace(
+        _strict_profile(orch),
+        builtin_activation_min_health_score=60.0,
+        builtin_activation_min_n_obs=500,
+        health_max_age_seconds=300.0,
+    )
+
+    result = orch._expansion_preflight(
+        [
+            {
+                "factor_id": "fresh_shadow",
+                "source": "builtin",
+                "role": "alpha",
+                "enabled": True,
+                "lifecycle_status": "SHADOW",
+                "health_status": "HEALTHY",
+                "health_score": 80.0,
+                "health_n_obs": 2000,
+                "health_updated_at": time.time(),
+                "factor_governance_shadow": {},
+            }
+        ],
+        cfg=rc.shared(),
+        profile=profile,
+        redundancy_report={"group_count": 0, "groups": []},
+    )
+
+    assert result["required"] is True
+    assert result["reasons"]["builtin_activation"] == ["fresh_shadow"]
+
 
 def test_orchestrator_requires_active_canary_before_shadow_promotion():
     rc.reset_for_tests()

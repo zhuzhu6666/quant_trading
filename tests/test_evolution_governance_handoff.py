@@ -13,9 +13,31 @@ def test_health_commit_immediately_hands_off_to_factor_governance(monkeypatch):
     )
     calls = []
 
+    import backend.services.autonomous_evolution_runner as nursery
+    import backend.services.v16_brain_orchestrator as v16
+
+    monkeypatch.setattr(
+        nursery.AutonomousEvolutionNurseryRunner,
+        "build_light_readiness",
+        lambda _self: {"schema_version": "test.readiness.v1"},
+    )
+    monkeypatch.setattr(
+        v16.V16BrainOrchestratorService,
+        "run_once",
+        lambda _self, **kwargs: (
+            calls.append(("v16", kwargs["source"]))
+            or {
+                "status": "delegated",
+                "snapshot_id": "brain-1",
+                "delegated_count": 1,
+                "command_count": 1,
+            }
+        ),
+    )
+
     class _Governance:
-        def run_cycle(self, *, trigger_source):
-            calls.append(trigger_source)
+        def run_cycle(self, *, trigger_source, v16_handoff):
+            calls.append(("governance", trigger_source, v16_handoff))
             return {"status": "ok"}
 
     import backend.runtime.factor_governance_orchestrator as governance
@@ -30,8 +52,30 @@ def test_health_commit_immediately_hands_off_to_factor_governance(monkeypatch):
     result = evolution.scheduled_evolution_with_governance_handoff()
 
     assert calls == [
-        "factor_health_handoff:factor_health:100000"
+        (
+            "v16",
+            "system:factor_health_handoff.v16:factor_health:100000",
+        ),
+        (
+            "governance",
+            "factor_health_handoff:factor_health:100000",
+            {
+                "status": "delegated",
+                "health_cycle_id": "factor_health:100000",
+                "snapshot_id": "brain-1",
+                "delegated_count": 1,
+                "command_count": 1,
+                "posterior_fingerprint": "",
+            },
+        ),
     ]
+    assert result.factor_v16_handoff == {
+        "status": "delegated",
+        "health_cycle_id": "factor_health:100000",
+        "snapshot_id": "brain-1",
+        "delegated_count": 1,
+        "command_count": 1,
+    }
     assert result.factor_governance_handoff == {
         "status": "ok",
         "health_cycle_id": "factor_health:100000",

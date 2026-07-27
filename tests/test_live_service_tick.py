@@ -405,6 +405,13 @@ def test_entry_protection_repair_preserves_existing_sl_when_restoring_tp(monkeyp
             )
 
     updates = []
+    monkeypatch.setattr(
+        live_service,
+        "_publish_fresh_position_reconcile",
+        lambda result, *, broker: [
+            dict(item) for item in (getattr(result, "positions", ()) or ())
+        ],
+    )
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
     monkeypatch.setattr(
         live_service,

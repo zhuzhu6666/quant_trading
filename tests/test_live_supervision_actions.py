@@ -2,6 +2,9 @@ import time
 from types import SimpleNamespace
 
 from backend.services.live_risk_sizing import floor_api_volume_to_step
+from backend.services.live_position_lifecycle import (
+    build_supervisor_tighten_result_payloads,
+)
 from backend.services.live_supervision_actions import (
     execute_supervisor_close_action,
     execute_supervisor_reduce_action,
@@ -803,3 +806,90 @@ def test_tighten_accepted_rpc_requires_matching_fresh_broker_projection():
     assert calls["logs"][-1].endswith(
         "supervisor tighten UNVERIFIED pos=74: amend_projection_unverified:stop_loss_mismatch"
     )
+
+
+def test_tighten_accepted_rpc_with_fresh_position_absence_records_closed():
+    calls = {
+        "tracked": [],
+        "events": [],
+        "traces": [],
+        "state": [],
+        "reentry": [],
+        "fail_closed": [],
+        "aux": [],
+        "logs": [],
+        "published": [],
+    }
+
+    class _Bridge:
+        is_connected = True
+
+        def get_spot_quote(self):
+            return {"mid": 4096.96}
+
+        def amend_position_sltp(self, pid, *, sl, tp):
+            calls["amend"] = (pid, sl, tp)
+            return SimpleNamespace(success=True)
+
+        def reconcile_positions(self, *, force, allow_cache_fallback):
+            return SimpleNamespace(
+                status="fresh",
+                observed_at=time.time(),
+                reconcile_id="reconcile-closed-75",
+                positions=(),
+            )
+
+    def _plan(**_kwargs):
+        return {
+            "target_sl": 4097.11,
+            "current_tp": 4087.16,
+            "target_tp": 4087.16,
+            "planned_tp": 4087.16,
+            "planned_sl": 4097.29,
+            "sl_plan": {"allowed": True},
+        }
+
+    execute_supervisor_tighten_action(
+        bridge=_Bridge(),
+        position={"position_id": 75, "current_price": 4097.13, "digits": 2},
+        verdict={"summary_reason": "thesis_weakening"},
+        risk_action="tighten_position",
+        risk_verdict={"allowed": True, "reason": "risk_reducing_action"},
+        decision_id="decision-tighten-closed",
+        cfg=SimpleNamespace(),
+        tick=12,
+        acct=None,
+        controls={
+            "target_stop_loss": 4097.11,
+            "target_take_profit": 4087.16,
+        },
+        log=calls["logs"].append,
+        build_tighten_execution_plan=_plan,
+        build_tighten_result_payloads=build_supervisor_tighten_result_payloads,
+        log_supervisor_position_event=lambda **kwargs: calls["events"].append(kwargs),
+        log_supervisor_trace=lambda **kwargs: calls["traces"].append(kwargs),
+        remember_supervisor_state=lambda *args, **kwargs: calls["state"].append((args, kwargs)),
+        remember_supervisor_reentry_block=lambda **kwargs: calls["reentry"].append(kwargs),
+        track_local_sl_tp=lambda *args, **kwargs: calls["tracked"].append((args, kwargs)),
+        result_is_position_not_found=lambda _result: False,
+        retire_broker_missing_position=lambda *_args, **_kwargs: None,
+        record_aux_failure=lambda event_type, **kwargs: calls["aux"].append((event_type, kwargs)),
+        persist_safety_fail_closed=lambda **kwargs: calls["fail_closed"].append(kwargs),
+        publish_fresh_positions=lambda projection: calls["published"].append(projection),
+    )
+
+    assert calls["amend"] == (75, 4097.29, 4087.16)
+    assert calls["tracked"] == []
+    assert calls["fail_closed"] == []
+    assert calls["aux"] == []
+    assert len(calls["published"]) == 1
+    assert calls["events"][0]["event_type"] == "tightened_then_closed"
+    assert calls["traces"][0]["execution_status"] == "applied"
+    assert (
+        calls["traces"][0]["execution_reason"]
+        == "amend_accepted_position_closed"
+    )
+    assert calls["traces"][0]["execution"]["position_closed_after_amend"] is True
+    assert calls["state"][0][1]["action_applied"] == "tighten"
+    assert calls["reentry"][0]["action"] == "tighten"
+    assert calls["logs"][-1].endswith("position_closed_after_amend")

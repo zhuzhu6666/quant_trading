@@ -20,8 +20,9 @@
 
 - 状态：`migrating`
 - canonical：`factor_lifecycle_state` + `factor_runtime_projection`；ACTIVE 必须经 typed Coordinator/V16、稳定 artifact、fresh health 和 loaded ack。
-- 剩余：coordinator-off generic rollback/restore 兼容。
-- 退出：稳定发布后删除 generic restore，Registry/RuntimeConfig 只保留 committed projection。
+- 当前：Catalog 已以 lifecycle row 覆盖 Registry/RuntimeConfig stage/admission，审计和 canary 名称不再独立创建目录条目；coordinator projection 已改用稳定身份并在 backend 恢复时删除同 factor 历史 PID 行。
+- 剩余：切入 typed lifecycle 前已存在的 native ACTIVE builtin 尚无 lifecycle row，Catalog 对这组代码内置因子保留 Registry/RuntimeConfig 兼容；coordinator-off generic rollback/restore 兼容仍在。
+- 退出：现有 ACTIVE builtin 按 code-bound identity、V16、prepared、真实 loaded ack 和 fresh health 分批重入 lifecycle 后删除 builtin fallback；稳定 enforce 发布后删除 generic restore。不得用直接数据库回填 ACTIVE 绕过晋升证据。
 
 ### 历史 runtime overlay 缺少 committed mutation 绑定
 
@@ -64,15 +65,15 @@
 ### live generation / Safety shadow 兼容
 
 - 状态：`migrating`
-- canonical：旧线程真实退出前保留 ownership；每 tick 先 reconcile/safety 后 alpha；Safety v2 与独立 legacy preview 比较。
+- canonical：旧线程真实退出前保留 ownership；每 tick 先 reconcile/safety 后 alpha；Safety v2 与独立 legacy preview 比较。已通过门的同一 closed bar 仅在 watchdog 自有 freshness cause 短暂锁存时由现有 serial owner 保留一次内存 admission retry，下一轮 canonical safety/reconcile 后复用原 open pipeline；bar 推进或出现其他 cause 立即丢弃，不新增执行通道。
 - 当前：Safety 为 shadow，尚未满足完整持仓生命周期或 24 小时无仓观察；Generation 开关不变。
 - 退出：观察与故障矩阵通过、受控发布稳定后删除 loop globals、旧 safety 尾部执行和并发 refresh 兼容。
 
 ### live_service 领域重力
 
 - 状态：`migrating`
-- canonical 模块：reconciliation、serial loop、emergency、position protection、open submission/protection/processing、execution recovery 已分离。
-- 剩余：`live_service` 仍保留 process wiring、兼容状态发布和少量 lifecycle wiring。
+- canonical 模块：reconciliation、serial loop、emergency、position protection、open submission/protection/processing、execution recovery 已分离；fresh position reconcile 是既有 `recovery_position_state.recovery_meta.position_path` 的唯一 live 累计写入边界，event/API 投影不写入。
+- 剩余：`live_service` 仍保留 process wiring、兼容状态发布和少量 lifecycle wiring；仓位路径持久化失败必须显式降级为 unknown，不得把单次观测伪装成累计 MFE/MAE。
 - 退出：只迁出真实决策/状态机；不为“拆文件”新增 wrapper。稳定发布后删除旧 globals 和 compatibility authority。
 
 ## 3. 治理、研究与客户端

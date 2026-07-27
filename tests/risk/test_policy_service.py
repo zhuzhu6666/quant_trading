@@ -232,8 +232,50 @@ def test_open_trade_blocks_cvar_threshold_from_risk_limits():
     )
 
     assert verdict.allowed is False
-    assert verdict.reason == "cvar_gate: CVaR=2.4% > 2.0%"
+    assert verdict.reason == "cvar_gate: CVaR=2.4000% > 2.0000%"
     assert verdict.audit_payload["source"] == "cvar_gate"
+
+
+def test_open_trade_allows_recent_min_volume_cvar_below_adjusted_limit():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "risk_snapshot": _risk_snapshot(
+                {"status": "known", "var_pct": 1.5, "cvar_pct": 2.092075}
+            ),
+            "var": {"enabled": True},
+            "risk_limits": {
+                "var_threshold_pct": 10.0,
+                "cvar_threshold_pct": 2.5,
+            },
+        },
+    )
+
+    assert verdict.allowed is True
+    assert verdict.reason == "ok"
+
+
+def test_open_trade_keeps_cvar_hard_limit_above_adjusted_limit():
+    service = _service()
+
+    verdict = service.evaluate(
+        "open_trade",
+        {
+            "risk_snapshot": _risk_snapshot(
+                {"status": "known", "var_pct": 1.5, "cvar_pct": 2.5001}
+            ),
+            "var": {"enabled": True},
+            "risk_limits": {
+                "var_threshold_pct": 10.0,
+                "cvar_threshold_pct": 2.5,
+            },
+        },
+    )
+
+    assert verdict.allowed is False
+    assert verdict.reason == "cvar_gate: CVaR=2.5001% > 2.5000%"
 
 
 def test_open_trade_demo_nursery_observes_var_cvar_and_allows():

@@ -326,6 +326,55 @@ def test_readiness_cannot_be_green_when_loop_or_safety_blocks_new_risk(monkeypat
     assert "safety_position_reconcile_not_fresh" in readiness["reasons"]
 
 
+def test_readiness_recovers_missed_bridge_edge_from_accepting_generation(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(live_service, "_phase2_v2_active", lambda: True)
+    monkeypatch.setattr(live_service, "_probe_ctrader", lambda: ("connected", None))
+    monkeypatch.setattr(
+        live_service,
+        "loop_status",
+        lambda: {
+            "running": True,
+            "phase": "running",
+            "ready": True,
+            "accepting_new_risk": True,
+            "blockers": [],
+            "safety_heartbeat_age_sec": 1.0,
+            "safety": {
+                "reconciliation_state": "fresh",
+                "blockers": [],
+                "unknown_execution_count": 0,
+                "accepting_new_risk": True,
+            },
+        },
+    )
+    live_service._live_state_update(
+        _diag={"bridge_ready": False},
+        account_reconciled={"ok": True, "broker": "ctrader", "balance": 1000.0},
+        account_updated_at=now,
+        account_reconcile_id="account-r1",
+        positions_reconciled=[],
+        positions_updated_at=now,
+        positions_reconcile_id="positions-r1",
+    )
+
+    readiness = live_service.get_live_readiness("ctrader")
+
+    assert readiness["ok"] is True
+    assert readiness["bridge_ready"] is True
+    assert "bridge_not_ready" not in readiness["reasons"]
+
+    monkeypatch.setattr(
+        live_service,
+        "_probe_ctrader",
+        lambda: ("disconnected", "socket_closed"),
+    )
+    disconnected = live_service.get_live_readiness("ctrader")
+    assert disconnected["ok"] is False
+    assert disconnected["bridge_ready"] is False
+    assert "bridge_not_ready" in disconnected["reasons"]
+
+
 def test_http_reads_do_not_rejuvenate_non_fresh_broker_cache(monkeypatch):
     from backend.services.api_fact_views import account_fact_payload, positions_fact_payload
 

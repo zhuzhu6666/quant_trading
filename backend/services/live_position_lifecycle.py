@@ -1945,13 +1945,18 @@ def build_position_path_metrics_result(
     entry_regime: str,
     current_regime: str,
     entry_ts_source: str,
+    original_stop_loss: float = 0.0,
+    original_take_profit: float = 0.0,
 ) -> dict[str, Any]:
     return {
         **metrics,
+        "position_path_metrics_state": "known",
         "time_in_profit": round(float(metrics["time_in_profit_seconds"]), 6),
         "entry_regime": str(entry_regime or ""),
         "current_regime": str(current_regime or ""),
         "entry_ts_source": str(entry_ts_source or ""),
+        "original_stop_loss": round(float(original_stop_loss or 0.0), 6),
+        "original_take_profit": round(float(original_take_profit or 0.0), 6),
     }
 
 
@@ -1985,6 +1990,7 @@ def build_position_path_metrics_update(
 ) -> dict[str, Any]:
     meta = dict(recovery_meta or {})
     entry_regime = str(meta.get("entry_regime") or "")
+    entry_protection_plan = dict(meta.get("entry_protection_plan") or {})
     next_state, metrics = update_position_path_metrics_fn(
         previous_state=normalize_path_state_fn(meta.get("position_path")),
         current_pnl=float(current_pnl or 0.0),
@@ -1999,6 +2005,12 @@ def build_position_path_metrics_update(
         entry_regime=entry_regime,
         current_regime=str(current_regime or ""),
         entry_ts_source=str((entry_context or {}).get("source") or ""),
+        original_stop_loss=float(
+            entry_protection_plan.get("target_stop_loss") or 0.0
+        ),
+        original_take_profit=float(
+            entry_protection_plan.get("target_take_profit") or 0.0
+        ),
     )
     next_meta = build_position_path_recovery_meta(
         recovery_meta=meta,
@@ -3185,11 +3197,17 @@ def build_supervisor_tighten_result_payloads(
                 "execution": {"sl_plan": sl_plan or {}, "applied_controls": controls or {}},
             },
         }
-    if result == "applied":
+    if result in {"applied", "applied_position_closed"}:
+        position_closed_after_amend = result == "applied_position_closed"
         return {
-            "position_event_type": "tightened",
+            "position_event_type": (
+                "tightened_then_closed"
+                if position_closed_after_amend
+                else "tightened"
+            ),
             "position_event_details": {
                 **base_details,
+                "position_closed_after_amend": position_closed_after_amend,
                 "applied_controls": {
                     **(controls or {}),
                     "target_stop_loss_original": target_sl,
@@ -3206,11 +3224,16 @@ def build_supervisor_tighten_result_payloads(
                 "risk_action": risk_action,
                 "risk_verdict": risk_payload,
                 "execution_status": "applied",
-                "execution_reason": "amend_position_sltp_success",
+                "execution_reason": (
+                    "amend_accepted_position_closed"
+                    if position_closed_after_amend
+                    else "amend_position_sltp_success"
+                ),
                 "execution": {
                     "target_stop_loss_sent": planned_sl,
                     "target_take_profit_sent": planned_tp,
                     "target_take_profit_changed": planned_tp != current_tp,
+                    "position_closed_after_amend": position_closed_after_amend,
                     "sl_plan": sl_plan or {},
                     "applied_controls": controls or {},
                 },

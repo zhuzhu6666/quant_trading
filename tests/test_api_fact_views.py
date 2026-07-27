@@ -417,6 +417,32 @@ def test_policy_verdicts_empty_query_is_a_known_empty_fact():
     assert payload["_fact"]["state"] == "known"
 
 
+def test_policy_verdicts_old_events_do_not_make_current_query_stale():
+    payload = policy_verdicts_fact_payload(
+        {
+            "limit": 50,
+            "total": 1,
+            "items": [{"decision_id": "dec_old", "decision_ts": 1.0}],
+        },
+        now=100.0,
+    )
+
+    assert payload["items"][0]["decision_ts"] == 1.0
+    assert payload["_fact"]["observed_at"] == 100.0
+    assert payload["_fact"]["generated_at"] == 100.0
+    assert payload["_fact"]["state"] == "known"
+
+
+def test_policy_verdicts_failed_query_remains_error():
+    payload = policy_verdicts_fact_payload(
+        {"ok": False, "error": "state_pg_unavailable", "items": []},
+        now=100.0,
+    )
+
+    assert payload["_fact"]["state"] == "error"
+    assert payload["_fact"]["reason_code"] == "source_error"
+
+
 def test_risk_summary_without_health_observation_is_unknown_not_green():
     payload = risk_summary_fact_payload(
         {"var": {"status": "ok"}, "system_health": {"overall": "unknown"}},

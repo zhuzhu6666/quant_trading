@@ -58,7 +58,7 @@ def test_position_without_broker_identity_has_no_path_metrics():
     ) == {}
 
 
-def test_path_metrics_persistence_failure_is_enrichment_only():
+def test_path_metrics_persistence_failure_marks_cumulative_state_unknown():
     failures = []
 
     def unavailable(*_args, **_kwargs):
@@ -73,7 +73,12 @@ def test_path_metrics_persistence_failure_is_enrichment_only():
         strategy_name="factor_v4",
     )
 
-    assert result == {"mfe": 42.0, "holding_seconds": 120.0}
+    assert result == {
+        "mfe": 42.0,
+        "holding_seconds": 120.0,
+        "position_path_metrics_state": "unknown",
+        "position_path_metrics_reason_code": "position_path_persist_failed",
+    }
     assert failures[0][0] == ("risk_reduction_state_persist_failed",)
     assert failures[0][1]["position_id"] == 7
     assert failures[0][1]["action"] == "position_path_metrics"

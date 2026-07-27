@@ -31,7 +31,11 @@ VALID_RUNTIME_INCIDENT_MODES = frozenset(
     {"normal", "shadow_only", "no_new_risk", "only_close", "frozen"}
 )
 OPERATOR_BOUNDED_DEMO_CONTROL_KEYS = frozenset(
-    {"governance_expansion_paused", "runtime_incident_mode"}
+    {
+        "governance_expansion_paused",
+        "risk_cvar_threshold_pct",
+        "runtime_incident_mode",
+    }
 )
 
 
@@ -79,16 +83,30 @@ def operator_bounded_demo_control_exempt(
     """Allow explicit operator control changes in the bounded Demo sandbox.
 
     This exemption is deliberately narrow: it does not apply to autonomous
-    actors, live accounts, trading parameters, or static release flags.
+    actors, live accounts, trading parameters other than the canonical CVaR
+    admission limit, or static release flags.
     """
 
-    keys = set(dict(patch or {}))
-    return bool(
+    payload = dict(patch or {})
+    keys = set(payload)
+    if not (
         str(actor or "").startswith("operator:")
         and keys
         and keys <= OPERATOR_BOUNDED_DEMO_CONTROL_KEYS
         and bounded_demo_mode_active(cfg)
-    )
+    ):
+        return False
+    if keys == {"risk_cvar_threshold_pct"}:
+        value = payload["risk_cvar_threshold_pct"]
+        if isinstance(value, bool):
+            return False
+        try:
+            cvar_limit = float(value)
+            var_limit = float(getattr(cfg, "risk_var_threshold_pct", 0.0))
+        except (TypeError, ValueError):
+            return False
+        return 0.0 < cvar_limit <= var_limit
+    return "risk_cvar_threshold_pct" not in keys
 
 
 def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
@@ -325,8 +343,8 @@ class RuntimeConfig:
                                         "tags": ["Fibonacci", "反弹确认", "反转"]},
 
         # 模式 B: rank_mapping（宏观/持仓/COT 因子）
-        "dxy_corr_20":             {"mode": "rank_mapping", "window": 100, "min_samples": 30, "direction": -1, "tags": ["宏观", "美元"]},
-        "slv_gld_ratio":           {"mode": "rank_mapping", "window": 100, "min_samples": 30, "direction": 1,  "tags": ["宏观", "金银比"]},
+        "dxy_corr_20":             {"mode": "rank_mapping", "window": 100, "min_samples": 30, "direction": 1, "role": "context", "tags": ["宏观", "美元", "相关性"]},
+        "slv_gld_ratio":           {"mode": "rank_mapping", "window": 100, "min_samples": 30, "direction": -1, "tags": ["宏观", "金银比"]},
         "real_yield_chg":          {"mode": "rank_mapping", "window": 100, "min_samples": 30, "direction": -1, "tags": ["宏观", "利率"]},
         "real_yield_pct_rank":     {"mode": "rank_mapping", "window": 100, "min_samples": 30, "direction": -1, "tags": ["宏观", "利率"]},
         "gld_tonnes_chg_5d":       {"mode": "rank_mapping", "window": 100, "min_samples": 30, "direction": 1,  "tags": ["持仓", "黄金"]},
@@ -389,7 +407,7 @@ class RuntimeConfig:
         "fib_rejection_confirmation": 0.0,
 
         # 宏观因子（Macro Layer）
-        "dxy_corr_20":             0.8,
+        "dxy_corr_20":             0.0,   # correlation regime only; not directional DXY alpha
         "slv_gld_ratio":            0.5,
         "real_yield_chg":           0.5,
         "real_yield_pct_rank":      0.5,

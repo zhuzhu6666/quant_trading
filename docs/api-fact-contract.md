@@ -68,7 +68,7 @@
 | `GET /api/live/realized-pnl-series` | `live.realized-pnl.v2` |
 | WebSocket state snapshot | `live.state.v2`，components 含 account/positions/loop/spot |
 | `GET /api/risk/summary` | `risk.summary.v2`，components 含 `system.runtime-health.v1` 和 `risk.inputs.v1` |
-| `GET /api/risk/policy/verdicts` | `risk.policy-verdicts.v2` |
+| `GET /api/risk/policy/verdicts` | `risk.policy-verdicts.v2`；成功 PostgreSQL 查询的 `observed_at` 是本次读取时间，item `decision_ts` 只表示事件发生时间，历史长期无新事件不得使当前列表变 stale |
 | `GET /api/risk/trade-trace/recent` | `risk.trade-trace-recent.v2` |
 | `GET /api/sync/status` | `ops.sync-status.v2` |
 | `GET /api/ctrader/token-status` | `ops.ctrader-token-status.v2` |
@@ -83,7 +83,7 @@
 
 account/positions 的 `observed_at` 与 reconcile ID 必须来自显式 fresh broker RPC；HTTP 读取和 cTrader push event 都不得刷新。push event 只进入 `event_projection` 子事实，供兼容展示和诊断，不能满足 startup、safety 或新增风险 admission。
 
-live loop 的串行 broker owner 在空仓时也必须每 5 秒醒来完成 freshness 所需的显式对账，给两次 RPC 和调度抖动预留空间，避免健康账户跨过 15 秒 account/positions 门槛。Web 端全应用只保留一个 `/ws/state` 连接；页面切换不得重建连接，WS/HTTP fallback 按 `_fact.generated_at` 单调合并，旧轮询响应不得覆盖更新的 WS 快照。短暂传输重连只改变 transport 状态，不得把已经保留的业务事实改写为 unknown。
+live loop 的串行 broker owner 在空仓时也必须每 5 秒醒来完成 freshness 所需的显式对账，给两次 RPC 和调度抖动预留空间，避免健康账户跨过 15 秒 account/positions 门槛。Web 端全应用只保留一个 `/ws/state` 连接；页面切换不得重建连接，WS/HTTP fallback 按 `_fact.generated_at` 单调合并，旧轮询响应不得覆盖更新的 WS 快照。WS 在线时 account/positions/loop/live-status 的 HTTP 端点每 10 秒做一次权威校验，断线时恢复 3 秒 fallback；两档周期都必须短于 15 秒 freshness。短暂传输重连只改变 transport 状态，不得把已经保留的业务事实改写为 unknown。
 
 cTrader bridge 的报价快照固定携带 `source=ctrader_spot`。有来源但超过 5 秒的最后报价必须表现为 stale 并保留数值与时间；只有从未收到报价或来源不可用时才是 unknown。
 

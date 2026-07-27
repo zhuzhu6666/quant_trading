@@ -93,11 +93,24 @@ def test_bounded_demo_mode_resolution_is_pure_and_no_arg_read_does_not_refresh(
 
 def test_operator_bounded_demo_control_exemption_is_narrow(monkeypatch) -> None:
     monkeypatch.setattr(rc, "bounded_demo_mode_active", lambda _cfg: True)
-    cfg = rc.RuntimeConfig(autonomy_mode="demo_autonomous")
+    cfg = rc.RuntimeConfig(
+        autonomy_mode="demo_autonomous",
+        risk_var_threshold_pct=10.0,
+    )
 
     assert rc.operator_bounded_demo_control_exempt(
         actor="operator:pytest",
         patch={"runtime_incident_mode": "normal"},
+        cfg=cfg,
+    )
+    assert rc.operator_bounded_demo_control_exempt(
+        actor="operator:pytest",
+        patch={"risk_cvar_threshold_pct": 2.5},
+        cfg=cfg,
+    )
+    assert not rc.operator_bounded_demo_control_exempt(
+        actor="operator:pytest",
+        patch={"risk_cvar_threshold_pct": 11.0},
         cfg=cfg,
     )
     assert not rc.operator_bounded_demo_control_exempt(
@@ -172,6 +185,14 @@ def test_from_yaml_uses_defaults_for_missing_keys() -> None:
     assert cfg.kelly_risk_per_trade_pct == 0.06
     assert cfg.kelly_min_closed_trades == 20
     assert cfg.kelly_canary_max_api_volume == 100.0
+
+
+def test_macro_factor_defaults_preserve_directional_semantics() -> None:
+    cfg = rc.RuntimeConfig.from_yaml({})
+
+    assert cfg.factor_signal_config["dxy_corr_20"]["role"] == "context"
+    assert cfg.factor_portfolio_weights["dxy_corr_20"] == 0.0
+    assert cfg.factor_signal_config["slv_gld_ratio"]["direction"] == -1
 
 
 def test_unknown_keys_go_to_extra() -> None:

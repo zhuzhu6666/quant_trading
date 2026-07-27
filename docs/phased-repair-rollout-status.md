@@ -184,6 +184,54 @@ P3 完成。
 P4 完成。后续只保留 P1 真实成交/完整生命周期验收、Safety shadow 运行证据和 P6 Demo
 观察，不再继续扩展 V16 调度层。
 
+2026-07-27 CVaR 最小仓位死锁修复：
+
+- canonical authority 仍是 `RiskPolicyService`，阈值输入仍只来自
+  `RiskLimitSnapshot <- RuntimeConfig`；
+- 当日启用 candidate-forward CVaR 证据后的三笔最小仓位候选全部被旧 `2.0%` 上限
+  拦截，精确值为 `2.007110%`、`2.009619%`、`2.092075%`，证明当前权益和 broker
+  最小 volume 组合下存在交易停摆；
+- 经 existing Governance Mutation Coordinator 提交
+  `gmut_fcf9e7cc545e41ca9ba7b90e568a764e`，以 committed/current runtime overlay
+  将 CVaR 开仓硬上限校准为 `2.5%`；该有界 Demo operator 入口不适用于 system actor
+  或 live 账户。新上限足以覆盖近期最高候选，同时
+  `2.5001%` 仍被硬拦截；未新增 service、gate、table、thread、计算者或旁路；
+- reason 展示改为四位小数，消除 `2.0% > 2.0%` 的舍入歧义；
+- policy/runtime/config/governance/live readiness 针对性验证 `209 passed`；
+- backend 与 learning worker 受控重启后均 active，overlay hash
+  `7bd980479adfd9f0e2c16390e6a1472a8ded5dc10d73ecf212b34b65dd62a619`
+  在两进程恢复成功，effective CVaR limit 为 `2.5%`；启动期 safety freshness latch
+  在 fresh reconcile 确认 intent 表为空、broker 无持仓后自动释放，未手工旁路。
+
+2026-07-27 因子治理闭环收敛：
+
+- canonical authority 保持为 `factor_lifecycle_state`、`governance_mutation_intent`、
+  `V16CommandGate` 和现有 `FactorGovernanceOrchestrator`，未新增 service、table、
+  scheduler、thread、阈值或 readiness verdict；
+- hourly evolution handoff 改为同一 coordinator 内
+  `factor_health -> V16 decision -> factor governance`，消除 300 秒 health freshness
+  与错位 cron 无交集的问题；V16 失败仍只阻断扩张，不阻断收紧；
+- Factor Governance 在领取 V16 前先生成 expansion preflight，没有 builtin
+  activation/restore、shadow promotion 或 redundancy mutation 时返回
+  `idle_no_expansion_action`，不再把 idle 周期写成 `blocked_by_v16_command`；
+- 同周期 V16 对 concrete preflight 签发 evidence-bound
+  `factor_governance_cycle` 单次委托；builtin 首次 `register_shadow_factor` 复用同一动作族，
+  DSL promotion 直接读取 canonical lifecycle expression。每周期最多提交一个 lifecycle
+  mutation；有提交时命令 `finalized/apply_count=1`，无提交时取消，不能跨周期复用；
+- Catalog 删除 audit/canary 名称作为独立因子来源，运行只读目录由 5,380 条收敛为
+  首次 clean snapshot 729 条；后续 health/lifecycle 产生的 canonical 条目可正常增长，
+  2026-07-27 最终运行快照为 758 条。存在 lifecycle row 时其 stage/admission 覆盖进程
+  Registry 和 RuntimeConfig，committed mutation 覆盖旧 suggestion 展示状态；
+- `governance_coordinator` projection 改用稳定
+  `factor_lifecycle_service/canonical` identity；backend committed-registry 恢复按 factor
+  删除 5,542 条旧 PID 投影；最终仅保留稳定 identity 的 131 条当前投影，旧 projection
+  是可重建运行事实，canonical lifecycle/mutation 审计未删除；
+- 运行闭环实测：DSL `dxy` 候选进入 `PROMOTION_PREPARED`；下一周期仅
+  `wick_rejection` 完成 `shadow_registered`，对应 V16 command
+  `finalized/apply_count=1/max_apply_count=1`，同周期未执行第二个扩张 mutation；
+- 因子治理、lifecycle、catalog、recovery 和 cards 针对性验证 `115 passed`；另有
+  V16/Coordinator 交接回归集 `46 passed`。
+
 ## 5. 仍需真实运行证明
 
 以下不能由测试替代：

@@ -28,6 +28,18 @@ type LiveStateValue = {
 
 const LiveStateContext = createContext<LiveStateValue | null>(null);
 
+export const LIVE_HTTP_POLL_INTERVAL_MS = {
+  snapshotFallback: 4_000,
+  endpointFallback: 3_000,
+  endpointVerification: 10_000,
+} as const;
+
+export function liveEndpointPollInterval(connected: boolean): number {
+  return connected
+    ? LIVE_HTTP_POLL_INTERVAL_MS.endpointVerification
+    : LIVE_HTTP_POLL_INTERVAL_MS.endpointFallback;
+}
+
 function epochSeconds(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value > 1e12 ? value / 1000 : value;
@@ -56,7 +68,10 @@ export function shouldApplyLiveSnapshot(
   return currentSequence <= 0 || incomingSequence <= 0 || incomingSequence >= currentSequence;
 }
 
-function useLiveStateConnection({ enabled, pollIntervalMs = 4000 }: LiveStateHookOptions): LiveStateValue {
+function useLiveStateConnection({
+  enabled,
+  pollIntervalMs = LIVE_HTTP_POLL_INTERVAL_MS.snapshotFallback,
+}: LiveStateHookOptions): LiveStateValue {
   const [snapshot, setSnapshot] = useState<StateSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [source, setSource] = useState<SourceType>("offline");
@@ -285,7 +300,7 @@ function useLiveStateConnection({ enabled, pollIntervalMs = 4000 }: LiveStateHoo
 
 export function LiveStateProvider({
   enabled,
-  pollIntervalMs = 4000,
+  pollIntervalMs = LIVE_HTTP_POLL_INTERVAL_MS.snapshotFallback,
   children,
 }: LiveStateHookOptions & { children: ReactNode }) {
   const value = useLiveStateConnection({ enabled, pollIntervalMs });

@@ -126,8 +126,9 @@ def test_position_supervisor_default_template_delays_thesis_break_until_complete
         }
     )
 
-    assert verdict["action"] == "tighten"
-    assert verdict["summary_reason"] == "thesis_weakening"
+    assert verdict["action"] == "hold"
+    assert verdict["summary_reason"] == "thesis_break_unconfirmed"
+    assert "thesis_broken_unconfirmed" in verdict["evidence"]["trigger_tags"]
     assert verdict["supervisor_template"]["template_version"] == "default.v1"
 
 
@@ -154,8 +155,8 @@ def test_position_supervisor_conservative_template_delays_early_thesis_broken_cl
         }
     )
 
-    assert verdict["action"] == "tighten"
-    assert verdict["summary_reason"] == "thesis_weakening"
+    assert verdict["action"] == "hold"
+    assert verdict["summary_reason"] == "thesis_break_unconfirmed"
     assert "thesis_broken_delayed" in verdict["evidence"]["trigger_tags"]
     assert verdict["supervisor_template"]["template_version"] == "conservative.v1"
 
@@ -186,8 +187,8 @@ def test_profit_protection_template_delays_young_thesis_broken_full_exit():
         }
     )
 
-    assert verdict["action"] == "tighten"
-    assert verdict["summary_reason"] == "thesis_weakening"
+    assert verdict["action"] == "hold"
+    assert verdict["summary_reason"] == "thesis_break_unconfirmed"
     assert "thesis_broken_delayed" in verdict["evidence"]["trigger_tags"]
     assert verdict["supervisor_template"]["thresholds"]["min_thesis_break_seconds"] == 300.0
 
@@ -219,8 +220,8 @@ def test_profit_protection_template_requires_two_independent_evidence_families()
         }
     )
 
-    assert verdict["action"] == "tighten"
-    assert verdict["summary_reason"] == "thesis_weakening"
+    assert verdict["action"] == "hold"
+    assert verdict["summary_reason"] == "thesis_break_unconfirmed"
     assert verdict["evidence"]["thesis_break_confirmed"] is False
     assert verdict["evidence"]["thesis_broken_confirmations"] == 2
 
@@ -357,6 +358,45 @@ def test_position_supervisor_preempts_when_near_stop_loss_and_weak():
     assert verdict["summary_reason"] == "near_stop_loss_preemptive_exit"
     assert "near_stop_loss" in verdict["evidence"]["trigger_tags"]
     assert verdict["evidence"]["stop_loss_progress"] >= 0.85
+
+
+def test_position_supervisor_does_not_self_trigger_from_tightened_stop():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "tightened-stop",
+                "direction": -1,
+                "entry_price": 4094.78,
+                "current_price": 4096.73,
+                "volume": 100.0,
+                "unrealized_pnl": -1.95,
+                "sl": 4097.07,
+                "tp": 4085.28,
+            },
+            "risk": {
+                "mfe": 0.0,
+                "mae": 2.68,
+                "holding_efficiency": 0.0,
+                "time_decay_score": 1.0,
+                "thesis_status": "broken",
+                "original_stop_loss": 4101.12,
+            },
+            "temporal_context": {
+                "decision_ts": time.time(),
+                "holding_seconds": 211.0,
+                "completed_bars_after_entry": 0,
+            },
+        }
+    )
+
+    assert verdict["action"] == "hold"
+    assert verdict["summary_reason"] == "thesis_break_unconfirmed"
+    assert verdict["evidence"]["current_stop_loss_progress"] >= 0.85
+    assert verdict["evidence"]["stop_loss_progress"] < 0.85
+    assert (
+        verdict["evidence"]["stop_loss_progress_source"]
+        == "original_entry_protection"
+    )
 
 
 def test_trade_trace_exposes_position_supervisor_events(monkeypatch, tmp_path):

@@ -26,7 +26,7 @@ import { MetricCard } from "@/components/Card";
 import { StatTile, numberTone, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import { useAuth } from "@/contexts/AuthContext";
-import { useLiveState } from "@/hooks/useLiveState";
+import { liveEndpointPollInterval, useLiveState } from "@/hooks/useLiveState";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 import {
   getAccount,
@@ -107,8 +107,10 @@ function blockerText(value: unknown): string {
   );
 }
 
-function useDashboardQueries() {
+function useDashboardQueries(connected: boolean) {
   const readiness = useBackendReadinessQuery();
+  const liveEndpointInterval = liveEndpointPollInterval(connected);
+  const liveEndpointStaleTime = Math.min(5_000, liveEndpointInterval / 2);
   return {
     health: useQuery({
       queryKey: queryKeys.health,
@@ -116,26 +118,26 @@ function useDashboardQueries() {
       // system.health.v2 expires after five seconds. Refresh with enough
       // headroom that the browser never oscillates between known and stale.
       refetchInterval: 3_000,
-      staleTime: 2_000,
+      staleTime: liveEndpointStaleTime,
       refetchOnWindowFocus: true,
     }),
     loop: useQuery({
       queryKey: queryKeys.loopStatus,
       queryFn: getLoopStatus,
-      refetchInterval: 3_000,
-      staleTime: 2_000,
+      refetchInterval: liveEndpointInterval,
+      staleTime: liveEndpointStaleTime,
     }),
     account: useQuery({
       queryKey: queryKeys.account,
       queryFn: getAccount,
-      refetchInterval: 3_000,
+      refetchInterval: liveEndpointInterval,
       staleTime: 2_000,
     }),
     session: useQuery({
       queryKey: queryKeys.sessionStats,
       queryFn: getSessionStats,
-      refetchInterval: 3_000,
-      staleTime: 2_000,
+      refetchInterval: 10_000,
+      staleTime: 5_000,
     }),
     risk: useQuery({
       queryKey: queryKeys.riskSummary,
@@ -156,7 +158,7 @@ function useDashboardQueries() {
 export function OverviewPage() {
   const { authenticated } = useAuth();
   const { snapshot, source, connected, error: wsError } = useLiveState({ enabled: authenticated });
-  const queries = useDashboardQueries();
+  const queries = useDashboardQueries(connected);
 
   const snapshotRecord = asRecord(snapshot);
   const loop = asRecord(queries.loop.data);

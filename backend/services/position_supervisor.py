@@ -160,6 +160,10 @@ def humanize_supervisor_reason(action: str, reason: str, evidence: dict[str, Any
         return "这笔仓位已经超过持仓时长上限，系统建议主动收口，不再继续等待原始止盈止损。"
     if reason == "thesis_broken":
         return "仓位 thesis 已经被判定为失效，继续占用风险预算的价值很低，系统建议直接退出。"
+    if reason == "thesis_break_unconfirmed":
+        return "交易假设出现弱化迹象，但独立证据尚未确认失效，系统保留原始风险保护并继续观察。"
+    if reason == "thesis_break_pending_window":
+        return "交易假设已有失效证据，但最小观察窗口尚未完成，系统保留原始风险保护并继续观察。"
     if reason == "profit_giveback_after_mfe":
         return "仓位曾经浮盈明显，但已经出现较大回吐，系统建议先收紧保护，避免继续把已证明的利润吐回去。"
     if reason == "time_decay_and_low_efficiency":
@@ -225,6 +229,8 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     time_decay_score = _safe_float(risk.get("time_decay_score"))
     thesis_status = str(risk.get("thesis_status") or "intact")
     regime_shift = str(risk.get("regime_shift") or "none")
+    original_sl = _safe_float(risk.get("original_stop_loss"))
+    risk_boundary_sl = original_sl if original_sl > 0 else current_sl
 
     trigger_tags: list[str] = []
     action = "hold"
@@ -254,6 +260,13 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         target_kind="tp",
     ) if price_known else 0.0
     stop_loss_progress = _target_progress(
+        direction=direction,
+        entry_price=entry_price,
+        current_price=current_price,
+        target_price=risk_boundary_sl,
+        target_kind="sl",
+    ) if price_known else 0.0
+    current_stop_loss_progress = _target_progress(
         direction=direction,
         entry_price=entry_price,
         current_price=current_price,
@@ -369,39 +382,51 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         action = "close"
         summary_reason = "thesis_broken"
         severity = "error"
-    elif thesis_break_ready and not thesis_break_confirmed:
+    elif (
+        path_metrics_known
+        and pnl_known
+        and giveback_ratio >= giveback_reduce_threshold
+        and mfe > 0
+        and profit_capture_ratio <= profit_capture_min_threshold
+    ):
+        trigger_tags.append("profit_giveback_after_mfe")
+        action = "reduce"
+        summary_reason = "profit_giveback_after_mfe"
+        severity = "warn"
+    elif thesis_status in {"broken", "confirmed_broken"}:
         trigger_tags.append("thesis_broken_delayed")
-        trigger_tags.append("thesis_broken_unconfirmed")
-        action = "tighten"
-        summary_reason = "thesis_weakening"
+        if not thesis_break_confirmed:
+            trigger_tags.append("thesis_broken_unconfirmed")
+        if not thesis_break_ready:
+            trigger_tags.append("thesis_break_window_pending")
+        action = "hold"
+        summary_reason = (
+            "thesis_break_unconfirmed"
+            if not thesis_break_confirmed
+            else "thesis_break_pending_window"
+        )
         severity = "warn"
     elif regime_shift == "confirmed" and pnl_known and current_pnl <= 0:
         trigger_tags.append("regime_shift_detected")
         action = "close"
         summary_reason = "regime_shift_detected"
         severity = "warn"
-    elif path_metrics_known and pnl_known and giveback_ratio >= giveback_reduce_threshold and mfe > 0 and profit_capture_ratio <= profit_capture_min_threshold:
-        trigger_tags.append("profit_giveback_after_mfe")
-        action = "reduce"
-        summary_reason = "profit_giveback_after_mfe"
-        severity = "warn"
     elif path_metrics_known and (time_decay_score <= time_decay_reduce_threshold or (timeout_ratio >= timeout_reduce_ratio and holding_efficiency <= weakening_efficiency_threshold)):
         trigger_tags.append("time_decay_and_low_efficiency")
         action = "reduce" if current_pnl > 0 else "close"
         summary_reason = "time_decay_and_low_efficiency"
         severity = "warn"
-    elif (path_metrics_known and giveback_ratio >= giveback_tighten_threshold) or thesis_status in {"weakening", "broken"} or timeout_ratio >= timeout_tighten_ratio:
+    elif (
+        (path_metrics_known and giveback_ratio >= giveback_tighten_threshold)
+        or thesis_status == "weakening"
+        or timeout_ratio >= timeout_tighten_ratio
+    ):
         if path_metrics_known and giveback_ratio >= giveback_tighten_threshold:
             trigger_tags.append("profit_giveback_after_mfe")
             summary_reason = "profit_giveback_after_mfe"
         elif timeout_ratio >= timeout_tighten_ratio:
             trigger_tags.append("time_decay_and_low_efficiency")
             summary_reason = "time_decay_and_low_efficiency"
-        elif thesis_status == "broken":
-            trigger_tags.append("thesis_broken_delayed")
-            if thesis_break_ready and not thesis_break_confirmed:
-                trigger_tags.append("thesis_broken_unconfirmed")
-            summary_reason = "thesis_weakening"
         else:
             trigger_tags.append("thesis_weakening")
             summary_reason = "thesis_weakening"
@@ -492,6 +517,11 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "distance_to_tp": _safe_float(market_space.get("distance_to_tp")),
         "take_profit_progress": round(take_profit_progress, 6),
         "stop_loss_progress": round(stop_loss_progress, 6),
+        "current_stop_loss_progress": round(current_stop_loss_progress, 6),
+        "original_stop_loss": round(original_sl, 6),
+        "stop_loss_progress_source": (
+            "original_entry_protection" if original_sl > 0 else "current_broker_stop"
+        ),
         "entry_regime": str(entry_context.get("entry_regime") or risk.get("entry_regime") or ""),
         "current_regime": str(risk.get("current_regime") or ""),
         "trigger_tags": trigger_tags,

@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active acceptance index
-> Snapshot: 2026-07-26
+> Snapshot: 2026-07-27
 > Scope: reproducible acceptance evidence and unresolved live evidence
 
 本文只记录“如何证明”。架构事实见 `system-source-of-truth.md`，实施阶段见
@@ -97,6 +97,8 @@ lifecycle。
 | current/final signed notional | `tests/risk/test_backend_risk_metrics.py::test_forward_var_projects_current_and_final_candidate_notional` |
 | unknown price 不变零敞口 | `tests/risk/test_backend_risk_metrics.py::test_snapshot_does_not_turn_unknown_position_price_into_zero_exposure` |
 | Policy 不把 unknown/stale 当零 | `tests/risk/test_policy_service.py::test_open_trade_blocks_unknown_var_instead_of_treating_it_as_zero` |
+| 最小仓位不被失真 CVaR 上限永久锁死 | `tests/risk/test_policy_service.py::test_open_trade_allows_recent_min_volume_cvar_below_adjusted_limit` |
+| 调整后仍保留 CVaR 硬上限 | `tests/risk/test_policy_service.py::test_open_trade_keeps_cvar_hard_limit_above_adjusted_limit` |
 | live/replay 同输入 | `tests/test_research_parity_boundaries.py::test_parity_replay_freezes_closed_bar_returns_for_candidate_var` |
 | readiness 只读投影 | `tests/test_backend_readiness_contract.py::test_readiness_projects_canonical_forward_var_snapshot` |
 | API 只读 canonical | `tests/test_risk_summary_inputs.py::test_risk_summary_uses_canonical_snapshot` |
@@ -195,6 +197,20 @@ P3 禁止以“先搭平台”为理由新增：
 | autonomous learning | entry-quality/parameter-template atomic commit | manual/no eligible/eligibility reject | transaction abort 后无残留，可由原 suggestion 重试 | v1 invalidation 与 parameter effect rollback | observing/terminal effect + new-evidence retry |
 | factor governance | atomic weight mutation | replay/admission/V16 block | mutation/risk failure 释放 reservation | domain fault/runtime target rollback | observing/ineffective effect |
 | position supervisor governance | atomic template switch | missing evidence/illegal stop/rolled-back application ignored | domain fault 后 suggestion 保持 approved、reservation released | ineffective supervisor effect rollback | observing -> ineffective terminal effect |
+
+因子治理运行闭环补充验收：
+
+| 合同 | 验证 |
+|---|---|
+| health 后同周期先 V16 再 governance | `tests/test_evolution_governance_handoff.py::test_health_commit_immediately_hands_off_to_factor_governance` |
+| 无扩张动作不领取 V16、不误报 blocker | `tests/backend/runtime/test_factor_governance_orchestrator.py::test_run_cycle_does_not_claim_v16_without_expansion_work` |
+| fresh builtin 扩张候选进入 preflight | `tests/backend/runtime/test_factor_governance_orchestrator.py::test_expansion_preflight_finds_fresh_builtin_activation` |
+| concrete preflight 生成 evidence-bound 单次 V16 delegate | `tests/backend/runtime/test_factor_governance_orchestrator.py::test_v16_delegates_only_concrete_factor_expansion_preflight` |
+| 周期 delegate 覆盖 builtin 首次 SHADOW 登记 | `tests/backend/runtime/test_factor_governance_orchestrator.py::test_factor_governance_cycle_authorizes_shadow_enrollment_step` |
+| lifecycle 覆盖 Registry/RuntimeConfig 推断 | `tests/test_factor_catalog_governance.py::test_factor_catalog_prefers_canonical_lifecycle_state` |
+| 审计/canary 名称不制造目录条目 | `tests/test_factor_catalog_governance.py::test_factor_catalog_includes_factor_governance_shadow_audit` |
+| committed mutation 覆盖旧 suggestion 展示 | `tests/test_factor_catalog_governance.py::test_factor_catalog_prefers_committed_mutation_over_older_suggestion` |
+| coordinator projection 稳定身份并清理 PID 行 | `tests/test_factor_lifecycle_service.py::test_coordinator_projection_uses_stable_identity_and_prunes_pid_rows` |
 
 bounded runtime trace：
 

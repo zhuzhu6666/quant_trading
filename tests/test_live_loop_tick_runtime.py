@@ -63,6 +63,7 @@ def _runtime(
     circuit_breaker=False,
     circuit_enforced=True,
     diagnostic_calls=None,
+    retry_calls=None,
 ):
     order = order if order is not None else []
     process_calls = process_calls if process_calls is not None else []
@@ -71,6 +72,7 @@ def _runtime(
     diagnostic_calls = (
         diagnostic_calls if diagnostic_calls is not None else []
     )
+    retry_calls = retry_calls if retry_calls is not None else []
     safety = safety or {
         "ok": True,
         "accepting_new_risk": True,
@@ -134,6 +136,7 @@ def _runtime(
         warmup_from_local_db=lambda *_args: _frame(),
         ensure_decision_bars_fresh=lambda **kwargs: kwargs["df_new"],
         get_safety_plane=lambda _generation_id: plane,
+        retry_pending_open=lambda **kwargs: retry_calls.append(kwargs),
         process_tick=lambda *args, **kwargs: process_calls.append(
             (args, kwargs)
         ),
@@ -261,6 +264,35 @@ def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
     assert diagnostics == [
         ((4, "bridge_ready"), {"bridge_ready": True}),
     ]
+
+
+def test_pending_open_retry_runs_after_safety_before_alpha_due_check():
+    retry_calls = []
+    runtime, _controller, plane = _runtime(
+        reconcile_account={
+            "account": {"balance": 10_000.0},
+            "observed_at": 100.0,
+            "reconcile_id": "account-retry",
+        },
+        retry_calls=retry_calls,
+    )
+    plane.alpha_due = lambda *, closed_bar_id: False
+
+    run_live_loop_tick_body(
+        broker="ctrader",
+        bridge_cfg=SimpleNamespace(),
+        timeframe="M5",
+        tick=40,
+        recovery_bootstrapped=True,
+        stop_requested=lambda: False,
+        log=lambda _message: None,
+        runtime=runtime,
+    )
+
+    assert len(retry_calls) == 1
+    assert retry_calls[0]["tick"] == 40
+    assert retry_calls[0]["broker"] == "ctrader"
+    assert retry_calls[0]["last_bar"]["close"] == 2_402.0
 
 
 def test_demo_mode_ignores_observed_session_circuit_and_runs_alpha():

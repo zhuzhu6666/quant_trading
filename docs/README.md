@@ -1,14 +1,14 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-07-26
+> Last verified: 2026-07-27
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读后面的对应合同。
 
 ## 1. 当前结论
 
-- 当前分支：`main`；本文核对时 HEAD 为 `471ea6d`，工作区有未提交的代码、测试和文档改动。
+- 当前分支：`main`；本文核对时 HEAD 为 `f1586dc`，工作区有未提交的代码、测试和文档改动。
 - P0 已完成。
 - P1 代码和历史污染修复已完成；仍等待新的真实 broker deal 与完整持仓生命周期运行验收。
 - P2 代码和合同已完成，schema 已到 v12；运行验收仍继续，静态发布顺序不推进。
@@ -23,20 +23,35 @@
 - Safety、Generation、Execution Outcome、Governance、PG Job Queue 的静态发布开关不得随普通修复切换。
 - 最近已知全量基线：`2452 passed, 9 skipped`。日常小批默认只跑针对性测试；阶段/发布验收才跑全量。
 
-2026-07-26 运行只读核对：
+2026-07-27 运行核对：
 
 - `quant-backend.service`、`quant-learning-worker.service`、`caddy.service` active；
 - `quant-job-worker.service` inactive，与 PG Job Queue 静态开关默认关闭一致；
 - `/api/health` 为 `db=connected`、`ctrader=connected`；
 - PostgreSQL `state_v1` migration `current=minimum=latest=12`，无 mismatch；
 - `risk_metrics_snapshot.v2` 与 `backend_readiness_snapshot.v1` 正常刷新；
-- readiness 已刷新：frontend 可读；live execution/live alpha 当前只因市场关闭而不授权，
-  不再包含 incident 或 `no_new_risk_latched` blocker；
-- live loop 运行；当前市场关闭，因此不接受新风险的有效原因是
-  `market_session_blocks_open`，不是 operator 锁仓；
+- readiness 已刷新：frontend、live execution、live alpha、autonomous mutation 和 release
+  均无 blocker；
+- live loop 运行，市场 `open_confirmed`，`ready_for_live_execution=true`、
+  `ready_for_live_alpha=true`；
 - broker reconcile fresh、unknown execution 为 0、当前空仓；
 - risk snapshot 为 closed-bar M5 500 样本，包含 current/candidate/forward notional 合同；空仓时 VaR/CVaR 为 0 是计算结果，不是缺失值兜底；
+- candidate-forward CVaR 开仓上限已由失真的 `2.0%` 校准为 `2.5%`：2026-07-27
+  三笔最小仓位候选为 `2.007110%`、`2.009619%`、`2.092075%`，旧值会把当前
+  最小可交易仓位全部拦截；`RiskPolicyService` 仍在 `>2.5%` 时硬拦截，reason 保留
+  四位小数，不再显示成误导性的 `2.0% > 2.0%`；
 - Safety shadow 仍只处于 observing，尚未满足完整持仓生命周期或 24 小时无仓观察门槛。
+- 已修复“ExecutionGate 已通过，但同 tick 因 factor/bar 工作使 watchdog freshness latch
+  短暂触发后整根 bar 永久丢失”的时序缺口：仅 watchdog 自有的 account/positions/safety
+  freshness cause 可在同一 closed bar 内由 serial loop 重试原 open pipeline；unknown
+  execution、incident、emergency、supervisor、governance 或混合 cause 仍严格禁止重试。
+- 因子治理运行闭环已修复：hourly cycle 现在同周期执行
+  `factor_health -> V16 -> Factor Governance`；空 preflight 不再误报 V16 blocker，真实
+  preflight 只签发一次 evidence-bound 委托且最多提交一个 lifecycle mutation。实测 DSL
+  `dxy` 候选进入 `PROMOTION_PREPARED`，随后 `wick_rejection` 完成
+  `shadow_registered`；两次命令均 `finalized/apply_count=1`。Catalog 已排除
+  audit/canary 幽灵条目，当前 canonical 运行快照 758 条；coordinator projection 只保留
+  稳定 `factor_lifecycle_service/canonical` identity。
 
 这些是带时间的运行快照，不是永久事实。每次实施或回答“现在能否交易/发布”前必须重新查询。
 

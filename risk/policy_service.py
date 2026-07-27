@@ -826,7 +826,7 @@ class RiskPolicyService:
             if cvar_threshold_pct > 0 and cvar_pct > cvar_threshold_pct:
                 verdict = RiskVerdict(
                     allowed=False,
-                    reason=f"cvar_gate: CVaR={cvar_pct:.1f}% > {cvar_threshold_pct:.1f}%",
+                    reason=f"cvar_gate: CVaR={cvar_pct:.4f}% > {cvar_threshold_pct:.4f}%",
                     severity="error",
                     audit_payload={
                         "action": "open_trade",

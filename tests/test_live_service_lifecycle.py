@@ -117,6 +117,18 @@ def _patch_close_context_metadata(monkeypatch):
     monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *args, **kwargs: None)
 
 
+def _patch_fresh_projection_publish_without_state_store(monkeypatch):
+    """Keep mocked broker projections from writing test positions to production PG."""
+
+    monkeypatch.setattr(
+        live_service,
+        "_publish_fresh_position_reconcile",
+        lambda result, *, broker: [
+            dict(item) for item in (getattr(result, "positions", ()) or ())
+        ],
+    )
+
+
 def test_closed_position_handler_preserves_close_source_mapping(monkeypatch):
     close_source = {
         "close_reason_source": "supervisor_tighten_stopout",
@@ -2897,6 +2909,34 @@ def test_position_path_metrics_tracks_mfe_giveback_and_time_in_profit(monkeypatc
     assert second["thesis_status"] == "weakening"
 
 
+def test_fresh_position_reconcile_is_canonical_path_metrics_writer(monkeypatch):
+    captured = {}
+    observed_at = time.time()
+
+    monkeypatch.setattr(
+        live_service,
+        "_enrich_positions_with_path_metrics",
+        lambda positions, **kwargs: (
+            captured.update(kwargs) or [dict(item) for item in positions]
+        ),
+    )
+
+    positions = live_service._publish_fresh_position_reconcile(
+        SimpleNamespace(
+            status="fresh",
+            reconcile_id="reconcile-path-writer",
+            observed_at=observed_at,
+            positions=({"position_id": 9004, "symbol": "XAUUSD+"},),
+            components={},
+        ),
+        broker="ctrader",
+    )
+
+    assert positions == [{"position_id": 9004, "symbol": "XAUUSD+"}]
+    assert captured["persist"] is True
+    assert captured["now_ts"] == observed_at
+
+
 def test_position_path_metrics_keeps_flat_new_position_intact(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     DecisionLedger(str(db_path))
@@ -2967,6 +3007,7 @@ def test_supervisor_tighten_trace_keeps_decision_id(monkeypatch):
     traces = []
     decisions = []
     events = []
+    _patch_fresh_projection_publish_without_state_store(monkeypatch)
     _patch_close_context_metadata(monkeypatch)
 
     class _Ledger:
@@ -3141,6 +3182,7 @@ def test_supervisor_dynamic_tpsl_sends_extended_take_profit(monkeypatch):
     amend_calls = []
     traces = []
     _patch_close_context_metadata(monkeypatch)
+    _patch_fresh_projection_publish_without_state_store(monkeypatch)
 
     class _Ledger:
         def log_decision(self, **kwargs):
@@ -3358,6 +3400,7 @@ def test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown(mo
     decisions = []
     protection_states = []
     _patch_close_context_metadata(monkeypatch)
+    _patch_fresh_projection_publish_without_state_store(monkeypatch)
 
     class _Ledger:
         def log_decision(self, **kwargs):

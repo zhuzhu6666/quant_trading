@@ -7,7 +7,7 @@ import { Field, StatTile, toneFromStatus } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import { FactBoundary } from "@/components/FactBoundary";
 import { useAuth } from "@/contexts/AuthContext";
-import { useLiveState } from "@/hooks/useLiveState";
+import { liveEndpointPollInterval, useLiveState } from "@/hooks/useLiveState";
 import {
   emergencyClose,
   getAccount,
@@ -126,39 +126,41 @@ export function TradingPage() {
   const { authenticated } = useAuth();
   const { snapshot, source, connected, refresh, error: wsError } = useLiveState({ enabled: authenticated });
   const queryClient = useQueryClient();
+  const liveEndpointInterval = liveEndpointPollInterval(connected);
+  const liveEndpointStaleTime = Math.min(5_000, liveEndpointInterval / 2);
 
   const loopQuery = useQuery({
     queryKey: queryKeys.loopStatus,
     queryFn: getLoopStatus,
-    refetchInterval: 2500,
-    staleTime: 1500,
+    refetchInterval: liveEndpointInterval,
+    staleTime: liveEndpointStaleTime,
     enabled: authenticated,
   });
 
   const accountQuery = useQuery({
     queryKey: queryKeys.account,
     queryFn: getAccount,
-    refetchInterval: 2500,
-    staleTime: 1500,
+    refetchInterval: liveEndpointInterval,
+    staleTime: liveEndpointStaleTime,
     enabled: authenticated,
   });
 
   const positionsQuery = useQuery({
-    queryKey: ["positions", "trading"],
+    queryKey: queryKeys.positions,
     queryFn: getPositions,
-    refetchInterval: 2500,
-    staleTime: 1500,
+    refetchInterval: liveEndpointInterval,
+    staleTime: liveEndpointStaleTime,
     enabled: authenticated,
   });
   const liveStatusQuery = useQuery({
-    queryKey: ["live-status", "trading"],
+    queryKey: queryKeys.liveStatus,
     queryFn: getLiveStatus,
-    refetchInterval: 2500,
-    staleTime: 1500,
+    refetchInterval: liveEndpointInterval,
+    staleTime: liveEndpointStaleTime,
     enabled: authenticated,
   });
   const strategyStatusQuery = useQuery({
-    queryKey: ["strategy-status", "trading"],
+    queryKey: queryKeys.strategyStatus,
     queryFn: getStrategyStatus,
     refetchInterval: 5000,
     staleTime: 2500,
@@ -377,9 +379,9 @@ export function TradingPage() {
     await refresh();
     await queryClient.invalidateQueries({ queryKey: queryKeys.loopStatus });
     await queryClient.invalidateQueries({ queryKey: queryKeys.account });
-    await queryClient.invalidateQueries({ queryKey: ["positions", "trading"] });
-    await queryClient.invalidateQueries({ queryKey: ["live-status", "trading"] });
-    await queryClient.invalidateQueries({ queryKey: ["strategy-status", "trading"] });
+    await queryClient.invalidateQueries({ queryKey: queryKeys.positions });
+    await queryClient.invalidateQueries({ queryKey: queryKeys.liveStatus });
+    await queryClient.invalidateQueries({ queryKey: queryKeys.strategyStatus });
     await queryClient.invalidateQueries({ queryKey: queryKeys.riskSummary });
     await queryClient.invalidateQueries({ queryKey: ["factor-v4-stats", "trading"] });
     await queryClient.invalidateQueries({ queryKey: ["factor-v4-recent-ticks", "trading"] });

@@ -76,13 +76,13 @@ export function RiskPage() {
   });
   const readinessQuery = useBackendReadinessQuery();
   const policyQuery = useQuery({
-    queryKey: ["risk-policy-verdicts"],
+    queryKey: queryKeys.riskPolicyVerdicts,
     queryFn: () => getRiskPolicyVerdicts(50),
     refetchInterval: 10_000,
     staleTime: 5_000,
   });
   const tradeTracesQuery = useQuery({
-    queryKey: ["risk-trade-traces"],
+    queryKey: queryKeys.riskTradeTraces,
     queryFn: () => getRecentTradeTraces(20),
     refetchInterval: 30_000,
     staleTime: 10_000,
@@ -322,8 +322,15 @@ export function RiskPage() {
                 const closeReason = translateDisplayValue(pickString(item, ["close_reason"], ""));
                 const responsibility = translateDisplayValue(pickString(item, ["primary_responsibility"], ""));
                 const pnl = extractTraceToken(rawSummary, "pnl");
-                const primaryFactor = extractTraceToken(rawSummary, "primary_factor");
-                const worstFactor = extractTraceToken(rawSummary, "worst_factor");
+                const largestContributionFactor = (
+                  pickString(item, ["largest_contribution_factor", "primary_factor"], "")
+                  || extractTraceToken(rawSummary, "largest_contribution_factor")
+                  || extractTraceToken(rawSummary, "primary_factor")
+                );
+                const worstFactor = (
+                  pickString(item, ["worst_factor"], "")
+                  || extractTraceToken(rawSummary, "worst_factor")
+                );
                 const positionId = pickString(item, ["position_id", "trade_id"], "");
                 const entryDecision = pickString(item, ["entry_decision_id"], "");
                 const exitDecision = pickString(item, ["exit_decision_id"], "");
@@ -350,8 +357,8 @@ export function RiskPage() {
                       <span className="trace-chip">入 {compactId(entryDecision)}</span>
                       <span className="trace-chip">离 {compactId(exitDecision)}</span>
                       <span className={`trace-chip trace-pnl trace-pnl-${tracePnlTone === "ok" && !traceKnown ? "mute" : tracePnlTone}`}>PnL {pnl}</span>
-                      <span className="trace-chip">主因 {primaryFactor}</span>
-                      <span className="trace-chip">弱项 {worstFactor}</span>
+                      {largestContributionFactor ? <span className="trace-chip">最大贡献 {translateReasonText(largestContributionFactor)}</span> : null}
+                      {worstFactor ? <span className="trace-chip">弱项 {translateReasonText(worstFactor)}</span> : null}
                     </div>
                   </article>
                 );

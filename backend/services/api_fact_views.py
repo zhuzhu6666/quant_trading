@@ -729,20 +729,19 @@ def policy_verdicts_fact_payload(
     *,
     now: float | None = None,
 ) -> dict[str, Any]:
-    """Mark a successful PostgreSQL verdict query, including a valid empty set."""
+    """Mark the current PostgreSQL history query, including a valid empty set.
 
+    Verdict timestamps describe when each business event occurred.  They do
+    not describe when this read model was observed: an unchanged history is
+    still current when PostgreSQL was queried successfully.
+    """
     generated_at = float(time.time() if now is None else now)
     result = _copy(payload)
-    items = payload.get("items") if isinstance(payload.get("items"), list) else []
-    observed_at = max(
-        (observed_epoch(item.get("decision_ts")) for item in items if isinstance(item, Mapping)),
-        default=generated_at,
-    )
     return dict(attach_fact(
         result,
         contract="risk.policy-verdicts.v2",
         source="state_pg",
-        observed_at=observed_at,
+        observed_at=generated_at,
         stale_after_sec=DEFAULT_STALE_AFTER_SEC["risk"],
         error=_error(payload),
         now=generated_at,

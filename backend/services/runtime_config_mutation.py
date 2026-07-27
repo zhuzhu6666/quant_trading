@@ -523,6 +523,7 @@ class RuntimeConfigMutationService:
             "live_autonomy_unlock_id",
             "autonomy_expansion_frozen",
             "governance_expansion_paused",
+            "risk_cvar_threshold_pct",
         }
         governance_tokens = (
             "factor_governance",

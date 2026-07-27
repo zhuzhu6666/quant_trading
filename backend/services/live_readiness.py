@@ -102,12 +102,23 @@ def build_live_readiness(
             and safety_accepting_new_risk
         )
     )
-    bridge_ready = bool(diag.get("bridge_ready"))
     loop_phase = str(
         loop.get("phase") or ("running" if loop_running else "stopped")
     )
     loop_ready = bool(loop.get("ready"))
     loop_accepting_new_risk = bool(loop.get("accepting_new_risk"))
+    # The serial generation cannot enter accepting_new_risk until its startup
+    # barrier has an authenticated bridge.  Reuse that current positive fact
+    # when an earlier warming diagnostic missed the recovery edge.  A broker
+    # disconnect still wins immediately, so this cannot mask a lost bridge.
+    bridge_ready = bool(
+        diag.get("bridge_ready")
+        or (
+            broker_status == "connected"
+            and loop_running
+            and loop_accepting_new_risk
+        )
+    )
     loop_blockers = sorted(
         {str(item) for item in list(loop.get("blockers") or []) if str(item)}
     )

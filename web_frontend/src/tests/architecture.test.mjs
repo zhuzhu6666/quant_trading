@@ -142,6 +142,18 @@ assert.match(consoleCss, /\.status-pending/);
 assert.match(dashboardBits, /tone === "pending" \? "数据待确认"/);
 assert.match(queryErrorList, /query\.isError \|\| query\.isRefetchError/);
 assert.match(queryErrorList, /query\.isRefetchError \? "刷新失败，当前显示缓存数据" : "请求失败"/);
+assert.match(
+  riskPage,
+  /extractTraceToken\(rawSummary, "largest_contribution_factor"\)/,
+  "交易证据链必须识别当前最大贡献因子摘要字段",
+);
+assert.match(
+  riskPage,
+  /pickString\(item, \["largest_contribution_factor", "primary_factor"\]/,
+  "交易证据链必须优先读取结构化因子字段并兼容旧字段",
+);
+assert.match(riskPage, /最大贡献 \{translateReasonText\(largestContributionFactor\)\}/);
+assert.doesNotMatch(riskPage, /主因 \{primaryFactor\}/, "交易证据链不得继续显示已废弃的空主因字段");
 assert.match(opsPage, /const logsRequestFailed = logsQuery\.isError \|\| logsQuery\.isRefetchError/);
 assert.match(opsPage, /\{ label: "logs", query: logsQuery \}/);
 assert.doesNotMatch(v16Page, /tone="ok"/, "V16 固定绿灯必须改为事实绑定");

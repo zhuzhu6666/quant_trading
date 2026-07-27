@@ -167,6 +167,102 @@ def _latest_policy_by_factor_for_db(db_path: str | Path = STATE_DB) -> dict[str,
         return {}
 
 
+def _lifecycle_by_factor_name(
+    db_path: str | Path = STATE_DB,
+) -> dict[str, dict[str, Any]]:
+    """Project the canonical lifecycle ledger by runtime registry name."""
+    try:
+        conn = _connect_state(db_path, read_only=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT factor_id, factor_name, origin, lifecycle_stage,
+                       runtime_admission, mutation_id, generation,
+                       definition_fingerprint, artifact_hash, metadata_json,
+                       activated_at, retired_at, updated_at
+                FROM factor_lifecycle_state
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+            result: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                factor_name = str(row["factor_name"] or "")
+                if not factor_name:
+                    continue
+                metadata = _loads(row["metadata_json"], {})
+                result[factor_name] = {
+                    "factor_id": str(row["factor_id"] or ""),
+                    "origin": str(row["origin"] or ""),
+                    "lifecycle_stage": str(row["lifecycle_stage"] or "").upper(),
+                    "runtime_admission": str(row["runtime_admission"] or ""),
+                    "mutation_id": str(row["mutation_id"] or ""),
+                    "generation": int(row["generation"] or 0),
+                    "definition_fingerprint": str(
+                        row["definition_fingerprint"] or ""
+                    ),
+                    "artifact_hash": str(row["artifact_hash"] or ""),
+                    "expression": str(
+                        metadata.get("expression") or ""
+                        if isinstance(metadata, dict)
+                        else ""
+                    ),
+                    "activated_at": float(row["activated_at"] or 0.0),
+                    "retired_at": float(row["retired_at"] or 0.0),
+                    "updated_at": float(row["updated_at"] or 0.0),
+                }
+            return result
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+
+
+def _latest_committed_mutation_by_factor(
+    db_path: str | Path = STATE_DB,
+) -> dict[str, dict[str, Any]]:
+    """Read final governance outcomes instead of treating suggestions as facts."""
+    try:
+        conn = _connect_state(db_path, read_only=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT scope_key, action, mutation_id, status,
+                       projection_status, committed_at, updated_at
+                FROM governance_mutation_intent
+                WHERE control_surface IN ('factor_weight', 'factor_lifecycle')
+                  AND status IN ('committed', 'rolled_back', 'superseded')
+                ORDER BY COALESCE(committed_at, updated_at) DESC, updated_at DESC
+                """
+            ).fetchall()
+            latest: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                key = str(row["scope_key"] or "")
+                if not key or key in latest:
+                    continue
+                status = str(row["status"] or "")
+                projection_status = str(row["projection_status"] or "")
+                latest[key] = {
+                    "action": str(row["action"] or ""),
+                    "status": (
+                        "applied"
+                        if status == "committed" and projection_status == "current"
+                        else "projection_degraded"
+                        if status == "committed"
+                        else status
+                    ),
+                    "mutation_id": str(row["mutation_id"] or ""),
+                    "projection_status": projection_status,
+                    "created_at": float(
+                        row["committed_at"] or row["updated_at"] or 0.0
+                    ),
+                }
+            return latest
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+
+
 def _factor_governance_shadow_by_factor(db_path: str | Path = STATE_DB) -> dict[str, dict[str, Any]]:
     try:
         conn = _connect_state(db_path, read_only=True)
@@ -306,6 +402,8 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
     health = _health_by_factor(db_path)
     canary = _canary_by_factor(db_path)
     latest_policy = _latest_policy_by_factor_for_db(db_path)
+    lifecycle = _lifecycle_by_factor_name(db_path)
+    latest_mutation = _latest_committed_mutation_by_factor(db_path)
     factor_governance_shadow = _factor_governance_shadow_by_factor(db_path)
     latest_snapshot = _latest_catalog_snapshot_meta(db_path)
     names = sorted(
@@ -314,21 +412,34 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         | set(weights)
         | meta_names
         | set(health)
-        | set(factor_governance_shadow)
-        | set(canary)
+        | set(lifecycle)
     )
 
     items: list[dict[str, Any]] = []
     now = time.time()
     for name in names:
         meta = adapter.get_meta(name) if adapter is not None else {}
-        source = str(meta.get("source") or ("builtin" if factor_registry.get(name) else "unknown"))
+        lifecycle_fact = lifecycle.get(name, {})
+        lifecycle_origin = str(lifecycle_fact.get("origin") or "").lower()
+        source = str(
+            "builtin"
+            if lifecycle_origin == "builtin"
+            else "shadow"
+            if lifecycle_origin in {"dsl", "shadow"}
+            and str(lifecycle_fact.get("lifecycle_stage") or "") == "SHADOW"
+            else "discovered"
+            if lifecycle_origin in {"dsl", "shadow", "discovered"}
+            else meta.get("source")
+            or ("builtin" if factor_registry.get(name) else "unknown")
+        )
         cfg_entry = signal_cfg.get(name)
         cfg_dict = cfg_entry if isinstance(cfg_entry, dict) else {}
         role = resolve_factor_role(name, cfg_dict)
         enabled = not (isinstance(cfg_entry, dict) and cfg_entry.get("enabled") is False)
         configured_lifecycle = str(cfg_dict.get("lifecycle_status") or "").upper()
-        lifecycle_status = "DEAD" if name in dead else (
+        lifecycle_status = "DEAD" if name in dead else str(
+            lifecycle_fact.get("lifecycle_stage") or ""
+        ) or (
             configured_lifecycle
             if configured_lifecycle
             else str(
@@ -336,6 +447,8 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
                 or ("ACTIVE" if factor_registry.get(name) else "UNKNOWN")
             )
         )
+        if lifecycle_status in {"QUARANTINED", "RETIRED", "DEAD"}:
+            enabled = False
         raw_weight = weights.get(name) if name in weights else None
         if isinstance(raw_weight, dict):
             raw_weight = raw_weight.get("weight")
@@ -344,15 +457,31 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         except (TypeError, ValueError):
             weight = 0.0
         explicit_weight = name in weights and raw_weight is not None
+        lifecycle_admitted = (
+            not lifecycle_fact
+            or str(lifecycle_fact.get("runtime_admission") or "") == "admitted"
+        )
         eligible = (
             name in selected
             and enabled
             and lifecycle_status == "ACTIVE"
+            and lifecycle_admitted
             and source != "shadow"
         )
         used_in_score = bool(eligible and role == "alpha" and explicit_weight and weight > 0)
         cadence, sample_policy = infer_factor_cadence(name, cfg_dict)
         policy = latest_policy.get(name, {})
+        mutation = latest_mutation.get(name, {})
+        lifecycle_factor_id = str(lifecycle_fact.get("factor_id") or "")
+        if lifecycle_factor_id:
+            mutation = max(
+                (mutation, latest_mutation.get(lifecycle_factor_id, {})),
+                key=lambda item: float(item.get("created_at") or 0.0),
+            )
+        governance = max(
+            (policy, mutation),
+            key=lambda item: float(item.get("created_at") or 0.0),
+        )
         reason = "" if eligible else excluded_reasons.get(name)
         if not reason:
             if source == "shadow":
@@ -369,10 +498,23 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         fg_shadow = factor_governance_shadow.get(name, {})
         items.append({
             "factor_id": name,
+            "lifecycle_factor_id": lifecycle_factor_id,
             "source": source,
             "role": role,
             "enabled": bool(enabled),
             "lifecycle_status": lifecycle_status,
+            "runtime_admission": str(
+                lifecycle_fact.get("runtime_admission") or ""
+            ),
+            "lifecycle_mutation_id": str(
+                lifecycle_fact.get("mutation_id") or ""
+            ),
+            "lifecycle_expression": str(
+                lifecycle_fact.get("expression") or ""
+            ),
+            "lifecycle_artifact_hash": str(
+                lifecycle_fact.get("artifact_hash") or ""
+            ),
             "eligible_for_live": bool(eligible),
             "used_in_score": used_in_score,
             "weight": weight,
@@ -391,10 +533,11 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "redundancy_group": str(cfg_dict.get("redundancy_group") or ""),
             "redundancy_leader": str(cfg_dict.get("redundancy_leader") or ""),
             "context_policy_effect": {},
-            "governance_action": str(policy.get("action") or ""),
-            "governance_status": str(policy.get("status") or ""),
-            "last_action_ts": float(policy.get("created_at") or meta.get("promote_time") or meta.get("register_time") or 0.0),
-            "rollback_state": "available" if policy else "",
+            "governance_action": str(governance.get("action") or ""),
+            "governance_status": str(governance.get("status") or ""),
+            "governance_mutation_id": str(mutation.get("mutation_id") or ""),
+            "last_action_ts": float(governance.get("created_at") or meta.get("promote_time") or meta.get("register_time") or 0.0),
+            "rollback_state": "available" if governance else "",
             "reason_excluded": reason,
             "runtime_selection_source": selection_source,
             "catalog_ts": now,

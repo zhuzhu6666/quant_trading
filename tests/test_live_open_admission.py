@@ -5,6 +5,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pandas as pd
 import pytest
 
 from backend.services import live_service
@@ -13,6 +14,7 @@ from backend.services.live_open_admission import (
     probe_postgres_authority,
 )
 from backend.services.live_safety_state import (
+    activate_no_new_risk_latch,
     no_new_risk_latch_status,
     reset_safety_state_for_tests,
 )
@@ -24,6 +26,11 @@ def _isolated_open_admission_state(monkeypatch, tmp_path):
     monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path / "safety"))
     monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
     monkeypatch.setattr(live_service, "_process_shutdown_requested", False)
+    monkeypatch.setattr(
+        live_service,
+        "_live_safety_watchdog_probe",
+        lambda: {"unknown_execution_count": 0},
+    )
     live_service._live_state_update(
         loop_running=False,
         accepting_new_risk=True,
@@ -50,6 +57,151 @@ def _fresh_quote(now_ts: float) -> dict:
         "mid": 4000.0,
         "ts": now_ts,
     }
+
+
+def test_watchdog_stale_facts_are_the_only_retryable_latch():
+    activate_no_new_risk_latch(
+        reason="safety_freshness_failed",
+        actor="system:safety_watchdog",
+        metadata={"blockers": ["account_freshness_stale"]},
+        cause="safety_freshness",
+        cause_id="safety_watchdog",
+    )
+
+    assert live_service._watchdog_freshness_retry_eligible(
+        ("no_new_risk_latched", "accepting_new_risk_false")
+    )
+
+
+@pytest.mark.parametrize(
+    "safety_blocker",
+    ["unresolved_execution_intent", "unknown_execution_status_unavailable"],
+)
+def test_watchdog_execution_uncertainty_is_never_retryable(safety_blocker):
+    activate_no_new_risk_latch(
+        reason="safety_freshness_failed",
+        actor="system:safety_watchdog",
+        metadata={"blockers": [safety_blocker]},
+        cause="safety_freshness",
+        cause_id="safety_watchdog",
+    )
+
+    assert not live_service._watchdog_freshness_retry_eligible(
+        ("no_new_risk_latched", "accepting_new_risk_false")
+    )
+
+
+def test_current_unknown_execution_projection_blocks_retry(monkeypatch):
+    activate_no_new_risk_latch(
+        reason="safety_freshness_failed",
+        actor="system:safety_watchdog",
+        metadata={"blockers": ["positions_freshness_stale"]},
+        cause="safety_freshness",
+        cause_id="safety_watchdog",
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_live_safety_watchdog_probe",
+        lambda: {"unknown_execution_count": 1},
+    )
+
+    assert not live_service._watchdog_freshness_retry_eligible(
+        ("no_new_risk_latched", "accepting_new_risk_false")
+    )
+
+
+def test_watchdog_freshness_is_not_retryable_with_an_incident_cause():
+    activate_no_new_risk_latch(
+        reason="safety_freshness_failed",
+        actor="system:safety_watchdog",
+        metadata={"blockers": ["positions_freshness_stale"]},
+        cause="safety_freshness",
+        cause_id="safety_watchdog",
+    )
+    activate_no_new_risk_latch(
+        reason="operator incident",
+        actor="operator:test",
+        cause="incident_control",
+        cause_id="runtime_incident_mode",
+    )
+
+    assert not live_service._watchdog_freshness_retry_eligible(
+        ("no_new_risk_latched", "accepting_new_risk_false")
+    )
+
+
+def test_pending_open_retry_reuses_same_bar_and_original_gate(monkeypatch):
+    signal_gate = SimpleNamespace(passed=True, reason="passed")
+    composite = SimpleNamespace(direction=-1)
+    pipeline = {
+        "pending_open_retry": {
+            "bar": {
+                "time": 1_767_225_600.0,
+                "timeframe": "M5",
+                "close": 4_000.0,
+            },
+            "factor_values": {"atr_ratio": 0.001},
+            "composite": composite,
+            "gate_result": signal_gate,
+        }
+    }
+    frame = pd.DataFrame(
+        {"open": [4_001.0], "high": [4_002.0], "low": [3_999.0], "close": [4_000.0]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-01-01T00:00:00Z")]),
+    )
+    calls = []
+    monkeypatch.setattr(live_service, "_factor_pipeline", pipeline)
+    monkeypatch.setattr(live_service, "_should_send_orders", lambda _broker: True)
+    monkeypatch.setattr(
+        live_service,
+        "_run_open_trade_pipeline",
+        lambda **kwargs: calls.append(kwargs)
+        or SimpleNamespace(passed=True, reason="passed"),
+    )
+    live_service._live_state_update(
+        account={"balance": 10_000.0},
+        positions=[],
+    )
+
+    live_service._retry_pending_open_trade(
+        bridge=SimpleNamespace(),
+        frame=frame,
+        last_bar=frame.iloc[-1],
+        broker="ctrader",
+        tick=41,
+        log=lambda _message: None,
+        stop_requested=lambda: False,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["gate_result"] is signal_gate
+    assert calls[0]["composite"] is composite
+    assert "pending_open_retry" not in pipeline
+
+
+def test_pending_open_retry_is_discarded_when_closed_bar_advances(monkeypatch):
+    pipeline = {
+        "pending_open_retry": {
+            "bar": {"time": 1.0, "timeframe": "M5"},
+        }
+    }
+    frame = pd.DataFrame(
+        {"open": [4_001.0], "high": [4_002.0], "low": [3_999.0], "close": [4_000.0]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-01-01T00:05:00Z")]),
+    )
+    monkeypatch.setattr(live_service, "_factor_pipeline", pipeline)
+
+    live_service._retry_pending_open_trade(
+        bridge=SimpleNamespace(),
+        frame=frame,
+        last_bar=frame.iloc[-1],
+        broker="ctrader",
+        tick=42,
+        log=lambda _message: None,
+        stop_requested=lambda: False,
+    )
+
+    assert "pending_open_retry" not in pipeline
 
 
 def test_final_open_admission_requires_fresh_pg_session_and_spot_facts():

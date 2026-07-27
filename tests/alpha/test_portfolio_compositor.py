@@ -17,7 +17,7 @@ TACTICAL_CONFIG = {
 }
 
 MACRO_CONFIG = {
-    "dxy_corr_20":       {"weight": 0.8, "tags": ["宏观", "美元"], "enabled": True, "mode": "rank_mapping"},
+    "real_yield_chg":    {"weight": 0.8, "tags": ["宏观", "利率"], "enabled": True, "mode": "rank_mapping"},
     "cot_mm_net":        {"weight": 0.8, "tags": ["COT", "投机"], "enabled": True, "mode": "rank_mapping"},
     "cb_total_chg_3m":   {"weight": 0.8, "tags": ["央行", "购金"], "enabled": True, "mode": "rank_mapping"},
     "hours_to_fomc":     {"weight": 0.3, "tags": ["事件", "FOMC"], "enabled": True, "mode": "discrete", "role": "gate"},
@@ -100,7 +100,7 @@ class TestCompose:
         """仅宏观层信号产生正确的 macro_score。"""
         c = PortfolioCompositor(FULL_CONFIG)
         signals = {
-            "dxy_corr_20": 0.3,      # weight=0.8, direction=-1
+            "real_yield_chg": 0.3,   # weight=0.8
             "cot_mm_net": 0.6,        # weight=0.8
             "hours_to_fomc": None,
         }
@@ -120,7 +120,7 @@ class TestCompose:
         signals = {
             "rsi_14": 0.6,           # tactical
             "di_spread": 0.7,        # tactical
-            "dxy_corr_20": 0.5,      # macro
+            "real_yield_chg": 0.5,   # macro
             "cot_mm_net": 0.4,       # macro
         }
         result = c.compose(signals, signals)
@@ -137,7 +137,7 @@ class TestCompose:
         result = c.compose(
             {
                 "rsi_14": 0.68,
-                "dxy_corr_20": -0.93,
+                "real_yield_chg": -0.93,
                 "cot_mm_net": 0.20,
             },
             {},
@@ -160,7 +160,7 @@ class TestCompose:
         )
 
         result = c.compose(
-            {"rsi_14": 0.8, "dxy_corr_20": -0.8},
+            {"rsi_14": 0.8, "real_yield_chg": -0.8},
             {},
         )
 
@@ -208,12 +208,12 @@ class TestTagsBreakdown:
         signals = {
             "rsi_14": 0.8,
             "di_spread": 0.6,
-            "dxy_corr_20": 0.5,
+            "real_yield_chg": 0.5,
         }
         result = c.compose(signals, signals)
         tbd = result.tags_breakdown
         assert "技术" in tbd
-        assert "宏观" in tbd or "美元" in tbd
+        assert "宏观" in tbd or "利率" in tbd
         # 技术分数应为正（两个技术因子均为正信号）
         tech_tags = [t for t in tbd if "技术" in t or "均值回归" in t or "趋势" in t]
         assert any(tbd[t] > 0 for t in tech_tags)
@@ -271,6 +271,29 @@ class TestDefaultGPConfig:
         assert result.n_active_alpha_factors == 0
         assert result.score == 0.0
         assert result.direction == 0
+
+    def test_dxy_correlation_is_context_not_directional_alpha(self):
+        """相关性描述 regime，不能把美元方向投射成黄金方向。"""
+        c = PortfolioCompositor(
+            {
+                "dxy_corr_20": {
+                    "weight": 0.8,
+                    "tags": ["宏观", "美元", "相关性"],
+                    "enabled": True,
+                }
+            }
+        )
+
+        result = c.compose(
+            {"dxy_corr_20": -0.99},
+            {"dxy_corr_20": 0.47},
+        )
+
+        assert result.factor_roles["dxy_corr_20"] == "context"
+        assert result.context_signals == {"dxy_corr_20": -0.99}
+        assert result.active_weights["dxy_corr_20"] == 0.0
+        assert result.macro_score == 0.0
+        assert result.score == 0.0
 
     def test_gate_factor_does_not_contribute_to_direction(self):
         c = PortfolioCompositor(FULL_CONFIG)

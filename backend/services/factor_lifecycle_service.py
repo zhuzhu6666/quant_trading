@@ -51,6 +51,8 @@ from config.runtime_config import RuntimeConfig
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PROJECTION_OK = frozenset({"loaded", "current", "healthy"})
 _LIVE_PROJECTION_ROLES = frozenset({"live_alpha", "backend", "live_loop"})
+_COORDINATOR_PROJECTION_PROCESS_ID = "factor_lifecycle_service"
+_COORDINATOR_PROJECTION_BOOT_ID = "canonical"
 
 
 class FactorLifecycleStage(str, Enum):
@@ -286,6 +288,7 @@ class FactorLifecycleService:
         reason: str = "register durable shadow candidate",
         evidence_refs: Mapping[str, Any] | None = None,
         idempotency_key: str = "",
+        v16: FactorV16Binding | None = None,
     ) -> dict[str, Any]:
         """Persist an observation-only SHADOW fact without live admission."""
         try:
@@ -319,6 +322,7 @@ class FactorLifecycleService:
                 source="factor_lifecycle.register_shadow",
                 evidence_refs=dict(evidence_refs or {}),
                 idempotency_key=idempotency_key,
+                v16=v16 or FactorV16Binding(),
             )
             return self._execute(mutation, current=None)
         except Exception as exc:
@@ -762,6 +766,28 @@ class FactorLifecycleService:
     def recover_projection(self, mutation_id: str) -> dict[str, Any]:
         return self.coordinator.replay_projection(str(mutation_id))
 
+    def _prune_legacy_coordinator_projections(self) -> int:
+        """Remove exited PID projections before backend registry recovery."""
+        self._prepare_storage()
+        conn = self._connect()
+        try:
+            result = conn.execute(
+                _p(
+                    self.db_path,
+                    """DELETE FROM factor_runtime_projection
+                       WHERE process_role='governance_coordinator'
+                         AND NOT (process_id=? AND boot_id=?)""",
+                ),
+                (
+                    _COORDINATOR_PROJECTION_PROCESS_ID,
+                    _COORDINATOR_PROJECTION_BOOT_ID,
+                ),
+            )
+            conn.commit()
+            return int(result.rowcount or 0)
+        finally:
+            conn.close()
+
     def recover_committed_projections(
         self,
         *,
@@ -812,6 +838,7 @@ class FactorLifecycleService:
                 "degraded_count": 0,
                 "results": [],
             }
+        self._prune_legacy_coordinator_projections()
         self._prepare_storage()
         self.coordinator._prepare_storage()
         safe_limit = max(1, min(5000, int(limit)))
@@ -1438,12 +1465,28 @@ class FactorLifecycleService:
             {
                 "factor_id": state.get("factor_id"),
                 "process_role": "governance_coordinator",
-                "process_id": str(os.getpid()),
-                "boot_id": "process",
+                "process_id": _COORDINATOR_PROJECTION_PROCESS_ID,
+                "boot_id": _COORDINATOR_PROJECTION_BOOT_ID,
             }
         )
         conn = self._connect()
         try:
+            # Coordinator projections describe the latest registry/config
+            # projection, not an append-only audit trail.  PID-bound rows made
+            # every restart look concurrently current and grew without bound.
+            conn.execute(
+                _p(
+                    self.db_path,
+                    """DELETE FROM factor_runtime_projection
+                       WHERE factor_id=? AND process_role='governance_coordinator'
+                         AND NOT (process_id=? AND boot_id=?)""",
+                ),
+                (
+                    str(state.get("factor_id") or ""),
+                    _COORDINATOR_PROJECTION_PROCESS_ID,
+                    _COORDINATOR_PROJECTION_BOOT_ID,
+                ),
+            )
             conn.execute(
                 _p(
                     self.db_path,
@@ -1452,7 +1495,7 @@ class FactorLifecycleService:
                         process_id, boot_id, generation, artifact_hash,
                         mutation_id, config_version, config_hash, loaded, status,
                         error_message, heartbeat_at, loaded_at, created_at, updated_at)
-                       VALUES (?, ?, ?, 'governance_coordinator', ?, 'process', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       VALUES (?, ?, ?, 'governance_coordinator', ?, 'canonical', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(factor_id, process_role, process_id, boot_id)
                        DO UPDATE SET generation=excluded.generation,
                           artifact_hash=excluded.artifact_hash,
@@ -1469,7 +1512,7 @@ class FactorLifecycleService:
                     projection_id,
                     str(state.get("factor_id") or ""),
                     str(state.get("factor_name") or ""),
-                    str(os.getpid()),
+                    _COORDINATOR_PROJECTION_PROCESS_ID,
                     int(state.get("generation") or 0),
                     str(state.get("artifact_hash") or ""),
                     str(state.get("mutation_id") or ""),

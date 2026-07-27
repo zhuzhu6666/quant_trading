@@ -120,7 +120,12 @@ class FactorGovernanceOrchestrator:
     def reset(cls) -> None:
         cls._instance = None
 
-    def run_cycle(self, *, trigger_source: str = "scheduled") -> dict[str, Any]:
+    def run_cycle(
+        self,
+        *,
+        trigger_source: str = "scheduled",
+        v16_handoff: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         cfg = runtime_config.shared()
         profile = self._governance_profile(cfg)
         if not bool(getattr(cfg, "factor_governance_enabled", True)):
@@ -181,8 +186,71 @@ class FactorGovernanceOrchestrator:
                 finish_evolution_run(run["run_id"], status=status, summary=summary)
                 return summary
             cfg = runtime_config.shared()
+            redundancy_report = RedundancyDetector().build_report(
+                catalog,
+                min_samples=int(
+                    getattr(cfg, "factor_redundancy_min_samples", 200) or 200
+                ),
+                corr_threshold=float(
+                    getattr(cfg, "factor_redundancy_corr_threshold", 0.85)
+                    or 0.85
+                ),
+            )
+            # Template recommendations are evidence handoffs only. Their
+            # specialist owns any mutation and its own V16 authorization.
+            actions.extend(self._apply_parameter_template_actions(catalog, run))
+            expansion_preflight = self._expansion_preflight(
+                catalog,
+                cfg=cfg,
+                profile=profile,
+                redundancy_report=redundancy_report,
+            )
+            if not expansion_preflight["required"]:
+                summary = {
+                    "status": "idle_no_expansion_action",
+                    "reason": "no_factor_expansion_actionable",
+                    "catalog_count": len(catalog),
+                    "actions": actions,
+                    "catalog_snapshot": catalog_snapshot,
+                    "redundancy_report": redundancy_report,
+                    "expansion_preflight": expansion_preflight,
+                    "governance_profile": profile.name,
+                }
+                finish_evolution_run(
+                    run["run_id"],
+                    status=status,
+                    summary=summary,
+                )
+                return summary
             v16_authority: dict[str, Any] = {}
             if is_state_db_path(self.overlay.db_path):
+                v16_delegation: dict[str, Any] = {}
+                if v16_handoff:
+                    from backend.services.v16_brain_orchestrator import (
+                        V16BrainOrchestratorService,
+                    )
+
+                    v16_delegation = (
+                        V16BrainOrchestratorService(
+                            db_path=self.overlay.db_path
+                        ).delegate_factor_governance_cycle(
+                            {
+                                "snapshot_id": str(
+                                    v16_handoff.get("snapshot_id") or ""
+                                ),
+                                "health_cycle_id": str(
+                                    v16_handoff.get("health_cycle_id") or ""
+                                ),
+                                "posterior_fingerprint": str(
+                                    v16_handoff.get(
+                                        "posterior_fingerprint"
+                                    )
+                                    or ""
+                                ),
+                                "expansion_preflight": expansion_preflight,
+                            }
+                        )
+                    )
                 from backend.services.v16_command_gate import V16CommandGate
 
                 v16_authority = V16CommandGate.authorize(
@@ -199,7 +267,9 @@ class FactorGovernanceOrchestrator:
                         "catalog_count": len(catalog),
                         "actions": actions,
                         "catalog_snapshot": catalog_snapshot,
-                        "redundancy_report": {},
+                        "redundancy_report": redundancy_report,
+                        "expansion_preflight": expansion_preflight,
+                        "v16_delegation": v16_delegation,
                         "v16_authority": v16_authority,
                     }
                     finish_evolution_run(
@@ -208,49 +278,68 @@ class FactorGovernanceOrchestrator:
                         summary=summary,
                     )
                     return summary
-            actions.extend(
-                self._restore_quarantined_builtin_alpha(
+            expansion_actions = self._restore_quarantined_builtin_alpha(
                     catalog,
                     run,
                     cfg=cfg,
                     profile=profile,
                     v16_authority=v16_authority,
                 )
+            actions.extend(expansion_actions)
+            expansion_committed = self._expansion_command_consumed(
+                expansion_actions
             )
-            if actions:
+            if expansion_actions:
                 catalog = build_factor_catalog()
-            actions.extend(
-                self._activate_healthy_builtin_shadow(
+            if not expansion_committed:
+                expansion_actions = self._activate_healthy_builtin_shadow(
                     catalog,
                     run,
                     v16_authority=v16_authority,
                     cfg=cfg,
                     profile=profile,
                 )
-            )
-            if actions:
-                catalog = build_factor_catalog()
-            redundancy_report = RedundancyDetector().build_report(
-                catalog,
-                min_samples=int(getattr(cfg, "factor_redundancy_min_samples", 200) or 200),
-                corr_threshold=float(getattr(cfg, "factor_redundancy_corr_threshold", 0.85) or 0.85),
-            )
-            actions.extend(self._apply_redundancy_report(catalog, redundancy_report, run))
-            if redundancy_report.get("group_count"):
-                catalog = build_factor_catalog()
-            actions.extend(
-                self._promote_shadow_candidates(
+                actions.extend(expansion_actions)
+                expansion_committed = self._expansion_command_consumed(
+                    expansion_actions
+                )
+                if expansion_actions:
+                    catalog = build_factor_catalog()
+            if not expansion_committed:
+                expansion_actions = self._apply_redundancy_report(
+                    catalog,
+                    redundancy_report,
+                    run,
+                )
+                actions.extend(expansion_actions)
+                expansion_committed = self._expansion_command_consumed(
+                    expansion_actions
+                )
+                if expansion_actions:
+                    catalog = build_factor_catalog()
+            if not expansion_committed:
+                expansion_actions = self._promote_shadow_candidates(
                     catalog,
                     run,
                     v16_authority=v16_authority,
                 )
-            )
+                actions.extend(expansion_actions)
+                expansion_committed = self._expansion_command_consumed(
+                    expansion_actions
+                )
+            if v16_delegation and not expansion_committed:
+                from backend.services.v16_brain_orchestrator import (
+                    V16BrainOrchestratorService,
+                )
+
+                command = dict(v16_delegation.get("command") or {})
+                V16BrainOrchestratorService(
+                    db_path=self.overlay.db_path
+                ).cancel_factor_governance_delegation(
+                    command_id=str(command.get("command_id") or ""),
+                    reason="factor_governance_cycle_no_committed_action",
+                )
             catalog = build_factor_catalog()
-            actions.extend(self._apply_parameter_template_actions(
-                catalog,
-                run,
-                v16_command_id=str(v16_authority.get("command_id") or ""),
-            ))
             summary = {
                 "status": "completed_with_errors" if any(
                     str(item.get("status") or "") in {"failed", "error", "mutation_failed"}
@@ -260,6 +349,8 @@ class FactorGovernanceOrchestrator:
                 "actions": actions,
                 "catalog_snapshot": catalog_snapshot,
                 "redundancy_report": redundancy_report,
+                "expansion_preflight": expansion_preflight,
+                "v16_delegation": v16_delegation,
                 "v16_authority": v16_authority,
                 "governance_profile": profile.name,
             }
@@ -280,6 +371,21 @@ class FactorGovernanceOrchestrator:
             return {"status": status, "error": str(exc), "actions": actions}
 
     # ── Action selection ────────────────────────────────────────────
+
+    @staticmethod
+    def _expansion_command_consumed(
+        actions: list[dict[str, Any]],
+    ) -> bool:
+        return any(
+            str(item.get("status") or "")
+            in {
+                "applied",
+                "promotion_prepared",
+                "shadow_registered",
+                "projection_degraded",
+            }
+            for item in actions
+        )
 
     @staticmethod
     def _governance_profile(cfg: Any) -> FactorGovernanceProfile:
@@ -472,6 +578,190 @@ class FactorGovernanceOrchestrator:
             return str(AutonomyHealthService().latest_snapshot().get("posture") or "unknown")
         except Exception:
             return "unknown"
+
+    def _expansion_preflight(
+        self,
+        catalog: list[dict[str, Any]],
+        *,
+        cfg: Any,
+        profile: FactorGovernanceProfile,
+        redundancy_report: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Find concrete expansion work before claiming a V16 command."""
+        now = time.time()
+        signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
+        weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
+        activation_ids: list[str] = []
+        restore_ids: list[str] = []
+        promotion_ids: list[str] = []
+
+        activation_enabled = bool(
+            getattr(cfg, "factor_governance_builtin_activation_enabled", True)
+        )
+        activation_weight = min(
+            0.50,
+            float(
+                getattr(
+                    cfg,
+                    "factor_governance_builtin_activation_weight",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        if profile.balanced_demo:
+            activation_weight = max(profile.min_live_weight, activation_weight)
+        if activation_enabled and activation_weight > 0.0:
+            for item in catalog:
+                factor_id = str(item.get("factor_id") or "")
+                entry = signal_cfg.get(factor_id)
+                if (
+                    not isinstance(entry, dict)
+                    or item.get("source") != "builtin"
+                    or item.get("role") != "alpha"
+                    or str(item.get("lifecycle_status") or "").upper()
+                    not in {
+                        FactorLifecycleStage.SHADOW.value,
+                        FactorLifecycleStage.PROMOTION_PREPARED.value,
+                    }
+                    or not bool(entry.get("autonomous_activation"))
+                    or not bool(item.get("enabled"))
+                ):
+                    continue
+                health_age = now - float(item.get("health_updated_at") or 0.0)
+                if (
+                    float(item.get("health_score") or 0.0)
+                    < profile.builtin_activation_min_health_score
+                    or int(item.get("health_n_obs") or 0)
+                    < profile.builtin_activation_min_n_obs
+                    or str(item.get("health_status") or "").upper()
+                    not in {"HEALTHY", "WATCH"}
+                    or health_age < -5.0
+                    or health_age > profile.health_max_age_seconds
+                    or self._factor_has_pending_effect(factor_id)
+                ):
+                    continue
+                model = self._model_governance_evidence(item, cfg)
+                if (
+                    int(model.get("sample_count") or 0)
+                    or int(model.get("weak_sample_count") or 0)
+                ) and float(model.get("avg_weakness_score") or 0.0) >= float(
+                    getattr(
+                        cfg,
+                        "factor_governance_builtin_activation_max_weakness",
+                        0.65,
+                    )
+                    or 0.65
+                ):
+                    continue
+                activation_ids.append(factor_id)
+
+        from backend.services.governance_control_plans import (
+            governance_coordinator_mode,
+        )
+
+        mode = governance_coordinator_mode()
+        restore_enabled = bool(
+            getattr(cfg, "factor_governance_auto_restore_enabled", True)
+        )
+        if restore_enabled and (mode == "off" or profile.balanced_demo):
+            for item in catalog:
+                factor_id = str(item.get("factor_id") or "")
+                entry = signal_cfg.get(factor_id)
+                if (
+                    not factor_id
+                    or item.get("source") != "builtin"
+                    or item.get("role") != "alpha"
+                    or not isinstance(entry, dict)
+                    or entry.get("enabled", True) is not False
+                    or str(entry.get("lifecycle_status") or "").upper()
+                    not in {"QUARANTINE", "QUARANTINED"}
+                    or item.get("governance_action") != "disable_factor_live"
+                ):
+                    continue
+                disabled_at = float(
+                    entry.get("disabled_at")
+                    or item.get("last_action_ts")
+                    or 0.0
+                )
+                health_updated_at = float(item.get("health_updated_at") or 0.0)
+                health_age = now - health_updated_at
+                if (
+                    disabled_at <= 0.0
+                    or now - disabled_at < profile.restore_cooldown_seconds
+                    or health_updated_at <= disabled_at
+                    or health_age < -5.0
+                    or health_age > profile.health_max_age_seconds
+                    or str(item.get("health_status") or "").upper()
+                    not in {"HEALTHY", "WATCH"}
+                    or float(item.get("health_score") or 0.0)
+                    < profile.restore_min_health_score
+                    or int(item.get("health_n_obs") or 0)
+                    < profile.restore_min_n_obs
+                    or (mode != "off" and self._factor_has_pending_effect(factor_id))
+                ):
+                    continue
+                model = self._model_governance_evidence(item, cfg)
+                has_model_evidence = (
+                    int(model.get("sample_count") or 0)
+                    >= profile.restore_model_min_samples
+                    or int(model.get("weak_sample_count") or 0)
+                    >= profile.restore_model_min_samples
+                )
+                observed_weakness = max(
+                    float(model.get("avg_weakness_score") or 0.0),
+                    float(model.get("latest_weakness_score") or 0.0),
+                )
+                if (
+                    has_model_evidence
+                    and observed_weakness >= profile.restore_max_weakness
+                ):
+                    continue
+                restore_ids.append(factor_id)
+
+        for item in catalog:
+            factor_id = str(item.get("factor_id") or "")
+            if (
+                item.get("source") != "shadow"
+                or not self._promotion_evidence(item, cfg).get("eligible")
+                or self._factor_has_pending_effect(factor_id)
+            ):
+                continue
+            promotion_ids.append(factor_id)
+
+        reasons = {
+            "builtin_activation": activation_ids,
+            "builtin_restore": restore_ids,
+            "shadow_promotion": promotion_ids,
+            "redundancy_groups": int(
+                redundancy_report.get("group_count") or 0
+            ),
+        }
+        return {
+            "required": bool(
+                activation_ids
+                or restore_ids
+                or promotion_ids
+                or reasons["redundancy_groups"]
+            ),
+            "reasons": reasons,
+            "candidate_count": (
+                len(activation_ids)
+                + len(restore_ids)
+                + len(promotion_ids)
+                + int(reasons["redundancy_groups"])
+            ),
+            "current_positive_weights": sum(
+                1
+                for value in weights.values()
+                if (
+                    float(value.get("weight") or 0.0)
+                    if isinstance(value, dict)
+                    else float(value or 0.0)
+                )
+                > 0.0
+            ),
+        }
 
     def _factor_has_pending_effect(self, factor_id: str) -> bool:
         if not factor_id:
@@ -1120,10 +1410,19 @@ class FactorGovernanceOrchestrator:
                 stage = str(state.get("lifecycle_stage") or FactorLifecycleStage.SHADOW.value)
                 if stage == FactorLifecycleStage.SHADOW.value:
                     meta = adapter.get_meta(factor_name)
+                    expression = str(
+                        item.get("lifecycle_expression")
+                        or meta.get("description")
+                        or ""
+                    )
                     result = lifecycle.prepare_promotion(
                         name=factor_name,
-                        expression=str(meta.get("description") or ""),
-                        artifact_hash=str(meta.get("artifact_hash") or ""),
+                        expression=expression,
+                        artifact_hash=str(
+                            item.get("lifecycle_artifact_hash")
+                            or meta.get("artifact_hash")
+                            or ""
+                        ),
                         actor="system:factor_governance",
                         reason="autonomous governance promotion preparation",
                         evidence_refs=evidence,
@@ -1838,6 +2137,7 @@ class FactorGovernanceOrchestrator:
                         idempotency_key=(
                             f"builtin_shadow:{factor_id}:{run.get('run_id', '')}"
                         ),
+                        v16=binding,
                     )
                     transition_status = "shadow_registered"
                 elif stage == FactorLifecycleStage.SHADOW.value:
@@ -1878,7 +2178,7 @@ class FactorGovernanceOrchestrator:
                     if committed
                     else "blocked_by_evidence"
                 )
-                if transition_status == "applied" and projection_ready:
+                if projection_ready:
                     activated += 1
                 actions.append(self._audit_action(
                     run,

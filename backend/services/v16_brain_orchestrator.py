@@ -616,6 +616,144 @@ class V16BrainOrchestratorService:
             self._persist_commands([command])
         return {"ok": True, "status": "delegated", "command": command, "boundary": self.boundary()}
 
+    def delegate_factor_governance_cycle(
+        self,
+        gate: dict[str, Any],
+        *,
+        persist: bool = True,
+    ) -> dict[str, Any]:
+        """Delegate one bounded factor-expansion cycle from concrete preflight evidence.
+
+        The command authorizes the specialist to evaluate only the candidates
+        already identified by its canonical preflight.  It does not select a
+        factor, change a weight, or bypass the specialist's risk and lifecycle
+        gates.
+        """
+
+        preflight = dict(gate.get("expansion_preflight") or {})
+        snapshot_id = str(gate.get("snapshot_id") or "")
+        candidate_count = int(preflight.get("candidate_count") or 0)
+        qualified = (
+            bool(snapshot_id)
+            and bool(preflight.get("required"))
+            and candidate_count > 0
+        )
+        if not qualified:
+            return {
+                "ok": False,
+                "status": "factor_expansion_evidence_not_ready",
+                "snapshot_id": snapshot_id,
+                "candidate_count": candidate_count,
+                "boundary": self.boundary(),
+            }
+
+        evidence = {
+            "schema_version": "v16_factor_governance_preflight.v1",
+            "snapshot_id": snapshot_id,
+            "health_cycle_id": str(gate.get("health_cycle_id") or ""),
+            "expansion_preflight": preflight,
+        }
+        evidence_fingerprint = hashlib.sha256(
+            dumps(evidence).encode("utf-8")
+        ).hexdigest()
+        now = time.time()
+        command = {
+            "command_id": (
+                "v16cmd_"
+                + hashlib.sha1(
+                    ("factor-governance|" + evidence_fingerprint).encode("utf-8")
+                ).hexdigest()[:20]
+            ),
+            "schema_version": "v16_brain_command.v1",
+            "snapshot_id": snapshot_id,
+            "plan_id": "",
+            "eval_id": "",
+            "candidate_id": f"factorpreflight_{evidence_fingerprint[:16]}",
+            "target_agent": "factor_governance",
+            "scope_type": "factor_weight",
+            "scope_key": "alpha_weight_policy",
+            "action": "factor_governance_cycle",
+            "decision": "delegate",
+            "status": "delegated_to_specialist",
+            "evidence": evidence,
+            "delegation": {
+                "target_agent": "factor_governance",
+                "delegated_by": "v16_brain",
+                "specialist_must_use": [
+                    "RiskPolicyService",
+                    "DecisionPolicy",
+                    "FactorLifecycleService",
+                ],
+                "specialist_must_not": [
+                    "expand_beyond_preflight",
+                    "bypass_risk_policy",
+                    "write_broker_directly",
+                ],
+            },
+            "posterior_fingerprint": str(
+                gate.get("posterior_fingerprint") or ""
+            ),
+            "evidence_fingerprint": evidence_fingerprint,
+            "max_apply_count": 1,
+            "authority_issued_at": now,
+            "created_at": now,
+            "updated_at": now,
+            "boundary": self.boundary(),
+        }
+        if persist:
+            ensure_v16_brain_command_table(self.db_path)
+            self._persist_commands([command])
+        return {
+            "ok": True,
+            "status": "delegated",
+            "command": command,
+            "boundary": self.boundary(),
+        }
+
+    def cancel_factor_governance_delegation(
+        self,
+        *,
+        command_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Close an unused one-cycle delegation after the specialist returns."""
+
+        if not command_id:
+            return {
+                "ok": False,
+                "status": "command_id_required",
+                "boundary": self.boundary(),
+            }
+        conn = connect(self.db_path)
+        try:
+            result = execute(
+                conn,
+                """UPDATE v16_brain_command
+                   SET claim_status='cancelled',
+                       status='specialist_no_action',
+                       failure_reason=?,
+                       updated_at=?
+                   WHERE command_id=?
+                     AND target_agent='factor_governance'
+                     AND claim_status='available'
+                     AND COALESCE(apply_count, 0)=0""",
+                (str(reason or "specialist_no_action"), time.time(), command_id),
+            )
+            conn.commit()
+            changed = int(getattr(result, "rowcount", 0) or 0) == 1
+            return {
+                "ok": changed,
+                "status": (
+                    "cancelled"
+                    if changed
+                    else "command_not_available"
+                ),
+                "command_id": command_id,
+                "boundary": self.boundary(),
+            }
+        finally:
+            conn.close()
+
     def delegate_entry_quality_control(
         self,
         gate: dict[str, Any],

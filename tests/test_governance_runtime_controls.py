@@ -202,6 +202,44 @@ def test_bounded_demo_operator_control_is_v16_exempt_in_production(
     assert claim["status"] == "operator_bounded_demo_control_exempt"
 
 
+def test_bounded_demo_operator_can_commit_cvar_limit_through_coordinator(
+    tmp_path, monkeypatch
+) -> None:
+    from backend.services.runtime_config_mutation import RuntimeConfigMutationService
+    from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
+
+    _set_coordinator_mode(monkeypatch, "dual_record")
+    monkeypatch.setattr(runtime_config, "bounded_demo_mode_active", lambda _cfg: True)
+    runtime_config.replace(
+        runtime_config.RuntimeConfig(
+            autonomy_mode="demo_autonomous",
+            risk_cvar_threshold_pct=2.0,
+        )
+    )
+    db_path = tmp_path / "state.db"
+
+    result = RuntimeConfigMutationService(db_path).apply_patch(
+        {"risk_cvar_threshold_pct": 2.5},
+        source="operator_cvar_limit",
+        actor="operator:pytest",
+        action="adjust_cvar_threshold",
+        reason="avoid minimum-volume admission deadlock",
+        audit=False,
+        v16_scope_type="context_policy",
+        v16_scope_key="threshold_and_sizing",
+        v16_target_agent="autonomous_learning",
+    )
+
+    assert result["ok"] is True, result
+    assert result["status"] == "committed"
+    assert result["risk_classification"]["risk_class"] == "risk_expanding"
+    assert result["v16_authority"]["status"] == "isolated_test_state"
+    assert runtime_config.shared().risk_cvar_threshold_pct == 2.5
+    latest = RuntimeConfigOverlayService(db_path).latest()
+    assert latest["overlay"]["risk_cvar_threshold_pct"] == 2.5
+    assert latest["mutation_id"] == result["mutation_id"]
+
+
 def test_persisted_operator_pause_blocks_stale_process_expansion(
     tmp_path, monkeypatch
 ) -> None:

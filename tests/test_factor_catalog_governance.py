@@ -30,6 +30,22 @@ def test_factor_catalog_includes_factor_governance_shadow_audit(tmp_path):
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE canary_state (
+                factor_name TEXT,
+                stage TEXT,
+                oos_bars INTEGER,
+                cumulative_pnl REAL,
+                evidence_hash TEXT,
+                dataset_hash TEXT,
+                evidence_end_at TEXT,
+                stage_evidence_hash TEXT,
+                fresh_evidence_bars INTEGER,
+                updated_at REAL
+            )
+            """
+        )
         conn.executemany(
             """
             INSERT INTO factor_governance_shadow_audit
@@ -40,7 +56,14 @@ def test_factor_catalog_includes_factor_governance_shadow_audit(tmp_path):
             [
                 ("fg1", "factor_governance_lightgbm", "1.0", "rsi_14", "shadow", 0.2, 0.7, 0, 100.0),
                 ("fg2", "factor_governance_lightgbm", "1.0", "rsi_14", "shadow", 0.1, 0.9, 0, 200.0),
+                ("fg3", "factor_governance_lightgbm", "1.0", "audit_only_ghost", "shadow", 0.1, 0.9, 0, 300.0),
             ],
+        )
+        conn.execute(
+            """
+            INSERT INTO canary_state
+            VALUES ('canary_only_ghost', 'SHADOW', 10, 0, '', '', '', '', 0, 300)
+            """
         )
         conn.commit()
     finally:
@@ -53,6 +76,127 @@ def test_factor_catalog_includes_factor_governance_shadow_audit(tmp_path):
     assert shadow["weak_sample_count"] == 2
     assert shadow["latest_inference_id"] == "fg2"
     assert catalog["rsi_14"]["model_weakness_score"] == 0.9
+    assert "audit_only_ghost" not in catalog
+    assert "canary_only_ghost" not in catalog
+
+
+def test_factor_catalog_prefers_canonical_lifecycle_state(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE factor_lifecycle_state (
+                factor_id TEXT PRIMARY KEY,
+                factor_name TEXT,
+                origin TEXT,
+                lifecycle_stage TEXT,
+                runtime_admission TEXT,
+                    mutation_id TEXT,
+                    generation INTEGER,
+                    definition_fingerprint TEXT,
+                    artifact_hash TEXT,
+                    metadata_json TEXT,
+                    activated_at REAL,
+                    retired_at REAL,
+                    updated_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+                INSERT INTO factor_lifecycle_state VALUES
+                ('builtin:rsi_14', 'rsi_14', 'builtin', 'QUARANTINED',
+                 'blocked', 'gmut_lifecycle', 2, 'rsi_14', 'artifact',
+                 '{"expression":"rsi_14"}', 0, 100, 100)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_config.reset_for_tests()
+    runtime_config.replace(
+        RuntimeConfig(
+            factor_signal_config={
+                "rsi_14": {
+                    "enabled": True,
+                    "role": "alpha",
+                    "lifecycle_status": "ACTIVE",
+                }
+            },
+            factor_portfolio_weights={"rsi_14": 1.0},
+        )
+    )
+    try:
+        item = {
+            row["factor_id"]: row for row in build_factor_catalog(db_path)
+        }["rsi_14"]
+    finally:
+        runtime_config.reset_for_tests()
+
+    assert item["lifecycle_factor_id"] == "builtin:rsi_14"
+    assert item["lifecycle_status"] == "QUARANTINED"
+    assert item["runtime_admission"] == "blocked"
+    assert item["enabled"] is False
+    assert item["eligible_for_live"] is False
+    assert item["used_in_score"] is False
+
+
+def test_factor_catalog_prefers_committed_mutation_over_older_suggestion(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE policy_suggestion (
+                scope_key TEXT,
+                action TEXT,
+                confidence REAL,
+                status TEXT,
+                created_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE governance_mutation_intent (
+                scope_key TEXT,
+                action TEXT,
+                mutation_id TEXT,
+                status TEXT,
+                projection_status TEXT,
+                control_surface TEXT,
+                committed_at REAL,
+                updated_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            VALUES ('rsi_14', 'downweight', 0.9, 'approved', 100)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO governance_mutation_intent
+            VALUES ('rsi_14', 'update_weight', 'gmut_applied', 'committed',
+                    'current', 'factor_weight', 200, 200)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    item = {
+        row["factor_id"]: row for row in build_factor_catalog(db_path)
+    }["rsi_14"]
+
+    assert item["governance_action"] == "update_weight"
+    assert item["governance_status"] == "applied"
+    assert item["governance_mutation_id"] == "gmut_applied"
+    assert item["last_action_ts"] == 200.0
 
 
 def test_factor_catalog_never_marks_prepared_builtin_live_eligible(tmp_path):

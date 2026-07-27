@@ -103,7 +103,7 @@ def position_path_metrics_for_position(
     broker: str = "",
     strategy_name: str = "",
 ) -> dict[str, Any]:
-    """Compute path metrics while treating persistence as enrichment only."""
+    """Compute path metrics and make cumulative state explicit when persistence fails."""
 
     position_id = runtime.position_id(position)
     if position_id <= 0:
@@ -161,6 +161,11 @@ def position_path_metrics_for_position(
                 action="position_path_metrics",
                 error=exc,
             )
+            return {
+                **path_update["result"],
+                "position_path_metrics_state": "unknown",
+                "position_path_metrics_reason_code": "position_path_persist_failed",
+            }
     return path_update["result"]
 
 

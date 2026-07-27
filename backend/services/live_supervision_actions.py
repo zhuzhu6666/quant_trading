@@ -228,10 +228,15 @@ def execute_supervisor_tighten_action(
                 "error": f"{type(exc).__name__}: {exc}",
             }
 
-        if not bool(verification.get("ok")):
-            projection_reason = str(
-                verification.get("reason") or "position_reconcile_failed"
-            )
+        projection_reason = str(
+            verification.get("reason") or "position_reconcile_failed"
+        )
+        position_closed_after_amend = (
+            not bool(verification.get("ok"))
+            and projection_reason == "position_missing_after_amend"
+            and str(verification.get("reconcile_status") or "") == "fresh"
+        )
+        if not bool(verification.get("ok")) and not position_closed_after_amend:
             failure_reason = f"amend_projection_unverified:{projection_reason}"
             if record_aux_failure is not None:
                 try:
@@ -339,16 +344,21 @@ def execute_supervisor_tighten_action(
                 record_aux_failure=record_aux_failure,
                 log=log,
             )
-        _best_effort_post_broker_effect(
-            lambda: track_local_sl_tp(pid, sl=planned_sl, tp=planned_tp),
-            position_id=pid,
-            action="tighten_position",
-            stage="track_local_sl_tp",
-            record_aux_failure=record_aux_failure,
-            log=log,
-        )
+        if not position_closed_after_amend:
+            _best_effort_post_broker_effect(
+                lambda: track_local_sl_tp(pid, sl=planned_sl, tp=planned_tp),
+                position_id=pid,
+                action="tighten_position",
+                stage="track_local_sl_tp",
+                record_aux_failure=record_aux_failure,
+                log=log,
+            )
         result_payloads = build_tighten_result_payloads(
-            result="applied",
+            result=(
+                "applied_position_closed"
+                if position_closed_after_amend
+                else "applied"
+            ),
             action="tighten",
             verdict=verdict,
             risk_action=risk_action,
@@ -419,7 +429,15 @@ def execute_supervisor_tighten_action(
             log=log,
         )
         tp_suffix = f" tp->{planned_tp:.2f}" if planned_tp != current_tp else ""
-        log(f"tick {tick}: supervisor tighten pos={pid} sl->{planned_sl:.2f}{tp_suffix}")
+        close_suffix = (
+            " position_closed_after_amend"
+            if position_closed_after_amend
+            else ""
+        )
+        log(
+            f"tick {tick}: supervisor tighten pos={pid} "
+            f"sl->{planned_sl:.2f}{tp_suffix}{close_suffix}"
+        )
         return
 
     comment = str(getattr(amend_res, "comment", "") or getattr(amend_res, "error", "") or "amend_failed")
