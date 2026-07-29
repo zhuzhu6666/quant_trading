@@ -165,9 +165,9 @@ P3 禁止以“先搭平台”为理由新增：
 | 检查 | 通过条件 |
 |---|---|
 | 三层记忆 | `MemoryIntegrityReport` 对原始 review、`trade_lesson_memory.v1` 与 `brain_memory` 返回来源覆盖、孤儿/重复/时间错位、污染隔离和索引引用；只读且不改变 readiness/trading authority |
-| API/readiness 投影 | `/api/ops/brain/memory.memory.integrity` 与 `learning_repair.memory_integrity` 使用同一报告，不新增 endpoint、业务事实表、应用 worker 或静态开关；pgBackRest timer 仅为未启用的运维模板 |
-| pgBackRest 合同 | 配置、timer、脱敏 health projection、manifest 与隔离 restore verifier 已受测试覆盖；无 S3 凭据、未执行 `stanza-create/check/first full backup` 时必须显示 `missing/unavailable`；有备份但尚无成功恢复演练必须显示 `degraded`，不得宣称已可恢复 |
-| 恢复演练 | 只允许独立 DSN，`verify_state_restore.py --confirm-isolated` 必须核对 schema、关键表行数和 MemoryIntegrity；任何差异非零退出，禁止自动 promote；仅显式 `--publish-production-health` 记录脱敏成功/失败结果 |
+| API/readiness 投影 | `/api/ops/brain/memory.memory.integrity` 与 `learning_repair.memory_integrity` 使用同一报告，不新增 endpoint、业务事实表、应用 worker 或静态开关；Windows 成功拉取回执只投影到既有 `postgres_backup_health.v1`，不改变交易/治理权限 |
+| Windows 主动拉取合同 | forced-command SSH 仅允许流式 `pg_dump` 与格式受限的回执；服务器不保存备份文件、不启用 WAL/S3/pgBackRest repository/timer。没有 Windows 成功回执时必须显示 `missing/unavailable`；有回执但尚无成功恢复演练必须显示 `degraded`，不得宣称已可恢复 |
+| 恢复演练 | 只允许独立 DSN，`verify_state_restore.py --confirm-isolated` 必须核对 schema 和 MemoryIntegrity；任何异常非零退出，不伪造离线快照与在线源的逐行一致性，禁止自动 promote；演练结果只可显式写入脱敏 health 投影 |
 
 本批不引入 pgvector、外部向量库、Redis/Kafka、PG Job Queue 发布、状态 schema migration 或实盘静态开关切换。
 

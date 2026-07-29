@@ -1856,10 +1856,10 @@ class BackendReadinessService:
             from backend.services.postgres_backup_health import PostgresBackupHealthService
 
             projection = RuntimeHealthProjectionService().latest(max_age_seconds=180.0)
-            # The backup reporter is the canonical writer of this external
-            # observation.  Readiness only carries it alongside the existing
-            # runtime projection; it does not turn backup freshness into a
-            # trading or release verdict.
+            # The Windows client receipt recorder is the canonical writer of
+            # this external observation. Readiness only carries it alongside
+            # the existing runtime projection; it does not turn backup
+            # freshness into a trading or release verdict.
             return {
                 **projection,
                 "postgres_backup": PostgresBackupHealthService().latest(),

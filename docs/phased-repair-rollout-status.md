@@ -138,7 +138,7 @@ P3 完成。
 ### P3 技术底座补充（2026-07-29，Demo 未发布）
 
 - `MemoryIntegrityReport` 已作为唯一只读比较器进入 brain memory API 和 learning readiness，覆盖原始 review、canonical lesson projection 与有界检索索引；降级只暴露证据问题，不成为交易或治理权限写入口。
-- pgBackRest 的 S3/WAL、full/diff timer、脱敏 `runtime_kv` 健康投影、备份 manifest 与隔离 restore verifier 已进入代码库；当前主机未安装/启用 pgBackRest、未配置 S3 或 WAL archive，因此灾备状态仍是 `missing`，不是 completed。
+- Windows 主动拉取、脱敏 `runtime_kv` 健康投影与隔离 restore verifier 已进入代码库；服务器不保存备份文件、未启用 S3、WAL archive、pgBackRest repository 或 timer。收到 Windows 成功拉取回执前，灾备状态仍是 `missing`；收到回执但尚未完成隔离演练时为 `degraded`，不是 completed。
 - 未新增业务事实表、迁移、PG Job Queue 发布、外部缓存/向量库或任何实盘静态开关。
 
 ## 4. P4：V16 因果调度与专员闭环

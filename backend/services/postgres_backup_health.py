@@ -1,9 +1,9 @@
-"""Canonical read/write projection for pgBackRest backup observations.
+"""Canonical projection for verified Windows-pull backup receipts.
 
-pgBackRest remains the authority for backup and WAL state.  The operational
-reporter is the only writer of this small ``runtime_kv`` projection; API and
-readiness consumers only read it.  It never changes PostgreSQL recovery,
-trading authority, or release flags.
+The Windows client owns its local file and reports success only after it has
+validated the received ``pg_dump`` archive. This service is the single writer
+of that compact receipt in ``runtime_kv``; API and readiness only read it. It
+never changes PostgreSQL recovery, trading authority, or release flags.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ SCHEMA_VERSION = "postgres_backup_health.v1"
 
 
 class PostgresBackupHealthService:
-    """Persist and read the external pgBackRest observation without re-evaluating it."""
+    """Persist and read the Windows-pull backup receipt without re-evaluating it."""
 
     def __init__(self, db_path: str | Path = STATE_DB):
         self.db_path = Path(db_path)
@@ -30,10 +30,11 @@ class PostgresBackupHealthService:
     def boundary() -> dict[str, Any]:
         return {
             "schema_version": "postgres_backup_health_boundary.v1",
-            "external_authority": "pgbackrest",
+            "external_authority": "windows_pull_client",
             "canonical_writer": "PostgresBackupHealthService",
-            "backup_observer": "scripts/pgbackrest_backup.py",
-            "restore_drill_recorder": "scripts/verify_state_restore.py (explicit opt-in)",
+            "backup_observer": "scripts/record_windows_pull_backup.py",
+            "restore_drill_verifier": "scripts/verify_state_restore.py (explicit opt-in)",
+            "restore_drill_recorder": "scripts/record_windows_restore_drill.py",
             "read_model_only": True,
             "does_not_authorize_trading": True,
             "does_not_change_postgresql_recovery": True,
@@ -41,7 +42,7 @@ class PostgresBackupHealthService:
         }
 
     def publish(self, observation: dict[str, Any]) -> dict[str, Any]:
-        """Publish a sanitized pgBackRest observation after a completed command."""
+        """Publish a sanitized backup observation after a completed command."""
         now = time.time()
         conn = connect(self.db_path)
         try:
@@ -76,6 +77,51 @@ class PostgresBackupHealthService:
             conn.close()
         return {**payload, "published_at": now, "boundary": self.boundary()}
 
+    def record_windows_pull(
+        self,
+        *,
+        completed_at: float,
+        byte_count: int,
+        sha256: str,
+    ) -> dict[str, Any]:
+        """Record a client-validated, off-host logical snapshot receipt.
+
+        The caller is the root-owned SSH bridge.  The receipt deliberately
+        says that the client reported validation: the server never pretends it
+        can read a Windows disk that may be offline.
+        """
+        completed = safe_float(completed_at)
+        size = int(byte_count or 0)
+        digest = str(sha256 or "").lower()
+        if (
+            completed <= 0
+            or completed > time.time() + 900.0
+            or size <= 0
+            or len(digest) != 64
+            or any(
+                char not in "0123456789abcdef" for char in digest
+            )
+        ):
+            raise ValueError("windows_pull_receipt_invalid")
+        return self.publish(
+            {
+                "ok": True,
+                "status": "healthy",
+                "source": "windows_pull",
+                "backup": {
+                    "method": "logical_pg_dump_custom",
+                    "database": "quant_audit",
+                    "completed_at": completed,
+                    "byte_count": size,
+                    "sha256": digest,
+                    "client_archive_verified": True,
+                    "offsite_copy": "client_reported",
+                    "server_retention": "none",
+                },
+                "observed_at": time.time(),
+            }
+        )
+
     def record_restore_drill(self, verification: dict[str, Any]) -> dict[str, Any]:
         """Record an already-completed isolated verification in the same projection.
 
@@ -86,6 +132,10 @@ class PostgresBackupHealthService:
         drill = {
             "status": "healthy" if bool(report.get("ok")) else "degraded",
             "verified_at": time.time(),
+            "client_verified_at": safe_float(report.get("verified_at")),
+            "verification_source": str(
+                report.get("verification_source") or "operator_reported"
+            ),
             "state_schema_status": str(
                 (report.get("state_schema") or {}).get("status") or "unavailable"
             ),
@@ -162,7 +212,11 @@ class PostgresBackupHealthService:
         )
         status = str(payload.get("status") or "unavailable")
         reason_code = str(payload.get("reason_code") or "")
-        if status == "healthy" and restore_status != "healthy":
+        source = str(payload.get("source") or "unknown")
+        if source != "windows_pull":
+            status = "unavailable"
+            reason_code = "backup_health_source_not_current"
+        elif status == "healthy" and restore_status != "healthy":
             status = "degraded"
             reason_code = "restore_drill_missing" if restore_status == "missing" else "restore_drill_not_healthy"
         return {
@@ -201,7 +255,7 @@ class PostgresBackupHealthService:
             "schema_version": SCHEMA_VERSION,
             "status": status,
             "observed_at": safe_float(clean_value.get("observed_at"), now),
-            "source": "pgbackrest",
+            "source": str(clean_value.get("source") or "unknown"),
             "boundary": self.boundary(),
         }
 

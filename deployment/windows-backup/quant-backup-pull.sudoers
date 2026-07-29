@@ -1,0 +1,1 @@
+quant-backup-pull ALL=(root) NOPASSWD: /usr/local/sbin/quant-state-backup-bridge dump, /usr/local/sbin/quant-state-backup-bridge receipt *, /usr/local/sbin/quant-state-backup-bridge restore-receipt *

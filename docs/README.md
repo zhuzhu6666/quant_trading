@@ -22,7 +22,7 @@
   canonical RiskPolicy、fresh reconcile 和真实 safety cause。
 - Safety、Generation、Execution Outcome、Governance、PG Job Queue 的静态发布开关不得随普通修复切换。
 - 学习记忆完整性已由只读 `MemoryIntegrityReport` 覆盖原始复盘、经验投影和检索索引；它只暴露证据问题，不改变 Demo 或实盘权限。
-- pgBackRest 的 S3/WAL/timer/隔离恢复合同已进入仓库，但当前未配置对象存储凭据、未安装或启用 pgBackRest；不得把“模板已提交”误报为已有灾备。
+- 灾备当前采用 Windows 电脑在线时的主动拉取：服务器只流式输出 `quant_audit` 的逻辑快照，不保存备份文件、不启用 WAL archive、S3、pgBackRest repository 或 timer。尚未收到 Windows 成功回执或隔离恢复演练前，灾备必须显示 `missing/degraded`，不得误报为可恢复。
 - 最近已知全量基线：`2452 passed, 9 skipped`。日常小批默认只跑针对性测试；阶段/发布验收才跑全量。
 
 2026-07-27 运行核对：

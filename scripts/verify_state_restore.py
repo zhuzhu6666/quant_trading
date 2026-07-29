@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Verify an isolated pgBackRest restore without starting or promoting it.
+"""Verify an isolated Windows-pull restore without starting or promoting it.
 
-This script never invokes ``pgbackrest restore``.  It only connects to a DSN
-that the operator has restored separately, compares it with the pre-backup
-manifest, and fails closed if that DSN is textually the configured production
-DSN.
+This script never restores data. It only connects to a separately restored
+logical snapshot and fails closed if that DSN is textually the configured
+production DSN.
 """
 from __future__ import annotations
 
@@ -22,7 +21,6 @@ from backend.core.db import STATE_SCHEMA, state_pg_dsn
 from backend.core.state_schema_migrations import STATE_SCHEMA_MIN_VERSION, state_schema_status
 from backend.core.state_store import connect_state_store
 from backend.services.memory_integrity import MemoryIntegrityReportService
-from backend.services.postgres_backup_health import PostgresBackupHealthService
 
 
 TABLES = ("trade_outcome_review", "experience_memory", "brain_memory")
@@ -52,37 +50,26 @@ def inspect_state(dsn: str) -> dict[str, Any]:
     return {"state_schema": schema, "table_counts": counts, "memory_integrity": integrity}
 
 
-def verify_manifest(expected: dict[str, Any], actual: dict[str, Any]) -> dict[str, Any]:
-    expected_counts = dict(expected.get("table_counts") or {})
-    actual_counts = dict(actual.get("table_counts") or {})
-    count_mismatches = {
-        table: {"expected": expected_counts.get(table), "actual": actual_counts.get(table)}
-        for table in TABLES
-        if expected_counts.get(table) != actual_counts.get(table)
-    }
-    expected_schema = dict(expected.get("state_schema") or {})
+def verify_restored_state(actual: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed on an invalid restored snapshot without inventing parity."""
     actual_schema = dict(actual.get("state_schema") or {})
-    schema_mismatch = (
-        not actual_schema.get("ok")
-        or int(actual_schema.get("current_version") or 0)
-        < int(expected_schema.get("current_version") or 0)
-    )
     integrity = dict(actual.get("memory_integrity") or {})
     integrity_status = str(integrity.get("status") or "unavailable")
-    ok = not count_mismatches and not schema_mismatch and integrity_status == "healthy"
+    schema_ok = bool(actual_schema.get("ok"))
+    ok = schema_ok and integrity_status == "healthy"
     return {
         "ok": ok,
-        "schema_version": "state_restore_verification.v1",
+        "schema_version": "windows_pull_restore_verification.v1",
         "state_schema": {
-            "expected_current_version": expected_schema.get("current_version"),
             "actual_current_version": actual_schema.get("current_version"),
-            "status": "matched" if not schema_mismatch else "mismatch",
+            "status": "healthy" if schema_ok else "invalid",
         },
         "table_counts": {
-            "status": "matched" if not count_mismatches else "mismatch",
-            "mismatches": count_mismatches,
+            "status": "observed_only",
+            "values": actual.get("table_counts") or {},
         },
         "memory_integrity": integrity,
+        "source_parity": "not_claimed_for_offline_logical_snapshot",
         "requires_manual_promotion": True,
     }
 
@@ -90,25 +77,14 @@ def verify_manifest(expected: dict[str, Any], actual: dict[str, Any]) -> dict[st
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--restored-dsn", required=True, help="Isolated restored database DSN; never printed")
-    parser.add_argument("--expected-manifest", required=True)
     parser.add_argument("--confirm-isolated", action="store_true")
-    parser.add_argument(
-        "--publish-production-health",
-        action="store_true",
-        help="Record only this completed drill result in the configured production health projection",
-    )
     args = parser.parse_args()
     if not args.confirm_isolated:
         raise SystemExit("refusing verification without --confirm-isolated")
     production_dsn = state_pg_dsn()
     if production_dsn and args.restored_dsn.strip() == production_dsn.strip():
         raise SystemExit("restored DSN matches configured production DSN")
-    expected = json.loads(Path(args.expected_manifest).read_text(encoding="utf-8"))
-    if str(expected.get("schema_version") or "") != "state_backup_manifest.v1":
-        raise SystemExit("expected manifest schema is unsupported")
-    report = verify_manifest(expected, inspect_state(args.restored_dsn))
-    if args.publish_production_health:
-        report["production_health_projection"] = PostgresBackupHealthService().record_restore_drill(report)
+    report = verify_restored_state(inspect_state(args.restored_dsn))
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0 if report["ok"] else 2
 

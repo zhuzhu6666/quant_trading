@@ -470,18 +470,18 @@ schema 写入只能由显式 migration 执行：
 ./.venv/bin/python scripts/state_schema_migrate.py --apply
 ```
 
-### PostgreSQL 灾备（未配置时禁止启用）
+### PostgreSQL 灾备（Windows 主动拉取）
 
-pgBackRest 的仓库模板和隔离恢复演练工具在 `deployment/pgbackrest/README.md`。它们默认不安装、不改 `archive_mode`、不创建 S3 bucket、不启用 timer，也不执行 restore。
+当前唯一合同在 `deployment/windows-backup/README.md`：Windows 电脑在线时，经由仅允许 `dump`、备份回执和恢复演练回执的 forced-command SSH key 拉取 `quant_audit` 的完整逻辑快照。服务器不保存备份文件，不启用 `archive_mode`、S3、pgBackRest repository 或 timer；不得把安装了客户端工具或受限 SSH 入口误报为已有可恢复备份。
 
-启用前先由 operator 准备受保护的 S3 配置与 cipher passphrase，完成 stanza/check/首次 full backup 后，才可安装 `quant-pgbackrest-full|diff.{service,timer}`。运行中只读核对：
+服务器管理员只安装入口与 Windows 公钥；Windows 拉取后以 `pg_restore --list` 验证文件，并通过回执更新既有 health 投影。只读核对：
 
 ```bash
-sudo -u postgres pgbackrest --stanza=quant-state-v1 --output=json info
 ./.venv/bin/python scripts/state_query.py --sql "SELECT value_json, updated_at FROM runtime_kv WHERE key='postgres_backup_health.v1'"
+sudo -u postgres psql -Atqc "SHOW archive_mode"
 ```
 
-恢复只能在隔离 DSN 上执行；恢复后使用 `scripts/verify_state_restore.py --confirm-isolated` 对照备份前 manifest，禁止自动 promote 或切换生产服务。只有演练确认成功后，才可在受控生产 health 主机额外传入 `--publish-production-health` 记录脱敏演练结果；有备份而无成功演练必须保持 `degraded`。
+恢复只能在隔离 DSN 上执行：`pg_restore` 后运行 `scripts/verify_state_restore.py --confirm-isolated`，它只核对 schema 和记忆完整性，不伪造与在线源的逐行一致性。禁止自动 promote 或切换生产服务；有成功拉取而无成功演练必须保持 `degraded`。
 
 cTrader 常用入口：
 
