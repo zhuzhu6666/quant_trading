@@ -231,6 +231,58 @@ def test_v16_orchestrator_dispatches_without_direct_runtime_mutation(tmp_path):
         conn.close()
 
 
+def test_expired_delegate_gets_a_fresh_command_without_reviving_terminal_row(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    _seed_posterior_facts(db_path, now)
+    service = V16BrainOrchestratorService(db_path)
+    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
+
+    conn = connect_sqlite(db_path)
+    try:
+        old = conn.execute(
+            """SELECT command_id, authority_issued_at
+               FROM v16_brain_command WHERE decision='delegate'"""
+        ).fetchone()
+        conn.execute(
+            """UPDATE v16_brain_command
+               SET claim_status='cancelled', failure_reason='authority_expired',
+                   finalized_at=?, updated_at=?
+               WHERE command_id=?""",
+            (now, now, old[0]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        rows = conn.execute(
+            """SELECT command_id, claim_status, failure_reason, authority_issued_at
+               FROM v16_brain_command WHERE decision='delegate'
+               ORDER BY created_at"""
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(rows) == 2
+    assert rows[0][0] != rows[1][0]
+    assert rows[0][1:] == ("cancelled", "authority_expired", rows[0][3])
+    assert rows[1][1] == "available"
+    assert rows[1][2] in (None, "")
+    assert rows[1][3] > rows[0][3]
+
+    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v16_brain_command WHERE decision='delegate'"
+        ).fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
 def test_superseded_candidate_cancels_unclaimed_delegate(tmp_path):
     db_path = tmp_path / "state.db"
     _seed_posterior_facts(db_path, time.time())
@@ -265,6 +317,9 @@ def test_superseded_candidate_cancels_unclaimed_delegate(tmp_path):
         readiness=_readiness(), limit=20, source="test", persist=True
     )
     assert rerun["delegated_count"] == 0
+    current_status = service.status()
+    assert current_status["status"] == "no_actionable_command"
+    assert current_status["actionable_command_count"] == 0
 
 
 def test_v16_delegates_only_qualified_entry_quality_v2_evidence(tmp_path):

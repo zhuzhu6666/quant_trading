@@ -699,7 +699,33 @@ class BrainGovernanceCandidateService:
                  decision_policy_json, rollback_plan_json, lineage_json, status,
                  submitted_suggestion_id, submitted_at, expires_at, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?, ?)
-                ON CONFLICT(candidate_id) DO NOTHING
+                ON CONFLICT(candidate_id) DO UPDATE SET
+                    source_agent=excluded.source_agent,
+                    source_kind=excluded.source_kind,
+                    source_ref_type=excluded.source_ref_type,
+                    source_ref_id=excluded.source_ref_id,
+                    proposal_stage=CASE
+                        WHEN brain_governance_candidate.status IN ('submitted', 'superseded', 'rejected')
+                        THEN brain_governance_candidate.proposal_stage
+                        ELSE excluded.proposal_stage
+                    END,
+                    capability_scope=excluded.capability_scope,
+                    scope_type=excluded.scope_type,
+                    scope_key=excluded.scope_key,
+                    action=excluded.action,
+                    confidence=excluded.confidence,
+                    evidence_score=excluded.evidence_score,
+                    risk_class=excluded.risk_class,
+                    max_impact=excluded.max_impact,
+                    expected_effect_json=excluded.expected_effect_json,
+                    evidence_refs_json=excluded.evidence_refs_json,
+                    counter_evidence_refs_json=excluded.counter_evidence_refs_json,
+                    risk_verdict_json=excluded.risk_verdict_json,
+                    decision_policy_json=excluded.decision_policy_json,
+                    rollback_plan_json=excluded.rollback_plan_json,
+                    lineage_json=excluded.lineage_json,
+                    expires_at=excluded.expires_at,
+                    updated_at=excluded.updated_at
                 """,
                 (
                     item["candidate_id"],

@@ -480,7 +480,10 @@ class BrainActionPlanEvaluatorService:
             clean_review_ids = {
                 str(row.get("review_id") or "") for row in trade_reviews
             }
-            learning_effects = self._fetch_table(conn, "learning_application_effect", limit,
+            # Effects are partitioned by scope in _evaluate_plan.  A global
+            # LIMIT here can fill the page with factor rows and hide the
+            # older supervisor effect that the selected plan needs.
+            learning_effects = self._fetch_table(conn, "learning_application_effect", None,
                                                   cols=["application_id", "scope_type", "scope_key",
                                                         "action", "status", "observed_trade_count",
                                                         "baseline_trade_count", "post_avg_reward",
@@ -572,10 +575,17 @@ class BrainActionPlanEvaluatorService:
     @staticmethod
     def _matches_scope(scope_type: str, effect: dict[str, Any]) -> bool:
         effect_scope = str(effect.get("scope_type") or "")
-        aliases = {"factor_weight": {"factor", "factor_weight", "alpha_weight_policy"},
-                    "parameter_template": {"parameter_template", "template", "online_light"},
-                    "context_policy": {"context", "context_policy", "threshold_and_sizing"},
-                    "supervisor_template": {"supervisor", "supervisor_template", "position_supervisor"}}
+        aliases = {
+            "factor_weight": {"factor", "factor_weight", "alpha_weight_policy"},
+            "parameter_template": {"parameter_template", "template", "online_light"},
+            "context_policy": {"context", "context_policy", "threshold_and_sizing"},
+            "supervisor_template": {
+                "supervisor",
+                "supervisor_template",
+                "position_supervisor",
+                "position_supervisor_template",
+            },
+        }
         allowed = aliases.get(scope_type, {scope_type})
         return effect_scope in allowed or str(effect.get("scope_key") or "") in allowed
 

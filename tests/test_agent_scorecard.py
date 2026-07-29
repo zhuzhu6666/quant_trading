@@ -10,6 +10,51 @@ from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.trade_lesson_memory import upsert_trade_lesson_memory
 
 
+def test_agent_chain_health_treats_idle_v16_as_healthy(monkeypatch, tmp_path):
+    service = AgentScorecardService(tmp_path / "state.db")
+    service.registry = type("Registry", (), {
+        "status": lambda *_args, **_kwargs: {"ok": True, "status": "healthy"}
+    })()
+    monkeypatch.setattr(
+        "backend.services.agent_scorecard.ProposalRegistryService",
+        lambda _db_path: type("Proposals", (), {
+            "status": lambda *_args, **_kwargs: {"proposal_count": 1, "conflict_count": 0}
+        })(),
+    )
+    monkeypatch.setattr(
+        service,
+        "scorecard",
+        lambda **_kwargs: {"items": [{"source_agent": "test"}], "summary": {}},
+    )
+    monkeypatch.setattr(
+        service,
+        "latest_trade_attributions",
+        lambda **_kwargs: {"ok": True, "status": "available", "summary": {"lesson_count": 1}},
+    )
+    monkeypatch.setattr(
+        "backend.services.entry_quality_governance.EntryQualityGovernanceService",
+        lambda _db_path: type("EntryQuality", (), {"status": lambda *_args: {"ok": True, "status": "healthy"}})(),
+    )
+    monkeypatch.setattr(
+        "backend.services.v16_brain_orchestrator.V16BrainOrchestratorService",
+        lambda _db_path: type("V16", (), {
+            "status": lambda *_args, **_kwargs: {
+                "ok": False,
+                "status": "no_actionable_command",
+                "actionable_command_count": 0,
+                "cancelled_command_count": 3,
+            }
+        })(),
+    )
+
+    health = service.chain_health()
+    v16 = next(item for item in health["checks"] if item["component"] == "v16_actionable_commands")
+
+    assert health["ok"] is True
+    assert v16["status"] == "idle"
+    assert v16["ok"] is True
+
+
 def _setup_state(db_path):
     conn = connect_sqlite(db_path)
     conn.row_factory = __import__("sqlite3").Row

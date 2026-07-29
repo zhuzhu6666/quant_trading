@@ -7,7 +7,7 @@ import { Field, StatTile, toneFromStatus } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import { FactBoundary } from "@/components/FactBoundary";
 import { useAuth } from "@/contexts/AuthContext";
-import { liveEndpointPollInterval, useLiveState } from "@/hooks/useLiveState";
+import { liveEndpointRefetchInterval, useLiveState } from "@/hooks/useLiveState";
 import {
   emergencyClose,
   getAccount,
@@ -57,6 +57,15 @@ function optionalNumber(row: Record<string, unknown>, keys: string[]): number | 
   if (raw === null || raw === undefined || raw === "") return null;
   const numeric = Number(raw);
   return Number.isFinite(numeric) ? numeric : null;
+}
+
+function formatOptionalDecimal(
+  row: Record<string, unknown>,
+  keys: string[],
+  digits: number,
+): string {
+  const value = optionalNumber(row, keys);
+  return value === null ? "未知" : formatDecimal(value, digits);
 }
 
 function componentValueAllowed(
@@ -126,14 +135,15 @@ export function TradingPage() {
   const { authenticated } = useAuth();
   const { snapshot, source, connected, refresh, error: wsError } = useLiveState({ enabled: authenticated });
   const queryClient = useQueryClient();
-  const liveEndpointInterval = liveEndpointPollInterval(connected);
-  const liveEndpointStaleTime = Math.min(5_000, liveEndpointInterval / 2);
+  const liveEndpointInterval = liveEndpointRefetchInterval(connected);
+  const liveEndpointStaleTime = 5_000;
 
   const loopQuery = useQuery({
     queryKey: queryKeys.loopStatus,
     queryFn: getLoopStatus,
     refetchInterval: liveEndpointInterval,
     staleTime: liveEndpointStaleTime,
+    retry: false,
     enabled: authenticated,
   });
 
@@ -142,6 +152,7 @@ export function TradingPage() {
     queryFn: getAccount,
     refetchInterval: liveEndpointInterval,
     staleTime: liveEndpointStaleTime,
+    retry: false,
     enabled: authenticated,
   });
 
@@ -150,6 +161,7 @@ export function TradingPage() {
     queryFn: getPositions,
     refetchInterval: liveEndpointInterval,
     staleTime: liveEndpointStaleTime,
+    retry: false,
     enabled: authenticated,
   });
   const liveStatusQuery = useQuery({
@@ -157,6 +169,7 @@ export function TradingPage() {
     queryFn: getLiveStatus,
     refetchInterval: liveEndpointInterval,
     staleTime: liveEndpointStaleTime,
+    retry: false,
     enabled: authenticated,
   });
   const strategyStatusQuery = useQuery({
@@ -164,6 +177,7 @@ export function TradingPage() {
     queryFn: getStrategyStatus,
     refetchInterval: 5000,
     staleTime: 2500,
+    retry: false,
     enabled: authenticated,
   });
   const riskQuery = useQuery({
@@ -287,7 +301,7 @@ export function TradingPage() {
     const seen = new Set<string>();
     return recentTicks
       .map((raw, sourceOrder) => ({ item: asRecord(raw), sourceOrder }))
-      .filter(({ item }) => pick(item, ["tactical_score"]) !== undefined || pick(item, ["macro_score"]) !== undefined)
+      .filter(({ item }) => pick(item, ["ts", "time"]) !== undefined)
       .sort((a, b) => {
         const timeDifference = pickNumber(b.item, ["ts"], 0) - pickNumber(a.item, ["ts"], 0);
         return timeDifference || b.sourceOrder - a.sourceOrder;
@@ -323,7 +337,7 @@ export function TradingPage() {
     && spotKnown;
   const positionsKnown = factIsKnown(positionsViewFact, positionsViewRequestFailed);
 
-  const connectionTone = connected ? "ok" : source === "polling" ? "warn" : "bad";
+  const connectionTone = connected ? "ok" : "warn";
   const loopRunning = pickBoolean(loop, ["running", "is_running", "pipeline_active", "alive", "status"], false);
   const broker = pickString(loop, ["broker", "broker_name", "exchange"], pickString(account, ["broker"], ""));
   const strategy = pickString(loop, ["strategy_name", "strategy", "strategyName", "active_strategy"], "");
@@ -438,7 +452,7 @@ export function TradingPage() {
           <p>启动、停止、紧急平仓和持仓监控集中在这一页，所有数值以实时接口为准。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={connected ? `连接 ${source}` : "连接中断"} tone={connectionTone} />
+          <StatusPill status={connected ? "WS 实时连接" : "WS 重连中"} tone={connectionTone} />
           {hasLoopData ? <StatusPill status={loopRunning ? "循环运行中" : "循环未运行"} tone={loopKnown && loopRunning ? "ok" : "warn"} /> : <StatusPill status="循环状态未知" tone="warn" />}
           <StatusPill status={factHasDisplayValue(statusFact) ? `市场 ${translateDisplayValue(marketStatus)}` : "市场状态未知"} tone={factBoundTone(statusFact, toneFromStatus(marketStatus), statusRequestFailed)} />
           <StatusPill status={broker} tone="mute" />
@@ -579,12 +593,12 @@ export function TradingPage() {
                 return (
                   <tr key={`${pickString(item, ["tick"], String(index))}-${index}`}>
                     <td>{formatReadableTime(pick(item, ["ts", "time"]))}</td>
-                    <td>{formatDecimal(pickNumber(item, ["tick"], 0), 0)}</td>
-                    <td>{formatDecimal(pickNumber(item, ["tactical_score"], 0), 4)}</td>
-                    <td>{formatDecimal(pickNumber(item, ["macro_score"], 0), 4)}</td>
-                    <td>{formatDecimal(pickNumber(item, ["n_active"], 0), 0)}</td>
-                    <td>{formatDecimal(pickNumber(item, ["n_abstain"], 0), 0)}</td>
-                    <td>{translateDisplayValue(pickString(item, ["gate_reason"], ""))}</td>
+                    <td>{formatOptionalDecimal(item, ["tick"], 0)}</td>
+                    <td>{formatOptionalDecimal(item, ["tactical_score", "signal.tactical_score"], 4)}</td>
+                    <td>{formatOptionalDecimal(item, ["macro_score", "signal.macro_score"], 4)}</td>
+                    <td>{formatOptionalDecimal(item, ["n_active", "signal.n_active"], 0)}</td>
+                    <td>{formatOptionalDecimal(item, ["n_abstain", "signal.n_abstain"], 0)}</td>
+                    <td>{translateDisplayValue(pickString(item, ["gate_reason", "gate_result.reason"], ""))}</td>
                   </tr>
                 );
               })}

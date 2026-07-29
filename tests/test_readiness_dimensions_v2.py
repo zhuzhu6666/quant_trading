@@ -93,6 +93,28 @@ def test_worker_mutation_circuit_only_blocks_autonomous_mutation() -> None:
     assert result["ready_for_release"] is True
 
 
+def test_blocked_factor_governance_runtime_blocks_autonomous_mutation() -> None:
+    rc.reset_for_tests()
+    try:
+        result = _dimensions(
+            governance={
+                "factor_governance_runtime": {
+                    "enabled": True,
+                    "ok": False,
+                    "status": "blocked_by_v16_command",
+                }
+            }
+        )
+    finally:
+        rc.reset_for_tests()
+
+    assert result["ready_for_autonomous_mutation"] is False
+    reasons = {
+        item["reason"] for item in result["blockers"]["autonomous_mutation"]
+    }
+    assert "governance_runtime_not_ready" in reasons
+
+
 def test_unknown_canonical_var_is_projected_as_live_readiness_blocker() -> None:
     rc.reset_for_tests()
     try:

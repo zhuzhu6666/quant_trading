@@ -308,6 +308,38 @@ def test_factor_governance_runtime_reports_fresh_run_and_catalog_snapshot(tmp_pa
     assert status["latest_catalog_snapshot"]["snapshot_id"] == "snap_1"
 
 
+def test_factor_governance_runtime_reports_v16_blocked_run_as_not_ready(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """INSERT INTO evolution_run
+               (run_id, run_type, trigger_source, status, config_version, config_hash,
+                summary_json, started_at, ended_at)
+               VALUES ('fg_run_blocked', 'factor_governance_autonomous', 'scheduler',
+                       'blocked_by_v16_command', 1, 'hash',
+                       '{\"reason\":\"factor_governance_mutation_requires_current_v16_delegate\"}', ?, ?)""",
+            (now - 10.0, now - 5.0),
+        )
+        conn.execute(
+            """INSERT INTO factor_catalog_snapshot
+               (snapshot_id, run_id, catalog_hash, catalog_json, source, created_at)
+               VALUES ('snap_blocked', 'fg_run_blocked', 'hash', '[]', 'test', ?)""",
+            (now - 4.0,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    status = BackendReadinessService(db_path=db_path)._factor_governance_runtime_status()
+
+    assert status["ok"] is False
+    assert status["status"] == "blocked_by_v16_command"
+    assert status["stale"] is False
+
+
 def test_factor_governance_runtime_rejects_missing_observation_timestamps(tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)

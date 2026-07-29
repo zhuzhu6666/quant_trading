@@ -664,6 +664,7 @@ class AutonomousEvolutionNurseryRunner:
         priority = tuple(allowlist or (
             "governor_review",
             "resolve_conflicts",
+            "apply_entry_quality_control",
             "rollback_supervisor_templates",
             "sync_factor_weights",
             "factor_pruning_bridge",

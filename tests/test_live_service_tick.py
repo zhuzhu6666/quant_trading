@@ -889,7 +889,6 @@ def test_process_tick_duplicate_decision_bar_skips_open_decision(monkeypatch):
     }
     try:
         monkeypatch.setattr(live_service, "_decision_run_live_decision_pipeline", _fail_decision_pipeline)
-        monkeypatch.setattr(live_service, "_write_live_trade_log_factor", lambda *args, **kwargs: None)
         monkeypatch.setattr(live_service, "_check_business_alerts", lambda *args, **kwargs: None)
         live_service._process_tick(
             bridge,

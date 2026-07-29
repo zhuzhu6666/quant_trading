@@ -519,6 +519,8 @@ class V16BrainOrchestratorService:
                 status = "posterior_not_dispatched"
             elif candidate_commands and not candidate_closed:
                 status = "command_candidate_gap"
+            elif candidate_commands and actionable_count == 0:
+                status = "no_actionable_command"
             return {
                 "ok": status == "healthy",
                 "schema_version": "v16_brain_orchestrator_status.v1",
@@ -974,6 +976,61 @@ class V16BrainOrchestratorService:
         conn = connect(self.db_path)
         try:
             for item in commands:
+                command_id = str(item.get("command_id") or "")
+                existing = execute(
+                    conn,
+                    """SELECT claim_status, failure_reason
+                       FROM v16_brain_command
+                       WHERE command_id=?""",
+                    (command_id,),
+                ).fetchone()
+                if (
+                    existing
+                    and str(item.get("decision") or "") == "delegate"
+                    and str(existing["claim_status"] or "") == "cancelled"
+                    and str(existing["failure_reason"] or "") == "authority_expired"
+                ):
+                    reusable = execute(
+                        conn,
+                        """SELECT command_id
+                           FROM v16_brain_command
+                           WHERE command_id<>?
+                             AND decision='delegate'
+                             AND target_agent=?
+                             AND scope_type=?
+                             AND scope_key=?
+                             AND action=?
+                             AND candidate_id=?
+                             AND posterior_fingerprint=?
+                             AND evidence_fingerprint=?
+                             AND NOT (
+                                 claim_status='cancelled'
+                                 AND failure_reason='authority_expired'
+                             )
+                           ORDER BY created_at DESC
+                           LIMIT 1""",
+                        (
+                            command_id,
+                            str(item.get("target_agent") or ""),
+                            str(item.get("scope_type") or ""),
+                            str(item.get("scope_key") or ""),
+                            str(item.get("action") or ""),
+                            str(item.get("candidate_id") or ""),
+                            str(item.get("posterior_fingerprint") or ""),
+                            str(item.get("evidence_fingerprint") or ""),
+                        ),
+                    ).fetchone()
+                    if reusable:
+                        item["command_id"] = str(reusable["command_id"] or "")
+                    else:
+                        reissue_key = (
+                            f"{command_id}|{safe_float(item.get('created_at')):.6f}|"
+                            f"{safe_float(item.get('updated_at')):.6f}"
+                        )
+                        item["command_id"] = (
+                            f"{command_id}_r"
+                            f"{hashlib.sha1(reissue_key.encode('utf-8')).hexdigest()[:12]}"
+                        )
                 execute(
                     conn,
                     """INSERT INTO v16_brain_command

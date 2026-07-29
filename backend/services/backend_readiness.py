@@ -1073,6 +1073,10 @@ class BackendReadinessService:
             status = "missing_catalog_snapshot"
             ok = False
             stale = True
+        elif str(latest_run.get("status") or "").lower().startswith("blocked"):
+            status = str(latest_run.get("status") or "blocked")
+            ok = False
+            stale = False
         else:
             run_age_raw = latest_run.get("age_seconds")
             snapshot_age_raw = latest_snapshot.get("age_seconds")

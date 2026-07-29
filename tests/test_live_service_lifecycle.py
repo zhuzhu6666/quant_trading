@@ -2195,6 +2195,113 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
     assert live_service._live_state_get("session_pnl") == pytest.approx(-10.0)
 
 
+def test_recovery_bootstrap_accepts_close_deal_before_last_seen_guard(
+    monkeypatch,
+    tmp_path,
+):
+    from backend.core import db as db_module
+
+    db_path = tmp_path / "state.db"
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    now = time.time()
+    close_ts = now - 15.5
+    last_seen_at = now - 10.0
+    conn = _conn()
+    try:
+        conn.executescript(db_module.STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO recovery_position_state
+            (position_id, broker, symbol, direction, open_price, volume,
+             first_seen_at, last_seen_at, status, strategy_name,
+             entry_decision_id, context_integrity, recovery_meta_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                303,
+                "ctrader",
+                "XAUUSD+",
+                -1,
+                4050.0,
+                100.0,
+                now - 30.0,
+                last_seen_at,
+                "open",
+                "factor_v4",
+                "dec_open",
+                "full",
+                "{}",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO ctrader_deals
+            (deal_id, position_id, exec_timestamp, exec_price,
+             gross_profit, swap, close_commission, closed_volume, is_close)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (9303, 303, close_ts, 4049.0, -1.0, 0.0, -0.1, 100, 1),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _Bridge:
+        is_connected = True
+
+        def reconcile_positions(self, *, force=False, allow_cache_fallback=True):
+            observed_at = time.time()
+            return SimpleNamespace(
+                reconcile_id="recovery-303",
+                status="fresh",
+                positions=(),
+                observed_at=observed_at,
+                generated_at=observed_at,
+            )
+
+        def get_deals(self, **_kwargs):
+            return []
+
+    _patch_live_state_conn(monkeypatch, _conn)
+    monkeypatch.setattr(live_service, "_LEDGER", None)
+    live_service._live_state_update(
+        positions=[],
+        positions_updated_at=time.time(),
+    )
+
+    bridge = _Bridge()
+    assert live_service._bootstrap_position_recovery(
+        bridge,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        log=lambda _message: None,
+    ) is False
+    assert live_service._bootstrap_position_recovery(
+        bridge,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        log=lambda _message: None,
+    ) is True
+
+    conn = _conn()
+    try:
+        row = conn.execute(
+            "SELECT status, close_reason, close_pnl "
+            "FROM recovery_position_state WHERE position_id=303"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row["status"] == "closed_replayed"
+    assert row["close_reason"] == "restart_replay"
+    assert row["close_pnl"] == pytest.approx(-1.1)
+
+
 def test_replay_keeps_close_deal_latch_until_recovery_projection_commits(
     monkeypatch,
 ):

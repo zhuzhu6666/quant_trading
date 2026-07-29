@@ -57,6 +57,10 @@ def _create_db(path):
             status TEXT DEFAULT 'proposed',
             reviewed_at REAL DEFAULT 0.0,
             review_note TEXT DEFAULT '',
+            governance_eligible INTEGER NOT NULL DEFAULT 0,
+            governance_eligibility_version TEXT NOT NULL DEFAULT '',
+            governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
+            governance_ineligible_reason TEXT NOT NULL DEFAULT '',
             created_at REAL NOT NULL DEFAULT 0.0
         );
         CREATE TABLE supervisor_counterfactual_review (
@@ -196,7 +200,7 @@ def test_replay_and_advisory_filter_contamination_before_effective_limit(tmp_pat
     assert "tighten_mfe_capture_protection" not in actions
 
 
-def test_position_supervisor_advisories_are_advisory_only_and_materializable(tmp_path):
+def test_position_supervisor_advisories_do_not_materialize_without_eligible_evidence(tmp_path):
     db_path = tmp_path / "state.db"
     _create_db(db_path)
 
@@ -217,13 +221,8 @@ def test_position_supervisor_advisories_are_advisory_only_and_materializable(tmp
         rows = conn.execute("SELECT scope_type, action, status, evidence_json FROM policy_suggestion").fetchall()
     finally:
         conn.close()
-    assert rows
-    assert rows[0][0] == "position_supervisor_template"
-    assert rows[0][2] == "proposed"
-    evidence = json.loads(rows[0][3])
-    assert evidence["source_agent"] == "autonomous_learning"
-    assert evidence["schema_version"] == "position_supervisor_advisory_evidence.v1"
-    assert evidence["agent_context"]["schema_version"] == "agent_generation_context.v1"
+    assert result["items"] == []
+    assert rows == []
 
 
 def test_counterfactual_summary_excludes_contaminated_source_review(tmp_path):
@@ -347,11 +346,69 @@ def test_position_supervisor_advisories_materialize_mfe_capture_failure_template
             WHERE action='switch_position_supervisor_template'
             """
         ).fetchone()
+        eligible_row = conn.execute(
+            """
+            SELECT governance_eligible, governance_eligibility_version,
+                   governance_eligibility_fingerprint, governance_ineligible_reason
+            FROM policy_suggestion
+            WHERE action='switch_position_supervisor_template'
+            """
+        ).fetchone()
     finally:
         conn.close()
     assert row == (PROFIT_PROTECTION_TEMPLATE_ID, "tighten_mfe_capture_protection", "proposed")
     assert generated_row[0] == generated["scope_key"]
     assert json.loads(generated_row[3])["candidate_template"]["template_id"] == generated["scope_key"]
+
+    eligibility = json.loads(generated_row[3])["governance_eligibility"]
+    assert eligibility["governance_eligible"] is True
+    assert eligibility["governance_eligibility_version"] == "governance_eligibility.v1"
+    assert eligibility["governance_eligibility_fingerprint"]
+
+    assert eligible_row[0] == 1
+    assert eligible_row[1] == "governance_eligibility.v1"
+    assert eligible_row[2]
+    assert eligible_row[3] == ""
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            UPDATE policy_suggestion
+            SET status='rejected', governance_eligible=0,
+                governance_eligibility_version='',
+                governance_eligibility_fingerprint='',
+                governance_ineligible_reason='eligibility_contract_invalid'
+            WHERE action='switch_position_supervisor_template'
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    build_position_supervisor_advisories(
+        day="2026-06-26",
+        db_path=db_path,
+        materialize=True,
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        repaired_row = conn.execute(
+            """
+            SELECT status, governance_eligible, governance_eligibility_version,
+                   governance_eligibility_fingerprint, governance_ineligible_reason
+            FROM policy_suggestion
+            WHERE action='switch_position_supervisor_template'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert repaired_row[0] == "proposed"
+    assert repaired_row[1] == 1
+    assert repaired_row[2] == "governance_eligibility.v1"
+    assert repaired_row[3]
+    assert repaired_row[4] == ""
 
     templates = {item["template_id"]: item for item in list_position_supervisor_templates(db_path=db_path)}
     assert generated["scope_key"] in templates

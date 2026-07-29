@@ -723,6 +723,7 @@ class FactorGovernanceOrchestrator:
             factor_id = str(item.get("factor_id") or "")
             if (
                 item.get("source") != "shadow"
+                or not self._has_durable_shadow_lifecycle_identity(item)
                 or not self._promotion_evidence(item, cfg).get("eligible")
                 or self._factor_has_pending_effect(factor_id)
             ):
@@ -1380,7 +1381,12 @@ class FactorGovernanceOrchestrator:
         cfg = runtime_config.shared()
         max_actions = int(getattr(cfg, "factor_governance_max_promotions_per_cycle", 1) or 1)
         actions: list[dict[str, Any]] = []
-        candidates = [item for item in catalog if item.get("source") == "shadow"]
+        candidates = [
+            item
+            for item in catalog
+            if item.get("source") == "shadow"
+            and self._has_durable_shadow_lifecycle_identity(item)
+        ]
         candidates.sort(key=lambda item: self._shadow_score(item), reverse=True)
         for item in candidates:
             if len(actions) >= max_actions:
@@ -2502,6 +2508,16 @@ class FactorGovernanceOrchestrator:
         return actions
 
     # ── Evidence and mutation helpers ───────────────────────────────
+
+    @staticmethod
+    def _has_durable_shadow_lifecycle_identity(item: dict[str, Any]) -> bool:
+        factor_id = str(item.get("factor_id") or "")
+        return bool(
+            factor_id
+            and str(item.get("lifecycle_factor_id") or "") == factor_id
+            and str(item.get("lifecycle_expression") or "")
+            and str(item.get("lifecycle_artifact_hash") or "")
+        )
 
     def _promotion_evidence(self, item: dict[str, Any], cfg: Any) -> dict[str, Any]:
         perf = item.get("shadow_perf") or {}

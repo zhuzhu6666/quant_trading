@@ -234,6 +234,7 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
       const status = pickString(query.state.data, ["status"], "");
       return ["done", "error", "cancelled"].includes(status) ? false : 5000;
     },
+    retry: false,
   });
   const readinessQuery = useBackendReadinessQuery(60_000);
   const datasetQuery = useQuery({

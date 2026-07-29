@@ -11,11 +11,10 @@ import {
 import { getStateSnapshot, getWsTicket, getWsUrl, SessionStats, StateSnapshot } from "@/api/client";
 import { factHasDisplayValue, readFactComponent } from "@/api/fact";
 
-type SourceType = "websocket" | "polling" | "offline";
+type SourceType = "websocket" | "offline";
 
 type LiveStateHookOptions = {
   enabled: boolean;
-  pollIntervalMs?: number;
 };
 
 type LiveStateValue = {
@@ -28,16 +27,13 @@ type LiveStateValue = {
 
 const LiveStateContext = createContext<LiveStateValue | null>(null);
 
-export const LIVE_HTTP_POLL_INTERVAL_MS = {
-  snapshotFallback: 4_000,
-  endpointFallback: 3_000,
-  endpointVerification: 10_000,
-} as const;
+export const LIVE_HTTP_ENDPOINT_VERIFY_INTERVAL_MS = 10_000;
+export const LIVE_WS_RECONNECT_BASE_DELAY_MS = 3_000;
 
-export function liveEndpointPollInterval(connected: boolean): number {
-  return connected
-    ? LIVE_HTTP_POLL_INTERVAL_MS.endpointVerification
-    : LIVE_HTTP_POLL_INTERVAL_MS.endpointFallback;
+// HTTP endpoints verify the canonical fact while WS is healthy. A disconnected
+// WS must not silently become an HTTP polling source.
+export function liveEndpointRefetchInterval(connected: boolean): number | false {
+  return connected ? LIVE_HTTP_ENDPOINT_VERIFY_INTERVAL_MS : false;
 }
 
 function epochSeconds(value: unknown): number {
@@ -68,22 +64,22 @@ export function shouldApplyLiveSnapshot(
   return currentSequence <= 0 || incomingSequence <= 0 || incomingSequence >= currentSequence;
 }
 
-function useLiveStateConnection({
-  enabled,
-  pollIntervalMs = LIVE_HTTP_POLL_INTERVAL_MS.snapshotFallback,
-}: LiveStateHookOptions): LiveStateValue {
+function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateValue {
   const [snapshot, setSnapshot] = useState<StateSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [source, setSource] = useState<SourceType>("offline");
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
-  const pollRef = useRef<number | null>(null);
+  const refreshInFlightRef = useRef<Promise<boolean> | null>(null);
   const retryTimerRef = useRef<number | null>(null);
   const retryRef = useRef<number>(0);
-  const closeRequestedRef = useRef(false);
+  const socketGenerationRef = useRef(0);
+  const lifecycleGenerationRef = useRef(0);
   const connectedRef = useRef(false);
   const hasSnapshotRef = useRef(false);
-  const token = localStorage.getItem("quant.auth.token");
+  const snapshotRef = useRef<StateSnapshot | null>(null);
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
 
   const wsBase = useMemo(getWsUrl, []);
 
@@ -136,21 +132,18 @@ function useLiveStateConnection({
     return merged;
   };
 
-  const stopPolling = () => {
-    if (pollRef.current) {
-      window.clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-  };
-
   const stopSocket = () => {
-    closeRequestedRef.current = true;
+    // Invalidate every pending ticket request and every old socket callback.
+    // WebSocket close events are asynchronous and may arrive after a new
+    // socket has already been created.
+    socketGenerationRef.current += 1;
     connectedRef.current = false;
-    if (retryTimerRef.current) {
+    retryRef.current = 0;
+    if (retryTimerRef.current !== null) {
       window.clearTimeout(retryTimerRef.current);
       retryTimerRef.current = null;
     }
-    if (wsRef.current) {
+    if (wsRef.current !== null) {
       wsRef.current.close();
       wsRef.current = null;
     }
@@ -158,62 +151,105 @@ function useLiveStateConnection({
 
   const applySnapshot = (incoming: StateSnapshot) => {
     const normalized = normalizeSnapshot(incoming || {});
-    setSnapshot((prev) => {
-      if (!shouldApplyLiveSnapshot(prev, normalized)) return prev;
-      hasSnapshotRef.current = true;
-      return { ...(prev || {}), ...(normalized || {}) };
-    });
+    const current = snapshotRef.current;
+    if (!shouldApplyLiveSnapshot(current, normalized)) return false;
+    const next = { ...(current || {}), ...(normalized || {}) };
+    snapshotRef.current = next;
+    hasSnapshotRef.current = true;
+    setSnapshot(next);
     setError(null);
+    return true;
   };
 
-  const fetchSnapshot = async () => {
-    try {
-      const next = await getStateSnapshot();
-      applySnapshot(next);
-      if (!connectedRef.current) {
-        setSource("polling");
-        setConnected(false);
+  const refreshSnapshot = (): Promise<boolean> => {
+    if (!enabledRef.current) return Promise.resolve(false);
+    if (refreshInFlightRef.current) return refreshInFlightRef.current;
+
+    const lifecycleGeneration = lifecycleGenerationRef.current;
+    const request = (async () => {
+      try {
+        const next = await getStateSnapshot();
+        if (!enabledRef.current || lifecycleGeneration !== lifecycleGenerationRef.current) {
+          return false;
+        }
+        return applySnapshot(next);
+      } catch (exc: unknown) {
+        if (!enabledRef.current || lifecycleGeneration !== lifecycleGenerationRef.current) {
+          return false;
+        }
+        const message = exc instanceof Error ? exc.message : String(exc);
+        if (!hasSnapshotRef.current) {
+          setError(message);
+        }
+        return false;
       }
-      return true;
-    } catch (exc: unknown) {
-      const message = exc instanceof Error ? exc.message : String(exc);
-      if (!hasSnapshotRef.current) {
-        setError(message);
-      }
-      return false;
-    }
+    })();
+    refreshInFlightRef.current = request;
+    void request.then(
+      () => {
+        if (refreshInFlightRef.current === request) refreshInFlightRef.current = null;
+      },
+      () => {
+        if (refreshInFlightRef.current === request) refreshInFlightRef.current = null;
+      },
+    );
+    return request;
   };
 
-  const startPolling = () => {
-    if (pollRef.current) {
+  function scheduleSocketRetry(generation: number): void {
+    const token = localStorage.getItem("quant.auth.token");
+    if (!enabledRef.current || !token || retryTimerRef.current !== null) return;
+
+    retryRef.current = Math.min(retryRef.current + 1, 5);
+    const baseDelayMs = LIVE_WS_RECONNECT_BASE_DELAY_MS;
+    const backoffMs = baseDelayMs * (2 ** Math.max(retryRef.current - 1, 0));
+    const jitterMs = Math.floor(Math.random() * (baseDelayMs / 3));
+    retryTimerRef.current = window.setTimeout(() => {
+      retryTimerRef.current = null;
+      if (
+        !enabledRef.current
+        || !localStorage.getItem("quant.auth.token")
+        || generation !== socketGenerationRef.current
+        || wsRef.current !== null
+      ) {
+        return;
+      }
+      void startSocket();
+    }, backoffMs + jitterMs);
+  }
+
+  async function startSocket(): Promise<void> {
+    if (!enabledRef.current || !localStorage.getItem("quant.auth.token") || wsRef.current !== null) {
       return;
     }
-    void fetchSnapshot();
-    pollRef.current = window.setInterval(() => {
-      void fetchSnapshot();
-    }, pollIntervalMs);
-  };
 
-  const startSocket = async () => {
-    if (!token) {
-      return;
-    }
-
-    closeRequestedRef.current = false;
+    const generation = socketGenerationRef.current + 1;
+    socketGenerationRef.current = generation;
     try {
       const wsTicket = await getWsTicket();
-      if (closeRequestedRef.current) return;
+      if (generation !== socketGenerationRef.current) return;
       const socket = new WebSocket(`${wsBase}?ticket=${encodeURIComponent(wsTicket.ticket)}`);
       wsRef.current = socket;
+      const isCurrentSocket = () => (
+        generation === socketGenerationRef.current && wsRef.current === socket
+      );
       socket.onopen = () => {
+        if (!isCurrentSocket()) {
+          socket.close();
+          return;
+        }
+        if (retryTimerRef.current !== null) {
+          window.clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = null;
+        }
         retryRef.current = 0;
         connectedRef.current = true;
         setSource("websocket");
         setConnected(true);
         setError(null);
-        stopPolling();
       };
       socket.onmessage = (event) => {
+        if (!isCurrentSocket()) return;
         try {
           const payload = JSON.parse(event.data);
           applySnapshot(payload as StateSnapshot);
@@ -222,61 +258,69 @@ function useLiveStateConnection({
         }
       };
       socket.onclose = (e) => {
+        if (!isCurrentSocket()) return;
         connectedRef.current = false;
         setConnected(false);
-        setSource("polling");
+        setSource("offline");
         wsRef.current = null;
-        if (closeRequestedRef.current) {
-          return;
-        }
         if (e.code === 4001) {
-          setError("WebSocket 认证失败，已回退轮询");
-          startPolling();
+          setError("WebSocket 认证失败，等待重连");
+          scheduleSocketRetry(generation);
           return;
         }
-        startPolling();
-        retryRef.current = Math.min(retryRef.current + 1, 5);
-        if (retryTimerRef.current) {
-          window.clearTimeout(retryTimerRef.current);
+        if (!hasSnapshotRef.current) {
+          setError("WebSocket 已断开，等待重连");
         }
-        retryTimerRef.current = window.setTimeout(() => {
-          if (!closeRequestedRef.current) {
-            void startSocket();
-          }
-        }, 3000);
+        scheduleSocketRetry(generation);
       };
       socket.onerror = () => {
+        if (!isCurrentSocket()) return;
         connectedRef.current = false;
         setConnected(false);
+        setSource("offline");
         if (!hasSnapshotRef.current) {
-          setError("WebSocket 连接异常，尝试轮询");
+          setError("WebSocket 连接异常，等待重连");
         }
-        startPolling();
+        // Some runtimes emit error without a subsequent close. Invalidate
+        // this socket before scheduling the one allowed retry so a late close
+        // callback cannot tear down the replacement socket.
+        socketGenerationRef.current += 1;
+        wsRef.current = null;
+        try {
+          socket.close();
+        } catch {
+          // The socket may already be closing; the retry remains sufficient.
+        }
+        scheduleSocketRetry(socketGenerationRef.current);
       };
     } catch {
+      if (generation !== socketGenerationRef.current) return;
+      connectedRef.current = false;
+      setConnected(false);
+      setSource("offline");
       if (!hasSnapshotRef.current) {
-        setError("WebSocket 创建失败，回退到轮询");
+        setError("WebSocket 创建失败，等待重连");
       }
-      startPolling();
+      scheduleSocketRetry(generation);
     }
   };
 
   useEffect(() => {
+    lifecycleGenerationRef.current += 1;
     if (!enabled) {
-      stopPolling();
       stopSocket();
       setSource("offline");
       setConnected(false);
       connectedRef.current = false;
       hasSnapshotRef.current = false;
+      snapshotRef.current = null;
       setSnapshot(null);
       return;
     }
-    setSource("polling");
-    startPolling();
+    setSource("offline");
     void startSocket();
     const onAuthInvalidated = () => {
-      stopPolling();
+      lifecycleGenerationRef.current += 1;
       stopSocket();
       setSource("offline");
       setConnected(false);
@@ -284,26 +328,27 @@ function useLiveStateConnection({
     window.addEventListener("quant-auth-invalidated", onAuthInvalidated);
     return () => {
       window.removeEventListener("quant-auth-invalidated", onAuthInvalidated);
-      stopPolling();
+      lifecycleGenerationRef.current += 1;
       stopSocket();
     };
-  }, [enabled, pollIntervalMs, token, wsBase]);
+  // Access-token rotation refreshes the one-time ticket request but must not
+  // tear down an already-authenticated WS session and start a second one.
+  }, [enabled, wsBase]);
 
   return {
     snapshot,
     error,
     source,
     connected,
-    refresh: fetchSnapshot,
+    refresh: refreshSnapshot,
   };
 }
 
 export function LiveStateProvider({
   enabled,
-  pollIntervalMs = LIVE_HTTP_POLL_INTERVAL_MS.snapshotFallback,
   children,
 }: LiveStateHookOptions & { children: ReactNode }) {
-  const value = useLiveStateConnection({ enabled, pollIntervalMs });
+  const value = useLiveStateConnection({ enabled });
   return createElement(LiveStateContext.Provider, { value }, children);
 }
 

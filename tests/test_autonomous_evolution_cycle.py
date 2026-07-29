@@ -446,6 +446,20 @@ def test_recommended_step_closes_approved_weight_before_bridging_more_candidates
     assert selected["step"] == "sync_factor_weights"
 
 
+def test_recommended_step_prioritizes_entry_quality_control_over_observation_only_steps():
+    selected = AutonomousEvolutionNurseryRunner._select_recommended_step(
+        {
+            "steps": [
+                {"step": "apply_supervisor_templates", "pending_count": 1, "recommended": True},
+                {"step": "apply_entry_quality_control", "pending_count": 1, "recommended": True},
+                {"step": "factor_pruning_bridge", "pending_count": 7, "recommended": True},
+            ]
+        }
+    )
+
+    assert selected["step"] == "apply_entry_quality_control"
+
+
 def test_replay_freshness_records_lightweight_report(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     service = ReplayHarnessService(db_path)

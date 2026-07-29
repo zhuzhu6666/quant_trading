@@ -258,13 +258,17 @@ def bootstrap_position_recovery(
     recovery_close_ids = set(active_rows_by_id) | pending_missing_ids
 
     if pending_open_ids:
+        # The broker position snapshot can arrive after its close deal.  Keep
+        # the local timestamp guard inside the same bounded replay window as
+        # the broker fetch; volume and cursor proofs still decide whether the
+        # close is authoritative.
         minimum_close_ts = {
             position_id: max(
                 0.0,
                 float(
                     active_rows_by_id[position_id].get("last_seen_at") or 0.0
                 )
-                - 5.0,
+                - float(runtime.replay_lookback_seconds or 0.0),
             )
             for position_id in pending_open_ids
             if position_id in active_rows_by_id
@@ -383,7 +387,8 @@ def bootstrap_position_recovery(
             minimum_close_ts = {
                 int(row["position_id"]): max(
                     0.0,
-                    float(row.get("last_seen_at") or 0.0) - 5.0,
+                    float(row.get("last_seen_at") or 0.0)
+                    - float(runtime.replay_lookback_seconds or 0.0),
                 )
                 for row in active_rows
                 if int(row["position_id"] or 0) in missing_ids
@@ -466,7 +471,8 @@ def bootstrap_position_recovery(
         minimum_close_ts = {
             int(row["position_id"]): max(
                 0.0,
-                float(row.get("last_seen_at") or 0.0) - 5.0,
+                float(row.get("last_seen_at") or 0.0)
+                - float(runtime.replay_lookback_seconds or 0.0),
             )
             for row in active_rows
             if int(row["position_id"] or 0) in missing_ids

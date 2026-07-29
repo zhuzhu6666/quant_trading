@@ -9933,9 +9933,6 @@ def _process_tick_existing_decision_bar(
         f"pos={len(pos)} "
         f"pnl_session={_live_state_get('session_pnl', 0):.2f}")
     _check_business_alerts(tick, acct, pos, log)
-    _write_live_trade_log_factor(
-        tick, current_price, acct, pos, None, None, _live_state,
-    )
     _prev_position_ids = current_pids
     _publish_latest_price(current_price, source="loop_tick")
 
@@ -10211,12 +10208,6 @@ def _process_tick_factor_pipeline(
 
     # ── 业务告警检查 ──
     _check_business_alerts(tick, acct, pos, log)
-
-    # ── 结构化日志 ──
-    _write_live_trade_log_factor(
-        tick, current_price, acct, pos, composite, gate_result,
-        _live_state,
-    )
 
     # ── 统一持仓保护仲裁: timeout > supervisor > legacy AWE trailing ──
     if not protection_already_run and pos and bridge is not None and cfg is not None:
@@ -10966,59 +10957,6 @@ def _run_position_protection_cycle(
         runtime=runtime,
         decision_ts=decision_ts,
     )
-
-
-def _write_live_trade_log_factor(
-    tick: int, price: float, acct: dict, pos: list,
-    composite, gate_result, state: dict,
-) -> None:
-    """因子管道版结构化审计日志 (写入 DecisionLogStore → PostgreSQL state store)。"""
-    try:
-        meta = {
-            "tick": tick, "price": round(price, 2),
-            "balance": acct.get("balance", 0),
-            "equity": acct.get("equity", 0),
-            "n_positions": len(pos),
-            "session_pnl": round(float(state.get("session_pnl", 0)), 2),
-            "session_trades": int(state.get("session_trades", 0)),
-            "circuit_breaker": bool(state.get("circuit_breaker", False)),
-            "v4": True,
-        }
-        if gate_result:
-            meta["gate_result"] = {
-                "passed": bool(getattr(gate_result, "passed", False)),
-                "reason": str(getattr(gate_result, "reason", "")),
-            }
-        direction = 0
-        confidence = 0.0
-        if composite and composite.direction != 0:
-            direction = composite.direction
-            confidence = composite.score
-            meta["signal"] = {
-                "direction": composite.direction,
-                "score": round(composite.score, 4),
-                "tactical_score": round(composite.tactical_score, 4),
-                "macro_score": round(composite.macro_score, 4),
-                "n_active": composite.n_active_factors,
-                "n_abstain": composite.n_abstain_factors,
-                "gate": gate_result.reason if gate_result else "",
-                "tags": composite.tags_breakdown,
-            }
-        if _DECISION_LOG:
-            _safe_decision_log(
-                _DECISION_LOG,
-                run_id=_DECISION_LOG_RUN_ID,
-                ts=time.time(),
-                bar_date="",
-                decision_type="signal",
-                strategy="factor_v4",
-                direction=direction,
-                confidence=confidence,
-                decision="signal",
-                meta=_json.dumps(meta, ensure_ascii=False),
-            )
-    except Exception as _e2:
-        logger.debug("[live] _write_live_trade_log_factor failed: %s", _e2)
 
 
 # ── 业务告警 ─────────────────────────────────────────────

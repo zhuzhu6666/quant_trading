@@ -78,6 +78,9 @@ def test_orchestrator_prepares_eligible_shadow_through_lifecycle_service(monkeyp
 
     catalog = [{
         "factor_id": "shadow_alpha_1",
+        "lifecycle_factor_id": "shadow_alpha_1",
+        "lifecycle_expression": "ts_mean(close, 5)",
+        "lifecycle_artifact_hash": "shadow-alpha-1",
         "source": "shadow",
         "role": "alpha",
         "canary": {"stage": "ACTIVE"},
@@ -143,6 +146,9 @@ def test_orchestrator_activates_only_prepared_factor_with_explicit_weight(monkey
 
     catalog = [{
         "factor_id": "shadow_alpha_1",
+        "lifecycle_factor_id": "shadow_alpha_1",
+        "lifecycle_expression": "ts_mean(close, 5)",
+        "lifecycle_artifact_hash": "shadow-alpha-1",
         "source": "shadow",
         "role": "alpha",
         "canary": {"stage": "ACTIVE"},
@@ -186,6 +192,39 @@ def test_orchestrator_does_not_promote_shadow_without_evidence():
         "health_score": 0.0,
     }]
 
+    assert orch._promote_shadow_candidates(catalog, {"run_id": "test-run"}) == []
+
+
+def test_orchestrator_ignores_shadow_without_durable_lifecycle_identity(monkeypatch):
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    profile = _strict_profile(orch)
+    catalog = [{
+        "factor_id": "pca_18",
+        "source": "shadow",
+        "role": "alpha",
+        "canary": {"stage": "ACTIVE"},
+        "shadow_perf": {
+            "oos_bars": 500,
+            "n_valid": 500,
+            "cumulative_pnl": 2.0,
+            "hit_rate": 0.70,
+            "max_drawdown": 0.01,
+        },
+        "health_status": "HEALTHY",
+        "health_score": 90.0,
+    }]
+
+    preflight = orch._expansion_preflight(
+        catalog,
+        cfg=rc.shared(),
+        profile=profile,
+        redundancy_report={"group_count": 0, "groups": []},
+    )
+
+    assert preflight["required"] is False
+    assert preflight["reasons"]["shadow_promotion"] == []
     assert orch._promote_shadow_candidates(catalog, {"run_id": "test-run"}) == []
 
 

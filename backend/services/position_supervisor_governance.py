@@ -16,6 +16,7 @@ from backend.core.db import (
     is_state_db_path,
     state_table_columns,
 )
+from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.position_supervisor import evaluate_position_supervisor
 from backend.services.position_supervisor_templates import (
@@ -903,6 +904,25 @@ def build_position_supervisor_advisories(
             "replay_summary": replay_summary,
             "counterfactual_summary": counterfactual_summary,
         }
+        eligibility_fingerprint = hashlib.sha256(
+            _json(
+                {
+                    "schema_version": GOVERNANCE_ELIGIBILITY_VERSION,
+                    "evidence_class": "position_supervisor_advisory",
+                    "suggestion_id": suggestion_id,
+                    "scope_type": "position_supervisor_template",
+                    "scope_key": target_template_id,
+                    "action": action,
+                    "evidence": evidence,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        evidence["governance_eligibility"] = {
+            "governance_eligible": True,
+            "governance_eligibility_version": GOVERNANCE_ELIGIBILITY_VERSION,
+            "governance_eligibility_fingerprint": eligibility_fingerprint,
+            "evidence_class": "position_supervisor_advisory",
+        }
         suggestions.append(
             {
                 "suggestion_id": suggestion_id,
@@ -928,6 +948,10 @@ def build_position_supervisor_advisories(
                 "status": "proposed",
                 "advisory_only": True,
                 "approval_path": "governor_review_then_offline_replay",
+                "governance_eligible": 1,
+                "governance_eligibility_version": GOVERNANCE_ELIGIBILITY_VERSION,
+                "governance_eligibility_fingerprint": eligibility_fingerprint,
+                "governance_ineligible_reason": "",
             }
         )
 
@@ -1060,15 +1084,44 @@ def build_position_supervisor_advisories(
                     """
                     INSERT INTO policy_suggestion
                     (suggestion_id, scope_type, scope_key, action, confidence, reason,
-                     evidence_json, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+                     evidence_json, status, governance_eligible,
+                     governance_eligibility_version, governance_eligibility_fingerprint,
+                     governance_ineligible_reason, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)
                     ON CONFLICT(suggestion_id) DO UPDATE SET
                         scope_type=excluded.scope_type,
                         scope_key=excluded.scope_key,
                         action=excluded.action,
                         confidence=excluded.confidence,
                         reason=excluded.reason,
-                        evidence_json=excluded.evidence_json
+                        evidence_json=excluded.evidence_json,
+                        governance_eligible=excluded.governance_eligible,
+                        governance_eligibility_version=excluded.governance_eligibility_version,
+                        governance_eligibility_fingerprint=excluded.governance_eligibility_fingerprint,
+                        governance_ineligible_reason=CASE
+                            WHEN policy_suggestion.status='rejected'
+                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
+                            THEN ''
+                            ELSE policy_suggestion.governance_ineligible_reason
+                        END,
+                        status=CASE
+                            WHEN policy_suggestion.status='rejected'
+                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
+                            THEN 'proposed'
+                            ELSE policy_suggestion.status
+                        END,
+                        reviewed_at=CASE
+                            WHEN policy_suggestion.status='rejected'
+                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
+                            THEN 0.0
+                            ELSE policy_suggestion.reviewed_at
+                        END,
+                        review_note=CASE
+                            WHEN policy_suggestion.status='rejected'
+                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
+                            THEN ''
+                            ELSE policy_suggestion.review_note
+                        END
                     """,
                     (
                         item["suggestion_id"],
@@ -1078,6 +1131,10 @@ def build_position_supervisor_advisories(
                         float(item["confidence"]),
                         item["reason"],
                         json.dumps(item["evidence"], ensure_ascii=False),
+                        int(item["governance_eligible"]),
+                        item["governance_eligibility_version"],
+                        item["governance_eligibility_fingerprint"],
+                        item["governance_ineligible_reason"],
                         now_ts,
                     ),
                 )

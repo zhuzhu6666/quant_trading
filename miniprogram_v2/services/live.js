@@ -16,6 +16,7 @@ let pollTimer = null;
 let started = false;
 let pollInFlight = null;
 let lastPollAt = 0;
+let reconnectAttempts = 0;
 
 function buildPositionSummary(positions = []) {
   let buys = 0;
@@ -92,6 +93,18 @@ function patchFromStatePayload(data) {
   liveStore.setState(patch);
 }
 
+function scheduleReconnect() {
+  const token = wx.getStorageSync('jwt_token') || '';
+  if (!started || !token || reconnectTimer !== null) return;
+
+  const delayMs = Math.min(4000 * (2 ** reconnectAttempts), CONFIG.REFRESH_INTERVAL);
+  reconnectAttempts += 1;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void connectSocket();
+  }, delayMs);
+}
+
 async function connectSocket() {
   if (socketTask) return;
   const token = wx.getStorageSync('jwt_token') || '';
@@ -107,6 +120,7 @@ async function connectSocket() {
       Date.now(),
       'ws_ticket_failed',
     ));
+    scheduleReconnect();
     return;
   }
   if (!ticket) {
@@ -115,24 +129,32 @@ async function connectSocket() {
       Date.now(),
       'ws_ticket_missing',
     ));
+    scheduleReconnect();
     return;
   }
   if (!started || socketTask) return;
 
-  socketTask = wx.connectSocket({
+  const socket = wx.connectSocket({
     url: `${CONFIG.WS_URL}?ticket=${encodeURIComponent(ticket)}`,
     timeout: 6000,
   });
+  socketTask = socket;
 
-  socketTask.onOpen(() => {
+  socket.onOpen(() => {
+    if (socketTask !== socket) {
+      socket.close();
+      return;
+    }
+    reconnectAttempts = 0;
     liveStore.setState({ wsConnected: true });
-    if (reconnectTimer) {
+    if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
   });
 
-  socketTask.onMessage((res) => {
+  socket.onMessage((res) => {
+    if (socketTask !== socket) return;
     try {
       patchFromStatePayload(JSON.parse(res.data));
     } catch (err) {
@@ -140,7 +162,8 @@ async function connectSocket() {
     }
   });
 
-  socketTask.onClose(() => {
+  socket.onClose(() => {
+    if (socketTask !== socket) return;
     const attemptedAt = Date.now();
     liveStore.setState(reduceLiveWsDisconnected(
       liveStore.getState(),
@@ -148,19 +171,23 @@ async function connectSocket() {
       'ws_closed',
     ));
     socketTask = null;
-    const tokenNow = wx.getStorageSync('jwt_token') || '';
-    if (!tokenNow || !started) return;
-    reconnectTimer = setTimeout(() => {
-      void connectSocket();
-    }, 4000);
+    scheduleReconnect();
   });
 
-  socketTask.onError(() => {
+  socket.onError(() => {
+    if (socketTask !== socket) return;
     liveStore.setState(reduceLiveWsDisconnected(
       liveStore.getState(),
       Date.now(),
       'ws_error',
     ));
+    socketTask = null;
+    try {
+      socket.close();
+    } catch (err) {
+      // The runtime may already have closed the failed socket.
+    }
+    scheduleReconnect();
   });
 }
 
@@ -170,13 +197,13 @@ async function pollLoop(options = {}) {
   const force = !!options.force;
   const wsFresh = state.wsConnected && now - (state.lastUpdate || 0) < 3000;
 
+  if (pollInFlight) {
+    return pollInFlight;
+  }
   if (!force && wsFresh) {
     return state;
   }
-  if (!force && pollInFlight) {
-    return pollInFlight;
-  }
-  if (!force && now - lastPollAt < 1200) {
+  if (now - lastPollAt < 1200) {
     return state;
   }
 
@@ -302,10 +329,11 @@ export function stopLiveRuntime() {
     socketTask.close();
     socketTask = null;
   }
-  if (reconnectTimer) {
+  if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  reconnectAttempts = 0;
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;

@@ -52,6 +52,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     queryFn: getSystemLoad,
     refetchInterval: 5_000,
     staleTime: 2_500,
+    retry: false,
     enabled: location.pathname !== "/login",
   });
 

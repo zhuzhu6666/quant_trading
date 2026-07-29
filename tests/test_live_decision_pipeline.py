@@ -172,3 +172,32 @@ def test_signal_decision_log_payload_matches_legacy_shape():
         gate_result=gate_result,
         tick=9,
     ) is None
+
+
+def test_signal_decision_log_payload_keeps_factor_facts_when_gate_blocks():
+    composite = SimpleNamespace(
+        direction=0,
+        score=0.0,
+        tactical_score=-0.011258,
+        macro_score=-0.577005,
+        n_active_factors=17,
+        n_available_factors=17,
+        n_scoring_factors=8,
+        n_contributing_factors=6,
+        n_abstain_factors=1,
+    )
+    gate_result = SimpleNamespace(passed=False, reason="signal_below_threshold")
+
+    payload = build_signal_decision_log_payload(
+        bar={"time": 1785256800.0},
+        composite=composite,
+        gate_result=gate_result,
+        tick=2064,
+    )
+
+    assert payload["decision"] == "hold"
+    assert payload["direction"] == 0
+    assert payload["meta"]["tactical_score"] == -0.011258
+    assert payload["meta"]["macro_score"] == -0.577005
+    assert payload["meta"]["n_active"] == 17
+    assert payload["meta"]["n_abstain"] == 1

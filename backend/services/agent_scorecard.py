@@ -174,6 +174,8 @@ class AgentScorecardService:
         except Exception as exc:
             entry_quality = {"ok": False, "status": "error", "error": str(exc)}
             v16_commands = {"ok": False, "status": "error", "error": str(exc)}
+        v16_status = str(v16_commands.get("status") or "unknown")
+        v16_idle = v16_status == "no_actionable_command"
         score_summary = scorecard.get("summary") or {}
         proposal_count = int(proposals.get("proposal_count") or 0)
         source_ledger_count = (
@@ -221,8 +223,8 @@ class AgentScorecardService:
             },
             {
                 "component": "v16_actionable_commands",
-                "status": v16_commands.get("status", "unknown"),
-                "ok": bool(v16_commands.get("ok")),
+                "status": "idle" if v16_idle else v16_status,
+                "ok": bool(v16_commands.get("ok")) or v16_idle,
                 "actionable_count": int(v16_commands.get("actionable_command_count") or 0),
                 "cancelled_count": int(v16_commands.get("cancelled_command_count") or 0),
                 "oldest_actionable_age_seconds": float(

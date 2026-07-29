@@ -26,7 +26,7 @@ import { MetricCard } from "@/components/Card";
 import { StatTile, numberTone, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import { useAuth } from "@/contexts/AuthContext";
-import { liveEndpointPollInterval, useLiveState } from "@/hooks/useLiveState";
+import { liveEndpointRefetchInterval, useLiveState } from "@/hooks/useLiveState";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 import {
   getAccount,
@@ -109,8 +109,8 @@ function blockerText(value: unknown): string {
 
 function useDashboardQueries(connected: boolean) {
   const readiness = useBackendReadinessQuery();
-  const liveEndpointInterval = liveEndpointPollInterval(connected);
-  const liveEndpointStaleTime = Math.min(5_000, liveEndpointInterval / 2);
+  const liveEndpointInterval = liveEndpointRefetchInterval(connected);
+  const liveEndpointStaleTime = 5_000;
   return {
     health: useQuery({
       queryKey: queryKeys.health,
@@ -119,19 +119,22 @@ function useDashboardQueries(connected: boolean) {
       // headroom that the browser never oscillates between known and stale.
       refetchInterval: 3_000,
       staleTime: liveEndpointStaleTime,
-      refetchOnWindowFocus: true,
+      retry: false,
+      refetchOnWindowFocus: false,
     }),
     loop: useQuery({
       queryKey: queryKeys.loopStatus,
       queryFn: getLoopStatus,
       refetchInterval: liveEndpointInterval,
       staleTime: liveEndpointStaleTime,
+      retry: false,
     }),
     account: useQuery({
       queryKey: queryKeys.account,
       queryFn: getAccount,
       refetchInterval: liveEndpointInterval,
       staleTime: 2_000,
+      retry: false,
     }),
     session: useQuery({
       queryKey: queryKeys.sessionStats,
@@ -316,7 +319,7 @@ export function OverviewPage() {
           <p>先看数据、交易、风控和自治链路走到哪里，再按节点进入详细页面。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={connected ? "WS 实时连接" : "轮询/重连中"} tone={connected ? "ok" : "warn"} />
+          <StatusPill status={connected ? "WS 实时连接" : "WS 重连中"} tone={connected ? "ok" : "warn"} />
           {hasLoopData ? <StatusPill status={loopRunning ? "交易运行中" : "交易未运行"} tone={loopKnown && loopRunning ? "ok" : "warn"} /> : <StatusPill status="循环状态未知" tone="warn" />}
           <StatusPill status={healthKnown ? `接口 ${healthStatus}` : "接口状态未知"} tone={healthKnown ? toneFromStatus(healthStatus) : "warn"} />
         </div>

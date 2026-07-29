@@ -144,7 +144,8 @@ P3 完成。
   command 不再被重复视为可授权。
 - authority freshness 只读不可变 `authority_issued_at`；claim/release/recovery 不续期。
 - orchestrator 使用同一既有最大授权年龄终态取消过期 available command，不新增队列、
-  readiness verdict、阈值或恢复 authority。
+  readiness verdict、阈值或恢复 authority；同一实质委派需要重试时保留旧的
+  `authority_expired` 终态并生成带新不可变授权时间的新 command，重复运行仍复用有效重试记录。
 - posterior 仲裁先选择 supervisor 证据，再只在相同 `review_id`，缺失时依次按
   `trade_id`、`position_id` 匹配 entry review；复用 position 的另一笔交易不会混入。
 - 运行库原唯一过期 available command 已取消为 `authority_expired`，`apply_count=0`；
@@ -247,6 +248,46 @@ P4 完成。后续只保留 P1 真实成交/完整生命周期验收、Safety sh
   “政策允许/政策拦截”和“真实执行/未执行”，历史 allowed-but-skipped 不再被显示成成交；
 - supervisor sizing/action/lifecycle/API 针对性验证通过，Web production build 通过；
   仍需发布后观察新的最小仓位 MFE 回吐周期，确认运行日志不再连续产生不可交易 reduce。
+
+2026-07-28 因子实时信号恢复与展示最小修复：
+
+- recovery 的 canonical authority 保持为 `live_execution_recovery` + 既有
+  `execution.deal_sync`；复用现有 `replay_lookback_seconds` bounded replay window，
+  不新增 service、table、thread、调度器、轮询或阈值。`last_seen_at` 不再作为固定 5 秒
+  的 close-deal 硬边界，完整 volume/cursor 与 projection commit 仍是关闭确认条件；
+- `TradingPage` 复用 `/api/v4/recent-ticks` 返回的 signal rows，只有缺少显式
+  `ts/time` 的记录才不展示；缺失 tactical/macro 等字段显示“未知”，不补零、不丢弃最新
+  signal，也没有新增 WS/polling 路径；
+- 针对性验证：recovery/deal-sync 21 passed，生命周期回归 5 passed，Web smoke、
+  architecture、fact/auth、fact behavior、typecheck、production build 全部通过；
+- 受控重启后 `recovery_position_state.position_id=279452614` 已落为
+  `closed_replayed`，日志确认 recovery reconciled；随后 canonical `decision_log` 已
+  产生新信号行 43705、43706，证明原先的 14:45 停摆已解除；
+- 重启后出现的 cTrader `get_positions/fetch_bars/account_info` RPC timeout 属于独立
+  的 broker transport/freshness 问题，当前仍按既有 fail-closed 规则保持新增风险受限，
+  不通过增加重试并发或绕过 readiness 来掩盖。
+
+2026-07-28 Web 实时状态来源收敛：
+
+- `web_frontend/src/hooks/useLiveState.ts` 将 WebSocket 保持为 live snapshot 唯一实时来源；
+  WS 建连前、close、error 和 ticket 失败均不再启动 HTTP snapshot 轮询，状态显示为
+  `offline/WS 重连中`，只保留单 socket、有界 backoff 重连；
+- loop/account/positions 的 HTTP endpoint 在 WS 已连接时仅保留低频 fact verification，
+  WS 断开后 `refetchInterval=false`，删除 3 秒 HTTP fallback，不再出现 WS/轮询来源来回切换；
+- 保留用户显式“刷新”触发的一次性 snapshot 请求和页面独立的 health/risk/session 查询，
+  不新增后台 timer、WS 连接或并发重试；
+- 前端 smoke、architecture、fact/auth、fact behavior、typecheck 和 production build
+  均通过，构建产物中已无旧 `startPolling`/`setSource("polling")` fallback 路径。
+
+2026-07-29 因子信号未知分与重复写入最小修复：
+
+- `build_signal_decision_log_payload` 是 factor_v4 signal 的唯一 canonical writer；保留
+  `direction=0`/gate blocked 记录中的真实 tactical、macro、active、abstain 字段；
+- 删除旧 `_write_live_trade_log_factor` 及两个调用点，重复 decision bar 不再伪造
+  `decision_type=signal`，减少无意义的 PostgreSQL 写入，不新增线程、定时器、轮询或重试；
+- 针对性验证：`tests/test_live_decision_pipeline.py` 与
+  `tests/test_live_service_tick.py` 共 33 passed，`live_service.py` 定向编译和 diff check 通过；
+  发布后需确认新 `state_v1.decision_log` signal 行不再出现无因子字段的交替记录。
 
 ## 5. 仍需真实运行证明
 
