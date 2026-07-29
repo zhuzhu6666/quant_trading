@@ -207,6 +207,8 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
     assert status["canary"]["reviewed_position_count"] == 3
     assert status["canary"]["stage"] == "learning_shadow"
     assert status["canary"]["broker_mutation_allowed"] is False
+    assert status["memory_integrity"]["boundary"]["read_only"] is True
+    assert status["memory_integrity"]["boundary"]["affects_trading"] is False
     assert status["ok"] is True
 
 

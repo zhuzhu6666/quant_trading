@@ -1,0 +1,41 @@
+# Copy to /etc/pgbackrest/pgbackrest.conf and replace every <...> value.
+# Keep the installed file root/postgres-readable only (0600); never commit it.
+# This example intentionally does not contain S3 credentials or cipher material.
+
+[global]
+repo1-type=s3
+repo1-s3-endpoint=<s3-compatible-endpoint>
+repo1-s3-region=<region>
+repo1-s3-bucket=<precreated-backup-bucket>
+repo1-path=/quant-trading/state-v1
+repo1-s3-uri-style=path
+repo1-s3-verify-tls=y
+
+# Prefer an instance/workload role.  If the provider requires shared keys,
+# change this protected host setting to ``shared`` and supply key material
+# outside this repository.
+repo1-s3-key-type=auto
+
+# Client-side encryption.  Set repo1-cipher-pass only in the protected host
+# configuration.  Optionally configure provider-side KMS separately.
+repo1-cipher-type=aes-256-cbc
+repo1-cipher-pass=<protected-random-cipher-passphrase>
+
+# Four weekly full backups and one week of six-hour differential backups.
+# Do not configure aggressive archive retention: PITR needs a continuous WAL chain.
+repo1-retention-full=4
+repo1-retention-diff=28
+repo1-retention-history=365
+start-fast=y
+process-max=2
+log-level-console=info
+log-level-file=detail
+log-path=/var/log/pgbackrest
+spool-path=/var/spool/pgbackrest
+
+[global:archive-push]
+compress-level=3
+
+[quant-state-v1]
+# Resolve with: sudo -u postgres psql -Atqc 'show data_directory'
+pg1-path=<postgresql-data-directory>

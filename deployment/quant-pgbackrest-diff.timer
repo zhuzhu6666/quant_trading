@@ -1,0 +1,11 @@
+[Unit]
+Description=Six-hour differential pgBackRest backup for quant_trading state_v1
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:15:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=quant-pgbackrest-diff.service
+
+[Install]
+WantedBy=timers.target

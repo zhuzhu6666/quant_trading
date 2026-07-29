@@ -21,6 +21,8 @@
   no-new-risk latch 已清空；Demo 开仓不再等待 P1/P2 观察时长，但仍服从 market session、
   canonical RiskPolicy、fresh reconcile 和真实 safety cause。
 - Safety、Generation、Execution Outcome、Governance、PG Job Queue 的静态发布开关不得随普通修复切换。
+- 学习记忆完整性已由只读 `MemoryIntegrityReport` 覆盖原始复盘、经验投影和检索索引；它只暴露证据问题，不改变 Demo 或实盘权限。
+- pgBackRest 的 S3/WAL/timer/隔离恢复合同已进入仓库，但当前未配置对象存储凭据、未安装或启用 pgBackRest；不得把“模板已提交”误报为已有灾备。
 - 最近已知全量基线：`2452 passed, 9 skipped`。日常小批默认只跑针对性测试；阶段/发布验收才跑全量。
 
 2026-07-27 运行核对：

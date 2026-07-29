@@ -549,10 +549,21 @@ class BackendReadinessService:
             "canary_required": int(getattr(cfg, "supervisor_canary_mature_trade_count", 50) or 50),
             "active_effect_limit": 24,
         }
+        # This is an advisory projection only.  Memory integrity must be
+        # visible beside learning readiness, but it must not become a second
+        # readiness or trading-authority gate.
+        from backend.services.memory_integrity import MemoryIntegrityReportService
+
+        memory_integrity = MemoryIntegrityReportService(self.db_path).build()
         try:
             conn = _connect_state(self.db_path)
         except Exception as exc:
-            return {**result, "ok": False, "reason": f"state_unavailable:{exc}"}
+            return {
+                **result,
+                "ok": False,
+                "reason": f"state_unavailable:{exc}",
+                "memory_integrity": memory_integrity,
+            }
         try:
             maturity_rows = []
             if (
@@ -702,6 +713,7 @@ class BackendReadinessService:
                 "max": max(effect_ages, default=0.0),
                 "over_7d": sum(age >= 7 * 86400 for age in effect_ages),
             },
+            "memory_integrity": memory_integrity,
             "exploration_budget_usage": budget,
             "canary": {
                 "started_at": canary_started_at,
@@ -1841,8 +1853,17 @@ class BackendReadinessService:
     def _runtime_health_projection_status() -> dict[str, Any]:
         try:
             from backend.services.runtime_health_projection import RuntimeHealthProjectionService
+            from backend.services.postgres_backup_health import PostgresBackupHealthService
 
-            return RuntimeHealthProjectionService().latest(max_age_seconds=180.0)
+            projection = RuntimeHealthProjectionService().latest(max_age_seconds=180.0)
+            # The backup reporter is the canonical writer of this external
+            # observation.  Readiness only carries it alongside the existing
+            # runtime projection; it does not turn backup freshness into a
+            # trading or release verdict.
+            return {
+                **projection,
+                "postgres_backup": PostgresBackupHealthService().latest(),
+            }
         except Exception as exc:
             return {
                 "ok": False,

@@ -1,0 +1,17 @@
+[Unit]
+Description=quant_trading PostgreSQL pgBackRest differential backup
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+WorkingDirectory=/home/ubuntu/quant_trading
+EnvironmentFile=-/etc/quant/pgbackrest.env
+ExecStart=/home/ubuntu/quant_trading/.venv/bin/python scripts/pgbackrest_backup.py --type=diff
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=full
+ReadWritePaths=/var/log/pgbackrest /var/spool/pgbackrest

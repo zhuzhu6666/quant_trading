@@ -470,6 +470,19 @@ schema 写入只能由显式 migration 执行：
 ./.venv/bin/python scripts/state_schema_migrate.py --apply
 ```
 
+### PostgreSQL 灾备（未配置时禁止启用）
+
+pgBackRest 的仓库模板和隔离恢复演练工具在 `deployment/pgbackrest/README.md`。它们默认不安装、不改 `archive_mode`、不创建 S3 bucket、不启用 timer，也不执行 restore。
+
+启用前先由 operator 准备受保护的 S3 配置与 cipher passphrase，完成 stanza/check/首次 full backup 后，才可安装 `quant-pgbackrest-full|diff.{service,timer}`。运行中只读核对：
+
+```bash
+sudo -u postgres pgbackrest --stanza=quant-state-v1 --output=json info
+./.venv/bin/python scripts/state_query.py --sql "SELECT value_json, updated_at FROM runtime_kv WHERE key='postgres_backup_health.v1'"
+```
+
+恢复只能在隔离 DSN 上执行；恢复后使用 `scripts/verify_state_restore.py --confirm-isolated` 对照备份前 manifest，禁止自动 promote 或切换生产服务。只有演练确认成功后，才可在受控生产 health 主机额外传入 `--publish-production-health` 记录脱敏演练结果；有备份而无成功演练必须保持 `degraded`。
+
 cTrader 常用入口：
 
 ```bash

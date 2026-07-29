@@ -43,6 +43,7 @@ from backend.services.factor_pruning_governance import FactorPruningGovernanceSe
 from backend.services.governance_expansion_control import GovernanceExpansionControlService
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.live_autonomy import LiveAutonomyService
+from backend.services.memory_integrity import MemoryIntegrityReportService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.release_control import ReleaseControlService
 from backend.services.replay_harness import ReplayHarnessService
@@ -832,6 +833,10 @@ def get_brain_memory(_user: RequireUser, refresh: bool = False, limit: int = 50)
         _READINESS_CACHE.invalidate("backend-readiness")
     else:
         memory = service.latest_indexed(limit=max(1, min(int(limit), 200)))
+    memory = {
+        **memory,
+        "integrity": MemoryIntegrityReportService().build(),
+    }
     return ledger_read_fact_payload({
         "ok": bool(memory.get("ok")),
         "schema_version": "ops_brain_memory.v1",

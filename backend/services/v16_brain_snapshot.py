@@ -1071,6 +1071,30 @@ class BrainMemoryService:
                          AND source_id IN (
                              SELECT suggestion_id FROM policy_suggestion
                              WHERE status IN ('superseded', 'rejected', 'failed', 'blocked_by_evidence')
+                       )""",
+                )
+            # ``brain_memory`` is a rebuildable retrieval index, not an
+            # archive.  P3 canonical lesson consolidation can retire old
+            # experience IDs while their derived index rows survive a normal
+            # upsert refresh.  Remove only references whose authoritative
+            # source no longer exists; raw evidence and current index rows
+            # remain untouched.
+            if state_table_exists(conn, "experience_memory"):
+                execute(
+                    conn,
+                    """DELETE FROM brain_memory
+                       WHERE source_table='experience_memory'
+                         AND source_id NOT IN (
+                             SELECT experience_id FROM experience_memory
+                         )""",
+                )
+            if state_table_exists(conn, "trade_outcome_review"):
+                execute(
+                    conn,
+                    """DELETE FROM brain_memory
+                       WHERE source_table='trade_outcome_review'
+                         AND source_id NOT IN (
+                             SELECT review_id FROM trade_outcome_review
                          )""",
                 )
             for item in items:

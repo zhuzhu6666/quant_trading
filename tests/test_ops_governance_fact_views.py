@@ -360,6 +360,15 @@ def test_v16_ops_routes_attach_endpoint_specific_facts(monkeypatch):
                 "items": [{"memory_id": "memory-1", "last_used_at": observed}],
             }
 
+    class FakeMemoryIntegrity:
+        def build(self):
+            return {
+                "ok": True,
+                "status": "healthy",
+                "observed_at": observed,
+                "boundary": {"read_only": True, "affects_trading": False},
+            }
+
     class FakeActionPlans:
         def latest_plans(self, *, limit):
             return {
@@ -445,6 +454,7 @@ def test_v16_ops_routes_attach_endpoint_specific_facts(monkeypatch):
     monkeypatch.setattr(ops_api, "BackendReadinessService", FakeReadiness)
     monkeypatch.setattr(ops_api, "BrainStateService", FakeBrainState)
     monkeypatch.setattr(ops_api, "BrainMemoryService", FakeMemory)
+    monkeypatch.setattr(ops_api, "MemoryIntegrityReportService", FakeMemoryIntegrity)
     monkeypatch.setattr(ops_api, "BrainActionPlannerService", FakeActionPlans)
     monkeypatch.setattr(ops_api, "BrainActionPlanEvaluatorService", FakeActionPlanEvals)
     monkeypatch.setattr(ops_api, "BrainLowImpactExecutorService", FakeLowImpact)
@@ -488,6 +498,7 @@ def test_v16_ops_routes_attach_endpoint_specific_facts(monkeypatch):
         "ops.v16-action-plans.v2",
         "ops.v16-action-plan-evals.v2",
     ]
+    assert responses[1]["memory"]["integrity"]["status"] == "healthy"
 
 
 def test_autonomy_proposal_routes_do_not_claim_unreconciled_refresh(monkeypatch):
