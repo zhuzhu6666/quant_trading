@@ -4418,6 +4418,8 @@ def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str
         latest_market_data_ts = float(bar_ts_by_tf.get("M1") or bar_ts_by_tf.get("M5") or 0.0)
     except Exception:
         latest_market_data_ts = 0.0
+    symbol_meta = getattr(bridge, "_symbol_meta", None) if bridge is not None else None
+    broker_schedule = (symbol_meta or {}).get("broker_schedule") if isinstance(symbol_meta, dict) else None
     state = evaluate_market_session(
         symbol="XAUUSD+",
         now_ts=now_ts,
@@ -4430,6 +4432,7 @@ def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str
         broker_connected=broker_connected,
         account_api_ok=account_api_ok,
         positions_api_ok=positions_api_ok,
+        broker_schedule=broker_schedule if isinstance(broker_schedule, dict) else None,
     ).to_dict()
     _live_state_update(
         market_session=state,
@@ -6304,6 +6307,95 @@ def _publish_fresh_position_reconcile(result: Any, *, broker: str) -> list[dict[
         positions_reconcile_error=None,
         positions_component_facts=copy.deepcopy(component_facts),
     )
+    # HTTP/diagnostic reads may publish a broker fact while the trading loop is
+    # stopped.  They must remain read-only; the running loop owns Safety's
+    # conflict latch and final open admission.
+    if not bool(_live_state_get("loop_running", False)):
+        return positions
+    # A successful Reconcile response is authoritative only when it agrees
+    # with broker-confirmed opens that have not yet received a complete close
+    # deal.  Do not turn that conflict into a safe empty account: keep normal
+    # multi-position operation when every durable open ID is present, but
+    # durably stop *new* risk while any such ID is absent.
+    conflict_reason = ""
+    try:
+        recovery_ids = _lifecycle_recovery_active_position_ids(
+            _list_active_recovery_positions(broker)
+        )
+        broker_ids = {
+            int(position.get("position_id") or position.get("ticket") or 0)
+            for position in positions
+            if int(position.get("position_id") or position.get("ticket") or 0) > 0
+        }
+        missing_recovery_ids = sorted(recovery_ids - broker_ids)
+        if missing_recovery_ids:
+            conflict_reason = "broker_recovery_position_conflict:" + ",".join(
+                str(position_id) for position_id in missing_recovery_ids
+            )
+    except Exception as exc:
+        missing_recovery_ids = []
+        conflict_reason = "recovery_position_state_unavailable"
+        logger.warning(
+            "[live] cannot validate fresh broker positions against recovery state: %s",
+            exc,
+        )
+
+    cause = "position_reconcile_conflict"
+    cause_id = "broker_recovery_state"
+    latch = no_new_risk_latch_status(fail_closed=True)
+    active_causes = {
+        (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
+        for item in list(latch.get("causes") or [])
+        if isinstance(item, dict)
+    }
+    cause_key = (cause, cause_id)
+    if conflict_reason:
+        _mark_positions_reconcile_failed(conflict_reason)
+        if cause_key not in active_causes:
+            try:
+                activate_no_new_risk_latch(
+                    reason=conflict_reason,
+                    actor="system:position_reconcile",
+                    correlation_id=reconcile_id,
+                    metadata={
+                        "broker": broker,
+                        "reconcile_id": reconcile_id,
+                        "observed_at": observed_at,
+                        "missing_recovery_position_ids": missing_recovery_ids,
+                    },
+                    cause=cause,
+                    cause_id=cause_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[live] failed to persist position reconcile conflict latch: %s",
+                    exc,
+                )
+        _live_state_update(
+            accepting_new_risk=False,
+            no_new_risk_latch=no_new_risk_latch_status(fail_closed=True),
+        )
+    elif cause_key in active_causes:
+        try:
+            release_no_new_risk_latch_cause(
+                cause=cause,
+                cause_id=cause_id,
+                reason="broker_recovery_position_conflict_resolved",
+                actor="system:position_reconcile",
+                correlation_id=reconcile_id,
+                evidence={
+                    "broker": broker,
+                    "reconcile_id": reconcile_id,
+                    "observed_at": observed_at,
+                    "broker_position_ids": sorted(broker_ids),
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "[live] failed to release resolved position reconcile conflict latch: %s",
+                exc,
+            )
+        _live_state_update(no_new_risk_latch=no_new_risk_latch_status(fail_closed=True))
     return positions
 
 

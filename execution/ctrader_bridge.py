@@ -88,6 +88,48 @@ def _parse_broker_money_amount(value: Any, money_digits: Any, *, default_digits:
     return amount / (10.0 ** digits)
 
 
+def _extract_broker_schedule(symbol: Any) -> dict[str, Any]:
+    """Keep the broker's weekly symbol intervals for session evaluation."""
+    intervals: list[dict[str, int]] = []
+    for interval in getattr(symbol, "schedule", ()) or ():
+        try:
+            start_second = int(getattr(interval, "startSecond", -1))
+            end_second = int(getattr(interval, "endSecond", -1))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= start_second <= 604800 and 0 <= end_second <= 604800 and start_second != end_second:
+            intervals.append(
+                {
+                    "start_second": start_second,
+                    "end_second": end_second,
+                }
+            )
+    if not intervals:
+        return {}
+    return {
+        "timezone": str(getattr(symbol, "scheduleTimeZone", "") or "UTC"),
+        "intervals": intervals,
+    }
+
+
+def _build_symbol_meta(symbol: Any, symbol_name: str = "") -> dict[str, Any]:
+    meta = {
+        "symbol_id": symbol.symbolId,
+        "symbol_name": symbol_name or str(getattr(symbol, "symbolName", "") or ""),
+        "digits": symbol.digits,
+        "lot_size": symbol.lotSize,
+        "api_min_volume": symbol.minVolume,
+        "api_step_volume": symbol.stepVolume,
+        "api_max_volume": symbol.maxVolume,
+        "volume_unit": "api",
+        "pip_position": symbol.pipPosition,
+    }
+    broker_schedule = _extract_broker_schedule(symbol)
+    if broker_schedule:
+        meta["broker_schedule"] = broker_schedule
+    return meta
+
+
 def _parse_broker_relative_price(value: Any, symbol_digits: Any) -> float:
     """Parse spot/trendbar relative integers; never use this for deal prices."""
     try:
@@ -567,7 +609,45 @@ class CTraderBridge(BaseBrokerBridge):
                                 if s.symbolName == self.symbol:
                                     self._symbol_id = s.symbolId
                                     logger.info(f"Symbol {self.symbol} id={self._symbol_id}")
-                                    return
+                                    req2 = TradeMsg.ProtoOASymbolByIdReq()
+                                    req2.ctidTraderAccountId = self.account_id
+                                    req2.symbolId.append(s.symbolId)
+                                    d2 = client.send(
+                                        req2,
+                                        clientMsgId=str(uuid.uuid4()),
+                                        responseTimeoutInSeconds=self.request_timeout_sec,
+                                    )
+                                    d2.addCallback(_unwrap)
+
+                                    def _check_full(resp2):
+                                        if type(resp2).__name__ == "ProtoOAErrorRes":
+                                            logger.warning(
+                                                "Symbol metadata unavailable: code=%s",
+                                                getattr(resp2, "errorCode", ""),
+                                            )
+                                            return resp2
+                                        if not resp2.symbol:
+                                            logger.warning("Symbol metadata response is empty")
+                                            return resp2
+                                        try:
+                                            self._symbol_meta = _build_symbol_meta(resp2.symbol[0], self.symbol)
+                                        except Exception as exc:
+                                            logger.warning("Symbol metadata parse failed: %s", exc)
+                                            return resp2
+                                        logger.info(
+                                            "Symbol schedule loaded: timezone=%s intervals=%d",
+                                            self._symbol_meta.get("broker_schedule", {}).get("timezone", ""),
+                                            len(self._symbol_meta.get("broker_schedule", {}).get("intervals", [])),
+                                        )
+                                        return resp2
+
+                                    def _metadata_failed(failure):
+                                        logger.warning("Symbol metadata request failed: %s", failure)
+                                        return None
+
+                                    d2.addCallback(_check_full)
+                                    d2.addErrback(_metadata_failed)
+                                    return d2
                             raise RuntimeError(f"Symbol {self.symbol} not found in list")
                         d.addCallback(_check)
                         return d
@@ -1318,17 +1398,7 @@ class CTraderBridge(BaseBrokerBridge):
             req2.symbolId.append(target_id)
             resp2 = self._send(req2, timeout=15.0)
             full = resp2.symbol[0]
-            meta = {
-                "symbol_id": full.symbolId,
-                "symbol_name": target_name,
-                "digits": full.digits,        # 价格小数位 (XAUUSD=2)
-                "lot_size": full.lotSize,     # 合约尺寸 (XAUUSD=100 oz)
-                "api_min_volume": full.minVolume,
-                "api_step_volume": full.stepVolume,
-                "api_max_volume": full.maxVolume,
-                "volume_unit": "api",
-                "pip_position": full.pipPosition,
-            }
+            meta = _build_symbol_meta(full, target_name)
             self._symbol_id = full.symbolId
             self._symbol_meta = meta
             logger.info(f"Symbol meta: {meta}")

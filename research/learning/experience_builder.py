@@ -6,6 +6,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from backend.core.db import (
     STATE_DB,
@@ -23,10 +24,11 @@ from backend.services.trade_lesson_memory import (
 class ExperienceBuilder:
     """Convert trade reviews into reusable experience samples."""
 
-    def __init__(self, db_path: str | None = None):
+    def __init__(self, db_path: str | Path | None = None, *, ensure_schema: bool = True):
         self.db_path = Path(db_path or str(STATE_DB))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
+        if ensure_schema:
+            self._ensure_schema()
 
     def _use_pg(self) -> bool:
         return is_state_db_path(self.db_path)
@@ -70,7 +72,7 @@ class ExperienceBuilder:
                 return ts
         return time.time()
 
-    def build_from_review(self, review: dict) -> dict:
+    def build_from_review(self, review: dict, *, conn: Any | None = None) -> dict:
         review_json = review.get("review_json", {}) or {}
         failure_tags = list(review.get("failure_tags", []) or [])
         outcome_label = str(review.get("outcome_label", "") or "")
@@ -273,7 +275,10 @@ class ExperienceBuilder:
             "evolution_run_id": "",
             "created_at": event_ts,
         }
-        with self._conn() as conn:
+        if conn is None:
+            with self._conn() as write_conn:
+                upsert_trade_lesson_memory(write_conn, review, lesson=lesson)
+        else:
             upsert_trade_lesson_memory(conn, review, lesson=lesson)
 
         return {

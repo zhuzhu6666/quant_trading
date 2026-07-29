@@ -964,14 +964,42 @@ def test_candidate_review_conflicts_ignore_legacy_ineligible_suggestions(tmp_pat
         conn.executemany(
             """
             INSERT INTO policy_suggestion
-            (suggestion_id, scope_type, scope_key, action, status,
+            (suggestion_id, scope_type, scope_key, action, evidence_json, status,
              governance_eligible, governance_eligibility_version,
              governance_eligibility_fingerprint, created_at)
-            VALUES (?, 'factor', 'rsi_14', 'downweight', 'approved', ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?)
             """,
             [
-                ("legacy", 0, "", "", 1.0),
-                ("current", 1, "governance_eligibility.v1", "fp", 2.0),
+                ("legacy", "factor", "rsi_14", "downweight", "{}", 0, "", "", 1.0),
+                ("current", "factor", "rsi_14", "downweight", "{}", 1, "governance_eligibility.v1", "fp", 2.0),
+                (
+                    "legacy_supervisor",
+                    "position_supervisor_template",
+                    "position_supervisor:auto_tpsl.867456274d.v1",
+                    "switch_position_supervisor_template",
+                    "{}",
+                    1,
+                    "governance_eligibility.v1",
+                    "legacy-fp",
+                    3.0,
+                ),
+                (
+                    "v16_supervisor",
+                    "position_supervisor_template",
+                    "position_supervisor:conservative.v1",
+                    "switch_position_supervisor_template",
+                    json.dumps(
+                        {
+                            "candidate_id": "candidate_supervisor",
+                            "source_agent": "v16_brain",
+                            "bridge": {"command_owner": "v16_brain"},
+                        }
+                    ),
+                    1,
+                    "governance_eligibility.v1",
+                    "v16-fp",
+                    4.0,
+                ),
             ],
         )
         conn.commit()
@@ -980,7 +1008,7 @@ def test_candidate_review_conflicts_ignore_legacy_ineligible_suggestions(tmp_pat
 
     rows = BrainGovernanceCandidateReviewService(db_path)._active_policy_suggestions()
 
-    assert [row["suggestion_id"] for row in rows] == ["current"]
+    assert [row["suggestion_id"] for row in rows] == ["v16_supervisor", "current"]
 
 
 def test_candidate_bridge_review_coverage_flags_missing_required_review(tmp_path):

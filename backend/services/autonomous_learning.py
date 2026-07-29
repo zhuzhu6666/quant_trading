@@ -3793,6 +3793,10 @@ def _approve_demo_policy_suggestions(
     db_path: str | Path = STATE_DB,
     run_id: str = "",
 ) -> dict[str, Any]:
+    from backend.services.brain_governance_candidates import (
+        is_v16_candidate_bridge_evidence,
+    )
+
     allowed_scopes = {
         "factor",
         "parameter_template",
@@ -3867,6 +3871,39 @@ def _approve_demo_policy_suggestions(
             continue
         evidence = _loads(row["evidence_json"], {})
         if scope_type == "position_supervisor_template":
+            if not is_v16_candidate_bridge_evidence(evidence):
+                _execute(
+                    conn,
+                    """
+                    UPDATE policy_suggestion
+                    SET status='superseded', reviewed_at=?, review_note=?
+                    WHERE suggestion_id=? AND status='proposed'
+                    """,
+                    (
+                        now,
+                        "superseded: position supervisor advisory is observation-only; V16 candidate bridge is required",
+                        suggestion_id,
+                    ),
+                )
+                conn.commit()
+                record_evolution_decision(
+                    run_id=run_id,
+                    decision_type="demo_auto_supersede",
+                    scope_type=scope_type,
+                    scope_key=str(row["scope_key"] or ""),
+                    action=action,
+                    status="superseded",
+                    evidence=evidence,
+                    before={"status": "proposed", "suggestion_id": suggestion_id},
+                    after={"status": "superseded", "suggestion_id": suggestion_id},
+                    result={"experiment_id": experiment_id, "reason": "v16_candidate_bridge_required"},
+                    db_path=db_path,
+                )
+                skipped.append({
+                    "suggestion_id": suggestion_id,
+                    "reason": "superseded_non_v16_supervisor_suggestion",
+                })
+                continue
             has_replay = bool(evidence.get("replay_summary") or evidence.get("replay") or evidence.get("day"))
             has_counterfactual = bool(evidence.get("counterfactual_summary") or evidence.get("counterfactual"))
             if not (has_replay and has_counterfactual):
@@ -4259,6 +4296,9 @@ def _auto_apply_position_supervisor_template_suggestions(
     limit: int = 50,
     run_id: str = "",
 ) -> dict[str, Any]:
+    from backend.services.brain_governance_candidates import (
+        is_v16_candidate_bridge_evidence,
+    )
     from backend.services.position_supervisor_templates import list_position_supervisor_templates
     from config.runtime_config import (
         DEMO_AUTONOMY_MODES,
@@ -4270,6 +4310,7 @@ def _auto_apply_position_supervisor_template_suggestions(
         PositionSupervisorGovernanceMutationService,
         materialize_position_supervisor_candidate_observations,
     )
+    from backend.services.v16_command_gate import V16CommandGate
     from research.learning.governor import RuleEvolutionGovernor
 
     cfg = runtime_config()
@@ -4325,15 +4366,13 @@ def _auto_apply_position_supervisor_template_suggestions(
             """,
             (int(limit),),
         ).fetchall()
-        active_auto_tpsl = "auto_tpsl" in previous_template_id
-        if active_auto_tpsl:
-            kept_rows = []
-            for row in rows:
-                suggestion_id = str(row["suggestion_id"] or "")
-                target_template_id = str(row["scope_key"] or "")
-                if target_template_id == previous_template_id:
-                    kept_rows.append(row)
-                    continue
+        switch_claimed = False
+        for row in sorted(rows, key=_template_switch_priority, reverse=True):
+            suggestion_id = str(row["suggestion_id"] or "")
+            target_template_id = str(row["scope_key"] or "")
+            evidence = _loads(row["evidence_json"], {})
+            candidate_id = str(evidence.get("candidate_id") or "")
+            if not is_v16_candidate_bridge_evidence(evidence):
                 _execute(
                     conn,
                     """
@@ -4343,17 +4382,16 @@ def _auto_apply_position_supervisor_template_suggestions(
                     """,
                     (
                         time.time(),
-                        f"superseded by active auto_tpsl template {previous_template_id}",
+                        "superseded: position supervisor template changes require a V16 candidate bridge",
                         suggestion_id,
                     ),
                 )
-                skipped.append({"suggestion_id": suggestion_id, "reason": "superseded_by_active_auto_tpsl"})
-            conn.commit()
-            rows = kept_rows
-        switch_claimed = False
-        for row in sorted(rows, key=_template_switch_priority, reverse=True):
-            suggestion_id = str(row["suggestion_id"] or "")
-            target_template_id = str(row["scope_key"] or "")
+                conn.commit()
+                skipped.append({
+                    "suggestion_id": suggestion_id,
+                    "reason": "superseded_non_v16_supervisor_suggestion",
+                })
+                continue
             canary_required = max(1, int(getattr(cfg, "supervisor_canary_mature_trade_count", 50) or 50))
             cf_rows = _execute(
                 conn,
@@ -4463,7 +4501,6 @@ def _auto_apply_position_supervisor_template_suggestions(
                 conn.commit()
                 skipped.append({"suggestion_id": suggestion_id, "reason": "invalid_template"})
                 continue
-            evidence = _loads(row["evidence_json"], {})
             verdict = RiskPolicyService.shared().evaluate(
                 "switch_position_supervisor_template",
                 {
@@ -4494,6 +4531,21 @@ def _auto_apply_position_supervisor_template_suggestions(
                 )
                 skipped.append({"suggestion_id": suggestion_id, "reason": "risk_blocked", "risk_verdict": verdict})
                 continue
+            v16_claim = V16CommandGate.claim(
+                db_path,
+                target_agent="position_supervisor_governance",
+                scope_type="supervisor_template",
+                scope_key="position_supervisor",
+                action="switch_position_supervisor_template",
+                candidate_id=candidate_id,
+            )
+            if not v16_claim.get("allowed", False):
+                skipped.append({
+                    "suggestion_id": suggestion_id,
+                    "reason": str(v16_claim.get("status") or "v16_command_required"),
+                    "v16_claim": v16_claim,
+                })
+                continue
             from backend.services.learning_experiment_admission import LearningExperimentAdmissionService
 
             experiment_admission = LearningExperimentAdmissionService(db_path).reserve_scope(
@@ -4503,6 +4555,12 @@ def _auto_apply_position_supervisor_template_suggestions(
                 allow_active_replacement=True,
             )
             if not experiment_admission.get("allowed"):
+                V16CommandGate.release(
+                    db_path,
+                    command_id=str(v16_claim.get("command_id") or ""),
+                    claim_token=str(v16_claim.get("claim_token") or ""),
+                    reason="supervisor_experiment_admission_blocked",
+                )
                 skipped.append({
                     "suggestion_id": suggestion_id,
                     "reason": str(experiment_admission.get("status") or "experiment_admission_blocked"),
@@ -4537,10 +4595,19 @@ def _auto_apply_position_supervisor_template_suggestions(
                         "session_count": len(mature_sessions),
                         "regime_count": len(mature_regimes),
                     },
+                    "v16_command_id": str(v16_claim.get("command_id") or ""),
                 },
+                v16_command_id=str(v16_claim.get("command_id") or ""),
+                v16_claim_token=str(v16_claim.get("claim_token") or ""),
             )
             mutation = dict(governed.get("mutation") or {})
             if not governed.get("committed"):
+                V16CommandGate.release(
+                    db_path,
+                    command_id=str(v16_claim.get("command_id") or ""),
+                    claim_token=str(v16_claim.get("claim_token") or ""),
+                    reason="supervisor_governance_mutation_blocked",
+                )
                 skipped.append({
                     "suggestion_id": suggestion_id,
                     "reason": str(

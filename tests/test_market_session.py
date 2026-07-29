@@ -21,6 +21,30 @@ def test_xauusd_session_uses_utc_schedule_not_local_time():
     assert state.confirmation_source == "fresh_quote"
 
 
+def test_broker_symbol_schedule_overrides_static_yaml_for_daily_break():
+    now = _ts(2026, 6, 25, 12, 30)
+    thursday_noon = 4 * 86400 + 12 * 3600
+    thursday_one_pm = 4 * 86400 + 13 * 3600
+    state = evaluate_market_session(
+        symbol="XAUUSD+",
+        now_ts=now,
+        latest_quote_ts=now - 600,
+        broker_schedule={
+            "timezone": "UTC",
+            "intervals": [
+                {"start_second": 0, "end_second": thursday_noon},
+                {"start_second": thursday_one_pm, "end_second": 4 * 86400 + 21 * 3600},
+            ],
+        },
+    )
+
+    assert state.status == "closed_confirmed"
+    assert state.high_load_allowed is True
+    assert state.schedule_source == "ctrader_symbol"
+    assert state.seconds_to_open == 30 * 60
+    assert "ctrader_symbol_schedule" in state.evidence
+
+
 def test_xauusd_scheduled_closed_waits_for_confirmation_when_flat():
     state = evaluate_market_session(
         symbol="XAUUSD+",

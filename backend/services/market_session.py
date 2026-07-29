@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -45,6 +46,7 @@ class MarketSessionState:
     broker_connected: bool | None = None
     market_closed_confidence: str = "low"
     evidence: list[str] | None = None
+    schedule_source: str = "config"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -199,6 +201,83 @@ def _schedule_window(
     return current_close is not None, current_close, next_open
 
 
+def _resolve_broker_schedule_timezone(value: Any) -> tuple[str, Any | None]:
+    name = str(value or "UTC").strip() or "UTC"
+    aliases = {
+        "GMT": "UTC",
+        "UTC": "UTC",
+    }
+    candidate = aliases.get(name.upper(), name)
+    try:
+        return name, ZoneInfo(candidate)
+    except (ZoneInfoNotFoundError, ValueError):
+        return name, None
+
+
+def _broker_schedule_window(
+    now: datetime,
+    broker_schedule: dict[str, Any] | None,
+) -> tuple[bool, float | None, float | None, str] | None:
+    """Calculate the current broker session from ProtoOASymbol intervals.
+
+    cTrader expresses intervals as seconds from Sunday 00:00 in the symbol's
+    own timezone.  Keeping this conversion here makes the broker schedule a
+    drop-in replacement for the static YAML fallback without creating a
+    second session authority.
+    """
+    if not isinstance(broker_schedule, dict):
+        return None
+    intervals: list[tuple[int, int]] = []
+    for item in broker_schedule.get("intervals") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start_second = int(item.get("start_second"))
+            end_second = int(item.get("end_second"))
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= start_second <= 604800 and 0 <= end_second <= 604800):
+            continue
+        if start_second == end_second:
+            continue
+        intervals.append((start_second, end_second))
+    if not intervals:
+        return None
+    timezone_name, schedule_tz = _resolve_broker_schedule_timezone(
+        broker_schedule.get("timezone")
+    )
+    if schedule_tz is None:
+        return None
+
+    local_now = now.astimezone(schedule_tz)
+    sunday_date = local_now.date() - timedelta(days=(local_now.weekday() + 1) % 7)
+    week_start = datetime.combine(sunday_date, dtime.min, tzinfo=schedule_tz)
+    windows: list[tuple[datetime, datetime]] = []
+    for week_offset in range(-1, 3):
+        base = week_start + timedelta(days=7 * week_offset)
+        for start_second, end_second in intervals:
+            end_offset = end_second
+            if end_offset <= start_second:
+                end_offset += 604800
+            windows.append(
+                (
+                    base + timedelta(seconds=start_second),
+                    base + timedelta(seconds=end_offset),
+                )
+            )
+
+    current_close: float | None = None
+    next_open: float | None = None
+    for start_dt, end_dt in sorted(windows, key=lambda item: item[0]):
+        if start_dt <= local_now < end_dt:
+            seconds = max(0.0, (end_dt - local_now).total_seconds())
+            current_close = seconds if current_close is None else min(current_close, seconds)
+        elif start_dt > local_now:
+            seconds = max(0.0, (start_dt - local_now).total_seconds())
+            next_open = seconds if next_open is None else min(next_open, seconds)
+    return current_close is not None, current_close, next_open, timezone_name
+
+
 def evaluate_market_session(
     *,
     symbol: str = "XAUUSD+",
@@ -216,12 +295,20 @@ def evaluate_market_session(
     broker_connected: bool | None = None,
     account_api_ok: bool = False,
     positions_api_ok: bool = False,
+    broker_schedule: dict[str, Any] | None = None,
 ) -> MarketSessionState:
     ts = float(now_ts or datetime.now(timezone.utc).timestamp())
     now = datetime.fromtimestamp(ts, tz=timezone.utc)
     hours = _load_hours(symbol)
     overrides = _load_session_overrides(symbol)
-    in_schedule, seconds_to_close, seconds_to_open = _schedule_window(now, hours)
+    schedule_source = "config"
+    schedule_timezone = "UTC"
+    broker_window = _broker_schedule_window(now, broker_schedule)
+    if broker_window is not None:
+        in_schedule, seconds_to_close, seconds_to_open, schedule_timezone = broker_window
+        schedule_source = "ctrader_symbol"
+    else:
+        in_schedule, seconds_to_close, seconds_to_open = _schedule_window(now, hours)
     override = _override_window(now, overrides)
     override_active = bool(override.get("active", False))
     if override_active:
@@ -272,6 +359,10 @@ def evaluate_market_session(
         evidence.append("market_data_stale")
     if override_active:
         evidence.append("trading_hour_override_active")
+    if schedule_source == "ctrader_symbol":
+        evidence.append("ctrader_symbol_schedule")
+    elif broker_schedule:
+        evidence.append("ctrader_schedule_unavailable")
     near_close = (
         in_schedule
         and seconds_to_close is not None
@@ -286,7 +377,8 @@ def evaluate_market_session(
             status=status,
             reason="broker_market_closed",
             now_ts=ts,
-            timezone="UTC",
+            timezone=schedule_timezone,
+            schedule_source=schedule_source,
             quote_age_seconds=quote_age,
             quote_change_age_seconds=quote_change_age,
             market_data_age_seconds=market_data_age,
@@ -326,7 +418,8 @@ def evaluate_market_session(
                 else str(override.get("reason") or "scheduled_closed_waiting_confirmation")
             ),
             now_ts=ts,
-            timezone="UTC",
+            timezone=schedule_timezone,
+            schedule_source=schedule_source,
             quote_age_seconds=quote_age,
             quote_change_age_seconds=quote_change_age,
             market_data_age_seconds=market_data_age,
@@ -368,7 +461,8 @@ def evaluate_market_session(
             status="open_pending_quote",
             reason="scheduled_open_waiting_fresh_quote",
             now_ts=ts,
-            timezone="UTC",
+            timezone=schedule_timezone,
+            schedule_source=schedule_source,
             quote_age_seconds=quote_age,
             quote_change_age_seconds=quote_change_age,
             market_data_age_seconds=market_data_age,
@@ -394,7 +488,8 @@ def evaluate_market_session(
             status="broker_connected_market_data_stale",
             reason="api_alive_market_data_stale",
             now_ts=ts,
-            timezone="UTC",
+            timezone=schedule_timezone,
+            schedule_source=schedule_source,
             quote_age_seconds=quote_age,
             quote_change_age_seconds=quote_change_age,
             market_data_age_seconds=market_data_age,
@@ -437,7 +532,8 @@ def evaluate_market_session(
             status=status,
             reason=reason,
             now_ts=ts,
-            timezone="UTC",
+            timezone=schedule_timezone,
+            schedule_source=schedule_source,
             quote_age_seconds=quote_age,
             quote_change_age_seconds=quote_change_age,
             market_data_age_seconds=market_data_age,
@@ -462,7 +558,8 @@ def evaluate_market_session(
             status="pre_close_risk",
             reason="near_scheduled_close",
             now_ts=ts,
-            timezone="UTC",
+            timezone=schedule_timezone,
+            schedule_source=schedule_source,
             quote_age_seconds=quote_age,
             quote_change_age_seconds=quote_change_age,
             market_data_age_seconds=market_data_age,
@@ -486,7 +583,8 @@ def evaluate_market_session(
         status="open_confirmed",
         reason="scheduled_open_fresh_quote",
         now_ts=ts,
-        timezone="UTC",
+        timezone=schedule_timezone,
+        schedule_source=schedule_source,
         quote_age_seconds=quote_age,
         quote_change_age_seconds=quote_change_age,
         market_data_age_seconds=market_data_age,

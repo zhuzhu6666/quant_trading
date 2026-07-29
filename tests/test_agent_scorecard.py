@@ -444,3 +444,65 @@ def test_agent_generation_context_includes_scope_relevant_experience(tmp_path):
 
     assert [item["primary_factor"] for item in context["relevant_experience"]] == ["rsi_14"]
     assert context["relevant_experience"][0]["recommended_action"] == "downweight"
+
+
+def test_agent_generation_context_does_not_promote_raw_entry_action_after_supervisor_posterior(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = _setup_state(db_path)
+    try:
+        now = time.time()
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, pnl, outcome_label,
+             failure_tags_json, review_json, created_at)
+            VALUES ('review_posterior', 'trade_posterior', 'position_posterior',
+                    -1.0, 'bad_loss', '["weak_entry_signal"]',
+                    '{"primary_responsibility": "signal_quality"}', ?)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO experience_memory
+            (experience_id, trade_id, source_table, source_id, append_source,
+             decision_context_json, outcome_label, reward_score,
+             failure_tags_json, recommended_action, evidence_strength,
+             artifact_version, created_at)
+            VALUES ('exp_posterior', 'trade_posterior', 'trade_outcome_review',
+                    'review_posterior', 'trade_lesson_memory.v1',
+                    '{"primary_factor": "rsi_14"}', 'bad_loss', -0.6,
+                    '["weak_entry_signal"]', 'downweight', 0.9, 'v1', ?)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO supervisor_counterfactual_review
+            (counterfactual_id, review_id, trade_id, position_id, close_ts,
+             label, confidence, horizons_json, evidence_json, created_at, updated_at)
+            VALUES ('cf_posterior', 'review_posterior', 'trade_posterior',
+                    'position_posterior', ?, 'premature_tighten', 0.8,
+                    '[{"horizon_minutes":30,"future_pnl":4.0}]',
+                    '{"tags":["future_recovered","original_tp_first"]}', ?, ?)
+            """,
+            (now, now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    context = AgentBriefingContextService(db_path).agent_context(
+        "factor_governance",
+        scope_type="factor",
+        scope_key="rsi_14",
+        action="update_weight",
+        requested_writes=["policy_suggestion"],
+    )
+
+    item = context["relevant_experience"][0]
+    assert item["source_recommended_action"] == "downweight"
+    assert item["recommended_action"] == "observe_and_compare"
+    assert item["evidence_eligible"] is False
+    assert item["posterior_action"] == "less_tighten"
+    assert item["posterior_reconciliation"]["status"] == "entry_conclusion_retained"

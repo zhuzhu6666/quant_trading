@@ -10,6 +10,7 @@ from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services._brain_helpers import connect as _connect, execute as _execute, loads as _loads
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.v16_brain_snapshot import BrainMemoryService
 
 
 class AgentBriefingContextService:
@@ -199,6 +200,11 @@ class AgentBriefingContextService:
                 SELECT e.experience_id, e.trade_id, e.regime_id, e.outcome_label,
                        e.reward_score, e.failure_tags_json, e.recommended_action,
                        e.evidence_strength, e.decision_context_json, e.created_at,
+                       r.review_id AS source_review_id, r.trade_id AS source_trade_id,
+                       r.position_id AS source_position_id, r.pnl AS source_pnl,
+                       r.outcome_label AS source_outcome_label,
+                       r.failure_tags_json AS source_failure_tags_json,
+                       r.created_at AS source_created_at,
                        r.review_json AS source_review_json
                 FROM experience_memory e
                 JOIN trade_outcome_review r
@@ -207,13 +213,73 @@ class AgentBriefingContextService:
                 WHERE e.append_source='trade_lesson_memory.v1'
                 {"AND " + where[6:] if where else ""}
                 ORDER BY e.evidence_strength DESC, e.created_at DESC
+                LIMIT ?
                 """,
-                tuple(params),
+                (*params, min(200, max(limit, limit * 5))),
             ).fetchall()
             result = []
             for row in rows:
-                if review_has_system_contamination(_loads(row["source_review_json"], {})):
+                review_json = _loads(row["source_review_json"], {})
+                if review_has_system_contamination(review_json):
                     continue
+                review_id = str(row["source_review_id"] or "")
+                review_failure_tags = _loads(row["source_failure_tags_json"], [])
+                if not isinstance(review_failure_tags, list):
+                    review_failure_tags = []
+                review = {
+                    "review_id": review_id,
+                    "source_id": review_id,
+                    "trade_id": str(row["source_trade_id"] or ""),
+                    "position_id": str(row["source_position_id"] or ""),
+                    "pnl": row["source_pnl"],
+                    "outcome_label": str(row["source_outcome_label"] or ""),
+                    "failure_tags": review_failure_tags,
+                    "failure_tags_json": row["source_failure_tags_json"],
+                    "review_json": review_json,
+                    "created_at": row["source_created_at"],
+                }
+                counterfactuals = []
+                if review_id:
+                    try:
+                        counterfactual_rows = _execute(
+                            conn,
+                            """
+                            SELECT counterfactual_id, review_id, trade_id, position_id,
+                                   label, confidence, horizons_json, evidence_json
+                            FROM supervisor_counterfactual_review
+                            WHERE review_id=?
+                            ORDER BY close_ts DESC, updated_at DESC
+                            """,
+                            (review_id,),
+                        ).fetchall()
+                    except Exception:
+                        counterfactual_rows = []
+                    for counterfactual in counterfactual_rows:
+                        evidence = _loads(counterfactual["evidence_json"], {})
+                        if not isinstance(evidence, dict) or evidence.get("evidence_invalidated"):
+                            continue
+                        horizons = _loads(counterfactual["horizons_json"], [])
+                        counterfactuals.append({
+                            "counterfactual_id": str(counterfactual["counterfactual_id"] or ""),
+                            "review_id": str(counterfactual["review_id"] or review_id),
+                            "trade_id": str(counterfactual["trade_id"] or ""),
+                            "position_id": str(counterfactual["position_id"] or ""),
+                            "label": str(counterfactual["label"] or ""),
+                            "confidence": counterfactual["confidence"],
+                            "horizons": horizons if isinstance(horizons, list) else [],
+                            "evidence": evidence,
+                        })
+                reconciled = BrainMemoryService.reconcile_trade_review(
+                    review,
+                    counterfactuals=counterfactuals,
+                )
+                posterior = (
+                    (reconciled.get("structured") or {}).get("posterior_reconciliation")
+                    or {}
+                )
+                selected = (posterior.get("local_arbitration") or {}).get("selected_conclusion") or {}
+                source_action = str(row["recommended_action"] or "watch")
+                evidence_eligible = bool(posterior.get("evidence_eligible", True))
                 context = _loads(row["decision_context_json"], {})
                 result.append({
                     "experience_id": str(row["experience_id"] or ""),
@@ -222,11 +288,20 @@ class AgentBriefingContextService:
                     "outcome_label": str(row["outcome_label"] or ""),
                     "reward_score": float(row["reward_score"] or 0.0),
                     "failure_tags": _loads(row["failure_tags_json"], []),
-                    "recommended_action": str(row["recommended_action"] or "watch"),
+                    # A source recommendation is retained for audit, but a
+                    # supervisor posterior makes it non-actionable for the
+                    # entry/factor generator.  The safe output is explicit.
+                    "recommended_action": source_action if evidence_eligible else "observe_and_compare",
+                    "source_recommended_action": source_action,
                     "evidence_strength": float(row["evidence_strength"] or 0.0),
                     "primary_factor": str(context.get("primary_factor") or ""),
                     "summary_text": str(context.get("summary_text") or ""),
                     "created_at": float(row["created_at"] or 0.0),
+                    "causal_scope": str(posterior.get("causal_scope") or ""),
+                    "action_owner": str(posterior.get("action_owner") or ""),
+                    "evidence_eligible": evidence_eligible,
+                    "posterior_action": str(selected.get("recommended_action") or ""),
+                    "posterior_reconciliation": posterior,
                 })
             return result[:limit]
         except Exception:

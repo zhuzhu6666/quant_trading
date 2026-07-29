@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.services import live_service
+from backend.services.live_safety_state import no_new_risk_latch_status
 
 
 @pytest.fixture(autouse=True)
@@ -60,12 +61,111 @@ def _publish_fresh_reconciles(now: float) -> None:
     )
 
 
+def _fresh_position_reconcile(*, now: float, positions: list[dict]) -> SimpleNamespace:
+    return SimpleNamespace(
+        status="fresh",
+        reconcile_id="positions-fresh",
+        observed_at=now,
+        positions=positions,
+        components={},
+    )
+
+
 def test_final_open_admission_allows_only_fresh_identified_reconciles():
     now = time.time()
     _publish_fresh_reconciles(now)
 
     assert live_service._new_risk_reconciliation_blockers(now_ts=now) == []
     assert live_service._open_trade_draining() is False
+
+
+def test_fresh_empty_reconcile_conflicting_with_recovery_blocks_new_risk(monkeypatch):
+    now = time.time()
+    _publish_fresh_reconciles(now)
+    monkeypatch.setattr(
+        live_service,
+        "_enrich_positions_with_path_metrics",
+        lambda positions, **_kwargs: positions,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_list_active_recovery_positions",
+        lambda _broker: [{"position_id": 101}],
+    )
+
+    live_service._publish_fresh_position_reconcile(
+        _fresh_position_reconcile(now=now, positions=[]),
+        broker="ctrader",
+    )
+
+    assert live_service._new_risk_reconciliation_blockers(now_ts=now) == [
+        "positions_reconcile_failed"
+    ]
+    assert live_service._live_state_get("accepting_new_risk") is False
+    assert "broker_recovery_position_conflict:101" in str(
+        live_service._live_state_get("positions_reconcile_error")
+    )
+    assert (
+        "position_reconcile_conflict",
+        "broker_recovery_state",
+    ) in {
+        (item["cause"], item["cause_id"])
+        for item in no_new_risk_latch_status(fail_closed=True)["causes"]
+    }
+
+
+def test_fresh_reconcile_keeps_multiple_aligned_recovery_positions_open(monkeypatch):
+    now = time.time()
+    _publish_fresh_reconciles(now)
+    monkeypatch.setattr(
+        live_service,
+        "_enrich_positions_with_path_metrics",
+        lambda positions, **_kwargs: positions,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_list_active_recovery_positions",
+        lambda _broker: [{"position_id": 101}, {"position_id": 202}],
+    )
+
+    positions = live_service._publish_fresh_position_reconcile(
+        _fresh_position_reconcile(
+            now=now,
+            positions=[{"position_id": 101}, {"position_id": 202}],
+        ),
+        broker="ctrader",
+    )
+
+    assert [item["position_id"] for item in positions] == [101, 202]
+    assert live_service._new_risk_reconciliation_blockers(now_ts=now) == []
+    assert live_service._live_state_get("positions_reconcile_error") is None
+
+
+def test_aligned_reconcile_releases_prior_recovery_conflict_latch(monkeypatch):
+    now = time.time()
+    _publish_fresh_reconciles(now)
+    monkeypatch.setattr(
+        live_service,
+        "_enrich_positions_with_path_metrics",
+        lambda positions, **_kwargs: positions,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_list_active_recovery_positions",
+        lambda _broker: [{"position_id": 101}],
+    )
+
+    live_service._publish_fresh_position_reconcile(
+        _fresh_position_reconcile(now=now, positions=[]),
+        broker="ctrader",
+    )
+    live_service._publish_fresh_position_reconcile(
+        _fresh_position_reconcile(now=now + 1.0, positions=[{"position_id": 101}]),
+        broker="ctrader",
+    )
+
+    assert no_new_risk_latch_status(fail_closed=True)["active"] is False
+    assert live_service._new_risk_reconciliation_blockers(now_ts=now + 1.0) == []
 
 
 def test_final_open_admission_blocks_missing_reconcile_identity():

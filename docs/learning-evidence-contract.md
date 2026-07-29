@@ -1,7 +1,7 @@
 # Learning Evidence Contract
 
 > Status: active
-> Last verified: 2026-07-18
+> Last verified: 2026-07-30
 > Scope: evidence semantics for learning samples, model training, governance, and autonomous replay/audit.
 
 状态：第一版已落地，2026-06-29；训练准入语义已收紧，2026-06-30；开仓质量、反事实训练契约、数据健康检查、动态仓位 trace 与事件窗口治理已补齐，2026-07-02；自治治理 V3 继续沿用本文作为证据等级 contract；2026-07-06 补齐学习系统、影子模型和数据精度关系。
@@ -254,6 +254,8 @@ observation/research 链路，但不能触发 mutation。
 - LLM advisory: 结构化复盘、治理说明、人工覆盖审计辅助；不进入执行层
 
 所有 LightGBM 训练必须记录 `split=time_ordered`、holdout 指标、规则基线和 majority baseline 对照。模型未通过基线比较时，只能继续 shadow/advisory。
+
+学习 worker 仍只有既有的 `offmarket_position_quality_lightgbm` 任务负责这组模型的重任务调度：`full` profile 在训练后为 position、open、factor、meta 四类模型各写一次影子评分；市场开盘或本轮不满足训练条件时，任务不训练，只用现有 artifact 以小批量、按 artifact 与来源样本去重的方式刷新 shadow audit。该刷新不进入 promotion、不物化治理建议，也不改变交易权限。
 
 ## Shadow Model Boundaries
 

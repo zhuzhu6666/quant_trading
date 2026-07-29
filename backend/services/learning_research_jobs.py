@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import time
 from pathlib import Path
@@ -166,12 +167,165 @@ def _record_offmarket_audit(
     return row
 
 
+def _build_shadow_model_suite(db_path: str | Path):
+    from research.factor_governance_lightgbm import FactorGovernanceLightGBMService
+    from research.meta_model_lightgbm import MetaModelLightGBMService
+    from research.open_quality_lightgbm import OpenQualityLightGBMService
+    from research.position_quality_lightgbm import PositionQualityLightGBMService
+
+    return [
+        (
+            "position_quality_lightgbm",
+            PositionQualityLightGBMService(db_path=db_path),
+            {
+                "limit": 4000,
+                "holdout_ratio": 0.2,
+                "min_samples": 20,
+                "register": True,
+                "symbol": "XAUUSD+",
+                "timeframe": "M5",
+            },
+        ),
+        (
+            "open_quality_lightgbm",
+            OpenQualityLightGBMService(db_path=db_path),
+            {
+                "limit": 3000,
+                "holdout_ratio": 0.25,
+                "min_samples": 100,
+                "register": True,
+            },
+        ),
+        (
+            "factor_governance_lightgbm",
+            FactorGovernanceLightGBMService(db_path=db_path),
+            {
+                "limit": 5000,
+                "holdout_ratio": 0.25,
+                "min_samples": 100,
+                "register": True,
+            },
+        ),
+        (
+            "meta_model_lightgbm",
+            MetaModelLightGBMService(db_path=db_path),
+            {
+                "limit": 3000,
+                "window": 12,
+                "horizon": 3,
+                "holdout_ratio": 0.25,
+                "min_samples": 100,
+                "register": True,
+            },
+        ),
+    ]
+
+
+def _score_shadow_model(
+    *,
+    model_type: str,
+    model_service: Any,
+    limit: int,
+    mode: str,
+    artifact_path: str | None = None,
+    skip_existing: bool = False,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "limit": int(limit),
+        "mode": mode,
+        "skip_existing": bool(skip_existing),
+    }
+    if artifact_path:
+        kwargs["artifact_path"] = artifact_path
+    try:
+        result = dict(model_service.score_samples(**kwargs) or {})
+    except Exception as exc:
+        logger.warning("[offmarket_high_load] %s shadow score failed: %s", model_type, exc)
+        return {
+            "ok": False,
+            "model_type": model_type,
+            "error": "shadow_score_error",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    result.setdefault("model_type", model_type)
+    return result
+
+
+def _offmarket_training_window_key(session: dict[str, Any], profile: str) -> str:
+    """Build a stable key for one closed window from the shared session state."""
+    try:
+        now_ts = float(session.get("now_ts") or 0.0)
+        seconds_to_open = float(session.get("seconds_to_open"))
+        next_open_ts = now_ts + seconds_to_open
+    except (AttributeError, TypeError, ValueError):
+        return ""
+    if now_ts <= 0.0 or seconds_to_open < 0.0 or not math.isfinite(next_open_ts):
+        return ""
+    # The evaluator derives seconds_to_open from the same session boundary on
+    # every snapshot; minute rounding removes scheduler-second jitter.
+    boundary_minute = int(round(next_open_ts / 60.0)) * 60
+    return f"{profile}:next_open:{boundary_minute}"
+
+
+def _completed_offmarket_training_window(
+    *,
+    db_path: str | Path,
+    job_name: str,
+    window_key: str,
+) -> dict[str, Any] | None:
+    if not window_key:
+        return None
+    conn = None
+    try:
+        conn = _connect(db_path)
+        rows = conn.execute(
+            _sql(
+                db_path,
+                """
+                SELECT audit_id, payload_json, finished_at
+                FROM offmarket_high_load_job_audit
+                WHERE job_name=? AND status='done'
+                ORDER BY finished_at DESC
+                LIMIT 500
+                """,
+            ),
+            (job_name,),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload_raw = row["payload_json"]
+                audit_id = row["audit_id"]
+                finished_at = row["finished_at"]
+            except (KeyError, IndexError, TypeError):
+                payload_raw = row[1]
+                audit_id = row[0]
+                finished_at = row[2]
+            try:
+                payload = json.loads(payload_raw or "{}")
+            except (TypeError, ValueError):
+                continue
+            if str(payload.get("training_window_key") or "") == window_key:
+                return {
+                    "audit_id": str(audit_id or ""),
+                    "finished_at": float(finished_at or 0.0),
+                }
+    except Exception as exc:
+        # A first run may legitimately have no audit table yet. The normal
+        # audit write below remains the source of truth and will surface a
+        # real database failure instead of silently claiming completion.
+        logger.debug("[offmarket_high_load] window lookup unavailable: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+    return None
+
+
 def run_offmarket_position_quality_job(
     *,
     session: dict[str, Any] | None = None,
     db_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Train the PIT-v2 model suite and promote only evidence-ready artifacts."""
+    """Train the PIT-v2 suite and keep every model's shadow output current."""
     job_name = "offmarket_position_quality_lightgbm"
     started_at = time.time()
     db_path = Path(db_path or state_db.STATE_DB)
@@ -188,50 +342,132 @@ def run_offmarket_position_quality_job(
         "min_samples": 20,
         "profile": profile,
     }
+    training_window_key = _offmarket_training_window_key(session or {}, profile)
+    payload["training_window_key"] = training_window_key
     if not allowed:
-        result = {"ok": False, "skipped": True, "reason": reason}
+        shadow_refresh: dict[str, Any] = {
+            "ok": False,
+            "skipped": True,
+            "reason": "market_session_not_safe_for_shadow_refresh",
+            "models": {},
+        }
+        session_status = str((session or {}).get("status") or "")
+        if session_status in {"open_confirmed", "closed_confirmed", "closed_pending_positions"}:
+            try:
+                suite = _build_shadow_model_suite(db_path)
+                shadow_refresh["models"] = {
+                    model_type: _score_shadow_model(
+                        model_type=model_type,
+                        model_service=model_service,
+                        limit=int(payload["shadow_limit"]),
+                        mode="offmarket_shadow_refresh",
+                        skip_existing=True,
+                    )
+                    for model_type, model_service, _ in suite
+                }
+                shadow_refresh["ok"] = any(
+                    bool(item.get("ok")) for item in shadow_refresh["models"].values()
+                )
+                shadow_refresh["skipped"] = False
+                shadow_refresh["reason"] = "shadow_refresh_completed"
+            except Exception as exc:
+                shadow_refresh["reason"] = "shadow_refresh_error"
+                shadow_refresh["error"] = f"{type(exc).__name__}: {exc}"
+        result = {
+            "ok": False,
+            "skipped": True,
+            "reason": reason,
+            "shadow_refresh": shadow_refresh,
+        }
         audit = _record_offmarket_audit(
             job_name=job_name, status="skipped", session=session or {}, payload=payload,
             result=result, started_at=started_at, db_path=db_path,
         )
         logger.info("[offmarket_high_load] %s skipped: %s", job_name, reason)
-        return {"ok": True, "skipped": True, "reason": reason, "audit": audit}
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": reason,
+            "shadow_refresh": shadow_refresh,
+            "audit": audit,
+        }
+    completed_window = _completed_offmarket_training_window(
+        db_path=db_path,
+        job_name=job_name,
+        window_key=training_window_key,
+    ) if allowed else None
+    if completed_window is not None:
+        result = {
+            "ok": False,
+            "skipped": True,
+            "reason": "training_window_already_completed",
+            "training_window_key": training_window_key,
+            "completed_audit": completed_window,
+        }
+        audit = _record_offmarket_audit(
+            job_name=job_name,
+            status="skipped",
+            session=session or {},
+            payload=payload,
+            result=result,
+            started_at=started_at,
+            db_path=db_path,
+        )
+        logger.info(
+            "[offmarket_high_load] %s skipped: training window already completed (%s)",
+            job_name,
+            training_window_key,
+        )
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": result["reason"],
+            "training_window_key": training_window_key,
+            "completed_audit": completed_window,
+            "audit": audit,
+        }
     try:
         from backend.services.model_influence_governance import ModelInfluenceGovernanceService
         from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
-        from research.factor_governance_lightgbm import FactorGovernanceLightGBMService
-        from research.meta_model_lightgbm import MetaModelLightGBMService
-        from research.open_quality_lightgbm import OpenQualityLightGBMService
-        from research.position_quality_lightgbm import PositionQualityLightGBMService
-
-        service = PositionQualityLightGBMService(db_path=db_path)
+        suite = _build_shadow_model_suite(db_path)
+        service = suite[0][1]
         train = service.train(
             limit=int(payload["limit"]), holdout_ratio=0.2,
             min_samples=int(payload["min_samples"]), register=True,
             symbol="XAUUSD+", timeframe="M5",
         )
         result: dict[str, Any] = {"train": train, "models": {"position_quality_lightgbm": {"train": train}}}
-        if train.get("ok"):
-            result["shadow"] = service.score_samples(
-                artifact_path=train.get("artifact_path"),
-                limit=int(payload["shadow_limit"]),
-                mode="offmarket_shadow_after_train",
-            )
-        suite = [
-            ("open_quality_lightgbm", OpenQualityLightGBMService(db_path=db_path), {
-                "limit": 3000, "holdout_ratio": 0.25, "min_samples": 100, "register": True,
-            }),
-            ("factor_governance_lightgbm", FactorGovernanceLightGBMService(db_path=db_path), {
-                "limit": 5000, "holdout_ratio": 0.25, "min_samples": 100, "register": True,
-            }),
-            ("meta_model_lightgbm", MetaModelLightGBMService(db_path=db_path), {
-                "limit": 3000, "window": 12, "horizon": 3, "holdout_ratio": 0.25,
-                "min_samples": 100, "register": True,
-            }),
-        ]
+        position_shadow = _score_shadow_model(
+            model_type="position_quality_lightgbm",
+            model_service=service,
+            artifact_path=str(train.get("artifact_path") or "") or None,
+            limit=int(payload["shadow_limit"]),
+            mode="offmarket_shadow_after_train",
+        )
+        result["models"]["position_quality_lightgbm"]["shadow"] = position_shadow
+        # Preserve the existing top-level position shadow field for API callers.
+        result["shadow"] = position_shadow
         if profile == "full":
-            for model_type, model_service, train_kwargs in suite:
-                result["models"][model_type] = {"train": model_service.train(**train_kwargs)}
+            for model_type, model_service, train_kwargs in suite[1:]:
+                trained = model_service.train(**train_kwargs)
+                item = {"train": trained}
+                item["shadow"] = _score_shadow_model(
+                    model_type=model_type,
+                    model_service=model_service,
+                    artifact_path=str(trained.get("artifact_path") or "") or None,
+                    limit=int(payload["shadow_limit"]),
+                    mode="offmarket_shadow_after_train",
+                )
+                result["models"][model_type] = item
+        else:
+            for model_type, _, _ in suite[1:]:
+                result["models"][model_type] = {
+                    "train": {
+                        "ok": False,
+                        "skipped": True,
+                        "reason": "profile_not_full",
+                    }
+                }
 
         governance = ModelInfluenceGovernanceService(db_path)
         result["reconcile_before_training"] = governance.reconcile_active_models()

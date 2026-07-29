@@ -213,6 +213,10 @@ class V16BrainOrchestratorService:
                 for item in raw_commands
                 if str(item.get("candidate_id") or "") in active_candidate_ids
             ]
+        reviewed_expired_reissues = (
+            self._reviewed_expired_delegate_reissues(limit=limit) if persist else []
+        )
+        raw_commands.extend(reviewed_expired_reissues)
         # Plan/eval tables are append-only audit ledgers.  Re-running the
         # coordinator therefore sees prior evaluations as well; the command
         # identity is deliberately posterior/scope based so the specialist
@@ -233,6 +237,7 @@ class V16BrainOrchestratorService:
             "governance_count": len(governance_run.get("items") or []),
             "command_count": len(commands),
             "delegated_count": len(delegated),
+            "reviewed_expired_reissue_count": len(reviewed_expired_reissues),
             "observation_count": len(evaluated_commands) - len(raw_commands),
             "cancelled_command_count": int(cancelled.get("cancelled_count") or 0),
             "cancelled_observation_count": int(
@@ -971,6 +976,86 @@ class V16BrainOrchestratorService:
             key=lambda item: safe_float(item.get("created_at")),
             reverse=True,
         )[:limit]
+
+    def _reviewed_expired_delegate_reissues(self, *, limit: int) -> list[dict[str, Any]]:
+        """Refresh only V16 delegates whose bridge evidence changed after expiry."""
+        now = time.time()
+        conn = connect(self.db_path, read_only=True)
+        try:
+            if not (
+                state_table_exists(conn, "brain_governance_candidate")
+                and state_table_exists(conn, "brain_governance_candidate_review")
+            ):
+                return []
+            rows = execute(
+                conn,
+                """
+                SELECT command.command_id, command.snapshot_id, command.plan_id,
+                       command.eval_id, command.candidate_id, command.target_agent,
+                       command.scope_type, command.scope_key, command.action,
+                       command.evidence_json, command.delegation_json,
+                       command.posterior_fingerprint, command.evidence_fingerprint,
+                       command.max_apply_count
+                FROM v16_brain_command AS command
+                JOIN brain_governance_candidate AS candidate
+                  ON candidate.candidate_id=command.candidate_id
+                WHERE command.decision='delegate'
+                  AND command.claim_status='cancelled'
+                  AND command.failure_reason='authority_expired'
+                  AND candidate.status='active'
+                  AND COALESCE(candidate.submitted_suggestion_id, '')=''
+                  AND (candidate.expires_at<=0 OR candidate.expires_at>?)
+                  AND command.updated_at=(
+                      SELECT MAX(latest.updated_at)
+                      FROM v16_brain_command AS latest
+                      WHERE latest.candidate_id=command.candidate_id
+                        AND latest.decision='delegate'
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM brain_governance_candidate_review AS review
+                      WHERE review.candidate_id=command.candidate_id
+                        AND review.bridge_ready=1
+                        AND review.created_at>command.updated_at
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM v16_brain_command AS current
+                      WHERE current.candidate_id=command.candidate_id
+                        AND current.decision='delegate'
+                        AND current.claim_status IN ('available', 'claimed', 'finalized')
+                  )
+                ORDER BY command.updated_at ASC
+                LIMIT ?
+                """,
+                (now, max(1, min(int(limit), 50))),
+            ).fetchall()
+            return [
+                {
+                    "command_id": str(row["command_id"] or ""),
+                    "snapshot_id": str(row["snapshot_id"] or ""),
+                    "plan_id": str(row["plan_id"] or ""),
+                    "eval_id": str(row["eval_id"] or ""),
+                    "candidate_id": str(row["candidate_id"] or ""),
+                    "target_agent": str(row["target_agent"] or ""),
+                    "scope_type": str(row["scope_type"] or ""),
+                    "scope_key": str(row["scope_key"] or ""),
+                    "action": str(row["action"] or ""),
+                    "decision": "delegate",
+                    "status": "delegated_to_specialist",
+                    "evidence": loads(row["evidence_json"], {}),
+                    "delegation": loads(row["delegation_json"], {}),
+                    "posterior_fingerprint": str(row["posterior_fingerprint"] or ""),
+                    "evidence_fingerprint": str(row["evidence_fingerprint"] or ""),
+                    "max_apply_count": max(1, int(row["max_apply_count"] or 1)),
+                    "authority_issued_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
 
     def _persist_commands(self, commands: list[dict[str, Any]]) -> None:
         conn = connect(self.db_path)

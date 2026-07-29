@@ -85,6 +85,13 @@
 - 当前：mode 为 dual-record；旧 off 兼容与旧 ledger 投影仍在。
 - 退出：稳定 enforce 发布后删除旧 consume/direct overlay/Registry mutation 兼容。
 
+### position supervisor 旧 advisory 冲突占位
+
+- 状态：`migrating`
+- canonical：持仓模板的自动切换只从 V16 candidate bridge 进入，`V16CommandGate.claim` 与 `PositionSupervisorGovernanceMutationService` 的 Coordinator transaction 共同完成单次授权和 finalize。
+- 剩余：历史/旧 worker 写入的 non-V16 `position_supervisor_template` advisory 仍可留作审计记录；它们已不再拥有 approve/apply 或 candidate conflict 权力，并将在既有 demo review/apply 路径中 terminalize。
+- 退出：历史 active advisory 全部 terminalize，连续真实 demo cycle 证明 V16 bridge、claim、Coordinator finalize 和 effect observation 连通后，删除旧 advisory 生成路径。
+
 ### parity replay 尚非 live-equivalent
 
 - 状态：`migrating`

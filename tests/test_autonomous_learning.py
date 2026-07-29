@@ -6,7 +6,45 @@ from backend.core.db import STATE_DB_DDL
 from backend.services import autonomous_learning as al
 from backend.services import evolution_ledger
 from backend.services.evolution_ledger import expire_stale_evolution_runs, start_evolution_run
+from backend.services.v16_command_gate import V16CommandGate
 from config import runtime_config as rc
+
+
+def _v16_supervisor_bridge_evidence(candidate_id: str) -> dict:
+    return {
+        "candidate_id": candidate_id,
+        "source_agent": "v16_brain",
+        "bridge": {"command_owner": "v16_brain"},
+        "governance_eligibility": {
+            "governance_eligible": True,
+            "governance_eligibility_version": "governance_eligibility.v1",
+            "governance_eligibility_fingerprint": f"eligible-{candidate_id}",
+        },
+        "replay_summary": {"sample_count": 8},
+        "counterfactual_summary": {"total": 12},
+    }
+
+
+def _seed_v16_supervisor_command(db_path, *, candidate_id: str) -> None:
+    V16CommandGate.ensure_finalize_schema(db_path)
+    now = time.time()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO v16_brain_command
+            (command_id, candidate_id, target_agent, scope_type, scope_key, action,
+             decision, status, evidence_json, delegation_json, claim_status,
+             authority_issued_at, created_at, updated_at)
+            VALUES (?, ?, 'position_supervisor_governance', 'supervisor_template',
+                    'position_supervisor', 'switch_position_supervisor_template',
+                    'delegate', 'delegated_to_specialist', '{}', '{}', 'available', ?, ?, ?)
+            """,
+            (f"v16_supervisor_{candidate_id}", candidate_id, now, now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _create_sample_db(path):
@@ -1644,9 +1682,13 @@ def test_auto_apply_position_supervisor_template_requires_matching_shadow_trace(
              evidence_json, status, reviewed_at, created_at)
             VALUES ('psv_shadow_scope', 'position_supervisor_template',
                     'position_supervisor:conservative.v1', 'increase_min_hold_window',
-                    0.82, 'scope test', '{}', 'approved', ?, ?)
+                    0.82, 'scope test', ?, 'approved', ?, ?)
             """,
-            (time.time(), created_at),
+            (
+                json.dumps(_v16_supervisor_bridge_evidence("candidate_shadow_scope")),
+                time.time(),
+                created_at,
+            ),
         )
         conn.execute(
             """
@@ -1700,9 +1742,13 @@ def test_auto_apply_position_supervisor_template_excludes_unusable_canary_eviden
              evidence_json, status, reviewed_at, created_at)
             VALUES ('psv_unusable_canary', 'position_supervisor_template',
                     'position_supervisor:conservative.v1', 'increase_min_hold_window',
-                    0.82, 'canonical evidence test', '{}', 'approved', ?, ?)
+                    0.82, 'canonical evidence test', ?, 'approved', ?, ?)
             """,
-            (time.time(), created_at),
+            (
+                json.dumps(_v16_supervisor_bridge_evidence("candidate_unusable_canary")),
+                time.time(),
+                created_at,
+            ),
         )
         conn.executemany(
             """
@@ -1827,7 +1873,84 @@ def test_auto_apply_position_supervisor_template_excludes_unusable_canary_eviden
     assert result["skipped"][0]["mature_trade_count"] == 0
 
 
-def test_demo_auto_applies_supervisor_template_without_mature_canary(tmp_path):
+def test_demo_auto_applies_supervisor_template_without_mature_canary(tmp_path, monkeypatch):
+    rc.reset_for_tests()
+    from backend.core import static_feature_flags
+
+    monkeypatch.setattr(
+        static_feature_flags,
+        "shared_static_feature_flags",
+        lambda: type("Flags", (), {"governance_mutation_coordinator_v2_mode": "dual_record"})(),
+    )
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, reviewed_at, governance_eligible,
+             governance_eligibility_version, governance_eligibility_fingerprint,
+             created_at)
+            VALUES ('psv_demo_aggressive', 'position_supervisor_template',
+                    'position_supervisor:conservative.v1', 'increase_min_hold_window',
+                    0.82, 'demo aggressive test', ?, 'approved', ?, 1,
+                    'governance_eligibility.v1', 'eligible-candidate_demo_aggressive', ?)
+            """,
+            (
+                json.dumps(
+                    _v16_supervisor_bridge_evidence("candidate_demo_aggressive")
+                ),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _seed_v16_supervisor_command(db_path, candidate_id="candidate_demo_aggressive")
+
+    rc.replace(
+        rc.RuntimeConfig(
+            autonomy_mode="demo_nursery",
+            autonomy_expansion_frozen=True,
+            supervisor_canary_mature_trade_count=50,
+            position_supervisor_template_id="position_supervisor:auto_tpsl.active.v1",
+        )
+    )
+    try:
+        result = al._auto_apply_position_supervisor_template_suggestions(
+            db_path=db_path,
+            experiment_id="demoauto_aggressive",
+            run_id="evorun_aggressive",
+        )
+        assert len(result["applied"]) == 1, result
+        assert rc.shared().position_supervisor_template_id == "position_supervisor:conservative.v1"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            details = json.loads(
+                conn.execute(
+                    "SELECT details_json FROM learning_application_log WHERE scope_type='position_supervisor_template'"
+                ).fetchone()[0]
+            )
+            v16_status = conn.execute(
+                "SELECT claim_status, apply_count FROM v16_brain_command"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert details["demo_aggressive_governance"] is True
+        assert details["canary_evidence_ready"] is False
+        # SQLite fixtures are deliberately treated as non-production by the
+        # coordinator, so they validate the claim handoff without consuming
+        # the command. Production PostgreSQL finalizes it atomically.
+        assert v16_status == ("claimed", 0)
+    finally:
+        rc.reset_for_tests()
+
+
+def test_demo_auto_supervisor_template_requires_matching_v16_command(tmp_path):
     rc.reset_for_tests()
     db_path = tmp_path / "state.db"
     now = time.time()
@@ -1839,17 +1962,13 @@ def test_demo_auto_applies_supervisor_template_without_mature_canary(tmp_path):
             INSERT INTO policy_suggestion
             (suggestion_id, scope_type, scope_key, action, confidence, reason,
              evidence_json, status, reviewed_at, created_at)
-            VALUES ('psv_demo_aggressive', 'position_supervisor_template',
-                    'position_supervisor:conservative.v1', 'increase_min_hold_window',
-                    0.82, 'demo aggressive test', ?, 'approved', ?, ?)
+            VALUES ('psv_v16_required', 'position_supervisor_template',
+                    'position_supervisor:conservative.v1',
+                    'switch_position_supervisor_template', 0.82, 'missing V16 command',
+                    ?, 'approved', ?, ?)
             """,
             (
-                json.dumps(
-                    {
-                        "replay_summary": {"sample_count": 8},
-                        "counterfactual_summary": {"total": 12},
-                    }
-                ),
+                json.dumps(_v16_supervisor_bridge_evidence("candidate_missing_command")),
                 now,
                 now,
             ),
@@ -1868,24 +1987,65 @@ def test_demo_auto_applies_supervisor_template_without_mature_canary(tmp_path):
     try:
         result = al._auto_apply_position_supervisor_template_suggestions(
             db_path=db_path,
-            experiment_id="demoauto_aggressive",
-            run_id="evorun_aggressive",
+            experiment_id="demoauto_v16_required",
+            run_id="evorun_v16_required",
         )
-        assert len(result["applied"]) == 1, result
-        assert rc.shared().position_supervisor_template_id == "position_supervisor:conservative.v1"
+        assert result["applied"] == []
+        assert result["skipped"][0]["reason"] == "v16_command_required"
         conn = sqlite3.connect(str(db_path))
         try:
-            details = json.loads(
-                conn.execute(
-                    "SELECT details_json FROM learning_application_log WHERE scope_type='position_supervisor_template'"
-                ).fetchone()[0]
-            )
+            assert conn.execute(
+                "SELECT status FROM policy_suggestion WHERE suggestion_id='psv_v16_required'"
+            ).fetchone()[0] == "approved"
+            assert conn.execute("SELECT COUNT(*) FROM learning_application_log").fetchone()[0] == 0
         finally:
             conn.close()
-        assert details["demo_aggressive_governance"] is True
-        assert details["canary_evidence_ready"] is False
     finally:
         rc.reset_for_tests()
+
+
+def test_demo_autonomy_supersedes_unbridged_supervisor_suggestion(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, created_at)
+            VALUES ('psv_legacy_direct', 'position_supervisor_template',
+                    'position_supervisor:conservative.v1',
+                    'switch_position_supervisor_template', 0.82, 'legacy direct',
+                    ?, 'proposed', ?)
+            """,
+            (
+                json.dumps(
+                    {
+                        "replay_summary": {"sample_count": 8},
+                        "counterfactual_summary": {"total": 12},
+                        "source_agent": "autonomous_learning",
+                    }
+                ),
+                time.time(),
+            ),
+        )
+        conn.commit()
+
+        result = al._approve_demo_policy_suggestions(
+            conn,
+            experiment_id="demoauto_legacy_supervisor",
+            db_path=db_path,
+            run_id="evorun_legacy_supervisor",
+        )
+        assert result["approved"] == []
+        assert result["skipped"][0]["reason"] == "superseded_non_v16_supervisor_suggestion"
+        assert conn.execute(
+            "SELECT status FROM policy_suggestion WHERE suggestion_id='psv_legacy_direct'"
+        ).fetchone()[0] == "superseded"
+    finally:
+        conn.close()
 
 
 def test_demo_autonomy_delegates_policy_review_to_governor(monkeypatch, tmp_path):

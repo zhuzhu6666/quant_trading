@@ -55,6 +55,41 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
     return default if value is None else value
 
 
+def trade_review_payload_from_row(row: Any) -> dict[str, Any]:
+    """Normalize a review table row for the canonical rich lesson builder.
+
+    The low-level upsert still accepts a row for compatibility with focused
+    callers/tests, but production rebuild paths must feed the same parsed
+    payload to ``ExperienceBuilder`` so a refresh cannot replace a rich lesson
+    with the old compact fallback shape.
+    """
+    review_json = _loads(_row_get(row, "review_json", "{}"), {})
+    if not isinstance(review_json, dict):
+        review_json = {}
+    failure_tags = _loads(_row_get(row, "failure_tags_json", "[]"), [])
+    if not isinstance(failure_tags, list):
+        failure_tags = []
+    regime_id = _row_get(row, "regime_id", "")
+    if not regime_id:
+        regime_id = review_json.get("regime_id") or review_json.get("regime") or ""
+    return {
+        "review_id": str(_row_get(row, "review_id", "") or ""),
+        "trade_id": str(_row_get(row, "trade_id", "") or ""),
+        "position_id": str(_row_get(row, "position_id", "") or ""),
+        "entry_decision_id": str(_row_get(row, "entry_decision_id", "") or ""),
+        "exit_decision_id": str(_row_get(row, "exit_decision_id", "") or ""),
+        "regime_id": str(regime_id or ""),
+        "pnl": _safe_float(_row_get(row, "pnl", 0.0)),
+        "mae": _safe_float(_row_get(row, "mae", 0.0)),
+        "mfe": _safe_float(_row_get(row, "mfe", 0.0)),
+        "outcome_label": str(_row_get(row, "outcome_label", "") or ""),
+        "failure_tags": [str(tag) for tag in failure_tags],
+        "summary_text": str(_row_get(row, "summary_text", "") or ""),
+        "review_json": review_json,
+        "created_at": _safe_float(_row_get(row, "created_at", 0.0)),
+    }
+
+
 def _use_pg(db_path: str | Path = STATE_DB) -> bool:
     return is_state_db_path(db_path)
 
@@ -421,6 +456,8 @@ def _agent_attribution_for_review(conn: Any, row: Any) -> dict[str, Any]:
 
 
 def rebuild_trade_lesson_memory(db_path: str | Path = STATE_DB, *, limit: int = 500) -> dict[str, Any]:
+    from research.learning.experience_builder import ExperienceBuilder
+
     conn = _connect(db_path)
     try:
         if not state_table_exists(conn, "trade_outcome_review"):
@@ -437,9 +474,10 @@ def rebuild_trade_lesson_memory(db_path: str | Path = STATE_DB, *, limit: int = 
             """,
             (max(1, int(limit)),),
         ).fetchall()
+        builder = ExperienceBuilder(db_path=db_path, ensure_schema=False)
         count = 0
         for row in rows:
-            upsert_trade_lesson_memory(conn, row)
+            builder.build_from_review(trade_review_payload_from_row(row), conn=conn)
             count += 1
         conn.commit()
         return {"ok": True, "status": "available", "upserted": count, "append_source": APPEND_SOURCE}

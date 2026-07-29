@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services import learning_backfill
-from backend.services.trade_lesson_memory import upsert_trade_lesson_memory
+from backend.services.trade_lesson_memory import trade_review_payload_from_row
 from backend.services.live_position_lifecycle import classify_close_source_from_evidence
 
 BACKFILL_SOURCE = "controlled_close_learning_backfill.v1"
@@ -335,8 +335,13 @@ def _insert_closed_event(conn, row: dict[str, Any], *, close_price: float) -> st
     return event_id
 
 
-def _insert_experience(conn, review: dict[str, Any]) -> str:
-    return str(upsert_trade_lesson_memory(conn, review)["experience_id"])
+def _insert_experience(conn, review: dict[str, Any], *, builder) -> str:
+    return str(
+        builder.build_from_review(
+            trade_review_payload_from_row(review),
+            conn=conn,
+        )["experience_id"]
+    )
 
 
 def _planned_action(row: dict[str, Any]) -> dict[str, Any]:
@@ -376,6 +381,9 @@ def run_backfill(*, position_ids: list[int], apply: bool, db_path: str | Path = 
             conn.rollback()
             return result
 
+        from research.learning.experience_builder import ExperienceBuilder
+
+        builder = ExperienceBuilder(db_path=db_path, ensure_schema=False)
         now = time.time()
         for row in rows:
             close_price = _normalize_deal_price(entry_price=row.get("entry_price"), exec_price=row.get("exec_price"))
@@ -392,7 +400,7 @@ def run_backfill(*, position_ids: list[int], apply: bool, db_path: str | Path = 
                 record = _amend_review_record(record, row, exit_decision_id=exit_decision_id, close_price=close_price)
                 learning_backfill.insert_review(conn, record)
                 review_id = str(record["review_id"])
-                experience_id = _insert_experience(conn, record)
+                experience_id = _insert_experience(conn, record, builder=builder)
             result["applied"].append(
                 {
                     "position_id": str(row["position_id"]),

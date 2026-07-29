@@ -21,7 +21,7 @@ from backend.services.review_contract import (
     normalize_trade_review_contract,
     review_has_system_contamination,
 )
-from backend.services.trade_lesson_memory import upsert_trade_lesson_memory
+from backend.services.trade_lesson_memory import trade_review_payload_from_row
 
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,20 @@ def _execute(conn, sql: str, params: Any = None):
     if params is None:
         return conn.execute(_sql(conn, sql))
     return conn.execute(_sql(conn, sql), params)
+
+
+def _experience_builder_for_conn(conn):
+    """Bind the rich lesson builder to the connection's state database."""
+    from research.learning.experience_builder import ExperienceBuilder
+
+    db_path = None
+    if not _conn_is_pg(conn):
+        try:
+            database = conn.execute("PRAGMA database_list").fetchone()
+            db_path = database[2] if database and len(database) > 2 and database[2] else None
+        except Exception:
+            db_path = None
+    return ExperienceBuilder(db_path=db_path, ensure_schema=False)
 
 
 def _startup_backfill_watermark() -> dict[str, Any]:
@@ -590,12 +604,14 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
     _execute(conn, "DELETE FROM experience_pattern_stats WHERE scope_type='factor'")
     reviews = _execute(conn,
         """
-        SELECT review_id, trade_id, position_id, outcome_label, pnl, failure_tags_json,
+        SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+               pnl, mae, mfe, outcome_label, failure_tags_json,
                summary_text, review_json, created_at
         FROM trade_outcome_review
         ORDER BY created_at ASC
         """
     ).fetchall()
+    experience_builder = _experience_builder_for_conn(conn)
     stats: dict[str, dict] = {}
     suggestions_created = 0
     rebuilt = 0
@@ -652,7 +668,10 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
         evidence_strength = min(1.0, max(0.15, abs(reward_score) + 0.20 * len(failure_tags)))
         evidence_strength = max(0.05, evidence_strength * evidence_scale)
 
-        lesson = upsert_trade_lesson_memory(conn, row)
+        lesson = experience_builder.build_from_review(
+            trade_review_payload_from_row(row),
+            conn=conn,
+        )
         source_table = str(lesson["source_table"])
         source_id = str(lesson["source_id"])
         append_source = str(lesson["append_source"])
@@ -810,9 +829,13 @@ def _refresh_trade_lesson_memory(conn: sqlite3.Connection, *, limit: int = 200) 
             "reason": f"{type(exc).__name__}: {exc}",
         }
 
+    experience_builder = _experience_builder_for_conn(conn)
     upserted = 0
     for row in rows:
-        upsert_trade_lesson_memory(conn, row)
+        experience_builder.build_from_review(
+            trade_review_payload_from_row(row),
+            conn=conn,
+        )
         upserted += 1
     return {
         "ok": True,

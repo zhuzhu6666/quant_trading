@@ -320,6 +320,8 @@ def test_learning_backfill_refreshes_trade_lesson_memory_without_new_reviews(mon
     assert row is not None
     context = json.loads(row[0] or "{}")
     assert context["agent_attribution"]["feedback_targets"] == ["autonomous_learning"]
+    assert context["primary_responsibility"] == "signal_quality"
+    assert "supervisor_feedback" in context
 
 
 def test_learning_backfill_restores_review_regime_from_entry_decision(monkeypatch, tmp_path):

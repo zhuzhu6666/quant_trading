@@ -16,6 +16,16 @@ from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSI
 BRIDGE_READY_STAGES = {"governance_ready", "applyable"}
 
 
+def is_v16_candidate_bridge_evidence(evidence: dict[str, Any] | None) -> bool:
+    """Whether a policy-suggestion evidence record is V16-owned and executable."""
+    payload = dict(evidence or {})
+    bridge = dict(payload.get("bridge") or {})
+    return bool(
+        str(payload.get("candidate_id") or "")
+        and str(payload.get("source_agent") or "") == "v16_brain"
+        and str(bridge.get("command_owner") or "") == "v16_brain"
+    )
+
 def ensure_brain_governance_candidate_table(db_path: str | Path = STATE_DB) -> None:
     conn = _connect(db_path)
     try:

@@ -958,6 +958,31 @@ class MetaModelLightGBMService:
         paths = sorted(self.artifact_dir.glob(f"{MODEL_TYPE}_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         return str(paths[0]) if paths else ""
 
+    def _existing_shadow_sample_ids(self, *, artifact_path: str) -> set[str]:
+        conn = self._conn()
+        try:
+            rows = _execute(
+                conn,
+                """
+                SELECT inference_id
+                FROM meta_model_shadow_audit
+                WHERE model_type=? AND artifact_path=?
+                """,
+                (MODEL_TYPE, artifact_path),
+            ).fetchall()
+            prefix = f"{MODEL_TYPE}:"
+            sample_ids = set()
+            for row in rows:
+                inference_id = str(row["inference_id"] or "")
+                if not inference_id.startswith(prefix):
+                    continue
+                sample_id = inference_id[len(prefix):].rsplit(":", 1)[0]
+                if sample_id:
+                    sample_ids.add(sample_id)
+            return sample_ids
+        finally:
+            conn.close()
+
     def score_samples(
         self,
         *,
@@ -966,6 +991,7 @@ class MetaModelLightGBMService:
         window: int = 12,
         horizon: int = 3,
         mode: str = "shadow",
+        skip_existing: bool = False,
         materialize_ledger: bool = False,
     ) -> dict[str, Any]:
         dep_error = _dependency_error()
@@ -1000,6 +1026,29 @@ class MetaModelLightGBMService:
         samples = self.load_samples(limit=limit, window=window, horizon=horizon)
         if not samples:
             return {"ok": False, "error": "no_samples"}
+        if skip_existing:
+            artifact_ref = str(artifact.get("artifact_path") or path)
+            existing = self._existing_shadow_sample_ids(artifact_path=artifact_ref)
+            samples = [
+                sample for sample in samples
+                if str(sample.get("sample_id") or "") not in existing
+            ]
+            if not samples:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "no_new_samples",
+                    "model_type": MODEL_TYPE,
+                    "model_version": str(artifact.get("model_version") or MODEL_VERSION),
+                    "artifact_path": str(path),
+                    "count": 0,
+                    "items": [],
+                    "capabilities": {
+                        "live_trading": False,
+                        "advisory_only": True,
+                        "shadow_only": True,
+                    },
+                }
         x = pd.DataFrame([item["features"] for item in samples], columns=feature_names)
         probs = model.predict_proba(x)
         items = []

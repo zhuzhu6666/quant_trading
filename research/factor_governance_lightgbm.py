@@ -640,12 +640,38 @@ class FactorGovernanceLightGBMService:
         paths = sorted(self.artifact_dir.glob(f"{MODEL_TYPE}_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         return str(paths[0]) if paths else ""
 
+    def _existing_shadow_sample_ids(self, *, artifact_path: str) -> set[str]:
+        conn = self._conn()
+        try:
+            rows = self._execute(
+                conn,
+                """
+                SELECT inference_id
+                FROM factor_governance_shadow_audit
+                WHERE model_type=? AND artifact_path=?
+                """,
+                (MODEL_TYPE, artifact_path),
+            ).fetchall()
+            prefix = f"{MODEL_TYPE}:"
+            sample_ids = set()
+            for row in rows:
+                inference_id = str(row["inference_id"] or "")
+                if not inference_id.startswith(prefix):
+                    continue
+                sample_id = inference_id[len(prefix):].rsplit(":", 1)[0]
+                if sample_id:
+                    sample_ids.add(sample_id)
+            return sample_ids
+        finally:
+            conn.close()
+
     def score_samples(
         self,
         *,
         artifact_path: str | Path | None = None,
         limit: int = 200,
         mode: str = "shadow",
+        skip_existing: bool = False,
         materialize: bool = False,
         min_weakness_score: float = 0.65,
     ) -> dict[str, Any]:
@@ -681,6 +707,30 @@ class FactorGovernanceLightGBMService:
         samples = self.load_samples(limit=limit)
         if not samples:
             return {"ok": False, "error": "no_samples"}
+        if skip_existing:
+            artifact_ref = str(artifact.get("artifact_path") or path)
+            existing = self._existing_shadow_sample_ids(artifact_path=artifact_ref)
+            samples = [
+                sample for sample in samples
+                if str(sample.get("sample_id") or "") not in existing
+            ]
+            if not samples:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "no_new_samples",
+                    "model_type": MODEL_TYPE,
+                    "model_version": str(artifact.get("model_version") or MODEL_VERSION),
+                    "artifact_path": str(path),
+                    "count": 0,
+                    "items": [],
+                    "suggestions": [],
+                    "capabilities": {
+                        "live_trading": False,
+                        "advisory_only": True,
+                        "shadow_only": True,
+                    },
+                }
         x = pd.DataFrame([item["features"] for item in samples], columns=feature_names)
         probs = model.predict_proba(x)[:, 1]
         items = []

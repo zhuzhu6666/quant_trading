@@ -832,6 +832,37 @@ class BrainMemoryService:
         }
 
     @classmethod
+    def reconcile_trade_review(
+        cls,
+        review: dict[str, Any],
+        *,
+        counterfactuals: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Expose the same posterior reconciliation used by memory retrieval.
+
+        Generation-context readers need the causal owner too.  Keeping this
+        small adapter here prevents them from reimplementing, or bypassing,
+        V16's entry-versus-supervisor arbitration rules.
+        """
+        payload = dict(review or {})
+        review_id = str(payload.get("review_id") or payload.get("source_id") or "")
+        payload.setdefault("review_id", review_id)
+        payload.setdefault("source_id", review_id)
+        item = {
+            "source_table": "trade_outcome_review",
+            "source_id": review_id,
+            "structured": {
+                "source_table": "trade_outcome_review",
+                "source_id": review_id,
+            },
+        }
+        return cls._apply_posterior_reconciliation(
+            item,
+            trade_reviews=[payload] if review_id else [],
+            counterfactuals=[dict(item) for item in (counterfactuals or []) if isinstance(item, dict)],
+        )
+
+    @classmethod
     def _apply_posterior_reconciliation(
         cls,
         item: dict[str, Any],

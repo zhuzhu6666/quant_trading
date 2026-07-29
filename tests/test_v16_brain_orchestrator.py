@@ -3,6 +3,9 @@ import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+from backend.services.brain_governance_candidate_review import (
+    ensure_brain_governance_candidate_review_table,
+)
 from backend.services.v16_brain_snapshot import build_posterior_arbitration
 
 
@@ -281,6 +284,56 @@ def test_expired_delegate_gets_a_fresh_command_without_reviving_terminal_row(tmp
         ).fetchone()[0] == 2
     finally:
         conn.close()
+
+
+def test_reviewed_expired_delegate_reissues_when_bridge_becomes_ready(tmp_path):
+    db_path = tmp_path / "state.db"
+    _seed_posterior_facts(db_path, time.time())
+    service = V16BrainOrchestratorService(db_path)
+    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
+    ensure_brain_governance_candidate_review_table(db_path)
+
+    cancelled_at = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        command = conn.execute(
+            "SELECT command_id, candidate_id FROM v16_brain_command WHERE decision='delegate'"
+        ).fetchone()
+        conn.execute(
+            """UPDATE v16_brain_command
+               SET claim_status='cancelled', failure_reason='authority_expired',
+                   updated_at=?
+               WHERE command_id=?""",
+            (cancelled_at, command[0]),
+        )
+        conn.execute(
+            """INSERT INTO brain_governance_candidate_review
+               (review_id, candidate_id, review_status, bridge_ready, created_at)
+               VALUES ('review_after_expiry', ?, 'bridge_ready', 1, ?)""",
+            (command[1], cancelled_at + 1.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reissues = service._reviewed_expired_delegate_reissues(limit=20)
+
+    assert len(reissues) == 1
+    assert reissues[0]["command_id"] == command[0]
+    service._persist_commands(reissues)
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        rows = conn.execute(
+            """SELECT command_id, claim_status, failure_reason
+               FROM v16_brain_command WHERE decision='delegate'
+               ORDER BY created_at"""
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows[0][1:] == ("cancelled", "authority_expired")
+    assert rows[1][0] != rows[0][0]
+    assert rows[1][1:] == ("available", "")
+    assert service._reviewed_expired_delegate_reissues(limit=20) == []
 
 
 def test_superseded_candidate_cancels_unclaimed_delegate(tmp_path):

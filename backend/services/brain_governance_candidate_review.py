@@ -13,6 +13,7 @@ from backend.services.brain_governance_candidates import (
     BRIDGE_READY_STAGES,
     BrainGovernanceCandidateService,
     ensure_brain_governance_candidate_table,
+    is_v16_candidate_bridge_evidence,
 )
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from research.learning.governance_conflicts import ACTIVE_CONFLICT_STATUSES, control_surface
@@ -662,7 +663,20 @@ class BrainGovernanceCandidateReviewService:
                 """,
                 (GOVERNANCE_ELIGIBILITY_VERSION,),
             ).fetchall()
-            return [dict(row) for row in rows if str(row["status"] or "") in ACTIVE_CONFLICT_STATUSES]
+            active = []
+            for raw_row in rows:
+                row = dict(raw_row)
+                if str(row["status"] or "") not in ACTIVE_CONFLICT_STATUSES:
+                    continue
+                if str(row.get("scope_type") or "") == "position_supervisor_template":
+                    evidence = _loads(row.get("evidence_json"), {})
+                    if not is_v16_candidate_bridge_evidence(evidence):
+                        # Legacy supervisor advisories are observation-only.
+                        # They are terminalized by the demo policy path and
+                        # must not prevent their V16 replacement from bridging.
+                        continue
+                active.append(row)
+            return active
         finally:
             conn.close()
 
