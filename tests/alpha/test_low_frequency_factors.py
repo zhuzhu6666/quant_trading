@@ -12,6 +12,7 @@ from alpha.registry import (
     factor_gld_tonnes_chg_5d,
     factor_real_yield_chg,
     factor_slv_gld_ratio,
+    factor_silver_gold_holdings_ratio,
 )
 from data.external_loader import ExternalDataLoader
 
@@ -52,6 +53,8 @@ def test_low_frequency_factors_prefer_standard_precomputed_columns_on_m5():
     frame["dxy_corr_20"] = np.arange(len(frame), dtype=float) + 30.0
     frame["slv_gld_ratio_5d"] = np.arange(len(frame), dtype=float) + 40.0
     frame["cb_china_3m_zscore"] = np.arange(len(frame), dtype=float) + 50.0
+    frame["silver_gold_holdings_ratio"] = np.arange(len(frame), dtype=float) + 60.0
+    frame["cot_extreme_signal"] = np.arange(len(frame), dtype=float) + 70.0
 
     assert factor_gld_tonnes_chg_5d(frame)[-1] == pytest.approx(19.0)
     assert factor_real_yield_chg(frame)[-1] == pytest.approx(29.0)
@@ -59,6 +62,8 @@ def test_low_frequency_factors_prefer_standard_precomputed_columns_on_m5():
     assert factor_dxy_corr_20(frame)[-1] == pytest.approx(49.0)
     assert factor_slv_gld_ratio(frame)[-1] == pytest.approx(59.0)
     assert factor_cb_china_3m_zscore(frame)[-1] == pytest.approx(69.0)
+    assert factor_silver_gold_holdings_ratio(frame)[-1] == pytest.approx(79.0)
+    assert factor_cot_extreme_signal(frame)[-1] == pytest.approx(89.0)
 
 
 def test_low_frequency_daily_fallback_still_works_when_standard_column_missing():
@@ -119,3 +124,21 @@ def test_external_loader_precomputes_low_frequency_standard_columns():
     assert np.isfinite(etf_out["slv_gld_ratio_5d"].iloc[-1])
     assert "cb_china_3m_zscore" in cb_out.columns
     assert np.isfinite(cb_out["cb_china_3m_zscore"].iloc[-1])
+
+
+def test_external_loader_computes_holdings_derivatives_on_source_observations():
+    idx = pd.date_range("2020-01-01", periods=45, freq="D")
+    slv = np.full(len(idx), np.nan)
+    slv[::2] = 400.0 + np.arange(len(slv[::2]))
+    holdings = pd.DataFrame(
+        {
+            "GLD_tonnes": 900.0 + np.arange(len(idx)),
+            "SLV_tonnes": slv,
+        },
+        index=idx,
+    )
+
+    out = ExternalDataLoader()._compute_etf_derived(holdings)
+
+    assert out["SLV_tonnes_chg_20d"].dropna().iloc[-1] == pytest.approx(20.0)
+    assert np.isfinite(out["silver_gold_holdings_ratio"].dropna()).all()

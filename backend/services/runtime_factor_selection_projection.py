@@ -55,6 +55,10 @@ class RuntimeFactorSelectionProjectionService:
             name: str((signal_cfg.get(name) or {}).get("role") or "alpha").lower()
             for name in selected
         }
+        selected_weights = {
+            name: float(weights.get(name, 0.0) or 0.0)
+            for name in selected
+        }
         role_counts = Counter(selected_roles.values())
         exclusion_reason_counts = Counter(
             str(reason or "unknown")
@@ -87,7 +91,7 @@ class RuntimeFactorSelectionProjectionService:
                         getattr(selection, "reason_excluded", {}) or {}
                     ),
                     "weights": {
-                        name: float(weights.get(name, 0.0) or 0.0)
+                        name: selected_weights[name]
                         for name in selected
                     },
                 },
@@ -100,6 +104,8 @@ class RuntimeFactorSelectionProjectionService:
             "schema_version": "runtime_factor_selection.v1",
             "source": source,
             "selected_factor_ids": selected,
+            "selected_factor_roles": selected_roles,
+            "selected_factor_weights": selected_weights,
             "excluded_factor_ids": list(getattr(selection, "excluded_factor_ids", []) or []),
             "reason_excluded": dict(getattr(selection, "reason_excluded", {}) or {}),
             "governance_profile": (

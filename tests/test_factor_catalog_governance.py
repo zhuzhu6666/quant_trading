@@ -1,8 +1,63 @@
 import sqlite3
+from types import SimpleNamespace
 
+import backend.services.factor_catalog as factor_catalog
 from backend.services.factor_catalog import build_factor_catalog
 from config import runtime_config
 from config.runtime_config import RuntimeConfig
+
+
+def test_factor_catalog_uses_runtime_selection_snapshot_roles_and_weights(
+    tmp_path,
+    monkeypatch,
+):
+    runtime_config.reset_for_tests()
+    runtime_config.replace(
+        RuntimeConfig(
+            factor_signal_config={
+                "alpha_a": {
+                    "enabled": True,
+                    "lifecycle_status": "ACTIVE",
+                    "role": "context",
+                }
+            },
+            factor_portfolio_weights={"alpha_a": 0.0},
+        )
+    )
+    monkeypatch.setattr(
+        factor_catalog,
+        "select_runtime_factors",
+        lambda _config: SimpleNamespace(
+            selected_factor_ids=["alpha_a"],
+            excluded_factor_ids=[],
+            reason_excluded={},
+        ),
+    )
+    monkeypatch.setattr(
+        "backend.services.runtime_factor_selection_projection."
+        "RuntimeFactorSelectionProjectionService.latest",
+        lambda _self: {
+            "ok": True,
+            "selected_factor_ids": ["alpha_a"],
+            "selected_factor_roles": {"alpha_a": "alpha"},
+            "selected_factor_weights": {"alpha_a": 0.5},
+            "reason_excluded": {},
+        },
+    )
+    try:
+        item = {
+            row["factor_id"]: row
+            for row in build_factor_catalog(tmp_path / "catalog.sqlite")
+        }["alpha_a"]
+    finally:
+        runtime_config.reset_for_tests()
+
+    assert item["role"] == "alpha"
+    assert item["weight"] == 0.5
+    assert item["explicit_weight"] is True
+    assert item["eligible_for_live"] is True
+    assert item["used_in_score"] is True
+    assert item["runtime_selection_source"] == "live_runtime_projection"
 
 
 def test_factor_catalog_includes_factor_governance_shadow_audit(tmp_path):

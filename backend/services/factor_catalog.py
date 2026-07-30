@@ -377,14 +377,39 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
     selected = set(selection.selected_factor_ids if selection is not None else factor_registry.list())
     excluded_reasons = dict(selection.reason_excluded if selection is not None else {})
     selection_source = "local_fallback"
+    selected_roles: dict[str, str] = {}
+    selected_weights: dict[str, float] = {}
     try:
         from backend.services.runtime_factor_selection_projection import RuntimeFactorSelectionProjectionService
 
         projection = RuntimeFactorSelectionProjectionService(db_path).latest()
         if projection.get("ok"):
-            selected = set(projection.get("selected_factor_ids") or [])
-            excluded_reasons = dict(projection.get("reason_excluded") or {})
-            selection_source = "live_runtime_projection"
+            projected_selected = [
+                str(name)
+                for name in list(projection.get("selected_factor_ids") or [])
+                if str(name)
+            ]
+            projected_roles = projection.get("selected_factor_roles")
+            projected_weights = projection.get("selected_factor_weights")
+            if (
+                isinstance(projected_roles, dict)
+                and isinstance(projected_weights, dict)
+                and set(projected_selected).issubset(projected_roles)
+                and set(projected_selected).issubset(projected_weights)
+            ):
+                selected = set(projected_selected)
+                excluded_reasons = dict(projection.get("reason_excluded") or {})
+                selected_roles = {
+                    name: str(projected_roles[name] or "alpha").lower()
+                    for name in projected_selected
+                }
+                selected_weights = {
+                    name: float(projected_weights[name] or 0.0)
+                    for name in projected_selected
+                }
+                selection_source = "live_runtime_projection"
+            else:
+                selection_source = "local_selection_projection_incomplete"
     except Exception:
         pass
 
@@ -434,7 +459,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         )
         cfg_entry = signal_cfg.get(name)
         cfg_dict = cfg_entry if isinstance(cfg_entry, dict) else {}
-        role = resolve_factor_role(name, cfg_dict)
+        role = selected_roles.get(name) or resolve_factor_role(name, cfg_dict)
         enabled = not (isinstance(cfg_entry, dict) and cfg_entry.get("enabled") is False)
         configured_lifecycle = str(cfg_dict.get("lifecycle_status") or "").upper()
         lifecycle_status = "DEAD" if name in dead else str(
@@ -449,7 +474,13 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         )
         if lifecycle_status in {"QUARANTINED", "RETIRED", "DEAD"}:
             enabled = False
-        raw_weight = weights.get(name) if name in weights else None
+        raw_weight = (
+            selected_weights[name]
+            if name in selected_weights
+            else weights.get(name)
+            if name in weights
+            else None
+        )
         if isinstance(raw_weight, dict):
             raw_weight = raw_weight.get("weight")
         try:

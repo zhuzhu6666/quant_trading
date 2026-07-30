@@ -12,7 +12,9 @@ FUND_CONFIG = (
     ("GLD", "1222333", Path("data/sec_gld")),
     ("SLV", "1330568", Path("data/sec_slv")),
 )
-MAX_FILINGS_PER_FUND = 12  # recent 3 years is enough for live factors and keeps SEC jobs bounded
+# SLV 是季度披露，20 期变化至少需要 21 个有效来源观察；保留少量余量，
+# 仍限制 SEC 作业规模，避免只拉最近 12 份导致因子永远没有 20 期历史。
+MAX_FILINGS_PER_FUND = 24
 # Kept as a compatibility alias for callers/tests that inspect the old GLD cache.
 CACHE_DIR = FUND_CONFIG[0][2]
 CACHE_DIR.mkdir(parents=True, exist_ok=True)

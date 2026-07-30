@@ -41,6 +41,52 @@ def test_cot_release_at_prevents_future_visibility(tmp_path):
     assert out.iloc[1]["cot_mm_net"] == 500
 
 
+def test_cot_loader_precomputes_standard_extreme_signal(tmp_path):
+    external = tmp_path / "external.duckdb"
+    ensure_external_schema(external)
+    con = connect_duckdb(external)
+    try:
+        rows = []
+        for i in range(60):
+            report_date = pd.Timestamp("2020-01-03") + pd.Timedelta(days=7 * i)
+            release_at = report_date + pd.Timedelta(days=3)
+            rows.append(
+                (
+                    report_date.date().isoformat(),
+                    1000 + i,
+                    600 + 3 * i,
+                    250 - i,
+                    0,
+                    180 + 2 * i,
+                    420 - 2 * i,
+                    0,
+                    0,
+                    0,
+                    0,
+                    release_at.timestamp(),
+                    release_at.timestamp(),
+                    "test",
+                )
+            )
+        con.executemany(
+            """
+            INSERT INTO cot_gold
+            (report_date, open_interest, mm_long, mm_short, mm_spread,
+             pm_long, pm_short, swap_long, swap_short, other_long, other_short,
+             release_at, fetched_at, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+    finally:
+        con.close()
+
+    out = ExternalDataLoader(external)._load_cot_gold()
+
+    assert "cot_extreme_signal" in out.columns
+    assert out["cot_extreme_signal"].notna().sum() > 0
+
+
 def test_etf_filing_date_prevents_future_visibility(tmp_path):
     external = tmp_path / "external.duckdb"
     events = tmp_path / "events.duckdb"

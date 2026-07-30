@@ -276,6 +276,7 @@ class ExternalDataLoader:
             cot_pm_net = pm_long - pm_short
             cot_mm_net_pct_oi = mm_net / open_interest
             cot_mm_net_chg_4w = mm_net_pct_oi 4w diff
+            cot_extreme_signal = mm_z - pm_z 的离散反转信号
         """
         cached = self._get_cached("cot_gold", self.db_path)
         if cached is not None:
@@ -311,6 +312,18 @@ class ExternalDataLoader:
         df["cot_mm_net_zscore_52w"] = (
             (df["cot_mm_net_pct_oi"] - roll52.mean()) / roll52.std()
         )
+        # COT 是周度来源。先在来源时间线上计算标准列，再向 M15 对齐，
+        # 避免因子在 M15 帧上拒绝周度原始列而始终没有健康证据。
+        pm_roll = df["cot_pm_net"].rolling(52, min_periods=12)
+        raw_extreme = (
+            (df["cot_mm_net_pct_oi"] - roll52.mean()) / roll52.std()
+            - (df["cot_pm_net"] - pm_roll.mean()) / pm_roll.std()
+        )
+        extreme = np.zeros(len(df), dtype=float)
+        extreme[raw_extreme > 1.5] = -1.0
+        extreme[raw_extreme < -1.5] = 1.0
+        extreme[raw_extreme.isna().to_numpy()] = np.nan
+        df["cot_extreme_signal"] = extreme
         # 重命名原始列
         rename_map = {
             "open_interest": "cot_open_interest",
@@ -355,19 +368,34 @@ class ExternalDataLoader:
         for sym in ["GLD", "SLV"]:
             tonnes_col = f"{sym}_tonnes"
             if tonnes_col in out.columns:
+                # GLD 月度和 SLV 季度披露共用一条 release 时间轴，不能直接
+                # 对含 NaN 的联合索引做 diff(20)，否则 20 代表混合披露行而
+                # 且几乎总会落在另一个 ETF 的空值上。先在各自真实观测上
+                # 计算，再回到联合时间轴供 PIT 对齐。
+                source = out[tonnes_col].dropna()
                 # 5d 变化 (吨)
-                out[f"{sym}_tonnes_chg_5d"] = out[tonnes_col].diff(5)
+                out[f"{sym}_tonnes_chg_5d"] = source.diff(5).reindex(out.index)
                 # 20d 变化 (吨)
-                out[f"{sym}_tonnes_chg_20d"] = out[tonnes_col].diff(20)
+                out[f"{sym}_tonnes_chg_20d"] = source.diff(20).reindex(out.index)
                 # 5d 变化百分比
-                out[f"{sym}_tonnes_pct_5d"] = out[tonnes_col].pct_change(5) * 100
+                out[f"{sym}_tonnes_pct_5d"] = source.pct_change(5) * 100
+                out[f"{sym}_tonnes_pct_5d"] = out[f"{sym}_tonnes_pct_5d"].reindex(out.index)
                 # 20d 变化百分比
-                out[f"{sym}_tonnes_pct_20d"] = out[tonnes_col].pct_change(20) * 100
+                out[f"{sym}_tonnes_pct_20d"] = source.pct_change(20) * 100
+                out[f"{sym}_tonnes_pct_20d"] = out[f"{sym}_tonnes_pct_20d"].reindex(out.index)
                 # 60d z-score (跟历史比较)
-                roll60 = out[tonnes_col].rolling(60, min_periods=20)
-                out[f"{sym}_tonnes_zscore_60d"] = (
-                    (out[tonnes_col] - roll60.mean()) / roll60.std()
-                )
+                roll60 = source.rolling(60, min_periods=20)
+                zscore = (source - roll60.mean()) / roll60.std()
+                out[f"{sym}_tonnes_zscore_60d"] = zscore.reindex(out.index)
+        if {"GLD_tonnes", "SLV_tonnes"}.issubset(out.columns):
+            # 银金持仓比只在两个来源都已经披露后计算。这里的 5 表示
+            # 联合披露时间线上的 5 个有效观察，不把 M15 前向填充当成
+            # 新的原始观察。
+            holdings = out[["GLD_tonnes", "SLV_tonnes"]].sort_index().ffill()
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio = holdings["SLV_tonnes"].div(holdings["GLD_tonnes"].replace(0, np.nan))
+            ratio_change = ratio.pct_change(5, fill_method=None) * 100
+            out["silver_gold_holdings_ratio"] = ratio_change.reindex(out.index)
         return out
 
     def _compute_etf_price_derived(self, etf: pd.DataFrame) -> pd.DataFrame:

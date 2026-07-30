@@ -1196,6 +1196,9 @@ def factor_silver_gold_holdings_ratio(df, lookback: int = 5):
 
     历史上金银 ETF 持仓比突破 +5% 5d, 跟黄金短期回调 -0.5%~-1% 同步。
     """
+    standard = _standard_col(df, "silver_gold_holdings_ratio")
+    if standard is not None:
+        return standard
     if not _has_external(df, ["SLV_tonnes", "GLD_tonnes"]) or not _is_low_frequency_frame(df):
         return np.full(len(df), np.nan)
     s_slv = df["SLV_tonnes"].values
@@ -1407,6 +1410,9 @@ def factor_cot_extreme_signal(df):
     黄金历史: 2020-08 投机者 +260k → 黄金顶部 2075
               2018-08 投机者 -100k → 黄金底部 1160
     """
+    standard = _standard_col(df, "cot_extreme_signal")
+    if standard is not None:
+        return standard
     if not _has_external(df, ["cot_mm_net_pct_oi", "cot_pm_net"]) or not _is_low_frequency_frame(df, min_hours=24.0 * 5.0):
         return np.full(len(df), np.nan)
     mm_s = pd.Series(df["cot_mm_net_pct_oi"].values)
