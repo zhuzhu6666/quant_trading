@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import time
+from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
@@ -75,6 +76,167 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+_SUPERVISOR_TEMPLATE_CONTROL_SECTIONS = (
+    "thresholds",
+    "sl_policy",
+    "tp_policy",
+    "capture_policy",
+    "learning_bounds",
+)
+
+
+def _nested_value(payload: Mapping[str, Any], path: str) -> tuple[bool, Any]:
+    current: Any = payload
+    for part in str(path or "").split("."):
+        if not part or not isinstance(current, Mapping) or part not in current:
+            return False, None
+        current = current[part]
+    return True, current
+
+
+def _flatten_template_controls(
+    payload: Mapping[str, Any],
+    *,
+    prefix: str = "",
+) -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    for key, value in payload.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, Mapping):
+            flattened.update(_flatten_template_controls(value, prefix=path))
+        else:
+            flattened[path] = value
+    return flattened
+
+
+def _single_control_candidate_contract(
+    candidate_template: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Validate a generated supervisor template as one scalar patch.
+
+    The runtime template snapshot is intentionally complete so it can be
+    restored after a restart.  The evidence contract, however, must prove
+    that only one control differs from the named base template.
+    """
+
+    candidate = dict(candidate_template or {})
+    base_template_id = str(
+        candidate.get("base_template_id")
+        or candidate.get("base_template")
+        or ""
+    )
+    patch = dict(candidate.get("candidate_patch") or {})
+    path = str(patch.get("path") or "")
+    regime_stratum = str(patch.get("regime_stratum") or "")
+    if not base_template_id or not path or not regime_stratum:
+        return {"ok": False, "reason": "missing_base_template_patch_or_regime"}
+    if path.split(".", 1)[0] not in _SUPERVISOR_TEMPLATE_CONTROL_SECTIONS:
+        return {"ok": False, "reason": "candidate_patch_outside_control_sections"}
+    base = get_position_supervisor_template(base_template_id)
+    base_exists, base_value = _nested_value(base, path)
+    candidate_exists, candidate_value = _nested_value(candidate, path)
+    if not base_exists or not candidate_exists:
+        return {"ok": False, "reason": "candidate_patch_path_missing"}
+    if patch.get("base_value") != base_value:
+        return {"ok": False, "reason": "candidate_patch_base_value_mismatch"}
+    if patch.get("candidate_value") != candidate_value:
+        return {"ok": False, "reason": "candidate_patch_value_mismatch"}
+    base_controls: dict[str, Any] = {}
+    candidate_controls: dict[str, Any] = {}
+    for section in _SUPERVISOR_TEMPLATE_CONTROL_SECTIONS:
+        base_controls.update(
+            _flatten_template_controls(
+                dict(base.get(section) or {}),
+                prefix=section,
+            )
+        )
+        candidate_controls.update(
+            _flatten_template_controls(
+                dict(candidate.get(section) or {}),
+                prefix=section,
+            )
+        )
+    changed = sorted(
+        key
+        for key in set(base_controls) | set(candidate_controls)
+        if base_controls.get(key) != candidate_controls.get(key)
+    )
+    if changed != [path]:
+        return {
+            "ok": False,
+            "reason": "candidate_template_changes_multiple_controls",
+            "changed_controls": changed,
+        }
+    return {
+        "ok": True,
+        "base_template_id": base_template_id,
+        "candidate_patch": patch,
+        "changed_controls": changed,
+    }
+
+
+def _build_single_control_candidate_template(
+    *,
+    day: str,
+    action: str,
+    base_template_id: str,
+    control_path: str,
+    candidate_value: Any,
+    regime_stratum: str,
+    generation_reason: str,
+) -> dict[str, Any] | None:
+    base = get_position_supervisor_template(base_template_id)
+    exists, base_value = _nested_value(base, control_path)
+    if not exists:
+        return None
+    candidate = deepcopy(base)
+    target: Any = candidate
+    parts = str(control_path or "").split(".")
+    for part in parts[:-1]:
+        if not isinstance(target, dict) or part not in target:
+            return None
+        target = target[part]
+    if not isinstance(target, dict) or not parts[-1]:
+        return None
+    target[parts[-1]] = deepcopy(candidate_value)
+    suffix = hashlib.sha1(
+        _json(
+            {
+                "day": day,
+                "action": action,
+                "base_template_id": base_template_id,
+                "control_path": control_path,
+                "candidate_value": candidate_value,
+                "regime_stratum": regime_stratum,
+            }
+        ).encode("utf-8")
+    ).hexdigest()[:10]
+    candidate_id = f"position_supervisor:auto_{action}.{suffix}.v1"
+    candidate["template_id"] = candidate_id
+    candidate["template_version"] = f"auto_{action}.{suffix}.v1"
+    candidate["template_role"] = "generated_single_control_candidate"
+    candidate["status"] = "candidate"
+    candidate["source"] = "generated_from_supervisor_learning"
+    candidate["base_template_id"] = base_template_id
+    candidate["candidate_patch"] = {
+        "path": control_path,
+        "base_value": deepcopy(base_value),
+        "candidate_value": deepcopy(candidate_value),
+        "regime_stratum": regime_stratum,
+    }
+    candidate["generation_context"] = {
+        "schema_version": "position_supervisor_candidate_generation.v1",
+        "day": day,
+        "action": action,
+        "control": control_path,
+        "regime_stratum": regime_stratum,
+        "base_template_id": base_template_id,
+        "reason": generation_reason,
+        "source": "position_supervisor_advisory",
+    }
+    return candidate
 
 
 def _stable_supervisor_application_id(suggestion_id: str, target_template_id: str) -> str:
@@ -333,6 +495,26 @@ def _position_prices(conn: sqlite3.Connection, position_id: str) -> dict[str, fl
 def _review_to_supervisor_context(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     payload = _loads(row["review_json"], {})
     real_pnl = payload.get("real_pnl") or {}
+    quality_context = payload.get("decision_quality_context")
+    if not isinstance(quality_context, dict):
+        quality_context = payload.get("decision_context")
+    if not isinstance(quality_context, dict):
+        quality_context = {}
+    context_state = quality_context.get("context_state")
+    if not isinstance(context_state, dict):
+        context_state = payload.get("context_state")
+    if not isinstance(context_state, dict):
+        context_state = {}
+    market_context = {
+        "context_state": dict(context_state),
+        "regime_id": str(
+            payload.get("regime_id")
+            or quality_context.get("regime_id")
+            or payload.get("current_regime")
+            or ""
+        ),
+        "regime_confidence": quality_context.get("regime_confidence"),
+    }
     position_id = str(row["position_id"] or payload.get("position_id") or "")
     prices = _position_prices(conn, position_id)
     entry_price = _safe_float(real_pnl.get("entry_price") or payload.get("entry_price"))
@@ -365,6 +547,7 @@ def _review_to_supervisor_context(conn: sqlite3.Connection, row: sqlite3.Row) ->
             "decision_ts": _safe_float(payload.get("close_ts") or row["created_at"]),
             "holding_seconds": _safe_float(payload.get("holding_seconds")),
         },
+        "market": market_context,
         "market_space_context": {
             "distance_to_sl": abs(current_price - prices["sl"]) if current_price > 0 and prices["sl"] > 0 else 0.0,
             "distance_to_tp": abs(prices["tp"] - current_price) if current_price > 0 and prices["tp"] > 0 else 0.0,
@@ -850,22 +1033,27 @@ def build_position_supervisor_advisories(
                 f"{int(counterfactual_summary.get('total') or 0)}"
             ).encode("utf-8")
         ).hexdigest()[:10]
-        thresholds = dict(base.get("thresholds") or {})
         sl_policy = dict(base.get("sl_policy") or {})
-        tp_policy = dict(base.get("tp_policy") or {})
-        capture_policy = dict(base.get("capture_policy") or {})
         severity = min(1.0, max(0.0, avg_giveback))
-        thresholds["giveback_tighten_threshold"] = round(max(0.16, min(0.30, 0.26 - 0.06 * severity)), 4)
-        thresholds["giveback_reduce_threshold"] = round(max(0.42, min(0.62, 0.58 - 0.10 * severity)), 4)
-        thresholds["profit_capture_min_threshold"] = round(max(0.36, min(0.56, 0.44 + 0.08 * (1.0 - avg_capture))), 4)
-        thresholds["near_take_profit_progress"] = round(max(0.82, min(0.92, 0.90 - 0.04 * severity)), 4)
-        sl_policy["profit_lock_multiplier"] = round(max(0.62, min(0.88, 0.68 + 0.14 * severity)), 4)
-        sl_policy["breakeven_lock_ratio"] = round(max(0.28, min(0.45, 0.32 + 0.08 * severity)), 4)
-        tp_policy["near_take_profit_action"] = "protect"
-        tp_policy["extension_enabled"] = True
-        tp_policy["extension_factor"] = round(max(0.12, min(0.32, 0.24 - 0.08 * severity)), 4)
-        tp_policy["extension_profit_capture_min"] = round(max(0.38, min(0.58, 0.46 + 0.08 * (1.0 - avg_capture))), 4)
-        capture_policy["mfe_capture_failure_threshold"] = round(max(0.16, min(0.28, 0.20 + 0.04 * severity)), 4)
+        learning_bounds = dict(base.get("learning_bounds") or {})
+        base_lock_multiplier = _safe_float(sl_policy.get("profit_lock_multiplier"), 0.60)
+        min_lock_multiplier = _safe_float(
+            learning_bounds.get("min_profit_lock_multiplier"),
+            0.35,
+        )
+        max_lock_multiplier = _safe_float(
+            learning_bounds.get("max_profit_lock_multiplier"),
+            0.85,
+        )
+        # A generated candidate changes exactly one management control.  The
+        # posture state machine owns regime behavior; this patch only relaxes
+        # the profit-lock multiplier when the counterfactual evidence says
+        # the existing stop was too tight.
+        candidate_lock_multiplier = max(
+            min_lock_multiplier,
+            min(max_lock_multiplier, base_lock_multiplier - 0.10 * severity),
+        )
+        sl_policy["profit_lock_multiplier"] = round(candidate_lock_multiplier, 4)
         return {
             **base,
             "template_id": f"position_supervisor:auto_tpsl.{suffix}.v1",
@@ -875,15 +1063,30 @@ def build_position_supervisor_advisories(
             "source": "generated_from_supervisor_learning",
             "base_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
             "description": "Generated dynamic TP/SL supervisor template from MFE capture failure evidence.",
-            "thresholds": thresholds,
             "sl_policy": sl_policy,
-            "tp_policy": tp_policy,
-            "capture_policy": capture_policy,
+            "candidate_patch": {
+                "path": "sl_policy.profit_lock_multiplier",
+                "base_value": round(base_lock_multiplier, 4),
+                "candidate_value": round(candidate_lock_multiplier, 4),
+                "regime_stratum": "range_capture",
+            },
+            "generation_context": {
+                "schema_version": "position_supervisor_candidate_generation.v1",
+                "day": day,
+                "action": "mfe_capture_failure",
+                "control": "sl_policy.profit_lock_multiplier",
+                "regime_stratum": "range_capture",
+                "base_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
+                "reason": "mfe_capture_failure",
+                "source": "position_supervisor_advisory",
+            },
             "generation_evidence": {
                 "day": day,
                 "capture_failed_count": capture_failed_count,
                 "avg_failed_giveback_ratio": round(avg_giveback, 6),
                 "avg_failed_profit_capture_ratio": round(avg_capture, 6),
+                "control": "sl_policy.profit_lock_multiplier",
+                "regime_stratum": "range_capture",
                 "source": "position_supervisor_advisory",
             },
         }
@@ -896,6 +1099,34 @@ def build_position_supervisor_advisories(
         *,
         target_template_id: str = CONSERVATIVE_TEMPLATE_ID,
     ) -> None:
+        candidate_template = evidence.get("candidate_template")
+        if action == "switch_position_supervisor_template":
+            contract = _single_control_candidate_contract(candidate_template)
+            if not contract.get("ok"):
+                skipped.append(
+                    {
+                        "action": action,
+                        "reason": "single_control_candidate_contract_missing",
+                        "target_template_id": target_template_id,
+                        "contract": contract,
+                    }
+                )
+                return
+        if isinstance(candidate_template, Mapping):
+            contract = _single_control_candidate_contract(candidate_template)
+            if contract.get("ok"):
+                evidence = {
+                    **evidence,
+                    "base_template": get_position_supervisor_template(
+                        str(contract.get("base_template_id") or "")
+                    ),
+                    "candidate_patch": dict(
+                        contract.get("candidate_patch") or {}
+                    ),
+                    "generation_context": dict(
+                        candidate_template.get("generation_context") or {}
+                    ),
+                }
         suggestion_id = "psv_" + hashlib.sha1(
             f"{day}:{action}:{target_template_id}:{reason}".encode("utf-8")
         ).hexdigest()[:16]
@@ -984,20 +1215,40 @@ def build_position_supervisor_advisories(
                     },
                     target_template_id=generated_template["template_id"],
                 )
-            _add(
-                "tighten_mfe_capture_protection",
-                min(0.82, 0.66 + 0.03 * capture_failed_count),
-                "closed losses had positive MFE but very low profit capture and high giveback",
-                {
-                    "day": day,
-                    "mfe_then_loss_count": mfe_then_loss_count,
-                    "capture_failed_count": capture_failed_count,
-                    "candidate_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
-                    "candidate_actions": profit_summary.get("actions") or {},
-                    "capture_failure_examples": capture_failure_summary.get("examples") or [],
-                },
-                target_template_id=PROFIT_PROTECTION_TEMPLATE_ID,
+            capture_candidate = _build_single_control_candidate_template(
+                day=day,
+                action="mfe_capture_protection",
+                base_template_id=DEFAULT_TEMPLATE_ID,
+                control_path="thresholds.giveback_reduce_threshold",
+                candidate_value=get_position_supervisor_template(
+                    PROFIT_PROTECTION_TEMPLATE_ID
+                ).get("thresholds", {}).get("giveback_reduce_threshold"),
+                regime_stratum="range_capture",
+                generation_reason="mfe_capture_failure",
             )
+            if capture_candidate is None:
+                skipped.append(
+                    {
+                        "action": "tighten_mfe_capture_protection",
+                        "reason": "single_control_candidate_generation_failed",
+                    }
+                )
+            else:
+                _add(
+                    "tighten_mfe_capture_protection",
+                    min(0.82, 0.66 + 0.03 * capture_failed_count),
+                    "closed losses had positive MFE but very low profit capture and high giveback",
+                    {
+                        "day": day,
+                        "mfe_then_loss_count": mfe_then_loss_count,
+                        "capture_failed_count": capture_failed_count,
+                        "candidate_template_id": capture_candidate["template_id"],
+                        "candidate_template": capture_candidate,
+                        "candidate_actions": profit_summary.get("actions") or {},
+                        "capture_failure_examples": capture_failure_summary.get("examples") or [],
+                    },
+                    target_template_id=capture_candidate["template_id"],
+                )
         else:
             skipped.append(
                 {
@@ -1013,58 +1264,120 @@ def build_position_supervisor_advisories(
             )
 
     if over_protection_count > correct_stop_count:
-        _add(
-            "switch_position_supervisor_template",
-            min(0.82, 0.66 + 0.02 * (over_protection_count - correct_stop_count)),
-            "counterfactual review shows profit protection exits are too aggressive",
-            {
-                "day": day,
-                "over_protection_count": over_protection_count,
-                "correct_stop_count": correct_stop_count,
-                "candidate_template_id": CONSERVATIVE_TEMPLATE_ID,
-            },
-            target_template_id=CONSERVATIVE_TEMPLATE_ID,
+        relax_candidate = _build_single_control_candidate_template(
+            day=day,
+            action="overprotection_relief",
+            base_template_id=DEFAULT_TEMPLATE_ID,
+            control_path="thresholds.min_thesis_break_seconds",
+            candidate_value=get_position_supervisor_template(
+                CONSERVATIVE_TEMPLATE_ID
+            ).get("thresholds", {}).get("min_thesis_break_seconds"),
+            regime_stratum="transition_confirming",
+            generation_reason="counterfactual_overprotection",
         )
+        if relax_candidate is None:
+            skipped.append(
+                {
+                    "action": "switch_position_supervisor_template",
+                    "reason": "single_control_candidate_generation_failed",
+                }
+            )
+        else:
+            _add(
+                "switch_position_supervisor_template",
+                min(0.82, 0.66 + 0.02 * (over_protection_count - correct_stop_count)),
+                "counterfactual review shows profit protection exits are too aggressive",
+                {
+                    "day": day,
+                    "over_protection_count": over_protection_count,
+                    "correct_stop_count": correct_stop_count,
+                    "candidate_template_id": relax_candidate["template_id"],
+                    "candidate_template": relax_candidate,
+                },
+                target_template_id=relax_candidate["template_id"],
+            )
 
     if int(replay["comparison"].get("small_loss_closes_reduced") or 0) > 0:
-        _add(
-            "relax_thesis_break",
-            0.76,
-            "conservative supervisor template reduces small-loss full exits in offline replay",
-            {
-                "day": day,
-                "default_small_loss_close_count": default_summary.get("small_loss_close_count"),
-                "candidate_small_loss_close_count": candidate_summary.get("small_loss_close_count"),
-                "candidate_template_id": CONSERVATIVE_TEMPLATE_ID,
-            },
+        relax_candidate = _build_single_control_candidate_template(
+            day=day,
+            action="relax_thesis_break",
+            base_template_id=DEFAULT_TEMPLATE_ID,
+            control_path="thresholds.min_thesis_break_seconds",
+            candidate_value=get_position_supervisor_template(
+                CONSERVATIVE_TEMPLATE_ID
+            ).get("thresholds", {}).get("min_thesis_break_seconds"),
+            regime_stratum="transition_confirming",
+            generation_reason="small_loss_replay",
         )
+        if relax_candidate is not None:
+            _add(
+                "relax_thesis_break",
+                0.76,
+                "conservative supervisor template reduces small-loss full exits in offline replay",
+                {
+                    "day": day,
+                    "default_small_loss_close_count": default_summary.get("small_loss_close_count"),
+                    "candidate_small_loss_close_count": candidate_summary.get("small_loss_close_count"),
+                    "candidate_template_id": relax_candidate["template_id"],
+                    "candidate_template": relax_candidate,
+                },
+                target_template_id=relax_candidate["template_id"],
+            )
     if (
         protection_can_tighten
         and int(default_summary.get("actions", {}).get("tighten", 0) or 0) > 0
     ):
-        _add(
-            "tighten_profit_protection",
-            0.68,
-            "historical samples show frequent tighten/reduce pressure before exits",
-            {
-                "day": day,
-                "default_actions": default_summary.get("actions") or {},
-                "candidate_actions": profit_summary.get("actions") or {},
-                "candidate_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
-            },
-            target_template_id=PROFIT_PROTECTION_TEMPLATE_ID,
+        tighten_candidate = _build_single_control_candidate_template(
+            day=day,
+            action="tighten_profit_protection",
+            base_template_id=DEFAULT_TEMPLATE_ID,
+            control_path="thresholds.giveback_tighten_threshold",
+            candidate_value=get_position_supervisor_template(
+                PROFIT_PROTECTION_TEMPLATE_ID
+            ).get("thresholds", {}).get("giveback_tighten_threshold"),
+            regime_stratum="range_capture",
+            generation_reason="historical_profit_protection_pressure",
         )
+        if tighten_candidate is not None:
+            _add(
+                "tighten_profit_protection",
+                0.68,
+                "historical samples show frequent tighten/reduce pressure before exits",
+                {
+                    "day": day,
+                    "default_actions": default_summary.get("actions") or {},
+                    "candidate_actions": profit_summary.get("actions") or {},
+                    "candidate_template_id": tighten_candidate["template_id"],
+                    "candidate_template": tighten_candidate,
+                },
+                target_template_id=tighten_candidate["template_id"],
+            )
     if int(default_summary.get("thesis_broken_close_count") or 0) >= 3:
-        _add(
-            "increase_min_hold_window",
-            0.64,
-            "multiple thesis-broken exits are small and early enough to require a minimum evidence window",
-            {
-                "day": day,
-                "thesis_broken_close_count": default_summary.get("thesis_broken_close_count"),
-                "candidate_min_thesis_break_seconds": get_position_supervisor_template(CONSERVATIVE_TEMPLATE_ID).get("thresholds", {}).get("min_thesis_break_seconds"),
-            },
+        hold_window_candidate = _build_single_control_candidate_template(
+            day=day,
+            action="increase_min_hold_window",
+            base_template_id=DEFAULT_TEMPLATE_ID,
+            control_path="thresholds.min_thesis_break_seconds",
+            candidate_value=get_position_supervisor_template(
+                CONSERVATIVE_TEMPLATE_ID
+            ).get("thresholds", {}).get("min_thesis_break_seconds"),
+            regime_stratum="transition_confirming",
+            generation_reason="early_thesis_break_replay",
         )
+        if hold_window_candidate is not None:
+            _add(
+                "increase_min_hold_window",
+                0.64,
+                "multiple thesis-broken exits are small and early enough to require a minimum evidence window",
+                {
+                    "day": day,
+                    "thesis_broken_close_count": default_summary.get("thesis_broken_close_count"),
+                    "candidate_min_thesis_break_seconds": get_position_supervisor_template(CONSERVATIVE_TEMPLATE_ID).get("thresholds", {}).get("min_thesis_break_seconds"),
+                    "candidate_template_id": hold_window_candidate["template_id"],
+                    "candidate_template": hold_window_candidate,
+                },
+                target_template_id=hold_window_candidate["template_id"],
+            )
     if int(amend_issues.get("amend_failed", 0) or 0) > 0 or int(amend_issues.get("amend_skipped", 0) or 0) > 0:
         skipped.append(
             {

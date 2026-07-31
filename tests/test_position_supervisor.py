@@ -22,6 +22,152 @@ def test_position_supervisor_derives_completed_bars_when_temporal_value_is_missi
     assert verdict["evidence"]["closed_bar_window_ready"] is True
 
 
+def test_position_supervisor_strong_trend_holds_near_take_profit():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "trend-hold",
+                "direction": 1,
+                "entry_price": 3000.0,
+                "current_price": 3038.5,
+                "volume": 100.0,
+                "unrealized_pnl": 38.5,
+                "sl": 2990.0,
+                "tp": 3040.0,
+            },
+            "risk": {
+                "mfe": 40.0,
+                "mae": 1.0,
+                "giveback_ratio": 0.15,
+                "profit_capture_ratio": 0.85,
+                "holding_efficiency": 0.9,
+                "time_decay_score": 0.9,
+                "thesis_status": "intact",
+                "regime_shift": "none",
+            },
+            "market": {
+                "trend_strength_state": "strong",
+                "volatility_state": "high",
+                "regime_source": "context_state.market_dimensions",
+                "regime_id": "trend=strong|volatility=high",
+                "regime_dimensions": {"trend": "strong", "volatility": "high"},
+            },
+            "temporal_context": {
+                "holding_seconds": 900.0,
+                "completed_bars_after_entry": 3,
+            },
+        }
+    )
+
+    assert verdict["action"] == "hold"
+    assert verdict["summary_reason"] == "trend_hold_preserve_profit"
+    assert verdict["evidence"]["supervisor_posture"] == "trend_hold"
+
+
+def test_position_supervisor_range_capture_allows_mature_giveback_recommendation():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "range-capture",
+                "direction": 1,
+                "entry_price": 3000.0,
+                "current_price": 3010.0,
+                "volume": 100.0,
+                "unrealized_pnl": 10.0,
+                "sl": 2990.0,
+                "tp": 3040.0,
+            },
+            "risk": {
+                "mfe": 40.0,
+                "mae": 5.0,
+                "giveback_ratio": 0.75,
+                "profit_capture_ratio": 0.25,
+                "holding_efficiency": 0.55,
+                "time_decay_score": 0.8,
+                "thesis_status": "intact",
+                "regime_shift": "none",
+            },
+            "market": {
+                "trend_strength_state": "normal",
+                "volatility_state": "normal",
+                "regime_source": "context_state.market_dimensions",
+                "regime_id": "trend=normal|volatility=normal",
+                "regime_dimensions": {"trend": "normal", "volatility": "normal"},
+            },
+            "temporal_context": {
+                "holding_seconds": 1800.0,
+                "completed_bars_after_entry": 4,
+            },
+        }
+    )
+
+    assert verdict["action"] == "reduce"
+    assert verdict["summary_reason"] == "profit_giveback_after_mfe"
+    assert verdict["evidence"]["supervisor_posture"] == "range_capture"
+
+
+def test_position_supervisor_unknown_market_context_observes_non_hard_management():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "unknown-market",
+                "direction": -1,
+                "entry_price": 4100.0,
+                "current_price": 4081.0,
+                "volume": 100.0,
+                "unrealized_pnl": 19.0,
+                "sl": 4110.0,
+                "tp": 4080.0,
+            },
+            "risk": {
+                "mfe": 19.0,
+                "holding_efficiency": 0.8,
+                "time_decay_score": 0.9,
+                "thesis_status": "intact",
+            },
+            "market": {
+                "trend_strength_state": "unknown",
+                "volatility_state": "unknown",
+                "regime_source": "unavailable",
+            },
+            "temporal_context": {"holding_seconds": 180.0},
+        }
+    )
+
+    assert verdict["action"] == "hold"
+    assert verdict["evidence"]["supervisor_posture"] == "unknown_observe"
+
+
+def test_position_supervisor_hard_risk_overrides_trend_hold():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "hard-risk",
+                "direction": 1,
+                "entry_price": 3000.0,
+                "current_price": 2990.0,
+                "volume": 100.0,
+                "unrealized_pnl": -10.0,
+                "sl": 2989.0,
+                "tp": 3040.0,
+            },
+            "risk": {
+                "hard_risk_active": True,
+                "thesis_status": "intact",
+            },
+            "market": {
+                "trend_strength_state": "strong",
+                "volatility_state": "normal",
+                "regime_source": "context_state.market_dimensions",
+            },
+            "temporal_context": {"holding_seconds": 600.0},
+        }
+    )
+
+    assert verdict["action"] == "close"
+    assert verdict["summary_reason"] == "hard_risk_active"
+
+
 def test_position_supervisor_recommends_reduce_after_large_giveback():
     verdict = evaluate_position_supervisor(
         {
@@ -53,14 +199,19 @@ def test_position_supervisor_recommends_reduce_after_large_giveback():
                 "holding_seconds": 4000.0,
             },
             "market_space_context": {},
+            "market": {
+                "trend_strength_state": "normal",
+                "volatility_state": "normal",
+                "regime_source": "context_state.market_dimensions",
+            },
             "entry_context": {},
             "runtime": {},
         }
     )
 
-    assert verdict["action"] == "reduce"
-    assert verdict["summary_reason"] == "profit_giveback_after_mfe"
-    assert verdict["recommended_controls"]["reduce_fraction"] == 0.5
+    assert verdict["action"] == "hold"
+    assert verdict["summary_reason"] == "transition_confirming"
+    assert verdict["evidence"]["supervisor_posture"] == "transition_confirming"
 
 
 def test_position_supervisor_recommends_close_when_timeout_exceeded():
@@ -325,6 +476,11 @@ def test_position_supervisor_captures_when_near_take_profit():
                 "time_decay_score": 0.9,
                 "thesis_status": "intact",
             },
+            "market": {
+                "trend_strength_state": "normal",
+                "volatility_state": "normal",
+                "regime_source": "context_state.market_dimensions",
+            },
             "temporal_context": {"decision_ts": time.time(), "holding_seconds": 180.0},
         }
     )
@@ -357,6 +513,11 @@ def test_profit_protection_template_outputs_dynamic_tpsl_candidate_near_take_pro
                 "time_decay_score": 0.9,
                 "thesis_status": "intact",
                 "regime_shift": "none",
+            },
+            "market": {
+                "trend_strength_state": "normal",
+                "volatility_state": "normal",
+                "regime_source": "context_state.market_dimensions",
             },
             "temporal_context": {"decision_ts": time.time(), "holding_seconds": 240.0},
             "position_supervisor_template": PROFIT_PROTECTION_TEMPLATE_ID,

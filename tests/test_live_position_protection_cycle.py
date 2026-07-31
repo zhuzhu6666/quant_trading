@@ -106,3 +106,52 @@ def test_protection_cycle_preserves_priority_and_single_position_authority():
     assert result["trailing_superseded"] == [2]
     assert [item["position_id"] for item in result["safety_candidates"]] == [1, 2, 3, 4]
     assert [item["priority"] for item in result["safety_arbitration"]] == [10, 20, 20, 30, 50, 50]
+
+
+def test_demo_protection_cycle_observes_legacy_trailing_without_execution():
+    candidate = _LegacyCandidate(
+        "legacy_awe_trailing",
+        "tighten",
+        50,
+        8,
+        "tighten_position",
+        {"target_stop_loss": 2405.0},
+        "legacy_awe_trailing",
+    )
+    executed: list[int] = []
+    superseded: list[tuple[int, str]] = []
+
+    runtime = PositionProtectionCycleRuntime(
+        update_trailing_stops=lambda *_args, **_kwargs: [candidate],
+        enforce_holding_timeout=lambda *_args, **_kwargs: set(),
+        entry_protection_repair_candidates=lambda *_args, **_kwargs: [],
+        log_candidate_superseded=lambda item, **kwargs: superseded.append(
+            (item.position_id, kwargs["reason"])
+        ),
+        execute_candidate=lambda item, **_kwargs: executed.append(item.position_id) or True,
+        run_position_supervision=lambda *_args, **_kwargs: set(),
+        protection_candidate_to_safety=protection_candidate_to_safety,
+        candidate_supersede_reason=lambda **_kwargs: "",
+        build_cycle_result=build_position_protection_cycle_result,
+        record_aux_failure=lambda *_args, **_kwargs: None,
+        warning=lambda *_args, **_kwargs: None,
+        now=lambda: 100.0,
+    )
+
+    result = run_position_protection_cycle(
+        SimpleNamespace(is_connected=True),
+        [{"position_id": 8}],
+        cfg=SimpleNamespace(autonomy_mode="demo_autonomous", timeframe="M5"),
+        account={},
+        pipeline={},
+        current_price=2400.0,
+        atr_price=5.0,
+        tick=2,
+        log=lambda _message: None,
+        runtime=runtime,
+    )
+
+    assert executed == []
+    assert superseded == [(8, "demo_adaptive_observation")]
+    assert result["trailing_applied"] == []
+    assert result["trailing_superseded"] == [8]

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 from alpha.registry_adapter import RegistryAdapter
@@ -12,6 +13,15 @@ from backend.services import live_service
 from backend.services import shadow_service
 from config import runtime_config as rc
 from deployment.canary import ACTIVE, CANARY_5, CANARY_20, CANARY_50, PROBATION, QUARANTINED, CanaryEvalContext
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_config_between_tests():
+    """Prevent canary fixtures from leaking autonomy mode into risk tests."""
+
+    rc.reset_for_tests()
+    yield
+    rc.reset_for_tests()
 
 
 @dataclass

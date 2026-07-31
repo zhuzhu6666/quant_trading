@@ -823,6 +823,11 @@ def test_parity_replay_uses_live_supervisor_context_builder_shape():
         "backend.services.position_metrics.update_position_path_metrics"
     )
     assert context["risk"]["mfe"] == pytest.approx(0.9)
+    assert context["market"]["market_context_state"] == "unknown"
+    assert context["market"]["regime_source"] == "unavailable"
+    assert context["market_space_context"]["atr_multiple_from_entry"] is None
+    assert context["market_space_context"]["range_location"] is None
+    assert context["market_space_context"]["structure_bias"] is None
     assert context["risk"]["profit_capture_ratio"] == pytest.approx(1.0)
 
 

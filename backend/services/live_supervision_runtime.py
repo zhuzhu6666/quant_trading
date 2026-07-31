@@ -54,6 +54,72 @@ class LiveSupervisionRuntime:
     remember_close_verdict: Any
     capture_partial_close_session_cursor: Any
     sync_partial_close_session_fact: Any
+    adaptive_duplicate_seen: Any = None
+
+
+def _demo_adaptive_observation_required(
+    verdict: dict[str, Any],
+    cfg: Any,
+) -> bool:
+    """Keep discretionary Demo actions non-mutating until governed release."""
+
+    mode = str(getattr(cfg, "autonomy_mode", "") or "").strip().lower()
+    if mode not in {"demo_autonomous", "demo_nursery"}:
+        return False
+    action = str(verdict.get("action") or "hold").strip().lower()
+    if action == "hold":
+        return False
+    template = dict(verdict.get("supervisor_template") or {})
+    boundary = dict(template.get("risk_boundary") or {})
+    execution_mode = str(
+        verdict.get("adaptive_execution_mode")
+        or boundary.get("adaptive_execution_mode")
+        or "observation_only"
+    ).strip().lower()
+    if execution_mode == "governed_execute":
+        return False
+    from backend.services.position_supervisor import is_hard_supervisor_action
+
+    return not is_hard_supervisor_action(
+        action=action,
+        summary_reason=str(verdict.get("summary_reason") or ""),
+        evidence=dict(verdict.get("evidence") or {}),
+    )
+
+
+def _observed_adaptive_verdict(
+    verdict: dict[str, Any],
+) -> dict[str, Any]:
+    """Annotate a recommendation whose effective live action is hold."""
+
+    normalized = copy.deepcopy(verdict or {})
+    requested = str(
+        normalized.get("requested_action")
+        or normalized.get("recommended_action")
+        or normalized.get("action")
+        or "hold"
+    ).strip().lower()
+    normalized["requested_action"] = requested
+    normalized["recommended_action"] = requested
+    normalized["effective_action"] = "hold"
+    normalized["execution_class"] = "observed"
+    normalized["execution_status"] = "observation_only"
+    normalized["execution_reason"] = "demo_adaptive_observation"
+    return normalized
+
+
+def _is_hard_verdict(verdict: dict[str, Any]) -> bool:
+    from backend.services.position_supervisor import is_hard_supervisor_action
+
+    return is_hard_supervisor_action(
+        action=str(
+            verdict.get("requested_action")
+            or verdict.get("action")
+            or ""
+        ),
+        summary_reason=str(verdict.get("summary_reason") or ""),
+        evidence=dict(verdict.get("evidence") or {}),
+    )
 
 
 @dataclass(frozen=True)
@@ -255,6 +321,12 @@ def evaluate_position_supervisor_for_position(
         and float(advisory.get("exit_risk_score") or 0.0) >= 0.65
     ):
         verdict["model_review_priority"] = "high"
+    rule_action = str(verdict.get("action") or "hold").strip().lower()
+    rule_evidence = dict(verdict.get("evidence") or {})
+    rule_posture = str(
+        rule_evidence.get("supervisor_posture") or "unknown_observe"
+    ).strip().lower()
+    rule_controls = copy.deepcopy(verdict.get("recommended_controls") or {})
     try:
         verdict = runtime.model_influence_service().fuse_position(
             verdict=verdict,
@@ -265,6 +337,30 @@ def evaluate_position_supervisor_for_position(
             cfg=cfg,
             tighten_controls=runtime.build_model_tighten_controls(context),
         )
+        if (
+            rule_action == "hold"
+            and rule_posture in {
+                "trend_hold",
+                "unknown_observe",
+                "transition_confirming",
+            }
+            and str(verdict.get("action") or "hold").strip().lower() != "hold"
+        ):
+            model_payload = dict(verdict.get("model_influence") or {})
+            model_payload.update(
+                {
+                    "applied": False,
+                    "stage": "shadow",
+                    "reason": "posture_boundary_blocked_model_action",
+                    "posture": rule_posture,
+                }
+            )
+            verdict["action"] = "hold"
+            verdict["requested_action"] = "hold"
+            verdict["recommended_action"] = "hold"
+            verdict["effective_action"] = "hold"
+            verdict["recommended_controls"] = rule_controls
+            verdict["model_influence"] = model_payload
     except Exception as exc:
         verdict["model_influence"] = {
             "schema_version": "model_influence_result.v1",
@@ -364,7 +460,15 @@ def run_position_supervision(
             )
             continue
 
-        action = str(verdict.get("action") or "hold")
+        action = str(verdict.get("action") or "hold").strip().lower()
+        requested_action = str(
+            verdict.get("requested_action")
+            or verdict.get("recommended_action")
+            or action
+        ).strip().lower()
+        verdict["requested_action"] = requested_action
+        verdict["recommended_action"] = requested_action
+        verdict.setdefault("effective_action", action)
         if action == "hold":
             runtime.log_trace(
                 position=position,
@@ -402,6 +506,29 @@ def run_position_supervision(
             ).strip().lower()
             if effective_action == "hold":
                 handled.add(position_id)
+                verdict["action_fingerprint"] = runtime.build_action_fingerprint(
+                    position_id=position_id,
+                    action="reduce_untradeable",
+                    direction=int(position.get("direction", 0) or 0),
+                    controls=controls,
+                )
+                if candidate_recorder is not None:
+                    try:
+                        candidate_recorder(
+                            runtime.make_candidate(
+                                action=requested_action,
+                                position_id=position_id,
+                                source=f"supervisor_{requested_action}",
+                                controls=controls,
+                            )
+                        )
+                    except Exception as exc:
+                        runtime.record_aux_failure(
+                            "safety_candidate_record_failed",
+                            position_id=position_id,
+                            action=requested_action,
+                            error=exc,
+                        )
                 fingerprint = runtime.build_action_fingerprint(
                     position_id=position_id,
                     action="reduce_untradeable",
@@ -440,13 +567,92 @@ def run_position_supervision(
                     )
                 continue
 
+        if _demo_adaptive_observation_required(verdict, cfg):
+            observed_verdict = _observed_adaptive_verdict(verdict)
+            observed_action = str(
+                observed_verdict.get("requested_action") or requested_action or action
+            ).strip().lower()
+            controls = dict(observed_verdict.get("recommended_controls") or controls)
+            fingerprint = runtime.build_action_fingerprint(
+                position_id=position_id,
+                action=observed_action,
+                direction=int(position.get("direction", 0) or 0),
+                controls=controls,
+            )
+            observed_verdict["action_fingerprint"] = fingerprint
+            if runtime.adaptive_duplicate_seen is not None and runtime.adaptive_duplicate_seen(
+                position_id,
+                observed_verdict,
+            ):
+                runtime.log_trace(
+                    position=position,
+                    verdict=observed_verdict,
+                    cfg=cfg,
+                    tick=tick,
+                    stage="no_op_suppressed",
+                    outcome="skipped",
+                    execution_status="observation_only",
+                    execution_reason="same_adaptive_trigger_episode_and_closed_bar",
+                    execution={
+                        "action_fingerprint": fingerprint,
+                        "requested_action": observed_action,
+                        "effective_action": "hold",
+                        "recommended_action": observed_action,
+                    },
+                    acct=account,
+                )
+                continue
+            if candidate_recorder is not None:
+                try:
+                    candidate_recorder(
+                        runtime.make_candidate(
+                            action=observed_action,
+                            position_id=position_id,
+                            source=f"supervisor_{observed_action}",
+                            controls=controls,
+                        )
+                    )
+                except Exception as exc:
+                    runtime.record_aux_failure(
+                        "safety_candidate_record_failed",
+                        position_id=position_id,
+                        action=observed_action,
+                        error=exc,
+                    )
+            handled.add(position_id)
+            runtime.log_trace(
+                position=position,
+                verdict=observed_verdict,
+                cfg=cfg,
+                tick=tick,
+                stage="execution_skipped",
+                outcome="skipped",
+                execution_status="observation_only",
+                execution_reason="demo_adaptive_observation",
+                execution={
+                    "action_fingerprint": fingerprint,
+                    "requested_action": observed_action,
+                    "effective_action": "hold",
+                    "recommended_action": observed_action,
+                },
+                acct=account,
+            )
+            runtime.remember_state(
+                position,
+                observed_verdict,
+                broker="ctrader",
+                strategy_name=runtime.strategy_name,
+            )
+            continue
+
+        verdict["effective_action"] = action
         if action in {"close", "reduce", "tighten"} and candidate_recorder is not None:
             try:
                 candidate_recorder(
                     runtime.make_candidate(
-                        action=action,
+                        action=requested_action or action,
                         position_id=position_id,
-                        source=f"supervisor_{action}",
+                        source=f"supervisor_{requested_action or action}",
                         controls=controls,
                     )
                 )
@@ -459,7 +665,38 @@ def run_position_supervision(
                 )
 
         handled.add(position_id)
-        if runtime.recently_applied(position_id, action):
+        action_fingerprint = runtime.build_action_fingerprint(
+            position_id=position_id,
+            action=action,
+            direction=int(position.get("direction", 0) or 0),
+            controls=controls,
+        )
+        verdict["action_fingerprint"] = action_fingerprint
+        hard_action = _is_hard_verdict(verdict)
+        if (
+            not hard_action
+            and runtime.adaptive_duplicate_seen is not None
+            and runtime.adaptive_duplicate_seen(position_id, verdict)
+        ):
+            runtime.log_trace(
+                position=position,
+                verdict=verdict,
+                cfg=cfg,
+                tick=tick,
+                stage="no_op_suppressed",
+                outcome="skipped",
+                execution_status="duplicate_episode",
+                execution_reason="same_adaptive_trigger_episode_and_closed_bar",
+                execution={
+                    "action_fingerprint": action_fingerprint,
+                    "requested_action": requested_action or action,
+                    "effective_action": "hold",
+                    "recommended_action": requested_action or action,
+                },
+                acct=account,
+            )
+            continue
+        if hard_action and runtime.recently_applied(position_id, action):
             runtime.log_trace(
                 position=position,
                 verdict=verdict,

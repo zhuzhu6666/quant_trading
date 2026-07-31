@@ -2000,6 +2000,49 @@ def test_build_position_supervisor_context_payload_uses_legacy_price_and_ticket_
     assert payload["runtime"]["account"] == {}
 
 
+def test_build_position_supervisor_context_payload_uses_canonical_market_dimensions_and_unknowns():
+    payload = build_position_supervisor_context_payload(
+        position={
+            "position_id": 905,
+            "direction": 1,
+            "entry_price": 2300.0,
+            "current_price": 2310.0,
+            "sl": 2290.0,
+            "tp": 2340.0,
+        },
+        temporal_context={"holding_seconds": 600.0, "timeframe_seconds": 300},
+        position_metrics={"entry_regime": "trend=strong", "current_regime": ""},
+        entry_decision_id="entry-905",
+        risk_snapshot={},
+        market_context={
+            "context_state": {
+                "trend_strength_state": "strong",
+                "trend_strength_score": 0.8,
+                "volatility_state": "high",
+                "volatility_score": 0.7,
+                "event_window_state": "none",
+                "event_window_score": 0.0,
+                "session_state": "us",
+            }
+        },
+        max_holding_bars=12,
+        open_position_count=1,
+        total_api_volume=100.0,
+        account={},
+        template_id="position_supervisor:default.v1",
+        loop_running=True,
+    )
+
+    assert payload["market"]["regime_id"] == "trend=strong|volatility=high"
+    assert payload["market"]["regime_confidence"] == 0.8
+    assert payload["market"]["trend_strength_state"] == "strong"
+    assert payload["market"]["volatility_state"] == "high"
+    assert payload["market_space_context"]["state"] == "known"
+    assert payload["market_space_context"]["atr_multiple_from_entry"] is None
+    assert payload["market_space_context"]["range_location"] is None
+    assert payload["market_space_context"]["structure_bias"] is None
+
+
 def test_build_position_supervisor_context_inputs_collects_live_defaults():
     position = {"position_id": 904}
     account = {"equity": 1000.0}
@@ -2020,6 +2063,8 @@ def test_build_position_supervisor_context_inputs_collects_live_defaults():
         "position": position,
         "entry_decision_id": "entry-904",
         "risk_snapshot": risk_snapshot,
+        "market_context": {},
+        "supervisor_state": {},
         "max_holding_bars": 12,
         "open_position_count": 2,
         "total_api_volume": 250.0,
@@ -3708,6 +3753,53 @@ def test_build_supervisor_recovery_meta_omits_applied_fields_when_not_applied():
         "latest_supervisor": verdict,
         "latest_supervisor_source": "position_supervisor",
     }
+
+
+def test_build_supervisor_recovery_meta_resets_adaptive_episode_on_posture_change_and_clear():
+    adaptive_verdict = {
+        "action": "tighten",
+        "requested_action": "tighten",
+        "action_fingerprint": "tighten:4005.0:4030.0",
+        "summary_reason": "profit_giveback_after_mfe",
+        "decision_ts": 100.0,
+        "evidence": {
+            "supervisor_posture": "range_capture",
+            "closed_bar_key": "bar:42",
+            "trigger_tags": ["profit_giveback_after_mfe"],
+        },
+        "execution_class": "observed",
+    }
+    meta = build_supervisor_recovery_meta(
+        recovery_meta=None,
+        verdict=adaptive_verdict,
+    )
+    assert meta["supervisor_trigger_episode"] == 1
+    assert meta["supervisor_last_adaptive_fingerprint"] == "tighten:4005.0:4030.0"
+
+    transition_meta = build_supervisor_recovery_meta(
+        recovery_meta=meta,
+        verdict={
+            "action": "hold",
+            "summary_reason": "transition_confirming",
+            "decision_ts": 101.0,
+            "evidence": {
+                "supervisor_posture": "transition_confirming",
+                "closed_bar_key": "bar:42",
+                "trigger_tags": [],
+            },
+        },
+    )
+    assert "supervisor_last_adaptive_fingerprint" not in transition_meta
+    assert transition_meta["supervisor_posture"] == "transition_confirming"
+
+    reentered_meta = build_supervisor_recovery_meta(
+        recovery_meta=transition_meta,
+        verdict={**adaptive_verdict, "decision_ts": 102.0},
+    )
+    assert reentered_meta["supervisor_trigger_episode"] == 2
+    assert reentered_meta["supervisor_last_adaptive_fingerprint"] == (
+        "tighten:4005.0:4030.0"
+    )
 
 
 def test_build_protection_recovery_meta_records_source_and_applied_state():

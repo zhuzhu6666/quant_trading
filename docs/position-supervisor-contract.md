@@ -1,8 +1,8 @@
 # Position Supervisor Contract
 
-> Last updated: 2026-06-30
+> Last updated: 2026-07-31
 > Phase: C-H
-> Status: implemented contract, live governance enabled, autonomous trace learning foundation enabled
+> Status: adaptive posture implemented, Demo discretionary execution observation-only
 
 本文定义并固化 `position_supervisor` 的运行 contract。Phase C 的持仓监督主链已经落地；后续修改应保持本文的权力边界、证据结构和治理入口不变。
 
@@ -262,6 +262,40 @@ PositionSupervisor.evaluate(position_context: dict[str, Any]) -> PositionSupervi
 - `close_reason`
 - `protection_mode`
 
+### 5.4 自适应监督输出与市场状态机
+
+live 与 parity replay 共用同一套市场上下文构造：输入来自
+`PortfolioCompositor._build_context_state()`，regime 由
+`resolve_market_regime()` 解析。上下文必须保留以下事实：
+
+- `trend_strength_state/score`
+- `volatility_state/score`
+- `event_window_state/score`
+- `session_state`
+- `regime_id/confidence/source/dimensions`
+
+`atr_multiple_from_entry` 只有 canonical factor frame 明确提供真实价格空间 ATR 时才有效；
+`range_location`、`structure_bias` 缺少事实源时保持 `None/unknown`，不能用 `0.0` 伪装有效。
+MFE、MAE、giveback、profit capture 和 time-in-profit 仍只由
+`position_metrics.update_position_path_metrics()` 累计写入。
+
+监督 posture 固定为：
+
+- `unknown_observe`：市场维度缺失、过期或只有低置信度 session fallback；只观察；
+- `trend_hold`：强趋势且 thesis 未确认破坏；普通 near-TP、giveback 和 time decay 不收紧；
+- `range_capture`：震荡/弱趋势且路径证据成熟；允许既有 profit protection 建议；
+- `transition_confirming`：regime/thesis 变化尚未完成闭合 bar 确认；只观察；
+- `exit_commit`：硬风险、timeout、确认反转或确认 thesis break；走既有 close/RiskPolicy 链路。
+
+优先级固定为硬风险/timeout/确认退出，其次才是 posture-owned 的自适应保护。
+高波动只影响闭合 bar 确认窗口，不直接等价于更快收紧；未确认 thesis break 继续 hold。
+
+输出中的 `recommended_action` 是状态机原始建议，`requested_action` 是进入执行规划的请求，
+`effective_action` 是最终允许送入 RiskPolicy 的动作。`execution_class=observed` 且
+`execution_status=observation_only` 只表示 Demo 观察，不调用 RiskPolicy 或 broker；真实执行
+仍严格限定为 `stage=executed AND outcome=applied`，此时才可有
+`execution_class=applied` 与 `is_real_execution=true`。
+
 ---
 
 ## 6. 与 `RiskPolicyService` 的关系
@@ -305,7 +339,10 @@ supervisor.action = close
 - `tighten / reduce / close` 必须先形成 supervisor verdict，再交给 `RiskPolicyService`
 - 风控拒绝时只写审计，不执行 broker 修改
 - broker amend / close 失败时必须写入 lifecycle，不得把 action 记成成功
-- supervisor 模板切换必须来自可审计治理建议；demo autonomous 下可自动批准/应用，人工入口只作为覆盖和追责
+- supervisor 模板切换必须来自可审计治理建议；Demo 仍可沿既有 V16/Admission/Coordinator
+  申请和应用模板，但模板中的自适应动作默认 `observation_only`，不会因此获得 broker 执行权。
+  只有具备有效 V16、Admission、RiskPolicy、Coordinator committed authority 的模板，才可
+  通过 `risk_boundary.adaptive_execution_mode=governed_execute` 释放自适应执行。
 
 ### 6.4 风控上下文扩展要求
 
@@ -405,6 +442,19 @@ supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
 - `is_real_execution=true` 仅允许出现在 `stage=executed AND outcome=applied`
 - `recommended_action` 保留 supervisor 建议动作；shadow 建议还在 `shadow_recommendation` 中显式保留
 
+Demo 自适应动作的首版边界：
+
+- `trend_hold` 下的普通保护、`range_capture` 下的 tighten/reduce/near-TP 均记录为
+  `observed/superseded`，不进入 `recently_applied`、broker cooldown 或 RiskPolicy application；
+- 硬风险、确认反转、确认 thesis break、原有 timeout 和 entry repair 仍保持正常执行优先级；
+- `recovery_position_state.recovery_meta` 记录 posture、posture 起始时间、trigger episode、
+  闭合 bar、adaptive fingerprint 和 execution class；同一 episode/bar/fingerprint 最多一次。
+  trigger 清除、posture 改变或目标 fingerprint 改变后才允许再次建议。
+
+`legacy_awe_trailing` 已接入同一保护仲裁。在 Demo 中只写
+`observed/superseded`，不得与 canonical supervisor 同时 applied；非 Demo 兼容路径暂保留，
+待 replay、trace、effect 证明等价后再删除执行分支和耦合测试。
+
 `tighten` 在进入 `RiskPolicyService` 前先比较 broker 当前 SL 与计划 SL。目标已经达到或没有形成更严格保护时，不创建 decision ledger、不调用 RiskPolicy、不触达 broker；首次写 `no_op_suppressed` trace，并把动作目标 fingerprint 保存到 `recovery_position_state.recovery_meta_json`，后续相同目标直接去重。目标变化或当前 SL 重新变得可收紧时会恢复正常风控和执行链路。
 
 这张表服务于后续自治闭环：
@@ -487,6 +537,7 @@ candidate observation 与 legacy trace 只用于审计/弱监督；前者必须�
 
 - `position_supervisor:default.v1`
 - `position_supervisor:conservative.v1`
+- `position_supervisor:profit_protection.v1`
 
 治理流程：
 
@@ -505,13 +556,21 @@ supervisor review / counterfactual
 
 - `proposed` 建议不能直接切 live 模板
 - 只有 `auto_approved` / `approved` 且通过风控的建议可以申请切换
-- 模板 ID 必须来自内置模板列表
+- 模板 ID 必须来自内置模板列表或可从 evidence/application 恢复的生成型候选
 - 自动部署只允许 `RuntimeConfig.autonomy_mode=demo_autonomous`
 - 自动部署必须同时具备 replay summary 和 counterfactual summary
 - 切换必须保留 `previous_template_id`，便于回滚审计
 - 切换必须通过 `RuntimeConfigMutationService` 写入 `runtime_config_overlay / runtime_config_snapshot / evolution_decision / learning_application_log / learning_application_effect`
 - 只调用 `config.runtime_config.patch()` 或只写 `runtime_config_snapshot` 属于临时内存变更，重启后不应被视为 active template
 - 生成型 supervisor 模板必须能从 `policy_suggestion.evidence_json` 或已应用的 `learning_application_log.details_json` 恢复；active template ID 指向孤儿模板时应视为治理链路缺口
+
+生成型候选不得由少量样本直接生成完整多阈值模板。每个 candidate 只能声明一个
+`control` 和一个 `regime_stratum`，evidence 必须同时包含 base template 快照、单字段
+`candidate_patch`、`generation_context`、replay summary 和 counterfactual summary。
+候选模板可以保存完整恢复快照，但必须能证明控制区只有一个 scalar diff；缺少 candidate ID、
+generation context、V16 bridge 或上述证据时只能 observation/superseded。approved suggestion
+不等于 applied，实际生效仍以 application log、effect log、`applied_mutation_id` 和 V16
+finalize 为准；普通 learning candidate 不能自动打开 `governed_execute`。
 
 ---
 

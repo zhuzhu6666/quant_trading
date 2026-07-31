@@ -4459,6 +4459,7 @@ def _auto_apply_position_supervisor_template_suggestions(
     from risk.policy_service import RiskPolicyService
     from backend.services.position_supervisor_governance import (
         PositionSupervisorGovernanceMutationService,
+        _single_control_candidate_contract,
         materialize_position_supervisor_candidate_observations,
     )
     from backend.services.v16_command_gate import V16CommandGate
@@ -4543,6 +4544,35 @@ def _auto_apply_position_supervisor_template_suggestions(
                     "reason": "superseded_non_v16_supervisor_suggestion",
                 })
                 continue
+            if target_template_id.startswith("position_supervisor:auto_"):
+                candidate_contract = _single_control_candidate_contract(
+                    evidence.get("candidate_template")
+                )
+                if not candidate_contract.get("ok") or not evidence.get(
+                    "generation_context"
+                ):
+                    _execute(
+                        conn,
+                        """
+                        UPDATE policy_suggestion
+                        SET status='superseded', reviewed_at=?, review_note=?
+                        WHERE suggestion_id=? AND status='approved'
+                        """,
+                        (
+                            time.time(),
+                            "superseded: supervisor candidate missing single-control generation contract",
+                            suggestion_id,
+                        ),
+                    )
+                    conn.commit()
+                    skipped.append(
+                        {
+                            "suggestion_id": suggestion_id,
+                            "reason": "superseded_invalid_supervisor_candidate_contract",
+                            "candidate_contract": candidate_contract,
+                        }
+                    )
+                    continue
             canary_required = max(1, int(getattr(cfg, "supervisor_canary_mature_trade_count", 50) or 50))
             cf_rows = _execute(
                 conn,

@@ -1249,6 +1249,7 @@ class ParityReplayRunner:
         self.progress_cb = progress_cb
         self._adapter_error = ""
         self._path_state: dict[int, dict[str, Any]] = {}
+        self._supervisor_state: dict[int, dict[str, Any]] = {}
         self._trailing_state: dict[int, dict[str, Any]] = {}
         self._latest_atr_price = 0.0
         self._latest_conviction = 0.0
@@ -1586,6 +1587,7 @@ class ParityReplayRunner:
         decision_start_index: int = 0,
     ) -> dict[str, Any]:
         self._path_state.clear()
+        self._supervisor_state.clear()
         self._trailing_state.clear()
         self._latest_atr_price = 0.0
         self._latest_conviction = 0.0
@@ -2121,6 +2123,19 @@ class ParityReplayRunner:
                 verdict.get("controls"), Mapping
             ):
                 verdict["recommended_controls"] = dict(verdict["controls"])
+            try:
+                from backend.services.live_position_lifecycle import (
+                    build_supervisor_recovery_meta,
+                )
+
+                self._supervisor_state[pid] = build_supervisor_recovery_meta(
+                    recovery_meta=self._supervisor_state.get(pid) or {},
+                    verdict=verdict,
+                )
+            except Exception:
+                # Replay remains diagnostic-only if its in-memory audit state
+                # cannot be advanced; the decision itself is still returned.
+                pass
             return verdict
 
         def build_trailing_update(item, existing_state, price, atr, conviction):
@@ -2604,6 +2619,7 @@ class ParityReplayRunner:
         if position["remaining_fraction"] <= 1e-12:
             pid = int(position.get("position_id") or 0)
             self._path_state.pop(pid, None)
+            self._supervisor_state.pop(pid, None)
             self._trailing_state.pop(pid, None)
         events.append({
             "event": "closed" if position["remaining_fraction"] <= 1e-12 else "reduced",
@@ -2714,6 +2730,10 @@ class ParityReplayRunner:
                 },
                 entry_decision_id=f"replay:{position['decision_index']}",
                 risk_snapshot={"replay_read_only": True},
+                market_context=_to_dict(
+                    getattr(self.decision_provider, "last_composite", {})
+                ),
+                supervisor_state=dict(self._supervisor_state.get(pid) or {}),
                 total_api_volume=self.request.volume_lots * 10_000.0,
                 loop_running=True,
             ),

@@ -205,6 +205,24 @@ def run_position_protection_cycle(
     trailing_applied: set[int] = set()
     trailing_superseded: set[int] = set()
     for candidate in sorted(trailing_candidates, key=lambda item: item.priority):
+        if str(getattr(cfg, "autonomy_mode", "") or "").strip().lower() in {
+            "demo_autonomous",
+            "demo_nursery",
+        }:
+            trailing_superseded.add(candidate.position_id)
+            runtime.log_candidate_superseded(
+                candidate,
+                cfg=cfg,
+                tick=tick,
+                reason="demo_adaptive_observation",
+                acct=account,
+            )
+            record_superseded(
+                runtime.protection_candidate_to_safety(candidate),
+                priority=50,
+                reason="demo_adaptive_observation",
+            )
+            continue
         supersede_reason = runtime.candidate_supersede_reason(
             position_id=candidate.position_id,
             timeout_handled=set(timeout_handled),

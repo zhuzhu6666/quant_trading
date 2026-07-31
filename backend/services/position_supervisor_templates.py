@@ -68,6 +68,10 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "can_auto_deploy": True,
             "auto_deploy_modes": ["demo_autonomous"],
             "requires_offline_replay": False,
+            # Discretionary position management is observation-only until a
+            # governed application explicitly opts into execution.  Hard
+            # risk/timeout actions are not covered by this boundary.
+            "adaptive_execution_mode": "observation_only",
         },
     },
     CONSERVATIVE_TEMPLATE_ID: {
@@ -124,6 +128,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "can_auto_deploy": False,
             "auto_deploy_modes": ["demo_autonomous"],
             "requires_offline_replay": True,
+            "adaptive_execution_mode": "observation_only",
         },
     },
     PROFIT_PROTECTION_TEMPLATE_ID: {
@@ -180,6 +185,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "can_auto_deploy": False,
             "auto_deploy_modes": ["demo_autonomous"],
             "requires_offline_replay": True,
+            "adaptive_execution_mode": "observation_only",
         },
     },
 }

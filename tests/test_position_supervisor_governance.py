@@ -325,10 +325,17 @@ def test_position_supervisor_advisories_materialize_mfe_capture_failure_template
     capture_summary = result["replay_summary"]["capture_failure_summary"]
     assert capture_summary["capture_failed_count"] == 2
     items = {item["action"]: item for item in result["items"]}
-    assert items["tighten_mfe_capture_protection"]["scope_key"] == PROFIT_PROTECTION_TEMPLATE_ID
+    capture_item = items["tighten_mfe_capture_protection"]
+    assert capture_item["scope_key"].startswith("position_supervisor:auto_mfe_capture_protection.")
+    capture_evidence = capture_item["evidence"]
+    assert capture_evidence["base_template"]["template_id"] == DEFAULT_TEMPLATE_ID
+    assert capture_evidence["candidate_patch"]["path"] == "thresholds.giveback_reduce_threshold"
+    assert capture_evidence["generation_context"]["regime_stratum"] == "range_capture"
     generated = items["switch_position_supervisor_template"]
     assert generated["scope_key"].startswith("position_supervisor:auto_tpsl.")
     assert generated["evidence"]["candidate_template"]["tp_policy"]["extension_enabled"] is True
+    assert generated["evidence"]["candidate_patch"]["path"] == "sl_policy.profit_lock_multiplier"
+    assert generated["evidence"]["generation_context"]["regime_stratum"] == "range_capture"
 
     conn = sqlite3.connect(str(db_path))
     try:
@@ -356,7 +363,11 @@ def test_position_supervisor_advisories_materialize_mfe_capture_failure_template
         ).fetchone()
     finally:
         conn.close()
-    assert row == (PROFIT_PROTECTION_TEMPLATE_ID, "tighten_mfe_capture_protection", "proposed")
+    assert row == (
+        capture_item["scope_key"],
+        "tighten_mfe_capture_protection",
+        "proposed",
+    )
     assert generated_row[0] == generated["scope_key"]
     assert json.loads(generated_row[3])["candidate_template"]["template_id"] == generated["scope_key"]
 
@@ -499,7 +510,13 @@ def test_counterfactual_overprotection_blocks_tighter_generated_template(tmp_pat
         item for item in result["items"]
         if item["action"] == "switch_position_supervisor_template"
     ]
-    assert [item["scope_key"] for item in switch_items] == [CONSERVATIVE_TEMPLATE_ID]
+    assert len(switch_items) == 1
+    assert switch_items[0]["scope_key"].startswith(
+        "position_supervisor:auto_overprotection_relief."
+    )
+    assert switch_items[0]["evidence"]["candidate_patch"]["path"] == (
+        "thresholds.min_thesis_break_seconds"
+    )
     assert all(
         item["action"] != "tighten_mfe_capture_protection"
         for item in result["items"]

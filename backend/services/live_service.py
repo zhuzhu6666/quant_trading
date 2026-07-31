@@ -441,7 +441,10 @@ from backend.services.live_scheduler_jobs import (
     start_scheduler_catch_up as _start_scheduler_catch_up,
 )
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
-from backend.services.position_supervisor import evaluate_position_supervisor
+from backend.services.position_supervisor import (
+    evaluate_position_supervisor,
+    is_hard_supervisor_action,
+)
 from backend.services.stability import record_timed
 _DECISION_LOG: DecisionLogStore | None = None
 _DECISION_LOG_RUN_ID: int = 0
@@ -1676,6 +1679,11 @@ def _build_position_supervisor_context(
         decision_ts=now_ts,
     )
     position_metrics = _position_path_metrics_for_position(position, cfg=cfg, now_ts=now_ts, persist=False)
+    supervisor_row = _load_recovery_row_for_risk_reduction(
+        int(position.get("position_id") or position.get("ticket") or 0),
+        operation="position_supervisor_context",
+    )
+    supervisor_state = dict((supervisor_row or {}).get("recovery_meta") or {})
     context_inputs = _lifecycle_build_position_supervisor_context_inputs(
         position=position,
         cfg=cfg,
@@ -1687,6 +1695,8 @@ def _build_position_supervisor_context(
         ),
         risk_snapshot=_live_state_get("risk", {}, clone=True) or {},
         total_api_volume=_tracked_total_api_volume(positions or []),
+        market_context=_live_state_get("last_composite", {}, clone=True) or {},
+        supervisor_state=supervisor_state,
         loop_running=bool(_live_state_get("loop_running", True)),
     )
     return _lifecycle_build_position_supervisor_context_payload(
@@ -1894,6 +1904,45 @@ def _supervisor_noop_fingerprint_seen(position_id: int, fingerprint: str) -> boo
     return _lifecycle_supervisor_noop_fingerprint_seen(
         recovery_meta=dict((row or {}).get("recovery_meta") or {}),
         fingerprint=fingerprint,
+    )
+
+
+def _supervisor_adaptive_duplicate_seen(
+    position_id: int,
+    verdict: dict[str, Any],
+) -> bool:
+    """Suppress repeated discretionary recommendations in one bar/episode."""
+
+    evidence = dict(verdict.get("evidence") or {})
+    closed_bar_key = str(evidence.get("closed_bar_key") or "")
+    trigger_key = "|".join(
+        sorted({str(item) for item in evidence.get("trigger_tags") or [] if str(item)})
+    )
+    if not closed_bar_key or not trigger_key:
+        return False
+    if is_hard_supervisor_action(
+        action=str(verdict.get("requested_action") or verdict.get("action") or ""),
+        summary_reason=str(verdict.get("summary_reason") or ""),
+        evidence=evidence,
+    ):
+        return False
+    fingerprint = str(verdict.get("action_fingerprint") or "")
+    if not fingerprint:
+        return False
+    row = _load_recovery_row_for_risk_reduction(
+        int(position_id or 0),
+        operation="supervisor_adaptive_duplicate",
+    )
+    meta = dict((row or {}).get("recovery_meta") or {})
+    return bool(
+        str(meta.get("supervisor_last_adaptive_closed_bar_key") or "")
+        == closed_bar_key
+        and str(meta.get("supervisor_last_adaptive_trigger_key") or "")
+        == trigger_key
+        and str(meta.get("supervisor_last_adaptive_fingerprint") or "")
+        == fingerprint
+        and str(meta.get("supervisor_posture") or "")
+        == str(evidence.get("supervisor_posture") or "")
     )
 
 
@@ -2214,6 +2263,7 @@ def _run_position_supervision(
                 **kwargs,
             )
         ),
+        adaptive_duplicate_seen=_supervisor_adaptive_duplicate_seen,
     )
     return _runtime_run_position_supervision(
         bridge,
@@ -6504,6 +6554,17 @@ def _live_safety_planner_runtime() -> SafetyPlannerRuntime:
             entry_decision_id="",
             risk_snapshot=_live_state_get("risk", {}, clone=True) or {},
             total_api_volume=_tracked_total_api_volume(list(all_positions)),
+            market_context=_live_state_get("last_composite", {}, clone=True) or {},
+            supervisor_state=dict(
+                (
+                    _load_recovery_row_for_risk_reduction(
+                        int(position.get("position_id") or position.get("ticket") or 0),
+                        operation="position_supervisor_safety_planner_context",
+                    )
+                    or {}
+                ).get("recovery_meta")
+                or {}
+            ),
             loop_running=bool(_live_state_get("loop_running", True)),
         )
         context = _lifecycle_build_position_supervisor_context_payload(

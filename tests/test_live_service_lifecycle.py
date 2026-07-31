@@ -3285,6 +3285,145 @@ def test_supervisor_tighten_noop_is_deduplicated_before_risk_policy(monkeypatch)
     assert traces[0]["execution"]["is_real_execution"] is False
 
 
+def test_demo_adaptive_supervisor_action_is_observed_without_risk_or_broker_mutation(monkeypatch):
+    traces = []
+
+    class _Ledger:
+        def log_position_supervisor_trace(self, **kwargs):
+            traces.append(kwargs)
+            return "trace_demo_observed"
+
+        def log_decision(self, **_kwargs):
+            raise AssertionError("Demo adaptive observation must not enter RiskPolicy ledger")
+
+    class _Policy:
+        def evaluate(self, *_args, **_kwargs):
+            raise AssertionError("Demo adaptive observation must not call RiskPolicy")
+
+    class _Bridge:
+        is_connected = True
+
+        def get_spot_quote(self):
+            raise AssertionError("Demo adaptive observation must not read a broker quote")
+
+        def amend_position_sltp(self, *_args, **_kwargs):
+            raise AssertionError("Demo adaptive observation must not amend broker SL/TP")
+
+    verdict = {
+        "position_id": "demo-observed",
+        "decision_ts": time.time(),
+        "action": "tighten",
+        "recommended_action": "tighten",
+        "confidence": 0.78,
+        "summary_reason": "profit_giveback_after_mfe",
+        "evidence": {
+            "supervisor_posture": "range_capture",
+            "trigger_tags": ["profit_giveback_after_mfe"],
+            "closed_bar_key": "bar:42",
+            "hard_risk_active": False,
+        },
+        "recommended_controls": {
+            "target_stop_loss": 4005.0,
+            "target_take_profit": 4030.0,
+        },
+        "supervisor_template": {
+            "template_id": "position_supervisor:default.v1",
+            "template_version": "default.v1",
+            "risk_boundary": {"adaptive_execution_mode": "observation_only"},
+        },
+    }
+    monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
+    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
+    monkeypatch.setattr(
+        live_service,
+        "_evaluate_position_supervisor_for_position",
+        lambda *args, **kwargs: verdict,
+    )
+    monkeypatch.setattr(live_service, "_remember_supervisor_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(live_service, "_supervisor_adaptive_duplicate_seen", lambda *args, **kwargs: False)
+
+    handled = live_service._run_position_supervision(
+        _Bridge(),
+        [
+            {
+                "position_id": 907,
+                "symbol": "XAUUSD+",
+                "direction": 1,
+                "entry_price": 4000.0,
+                "current_price": 4010.0,
+                "sl": 3990.0,
+                "tp": 4030.0,
+                "volume": 100.0,
+            }
+        ],
+        cfg=SimpleNamespace(autonomy_mode="demo_autonomous", timeframe="M5"),
+        acct={"balance": 10000.0, "equity": 10000.0},
+        tick=42,
+        log=lambda msg: None,
+    )
+
+    assert handled == {907}
+    assert traces
+    observed = traces[-1]
+    assert observed["stage"] == "execution_skipped"
+    assert observed["execution_status"] == "observation_only"
+    assert observed["execution"]["execution_class"] == "observed"
+    assert observed["execution"]["requested_action"] == "tighten"
+    assert observed["execution"]["effective_action"] == "hold"
+    assert observed["execution"]["is_real_execution"] is False
+
+
+def test_adaptive_duplicate_requires_same_bar_episode_posture_and_fingerprint(monkeypatch):
+    recovery_row = {
+        "recovery_meta": {
+            "supervisor_posture": "range_capture",
+            "supervisor_last_adaptive_closed_bar_key": "bar:42",
+            "supervisor_last_adaptive_trigger_key": "profit_giveback_after_mfe",
+            "supervisor_last_adaptive_fingerprint": "tighten:4005.0:4030.0",
+        }
+    }
+    monkeypatch.setattr(
+        live_service,
+        "_load_recovery_row_for_risk_reduction",
+        lambda *_args, **_kwargs: recovery_row,
+    )
+    verdict = {
+        "action": "tighten",
+        "requested_action": "tighten",
+        "action_fingerprint": "tighten:4005.0:4030.0",
+        "summary_reason": "profit_giveback_after_mfe",
+        "evidence": {
+            "supervisor_posture": "range_capture",
+            "closed_bar_key": "bar:42",
+            "trigger_tags": ["profit_giveback_after_mfe"],
+        },
+    }
+
+    assert live_service._supervisor_adaptive_duplicate_seen(42, verdict) is True
+
+    changed_target = dict(verdict, action_fingerprint="tighten:4006.0:4030.0")
+    assert live_service._supervisor_adaptive_duplicate_seen(42, changed_target) is False
+
+    changed_bar = {
+        **verdict,
+        "evidence": {**verdict["evidence"], "closed_bar_key": "bar:43"},
+    }
+    assert live_service._supervisor_adaptive_duplicate_seen(42, changed_bar) is False
+
+    hard_action = {
+        **verdict,
+        "action": "close",
+        "requested_action": "close",
+        "summary_reason": "confirmed_thesis_break",
+        "evidence": {
+            **verdict["evidence"],
+            "thesis_break_confirmed": True,
+            "hard_risk_active": True,
+        },
+    }
+    assert live_service._supervisor_adaptive_duplicate_seen(42, hard_action) is False
+
+
 def test_supervisor_minimum_position_reduce_is_deduplicated_before_policy(monkeypatch):
     traces = []
     remembered = set()

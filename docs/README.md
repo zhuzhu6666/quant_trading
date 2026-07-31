@@ -1,16 +1,21 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-07-27
+> Last verified: 2026-08-01
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读后面的对应合同。
 
 ## 1. 当前结论
 
-- 当前分支：`main`；本文核对时 HEAD 为 `f1586dc`，工作区有未提交的代码、测试和文档改动。
+- 当前分支：`main`；本文核对时 HEAD 为 `e5cac41`，工作区有未提交的
+  持仓监督器自适应重构批次（23 个文件，代码已完成，运行观察待部署验证）。
 - P0 已完成。
-- P1 代码和历史污染修复已完成；仍等待新的真实 broker deal 与完整持仓生命周期运行验收。
+- P1 代码和历史污染修复已完成；2026-07-31 受控重启后已产生 post-repair
+  新成交与完整生命周期（280363885 / 280379926 / 280411506 / 280452088，
+  开仓→保护→平仓→deal sync→review→sample 均落库），review 现 641 条、
+  learning sample 现 18,641 条；仍继续等待更多真实 broker deal 与完整
+  持仓生命周期运行验收。
 - P2 代码和合同已完成，schema 已到 v12；运行验收仍继续，静态发布顺序不推进。
 - P3 writer/identity 收敛已完成：current 与历史 review memory 均只保留
   `trade_lesson_memory.v1` canonical projection；application/effect 当前 16 个 active scope
@@ -24,36 +29,47 @@
 - 学习记忆完整性已由只读 `MemoryIntegrityReport` 覆盖原始复盘、经验投影和检索索引；它只暴露证据问题，不改变 Demo 或实盘权限。
 - 灾备当前采用 Windows 电脑在线时的主动拉取：服务器只流式输出 `quant_audit` 的逻辑快照，不保存备份文件、不启用 WAL archive、S3、pgBackRest repository 或 timer。尚未收到 Windows 成功回执或隔离恢复演练前，灾备必须显示 `missing/degraded`，不得误报为可恢复。
 - 最近已知全量基线：`2452 passed, 9 skipped`。日常小批默认只跑针对性测试；阶段/发布验收才跑全量。
+- 账户已切换：cTrader demo 账户 47276606（login 5817896）现为 USD 计价，
+  当前权益约 `$344.76`（2026-08-01 实测 balance/equity=344.76，
+  非旧文档记录的 EUR €10,982）；风控与 Kelly sizing 均以当前权益为基准。
 
-2026-07-27 运行核对：
+2026-08-01 运行核对（全部为本次实查）：
 
 - `quant-backend.service`、`quant-learning-worker.service`、`caddy.service` active；
 - `quant-job-worker.service` inactive，与 PG Job Queue 静态开关默认关闭一致；
 - `/api/health` 为 `db=connected`、`ctrader=connected`；
 - PostgreSQL `state_v1` migration `current=minimum=latest=12`，无 mismatch；
-- `risk_metrics_snapshot.v2` 与 `backend_readiness_snapshot.v1` 正常刷新；
-- readiness 已刷新：frontend、live execution、live alpha、autonomous mutation 和 release
-  均无 blocker；
-- live loop 运行，市场 `open_confirmed`，`ready_for_live_execution=true`、
-  `ready_for_live_alpha=true`；
-- broker reconcile fresh、unknown execution 为 0、当前空仓；
-- risk snapshot 为 closed-bar M5 500 样本，包含 current/candidate/forward notional 合同；空仓时 VaR/CVaR 为 0 是计算结果，不是缺失值兜底；
-- candidate-forward CVaR 开仓上限已由失真的 `2.0%` 校准为 `2.5%`：2026-07-27
-  三笔最小仓位候选为 `2.007110%`、`2.009619%`、`2.092075%`，旧值会把当前
-  最小可交易仓位全部拦截；`RiskPolicyService` 仍在 `>2.5%` 时硬拦截，reason 保留
-  四位小数，不再显示成误导性的 `2.0% > 2.0%`；
+- `risk_metrics_snapshot.v2` 与 `backend_readiness_snapshot.v1` 正常刷新
+  （snapshot updated_at 均在分钟级内）；
+- readiness：`ready_for_live_execution=true`、`ready_for_live_alpha=true`、
+  `ready_for_release=true`，但 `ready_for_autonomous_mutation=false`，
+  blocker 为 `factor_governance_runtime / blocked_by_v16_command`
+  （v16_brain_command 有多个 `delegated_to_specialist` 未 finalize，
+  apply_count=0，其中 entry_quality weak_signal 与 supervisor_template
+  position_supervisor 各有多条历史委派）；
+- live loop 运行，市场 `open_confirmed`，quote age <0.1s，can_open_positions=true；
+- broker reconcile fresh（account/positions reconcile id 均存在），
+  recovery_position_state 当前全部 `closed_replayed`（587 条），当前空仓；
+- risk snapshot 为 closed-bar M5 500 样本，空仓时 VaR/CVaR=0 是计算结果，
+  不是缺失值兜底；
+- AWE 权重自适应每 30 分钟计算，但持续 `blocked_by_admission`：
+  rsi_14 / engulfing / wick_rejection / fib_rejection_confirmation /
+  candle_body_pressure 等因子的 active application/effect 处于
+  `mixed`/`observing`，reason 为 `existing_effect_window_must_terminalize`，
+  权重计算未落地；
+- 02:40:12 LONG 信号 gate=passed 但被 `learning_weak_signal_threshold`
+  SKIP，未下单；
+- readiness 快照内嵌 `system_health` 显示 unknown/score=0，但
+  monitor.system_health 日志每 60s 报 healthy score=1.00，投影口径待核对；
+- 02:18 前后出现过约 2 分钟 broker-missing 窗口（280452088 平仓前后），
+  session_restore 连续 WARNING "broker-missing positions lack close deals"，
+  随后 close deal 327654818 到达自动恢复，符合 position_reconcile_conflict
+  安全闩设计；
 - Safety shadow 仍只处于 observing，尚未满足完整持仓生命周期或 24 小时无仓观察门槛。
-- 已修复“ExecutionGate 已通过，但同 tick 因 factor/bar 工作使 watchdog freshness latch
-  短暂触发后整根 bar 永久丢失”的时序缺口：仅 watchdog 自有的 account/positions/safety
-  freshness cause 可在同一 closed bar 内由 serial loop 重试原 open pipeline；unknown
-  execution、incident、emergency、supervisor、governance 或混合 cause 仍严格禁止重试。
-- 因子治理运行闭环已修复：hourly cycle 现在同周期执行
-  `factor_health -> V16 -> Factor Governance`；空 preflight 不再误报 V16 blocker，真实
-  preflight 只签发一次 evidence-bound 委托且最多提交一个 lifecycle mutation。实测 DSL
-  `dxy` 候选进入 `PROMOTION_PREPARED`，随后 `wick_rejection` 完成
-  `shadow_registered`；两次命令均 `finalized/apply_count=1`。Catalog 已排除
-  audit/canary 幽灵条目，当前 canonical 运行快照 758 条；coordinator projection 只保留
-  稳定 `factor_lifecycle_service/canonical` identity。
+- 历史已修复项（保留为事实）：candidate-forward CVaR 开仓上限校准为 `2.5%`
+  （原失真 2.0%）；factor governance hourly 闭环
+  `factor_health -> V16 -> Factor Governance` 同周期执行；因子治理 watchfreshness
+  时序缺口已修复（仅 watchdog 自有 freshness cause 可在同一 closed bar 内重试）。
 
 这些是带时间的运行快照，不是永久事实。每次实施或回答“现在能否交易/发布”前必须重新查询。
 
@@ -97,7 +113,9 @@ learning worker
 
 当前只做 P1/P2 运行验收与兼容删除；有界 Demo 可直接产生验收交易：
 
-1. 等待并核对新的真实 broker deal、开仓、保护、平仓、同步、复盘与学习生命周期；
+1. 继续核对 post-repair 新的真实 broker deal、开仓、保护、平仓、同步、复盘与学习
+   生命周期（2026-07-31 重启后已有 4 笔完整闭环：280363885 / 280379926 /
+   280411506 / 280452088，review 641 条、sample 18,641 条，证据持续积累）；
 2. 完成 Safety shadow 的完整生命周期或 24 小时无仓观察与故障矩阵；
 3. 对每条仍在迁移的兼容路径收集退出证据，同批删除旧 authority、旧重算、旧字段回退或无意义 wrapper；
 4. P4 已完成，不再扩展 V16 调度层；下一步只处理真实运行验收与 P6 Demo 观察。

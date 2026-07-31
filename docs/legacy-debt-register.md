@@ -89,8 +89,9 @@
 
 - 状态：`migrating`
 - canonical：持仓模板的自动切换只从 V16 candidate bridge 进入，`V16CommandGate.claim` 与 `PositionSupervisorGovernanceMutationService` 的 Coordinator transaction 共同完成单次授权和 finalize。
-- 剩余：历史/旧 worker 写入的 non-V16 `position_supervisor_template` advisory 仍可留作审计记录；它们已不再拥有 approve/apply 或 candidate conflict 权力，并将在既有 demo review/apply 路径中 terminalize。
-- 退出：历史 active advisory 全部 terminalize，连续真实 demo cycle 证明 V16 bridge、claim、Coordinator finalize 和 effect observation 连通后，删除旧 advisory 生成路径。
+- 当前：历史/旧 worker 写入的 non-V16 `position_supervisor_template` advisory 仍可留作审计记录；它们已不再拥有 approve/apply 或 candidate conflict 权力，并将在既有 demo review/apply 路径中 terminalize。新生成候选只能针对一个 control 和一个 regime stratum，完整快照必须能由 evidence 中的单 scalar patch 证明。
+- 剩余：`legacy_awe_trailing` 的非 Demo 兼容 planner/trace/close attribution 仍存在；Demo 已在 protection cycle 中标记 `observed/superseded`，不得与 canonical supervisor 同时 applied。Parity replay 仍是 diagnostic-only，不能替代 broker lifecycle 证据。
+- 退出：历史 active advisory 全部 terminalize，连续真实 demo cycle 证明 V16 bridge、claim、Coordinator finalize 和 effect observation 连通后，删除旧 advisory 生成路径；另在 replay、trace、effect 证明 trailing 行为等价后，删除 legacy AWE trailing 执行分支、兼容配置和不再需要的耦合测试。
 
 ### parity replay 尚非 live-equivalent
 

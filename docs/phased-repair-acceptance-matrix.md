@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active acceptance index
-> Snapshot: 2026-07-27
+> Snapshot: 2026-07-31
 > Scope: reproducible acceptance evidence and unresolved live evidence
 
 本文只记录“如何证明”。架构事实见 `system-source-of-truth.md`，实施阶段见
@@ -116,6 +116,22 @@ lifecycle。
 - P2 complete。
 
 P2 complete 不授权清锁或切换静态 flag。
+
+## 4.1 Demo 持仓监督器自适应重构
+
+| 合同 | 必须证明 | 当前代码/测试证据 |
+|---|---|---|
+| canonical market context | live/replay 复用 compositor context state 与 `resolve_market_regime()`；缺失 ATR/range/structure 保持 unknown，不补零 | `tests/test_live_position_lifecycle.py`、`tests/test_position_supervisor.py`、`tests/test_market_regime.py` |
+| posture priority | 强趋势 near-TP/giveback/time-decay 不提前 close/tighten；unknown/transition 只 observe；确认退出和硬风险仍 close | `tests/test_position_supervisor.py` |
+| Demo execution boundary | adaptive `recommended/requested` 保留，`effective_action=hold`、`observed/observation_only`，不调用 RiskPolicy/broker；hard protection 仍 applied | `tests/test_live_service_lifecycle.py::test_demo_adaptive_supervisor_action_is_observed_without_risk_or_broker_mutation` |
+| persistent dedupe | 同一 episode/bar/fingerprint 最多一次；posture 改变、trigger 清除重入、fingerprint 改变可重新建议 | `tests/test_live_service_lifecycle.py::test_adaptive_duplicate_requires_same_bar_episode_posture_and_fingerprint`、`tests/test_live_position_lifecycle.py::test_build_supervisor_recovery_meta_resets_adaptive_episode_on_posture_change_and_clear` |
+| reduce safety | 不可交易 reduce 只产生一次 no-op/hold，不静默升级 full close；最小仓位无非法 broker RPC | `tests/test_live_service_lifecycle.py::test_supervisor_minimum_position_reduce_is_deduplicated_before_policy` |
+| legacy AWE boundary | Demo AWE 只 observed/superseded，不与 canonical supervisor 同时 applied；非 Demo 删除受 replay/trace/effect gate 约束 | `tests/test_live_position_protection_cycle.py` |
+| governance candidate | 每个生成候选一个 control/一个 regime，evidence 具备 base template、single patch、generation context、replay/counterfactual；approved 不等于 applied | `tests/test_position_supervisor_governance.py`、`tests/risk/test_policy_service.py` |
+
+本批只把自适应动作部署为 observation-only；不解除 freeze、不切静态开关、不清理 active effect、不回滚既有 mutation，
+也不把 parity replay 当作 live authority。只有现有 V16/Admission/RiskPolicy/Coordinator 链完整提交并形成有效 authority，
+才可单项申请 `governed_execute`。
 
 ## 5. P3 证据/记忆/effect 准入矩阵
 

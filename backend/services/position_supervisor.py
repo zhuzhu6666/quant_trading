@@ -157,6 +157,126 @@ def _target_progress(
     return _clamp(move / denom, 0.0, 10.0)
 
 
+_KNOWN_MARKET_STATES = frozenset({
+    "low",
+    "normal",
+    "high",
+    "weak",
+    "strong",
+})
+
+
+def _market_state(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return "" if normalized in {"", "unknown", "none", "null", "n/a"} else normalized
+
+
+def resolve_supervisor_posture(
+    *,
+    market: dict[str, Any] | None,
+    risk: dict[str, Any] | None,
+    thesis_status: str,
+    regime_shift: str,
+    hard_risk_active: bool,
+    signal_reversal: bool,
+    thesis_break_ready: bool,
+    thesis_break_confirmed: bool,
+    closed_bar_window_ready: bool,
+) -> dict[str, Any]:
+    """Resolve one explainable management posture from existing market facts.
+
+    This is deliberately a pure, low-cardinality state resolver.  It does not
+    calculate indicators or invent a second market regime authority.  Missing
+    trend/volatility dimensions stay observational so a stale/partial market
+    payload cannot turn into an aggressive protection action.
+    """
+
+    market = dict(market or {})
+    risk = dict(risk or {})
+    trend_state = _market_state(
+        market.get("trend_strength_state")
+        or (market.get("regime_dimensions") or {}).get("trend")
+    )
+    volatility_state = _market_state(
+        market.get("volatility_state")
+        or (market.get("regime_dimensions") or {}).get("volatility")
+    )
+    regime_source = str(market.get("regime_source") or "").strip().lower()
+    regime_confidence = _safe_float(market.get("regime_confidence"), 0.0)
+    dimensions_known = (
+        trend_state in _KNOWN_MARKET_STATES
+        and volatility_state in _KNOWN_MARKET_STATES
+        and not regime_source.endswith("session_fallback")
+    )
+    hard_exit = bool(
+        hard_risk_active
+        or signal_reversal
+        or (
+            thesis_break_ready
+            and thesis_break_confirmed
+            and closed_bar_window_ready
+        )
+    )
+    if hard_exit:
+        posture = "exit_commit"
+        reason = "confirmed_exit_evidence"
+    elif not dimensions_known:
+        posture = "unknown_observe"
+        reason = "market_context_unknown"
+    elif (
+        regime_shift in {"confirmed", "transition", "detected"}
+        or thesis_status in {"weakening", "broken", "confirmed_broken"}
+    ):
+        posture = "transition_confirming"
+        reason = "market_or_thesis_transition"
+    elif trend_state == "strong" and volatility_state in _KNOWN_MARKET_STATES:
+        posture = "trend_hold"
+        reason = "strong_trend_thesis_hold"
+    else:
+        posture = "range_capture"
+        reason = "range_or_normal_market_capture"
+    return {
+        "posture": posture,
+        "reason": reason,
+        "trend_strength_state": trend_state or "unknown",
+        "volatility_state": volatility_state or "unknown",
+        "regime_source": regime_source or "unavailable",
+        "regime_confidence": round(_clamp(regime_confidence), 4),
+        "market_dimensions_known": bool(dimensions_known),
+        "hard_exit": bool(hard_exit),
+    }
+
+
+def adaptive_execution_mode(template: dict[str, Any] | None) -> str:
+    """Return the fail-closed template boundary for discretionary actions."""
+
+    boundary = dict((template or {}).get("risk_boundary") or {})
+    mode = str(boundary.get("adaptive_execution_mode") or "observation_only")
+    return mode if mode in {"observation_only", "governed_execute"} else "observation_only"
+
+
+def is_hard_supervisor_action(
+    *,
+    action: str,
+    summary_reason: str,
+    evidence: dict[str, Any] | None = None,
+) -> bool:
+    """Identify actions that remain executable in Demo observation mode."""
+
+    evidence = dict(evidence or {})
+    if str(action or "").strip().lower() == "hold":
+        return False
+    if bool(evidence.get("hard_risk_active")):
+        return True
+    return str(summary_reason or "") in {
+        "hard_risk_active",
+        "holding_timeout_exceeded",
+        "near_stop_loss_preemptive_exit",
+        "thesis_broken",
+        "regime_shift_detected",
+    }
+
+
 def humanize_supervisor_reason(action: str, reason: str, evidence: dict[str, Any] | None = None) -> str:
     evidence = evidence or {}
     if reason == "holding_timeout_exceeded":
@@ -171,6 +291,12 @@ def humanize_supervisor_reason(action: str, reason: str, evidence: dict[str, Any
         return "仓位曾经浮盈明显，但已经出现较大回吐，系统建议先收紧保护，避免继续把已证明的利润吐回去。"
     if reason == "profit_protection_evidence_pending":
         return "仓位出现了回吐或弱化信号，但有效盈利证据或完整观察窗口尚未形成，系统暂不主动收紧保护。"
+    if reason == "trend_hold_preserve_profit":
+        return "当前市场仍处于有效趋势，仓位没有确认失效；系统暂不因普通回吐或接近止盈而提前磨损利润。"
+    if reason == "market_context_unknown":
+        return "市场状态上下文不完整，系统保留硬风险保护并暂不执行主动持仓管理。"
+    if reason == "hard_risk_active":
+        return "检测到硬风险保护条件，系统优先执行风险收口。"
     if reason == "time_decay_and_low_efficiency":
         return "这笔仓位已经拿得偏久，但收益效率没有跟上，系统判断继续硬拿的性价比在下降。"
     if reason == "regime_shift_detected":
@@ -201,6 +327,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     position = position_context.get("position") or {}
     risk = position_context.get("risk") or {}
     temporal = position_context.get("temporal_context") or {}
+    market = position_context.get("market") or {}
     market_space = position_context.get("market_space_context") or {}
     entry_context = position_context.get("entry_context") or {}
 
@@ -234,6 +361,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     time_decay_score = _safe_float(risk.get("time_decay_score"))
     thesis_status = str(risk.get("thesis_status") or "intact")
     regime_shift = str(risk.get("regime_shift") or "none")
+    supervisor_state = dict(risk.get("supervisor_state") or {})
     original_sl = _safe_float(risk.get("original_stop_loss"))
     risk_boundary_sl = original_sl if original_sl > 0 else current_sl
 
@@ -314,8 +442,23 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         0,
         _safe_int(temporal.get("completed_bars_after_entry"), int(holding_seconds // 300.0)),
     )
-    current_regime_text = str(risk.get("current_regime") or "").lower()
-    fast_window = "volatility=high" in current_regime_text or "trend=weak" in current_regime_text
+    closed_bar_key = str(
+        temporal.get("closed_bar_key")
+        or temporal.get("closed_bar_ts")
+        or temporal.get("last_closed_bar_ts")
+        or f"bars:{completed_bars_after_entry}"
+    )
+    current_regime_text = str(
+        risk.get("current_regime")
+        or market.get("regime_id")
+        or ""
+    ).lower()
+    fast_window = (
+        "volatility=high" in current_regime_text
+        or "trend=weak" in current_regime_text
+        or str(market.get("volatility_state") or "").lower() == "high"
+        or str(market.get("trend_strength_state") or "").lower() == "weak"
+    )
     required_closed_bars = min_closed_bars_fast if fast_window else min_closed_bars_default
     closed_bar_window_ready = completed_bars_after_entry >= required_closed_bars
     # Discretionary profit protection needs one completed bar to distinguish
@@ -392,11 +535,82 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         or len(thesis_break_evidence_families) >= min_independent_evidence
     )
 
-    if max_holding_seconds > 0 and holding_seconds >= max_holding_seconds:
+    posture_info = resolve_supervisor_posture(
+        market=market,
+        risk=risk,
+        thesis_status=thesis_status,
+        regime_shift=regime_shift,
+        hard_risk_active=hard_risk_active,
+        signal_reversal=signal_reversal,
+        thesis_break_ready=thesis_break_ready,
+        thesis_break_confirmed=thesis_break_confirmed,
+        closed_bar_window_ready=closed_bar_window_ready,
+    )
+    supervisor_posture = str(posture_info.get("posture") or "unknown_observe")
+    if supervisor_posture != "range_capture":
+        # The existing thresholds remain valid, but they cannot authorize a
+        # discretionary action outside the posture that owns that control.
+        can_extend_tp = False
+
+    near_stop_loss_strong = bool(
+        price_known
+        and pnl_known
+        and stop_loss_progress >= near_sl_progress_threshold
+        and current_pnl <= 0
+        and (
+            thesis_status == "broken"
+            or holding_efficiency <= near_sl_efficiency_threshold
+            or time_decay_score <= time_decay_reduce_threshold
+            or regime_shift == "confirmed"
+        )
+    )
+
+    if hard_risk_active:
+        trigger_tags.append("hard_risk_active")
+        action = "close"
+        summary_reason = "hard_risk_active"
+        severity = "error"
+    elif max_holding_seconds > 0 and holding_seconds >= max_holding_seconds:
         trigger_tags.append("holding_timeout_exceeded")
         action = "close"
         summary_reason = "holding_timeout_exceeded"
         severity = "warn"
+    elif near_stop_loss_strong:
+        trigger_tags.append("near_stop_loss")
+        action = "close"
+        summary_reason = "near_stop_loss_preemptive_exit"
+        severity = "warn"
+    elif supervisor_posture == "exit_commit":
+        if thesis_break_ready and thesis_break_confirmed:
+            trigger_tags.append("thesis_broken")
+            action = "close"
+            summary_reason = "thesis_broken"
+            severity = "error"
+        elif signal_reversal or regime_shift == "confirmed":
+            trigger_tags.append("regime_shift_detected")
+            action = "close"
+            summary_reason = "regime_shift_detected"
+            severity = "warn"
+    elif supervisor_posture == "trend_hold":
+        if (
+            take_profit_progress >= near_tp_progress_threshold
+            or giveback_ratio >= giveback_tighten_threshold
+            or timeout_ratio >= timeout_tighten_ratio
+            or thesis_status == "weakening"
+        ):
+            trigger_tags.append("trend_hold_preserve_profit")
+            summary_reason = "trend_hold_preserve_profit"
+            severity = "info"
+    elif supervisor_posture in {"unknown_observe", "transition_confirming"}:
+        trigger_tags.append(supervisor_posture)
+        if supervisor_posture == "transition_confirming":
+            summary_reason = "transition_confirming"
+            severity = "info"
+        if thesis_status in {"broken", "confirmed_broken"}:
+            trigger_tags.append("thesis_broken_delayed")
+            trigger_tags.append("thesis_broken_unconfirmed")
+            summary_reason = "thesis_break_unconfirmed"
+            severity = "warn"
     elif price_known and pnl_known and current_pnl > 0 and take_profit_progress >= near_tp_progress_threshold and near_tp_action == "protect":
         trigger_tags.append("near_take_profit")
         action = "tighten"
@@ -408,27 +622,8 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         summary_reason = "near_take_profit_capture"
         severity = "info"
     elif (
-        price_known
-        and pnl_known
-        and stop_loss_progress >= near_sl_progress_threshold
-        and current_pnl <= 0
-        and (
-            thesis_status == "broken"
-            or holding_efficiency <= near_sl_efficiency_threshold
-            or time_decay_score <= time_decay_reduce_threshold
-            or regime_shift == "confirmed"
-        )
-    ):
-        trigger_tags.append("near_stop_loss")
-        action = "close"
-        summary_reason = "near_stop_loss_preemptive_exit"
-        severity = "warn"
-    elif thesis_break_ready and thesis_break_confirmed:
-        trigger_tags.append("thesis_broken")
-        action = "close"
-        summary_reason = "thesis_broken"
-        severity = "error"
-    elif (
+        supervisor_posture == "range_capture"
+        and
         path_metrics_known
         and pnl_known
         and giveback_ratio >= giveback_reduce_threshold
@@ -453,12 +648,12 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
             else "thesis_break_pending_window"
         )
         severity = "warn"
-    elif regime_shift == "confirmed" and pnl_known and current_pnl <= 0:
+    elif supervisor_posture == "range_capture" and regime_shift == "confirmed" and pnl_known and current_pnl <= 0:
         trigger_tags.append("regime_shift_detected")
         action = "close"
         summary_reason = "regime_shift_detected"
         severity = "warn"
-    elif (
+    elif supervisor_posture == "range_capture" and (
         path_metrics_known
         and pnl_known
         and time_decay_window_ready
@@ -474,7 +669,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         action = "reduce" if current_pnl > 0 else "close"
         summary_reason = "time_decay_and_low_efficiency"
         severity = "warn"
-    elif (
+    elif supervisor_posture == "range_capture" and (
         (
             profit_protection_window_ready
             and giveback_ratio >= giveback_tighten_threshold
@@ -577,6 +772,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "thesis_break_ready": bool(thesis_break_ready),
         "thesis_break_confirmed": bool(thesis_break_confirmed),
         "completed_bars_after_entry": int(completed_bars_after_entry),
+        "closed_bar_key": closed_bar_key,
         "required_closed_bars": int(required_closed_bars),
         "closed_bar_window_ready": bool(closed_bar_window_ready),
         "management_required_closed_bars": int(management_required_closed_bars),
@@ -596,6 +792,19 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "thesis_broken_confirmations": int(thesis_broken_confirmations),
         "signal_reversal": bool(signal_reversal),
         "regime_shift": regime_shift,
+        "supervisor_posture": supervisor_posture,
+        "supervisor_posture_reason": str(posture_info.get("reason") or ""),
+        "market_context_state": str(market.get("market_context_state") or "unknown"),
+        "market_regime_id": str(market.get("regime_id") or ""),
+        "market_regime_confidence": round(_safe_float(market.get("regime_confidence")), 6),
+        "market_regime_source": str(market.get("regime_source") or "unavailable"),
+        "market_regime_dimensions": dict(market.get("regime_dimensions") or {}),
+        "trend_strength_state": str(market.get("trend_strength_state") or "unknown"),
+        "volatility_state": str(market.get("volatility_state") or "unknown"),
+        "event_window_state": str(market.get("event_window_state") or "unknown"),
+        "session_state": str(market.get("session_state") or "unknown"),
+        "market_dimensions_known": bool(posture_info.get("market_dimensions_known")),
+        "supervisor_state": supervisor_state,
         "current_pnl": round(current_pnl, 6),
         "current_price_component_state": price_component_state or "legacy_unspecified",
         "pnl_component_state": pnl_component_state or "legacy_unspecified",
@@ -603,6 +812,10 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "volume": round(volume, 6),
         "distance_to_sl": _safe_float(market_space.get("distance_to_sl")),
         "distance_to_tp": _safe_float(market_space.get("distance_to_tp")),
+        "market_space_context_state": str(market_space.get("state") or "unknown"),
+        "atr_multiple_from_entry": market_space.get("atr_multiple_from_entry"),
+        "range_location": market_space.get("range_location"),
+        "structure_bias": market_space.get("structure_bias"),
         "take_profit_progress": round(take_profit_progress, 6),
         "stop_loss_progress": round(stop_loss_progress, 6),
         "current_stop_loss_progress": round(current_stop_loss_progress, 6),
@@ -611,7 +824,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
             "original_entry_protection" if original_sl > 0 else "current_broker_stop"
         ),
         "entry_regime": str(entry_context.get("entry_regime") or risk.get("entry_regime") or ""),
-        "current_regime": str(risk.get("current_regime") or ""),
+        "current_regime": str(risk.get("current_regime") or market.get("regime_id") or ""),
         "trigger_tags": trigger_tags,
         "supervisor_template_id": str(template.get("template_id") or ""),
         "supervisor_template_version": str(template.get("template_version") or ""),
@@ -664,6 +877,10 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "position_id": position_id,
         "decision_ts": _safe_float(temporal.get("decision_ts")),
         "action": action,
+        "recommended_action": action,
+        "requested_action": action,
+        "effective_action": action,
+        "adaptive_execution_mode": adaptive_execution_mode(template),
         "confidence": confidence,
         "severity": severity,
         "thesis_status": thesis_status,
@@ -684,6 +901,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
             "tp_policy": tp_policy,
             "capture_policy": capture_policy,
             "learning_bounds": template.get("learning_bounds") or {},
+            "risk_boundary": template.get("risk_boundary") or {},
         },
         "requires_risk_verdict": action in {"tighten", "reduce", "close"},
         "action_label": {

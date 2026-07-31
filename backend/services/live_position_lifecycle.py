@@ -1821,6 +1821,8 @@ def build_position_supervisor_context_inputs(
     account: dict[str, Any] | None = None,
     entry_decision_id: str = "",
     risk_snapshot: dict[str, Any] | None = None,
+    market_context: dict[str, Any] | None = None,
+    supervisor_state: dict[str, Any] | None = None,
     total_api_volume: float = 0.0,
     loop_running: bool = True,
 ) -> dict[str, Any]:
@@ -1828,6 +1830,8 @@ def build_position_supervisor_context_inputs(
         "position": position,
         "entry_decision_id": str(entry_decision_id or ""),
         "risk_snapshot": risk_snapshot or {},
+        "market_context": market_context or {},
+        "supervisor_state": supervisor_state or {},
         "max_holding_bars": int(getattr(cfg, "risk_max_holding_bars", 0) or 0) if cfg else 0,
         "open_position_count": len(positions or []),
         "total_api_volume": float(total_api_volume or 0.0),
@@ -1844,6 +1848,8 @@ def build_position_supervisor_context_payload(
     position_metrics: dict[str, Any],
     entry_decision_id: str,
     risk_snapshot: dict[str, Any],
+    market_context: dict[str, Any] | None = None,
+    supervisor_state: dict[str, Any] | None = None,
     max_holding_bars: int,
     open_position_count: int,
     total_api_volume: float,
@@ -1857,12 +1863,44 @@ def build_position_supervisor_context_payload(
     holding_timeout_ratio = float(position.get("holding_timeout_ratio", 0.0) or 0.0)
     timeframe_seconds = int(temporal_context.get("timeframe_seconds", 0) or 0)
     holding_seconds = float(temporal_context.get("holding_seconds", 0.0) or 0.0)
+    raw_market_context = dict(market_context or {})
+    context_state = raw_market_context.get("context_state")
+    if not isinstance(context_state, dict):
+        context_state = {}
+    resolved_regime = resolve_market_regime(raw_market_context)
+    regime_id = str(
+        resolved_regime.get("regime_id")
+        or position_metrics.get("current_regime")
+        or ""
+    )
+    regime_dimensions = dict(resolved_regime.get("dimensions") or {})
+    trend_strength_state = str(context_state.get("trend_strength_state") or "unknown")
+    volatility_state = str(context_state.get("volatility_state") or "unknown")
+    event_window_state = str(context_state.get("event_window_state") or "unknown")
+    session_state = str(context_state.get("session_state") or "unknown")
+    known_dimension_count = sum(
+        state not in {"", "unknown", "none"}
+        for state in (trend_strength_state, volatility_state)
+    )
+    market_dimensions_known = known_dimension_count == 2
+    market_context_state = (
+        "known" if known_dimension_count == 2
+        else "partial" if known_dimension_count == 1
+        else "unknown"
+    )
+    # ``atr_ratio`` in the compositor is a normalized signal, not an ATR
+    # price.  Do not convert it into a price-space multiple here.  A future
+    # canonical factor frame may provide a real ATR price explicitly.
+    atr_multiple_from_entry = raw_market_context.get("atr_multiple_from_entry")
+    if atr_multiple_from_entry in ("", 0.0):
+        atr_multiple_from_entry = None
     market_space_context = {
         "distance_to_sl": round(abs(current_price - stop_loss), 6) if stop_loss > 0 else 0.0,
         "distance_to_tp": round(abs(take_profit - current_price), 6) if take_profit > 0 else 0.0,
-        "atr_multiple_from_entry": 0.0,
-        "range_location": 0.0,
-        "structure_bias": "",
+        "atr_multiple_from_entry": atr_multiple_from_entry,
+        "range_location": raw_market_context.get("range_location"),
+        "structure_bias": raw_market_context.get("structure_bias"),
+        "state": market_context_state,
     }
     entry_ctx = {
         "entry_decision_id": entry_decision_id,
@@ -1883,6 +1921,13 @@ def build_position_supervisor_context_payload(
         "total_api_volume": total_api_volume,
         "holding_timeout_ratio": holding_timeout_ratio,
         **position_metrics,
+        # Canonical market facts are written after the path-metric projection:
+        # an empty/legacy metric field must not erase a real regime fact.
+        "current_regime": str(position_metrics.get("current_regime") or regime_id),
+        "entry_regime": str(position_metrics.get("entry_regime") or ""),
+        "regime_confidence": float(resolved_regime.get("confidence") or 0.0),
+        "regime_source": str(resolved_regime.get("source") or "unavailable"),
+        "supervisor_state": dict(supervisor_state or {}),
     }
     return {
         "position_supervisor_template": str(template_id or ""),
@@ -1915,8 +1960,19 @@ def build_position_supervisor_context_payload(
                 or temporal_context.get("timeframe", "")
             ),
             "timeframe_seconds": timeframe_seconds,
-            "regime_state": position_metrics.get("current_regime", ""),
-            "volatility_state": "",
+            "regime_state": regime_id,
+            "regime_id": regime_id,
+            "regime_confidence": float(resolved_regime.get("confidence") or 0.0),
+            "regime_source": str(resolved_regime.get("source") or "unavailable"),
+            "regime_dimensions": regime_dimensions,
+            "trend_strength_state": trend_strength_state,
+            "trend_strength_score": context_state.get("trend_strength_score"),
+            "volatility_state": volatility_state,
+            "volatility_score": context_state.get("volatility_score"),
+            "event_window_state": event_window_state,
+            "event_window_score": context_state.get("event_window_score"),
+            "session_state": session_state,
+            "market_context_state": market_context_state,
         },
         "risk": risk_context,
         "temporal_context": {
@@ -2407,7 +2463,16 @@ def build_supervisor_trace_ledger_payload(
     risk_payload = risk_verdict or {}
     execution_payload = dict(execution or {})
     is_real_execution = str(stage or "") == "executed" and str(outcome or "") == "applied"
-    if is_real_execution:
+    explicit_execution_class = str(
+        execution_payload.get("execution_class")
+        or verdict.get("execution_class")
+        or ""
+    ).strip().lower()
+    if explicit_execution_class == "observed" or str(
+        execution_status or ""
+    ).strip().lower() == "observation_only":
+        execution_class = "observed"
+    elif is_real_execution:
         execution_class = "applied"
     elif str(stage or "") == "canary_shadow" or str(execution_status or "") == "shadow_only":
         execution_class = "shadow"
@@ -3403,6 +3468,89 @@ def build_supervisor_recovery_meta(
     meta = dict(recovery_meta or {})
     meta["latest_supervisor"] = verdict
     meta["latest_supervisor_source"] = "position_supervisor"
+    evidence = dict(verdict.get("evidence") or {})
+    has_state_contract = bool(
+        "supervisor_posture" in evidence
+        or "closed_bar_key" in evidence
+        or "trigger_tags" in evidence
+        or verdict.get("action_fingerprint")
+    )
+    if not has_state_contract:
+        if action_applied:
+            meta["last_supervisor_applied_action"] = action_applied
+            meta["last_supervisor_applied_ts"] = float(applied_ts or 0.0)
+            meta["last_supervisor_reason"] = verdict.get("summary_reason")
+            meta["last_supervisor_applied_source"] = "position_supervisor"
+        return meta
+    posture = str(evidence.get("supervisor_posture") or "unknown_observe")
+    previous_posture = str(meta.get("supervisor_posture") or "")
+    meta["supervisor_posture"] = posture
+    posture_changed = previous_posture not in {"", posture}
+    if posture_changed:
+        # A posture transition starts a new management episode.  Do not let
+        # the previous posture's adaptive fingerprint suppress a fresh
+        # recommendation if the position later returns to this posture.
+        meta.pop("supervisor_last_adaptive_fingerprint", None)
+        meta.pop("supervisor_last_adaptive_closed_bar_key", None)
+        meta.pop("supervisor_last_adaptive_trigger_key", None)
+    if posture_changed or not meta.get("supervisor_posture_since_ts"):
+        meta["supervisor_posture_since_ts"] = float(
+            verdict.get("decision_ts") or time.time()
+        )
+    closed_bar_key = str(
+        evidence.get("closed_bar_key")
+        or evidence.get("completed_bars_after_entry")
+        or ""
+    )
+    if closed_bar_key:
+        meta["supervisor_last_closed_bar_key"] = closed_bar_key
+    trigger_tags = [str(item) for item in evidence.get("trigger_tags") or [] if str(item)]
+    trigger_key = "|".join(sorted(set(trigger_tags)))
+    previous_trigger_key = str(meta.get("supervisor_trigger_key") or "")
+    if trigger_key and trigger_key != previous_trigger_key:
+        # A changed trigger set is a new episode even when the bar has not
+        # advanced.  Clearing the old fingerprint also handles the
+        # clear-and-reenter case where the same trigger returns later.
+        meta.pop("supervisor_last_adaptive_fingerprint", None)
+        meta.pop("supervisor_last_adaptive_closed_bar_key", None)
+        meta.pop("supervisor_last_adaptive_trigger_key", None)
+        try:
+            episode = int(meta.get("supervisor_trigger_episode") or 0) + 1
+        except (TypeError, ValueError):
+            episode = 1
+        meta["supervisor_trigger_episode"] = episode
+    elif not trigger_key:
+        meta.pop("supervisor_last_adaptive_fingerprint", None)
+        meta.pop("supervisor_last_adaptive_closed_bar_key", None)
+        meta.pop("supervisor_last_adaptive_trigger_key", None)
+    elif "supervisor_trigger_episode" not in meta:
+        meta["supervisor_trigger_episode"] = 0
+    meta["supervisor_trigger_key"] = trigger_key
+    fingerprint = str(verdict.get("action_fingerprint") or "")
+    if fingerprint:
+        requested_action = str(
+            verdict.get("requested_action")
+            or verdict.get("recommended_action")
+            or verdict.get("action")
+            or ""
+        ).strip().lower()
+        summary_reason = str(verdict.get("summary_reason") or "")
+        hard_action = bool(evidence.get("hard_risk_active")) or summary_reason in {
+            "hard_risk_active",
+            "holding_timeout_exceeded",
+            "near_stop_loss_preemptive_exit",
+            "thesis_broken",
+            "regime_shift_detected",
+        }
+        if requested_action != "hold" and not hard_action:
+            meta["supervisor_last_adaptive_fingerprint"] = fingerprint
+            meta["supervisor_last_adaptive_closed_bar_key"] = closed_bar_key
+            meta["supervisor_last_adaptive_trigger_key"] = trigger_key
+    meta["supervisor_last_adaptive_execution_class"] = str(
+        verdict.get("execution_class")
+        or verdict.get("execution_status")
+        or "observed"
+    )
     if action_applied:
         meta["last_supervisor_applied_action"] = action_applied
         meta["last_supervisor_applied_ts"] = float(applied_ts or 0.0)

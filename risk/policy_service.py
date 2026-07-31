@@ -1322,6 +1322,65 @@ class RiskPolicyService:
                     "has_counterfactual": has_counterfactual,
                 },
             )
+        if target_template_id.startswith("position_supervisor:auto_"):
+            candidate_template = evidence.get("candidate_template")
+            try:
+                from backend.services.position_supervisor_governance import (
+                    _single_control_candidate_contract,
+                )
+
+                candidate_contract = _single_control_candidate_contract(
+                    candidate_template
+                )
+            except Exception as exc:
+                candidate_contract = {
+                    "ok": False,
+                    "reason": f"candidate_contract_check_failed:{type(exc).__name__}",
+                }
+            if not candidate_contract.get("ok"):
+                return RiskVerdict(
+                    allowed=False,
+                    reason="invalid_single_control_supervisor_candidate",
+                    severity="error",
+                    required_mode="governed",
+                    audit_payload={
+                        "action": "switch_position_supervisor_template",
+                        "source": "risk_policy",
+                        "target_template_id": target_template_id,
+                        "candidate_contract": candidate_contract,
+                    },
+                )
+        adaptive_execution_mode = str(
+            (template_meta.get("risk_boundary") or {}).get(
+                "adaptive_execution_mode",
+                "observation_only",
+            )
+            or "observation_only"
+        ).strip().lower()
+        if adaptive_execution_mode not in {"observation_only", "governed_execute"}:
+            adaptive_execution_mode = "observation_only"
+        if adaptive_execution_mode == "governed_execute":
+            bridge = evidence.get("bridge") if isinstance(evidence.get("bridge"), dict) else {}
+            release_bound = bool(
+                context.get("v16_command_id")
+                or context.get("committed_mutation_id")
+                or bridge.get("bridge_ready")
+                or bridge.get("automatic_demo")
+            )
+            if not release_bound:
+                return RiskVerdict(
+                    allowed=False,
+                    reason="adaptive_execution_release_not_governed",
+                    severity="error",
+                    required_mode="governed",
+                    audit_payload={
+                        "action": "switch_position_supervisor_template",
+                        "source": "risk_policy",
+                        "target_template_id": target_template_id,
+                        "adaptive_execution_mode": adaptive_execution_mode,
+                        "release_bound": False,
+                    },
+                )
         if bool(context.get("autonomous_apply", False)):
             try:
                 from config.runtime_config import shared as runtime_config

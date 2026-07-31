@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Snapshot: 2026-07-31
+> Snapshot: 2026-08-01
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -14,7 +14,7 @@
 | 阶段 | 状态 | 剩余工作 |
 |---|---|---|
 | P0 保护现场 | complete | 无 |
-| P1 broker 成交事实 | runtime acceptance | 新 broker deal、restart replay、完整持仓生命周期 |
+| P1 broker 成交事实 | runtime acceptance | 继续积累 post-repair 新成交与完整持仓生命周期（重启后已有 4 笔闭环，见 2026-08-01 记录） |
 | P2 风险指标平面 | complete | 继续观察，不新增平行风险路径 |
 | P3 证据/记忆/effect | complete | canonical memory 与 active application/effect identity 已收敛 |
 | P4 V16 因果调度 | complete | causal grouping、单一 actionable/authority、单次 mutation 与三条 lane 已收口 |
@@ -325,8 +325,30 @@ P4 完成。后续只保留 P1 真实成交/完整生命周期验收、Safety sh
   证据到达后自动释放，未手工清闸。
 - Candidate Review 新生成的 `needs_evidence` 记录已使用
   `bridge_ready=false + needs_evidence:<gap>`；历史 review 行按 append-only 审计事实保留，
-  不通过 SQL 改写历史 reason。V16 abort 只读统计为 `v16_claim=38`、真实 `transaction=1`，
+  不通过 SQL 改写历史 reason。V16 abort 只读统计为 `v16_claim=40`、真实 `transaction=1`，
   未把 approved/bridge-ready 解释为 applied。
+
+2026-07-31 Demo 持仓监督器自适应重构（代码完成，运行观察待部署验证）：
+
+- `PositionSupervisor` 现在只消费 live/replay 共用的 compositor context state 与
+  `resolve_market_regime()`；posture 固定为 `unknown_observe/trend_hold/range_capture/
+  transition_confirming/exit_commit`。强趋势下普通 near-TP/giveback/time-decay 不再提前
+  close/tighten，未知上下文和未确认 thesis break 只 hold/observe，硬风险/timeout/确认退出
+  保持原有 RiskPolicy/Coordinator 链路。
+- Demo 自适应默认 `observation_only`：保留 `recommended_action/requested_action`，将实际
+  `effective_action` 收敛为 hold，trace 标记 `observed/observation_only`，不进入 RiskPolicy、
+  broker cooldown 或 `recently_applied`。entry repair、硬风险、timeout 和确认退出不受影响。
+- recovery meta 由既有 supervisor state upsert writer 持久化 posture、trigger episode、闭合
+  bar 和 adaptive fingerprint；同 episode/bar/fingerprint 去重，posture 改变、trigger 清除
+  重入或目标改变可重新建议。不可交易 reduce 仍只写一次 no-op/hold，不升级 full close。
+- Demo `legacy_awe_trailing` 标为 `observed/superseded`，非 Demo 兼容执行路径保留到 replay、
+  trace、effect 等价证据满足后删除。生成候选统一为单 control/单 regime stratum，并要求
+  base template、single patch、generation context、replay/counterfactual evidence。
+- 定向回归：监督器/生命周期/治理/RiskPolicy/自治学习批次及相关回归合计 `526 passed`，另有 episode 去重
+  补充回归通过；本批未新增 service、table、migration、thread、scheduler、threshold 或
+  public API，未解除 freeze、未切静态开关、未清理 active effect、未回滚 mutation。
+- 运行状态、replay 指标和 Demo trace 的部署后只读验收仍待本批收口；在此之前 P6 继续
+  `blocked`，不把测试通过解释为自治毕业。
 
 ## 5. 仍需真实运行证明
 
@@ -346,6 +368,59 @@ P4 完成。后续只保留 P1 真实成交/完整生命周期验收、Safety sh
 - 后续静态开关不推进；
 - 不阻止有界 Demo 在现有 legacy-authoritative 开仓链产生验收交易；不得用 Safety
   enforce 的观察时长重新制造 operator incident 锁。
+
+## 5.1 2026-08-01 只读实查记录（账户切换与 P1 证据积累）
+
+Batch: 2026-08-01 运行状态核对（只读，未改代码、未切开关）
+Canonical authority: 不变（RiskPolicyService / Safety / readiness 投影）
+Deleted paths: 无
+Targeted verification: 只读核对服务、PostgreSQL `state_v1`、`runtime_kv`、日志与 broker
+Migration/OpenAPI/build: 无
+Runtime verification:
+
+- 账户已切换为 USD demo：`balance/equity=344.76`（日志 `Balance: $343.99`，
+  2026-08-01 02:38），非旧文档 EUR €10,982；cTrader demo 账户 47276606
+  （login 5817896）计价币种/权益已变，Kelly sizing 与风控以当前权益为基准；
+- 服务：quant-backend / quant-learning-worker / caddy active，
+  quant-job-worker inactive（符合 PG Job Queue 关闭）；`/api/health`
+  db=connected、ctrader=connected；migration v12 无 mismatch；
+- P1 证据积累：重启后 4 笔完整 broker lifecycle 已闭环并落库——
+  280363885（lucky_win +0.32）、280379926（lucky_win +0.16，文档 2026-07-31
+  已记录）、280411506（good_loss -0.04）、280452088（lucky_win +0.77，
+  02:05 SHORT 开仓→02:18 平仓，close deal 327654818，broker price 4050.71）；
+  `ctrader_deals` 1,280 条，`trade_outcome_review` 641 条、
+  `experience_memory` 641 条（一一对应）、`autonomous_learning_sample` 18,641 条；
+  `recovery_position_state` 587 条全部 `closed_replayed`，当前空仓；
+- readiness：`ready_for_live_execution=true`、`ready_for_live_alpha=true`、
+  `ready_for_release=true`，但 `ready_for_autonomous_mutation=false`，
+  blocker=`factor_governance_runtime / blocked_by_v16_command`；
+  `v16_brain_command` 有多个 `delegated_to_specialist` 未 finalize
+  （apply_count=0，entry_quality weak_signal 与 supervisor_template
+  position_supervisor 各有多条历史委派）；
+- risk_metrics_snapshot.v2 status=known，closed-bar M5 500 样本，空仓
+  VaR/CVaR=0（计算结果）；reconcile fresh（account/positions reconcile id 均在）；
+- AWE 权重自适应每 30 分钟计算但持续 `blocked_by_admission`：
+  rsi_14 / engulfing / wick_rejection / fib_rejection_confirmation /
+  candle_body_pressure 的 active application/effect 处于
+  `mixed`/`observing`，reason=`existing_effect_window_must_terminalize`，
+  权重计算未落地；
+- 02:40:12 LONG 信号 gate=passed 后被 `learning_weak_signal_threshold`
+  SKIP，未下单；
+- readiness 快照内嵌 `system_health` 为 unknown/score=0，而
+  monitor.system_health 日志每 60s healthy score=1.00，投影口径待核对；
+- 02:18 前后约 2 分钟 broker-missing 窗口（280452088 平仓前后），
+  session_restore WARNING "broker-missing positions lack close deals"，
+  close deal 到达后自动恢复，符合 position_reconcile_conflict 安全闩设计；
+- 工作区 23 个未提交文件 = 2026-07-31 记录的持仓监督器自适应重构批次
+  （代码完成，运行观察待部署验证）。
+
+Remaining compatibility: 无新增
+Unresolved live evidence: Safety shadow 仍只 observing；P1 继续积累真实成交；
+autonomous_mutation blocker、AWE admission 阻塞、system_health 投影口径
+三项为本次核对新发现，待下批处理
+Next batch: 按需处理 readiness autonomous_mutation blocker 根因（V16
+delegated_to_specialist 未 finalize）、AWE admission 阻塞、system_health
+投影口径；P6 继续 blocked
 
 ## 6. 每批状态更新格式
 

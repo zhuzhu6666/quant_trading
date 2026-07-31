@@ -2281,23 +2281,47 @@ class BackendReadinessService:
 
     @staticmethod
     def _system_health() -> dict[str, Any]:
-        line = BackendReadinessService._latest_system_health_line()
-        if not line:
-            return {
-                "overall": "unknown",
-                "display_overall": "unknown",
-                "score": 0.0,
-                "components": {},
-                "blocking_components": [],
-                "known_observations": [],
+        # 事实源:monitor.system_health 同进程单例快照(每 60s 刷新,唯一生产计算者)。
+        # 日志文件解析仅作为无快照时的降级(旧部署/独立进程)。
+        report = None
+        source = str(LOG_PATH)
+        try:
+            from monitor.system_health import shared as _system_health_shared
+
+            report = _system_health_shared().get_last_report()
+            if report is not None:
+                source = "monitor.system_health.shared()"
+        except Exception:
+            report = None
+        if report is None:
+            line = BackendReadinessService._latest_system_health_line()
+            if not line:
+                return {
+                    "overall": "unknown",
+                    "display_overall": "unknown",
+                    "score": 0.0,
+                    "components": {},
+                    "blocking_components": [],
+                    "known_observations": [],
+                    "source": source,
+                }
+            components = {
+                str(name): str(status)
+                for name, status in BackendReadinessService._parse_components(line).items()
             }
-        components = BackendReadinessService._parse_components(line)
-        overall = BackendReadinessService._parse_token_after(line, "overall=") or "unknown"
-        score = _safe_float(BackendReadinessService._parse_token_after(line, "score="))
+            overall = BackendReadinessService._parse_token_after(line, "overall=") or "unknown"
+            score = _safe_float(BackendReadinessService._parse_token_after(line, "score="))
+        else:
+            raw_components = getattr(report, "components", None) or {}
+            components = {
+                str(name): str(getattr(component, "status", "") or "")
+                for name, component in raw_components.items()
+            }
+            overall = str(getattr(report, "overall", "") or "") or "unknown"
+            score = round(_safe_float(getattr(report, "overall_score", 0.0)), 2)
         blocking = []
         observations = []
-        for name, status in components.items():
-            status_text = str(status)
+        for name, status_text in components.items():
             if status_text not in {"degraded", "critical"}:
                 continue
             if name in BLOCKING_COMPONENTS and status_text == "critical":
@@ -2318,7 +2342,7 @@ class BackendReadinessService:
             "components": components,
             "blocking_components": blocking,
             "known_observations": observations,
-            "source": str(LOG_PATH),
+            "source": source,
         }
 
     @staticmethod
