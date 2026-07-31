@@ -103,6 +103,38 @@ def test_governance_release_preflight_blocks_every_integrity_failure():
     assert result["invalid_v16_binding_mutation_ids"] == ["bad-v16"]
 
 
+def test_governance_release_preflight_separates_v16_claim_abort_from_transaction_abort():
+    conn = _Conn(
+        [
+            {
+                "mutation_id": "claim-aborted",
+                "status": "aborted",
+                "error_stage": "v16_claim",
+            },
+            {
+                "mutation_id": "transaction-aborted",
+                "status": "aborted",
+                "error_stage": "transaction",
+            },
+            {
+                "mutation_id": "recovery-aborted",
+                "status": "aborted",
+                "error_stage": "recovery",
+            },
+        ]
+    )
+
+    result = collect_governance_release_preflight(conn_factory=lambda: conn)
+
+    assert result["ok"] is True
+    assert result["aborted_count"] == 3
+    assert result["v16_claim_aborted_count"] == 1
+    assert result["transaction_aborted_count"] == 1
+    assert result["recovery_aborted_count"] == 1
+    assert result["v16_claim_aborted_mutation_ids"] == ["claim-aborted"]
+    assert result["transaction_aborted_mutation_ids"] == ["transaction-aborted"]
+
+
 def test_governance_release_preflight_fails_closed_when_postgres_is_unavailable():
     def fail():
         raise RuntimeError("postgres_unavailable")

@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Snapshot: 2026-07-26
+> Snapshot: 2026-07-31
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -294,6 +294,39 @@ P4 完成。后续只保留 P1 真实成交/完整生命周期验收、Safety sh
 - 针对性验证：`tests/test_live_decision_pipeline.py` 与
   `tests/test_live_service_tick.py` 共 33 passed，`live_service.py` 定向编译和 diff check 通过；
   发布后需确认新 `state_v1.decision_log` signal 行不再出现无因子字段的交替记录。
+
+2026-07-31 今日治理后验断点修复：
+
+- P1 在 `autonomous_learning` 内统一 `_upsert_sample()` 与
+  `repair_evidence_contracts()` 的 sample normalization/evaluator；executable 权限只接受实际
+  contract quality，不从 `sample_type` 推断。污染、pending、缺 lineage、未验证 recovered 继续
+  fail-closed，health 增加污染强用途与资格漂移检查；不改 v1 schema，不执行手工 SQL repair。
+- P2 保持 Candidate Review、AWE Admission 和 Governance Mutation Coordinator 的既有字段/状态机；
+  顶层 `bridge_reason` 跟随最终状态，preview reason 留在 `bridge_preview`；AWE 诊断补充 active
+  application/effect；只读 preflight 区分 `v16_claim` 与真实 transaction/recovery abort，不把
+  approved/bridge-ready 误报为 applied。
+- P3 保留 observational factor attribution，不以 raw `largest_contribution_factor` 单独生成
+  因子惩罚；`exit/holding/data_quality/parameter` 责任域隔离出 factor penalty/counter-evidence
+  写入。Shadow 继续以 `parse_dsl()` 为唯一校验，invalid DSL 跳过，无真实 shadow perf 不推进 stage。
+- 计划中的 8 个测试文件合计 `119 passed`。本批未新增 service、table、migration、thread、scheduler、
+  threshold 或 public API；未切静态开关、未解除 freeze、未清理 active effect、未回滚 mutation。
+- 发布后已用既有 `repair_evidence_contracts(limit=100000)` 完成最终回填：当前
+  `autonomous_learning_sample` 共 `18521` 行，末次补修 `repaired=42`，紧接着重复 repair 为
+  `repaired=0`；contract/资格不变量为 `eligibility_mismatch=0`、`weight_mismatch=0`、
+  `contaminated_release=0`，`evidence_contract_health.bad_total=0`。
+- backend 与 learning worker 已受控重启且保持 `active`；本机与公网 `/api/health` 均为
+  `db=connected / ctrader=connected`，worker capability 为 `ready/complete/available`。
+  readiness 最新投影为 `ready_for_live_execution=true`、`live_execution blockers=[]`、
+  `incident_mode=normal`、`loop_accepting_new_risk=true`、risk metrics `known`。
+- 重启后的完整 broker lifecycle 已闭环：position `280379926` 经保护、supervisor tighten、
+  close deal `327606244`（broker price `4041.14`，net `+0.16`）和 deal sync 后进入
+  `closed_replayed`；关联 review、counterfactual 与 learning sample 已落库。期间出现的
+  broker-missing 窗口由现有 `position_reconcile_conflict` 安全闩阻断新增风险，并在 close deal
+  证据到达后自动释放，未手工清闸。
+- Candidate Review 新生成的 `needs_evidence` 记录已使用
+  `bridge_ready=false + needs_evidence:<gap>`；历史 review 行按 append-only 审计事实保留，
+  不通过 SQL 改写历史 reason。V16 abort 只读统计为 `v16_claim=38`、真实 `transaction=1`，
+  未把 approved/bridge-ready 解释为 applied。
 
 ## 5. 仍需真实运行证明
 

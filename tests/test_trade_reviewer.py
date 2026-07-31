@@ -194,6 +194,8 @@ def test_trade_reviewer_assigns_full_giveback_loss_to_exit(monkeypatch, tmp_path
 
     assert "alpha_correct_but_capture_failed" in result["failure_tags"]
     assert result["review_json"]["primary_responsibility"] == "exit"
+    assert result["review_json"]["factor_attribution"]["causal_level"] == "observational"
+    assert result["review_json"]["factor_attribution"]["causal_claim"] is False
 
 
 def test_trade_reviewer_separates_signal_and_fill_time_for_system_contamination(tmp_path):

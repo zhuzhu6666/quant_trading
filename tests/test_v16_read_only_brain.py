@@ -875,9 +875,11 @@ def test_brain_governance_candidate_review_classifies_bridge_readiness(monkeypat
     assert reviews["candidate_supervisor_ready"]["review_status"] == "bridge_ready"
     assert reviews["candidate_supervisor_ready"]["bridge_ready"] is True
     assert reviews["candidate_supervisor_ready"]["bridge_preview"]["status"] == "bridge_ready"
+    assert reviews["candidate_supervisor_ready"]["bridge_reason"] == reviews["candidate_supervisor_ready"]["bridge_preview"]["reason"]
     assert reviews["candidate_supervisor_ready"]["llm_advisory"]["audit"]["audit_id"] == "llm:test"
     assert reviews["candidate_factor_update"]["review_status"] == "not_bridge_compatible"
     assert reviews["candidate_factor_update"]["bridge_ready"] is False
+    assert reviews["candidate_factor_update"]["bridge_reason"] == "not_bridge_compatible"
 
     latest = BrainGovernanceCandidateReviewService(db_path).latest_reviews(limit=10)
     assert latest["schema_version"] == "brain_governance_candidate_review_list.v1"
@@ -952,6 +954,7 @@ def test_brain_governance_candidate_review_uses_agent_reliability_gate(tmp_path)
 
     assert review["review_status"] == "needs_evidence"
     assert review["bridge_ready"] is False
+    assert review["bridge_reason"].startswith("needs_evidence:")
     assert "agent_negative_effect_history_requires_counter_evidence" in review["evidence_gaps"]
     assert review["source_reliability"]["agent_scorecard"]["negative_effect_count"] == 1
 

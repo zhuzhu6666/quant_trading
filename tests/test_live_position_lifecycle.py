@@ -2674,6 +2674,8 @@ def test_build_supervisor_trace_ledger_payload_preserves_contract():
         **execution,
         "execution_class": "observed",
         "is_real_execution": False,
+        "requested_action": "tighten",
+        "effective_action": "tighten",
         "recommended_action": "tighten",
     }
 
@@ -2749,6 +2751,8 @@ def test_build_supervisor_trace_ledger_payload_uses_safe_defaults():
     assert payload["execution"] == {
         "execution_class": "observed",
         "is_real_execution": False,
+        "requested_action": "",
+        "effective_action": "",
         "recommended_action": "",
     }
 

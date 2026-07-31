@@ -677,6 +677,7 @@ def test_entry_cluster_governance_materializes_policy_suggestion(tmp_path):
             "schema_version": "learning_evidence_contract.v1",
             "allowed_uses": ["audit", "explainability", "supervised_training"],
             "model_ready": True,
+            "quality": {"executable_governance_allowed": True},
         }
         for idx in range(3):
             features = {
@@ -756,6 +757,7 @@ def test_event_window_governance_materializes_policy_suggestion(tmp_path):
             "schema_version": "learning_evidence_contract.v1",
             "allowed_uses": ["audit", "explainability", "supervised_training"],
             "model_ready": True,
+            "quality": {"executable_governance_allowed": True},
         }
         for idx in range(3):
             features = {
@@ -838,6 +840,7 @@ def test_entry_quality_governance_materializes_policy_suggestions(tmp_path):
             "schema_version": "learning_evidence_contract.v1",
             "allowed_uses": ["audit", "explainability", "supervised_training"],
             "model_ready": True,
+            "quality": {"executable_governance_allowed": True},
         }
         for idx in range(24):
             low_score = idx < 12
@@ -853,6 +856,7 @@ def test_entry_quality_governance_materializes_policy_suggestions(tmp_path):
             review = {
                 "entry_score": 0.32 if low_score else 0.60,
                 "worst_factor": "real_yield_chg" if idx < 3 else "",
+                "primary_responsibility": "factor_conflict" if idx < 3 else "signal_quality",
                 "failure_tags": failure_tags,
             }
             label = {
@@ -958,6 +962,89 @@ def test_entry_quality_governance_materializes_policy_suggestions(tmp_path):
     assert repeated["suggestions"] == 0
 
 
+def test_entry_quality_observational_factor_does_not_penalize_non_entry_responsibility(tmp_path):
+    db_path = tmp_path / "state.db"
+    al.ensure_autonomous_learning_tables(db_path)
+    contract = {
+        "schema_version": "learning_evidence_contract.v1",
+        "allowed_uses": ["audit", "explainability", "supervised_training"],
+        "model_ready": True,
+        "quality": {"executable_governance_allowed": True},
+    }
+    responsibilities = ["exit", "holding", "data_quality", "parameter"]
+    conn = sqlite3.connect(str(db_path))
+    try:
+        now = time.time()
+        for idx in range(8):
+            responsibility = responsibilities[idx % len(responsibilities)]
+            review = {
+                "entry_score": 0.31,
+                "worst_factor": "engulfing",
+                "largest_contribution_factor": "engulfing",
+                "primary_responsibility": responsibility,
+                "factor_attribution": {
+                    "largest_contribution_factor": "engulfing",
+                    "causal_level": "observational",
+                    "causal_claim": False,
+                },
+                "failure_tags": ["factor_conflict", "conflicting_factor_entry"],
+            }
+            label = {
+                "outcome_label": "bad_loss",
+                "pnl": -5.0,
+                "failure_tags": review["failure_tags"],
+            }
+            conn.execute(
+                """
+                INSERT INTO autonomous_learning_sample
+                (sample_id, sample_type, source_table, source_id, decision_id,
+                 position_id, label_status, integrity, train_weight, event_ts,
+                 features_json, verdict_json, label_json, trace_json,
+                 evidence_contract_json, created_at, updated_at)
+                VALUES (?, 'trade_review_outcome', 'trade_outcome_review', ?, ?, ?,
+                        'matured', 'full', 1.0, ?, ?, '{}', ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"observational_factor_{idx}",
+                    f"review_observational_factor_{idx}",
+                    f"decision_observational_factor_{idx}",
+                    f"position_observational_factor_{idx}",
+                    now + idx,
+                    json.dumps({"review": review}),
+                    json.dumps(label),
+                    json.dumps({"position_id": f"position_observational_factor_{idx}"}),
+                    json.dumps(contract),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    al.repair_evidence_contracts(db_path=db_path)
+    al.materialize_entry_quality_governance_suggestions(
+        db_path=db_path,
+        min_samples=3,
+        min_bad_rate=0.5,
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        suppressed = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM policy_suggestion
+            WHERE scope_type='entry_quality'
+              AND action='suppress_recent_worst_factor'
+              AND status IN ('proposed', 'approved', 'applied')
+            """
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert suppressed == 0
+
+
 def test_event_window_governance_ignores_legacy_gradient_samples(tmp_path):
     db_path = tmp_path / "state.db"
     al.ensure_autonomous_learning_tables(db_path)
@@ -968,6 +1055,7 @@ def test_event_window_governance_ignores_legacy_gradient_samples(tmp_path):
             "schema_version": "learning_evidence_contract.v1",
             "allowed_uses": ["audit", "explainability", "supervised_training"],
             "model_ready": True,
+            "quality": {"executable_governance_allowed": True},
         }
         for idx in range(3):
             features = {

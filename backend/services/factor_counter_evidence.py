@@ -5,6 +5,7 @@ from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 from backend.services._brain_helpers import loads
+from backend.services.failure_taxonomy import FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES
 from backend.services.review_contract import review_has_system_contamination
 
 
@@ -154,6 +155,12 @@ class FactorCounterEvidenceService:
             """,
             (factor,),
         ).fetchall()
+        rows = [
+            row
+            for row in rows
+            if self._primary_responsibility(row["review_json"])
+            not in FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES
+        ]
         if not rows:
             return {"available": True, "keep_score": 0.0, "prune_score": 0.0, "sample_count": 0, "regimes": []}
         weighted_sum = 0.0
@@ -233,6 +240,8 @@ class FactorCounterEvidenceService:
         for row in rows:
             if review_has_system_contamination(loads(row["source_review_json"], {})):
                 continue
+            if self._primary_responsibility(row["source_review_json"]) in FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES:
+                continue
             if sample_count >= 50:
                 break
             sample_count += 1
@@ -254,6 +263,18 @@ class FactorCounterEvidenceService:
             "positive_memory_count": positive,
             "negative_memory_count": negative,
         }
+
+    @staticmethod
+    def _primary_responsibility(raw: Any) -> str:
+        payload = loads(raw, {})
+        if not isinstance(payload, dict):
+            return ""
+        taxonomy = payload.get("failure_taxonomy") or {}
+        return str(
+            payload.get("primary_responsibility")
+            or (taxonomy.get("primary_responsibility") if isinstance(taxonomy, dict) else "")
+            or ""
+        ).strip().lower()
 
     @staticmethod
     def _extract_regime(raw: Any) -> str:

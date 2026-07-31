@@ -5,6 +5,11 @@ from typing import Any
 from backend.services.review_contract import build_system_issue_context
 
 
+FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES = frozenset(
+    {"exit", "holding", "data_quality", "parameter"}
+)
+
+
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value if value not in (None, "") else default)

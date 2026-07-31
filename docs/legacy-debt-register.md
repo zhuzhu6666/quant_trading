@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-07-26
+> Last verified: 2026-07-31
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -20,7 +20,7 @@
 
 - 状态：`migrating`
 - canonical：`factor_lifecycle_state` + `factor_runtime_projection`；ACTIVE 必须经 typed Coordinator/V16、稳定 artifact、fresh health 和 loaded ack。
-- 当前：Catalog 已以 lifecycle row 覆盖 Registry/RuntimeConfig stage/admission，审计和 canary 名称不再独立创建目录条目；coordinator projection 已改用稳定身份并在 backend 恢复时删除同 factor 历史 PID 行。
+- 当前：Catalog 已以 lifecycle row 覆盖 Registry/RuntimeConfig stage/admission，审计和 canary 名称不再独立创建目录条目；coordinator projection 已改用稳定身份并在 backend 恢复时删除同 factor 历史 PID 行。invalid DSL 只保留 `shadow_register_invalid_dsl_skipped` 审计，不进入 Registry/lifecycle；缺真实 shadow performance 的候选留在当前 stage，不用 fallback 分数推进。
 - 剩余：切入 typed lifecycle 前已存在的 native ACTIVE builtin 尚无 lifecycle row，Catalog 对这组代码内置因子保留 Registry/RuntimeConfig 兼容；coordinator-off generic rollback/restore 兼容仍在。
 - 退出：现有 ACTIVE builtin 按 code-bound identity、V16、prepared、真实 loaded ack 和 fresh health 分批重入 lifecycle 后删除 builtin fallback；稳定 enforce 发布后删除 generic restore。不得用直接数据库回填 ACTIVE 绕过晋升证据。
 
@@ -82,7 +82,7 @@
 
 - 状态：`migrating`
 - canonical：`GovernanceMutationCoordinator` 在同一 PG 事务内 reserve、重验 before、写 intent/领域事实、finalize；commit 后才发布 RuntimeConfig。
-- 当前：mode 为 dual-record；旧 off 兼容与旧 ledger 投影仍在。
+- 当前：mode 为 dual-record；旧 off 兼容与旧 ledger 投影仍在。只读 release preflight 已按 `error_stage=v16_claim` 与真实 transaction/recovery failure 分类 aborted intent，不改变状态机或应用证据要求。
 - 退出：稳定 enforce 发布后删除旧 consume/direct overlay/Registry mutation 兼容。
 
 ### position supervisor 旧 advisory 冲突占位

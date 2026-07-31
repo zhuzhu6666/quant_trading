@@ -732,6 +732,13 @@ def _run_canary_evaluation(
             # 是什么) 都从 canary_state 恢复 stage, 走标准 canary 管道。
             # 移除了 "discovered源且无saved_states→直接ACTIVE" 的捷径。
             ctx = _load_canary_ctx_from_log(name, score)
+            if str((ctx.additional_metrics or {}).get("source") or "") == "missing_shadow_perf":
+                # A candidate without real shadow OOS evidence remains in its
+                # current stage.  Do not even let the canary director record a
+                # synthetic evaluation that could be mistaken for promotion
+                # evidence.
+                stay.append(name)
+                continue
             try:
                 result = director.check_promotion(name, ctx)
                 if result == "promote":

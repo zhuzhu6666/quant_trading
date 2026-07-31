@@ -245,6 +245,10 @@ def evaluate_position_supervisor_for_position(
     verdict["position_quality_advisory"] = advisory
     evidence = dict(verdict.get("evidence") or {})
     evidence["position_quality_advisory"] = advisory
+    # Older/custom rule evaluators may not emit the lifecycle gate.  The live
+    # agent must fail closed for model-originated reduce/tighten actions until
+    # the rule has explicitly confirmed the management evidence window.
+    evidence.setdefault("model_action_boundary_ready", False)
     verdict["evidence"] = evidence
     if (
         advisory.get("ok")
@@ -386,6 +390,13 @@ def run_position_supervision(
                 )
                 or {}
             )
+            # Make broker executability part of the agent's canonical action
+            # before any trace, candidate, risk-policy, or state consumer sees
+            # the verdict.  A requested reduce is not an effective reduce
+            # when the broker cannot trade that volume.
+            verdict = runtime.normalize_reduce(verdict, reduce_execution_plan)
+            action = str(verdict.get("action") or "hold").strip().lower()
+            controls = dict(verdict.get("recommended_controls") or {})
             effective_action = str(
                 reduce_execution_plan.get("effective_action") or "hold"
             ).strip().lower()
@@ -406,10 +417,14 @@ def run_position_supervision(
                         stage="no_op_suppressed",
                         outcome="skipped",
                         execution_status="no_op",
-                        execution_reason="invalid_reduce_volume",
+                        execution_reason=str(
+                            reduce_execution_plan.get("reason")
+                            or "reduce_not_tradeable"
+                        ),
                         execution={
                             **reduce_execution_plan,
                             "action_fingerprint": fingerprint,
+                            "requested_action": "reduce",
                             "applied_controls": controls,
                         },
                         acct=account,
@@ -420,14 +435,10 @@ def run_position_supervision(
                         fingerprint=fingerprint,
                         reason=str(
                             reduce_execution_plan.get("reason")
-                            or "invalid_reduce_volume"
+                            or "reduce_not_tradeable"
                         ),
                     )
                 continue
-            if effective_action == "close":
-                action = "close"
-                verdict = runtime.normalize_reduce(verdict, reduce_execution_plan)
-                controls = dict(verdict.get("recommended_controls") or {})
 
         if action in {"close", "reduce", "tighten"} and candidate_recorder is not None:
             try:

@@ -2426,11 +2426,19 @@ def build_supervisor_trace_ledger_payload(
         execution_class = "failed"
     else:
         execution_class = "observed"
+    requested_action = str(
+        verdict.get("requested_action") or verdict.get("action") or ""
+    )
+    effective_action = str(
+        verdict.get("effective_action") or verdict.get("action") or ""
+    )
     execution_payload.update(
         {
             "execution_class": execution_class,
             "is_real_execution": is_real_execution,
-            "recommended_action": str(verdict.get("action") or ""),
+            "requested_action": requested_action,
+            "effective_action": effective_action,
+            "recommended_action": requested_action,
         }
     )
     return {

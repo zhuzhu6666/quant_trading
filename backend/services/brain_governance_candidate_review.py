@@ -368,6 +368,16 @@ class BrainGovernanceCandidateReviewService:
             bridge_preview=bridge_preview,
             now=now,
         )
+        if review_status == "bridge_ready":
+            bridge_reason = str(bridge_preview.get("reason") or review_status)
+        elif review_status == "needs_evidence" and evidence_gaps:
+            bridge_reason = f"needs_evidence:{evidence_gaps[0]}"
+        else:
+            # The preview is an input to review, not the final review
+            # decision.  Keep its raw reason nested below, while the
+            # top-level field remains a stable explanation of the persisted
+            # review status.
+            bridge_reason = review_status or str(bridge_preview.get("reason") or "blocked")
         llm_advisory = self._llm_advisory(
             candidate=candidate,
             review_status=review_status,
@@ -396,7 +406,7 @@ class BrainGovernanceCandidateReviewService:
             },
             "review_status": review_status,
             "bridge_ready": review_status == "bridge_ready",
-            "bridge_reason": str(bridge_preview.get("reason") or review_status),
+            "bridge_reason": bridge_reason,
             "evidence_gaps": evidence_gaps,
             "conflict": conflict,
             "bridge_preview": bridge_preview,

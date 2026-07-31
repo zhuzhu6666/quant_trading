@@ -212,7 +212,21 @@ class ModelInfluenceService:
             tighten_threshold = float(policy.get("tighten_threshold") or 0.70)
             reduce_threshold = float(policy.get("reduce_threshold") or 0.88)
             effects = set(policy.get("allowed_effects") or [])
-            if action == "hold" and exit_risk >= reduce_threshold and "reduce" in effects:
+            # The position supervisor owns lifecycle evidence readiness.  A
+            # model may advise a risk-reducing action, but it must not bypass
+            # the supervisor's observation window or act on unknown position
+            # components.  Direct callers without this field retain the
+            # historical model-service contract; the live supervisor runtime
+            # always supplies it.
+            model_action_boundary_ready = bool(
+                (original.get("evidence") or {}).get(
+                    "model_action_boundary_ready",
+                    True,
+                )
+            )
+            if not model_action_boundary_ready:
+                reason = "position_supervisor_evidence_boundary"
+            elif action == "hold" and exit_risk >= reduce_threshold and "reduce" in effects:
                 if not self._position_model_reduce_already_applied(position_id, str(policy.get("artifact_sha256") or "")):
                     fused["action"] = "reduce"
                     controls = dict(fused.get("recommended_controls") or {})

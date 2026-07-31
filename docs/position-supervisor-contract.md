@@ -194,6 +194,18 @@ PositionSupervisor.evaluate(position_context: dict[str, Any]) -> PositionSupervi
 - `signal_reversal`: 入场方向信号是否出现明确反转
 - `regime_shift`: `none / mild / confirmed`
 
+### 4.2 动作有效性边界
+
+模板只提供策略参数，不能绕过监督智能体的基础证据门。所有模板、治理切换后的模板以及
+模型建议都必须遵守：
+
+- 盈利回吐类 `tighten / reduce` 必须同时满足价格、PnL、路径指标已知，并至少完成一根已收盘 bar；thesis-break 仍遵守模板声明的更长观察窗；
+- `mfe` 必须达到内置 baseline 模板现有 `capture_policy.mfe_capture_failure_threshold`
+  的非微量盈利底线（当前为 `0.15`）。治理模板的同名字段只能把底线抬高，不能降低；
+- 未满足时统一输出 `hold`，并使用 `profit_protection_evidence_pending`，不进入 RiskPolicy，也不触达 broker；
+- 模型只能在 `evidence.model_action_boundary_ready=true` 时把 `hold` 提升为 `tighten / reduce`；
+- `reduce` 还必须通过 broker 最小手数和步进规划，最终动作以 `effective_action` 为准。
+
 ---
 
 ## 5. 输出 Contract
@@ -366,6 +378,12 @@ supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
 - `verdict_json`
 - `risk_verdict_json`
 - `execution_json`
+
+当请求动作无法执行时，trace 还必须区分：
+
+- `requested_action`: supervisor 原始建议；
+- `effective_action`: 经证据门和 broker 可执行性规划后的最终动作；
+- `recommended_action`: 保留原始建议，不能被误读为 broker 已执行。
 
 标准 `stage / outcome` 口径：
 

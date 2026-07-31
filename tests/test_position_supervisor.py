@@ -226,7 +226,7 @@ def test_profit_protection_template_requires_two_independent_evidence_families()
     assert verdict["evidence"]["thesis_broken_confirmations"] == 2
 
 
-def test_profit_protection_template_delays_unconfirmed_thesis_broken_after_evidence_window():
+def test_profit_protection_template_blocks_micro_mfe_even_after_evidence_window():
     verdict = evaluate_position_supervisor(
         {
             "position": {
@@ -255,12 +255,54 @@ def test_profit_protection_template_delays_unconfirmed_thesis_broken_after_evide
         }
     )
 
-    assert verdict["action"] == "reduce"
-    assert verdict["summary_reason"] == "profit_giveback_after_mfe"
+    assert verdict["action"] == "hold"
+    assert verdict["summary_reason"] == "thesis_break_unconfirmed"
+    assert verdict["evidence"]["mfe_is_meaningful"] is False
+    assert verdict["evidence"]["profit_protection_window_ready"] is False
     assert verdict["evidence"]["thesis_break_ready"] is False
     assert verdict["evidence"]["thesis_break_confirmed"] is False
     assert verdict["evidence"]["stop_loss_progress"] < 0.82
-    assert "profit_giveback_after_mfe" in verdict["evidence"]["trigger_tags"]
+
+
+def test_profit_protection_evidence_gate_is_invariant_across_templates():
+    base = {
+        "position": {
+            "position_id": "template-invariant-gate",
+            "direction": -1,
+            "entry_price": 4000.0,
+            "current_price": 3999.8,
+            "volume": 100.0,
+            "unrealized_pnl": 0.02,
+            "sl": 4010.0,
+            "tp": 3980.0,
+        },
+        "risk": {
+            "mfe": 0.12,
+            "mae": 0.01,
+            "giveback_ratio": 0.92,
+            "profit_capture_ratio": 0.08,
+            "holding_efficiency": 0.15,
+            "time_decay_score": 0.7,
+            "thesis_status": "intact",
+            "regime_shift": "none",
+        },
+        "temporal_context": {
+            "decision_ts": time.time(),
+            "holding_seconds": 90.0,
+            "completed_bars_after_entry": 1,
+        },
+    }
+    templates = [None, CONSERVATIVE_TEMPLATE_ID, PROFIT_PROTECTION_TEMPLATE_ID]
+
+    for template_id in templates:
+        context = dict(base)
+        if template_id:
+            context["position_supervisor_template"] = template_id
+        verdict = evaluate_position_supervisor(context)
+        assert verdict["action"] == "hold"
+        assert verdict["summary_reason"] == "profit_protection_evidence_pending"
+        assert verdict["evidence"]["model_action_boundary_ready"] is False
+        assert verdict["evidence"]["profit_protection_window_ready"] is False
 
 
 def test_position_supervisor_captures_when_near_take_profit():

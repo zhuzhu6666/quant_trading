@@ -56,6 +56,32 @@ def test_position_model_can_only_tighten_or_bounded_reduce(tmp_path):
     assert second["model_influence"]["applied"] is False
 
 
+def test_position_model_cannot_bypass_supervisor_evidence_boundary(tmp_path):
+    service = ModelInfluenceService(tmp_path / "state.db")
+    cfg = _cfg("position_quality_lightgbm", {
+        "allowed_effects": ["tighten", "reduce"],
+        "tighten_threshold": 0.7,
+        "reduce_threshold": 0.88,
+        "max_reduce_fraction": 0.25,
+    })
+    fused = service.fuse_position(
+        verdict={
+            "action": "hold",
+            "confidence": 0.8,
+            "evidence": {"model_action_boundary_ready": False},
+            "recommended_controls": {},
+        },
+        advisory={"ok": True, "model_version": "2.0", "exit_risk_score": 0.95},
+        position_id="p-boundary",
+        cfg=cfg,
+        tighten_controls={"stop_loss": 10.0},
+    )
+
+    assert fused["action"] == "hold"
+    assert fused["model_influence"]["applied"] is False
+    assert fused["model_influence"]["reason"] == "position_supervisor_evidence_boundary"
+
+
 def test_open_model_is_veto_only_and_inactive_model_does_not_duplicate_audit(tmp_path):
     db_path = tmp_path / "state.db"
     service = ModelInfluenceService(db_path)

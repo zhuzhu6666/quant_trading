@@ -1,7 +1,7 @@
 # Learning Evidence Contract
 
 > Status: active
-> Last verified: 2026-07-30
+> Last verified: 2026-07-31
 > Scope: evidence semantics for learning samples, model training, governance, and autonomous replay/audit.
 
 状态：第一版已落地，2026-06-29；训练准入语义已收紧，2026-06-30；开仓质量、反事实训练契约、数据健康检查、动态仓位 trace 与事件窗口治理已补齐，2026-07-02；自治治理 V3 继续沿用本文作为证据等级 contract；2026-07-06 补齐学习系统、影子模型和数据精度关系。
@@ -33,6 +33,18 @@
 - `governance_eligibility_version`
 - `governance_eligibility_fingerprint`
 - `governance_ineligible_reason`
+
+本批（2026-07-31）进一步收敛证据合同的唯一计算路径：样本物化与
+`repair_evidence_contracts()` 共用同一 canonical normalization/evaluator。repair 只能复用样本
+实际保存的 `quality.executable_governance_allowed`，不能从 `sample_type` 推断可执行治理；污染、缺
+lineage、未验证 recovered、pending 或未成熟样本继续 fail-closed，且同一批数据第二次 repair 应为零修复。
+`allowed_uses`、`model_ready`、`governance_eligible` 与资格列必须由同一份 v1 contract 保持一致，不新增
+schema、列或旁路 writer。
+
+部署后验收（2026-07-31）：`autonomous_learning_sample` 全量 `18521` 行的 contract/资格列无漂移，
+污染样本无 `model_ready` 或 `executable_governance_allowed` 放行；最终 repair 为 `42` 行，重复
+repair 为 `0`，`evidence_contract_health.bad_total=0`。这些是既有 repair ledger 与只读 PostgreSQL
+检查结果，不改变 `learning_evidence_contract.v1` 或 `governance_eligibility.v1`。
 
 ## Learning Data Flow
 
@@ -197,7 +209,7 @@ readiness 状态语义：
 - `system_issue_context`: 数据时效、决策陈旧、信号到成交延迟等是否污染学习样本
 - `market_session`: 市场会话状态
 
-复盘摘要的附加口径：`factor_attribution` 必须标注 `causal_level=observational`，`largest_contribution_factor` 只表示最大观测贡献，不表示因果责任；`summary_consistency` 用于记录 sizing trace、执行量、成交量和事件上下文之间的可比性。发现 mismatch 或 different scopes 时只能增加 evidence gap/审计提示，不能直接生成因子惩罚或策略结论。
+复盘摘要的附加口径：`factor_attribution` 必须标注 `causal_level=observational`，`largest_contribution_factor` 只表示最大观测贡献，不表示因果责任；`summary_consistency` 用于记录 sizing trace、执行量、成交量和事件上下文之间的可比性。发现 mismatch 或 different scopes 时只能增加 evidence gap/审计提示，不能直接生成因子惩罚或策略结论。因子治理建议只消费已有责任域、最差因子、冲突、贡献复核和 counter-evidence；责任域为 `exit`、`holding`、`data_quality` 或 `parameter` 时不得生成因子惩罚。
 
 历史样本不得伪造不可恢复的实时上下文。旧 open decision 可以回填同向簇和组合暴露，但 `bar_context / execution_context / market_micro_context / event_context / sizing_trace` 等只能从真实新单开始自然积累；缺少事件距离或窗口桶的旧样本不得事后猜测补造。
 
@@ -257,6 +269,11 @@ observation/research 链路，但不能触发 mutation。
 
 学习 worker 仍只有既有的 `offmarket_position_quality_lightgbm` 任务负责这组模型的重任务调度：`full` profile 在训练后为 position、open、factor、meta 四类模型各写一次影子评分；市场开盘或本轮不满足训练条件时，任务不训练，只用现有 artifact 以小批量、按 artifact 与来源样本去重的方式刷新 shadow audit。该刷新不进入 promotion、不物化治理建议，也不改变交易权限。
 
+Shadow candidate 的 DSL 仍只由既有 `parse_dsl()` 校验；malformed expression 在进入 Registry/
+lifecycle 前跳过并保留 `shadow_register_invalid_dsl_skipped` 审计事件。没有真实 shadow performance 的候选
+保持当前 stage，不得用合成分数推进 promotion 或 active；该约束不新增冷启动阈值，也不关闭 valid shadow
+注册能力。
+
 ## Shadow Model Boundaries
 
 影子模型的共同边界：
@@ -304,6 +321,8 @@ observation/research 链路，但不能触发 mutation。
 学习数据健康由 `/api/learning/dataset/quality-health` 暴露：
 
 - `evidence_contract`: 检查 `allowed_uses/model_ready/label_status/integrity` 是否自洽
+- 同时检查污染样本是否仍声明 `supervised_training/strong_governance/executable_governance`，以及
+  `governance_eligible` 与 contract 资格是否一致
 - `entry_context`: 检查最近开仓决策是否带齐 open outcome 所需上下文
 
 学习数据就绪由 `/api/learning/dataset/readiness` 暴露：

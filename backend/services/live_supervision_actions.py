@@ -132,15 +132,19 @@ def normalize_supervisor_reduce_verdict(
     """Project an evaluated reduce verdict to its canonical executable action."""
 
     normalized = dict(verdict or {})
+    requested_action = str(normalized.get("action") or "reduce").strip().lower()
+    requested_reason = str(normalized.get("summary_reason") or "")
     effective_action = str(
         (execution_plan or {}).get("effective_action") or "hold"
     ).strip().lower()
+    normalized["requested_action"] = requested_action
+    normalized["requested_summary_reason"] = requested_reason
+    normalized["effective_action"] = effective_action
+    normalized["reduce_execution_plan"] = dict(execution_plan or {})
     if effective_action == "reduce":
         return normalized
-    original_reason = str(normalized.get("summary_reason") or "")
     controls = dict(normalized.get("recommended_controls") or {})
     normalized["action"] = effective_action
-    normalized["reduce_execution_plan"] = dict(execution_plan or {})
     if effective_action == "close":
         close_reason = str(
             (execution_plan or {}).get("reason")
@@ -152,8 +156,8 @@ def normalize_supervisor_reduce_verdict(
             "reduce_fraction": 0.0,
             "close_reason": close_reason,
             "protection_mode": "full_exit",
-            "original_action": "reduce",
-            "original_summary_reason": original_reason,
+            "original_action": requested_action,
+            "original_summary_reason": requested_reason,
         }
     return normalized
 

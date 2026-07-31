@@ -160,6 +160,18 @@ P3 禁止以“先搭平台”为理由新增：
 - 第三小批 memory、application/effect 与 domain writer 针对性验证为 `80 passed`，
   P3 writer/identity 准入完成。
 
+### 2026-07-31 今日治理后验断点收口
+
+| 检查 | 通过条件与本批证据 |
+|---|---|
+| evidence contract normalization | materialize 与 `repair_evidence_contracts()` 共用 canonical normalization；全量 `18521` 行末次 repair 为 `42`、重复 repair 为 `0`，JSON contract 与资格列一致；repair 不从 `sample_type` 推断 executable 权限 |
+| evidence fail-closed | matured/pending、full/recovered/partial、污染/非污染和 lineage 场景保持既有 eligibility 语义；污染、缺 lineage、未验证 recovered、pending 不得进入强训练/强治理；部署后 `bad_total=0` 且无污染质量放行 |
+| candidate review expression | 新生成 review 的 `bridge_reason` 与最终 `review_status` 一致；`needs_evidence` 带具体 gap，原始 preview reason 仍在 `bridge_preview`；历史 review 仅保留审计事实；review/approved 不等于 applied |
+| mutation/effect expression | active `mixed/observing` effect 继续阻断新实验且不新增 application/mutation；read-only preflight 将 `v16_claim` abort 与真实 transaction/recovery failure 分开统计，Coordinator 状态机不变 |
+| attribution boundary | `largest_contribution_factor` 保持 observational；责任域为 `exit/holding/data_quality/parameter` 时不生成因子惩罚写入，既有 counter-evidence 仍可作为只读刹车 |
+| shadow lane | malformed DSL 在 Registry/lifecycle 前跳过并写既有审计；缺真实 shadow perf 的候选保持当前 stage；valid shadow promotion 仍可通过 |
+| regression | 计划中的 8 个测试文件合计 `119 passed`，补充治理/运行回归 `54 passed`；本批未新增 service、table、migration、thread、scheduler、threshold 或 public API |
+
 ### P3 记忆完整性与灾备底座（Demo，未发布）
 
 | 检查 | 通过条件 |

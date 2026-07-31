@@ -3371,8 +3371,9 @@ def test_supervisor_minimum_position_reduce_is_deduplicated_before_policy(monkey
 
     assert len(traces) == 1
     assert traces[0]["stage"] == "no_op_suppressed"
-    assert traces[0]["execution_reason"] == "invalid_reduce_volume"
+    assert traces[0]["execution_reason"] == "risk_evidence_not_strong_enough"
     assert traces[0]["execution"]["effective_action"] == "hold"
+    assert traces[0]["execution"]["requested_action"] == "reduce"
     assert traces[0]["execution"]["reason"] == "risk_evidence_not_strong_enough"
     assert traces[0]["execution"]["is_real_execution"] is False
 

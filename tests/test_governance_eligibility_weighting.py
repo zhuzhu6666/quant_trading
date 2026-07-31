@@ -95,6 +95,11 @@ def test_sample_upsert_persists_full_recovered_and_contaminated_eligibility(tmp_
     assert "integrity_recovered" in rows[3][6]
     assert all(row[4] == learning.GOVERNANCE_ELIGIBILITY_VERSION for row in rows)
     assert all(len(row[5]) == 64 for row in rows)
+    health = learning.validate_evidence_contract_health(db_path=db_path)
+    assert health["counts"]["contaminated_governance_eligible"] == 0
+    assert health["counts"]["contaminated_allows_strong_governance"] == 0
+    assert health["counts"]["contaminated_quality_model_ready"] == 0
+    assert health["counts"]["contaminated_quality_executable_governance"] == 0
 
 
 def test_weighted_materializer_uses_effective_sample_size(tmp_path) -> None:
@@ -225,6 +230,56 @@ def test_repair_backfills_eligibility_and_is_idempotent(tmp_path) -> None:
              position_id, event_ts, label_status, integrity, train_weight,
              features_json, verdict_json, label_json, trace_json,
              evidence_contract_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item["sample_id"],
+                item["sample_type"],
+                item["source_table"],
+                item["source_id"],
+                item["decision_id"],
+                item["position_id"],
+                item["event_ts"],
+                item["label_status"],
+                item["integrity"],
+                item["train_weight"],
+                json.dumps(item["features"]),
+                json.dumps(item["verdict"]),
+                json.dumps(item["label"]),
+                json.dumps(item["trace"]),
+                json.dumps({"quality": {"executable_governance_allowed": True}}),
+                time.time(),
+                time.time(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    first = learning.repair_evidence_contracts(db_path=db_path)
+    second = learning.repair_evidence_contracts(db_path=db_path)
+
+    assert first["repaired"] == 1
+    assert second["repaired"] == 0
+    sample = learning.list_autonomous_learning_samples(db_path=db_path)["items"][0]
+    assert sample["governance_eligible"] is True
+    assert sample["governance_effective_weight"] == 1.0
+    assert len(sample["governance_eligibility_fingerprint"]) == 64
+
+
+def test_repair_does_not_infer_executable_governance_from_sample_type(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    learning.ensure_autonomous_learning_tables(db_path)
+    item = _sample(11)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO autonomous_learning_sample
+            (sample_id, sample_type, source_table, source_id, decision_id,
+             position_id, event_ts, label_status, integrity, train_weight,
+             features_json, verdict_json, label_json, trace_json,
+             evidence_contract_json, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
             """,
             (
@@ -250,12 +305,8 @@ def test_repair_backfills_eligibility_and_is_idempotent(tmp_path) -> None:
     finally:
         conn.close()
 
-    first = learning.repair_evidence_contracts(db_path=db_path)
-    second = learning.repair_evidence_contracts(db_path=db_path)
-
-    assert first["repaired"] == 1
-    assert second["repaired"] == 0
+    learning.repair_evidence_contracts(db_path=db_path)
     sample = learning.list_autonomous_learning_samples(db_path=db_path)["items"][0]
-    assert sample["governance_eligible"] is True
-    assert sample["governance_effective_weight"] == 1.0
-    assert len(sample["governance_eligibility_fingerprint"]) == 64
+
+    assert sample["governance_eligible"] is False
+    assert "executable_governance_not_allowed" in sample["governance_ineligible_reason"]

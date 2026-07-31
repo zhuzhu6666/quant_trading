@@ -5283,12 +5283,24 @@ def _scheduled_awe_adapt():
                     )
                     return
                 if status != "applied" or not partial:
+                    admission_summary = {}
+                    for name, item in (result.get("admissions") or {}).items():
+                        item = item if isinstance(item, dict) else {}
+                        active = item.get("active_application") or {}
+                        active = active if isinstance(active, dict) else {}
+                        admission_summary[name] = {
+                            "status": item.get("status") or "",
+                            "reason": item.get("reason") or "",
+                            "active_application_id": active.get("application_id") or "",
+                            "active_application_status": active.get("application_status") or "",
+                            "active_effect_status": active.get("effect_status") or "",
+                        }
                     logger.info(
                         "[awe_adapt] weight update not applied run_id={} status={} admission_status={} admissions={}",
                         run_id,
                         status or "unknown",
                         result.get("admission_status") or "",
-                        {name: item.get("status") for name, item in (result.get("admissions") or {}).items()},
+                        admission_summary,
                     )
                     return
                 logger.info(

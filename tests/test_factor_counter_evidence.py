@@ -64,3 +64,53 @@ def test_factor_counter_evidence_allows_when_no_keep_signal(tmp_path):
     assert result["recommended_stage"] == "allow_pruning"
     assert result["keep_score"] == 0.0
     assert result["regime_exception"]["exists"] is False
+
+
+def test_factor_counter_evidence_ignores_non_entry_responsibility_for_factor_penalty(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        for idx in range(4):
+            review_id = f"review_exit_{idx}"
+            conn.execute(
+                """
+                INSERT INTO trade_outcome_review
+                (review_id, trade_id, pnl, outcome_label, review_json, created_at)
+                VALUES (?, ?, -10.0, 'bad_loss', ?, ?)
+                """,
+                (
+                    review_id,
+                    f"trade_exit_{idx}",
+                    json.dumps(
+                        {
+                            "primary_responsibility": "exit" if idx % 2 == 0 else "data_quality",
+                            "largest_contribution_factor": "engulfing",
+                            "factor_attribution": {
+                                "largest_contribution_factor": "engulfing",
+                                "causal_level": "observational",
+                                "causal_claim": False,
+                            },
+                        }
+                    ),
+                    now + idx,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO factor_contribution_review
+                (review_id, trade_id, factor, net_contribution, confidence, notes)
+                VALUES (?, ?, 'engulfing', -0.50, 0.9, '{}')
+                """,
+                (review_id, f"trade_exit_{idx}"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = FactorCounterEvidenceService(db_path).build_for_factor("engulfing")
+
+    assert result["sources"]["factor_contribution_review"]["sample_count"] == 0
+    assert result["sources"]["factor_contribution_review"]["prune_score"] == 0.0
+    assert result["prune_score"] == 0.0

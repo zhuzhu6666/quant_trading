@@ -246,6 +246,8 @@ def test_minimum_reduce_upgrades_only_at_supervisor_near_stop_threshold():
     assert below_threshold["effective_action"] == "hold"
     assert above_threshold["effective_action"] == "close"
     assert normalized["action"] == "close"
+    assert normalized["requested_action"] == "reduce"
+    assert normalized["effective_action"] == "close"
     assert normalized["recommended_controls"]["original_action"] == "reduce"
     assert normalized["recommended_controls"]["protection_mode"] == "full_exit"
 

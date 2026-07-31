@@ -35,6 +35,7 @@ def collect_governance_release_preflight(
                         g.status,
                         g.projection_status,
                         g.v16_command_id,
+                        g.error_stage,
                         g.committed_config_hash,
                         g.domain_hash,
                         v.command_id AS bound_v16_command_id,
@@ -45,7 +46,7 @@ def collect_governance_release_preflight(
                     FROM governance_mutation_intent AS g
                     LEFT JOIN v16_brain_command AS v
                       ON v.command_id = NULLIF(g.v16_command_id, '')
-                    WHERE g.status IN ('reserved', 'prepared', 'committed')
+                    WHERE g.status IN ('reserved', 'prepared', 'committed', 'aborted')
                     ORDER BY g.created_at, g.mutation_id
                     """
                 )
@@ -60,11 +61,28 @@ def collect_governance_release_preflight(
         degraded_projection_ids: list[str] = []
         missing_hash_ids: list[str] = []
         invalid_v16_binding_ids: list[str] = []
+        aborted_ids: list[str] = []
+        v16_claim_aborted_ids: list[str] = []
+        transaction_aborted_ids: list[str] = []
+        recovery_aborted_ids: list[str] = []
+        other_aborted_ids: list[str] = []
         committed_count = 0
         expanding_count = 0
         for row in rows:
             mutation_id = str(row.get("mutation_id") or "")
             status = str(row.get("status") or "")
+            if status == "aborted":
+                aborted_ids.append(mutation_id)
+                error_stage = str(row.get("error_stage") or "")
+                if error_stage == "v16_claim":
+                    v16_claim_aborted_ids.append(mutation_id)
+                elif error_stage == "transaction":
+                    transaction_aborted_ids.append(mutation_id)
+                elif error_stage == "recovery":
+                    recovery_aborted_ids.append(mutation_id)
+                else:
+                    other_aborted_ids.append(mutation_id)
+                continue
             if status in {"reserved", "prepared"}:
                 in_flight_ids.append(mutation_id)
                 continue
@@ -112,6 +130,18 @@ def collect_governance_release_preflight(
             "degraded_projection_mutation_ids": degraded_projection_ids,
             "missing_hash_mutation_ids": missing_hash_ids,
             "invalid_v16_binding_mutation_ids": invalid_v16_binding_ids,
+            # Abort classification is diagnostic only.  It intentionally does
+            # not add a release blocker or change the coordinator state machine.
+            "aborted_count": len(aborted_ids),
+            "v16_claim_aborted_count": len(v16_claim_aborted_ids),
+            "transaction_aborted_count": len(transaction_aborted_ids),
+            "recovery_aborted_count": len(recovery_aborted_ids),
+            "other_aborted_count": len(other_aborted_ids),
+            "aborted_mutation_ids": aborted_ids,
+            "v16_claim_aborted_mutation_ids": v16_claim_aborted_ids,
+            "transaction_aborted_mutation_ids": transaction_aborted_ids,
+            "recovery_aborted_mutation_ids": recovery_aborted_ids,
+            "other_aborted_mutation_ids": other_aborted_ids,
         }
     except Exception as exc:
         return {

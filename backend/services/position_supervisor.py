@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.services.position_supervisor_templates import normalize_position_supervisor_template
+from backend.services.position_supervisor_templates import (
+    DEFAULT_TEMPLATE_ID,
+    normalize_position_supervisor_template,
+)
 
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -166,6 +169,8 @@ def humanize_supervisor_reason(action: str, reason: str, evidence: dict[str, Any
         return "交易假设已有失效证据，但最小观察窗口尚未完成，系统保留原始风险保护并继续观察。"
     if reason == "profit_giveback_after_mfe":
         return "仓位曾经浮盈明显，但已经出现较大回吐，系统建议先收紧保护，避免继续把已证明的利润吐回去。"
+    if reason == "profit_protection_evidence_pending":
+        return "仓位出现了回吐或弱化信号，但有效盈利证据或完整观察窗口尚未形成，系统暂不主动收紧保护。"
     if reason == "time_decay_and_low_efficiency":
         return "这笔仓位已经拿得偏久，但收益效率没有跟上，系统判断继续硬拿的性价比在下降。"
     if reason == "regime_shift_detected":
@@ -313,6 +318,42 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     fast_window = "volatility=high" in current_regime_text or "trend=weak" in current_regime_text
     required_closed_bars = min_closed_bars_fast if fast_window else min_closed_bars_default
     closed_bar_window_ready = completed_bars_after_entry >= required_closed_bars
+    # Discretionary profit protection needs one completed bar to distinguish
+    # a real path from quote noise.  Thesis-break decisions retain the
+    # template-specific (possibly longer) observation window above.
+    management_required_closed_bars = max(1, min_closed_bars_fast)
+    management_closed_bar_window_ready = (
+        completed_bars_after_entry >= management_required_closed_bars
+    )
+    # Reuse the existing built-in baseline capture-policy floor as the
+    # agent-level validity boundary.  Governance templates may raise this
+    # floor, but may not create a second lower authority for micro-MFE.
+    baseline_capture_policy = dict(
+        normalize_position_supervisor_template(DEFAULT_TEMPLATE_ID).get(
+            "capture_policy"
+        )
+        or {}
+    )
+    baseline_capture_mfe_floor = _safe_float(
+        baseline_capture_policy.get("mfe_capture_failure_threshold"),
+        0.0,
+    )
+    capture_mfe_floor = max(
+        baseline_capture_mfe_floor,
+        _safe_float(
+            capture_policy.get("mfe_capture_failure_threshold"),
+            baseline_capture_mfe_floor,
+        ),
+    )
+    management_evidence_ready = bool(
+        price_known
+        and pnl_known
+        and path_metrics_known
+        and management_closed_bar_window_ready
+    )
+    profit_protection_window_ready = bool(
+        management_evidence_ready and mfe >= capture_mfe_floor
+    )
     thesis_break_evidence_families: list[str] = []
     if signal_reversal:
         thesis_break_evidence_families.append("signal_reversal")
@@ -333,6 +374,11 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         or risk.get("circuit_breaker_active")
         or risk.get("connection_risk_active")
         or (price_known and stop_loss_progress >= 1.0)
+    )
+    time_decay_window_ready = bool(
+        management_evidence_ready
+        or timeout_ratio >= 1.0
+        or hard_risk_active
     )
     thesis_break_ready = (
         thesis_status in {"broken", "confirmed_broken"}
@@ -388,6 +434,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         and giveback_ratio >= giveback_reduce_threshold
         and mfe > 0
         and profit_capture_ratio <= profit_capture_min_threshold
+        and profit_protection_window_ready
     ):
         trigger_tags.append("profit_giveback_after_mfe")
         action = "reduce"
@@ -411,17 +458,31 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         action = "close"
         summary_reason = "regime_shift_detected"
         severity = "warn"
-    elif path_metrics_known and (time_decay_score <= time_decay_reduce_threshold or (timeout_ratio >= timeout_reduce_ratio and holding_efficiency <= weakening_efficiency_threshold)):
+    elif (
+        path_metrics_known
+        and pnl_known
+        and time_decay_window_ready
+        and (
+            time_decay_score <= time_decay_reduce_threshold
+            or (
+                timeout_ratio >= timeout_reduce_ratio
+                and holding_efficiency <= weakening_efficiency_threshold
+            )
+        )
+    ):
         trigger_tags.append("time_decay_and_low_efficiency")
         action = "reduce" if current_pnl > 0 else "close"
         summary_reason = "time_decay_and_low_efficiency"
         severity = "warn"
     elif (
-        (path_metrics_known and giveback_ratio >= giveback_tighten_threshold)
-        or thesis_status == "weakening"
-        or timeout_ratio >= timeout_tighten_ratio
+        (
+            profit_protection_window_ready
+            and giveback_ratio >= giveback_tighten_threshold
+        )
+        or (management_evidence_ready and thesis_status == "weakening")
+        or (time_decay_window_ready and timeout_ratio >= timeout_tighten_ratio)
     ):
-        if path_metrics_known and giveback_ratio >= giveback_tighten_threshold:
+        if profit_protection_window_ready and giveback_ratio >= giveback_tighten_threshold:
             trigger_tags.append("profit_giveback_after_mfe")
             summary_reason = "profit_giveback_after_mfe"
         elif timeout_ratio >= timeout_tighten_ratio:
@@ -432,6 +493,22 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
             summary_reason = "thesis_weakening"
         action = "tighten"
         severity = "warn"
+
+    if (
+        action == "hold"
+        and summary_reason == "position_healthy"
+        and not profit_protection_window_ready
+        and (
+            giveback_ratio >= giveback_tighten_threshold
+            or thesis_status == "weakening"
+            or timeout_ratio >= timeout_tighten_ratio
+        )
+    ):
+        trigger_tags.append("profit_protection_window_pending")
+        if giveback_ratio >= giveback_tighten_threshold:
+            trigger_tags.append("profit_giveback_after_mfe_pending")
+        summary_reason = "profit_protection_evidence_pending"
+        severity = "info"
 
     confidence = 0.35
     if action == "hold":
@@ -502,6 +579,17 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "completed_bars_after_entry": int(completed_bars_after_entry),
         "required_closed_bars": int(required_closed_bars),
         "closed_bar_window_ready": bool(closed_bar_window_ready),
+        "management_required_closed_bars": int(management_required_closed_bars),
+        "management_closed_bar_window_ready": bool(
+            management_closed_bar_window_ready
+        ),
+        "capture_mfe_floor": round(capture_mfe_floor, 6),
+        "mfe_is_meaningful": bool(mfe >= capture_mfe_floor),
+        "management_evidence_ready": bool(management_evidence_ready),
+        "profit_protection_window_ready": bool(profit_protection_window_ready),
+        # Model influence is advisory and may only act after the same
+        # meaningful-profit evidence window used by discretionary protection.
+        "model_action_boundary_ready": bool(profit_protection_window_ready),
         "thesis_break_evidence_families": thesis_break_evidence_families,
         "min_independent_thesis_break_evidence": int(min_independent_evidence),
         "hard_risk_active": bool(hard_risk_active),
@@ -568,6 +656,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "near_stop_loss_preemptive_exit",
         "regime_shift_detected",
         "profit_giveback_after_mfe",
+        "profit_protection_evidence_pending",
     }:
         required_components.append("pnl")
     required_components = list(dict.fromkeys(required_components))

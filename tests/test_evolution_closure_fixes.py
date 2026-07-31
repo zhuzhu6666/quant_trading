@@ -281,6 +281,34 @@ def test_canary_stage_does_not_advance_while_expansion_is_frozen(monkeypatch):
     assert saved["foo"]["stage"] == "SHADOW"
 
 
+def test_canary_missing_shadow_perf_keeps_current_stage(monkeypatch):
+    rc.patch({"autonomy_mode": "live_candidate", "autonomy_expansion_frozen": False})
+    saved = {}
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
+    monkeypatch.setattr(
+        evo,
+        "_load_canary_states",
+        lambda: {"foo": {"stage": CANARY_5, "oos_bars": 10, "cumulative_pnl": 0.005}},
+    )
+    monkeypatch.setattr(evo, "_save_canary_states", lambda states: saved.update(states))
+    monkeypatch.setattr(
+        evo,
+        "_load_canary_ctx_from_log",
+        lambda name, score: CanaryEvalContext(
+            oos_bars=0,
+            oos_pnl=0.0,
+            additional_metrics={"source": "missing_shadow_perf"},
+        ),
+    )
+
+    promotions, rollbacks, stay = evo._run_canary_evaluation("XAUUSD+", "M5", 1000)
+
+    assert promotions == []
+    assert rollbacks == []
+    assert stay == ["foo"]
+    assert saved["foo"]["stage"] == CANARY_5
+
+
 def test_demo_canary_advances_even_when_global_expansion_freeze_is_configured(monkeypatch):
     saved = {}
     rc.patch({"autonomy_mode": "demo_nursery", "autonomy_expansion_frozen": True})
@@ -537,6 +565,18 @@ def test_canary_context_prefers_shadow_factor_perf(monkeypatch):
     assert ctx.oos_bars == 88
     assert ctx.oos_pnl == 0.0123
     assert ctx.additional_metrics["source"] == "shadow_factor_perf"
+
+
+def test_canary_context_marks_missing_shadow_perf_without_fallback_estimate(monkeypatch):
+    import alpha.shadow_trader as shadow_trader
+
+    monkeypatch.setattr(shadow_trader, "load_shadow_perf", lambda name: None)
+
+    ctx = evo._load_canary_ctx_from_log("foo", score=0.9)
+
+    assert ctx.oos_bars == 0
+    assert ctx.oos_pnl == 0.0
+    assert ctx.additional_metrics["source"] == "missing_shadow_perf"
 
 
 def test_update_shadow_performance_uses_shadow_trader(monkeypatch):

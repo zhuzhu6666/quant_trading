@@ -27,7 +27,10 @@ from backend.services.evolution_ledger import (
     record_evolution_decision,
     start_evolution_run,
 )
-from backend.services.failure_taxonomy import build_failure_taxonomy
+from backend.services.failure_taxonomy import (
+    FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES,
+    build_failure_taxonomy,
+)
 from backend.services.governance_eligibility import (
     GOVERNANCE_ELIGIBILITY_VERSION,
     GovernanceEligibility,
@@ -404,6 +407,157 @@ def _evaluate_sample_governance_eligibility(
     return evaluate_governance_eligibility(eligibility_input)
 
 
+def _canonical_sample_evidence_inputs(
+    item: dict[str, Any],
+    *,
+    stored_system_contaminated: Any = None,
+) -> dict[str, Any]:
+    """Normalize one sample before building its evidence and eligibility.
+
+    Materialization and historical repair must consume the same semantic
+    inputs.  In particular, executable governance is an explicit evidence
+    property, not a shortcut derived only from ``sample_type``.  The stored
+    contamination bit is used only as a fail-closed fallback for legacy rows;
+    current JSON evidence remains the primary source.
+    """
+    normalized = dict(item or {})
+    sample_type = str(normalized.get("sample_type") or "")
+    source_table = str(normalized.get("source_table") or "")
+    source_id = str(normalized.get("source_id") or "")
+    sample_id = str(normalized.get("sample_id") or "")
+    features = normalized.get("features")
+    verdict = normalized.get("verdict")
+    label = normalized.get("label")
+    trace = normalized.get("trace")
+    features = features if isinstance(features, dict) else {}
+    verdict = verdict if isinstance(verdict, dict) else {}
+    label = label if isinstance(label, dict) else {}
+    trace = trace if isinstance(trace, dict) else {}
+    integrity = _sample_integrity_level(normalized.get("integrity") or "missing")
+    label_status = str(normalized.get("label_status") or "pending")
+    train_weight = float(
+        normalized.get("train_weight")
+        if normalized.get("train_weight") is not None
+        else 0.0
+    )
+    causal_level = _sample_causal_level(
+        sample_type,
+        label_status,
+        normalized.get("causal_level"),
+    )
+    model_ready = (
+        label_status == "matured"
+        and integrity in {"full", "recovered"}
+        and bool(features)
+        and bool(label)
+        and bool(trace)
+    )
+
+    normalized.update(
+        {
+            "sample_id": sample_id,
+            "sample_type": sample_type,
+            "source_table": source_table,
+            "source_id": source_id,
+            "features": features,
+            "verdict": verdict,
+            "label": label,
+            "trace": trace,
+            "integrity": integrity,
+            "label_status": label_status,
+            "train_weight": train_weight,
+            "causal_level": causal_level,
+        }
+    )
+
+    contaminated = _sample_is_system_contaminated(normalized)
+    if not contaminated and stored_system_contaminated is not None:
+        # A legacy row can have lost its nested contamination marker.  Never
+        # turn an already-blocked stored row into an executable sample during
+        # a repair pass.
+        contaminated = bool(stored_system_contaminated)
+    normalized["system_contaminated"] = contaminated
+    model_ready = model_ready and not contaminated
+
+    existing_contract = normalized.get("evidence_contract")
+    existing_contract = existing_contract if isinstance(existing_contract, dict) else {}
+    existing_quality = existing_contract.get("quality")
+    existing_quality = existing_quality if isinstance(existing_quality, dict) else {}
+    explicit_executable = normalized.get("executable_governance_allowed")
+    if explicit_executable is None:
+        explicit_executable = existing_quality.get("executable_governance_allowed")
+    if explicit_executable is None:
+        # Missing evidence is not permission.  Builders must provide the
+        # explicit flag; repair must never recreate it from sample type.
+        explicit_executable = False
+    # Contamination can never advertise executable governance, even though
+    # the evaluator independently fail-closes the sample.
+    executable_allowed = bool(explicit_executable) and not contaminated
+    normalized["executable_governance_allowed"] = executable_allowed
+    normalized["model_ready"] = model_ready
+    normalized["quality"] = {
+        "quality_score": max(0.0, min(1.0, train_weight)),
+        "model_ready": model_ready,
+        "executable_governance_allowed": executable_allowed,
+        "missing": [],
+    }
+    return normalized
+
+
+def _build_sample_evidence_contract(
+    item: dict[str, Any],
+    *,
+    stored_system_contaminated: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any], GovernanceEligibility]:
+    """Build the evidence contract and eligibility from canonical inputs."""
+    normalized = _canonical_sample_evidence_inputs(
+        item,
+        stored_system_contaminated=stored_system_contaminated,
+    )
+    contract = build_evidence_contract(
+        sample_id=str(normalized.get("sample_id") or ""),
+        sample_kind=str(normalized.get("sample_type") or ""),
+        source={
+            "table": str(normalized.get("source_table") or ""),
+            "source_id": str(normalized.get("source_id") or ""),
+        },
+        features=normalized["features"],
+        label=normalized["label"],
+        trace=normalized["trace"],
+        quality=normalized["quality"],
+        integrity=str(normalized.get("integrity") or "missing"),
+        causal_level=str(normalized.get("causal_level") or "observational"),
+        label_status=str(normalized.get("label_status") or "pending"),
+        explanation={"verdict": normalized["verdict"]},
+    )
+    if normalized.get("system_contaminated"):
+        # Keep the v1 contract shape, but remove strong uses from contaminated
+        # evidence so health/readiness cannot describe it as trainable even
+        # before the eligibility columns are inspected.
+        strong_uses = {
+            "supervised_training",
+            "strong_governance",
+            "executable_governance",
+        }
+        contract["allowed_uses"] = [
+            use for use in list(contract.get("allowed_uses") or []) if use not in strong_uses
+        ]
+        blockers = list(contract.get("blockers") or [])
+        if "system_contaminated" not in blockers:
+            blockers.append("system_contaminated")
+        contract["blockers"] = blockers
+        contract["quality"]["model_ready"] = False
+        contract["quality"]["executable_governance_allowed"] = False
+        contract["model_ready"] = False
+    eligibility = _evaluate_sample_governance_eligibility(
+        item=normalized,
+        sample_id=str(normalized.get("sample_id") or ""),
+        evidence_contract=contract,
+    )
+    contract["governance_eligibility"] = eligibility.to_dict()
+    return normalized, contract, eligibility
+
+
 def _upsert_sample(conn, item: dict[str, Any]) -> bool:
     now = time.time()
     sample_type = str(item.get("sample_type") or "")
@@ -412,14 +566,30 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
     if not sample_type or not source_table or not source_id:
         return False
     sample_id = str(item.get("sample_id") or _sample_id(sample_type, source_table, source_id))
-    features = item.get("features") or {}
-    verdict = item.get("verdict") or {}
-    label = item.get("label") or {}
-    trace = item.get("trace") or {}
-    integrity = _sample_integrity_level(item.get("integrity") or "full")
-    label_status = str(item.get("label_status") or "pending")
-    train_weight = float(item.get("train_weight") if item.get("train_weight") is not None else 1.0)
-    causal_level = _sample_causal_level(sample_type, label_status, item.get("causal_level"))
+    normalized_item = {
+        **item,
+        "sample_id": sample_id,
+        "sample_type": sample_type,
+        "source_table": source_table,
+        "source_id": source_id,
+        "integrity": item.get("integrity") or "full",
+        "train_weight": (
+            item.get("train_weight")
+            if item.get("train_weight") is not None
+            else 1.0
+        ),
+    }
+    normalized_item, evidence_contract, eligibility = _build_sample_evidence_contract(
+        normalized_item,
+    )
+    features = normalized_item["features"]
+    verdict = normalized_item["verdict"]
+    label = normalized_item["label"]
+    trace = normalized_item["trace"]
+    integrity = normalized_item["integrity"]
+    label_status = normalized_item["label_status"]
+    train_weight = normalized_item["train_weight"]
+    causal_level = normalized_item["causal_level"]
     snapshot = item.get("runtime_config") or {}
     config_version = int(item.get("config_version") or (snapshot or {}).get("config_version") or 0)
     config_hash = str(item.get("config_hash") or (snapshot or {}).get("config_hash") or "")
@@ -441,51 +611,6 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
             existing_label_status = str(existing[0] or "")
         if existing_label_status == "matured" and label_status != "matured":
             return False
-    model_ready = (
-        label_status == "matured"
-        and integrity in {"full", "recovered"}
-        and bool(features)
-        and bool(label)
-        and bool(trace)
-    )
-    evidence_contract = build_evidence_contract(
-        sample_id=sample_id,
-        sample_kind=sample_type,
-        source={"table": source_table, "source_id": source_id},
-        features=features,
-        label=label,
-        trace=trace,
-        quality={
-            "quality_score": max(0.0, min(1.0, train_weight)),
-            "model_ready": model_ready,
-            "executable_governance_allowed": bool(
-                item.get("executable_governance_allowed", False)
-            ),
-            "missing": [],
-        },
-        integrity=integrity,
-        causal_level=causal_level,
-        label_status=label_status,
-        explanation={"verdict": verdict},
-    )
-    eligibility = _evaluate_sample_governance_eligibility(
-        item={
-            **item,
-            "sample_id": sample_id,
-            "sample_type": sample_type,
-            "source_table": source_table,
-            "source_id": source_id,
-            "label_status": label_status,
-            "integrity": integrity,
-            "features": features,
-            "verdict": verdict,
-            "label": label,
-            "trace": trace,
-        },
-        sample_id=sample_id,
-        evidence_contract=evidence_contract,
-    )
-    evidence_contract["governance_eligibility"] = eligibility.to_dict()
     row_payload = {
         "sample_id": sample_id,
         "sample_type": sample_type,
@@ -2364,6 +2489,18 @@ def materialize_entry_quality_governance_suggestions(
             pnl = float(label.get("pnl") or 0.0)
             entry_score = abs(float(review.get("entry_score") or 0.0))
             worst_factor = str(review.get("worst_factor") or "").strip()
+            taxonomy = review.get("failure_taxonomy") or {}
+            primary_responsibility = str(
+                review.get("primary_responsibility")
+                or (taxonomy.get("primary_responsibility") if isinstance(taxonomy, dict) else "")
+                or ""
+            ).strip().lower()
+            factor_penalty_eligible = bool(
+                worst_factor
+                and primary_responsibility
+                and primary_responsibility != "unclear"
+                and primary_responsibility not in FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES
+            )
             bad = pnl < 0 or str(label.get("outcome_label") or "") == "bad_loss"
             base_item = {
                 "sample_id": str(row["sample_id"] or ""),
@@ -2373,6 +2510,8 @@ def materialize_entry_quality_governance_suggestions(
                 "bad": bad,
                 "entry_score": entry_score,
                 "worst_factor": worst_factor,
+                "primary_responsibility": primary_responsibility,
+                "factor_penalty_eligible": factor_penalty_eligible,
                 "failure_tags": sorted(failure_tags),
                 "governance_weight": float(row["governance_effective_weight"] or 0.0),
                 "governance_eligibility_fingerprint": str(row["governance_eligibility_fingerprint"] or ""),
@@ -2381,7 +2520,7 @@ def materialize_entry_quality_governance_suggestions(
                 buckets.setdefault("weak_signal", []).append(dict(base_item))
             if bad and failure_tags.intersection({"factor_conflict", "conflicting_factor_entry", "conflict_entry_loss"}):
                 buckets.setdefault("factor_conflict", []).append(dict(base_item))
-                if worst_factor:
+                if factor_penalty_eligible:
                     buckets.setdefault(f"worst_factor:{worst_factor}", []).append(dict(base_item))
 
         now = time.time()
@@ -2537,6 +2676,14 @@ def materialize_entry_quality_governance_suggestions(
                 **_governance_evidence_metrics(metrics),
                 "avg_entry_score": round(avg_entry_score, 6),
                 "worst_factor": scope_key if bucket.startswith("worst_factor:") else "",
+                "primary_responsibilities": sorted(
+                    {
+                        str(item.get("primary_responsibility") or "")
+                        for item in items
+                        if str(item.get("primary_responsibility") or "")
+                    }
+                ),
+                "factor_penalty_eligible": bucket.startswith("worst_factor:"),
                 "sample_ids": [item["sample_id"] for item in items[:20]],
                 "position_ids": [item["position_id"] for item in items[:20]],
                 "recommended_controls": recommended_controls,
@@ -2715,61 +2862,33 @@ def list_autonomous_learning_samples(
 
 
 def _rebuilt_evidence_contract_from_sample(row: Any) -> dict[str, Any]:
-    features = _loads(row["features_json"], {})
-    label = _loads(row["label_json"], {})
-    trace = _loads(row["trace_json"], {})
-    verdict = _loads(row["verdict_json"], {})
-    label_status = str(row["label_status"] or "pending")
-    integrity = _sample_integrity_level(row["integrity"] or "missing")
-    train_weight = float(row["train_weight"] if row["train_weight"] is not None else 0.0)
-    sample_type = str(row["sample_type"] or "")
-    causal_level = _sample_causal_level(sample_type, label_status)
-    model_ready = (
-        label_status == "matured"
-        and integrity in {"full", "recovered"}
-        and bool(features)
-        and bool(label)
-        and bool(trace)
+    item = {
+        "sample_id": str(row["sample_id"] or ""),
+        "sample_type": str(row["sample_type"] or ""),
+        "source_table": str(row["source_table"] or ""),
+        "source_id": str(row["source_id"] or ""),
+        "decision_id": str(row["decision_id"] or ""),
+        "trade_id": str(row["trade_id"] or ""),
+        "position_id": str(row["position_id"] or ""),
+        "label_status": str(row["label_status"] or "pending"),
+        "integrity": row["integrity"] or "missing",
+        "train_weight": row["train_weight"] if row["train_weight"] is not None else 0.0,
+        "features": _loads(row["features_json"], {}),
+        "verdict": _loads(row["verdict_json"], {}),
+        "label": _loads(row["label_json"], {}),
+        "trace": _loads(row["trace_json"], {}),
+        "evidence_contract": _loads(row["evidence_contract_json"], {}),
+    }
+    trace = item["trace"] if isinstance(item["trace"], dict) else {}
+    item["verified_recovered"] = bool(trace.get("verified_recovered"))
+    _, contract, _ = _build_sample_evidence_contract(
+        item,
+        stored_system_contaminated=(
+            row["system_contaminated"]
+            if "system_contaminated" in row.keys()
+            else None
+        ),
     )
-    contract = build_evidence_contract(
-        sample_id=str(row["sample_id"] or ""),
-        sample_kind=sample_type,
-        source={"table": str(row["source_table"] or ""), "source_id": str(row["source_id"] or "")},
-        features=features,
-        label=label,
-        trace=trace,
-        quality={
-            "quality_score": max(0.0, min(1.0, train_weight)),
-            "model_ready": model_ready,
-            "executable_governance_allowed": sample_type in EXECUTABLE_GOVERNANCE_SAMPLE_TYPES,
-            "missing": [],
-        },
-        integrity=integrity,
-        causal_level=causal_level,
-        label_status=label_status,
-        explanation={"verdict": verdict},
-    )
-    eligibility = _evaluate_sample_governance_eligibility(
-        item={
-            "sample_id": str(row["sample_id"] or ""),
-            "sample_type": sample_type,
-            "source_table": str(row["source_table"] or ""),
-            "source_id": str(row["source_id"] or ""),
-            "decision_id": str(row["decision_id"] or ""),
-            "trade_id": str(row["trade_id"] or ""),
-            "position_id": str(row["position_id"] or ""),
-            "label_status": label_status,
-            "integrity": integrity,
-            "features": features,
-            "verdict": verdict,
-            "label": label,
-            "trace": trace,
-            "verified_recovered": bool(trace.get("verified_recovered")),
-        },
-        sample_id=str(row["sample_id"] or ""),
-        evidence_contract=contract,
-    )
-    contract["governance_eligibility"] = eligibility.to_dict()
     return contract
 
 
@@ -2782,6 +2901,11 @@ def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: 
         "model_ready_without_supervised_training": 0,
         "model_ready_non_matured": 0,
         "model_ready_missing_or_incomplete": 0,
+        "non_matured_allows_strong_governance": 0,
+        "contaminated_allows_strong_governance": 0,
+        "contaminated_governance_eligible": 0,
+        "contaminated_quality_model_ready": 0,
+        "contaminated_quality_executable_governance": 0,
         "parse_errors": 0,
     }
     examples: list[dict[str, Any]] = []
@@ -2790,6 +2914,7 @@ def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: 
             conn,
             """
             SELECT sample_id, sample_type, label_status, integrity,
+                   system_contaminated, governance_eligible,
                    features_json, label_json, trace_json, evidence_contract_json
             FROM autonomous_learning_sample
             ORDER BY updated_at DESC, created_at DESC
@@ -2805,14 +2930,35 @@ def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: 
                 contract = {}
                 counts["parse_errors"] += 1
             allowed = set(contract.get("allowed_uses") or [])
+            quality = contract.get("quality") if isinstance(contract.get("quality"), dict) else {}
             model_ready = bool(contract.get("model_ready"))
             label_status = str(row["label_status"] or "")
             integrity = str(row["integrity"] or "")
+            system_contaminated = bool(row["system_contaminated"] or 0)
+            governance_eligible = bool(row["governance_eligible"] or 0)
             complete = bool(_loads(row["features_json"], {})) and bool(_loads(row["label_json"], {})) and bool(_loads(row["trace_json"], {}))
             bad_codes = []
             if label_status != "matured" and "supervised_training" in allowed:
                 counts["non_matured_allows_supervised_training"] += 1
                 bad_codes.append("non_matured_allows_supervised_training")
+            strong_uses = allowed.intersection(
+                {"supervised_training", "strong_governance", "executable_governance"}
+            )
+            if label_status != "matured" and strong_uses:
+                counts["non_matured_allows_strong_governance"] += 1
+                bad_codes.append("non_matured_allows_strong_governance")
+            if system_contaminated and strong_uses:
+                counts["contaminated_allows_strong_governance"] += 1
+                bad_codes.append("contaminated_allows_strong_governance")
+            if system_contaminated and governance_eligible:
+                counts["contaminated_governance_eligible"] += 1
+                bad_codes.append("contaminated_governance_eligible")
+            if system_contaminated and bool(quality.get("model_ready")):
+                counts["contaminated_quality_model_ready"] += 1
+                bad_codes.append("contaminated_quality_model_ready")
+            if system_contaminated and bool(quality.get("executable_governance_allowed")):
+                counts["contaminated_quality_executable_governance"] += 1
+                bad_codes.append("contaminated_quality_executable_governance")
             if model_ready and "supervised_training" not in allowed:
                 counts["model_ready_without_supervised_training"] += 1
                 bad_codes.append("model_ready_without_supervised_training")
@@ -2839,6 +2985,11 @@ def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: 
                 "model_ready_without_supervised_training",
                 "model_ready_non_matured",
                 "model_ready_missing_or_incomplete",
+                "non_matured_allows_strong_governance",
+                "contaminated_allows_strong_governance",
+                "contaminated_governance_eligible",
+                "contaminated_quality_model_ready",
+                "contaminated_quality_executable_governance",
                 "parse_errors",
             )
         )
