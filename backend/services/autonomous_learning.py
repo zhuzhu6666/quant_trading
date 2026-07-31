@@ -5319,6 +5319,21 @@ def run_autonomous_learning_cycle(
     event_window_governance = materialize_event_window_governance_suggestions(db_path=db_path, limit=sample_limit)
     contract_repair = repair_evidence_contracts(db_path=db_path, limit=max(sample_limit, sample_limit * 4))
     gov = RuleEvolutionGovernor(str(db_path))
+    # Demo autonomy must not let an old observation-only window occupy a
+    # scope indefinitely.  demo_nursery already terminalizes via
+    # apply_demo_autonomy; demo_autonomous runs the same reconcile here so
+    # mixed/observing windows are closed as inconclusive (evidence quality
+    # preserved, retry_via_new_application=True) instead of blocking AWE
+    # weight adaptation forever.
+    _effect_reconcile_kwargs = (
+        {
+            "mixed_recheck_after_seconds": 0.0,
+            "max_observation_age_seconds": 86400.0,
+            "terminalize_mixed_after_recheck": True,
+        }
+        if _autonomy_mode() in {"demo_autonomous", "demo_nursery"}
+        else {}
+    )
     governance = {
         "review_pending": (
             gov.review_pending()
@@ -5331,7 +5346,7 @@ def run_autonomous_learning_cycle(
             else dict(mutation_block)
         ),
         "reconcile_application_effects": (
-            gov.reconcile_application_effects()
+            gov.reconcile_application_effects(**_effect_reconcile_kwargs)
             if mutation_allowed
             else dict(mutation_block)
         ),

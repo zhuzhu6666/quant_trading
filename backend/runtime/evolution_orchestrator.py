@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 from backend.core.db import connect_sqlite, get_state_pg_conn
 from backend.core.state_store import RuntimeStateSchemaError, validate_runtime_state_schema
 
+from backend.services.autonomous_learning import _autonomy_mode
+
 
 _CANARY_DB = None
 
@@ -1331,7 +1333,22 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
             _gov = RuleEvolutionGovernor()
             governance_result["review_pending"] = _gov.review_pending()
             governance_result["reconcile_active"] = _gov.reconcile_active()
-            governance_result["reconcile_application_effects"] = _gov.reconcile_application_effects()
+            # Keep the hourly chain consistent with run_autonomous_learning_cycle:
+            # in demo autonomy modes an observation-only window must not occupy
+            # a factor scope forever (mixed -> inconclusive, retry via a new
+            # governed application) instead of blocking AWE weight adaptation.
+            _effect_reconcile_kwargs = (
+                {
+                    "mixed_recheck_after_seconds": 0.0,
+                    "max_observation_age_seconds": 86400.0,
+                    "terminalize_mixed_after_recheck": True,
+                }
+                if _autonomy_mode() in {"demo_autonomous", "demo_nursery"}
+                else {}
+            )
+            governance_result["reconcile_application_effects"] = _gov.reconcile_application_effects(
+                **_effect_reconcile_kwargs
+            )
             _emit_evolution_story("learning_governance", governance_result)
         except Exception as e:
             logger.debug("[Evolve] learning governance: %s", e)

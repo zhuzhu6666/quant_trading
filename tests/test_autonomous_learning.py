@@ -2421,7 +2421,7 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
             calls.append("reconcile_active")
             return {}
 
-        def reconcile_application_effects(self):
+        def reconcile_application_effects(self, **kwargs):
             calls.append("reconcile_application_effects")
             return {}
 
