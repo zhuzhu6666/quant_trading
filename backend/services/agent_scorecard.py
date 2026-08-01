@@ -94,6 +94,9 @@ class AgentScorecardService:
         items = []
         for metric in agents.values():
             metric["quality_score"] = self._quality_score(metric)
+            # Keep the lifecycle distinction private so the v1 response
+            # remains backward-compatible for readiness/API consumers.
+            metric.pop("_posterior_not_selected_count", None)
             items.append(metric)
         items.sort(key=lambda item: (item["quality_score"], item["proposal_count"], item["application_count"]), reverse=True)
         return {
@@ -272,6 +275,9 @@ class AgentScorecardService:
             "source_kind": contract.get("source_kind", ""),
             "capability_scope": contract.get("capability_scope", ""),
             "authority_state": contract.get("authority_state", "review_only"),
+            # Internal-only lifecycle detail. Normal V16 posterior rotation
+            # is not a failed candidate lifecycle and is not public output.
+            "_posterior_not_selected_count": 0,
             "proposal_count": 0,
             "candidate_count": 0,
             "policy_suggestion_count": 0,
@@ -351,6 +357,7 @@ class AgentScorecardService:
             conn,
             """
             SELECT candidate_id, source_agent, scope_type, action, status,
+                   proposal_stage,
                    lineage_json, created_at, updated_at
             FROM brain_governance_candidate
             ORDER BY created_at DESC
@@ -363,6 +370,11 @@ class AgentScorecardService:
             metric["candidate_count"] += 1
             _status_inc(metric["status_counts"], row["status"])
             self._touch(metric, row["updated_at"] or row["created_at"])
+            if (
+                _text(row["status"]) == "superseded"
+                and _text(row["proposal_stage"]) == "posterior_not_selected"
+            ):
+                metric["_posterior_not_selected_count"] += 1
             lineage = _loads(row["lineage_json"], {})
             verdict = lineage.get("authority_verdict") if isinstance(lineage, dict) else {}
             if isinstance(verdict, dict) and verdict.get("violations"):
@@ -863,6 +875,11 @@ class AgentScorecardService:
         terminal = int(metric.get("terminal_effect_count") or 0)
         inconclusive = int(metric.get("inconclusive_effect_count") or 0)
         superseded = int((metric.get("status_counts") or {}).get("superseded") or 0)
+        posterior_not_selected = min(
+            superseded,
+            int(metric.get("_posterior_not_selected_count") or 0),
+        )
+        failed_superseded = max(0, superseded - posterior_not_selected)
         submitted = int((metric.get("status_counts") or {}).get("submitted") or 0)
         outcome_count = positive + negative
         score = 0.55
@@ -873,7 +890,11 @@ class AgentScorecardService:
         if application_count:
             score += 0.08 * min(1.0, terminal / application_count)
             score -= 0.08 * min(1.0, inconclusive / application_count)
-        score -= 0.10 * min(1.0, superseded / originated_count)
+        # V16 marks candidates that lost posterior arbitration as
+        # ``posterior_not_selected``. They are ordinary candidate rotation,
+        # not evidence of a failed lifecycle. Preserve the penalty for every
+        # other superseded candidate.
+        score -= 0.10 * min(1.0, failed_superseded / originated_count)
         # Candidate-only agents hand work to the policy lane instead of owning
         # applications.  A successful submit is positive lifecycle evidence;
         # using proposal_count=1 as their denominator used to mark healthy

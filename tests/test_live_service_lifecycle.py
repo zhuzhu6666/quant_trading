@@ -3,6 +3,7 @@ import sqlite3
 import time
 from types import SimpleNamespace
 
+import duckdb
 import pytest
 
 from backend.ledger.service import DecisionLedger
@@ -127,6 +128,46 @@ def _patch_fresh_projection_publish_without_state_store(monkeypatch):
             dict(item) for item in (getattr(result, "positions", ()) or ())
         ],
     )
+
+
+def test_warmup_reads_previous_month_when_current_month_is_empty(monkeypatch, tmp_path):
+    from backend.core import db as core_db
+
+    monthly_dir = tmp_path / "bars_monthly"
+    monthly_dir.mkdir()
+    current_path = monthly_dir / "bars_2026_08.duckdb"
+    previous_path = monthly_dir / "bars_2026_07.duckdb"
+    schema = (
+        "CREATE TABLE bars ("
+        "symbol VARCHAR, timeframe VARCHAR, time BIGINT, "
+        "open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE"
+        ")"
+    )
+
+    for path in (current_path, previous_path):
+        conn = duckdb.connect(str(path))
+        conn.execute(schema)
+        conn.close()
+    conn = duckdb.connect(str(previous_path))
+    conn.executemany(
+        "INSERT INTO bars VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("XAUUSD+", "M5", 1785531000, 2400.0, 2401.0, 2399.0, 2400.5, 10.0),
+            ("XAUUSD+", "M5", 1785531300, 2401.0, 2402.0, 2400.0, 2401.5, 11.0),
+            ("XAUUSD+", "M5", 1785531600, 2402.0, 2403.0, 2401.0, 2402.5, 12.0),
+        ],
+    )
+    conn.close()
+
+    monkeypatch.setattr(core_db, "DUCKDB_BARS_MONTHLY_DIR", monthly_dir)
+    monkeypatch.setattr(core_db, "DUCKDB_BARS", current_path)
+
+    frame = live_service._warmup_from_local_db("XAUUSD+", "M5", 3)
+
+    assert frame is not None
+    assert len(frame) == 3
+    assert frame.index.is_monotonic_increasing
+    assert frame["close"].tolist() == [2400.5, 2401.5, 2402.5]
 
 
 def test_closed_position_handler_preserves_close_source_mapping(monkeypatch):

@@ -5988,21 +5988,43 @@ def _warmup_from_local_db(symbol: str = "XAUUSD+", timeframe: str = "M15", n_bar
     实时 tick 走 broker spot event, 这里只保证 strategy 暖机有数据。
     """
     import time as _time
-    from backend.core.db import DUCKDB_BARS, duckdb_readonly_connection
-    db_path = str(DUCKDB_BARS)
+    from backend.core.db import (
+        bars_monthly_read_paths,
+        duckdb_readonly_connection,
+    )
+
+    db_paths = bars_monthly_read_paths(newest_first=True)
+    target_bars = int(n_bars)
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            with duckdb_readonly_connection(db_path, snapshot_first=True) as conn:
-                df = conn.execute(
-                    "SELECT time, open, high, low, close, volume "
-                    "FROM bars WHERE symbol=? AND timeframe=? "
-                    "ORDER BY time DESC LIMIT ?",
-                    [symbol, timeframe, n_bars]
-                ).df()
-            if df is None or len(df) == 0:
+            remaining = target_bars
+            frames = []
+            for db_path in db_paths:
+                if remaining <= 0:
+                    break
+                with duckdb_readonly_connection(
+                    str(db_path), snapshot_first=True
+                ) as conn:
+                    frame = conn.execute(
+                        "SELECT time, open, high, low, close, volume "
+                        "FROM bars WHERE symbol=? AND timeframe=? "
+                        "ORDER BY time DESC LIMIT ?",
+                        [symbol, timeframe, remaining],
+                    ).df()
+                if frame is not None and len(frame) > 0:
+                    frames.append(frame)
+                    remaining -= len(frame)
+
+            if not frames:
                 logger.warning(f"DuckDB has no bars for {symbol} {timeframe}")
                 return None
+            df = pd.concat(frames, ignore_index=True)
+            df = (
+                df.drop_duplicates(subset=["time"], keep="first")
+                .sort_values("time")
+                .tail(target_bars)
+            )
             # time 是 epoch 秒, 转 datetime index
             df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
             df = df.set_index("time").sort_index()

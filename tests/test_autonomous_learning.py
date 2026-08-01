@@ -25,7 +25,9 @@ def _v16_supervisor_bridge_evidence(candidate_id: str) -> dict:
     }
 
 
-def _seed_v16_supervisor_command(db_path, *, candidate_id: str) -> None:
+def _seed_v16_supervisor_command(
+    db_path, *, candidate_id: str, evidence_fingerprint: str = ""
+) -> None:
     V16CommandGate.ensure_finalize_schema(db_path)
     now = time.time()
     conn = sqlite3.connect(str(db_path))
@@ -35,12 +37,19 @@ def _seed_v16_supervisor_command(db_path, *, candidate_id: str) -> None:
             INSERT INTO v16_brain_command
             (command_id, candidate_id, target_agent, scope_type, scope_key, action,
              decision, status, evidence_json, delegation_json, claim_status,
-             authority_issued_at, created_at, updated_at)
+             evidence_fingerprint, authority_issued_at, created_at, updated_at)
             VALUES (?, ?, 'position_supervisor_governance', 'supervisor_template',
                     'position_supervisor', 'switch_position_supervisor_template',
-                    'delegate', 'delegated_to_specialist', '{}', '{}', 'available', ?, ?, ?)
+                    'delegate', 'delegated_to_specialist', '{}', '{}', 'available', ?, ?, ?, ?)
             """,
-            (f"v16_supervisor_{candidate_id}", candidate_id, now, now, now),
+            (
+                f"v16_supervisor_{candidate_id}",
+                candidate_id,
+                evidence_fingerprint,
+                now,
+                now,
+                now,
+            ),
         )
         conn.commit()
     finally:
@@ -1599,6 +1608,98 @@ def test_position_supervisor_trace_backfill_from_decision_ledger(tmp_path):
     assert row[4]
 
 
+def test_candidate_observation_replays_current_applied_supervisor_effect(tmp_path):
+    db_path = tmp_path / "state.db"
+    candidate_started_at = time.time() - 7200
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, status,
+             applied_mutation_id, created_at)
+            VALUES ('applied_current', 'position_supervisor_template',
+                    'position_supervisor:conservative.v1',
+                    'switch_position_supervisor_template', 'applied',
+                    'mutation_current', ?)
+            """,
+            (candidate_started_at,),
+        )
+        conn.execute(
+            """
+            INSERT INTO learning_application_effect
+            (application_id, scope_type, scope_key, action, status,
+             mutation_id, created_at, updated_at)
+            VALUES ('effect_current', 'position_supervisor_template',
+                    'position_supervisor:conservative.v1',
+                    'switch_position_supervisor_template', 'observing',
+                    'mutation_current', ?, ?)
+            """,
+            (candidate_started_at + 1, candidate_started_at + 1),
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, review_json, created_at)
+            VALUES ('review_current', 'trade_current', 'position_current', '{}', ?)
+            """,
+            (candidate_started_at + 3600,),
+        )
+        conn.execute(
+            """
+            INSERT INTO supervisor_counterfactual_review
+            (counterfactual_id, review_id, trade_id, position_id, close_ts,
+             evidence_json, created_at, updated_at)
+            VALUES ('cf_current', 'review_current', 'trade_current',
+                    'position_current', ?, ?, ?, ?)
+            """,
+            (
+                candidate_started_at + 3600,
+                json.dumps(
+                    {
+                        "maturity": {"governance_eligible": True},
+                        "regime": "current_regime",
+                    }
+                ),
+                candidate_started_at + 3600,
+                candidate_started_at + 3600,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    from backend.services.position_supervisor_governance import (
+        materialize_position_supervisor_candidate_observations,
+    )
+
+    result = materialize_position_supervisor_candidate_observations(
+        db_path=db_path,
+        limit=10,
+        run_id="run_current_applied",
+    )
+
+    assert result["inserted"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            """
+            SELECT template_id, stage, execution_reason, trace_integrity
+            FROM position_supervisor_trace
+            WHERE position_id='position_current'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == (
+        "position_supervisor:conservative.v1",
+        "learning_shadow",
+        "learning_worker_candidate_replay:applied_current",
+        "recovered",
+    )
+
+
 def test_parameter_template_recommendations_auto_materialize_and_dedupe(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(str(db_path))
@@ -1998,7 +2099,28 @@ def test_demo_auto_applies_supervisor_template_without_mature_canary(tmp_path, m
         conn.commit()
     finally:
         conn.close()
-    _seed_v16_supervisor_command(db_path, candidate_id="candidate_demo_aggressive")
+    _seed_v16_supervisor_command(
+        db_path,
+        candidate_id="candidate_demo_aggressive",
+        evidence_fingerprint="command-evidence-demo-aggressive",
+    )
+
+    from backend.services import governance_mutation_coordinator as coordinator_module
+
+    # Bootstrap the local fixture with the same coordinator tables that the
+    # production migration owns before exercising production-like V16 finalize.
+    coordinator_module.GovernanceMutationCoordinator(db_path)._prepare_storage()
+
+    class ProductionLikeCoordinator(coordinator_module.GovernanceMutationCoordinator):
+        @property
+        def production_state(self):
+            return True
+
+    monkeypatch.setattr(
+        coordinator_module,
+        "GovernanceMutationCoordinator",
+        ProductionLikeCoordinator,
+    )
 
     rc.replace(
         rc.RuntimeConfig(
@@ -2024,16 +2146,22 @@ def test_demo_auto_applies_supervisor_template_without_mature_canary(tmp_path, m
                 ).fetchone()[0]
             )
             v16_status = conn.execute(
-                "SELECT claim_status, apply_count FROM v16_brain_command"
+                "SELECT command_id, claim_status, apply_count FROM v16_brain_command"
+            ).fetchone()
+            intent = conn.execute(
+                "SELECT idempotency_key, evidence_fingerprint FROM governance_mutation_intent"
             ).fetchone()
         finally:
             conn.close()
         assert details["demo_aggressive_governance"] is True
         assert details["canary_evidence_ready"] is False
-        # SQLite fixtures are deliberately treated as non-production by the
-        # coordinator, so they validate the claim handoff without consuming
-        # the command. Production PostgreSQL finalizes it atomically.
-        assert v16_status == ("claimed", 0)
+        assert v16_status == (
+            "v16_supervisor_candidate_demo_aggressive",
+            "finalized",
+            1,
+        )
+        assert intent[0].endswith(f":v16:{v16_status[0]}")
+        assert intent[1] == "command-evidence-demo-aggressive"
     finally:
         rc.reset_for_tests()
 
@@ -2370,14 +2498,18 @@ def test_demo_factor_apply_supersedes_missing_runtime_downweight(monkeypatch):
         factor_signal_config = {}
 
     reviewed = []
+
+    class _Governor:
+        def set_status(self, suggestion_id, status, note=""):
+            reviewed.append((suggestion_id, status, note))
+            return True
+
     monkeypatch.setattr(al, "_connect", lambda *_args, **_kwargs: _Conn())
     monkeypatch.setattr(al, "_execute", lambda *_args, **_kwargs: _Rows())
     monkeypatch.setattr(rc, "shared", lambda: _Config())
     monkeypatch.setattr(
-        "research.learning.governor.RuleEvolutionGovernor.set_status",
-        lambda _self, suggestion_id, status, note="": reviewed.append(
-            (suggestion_id, status, note)
-        ) or True,
+        "research.learning.governor.RuleEvolutionGovernor",
+        _Governor,
     )
 
     result = al._apply_approved_factor_suggestions_for_demo(experiment_id="exp_stale")

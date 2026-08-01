@@ -212,6 +212,136 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
     assert status["ok"] is True
 
 
+def test_learning_repair_tracks_active_applied_supervisor_cohort(tmp_path):
+    db_path = tmp_path / "state.db"
+    candidate_started_at = 1_700_000_000.0
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.executemany(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, status,
+             applied_mutation_id, created_at)
+            VALUES (?, 'position_supervisor_template', ?,
+                    'switch_position_supervisor_template', 'applied', ?, ?)
+            """,
+            [
+                (
+                    "applied_old",
+                    "position_supervisor:old.v1",
+                    "mutation_old",
+                    candidate_started_at - 86400,
+                ),
+                (
+                    "applied_current",
+                    "position_supervisor:current.v1",
+                    "mutation_current",
+                    candidate_started_at,
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO learning_application_effect
+            (application_id, scope_type, scope_key, action, status,
+             mutation_id, created_at, updated_at)
+            VALUES (?, 'position_supervisor_template', ?,
+                    'switch_position_supervisor_template', ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "effect_old",
+                    "position_supervisor:old.v1",
+                    "rolled_back",
+                    "mutation_old",
+                    candidate_started_at - 86399,
+                    candidate_started_at - 86399,
+                ),
+                (
+                    "effect_current",
+                    "position_supervisor:current.v1",
+                    "observing",
+                    "mutation_current",
+                    candidate_started_at + 1,
+                    candidate_started_at + 1,
+                ),
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, status, created_at)
+            VALUES ('approved_pending', 'position_supervisor_template',
+                    'position_supervisor:pending.v1',
+                    'switch_position_supervisor_template', 'approved', ?)
+            """,
+            (candidate_started_at + 7200,),
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, review_json, created_at)
+            VALUES ('review_current', 'trade_current', 'position_current', '{}', ?)
+            """,
+            (candidate_started_at + 3600,),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_supervisor_trace
+            (trace_id, position_id, template_id, stage, outcome,
+             execution_status, execution_reason, trace_integrity, event_ts, created_at)
+            VALUES ('trace_current', 'position_current', 'position_supervisor:current.v1',
+                    'learning_shadow', 'shadow', 'observation_only',
+                    'learning_worker_candidate_replay:applied_current',
+                    'recovered', ?, ?)
+            """,
+            (candidate_started_at + 3590, candidate_started_at + 3590),
+        )
+        conn.execute(
+            """
+            INSERT INTO supervisor_counterfactual_review
+            (counterfactual_id, review_id, position_id, close_ts,
+             evidence_json, created_at, updated_at)
+            VALUES ('cf_current', 'review_current', 'position_current', ?, ?, ?, ?)
+            """,
+            (
+                candidate_started_at + 3600,
+                json.dumps(
+                    {
+                        "regime": "current_regime",
+                        "maturity": {"governance_eligible": True},
+                    }
+                ),
+                candidate_started_at + 3600,
+                candidate_started_at + 3600,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rc.replace(
+        rc.RuntimeConfig(
+            autonomy_expansion_frozen=True,
+            supervisor_canary_mature_trade_count=1,
+            supervisor_counterfactual_governance_horizon_minutes=60,
+        )
+    )
+    try:
+        status = BackendReadinessService(db_path=db_path)._learning_repair_status()
+    finally:
+        rc.reset_for_tests()
+
+    assert status["canary"]["suggestion_id"] == "applied_current"
+    assert status["canary"]["template_id"] == "position_supervisor:current.v1"
+    assert status["canary"]["shadow_position_count"] == 1
+    assert status["canary"]["mature_trade_count"] == 1
+    assert status["checks"]["candidate_observation_available"] is True
+    assert status["checks"]["counterfactual_maturity"] is True
+    assert status["checks"]["canary_sample_count"] is True
+
+
 def test_readiness_stability_status_reports_phase_h_guards(tmp_path):
     db_path = tmp_path / "state.db"
     persist_runtime_config_snapshot({"risk_per_trade": 0.01}, source="test", db_path=db_path)

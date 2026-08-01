@@ -23,9 +23,9 @@ import pandas as pd
 from backend.core.db import (
     DUCKDB_BARS_CURRENT,
     DUCKDB_BARS_LEGACY,
-    DUCKDB_BARS_MONTHLY_DIR,
     DUCKDB_EXTERNAL,
     bars_monthly_path,
+    bars_monthly_read_paths,
     connect_duckdb,
     duckdb_readonly_connection,
     ensure_bars_table,
@@ -93,11 +93,7 @@ class DuckDBDataStore:
     def _bar_read_paths(self) -> list[Path]:
         if not self._monthly_bars:
             return [self.bars_db_path]
-        paths = sorted(DUCKDB_BARS_MONTHLY_DIR.glob("bars_*.duckdb"))
-        if paths:
-            return paths
-        # Cold-start compatibility before migration: read the legacy monolith.
-        return [self.db_path]
+        return bars_monthly_read_paths(fallback=self.db_path)
 
     @staticmethod
     def _to_epoch(value: str | int | float | None) -> int | None:

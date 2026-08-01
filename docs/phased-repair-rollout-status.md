@@ -422,6 +422,68 @@ Next batch: 按需处理 readiness autonomous_mutation blocker 根因（V16
 delegated_to_specialist 未 finalize）、AWE admission 阻塞、system_health
 投影口径；P6 继续 blocked
 
+2026-08-01 V16 Supervisor 首桥接死锁修复（首个真实 bridge 已完成，效果继续观察）
+
+Batch: V16 candidate lifecycle scorecard 与 supervisor bridge evidence binding
+Canonical authority: `AgentScorecardService` 只把
+`status=superseded + proposal_stage=posterior_not_selected` 作为正常后验轮换；
+`BrainGovernanceCandidateReviewService`、`V16CommandGate`、
+`GovernanceMutationCoordinator` 和 `PositionSupervisorGovernanceMutationService`
+的桥接、风险、单命令单 mutation 权力不变
+Deleted paths: 无；旧 `autonomous_learning` supervisor advisory writer 保留，
+因为 effect observation 与 maturity counting 尚未完成
+Targeted verification: 指定治理回归 `98 passed`；V16 orchestrator、
+V16/read-only 与 autonomous-learning 针对性回归通过；幂等重试路径通过
+Migration/OpenAPI/build: 无 schema、migration、endpoint、阈值、service、thread、
+scheduler 或 public API 变化；`git diff --check`、py_compile 通过
+Runtime verification:
+
+- `quant-backend`、`quant-learning-worker` 重启后 active；`/api/health`
+  恢复为 `db=connected / ctrader=connected`。
+- 运行 scorecard 的 `v16_brain` `quality_score=0.5488`，当前窗口内
+  `49` 个正常 `posterior_not_selected` rotation 不再制造低可靠性；内部计数未出现在
+  `agent_scorecard.v1` 公共结果。
+- PostgreSQL 中候选仍为 `submitted`，review 为 `bridge_ready=1`；历史 aborted mutation
+  保留原始 `v16_command_evidence_fingerprint_mismatch` 审计，不改写历史。修复后的
+  command `..._r1794f53ecacc` 已 `finalized/apply_count=1`，`gmut_61d79...` 为
+  `committed/projection_status=current`，suggestion 与 application log 已 applied。
+- 修复后的 nursery runner 完成；旧失败命令未复活，恢复路径生成了新的 V16 command 并由
+  同一 RiskPolicy/Coordinator 链完成 apply，未越权重放或强行补样本。
+- `backend_readiness_snapshot.v1` 的 live/maturity 解锁条件仍按事实判断；generic
+  `ready_for_autonomous_mutation=true` 只表示现有 worker mutation capability 可用，当前
+  supervisor `learning_repair.ok=false` 且 `canary.broker_mutation_allowed=false`。市场关闭/
+  no-new-risk 等 live blocker 保持真实语义，现有 learning shadow/maturity 门槛未被修改，
+  首次 bridge 不宣称自治解锁。
+- production-like 与真实 PostgreSQL 均验证当前 V16 command 的 evidence fingerprint 会进入
+  `governance_mutation_intent` 并原子 finalize；下一步只观察
+  `learning_shadow -> effect -> maturity`，不放宽成熟门槛。
+
+Next batch: 观察已应用 suggestion 的 effect 与 learning_shadow/maturity；满足既有
+effect observation 和成熟条件后，再删除旧 advisory writer及其专用兼容测试。
+
+2026-08-01 月度 K 线边界最小修复
+
+Batch: 当月月库为空时的历史闭合 bar 回读
+Canonical authority: `backend.core.db.bars_monthly_read_paths()` 统一提供月库读取顺序；
+暖机、`DuckDBDataStore` 和 `monitor.system_health` 复用该路径，`data/bars.duckdb` 当前月兼容链接
+保持不变
+Deleted paths: 无；保留 DataStore 的 legacy 单库冷启动 fallback
+Targeted verification: 月切换临时月库回归、暖机/启动、DataStore、数据同步、风险和健康测试共
+`108 passed`
+Migration/OpenAPI/build: 无 schema、migration、endpoint、service、thread、scheduler、
+阈值或 readiness/maturity 条件变化；`git diff --check`、py_compile 通过
+Runtime verification:
+
+- 真实当前月库为空时，后端日志显示 `warmed up: 200 bars (source=local_db)`；直接读取返回
+  200 个最新闭合 M5 bar，来自上月月库的连续历史窗口。
+- PostgreSQL `risk_metrics_snapshot.v2` 为 `status=known`、`sample_count=500`、
+  `var=known`；`/api/health` 为 `db=connected / ctrader=connected`，两个服务 active。
+- 下一次健康调度显示 `overall=healthy`、`bar_m1=ok`、`bar_m5=ok`、`errors=0`，消除当月空库
+  造成的 false critical；市场关闭、no-new-risk、V16 effect/maturity 等既有事实保持不变。
+
+Remaining compatibility: 月库全部不可用时仍按既有 cold-start fallback 读取，不通过 SQL 补写
+历史 bar，不降低任何风险、readiness 或成熟度门槛。
+
 ## 6. 每批状态更新格式
 
 以后本文件只追加或替换以下当前信息，不保留逐时流水：

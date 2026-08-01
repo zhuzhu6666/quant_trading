@@ -41,17 +41,19 @@
 - PostgreSQL `state_v1` migration `current=minimum=latest=12`，无 mismatch；
 - `risk_metrics_snapshot.v2` 与 `backend_readiness_snapshot.v1` 正常刷新
   （snapshot updated_at 均在分钟级内）；
-- readiness：`ready_for_live_execution=true`、`ready_for_live_alpha=true`、
-  `ready_for_release=true`，但 `ready_for_autonomous_mutation=false`，
-  blocker 为 `factor_governance_runtime / blocked_by_v16_command`
-  （v16_brain_command 有多个 `delegated_to_specialist` 未 finalize，
-  apply_count=0，其中 entry_quality weak_signal 与 supervisor_template
-  position_supervisor 各有多条历史委派）；
-- live loop 运行，市场 `open_confirmed`，quote age <0.1s，can_open_positions=true；
+- readiness：当前 generic `ready_for_autonomous_mutation=true`、
+  `ready_for_release=true`，但 `ready_for_live_execution=false`、
+  `ready_for_live_alpha=false`；当前 supervisor `learning_repair.ok=false`，
+  `canary.broker_mutation_allowed=false`，成熟度门仍按 50 笔 clean mature
+  positions 和既有 session/regime 条件执行；
+- live loop 运行但处于 degraded/not accepting new risk，当前市场关闭；
+  不把 cTrader 连接正常解释为可开仓；
 - broker reconcile fresh（account/positions reconcile id 均存在），
   recovery_position_state 当前全部 `closed_replayed`（587 条），当前空仓；
 - risk snapshot 为 closed-bar M5 500 样本，空仓时 VaR/CVaR=0 是计算结果，
   不是缺失值兜底；
+- 月切换读取已统一复用月库新到旧路径：当月库为空但上月存在闭合 bar 时，暖机、
+  DataStore 与 `system_health` 不再把数据误判为缺失；本批未修改风险、readiness 或成熟度阈值；
 - AWE 权重自适应每 30 分钟计算，但持续 `blocked_by_admission`：
   rsi_14 / engulfing / wick_rejection / fib_rejection_confirmation /
   candle_body_pressure 等因子的 active application/effect 处于
@@ -70,6 +72,23 @@
   （原失真 2.0%）；factor governance hourly 闭环
   `factor_health -> V16 -> Factor Governance` 同周期执行；因子治理 watchfreshness
   时序缺口已修复（仅 watchdog 自有 freshness cause 可在同一 closed bar 内重试）。
+
+本批 2026-08-01 V16 supervisor 首桥接修复刷新：
+
+- `quant-backend`、`quant-learning-worker` 受控重启后 active；
+  `/api/health` 为 `db=connected / ctrader=connected`。
+- `v16_brain` 运行 scorecard `quality_score=0.5488`；正常
+  `posterior_not_selected` rotation 不再作为失败生命周期扣分，内部统计未进入
+  `agent_scorecard.v1`。
+- 最新 review 为 `bridge_ready`；旧 aborted command/mutation 保留审计，恢复后的
+  supervisor command 已 `finalized/apply_count=1`，Coordinator intent 为
+  `committed/projection_status=current`，suggestion/application 已 applied；effect
+  observation、maturity counting 和自治解锁仍未宣称完成。
+- `runtime_kv[backend_readiness_snapshot.v1]` 当前 generic
+  `ready_for_autonomous_mutation=true`，但当前 supervisor 的
+  `learning_repair.ok=false`、`canary.broker_mutation_allowed=false`，所以不代表
+  supervisor 自治扩张已解锁；市场关闭/no-new-risk 等 blocker 继续按真实状态投影，未通过
+  SQL 改写历史 review、补 command 或补成熟样本。
 
 这些是带时间的运行快照，不是永久事实。每次实施或回答“现在能否交易/发布”前必须重新查询。
 

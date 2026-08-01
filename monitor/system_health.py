@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from backend.core.db import duckdb_readonly_connection
+from backend.core.db import bars_monthly_read_paths, duckdb_readonly_connection
 from backend.services.live_data_sync_helpers import DATA_SYNC_INTERVAL_SECONDS, timeframe_seconds
 from loguru import logger
 
@@ -267,125 +267,134 @@ class SystemHealth:
         market_closed_detail = ""
 
         try:
-            from backend.core.db import DUCKDB_BARS
-            with duckdb_readonly_connection(DUCKDB_BARS, snapshot_first=True) as db:
+            m1_ts = None
+            m5_ts = None
+            for db_path in bars_monthly_read_paths(newest_first=True):
+                if m1_ts is not None and m5_ts is not None:
+                    break
+                with duckdb_readonly_connection(db_path, snapshot_first=True) as db:
+                    rows = db.execute(
+                        "SELECT timeframe, MAX(time) "
+                        "FROM bars WHERE symbol=? AND timeframe IN (?, ?) "
+                        "GROUP BY timeframe",
+                        ["XAUUSD+", "M1", "M5"],
+                    ).fetchall()
+                for timeframe, latest_ts in rows:
+                    if timeframe == "M1" and m1_ts is None:
+                        m1_ts = latest_ts
+                    elif timeframe == "M5" and m5_ts is None:
+                        m5_ts = latest_ts
 
-                m1_ts = db.execute(
-                    "SELECT MAX(time) FROM bars WHERE symbol='XAUUSD+' AND timeframe='M1'"
-                ).fetchone()[0]
-                m5_ts = db.execute(
-                    "SELECT MAX(time) FROM bars WHERE symbol='XAUUSD+' AND timeframe='M5'"
-                ).fetchone()[0]
-                try:
-                    from backend.services.live_service import _market_session_snapshot
+            try:
+                from backend.services.live_service import _market_session_snapshot
 
-                    report.market_session = dict(_market_session_snapshot(None) or {})
-                    if bridge is not None:
-                        report.market_session["broker_connected"] = bool(
-                            getattr(bridge, "is_connected", False)
-                        )
-                except Exception as exc:
-                    logger.debug("[system_health] shared market session snapshot failed: {}", exc)
-                    report.market_session = {}
-                try:
-                    from config.runtime_config import shared as _runtime_cfg
-                    grace_seconds = float(_runtime_cfg().market_open_pending_quote_grace_seconds)
-                except Exception:
-                    from config.runtime_config import RuntimeConfig
-                    grace_seconds = float(RuntimeConfig().market_open_pending_quote_grace_seconds)
-
-                # M1
-                if m1_ts:
-                    age = now - m1_ts
-                    market_closed, market_closed_detail = _market_closed_for_freshness(now, float(m1_ts))
-                    from backend.services.market_session import maintenance_wait_evidence
-                    maintenance = maintenance_wait_evidence(
-                        report.market_session,
-                        latest_market_data_ts=float(m1_ts),
-                        now_ts=now,
-                        grace_seconds=grace_seconds,
+                report.market_session = dict(_market_session_snapshot(None) or {})
+                if bridge is not None:
+                    report.market_session["broker_connected"] = bool(
+                        getattr(bridge, "is_connected", False)
                     )
-                    if age < THRESHOLDS["m1_max_age"]:
-                        components["bar_m1"] = ComponentStatus(
-                            name="M1 Bar", status="ok", score=1.0,
-                            detail=f"{age/60:.0f} min ago", ts=now,
-                        )
-                    elif market_closed:
-                        components["bar_m1"] = ComponentStatus(
-                            name="M1 Bar", status="ok", score=1.0,
-                            detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
-                        )
-                    elif maintenance["active"]:
-                        components["bar_m1"] = ComponentStatus(
-                            name="M1 Bar", status="maintenance_wait", score=1.0,
-                            detail=(
-                                f"scheduled-open maintenance wait; last {age/60:.0f} min ago; "
-                                f"grace remaining {maintenance['remaining_seconds']/60:.0f} min"
-                            ), ts=now,
-                        )
-                    elif age < THRESHOLDS["m1_warn_age"]:
-                        components["bar_m1"] = ComponentStatus(
-                            name="M1 Bar", status="degraded", score=0.5,
-                            detail=f"{age/60:.0f} min ago", ts=now,
-                        )
-                    else:
-                        components["bar_m1"] = ComponentStatus(
-                            name="M1 Bar", status="critical", score=0.0,
-                            detail=f"{age/60:.0f} min ago (stale)", ts=now,
-                        )
-                        errors.append(f"M1 bar stale: {age/60:.0f} min")
+            except Exception as exc:
+                logger.debug("[system_health] shared market session snapshot failed: {}", exc)
+                report.market_session = {}
+            try:
+                from config.runtime_config import shared as _runtime_cfg
+                grace_seconds = float(_runtime_cfg().market_open_pending_quote_grace_seconds)
+            except Exception:
+                from config.runtime_config import RuntimeConfig
+                grace_seconds = float(RuntimeConfig().market_open_pending_quote_grace_seconds)
+
+            # M1
+            if m1_ts:
+                age = now - m1_ts
+                market_closed, market_closed_detail = _market_closed_for_freshness(now, float(m1_ts))
+                from backend.services.market_session import maintenance_wait_evidence
+                maintenance = maintenance_wait_evidence(
+                    report.market_session,
+                    latest_market_data_ts=float(m1_ts),
+                    now_ts=now,
+                    grace_seconds=grace_seconds,
+                )
+                if age < THRESHOLDS["m1_max_age"]:
+                    components["bar_m1"] = ComponentStatus(
+                        name="M1 Bar", status="ok", score=1.0,
+                        detail=f"{age/60:.0f} min ago", ts=now,
+                    )
+                elif market_closed:
+                    components["bar_m1"] = ComponentStatus(
+                        name="M1 Bar", status="ok", score=1.0,
+                        detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
+                    )
+                elif maintenance["active"]:
+                    components["bar_m1"] = ComponentStatus(
+                        name="M1 Bar", status="maintenance_wait", score=1.0,
+                        detail=(
+                            f"scheduled-open maintenance wait; last {age/60:.0f} min ago; "
+                            f"grace remaining {maintenance['remaining_seconds']/60:.0f} min"
+                        ), ts=now,
+                    )
+                elif age < THRESHOLDS["m1_warn_age"]:
+                    components["bar_m1"] = ComponentStatus(
+                        name="M1 Bar", status="degraded", score=0.5,
+                        detail=f"{age/60:.0f} min ago", ts=now,
+                    )
                 else:
                     components["bar_m1"] = ComponentStatus(
                         name="M1 Bar", status="critical", score=0.0,
-                        detail="no data", ts=now,
+                        detail=f"{age/60:.0f} min ago (stale)", ts=now,
                     )
+                    errors.append(f"M1 bar stale: {age/60:.0f} min")
+            else:
+                components["bar_m1"] = ComponentStatus(
+                    name="M1 Bar", status="critical", score=0.0,
+                    detail="no data", ts=now,
+                )
 
-                # M5
-                if m5_ts:
-                    age = now - m5_ts
-                    if not market_closed:
-                        market_closed, market_closed_detail = _market_closed_for_freshness(now, float(m5_ts))
-                    from backend.services.market_session import maintenance_wait_evidence
-                    maintenance = maintenance_wait_evidence(
-                        report.market_session,
-                        latest_market_data_ts=float(m5_ts),
-                        now_ts=now,
-                        grace_seconds=grace_seconds,
+            # M5
+            if m5_ts:
+                age = now - m5_ts
+                if not market_closed:
+                    market_closed, market_closed_detail = _market_closed_for_freshness(now, float(m5_ts))
+                from backend.services.market_session import maintenance_wait_evidence
+                maintenance = maintenance_wait_evidence(
+                    report.market_session,
+                    latest_market_data_ts=float(m5_ts),
+                    now_ts=now,
+                    grace_seconds=grace_seconds,
+                )
+                if age < THRESHOLDS["m5_max_age"]:
+                    components["bar_m5"] = ComponentStatus(
+                        name="M5 Bar", status="ok", score=1.0,
+                        detail=f"{age/60:.0f} min ago", ts=now,
                     )
-                    if age < THRESHOLDS["m5_max_age"]:
-                        components["bar_m5"] = ComponentStatus(
-                            name="M5 Bar", status="ok", score=1.0,
-                            detail=f"{age/60:.0f} min ago", ts=now,
-                        )
-                    elif market_closed:
-                        components["bar_m5"] = ComponentStatus(
-                            name="M5 Bar", status="ok", score=1.0,
-                            detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
-                        )
-                    elif maintenance["active"]:
-                        components["bar_m5"] = ComponentStatus(
-                            name="M5 Bar", status="maintenance_wait", score=1.0,
-                            detail=(
-                                f"scheduled-open maintenance wait; last {age/60:.0f} min ago; "
-                                f"grace remaining {maintenance['remaining_seconds']/60:.0f} min"
-                            ), ts=now,
-                        )
-                    elif age < THRESHOLDS["m5_warn_age"]:
-                        components["bar_m5"] = ComponentStatus(
-                            name="M5 Bar", status="degraded", score=0.5,
-                            detail=f"{age/60:.0f} min ago", ts=now,
-                        )
-                    else:
-                        components["bar_m5"] = ComponentStatus(
-                            name="M5 Bar", status="critical", score=0.0,
-                            detail=f"{age/60:.0f} min ago (stale)", ts=now,
-                        )
-                        errors.append(f"M5 bar stale: {age/60:.0f} min")
+                elif market_closed:
+                    components["bar_m5"] = ComponentStatus(
+                        name="M5 Bar", status="ok", score=1.0,
+                        detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
+                    )
+                elif maintenance["active"]:
+                    components["bar_m5"] = ComponentStatus(
+                        name="M5 Bar", status="maintenance_wait", score=1.0,
+                        detail=(
+                            f"scheduled-open maintenance wait; last {age/60:.0f} min ago; "
+                            f"grace remaining {maintenance['remaining_seconds']/60:.0f} min"
+                        ), ts=now,
+                    )
+                elif age < THRESHOLDS["m5_warn_age"]:
+                    components["bar_m5"] = ComponentStatus(
+                        name="M5 Bar", status="degraded", score=0.5,
+                        detail=f"{age/60:.0f} min ago", ts=now,
+                    )
                 else:
                     components["bar_m5"] = ComponentStatus(
                         name="M5 Bar", status="critical", score=0.0,
-                        detail="no data", ts=now,
+                        detail=f"{age/60:.0f} min ago (stale)", ts=now,
                     )
+                    errors.append(f"M5 bar stale: {age/60:.0f} min")
+            else:
+                components["bar_m5"] = ComponentStatus(
+                    name="M5 Bar", status="critical", score=0.0,
+                    detail="no data", ts=now,
+                )
         except Exception as e:
             components["data_freshness"] = ComponentStatus(
                 name="数据新鲜度", status="critical", score=0.0,

@@ -7,6 +7,7 @@ from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.agent_briefing import AgentBriefingContextService
 from backend.services.agent_scorecard import AgentScorecardService
+from backend.services.brain_governance_candidates import ensure_brain_governance_candidate_table
 from backend.services.trade_lesson_memory import upsert_trade_lesson_memory
 
 
@@ -393,6 +394,90 @@ def test_candidate_only_quality_still_penalizes_failed_lifecycle():
     )
 
     assert score < 0.5
+
+
+def test_candidate_only_quality_ignores_posterior_not_selected_rotation():
+    score = AgentScorecardService._quality_score(
+        {
+            "proposal_count": 0,
+            "candidate_count": 20,
+            "policy_suggestion_count": 0,
+            "application_count": 0,
+            "status_counts": {"superseded": 20},
+            "_posterior_not_selected_count": 20,
+        }
+    )
+
+    assert score == 0.55
+
+
+def test_candidate_only_quality_penalizes_only_non_rotation_superseded():
+    rotation_only = AgentScorecardService._quality_score(
+        {
+            "proposal_count": 0,
+            "candidate_count": 20,
+            "policy_suggestion_count": 0,
+            "application_count": 0,
+            "status_counts": {"superseded": 20},
+            "_posterior_not_selected_count": 20,
+        }
+    )
+    mixed = AgentScorecardService._quality_score(
+        {
+            "proposal_count": 0,
+            "candidate_count": 20,
+            "policy_suggestion_count": 0,
+            "application_count": 0,
+            "status_counts": {"superseded": 20},
+            "_posterior_not_selected_count": 19,
+        }
+    )
+    failed = AgentScorecardService._quality_score(
+        {
+            "proposal_count": 0,
+            "candidate_count": 20,
+            "policy_suggestion_count": 0,
+            "application_count": 0,
+            "status_counts": {"superseded": 20},
+        }
+    )
+
+    assert rotation_only > mixed > failed
+
+
+def test_agent_scorecard_keeps_rotation_detail_private_and_source_eligible(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = _setup_state(db_path)
+    try:
+        conn.commit()
+    finally:
+        conn.close()
+
+    ensure_brain_governance_candidate_table(db_path)
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executemany(
+            """
+            INSERT INTO brain_governance_candidate
+            (candidate_id, source_agent, proposal_stage, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (f"v16_rotation_{index}", "v16_brain", "posterior_not_selected", "superseded", now, now)
+                for index in range(20)
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    scorecard = AgentScorecardService(db_path).scorecard(limit=50)
+    v16 = next(item for item in scorecard["items"] if item["source_agent"] == "v16_brain")
+
+    assert v16["candidate_count"] == 20
+    assert v16["quality_score"] == 0.55
+    assert "_posterior_not_selected_count" not in v16
 
 
 def test_agent_generation_context_includes_scope_relevant_experience(tmp_path):

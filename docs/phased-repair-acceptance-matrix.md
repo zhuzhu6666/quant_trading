@@ -232,6 +232,32 @@ P3 禁止以“先搭平台”为理由新增：
 - `entry_quality` 已纳入 autonomous learning 的唯一 execution owner / RiskPolicy gate，
   专用 delegation 不再硬编码 target 或 gate。
 
+### 2026-08-01 V16 Supervisor 首桥接死锁修复
+
+| 检查 | 验收证据与当前状态 |
+|---|---|
+| 正常后验轮换不惩罚 | `posterior_not_selected` + `superseded` 不进入失败生命周期扣分；rotation-only、普通失败、混合样本单测通过；`agent_scorecard.v1` 不暴露内部计数 |
+| review/bridge 门 | 当前真实 review 为 `bridge_ready=1`；风险、replay/trace/source、冲突、负效果、合同和当前 V16 delegate 门未放宽；负效果、合同违规、缺 evidence 或缺 delegate 的既有阻断测试保留 |
+| suggestion 写入 | nursery/bridge 仍是唯一调用路径，`submit_candidate_to_policy_suggestion()` 幂等；重复提交回归通过，未新增 source-agent 直接 writer |
+| V16 evidence binding | `PositionSupervisorTemplatePlan` 使用已 claim command 的权威 `evidence_fingerprint`；Coordinator 仍在同一 transaction 内严格重验并 finalize。production-like 回归验证 `apply_count=1` 且 intent fingerprint 与 command 一致 |
+| 真实运行 | 重启后 backend/worker active；受控 nursery runner 完成真实 bridge。旧 aborted command/mutation 保留审计，新 command `..._r1794f53ecacc` 已 `finalized/apply_count=1`，新 intent 为 `committed/projection_status=current`，suggestion/application 已 applied；后续 effect observation 与 maturity 仍未宣称完成 |
+| readiness/maturity | 未修改 50 个 clean mature positions、2 个 session/regime、replay/counterfactual/learning_shadow/governance 条件；generic `ready_for_autonomous_mutation=true` 不等于 supervisor `learning_repair.ok=true`，当前 `canary.broker_mutation_allowed=false`，首次 bridge 不等于自治解锁 |
+| 回归 | 指定批次 `98 passed`；V16 orchestrator、V16/read-only 与 autonomous-learning 针对性回归通过；幂等键绑定当前 V16 command 的重试路径通过 |
+
+本批已完成首个真实 command claim、Coordinator finalize、application 写入和 effect 记录；仍为
+`migrating/observing`，不得把一次 applied 解释为自治解锁，也不得删除旧 advisory writer，直到
+effect observation 与既有 maturity counting 连续贯通。
+
+### 2026-08-01 月度 K 线边界最小修复
+
+| 检查 | 验收证据与当前状态 |
+|---|---|
+| 月库读取 authority | `bars_monthly_read_paths()` 按月新到旧返回路径；暖机、`DuckDBDataStore` 与 `system_health` 共用；当前月空库时回读上月闭合 bar，当前月兼容链接不变 |
+| 冷启动兼容 | 月库目录无可用文件时仍回退既有 legacy 单库路径；不新增表、服务、线程、队列或 flag |
+| 运行事实 | 后端日志 `warmed up: 200 bars (source=local_db)`；risk snapshot `known / 500 / var known`；健康调度 `overall=healthy`、`bar_m1/bar_m5=ok` |
+| 门槛不变 | 不修改 RiskPolicy、bar freshness、readiness、50 笔 mature positions、session/regime、replay、counterfactual 或 learning_shadow 条件 |
+| 回归 | 月库边界、live warmup、启动、数据同步、风险与健康相关测试共 `108 passed`；py_compile 与 `git diff --check` 通过 |
+
 三条 lane 终态证据：
 
 | lane | success | noop/reject | retry | rollback | effect |

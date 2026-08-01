@@ -264,6 +264,17 @@ def bars_monthly_path(ts: float | int | None = None) -> Path:
     return DUCKDB_BARS_MONTHLY_DIR / f"bars_{bars_month_key(ts)}.duckdb"
 
 
+def bars_monthly_read_paths(
+    *, newest_first: bool = False, fallback: Path | None = None
+) -> list[Path]:
+    """Return available monthly bar databases, with a cold-start fallback."""
+    paths = sorted(
+        DUCKDB_BARS_MONTHLY_DIR.glob("bars_*.duckdb"),
+        reverse=newest_first,
+    )
+    return paths or [fallback or DUCKDB_BARS]
+
+
 def refresh_current_bars_link(ts: float | int | None = None) -> Path:
     """Point data/bars.duckdb at the current month database and return target."""
     target = bars_monthly_path(ts)

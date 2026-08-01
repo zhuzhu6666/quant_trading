@@ -4780,6 +4780,9 @@ def _auto_apply_position_supervisor_template_suggestions(
                 },
                 v16_command_id=str(v16_claim.get("command_id") or ""),
                 v16_claim_token=str(v16_claim.get("claim_token") or ""),
+                evidence_fingerprint=str(
+                    v16_claim.get("evidence_fingerprint") or ""
+                ),
             )
             mutation = dict(governed.get("mutation") or {})
             if not governed.get("committed"):

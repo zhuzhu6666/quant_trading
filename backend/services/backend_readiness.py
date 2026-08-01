@@ -586,13 +586,18 @@ class BackendReadinessService:
             canary_template_id = ""
             shadow_position_ids: set[str] = set()
             if _table_exists(conn, "policy_suggestion"):
-                candidate = _execute(
-                    conn,
-                    "SELECT suggestion_id, scope_key, created_at FROM policy_suggestion WHERE scope_type='position_supervisor_template' AND status='approved' ORDER BY created_at DESC LIMIT 1",
-                ).fetchone()
-                canary_started_at = _safe_float(dict(candidate).get("created_at")) if candidate else 0.0
-                canary_suggestion_id = str(dict(candidate).get("suggestion_id") or "") if candidate else ""
-                canary_template_id = str(dict(candidate).get("scope_key") or "") if candidate else ""
+                from backend.services.position_supervisor_governance import (
+                    list_position_supervisor_canary_candidates,
+                )
+
+                candidates = list_position_supervisor_canary_candidates(conn, limit=100)
+                candidate = next(
+                    (item for item in candidates if item.get("status") == "applied"),
+                    candidates[0] if candidates else None,
+                )
+                canary_started_at = _safe_float(candidate.get("created_at")) if candidate else 0.0
+                canary_suggestion_id = str(candidate.get("suggestion_id") or "") if candidate else ""
+                canary_template_id = str(candidate.get("scope_key") or "") if candidate else ""
             if canary_template_id and _table_exists(conn, "position_supervisor_trace"):
                 shadow_rows = _execute(
                     conn,

@@ -6,6 +6,7 @@ from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
 from backend.services.brain_governance_candidate_review import (
     ensure_brain_governance_candidate_review_table,
 )
+from backend.services.brain_governance_candidates import ensure_policy_suggestion_table
 from backend.services.v16_brain_snapshot import build_posterior_arbitration
 
 
@@ -334,6 +335,98 @@ def test_reviewed_expired_delegate_reissues_when_bridge_becomes_ready(tmp_path):
     assert rows[1][0] != rows[0][0]
     assert rows[1][1:] == ("available", "")
     assert service._reviewed_expired_delegate_reissues(limit=20) == []
+
+
+def test_aborted_submitted_bridge_reissues_only_pending_approved_suggestion(tmp_path):
+    db_path = tmp_path / "state.db"
+    _seed_posterior_facts(db_path, time.time())
+    service = V16BrainOrchestratorService(db_path)
+    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
+    ensure_brain_governance_candidate_review_table(db_path)
+    ensure_policy_suggestion_table(db_path)
+
+    cancelled_at = time.time()
+    suggestion_id = "suggestion-v16-recovery"
+    conn = connect_sqlite(db_path)
+    try:
+        command = conn.execute(
+            """SELECT command_id, candidate_id, scope_type, scope_key, action
+               FROM v16_brain_command WHERE decision='delegate'"""
+        ).fetchone()
+        conn.execute(
+            """INSERT INTO policy_suggestion
+               (suggestion_id, scope_type, scope_key, action, status,
+                governance_eligible, applied_mutation_id, created_at)
+               VALUES (?, ?, ?, ?, 'approved', 1, '', ?)""",
+            (
+                suggestion_id,
+                "position_supervisor_template",
+                "position_supervisor:conservative.v1",
+                command[4],
+                cancelled_at,
+            ),
+        )
+        conn.execute(
+            """UPDATE brain_governance_candidate
+               SET proposal_stage='submitted_to_policy_suggestion',
+                   status='submitted', submitted_suggestion_id=?,
+                   submitted_at=?, updated_at=?
+               WHERE candidate_id=?""",
+            (suggestion_id, cancelled_at, cancelled_at, command[1]),
+        )
+        conn.execute(
+            """UPDATE v16_brain_command
+               SET claim_status='cancelled', failure_reason='candidate_not_active',
+                   last_release_reason='governance_transaction_aborted',
+                   finalized_at=?, updated_at=?
+               WHERE command_id=?""",
+            (cancelled_at, cancelled_at, command[0]),
+        )
+        conn.execute(
+            """INSERT INTO brain_governance_candidate_review
+               (review_id, candidate_id, review_status, bridge_ready, created_at)
+               VALUES ('review_submitted_bridge', ?, 'bridge_ready', 1, ?)""",
+            (command[1], cancelled_at + 1.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = service.run_once(
+        readiness=_readiness(), limit=20, source="test", persist=True
+    )
+
+    assert result["delegated_count"] == 1
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        rows = conn.execute(
+            """SELECT command_id, claim_status, failure_reason
+               FROM v16_brain_command WHERE decision='delegate'
+               ORDER BY created_at"""
+        ).fetchall()
+        suggestion = conn.execute(
+            """SELECT status, governance_eligible, applied_mutation_id
+               FROM policy_suggestion WHERE suggestion_id=?""",
+            (suggestion_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert len(rows) == 2
+    assert rows[0][0] == command[0]
+    assert rows[0][1:] == ("cancelled", "candidate_not_active")
+    assert rows[1][0] != rows[0][0]
+    assert rows[1][1:] == ("available", "")
+    assert suggestion == ("approved", 1, "")
+
+    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v16_brain_command WHERE decision='delegate'"
+        ).fetchone()[0] == 2
+    finally:
+        conn.close()
 
 
 def test_superseded_candidate_cancels_unclaimed_delegate(tmp_path):

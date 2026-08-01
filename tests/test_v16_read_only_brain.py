@@ -761,6 +761,11 @@ def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tm
     assert submit_result["status"] == "submitted_to_policy_suggestion"
     assert submit_result["suggestion_id"].startswith("brain_bridge_")
 
+    repeated_submit = service.submit_candidate_to_policy_suggestion(ready["candidate_id"], actor="test")
+    assert repeated_submit["ok"] is True
+    assert repeated_submit["status"] == "already_submitted"
+    assert repeated_submit["suggestion_id"] == submit_result["suggestion_id"]
+
     conn = connect_sqlite(db_path, read_only=True)
     try:
         suggestion = conn.execute(
@@ -798,6 +803,25 @@ def test_brain_governance_candidate_review_classifies_bridge_readiness(monkeypat
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        now = time.time()
+        conn.executemany(
+            """
+            INSERT INTO brain_governance_candidate
+            (candidate_id, source_agent, proposal_stage, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    f"candidate_posterior_rotation_{index}",
+                    "v16_brain",
+                    "posterior_not_selected",
+                    "superseded",
+                    now - index - 1,
+                    now - index - 1,
+                )
+                for index in range(20)
+            ],
+        )
         conn.commit()
     finally:
         conn.close()

@@ -78,6 +78,86 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def list_position_supervisor_canary_candidates(
+    conn: Any,
+    *,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """List approved candidates and the currently active applied candidate.
+
+    ``approved`` rows are still needed for pre-application shadow replay.  Once
+    a supervisor mutation is committed, the suggestion transitions to
+    ``applied``; the active effect and mutation binding then become the only
+    safe way to keep observing that same cohort.  Historical applied effects,
+    rolled-back effects, and ineffective effects must not reopen a canary.
+    """
+    bounded_limit = max(1, min(int(limit), 100))
+    suggestion_columns = state_table_columns(conn, "policy_suggestion")
+    required_suggestion_columns = {
+        "suggestion_id",
+        "scope_type",
+        "scope_key",
+        "status",
+        "created_at",
+    }
+    if not required_suggestion_columns.issubset(suggestion_columns):
+        return []
+
+    effect_columns = state_table_columns(conn, "learning_application_effect")
+    can_bind_active_applied = {
+        "application_id",
+        "scope_type",
+        "scope_key",
+        "status",
+        "mutation_id",
+        "created_at",
+    }.issubset(effect_columns) and "applied_mutation_id" in suggestion_columns
+
+    if can_bind_active_applied:
+        rows = _execute(
+            conn,
+            """
+            SELECT suggestion_id, scope_key, status, created_at
+            FROM (
+                SELECT p.suggestion_id, p.scope_key, p.status, p.created_at,
+                       p.created_at AS lifecycle_ts
+                FROM policy_suggestion p
+                WHERE p.scope_type='position_supervisor_template'
+                  AND p.status='approved'
+                UNION ALL
+                SELECT p.suggestion_id, p.scope_key, p.status, p.created_at,
+                       e.created_at AS lifecycle_ts
+                FROM policy_suggestion p
+                JOIN learning_application_effect e
+                  ON e.scope_type='position_supervisor_template'
+                 AND e.scope_key=p.scope_key
+                 AND e.mutation_id=p.applied_mutation_id
+                WHERE p.scope_type='position_supervisor_template'
+                  AND p.status='applied'
+                  AND p.applied_mutation_id<>''
+                  AND e.status IN ('prepared', 'observing', 'mixed')
+            ) candidates
+            ORDER BY lifecycle_ts DESC, created_at DESC
+            LIMIT ?
+            """,
+            (bounded_limit,),
+        ).fetchall()
+    else:
+        rows = _execute(
+            conn,
+            """
+            SELECT suggestion_id, scope_key, status, created_at
+            FROM policy_suggestion
+            WHERE scope_type='position_supervisor_template'
+              AND status='approved'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (bounded_limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 _SUPERVISOR_TEMPLATE_CONTROL_SECTIONS = (
     "thresholds",
     "sl_policy",
@@ -654,14 +734,14 @@ def materialize_position_supervisor_candidate_observations(
     limit: int = 500,
     run_id: str = "",
 ) -> dict[str, Any]:
-    """Replay approved supervisor candidates in the non-execution learning plane.
+    """Replay supervisor candidates in the non-execution learning plane.
 
-    Approved suggestions are observations, never live controls.  This helper
-    reconstructs a closed-position context from the outcome review, evaluates
-    the candidate without a broker dependency, and persists an immutable
-    ``learning_shadow`` trace.  The trace is deliberately marked recovered and
-    non-authoritative so it cannot be mistaken for a broker mutation or a live
-    execution trace.
+    Approved suggestions and the currently active applied suggestion are
+    observations, never live controls.  This helper reconstructs a
+    closed-position context from the outcome review, evaluates the candidate
+    without a broker dependency, and persists an immutable ``learning_shadow``
+    trace.  The trace is deliberately marked recovered and non-authoritative
+    so it cannot be mistaken for a broker mutation or a live execution trace.
     """
     bounded_limit = max(1, min(int(limit), 5000))
     now = time.time()
@@ -683,18 +763,10 @@ def materialize_position_supervisor_candidate_observations(
                 "candidates": [],
                 "skipped": [],
             }
-        candidates = _execute(
+        candidates = list_position_supervisor_canary_candidates(
             conn,
-            """
-            SELECT suggestion_id, scope_key, created_at
-            FROM policy_suggestion
-            WHERE scope_type='position_supervisor_template'
-              AND status='approved'
-            ORDER BY reviewed_at DESC, created_at DESC
-            LIMIT ?
-            """,
-            (min(bounded_limit, 100),),
-        ).fetchall()
+            limit=min(bounded_limit, 100),
+        )
         remaining = bounded_limit
         for candidate_row in candidates:
             if remaining <= 0:
@@ -1488,6 +1560,36 @@ class PositionSupervisorGovernanceMutationService:
             "committed_projection_degraded",
         }
 
+    def _claimed_v16_evidence_fingerprint(
+        self,
+        *,
+        command_id: str,
+        claim_token: str,
+    ) -> str:
+        """Read the command-bound evidence for a supplied V16 claim.
+
+        The command fingerprint is the authority for the mutation binding.
+        Candidate-review and policy-suggestion fingerprints describe different
+        evidence surfaces and must not be substituted for it.
+        """
+        if not command_id or not claim_token:
+            return ""
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            row = _execute(
+                conn,
+                """SELECT evidence_fingerprint
+                   FROM v16_brain_command
+                   WHERE command_id=? AND claim_status='claimed'
+                     AND claim_token=?""",
+                (str(command_id), str(claim_token)),
+            ).fetchone()
+            if not row:
+                return ""
+            return str(row["evidence_fingerprint"] or "")
+        finally:
+            conn.close()
+
     def switch_template(
         self,
         *,
@@ -1505,6 +1607,7 @@ class PositionSupervisorGovernanceMutationService:
         application_details: Mapping[str, Any] | None = None,
         v16_command_id: str = "",
         v16_claim_token: str = "",
+        evidence_fingerprint: str = "",
     ) -> dict[str, Any]:
         from backend.services.governance_control_plans import (
             PositionSupervisorTemplatePlan,
@@ -1512,6 +1615,12 @@ class PositionSupervisorGovernanceMutationService:
         )
 
         now = time.time()
+        v16_evidence_fingerprint = str(evidence_fingerprint or "")
+        if v16_command_id and v16_claim_token and not v16_evidence_fingerprint:
+            v16_evidence_fingerprint = self._claimed_v16_evidence_fingerprint(
+                command_id=v16_command_id,
+                claim_token=v16_claim_token,
+            )
         application_id = application_id or _stable_supervisor_application_id(
             suggestion_id, target_template_id
         )
@@ -1551,9 +1660,11 @@ class PositionSupervisorGovernanceMutationService:
             idempotency_key=(
                 f"position-supervisor-switch:v2:{suggestion_id or run_id}:"
                 f"{previous_template_id}:{target_template_id}"
+                + (f":v16:{v16_command_id}" if v16_command_id else "")
             ),
             v16_command_id=v16_command_id,
             v16_claim_token=v16_claim_token,
+            evidence_fingerprint=v16_evidence_fingerprint,
         )
 
         mode = governance_coordinator_mode()
