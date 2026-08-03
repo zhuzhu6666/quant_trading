@@ -485,7 +485,7 @@ def test_stop_timeout_warns_and_does_not_block_remaining_stops():
     ) in events
 
 
-def test_legacy_governance_restore_failure_records_blocker_and_latches_new_risk(
+def test_governance_authority_failure_records_blocker_and_latches_new_risk(
     monkeypatch,
 ):
     import backend.app as app_module
@@ -505,9 +505,9 @@ def test_legacy_governance_restore_failure_records_blocker_and_latches_new_risk(
         lambda **kwargs: latched.append(kwargs) or {"active": True},
     )
 
-    app_module._fail_closed_legacy_governance_restore(
-        component="parameter_template_restore",
-        error=RuntimeError("unverified legacy row"),
+    app_module._fail_closed_governance_authority(
+        component="runtime_config_overlay",
+        error=RuntimeError("unverified overlay authority"),
         record_startup_issue=lambda *args, **kwargs: recorded.append((args, kwargs)),
         logger=_ErrorLogger(),
     )
@@ -515,15 +515,15 @@ def test_legacy_governance_restore_failure_records_blocker_and_latches_new_risk(
     assert recorded == [
         (
             (
-                "parameter_template_restore",
+                "runtime_config_overlay",
                 "critical",
-                "RuntimeError: unverified legacy row",
+                "RuntimeError: unverified overlay authority",
             ),
             {"blocking": True},
         )
     ]
     assert latched[0]["cause"] == "governance_authority"
-    assert latched[0]["cause_id"] == "legacy_restore:parameter_template_restore"
+    assert latched[0]["cause_id"] == "legacy_restore:runtime_config_overlay"
     assert latched[0]["reason"] == "legacy_governance_restore_unverified"
     assert "blocking new risk" in errors[-1]
 
@@ -534,11 +534,8 @@ async def test_backend_lifespan_stops_runtime_when_context_exits_with_error(monk
     import backend.core.auth as auth_module
     import backend.core.db as db_module
     import backend.services.execution_semantics as semantics_module
-    import backend.services.parameter_templates as parameter_module
-    import backend.services.position_supervisor_templates as supervisor_template_module
     import backend.services.runtime_config_startup as startup_module
     import backend.services.startup_status as startup_status_module
-    import alpha.persistent_registry as registry_module
 
     events = []
     runtime_config = SimpleNamespace(position_supervisor_template_id="")
@@ -573,14 +570,6 @@ async def test_backend_lifespan_stops_runtime_when_context_exits_with_error(monk
         lambda config, **_kwargs: {"config": config, "overlay": {}},
     )
     monkeypatch.setattr(db_module, "init_all", lambda: None)
-    monkeypatch.setattr(parameter_module.ParameterTemplateService, "sync_runtime_config", lambda self: None)
-    monkeypatch.setattr(
-        supervisor_template_module,
-        "latest_applied_position_supervisor_template_id",
-        lambda **_kwargs: "",
-    )
-    monkeypatch.setattr(registry_module, "restore_from_log", lambda **_kwargs: 0)
-
     with pytest.raises(RuntimeError, match="lifespan body failed"):
         async with app_module.lifespan(SimpleNamespace()):
             assert events[-1] == "start"

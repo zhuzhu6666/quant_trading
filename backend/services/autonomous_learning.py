@@ -44,6 +44,7 @@ from backend.services.review_contract import (
 )
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from research.features.evidence_contract import build_evidence_contract
+from backend.services.live_position_lifecycle import _compact_supervisor_mapping
 
 _scheduler_thread: threading.Thread | None = None
 _stop_event = threading.Event()
@@ -3243,9 +3244,9 @@ def _latest_protection_evidence_before_close(
             "seconds_before_close": round(max(0.0, upper - float(row["decision_ts"] or 0.0)), 3),
             "action": str(verdict.get("action") or "").strip(),
             "summary_reason": str(verdict.get("summary_reason") or row["action_reason"] or ""),
-            "evidence": verdict.get("evidence") or {},
-            "recommended_controls": verdict.get("recommended_controls") or {},
-            "risk_state": risk_state,
+            "evidence": _compact_supervisor_mapping(verdict.get("evidence")),
+            "recommended_controls": _compact_supervisor_mapping(verdict.get("recommended_controls")),
+            "risk_state": _compact_supervisor_mapping(risk_state),
             "source_table": "decision_ledger",
         }
     try:
@@ -3270,7 +3271,7 @@ def _latest_protection_evidence_before_close(
         verdict = _loads(trace["verdict_json"], {})
         risk_state = _loads(trace["risk_verdict_json"], {})
         execution = _loads(trace["execution_json"], {})
-        evidence = verdict.get("evidence") or {}
+        evidence = _compact_supervisor_mapping(verdict.get("evidence"))
         source = str(evidence.get("protection_source") or "")
         action = str(trace["action"] or "")
         if source == "legacy_awe_trailing":
@@ -3289,9 +3290,12 @@ def _latest_protection_evidence_before_close(
             "action": action,
             "summary_reason": str(trace["summary_reason"] or ""),
             "evidence": evidence,
-            "recommended_controls": verdict.get("recommended_controls") or {},
-            "risk_state": risk_state,
-            "execution": execution,
+            "recommended_controls": _compact_supervisor_mapping(verdict.get("recommended_controls")),
+            "risk_state": _compact_supervisor_mapping(risk_state),
+            "execution": _compact_supervisor_mapping(
+                execution,
+                nested_keys=frozenset({"evidence", "controls"}),
+            ),
             "stage": str(trace["stage"] or ""),
             "outcome": str(trace["outcome"] or ""),
             "source_table": "position_supervisor_trace",

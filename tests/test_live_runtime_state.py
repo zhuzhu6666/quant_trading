@@ -26,6 +26,21 @@ def test_live_runtime_state_defaults_and_clone_reads():
     assert state_get(state, lock, "loop_running") is True
 
 
+def test_live_runtime_state_clone_cuts_recursive_projection_edges():
+    state = default_live_state()
+    lock = threading.Lock()
+    position = {"position_id": 42}
+    position["supervisor"] = {"position": position}
+    state_update(state, lock, positions_reconciled=[position])
+
+    cloned = state_get(state, lock, "positions_reconciled", clone=True)
+
+    assert cloned[0]["position_id"] == 42
+    assert cloned[0]["supervisor"]["position"] is None
+    cloned[0]["position_id"] = 99
+    assert position["position_id"] == 42
+
+
 def test_live_runtime_cache_single_flight_and_stale_fallback():
     cache = {}
     lock = threading.Lock()

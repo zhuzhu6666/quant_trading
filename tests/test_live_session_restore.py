@@ -624,59 +624,6 @@ def test_legacy_final_open_boundary_blocks_non_authoritative_session(
     assert live_service._open_trade_draining(lambda: False) is True
 
 
-def test_legacy_session_retry_runs_recovery_and_fresh_account_before_restore(
-    monkeypatch,
-):
-    order: list[str] = []
-    bridge = SimpleNamespace(is_connected=True)
-    monkeypatch.setattr(
-        live_service,
-        "_get_ctrader",
-        lambda: (bridge, None, False),
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_bootstrap_position_recovery",
-        lambda *_args, **_kwargs: order.append("deal_recovery") or True,
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_explicit_account_reconcile",
-        lambda _bridge: SimpleNamespace(
-            status="fresh",
-            reconcile_id="legacy-account-r1",
-            observed_at=123.0,
-            account={"balance": 1012.0, "equity": 1012.0},
-        ),
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_fresh_cached_broker_open_position_ids",
-        lambda: {7},
-    )
-
-    def _restore(trade_date, **kwargs):
-        order.append("session_restore")
-        assert trade_date == "2026-07-19"
-        assert kwargs["broker_open_position_ids"] == {7}
-        assert live_service._live_state_get("account", clone=True)["balance"] == 1012.0
-        live_service._live_state_update(session_state_status="available")
-        return True
-
-    monkeypatch.setattr(live_service, "_restore_session_state_for_day", _restore)
-
-    assert live_service._retry_legacy_session_restore(
-        broker="ctrader",
-        strategy_name="factor_v4",
-        trade_date="2026-07-19",
-        log=lambda _message: None,
-    ) is True
-    assert order == ["deal_recovery", "session_restore"]
-    assert live_service._live_state_get("account_reconcile_id") == (
-        "legacy-account-r1"
-    )
-
-
 def test_legacy_final_open_boundary_allows_available_session(monkeypatch):
     monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: False)

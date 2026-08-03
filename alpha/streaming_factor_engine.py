@@ -1,6 +1,6 @@
 """StreamingFactorEngine — 流式因子计算引擎。
 
-取代 FactorEngine 的 batch 模式，改为每根 bar 增量计算。
+取代 FactorEngine 的 batch 模式，改为每根 bar 的有界滚动重算。
 所有因子计算失败时独立处理，不互相影响。
 
 设计事实源: docs/system-source-of-truth.md
@@ -25,7 +25,8 @@ class StreamingFactorEngine:
     """流式因子计算引擎。
 
     维护滚动 bar 缓存，每 append 一根 bar 就重算所有因子。
-    支持增量计算：EMA/mean 类因子只递推，全量因子按需重算。
+    因子计算保持单一实现；当前实现对滚动窗口做有界重算，不伪称为
+    增量状态机。
 
     用法:
         engine = StreamingFactorEngine(max_buffer=200)
@@ -72,7 +73,6 @@ class StreamingFactorEngine:
         self._buffer: deque[dict] = deque(maxlen=max_buffer)
         self._factor_cache: dict[str, float | None] = {}
         self._available_factors: list[str] = list(factor_registry.list())
-        self._incremental_state: dict[str, float] = {}
         self._warm: bool = False
         self._last_bar_ts: float = 0.0
         self._factor_runtime_config: dict[str, dict] = dict(factor_runtime_config or {})
@@ -221,11 +221,18 @@ class StreamingFactorEngine:
 
     @property
     def voting_factor_ids(self) -> tuple[str, ...]:
-        """Factors admitted to normal live computation/voting.
+        """Backward-compatible alias for factors admitted to computation.
 
         Prepared shadow factors are validated through
         :meth:`validate_loaded_factor` without being added to this set.
+        Directional voting still requires the per-bar value and effective
+        weight checks performed by ``PortfolioCompositor``.
         """
+        return tuple(self._available_factors)
+
+    @property
+    def computed_factor_ids(self) -> tuple[str, ...]:
+        """Factors in the live computation set before normalization/scoring."""
         return tuple(self._available_factors)
 
     def validate_loaded_factor(self, name: str) -> dict[str, object]:
@@ -283,7 +290,11 @@ class StreamingFactorEngine:
             adapter = RegistryAdapter.shared()
             voting = []
             for name in all_factors:
-                meta = adapter.get_meta(name)
+                meta = (
+                    adapter.get_meta(name)
+                    if hasattr(adapter, "get_meta")
+                    else {"source": "builtin"}
+                )
                 source = meta.get("source", "builtin") if meta else "builtin"
                 if source != "shadow":
                     voting.append(name)
@@ -291,8 +302,36 @@ class StreamingFactorEngine:
             if skipped:
                 logger.debug("StreamingFactorEngine: skipping shadow factors: %s", skipped)
             self._available_factors = voting
-        except Exception:
-            self._available_factors = list(all_factors)
+        except Exception as exc:
+            # Registry metadata is an admission authority for alpha. A
+            # lookup failure must not widen the live alpha set back to every
+            # configured factor; context/gate inputs remain observable.
+            from alpha.portfolio_compositor import resolve_factor_role
+
+            self._available_factors = [
+                name
+                for name in all_factors
+                if resolve_factor_role(
+                    name,
+                    self._factor_runtime_config.get(name)
+                    if isinstance(self._factor_runtime_config.get(name), dict)
+                    else None,
+                )
+                != "alpha"
+                or bool(
+                    (
+                        self._factor_runtime_config.get(name)
+                        if isinstance(self._factor_runtime_config.get(name), dict)
+                        else {}
+                    ).get("health_gate_exempt")
+                )
+            ]
+            logger.warning(
+                "StreamingFactorEngine: registry admission unavailable; "
+                "alpha computation fail-closed (%s): retained=%s",
+                exc,
+                self._available_factors,
+            )
         self._prune_factor_cache()
 
     def set_factor_runtime_config(self, config: dict[str, dict] | None) -> None:
@@ -313,7 +352,6 @@ class StreamingFactorEngine:
         """清空缓冲区（策略切换/重启时）。"""
         self._buffer.clear()
         self._factor_cache.clear()
-        self._incremental_state.clear()
         self._warm = False
         self._last_bar_ts = 0.0
 

@@ -246,6 +246,23 @@ class TestDefaultGPConfig:
         assert result.active_weights["missing_weight"] == 0.0
         assert result.n_active_alpha_factors == 0
 
+    def test_none_enabled_uses_the_shared_existing_default(self):
+        c = PortfolioCompositor(
+            {
+                "null_enabled": {
+                    "enabled": None,
+                    "role": "alpha",
+                    "weight": 1.0,
+                }
+            }
+        )
+
+        result = c.compose({"null_enabled": 0.8}, {"null_enabled": 0.8})
+
+        assert result.n_scoring_factors == 1
+        assert result.n_contributing_factors == 1
+        assert result.score == pytest.approx(0.8)
+
     def test_disabled_factors_excluded(self):
         """enabled=False 的因子不参与组合。"""
         config = {**FULL_CONFIG, "rsi_14": {**FULL_CONFIG["rsi_14"], "enabled": False}}

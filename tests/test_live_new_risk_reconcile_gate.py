@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -266,3 +267,59 @@ def test_open_pipeline_refreshes_stale_reconcile_before_candidate(monkeypatch):
     assert result is policy_gate
     assert len(refreshes) == 1
     assert any("refreshing final open reconciles" in item for item in logs)
+
+
+def test_signal_pass_admission_block_is_audited_without_risk_verdict(monkeypatch):
+    now = time.time()
+    _publish_fresh_reconciles(now)
+    monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        live_service,
+        "_watchdog_freshness_retry_eligible",
+        lambda _blockers: False,
+    )
+
+    class _Ledger:
+        def __init__(self):
+            self.calls = []
+
+        def log_composite_decision(self, **payload):
+            self.calls.append(payload)
+            return "dec_admission_blocked"
+
+    ledger = _Ledger()
+    monkeypatch.setattr(live_service, "_LEDGER", ledger)
+    prepare = MagicMock()
+    monkeypatch.setattr(live_service, "_prepare_open_trade_candidate", prepare)
+
+    result = live_service._run_open_trade_pipeline(
+        bridge=SimpleNamespace(is_connected=True),
+        pipeline={},
+        broker="ctrader",
+        cfg=SimpleNamespace(timeframe="M5"),
+        bar={"time": now},
+        factor_values={},
+        composite=SimpleNamespace(direction=1, score=0.8),
+        gate_result=SimpleNamespace(passed=True, reason="passed"),
+        account={"balance": 1000.0, "equity": 1000.0},
+        positions=[],
+        attr_engine=None,
+        current_price=4000.0,
+        atr_price=4.0,
+        pending_open_attach_ids=[],
+        send=True,
+        tick=1625,
+        log=lambda _message: None,
+    )
+
+    assert result.passed is False
+    assert result.reason == "no_new_risk_latched"
+    assert len(ledger.calls) == 1
+    action = ledger.calls[0]["action_json"]
+    assert action["gate_passed"] is True
+    assert action["skip_stage"] == "before_candidate"
+    assert action["risk_stage"] == "not_reached"
+    assert action["risk_policy_reached"] is False
+    assert "risk_verdict" not in action
+    assert "no_new_risk_latched" in action["blockers"]
+    prepare.assert_not_called()

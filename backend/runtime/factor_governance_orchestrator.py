@@ -278,33 +278,22 @@ class FactorGovernanceOrchestrator:
                         summary=summary,
                     )
                     return summary
-            expansion_actions = self._restore_quarantined_builtin_alpha(
-                    catalog,
-                    run,
-                    cfg=cfg,
-                    profile=profile,
-                    v16_authority=v16_authority,
-                )
+            # Terminal hard-quarantine is not an autonomous restore source.
+            # Expansion starts only from the existing shadow/prepared lifecycle
+            # and is limited to one evidence-bound builtin candidate.
+            expansion_actions = self._activate_healthy_builtin_shadow(
+                catalog,
+                run,
+                v16_authority=v16_authority,
+                cfg=cfg,
+                profile=profile,
+            )
             actions.extend(expansion_actions)
             expansion_committed = self._expansion_command_consumed(
                 expansion_actions
             )
             if expansion_actions:
                 catalog = build_factor_catalog()
-            if not expansion_committed:
-                expansion_actions = self._activate_healthy_builtin_shadow(
-                    catalog,
-                    run,
-                    v16_authority=v16_authority,
-                    cfg=cfg,
-                    profile=profile,
-                )
-                actions.extend(expansion_actions)
-                expansion_committed = self._expansion_command_consumed(
-                    expansion_actions
-                )
-                if expansion_actions:
-                    catalog = build_factor_catalog()
             if not expansion_committed:
                 expansion_actions = self._apply_redundancy_report(
                     catalog,
@@ -1927,7 +1916,16 @@ class FactorGovernanceOrchestrator:
                 )
 
                 mode = governance_coordinator_mode()
-                if mode != "off":
+                if mode == "off":
+                    # A production governance mutation must not fall back to
+                    # a direct overlay write when the Coordinator is absent.
+                    # Keep the tightening decision auditable and fail closed.
+                    result = {
+                        "ok": False,
+                        "status": "governance_coordinator_required",
+                        "reason": "factor_quarantine_requires_coordinator",
+                    }
+                else:
                     # Native and discovered factors share one durable state
                     # machine. Builtin code stays registered, while its
                     # RuntimeConfig admission and weight become terminal.
@@ -1950,13 +1948,6 @@ class FactorGovernanceOrchestrator:
                             f"factor_weak_quarantine:{name}:"
                             f"{run.get('run_id', '')}"
                         ),
-                    )
-                else:
-                    # One-release legacy path only.
-                    result = self._apply_runtime_patch(
-                        {"factor_signal_config": {name: entry}},
-                        source="factor_governance_disable_live",
-                        run_id=str(run.get("run_id") or ""),
                     )
             except Exception as exc:
                 result = {
@@ -2022,7 +2013,13 @@ class FactorGovernanceOrchestrator:
 
         min_score = profile.builtin_activation_min_health_score
         min_n_obs = profile.builtin_activation_min_n_obs
-        max_activations = int(getattr(cfg, "factor_governance_max_builtin_activations_per_cycle", 1) or 1)
+        configured_max_activations = int(
+            getattr(cfg, "factor_governance_max_builtin_activations_per_cycle", 1)
+            or 1
+        )
+        # Promotion is deliberately single-candidate. The existing config
+        # remains the kill switch, but a cycle never batches activations.
+        max_activations = min(1, max(0, configured_max_activations))
         initial_weight = min(
             0.50,
             float(getattr(cfg, "factor_governance_builtin_activation_weight", 0.0) or 0.0),
@@ -2077,6 +2074,7 @@ class FactorGovernanceOrchestrator:
             candidates.append({**item, "_model_governance": model_evidence})
 
         candidates.sort(key=lambda item: (
+            0 if str(item.get("factor_id") or "") == "morning_evening_star" else 1,
             -float(item.get("health_score") or 0.0),
             -int(item.get("health_n_obs") or 0),
             str(item.get("factor_id") or ""),
@@ -2233,214 +2231,14 @@ class FactorGovernanceOrchestrator:
         profile: FactorGovernanceProfile | None = None,
         v16_authority: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """Keep one-release restore compatibility outside typed governance.
+        """Do not automatically reopen a terminal hard-quarantine.
 
-        Governance previously had a one-way path: a weak factor was marked
-        ``enabled=false``/``QUARANTINE`` and AWE could only resurrect its
-        weight.  That left the factor permanently outside the live selector.
-        Recovery is deliberately conservative and only restores builtin
-        factors after a fresh health evaluation, a cooldown, and (when model
-        evidence exists) a cleared weakness verdict.  Discovered factors keep
-        their separate Canary lifecycle and are not enabled by this path.
-        Typed lifecycle treats QUARANTINED as terminal. A healthy native
-        implementation must re-enter through a newly code-bound lifecycle,
-        never by rewriting the terminal row back to ACTIVE.
+        A cleared health observation does not erase the original quarantine
+        fact. Recovery must be an explicit, evidence-bound lifecycle action
+        that creates a new generation; this compatibility hook is retained as
+        a no-op until its callers are removed with the old recovery tests.
         """
-        from backend.services.governance_control_plans import (
-            governance_coordinator_mode,
-        )
-
-        mode = governance_coordinator_mode()
-        cfg = cfg or runtime_config.shared()
-        profile = profile or self._governance_profile(cfg)
-        if mode != "off" and not profile.balanced_demo:
-            return []
-        if not bool(getattr(cfg, "factor_governance_auto_restore_enabled", True)):
-            return []
-
-        max_actions = max(
-            0,
-            int(getattr(cfg, "factor_governance_max_restores_per_cycle", 1) or 1),
-        )
-        if max_actions <= 0:
-            return []
-        cooldown_seconds = max(0.0, profile.restore_cooldown_seconds)
-        health_threshold = profile.restore_min_health_score
-        max_weakness = profile.restore_max_weakness
-        min_obs = profile.restore_min_n_obs
-        now = time.time()
-        candidates: list[tuple[dict[str, Any], dict[str, Any], float]] = []
-
-        for item in catalog:
-            factor_id = str(item.get("factor_id") or "")
-            if not factor_id or item.get("source") != "builtin":
-                continue
-            if item.get("role") != "alpha" or item.get("lifecycle_status") == "DEAD":
-                continue
-            if item.get("governance_action") != "disable_factor_live":
-                continue
-            signal_entry = dict(cfg.factor_signal_config.get(factor_id, {}) or {})
-            lifecycle = str(signal_entry.get("lifecycle_status") or "").upper()
-            if signal_entry.get("enabled", True) is not False:
-                continue
-            if lifecycle not in {"QUARANTINE", "QUARANTINED"}:
-                # Do not override an explicit/unknown disable reason.
-                continue
-
-            disabled_at = float(signal_entry.get("disabled_at") or item.get("last_action_ts") or 0.0)
-            if disabled_at <= 0.0 or now - disabled_at < cooldown_seconds:
-                continue
-            health_updated_at = float(item.get("health_updated_at") or 0.0)
-            if health_updated_at <= disabled_at:
-                continue
-            health_age = now - health_updated_at
-            if health_age < -5.0 or health_age > profile.health_max_age_seconds:
-                continue
-            if str(item.get("health_status") or "").upper() not in {
-                "HEALTHY",
-                "WATCH",
-            }:
-                continue
-            health_score = float(item.get("health_score") or 0.0)
-            health_n_obs = int(item.get("health_n_obs") or 0)
-            if health_score < health_threshold or health_n_obs < min_obs:
-                continue
-
-            model_evidence = self._model_governance_evidence(item, cfg)
-            model_samples = int(model_evidence.get("sample_count") or 0)
-            weak_samples = int(model_evidence.get("weak_sample_count") or 0)
-            has_model_evidence = (
-                model_samples >= profile.restore_model_min_samples
-                or weak_samples >= profile.restore_model_min_samples
-            )
-            observed_weakness = max(
-                float(model_evidence.get("avg_weakness_score") or 0.0),
-                float(model_evidence.get("latest_weakness_score") or 0.0),
-            )
-            if has_model_evidence and observed_weakness >= max_weakness:
-                continue
-
-            if mode != "off" and self._factor_has_pending_effect(factor_id):
-                continue
-            candidates.append((item, signal_entry, disabled_at))
-
-        candidates.sort(key=lambda row: (float(row[0].get("health_score") or 0.0), row[0].get("factor_id", "")), reverse=True)
-        actions: list[dict[str, Any]] = []
-        for item, entry, disabled_at in candidates[:max_actions]:
-            factor_id = str(item["factor_id"])
-            evidence = {
-                "reason": "autonomous_quarantine_recovery",
-                "source": item.get("source"),
-                "health_score": float(item.get("health_score") or 0.0),
-                "health_status": item.get("health_status"),
-                "health_n_obs": int(item.get("health_n_obs") or 0),
-                "health_updated_at": float(item.get("health_updated_at") or 0.0),
-                "disabled_at": disabled_at,
-                "cooldown_seconds": cooldown_seconds,
-                "restore_health_threshold": health_threshold,
-                "model_governance": self._model_governance_evidence(item, cfg),
-                "governance_profile": profile.name,
-                "target_stage": (
-                    FactorLifecycleStage.SHADOW.value
-                    if mode != "off"
-                    else FactorLifecycleStage.ACTIVE.value
-                ),
-            }
-            verdict = self._risk("restore_factor_live", item, evidence)
-            if not verdict.allowed:
-                actions.append(self._audit_action(run, item, "restore_factor_live", "blocked_by_risk", evidence, verdict))
-                continue
-
-            before_cfg = runtime_config.shared().to_dict()
-            restored_entry = dict(entry)
-            restored_entry["enabled"] = True
-            restored_entry["lifecycle_status"] = "ACTIVE"
-            restored_entry["restored_at"] = now
-            restored_entry["restored_from"] = "QUARANTINE"
-            try:
-                if mode != "off":
-                    authority = dict(v16_authority or {})
-                    result = FactorLifecycleService(
-                        self.overlay.db_path,
-                        adapter=RegistryAdapter.shared(),
-                    ).reenroll_quarantined_builtin(
-                        name=factor_id,
-                        actor="system:factor_governance",
-                        reason="healthy builtin starts a new Demo shadow generation",
-                        evidence_refs=evidence,
-                        idempotency_key=(
-                            f"builtin_reenroll:{factor_id}:{run.get('run_id', '')}"
-                        ),
-                        v16=FactorV16Binding(
-                            command_id=str(authority.get("command_id") or ""),
-                            claim_token=str(authority.get("claim_token") or ""),
-                            target_agent=str(
-                                authority.get("target_agent")
-                                or "factor_governance"
-                            ),
-                            candidate_id=str(authority.get("candidate_id") or ""),
-                            posterior_fingerprint=str(
-                                authority.get("posterior_fingerprint") or ""
-                            ),
-                            evidence_fingerprint=str(
-                                authority.get("evidence_fingerprint") or ""
-                            ),
-                        ),
-                    )
-                else:
-                    result = self._apply_runtime_patch(
-                        {"factor_signal_config": {factor_id: restored_entry}},
-                        source="factor_governance_restore_live",
-                        run_id=str(run.get("run_id") or ""),
-                    )
-                committed, projection_ready, mutation_status = self._mutation_commit_state(result)
-                after_cfg = runtime_config.shared().to_dict()
-                after_entry = dict(
-                    (after_cfg.get("factor_signal_config") or {}).get(factor_id) or {}
-                )
-                actions.append(self._audit_action(
-                    run,
-                    item,
-                    "restore_factor_live",
-                    (
-                        "applied"
-                        if projection_ready
-                        else "projection_degraded"
-                        if committed
-                        else "blocked_by_evidence"
-                    ),
-                    evidence,
-                    verdict,
-                    before={"runtime_config": before_cfg, "enabled": False},
-                    after={
-                        "runtime_config": after_cfg,
-                        "enabled": after_entry.get("enabled"),
-                        "lifecycle_status": after_entry.get("lifecycle_status"),
-                        "weight": float((runtime_config.shared().factor_portfolio_weights or {}).get(factor_id, 0.0) or 0.0),
-                    },
-                    rollback={"runtime_config": before_cfg},
-                    result={
-                        **dict(result or {}),
-                        "mutation_status": mutation_status,
-                        "durably_committed": committed,
-                        "projection_ready": projection_ready,
-                    },
-                ))
-            except Exception as exc:
-                logger.exception("[factor_governance] restore failed for %s", factor_id)
-                actions.append(self._audit_action(
-                    run,
-                    item,
-                    "restore_factor_live",
-                    "failed",
-                    {**evidence, "error": str(exc)},
-                    verdict,
-                    before={"runtime_config": before_cfg, "enabled": False},
-                    after={"runtime_config": runtime_config.shared().to_dict(), "enabled": False},
-                    rollback={"runtime_config": before_cfg},
-                    result={"error": str(exc)},
-                ))
-        return actions
+        return []
 
     def _retire_quarantined_discovered(self, catalog: list[dict[str, Any]], run: dict[str, Any]) -> list[dict[str, Any]]:
         cfg = runtime_config.shared()

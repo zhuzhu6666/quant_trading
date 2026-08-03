@@ -21,6 +21,7 @@ from backend.services.api_fact_views import (
     sync_status_fact_payload,
     trade_traces_fact_payload,
 )
+from backend.services.live_runtime_state import safe_container_snapshot
 
 
 def _known_position_components(observed_at: float = 99.0) -> dict:
@@ -217,6 +218,54 @@ def test_strategy_session_and_realized_contracts_use_domain_observations():
     assert strategy["_fact"]["state"] == "unknown"
     assert session["_fact"]["state"] == "known"
     assert realized["_fact"]["state"] == "known"
+
+
+def test_fact_projection_cuts_recursive_edges_without_changing_fact_contract():
+    position = {"position_id": 42, "direction": 1}
+    position["diagnostic"] = position
+    payload = positions_fact_payload(
+        {
+            "ok": True,
+            "broker": "ctrader",
+            "positions": [position],
+            "readiness": {
+                "positions_updated_at": 99.0,
+                "positions_component_facts": _known_position_components(),
+            },
+        },
+        now=100.0,
+    )
+
+    assert payload["positions"][0]["position_id"] == 42
+    assert payload["positions"][0]["diagnostic"] is None
+    assert payload["_fact"]["contract"] == "live.positions.v2"
+
+
+def test_safe_container_snapshot_copies_shared_values_but_cuts_only_cycles():
+    shared = {"value": 1}
+    source = {"left": shared, "right": shared}
+    source["self"] = source
+
+    copied = safe_container_snapshot(source)
+
+    assert copied["left"] == {"value": 1}
+    assert copied["right"] == {"value": 1}
+    assert copied["left"] is not copied["right"]
+    assert copied["self"] is None
+
+
+def test_safe_container_snapshot_cuts_cycles_in_projection_objects():
+    class Projection:
+        pass
+
+    root = Projection()
+    root.position_id = 42
+    root.self = root
+
+    copied = safe_container_snapshot({"position": root})
+
+    assert copied["position"]["position_id"] == 42
+    assert copied["position"]["self"] is None
 
 
 def test_ops_status_facts_preserve_payload_and_require_real_observations():

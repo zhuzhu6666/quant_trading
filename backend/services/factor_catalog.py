@@ -11,7 +11,10 @@ from typing import Any
 from alpha.factor_cadence import infer_factor_cadence
 from alpha.portfolio_compositor import resolve_factor_role
 from alpha.registry import factor_registry
-from alpha.runtime_factor_selection import select_runtime_factors
+from alpha.runtime_factor_selection import (
+    runtime_factor_enabled,
+    select_runtime_factors,
+)
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.core.state_store import validate_runtime_state_schema
 from config.runtime_config import shared as runtime_config
@@ -460,7 +463,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         cfg_entry = signal_cfg.get(name)
         cfg_dict = cfg_entry if isinstance(cfg_entry, dict) else {}
         role = selected_roles.get(name) or resolve_factor_role(name, cfg_dict)
-        enabled = not (isinstance(cfg_entry, dict) and cfg_entry.get("enabled") is False)
+        enabled = runtime_factor_enabled(cfg_entry)
         configured_lifecycle = str(cfg_dict.get("lifecycle_status") or "").upper()
         lifecycle_status = "DEAD" if name in dead else str(
             lifecycle_fact.get("lifecycle_stage") or ""

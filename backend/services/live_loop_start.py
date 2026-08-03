@@ -23,7 +23,6 @@ class LiveLoopStartRuntime:
     reset_start_ownership: Any
     persist_desired_state: Any
     prime_live_loop_state: Any
-    phase2_active: Any
     start_safety_watchdog: Any
     start_scheduler: Any
     stop_scheduler: Any
@@ -232,14 +231,13 @@ def _start_admitted_generation(
                 strategy_name=strategy_name,
                 reason=trigger_reason,
             )
-        phase2_active = runtime.phase2_active()
         runtime.prime_live_loop_state(
             broker=broker,
             strategy_name=strategy_name,
             started_at=started_at,
             account=placeholder_account,
-            accepting_new_risk=not phase2_active,
-            restore_session=not phase2_active,
+            accepting_new_risk=False,
+            restore_session=True,
             account_observed=False,
         )
         runtime.start_safety_watchdog()
@@ -299,18 +297,10 @@ def _start_admitted_generation(
             ),
         }
 
-    phase2_active = runtime.phase2_active()
-    legacy_ready = bool(
-        not phase2_active
-        and runtime.live_state_get("loop_running", False)
-        and runtime.live_state_get("accepting_new_risk", False)
-        and str(
-            runtime.live_state_get("session_state_status", "unknown")
-            or "unknown"
-        )
-        == "available"
-        and not runtime.no_new_risk_latched(fail_closed=True)
-    )
+    # The canonical V2 tick owner must complete its broker/safety/session
+    # barrier before the start endpoint can advertise readiness or new-risk
+    # admission.  The old phase2/off-path shortcut is intentionally gone.
+    ready = False
     return {
         "ok": True,
         "broker": broker,
@@ -322,9 +312,9 @@ def _start_admitted_generation(
         "generation": (
             generation.generation_id if generation is not None else ""
         ),
-        "phase": "starting" if phase2_active else "running",
-        "ready": legacy_ready,
-        "accepting_new_risk": legacy_ready,
+        "phase": "starting",
+        "ready": ready,
+        "accepting_new_risk": ready,
         "msg": (
             "live loop thread started. Read /api/live/loop-status to monitor."
         ),

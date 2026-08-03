@@ -726,7 +726,9 @@ def test_all_ops_route_return_paths_are_endpoint_fact_wrapped():
         if route_decorators:
             endpoints.append(node)
 
-    assert len(endpoints) >= 68
+    # The duplicate /api/ops/replay/parity-run route was removed when
+    # backtesting converged on POST /api/backtest/run.
+    assert len(endpoints) >= 67
     for endpoint in endpoints:
         returns = [item for item in ast.walk(endpoint) if isinstance(item, ast.Return)]
         assert returns, endpoint.name
@@ -869,18 +871,7 @@ def test_replay_ops_facts_distinguish_durable_reports_from_previews(monkeypatch)
                 "items": [{"decision_id": "d-1", "decision_ts": observed}]
             }
 
-    class FakeParity:
-        def run(self, _params):
-            return {
-                "replay_run_id": "parity-1",
-                "status": "completed",
-                "created_at": observed,
-                "artifact_path": "/tmp/parity-1.json",
-                "report_artifact_hash": "artifact-hash",
-            }
-
     monkeypatch.setattr(ops_api, "ReplayHarnessService", FakeReplay)
-    monkeypatch.setattr(ops_api, "ParityReplayService", FakeParity)
     monkeypatch.setattr(
         "backend.services.ops_governance_fact_views.time.time", lambda: observed + 1.0
     )
@@ -888,13 +879,12 @@ def test_replay_ops_facts_distinguish_durable_reports_from_previews(monkeypatch)
     latest = ops_api.get_latest_replay_report(None)
     run = ops_api.run_replay_harness(None)
     bar_run = ops_api.run_bar_replay_harness(None)
-    parity = ops_api.run_parity_replay_harness(ops_api.ParityReplayRunRequest(), None)
     preview = ops_api.run_bar_replay_preview(None)
     decisions = ops_api.list_bar_replay_decisions(None)
 
     assert all(
         response["_fact"]["state"] == "known"
-        for response in (latest, run, bar_run, parity, decisions)
+        for response in (latest, run, bar_run, decisions)
     )
     assert preview["_fact"]["state"] == "unknown"
     assert preview["_fact"]["source"] == "none"

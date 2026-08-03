@@ -505,6 +505,23 @@ def build_skip_ledger_payload(
     decision_ts_fallback: float,
 ) -> dict[str, Any]:
     risk_payload = risk_verdict.to_dict() if hasattr(risk_verdict, "to_dict") else dict(risk_verdict or {})
+    action_json = {
+        "tick": tick,
+        "skip_stage": skip_stage,
+        "sizing_trace": dict(sizing_trace or {}),
+        "market_session": dict(market_session or {}),
+        "event_sizing": dict(event_sizing_context or {}),
+        **dict(learning_context or {}),
+    }
+    # A pre-candidate admission blocker is not a RiskPolicy verdict.  Keep
+    # the existing ledger shape for evaluated risk decisions, while making an
+    # unevaluated risk stage explicit instead of persisting an empty/fake
+    # verdict that downstream readers could interpret as a policy result.
+    if risk_payload:
+        action_json["risk_verdict"] = risk_payload
+    else:
+        action_json["risk_stage"] = "not_reached"
+        action_json["risk_policy_reached"] = False
     return {
         "event_type": "skip",
         "composite": composite,
@@ -519,15 +536,7 @@ def build_skip_ledger_payload(
         },
         "risk_state": dict(risk_state or {}),
         "action_reason": block_reason,
-        "action_json": {
-            "tick": tick,
-            "skip_stage": skip_stage,
-            "sizing_trace": dict(sizing_trace or {}),
-            "market_session": dict(market_session or {}),
-            "risk_verdict": risk_payload,
-            "event_sizing": dict(event_sizing_context or {}),
-            **dict(learning_context or {}),
-        },
+        "action_json": action_json,
     }
 
 

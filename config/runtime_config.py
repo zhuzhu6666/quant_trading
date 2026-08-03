@@ -439,7 +439,9 @@ class RuntimeConfig:
     factor_tactical_alpha: float = 0.7      # 战术层权重
     factor_signal_threshold: float = 0.3    # 开仓信号阈值
     live_factor_warmup_bars: int = 150      # live 启动时喂给因子/normalizer 的最近 K 线数
-    filter_bb_enabled: bool = False  # deprecated: bb_width is context, not a hard gate
+    # Retained only for persisted runtime-config hash compatibility.  The
+    # live factor and gate paths must not read this deprecated field.
+    filter_bb_enabled: bool = False
 
     # --- 金字塔/仓位控制 ---
     pyramid_enabled: bool = True             # 金字塔加仓规则: 新信号需强于已有持仓才加仓

@@ -6,6 +6,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
+from alpha.runtime_factor_selection import runtime_factor_enabled
+
 logger = logging.getLogger(__name__)
 
 
@@ -122,7 +124,7 @@ class PortfolioCompositor:
             all_weights[name] = 0.0
             if sig is None:
                 continue
-            if not cfg.get("enabled", False):
+            if not runtime_factor_enabled(cfg):
                 continue
             if role != "alpha":
                 context_signals[name] = float(sig)
@@ -236,7 +238,7 @@ class PortfolioCompositor:
             if sig is None:
                 continue
             cfg = self._factor_configs.get(name, self._default_gp_config(name))
-            if not cfg.get("enabled", False) or resolve_factor_role(name, cfg) != "alpha":
+            if not runtime_factor_enabled(cfg) or resolve_factor_role(name, cfg) != "alpha":
                 continue
             w = float(cfg.get("weight", 0.0) or 0.0)
             if w <= 0:

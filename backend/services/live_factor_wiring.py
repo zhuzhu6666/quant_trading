@@ -30,7 +30,10 @@ def merge_portfolio_configs(
     signals = dict(signal_config or {})
     weights = dict(weight_config or {})
     try:
-        from alpha.runtime_factor_selection import select_runtime_factors
+        from alpha.runtime_factor_selection import (
+            runtime_factor_enabled,
+            select_runtime_factors,
+        )
 
         selection = select_runtime_factors(signals)
         selected_names = set(
@@ -76,7 +79,7 @@ def merge_portfolio_configs(
             ),
             "mode": factor.get("mode", "rank_mapping"),
             "role": factor.get("role", "alpha"),
-            "enabled": factor.get("enabled", True),
+            "enabled": runtime_factor_enabled(factor),
             "source": factor.get(
                 "source",
                 "discovered" if name in discovered_names else "builtin",

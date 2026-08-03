@@ -29,6 +29,7 @@ from backend.services._brain_helpers import (
     text,
 )
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.live_position_lifecycle import _compact_supervisor_mapping
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +66,47 @@ _NON_ACTIONABLE_POLICY_STATUSES = {
     "failed",
     "blocked_by_evidence",
 }
+
+
+def _review_fact_projection(
+    review: Any,
+    *,
+    review_id: Any = "",
+    trade_id: Any = "",
+    position_id: Any = "",
+    pnl: Any = None,
+    outcome_label: Any = "",
+    failure_tags: Any = None,
+) -> dict[str, Any]:
+    """Project review facts without carrying the full close-time payload."""
+    raw = review if isinstance(review, dict) else {}
+    tags = failure_tags if isinstance(failure_tags, list) else raw.get("failure_tags")
+    if not isinstance(tags, list):
+        tags = []
+    projected: dict[str, Any] = {
+        "review_id": str(review_id or raw.get("review_id") or ""),
+        "trade_id": str(trade_id or raw.get("trade_id") or ""),
+        "position_id": str(position_id or raw.get("position_id") or ""),
+        "pnl": safe_float(raw.get("pnl") if pnl is None else pnl),
+        "outcome_label": str(outcome_label or raw.get("outcome_label") or ""),
+        "failure_tags": [str(tag) for tag in tags],
+    }
+    for key in ("primary_responsibility", "close_reason", "thesis_status"):
+        value = raw.get(key)
+        if value is not None and not isinstance(value, (dict, list)):
+            projected[key] = value
+    taxonomy = raw.get("failure_taxonomy")
+    if isinstance(taxonomy, dict):
+        primary = taxonomy.get("primary_responsibility")
+        if primary is not None and not isinstance(primary, (dict, list)):
+            projected["failure_taxonomy"] = {"primary_responsibility": primary}
+    inferred = raw.get("inferred_close_supervisor")
+    if isinstance(inferred, dict):
+        projected["inferred_close_supervisor"] = _compact_supervisor_mapping(
+            inferred,
+            nested_keys=frozenset({"evidence", "recommended_controls", "execution", "risk_state"}),
+        )
+    return projected
 
 
 def build_posterior_arbitration(
@@ -1175,7 +1217,13 @@ class BrainMemoryService:
                 continue
             tags = loads(row["failure_tags_json"], [])
             context = loads(row["decision_context_json"], {})
-            lesson = context.get("lesson") if isinstance(context, dict) else {}
+            context_projection = dict(context) if isinstance(context, dict) else {}
+            # Older lessons stored the complete review here.  Keep the
+            # derived lesson fields, but never rehydrate that recursive
+            # source payload into the brain/readiness projection.
+            context_projection.pop("review_json", None)
+            context_projection.pop("review", None)
+            lesson = context_projection.get("lesson")
             if not isinstance(lesson, dict):
                 lesson = {}
             summary = " ".join(str(part or "") for part in [row["outcome_label"],
@@ -1199,7 +1247,14 @@ class BrainMemoryService:
                             "artifact_version": row["artifact_version"],
                             "outcome_label": outcome_label, "reward_score": reward,
                             "failure_tags": tags, "recommended_action": row["recommended_action"],
-                            "lesson": lesson, "decision_context": context},
+                            "lesson": lesson, "decision_context": context_projection,
+                            "review": _review_fact_projection(
+                                source_review,
+                                review_id=row["source_review_id"],
+                                trade_id=row["trade_id"],
+                                failure_tags=tags,
+                                outcome_label=outcome_label,
+                            )},
                 evidence_score=max(0.0, min(safe_float(row["evidence_strength"]), 1.0)),
                 polarity=polarity, created_at=safe_float(row["created_at"]), terms=terms,
                 regime=str(row["regime_id"] or ""),
@@ -1238,7 +1293,15 @@ class BrainMemoryService:
                             "trade_id": row["trade_id"], "position_id": row["position_id"],
                             "entry_decision_id": row["entry_decision_id"], "pnl": pnl,
                             "outcome_label": outcome_label, "failure_tags": tags,
-                            "review": review,
+                            "review": _review_fact_projection(
+                                review,
+                                review_id=row["review_id"],
+                                trade_id=row["trade_id"],
+                                position_id=row["position_id"],
+                                pnl=pnl,
+                                outcome_label=outcome_label,
+                                failure_tags=tags,
+                            ),
                             "created_at": safe_float(row["created_at"])},
                 evidence_score=0.75, polarity=polarity,
                 created_at=safe_float(row["created_at"]), terms=terms,

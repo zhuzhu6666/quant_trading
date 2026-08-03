@@ -15,10 +15,12 @@ from backend.services.fact_envelope import (
     fact_envelope,
     observed_epoch,
 )
+from backend.services.live_runtime_state import safe_container_snapshot
 
 
 def _copy(payload: Mapping[str, Any] | None) -> dict[str, Any]:
-    return dict(payload or {})
+    copied = safe_container_snapshot(dict(payload or {}))
+    return copied if isinstance(copied, dict) else {}
 
 
 def _error(payload: Mapping[str, Any]) -> str | None:

@@ -1492,6 +1492,39 @@ def test_experience_builder_does_not_downweight_alpha_for_exit_failure(tmp_path)
     assert experience["decision_context_json"]["primary_responsibility"] == "exit"
 
 
+def test_experience_builder_drops_recursive_review_payload(tmp_path):
+    builder = ExperienceBuilder(str(tmp_path / "state.db"))
+    experience = builder.build_from_review(
+        {
+            "review_id": "review_recursive_builder",
+            "trade_id": "trade_recursive_builder",
+            "position_id": "position_recursive_builder",
+            "pnl": -1.0,
+            "outcome_label": "loss",
+            "failure_tags": [],
+            "summary_text": "recursive supervisor payload",
+            "review_json": {
+                "close_ts": 200.0,
+                "inferred_close_supervisor": {
+                    "event_type": "supervisor_tighten",
+                    "evidence": {
+                        "protection_source": "position_supervisor",
+                        "supervisor_state": {"latest_supervisor": {"position": {}}},
+                    },
+                    "execution": {"candidate": {"position": {}}},
+                },
+            },
+        }
+    )
+
+    context = experience["decision_context_json"]
+    assert "review_json" not in context
+    assert context["supervisor_feedback"]["inferred_close_supervisor"] == {
+        "event_type": "supervisor_tighten",
+        "evidence": {"protection_source": "position_supervisor"},
+    }
+
+
 def test_governance_run_returns_risk_verdict(monkeypatch):
     class _FakeGovernor:
         def list_suggestions(self, limit=500, status=None):

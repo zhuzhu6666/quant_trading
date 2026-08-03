@@ -241,7 +241,22 @@ class RuntimeConfigMutationService:
                 governance_transaction_writer=governance_transaction_writer,
                 coordinator_mode=coordinator_mode,
             )
-        production_state = is_state_db_path(self.db_path) and Path(self.db_path).resolve() == Path(STATE_DB).resolve()
+        production_state = (
+            is_state_db_path(self.db_path)
+            and Path(self.db_path).resolve() == Path(STATE_DB).resolve()
+        )
+        if production_state and governance_surface and coordinator_mode not in {
+            "dual_record",
+            "enforce",
+        }:
+            return {
+                "ok": False,
+                "status": "governance_coordinator_required",
+                "reason": "production_governance_mutations_cannot_bypass_coordinator",
+                "mutation_source": source,
+                "mutation_action": action or source,
+                "coordinator_mode": coordinator_mode,
+            }
         # Callers cannot exempt a governance mutation by supplying the legacy
         # ``risk_reduction`` boolean.  Only derived before/target facts decide
         # whether the V16 expansion command is required.

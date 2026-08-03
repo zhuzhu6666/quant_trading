@@ -27,7 +27,6 @@ def _runtime(
     state_updates=None,
     acknowledgements=None,
     risk_updates=None,
-    phase2=True,
 ):
     diagnostics = diagnostics if diagnostics is not None else []
     state_updates = state_updates if state_updates is not None else []
@@ -44,7 +43,6 @@ def _runtime(
         )
         or {"acknowledged": True},
         live_state_update=lambda **kwargs: state_updates.append(kwargs),
-        phase2_active=lambda: phase2,
         update_risk_metrics=lambda **kwargs: risk_updates.append(kwargs),
     )
 
@@ -84,7 +82,7 @@ def test_tick_requested_break_preserves_recovery_and_projection_ack():
     assert pipeline["factor_projection_ack"] == {"acknowledged": True}
 
 
-def test_phase2_tick_exception_blocks_risk_and_retries_safety_in_five_seconds():
+def test_tick_exception_blocks_risk_and_retries_safety_in_five_seconds():
     state_updates = []
     logs = []
     stop_flag = _StopFlag(wait_results=[True])
@@ -102,7 +100,6 @@ def test_phase2_tick_exception_blocks_risk_and_retries_safety_in_five_seconds():
         runtime=_runtime(
             run_tick=unavailable,
             state_updates=state_updates,
-            phase2=True,
         ),
     )
 

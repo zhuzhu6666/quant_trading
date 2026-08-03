@@ -189,6 +189,96 @@ def test_watchdog_recovery_releases_only_its_own_latch_cause():
     assert causes == {("incident_control", "runtime_incident_mode")}
 
 
+def test_live_loop_cause_requires_normal_cycle_and_reconciled_facts(monkeypatch):
+    now = time.time()
+    activate_no_new_risk_latch(
+        reason="live loop safety cycle failed",
+        actor="system:live_loop",
+        cause="safety_freshness",
+        cause_id="live_loop",
+    )
+    live_service._live_state_update(
+        loop_running=True,
+        session_state_status="available",
+        account_reconciled={"ok": True, "account_id": "acct-1"},
+        account_reconcile_id="account-r1",
+        positions_reconciled=[],
+        positions_reconcile_id="positions-r1",
+        safety_plane={
+            "status": "completed",
+            "accepting_new_risk": True,
+        },
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_live_safety_watchdog_probe",
+        lambda: {
+            "enabled": True,
+            "running": True,
+            "started_at": now - 60.0,
+            "safety_heartbeat_at": now,
+            "account_updated_at": now,
+            "positions_updated_at": now,
+            "unknown_execution_count": 0,
+        },
+    )
+    result = evaluate_safety_freshness(
+        {
+            "enabled": True,
+            "running": True,
+            "started_at": now - 60.0,
+            "safety_heartbeat_at": now,
+            "account_updated_at": now,
+            "positions_updated_at": now,
+            "unknown_execution_count": 0,
+        },
+        now=now,
+    )
+
+    live_service._on_live_safety_watchdog_recovery(result)
+
+    assert no_new_risk_latch_status()["active"] is False
+    assert no_new_risk_latch_status()["causes"] == []
+
+
+def test_live_loop_cause_stays_latched_when_safety_cycle_is_not_ready():
+    now = time.time()
+    activate_no_new_risk_latch(
+        reason="live loop safety cycle failed",
+        actor="system:live_loop",
+        cause="safety_freshness",
+        cause_id="live_loop",
+    )
+    live_service._live_state_update(
+        loop_running=True,
+        session_state_status="available",
+        account_reconciled={"ok": True},
+        account_reconcile_id="account-r1",
+        positions_reconciled=[],
+        positions_reconcile_id="positions-r1",
+        safety_plane={"status": "completed", "accepting_new_risk": False},
+    )
+    result = evaluate_safety_freshness(
+        {
+            "enabled": True,
+            "running": True,
+            "started_at": now - 60.0,
+            "safety_heartbeat_at": now,
+            "account_updated_at": now,
+            "positions_updated_at": now,
+            "unknown_execution_count": 0,
+        },
+        now=now,
+    )
+
+    live_service._on_live_safety_watchdog_recovery(result)
+
+    assert {
+        (item["cause"], item["cause_id"])
+        for item in no_new_risk_latch_status()["causes"]
+    } == {("safety_freshness", "live_loop")}
+
+
 def test_verified_overlay_recovery_releases_refresh_and_legacy_restore_causes():
     activate_no_new_risk_latch(
         reason="incident active",

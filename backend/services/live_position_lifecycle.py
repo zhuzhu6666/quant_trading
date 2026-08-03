@@ -1441,6 +1441,38 @@ def latest_close_evidence(ledger_latest: dict[str, Any] | None, trace_latest: di
     return ledger
 
 
+def _compact_supervisor_mapping(
+    value: Any,
+    *,
+    nested_keys: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Keep supervisor evidence scalar and bounded at the lifecycle boundary.
+
+    Supervisor verdicts can contain the live position context and the previous
+    supervisor result.  Persisting those nested mappings in every trace row
+    creates an ever-growing object graph.  The trace/readback contract only
+    needs scalar facts and a few scalar control/evidence maps, so nested
+    payloads are intentionally not carried across this boundary.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    compact: dict[str, Any] = {}
+    for key, item in value.items():
+        key = str(key)
+        if item is None or isinstance(item, (str, int, float, bool)):
+            compact[key] = item
+        elif isinstance(item, list) and all(
+            part is None or isinstance(part, (str, int, float, bool))
+            for part in item
+        ):
+            compact[key] = list(item)
+        elif key in nested_keys and isinstance(item, Mapping):
+            nested = _compact_supervisor_mapping(item)
+            if nested:
+                compact[key] = nested
+    return compact
+
+
 def _json_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -1464,7 +1496,7 @@ def normalize_supervisor_event_row(row: Any, *, close_ts: float) -> dict[str, An
     if not row:
         return {}
     action_json = _json_dict(_row_get(row, "action_json", "{}"))
-    risk_state = _json_dict(_row_get(row, "risk_state_json", "{}"))
+    risk_state = _compact_supervisor_mapping(_json_dict(_row_get(row, "risk_state_json", "{}")))
     verdict = action_json.get("supervisor_verdict") or {}
     decision_ts = float(_row_get(row, "decision_ts", 0.0) or 0.0)
     return {
@@ -1475,8 +1507,8 @@ def normalize_supervisor_event_row(row: Any, *, close_ts: float) -> dict[str, An
         "seconds_before_close": round(max(0.0, float(close_ts or 0.0) - decision_ts), 3),
         "action": str(verdict.get("action") or "").strip(),
         "summary_reason": str(verdict.get("summary_reason") or _row_get(row, "action_reason", "") or ""),
-        "evidence": verdict.get("evidence") or {},
-        "recommended_controls": verdict.get("recommended_controls") or {},
+        "evidence": _compact_supervisor_mapping(verdict.get("evidence")),
+        "recommended_controls": _compact_supervisor_mapping(verdict.get("recommended_controls")),
         "risk_state": risk_state,
     }
 
@@ -1485,9 +1517,12 @@ def normalize_protection_trace_row(row: Any, *, close_ts: float) -> dict[str, An
     if not row:
         return {}
     verdict = _json_dict(_row_get(row, "verdict_json", "{}"))
-    risk_state = _json_dict(_row_get(row, "risk_verdict_json", "{}"))
-    execution = _json_dict(_row_get(row, "execution_json", "{}"))
-    evidence = verdict.get("evidence") or {}
+    risk_state = _compact_supervisor_mapping(_json_dict(_row_get(row, "risk_verdict_json", "{}")))
+    execution = _compact_supervisor_mapping(
+        _json_dict(_row_get(row, "execution_json", "{}")),
+        nested_keys=frozenset({"evidence", "controls"}),
+    )
+    evidence = _compact_supervisor_mapping(verdict.get("evidence"))
     source = str(evidence.get("protection_source") or "")
     action = str(_row_get(row, "action", "") or "")
     if source == "legacy_awe_trailing":
@@ -1507,7 +1542,7 @@ def normalize_protection_trace_row(row: Any, *, close_ts: float) -> dict[str, An
         "action": action,
         "summary_reason": str(_row_get(row, "summary_reason", "") or ""),
         "evidence": evidence,
-        "recommended_controls": verdict.get("recommended_controls") or {},
+        "recommended_controls": _compact_supervisor_mapping(verdict.get("recommended_controls")),
         "risk_state": risk_state,
         "execution": execution,
         "stage": str(_row_get(row, "stage", "") or ""),
@@ -1592,7 +1627,10 @@ def classify_close_source_from_evidence(
     evidence: dict[str, Any] | None,
 ) -> dict[str, Any]:
     reason = str(close_reason or "")
-    latest = evidence or {}
+    latest = _compact_supervisor_mapping(
+        evidence,
+        nested_keys=frozenset({"evidence", "recommended_controls", "execution", "risk_state"}),
+    )
     source = "external_broker_close" if reason == "broker_close" else reason
     if reason == "restart_replay":
         source = "restart_replay"
@@ -1927,7 +1965,14 @@ def build_position_supervisor_context_payload(
         "entry_regime": str(position_metrics.get("entry_regime") or ""),
         "regime_confidence": float(resolved_regime.get("confidence") or 0.0),
         "regime_source": str(resolved_regime.get("source") or "unavailable"),
-        "supervisor_state": dict(supervisor_state or {}),
+        # Recovery metadata is fed back into the next supervisor evaluation.
+        # Keep only the bounded state projection here; carrying a previous
+        # verdict's evidence would reintroduce the position/supervisor graph
+        # into the next verdict.
+        "supervisor_state": _compact_supervisor_mapping(
+            supervisor_state,
+            nested_keys=frozenset({"latest_supervisor", "latest_protection"}),
+        ),
     }
     return {
         "position_supervisor_template": str(template_id or ""),
@@ -2545,9 +2590,15 @@ def build_supervisor_trace_ledger_payload(
             },
             "tick": int(tick or 0),
         },
-        "verdict": verdict,
+        "verdict": _compact_supervisor_mapping(
+            verdict,
+            nested_keys=frozenset({"evidence", "recommended_controls", "supervisor_template"}),
+        ),
         "risk_verdict": risk_payload,
-        "execution": execution_payload,
+        "execution": _compact_supervisor_mapping(
+            execution_payload,
+            nested_keys=frozenset({"evidence", "controls"}),
+        ),
     }
 
 
@@ -3466,7 +3517,14 @@ def build_supervisor_recovery_meta(
     applied_ts: float = 0.0,
 ) -> dict[str, Any]:
     meta = dict(recovery_meta or {})
-    meta["latest_supervisor"] = verdict
+    for key in ("latest_supervisor", "latest_protection"):
+        previous = meta.get(key)
+        if isinstance(previous, Mapping):
+            meta[key] = _compact_supervisor_mapping(previous)
+    meta["latest_supervisor"] = _compact_supervisor_mapping(
+        verdict,
+        nested_keys=frozenset({"evidence", "recommended_controls", "execution"}),
+    )
     meta["latest_supervisor_source"] = "position_supervisor"
     evidence = dict(verdict.get("evidence") or {})
     has_state_contract = bool(
@@ -3568,8 +3626,15 @@ def build_protection_recovery_meta(
     applied_ts: float = 0.0,
 ) -> dict[str, Any]:
     meta = dict(recovery_meta or {})
+    for key in ("latest_supervisor", "latest_protection"):
+        previous = meta.get(key)
+        if isinstance(previous, Mapping):
+            meta[key] = _compact_supervisor_mapping(previous)
     source = str(source or "position_protection")
-    meta["latest_protection"] = verdict
+    meta["latest_protection"] = _compact_supervisor_mapping(
+        verdict,
+        nested_keys=frozenset({"evidence", "recommended_controls", "execution", "controls"}),
+    )
     meta["latest_protection_source"] = source
     if action_applied:
         meta["last_protection_applied_action"] = action_applied

@@ -34,6 +34,10 @@ _PERSISTENCE_FAILURE_LATCH = False
 _PERSISTENCE_FAILURE_CAUSES: dict[tuple[str, str], dict[str, Any]] = {}
 _LATCH_SCHEMA_V1 = "live_no_new_risk_latch.v1"
 _LATCH_CAUSE_CONTRACT = "live_no_new_risk_latch_causes.v2"
+_LATCH_CACHE_SIGNATURE: tuple[str, int, int] | None = None
+_LATCH_CACHE_ACTIVE: dict[tuple[str, str], dict[str, Any]] = {}
+_LATCH_CACHE_LEGACY = False
+_LATCH_CACHE_LATEST: dict[str, Any] = {}
 
 
 def _normalized_token(value: Any, *, default: str) -> str:
@@ -137,6 +141,11 @@ def _append_fsynced(path: Path, record: Mapping[str, Any]) -> None:
             os.close(fd)
 
 
+def _invalidate_latch_cache() -> None:
+    global _LATCH_CACHE_SIGNATURE
+    _LATCH_CACHE_SIGNATURE = None
+
+
 def activate_no_new_risk_latch(
     *,
     reason: str,
@@ -182,6 +191,7 @@ def activate_no_new_risk_latch(
     global _PERSISTENCE_FAILURE_LATCH
     try:
         _append_fsynced(safety_latch_path(), record)
+        _invalidate_latch_cache()
     except Exception as exc:  # the latch itself must fail closed
         # Even when durable storage is unavailable, the current process must
         # stop admitting risk immediately.  This cannot replace durability;
@@ -213,51 +223,112 @@ def _decoded_latch_events() -> list[dict[str, Any]]:
     return events
 
 
+def _apply_latch_event(
+    active: dict[tuple[str, str], dict[str, Any]],
+    payload: Mapping[str, Any],
+) -> bool:
+    """Apply one event without retaining the historical event list."""
+
+    event = str(payload.get("event") or "").strip().lower()
+    metadata = payload.get("metadata")
+    metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+    explicit_cause = str(payload.get("cause") or "").strip()
+    explicit_cause_id = str(payload.get("cause_id") or "").strip()
+    if not explicit_cause:
+        legacy_records = True
+    else:
+        legacy_records = False
+    cause, cause_id = _cause_identity(
+        cause=explicit_cause,
+        cause_id=explicit_cause_id,
+        reason=str(payload.get("reason") or "safety_condition"),
+        actor=str(payload.get("actor") or "system:safety"),
+        correlation_id=str(payload.get("correlation_id") or ""),
+        metadata=metadata,
+    )
+    if event == "activate":
+        active[(cause, cause_id)] = {
+            **dict(payload),
+            "cause": cause,
+            "cause_id": cause_id,
+            "metadata": metadata,
+        }
+    elif event == "release_cause":
+        released_ids = payload.get("released_cause_ids")
+        if isinstance(released_ids, list) and released_ids:
+            for released_id in released_ids:
+                active.pop((cause, str(released_id or "")), None)
+        elif explicit_cause_id:
+            active.pop((cause, cause_id), None)
+        else:
+            for key in [item for item in active if item[0] == cause]:
+                active.pop(key, None)
+    elif event == "clear":
+        # Historical v1 clear had blanket semantics.  New code never
+        # appends this event, but must preserve the old replay contract.
+        active.clear()
+        legacy_records = True
+    return legacy_records
+
+
+def _load_latch_state() -> tuple[
+    dict[tuple[str, str], dict[str, Any]],
+    bool,
+    dict[str, Any],
+]:
+    """Replay the compact active state, caching it until the ledger changes.
+
+    The safety ledger is intentionally append-only, but it can contain years
+    of historical events.  Re-decoding the whole JSONL file for every
+    watchdog probe creates avoidable CPU/memory pressure and can delay the
+    very recovery callback that releases a transient freshness cause.
+    """
+
+    global _LATCH_CACHE_SIGNATURE, _LATCH_CACHE_ACTIVE
+    global _LATCH_CACHE_LEGACY, _LATCH_CACHE_LATEST
+    path = safety_latch_path()
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        _invalidate_latch_cache()
+        return {}, False, {}
+    signature = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+    with _WRITE_LOCK:
+        if signature == _LATCH_CACHE_SIGNATURE:
+            return (
+                dict(_LATCH_CACHE_ACTIVE),
+                bool(_LATCH_CACHE_LEGACY),
+                dict(_LATCH_CACHE_LATEST),
+            )
+        active: dict[tuple[str, str], dict[str, Any]] = {}
+        legacy_records = False
+        latest: dict[str, Any] = {}
+        with path.open("r", encoding="utf-8", errors="strict") as handle:
+            for raw in handle:
+                if not raw.strip():
+                    continue
+                payload = json.loads(raw)
+                if (
+                    not isinstance(payload, dict)
+                    or payload.get("schema_version") != _LATCH_SCHEMA_V1
+                ):
+                    continue
+                latest = payload
+                legacy_records = _apply_latch_event(active, payload) or legacy_records
+        _LATCH_CACHE_SIGNATURE = signature
+        _LATCH_CACHE_ACTIVE = dict(active)
+        _LATCH_CACHE_LEGACY = legacy_records
+        _LATCH_CACHE_LATEST = dict(latest)
+        return dict(active), legacy_records, dict(latest)
+
+
 def _replay_latch_causes(
     events: list[dict[str, Any]],
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], bool]:
     active: dict[tuple[str, str], dict[str, Any]] = {}
     legacy_records = False
     for payload in events:
-        event = str(payload.get("event") or "").strip().lower()
-        metadata = payload.get("metadata")
-        metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
-        explicit_cause = str(payload.get("cause") or "").strip()
-        explicit_cause_id = str(payload.get("cause_id") or "").strip()
-        if not explicit_cause:
-            legacy_records = True
-        cause, cause_id = _cause_identity(
-            cause=explicit_cause,
-            cause_id=explicit_cause_id,
-            reason=str(payload.get("reason") or "safety_condition"),
-            actor=str(payload.get("actor") or "system:safety"),
-            correlation_id=str(payload.get("correlation_id") or ""),
-            metadata=metadata,
-        )
-        if event == "activate":
-            active[(cause, cause_id)] = {
-                **payload,
-                "cause": cause,
-                "cause_id": cause_id,
-                "metadata": metadata,
-            }
-            continue
-        if event == "release_cause":
-            released_ids = payload.get("released_cause_ids")
-            if isinstance(released_ids, list) and released_ids:
-                for released_id in released_ids:
-                    active.pop((cause, str(released_id or "")), None)
-            elif explicit_cause_id:
-                active.pop((cause, cause_id), None)
-            else:
-                for key in [item for item in active if item[0] == cause]:
-                    active.pop(key, None)
-            continue
-        if event == "clear":
-            # Historical v1 clear had blanket semantics.  New code never
-            # appends this event, but must preserve the old replay contract.
-            legacy_records = True
-            active.clear()
+        legacy_records = _apply_latch_event(active, payload) or legacy_records
     return active, legacy_records
 
 
@@ -296,7 +367,7 @@ def release_no_new_risk_latch_cause(
         raise ValueError("latch_cause_release_requires_cause_reason_and_actor")
     requested_id = str(cause_id or "").strip()
     try:
-        durable_active, _legacy = _replay_latch_causes(_decoded_latch_events())
+        durable_active, _legacy, _latest = _load_latch_state()
     except Exception as exc:
         raise SafetyStatePersistenceError(
             f"no_new_risk_latch_read_before_release_failed:{type(exc).__name__}:{exc}"
@@ -338,6 +409,7 @@ def release_no_new_risk_latch_cause(
     }
     try:
         _append_fsynced(safety_latch_path(), record)
+        _invalidate_latch_cache()
     except Exception as exc:
         raise SafetyStatePersistenceError(
             f"no_new_risk_latch_cause_release_failed:{type(exc).__name__}:{exc}"
@@ -396,14 +468,12 @@ def no_new_risk_latch_status(*, fail_closed: bool = True) -> dict[str, Any]:
             "cause_count": 0,
         }
     try:
-        events = _decoded_latch_events()
-        active, legacy_records = _replay_latch_causes(events)
+        active, legacy_records, latest = _load_latch_state()
         for key, record in _PERSISTENCE_FAILURE_CAUSES.items():
             active[key] = record
-        if not events and not active:
+        if not latest and not active:
             raise ValueError("no valid latch records")
         summaries = _cause_summaries(active)
-        latest = dict(events[-1]) if events else {}
         persistence_failed = bool(_PERSISTENCE_FAILURE_CAUSES)
         return {
             **latest,
@@ -466,7 +536,7 @@ def safety_v2_forced_shadow_status() -> dict[str, Any]:
             "reason": "",
         }
     try:
-        active, _legacy = _replay_latch_causes(_decoded_latch_events())
+        active, _legacy, _latest = _load_latch_state()
         for key, record in _PERSISTENCE_FAILURE_CAUSES.items():
             active[key] = record
         forced_record: dict[str, Any] | None = None
@@ -517,7 +587,7 @@ def unresolved_broker_outcome_mutations() -> list[dict[str, Any]]:
     if not path.exists() and not _PERSISTENCE_FAILURE_CAUSES:
         return []
     try:
-        replayed, _legacy = _replay_latch_causes(_decoded_latch_events())
+        replayed, _legacy, _latest = _load_latch_state()
         for key, record in _PERSISTENCE_FAILURE_CAUSES.items():
             replayed[key] = record
         active: dict[tuple[str, int, str], dict[str, Any]] = {}
@@ -575,7 +645,7 @@ def resolve_broker_outcome_mutation(
     if not normalized_intent and (not normalized_action or normalized_position_id <= 0):
         raise ValueError("broker_outcome_resolution_requires_intent_or_action_position")
 
-    replayed, _legacy = _replay_latch_causes(_decoded_latch_events())
+    replayed, _legacy, _latest = _load_latch_state()
     for key, record in _PERSISTENCE_FAILURE_CAUSES.items():
         replayed[key] = record
     matches: list[tuple[str, str, dict[str, Any]]] = []
@@ -662,3 +732,4 @@ def reset_safety_state_for_tests() -> None:
     global _PERSISTENCE_FAILURE_LATCH
     _PERSISTENCE_FAILURE_LATCH = False
     _PERSISTENCE_FAILURE_CAUSES.clear()
+    _invalidate_latch_cache()

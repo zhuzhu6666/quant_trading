@@ -158,6 +158,48 @@ def test_coordinator_commits_overlay_snapshot_and_intent_before_publish(tmp_path
     assert snapshot["config_hash"] == intent["committed_config_hash"]
 
 
+def test_coordinator_binds_existing_trade_lineage_ids_to_mutation_and_overlay(tmp_path):
+    db_path = tmp_path / "state.db"
+    lineage = {
+        "bar_ts": "2026-08-02T08:00:00+00:00",
+        "decision_id": "decision-1",
+        "intent_id": "intent-1",
+        "broker_order_id": "order-1",
+        "deal_id": "deal-1",
+        "position_id": "position-1",
+        "review_id": "review-1",
+        "sample_id": "sample-1",
+    }
+
+    result = GovernanceMutationCoordinator(db_path).execute(
+        _plan(evidence_refs=lineage, mutation_id="mutation-lineage-1")
+    )
+
+    assert result["ok"] is True
+    intent = _row(
+        db_path,
+        "SELECT mutation_id, evidence_refs_json, committed_config_hash, domain_hash "
+        "FROM governance_mutation_intent WHERE mutation_id=?",
+        (result["mutation_id"],),
+    )
+    overlay = _row(
+        db_path,
+        "SELECT mutation_id, overlay_hash FROM runtime_config_overlay"
+    )
+    snapshot = _row(
+        db_path,
+        "SELECT mutation_id, config_hash FROM runtime_config_snapshot"
+    )
+
+    assert intent["mutation_id"] == result["mutation_id"]
+    assert json.loads(intent["evidence_refs_json"]) == lineage
+    assert overlay["mutation_id"] == result["mutation_id"]
+    assert overlay["overlay_hash"] == result["overlay_hash"]
+    assert snapshot["mutation_id"] == result["mutation_id"]
+    assert snapshot["config_hash"] == intent["committed_config_hash"]
+    assert result["domain_hash"] == intent["domain_hash"]
+
+
 def test_publish_failure_is_degraded_and_replayable_without_recommit(tmp_path):
     db_path = tmp_path / "state.db"
     attempts = []

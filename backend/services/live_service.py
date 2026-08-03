@@ -104,9 +104,7 @@ from backend.services.live_loop_start import (
     start_live_loop as _runtime_start_live_loop,
 )
 from backend.services.live_loop_tick_runtime import (
-    LegacyLiveLoopTickRuntime,
     LiveLoopTickRuntime,
-    run_legacy_live_loop_tick_body as _runtime_run_legacy_live_loop_tick_body,
     run_live_loop_tick_body as _runtime_run_live_loop_tick_body,
 )
 from backend.services.live_execution_recovery import (
@@ -214,6 +212,7 @@ from backend.services.review_contract import build_entry_timing_context
 from backend.services.live_runtime_state import (
     cache_get_or_refresh as _runtime_cache_get_or_refresh,
     default_live_state,
+    safe_container_snapshot as _safe_container_snapshot,
     state_get as _runtime_state_get,
     state_set as _runtime_state_set,
     state_update as _runtime_state_update,
@@ -372,6 +371,7 @@ from backend.services.live_position_lifecycle import (
     build_supervisor_position_event_payload as _lifecycle_build_supervisor_position_event_payload,
     build_supervisor_state_upsert_payload as _lifecycle_build_supervisor_state_upsert_payload,
     build_supervisor_trace_ledger_payload as _lifecycle_build_supervisor_trace_ledger_payload,
+    _compact_supervisor_mapping as _lifecycle_compact_supervisor_mapping,
     build_supervisor_close_context_inputs as _lifecycle_build_supervisor_close_context_inputs,
     build_supervisor_action_fingerprint as _lifecycle_build_supervisor_action_fingerprint,
     build_supervisor_risk_context_payload as _lifecycle_build_supervisor_risk_context_payload,
@@ -2898,104 +2898,6 @@ def _restore_session_state_for_day(
     return bool(decision.get("restored"))
 
 
-def _retry_legacy_session_restore(
-    *,
-    broker: str,
-    strategy_name: str,
-    trade_date: str,
-    log,
-) -> bool:
-    """Retry delayed close deals before legacy-loop session admission.
-
-    Phase 2 already runs recovery after its broker/account/safety snapshot.
-    The compatibility loop needs the same fail-closed retry or a delayed
-    final/partial deal would leave its durable cause latched forever.  A fresh
-    account reconcile is required because realized legs change the balance
-    used to derive the UTC-day opening balance.
-    """
-
-    if str(broker or "") != "ctrader":
-        _live_state_update(accepting_new_risk=False)
-        return False
-    bridge, error, warming = _get_ctrader()
-    if (
-        error
-        or bridge is None
-        or warming
-        or not bool(getattr(bridge, "is_connected", False))
-    ):
-        _live_state_update(accepting_new_risk=False)
-        log(
-            "legacy session recovery waiting for broker: "
-            f"{error or 'ctrader_not_ready'}"
-        )
-        return False
-    try:
-        if not _bootstrap_position_recovery(
-            bridge,
-            broker="ctrader",
-            strategy_name=str(strategy_name or "factor_v4"),
-            log=log,
-        ):
-            _live_state_update(accepting_new_risk=False)
-            return False
-    except Exception as exc:
-        _live_state_update(accepting_new_risk=False)
-        log(
-            "legacy session close-deal recovery failed closed: "
-            f"{type(exc).__name__}: {exc}"
-        )
-        return False
-
-    account_reconcile = _explicit_account_reconcile(bridge)
-    account_value = (
-        _reconcile_value(account_reconcile, "account", None)
-        if account_reconcile is not None
-        else None
-    )
-    if account_value is None:
-        _mark_account_reconcile_failed("legacy_session_account_reconcile_failed")
-        _live_state_update(accepting_new_risk=False)
-        return False
-    try:
-        account_payload = (
-            asdict(account_value)
-            if is_dataclass(account_value)
-            else dict(account_value)
-        )
-    except (TypeError, ValueError):
-        _mark_account_reconcile_failed("legacy_session_account_payload_invalid")
-        _live_state_update(accepting_new_risk=False)
-        return False
-    account_payload.update({"ok": True, "broker": "ctrader"})
-    _live_state_update(
-        account=account_payload,
-        account_reconciled=copy.deepcopy(account_payload),
-        account_updated_at=float(
-            _reconcile_value(account_reconcile, "observed_at", 0.0) or 0.0
-        ),
-        account_reconcile_id=str(
-            _reconcile_value(account_reconcile, "reconcile_id", "") or ""
-        ),
-        account_reconcile_failed_at=None,
-        account_reconcile_error=None,
-    )
-    open_position_ids = _fresh_cached_broker_open_position_ids()
-    if open_position_ids is None:
-        _live_state_update(accepting_new_risk=False)
-        return False
-    restored = _restore_session_state_for_day(
-        trade_date,
-        broker_open_position_ids=open_position_ids,
-    )
-    if not restored or str(
-        _live_state_get("session_state_status", "unknown") or "unknown"
-    ) != "available":
-        _live_state_update(accepting_new_risk=False)
-        return False
-    return True
-
-
 def _defer_close_until_authoritative_deal(
     position_id: int,
     *,
@@ -4603,7 +4505,15 @@ def _coerce_live_positions(raw_positions) -> list[dict]:
     if pos_list and not isinstance(pos_list[0], dict):
         from backend.ws.endpoints import _position_to_dict
         pos_list = [_position_to_dict(p) for p in pos_list]
-    return list(pos_list or [])
+    # Broker snapshots are JSON projections.  Copy them at this boundary so a
+    # stale/enriched compatibility dict cannot retain a recursive nested
+    # reference and poison every readiness/API response built from it.
+    return [
+        item
+        if not isinstance(item, (dict, list, tuple, set, frozenset))
+        else _safe_container_snapshot(item)
+        for item in list(pos_list or [])
+    ]
 
 
 def get_live_readiness(broker: str = "ctrader") -> dict:
@@ -4779,7 +4689,31 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
         )
 
     def _visible_positions(pos_list: list[Any]) -> list[dict]:
-        visible = _enrich_positions(pos_list)
+        projected = _coerce_live_positions(pos_list)
+        # The serial live owner already enriches the authoritative snapshot.
+        # HTTP/compatibility reads must project that snapshot only; repeating
+        # lifecycle and supervisor evaluation per browser poll creates extra
+        # DB work and lets concurrent requests amplify memory/CPU usage.
+        loop_projection_ready = bool(
+            _live_state_get("loop_running")
+            and _live_state_get("broker") == broker
+        )
+        cached_projection_ready = bool(
+            projected
+            and all(
+                isinstance(item, dict)
+                and (
+                    "supervisor" in item
+                    or "position_path_metrics_state" in item
+                )
+                for item in projected
+            )
+        )
+        visible = (
+            projected
+            if loop_projection_ready or cached_projection_ready
+            else _enrich_positions(projected)
+        )
         if symbol:
             expected = str(symbol).upper()
             visible = [
@@ -4860,6 +4794,7 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
             positions = _publish_fresh_position_reconcile(
                 reconcile,
                 broker="ctrader",
+                persist=False,
             )
             visible = _visible_positions(positions)
             return {
@@ -4989,7 +4924,14 @@ def _persist_safety_fail_closed(
     ]
     latch = no_new_risk_latch_status(fail_closed=True)
     forced_shadow = "safety_v2_forced_shadow" in normalized
-    persisted_forced_shadow = safety_v2_forced_shadow_status()
+    # A normal freshness failure has no bearing on the V2 candidate authority.
+    # Avoid replaying the separate forced-shadow projection (and its history)
+    # on every watchdog probe; only the forced-shadow path needs it.
+    persisted_forced_shadow = (
+        safety_v2_forced_shadow_status()
+        if forced_shadow
+        else {"active": False}
+    )
     latch_cause = "safety_v2_forced_shadow" if forced_shadow else "safety_freshness"
     latch_cause_id = (
         "candidate_comparison" if forced_shadow else str(source or "safety")
@@ -5094,6 +5036,97 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
             evidence=base_evidence,
         )
 
+    # ``live_loop`` is a separate cause from the watchdog observation itself.
+    # A fresh watchdog snapshot alone is not enough to release it: the
+    # canonical tick owner must have completed a normal Safety cycle and both
+    # account/position reconciles must be identifiable and current.  Keep the
+    # check here, at the existing latch owner, so no caller can accidentally
+    # turn a healthy timestamp into a blanket thaw.
+    live_loop_cause = ("safety_freshness", "live_loop")
+    live_loop_record = active_causes.get(live_loop_cause) or {}
+    live_loop_probe: dict[str, Any] = {}
+    safety_payload: dict[str, Any] = {}
+    account_snapshot: dict[str, Any] = {}
+    positions_snapshot: Any = None
+    live_loop_recovered = False
+    independent_safety_causes = {
+        key
+        for key in active_causes
+        if key[0] == "safety_freshness"
+        and key not in {watchdog_cause, live_loop_cause}
+    }
+    if (
+        live_loop_record
+        and not independent_safety_causes
+        and result.enabled
+        and result.running
+        and result.ok
+        and result.state == "current"
+    ):
+        try:
+            live_loop_probe = dict(_live_safety_watchdog_probe() or {})
+            safety_payload = dict(
+                _live_state_get("safety_plane", {}, clone=True) or {}
+            )
+            account_snapshot = dict(
+                _live_state_get("account_reconciled", {}, clone=True) or {}
+            )
+            positions_snapshot = _live_state_get(
+                "positions_reconciled", None, clone=True
+            )
+            account_id = str(
+                _live_state_get("account_reconcile_id", "") or ""
+            )
+            positions_id = str(
+                _live_state_get("positions_reconcile_id", "") or ""
+            )
+            live_loop_recovered = bool(
+                live_loop_probe.get("running")
+                and bool(_live_state_get("loop_running", False))
+                and str(
+                    _live_state_get("session_state_status", "unknown")
+                    or "unknown"
+                )
+                == "available"
+                and bool(account_snapshot.get("ok"))
+                and bool(account_id)
+                and isinstance(positions_snapshot, list)
+                and bool(positions_id)
+                and bool(safety_payload.get("accepting_new_risk"))
+                and str(safety_payload.get("status") or "")
+                not in {"", "exception", "failed", "unavailable"}
+            )
+        except Exception as exc:
+            logger.debug(
+                "[live] live-loop latch recovery evidence unavailable: %s",
+                exc,
+            )
+            live_loop_recovered = False
+    if live_loop_record and live_loop_recovered:
+        released = release_no_new_risk_latch_cause(
+            cause=live_loop_cause[0],
+            cause_id=live_loop_cause[1],
+            reason="live_loop_safety_reconcile_recovered",
+            actor="system:safety_watchdog",
+            evidence={
+                **base_evidence,
+                "live_loop_heartbeat_at": live_loop_probe.get(
+                    "safety_heartbeat_at"
+                ),
+                "account_reconcile_id": str(
+                    _live_state_get("account_reconcile_id", "") or ""
+                ),
+                "positions_reconcile_id": str(
+                    _live_state_get("positions_reconcile_id", "") or ""
+                ),
+                "session_state_status": str(
+                    _live_state_get("session_state_status", "unknown")
+                    or "unknown"
+                ),
+                "safety_status": str(safety_payload.get("status") or ""),
+            },
+        )
+
     supervisor_cause = ("safety_freshness", "supervisor_tighten")
     supervisor_record = active_causes.get(supervisor_cause) or {}
     supervisor_metadata = dict(supervisor_record.get("metadata") or {})
@@ -5150,6 +5183,9 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
     ) or (
         failure_source == "supervisor_tighten"
         and supervisor_cause not in remaining_causes
+    ) or (
+        failure_source == "live_loop"
+        and live_loop_cause not in remaining_causes
     ):
         updates["safety_failure"] = {}
     _live_state_update(**updates)
@@ -5724,7 +5760,6 @@ def _live_loop_start_runtime() -> LiveLoopStartRuntime:
         reset_start_ownership=_reset_start_ownership,
         persist_desired_state=_persist_loop_desired_state,
         prime_live_loop_state=_prime_live_loop_state,
-        phase2_active=_phase2_v2_active,
         start_safety_watchdog=_start_live_safety_watchdog,
         start_scheduler=_start_live_scheduler,
         stop_scheduler=_stop_live_scheduler,
@@ -6331,7 +6366,12 @@ def _load_bar_cache() -> "pd.DataFrame | None":
     return None
 
 
-def _publish_fresh_position_reconcile(result: Any, *, broker: str) -> list[dict[str, Any]]:
+def _publish_fresh_position_reconcile(
+    result: Any,
+    *,
+    broker: str,
+    persist: bool = True,
+) -> list[dict[str, Any]]:
     if str(_reconcile_value(result, "status", "failed") or "failed") != "fresh":
         return []
     reconcile_id = str(_reconcile_value(result, "reconcile_id", "") or "")
@@ -6373,7 +6413,7 @@ def _publish_fresh_position_reconcile(result: Any, *, broker: str) -> list[dict[
             positions,
             cfg=_rc(),
             now_ts=observed_at,
-            persist=True,
+            persist=bool(persist),
             broker=broker,
             strategy_name=str(_loop_strategy_name or "factor_v4"),
             account=_live_state_get("account", {}, clone=True) or {},
@@ -6382,19 +6422,26 @@ def _publish_fresh_position_reconcile(result: Any, *, broker: str) -> list[dict[
         # Enrichment/audit is advisory; the broker snapshot remains usable by
         # the safety plane when PostgreSQL or learning metadata is unavailable.
         logger.warning("[live] position snapshot enrichment unavailable: %s", exc)
+    safe_positions = _safe_container_snapshot(positions)
+    if not isinstance(safe_positions, list):
+        safe_positions = []
+    positions = [
+        item if isinstance(item, dict) else {}
+        for item in safe_positions
+    ]
     _live_state_update(
         positions=positions,
-        positions_reconciled=copy.deepcopy(positions),
+        positions_reconciled=_safe_container_snapshot(positions),
         positions_updated_at=observed_at,
         positions_reconcile_id=reconcile_id,
         positions_reconcile_failed_at=None,
         positions_reconcile_error=None,
-        positions_component_facts=copy.deepcopy(component_facts),
+        positions_component_facts=_safe_container_snapshot(component_facts),
     )
-    # HTTP/diagnostic reads may publish a broker fact while the trading loop is
-    # stopped.  They must remain read-only; the running loop owns Safety's
-    # conflict latch and final open admission.
-    if not bool(_live_state_get("loop_running", False)):
+    # HTTP/compatibility reads may publish a broker fact without owning the
+    # durable recovery/lifecycle write. Only the Safety and execution paths
+    # pass persist=True; a loop-running flag is not an ownership boundary.
+    if not bool(_live_state_get("loop_running", False)) or not persist:
         return positions
     # A successful Reconcile response is authoritative only when it agrees
     # with broker-confirmed opens that have not yet received a complete close
@@ -6540,7 +6587,10 @@ def _live_safety_planner_runtime() -> SafetyPlannerRuntime:
     def evaluate_supervisor_read_only(position, all_positions, effective_cfg, acct, now_ts):
         existing = position.get("supervisor")
         if isinstance(existing, dict) and existing.get("action"):
-            return copy.deepcopy(existing)
+            return _lifecycle_compact_supervisor_mapping(
+                existing,
+                nested_keys=frozenset({"evidence", "recommended_controls", "execution"}),
+            )
         timeout_context = build_timeout_context(position, effective_cfg, now_ts)
         planner_position = dict(position)
         planner_position["max_holding_seconds"] = float(
@@ -6863,8 +6913,6 @@ def _attempt_generation_startup_barrier(
 
 def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
     return LiveLoopTickRuntime(
-        phase2_active=_phase2_v2_active,
-        legacy_tick_body=_run_live_loop_tick_body_legacy,
         get_ctrader=_get_ctrader,
         reconcile_positions=_explicit_position_reconcile,
         run_safety_cycle=_run_live_safety_cycle,
@@ -6916,68 +6964,6 @@ def _run_live_loop_tick_body(
         log=log,
         generation_id=generation_id,
         runtime=_live_loop_tick_runtime(),
-    )
-
-
-def _legacy_live_loop_tick_runtime() -> LegacyLiveLoopTickRuntime:
-    return LegacyLiveLoopTickRuntime(
-        get_ctrader=_get_ctrader,
-        reconcile_positions=_explicit_position_reconcile,
-        run_safety_cycle=_run_live_safety_cycle,
-        persist_safety_fail_closed=_persist_safety_fail_closed,
-        live_state_update=_live_state_update,
-        market_session_snapshot=_market_session_snapshot,
-        set_loop_diagnostic=_set_loop_diagnostic,
-        market_closed_log_message=_loop_market_closed_log_message,
-        bridge_readiness_label=_loop_bridge_readiness_label,
-        ensure_spot_subscription=_ensure_spot_subscription,
-        logger_debug=logger.debug,
-        kickoff_account_refresh=kickoff_account_refresh,
-        live_state_get=_live_state_get,
-        retry_session_restore=_retry_legacy_session_restore,
-        loop_strategy_name=str(_loop_strategy_name or "factor_v4"),
-        bootstrap_position_recovery=_bootstrap_position_recovery,
-        session_circuit_breaker_enforced=lambda: not bounded_demo_mode_active(),
-        evaluate_daily_drawdown=_evaluate_daily_drawdown,
-        warmup_from_local_db=_warmup_from_local_db,
-        ensure_decision_bars_fresh=_ensure_live_decision_bars_fresh,
-        new_risk_reconciliation_blockers=(
-            _new_risk_reconciliation_blockers
-        ),
-        no_new_risk_latched=no_new_risk_latched,
-        process_shutdown_requested=lambda: _process_shutdown_requested,
-        compare_spot_to_bar=_loop_compare_spot_quote_to_latest_bar,
-        quote_is_fresh=_quote_is_fresh,
-        process_tick=_process_tick,
-        refresh_account_positions=lambda bridge, broker: (
-            _refresh_account_positions_sync(
-                bridge,
-                broker,
-                wait_for_lock_sec=5.0,
-            )
-        ),
-    )
-
-
-def _run_live_loop_tick_body_legacy(
-    *,
-    broker: str,
-    bridge_cfg: Any,
-    timeframe: str,
-    tick: int,
-    recovery_bootstrapped: bool,
-    stop_requested,
-    log,
-) -> dict[str, Any]:
-    return _runtime_run_legacy_live_loop_tick_body(
-        broker=broker,
-        bridge_cfg=bridge_cfg,
-        timeframe=timeframe,
-        tick=tick,
-        recovery_bootstrapped=recovery_bootstrapped,
-        stop_requested=stop_requested,
-        log=log,
-        runtime=_legacy_live_loop_tick_runtime(),
     )
 
 
@@ -7398,7 +7384,6 @@ def _serial_live_tick_runtime() -> SerialLiveTickRuntime:
             _loop_ack_prepared_factor_projections
         ),
         live_state_update=_live_state_update,
-        phase2_active=_phase2_v2_active,
         update_risk_metrics=_update_live_loop_risk_metrics,
     )
 
@@ -7625,6 +7610,7 @@ def _refresh_account_positions_sync(
                     _publish_fresh_position_reconcile(
                         positions_reconcile,
                         broker=broker,
+                        persist=False,
                     )
                 else:
                     _mark_positions_reconcile_failed(
@@ -9233,6 +9219,72 @@ def _record_open_trade_blocked_by_policy(
     return gate_result
 
 
+def _record_open_trade_admission_blocked(
+    *,
+    cfg: Any,
+    bar: dict[str, Any],
+    account: dict[str, Any],
+    positions: list,
+    composite: Any,
+    gate_result: Any,
+    blockers: tuple[str, ...],
+    block_reason: str,
+    skip_stage: str,
+    tick: int,
+) -> None:
+    """Persist a signal-pass admission stop before RiskPolicy is reached.
+
+    This is deliberately a ledger-only observation.  It does not invoke
+    RiskPolicy, create an execution intent, or turn the admission blocker into
+    a risk verdict.  The same decision ledger remains the audit authority used
+    by later risk/order/position records.
+    """
+    if not _LEDGER:
+        return
+    action_json = {
+        "bar_ts": (bar or {}).get("time"),
+        "gate_passed": bool(getattr(gate_result, "passed", False)),
+        "admission_gate_passed": False,
+        "blockers": list(blockers),
+        "action_reason": str(block_reason or "open_admission_blocked"),
+        "execution_intent_created": False,
+    }
+    try:
+        payload = _tick_build_skip_ledger_payload(
+            composite=composite,
+            gate_result=gate_result,
+            cfg=cfg,
+            bar=bar,
+            account=account,
+            positions_before=positions,
+            risk_state=_live_state_get("risk", {}, clone=True) or {},
+            risk_verdict=None,
+            block_reason=block_reason,
+            skip_stage=skip_stage,
+            tick=tick,
+            sizing_trace={},
+            market_session=_live_state_get("market_session", {}, clone=True) or {},
+            event_sizing_context={},
+            learning_context={},
+            decision_ts_fallback=time.time(),
+        )
+        payload["action_json"].update(action_json)
+        decision_id = _LEDGER.log_composite_decision(**payload)
+        logger.debug(
+            "[live] open admission blocker audited decision_id=%s stage=%s blockers=%s",
+            decision_id,
+            skip_stage,
+            list(blockers),
+        )
+    except Exception as ledger_error:
+        # Admission remains fail-closed when the audit sink is unavailable;
+        # the ledger is observability, never permission to submit an order.
+        logger.debug(
+            "[live] open admission blocker ledger persist failed: %s",
+            ledger_error,
+        )
+
+
 def _submit_open_trade_order(bridge: Any, composite: Any, volume: float):
     if composite.direction == 1:
         return bridge.market_buy(volume=volume, sl=0.0, tp=0.0, comment="quant-v4")
@@ -9815,12 +9867,25 @@ def _run_open_trade_pipeline(
         )
         admission_blockers = _open_trade_admission_blockers(stop_requested)
     if admission_blockers:
-        return _open_admission_gate_result(
+        admission_result = _open_admission_gate_result(
             tick=tick,
             stage="before_candidate",
             blockers=admission_blockers,
             log=log,
         )
+        _record_open_trade_admission_blocked(
+            cfg=cfg,
+            bar=bar,
+            account=account,
+            positions=positions,
+            composite=composite,
+            gate_result=gate_result,
+            blockers=admission_blockers,
+            block_reason=_open_admission_gate_reason(admission_blockers),
+            skip_stage="before_candidate",
+            tick=tick,
+        )
+        return admission_result
     if pending_open_attach_ids:
         log(
             f"tick {tick}: v4 open SKIP (pending_open_attach "

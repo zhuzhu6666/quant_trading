@@ -638,8 +638,15 @@ class FactorLifecycleService:
             name = str(state.get("factor_name") or "")
             try:
                 definition = self._definition_from_state(state)
-                meta = self.adapter.get_meta(name)
                 origin = str(state.get("origin") or "dsl").strip().lower()
+                if origin != SOURCE_BUILTIN and name not in factor_registry:
+                    # A governance/learning process can commit a prepared
+                    # DSL definition after this live process booted.  The
+                    # committed lifecycle fact is the only authority for
+                    # loading that callable; keep it shadow-only until the
+                    # live proof below succeeds.
+                    self._project_registry(state)
+                meta = self.adapter.get_meta(name)
                 expected_source = (
                     SOURCE_BUILTIN if origin == SOURCE_BUILTIN else SOURCE_SHADOW
                 )
@@ -853,7 +860,12 @@ class FactorLifecycleService:
                          ON g.mutation_id=s.mutation_id
                        WHERE g.status='committed'
                          AND g.control_surface='factor_lifecycle'
-                       ORDER BY s.updated_at DESC, s.factor_name
+                       ORDER BY CASE
+                                  WHEN s.lifecycle_stage IN ('ACTIVE', 'PROMOTION_PREPARED')
+                                  THEN 0
+                                  ELSE 1
+                                END,
+                                s.updated_at DESC, s.factor_name
                        LIMIT ?""",
                 ),
                 (safe_limit,),

@@ -70,6 +70,7 @@ def test_trade_lesson_memory_upserts_stable_experience_and_brain_reads_it(tmp_pa
     assert stored["source_id"] == "review_lesson_1"
     assert stored["recommended_action"] == "tighten_entry_review"
     context = json.loads(stored["decision_context_json"])
+    assert "review_json" not in context
     assert context["market_state"]["regime"] == "noisy_range"
     assert context["risk_observations"][0]["reason"] == "var_gate"
     assert context["result"]["outcome_label"] == "bad_loss"

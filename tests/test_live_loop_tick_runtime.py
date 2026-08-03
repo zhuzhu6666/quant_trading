@@ -59,7 +59,6 @@ def _runtime(
     state_updates=None,
     persisted=None,
     safety_error=None,
-    phase2=True,
     circuit_breaker=False,
     circuit_enforced=True,
     diagnostic_calls=None,
@@ -93,8 +92,6 @@ def _runtime(
         return dict(safety)
 
     runtime = LiveLoopTickRuntime(
-        phase2_active=lambda: phase2,
-        legacy_tick_body=lambda **_kwargs: {"legacy": True},
         get_ctrader=lambda: (bridge, None, False),
         reconcile_positions=lambda _bridge: order.append("positions")
         or {"positions": []},
@@ -142,21 +139,6 @@ def _runtime(
         ),
     )
     return runtime, controller, plane
-
-
-def test_legacy_mode_delegates_without_touching_v2_safety():
-    runtime, _controller, _plane = _runtime(phase2=False)
-
-    assert run_live_loop_tick_body(
-        broker="ctrader",
-        bridge_cfg=SimpleNamespace(),
-        timeframe="M5",
-        tick=1,
-        recovery_bootstrapped=False,
-        stop_requested=lambda: False,
-        log=lambda _message: None,
-        runtime=runtime,
-    ) == {"legacy": True}
 
 
 def test_safety_exception_fails_closed_before_account_or_alpha():

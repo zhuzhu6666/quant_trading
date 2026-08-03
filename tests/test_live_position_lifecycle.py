@@ -1,3 +1,4 @@
+import json
 import time
 from types import SimpleNamespace
 
@@ -2043,6 +2044,51 @@ def test_build_position_supervisor_context_payload_uses_canonical_market_dimensi
     assert payload["market_space_context"]["structure_bias"] is None
 
 
+def test_supervisor_recovery_projection_bounds_recursive_previous_verdict():
+    previous = {"action": "hold", "summary_reason": "no_action", "evidence": {}}
+    previous["evidence"]["supervisor_state"] = {"latest_supervisor": previous}
+
+    meta = build_supervisor_recovery_meta(
+        recovery_meta={"latest_supervisor": previous},
+        verdict=previous,
+    )
+
+    json.dumps(meta)
+    assert meta["latest_supervisor"] == {
+        "action": "hold",
+        "summary_reason": "no_action",
+    }
+
+
+def test_supervisor_context_drops_recursive_recovery_state_before_evaluation():
+    supervisor_state = {"supervisor_posture": "range_capture"}
+    supervisor_state["latest_supervisor"] = {
+        "action": "hold",
+        "evidence": {"supervisor_state": supervisor_state},
+    }
+
+    payload = build_position_supervisor_context_payload(
+        position={"position_id": 1, "current_price": 2300.0},
+        temporal_context={"holding_seconds": 0.0, "timeframe_seconds": 300},
+        position_metrics={},
+        entry_decision_id="",
+        risk_snapshot={},
+        supervisor_state=supervisor_state,
+        max_holding_bars=0,
+        open_position_count=1,
+        total_api_volume=1.0,
+        account={},
+        template_id="",
+        loop_running=True,
+    )
+
+    json.dumps(payload)
+    assert payload["risk"]["supervisor_state"] == {
+        "supervisor_posture": "range_capture",
+        "latest_supervisor": {"action": "hold"},
+    }
+
+
 def test_build_position_supervisor_context_inputs_collects_live_defaults():
     position = {"position_id": 904}
     account = {"equity": 1000.0}
@@ -2713,10 +2759,49 @@ def test_build_supervisor_trace_ledger_payload_preserves_contract():
         "account": {"equity": 10010.0, "balance": 10000.0},
         "tick": 7,
     }
-    assert payload["verdict"] is verdict
+    assert payload["verdict"] == verdict
+    assert payload["verdict"] is not verdict
     assert payload["risk_verdict"] is risk_verdict
     assert payload["execution"] == {
         **execution,
+        "execution_class": "observed",
+        "is_real_execution": False,
+        "requested_action": "tighten",
+        "effective_action": "tighten",
+        "recommended_action": "tighten",
+    }
+
+
+def test_build_supervisor_trace_ledger_payload_drops_recursive_context():
+    payload = build_supervisor_trace_ledger_payload(
+        position={"position_id": 92, "direction": 1},
+        verdict={
+            "action": "tighten",
+            "summary_reason": "profit_lock",
+            "evidence": {
+                "protection_source": "position_supervisor",
+                "supervisor_state": {"latest_supervisor": {"evidence": {"position": {}}}},
+            },
+            "recommended_controls": {
+                "target_stop_loss": 4004.5,
+                "position": {"supervisor": "recursive"},
+            },
+            "position": {"supervisor": "recursive"},
+        },
+        cfg=SimpleNamespace(timeframe="M5"),
+        tick=1,
+        stage="protection_arbitrated",
+        outcome="observed",
+        execution={"execution_class": "observed", "candidate": {"position": {}}},
+    )
+
+    assert payload["verdict"] == {
+        "action": "tighten",
+        "summary_reason": "profit_lock",
+        "evidence": {"protection_source": "position_supervisor"},
+        "recommended_controls": {"target_stop_loss": 4004.5},
+    }
+    assert payload["execution"] == {
         "execution_class": "observed",
         "is_real_execution": False,
         "requested_action": "tighten",

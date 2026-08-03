@@ -136,7 +136,6 @@ def _runtime(
             (args, kwargs)
         ),
         prime_live_loop_state=lambda **kwargs: primed.append(kwargs),
-        phase2_active=lambda: generation_enabled,
         start_safety_watchdog=lambda: components.append("watchdog_start"),
         start_scheduler=lambda: components.append("scheduler_start"),
         stop_scheduler=lambda: components.append("scheduler_stop"),

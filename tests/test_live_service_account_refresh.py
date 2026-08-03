@@ -1,8 +1,9 @@
-"""Tests for live loop background account/positions refresh.
+"""Tests for the compatibility account/positions refresh.
 
-The legacy loop keeps a compatibility refresh worker while the Phase2 safety
-plane flag is off. It must publish only explicit fresh broker reconciliations
-using the broker's observed_at; HTTP or worker fetch time is never a fact.
+The Phase2 safety plane owns durable position recovery writes. Compatibility
+refreshes and HTTP reads may publish fresh broker facts, but must not create
+durable recovery rows. Broker observed_at, not worker fetch time, remains the
+fact timestamp.
 """
 import threading
 import time
@@ -66,6 +67,7 @@ def test_recent_review_reentry_block_requires_consecutive_failures(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_state():
+    live_service._live_state["loop_running"] = False
     live_service._live_state["account"] = None
     live_service._live_state["account_reconciled"] = None
     live_service._live_state["account_reconcile_id"] = None
@@ -81,6 +83,7 @@ def _reset_state():
     live_service._live_state["positions_event_reason"] = None
     live_service._live_state["account_updated_at"] = None
     live_service._live_state["positions_updated_at"] = None
+    live_service._live_state["loop_running"] = False
     live_service._refresh_thread = None
     live_service._ACCOUNT_CACHE.clear()
     live_service._POSITIONS_CACHE.clear()
@@ -101,6 +104,7 @@ def _reset_state():
     live_service._live_state["positions_event_reason"] = None
     live_service._live_state["account_updated_at"] = None
     live_service._live_state["positions_updated_at"] = None
+    live_service._live_state["loop_running"] = False
     live_service._refresh_thread = None
     live_service._ACCOUNT_CACHE.clear()
     live_service._POSITIONS_CACHE.clear()
@@ -176,10 +180,17 @@ def test_http_reads_preserve_fresh_broker_observation_timestamp(monkeypatch):
 
     bridge = _Bridge()
     monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+
+    persist_values = []
+
+    def _enrich(positions, **kwargs):
+        persist_values.append(kwargs["persist"])
+        return list(positions)
+
     monkeypatch.setattr(
         live_service,
         "_enrich_positions_with_path_metrics",
-        lambda positions, **_kwargs: list(positions),
+        _enrich,
     )
     monkeypatch.setattr(live_service, "_loop_thread", None)
     live_service._live_state["loop_running"] = False
@@ -191,8 +202,56 @@ def test_http_reads_preserve_fresh_broker_observation_timestamp(monkeypatch):
     assert live_service._live_state["positions_updated_at"] == observed_at
     assert account["reconcile_status"] == "fresh"
     assert positions["reconcile_status"] == "fresh"
+    assert persist_values and all(value is False for value in persist_values)
     assert account_fact_payload(account, now=observed_at + 3)["_fact"]["state"] == "known"
     assert positions_fact_payload(positions, now=observed_at + 3)["_fact"]["state"] == "known"
+
+
+def test_compat_refresh_does_not_persist_recovery_rows(monkeypatch):
+    bridge = _fake_bridge()
+    persist_values = []
+
+    def _enrich(positions, **kwargs):
+        persist_values.append(kwargs["persist"])
+        return list(positions)
+
+    monkeypatch.setattr(live_service, "_enrich_positions_with_path_metrics", _enrich)
+
+    live_service._refresh_account_positions_sync(bridge, "ctrader")
+
+    assert persist_values == [False]
+
+
+def test_live_http_positions_read_existing_projection_without_recomputing(monkeypatch):
+    projected = {
+        "position_id": 42,
+        "symbol": "XAUUSD+",
+        "position_path_metrics_state": "known",
+        "supervisor": {"action": "hold"},
+    }
+    live_service._live_state.update(
+        {
+            "loop_running": True,
+            "broker": "ctrader",
+            "positions_reconciled": [projected],
+            "positions": [projected],
+            "positions_updated_at": time.time(),
+            "positions_reconcile_id": "positions-read-projection",
+        }
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_enrich_positions_with_path_metrics",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("HTTP reads must not recompute live projections")
+        ),
+    )
+    monkeypatch.setattr(live_service, "_probe_ctrader", lambda: ("connected", None))
+
+    result = live_service.get_positions("ctrader")
+
+    assert result["positions"][0]["position_id"] == 42
+    assert result["positions"][0]["supervisor"]["action"] == "hold"
 
 
 def test_ctrader_events_never_rejuvenate_reconciled_account_or_positions(monkeypatch):
@@ -702,49 +761,3 @@ class _SyncThread:
 
     def is_alive(self):
         return self._alive
-
-
-# ── Regression: kickoff fires even when fetch_bars returns None ──────────
-# audit 2026-06-10: cTrader broker demo doesn't return history bars.
-# Previous code put kickoff_account_refresh inside the `else` branch
-# (after fetch_bars succeeded), so it never ran in production. Fix: move
-# kickoff above fetch_bars in _run_loop. This test reads the source file
-# and asserts the call ordering — if anyone moves kickoff back inside the
-# else, this test fails.
-def test_kickoff_runs_even_when_fetch_bars_returns_none():
-    """Regression: in the live tick body cTrader branch, kickoff_account_refresh
-    must be called BEFORE _fetch_bars_with_retry. Otherwise the cTrader
-    demo (which returns 0 history bars) will skip the kickoff forever.
-    """
-    from pathlib import Path as _Path
-    src_path = (
-        _Path(__file__).resolve().parent.parent
-        / "backend"
-        / "services"
-        / "live_loop_tick_runtime.py"
-    )
-    src = src_path.read_text(encoding="utf-8")
-    lines = src.splitlines()
-    # Locate the extracted tick body used by _run_loop's main while loop.
-    # Phase2 runs broker reconciliation inline on the single mutation thread;
-    # this regression assertion applies only to the compatibility loop, which
-    # still owns the background refresh worker.
-    main_loop_idx = next(
-        i for i, ln in enumerate(lines)
-        if "def run_legacy_live_loop_tick_body" in ln
-    )
-    helper_end = next(
-        i for i, ln in enumerate(lines[main_loop_idx + 1:], start=main_loop_idx + 1)
-        if ln.startswith("def run_live_loop_tick_body")
-    )
-    branch_text = "\n".join(lines[main_loop_idx:helper_end])
-    kickoff_pos = branch_text.find("kickoff_account_refresh")
-    # cTrader reads from local DataStore now
-    warmup_pos = branch_text.find("warmup_from_local_db")
-    assert kickoff_pos > 0, "kickoff_account_refresh not found in cTrader main-loop block"
-    assert warmup_pos > 0, "warmup_from_local_db not found in cTrader main-loop block"
-    assert kickoff_pos < warmup_pos, (
-        "REGRESSION: kickoff_account_refresh is AFTER _warmup_from_local_db in "
-        "the cTrader live tick body. It must be BEFORE so the cache writer still "
-        "runs when warmup returns None."
-    )

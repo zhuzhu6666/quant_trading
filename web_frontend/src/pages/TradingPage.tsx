@@ -505,7 +505,7 @@ export function TradingPage() {
           <section className="trading-status-section" aria-label="策略信号">
             <div className="trading-status-head">
               <h3>策略信号</h3>
-              <StatusPill status={strategyDisplayable ? (gatePassed ? "通过" : "未通过") : "状态未知"} tone={factBoundTone(strategyFact, gatePassed ? "ok" : "warn", strategyRequestFailed)} />
+              <StatusPill status={strategyDisplayable ? (gatePassed ? "信号通过" : "信号未通过") : "状态未知"} tone={factBoundTone(strategyFact, gatePassed ? "ok" : "warn", strategyRequestFailed)} />
             </div>
             <div className="field-list trading-compact-fields">
               <Field label="实单发送" value={strategyDisplayable ? (pickBoolean(strategyStatus, ["send_orders"], false) ? "开启" : "关闭") : "未知"} tone={factBoundTone(strategyFact, pickBoolean(strategyStatus, ["send_orders"], false) ? "ok" : "warn", strategyRequestFailed)} />
@@ -523,8 +523,10 @@ export function TradingPage() {
             </div>
             <div className="field-list trading-compact-fields">
               <Field label="缓冲区" value={formatDecimal(bufferSize, 0)} />
-              <Field label="活跃因子" value={formatDecimal(pickNumber(lastComposite, ["n_active"], 0), 0)} />
-              <Field label="弃权因子" value={formatDecimal(pickNumber(lastComposite, ["n_abstain"], 0), 0)} />
+              <Field label="可用因子" value={formatDecimal(pickNumber(lastComposite, ["n_available", "n_available_factors"], 0), 0)} />
+              <Field label="评分因子" value={formatDecimal(pickNumber(lastComposite, ["n_scoring", "n_scoring_factors"], 0), 0)} />
+              <Field label="贡献因子" value={formatDecimal(pickNumber(lastComposite, ["n_contributing", "n_contributing_factors"], 0), 0)} />
+              <Field label="弃权因子" value={formatDecimal(pickNumber(lastComposite, ["n_abstain", "n_abstain_factors"], 0), 0)} />
               <Field label="归因样本" value={formatDecimal(attributedTrades, 0)} />
               <Field label="自适应综合置信度" value={formatDecimal(aweConviction * 100, 1) + "%"} />
               <Field label="归因胜率" value={overallWinRate ? `${formatDecimal(overallWinRate * 100, 1)}%` : ""} />
@@ -580,7 +582,7 @@ export function TradingPage() {
                 <th scope="col">Tick</th>
                 <th scope="col">战术分</th>
                 <th scope="col">宏观分</th>
-                <th scope="col">活跃因子</th>
+                <th scope="col">贡献因子</th>
                 <th scope="col">弃权</th>
                 <th scope="col">决策条件原因</th>
               </tr>
@@ -596,7 +598,7 @@ export function TradingPage() {
                     <td>{formatOptionalDecimal(item, ["tick"], 0)}</td>
                     <td>{formatOptionalDecimal(item, ["tactical_score", "signal.tactical_score"], 4)}</td>
                     <td>{formatOptionalDecimal(item, ["macro_score", "signal.macro_score"], 4)}</td>
-                    <td>{formatOptionalDecimal(item, ["n_active", "signal.n_active"], 0)}</td>
+                    <td>{formatOptionalDecimal(item, ["n_contributing", "n_contributing_factors", "signal.n_contributing"], 0)}</td>
                     <td>{formatOptionalDecimal(item, ["n_abstain", "signal.n_abstain"], 0)}</td>
                     <td>{translateDisplayValue(pickString(item, ["gate_reason", "gate_result.reason"], ""))}</td>
                   </tr>

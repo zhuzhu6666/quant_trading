@@ -12,20 +12,8 @@ def _call_name(node: ast.Call) -> str:
     return ""
 
 
-def _is_off_mode_guard(node: ast.If) -> bool:
-    try:
-        return ast.unparse(node.test) == "coordinator_mode == 'off'"
-    except Exception:
-        return False
-
-
-def test_legacy_startup_governance_projections_are_off_mode_only():
+def test_startup_has_no_legacy_governance_projection_writes():
     tree = ast.parse(Path("backend/app.py").read_text(encoding="utf-8"))
-    parents: dict[ast.AST, ast.AST] = {
-        child: parent
-        for parent in ast.walk(tree)
-        for child in ast.iter_child_nodes(parent)
-    }
     guarded_calls = {"sync_runtime_config", "rc_patch", "restore_from_log"}
     seen: set[str] = set()
     for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
@@ -33,22 +21,7 @@ def test_legacy_startup_governance_projections_are_off_mode_only():
         if name not in guarded_calls:
             continue
         seen.add(name)
-        child: ast.AST = call
-        parent = parents.get(child)
-        guarded = False
-        while parent is not None:
-            if (
-                isinstance(parent, ast.If)
-                and _is_off_mode_guard(parent)
-                and child in parent.body
-            ):
-                guarded = True
-                break
-            child = parent
-            parent = parents.get(child)
-        assert guarded, f"legacy startup call {name} escaped coordinator off guard"
-
-    assert seen == guarded_calls
+    assert seen == set()
 
 
 def test_evolution_generated_factor_name_never_uses_python_hash():

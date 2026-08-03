@@ -9,7 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import threading
 import time
+import logging
 from typing import Any, Callable, Mapping
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -180,10 +184,11 @@ class LiveSafetyWatchdog:
             while not self._stop.wait(self._interval_sec):
                 try:
                     self.run_once()
-                except Exception:
+                except Exception as exc:
                     # The safety callback installs its own process-local
                     # fail-closed latch on persistence failure.  A watchdog
                     # exception must not terminate future checks.
+                    _LOGGER.warning("safety watchdog check failed closed: %s", exc)
                     continue
 
         self._thread = threading.Thread(

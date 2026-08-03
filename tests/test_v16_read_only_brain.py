@@ -393,6 +393,52 @@ def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path):
     } == {"cf_clean"}
 
 
+def test_brain_memory_projects_recursive_review_lineage(tmp_path):
+    db_path = tmp_path / "state.db"
+    recursive_evidence = {
+        "protection_source": "position_supervisor",
+        "supervisor_state": {"latest_supervisor": {"evidence": {"position": {}}}},
+    }
+    review = {
+        "primary_responsibility": "exit",
+        "inferred_close_supervisor": {
+            "event_type": "supervisor_tighten",
+            "evidence": recursive_evidence,
+            "execution": {"candidate": {"position": {}}},
+        },
+    }
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """INSERT INTO trade_outcome_review
+               (review_id, trade_id, position_id, pnl, outcome_label, review_json, created_at)
+               VALUES ('review_recursive', 'trade_recursive', 'position_recursive', -2,
+                       'loss', ?, 20)""",
+            (json.dumps(review),),
+        )
+        conn.execute(
+            """INSERT INTO experience_memory
+               (experience_id, trade_id, source_table, source_id, decision_context_json,
+                append_source, outcome_label, reward_score, evidence_strength, created_at)
+               VALUES ('trade_lesson:review_recursive', 'trade_recursive', 'trade_outcome_review',
+                       'review_recursive', ?, 'trade_lesson_memory.v1', 'loss', -1, 1, 20)""",
+            (json.dumps({"review_json": review, "lesson": {"summary": "recursive"}}),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = BrainMemoryService(db_path).retrieve(persist=False, limit=50)
+    item = next(item for item in result["items"] if item["source_id"] == "trade_lesson:review_recursive")
+
+    assert "review_json" not in item["structured"]["decision_context"]
+    assert item["structured"]["review"]["inferred_close_supervisor"] == {
+        "event_type": "supervisor_tighten",
+        "evidence": {"protection_source": "position_supervisor"},
+    }
+
+
 def test_brain_action_planner_records_shadow_only_action_plans(tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)

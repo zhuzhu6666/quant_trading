@@ -725,7 +725,7 @@ tbody tr:hover {
   .factor-ticks-table td:nth-child(2)::before { content: "Tick"; }
   .factor-ticks-table td:nth-child(3)::before { content: "战术分"; }
   .factor-ticks-table td:nth-child(4)::before { content: "宏观分"; }
-  .factor-ticks-table td:nth-child(5)::before { content: "活跃因子"; }
+  .factor-ticks-table td:nth-child(5)::before { content: "贡献因子"; }
   .factor-ticks-table td:nth-child(6)::before { content: "弃权"; }
   .factor-ticks-table td:nth-child(7)::before { content: "闸门原因"; }
 

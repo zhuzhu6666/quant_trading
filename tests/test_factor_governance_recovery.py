@@ -65,7 +65,7 @@ def _catalog(now: float, *, health_updated_at: float | None = None, shadow: dict
     }]
 
 
-def test_quarantined_builtin_alpha_is_restored_after_fresh_recovery_evidence(monkeypatch):
+def test_quarantined_builtin_alpha_is_not_automatically_restored(monkeypatch):
     now = time.time()
     rc.replace(_runtime_config(now - 8 * 86400))
     risk = _AllowRisk()
@@ -95,15 +95,14 @@ def test_quarantined_builtin_alpha_is_restored_after_fresh_recovery_evidence(mon
         {"run_id": "restore_test"},
     )
 
-    assert [item["action"] for item in actions] == ["restore_factor_live"]
-    assert actions[0]["status"] == "applied"
-    assert risk.actions == ["restore_factor_live"]
-    assert applied[0]["source"] == "factor_governance_restore_live"
-    assert audited == [("pin_bar", "restore_factor_live", "applied")]
+    assert actions == []
+    assert risk.actions == []
+    assert applied == []
+    assert audited == []
     restored = rc.shared().factor_signal_config["pin_bar"]
-    assert restored["enabled"] is True
-    assert restored["lifecycle_status"] == "ACTIVE"
-    assert restored["restored_from"] == "QUARANTINE"
+    assert restored["enabled"] is False
+    assert restored["lifecycle_status"] == "QUARANTINE"
+    assert "restored_from" not in restored
 
 
 @pytest.mark.parametrize(
@@ -130,7 +129,7 @@ def test_quarantined_builtin_alpha_requires_cooldown_fresh_health_and_cleared_mo
     assert actions == []
 
 
-def test_coordinator_off_compatibility_uses_legacy_quarantine_patch(monkeypatch):
+def test_coordinator_off_does_not_bypass_with_legacy_quarantine_patch(monkeypatch):
     now = time.time()
     rc.replace(RuntimeConfig(
         autonomy_mode="live_candidate",
@@ -147,7 +146,13 @@ def test_coordinator_off_compatibility_uses_legacy_quarantine_patch(monkeypatch)
         return {"ok": True}
 
     monkeypatch.setattr(orchestrator, "_apply_runtime_patch", apply_patch)
-    monkeypatch.setattr(orchestrator, "_audit_action", lambda *_args, **_kwargs: {"status": "applied"})
+    monkeypatch.setattr(
+        orchestrator,
+        "_audit_action",
+        lambda _run, _item, _action, status, *_args, **_kwargs: {
+            "status": status
+        },
+    )
     # A pending experiment may defer another exploratory weight change, but
     # must never defer severe risk tightening.
     monkeypatch.setattr(orchestrator, "_factor_has_pending_effect", lambda _factor_id: True)
@@ -165,9 +170,8 @@ def test_coordinator_off_compatibility_uses_legacy_quarantine_patch(monkeypatch)
         {"run_id": "disable_test"},
     )
 
-    assert actions == [{"status": "applied"}]
-    assert captured[0]["factor_signal_config"]["pin_bar"]["lifecycle_status"] == "QUARANTINE"
-    assert captured[0]["factor_signal_config"]["pin_bar"]["disabled_at"] >= now
+    assert actions == [{"status": "blocked_by_evidence"}]
+    assert captured == []
 
 
 def test_typed_governance_quarantines_builtin_through_lifecycle(monkeypatch):
@@ -431,7 +435,7 @@ def test_demo_disable_streak_advances_only_for_unique_evidence_cycles(
     )["pin_bar"]["streak"] == 1
 
 
-def test_typed_demo_governance_reenrolls_terminal_builtin_as_new_shadow(monkeypatch):
+def test_typed_demo_governance_does_not_auto_reenroll_terminal_builtin(monkeypatch):
     import backend.services.governance_control_plans as control_plans
 
     now = time.time()
@@ -479,11 +483,11 @@ def test_typed_demo_governance_reenrolls_terminal_builtin_as_new_shadow(monkeypa
         {"run_id": "terminal_builtin_restore"},
     )
 
-    assert actions == [{"status": "applied"}]
-    assert calls[0]["name"] == "pin_bar"
-    assert rc.shared().factor_signal_config["pin_bar"]["enabled"] is True
-    assert rc.shared().factor_signal_config["pin_bar"]["lifecycle_status"] == "SHADOW"
-    assert rc.shared().factor_portfolio_weights["pin_bar"] == 0.0
+    assert actions == []
+    assert calls == []
+    assert rc.shared().factor_signal_config["pin_bar"]["enabled"] is False
+    assert rc.shared().factor_signal_config["pin_bar"]["lifecycle_status"] == "QUARANTINE"
+    assert rc.shared().factor_portfolio_weights["pin_bar"] == 0.1
 
 
 def test_risk_policy_dispatches_factor_restore_and_honors_freeze():

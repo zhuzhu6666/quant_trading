@@ -18,12 +18,14 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
 
 from alpha.ic_tracker import ICTracker, safe_corrcoef
+from alpha.factor_cadence import infer_factor_cadence
+from alpha.portfolio_compositor import resolve_factor_role
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,72 @@ HEALTHY_SCORE_THRESHOLD = 70.0
 WATCH_SCORE_THRESHOLD = 40.0
 ACTIVE_IC_THRESHOLD = 0.02  # |rolling_ic| >= 此值才算 ACTIVE
 MIN_N_OBS = 100             # 至少 100 个观察点才评估
+
+
+def _load_committed_runtime_factor_functions() -> dict[str, Callable]:
+    """Load only committed prepared/active DSL definitions for health checks.
+
+    The learning worker deliberately does not rebuild the process-local
+    Registry projection.  Without this read-only bridge, a restart removes
+    the callable from that process and the factor never receives a health
+    fact, so a prepared promotion can never reach activation.
+    """
+    try:
+        import json
+
+        from alpha.factor_dsl import evaluate_dsl, parse_dsl
+        from alpha.factor_identity import (
+            canonical_factor_id,
+            factor_definition_fingerprint,
+        )
+        from backend.core.db import get_state_pg_conn
+
+        conn = get_state_pg_conn(read_only=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT factor_id, factor_name, definition_fingerprint, metadata_json
+                FROM factor_lifecycle_state
+                WHERE origin=%s
+                  AND lifecycle_stage IN (%s, %s)
+                ORDER BY updated_at DESC, factor_name
+                """,
+                ("dsl", "PROMOTION_PREPARED", "ACTIVE"),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        functions: dict[str, Callable] = {}
+        for row in rows:
+            factor_id = str(row["factor_id"] or "")
+            name = str(row["factor_name"] or "").strip()
+            definition_fingerprint = str(row["definition_fingerprint"] or "")
+            metadata = row["metadata_json"]
+            if not isinstance(metadata, dict):
+                try:
+                    metadata = json.loads(str(metadata or "{}"))
+                except Exception:
+                    metadata = {}
+            expression = str((metadata or {}).get("expression") or "").strip()
+            if not name or not expression:
+                continue
+            try:
+                parse_dsl(expression)
+                if (
+                    canonical_factor_id(expression) != factor_id
+                    or factor_definition_fingerprint(expression)
+                    != definition_fingerprint
+                ):
+                    continue
+            except Exception:
+                continue
+            functions[name] = lambda frame, _expression=expression: evaluate_dsl(
+                _expression, frame
+            )
+        return functions
+    except Exception as exc:
+        logger.debug("factor health committed runtime definitions unavailable: %s", exc)
+        return {}
 
 
 class FactorHealth:
@@ -380,6 +448,66 @@ def _invalid_dsl_reason(name: str, fn: object) -> str:
     return ""
 
 
+def _runtime_factor_signal_config() -> dict[str, dict]:
+    """Read the existing signal projection without making it a new owner."""
+    try:
+        from config.runtime_config import shared
+
+        cfg = shared()
+        raw = getattr(cfg, "factor_signal_config", {}) or {}
+        return {
+            str(name): dict(value)
+            for name, value in raw.items()
+            if isinstance(value, dict)
+        }
+    except Exception as exc:
+        logger.debug("factor health runtime signal config unavailable: %s", exc)
+        return {}
+
+
+def _cadence_sample_indices(values: np.ndarray, policy: str) -> np.ndarray:
+    """Return observations that represent new evidence for this cadence."""
+    finite = np.flatnonzero(np.isfinite(values))
+    if not len(finite) or policy != "on_value_change":
+        return finite
+
+    selected: list[int] = []
+    previous: float | None = None
+    for index in finite.tolist():
+        value = float(values[index])
+        if previous is None or value != previous:
+            selected.append(index)
+        previous = value
+    return np.asarray(selected, dtype=np.int64)
+
+
+def _factor_horizon_ics(
+    values: np.ndarray,
+    forward_returns: dict[int, np.ndarray],
+    indices: np.ndarray,
+) -> dict[str, float]:
+    """Expose the existing multi-horizon IC evidence without new thresholds."""
+    result: dict[str, float] = {}
+    for horizon, returns in forward_returns.items():
+        usable = indices[indices < len(returns)]
+        if not len(usable):
+            continue
+        sampled_values = values[usable]
+        sampled_returns = returns[usable]
+        mask = np.isfinite(sampled_values) & np.isfinite(sampled_returns)
+        if int(mask.sum()) < 10:
+            continue
+        result[f"ic_{horizon}"] = round(
+            safe_corrcoef(
+                sampled_values[mask],
+                sampled_returns[mask],
+                min_samples=10,
+            ),
+            4,
+        )
+    return result
+
+
 def evaluate_factors(
     df: "pd.DataFrame",
     threshold: float = 0.04,
@@ -393,22 +521,40 @@ def evaluate_factors(
         "factors": [FactorHealthStatus.to_dict() ...]
     }
 
-    注: 这是 v1 简化版 — 用 1 步 forward return 当 ground truth,
-    没考虑交易成本/regime. v2 应该接 factor_score_evaluator 算多 horizon.
+    健康分仍复用 FactorHealth 的既有阈值；输入按 factor cadence 去重，
+    并把既有 FactorEngine 的 [1, 5, 10, 20] horizon IC 作为审计组件。
     """
     from alpha.registry import factor_registry
 
     cb = progress_cb or (lambda *_: None)
-    cb("loading_factors", 35, f"scanning {len(factor_registry.list())} factors")
 
     if len(df) < 50:
         cb("warning", 38, f"only {len(df)} bars, health report may be sparse")
 
-    fwd_returns = _build_forward_returns(df, horizon=1)
+    forward_returns = {
+        horizon: _build_forward_returns(df, horizon=horizon)
+        for horizon in (1, 5, 10, 20)
+    }
+    fwd_returns = forward_returns[1]
     tracker = ICTracker(window=min(2000, len(df)))
     health = FactorHealth(tracker)
+    signal_config = _runtime_factor_signal_config()
 
-    n_factors = len(factor_registry.list())
+    registered_names = list(factor_registry.list())
+    committed_functions = _load_committed_runtime_factor_functions()
+    factor_names = list(registered_names)
+    factor_functions: dict[str, Callable] = {}
+    for name in registered_names:
+        fn = factor_registry.get(name)
+        if fn is not None:
+            factor_functions[name] = fn
+    for name, fn in committed_functions.items():
+        if name not in factor_functions:
+            factor_names.append(name)
+            factor_functions[name] = fn
+
+    n_factors = len(factor_names)
+    cb("loading_factors", 35, f"scanning {n_factors} factors")
     # 跳过 DEAD 因子 (reduce CPU, 避免 builtin DEAD 因子反复评估)
     dead_names_set: set[str] = set()
     if exclude_dead:
@@ -420,14 +566,14 @@ def evaluate_factors(
 
     all_status: list[FactorHealthStatus] = []
     n_dead_skipped = 0
-    for i, name in enumerate(factor_registry.list()):
+    for i, name in enumerate(factor_names):
         if name in dead_names_set:
             n_dead_skipped += 1
             if n_factors > 0 and (i + 1) % 5 == 0:
                 cb("evaluating", 35 + 50 * (i + 1) / n_factors, f"{i+1}/{n_factors} factors ({n_dead_skipped} DEAD skipped)")
             continue
         try:
-            fn = factor_registry.get(name)
+            fn = factor_functions.get(name)
             if fn is None:
                 continue
             invalid_dsl_reason = _invalid_dsl_reason(name, fn)
@@ -446,11 +592,61 @@ def evaluate_factors(
                 continue
             vals = fn(df)
             # 必须等长 (跟 ICTracker.update 严格校验一致)
+            vals = np.asarray(vals, dtype=np.float64)
+            if vals.ndim == 0:
+                vals = np.full(len(df), float(vals), dtype=np.float64)
             n = min(len(vals), len(fwd_returns))
-            vals = np.asarray(vals, dtype=np.float64)[:n]
+            vals = vals[:n]
             fr = fwd_returns[:n]
-            tracker.update(name, vals, fr)
+            cfg_entry = signal_config.get(name, {})
+            role = resolve_factor_role(name, cfg_entry)
+            cadence, sample_policy = infer_factor_cadence(name, cfg_entry)
+            sample_indices = _cadence_sample_indices(vals, sample_policy)
+            raw_observations = int(np.isfinite(vals).sum())
+            horizon_returns = {
+                horizon: returns[:n]
+                for horizon, returns in forward_returns.items()
+            }
+            horizon_ics = _factor_horizon_ics(
+                vals,
+                horizon_returns,
+                sample_indices,
+            )
+            cadence_metadata = {
+                "role": role,
+                "cadence": cadence,
+                "history_sample_policy": sample_policy,
+                "evaluation_mode": "cadence_aware",
+                "raw_observations": raw_observations,
+                "sampled_observations": int(len(sample_indices)),
+                "horizon_ics": horizon_ics,
+            }
+            # Context, sizing, gate and event/calendar inputs are useful
+            # runtime facts, but they are not ordinary directional alpha IC.
+            # Keep them UNKNOWN rather than inventing a health score from
+            # repeated availability values.
+            if role != "alpha" or cadence == "event" or sample_policy == "event_window":
+                all_status.append(
+                    FactorHealthStatus(
+                        factor=name,
+                        score=0.0,
+                        status="UNKNOWN",
+                        components={
+                            **cadence_metadata,
+                            "evaluation_reason": "non_directional_factor",
+                        },
+                        n_obs=raw_observations,
+                        rolling_ic=0.0,
+                    )
+                )
+                continue
+
+            # Only the de-duplicated cadence observations enter FactorHealth;
+            # the final incomplete forward return is harmlessly excluded by
+            # ICTracker.update.
+            tracker.update(name, vals[sample_indices], fr[sample_indices])
             status = health.evaluate(name)
+            status.components = {**cadence_metadata, **status.components}
             all_status.append(status)
         except Exception as e:
             logger.warning(f"evaluate_factors: {name} failed: {e}")

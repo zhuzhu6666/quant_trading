@@ -1,5 +1,6 @@
 import json
 import time
+from types import SimpleNamespace
 
 from backend.services import config_service
 from backend.core.db import STATE_DB_DDL, connect_sqlite
@@ -7,6 +8,88 @@ from backend.services.backend_readiness import BackendReadinessService
 from backend.services.evolution_ledger import persist_runtime_config_snapshot
 from backend.services.policy_suggestion_status import normalize_policy_suggestion_status
 from config import runtime_config as rc
+
+
+def test_system_health_readiness_uses_only_canonical_snapshot(monkeypatch):
+    from backend.services import backend_readiness
+    from monitor import system_health
+
+    monkeypatch.setattr(
+        system_health,
+        "shared",
+        lambda: SimpleNamespace(get_last_report=lambda: None),
+    )
+
+    status = BackendReadinessService._system_health()
+
+    assert status["status"] == "unknown"
+    assert status["reason_code"] == "system_health_snapshot_unavailable"
+    assert status["source"] == "monitor.system_health.shared()"
+    assert status["blocking_components"] == [
+        {
+            "component": "system_health",
+            "status": "unknown",
+            "reason": "system_health_snapshot_unavailable",
+        }
+    ]
+
+
+def test_system_health_readiness_projects_canonical_freshness(monkeypatch):
+    from backend.services import backend_readiness
+    from monitor import system_health
+
+    report = SimpleNamespace(
+        overall="healthy",
+        overall_score=1.0,
+        ts=100.0,
+        components={
+            "ctrader_bridge": SimpleNamespace(status="ok"),
+        },
+    )
+    monkeypatch.setattr(
+        system_health,
+        "shared",
+        lambda: SimpleNamespace(get_last_report=lambda: report),
+    )
+    monkeypatch.setattr(backend_readiness.time, "time", lambda: 110.0)
+
+    status = BackendReadinessService._system_health()
+
+    assert status["status"] == "known"
+    assert status["display_overall"] == "healthy"
+    assert status["blocking_components"] == []
+    assert status["observed_at"] == 100.0
+    assert status["age_seconds"] == 10.0
+
+
+def test_system_health_readiness_marks_expired_snapshot_stale(monkeypatch):
+    from backend.services import backend_readiness
+    from monitor import system_health
+
+    report = SimpleNamespace(
+        overall="healthy",
+        overall_score=1.0,
+        ts=100.0,
+        components={},
+    )
+    monkeypatch.setattr(
+        system_health,
+        "shared",
+        lambda: SimpleNamespace(get_last_report=lambda: report),
+    )
+    monkeypatch.setattr(backend_readiness.time, "time", lambda: 176.0)
+
+    status = BackendReadinessService._system_health()
+
+    assert status["status"] == "stale"
+    assert status["reason_code"] == "system_health_snapshot_stale"
+    assert status["blocking_components"] == [
+        {
+            "component": "system_health",
+            "status": "stale",
+            "reason": "system_health_snapshot_stale",
+        }
+    ]
 
 
 def test_readiness_reports_config_runtime_drift(monkeypatch, tmp_path):

@@ -1567,13 +1567,14 @@ def test_run_live_loop_tick_body_returns_wait_when_market_closed(monkeypatch):
         log=logs.append,
     )
 
-    # Even on a confirmed weekend the default-off compatibility loop keeps a
-    # five-second retry cadence while broker reconciliation is unavailable;
-    # market-session state may block alpha but may not suspend safety.
-    assert result == {"recovery_bootstrapped": False, "wait_seconds": 5.0, "break_loop": False}
-    assert diagnostics[0][0][:2] == (12, "market_closed")
-    assert "market closed confirmed" in logs[0]
-    assert "weekend" in logs[0]
+    # The canonical tick owner always returns the completed Safety projection;
+    # a closed session blocks alpha but does not suspend Safety.
+    assert result["recovery_bootstrapped"] is False
+    assert result["wait_seconds"] == 5.0
+    assert result["break_loop"] is False
+    assert result["safety"]["accepting_new_risk"] is False
+    assert diagnostics[0][0][:2] == (12, "bridge_unavailable")
+    assert "safety failed closed" in logs[0]
 
 
 def test_closed_decision_bar_frame_drops_current_partial_bar():

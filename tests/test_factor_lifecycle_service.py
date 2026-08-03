@@ -262,6 +262,51 @@ def test_activation_fails_closed_without_projection_health_or_explicit_weight(li
     assert service.get_state(factor_name=name)["lifecycle_stage"] == "PROMOTION_PREPARED"
 
 
+def test_live_ack_loads_committed_prepared_dsl_when_registry_is_cold(
+    lifecycle, monkeypatch
+):
+    service, adapter, name, _expression = lifecycle
+    assert service.prepare_promotion(name=name)["ok"] is True
+
+    # Simulate a live process that booted before this committed definition was
+    # projected.  The ACK owner must load the committed shadow callable, but
+    # it must still keep the factor out of the voting list.
+    factor_registry._factors.pop(name, None)
+    adapter.meta.pop(name, None)
+    monkeypatch.setattr(
+        "alpha.registry_adapter.RegistryAdapter.shared",
+        classmethod(lambda cls: adapter),
+    )
+    engine = StreamingFactorEngine(
+        max_buffer=80,
+        factor_runtime_config=runtime_config.shared().factor_signal_config,
+    )
+    engine.warmup_bars(
+        [
+            {
+                "open": 1900.0 + idx,
+                "high": 1901.0 + idx,
+                "low": 1899.0 + idx,
+                "close": 1900.5 + idx,
+                "volume": 100.0 + idx,
+                "time": float(idx + 1),
+                "complete": True,
+            }
+            for idx in range(60)
+        ]
+    )
+
+    result = service.acknowledge_loaded_prepared_factors(
+        engine=engine,
+        boot_id="live-generation-cold-registry",
+    )
+
+    assert result["acknowledged_count"] == 1
+    assert result["blocked_count"] == 0
+    assert adapter.get_meta(name)["source"] == SOURCE_SHADOW
+    assert name not in engine.voting_factor_ids
+
+
 def test_live_warm_engine_acknowledges_prepared_without_adding_it_to_votes(
     lifecycle, monkeypatch
 ):
@@ -434,6 +479,66 @@ def test_backend_bootstrap_rebuilds_active_registry_from_committed_state_only(
     assert adapter.promote_calls == promote_before + 1
     assert adapter.get_meta(name)["source"] == SOURCE_DISCOVERED
     assert name in factor_registry
+
+
+def test_backend_bootstrap_prioritizes_prepared_over_recent_shadow_volume(
+    lifecycle, monkeypatch
+):
+    service, _adapter, name, _expression = lifecycle
+    assert service.prepare_promotion(name=name)["ok"] is True
+
+    now = time.time()
+    conn = sqlite3.connect(service.db_path)
+    try:
+        for idx in range(101):
+            mutation_id = f"cold-shadow-mutation-{idx}"
+            factor_id = f"dsl:{idx:064x}"
+            conn.execute(
+                """INSERT INTO governance_mutation_intent
+                   (mutation_id, idempotency_key, control_surface, status,
+                    created_at, updated_at)
+                   VALUES (?, ?, 'factor_lifecycle', 'committed', ?, ?)""",
+                (mutation_id, f"cold-shadow-key-{idx}", now, now),
+            )
+            conn.execute(
+                """INSERT INTO factor_lifecycle_state
+                   (factor_id, factor_name, definition_fingerprint,
+                    artifact_hash, origin, lifecycle_stage, generation,
+                    runtime_admission, mutation_id, metadata_json, updated_at)
+                   VALUES (?, ?, ?, ?, 'dsl', 'SHADOW', 1, 'blocked', ?, ?, ?)""",
+                (
+                    factor_id,
+                    f"cold_shadow_{idx}",
+                    "a" * 64,
+                    "a" * 64,
+                    mutation_id,
+                    '{"expression":"rank(close)"}',
+                    now + idx + 1.0,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    projected: list[str] = []
+    monkeypatch.setattr(
+        service,
+        "_project_registry",
+        lambda state: projected.append(str(state["factor_name"])),
+    )
+    monkeypatch.setattr(service, "_record_projection_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_set_runtime_admission", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        service.coordinator,
+        "_record_projection",
+        lambda *args, **kwargs: None,
+    )
+
+    result = service.restore_committed_registry(process_role="backend", limit=1)
+
+    assert result["attempted_count"] == 1
+    assert result["current_count"] == 1
+    assert projected == [name]
 
 
 def test_backend_bootstrap_rejects_non_backend_process(lifecycle):

@@ -11,6 +11,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from alpha.portfolio_compositor import resolve_factor_role
+from alpha.runtime_factor_selection import runtime_factor_enabled
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.core.state_store import validate_runtime_state_schema
 
@@ -52,7 +54,12 @@ class RuntimeFactorSelectionProjectionService:
         weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
         selected = list(getattr(selection, "selected_factor_ids", []) or [])
         selected_roles = {
-            name: str((signal_cfg.get(name) or {}).get("role") or "alpha").lower()
+            name: resolve_factor_role(
+                name,
+                signal_cfg.get(name)
+                if isinstance(signal_cfg.get(name), dict)
+                else None,
+            )
             for name in selected
         }
         selected_weights = {
@@ -60,6 +67,21 @@ class RuntimeFactorSelectionProjectionService:
             for name in selected
         }
         role_counts = Counter(selected_roles.values())
+        configured_directional_factor_ids = [
+            name
+            for name in selected
+            if (
+                selected_roles.get(name) == "alpha"
+                and runtime_factor_enabled(signal_cfg.get(name))
+                and selected_weights.get(name, 0.0) > 0.0
+            )
+        ]
+        context_factor_ids = [
+            name for name in selected if selected_roles.get(name) == "context"
+        ]
+        gate_factor_ids = [
+            name for name in selected if selected_roles.get(name) == "gate"
+        ]
         exclusion_reason_counts = Counter(
             str(reason or "unknown")
             for reason in dict(
@@ -113,11 +135,13 @@ class RuntimeFactorSelectionProjectionService:
                 if runtime_config.bounded_demo_mode_active(cfg)
                 else "strict_live"
             ),
-            "alpha_voter_count": sum(
-                1
-                for name, role in selected_roles.items()
-                if role == "alpha" and float(weights.get(name, 0.0) or 0.0) > 0.0
-            ),
+            # This is the configured/effective candidate count. The actual
+            # per-bar vote count comes from CompositeSignal's scoring and
+            # contributing counters after values are available.
+            "alpha_voter_count": len(configured_directional_factor_ids),
+            "configured_directional_factor_ids": configured_directional_factor_ids,
+            "context_factor_ids": context_factor_ids,
+            "gate_factor_ids": gate_factor_ids,
             "context_count": int(role_counts.get("context", 0)),
             "gate_count": int(role_counts.get("gate", 0)),
             "exclusion_reason_counts": dict(exclusion_reason_counts),

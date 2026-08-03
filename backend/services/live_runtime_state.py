@@ -1,12 +1,124 @@
 from __future__ import annotations
 
-import copy
+import dataclasses
+import enum
 import threading
 import time
+from collections.abc import Mapping
+from datetime import date, datetime
 from typing import Any, Callable, TypeVar
 
 
 T = TypeVar("T")
+
+
+def safe_container_snapshot(value: Any, *, _active: set[int] | None = None) -> Any:
+    """Copy projection containers while cutting only true recursive edges.
+
+    Live state is assembled from several compatibility projections.  A
+    malformed nested mapping must not make an API response impossible to
+    serialize, but repeated references that are not recursive should remain
+    valid copies.  Non-container domain values are intentionally left alone.
+    """
+
+    active = _active if _active is not None else set()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, enum.Enum):
+        return safe_container_snapshot(value.value, _active=active)
+    if isinstance(value, Mapping):
+        identity = id(value)
+        if identity in active:
+            return None
+        active.add(identity)
+        try:
+            return {
+                key: safe_container_snapshot(item, _active=active)
+                for key, item in value.items()
+            }
+        finally:
+            active.remove(identity)
+    if isinstance(value, list):
+        identity = id(value)
+        if identity in active:
+            return None
+        active.add(identity)
+        try:
+            return [
+                safe_container_snapshot(item, _active=active)
+                for item in value
+            ]
+        finally:
+            active.remove(identity)
+    if isinstance(value, tuple):
+        identity = id(value)
+        if identity in active:
+            return None
+        active.add(identity)
+        try:
+            return tuple(
+                safe_container_snapshot(item, _active=active)
+                for item in value
+            )
+        finally:
+            active.remove(identity)
+    if isinstance(value, (set, frozenset)):
+        identity = id(value)
+        if identity in active:
+            return None
+        active.add(identity)
+        try:
+            return [
+                safe_container_snapshot(item, _active=active)
+                for item in value
+            ]
+        finally:
+            active.remove(identity)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        identity = id(value)
+        if identity in active:
+            return None
+        active.add(identity)
+        try:
+            return {
+                field.name: safe_container_snapshot(
+                    getattr(value, field.name),
+                    _active=active,
+                )
+                for field in dataclasses.fields(value)
+            }
+        finally:
+            active.remove(identity)
+    # Compatibility adapters may place a small domain object in an otherwise
+    # JSON-shaped projection.  Copy its attributes here so the public API
+    # serializer cannot walk an object graph after this cycle guard.
+    attrs = getattr(value, "__dict__", None)
+    if isinstance(attrs, dict):
+        identity = id(value)
+        if identity in active:
+            return None
+        active.add(identity)
+        try:
+            return {
+                key: safe_container_snapshot(item, _active=active)
+                for key, item in attrs.items()
+                if not str(key).startswith("__")
+            }
+        finally:
+            active.remove(identity)
+    # Normalize numpy scalar-like values when available without adding a
+    # dependency to this low-level state module.
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            normalized = item()
+        except Exception:
+            normalized = value
+        if normalized is not value:
+            return safe_container_snapshot(normalized, _active=active)
+    return value
 
 
 def default_live_state() -> dict[str, Any]:
@@ -85,8 +197,11 @@ def state_get(
 ) -> Any:
     with lock:
         value = state.get(key, default)
-    if clone and isinstance(value, (dict, list, set)):
-        return copy.deepcopy(value)
+    if clone and isinstance(value, (dict, list, tuple, set, frozenset)):
+        # Runtime projections can contain compatibility objects with a
+        # recursive edge.  Keep clone reads isolated from the live state while
+        # cutting only the recursive edge instead of failing the whole read.
+        return safe_container_snapshot(value)
     return value
 
 

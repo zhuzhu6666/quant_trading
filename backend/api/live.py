@@ -274,20 +274,36 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
             if size > 8000:
                 lines = lines[1:]
             for line in lines[-30:]:
-                m = re.search(
+                current = re.search(
+                    r"signal=(LONG|SHORT)\s+score=([\d.\-]+)\s+"
+                    r"tactical=([\d.\-]+)\s+macro=([\d.\-]+)\s+"
+                    r"available=(\d+)\s+scoring=(\d+)\s+"
+                    r"contributing=(\d+)\s+gate=(\S+)",
+                    line,
+                )
+                legacy = None if current else re.search(
                     r"signal=(LONG|SHORT)\s+score=([\d.\-]+)\s+"
                     r"tactical=([\d.\-]+)\s+macro=([\d.\-]+)\s+"
                     r"n=(\d+)\s+gate=(\S+)",
                     line,
                 )
+                m = current or legacy
                 if m:
+                    available = int(m.group(5))
+                    scoring = int(m.group(6)) if current else available
+                    contributing = int(m.group(7)) if current else scoring
                     recent_signals.append({
                         "direction": m.group(1),
                         "score": float(m.group(2)),
                         "tactical_score": float(m.group(3)),
                         "macro_score": float(m.group(4)),
-                        "n_active_factors": int(m.group(5)),
-                        "gate_reason": m.group(6),
+                        # Keep the old field for compatibility; consumers
+                        # should use the explicit semantic counters below.
+                        "n_active_factors": available,
+                        "n_available_factors": available,
+                        "n_scoring_factors": scoring,
+                        "n_contributing_factors": contributing,
+                        "gate_reason": m.group(8) if current else m.group(6),
                     })
         except Exception:
             pass

@@ -25,6 +25,17 @@ class RuntimeFactorSelection:
     reason_excluded: dict[str, str] = field(default_factory=dict)
 
 
+def runtime_factor_enabled(config: dict[str, object] | None) -> bool:
+    """Resolve the existing config default once at the selection boundary.
+
+    RuntimeConfig historically omits ``enabled`` for ordinary builtin
+    factors. Missing and explicit ``None`` therefore retain that existing
+    default; only an explicit ``False`` disables the factor. Consumers must
+    use this helper instead of applying different truthiness rules.
+    """
+    return not (isinstance(config, dict) and config.get("enabled") is False)
+
+
 def configured_factor_ids(config: dict[str, dict] | None) -> list[str] | None:
     if not config:
         return None
@@ -32,7 +43,7 @@ def configured_factor_ids(config: dict[str, dict] | None) -> list[str] | None:
     for name, cfg in config.items():
         if str(name).startswith("_"):
             continue
-        if isinstance(cfg, dict) and cfg.get("enabled") is False:
+        if isinstance(cfg, dict) and not runtime_factor_enabled(cfg):
             continue
         names.append(str(name))
     return names

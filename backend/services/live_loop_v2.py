@@ -181,7 +181,7 @@ def run_live_safety_cycle(
                 )
         except Exception as exc:
             planner_error = f"{type(exc).__name__}: {exc}"
-            logger.warning("[live] independent safety planner failed: %s", planner_error)
+            logger.warning("[live] independent safety planner failed: {}", planner_error)
 
         if plane.mode in {"shadow", "enforce"}:
             try:
@@ -205,7 +205,7 @@ def run_live_safety_cycle(
             except Exception as exc:
                 legacy_preview_error = f"{type(exc).__name__}: {exc}"
                 logger.warning(
-                    "[live] read-only legacy safety preview failed: %s",
+                    "[live] read-only legacy safety preview failed: {}",
                     legacy_preview_error,
                 )
 

@@ -14,7 +14,6 @@ class SerialLiveTickRuntime:
     factor_pipeline: Any
     acknowledge_factor_projections: Any
     live_state_update: Any
-    phase2_active: Any
     update_risk_metrics: Any
 
 
@@ -70,11 +69,10 @@ def run_serial_live_ticks(
                 f"{traceback.format_exc()[-300:]}"
             )
             runtime.live_state_update(accepting_new_risk=False)
-            if runtime.phase2_active():
-                if stop_flag.wait(5.0):
-                    exit_reason = "stop_during_safety_retry"
-                    break
-                continue
+            if stop_flag.wait(5.0):
+                exit_reason = "stop_during_safety_retry"
+                break
+            continue
 
         if stop_flag.wait(60.0):
             exit_reason = "stop_during_alpha_wait"

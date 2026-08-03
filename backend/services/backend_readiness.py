@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import json
 import time
 from pathlib import Path
@@ -20,15 +19,13 @@ from backend.core.db import (
 from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.agent_governance import AgentBriefingContextService, AgentScorecardService
 from backend.services.autonomous_evolution_cycle import AutonomousEvolutionCycleService
+from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC
 from backend.services.meta_governance import MetaGovernanceService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.stability import measure, record_timing, timing_snapshot
 from research.meta_model_lightgbm import MetaModelLightGBMService
 
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-LOG_PATH = PROJECT_ROOT / "logs" / "backend_uvicorn.log"
 
 KNOWN_OBSERVATION_COMPONENTS = {
     "disk_space": "known_disk_space_degraded",
@@ -2286,44 +2283,77 @@ class BackendReadinessService:
 
     @staticmethod
     def _system_health() -> dict[str, Any]:
-        # 事实源:monitor.system_health 同进程单例快照(每 60s 刷新,唯一生产计算者)。
-        # 日志文件解析仅作为无快照时的降级(旧部署/独立进程)。
-        report = None
-        source = str(LOG_PATH)
+        # monitor.system_health is the only producer. Log lines remain
+        # diagnostic artifacts and must never become a second readiness source.
+        source = "monitor.system_health.shared()"
+        stale_after_seconds = DEFAULT_STALE_AFTER_SEC["system_health"]
         try:
             from monitor.system_health import shared as _system_health_shared
 
             report = _system_health_shared().get_last_report()
-            if report is not None:
-                source = "monitor.system_health.shared()"
-        except Exception:
-            report = None
-        if report is None:
-            line = BackendReadinessService._latest_system_health_line()
-            if not line:
-                return {
-                    "overall": "unknown",
-                    "display_overall": "unknown",
-                    "score": 0.0,
-                    "components": {},
-                    "blocking_components": [],
-                    "known_observations": [],
-                    "source": source,
-                }
-            components = {
-                str(name): str(status)
-                for name, status in BackendReadinessService._parse_components(line).items()
+        except Exception as exc:
+            return {
+                "overall": "unknown",
+                "display_overall": "unknown",
+                "score": 0.0,
+                "components": {},
+                "blocking_components": [
+                    {
+                        "component": "system_health",
+                        "status": "error",
+                        "reason": "system_health_source_error",
+                    }
+                ],
+                "known_observations": [],
+                "source": source,
+                "status": "error",
+                "reason_code": "system_health_source_error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "observed_at": 0.0,
+                "age_seconds": None,
+                "stale_after_seconds": stale_after_seconds,
             }
-            overall = BackendReadinessService._parse_token_after(line, "overall=") or "unknown"
-            score = _safe_float(BackendReadinessService._parse_token_after(line, "score="))
-        else:
-            raw_components = getattr(report, "components", None) or {}
-            components = {
-                str(name): str(getattr(component, "status", "") or "")
-                for name, component in raw_components.items()
+
+        observed_at = (
+            _safe_float(getattr(report, "ts", 0.0)) if report is not None else 0.0
+        )
+        age_seconds = (
+            max(0.0, time.time() - observed_at) if observed_at > 0 else None
+        )
+        if report is None or observed_at <= 0:
+            reason_code = (
+                "system_health_snapshot_unavailable"
+                if report is None
+                else "system_health_timestamp_unknown"
+            )
+            return {
+                "overall": "unknown",
+                "display_overall": "unknown",
+                "score": 0.0,
+                "components": {},
+                "blocking_components": [
+                    {
+                        "component": "system_health",
+                        "status": "unknown",
+                        "reason": reason_code,
+                    }
+                ],
+                "known_observations": [],
+                "source": source,
+                "status": "unknown",
+                "reason_code": reason_code,
+                "observed_at": observed_at or None,
+                "age_seconds": age_seconds,
+                "stale_after_seconds": stale_after_seconds,
             }
-            overall = str(getattr(report, "overall", "") or "") or "unknown"
-            score = round(_safe_float(getattr(report, "overall_score", 0.0)), 2)
+
+        raw_components = getattr(report, "components", None) or {}
+        components = {
+            str(name): str(getattr(component, "status", "") or "")
+            for name, component in raw_components.items()
+        }
+        overall = str(getattr(report, "overall", "") or "") or "unknown"
+        score = round(_safe_float(getattr(report, "overall_score", 0.0)), 2)
         blocking = []
         observations = []
         for name, status_text in components.items():
@@ -2339,7 +2369,24 @@ class BackendReadinessService:
                         "classification": KNOWN_OBSERVATION_COMPONENTS.get(name, "non_blocking_observation"),
                     }
                 )
-        display_overall = "critical" if blocking else "degraded" if observations else overall
+        stale = age_seconds is not None and age_seconds > stale_after_seconds
+        if stale:
+            blocking.append(
+                {
+                    "component": "system_health",
+                    "status": "stale",
+                    "reason": "system_health_snapshot_stale",
+                }
+            )
+        display_overall = (
+            "stale"
+            if stale
+            else "critical"
+            if blocking
+            else "degraded"
+            if observations
+            else overall
+        )
         return {
             "overall": overall,
             "display_overall": display_overall,
@@ -2348,6 +2395,11 @@ class BackendReadinessService:
             "blocking_components": blocking,
             "known_observations": observations,
             "source": source,
+            "status": "stale" if stale else "known",
+            "reason_code": "system_health_snapshot_stale" if stale else None,
+            "observed_at": observed_at,
+            "age_seconds": age_seconds,
+            "stale_after_seconds": stale_after_seconds,
         }
 
     @staticmethod
@@ -2435,42 +2487,3 @@ class BackendReadinessService:
             "source": f"runtime_kv:{SNAPSHOT_KEY}",
             "read_only": True,
         }
-
-    @staticmethod
-    def _latest_system_health_line() -> str:
-        if not LOG_PATH.exists():
-            return ""
-        try:
-            with LOG_PATH.open("rb") as f:
-                f.seek(0, 2)
-                size = f.tell()
-                f.seek(max(size - 250000, 0))
-                lines = f.read().decode("utf-8", errors="replace").splitlines()
-        except Exception:
-            return ""
-        for line in reversed(lines):
-            if "[system_health]" in line and "components=" in line:
-                return line
-        return ""
-
-    @staticmethod
-    def _parse_components(line: str) -> dict[str, str]:
-        marker = "components="
-        if marker not in line:
-            return {}
-        after = line.split(marker, 1)[1]
-        raw = after.split(" errors=", 1)[0].strip()
-        try:
-            parsed = ast.literal_eval(raw)
-            if isinstance(parsed, dict):
-                return {str(k): str(v) for k, v in parsed.items()}
-        except Exception:
-            return {}
-        return {}
-
-    @staticmethod
-    def _parse_token_after(line: str, marker: str) -> str:
-        if marker not in line:
-            return ""
-        after = line.split(marker, 1)[1]
-        return after.split()[0].strip()

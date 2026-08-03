@@ -148,19 +148,22 @@ def test_runtime_state_code_does_not_open_state_sqlite_directly():
 
 
 def test_runtime_config_overlay_writes_stay_behind_mutation_service():
-    """Overlay persistence is private to RuntimeConfigMutationService.
+    """Overlay persistence is private to the mutation/coordinator boundary.
 
     Startup/restore/status code may construct RuntimeConfigOverlayService, but
-    production callers must not invoke its write method directly.  The AST
-    check deliberately follows the service expression instead of matching a
-    comment or docstring containing ``apply_patch``.
+    production callers must not invoke its write methods directly.  The
+    low-level overlay module is the storage implementation; all governance
+    callers enter through RuntimeConfigMutationService and, in the active
+    production mode, GovernanceMutationCoordinator.  The AST check follows
+    the service expression instead of matching a comment or docstring.
     """
     repo = Path(__file__).resolve().parents[1]
     boundary = "backend/services/runtime_config_mutation.py"
+    storage = "backend/services/runtime_config_overlay.py"
     offenders: list[str] = []
     for path in _python_files(repo):
         rel = path.relative_to(repo).as_posix()
-        if rel == boundary:
+        if rel in {boundary, storage}:
             continue
         tree = _parse(path)
         overlay_constructors = {"RuntimeConfigOverlayService"}
@@ -183,7 +186,11 @@ def test_runtime_config_overlay_writes_stay_behind_mutation_service():
         visitor = _ScopedCallVisitor()
         visitor.visit(tree)
         for scope, call in visitor.calls:
-            if not isinstance(call.func, ast.Attribute) or call.func.attr != "apply_patch":
+            if not isinstance(call.func, ast.Attribute) or call.func.attr not in {
+                "apply_patch",
+                "replace_overlay",
+                "clear_overlay_to_base",
+            }:
                 continue
             receiver = call.func.value
             direct_overlay = (
