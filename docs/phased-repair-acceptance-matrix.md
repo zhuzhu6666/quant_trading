@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active acceptance index
-> Snapshot: 2026-07-31
+> Snapshot: 2026-08-03
 > Scope: reproducible acceptance evidence and unresolved live evidence
 
 本文只记录“如何证明”。架构事实见 `system-source-of-truth.md`，实施阶段见
@@ -359,3 +359,24 @@ Safety enforce 之前还必须满足二选一：
 
 运行全量测试时记录 commit/worktree fingerprint、命令、passed/skipped/deselected 和
 PostgreSQL isolation。旧全量结果只能作为基线，不能证明后续源码。
+
+## 10. 学习 worker 内存收敛验收（2026-08-03）
+
+| 合同 | 验证 |
+|---|---|
+| 唯一自动完整周期 | 常规 nursery 四个运行窗口的 actions 只包含 orchestration/review/bridge/recommended step，不包含 `run_autonomous_learning_cycle`；完整周期只在 watermark-gated `:12/:42 UTC` 执行 |
+| 显式能力 | `full_learning_cycle=true` 行为回归通过；运维 `--run-once` 直接完整周期后的 nursery pass 不再重复运行第二个完整周期 |
+| 紧凑合同 | 连续两个 event 均为 `autonomous_learning_cycle.v2/completed`，包含 17 个阶段内存观测，payload 分别为 9,440 / 9,580 bytes；周期 event 不携带 sample/counterfactual/candidate 行集合 |
+| canonical evidence | 两轮 `samples.total_changed=2303/2262`，第二轮 effect reconcile 正常推进 `observed=4/inconclusive=1`；watermark fingerprint 从 `e7f616...` 推进到 `fbb1af...`，完整证据仍落现有表 |
+| 峰值 RSS | 阶段观测分别最高 449,740 / 476,668 KiB；包含相邻 nursery、supervisor 和 factor governance 的 2 秒外部观测全局峰值 635,876 KiB，低于 1.5 GiB |
+| 10 分钟残留 | 两轮结束 10 分钟后 RSS 分别为 440,400 / 594,784 KiB，均低于 700 MiB |
+| swap / 整机安全 | 修复后进程观察内 swap 最高 25,964 KiB，第二轮相对周期前增量约 13.6 MiB；host swap delta 无正增量，`MemAvailable` 最低 1,212,184 KiB，无 OOM 或 worker restart |
+| 相邻高负载 | open market 下 `offmarket_position_quality_lightgbm` 在 0.1s 内以 `market_session_not_offmarket:open_confirmed` 跳过，不构造四个 LightGBM service，无 RSS/swap 跃升 |
+
+验证命令/结果：
+
+- learning/runner/watermark/capability/scheduler/offmarket 相关回归：`136 passed`；最后 run-once 去重后子集：`39 passed`。
+- `scripts/check_openapi_snapshot.py`：当前；`state_schema_migrate.py --check`：`current=latest=minimum=12`、无 mismatch。
+- `py_compile` 与 `git diff --check` 通过；无 migration、endpoint、静态开关、服务、线程、表或调度器变化。
+
+连续两轮全部达标，因此条件性的一次性子进程隔离未启用。

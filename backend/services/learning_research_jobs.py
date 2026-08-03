@@ -351,28 +351,6 @@ def run_offmarket_position_quality_job(
             "reason": "market_session_not_safe_for_shadow_refresh",
             "models": {},
         }
-        session_status = str((session or {}).get("status") or "")
-        if session_status in {"open_confirmed", "closed_confirmed", "closed_pending_positions"}:
-            try:
-                suite = _build_shadow_model_suite(db_path)
-                shadow_refresh["models"] = {
-                    model_type: _score_shadow_model(
-                        model_type=model_type,
-                        model_service=model_service,
-                        limit=int(payload["shadow_limit"]),
-                        mode="offmarket_shadow_refresh",
-                        skip_existing=True,
-                    )
-                    for model_type, model_service, _ in suite
-                }
-                shadow_refresh["ok"] = any(
-                    bool(item.get("ok")) for item in shadow_refresh["models"].values()
-                )
-                shadow_refresh["skipped"] = False
-                shadow_refresh["reason"] = "shadow_refresh_completed"
-            except Exception as exc:
-                shadow_refresh["reason"] = "shadow_refresh_error"
-                shadow_refresh["error"] = f"{type(exc).__name__}: {exc}"
         result = {
             "ok": False,
             "skipped": True,

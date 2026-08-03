@@ -1,4 +1,5 @@
 from backend.core.db import connect_sqlite
+from backend.services import autonomous_learning
 from backend.services.learning_cycle_watermark import FACT_SOURCES, LearningCycleWatermarkService
 
 
@@ -28,3 +29,31 @@ def test_watermark_runs_once_then_only_when_new_facts_arrive(tmp_path):
     changed = service.evaluate()
     assert changed["should_run"] is True
     assert changed["current"]["fingerprint"] != first["current"]["fingerprint"]
+
+
+def test_watermark_gated_cycle_executes_once_for_each_fact_frontier(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    _db(db_path)
+    calls = []
+    monkeypatch.setattr(
+        autonomous_learning,
+        "run_autonomous_learning_cycle",
+        lambda **kwargs: calls.append(kwargs)
+        or {
+            "schema_version": "autonomous_learning_cycle.v2",
+            "status": "completed",
+            "stages": {},
+            "memory_profile": [],
+        },
+    )
+
+    first = autonomous_learning.run_watermark_gated_autonomous_learning_cycle(
+        db_path=db_path
+    )
+    skipped = autonomous_learning.run_watermark_gated_autonomous_learning_cycle(
+        db_path=db_path
+    )
+
+    assert first["schema_version"] == "autonomous_learning_cycle.v2"
+    assert skipped["status"] == "skipped_no_new_facts"
+    assert len(calls) == 1

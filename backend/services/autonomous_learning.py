@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import math
@@ -76,6 +77,86 @@ def _loads(raw: Any, default: Any) -> Any:
 
 def _dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _process_memory_snapshot() -> dict[str, Any]:
+    """Return a compact, best-effort Linux process memory observation."""
+
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return {}
+    fields = {
+        "VmRSS": "rss_kib",
+        "RssAnon": "anonymous_rss_kib",
+        "VmSwap": "swap_kib",
+    }
+    snapshot: dict[str, Any] = {"observed_at": time.time()}
+    for line in status.splitlines():
+        key, separator, raw_value = line.partition(":")
+        output_key = fields.get(key)
+        if not separator or output_key is None:
+            continue
+        try:
+            snapshot[output_key] = int(raw_value.strip().split()[0])
+        except (IndexError, TypeError, ValueError):
+            continue
+    return snapshot if len(snapshot) > 1 else {}
+
+
+def _compact_learning_cycle_stage(value: Any) -> dict[str, Any]:
+    """Drop row collections and evidence JSON from the cycle-level projection."""
+
+    if not isinstance(value, dict):
+        return {"ok": True, "status": "completed"}
+    status = str(value.get("status") or "completed")[:256]
+    failed = any(marker in status.lower() for marker in ("fail", "error", "unavailable"))
+    summary: dict[str, Any] = {
+        "ok": bool(value.get("ok", not failed)),
+        "status": status,
+    }
+    for key, item in value.items():
+        if key in {"ok", "status"}:
+            continue
+        if key == "counts" and isinstance(item, dict):
+            summary[key] = {
+                str(count_key): count_value
+                for count_key, count_value in item.items()
+                if count_value is None or isinstance(count_value, (bool, int, float))
+            }
+            continue
+        if item is None or isinstance(item, (bool, int, float)):
+            summary[str(key)] = item
+            continue
+        if isinstance(item, str) and (
+            key in {"schema_version", "reason", "error", "mode"}
+            or key.endswith("_id")
+        ):
+            summary[str(key)] = item[:512]
+    return summary
+
+
+def _run_compact_learning_stage(
+    name: str,
+    operation: Callable[[], Any],
+    memory_profile: list[dict[str, Any]],
+) -> dict[str, Any]:
+    started_at = time.time()
+    before = _process_memory_snapshot()
+    raw_result = operation()
+    summary = _compact_learning_cycle_stage(raw_result)
+    del raw_result
+    gc.collect()
+    memory_profile.append(
+        {
+            "stage": name,
+            "started_at": started_at,
+            "finished_at": time.time(),
+            "before": before,
+            "after": _process_memory_snapshot(),
+        }
+    )
+    return summary
 
 
 def _use_pg(db_path: str | Path = STATE_DB) -> bool:
@@ -1533,27 +1614,42 @@ def mature_position_supervisor_traces(
             (max(1, int(limit)),),
         ).fetchall()
         for trace in traces:
-            cf_rows = _execute(
-                conn,
-                """
-                SELECT cf.*, r.review_id AS source_review_id,
-                       r.review_json AS source_review_json
-                FROM supervisor_counterfactual_review cf
-                JOIN trade_outcome_review r ON r.review_id=cf.review_id
-                WHERE cf.position_id=?
-                  AND cf.close_ts >= ?
-                ORDER BY cf.updated_at DESC, cf.close_ts ASC
-                """,
-                (str(trace["position_id"] or ""), float(trace["event_ts"] or 0.0)),
-            ).fetchall()
-            cf = next(
-                (
-                    candidate
-                    for candidate in cf_rows
-                    if _counterfactual_source_is_clean(candidate)
-                ),
-                None,
-            )
+            cf = None
+            page_offset = 0
+            page_limit = max(1, int(limit))
+            while cf is None:
+                cf_rows = _execute(
+                    conn,
+                    """
+                    SELECT cf.*, r.review_id AS source_review_id,
+                           r.review_json AS source_review_json
+                    FROM supervisor_counterfactual_review cf
+                    JOIN trade_outcome_review r ON r.review_id=cf.review_id
+                    WHERE cf.position_id=?
+                      AND cf.close_ts >= ?
+                    ORDER BY cf.updated_at DESC, cf.close_ts ASC,
+                             cf.counterfactual_id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (
+                        str(trace["position_id"] or ""),
+                        float(trace["event_ts"] or 0.0),
+                        page_limit,
+                        page_offset,
+                    ),
+                ).fetchall()
+                if not cf_rows:
+                    break
+                page_offset += len(cf_rows)
+                cf = next(
+                    (
+                        candidate
+                        for candidate in cf_rows
+                        if _counterfactual_source_is_clean(candidate)
+                    ),
+                    None,
+                )
+                del cf_rows
             item = _matured_sample_from_supervisor_trace(trace, cf, run_context=run_context)
             if _upsert_sample(conn, item):
                 if item["label_status"] == "matured":
@@ -1643,6 +1739,8 @@ def materialize_autonomous_learning_samples(
                 outcome_review = _review_for_open_decision(conn, row)
                 if _upsert_sample(conn, {**_sample_from_decision(row, "supervisor_trajectory", outcome_review=outcome_review), **sample_context}):
                     counts["supervisor_trajectory"] += 1
+        del decisions
+        gc.collect()
 
         if state_table_exists(conn, "position_supervisor_trace"):
             traces = _execute(
@@ -1667,6 +1765,8 @@ def materialize_autonomous_learning_samples(
             for row in traces:
                 if _upsert_sample(conn, {**_sample_from_supervisor_trace(row), **sample_context}):
                     counts["supervisor_execution_trace"] += 1
+            del traces
+            gc.collect()
 
         reviews = _execute(
             conn,
@@ -1684,6 +1784,8 @@ def materialize_autonomous_learning_samples(
             entry_feedback = _sample_from_entry_supervisor_feedback(row)
             if entry_feedback and _upsert_sample(conn, {**entry_feedback, **sample_context}):
                 counts["entry_supervisor_feedback"] += 1
+        del reviews
+        gc.collect()
 
         if state_table_exists(conn, "supervisor_counterfactual_review"):
             _execute(
@@ -1699,25 +1801,34 @@ def materialize_autonomous_learning_samples(
                   )
                 """,
             )
-            cfs = _execute(
-                conn,
-                """
-                SELECT cf.*, r.review_id AS source_review_id,
-                       r.review_json AS source_review_json
-                FROM supervisor_counterfactual_review cf
-                JOIN trade_outcome_review r ON r.review_id=cf.review_id
-                ORDER BY cf.updated_at DESC
-                """,
-            ).fetchall()
             accepted_counterfactuals = 0
-            for row in cfs:
-                if not _counterfactual_source_is_clean(row):
-                    continue
-                accepted_counterfactuals += 1
-                if _upsert_sample(conn, {**_sample_from_counterfactual(row), **sample_context}):
-                    counts["post_close_counterfactual"] += 1
-                if accepted_counterfactuals >= max(1, int(limit)):
+            page_offset = 0
+            page_limit = max(1, int(limit))
+            while accepted_counterfactuals < page_limit:
+                cfs = _execute(
+                    conn,
+                    """
+                    SELECT cf.*, r.review_id AS source_review_id,
+                           r.review_json AS source_review_json
+                    FROM supervisor_counterfactual_review cf
+                    JOIN trade_outcome_review r ON r.review_id=cf.review_id
+                    ORDER BY cf.updated_at DESC, cf.counterfactual_id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (page_limit, page_offset),
+                ).fetchall()
+                if not cfs:
                     break
+                page_offset += len(cfs)
+                for row in cfs:
+                    if not _counterfactual_source_is_clean(row):
+                        continue
+                    accepted_counterfactuals += 1
+                    if _upsert_sample(conn, {**_sample_from_counterfactual(row), **sample_context}):
+                        counts["post_close_counterfactual"] += 1
+                    if accepted_counterfactuals >= page_limit:
+                        break
+                del cfs
 
         payload = {
             "schema_version": "autonomous_learning_samples.v1",
@@ -2443,25 +2554,36 @@ def materialize_entry_quality_governance_suggestions(
             """,
             (GOVERNANCE_ELIGIBILITY_VERSION, max(1, int(limit))),
         ).fetchall()
-        legacy_weak_rows = _execute(
-            conn,
-            """
-            SELECT suggestion_id, evidence_json
-            FROM policy_suggestion
-            WHERE scope_type='entry_quality'
-              AND scope_key='weak_signal'
-              AND action='raise_weak_signal_threshold'
-              AND status IN ('proposed', 'approved')
-            """,
-        ).fetchall()
-        legacy_weak_ids = [
-            str(row["suggestion_id"] or "")
-            for row in legacy_weak_rows
-            if str(
-                _loads(row["evidence_json"], {}).get("schema_version") or ""
-            )
-            != "entry_quality_governance_evidence.v2"
-        ]
+        legacy_weak_ids: list[str] = []
+        page_offset = 0
+        page_limit = max(1, int(limit))
+        while len(legacy_weak_ids) < page_limit:
+            legacy_weak_rows = _execute(
+                conn,
+                """
+                SELECT suggestion_id, evidence_json
+                FROM policy_suggestion
+                WHERE scope_type='entry_quality'
+                  AND scope_key='weak_signal'
+                  AND action='raise_weak_signal_threshold'
+                  AND status IN ('proposed', 'approved')
+                ORDER BY created_at DESC, suggestion_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (page_limit, page_offset),
+            ).fetchall()
+            if not legacy_weak_rows:
+                break
+            page_offset += len(legacy_weak_rows)
+            for legacy_row in legacy_weak_rows:
+                if str(
+                    _loads(legacy_row["evidence_json"], {}).get("schema_version") or ""
+                ) == "entry_quality_governance_evidence.v2":
+                    continue
+                legacy_weak_ids.append(str(legacy_row["suggestion_id"] or ""))
+                if len(legacy_weak_ids) >= page_limit:
+                    break
+            del legacy_weak_rows
         if legacy_weak_ids:
             placeholders = ",".join("?" for _ in legacy_weak_ids)
             _execute(
@@ -2618,50 +2740,55 @@ def materialize_entry_quality_governance_suggestions(
             if action == "watch":
                 skipped += 1
                 continue
-            existing_rows = _execute(
+            current = _execute(
                 conn,
                 """
-                SELECT suggestion_id, status, governance_eligible,
-                       governance_eligibility_version,
-                       governance_eligibility_fingerprint
+                SELECT suggestion_id, status
                 FROM policy_suggestion
                 WHERE scope_type='entry_quality'
                   AND scope_key=?
                   AND action=?
                   AND status IN ('proposed', 'approved', 'applied')
-                ORDER BY created_at DESC
+                  AND governance_eligible=1
+                  AND governance_eligibility_version=?
+                  AND governance_eligibility_fingerprint=?
+                ORDER BY created_at DESC, suggestion_id DESC
+                LIMIT 1
                 """,
-                (scope_key, action),
-            ).fetchall()
-            current = next(
                 (
-                    row
-                    for row in existing_rows
-                    if bool(row["governance_eligible"])
-                    and str(row["governance_eligibility_version"] or "")
-                    == GOVERNANCE_ELIGIBILITY_VERSION
-                    and str(row["governance_eligibility_fingerprint"] or "")
-                    == eligibility_fingerprint
+                    scope_key,
+                    action,
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    eligibility_fingerprint,
                 ),
-                None,
-            )
+            ).fetchone()
             if current:
                 skipped += 1
                 continue
-            stale_ids = [str(row["suggestion_id"] or "") for row in existing_rows]
-            if stale_ids:
-                placeholders = ",".join("?" for _ in stale_ids)
-                _execute(
-                    conn,
-                    f"""
-                    UPDATE policy_suggestion
-                    SET status='invalidated_evidence', reviewed_at=?,
-                        review_note='superseded_by_current_governance_eligibility'
-                    WHERE suggestion_id IN ({placeholders})
-                      AND status IN ('proposed', 'approved')
-                    """,
-                    (now, *stale_ids),
-                )
+            _execute(
+                conn,
+                """
+                UPDATE policy_suggestion
+                SET status='invalidated_evidence', reviewed_at=?,
+                    review_note='superseded_by_current_governance_eligibility'
+                WHERE scope_type='entry_quality'
+                  AND scope_key=?
+                  AND action=?
+                  AND status IN ('proposed', 'approved')
+                  AND NOT (
+                      COALESCE(governance_eligible, 0)=1
+                      AND COALESCE(governance_eligibility_version, '')=?
+                      AND COALESCE(governance_eligibility_fingerprint, '')=?
+                  )
+                """,
+                (
+                    now,
+                    scope_key,
+                    action,
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    eligibility_fingerprint,
+                ),
+            )
             suggestion_id = "psg_entry_quality_" + hashlib.sha1(
                 f"{scope_key}:{action}:{eligibility_fingerprint}".encode("utf-8")
             ).hexdigest()[:16]
@@ -4578,60 +4705,67 @@ def _auto_apply_position_supervisor_template_suggestions(
                     )
                     continue
             canary_required = max(1, int(getattr(cfg, "supervisor_canary_mature_trade_count", 50) or 50))
-            cf_rows = _execute(
-                conn,
-                """
-                SELECT cf.position_id, cf.close_ts, cf.evidence_json,
-                       r.review_id AS source_review_id,
-                       r.review_json AS source_review_json
-                FROM supervisor_counterfactual_review cf
-                JOIN trade_outcome_review r ON r.review_id=cf.review_id
-                WHERE cf.close_ts>=?
-                ORDER BY cf.close_ts DESC
-                """,
-                (float(row["created_at"] or 0.0),),
-            ).fetchall()
-            shadow_rows = _execute(
-                conn,
-                """
-                SELECT DISTINCT position_id
-                FROM position_supervisor_trace
-                WHERE template_id=?
-                  AND stage='learning_shadow'
-                  AND execution_status='observation_only'
-                  AND trace_integrity='recovered'
-                  AND execution_reason=?
-                  AND event_ts>=?
-                """,
-                (
-                    target_template_id,
-                    f"learning_worker_candidate_replay:{suggestion_id}",
-                    float(row["created_at"] or 0.0),
-                ),
-            ).fetchall()
-            shadow_position_ids = {str(item["position_id"] or "") for item in shadow_rows}
             mature_positions: set[str] = set()
             mature_sessions: set[str] = set()
             mature_regimes: set[str] = set()
             accepted_counterfactuals = 0
-            for cf_row in cf_rows:
-                if not _counterfactual_source_is_clean(cf_row):
-                    continue
-                position_id = str(cf_row["position_id"] or "")
-                if position_id not in shadow_position_ids:
-                    continue
-                cf_evidence = _loads(cf_row["evidence_json"], {})
-                if not bool((cf_evidence.get("maturity") or {}).get("governance_eligible")):
-                    continue
-                accepted_counterfactuals += 1
-                mature_positions.add(position_id)
-                close_hour = time.gmtime(float(cf_row["close_ts"] or 0.0)).tm_hour
-                mature_sessions.add("asia" if close_hour < 7 else "europe" if close_hour < 13 else "us")
-                regime = str(cf_evidence.get("regime") or "")
-                if regime and regime != "unknown":
-                    mature_regimes.add(regime)
-                if accepted_counterfactuals >= 2000:
+            page_offset = 0
+            page_limit = 2000
+            while accepted_counterfactuals < page_limit:
+                cf_rows = _execute(
+                    conn,
+                    """
+                    SELECT cf.position_id, cf.close_ts, cf.evidence_json,
+                           r.review_id AS source_review_id,
+                           r.review_json AS source_review_json
+                    FROM supervisor_counterfactual_review cf
+                    JOIN trade_outcome_review r ON r.review_id=cf.review_id
+                    WHERE cf.close_ts>=?
+                      AND EXISTS (
+                          SELECT 1
+                          FROM position_supervisor_trace t
+                          WHERE t.position_id=cf.position_id
+                            AND t.template_id=?
+                            AND t.stage='learning_shadow'
+                            AND t.execution_status='observation_only'
+                            AND t.trace_integrity='recovered'
+                            AND t.execution_reason=?
+                            AND t.event_ts>=?
+                      )
+                    ORDER BY cf.close_ts DESC, cf.counterfactual_id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (
+                        float(row["created_at"] or 0.0),
+                        target_template_id,
+                        f"learning_worker_candidate_replay:{suggestion_id}",
+                        float(row["created_at"] or 0.0),
+                        page_limit,
+                        page_offset,
+                    ),
+                ).fetchall()
+                if not cf_rows:
                     break
+                page_offset += len(cf_rows)
+                for cf_row in cf_rows:
+                    if not _counterfactual_source_is_clean(cf_row):
+                        continue
+                    cf_evidence = _loads(cf_row["evidence_json"], {})
+                    if not bool((cf_evidence.get("maturity") or {}).get("governance_eligible")):
+                        continue
+                    position_id = str(cf_row["position_id"] or "")
+                    if not position_id or position_id in mature_positions:
+                        continue
+                    mature_positions.add(position_id)
+                    accepted_counterfactuals += 1
+                    close_hour = time.gmtime(float(cf_row["close_ts"] or 0.0)).tm_hour
+                    mature_sessions.add("asia" if close_hour < 7 else "europe" if close_hour < 13 else "us")
+                    regime = str(cf_evidence.get("regime") or "")
+                    if regime and regime != "unknown":
+                        mature_regimes.add(regime)
+                    if accepted_counterfactuals >= page_limit:
+                        break
+                del cf_rows
             evidence_ready = (
                 len(mature_positions) >= canary_required
                 and len(mature_sessions) >= 2
@@ -5280,6 +5414,9 @@ def run_autonomous_learning_cycle(
 
     from config.runtime_config import governance_expansion_is_paused
 
+    started_at = time.time()
+    memory_profile: list[dict[str, Any]] = []
+    stages: dict[str, dict[str, Any]] = {}
     operator_paused = bool(governance_expansion_is_paused())
     mutation_allowed = bool(mutation_capability and not operator_paused)
     mutation_block = {
@@ -5292,39 +5429,91 @@ def run_autonomous_learning_cycle(
         ),
     }
 
-    counterfactuals = evaluate_counterfactuals(db_path=db_path, limit=sample_limit, materialize=True)
-    try:
-        from backend.services.position_supervisor_governance import (
-            materialize_position_supervisor_candidate_observations,
-        )
+    stages["counterfactuals"] = _run_compact_learning_stage(
+        "counterfactuals",
+        lambda: evaluate_counterfactuals(
+            db_path=db_path,
+            limit=sample_limit,
+            materialize=True,
+        ),
+        memory_profile,
+    )
 
-        supervisor_candidate_observations = (
-            materialize_position_supervisor_candidate_observations(
+    def _materialize_supervisor_candidate_observations() -> dict[str, Any]:
+        try:
+            from backend.services.position_supervisor_governance import (
+                materialize_position_supervisor_candidate_observations,
+            )
+
+            return materialize_position_supervisor_candidate_observations(
                 db_path=db_path,
                 limit=sample_limit,
                 run_id=f"learning_observation_{int(time.time())}",
             )
+        except Exception as exc:
+            return {
+                "schema_version": "position_supervisor_candidate_observation.v1",
+                "status": "unavailable",
+                "reason": f"{type(exc).__name__}: {exc}",
+                "broker_mutation_allowed": False,
+                "inserted": 0,
+                "existing": 0,
+                "evaluated": 0,
+            }
+
+    stages["supervisor_candidate_observations"] = _run_compact_learning_stage(
+        "supervisor_candidate_observations",
+        _materialize_supervisor_candidate_observations,
+        memory_profile,
+    )
+    stage_operations: tuple[tuple[str, Callable[[], Any]], ...] = (
+        (
+            "trace_maturation",
+            lambda: mature_position_supervisor_traces(db_path=db_path, limit=sample_limit),
+        ),
+        (
+            "review_integrity_backfill",
+            lambda: backfill_trade_review_integrity_markers(db_path=db_path, limit=sample_limit),
+        ),
+        (
+            "close_source_backfill",
+            lambda: backfill_trade_review_close_sources(db_path=db_path, limit=sample_limit),
+        ),
+        (
+            "samples",
+            lambda: materialize_autonomous_learning_samples(db_path=db_path, limit=sample_limit),
+        ),
+        (
+            "portfolio_shadow",
+            lambda: materialize_portfolio_shadow_trades(db_path=db_path, limit=sample_limit),
+        ),
+        (
+            "entry_quality_governance",
+            lambda: materialize_entry_quality_governance_suggestions(db_path=db_path, limit=sample_limit),
+        ),
+        (
+            "entry_cluster_governance",
+            lambda: materialize_entry_cluster_governance_suggestions(db_path=db_path, limit=sample_limit),
+        ),
+        (
+            "event_window_governance",
+            lambda: materialize_event_window_governance_suggestions(db_path=db_path, limit=sample_limit),
+        ),
+        (
+            "evidence_contract_repair",
+            lambda: repair_evidence_contracts(
+                db_path=db_path,
+                limit=max(sample_limit, sample_limit * 4),
+            ),
+        ),
+    )
+    for stage_name, operation in stage_operations:
+        stages[stage_name] = _run_compact_learning_stage(
+            stage_name,
+            operation,
+            memory_profile,
         )
-    except Exception as exc:
-        supervisor_candidate_observations = {
-            "schema_version": "position_supervisor_candidate_observation.v1",
-            "status": "unavailable",
-            "reason": f"{type(exc).__name__}: {exc}",
-            "broker_mutation_allowed": False,
-            "inserted": 0,
-            "existing": 0,
-            "evaluated": 0,
-            "candidates": [],
-        }
-    trace_maturation = mature_position_supervisor_traces(db_path=db_path, limit=sample_limit)
-    review_integrity_backfill = backfill_trade_review_integrity_markers(db_path=db_path, limit=sample_limit)
-    close_source_backfill = backfill_trade_review_close_sources(db_path=db_path, limit=sample_limit)
-    samples = materialize_autonomous_learning_samples(db_path=db_path, limit=sample_limit)
-    portfolio_shadow = materialize_portfolio_shadow_trades(db_path=db_path, limit=sample_limit)
-    entry_quality_governance = materialize_entry_quality_governance_suggestions(db_path=db_path, limit=sample_limit)
-    entry_cluster_governance = materialize_entry_cluster_governance_suggestions(db_path=db_path, limit=sample_limit)
-    event_window_governance = materialize_event_window_governance_suggestions(db_path=db_path, limit=sample_limit)
-    contract_repair = repair_evidence_contracts(db_path=db_path, limit=max(sample_limit, sample_limit * 4))
+
     gov = RuleEvolutionGovernor(str(db_path))
     # Demo autonomy must not let an old observation-only window occupy a
     # scope indefinitely.  demo_nursery already terminalizes via
@@ -5342,75 +5531,86 @@ def run_autonomous_learning_cycle(
         else {}
     )
     governance = {
-        "review_pending": (
-            gov.review_pending()
-            if mutation_allowed
-            else dict(mutation_block)
+        "review_pending": _run_compact_learning_stage(
+            "governance.review_pending",
+            gov.review_pending if mutation_allowed else lambda: dict(mutation_block),
+            memory_profile,
         ),
-        "reconcile_active": (
-            gov.reconcile_active()
-            if mutation_allowed
-            else dict(mutation_block)
+        "reconcile_active": _run_compact_learning_stage(
+            "governance.reconcile_active",
+            gov.reconcile_active if mutation_allowed else lambda: dict(mutation_block),
+            memory_profile,
         ),
-        "reconcile_application_effects": (
-            gov.reconcile_application_effects(**_effect_reconcile_kwargs)
-            if mutation_allowed
-            else dict(mutation_block)
+        "reconcile_application_effects": _run_compact_learning_stage(
+            "governance.reconcile_application_effects",
+            (
+                (lambda: gov.reconcile_application_effects(**_effect_reconcile_kwargs))
+                if mutation_allowed
+                else (lambda: dict(mutation_block))
+            ),
+            memory_profile,
         ),
     }
-    recommendations = materialize_parameter_template_recommendations(
-        db_path=db_path,
-        limit=recommendation_limit,
-        submit_offline_deep=submit_offline_deep,
+    stages["parameter_template_recommendations"] = _run_compact_learning_stage(
+        "parameter_template_recommendations",
+        lambda: materialize_parameter_template_recommendations(
+            db_path=db_path,
+            limit=recommendation_limit,
+            submit_offline_deep=submit_offline_deep,
+        ),
+        memory_profile,
     )
-    demo_apply = (
-        apply_demo_autonomy(db_path=db_path)
-        if apply_demo and mutation_allowed
-        else {
-            "schema_version": "demo_autonomy_apply.v1",
-            "enabled": False,
-            "mode": _autonomy_mode(),
-            "status": (
-                "skipped_explicit_apply_required"
-                if mutation_allowed
-                else str(mutation_block["status"])
-            ),
-            "reason": (
-                "explicit_apply_not_requested"
-                if mutation_allowed
-                else str(mutation_block["reason"])
-            ),
-        }
+    demo_apply = _run_compact_learning_stage(
+        "demo_autonomy",
+        (
+            (lambda: apply_demo_autonomy(db_path=db_path))
+            if apply_demo and mutation_allowed
+            else (lambda: {
+                "schema_version": "demo_autonomy_apply.v1",
+                "enabled": False,
+                "mode": _autonomy_mode(),
+                "status": (
+                    "skipped_explicit_apply_required"
+                    if mutation_allowed
+                    else str(mutation_block["status"])
+                ),
+                "reason": (
+                    "explicit_apply_not_requested"
+                    if mutation_allowed
+                    else str(mutation_block["reason"])
+                ),
+            })
+        ),
+        memory_profile,
     )
-    conn = _connect(db_path)
-    try:
-        auto_unfreeze = (
-            maybe_auto_unfreeze_learning_repair(db_path=db_path)
+    auto_unfreeze = _run_compact_learning_stage(
+        "learning_repair_auto_unfreeze",
+        (
+            (lambda: maybe_auto_unfreeze_learning_repair(db_path=db_path))
             if mutation_allowed
-            else {
+            else (lambda: {
                 "ok": False,
                 "status": str(mutation_block["status"]),
                 "reason": str(mutation_block["reason"]),
-            }
-        )
-        payload = {
-            "schema_version": "autonomous_learning_cycle.v1",
-            "counterfactuals": counterfactuals,
-            "supervisor_candidate_observations": supervisor_candidate_observations,
-            "trace_maturation": trace_maturation,
-            "review_integrity_backfill": review_integrity_backfill,
-            "close_source_backfill": close_source_backfill,
-            "samples": samples,
-            "portfolio_shadow": portfolio_shadow,
-            "entry_quality_governance": entry_quality_governance,
-            "entry_cluster_governance": entry_cluster_governance,
-            "event_window_governance": event_window_governance,
-            "evidence_contract_repair": contract_repair,
-            "governance": governance,
-            "parameter_template_recommendations": recommendations,
-            "demo_autonomy": demo_apply,
-            "learning_repair_auto_unfreeze": auto_unfreeze,
-        }
+            })
+        ),
+        memory_profile,
+    )
+    finished_at = time.time()
+    payload = {
+        "schema_version": "autonomous_learning_cycle.v2",
+        "status": "completed",
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_sec": max(0.0, finished_at - started_at),
+        "stages": stages,
+        "governance": governance,
+        "demo_autonomy": demo_apply,
+        "learning_repair_auto_unfreeze": auto_unfreeze,
+        "memory_profile": memory_profile,
+    }
+    conn = _connect(db_path)
+    try:
         _insert_evolution_event(conn, "autonomous_learning_cycle", payload)
         conn.commit()
         return payload
@@ -5471,34 +5671,14 @@ def schedule_autonomous_learning(
     _stop_event.clear()
 
     def _log_summary(result: dict) -> dict:
-        samples = result.get("samples") or {}
-        entry_quality_governance = result.get("entry_quality_governance") or {}
-        entry_cluster_governance = result.get("entry_cluster_governance") or {}
-        event_window_governance = result.get("event_window_governance") or {}
-        governance = result.get("governance") or {}
-        recommendations = result.get("parameter_template_recommendations") or {}
-        demo_apply = result.get("demo_autonomy") or {}
         return {
             "schema_version": result.get("schema_version"),
-            "counterfactual_count": (result.get("counterfactuals") or {}).get("count"),
-            "trace_matured": (result.get("trace_maturation") or {}).get("matured"),
-            "trace_pending": (result.get("trace_maturation") or {}).get("pending"),
-            "samples_total_changed": samples.get("total_changed"),
-            "sample_counts": samples.get("counts"),
-            "entry_quality_suggestions": entry_quality_governance.get("suggestions"),
-            "entry_quality_bucket_count": entry_quality_governance.get("bucket_count"),
-            "entry_cluster_suggestions": entry_cluster_governance.get("suggestions"),
-            "entry_cluster_bucket_count": entry_cluster_governance.get("bucket_count"),
-            "event_window_suggestions": event_window_governance.get("suggestions"),
-            "event_window_bucket_count": event_window_governance.get("bucket_count"),
-            "contract_repaired": (result.get("evidence_contract_repair") or {}).get("repaired"),
-            "governance": {
-                "review_pending": governance.get("review_pending"),
-                "reconcile_active": governance.get("reconcile_active"),
-                "reconcile_application_effects": governance.get("reconcile_application_effects"),
-            },
-            "parameter_template_counts": recommendations.get("counts"),
-            "demo_autonomy_mode": demo_apply.get("mode"),
+            "status": result.get("status"),
+            "duration_sec": result.get("duration_sec"),
+            "stages": result.get("stages") or {},
+            "governance": result.get("governance") or {},
+            "demo_autonomy": result.get("demo_autonomy") or {},
+            "memory_profile": result.get("memory_profile") or [],
         }
 
     def _worker() -> None:

@@ -1,7 +1,7 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-08-02
+> Last verified: 2026-08-03
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读后面的对应合同。
@@ -28,6 +28,7 @@
   canonical RiskPolicy、fresh reconcile 和真实 safety cause。
 - Safety、Generation、Execution Outcome、Governance、PG Job Queue 的静态发布开关不得随普通修复切换。
 - 学习记忆完整性已由只读 `MemoryIntegrityReport` 覆盖原始复盘、经验投影和检索索引；它只暴露证据问题，不改变 Demo 或实盘权限。
+- 学习 worker 的完整周期已收口为 watermark-gated `:12/:42 UTC` 唯一自动 owner；常规 nursery 只执行 orchestration/review/bridge/reconcile 和最多一个 recommended apply step。周期投影统一为紧凑 `autonomous_learning_cycle.v2`，完整 evidence 继续落现有 canonical 表，不新增表、服务或调度器。
 - 灾备当前采用 Windows 电脑在线时的主动拉取：服务器只流式输出 `quant_audit` 的逻辑快照，不保存备份文件、不启用 WAL archive、S3、pgBackRest repository 或 timer。尚未收到 Windows 成功回执或隔离恢复演练前，灾备必须显示 `missing/degraded`，不得误报为可恢复。
 - 最近已知全量基线：`2452 passed, 9 skipped`。日常小批默认只跑针对性测试；阶段/发布验收才跑全量。
 - 账户已切换：cTrader demo 账户 47276606（login 5817896）现为 USD 计价，

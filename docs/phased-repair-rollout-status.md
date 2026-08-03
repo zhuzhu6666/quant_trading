@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Snapshot: 2026-08-01
+> Snapshot: 2026-08-03
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -483,6 +483,31 @@ Runtime verification:
 
 Remaining compatibility: 月库全部不可用时仍按既有 cold-start fallback 读取，不通过 SQL 补写
 历史 bar，不降低任何风险、readiness 或成熟度门槛。
+
+2026-08-03 学习 worker 内存收敛（第一阶段已验收）
+
+Batch: 唯一完整学习 owner、`autonomous_learning_cycle.v2`、稳定有界分页、阶段内存观测与相邻 open-market 重训跳过
+
+Canonical authority: 完整自动学习唯一由 watermark-gated `:12/:42 UTC` 任务运行；常规 nursery 只协调并每轮最多消费一个 recommended step；完整 evidence 继续由现有 PostgreSQL canonical 表保存
+
+Deleted paths: 删除 `automatic_demo=true` 隐式完整周期和常规 nursery 的 legacy full demo apply；运维 `--run-once` 不再通过 nursery 重复第二次完整周期；open-market skip 不再先构造四套 LightGBM shadow service
+
+Targeted verification: 相关回归 `136 passed`，最后 run-once 去重子集 `39 passed`；覆盖真实 `_run_learning_cycle` 调用、显式 full cycle、单步 recommended apply、watermark、v2 摘要、污染/去重后 limit 和 `/proc` 降级
+
+Migration/OpenAPI/build: OpenAPI snapshot current；state schema 12/12/12 无 mismatch；`py_compile` / `git diff --check` 通过；无 schema、route、静态开关、服务、线程、表、调度器或治理阈值变化
+
+Runtime verification:
+
+- backend/worker active，`/api/health` 为 `status=ok / db=connected / ctrader=connected`；worker PID 441967、`NRestarts=0`，capability ready，config/overlay hash 与 readiness 投影一致，mutation capability available。
+- 22:42 / 23:12 两个完整周期分别耗时 84.7s / 82.6s，均写入紧凑 v2 event；watermark、sample 和 effect 正常推进。
+- 阶段峰值 449,740 / 476,668 KiB，包含相邻任务的外部观察全局峰值 635,876 KiB；10 分钟后 440,400 / 594,784 KiB，进程 swap 最高 25,964 KiB，`MemAvailable` 最低 1,212,184 KiB。
+- 23:20 open-market offmarket job 在 0.1s 内正确跳过；无 OOM、服务重启、学习水位或治理证据缺失。
+
+Remaining compatibility: 显式 API/运维完整周期能力保留，统一返回 v2；无 full/compact 双轨。
+
+Unresolved live evidence: 本批内存验收无；不扩大为 CPU、磁盘、交易风控或治理权限变更。
+
+Next batch: 继续常规观测；只有未来再出现连续两轮超标才进入已定义的一次性子进程隔离，本次不启用。
 
 ## 6. 每批状态更新格式
 

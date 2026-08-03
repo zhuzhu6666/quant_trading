@@ -5,32 +5,6 @@ def test_offmarket_high_load_skips_when_market_open(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.core.db.DATA_DIR", tmp_path)
     db_path = tmp_path / "offmarket-audit.db"
 
-    class FakeShadowService:
-        def __init__(self, db_path=None):
-            self.db_path = db_path
-
-        def score_samples(self, **kwargs):
-            assert kwargs["limit"] == 30
-            assert kwargs["mode"] == "offmarket_shadow_refresh"
-            assert kwargs["skip_existing"] is True
-            return {"ok": True, "count": 0}
-
-    monkeypatch.setattr(
-        "research.position_quality_lightgbm.PositionQualityLightGBMService",
-        FakeShadowService,
-    )
-    monkeypatch.setattr(
-        "research.open_quality_lightgbm.OpenQualityLightGBMService",
-        FakeShadowService,
-    )
-    monkeypatch.setattr(
-        "research.factor_governance_lightgbm.FactorGovernanceLightGBMService",
-        FakeShadowService,
-    )
-    monkeypatch.setattr(
-        "research.meta_model_lightgbm.MetaModelLightGBMService",
-        FakeShadowService,
-    )
     live_service._live_state["market_session"] = {
         "status": "open_confirmed",
         "high_load_allowed": False,
@@ -43,11 +17,11 @@ def test_offmarket_high_load_skips_when_market_open(tmp_path, monkeypatch):
     assert result["skipped"] is True
     assert result["audit"]["status"] == "skipped"
     assert result["audit"]["session_status"] == "open_confirmed"
-    assert set(result["shadow_refresh"]["models"]) == {
-        "position_quality_lightgbm",
-        "open_quality_lightgbm",
-        "factor_governance_lightgbm",
-        "meta_model_lightgbm",
+    assert result["shadow_refresh"] == {
+        "ok": False,
+        "skipped": True,
+        "reason": "market_session_not_safe_for_shadow_refresh",
+        "models": {},
     }
 
 

@@ -236,7 +236,8 @@ def test_autonomous_evolution_runner_repairs_then_uses_existing_learning_cycle(t
         "record_release_evidence",
         "run_autonomous_learning_cycle",
     ]
-    assert result["boundary"]["demo_apply_uses_existing_autonomous_learning_cycle"] is True
+    assert result["boundary"]["automatic_full_learning_cycle"] is False
+    assert result["boundary"]["full_learning_cycle_requires_explicit_flag"] is True
 
 
 def test_autonomous_evolution_runner_defaults_to_small_demo_apply(tmp_path, monkeypatch):
@@ -274,7 +275,7 @@ def test_autonomous_evolution_runner_defaults_to_small_demo_apply(tmp_path, monk
     assert demo_action["result"]["suggestion_limit"] == 7
 
 
-def test_autonomous_evolution_runner_demo_owns_review_bridge_and_apply(tmp_path, monkeypatch):
+def test_autonomous_evolution_runner_demo_owns_review_bridge_without_full_learning(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     ensure_proposal_registry_table(db_path)
     _create_core_tables(db_path, include_replay=True, include_effect=True)
@@ -298,11 +299,9 @@ def test_autonomous_evolution_runner_demo_owns_review_bridge_and_apply(tmp_path,
     monkeypatch.setattr(
         AutonomousEvolutionNurseryRunner,
         "_run_learning_cycle",
-        lambda self, *, sample_limit, recommendation_limit: {
-            "ok": True,
-            "schema_version": "test_learning.v1",
-            "status": "completed",
-        },
+        lambda self, **kwargs: pytest.fail(
+            f"automatic demo nursery must not run the full learning cycle: {kwargs}"
+        ),
     )
 
     result = AutonomousEvolutionNurseryRunner(db_path).run_once(
@@ -315,7 +314,6 @@ def test_autonomous_evolution_runner_demo_owns_review_bridge_and_apply(tmp_path,
     assert actions == [
         "auto_review_governance_candidates",
         "auto_bridge_governance_candidates",
-        "run_autonomous_learning_cycle",
     ]
 
 
@@ -395,7 +393,7 @@ def test_autonomous_evolution_runner_consumes_one_recommended_step(tmp_path, mon
     ]
 
 
-def test_autonomous_evolution_runner_consumes_step_before_automatic_apply(tmp_path, monkeypatch):
+def test_autonomous_evolution_runner_explicit_full_cycle_runs_after_recommended_step(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     ensure_proposal_registry_table(db_path)
     _create_core_tables(db_path, include_replay=True, include_effect=True)
@@ -420,7 +418,6 @@ def test_autonomous_evolution_runner_consumes_step_before_automatic_apply(tmp_pa
 
     result = AutonomousEvolutionNurseryRunner(db_path).run_once(
         refresh_proposals=False,
-        apply_when_ready=True,
         full_learning_cycle=True,
         consume_recommended_step=True,
     )

@@ -239,7 +239,6 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
                 # without waiting for an operator confirmation.  Live unlock
                 # remains outside this path and still requires the live gate.
                 automatic_demo=True,
-                apply_when_ready=True,
                 full_learning_cycle=False,
                 consume_recommended_step=True,
                 recommended_step_limit=int(os.getenv("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_STEP_LIMIT", "5") or "5"),
@@ -458,7 +457,9 @@ def _run_once(
             lambda: AutonomousEvolutionNurseryRunner().run_once(
                 automatic_demo=True,
                 apply_when_ready=True,
-                full_learning_cycle=True,
+                # The explicit run-once path already executed the full learning
+                # cycle above; keep the nursery pass orchestration-only.
+                full_learning_cycle=False,
                 consume_recommended_step=True,
                 recommended_step_limit=int(os.getenv("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_STEP_LIMIT", "5") or "5"),
             ),

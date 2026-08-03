@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import time
+from pathlib import Path
 
 from backend.core.db import STATE_DB_DDL
 from backend.services import autonomous_learning as al
@@ -2563,7 +2564,8 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     monkeypatch.setattr(
         scf,
         "evaluate_counterfactuals",
-        lambda **kwargs: calls.append("counterfactual") or {"count": 1},
+        lambda **kwargs: calls.append("counterfactual")
+        or {"count": 1, "items": [{"evidence": "must-not-escape"}]},
     )
     monkeypatch.setattr(
         al,
@@ -2624,13 +2626,17 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
 
     result = al.run_autonomous_learning_cycle(db_path=db_path, sample_limit=20, apply_demo=True)
 
-    assert result["counterfactuals"] == {"count": 1}
-    assert result["trace_maturation"]["matured"] == 1
-    assert result["close_source_backfill"]["updated"] == 1
-    assert result["entry_quality_governance"]["suggestions"] == 1
-    assert result["entry_cluster_governance"]["suggestions"] == 1
-    assert result["event_window_governance"]["suggestions"] == 1
-    assert result["evidence_contract_repair"]["repaired"] == 1
+    assert result["schema_version"] == "autonomous_learning_cycle.v2"
+    assert result["status"] == "completed"
+    assert result["stages"]["counterfactuals"]["count"] == 1
+    assert result["stages"]["trace_maturation"]["matured"] == 1
+    assert result["stages"]["close_source_backfill"]["updated"] == 1
+    assert result["stages"]["entry_quality_governance"]["suggestions"] == 1
+    assert result["stages"]["entry_cluster_governance"]["suggestions"] == 1
+    assert result["stages"]["event_window_governance"]["suggestions"] == 1
+    assert result["stages"]["evidence_contract_repair"]["repaired"] == 1
+    assert len(result["memory_profile"]) == 17
+    assert "must-not-escape" not in json.dumps(result)
     assert calls[:5] == [
         "counterfactual",
         "mature_traces",
@@ -2644,6 +2650,24 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert calls[8] == "event_window_governance"
     assert calls[9] == "repair_contracts"
     assert calls[-1] == "demo_apply"
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        stored_cycle = json.loads(
+            conn.execute(
+                """
+                SELECT payload_json
+                FROM evolution_events
+                WHERE event_type='autonomous_learning_cycle'
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+    assert stored_cycle["schema_version"] == "autonomous_learning_cycle.v2"
+    assert "items" not in stored_cycle["stages"]["counterfactuals"]
 
     calls.clear()
     result = al.run_autonomous_learning_cycle(db_path=db_path, sample_limit=20)
@@ -2668,3 +2692,13 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert "demo_apply" not in calls
     assert result["governance"]["review_pending"]["status"] == "mutation_circuit_open"
     assert result["demo_autonomy"]["status"] == "mutation_circuit_open"
+
+
+def test_process_memory_snapshot_missing_proc_is_non_blocking(monkeypatch):
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda self, **kwargs: (_ for _ in ()).throw(OSError("proc unavailable")),
+    )
+
+    assert al._process_memory_snapshot() == {}

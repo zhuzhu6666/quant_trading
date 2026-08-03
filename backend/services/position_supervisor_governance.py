@@ -728,6 +728,41 @@ def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, 
     }
 
 
+def _iter_candidate_observation_reviews(
+    conn: sqlite3.Connection,
+    *,
+    candidate_created_at: float,
+    page_limit: int,
+):
+    page_offset = 0
+    while True:
+        rows = _execute(
+            conn,
+            """
+            SELECT cf.counterfactual_id, cf.close_ts,
+                   cf.evidence_json AS counterfactual_evidence_json,
+                   tr.review_id, tr.trade_id, tr.position_id,
+                   tr.entry_decision_id, tr.exit_decision_id,
+                   tr.pnl, tr.mae, tr.mfe, tr.outcome_label,
+                   tr.failure_tags_json, tr.summary_text,
+                   tr.review_json, tr.created_at
+            FROM supervisor_counterfactual_review cf
+            JOIN trade_outcome_review tr ON tr.review_id=cf.review_id
+            WHERE cf.close_ts>=?
+            ORDER BY cf.close_ts ASC, tr.created_at DESC,
+                     cf.counterfactual_id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (candidate_created_at, page_limit, page_offset),
+        ).fetchall()
+        if not rows:
+            return
+        page_offset += len(rows)
+        for row in rows:
+            yield row
+        del rows
+
+
 def materialize_position_supervisor_candidate_observations(
     *,
     db_path: str | Path = STATE_DB,
@@ -785,28 +820,15 @@ def materialize_position_supervisor_candidate_observations(
                     }
                 )
                 continue
-            rows = _execute(
-                conn,
-                """
-                SELECT cf.counterfactual_id, cf.close_ts,
-                       cf.evidence_json AS counterfactual_evidence_json,
-                       tr.review_id, tr.trade_id, tr.position_id,
-                       tr.entry_decision_id, tr.exit_decision_id,
-                       tr.pnl, tr.mae, tr.mfe, tr.outcome_label,
-                       tr.failure_tags_json, tr.summary_text,
-                       tr.review_json, tr.created_at
-                FROM supervisor_counterfactual_review cf
-                JOIN trade_outcome_review tr ON tr.review_id=cf.review_id
-                WHERE cf.close_ts>=?
-                ORDER BY cf.close_ts ASC, tr.created_at DESC
-                """,
-                (candidate_created_at,),
-            ).fetchall()
             seen_positions: set[str] = set()
             candidate_inserted = 0
             candidate_existing = 0
             candidate_evaluated = 0
-            for row in rows:
+            for row in _iter_candidate_observation_reviews(
+                conn,
+                candidate_created_at=candidate_created_at,
+                page_limit=bounded_limit,
+            ):
                 item = dict(row)
                 if review_has_system_contamination(
                     _loads(item.get("review_json"), {})

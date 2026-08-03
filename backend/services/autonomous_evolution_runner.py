@@ -34,7 +34,8 @@ class AutonomousEvolutionNurseryRunner:
             "demo_nursery_automatic_review_and_bridge": True,
             "demo_nursery_automatic_apply_and_reconcile": True,
             "uses_existing_effect_reconcile": True,
-            "demo_apply_uses_existing_autonomous_learning_cycle": True,
+            "automatic_full_learning_cycle": False,
+            "full_learning_cycle_requires_explicit_flag": True,
             "recommended_step_consumption_supported": True,
             "recommended_step_max_per_cycle": 1,
         }
@@ -223,8 +224,8 @@ class AutonomousEvolutionNurseryRunner:
             )
 
         effective_apply_when_ready = bool(apply_when_ready or automatic_demo)
-        if effective_apply_when_ready and bool(repaired_cycle.get("stable_demo_nursery_ready")):
-            if full_learning_cycle or automatic_demo:
+        if bool(repaired_cycle.get("stable_demo_nursery_ready")):
+            if full_learning_cycle:
                 actions.append(
                     self._record(
                         "run_autonomous_learning_cycle",
@@ -234,7 +235,7 @@ class AutonomousEvolutionNurseryRunner:
                         ),
                     )
                 )
-            else:
+            elif effective_apply_when_ready and not automatic_demo:
                 actions.append(
                     self._record(
                         "run_demo_autonomy_apply",

@@ -500,7 +500,7 @@ def test_learning_worker_registers_factor_governance_job(monkeypatch):
     assert "backend.services.live_service" not in Path(worker.__file__).read_text(encoding="utf-8")
 
 
-def test_learning_worker_nursery_does_not_repeat_full_learning_cycle(
+def test_learning_worker_nursery_uses_bounded_demo_step_without_full_learning_cycle(
     monkeypatch,
 ):
     import scripts.learning_worker as worker
@@ -549,6 +549,9 @@ def test_learning_worker_nursery_does_not_repeat_full_learning_cycle(
     jobs["autonomous_evolution_nursery"]()
 
     assert captured[0]["full_learning_cycle"] is False
+    assert captured[0]["automatic_demo"] is True
+    assert captured[0]["consume_recommended_step"] is True
+    assert "apply_when_ready" not in captured[0]
 
 
 def test_factor_catalog_snapshot_round_trips_full_catalog_json(tmp_path):

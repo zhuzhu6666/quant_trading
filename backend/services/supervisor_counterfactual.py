@@ -460,39 +460,41 @@ def evaluate_counterfactuals(
     conn = _connect(db_path)
     try:
         target_review_ids = sorted({str(item) for item in (review_ids or []) if str(item)})
-        if review_ids is not None:
-            if target_review_ids:
-                placeholders = ",".join("?" for _ in target_review_ids)
-                rows = _execute(
+        bounded_limit = max(1, int(limit))
+
+        def _review_rows():
+            if review_ids is not None and not target_review_ids:
+                return
+            page_offset = 0
+            placeholders = ",".join("?" for _ in target_review_ids)
+            review_filter = (
+                f"AND review_id IN ({placeholders})"
+                if review_ids is not None
+                else ""
+            )
+            review_params: tuple[Any, ...] = tuple(target_review_ids)
+            while True:
+                page = _execute(
                     conn,
                     f"""
                     SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                            pnl, review_json, created_at
                     FROM trade_outcome_review
-                    WHERE created_at > 0 AND review_id IN ({placeholders})
-                    ORDER BY created_at DESC
+                    WHERE created_at > 0 {review_filter}
+                    ORDER BY created_at DESC, review_id DESC
+                    LIMIT ? OFFSET ?
                     """,
-                    tuple(target_review_ids),
+                    (*review_params, bounded_limit, page_offset),
                 ).fetchall()
-            else:
-                rows = []
-        else:
-            rows = _execute(
-                conn,
-                """
-                SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                       pnl, review_json, created_at
-                FROM trade_outcome_review
-                WHERE created_at > 0
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (int(limit),),
-            ).fetchall()
-        if _conn_is_pg(conn):
-            conn.commit()
+                if not page:
+                    return
+                page_offset += len(page)
+                for page_row in page:
+                    yield page_row
+                del page
+
         candidates = []
-        for row in rows:
+        for row in _review_rows():
             review = _loads(row["review_json"], {})
             if review_has_system_contamination(review):
                 continue
@@ -552,6 +554,8 @@ def evaluate_counterfactuals(
                     "trade_timeframe": str(review.get("timeframe") or "M5"),
                 }
             )
+            if len(candidates) >= bounded_limit:
+                break
 
         max_horizon = max(horizons_minutes)
         bar_cache = _load_future_bar_cache(candidates, max_horizon)
