@@ -101,7 +101,7 @@ class EvolutionKernel:
 
         sched.add_job(
             "evolution_hourly",
-            "2 * * * *",
+            "8,23,38,53 * * * *",
             coordinated_job(
                 "evolution_hourly",
                 scheduled_evolution_with_governance_handoff,
