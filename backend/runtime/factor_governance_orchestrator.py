@@ -92,6 +92,33 @@ class FactorGovernanceProfile:
     health_max_age_seconds: float
 
 
+def posterior_expansion_verdict(
+    *,
+    delta_avg_reward: float | None,
+    observed_trade_count: int,
+    block_delta: float = -0.05,
+    min_samples: int = 10,
+) -> str:
+    """Mixed-mode posterior guard verdict for factor expansion candidates.
+
+    A previously-applied autonomous factor action whose measured posterior
+    effect (delta_avg_reward in learning_application_effect) is negative must
+    not be blindly repeated.  With enough observed trades the expansion is
+    blocked; with thin evidence the candidate is kept but flagged degraded
+    (apply path may use a reduced weight/scope).  No record or non-negative
+    delta allows the expansion.
+
+    Returns one of: blocked_by_posterior | posterior_degraded | posterior_ok.
+    """
+    if delta_avg_reward is None:
+        return "posterior_ok"
+    if delta_avg_reward < block_delta:
+        if observed_trade_count >= min_samples:
+            return "blocked_by_posterior"
+        return "posterior_degraded"
+    return "posterior_ok"
+
+
 def _p(sql: str) -> str:
     return sql.replace("?", "%s")
 
@@ -627,6 +654,8 @@ class FactorGovernanceOrchestrator:
         active_zero_weight_ids: list[str] = []
         restore_ids: list[str] = []
         promotion_ids: list[str] = []
+        posterior_blocked_ids: list[str] = []
+        posterior_degraded_ids: list[str] = []
 
         activation_enabled = bool(
             getattr(cfg, "factor_governance_builtin_activation_enabled", True)
@@ -694,6 +723,15 @@ class FactorGovernanceOrchestrator:
                     or 0.65
                 ):
                     continue
+                posterior = self._posterior_expansion_guard(
+                    factor_id,
+                    cfg=cfg,
+                )
+                if posterior == "blocked_by_posterior":
+                    posterior_blocked_ids.append(factor_id)
+                    continue
+                if posterior == "posterior_degraded":
+                    posterior_degraded_ids.append(factor_id)
                 activation_ids.append(factor_id)
 
         from backend.services.governance_control_plans import (
@@ -752,6 +790,15 @@ class FactorGovernanceOrchestrator:
                 )
                 if has_model_evidence and observed_weakness >= profile.restore_max_weakness:
                     continue
+                posterior = self._posterior_expansion_guard(
+                    factor_id,
+                    cfg=cfg,
+                )
+                if posterior == "blocked_by_posterior":
+                    posterior_blocked_ids.append(factor_id)
+                    continue
+                if posterior == "posterior_degraded":
+                    posterior_degraded_ids.append(factor_id)
                 active_zero_weight_ids.append(factor_id)
         if restore_enabled and (mode == "off" or profile.balanced_demo):
             for item in catalog:
@@ -803,6 +850,15 @@ class FactorGovernanceOrchestrator:
                     and observed_weakness >= profile.restore_max_weakness
                 ):
                     continue
+                posterior = self._posterior_expansion_guard(
+                    factor_id,
+                    cfg=cfg,
+                )
+                if posterior == "blocked_by_posterior":
+                    posterior_blocked_ids.append(factor_id)
+                    continue
+                if posterior == "posterior_degraded":
+                    posterior_degraded_ids.append(factor_id)
                 restore_ids.append(factor_id)
 
         for item in catalog:
@@ -813,6 +869,15 @@ class FactorGovernanceOrchestrator:
                 or self._factor_has_pending_effect(factor_id)
             ):
                 continue
+            posterior = self._posterior_expansion_guard(
+                factor_id,
+                cfg=cfg,
+            )
+            if posterior == "blocked_by_posterior":
+                posterior_blocked_ids.append(factor_id)
+                continue
+            if posterior == "posterior_degraded":
+                posterior_degraded_ids.append(factor_id)
             promotion_ids.append(factor_id)
 
         reasons = {
@@ -840,6 +905,8 @@ class FactorGovernanceOrchestrator:
                 + len(promotion_ids)
                 + int(reasons["redundancy_groups"])
             ),
+            "posterior_blocked_ids": posterior_blocked_ids,
+            "posterior_degraded_ids": posterior_degraded_ids,
             "directional_portfolio_guard": FactorWeightChangeService._directional_guard(
                 factor_configs=self._portfolio_configs(cfg),
                 weights=weights,
@@ -890,6 +957,121 @@ class FactorGovernanceOrchestrator:
             # isolated test/research store has no live authority and may treat
             # a missing ledger as no pending experiment.
             return bool(production_state)
+
+    def _latest_posterior_effect(
+        self,
+        factor_id: str,
+    ) -> dict[str, Any] | None:
+        """Latest measured posterior effect of the last autonomous factor action.
+
+        Reuses the same production table and filter rules as the rollback path
+        (learning_application_effect joined on learning_application_log), so the
+        expansion guard shares one fact source instead of adding a new writer.
+        Returns None when there is no applicable record.
+        """
+        if not factor_id:
+            return None
+        db_path = self.overlay.db_path
+        production_state = is_state_db_path(db_path)
+        if not production_state and not Path(db_path).exists():
+            return None
+        try:
+            conn = (
+                get_state_pg_conn(read_only=True)
+                if production_state
+                else connect_sqlite(db_path, read_only=True)
+            )
+            if not production_state:
+                conn.row_factory = sqlite3.Row
+            try:
+                if not state_table_exists(conn, "learning_application_effect"):
+                    return None
+                sql = """
+                    SELECT e.observed_trade_count, e.delta_avg_reward
+                    FROM learning_application_log l
+                    JOIN learning_application_effect e
+                      ON e.application_id = l.application_id
+                    WHERE l.scope_type='factor' AND l.scope_key=?
+                      AND l.status IN ('applied','observing','ineffective')
+                      AND e.status IN ('observing','applied','ineffective')
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM learning_application_log newer
+                          WHERE newer.scope_type='factor'
+                            AND newer.scope_key=l.scope_key
+                            AND newer.created_at > l.created_at
+                            AND newer.status NOT IN ('rolled_back','superseded')
+                      )
+                    ORDER BY e.updated_at DESC, l.created_at DESC
+                    LIMIT 1
+                """
+                row = conn.execute(
+                    _p(sql) if production_state else sql,
+                    (factor_id,),
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "observed_trade_count": int(
+                        row["observed_trade_count"] or 0
+                    ),
+                    "delta_avg_reward": (
+                        float(row["delta_avg_reward"])
+                        if row["delta_avg_reward"] is not None
+                        else None
+                    ),
+                }
+            finally:
+                conn.close()
+        except Exception:
+            # Production state uncertainty must block expansion; an isolated
+            # test/research store has no live authority and may treat a
+            # missing ledger as no posterior evidence.
+            if not production_state:
+                return None
+            return {
+                "observed_trade_count": 0,
+                "delta_avg_reward": None,
+                "unknown": True,
+            }
+
+    def _posterior_expansion_guard(
+        self,
+        factor_id: str,
+        *,
+        cfg: Any,
+    ) -> str:
+        """Verdict for one factor expansion candidate from posterior evidence.
+
+        blocked_by_posterior  -> candidate must be removed
+        posterior_degraded    -> candidate kept, but flagged for degraded apply
+        posterior_ok          -> no posterior objection
+        """
+        effect = self._latest_posterior_effect(factor_id)
+        if effect is None:
+            return "posterior_ok"
+        if bool(effect.get("unknown")):
+            return "blocked_by_posterior"
+        return posterior_expansion_verdict(
+            delta_avg_reward=effect.get("delta_avg_reward"),
+            observed_trade_count=int(effect.get("observed_trade_count") or 0),
+            block_delta=float(
+                getattr(
+                    cfg,
+                    "factor_governance_posterior_block_delta",
+                    -0.05,
+                )
+                or -0.05
+            ),
+            min_samples=int(
+                getattr(
+                    cfg,
+                    "factor_governance_posterior_min_samples",
+                    10,
+                )
+                or 10
+            ),
+        )
 
     def _advance_disable_evidence_streaks(
         self,

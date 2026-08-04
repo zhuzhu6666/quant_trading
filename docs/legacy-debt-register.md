@@ -79,6 +79,13 @@
 
 ## 3. 治理、研究与客户端
 
+### 因子扩张缺少后验防抖（已接入）
+
+- 状态：`active`
+- canonical：`FactorGovernanceOrchestrator._posterior_expansion_guard` + `posterior_expansion_verdict`，复用 `learning_application_effect`（scope_type=factor、最新非 rolled_back/superseded effect）作为唯一后验事实源。`delta_avg_reward < factor_governance_posterior_block_delta`（默认 -0.05）且 `observed_trade_count >= factor_governance_posterior_min_samples`（默认 10）→ `blocked_by_posterior` 剔除扩张候选；样本不足 → `posterior_degraded` 保留但标记；无记录/非负 → `posterior_ok`。四类扩张候选（builtin activation、active zero-weight restore、quarantined builtin restore、shadow promotion）统一在 preflight 过闸，preflight 输出 `posterior_blocked_ids`/`posterior_degraded_ids` 只读投影；V16 delegate 粒度不变（批轮次、specialist 选因子），生产查询不确定 fail-closed 阻断扩张。
+- 剩余：`posterior_degraded` 的降级应用路径（受限权重/scope）尚未在 apply 侧实现，当前仅标记不阻断；因子×regime 条件绩效（`ic_tracker` 无 regime 标签）仍是失效归因的上游缺口，另行批次处理。
+- 退出：degraded 降级应用落地且连续真实周期验证后，将本条目转为 `migrating`；regime 标签链路完成后关闭归因缺口。
+
 ### 治理 mutation 跨账本提交兼容
 
 - 状态：`migrating`
