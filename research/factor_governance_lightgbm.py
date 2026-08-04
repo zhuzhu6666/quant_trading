@@ -18,8 +18,8 @@ from backend.services.policy_suggestion_context import attach_policy_suggestion_
 
 
 MODEL_TYPE = "factor_governance_lightgbm"
-MODEL_VERSION = "4.0"
-FEATURE_SCHEMA_VERSION = "pit.v2.factor_rolling_lineage"
+MODEL_VERSION = "5.0"
+FEATURE_SCHEMA_VERSION = "pit.v3.factor_regime_rolling_lineage"
 FEATURE_NAMES = [
     "current_entry_contribution",
     "current_net_contribution",
@@ -36,6 +36,11 @@ FEATURE_NAMES = [
     "rolling_mae_avg",
     "rolling_mfe_avg",
     "rolling_loss_rate",
+    # v5.0 (pit.v3): regime 条件维度 —— regime_fit_score 此前被 SQL SELECT
+    # 却从未进入特征集；现在模型能学到"因子在哪种市场状态下弱/强"。
+    "current_regime_fit_score",
+    "rolling_regime_fit_avg",
+    "rolling_regime_fit_min",
 ]
 
 
@@ -108,6 +113,7 @@ def _rolling_factor_features(history: list[dict[str, Any]], *, window: int = 5) 
     items = history[-max(2, int(window)):]
     current = items[-1]
     n = max(len(items), 1)
+    regime_fits = [_safe_float(item.get("regime_fit_score")) for item in items]
     return {
         "current_entry_contribution": _safe_float(current.get("entry_contribution")),
         "current_net_contribution": _safe_float(current.get("net_contribution")),
@@ -124,6 +130,10 @@ def _rolling_factor_features(history: list[dict[str, Any]], *, window: int = 5) 
         "rolling_mae_avg": sum(_safe_float(item.get("mae")) for item in items) / n,
         "rolling_mfe_avg": sum(_safe_float(item.get("mfe")) for item in items) / n,
         "rolling_loss_rate": sum(1 for item in items if _safe_float(item.get("pnl")) < 0.0) / n,
+        # v5.0 (pit.v3): regime 条件维度。
+        "current_regime_fit_score": _safe_float(current.get("regime_fit_score")),
+        "rolling_regime_fit_avg": sum(regime_fits) / n,
+        "rolling_regime_fit_min": min(regime_fits) if regime_fits else 0.0,
     }
 
 

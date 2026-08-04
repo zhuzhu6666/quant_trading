@@ -2,7 +2,10 @@ import json
 import sqlite3
 
 from research.factor_governance_lightgbm import (
+    FEATURE_NAMES,
     MODEL_TYPE,
+    MODEL_VERSION,
+    FEATURE_SCHEMA_VERSION,
     FactorGovernanceLightGBMService,
 )
 
@@ -141,7 +144,7 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
         return
 
     assert result["model_type"] == MODEL_TYPE
-    assert result["feature_schema_version"] == "pit.v2.factor_rolling_lineage"
+    assert result["feature_schema_version"] == FEATURE_SCHEMA_VERSION
     assert result["metrics"]["distinct_trade_count"] == 12
     assert result["metrics"]["train_trade_count"] + result["metrics"]["holdout_trade_count"] == 12
     assert result["metrics"]["holdout"]["majority_baseline_accuracy"] is not None
@@ -322,3 +325,83 @@ def test_factor_governance_demo_bridge_supersedes_inactive_target(tmp_path, monk
         "SELECT status, review_note FROM policy_suggestion WHERE suggestion_id='fgm_stale'"
     ).fetchone()
     assert row == ("superseded", "superseded: factor is no longer active in runtime score")
+
+
+# ── 批次 A: regime 特征进入治理模型 ─────────────────────────────
+
+REGIME_FEATURES = {
+    "current_regime_fit_score",
+    "rolling_regime_fit_avg",
+    "rolling_regime_fit_min",
+}
+
+
+def test_batch_a_feature_names_include_regime_dimensions():
+    """FEATURE_NAMES 必须包含 regime 条件维度，不能只被 SQL SELECT 后丢弃。"""
+    missing = REGIME_FEATURES - set(FEATURE_NAMES)
+    assert not missing, f"regime 特征缺失: {missing}"
+
+
+def test_batch_a_samples_carry_regime_features(tmp_path):
+    """load_samples 产出的每个样本 features 必须含 regime 维度且来自 regime_fit_score。"""
+    db_path = tmp_path / "state.db"
+    artifact_dir = tmp_path / "artifacts"
+    _create_factor_reviews(db_path)
+
+    service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=artifact_dir)
+    samples = service.load_samples(limit=20)
+    assert samples
+    for sample in samples:
+        feats = sample["features"]
+        for name in REGIME_FEATURES:
+            assert name in feats, f"{name} 未进入样本特征"
+            assert isinstance(feats[name], (int, float)), f"{name} 非数值: {feats[name]!r}"
+    # fixture 里 regime_fit_score 有区分度(0.8/0.3)，当前特征不应全为 0
+    any_nonzero = any(
+        sample["features"].get("current_regime_fit_score", 0.0) != 0.0
+        for sample in samples
+    )
+    # 当前行 regime_fit_score 至少遇到一个非零
+    assert any_nonzero
+
+
+def test_batch_a_train_reports_version_bump():
+    """治理模型版本号必须因加入 regime 特征而升版(schema 版本标识特征集)。"""
+    # 只验证常量已定义且版本字符串是新 schema；train 本身在
+    # test_batch_a_train_schema_bump 验证
+    assert MODEL_VERSION == "5.0"
+    assert FEATURE_SCHEMA_VERSION.startswith("pit.v3")
+
+
+def test_batch_a_train_schema_bump(tmp_path, monkeypatch):
+    """训练产出 feature_count 含 regime 维度且 schema 版本为 v3。"""
+    db_path = tmp_path / "state.db"
+    artifact_dir = tmp_path / "artifacts"
+    _create_factor_reviews(db_path)
+
+    service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=artifact_dir)
+    samples = service.load_samples(limit=20)
+    replay_samples = [
+        {
+            **sample,
+            "sample_id": f"replay-{sample['sample_id']}",
+            "trade_id": f"replay-{sample['trade_id']}",
+            "review_id": f"replay-{sample['review_id']}",
+            "source": "historical_replay",
+        }
+        for sample in samples[:6]
+    ]
+    monkeypatch.setattr(
+        "backend.services.parity_replay.load_parity_learning_samples",
+        lambda kind: replay_samples if kind == "factor" else [],
+    )
+
+    result = service.train(limit=20, min_samples=6, register=False)
+
+    if not result["ok"]:
+        assert result["error"] == "dependency_missing"
+        return
+    assert result["feature_schema_version"] == FEATURE_SCHEMA_VERSION
+    assert result["feature_schema_version"].startswith("pit.v3")
+    assert result["metrics"]["feature_count"] == len(FEATURE_NAMES)
+    assert REGIME_FEATURES.issubset(set(FEATURE_NAMES))
