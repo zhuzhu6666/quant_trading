@@ -151,6 +151,72 @@ def test_model_promotion_gate_rejects_legacy_generic_pit_v2_schema(tmp_path):
     assert "feature_schema" in gate["failed_checks"]
 
 
+def test_factor_governance_v5_artifact_passes_feature_schema_gate(tmp_path):
+    """Batch A upgraded factor_governance_lightgbm to pit.v3.factor_regime_rolling_lineage
+    (MODEL_VERSION 5.0 / FEATURE_NAMES +3 regime features); the promotion gate must
+    accept the new schema so the v5.0 artifact can advance to demo_canary."""
+    model_file = tmp_path / "model.joblib"
+    model_file.write_bytes(b"test-model")
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(json.dumps({
+        "model_type": "factor_governance_lightgbm",
+        "feature_schema_version": "pit.v3.factor_regime_rolling_lineage",
+        "created_at": __import__("time").time(),
+        "model_file": str(model_file),
+        "model_file_sha256": __import__("hashlib").sha256(b"test-model").hexdigest(),
+        "metrics": {
+            "split": "time_ordered_grouped_purged",
+            "distinct_trade_count": 350,
+            "holdout_trade_count": 80,
+            "holdout": {
+                "accuracy": 0.70,
+                "balanced_accuracy": 0.66,
+                "auc": 0.70,
+                "majority_baseline_accuracy": 0.55,
+            },
+            "train": {"accuracy": 0.75},
+        },
+    }), encoding="utf-8")
+
+    gate = ModelInfluenceGovernanceService(tmp_path / "state.db").evaluate_artifact(artifact_path)
+
+    assert gate["passed"] is True
+    assert "feature_schema" not in gate["failed_checks"]
+
+
+def test_factor_governance_v4_artifact_rejected_by_feature_schema_gate(tmp_path):
+    """Legacy pit.v2.factor_rolling_lineage artifacts must NOT pass the promotion
+    gate anymore: their 15-feature schema cannot be promoted against the v5.0
+    regime-aware contract (feature mismatch would break inference)."""
+    model_file = tmp_path / "model.joblib"
+    model_file.write_bytes(b"test-model")
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(json.dumps({
+        "model_type": "factor_governance_lightgbm",
+        "feature_schema_version": "pit.v2.factor_rolling_lineage",
+        "created_at": __import__("time").time(),
+        "model_file": str(model_file),
+        "model_file_sha256": __import__("hashlib").sha256(b"test-model").hexdigest(),
+        "metrics": {
+            "split": "time_ordered_grouped_purged",
+            "distinct_trade_count": 350,
+            "holdout_trade_count": 80,
+            "holdout": {
+                "accuracy": 0.70,
+                "balanced_accuracy": 0.66,
+                "auc": 0.70,
+                "majority_baseline_accuracy": 0.55,
+            },
+            "train": {"accuracy": 0.75},
+        },
+    }), encoding="utf-8")
+
+    gate = ModelInfluenceGovernanceService(tmp_path / "state.db").evaluate_artifact(artifact_path)
+
+    assert gate["passed"] is False
+    assert "feature_schema" in gate["failed_checks"]
+
+
 def test_v16_only_delegates_model_promotion_after_gate_passes(tmp_path):
     service = V16BrainOrchestratorService(tmp_path / "state.db")
     blocked = service.delegate_model_promotion({
