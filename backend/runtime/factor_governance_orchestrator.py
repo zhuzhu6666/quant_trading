@@ -650,6 +650,13 @@ class FactorGovernanceOrchestrator:
         now = time.time()
         signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
         weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
+        # Batch D: single-point current-regime resolution consumed by every
+        # restore candidate gate below (same fact owner as batch C).
+        current_regime = self._current_market_regime_projection()
+        current_regime_id = str(current_regime.get("regime_id") or "")
+        regime_fit_ok = float(
+            getattr(cfg, "factor_governance_regime_fit_ok_threshold", 0.5) or 0.5
+        )
         activation_ids: list[str] = []
         active_zero_weight_ids: list[str] = []
         restore_ids: list[str] = []
@@ -799,6 +806,13 @@ class FactorGovernanceOrchestrator:
                     continue
                 if posterior == "posterior_degraded":
                     posterior_degraded_ids.append(factor_id)
+                regime_verdict = self._regime_suitable_for_restore(
+                    current_regime_id=current_regime_id,
+                    regime_fit_score=self._shadow_regime_fit_score(item),
+                    regime_fit_ok_threshold=regime_fit_ok,
+                )
+                if not regime_verdict.get("suitable"):
+                    continue
                 active_zero_weight_ids.append(factor_id)
         if restore_enabled and (mode == "off" or profile.balanced_demo):
             for item in catalog:
@@ -859,6 +873,13 @@ class FactorGovernanceOrchestrator:
                     continue
                 if posterior == "posterior_degraded":
                     posterior_degraded_ids.append(factor_id)
+                regime_verdict = self._regime_suitable_for_restore(
+                    current_regime_id=current_regime_id,
+                    regime_fit_score=self._shadow_regime_fit_score(item),
+                    regime_fit_ok_threshold=regime_fit_ok,
+                )
+                if not regime_verdict.get("suitable"):
+                    continue
                 restore_ids.append(factor_id)
 
         for item in catalog:
@@ -1946,16 +1967,7 @@ class FactorGovernanceOrchestrator:
             # whether it actually fits the *current* regime.  If its recent
             # regime-fit is good, global weakness is concentrated elsewhere ->
             # regime_mismatch: keep the weight, record the reason, do not drop it.
-            regime_fit_score: float | None = None
-            shadow_payload = (item.get("factor_governance_shadow") or {}).get("payload") or {}
-            shadow_features = shadow_payload.get("features") or {}
-            if isinstance(shadow_features, dict):
-                candidate = shadow_features.get("current_regime_fit_score")
-                if candidate is not None:
-                    try:
-                        regime_fit_score = float(candidate)
-                    except (TypeError, ValueError):
-                        regime_fit_score = None
+            regime_fit_score = self._shadow_regime_fit_score(item)
             mismatch = self._regime_mismatch_verdict(
                 model_weak,
                 current_regime_id=current_regime_id,
@@ -3164,6 +3176,66 @@ class FactorGovernanceOrchestrator:
             }
         return {
             "regime_mismatch": False,
+            "reason": "current_regime_weak_too",
+            "current_regime_id": current_regime_id,
+            "regime_fit_score": round(fit, 4),
+        }
+
+    @staticmethod
+    def _shadow_regime_fit_score(item: dict[str, Any]) -> float | None:
+        """Extract the factor's latest regime-fit score from shadow payload.
+
+        Batch-A features are stored per-inference in
+        `factor_governance_shadow_audit.payload_json.features`; the catalog
+        projection keeps the newest inference per factor.  Returns None when
+        the evidence is missing or unparseable (callers fail open/fail safe
+        as documented per gate).
+        """
+        try:
+            shadow_payload = (item.get("factor_governance_shadow") or {}).get("payload") or {}
+            shadow_features = shadow_payload.get("features") or {}
+            if not isinstance(shadow_features, dict):
+                return None
+            candidate = shadow_features.get("current_regime_fit_score")
+            if candidate is None:
+                return None
+            return float(candidate)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _regime_suitable_for_restore(
+        *,
+        current_regime_id: str,
+        regime_fit_score: float | None,
+        regime_fit_ok_threshold: float = 0.5,
+    ) -> dict[str, Any]:
+        """Batch D: second gate for zero-weight/quarantined restore candidates.
+
+        A factor that was downweighted/frozen may become usable again when the
+        market regime switches and the factor now fits the *current* regime.
+        Restore is only allowed while the current-regime fit clears the
+        threshold ("not suited to yesterday's market" is not "never usable").
+
+        Fail-open on missing regime projection or missing fit evidence so the
+        new gate never silently starves the existing restore path (the
+        posterior guard already covers "this restore lost money last time" -
+        these two gates are orthogonal).
+        """
+        if not current_regime_id:
+            return {"suitable": True, "reason": "no_current_regime"}
+        if regime_fit_score is None:
+            return {"suitable": True, "reason": "no_regime_fit_evidence"}
+        fit = float(regime_fit_score)
+        if fit >= float(regime_fit_ok_threshold):
+            return {
+                "suitable": True,
+                "reason": "current_regime_fit_ok",
+                "current_regime_id": current_regime_id,
+                "regime_fit_score": round(fit, 4),
+            }
+        return {
+            "suitable": False,
             "reason": "current_regime_weak_too",
             "current_regime_id": current_regime_id,
             "regime_fit_score": round(fit, 4),

@@ -851,6 +851,47 @@ def test_regime_mismatch_verdict_ignores_when_not_globally_weak():
     assert verdict["reason"] == "not_globally_weak"
 
 
+# ── 批次 D: 条件化恢复 (当前 regime 下弱则不恢复; 与后验闸正交) ──────────────
+
+def test_regime_suitable_for_restore_permits_when_fit_good():
+    """当前 regime 适配好 -> 允许恢复."""
+    verdict = FactorGovernanceOrchestrator._regime_suitable_for_restore(
+        current_regime_id="trend=strong|volatility=high",
+        regime_fit_score=0.9,
+        regime_fit_ok_threshold=0.5,
+    )
+    assert verdict["suitable"] is True
+    assert verdict["reason"] == "current_regime_fit_ok"
+
+
+def test_regime_suitable_for_restore_blocks_when_current_regime_weak():
+    """当前 regime 下适配弱 -> 不恢复 (条件化恢复核心)."""
+    verdict = FactorGovernanceOrchestrator._regime_suitable_for_restore(
+        current_regime_id="trend=weak|volatility=low",
+        regime_fit_score=0.1,
+        regime_fit_ok_threshold=0.5,
+    )
+    assert verdict["suitable"] is False
+    assert verdict["reason"] == "current_regime_weak_too"
+
+
+def test_regime_suitable_for_restore_fail_open_when_no_evidence():
+    """无当前 regime 投影或无数值证据 -> fail-open 允许恢复 (不误伤既有恢复路径)."""
+    no_regime = FactorGovernanceOrchestrator._regime_suitable_for_restore(
+        current_regime_id="",
+        regime_fit_score=0.9,
+    )
+    assert no_regime["suitable"] is True
+    assert no_regime["reason"] == "no_current_regime"
+
+    no_fit = FactorGovernanceOrchestrator._regime_suitable_for_restore(
+        current_regime_id="trend=strong|volatility=high",
+        regime_fit_score=None,
+    )
+    assert no_fit["suitable"] is True
+    assert no_fit["reason"] == "no_regime_fit_evidence"
+
+
 def test_downweight_skipped_when_current_regime_fit_good_for_weak_factor(monkeypatch, tmp_path):
     """批C接入: 模型判弱但当前 regime 适配好 -> regime_mismatch, 权重不变."""
     rc.reset_for_tests()
@@ -968,3 +1009,85 @@ def test_downweight_applied_when_current_regime_weak_too(monkeypatch, tmp_path):
 
     assert any(a["status"] == "applied" for a in actions)
     assert rc.shared().factor_portfolio_weights.get("weak_in_current_regime") == 0.255
+
+
+def test_expansion_preflight_blocks_restore_when_current_regime_weak(monkeypatch, tmp_path):
+    """批D接入: 当前 regime 下适配弱的 zero-weight 恢复候选不进 preflight 候选集."""
+    rc.reset_for_tests()
+    rc.patch({
+        "factor_signal_config": {
+            "regime_weak_restore_cand": {
+                "role": "alpha", "enabled": True, "tags": ["技术"],
+                "autonomous_activation": True,
+            },
+        },
+        "factor_portfolio_weights": {"regime_weak_restore_cand": 0.0},
+        "factor_governance_builtin_activation_enabled": False,
+        "factor_governance_auto_restore_enabled": True,
+    })
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(tmp_path / "state.db")
+    conn.executescript(
+        """
+        CREATE TABLE experience_memory (
+            regime_id TEXT, created_at REAL, trade_id TEXT
+        );
+        INSERT INTO experience_memory (regime_id, created_at, trade_id)
+        VALUES ('trend=weak|volatility=low', 1600000.0, 't1'),
+               ('trend=weak|volatility=low', 1600010.0, 't2'),
+               ('trend=weak|volatility=low', 1600020.0, 't3');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    profile = replace(
+        orch._governance_profile(rc.shared()),
+        name="balanced_demo",
+        balanced_demo=True,
+        restore_min_health_score=0.0,
+        restore_min_n_obs=0,
+        restore_model_min_samples=0,
+        restore_max_weakness=1.0,
+        restore_cooldown_seconds=0.0,
+        health_max_age_seconds=1e18,
+        min_live_weight=0.05,
+    )
+    now = time.time()
+    catalog = [{
+        "factor_id": "regime_weak_restore_cand",
+        "source": "builtin",
+        "role": "alpha",
+        "enabled": True,
+        "eligible_for_live": True,
+        "used_in_score": True,
+        "weight": 0.0,
+        "lifecycle_origin": "builtin",
+        "lifecycle_status": "ACTIVE",
+        "health_updated_at": now,
+        "health_status": "HEALTHY",
+        "health_score": 85.0,
+        "health_n_obs": 40,
+        "factor_governance_shadow": {
+            "sample_count": 4,
+            "weak_sample_count": 4,
+            "avg_weakness_score": 0.78,
+            "weakness_score": 0.8,
+            "model_type": "factor_governance_lightgbm",
+            "latest_inference_id": "fg_restore_1",
+            "payload": {"features": {"current_regime_fit_score": 0.1}},
+        },
+    }]
+
+    preflight = orch._expansion_preflight(
+        catalog,
+        cfg=rc.shared(),
+        profile=profile,
+        redundancy_report={"group_count": 0, "groups": []},
+    )
+
+    assert "regime_weak_restore_cand" not in preflight["reasons"]["active_zero_weight_restore"]
+    assert "regime_weak_restore_cand" not in preflight["reasons"]["builtin_restore"]
