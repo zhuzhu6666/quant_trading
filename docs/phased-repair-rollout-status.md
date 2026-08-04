@@ -532,6 +532,26 @@ Unresolved live evidence: 本批内存验收无；不扩大为 CPU、磁盘、�
 
 Next batch: 继续常规观测；只有未来再出现连续两轮超标才进入已定义的一次性子进程隔离，本次不启用。
 
+2026-08-05 L4/L5 因子×市场状态（regime）认知闭环（批次 A-D complete，批次 E 文档收口）
+
+Batch: regime 条件失效归因闭环——lightgbm v5.0 增加 regime 条件特征（A）→ market_regime 权威投影（B）→ 降权条件化（C）→ 条件化恢复（D）
+
+Canonical authority: 当前 regime 唯一投影 `backend.services.market_regime.project_current_market_regime()`（`experience_memory.regime_id` 只读，latest 优先/recent_majority/fail-closed）；regime 条件弱分数唯一由治理模型 `research/factor_governance_lightgbm.py`（v5.0，FEATURE_NAMES +3）承担；降权/恢复条件化由 `FactorGovernanceOrchestrator` 单点消费，V16 裁决粒度不变
+
+Deleted paths: 无（本批不新增表/写者/计算者，未删既有路径；`ic_tracker` 签名保持不变）
+
+Targeted verification: lightgbm 8 passed（含 4 个 regime RED→GREEN）；market_regime 8 passed；orchestrator +6（批次 C 4 verdict 单测 + 2 集成）；lightgbm+parity+position 55 passed；生产只读验证 3 个 PREPARED 晋升因子不进 regime 门槛
+
+Migration/OpenAPI/build: 无 schema/route/静态开关/服务/线程/表/调度器/治理阈值变化；`git diff --check` 通过
+
+Runtime verification: 批次 B 投影在生产数据验证 `trend=strong|volatility=high`（conf 0.8, recent_majority）；9 种 regime、样本 10-35 条可支撑条件绩效；shadow 审计无 PREPARED 因子误伤
+
+Remaining compatibility: `posterior_degraded` 降级应用路径未在 apply 侧实现（legacy-debt 已登记）；factor_health `regime_consistency` 保持 5 段分桶（Q1 既定决策，真实 regime 条件绩效由 lightgbm 唯一承担）
+
+Unresolved live evidence: 降权/恢复条件化需连续真实治理周期观察（当前市场关闭、无活跃因子降权/恢复事件）
+
+Next batch: 观察 regime 条件化在真实治理周期的行为；`posterior_degraded` 降级应用路径作为后续候选批次
+
 ## 6. 每批状态更新格式
 
 以后本文件只追加或替换以下当前信息，不保留逐时流水：

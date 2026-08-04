@@ -303,6 +303,20 @@ v16cmd_7be9876b49138e64e726
 `rollback_mutation_id`；rollback 不复用或增加原 command apply count。P4 最终分批低优先级
 验证共执行 131 个测试，全部通过。
 
+### 2026-08-05 L4/L5 因子×regime 认知闭环（批次 A-D complete，批次 E 文档收口）
+
+| 检查 | 验收证据与当前状态 |
+|---|---|
+| lightgbm regime 条件特征 | `MODEL_VERSION=5.0` / `FEATURE_SCHEMA_VERSION=pit.v3.factor_regime_rolling_lineage`；`FEATURE_NAMES` 新增 `current_regime_fit_score`/`rolling_regime_fit_avg`/`rolling_regime_fit_min` 三个特征，消费 `trade_outcome_review.regime_fit_score`，缺失→0.0 安全降级；`tests/test_factor_governance_lightgbm.py` 8 passed，lightgbm+parity+position 55 passed |
+| 当前 regime 权威投影 | `project_current_market_regime()` 从 `experience_memory.regime_id` 只读投影（latest 优先 / recent_majority 窗口多数票 / fail-closed `unavailable`）；不新增写者/表；`tests/test_market_regime.py` 8 passed；生产只读验证当前投影 `trend=strong\|volatility=high`（conf 0.8） |
+| 降权条件化 | `_downweight_weak_alpha` 当前 regime fit 达标 → `regime_mismatch` reason code、权重不动；缺投影/证据 fail-safe 落回全局弱路径；`tests/test_factor_governance_orchestrator.py` +6（4 verdict 单测 + 2 集成） |
+| 恢复条件化 | `_regime_suitable_for_restore()` 在 `_posterior_expansion_guard` 之外叠加 regime 闸（后验闸管\"上次亏了\"、regime 闸管\"当前适不适合\"，正交）；缺投影/证据 fail-open 不饿死恢复路径 |
+| 单 owner 收敛 | regime 投影只在 `market_regime.py` 单点生产、lightgbm 条件弱分数唯一由治理模型承担；orchestrator 只消费，无第二计算者/新表/新写者 |
+| PREPARED 晋升不受影响 | 3 个 PREPARED 因子（dsl_auto_96902edc / htf_trend_alignment / morning_evening_star）走 Registry/PREPARED 晋升链，不在 `factor_governance_shadow_audit`，不进 regime 门槛（生产只读验证） |
+| 文档收口 | source-of-truth（LightGBM 契约 v3/regime 特征、market_regime 投影、orchestrator 条件化条款、组合决策）、legacy-debt（regime 归因缺口关闭）与验收矩阵同步 |
+
+本批四个代码批次 commit 链：`12c6f7a`（批次 A）→ `47b1681`（批次 B）→ `9f54767`（批次 C）→ `0dba946`（批次 D）；批次 E 为纯文档收口。全部为只读投影与治理决策条件化，不改变 V16 裁决粒度、RiskPolicy、readiness 或成熟度门槛；`posterior_degraded` 降级应用路径仍登记 legacy-debt 待后续批次。
+
 ## 7. 删除验收
 
 删除模块、字段或兼容层时至少执行：
