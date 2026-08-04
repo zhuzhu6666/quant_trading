@@ -892,6 +892,47 @@ def test_regime_suitable_for_restore_fail_open_when_no_evidence():
     assert no_fit["reason"] == "no_regime_fit_evidence"
 
 
+def test_shadow_regime_fit_score_prefers_same_regime_conditional():
+    """批次F: 条件化闸优先消费因子×regime 条件胜率 (same_regime_positive_rate),
+    而非交易级 fit_score —— 因子级特征能区分因子, 交易级不能."""
+    item = {
+        "factor_governance_shadow": {
+            "payload": {
+                "features": {
+                    "same_regime_positive_rate": 0.8,
+                    "current_regime_fit_score": 0.2,
+                }
+            }
+        }
+    }
+    score = FactorGovernanceOrchestrator._shadow_regime_fit_score(item)
+    assert score == 0.8
+
+
+def test_shadow_regime_fit_score_falls_back_to_trade_level_fit():
+    """旧 schema (v5.0 及之前) 无 same_regime_* 特征 -> 回退交易级 fit_score."""
+    item = {
+        "factor_governance_shadow": {
+            "payload": {
+                "features": {
+                    "current_regime_fit_score": 0.32,
+                }
+            }
+        }
+    }
+    score = FactorGovernanceOrchestrator._shadow_regime_fit_score(item)
+    assert score == 0.32
+
+
+def test_shadow_regime_fit_score_none_when_no_evidence():
+    """无任何 regime 证据 -> None (调用方 fail-safe/fail-open)."""
+    assert FactorGovernanceOrchestrator._shadow_regime_fit_score({}) is None
+    item = {"factor_governance_shadow": {"payload": {"features": {}}}}
+    assert FactorGovernanceOrchestrator._shadow_regime_fit_score(item) is None
+    item = {"factor_governance_shadow": {"payload": {"features": {"current_regime_fit_score": "nan"}}}}
+    assert FactorGovernanceOrchestrator._shadow_regime_fit_score(item) is None
+
+
 def test_downweight_skipped_when_current_regime_fit_good_for_weak_factor(monkeypatch, tmp_path):
     """批C接入: 模型判弱但当前 regime 适配好 -> regime_mismatch, 权重不变."""
     rc.reset_for_tests()

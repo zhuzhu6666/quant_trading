@@ -42,7 +42,7 @@ MODEL_EFFECTS: dict[str, dict[str, Any]] = {
 MODEL_FEATURE_SCHEMAS = {
     "open_quality_lightgbm": "pit.v2.open_lineage",
     "position_quality_lightgbm": "pit.v2.position_h30",
-    "factor_governance_lightgbm": "pit.v3.factor_regime_rolling_lineage",
+    "factor_governance_lightgbm": "pit.v4.factor_regime_decision_lineage",
     "meta_model_lightgbm": "pit.v2.meta_residual_rate",
 }
 

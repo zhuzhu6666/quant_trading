@@ -420,7 +420,7 @@ def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
                 )
                 sample["source"] = "historical_replay"
                 sample["binding_hash"] = binding_hash
-                sample["feature_schema_version"] = "pit.v2.factor_rolling_lineage"
+                sample["feature_schema_version"] = "pit.v4.factor_regime_decision_lineage"
                 factor_candidates.append(sample)
 
     trainable = not blockers and bool(eligible_independent)
@@ -442,7 +442,7 @@ def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
         "bindings": bindings,
         "feature_schemas": {
             "open": "pit.v2.open_lineage",
-            "factor": "pit.v2.factor_rolling_lineage",
+            "factor": "pit.v4.factor_regime_decision_lineage",
         },
         "independent_trade_count": len(independent),
         "excluded_trade_count": excluded_trade_count,
@@ -2887,7 +2887,7 @@ def load_parity_learning_samples(
     expected_schema = (
         "pit.v2.open_lineage"
         if sample_kind == "open"
-        else "pit.v2.factor_rolling_lineage"
+        else "pit.v4.factor_regime_decision_lineage"
     )
     samples: dict[str, dict[str, Any]] = {}
     for path in sorted(Path(artifact_dir).glob("parity_*.json")):

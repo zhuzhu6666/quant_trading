@@ -173,7 +173,7 @@ def test_replay_learning_bundle_has_deterministic_ids_and_current_schemas():
     assert first["trainable"] is True
     assert first["feature_schemas"] == {
         "open": "pit.v2.open_lineage",
-        "factor": "pit.v2.factor_rolling_lineage",
+        "factor": "pit.v4.factor_regime_decision_lineage",
     }
     assert [item["sample_id"] for item in first["open_samples"]] == [
         item["sample_id"] for item in second["open_samples"]

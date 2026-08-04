@@ -18,8 +18,8 @@ from backend.services.policy_suggestion_context import attach_policy_suggestion_
 
 
 MODEL_TYPE = "factor_governance_lightgbm"
-MODEL_VERSION = "5.0"
-FEATURE_SCHEMA_VERSION = "pit.v3.factor_regime_rolling_lineage"
+MODEL_VERSION = "6.0"
+FEATURE_SCHEMA_VERSION = "pit.v4.factor_regime_decision_lineage"
 FEATURE_NAMES = [
     "current_entry_contribution",
     "current_net_contribution",
@@ -41,6 +41,13 @@ FEATURE_NAMES = [
     "current_regime_fit_score",
     "rolling_regime_fit_avg",
     "rolling_regime_fit_min",
+    # v6.0 (pit.v4): 因子×regime 真条件绩效 —— 数据源升级为
+    # decision_factor_snapshot JOIN decision_ledger(因子决策时点的真实
+    # regime_id),按同 regime 历史聚合 positive_rate/pnl_avg/sample_count,
+    # 替代交易级 regime_fit_score 的"全因子共享"局限。
+    "same_regime_positive_rate",
+    "same_regime_pnl_avg",
+    "same_regime_sample_count",
 ]
 
 
@@ -114,6 +121,24 @@ def _rolling_factor_features(history: list[dict[str, Any]], *, window: int = 5) 
     current = items[-1]
     n = max(len(items), 1)
     regime_fits = [_safe_float(item.get("regime_fit_score")) for item in items]
+    # v6.0 (pit.v4): 因子×regime 真条件绩效 —— 按"同 regime"聚合历史。
+    # regime_id 来自 decision_ledger(因子决策时点的真实市场状态),
+    # 每个因子只在自己的决策快照行上带 regime_id,不再是交易级共享值。
+    current_regime = str(current.get("regime_id") or "")
+    same_regime_items = (
+        [item for item in items if str(item.get("regime_id") or "") == current_regime]
+        if current_regime
+        else []
+    )
+    sr_n = len(same_regime_items)
+    if sr_n >= 3:
+        same_regime_positive_rate = sum(_current_row_label(item) for item in same_regime_items) / sr_n
+        same_regime_pnl_avg = sum(_safe_float(item.get("pnl")) for item in same_regime_items) / sr_n
+    else:
+        # 样本不足(<3)时退化为全局滚动值,不引入误导信号;
+        # sample_count 字段保留实际值,模型可学到置信度。
+        same_regime_positive_rate = sum(_current_row_label(item) for item in items) / n
+        same_regime_pnl_avg = sum(_safe_float(item.get("pnl")) for item in items) / n
     return {
         "current_entry_contribution": _safe_float(current.get("entry_contribution")),
         "current_net_contribution": _safe_float(current.get("net_contribution")),
@@ -134,6 +159,10 @@ def _rolling_factor_features(history: list[dict[str, Any]], *, window: int = 5) 
         "current_regime_fit_score": _safe_float(current.get("regime_fit_score")),
         "rolling_regime_fit_avg": sum(regime_fits) / n,
         "rolling_regime_fit_min": min(regime_fits) if regime_fits else 0.0,
+        # v6.0 (pit.v4): 因子×regime 真条件绩效。
+        "same_regime_positive_rate": same_regime_positive_rate,
+        "same_regime_pnl_avg": same_regime_pnl_avg,
+        "same_regime_sample_count": float(sr_n),
     }
 
 
@@ -256,13 +285,20 @@ class FactorGovernanceLightGBMService:
                            f.hold_contribution, f.exit_contribution, f.net_contribution,
                            f.confidence, f.notes, r.position_id, r.entry_quality, r.hold_quality,
                            r.exit_quality, r.regime_fit_score, r.execution_quality,
-                           r.pnl, r.mae, r.mfe, r.outcome_label, r.review_json, r.created_at
-                    FROM factor_contribution_review f
-                    JOIN trade_outcome_review r ON r.review_id = f.review_id
-                    ORDER BY r.created_at DESC, f.id DESC
+                           r.pnl, r.mae, r.mfe, r.outcome_label, r.review_json, r.created_at,
+                           dl.regime_id AS regime_id,
+                           dl.regime_confidence AS regime_confidence,
+                           dl.decision_ts AS decision_ts
+                    FROM decision_factor_snapshot dfs
+                    JOIN decision_ledger dl ON dl.decision_id = dfs.decision_id
+                    JOIN trade_outcome_review r ON r.entry_decision_id = dfs.decision_id
+                    JOIN factor_contribution_review f
+                      ON f.review_id = r.review_id AND f.factor = dfs.factor
+                    WHERE dl.regime_id IS NOT NULL AND dl.regime_id <> ''
+                    ORDER BY dl.decision_ts DESC, dfs.id DESC
                     LIMIT ?
                 ) recent_factors
-                ORDER BY created_at ASC, id ASC
+                ORDER BY decision_ts ASC, id ASC
                 """,
                 (int(limit),),
             ).fetchall()
@@ -293,7 +329,13 @@ class FactorGovernanceLightGBMService:
                 by_factor.setdefault(str(item.get("factor") or ""), []).append(item)
             samples = []
             for factor, factor_rows in by_factor.items():
-                ordered = sorted(factor_rows, key=lambda item: (_safe_float(item.get("created_at")), int(item.get("id") or 0)))
+                ordered = sorted(
+                    factor_rows,
+                    key=lambda item: (
+                        _safe_float(item.get("decision_ts") or item.get("created_at")),
+                        int(item.get("id") or 0),
+                    ),
+                )
                 for idx, item in enumerate(ordered[:-1]):
                     if idx < 2:
                         continue

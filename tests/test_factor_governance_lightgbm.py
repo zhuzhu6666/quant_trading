@@ -46,6 +46,41 @@ def _create_factor_reviews(path):
             confidence REAL DEFAULT 0.0,
             notes TEXT DEFAULT ''
         );
+        CREATE TABLE decision_ledger (
+            decision_id TEXT PRIMARY KEY,
+            trade_id TEXT DEFAULT '',
+            position_id TEXT DEFAULT '',
+            event_type TEXT DEFAULT '',
+            symbol TEXT DEFAULT '',
+            timeframe TEXT DEFAULT '',
+            decision_ts REAL DEFAULT 0.0,
+            regime_id TEXT DEFAULT '',
+            regime_confidence REAL DEFAULT 0.0,
+            portfolio_state_json TEXT DEFAULT '{}',
+            risk_state_json TEXT DEFAULT '{}',
+            policy_version TEXT DEFAULT '',
+            factor_set_version TEXT DEFAULT '',
+            action_score REAL DEFAULT 0.0,
+            action_reason TEXT DEFAULT '',
+            action_json TEXT DEFAULT '{}',
+            created_at REAL NOT NULL DEFAULT 0.0
+        );
+        CREATE TABLE decision_factor_snapshot (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id TEXT NOT NULL,
+            factor TEXT NOT NULL,
+            source TEXT DEFAULT 'registry',
+            raw_value REAL DEFAULT 0.0,
+            normalized_value REAL DEFAULT 0.0,
+            direction REAL DEFAULT 0.0,
+            base_weight REAL DEFAULT 0.0,
+            policy_weight REAL DEFAULT 0.0,
+            shadow_score REAL DEFAULT 0.0,
+            health_score REAL DEFAULT 0.0,
+            gated INTEGER DEFAULT 0,
+            gated_reason TEXT DEFAULT '',
+            contribution_score REAL DEFAULT 0.0
+        );
         CREATE TABLE policy_suggestion (
             suggestion_id TEXT PRIMARY KEY,
             scope_type TEXT NOT NULL,
@@ -66,15 +101,16 @@ def _create_factor_reviews(path):
         conn.execute(
             """
             INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, entry_quality, hold_quality,
+            (review_id, trade_id, position_id, entry_decision_id, entry_quality, hold_quality,
              exit_quality, regime_fit_score, execution_quality, pnl, mae, mfe,
              outcome_label, review_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"rev_{i}",
                 f"trade_{i}",
                 f"pos_{i}",
+                f"dec_{i}",
                 0.8 if positive else 0.2,
                 0.7 if positive else 0.2,
                 0.7 if positive else 0.2,
@@ -105,6 +141,50 @@ def _create_factor_reviews(path):
                 0.8 if positive else -0.9,
                 0.8,
                 "",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO decision_ledger
+            (decision_id, trade_id, position_id, event_type, symbol, timeframe,
+             decision_ts, regime_id, regime_confidence, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"dec_{i}",
+                f"trade_{i}",
+                f"pos_{i}",
+                "open",
+                "XAUUSD+",
+                "M5",
+                1000.0 + i,
+                "trend=strong|volatility=high" if positive else "trend=weak|volatility=low",
+                0.8,
+                1000.0 + i,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO decision_factor_snapshot
+            (decision_id, factor, source, raw_value, normalized_value, direction,
+             base_weight, policy_weight, shadow_score, health_score, gated,
+             gated_reason, contribution_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"dec_{i}",
+                "momentum_factor" if positive else "weak_factor",
+                "registry",
+                1.5 if positive else -1.5,
+                0.6 if positive else -0.6,
+                1.0 if positive else -1.0,
+                0.3,
+                0.3,
+                0.5,
+                72.0 if positive else 30.0,
+                0,
+                "",
+                0.18 if positive else -0.18,
             ),
         )
     conn.commit()
@@ -369,8 +449,60 @@ def test_batch_a_train_reports_version_bump():
     """治理模型版本号必须因加入 regime 特征而升版(schema 版本标识特征集)。"""
     # 只验证常量已定义且版本字符串是新 schema；train 本身在
     # test_batch_a_train_schema_bump 验证
-    assert MODEL_VERSION == "5.0"
-    assert FEATURE_SCHEMA_VERSION.startswith("pit.v3")
+    assert MODEL_VERSION == "6.0"
+    assert FEATURE_SCHEMA_VERSION.startswith("pit.v4")
+
+
+# ── 批次 F: 因子×regime 条件绩效(decision_factor_snapshot JOIN decision_ledger) ──
+
+REGIME_CONDITIONAL_FEATURES = {
+    "same_regime_positive_rate",
+    "same_regime_pnl_avg",
+    "same_regime_sample_count",
+}
+
+
+def test_batch_f_feature_names_include_regime_conditional_dimensions():
+    """FEATURE_NAMES 必须包含同 regime 条件绩效特征(因子×regime 真条件绩效)。"""
+    missing = REGIME_CONDITIONAL_FEATURES - set(FEATURE_NAMES)
+    assert not missing, f"同 regime 条件特征缺失: {missing}"
+
+
+def test_batch_f_samples_carry_same_regime_conditional_features(tmp_path):
+    """load_samples 产出的样本 features 必须含 same_regime_* 特征。
+
+    fixture 中 momentum_factor 只在 trend=strong|volatility=high 出现(全赢),
+    weak_factor 只在 trend=weak|volatility=low 出现(全输)——同 regime 条件
+    绩效必须能区分这两种因子,而不是全部相同。
+    """
+    db_path = tmp_path / "state.db"
+    artifact_dir = tmp_path / "artifacts"
+    _create_factor_reviews(db_path)
+
+    service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=artifact_dir)
+    samples = service.load_samples(limit=50)
+    assert samples
+    momentum = [s for s in samples if s["factor"] == "momentum_factor"]
+    weak = [s for s in samples if s["factor"] == "weak_factor"]
+    assert momentum and weak, f"fixture 因子未全部产出样本: momentum={len(momentum)} weak={len(weak)}"
+
+    for sample in samples:
+        feats = sample["features"]
+        for name in REGIME_CONDITIONAL_FEATURES:
+            assert name in feats, f"{name} 未进入样本特征"
+            assert isinstance(feats[name], (int, float)), f"{name} 非数值: {feats[name]!r}"
+
+    # momentum_factor 在 strong/high regime 下历史全赢 → 同 regime 胜率高
+    m_positive = sum(s["features"].get("same_regime_positive_rate", 0.0) for s in momentum)
+    m_avg_pnl = sum(s["features"].get("same_regime_pnl_avg", 0.0) for s in momentum)
+    # weak_factor 在 weak/low regime 下历史全输 → 同 regime 胜率低
+    w_positive = sum(s["features"].get("same_regime_positive_rate", 0.0) for s in weak)
+    w_avg_pnl = sum(s["features"].get("same_regime_pnl_avg", 0.0) for s in weak)
+    # 样本量足够时(≥5 个同 regime 历史),条件绩效必须有区分度
+    m_n = sum(s["features"].get("same_regime_sample_count", 0.0) for s in momentum) / max(len(momentum), 1)
+    assert m_n >= 3.0, f"momentum_factor 同 regime 历史样本不足: {m_n}"
+    assert m_positive > w_positive, f"同 regime 胜率无区分度: momentum={m_positive} weak={w_positive}"
+    assert m_avg_pnl > w_avg_pnl, f"同 regime pnl 无区分度: momentum={m_avg_pnl} weak={w_avg_pnl}"
 
 
 def test_batch_a_train_schema_bump(tmp_path, monkeypatch):
@@ -402,6 +534,6 @@ def test_batch_a_train_schema_bump(tmp_path, monkeypatch):
         assert result["error"] == "dependency_missing"
         return
     assert result["feature_schema_version"] == FEATURE_SCHEMA_VERSION
-    assert result["feature_schema_version"].startswith("pit.v3")
+    assert result["feature_schema_version"].startswith("pit.v4")
     assert result["metrics"]["feature_count"] == len(FEATURE_NAMES)
     assert REGIME_FEATURES.issubset(set(FEATURE_NAMES))

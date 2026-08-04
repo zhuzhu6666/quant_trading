@@ -3183,23 +3183,37 @@ class FactorGovernanceOrchestrator:
 
     @staticmethod
     def _shadow_regime_fit_score(item: dict[str, Any]) -> float | None:
-        """Extract the factor's latest regime-fit score from shadow payload.
+        """Extract the factor's current-regime conditional performance.
 
-        Batch-A features are stored per-inference in
+        Batch-F features are stored per-inference in
         `factor_governance_shadow_audit.payload_json.features`; the catalog
-        projection keeps the newest inference per factor.  Returns None when
-        the evidence is missing or unparseable (callers fail open/fail safe
-        as documented per gate).
+        projection keeps the newest inference per factor.
+
+        Priority:
+          1. `same_regime_positive_rate` — factor x regime conditional win rate
+             (aggregated over the factor's own history in the current regime,
+             from decision_factor_snapshot JOIN decision_ledger; distinguishes
+             factors that fit today's market from those that don't).
+          2. `current_regime_fit_score` — trade-level fallback (shared by all
+             factors of the same trade, pre-Batch-F schema).
+
+        Returns None when the evidence is missing or unparseable (callers
+        fail open/fail safe as documented per gate).
         """
         try:
             shadow_payload = (item.get("factor_governance_shadow") or {}).get("payload") or {}
             shadow_features = shadow_payload.get("features") or {}
             if not isinstance(shadow_features, dict):
                 return None
-            candidate = shadow_features.get("current_regime_fit_score")
+            candidate = shadow_features.get("same_regime_positive_rate")
+            if candidate is None:
+                candidate = shadow_features.get("current_regime_fit_score")
             if candidate is None:
                 return None
-            return float(candidate)
+            value = float(candidate)
+            if math.isnan(value) or math.isinf(value):
+                return None
+            return value
         except (TypeError, ValueError):
             return None
 

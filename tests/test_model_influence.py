@@ -160,7 +160,7 @@ def test_factor_governance_v5_artifact_passes_feature_schema_gate(tmp_path):
     artifact_path = tmp_path / "artifact.json"
     artifact_path.write_text(json.dumps({
         "model_type": "factor_governance_lightgbm",
-        "feature_schema_version": "pit.v3.factor_regime_rolling_lineage",
+        "feature_schema_version": "pit.v4.factor_regime_decision_lineage",
         "created_at": __import__("time").time(),
         "model_file": str(model_file),
         "model_file_sha256": __import__("hashlib").sha256(b"test-model").hexdigest(),
