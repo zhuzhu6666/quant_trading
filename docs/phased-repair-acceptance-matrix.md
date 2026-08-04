@@ -314,8 +314,9 @@ v16cmd_7be9876b49138e64e726
 | 单 owner 收敛 | regime 投影只在 `market_regime.py` 单点生产、lightgbm 条件弱分数唯一由治理模型承担；orchestrator 只消费，无第二计算者/新表/新写者 |
 | PREPARED 晋升不受影响 | 3 个 PREPARED 因子（dsl_auto_96902edc / htf_trend_alignment / morning_evening_star）走 Registry/PREPARED 晋升链，不在 `factor_governance_shadow_audit`，不进 regime 门槛（生产只读验证） |
 | 文档收口 | source-of-truth（LightGBM 契约 v3/regime 特征、market_regime 投影、orchestrator 条件化条款、组合决策）、legacy-debt（regime 归因缺口关闭）与验收矩阵同步 |
+| 因子×regime 条件绩效（批次 F，v6.0/pit.v4） | 训练数据源切换为 `decision_factor_snapshot JOIN decision_ledger`（因子决策时点真实 regime_id，开仓时 resolve_market_regime 写入）；`FEATURE_NAMES` +3：`same_regime_positive_rate`/`same_regime_pnl_avg`/`same_regime_sample_count`（同 regime 历史聚合，<3 样本退化全局滚动值）；条件化闸优先消费因子级特征（回退交易级）；生产验证 11 因子获区分度判定（atr_ratio/keltner_width/wick_rejection/vol_ma_ratio fit_ok 豁免，bb_width/engulfing/candle_body_pressure weak_too）；v6.0 训练 auc 0.487→0.554 |
 
-本批四个代码批次 commit 链：`12c6f7a`（批次 A）→ `47b1681`（批次 B）→ `9f54767`（批次 C）→ `0dba946`（批次 D）；批次 E 为纯文档收口。全部为只读投影与治理决策条件化，不改变 V16 裁决粒度、RiskPolicy、readiness 或成熟度门槛；`posterior_degraded` 降级应用路径仍登记 legacy-debt 待后续批次。
+本批四个代码批次 commit 链：`12c6f7a`（批次 A）→ `47b1681`（批次 B）→ `9f54767`（批次 C）→ `0dba946`（批次 D）；批次 E 为纯文档收口。**批次 F（`0e2929c` + 文档 `2c29a0d`）** 把训练数据源切换为 `decision_factor_snapshot JOIN decision_ledger`（因子决策时点真实 regime_id），新增 3 个因子×regime 条件绩效特征（v6.0/pit.v4），条件化闸优先消费因子级特征。全部为只读投影与治理决策条件化，不改变 V16 裁决粒度、RiskPolicy、readiness 或成熟度门槛；`posterior_degraded` 降级应用路径仍登记 legacy-debt 待后续批次。
 
 ## 7. 删除验收
 

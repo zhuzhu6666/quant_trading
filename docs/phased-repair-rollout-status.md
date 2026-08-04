@@ -552,6 +552,26 @@ Unresolved live evidence: 降权/恢复条件化需连续真实治理周期观�
 
 Next batch: 观察 regime 条件化在真实治理周期的行为；`posterior_degraded` 降级应用路径作为后续候选批次
 
+2026-08-05 批次 F 因子×regime 条件绩效（v6.0 / pit.v4）
+
+Batch: 训练数据源切换为 `decision_factor_snapshot JOIN decision_ledger`（因子决策时点真实 regime_id），新增 3 个因子×regime 条件绩效特征（same_regime_positive_rate/pnl_avg/sample_count），条件化闸优先消费因子级特征
+
+Canonical authority: 因子决策时点 regime 唯一事实源 `decision_ledger.regime_id`（开仓时 resolve_market_regime 写入）；因子×regime 条件绩效唯一由治理模型 `factor_governance_lightgbm.py`（v6.0，FEATURE_NAMES +3）承担；条件化闸 `_shadow_regime_fit_score` 优先读 same_regime_positive_rate、回退交易级 fit_score
+
+Deleted paths: 无（数据源切换不删旧表；`current_regime_fit_score`/`rolling_regime_fit_avg`/`rolling_regime_fit_min` 保留为交易级特征）
+
+Targeted verification: 129 passed（lightgbm 10 + orchestrator 31 + model_influence/parity 等）；新用例覆盖 fixture 三表（decision_ledger/decision_factor_snapshot）+ 条件特征区分度（momentum vs weak 因子）+ 闸优先级（same_regime 优先/回退/NaN 防护）
+
+Migration/OpenAPI/build: 无 schema/route/服务/表/调度器变化；MODEL_FEATURE_SCHEMAS 与 parity_replay schema 常量同步 pit.v4；`git diff --check` 通过
+
+Runtime verification: v6.0 生产重训 2597 样本（auc 0.487→0.554），shadow refresh 151 因子写入 v6.0 payload；生产验证 11 因子获区分度判定（atr_ratio/keltner_width/wick_rejection/vol_ma_ratio fit_ok 豁免，bb_width/engulfing/candle_body_pressure weak_too）；quant-learning-worker 重启后 active
+
+Remaining compatibility: v6.0 未过 promotion gate（distinct_trades 128<300、auc 0.55<0.65），shadow 使用不受影响，等样本积累后 offmarket 周末重训自动尝试；`posterior_degraded` 降级应用路径仍登记 legacy-debt
+
+Unresolved live evidence: 条件化豁免（fit_ok 不降权）需连续真实治理周期观察行为正确性
+
+Next batch: 观察因子级条件化在真实治理周期的行为；`posterior_degraded` 降级应用路径作为后续候选批次
+
 ## 6. 每批状态更新格式
 
 以后本文件只追加或替换以下当前信息，不保留逐时流水：
