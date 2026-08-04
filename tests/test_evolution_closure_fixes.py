@@ -156,9 +156,9 @@ def test_scheduled_awe_adapt_publishes_runtime_patch(monkeypatch):
 
     live_service._scheduled_awe_adapt()
 
-    assert rc.shared().factor_portfolio_weights == {"foo": 0.0, "bar": 2.0}
+    assert rc.shared().factor_portfolio_weights == {"foo": 0.05, "bar": 2.0}
     assert risk.calls[0][0] == "update_weight"
-    assert risk.calls[0][1]["proposed_weights"] == {"foo": 0.0}
+    assert risk.calls[0][1]["proposed_weights"] == {"foo": 0.05}
 
 
 def test_scheduled_awe_adapt_risk_block_prevents_runtime_patch(monkeypatch):

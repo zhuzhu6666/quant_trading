@@ -99,6 +99,8 @@ class RuntimeConfigMutationService:
         v16_scope_type: str = "",
         v16_scope_key: str = "",
         v16_action: str = "",
+        v16_candidate_id: str = "",
+        v16_posterior_fingerprint: str = "",
         risk_reduction: bool = False,
         governance_mutation_id: str = "",
         governance_idempotency_key: str = "",
@@ -232,6 +234,8 @@ class RuntimeConfigMutationService:
                 v16_scope_type=v16_scope_type,
                 v16_scope_key=v16_scope_key,
                 v16_action=v16_action,
+                v16_candidate_id=v16_candidate_id,
+                v16_posterior_fingerprint=v16_posterior_fingerprint,
                 caller_risk_reduction=risk_reduction,
                 governance_mutation_id=governance_mutation_id,
                 governance_idempotency_key=governance_idempotency_key,
@@ -388,6 +392,8 @@ class RuntimeConfigMutationService:
         v16_scope_type: str,
         v16_scope_key: str,
         v16_action: str,
+        v16_candidate_id: str,
+        v16_posterior_fingerprint: str,
         caller_risk_reduction: bool,
         governance_mutation_id: str,
         governance_idempotency_key: str,
@@ -433,6 +439,10 @@ class RuntimeConfigMutationService:
                 v16_command_id=str(v16_command_id or ""),
                 v16_claim_token=str(v16_claim_token or ""),
                 v16_target_agent=target_agent,
+                v16_candidate_id=str(v16_candidate_id or ""),
+                v16_posterior_fingerprint=str(
+                    v16_posterior_fingerprint or ""
+                ),
             ),
             transaction_writer=governance_transaction_writer,
         )

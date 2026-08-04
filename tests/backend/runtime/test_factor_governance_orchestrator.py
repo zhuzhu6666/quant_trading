@@ -1,9 +1,14 @@
+import hashlib
 from dataclasses import replace
 from types import SimpleNamespace
 import time
 
 import backend.runtime.factor_governance_orchestrator as governance_module
 from backend.runtime.factor_governance_orchestrator import FactorGovernanceOrchestrator
+from backend.services.factor_identity import (
+    canonical_factor_id,
+    factor_definition_fingerprint,
+)
 from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
 from config import runtime_config as rc
 
@@ -37,7 +42,7 @@ def test_orchestrator_prepares_eligible_shadow_through_lifecycle_service(monkeyp
             return {"source": "shadow", "description": "ts_mean(close, 5)"}
 
     class _Lifecycle:
-        def __init__(self, _db_path, *, adapter):
+        def __init__(self, _db_path, *, adapter, health_stale_after_sec=None):
             self.adapter = adapter
 
         def get_state(self, *, factor_name):
@@ -78,9 +83,12 @@ def test_orchestrator_prepares_eligible_shadow_through_lifecycle_service(monkeyp
 
     catalog = [{
         "factor_id": "shadow_alpha_1",
-        "lifecycle_factor_id": "shadow_alpha_1",
+        "lifecycle_factor_id": canonical_factor_id("ts_mean(close, 5)"),
+        "lifecycle_origin": "shadow",
+        "lifecycle_status": "SHADOW",
         "lifecycle_expression": "ts_mean(close, 5)",
-        "lifecycle_artifact_hash": "shadow-alpha-1",
+        "lifecycle_definition_fingerprint": factor_definition_fingerprint("ts_mean(close, 5)"),
+        "lifecycle_artifact_hash": hashlib.sha256(b"ts_mean(close, 5)").hexdigest(),
         "source": "shadow",
         "role": "alpha",
         "canary": {"stage": "ACTIVE"},
@@ -115,7 +123,7 @@ def test_orchestrator_activates_only_prepared_factor_with_explicit_weight(monkey
         pass
 
     class _Lifecycle:
-        def __init__(self, _db_path, *, adapter):
+        def __init__(self, _db_path, *, adapter, health_stale_after_sec=None):
             self.adapter = adapter
 
         def get_state(self, *, factor_name):
@@ -146,9 +154,13 @@ def test_orchestrator_activates_only_prepared_factor_with_explicit_weight(monkey
 
     catalog = [{
         "factor_id": "shadow_alpha_1",
-        "lifecycle_factor_id": "shadow_alpha_1",
+        "lifecycle_factor_id": canonical_factor_id("ts_mean(close, 5)"),
+        "lifecycle_origin": "shadow",
+        "lifecycle_status": "PROMOTION_PREPARED",
+        "runtime_admission": "projection_acknowledged",
         "lifecycle_expression": "ts_mean(close, 5)",
-        "lifecycle_artifact_hash": "shadow-alpha-1",
+        "lifecycle_definition_fingerprint": factor_definition_fingerprint("ts_mean(close, 5)"),
+        "lifecycle_artifact_hash": hashlib.sha256(b"ts_mean(close, 5)").hexdigest(),
         "source": "shadow",
         "role": "alpha",
         "canary": {"stage": "ACTIVE"},

@@ -475,7 +475,7 @@ def test_learning_worker_registers_factor_governance_job(monkeypatch):
     assert "factor_governance_autonomous" in names
     assert (
         "factor_governance_autonomous",
-        "*/15 * * * *",
+        "15,30,45 * * * *",
         "coordinated_factor_governance_autonomous",
     ) in registered
     assert "awe_adapt" not in names
@@ -498,6 +498,32 @@ def test_learning_worker_registers_factor_governance_job(monkeypatch):
     )
     assert worker.__file__
     assert "backend.services.live_service" not in Path(worker.__file__).read_text(encoding="utf-8")
+
+
+def test_learning_worker_factor_health_catchup_reuses_governance_freshness(
+    monkeypatch,
+):
+    import scripts.learning_worker as worker
+    import backend.runtime.factor_governance_orchestrator as governance
+
+    calls = []
+    monkeypatch.setattr(worker, "_factor_health_catchup_thread", None)
+    monkeypatch.setattr(worker, "_latest_factor_health_age_seconds", lambda: 301.0)
+    monkeypatch.setattr(
+        governance,
+        "factor_governance_health_max_age_seconds",
+        lambda _cfg=None: 300.0,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_coordinated_mutation_job",
+        lambda name, _fn: lambda: calls.append(name) or {"status": "ok"},
+    )
+
+    assert worker._schedule_factor_health_catchup(delay_sec=0.0) is True
+    worker._factor_health_catchup_thread.join(timeout=2.0)
+
+    assert calls == ["factor_health_startup_catchup"]
 
 
 def test_learning_worker_nursery_uses_bounded_demo_step_without_full_learning_cycle(

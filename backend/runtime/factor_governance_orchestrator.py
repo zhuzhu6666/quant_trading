@@ -22,6 +22,11 @@ from alpha.portfolio_compositor import resolve_factor_role
 from alpha.registry_adapter import RegistryAdapter
 from backend.core.db import connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
+from backend.services.factor_blend_health import FactorBlendHealthService
+from backend.services.factor_identity import (
+    canonical_factor_id,
+    factor_definition_fingerprint,
+)
 from backend.services.factor_lifecycle_service import (
     FactorLifecycleService,
     FactorLifecycleStage,
@@ -45,6 +50,24 @@ from risk.policy_service import RiskPolicyService, RiskVerdict
 logger = logging.getLogger(__name__)
 
 _EVIDENCE_STREAK_KEY = "factor_governance_evidence_streak.v1"
+
+
+def factor_governance_health_max_age_seconds(
+    cfg: RuntimeConfig | None = None,
+) -> float:
+    """Return the canonical freshness contract for factor governance."""
+
+    current = cfg if cfg is not None else runtime_config.shared()
+    if runtime_config.bounded_demo_mode_active(current):
+        return float(
+            getattr(
+                current,
+                "factor_governance_demo_health_max_age_seconds",
+                300.0,
+            )
+            or 300.0
+        )
+    return 180.0
 
 
 @dataclass(frozen=True)
@@ -278,10 +301,9 @@ class FactorGovernanceOrchestrator:
                         summary=summary,
                     )
                     return summary
-            # Terminal hard-quarantine is not an autonomous restore source.
-            # Expansion starts only from the existing shadow/prepared lifecycle
-            # and is limited to one evidence-bound builtin candidate.
-            expansion_actions = self._activate_healthy_builtin_shadow(
+            # Expansion is single-mutation and ordered by the shortest safe
+            # recovery path before longer lifecycle promotion work.
+            expansion_actions = self._restore_active_zero_weight_alpha(
                 catalog,
                 run,
                 v16_authority=v16_authority,
@@ -294,6 +316,34 @@ class FactorGovernanceOrchestrator:
             )
             if expansion_actions:
                 catalog = build_factor_catalog()
+            if not expansion_committed:
+                expansion_actions = self._restore_quarantined_builtin_alpha(
+                    catalog,
+                    run,
+                    v16_authority=v16_authority,
+                    cfg=cfg,
+                    profile=profile,
+                )
+                actions.extend(expansion_actions)
+                expansion_committed = self._expansion_command_consumed(
+                    expansion_actions
+                )
+                if expansion_actions:
+                    catalog = build_factor_catalog()
+            if not expansion_committed:
+                expansion_actions = self._activate_healthy_builtin_shadow(
+                    catalog,
+                    run,
+                    v16_authority=v16_authority,
+                    cfg=cfg,
+                    profile=profile,
+                )
+                actions.extend(expansion_actions)
+                expansion_committed = self._expansion_command_consumed(
+                    expansion_actions
+                )
+                if expansion_actions:
+                    catalog = build_factor_catalog()
             if not expansion_committed:
                 expansion_actions = self._apply_redundancy_report(
                     catalog,
@@ -492,14 +542,7 @@ class FactorGovernanceOrchestrator:
                     )
                     or 3
                 ),
-                health_max_age_seconds=float(
-                    getattr(
-                        cfg,
-                        "factor_governance_demo_health_max_age_seconds",
-                        300.0,
-                    )
-                    or 300.0
-                ),
+                health_max_age_seconds=factor_governance_health_max_age_seconds(cfg),
             )
         return FactorGovernanceProfile(
             name="strict_live",
@@ -556,7 +599,7 @@ class FactorGovernanceOrchestrator:
             ),
             hard_model_health_ceiling=100.0,
             hard_disable_streak_cycles=1,
-            health_max_age_seconds=180.0,
+            health_max_age_seconds=factor_governance_health_max_age_seconds(cfg),
         )
 
     @staticmethod
@@ -581,6 +624,7 @@ class FactorGovernanceOrchestrator:
         signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
         weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
         activation_ids: list[str] = []
+        active_zero_weight_ids: list[str] = []
         restore_ids: list[str] = []
         promotion_ids: list[str] = []
 
@@ -606,14 +650,21 @@ class FactorGovernanceOrchestrator:
                 entry = signal_cfg.get(factor_id)
                 if (
                     not isinstance(entry, dict)
-                    or item.get("source") != "builtin"
+                    or str(
+                        item.get("lifecycle_origin")
+                        or item.get("source")
+                        or ""
+                    ).lower() != "builtin"
                     or item.get("role") != "alpha"
                     or str(item.get("lifecycle_status") or "").upper()
                     not in {
                         FactorLifecycleStage.SHADOW.value,
                         FactorLifecycleStage.PROMOTION_PREPARED.value,
                     }
-                    or not bool(entry.get("autonomous_activation"))
+                    or not (
+                        bool(entry.get("autonomous_activation"))
+                        or int(item.get("lifecycle_generation") or 1) > 1
+                    )
                     or not bool(item.get("enabled"))
                 ):
                     continue
@@ -653,23 +704,69 @@ class FactorGovernanceOrchestrator:
         restore_enabled = bool(
             getattr(cfg, "factor_governance_auto_restore_enabled", True)
         )
+        if restore_enabled and profile.balanced_demo:
+            for item in catalog:
+                factor_id = str(item.get("factor_id") or "")
+                entry = signal_cfg.get(factor_id)
+                current_weight = float(weights.get(factor_id, 0.0) or 0.0)
+                if (
+                    not factor_id
+                    or str(
+                        item.get("lifecycle_origin")
+                        or item.get("source")
+                        or ""
+                    ).lower() != "builtin"
+                    or item.get("role") != "alpha"
+                    or not isinstance(entry, dict)
+                    or entry.get("enabled", True) is False
+                    or str(item.get("lifecycle_status") or "").upper()
+                    != FactorLifecycleStage.ACTIVE.value
+                    or current_weight >= profile.min_live_weight
+                ):
+                    continue
+                health_updated_at = float(item.get("health_updated_at") or 0.0)
+                health_age = now - health_updated_at
+                if (
+                    health_updated_at <= 0.0
+                    or health_age < -5.0
+                    or health_age > profile.health_max_age_seconds
+                    or str(item.get("health_status") or "").upper()
+                    not in {"HEALTHY", "WATCH"}
+                    or float(item.get("health_score") or 0.0)
+                    < profile.restore_min_health_score
+                    or int(item.get("health_n_obs") or 0)
+                    < profile.restore_min_n_obs
+                    or self._factor_has_pending_effect(factor_id)
+                ):
+                    continue
+                model = self._model_governance_evidence(item, cfg)
+                has_model_evidence = (
+                    int(model.get("sample_count") or 0)
+                    >= profile.restore_model_min_samples
+                    or int(model.get("weak_sample_count") or 0)
+                    >= profile.restore_model_min_samples
+                )
+                observed_weakness = max(
+                    float(model.get("avg_weakness_score") or 0.0),
+                    float(model.get("latest_weakness_score") or 0.0),
+                )
+                if has_model_evidence and observed_weakness >= profile.restore_max_weakness:
+                    continue
+                active_zero_weight_ids.append(factor_id)
         if restore_enabled and (mode == "off" or profile.balanced_demo):
             for item in catalog:
                 factor_id = str(item.get("factor_id") or "")
                 entry = signal_cfg.get(factor_id)
                 if (
                     not factor_id
-                    or item.get("source") != "builtin"
+                    or not self._is_quarantined_builtin_lifecycle(item)
                     or item.get("role") != "alpha"
                     or not isinstance(entry, dict)
-                    or entry.get("enabled", True) is not False
-                    or str(entry.get("lifecycle_status") or "").upper()
-                    not in {"QUARANTINE", "QUARANTINED"}
-                    or item.get("governance_action") != "disable_factor_live"
                 ):
                     continue
                 disabled_at = float(
-                    entry.get("disabled_at")
+                    item.get("lifecycle_terminal_at")
+                    or entry.get("disabled_at")
                     or item.get("last_action_ts")
                     or 0.0
                 )
@@ -711,8 +808,7 @@ class FactorGovernanceOrchestrator:
         for item in catalog:
             factor_id = str(item.get("factor_id") or "")
             if (
-                item.get("source") != "shadow"
-                or not self._has_durable_shadow_lifecycle_identity(item)
+                not self._is_dsl_promotion_lifecycle_candidate(item)
                 or not self._promotion_evidence(item, cfg).get("eligible")
                 or self._factor_has_pending_effect(factor_id)
             ):
@@ -721,6 +817,7 @@ class FactorGovernanceOrchestrator:
 
         reasons = {
             "builtin_activation": activation_ids,
+            "active_zero_weight_restore": active_zero_weight_ids,
             "builtin_restore": restore_ids,
             "shadow_promotion": promotion_ids,
             "redundancy_groups": int(
@@ -730,6 +827,7 @@ class FactorGovernanceOrchestrator:
         return {
             "required": bool(
                 activation_ids
+                or active_zero_weight_ids
                 or restore_ids
                 or promotion_ids
                 or reasons["redundancy_groups"]
@@ -737,19 +835,14 @@ class FactorGovernanceOrchestrator:
             "reasons": reasons,
             "candidate_count": (
                 len(activation_ids)
+                + len(active_zero_weight_ids)
                 + len(restore_ids)
                 + len(promotion_ids)
                 + int(reasons["redundancy_groups"])
             ),
-            "current_positive_weights": sum(
-                1
-                for value in weights.values()
-                if (
-                    float(value.get("weight") or 0.0)
-                    if isinstance(value, dict)
-                    else float(value or 0.0)
-                )
-                > 0.0
+            "directional_portfolio_guard": FactorWeightChangeService._directional_guard(
+                factor_configs=self._portfolio_configs(cfg),
+                weights=weights,
             ),
         }
 
@@ -1368,15 +1461,20 @@ class FactorGovernanceOrchestrator:
         v16_authority: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         cfg = runtime_config.shared()
+        profile = self._governance_profile(cfg)
         max_actions = int(getattr(cfg, "factor_governance_max_promotions_per_cycle", 1) or 1)
         actions: list[dict[str, Any]] = []
         candidates = [
             item
             for item in catalog
-            if item.get("source") == "shadow"
-            and self._has_durable_shadow_lifecycle_identity(item)
+            if self._is_dsl_promotion_lifecycle_candidate(item)
         ]
-        candidates.sort(key=lambda item: self._shadow_score(item), reverse=True)
+        candidates.sort(
+            key=lambda item: (
+                -self._shadow_score(item),
+                str(item.get("factor_id") or ""),
+            )
+        )
         for item in candidates:
             if len(actions) >= max_actions:
                 break
@@ -1400,7 +1498,11 @@ class FactorGovernanceOrchestrator:
             )
             try:
                 adapter = RegistryAdapter.shared()
-                lifecycle = FactorLifecycleService(self.overlay.db_path, adapter=adapter)
+                lifecycle = FactorLifecycleService(
+                    self.overlay.db_path,
+                    adapter=adapter,
+                    health_stale_after_sec=profile.health_max_age_seconds,
+                )
                 state = lifecycle.get_state(factor_name=factor_name)
                 stage = str(state.get("lifecycle_stage") or FactorLifecycleStage.SHADOW.value)
                 if stage == FactorLifecycleStage.SHADOW.value:
@@ -1910,6 +2012,45 @@ class FactorGovernanceOrchestrator:
             # path. Typed governance uses the terminal QUARANTINED state.
             entry["lifecycle_status"] = "QUARANTINE"
             entry["disabled_at"] = time.time()
+            before_signal_cfg = dict(before_cfg.get("factor_signal_config") or {})
+            after_signal_cfg = {**before_signal_cfg, name: entry}
+            before_weights = dict(before_cfg.get("factor_portfolio_weights") or {})
+            after_weights = {**before_weights, name: 0.0}
+            before_guard = FactorWeightChangeService._directional_guard(
+                factor_configs=self._portfolio_configs(
+                    cfg,
+                    signal_cfg=before_signal_cfg,
+                ),
+                weights=before_weights,
+            )
+            after_guard = FactorWeightChangeService._directional_guard(
+                factor_configs=self._portfolio_configs(
+                    cfg,
+                    signal_cfg=after_signal_cfg,
+                ),
+                weights=after_weights,
+            )
+            evidence["directional_portfolio_guard_before"] = before_guard
+            evidence["directional_portfolio_guard"] = after_guard
+            if profile.balanced_demo and not FactorBlendHealthService.guard_allows_transition(
+                before_guard,
+                after_guard,
+            ):
+                actions.append(
+                    self._audit_action(
+                        run,
+                        item,
+                        "disable_factor_live",
+                        "blocked_by_directional_portfolio_guard",
+                        evidence,
+                        verdict,
+                        before={"runtime_config": before_cfg, "enabled": True},
+                        after={"runtime_config": before_cfg, "enabled": True},
+                        rollback={"runtime_config": before_cfg},
+                        result={"reason": "directional_portfolio_degraded"},
+                    )
+                )
+                continue
             try:
                 from backend.services.governance_control_plans import (
                     governance_coordinator_mode,
@@ -2040,14 +2181,25 @@ class FactorGovernanceOrchestrator:
                 continue
             if self._factor_has_pending_effect(factor_id):
                 continue
-            if item.get("source") != "builtin" or item.get("role") != "alpha":
+            if (
+                str(
+                    item.get("lifecycle_origin")
+                    or item.get("source")
+                    or ""
+                ).lower()
+                != "builtin"
+                or item.get("role") != "alpha"
+            ):
                 continue
             if str(item.get("lifecycle_status") or "").upper() not in {
                 FactorLifecycleStage.SHADOW.value,
                 FactorLifecycleStage.PROMOTION_PREPARED.value,
             }:
                 continue
-            if not bool(entry.get("autonomous_activation")):
+            if not (
+                bool(entry.get("autonomous_activation"))
+                or int(item.get("lifecycle_generation") or 1) > 1
+            ):
                 continue
             if not bool(item.get("enabled")) or item.get("lifecycle_status") == "DEAD":
                 continue
@@ -2128,6 +2280,7 @@ class FactorGovernanceOrchestrator:
                 lifecycle = FactorLifecycleService(
                     self.overlay.db_path,
                     adapter=adapter,
+                    health_stale_after_sec=profile.health_max_age_seconds,
                 )
                 state = lifecycle.get_state(factor_name=factor_id)
                 stage = str(state.get("lifecycle_stage") or "")
@@ -2222,6 +2375,150 @@ class FactorGovernanceOrchestrator:
                 ))
         return actions
 
+    def _restore_active_zero_weight_alpha(
+        self,
+        catalog: list[dict[str, Any]],
+        run: dict[str, Any],
+        *,
+        cfg: Any | None = None,
+        profile: FactorGovernanceProfile | None = None,
+        v16_authority: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Restore one evidence-qualified ACTIVE builtin to the demo canary."""
+
+        cfg = cfg or runtime_config.shared()
+        profile = profile or self._governance_profile(cfg)
+        if not profile.balanced_demo:
+            return []
+        now = time.time()
+        weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
+        candidates: list[dict[str, Any]] = []
+        for item in catalog:
+            factor_id = str(item.get("factor_id") or "")
+            if (
+                not factor_id
+                or str(
+                    item.get("lifecycle_origin")
+                    or item.get("source")
+                    or ""
+                ).lower() != "builtin"
+                or item.get("role") != "alpha"
+                or not bool(item.get("enabled"))
+                or str(item.get("lifecycle_status") or "").upper()
+                != FactorLifecycleStage.ACTIVE.value
+                or float(weights.get(factor_id, 0.0) or 0.0)
+                >= profile.min_live_weight
+                or self._factor_has_pending_effect(factor_id)
+            ):
+                continue
+            health_updated_at = float(item.get("health_updated_at") or 0.0)
+            health_age = now - health_updated_at
+            if (
+                health_updated_at <= 0.0
+                or health_age < -5.0
+                or health_age > profile.health_max_age_seconds
+                or str(item.get("health_status") or "").upper()
+                not in {"HEALTHY", "WATCH"}
+                or float(item.get("health_score") or 0.0)
+                < profile.restore_min_health_score
+                or int(item.get("health_n_obs") or 0) < profile.restore_min_n_obs
+            ):
+                continue
+            model = self._model_governance_evidence(item, cfg)
+            has_model_evidence = (
+                int(model.get("sample_count") or 0) >= profile.restore_model_min_samples
+                or int(model.get("weak_sample_count") or 0)
+                >= profile.restore_model_min_samples
+            )
+            observed_weakness = max(
+                float(model.get("avg_weakness_score") or 0.0),
+                float(model.get("latest_weakness_score") or 0.0),
+            )
+            if has_model_evidence and observed_weakness >= profile.restore_max_weakness:
+                continue
+            candidates.append({**item, "_model_governance": model})
+        candidates.sort(
+            key=lambda item: (
+                -float(item.get("health_score") or 0.0),
+                -int(item.get("health_n_obs") or 0),
+                str(item.get("factor_id") or ""),
+            )
+        )
+        if not candidates:
+            return []
+        item = candidates[0]
+        factor_id = str(item["factor_id"])
+        evidence = {
+            "recovery_mode": "active_zero_weight_to_demo_canary",
+            "health_score": float(item.get("health_score") or 0.0),
+            "health_status": str(item.get("health_status") or "UNKNOWN"),
+            "health_n_obs": int(item.get("health_n_obs") or 0),
+            "model_governance": item.get("_model_governance") or {},
+            "old_weight": float(weights.get(factor_id, 0.0) or 0.0),
+            "target_weight": profile.min_live_weight,
+            "governance_profile": profile.name,
+        }
+        verdict = self._risk("promote_factor", item, evidence)
+        if not verdict.allowed:
+            return [
+                self._audit_action(
+                    run,
+                    item,
+                    "promote_factor",
+                    "blocked_by_risk",
+                    evidence,
+                    verdict,
+                )
+            ]
+        authority = dict(v16_authority or {})
+        result = FactorWeightChangeService(self.overlay.db_path).execute(
+            source="factor_governance_active_canary_restore",
+            producer="factor_governance_restore",
+            run_id=str(run.get("run_id") or ""),
+            actor="system:factor_governance",
+            reason=f"restore evidence-qualified ACTIVE builtin canary: {factor_id}",
+            factor_configs=self._portfolio_configs(cfg),
+            current_weights=weights,
+            weight_policy_weights={factor_id: profile.min_live_weight},
+            fast=True,
+            risk_check=lambda _plan, _verdict=verdict: _verdict,
+            evidence_by_factor={factor_id: evidence},
+            source_agent="factor_governance",
+            v16_command_id=str(authority.get("command_id") or ""),
+            v16_candidate_id=str(authority.get("candidate_id") or ""),
+            v16_posterior_fingerprint=str(
+                authority.get("posterior_fingerprint") or ""
+            ),
+            v16_evidence_fingerprint=str(
+                authority.get("evidence_fingerprint") or ""
+            ),
+        )
+        result_status = str(result.get("status") or "")
+        applied = result_status == "applied"
+        audit_status = (
+            "applied"
+            if applied
+            else "blocked_by_directional_portfolio_guard"
+            if result_status == "blocked_by_directional_portfolio_guard"
+            else "mutation_failed"
+            if result_status == "governance_error"
+            else "blocked_by_evidence"
+        )
+        return [
+            self._audit_action(
+                run,
+                item,
+                "promote_factor",
+                audit_status,
+                evidence,
+                verdict,
+                before={"weight": evidence["old_weight"]},
+                after={"weight": profile.min_live_weight if applied else evidence["old_weight"]},
+                rollback={"weight": evidence["old_weight"]},
+                result=result,
+            )
+        ]
+
     def _restore_quarantined_builtin_alpha(
         self,
         catalog: list[dict[str, Any]],
@@ -2231,14 +2528,144 @@ class FactorGovernanceOrchestrator:
         profile: FactorGovernanceProfile | None = None,
         v16_authority: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """Do not automatically reopen a terminal hard-quarantine.
+        """Create one new SHADOW generation for an evidence-qualified builtin."""
 
-        A cleared health observation does not erase the original quarantine
-        fact. Recovery must be an explicit, evidence-bound lifecycle action
-        that creates a new generation; this compatibility hook is retained as
-        a no-op until its callers are removed with the old recovery tests.
-        """
-        return []
+        cfg = cfg or runtime_config.shared()
+        profile = profile or self._governance_profile(cfg)
+        if not profile.balanced_demo:
+            return []
+        now = time.time()
+        signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
+        candidates: list[dict[str, Any]] = []
+        for item in catalog:
+            factor_id = str(item.get("factor_id") or "")
+            entry = signal_cfg.get(factor_id)
+            if (
+                not factor_id
+                or not self._is_quarantined_builtin_lifecycle(item)
+                or item.get("role") != "alpha"
+                or not isinstance(entry, dict)
+                or self._factor_has_pending_effect(factor_id)
+            ):
+                continue
+            disabled_at = float(
+                item.get("lifecycle_terminal_at")
+                or entry.get("disabled_at")
+                or item.get("last_action_ts")
+                or 0.0
+            )
+            health_updated_at = float(item.get("health_updated_at") or 0.0)
+            health_age = now - health_updated_at
+            if (
+                disabled_at <= 0.0
+                or now - disabled_at < profile.restore_cooldown_seconds
+                or health_updated_at <= disabled_at
+                or health_age < -5.0
+                or health_age > profile.health_max_age_seconds
+                or str(item.get("health_status") or "").upper()
+                not in {"HEALTHY", "WATCH"}
+                or float(item.get("health_score") or 0.0)
+                < profile.restore_min_health_score
+                or int(item.get("health_n_obs") or 0) < profile.restore_min_n_obs
+            ):
+                continue
+            model = self._model_governance_evidence(item, cfg)
+            has_model_evidence = (
+                int(model.get("sample_count") or 0) >= profile.restore_model_min_samples
+                or int(model.get("weak_sample_count") or 0)
+                >= profile.restore_model_min_samples
+            )
+            observed_weakness = max(
+                float(model.get("avg_weakness_score") or 0.0),
+                float(model.get("latest_weakness_score") or 0.0),
+            )
+            if has_model_evidence and observed_weakness >= profile.restore_max_weakness:
+                continue
+            candidates.append({**item, "_model_governance": model})
+        candidates.sort(
+            key=lambda item: (
+                -float(item.get("health_score") or 0.0),
+                -int(item.get("health_n_obs") or 0),
+                str(item.get("factor_id") or ""),
+            )
+        )
+        if not candidates:
+            return []
+        item = candidates[0]
+        factor_id = str(item["factor_id"])
+        evidence = {
+            "recovery_mode": "quarantined_builtin_new_shadow_generation",
+            "health_score": float(item.get("health_score") or 0.0),
+            "health_status": str(item.get("health_status") or "UNKNOWN"),
+            "health_n_obs": int(item.get("health_n_obs") or 0),
+            "model_governance": item.get("_model_governance") or {},
+            "governance_profile": profile.name,
+        }
+        verdict = self._risk("promote_factor", item, evidence)
+        if not verdict.allowed:
+            return [
+                self._audit_action(
+                    run,
+                    item,
+                    "promote_factor",
+                    "blocked_by_risk",
+                    evidence,
+                    verdict,
+                )
+            ]
+        authority = dict(v16_authority or {})
+        binding = FactorV16Binding(
+            command_id=str(authority.get("command_id") or ""),
+            claim_token=str(authority.get("claim_token") or ""),
+            target_agent=str(authority.get("target_agent") or "factor_governance"),
+            candidate_id=str(authority.get("candidate_id") or ""),
+            posterior_fingerprint=str(authority.get("posterior_fingerprint") or ""),
+            evidence_fingerprint=str(authority.get("evidence_fingerprint") or ""),
+        )
+        result = FactorLifecycleService(
+            self.overlay.db_path,
+            adapter=RegistryAdapter.shared(),
+        ).reenroll_quarantined_builtin(
+            name=factor_id,
+            actor="system:factor_governance",
+            reason="evidence-qualified builtin re-enrollment",
+            evidence_refs=evidence,
+            idempotency_key=f"builtin_reenroll:{factor_id}:{run.get('run_id', '')}",
+            v16=binding,
+        )
+        committed, projection_ready, mutation_status = self._mutation_commit_state(result)
+        status = (
+            "shadow_registered"
+            if projection_ready
+            else "projection_degraded"
+            if committed
+            else "blocked_by_evidence"
+        )
+        return [
+            self._audit_action(
+                run,
+                item,
+                "promote_factor",
+                status,
+                evidence,
+                verdict,
+                before={
+                    "lifecycle_status": FactorLifecycleStage.QUARANTINED.value,
+                    "generation": int(item.get("lifecycle_generation") or 1),
+                },
+                after={
+                    "lifecycle_status": str(result.get("lifecycle_stage") or ""),
+                    "generation": int(result.get("generation") or 0),
+                },
+                rollback={"target_stage": FactorLifecycleStage.QUARANTINED.value},
+                result={
+                    **dict(result or {}),
+                    "mutation_status": mutation_status,
+                    "durably_committed": committed,
+                    "projection_ready": projection_ready,
+                },
+            )
+        ]
 
     def _retire_quarantined_discovered(self, catalog: list[dict[str, Any]], run: dict[str, Any]) -> list[dict[str, Any]]:
         cfg = runtime_config.shared()
@@ -2309,12 +2736,57 @@ class FactorGovernanceOrchestrator:
 
     @staticmethod
     def _has_durable_shadow_lifecycle_identity(item: dict[str, Any]) -> bool:
-        factor_id = str(item.get("factor_id") or "")
+        expression = str(item.get("lifecycle_expression") or "").strip()
+        lifecycle_factor_id = str(item.get("lifecycle_factor_id") or "")
+        definition_fingerprint = str(
+            item.get("lifecycle_definition_fingerprint") or ""
+        )
+        artifact_hash = str(item.get("lifecycle_artifact_hash") or "").lower()
+        if not expression or not lifecycle_factor_id or len(artifact_hash) != 64:
+            return False
+        try:
+            return bool(
+                lifecycle_factor_id == canonical_factor_id(expression)
+                and definition_fingerprint
+                == factor_definition_fingerprint(expression)
+                and all(char in "0123456789abcdef" for char in artifact_hash)
+            )
+        except Exception:
+            return False
+
+    @classmethod
+    def _is_dsl_promotion_lifecycle_candidate(
+        cls,
+        item: dict[str, Any],
+    ) -> bool:
+        """Use the durable lifecycle state, not the mutable catalog source."""
+
+        stage = str(item.get("lifecycle_status") or "").upper()
+        projection_ready = (
+            stage == FactorLifecycleStage.SHADOW.value
+            or str(item.get("runtime_admission") or "").lower()
+            == "projection_acknowledged"
+        )
         return bool(
-            factor_id
-            and str(item.get("lifecycle_factor_id") or "") == factor_id
-            and str(item.get("lifecycle_expression") or "")
-            and str(item.get("lifecycle_artifact_hash") or "")
+            str(item.get("lifecycle_origin") or "").lower()
+            in {"dsl", "shadow", "discovered"}
+            and stage
+            in {
+                FactorLifecycleStage.SHADOW.value,
+                FactorLifecycleStage.PROMOTION_PREPARED.value,
+            }
+            and projection_ready
+            and cls._has_durable_shadow_lifecycle_identity(item)
+        )
+
+    @staticmethod
+    def _is_quarantined_builtin_lifecycle(item: dict[str, Any]) -> bool:
+        """Identify re-enrollment solely from the terminal lifecycle fact."""
+
+        return bool(
+            str(item.get("lifecycle_origin") or "").lower() == "builtin"
+            and str(item.get("lifecycle_status") or "").upper()
+            == FactorLifecycleStage.QUARANTINED.value
         )
 
     def _promotion_evidence(self, item: dict[str, Any], cfg: Any) -> dict[str, Any]:

@@ -93,6 +93,33 @@ def test_worker_mutation_circuit_only_blocks_autonomous_mutation() -> None:
     assert result["ready_for_release"] is True
 
 
+def test_directional_portfolio_degradation_blocks_only_live_alpha() -> None:
+    rc.reset_for_tests()
+    try:
+        result = _dimensions(
+            factor_blend_health={
+                "ok": False,
+                "status": "critical",
+                "directional_portfolio_guard": {
+                    "schema_version": "directional_portfolio_guard.v1",
+                    "status": "degraded",
+                    "voter_count": 2,
+                    "independent_group_count": 2,
+                    "reason_codes": ["insufficient_directional_alpha_voters"],
+                },
+            }
+        )
+    finally:
+        rc.reset_for_tests()
+
+    assert result["ready_for_frontend"] is True
+    assert result["ready_for_live_execution"] is True
+    assert result["ready_for_live_alpha"] is False
+    assert result["ready_for_release"] is True
+    blockers = result["blockers"]["live_alpha"]
+    assert any(item["reason"] == "directional_portfolio_degraded" for item in blockers)
+
+
 def test_blocked_factor_governance_runtime_blocks_autonomous_mutation() -> None:
     rc.reset_for_tests()
     try:

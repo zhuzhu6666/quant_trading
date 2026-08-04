@@ -196,7 +196,10 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
     from backend.runtime.scheduler import InProcessScheduler
     from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
     from backend.services.evolution_work_coordinator import coordinated_job
-    from config.runtime_config import shared as _runtime_shared
+    from config.runtime_config import (
+        effective_factor_governance_cron,
+        shared as _runtime_shared,
+    )
     from backend.services.learning_research_jobs import (
         run_feature_engineering_job,
         run_offmarket_position_quality_job,
@@ -218,7 +221,7 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
             scheduled_evolution_with_governance_handoff,
         ),
     )
-    governance_cron = str(getattr(_runtime_shared(), "factor_governance_cron", "*/15 * * * *") or "*/15 * * * *")
+    governance_cron = effective_factor_governance_cron()
     _add_job(
         scheduler,
         "factor_governance_autonomous",
@@ -340,7 +343,7 @@ def _latest_factor_health_age_seconds() -> float | None:
 def _schedule_factor_health_catchup(
     *,
     delay_sec: float = 180.0,
-    stale_after_sec: float = 3600.0,
+    stale_after_sec: float | None = None,
 ) -> bool:
     """Run one watermark-gated health/evolution catch-up after a restart."""
 
@@ -356,12 +359,22 @@ def _schedule_factor_health_catchup(
         if _factor_health_catchup_stop.wait(max(0.0, delay_sec)):
             return
         try:
+            from backend.runtime.factor_governance_orchestrator import (
+                factor_governance_health_max_age_seconds,
+            )
+
+            freshness_limit = (
+                factor_governance_health_max_age_seconds()
+                if stale_after_sec is None
+                else max(0.0, float(stale_after_sec))
+            )
             age = _latest_factor_health_age_seconds()
-            if age is not None and age <= stale_after_sec:
+            if age is not None and age <= freshness_limit:
                 logger.info(
                     "[learning_worker] factor health catch-up skipped: "
-                    "current age={:.1f}s",
+                    "current age={:.1f}s freshness_limit={:.1f}s",
                     age,
+                    freshness_limit,
                 )
                 return
             from backend.runtime.evolution_orchestrator import (
@@ -415,8 +428,9 @@ def _run_once(
     capability: LearningWorkerCapability | None = None,
 ) -> None:
     capability = capability or _worker_capability
-    from backend.runtime.evolution_orchestrator import scheduled_evolution_cycle
-    from backend.runtime.factor_governance_orchestrator import run_autonomous_factor_governance_cycle
+    from backend.runtime.evolution_orchestrator import (
+        scheduled_evolution_with_governance_handoff,
+    )
     from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
     from backend.services.autonomous_learning import run_autonomous_learning_cycle
     from backend.services.supervisor_learning_scheduler import run_supervisor_learning_cycle
@@ -436,18 +450,9 @@ def _run_once(
     report = guarded_mutation_job(
         capability,
         "evolution_run_once",
-        scheduled_evolution_cycle,
+        scheduled_evolution_with_governance_handoff,
     )()
     logger.info("[learning_worker] evolution result: {}", report.to_dict() if hasattr(report, "to_dict") else report)
-    logger.info("[learning_worker] run-once factor governance")
-    logger.info(
-        "[learning_worker] factor governance result: {}",
-        guarded_mutation_job(
-            capability,
-            "factor_governance_run_once",
-            run_autonomous_factor_governance_cycle,
-        )(),
-    )
     logger.info("[learning_worker] run-once autonomous evolution nursery")
     logger.info(
         "[learning_worker] autonomous evolution nursery result: {}",

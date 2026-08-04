@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from alpha.decision_policy import DecisionPolicy
+from alpha.portfolio_compositor import resolve_factor_role
+from alpha.runtime_factor_selection import select_runtime_factors
 from backend.core.db import (
     STATE_DB,
     connect_sqlite,
@@ -17,6 +19,7 @@ from backend.core.db import (
     state_table_columns,
 )
 from backend.services.experience_prior import ExperiencePriorService
+from backend.services.factor_blend_health import FactorBlendHealthService
 from backend.services.learning_application_state import LearningApplicationStateService
 from backend.services.learning_experiment_admission import LearningExperimentAdmissionService
 
@@ -148,6 +151,28 @@ class FactorWeightChangeService:
             "replay_run_id": str(payload.get("replay_run_id") or ""),
             "evidence_grade": grade, "error": error,
         }
+
+    @staticmethod
+    def _directional_guard(
+        *,
+        factor_configs: Mapping[str, Any],
+        weights: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        selection = select_runtime_factors(dict(factor_configs))
+        selected: list[str] | None = None
+        if selection is not None:
+            unavailable_reasons = {
+                "factor_admission_unavailable",
+                "registry_metadata_unavailable",
+            }
+            reasons = set((selection.reason_excluded or {}).values())
+            if not reasons.intersection(unavailable_reasons):
+                selected = list(selection.selected_factor_ids)
+        return FactorBlendHealthService.evaluate_directional_portfolio_guard(
+            selected_factor_ids=selected,
+            factor_configs=factor_configs,
+            weights=weights,
+        )
 
     @staticmethod
     def boundary() -> dict[str, Any]:
@@ -424,6 +449,7 @@ class FactorWeightChangeService:
         fast: bool = False,
         bypass_for_risk_reduction: bool = False,
         decision_policy: DecisionPolicy | None = None,
+        exact_committed_rollback: bool = False,
     ) -> dict[str, Any]:
         policy = decision_policy or DecisionPolicy()
         prior_error = ""
@@ -452,6 +478,35 @@ class FactorWeightChangeService:
                 regime=regime,
                 experience_priors=priors,
             )
+        from config import runtime_config
+
+        balanced_demo = runtime_config.bounded_demo_mode_active(
+            runtime_config.shared()
+        )
+        normalizations: dict[str, dict[str, Any]] = {}
+        if balanced_demo and not exact_committed_rollback:
+            minimum_live_weight = 0.05
+            for name, decision in decisions.items():
+                raw_entry = factor_configs.get(name, {})
+                entry = raw_entry if isinstance(raw_entry, dict) else {}
+                lifecycle = str(entry.get("lifecycle_status") or "ACTIVE").upper()
+                requested = float(decision.new_weight)
+                if (
+                    resolve_factor_role(name, entry) == "alpha"
+                    and entry.get("enabled", True) is not False
+                    and lifecycle == "ACTIVE"
+                    and requested < minimum_live_weight
+                    and abs(requested - float(decision.old_weight)) > 1e-9
+                ):
+                    decision.new_weight = minimum_live_weight
+                    decision.reason += " | balanced_demo_min_live_weight"
+                    decision.source_scores["requested_weight"] = requested
+                    decision.source_scores["minimum_live_weight"] = minimum_live_weight
+                    normalizations[name] = {
+                        "reason": "balanced_demo_min_live_weight",
+                        "requested_weight": requested,
+                        "effective_weight": minimum_live_weight,
+                    }
         decisions = {
             name: decision
             for name, decision in decisions.items()
@@ -471,14 +526,40 @@ class FactorWeightChangeService:
             admissions[name] = admission
             if admission.get("allowed"):
                 admitted[name] = decision
+        proposed_weights = {
+            **{name: float(value or 0.0) for name, value in current_weights.items()},
+            **DecisionPolicy.to_weights(admitted),
+        }
+        directional_guard_before = self._directional_guard(
+            factor_configs=factor_configs,
+            weights=current_weights,
+        )
+        directional_guard_after = self._directional_guard(
+            factor_configs=factor_configs,
+            weights=proposed_weights,
+        )
+        guard_allowed = FactorBlendHealthService.guard_allows_transition(
+            directional_guard_before,
+            directional_guard_after,
+        )
         return {
             "ok": True,
             "schema_version": "factor_weight_change_plan.v1",
-            "status": "planned" if admitted else "no_admitted_change",
+            "status": (
+                "blocked_by_directional_portfolio_guard"
+                if admitted and not guard_allowed
+                else "planned"
+                if admitted
+                else "no_admitted_change"
+            ),
             "decisions": decisions,
             "admitted_decisions": admitted,
             "admissions": admissions,
             "proposed_weights": DecisionPolicy.to_weights(admitted),
+            "weight_normalizations": normalizations,
+            "directional_portfolio_guard_before": directional_guard_before,
+            "directional_portfolio_guard": directional_guard_after,
+            "directional_portfolio_guard_allowed": guard_allowed,
             "experience_prior_count": len(priors),
             "experience_prior_status": "available" if not prior_error else "unavailable",
             "experience_prior_error": prior_error,
@@ -508,6 +589,9 @@ class FactorWeightChangeService:
         source_agent: str = "factor_governance",
         additional_patch: dict[str, Any] | None = None,
         v16_command_id: str = "",
+        v16_candidate_id: str = "",
+        v16_posterior_fingerprint: str = "",
+        v16_evidence_fingerprint: str = "",
     ) -> dict[str, Any]:
         # Fail before preparing application rows when pytest accidentally
         # inherits the production PostgreSQL DSN.  The overlay boundary used
@@ -527,6 +611,10 @@ class FactorWeightChangeService:
                 "boundary": self.boundary(),
             }
         try:
+            exact_committed_rollback = source in {
+                "factor_governance_auto_rollback",
+                "factor_governance_auto_rollback_config_only",
+            }
             plan = self.plan(
                 factor_configs=factor_configs,
                 current_weights=current_weights,
@@ -537,9 +625,20 @@ class FactorWeightChangeService:
                 fast=fast,
                 bypass_for_risk_reduction=bypass_for_risk_reduction,
                 decision_policy=decision_policy,
+                exact_committed_rollback=exact_committed_rollback,
             )
         except Exception as exc:
             return self._governance_error(stage="plan", exc=exc)
+        if (
+            plan.get("status") == "blocked_by_directional_portfolio_guard"
+            and not exact_committed_rollback
+        ):
+            return {
+                **plan,
+                "ok": False,
+                "reason": "directional_portfolio_degraded",
+                "applications": {},
+            }
         admitted_for_preflight = dict(plan.get("admitted_decisions") or {})
         weight_expansion_requires_v16 = any(
             float(decision.new_weight) > float(decision.old_weight) + 1e-12
@@ -785,6 +884,12 @@ class FactorWeightChangeService:
             },
             "risk_verdict": risk_verdict,
             "replay_admission": replay_admission,
+            "v16_binding": {
+                "command_id": v16_command_id,
+                "candidate_id": v16_candidate_id,
+                "posterior_fingerprint": v16_posterior_fingerprint,
+                "evidence_fingerprint": v16_evidence_fingerprint,
+            },
         }
 
         def transaction_writer(conn: Any, mutation_id: str, _effective_config: Any):
@@ -832,6 +937,8 @@ class FactorWeightChangeService:
                     else "alpha_weight_policy"
                 ),
                 "v16_action": "update_weight",
+                "v16_candidate_id": v16_candidate_id,
+                "v16_posterior_fingerprint": v16_posterior_fingerprint,
                 "risk_reduction": bypass_for_risk_reduction,
             }
             if coordinated:
@@ -848,8 +955,9 @@ class FactorWeightChangeService:
                             }
                         ),
                         "governance_evidence_refs": governance_evidence_refs,
-                        "governance_evidence_fingerprint": _fingerprint(
-                            governance_evidence_refs
+                        "governance_evidence_fingerprint": (
+                            v16_evidence_fingerprint
+                            or _fingerprint(governance_evidence_refs)
                         ),
                         "governance_rollback": {
                             "factor_portfolio_weights": {

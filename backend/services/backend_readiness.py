@@ -1008,15 +1008,18 @@ class BackendReadinessService:
 
     def _factor_governance_runtime_status(self) -> dict[str, Any]:
         try:
-            from config.runtime_config import shared as runtime_config
+            from config.runtime_config import (
+                effective_factor_governance_cron,
+                shared as runtime_config,
+            )
 
             cfg = runtime_config()
             enabled = bool(getattr(cfg, "factor_governance_enabled", True))
-            cron = str(getattr(cfg, "factor_governance_cron", "*/15 * * * *") or "*/15 * * * *")
+            cron = effective_factor_governance_cron(cfg)
             stale_after_sec = float(getattr(cfg, "factor_governance_stale_after_sec", 7200.0) or 7200.0)
         except Exception:
             enabled = True
-            cron = "*/15 * * * *"
+            cron = "15,30,45 * * * *"
             stale_after_sec = 7200.0
 
         conn = _connect_state(self.db_path)
@@ -1418,8 +1421,21 @@ class BackendReadinessService:
             )
         blend_status = str(factor_blend_health.get("status") or "").lower()
         if factor_blend_health.get("ok") is False or blend_status in {"error", "critical"}:
+            directional_guard = dict(
+                factor_blend_health.get("directional_portfolio_guard") or {}
+            )
             live_alpha_blockers.append(
-                blocker("factor_blend_health", "live_factor_blend_unhealthy", status=blend_status or "unknown")
+                blocker(
+                    "factor_blend_health",
+                    (
+                        "directional_portfolio_degraded"
+                        if str(directional_guard.get("status") or "")
+                        in {"degraded", "unavailable"}
+                        else "live_factor_blend_unhealthy"
+                    ),
+                    status=blend_status or "unknown",
+                    directional_portfolio_guard=directional_guard,
+                )
             )
 
         mutation_blockers: list[dict[str, Any]] = []

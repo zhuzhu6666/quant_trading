@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active acceptance index
-> Snapshot: 2026-08-03
+> Snapshot: 2026-08-04
 > Scope: reproducible acceptance evidence and unresolved live evidence
 
 本文只记录“如何证明”。架构事实见 `system-source-of-truth.md`，实施阶段见
@@ -267,6 +267,14 @@ effect observation 与既有 maturity counting 连续贯通。
 | position supervisor governance | atomic template switch | missing evidence/illegal stop/rolled-back application ignored | domain fault 后 suggestion 保持 approved、reservation released | ineffective supervisor effect rollback | observing -> ineffective terminal effect |
 
 因子治理运行闭环补充验收：
+
+- `directional_portfolio_guard.v1` 必须证明 canonical selection 至少 3 个正权重 alpha、覆盖至少 2 个独立 bucket；selector authority unavailable 必须 fail-closed。
+- prepared GP 即使 catalog source 已变为 `discovered`，只要 canonical lifecycle 为 `origin=dsl + PROMOTION_PREPARED` 且证据/投影合格，就必须进入 preflight 并可由下一条 V16 command 激活；QUARANTINED builtin 新代重入只读取 lifecycle origin/stage、cooldown 与健康证据，不依赖历史 governance action 名。
+- preflight 与最终 lifecycle activation 必须复用治理 profile 的同一 freshness；bounded Demo 的完整 health -> V16 -> lifecycle 链耗时超过 180 秒时，仍须在既有 300 秒合同内可达。
+- ACTIVE discovered generation 在进程重启后必须由当前 live PID 重新完成 loaded/computable ack；generation 2 builtin 即使来自缺旧 activation 标记的 terminal 配置，也必须能进入 canonical builtin SHADOW preflight，同时仍受当前 V16 critic/claim 拒绝。
+- Demo 权重写入低于 `0.05` 必须在唯一 FactorWeightChange 边界规范化，组合阻断发生在 application/reservation/mutation 前且数据库零副作用。
+- Demo 硬隔离不得继续恶化组合合同；strict live 可收紧，但方向组合退化必须令 `ready_for_live_alpha=false`。
+- ACTIVE 零权重恢复和 terminal builtin 新代 SHADOW 重入必须持有 V16/RiskPolicy 许可，每个治理周期只消费一个扩张 mutation。
 
 | 合同 | 验证 |
 |---|---|

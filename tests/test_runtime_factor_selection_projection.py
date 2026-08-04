@@ -58,6 +58,8 @@ def test_runtime_factor_selection_projection_exposes_governance_counts(
 
     assert published["governance_profile"] == "balanced_demo"
     assert published["alpha_voter_count"] == 1
+    assert published["directional_portfolio_guard"]["status"] == "degraded"
+    assert published["directional_portfolio_guard"]["voter_ids"] == ["alpha_a"]
     assert published["context_count"] == 1
     assert published["gate_count"] == 0
     assert published["selected_factor_roles"] == {
@@ -79,3 +81,32 @@ def test_runtime_factor_selection_projection_exposes_governance_counts(
     assert published["heartbeat_at"] == published["published_at"]
     assert latest["ok"] is True
     assert latest["evidence_maturity"]["factors"] == {}
+
+
+def test_runtime_factor_selection_projection_fails_closed_when_admission_unavailable(
+    tmp_path,
+):
+    runtime_config.reset_for_tests()
+    runtime_config.replace(
+        RuntimeConfig(
+            factor_signal_config={
+                "alpha_a": {"enabled": True, "role": "alpha"},
+            },
+            factor_portfolio_weights={"alpha_a": 0.1},
+        )
+    )
+    selection = SimpleNamespace(
+        selected_factor_ids=[],
+        excluded_factor_ids=["alpha_a"],
+        reason_excluded={"alpha_a": "factor_admission_unavailable"},
+    )
+
+    published = RuntimeFactorSelectionProjectionService(
+        tmp_path / "state.db"
+    ).publish(selection)
+
+    guard = published["directional_portfolio_guard"]
+    assert guard["status"] == "unavailable"
+    assert guard["reason_codes"] == [
+        "directional_portfolio_evidence_unavailable"
+    ]

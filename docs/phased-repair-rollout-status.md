@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Snapshot: 2026-08-03
+> Snapshot: 2026-08-04
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -30,6 +30,29 @@
 - Governance 保持 `dual_record`；
 - 不自动切 flag、不进入 `live_autonomous`；开仓继续服从市场时段、canonical RiskPolicy、
   fresh reconcile 和 cause-specific safety latch。
+
+2026-08-04 方向组合治理闭环已完成代码收敛：组合充分性统一由
+`FactorBlendHealthService` 计算，FactorWeightChange 与 typed lifecycle 在 mutation 前复用；
+Demo ACTIVE canary、terminal builtin 新代 SHADOW 重入及 live-alpha readiness blocker 已接通。
+运行态是否恢复到 3 个方向票、2 个独立 bucket 仍以部署后的三个 canonical snapshot 为准，
+不得用本段代码状态代替运行验收。
+首次发布验收已确认 2 个方向票（`engulfing`、`pin_bar`）、2 个独立 bucket 时，
+`factor_blend_health=critical` 且 live-alpha blocker 为
+`directional_portfolio_degraded`；服务和持仓保护继续运行。首个 ACTIVE 零权重恢复候选
+`fib_rejection_confirmation` 的预演可把组合恢复为 3/3，但第一次提交暴露 V16 evidence
+fingerprint 未透传到 Coordinator claim，已在同批修复。2026-08-04 01:23 的真实
+`health -> V16 -> governance` 补偿链已完成：health persisted、handoff delay 35 秒、治理终态为
+`idle_no_expansion_action`；该因子最新健康分降至 54.20 且最新模型弱度 0.705，当前不满足
+恢复证据，因此权重保持 0、`ready_for_live_alpha=false`。同轮审计确认的 catalog source、
+runtime/canonical DSL identity、terminal builtin action lineage 及 preflight/lifecycle 300/180 秒
+freshness 四处断路，已于 2026-08-04 收敛到 canonical lifecycle/profile。真实治理链已生成
+`vol_ma_ratio`、`obv_slope` generation 2 SHADOW，并以 V16 command `v16cmd_21a996...`、
+mutation `e7fd4a07-...` 将 `dsl_auto_a3eeb...` 激活为 ACTIVE/admitted；runtime selector 随后
+收敛为 3 voters / 3 groups、directional guard healthy。
+后续受控重启进一步验证 ACTIVE discovered generation 会由新 backend PID 重写 live projection
+ack；已删除只确认 PREPARED、导致 ACTIVE 因子重启后永久掉票的旧行为。`vol_ma_ratio` 当前
+generation 2 SHADOW、健康 78.26，已进入 concrete expansion preflight；本轮 V16 critic 因
+`defensive/warming_up` 仅允许 shadow，故未签发 command，属于显式授权等待而非调度死锁。
 
 上述值必须在下一批开始前从 process-loaded flags 和运行事实重新验证，不能只相信本文。
 

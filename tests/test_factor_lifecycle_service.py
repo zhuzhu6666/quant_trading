@@ -455,6 +455,60 @@ def test_activation_requires_fresh_bound_projection_and_health(lifecycle):
     assert cfg.factor_portfolio_weights[name] == 0.25
 
 
+def test_fresh_live_process_acknowledges_active_discovered_generation(
+    lifecycle, monkeypatch
+):
+    service, adapter, name, _expression = lifecycle
+    now = time.time()
+    _prepare_and_ack(service, name, now=now)
+    _write_health(service, name, now=now)
+    assert service.activate(name=name, weight=0.25, now=now)["ok"] is True
+    monkeypatch.setattr(
+        "alpha.registry_adapter.RegistryAdapter.shared",
+        classmethod(lambda cls: adapter),
+    )
+    engine = StreamingFactorEngine(
+        max_buffer=80,
+        factor_runtime_config=runtime_config.shared().factor_signal_config,
+    )
+    engine.warmup_bars(
+        [
+            {
+                "open": 1900.0 + idx,
+                "high": 1901.0 + idx,
+                "low": 1899.0 + idx,
+                "close": 1900.5 + idx,
+                "volume": 100.0 + idx,
+                "time": float(idx + 1),
+                "complete": True,
+            }
+            for idx in range(60)
+        ]
+    )
+
+    result = service.acknowledge_loaded_prepared_factors(
+        engine=engine,
+        boot_id="live-generation-after-restart",
+        process_id="live-process-after-restart",
+        observed_at=now + 1.0,
+    )
+
+    assert result["acknowledged_count"] == 1
+    assert result["active_count"] == 1
+    assert result["prepared_count"] == 0
+    assert result["results"][0]["lifecycle_stage"] == "ACTIVE"
+    # The first boot proof is allowed before selector admission; publishing
+    # this current-process ACK is what lets the next canonical selection
+    # include the ACTIVE factor without trusting an old PID.
+    assert result["results"][0]["load_validation"]["voting_admitted"] is False
+    row = sqlite3.connect(service.db_path).execute(
+        """SELECT loaded, status, boot_id FROM factor_runtime_projection
+           WHERE factor_id=? AND process_role='live_alpha' AND process_id=?""",
+        (service.get_state(factor_name=name)["factor_id"], "live-process-after-restart"),
+    ).fetchone()
+    assert row == (1, "loaded", "live-generation-after-restart")
+
+
 def test_backend_bootstrap_rebuilds_active_registry_from_committed_state_only(
     lifecycle,
 ):
@@ -675,6 +729,8 @@ def test_builtin_lifecycle_governs_admission_without_mutating_code_registry(
         assert state["generation"] == terminal_state["generation"] + 1
         assert runtime_config.shared().factor_signal_config[name]["enabled"] is True
         assert runtime_config.shared().factor_signal_config[name]["lifecycle_status"] == "SHADOW"
+        assert runtime_config.shared().factor_signal_config[name]["source"] == SOURCE_BUILTIN
+        assert runtime_config.shared().factor_signal_config[name]["autonomous_activation"] is True
         assert runtime_config.shared().factor_portfolio_weights[name] == 0.0
         metadata = json.loads(state["metadata_json"])
         assert metadata["reenrolled_from"]["lifecycle_stage"] == "QUARANTINED"

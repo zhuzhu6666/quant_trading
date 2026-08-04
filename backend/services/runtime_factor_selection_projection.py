@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from alpha.portfolio_compositor import resolve_factor_role
-from alpha.runtime_factor_selection import runtime_factor_enabled
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.core.state_store import validate_runtime_state_schema
+from backend.services.factor_blend_health import FactorBlendHealthService
 
 
 PROJECTION_KEY = "runtime_factor_selection.v1"
@@ -67,15 +67,25 @@ class RuntimeFactorSelectionProjectionService:
             for name in selected
         }
         role_counts = Counter(selected_roles.values())
-        configured_directional_factor_ids = [
-            name
-            for name in selected
-            if (
-                selected_roles.get(name) == "alpha"
-                and runtime_factor_enabled(signal_cfg.get(name))
-                and selected_weights.get(name, 0.0) > 0.0
+        unavailable_reasons = {
+            "factor_admission_unavailable",
+            "registry_metadata_unavailable",
+        }
+        selection_reasons = set(
+            dict(getattr(selection, "reason_excluded", {}) or {}).values()
+        )
+        directional_guard = (
+            FactorBlendHealthService.evaluate_directional_portfolio_guard(
+                selected_factor_ids=(
+                    None
+                    if selection_reasons.intersection(unavailable_reasons)
+                    else selected
+                ),
+                factor_configs=signal_cfg,
+                weights=selected_weights,
             )
-        ]
+        )
+        configured_directional_factor_ids = list(directional_guard["voter_ids"])
         context_factor_ids = [
             name for name in selected if selected_roles.get(name) == "context"
         ]
@@ -140,6 +150,7 @@ class RuntimeFactorSelectionProjectionService:
             # contributing counters after values are available.
             "alpha_voter_count": len(configured_directional_factor_ids),
             "configured_directional_factor_ids": configured_directional_factor_ids,
+            "directional_portfolio_guard": directional_guard,
             "context_factor_ids": context_factor_ids,
             "gate_factor_ids": gate_factor_ids,
             "context_count": int(role_counts.get("context", 0)),

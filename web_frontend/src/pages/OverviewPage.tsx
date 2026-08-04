@@ -281,6 +281,19 @@ export function OverviewPage() {
   const factorHealth = asRecord(pick(readiness, ["factor_blend_health"]));
   const factorStatus = pickString(factorHealth, ["status"], "");
   const factorOk = pickBoolean(factorHealth, ["ok"], false);
+  const directionalGuard = asRecord(pick(factorHealth, ["directional_portfolio_guard"]));
+  const directionalVoters = pickNumber(directionalGuard, ["voter_count"], 0);
+  const directionalGroups = pickNumber(directionalGuard, ["independent_group_count"], 0);
+  const directionalGuardStatus = pickString(directionalGuard, ["status"], "unavailable");
+  const directionalReason = pickArray(directionalGuard, ["reason_codes"])
+    .map((reason) => translateDisplayValue(reason))
+    .filter(Boolean)
+    .join("、");
+  const directionalRecoveryStage = directionalGuardStatus === "healthy"
+    ? "组合合同满足"
+    : directionalGuardStatus === "unavailable"
+      ? "等待 selector 健康投影"
+      : "等待 ACTIVE canary 或新代 SHADOW 恢复";
   const agentChain = asRecord(pick(readiness, ["agent_chain_health", "v16.agent_chain_health"]));
   const agentChainStatus = pickString(agentChain, ["status"], "");
   const agentChainOk = pickBoolean(agentChain, ["ok"], false);
@@ -403,8 +416,10 @@ export function OverviewPage() {
               icon={BrainCircuit}
               role="决策计算"
               title="因子组合 + 决策规则"
-              detail="生成方向、置信度、场景与决策门"
-              io={strategy || "因子组合 · 历史经验只做有限修正"}
+              detail={`生成方向、置信度、场景与决策门 · ${directionalRecoveryStage}`}
+              io={directionalGuardStatus !== "unavailable"
+                ? `方向票 ${formatDecimal(directionalVoters, 0)}/3 · 独立组 ${formatDecimal(directionalGroups, 0)}/2${directionalReason ? ` · ${directionalReason}` : ""}`
+                : strategy || "方向组合证据不可用"}
               status={translateDisplayValue(factorStatus || "unknown")}
               tone={statusTone(factorOk, readinessKnown && Boolean(factorStatus))}
               to="/trading"

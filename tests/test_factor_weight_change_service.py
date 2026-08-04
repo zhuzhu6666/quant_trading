@@ -45,6 +45,21 @@ class _ExpansionPolicy:
     fast_decide = decide
 
 
+class _ZeroPolicy:
+    def decide(self, **_kwargs):
+        return {
+            "alpha_x": WeightDecision(
+                factor="alpha_x",
+                old_weight=0.1,
+                new_weight=0.0,
+                reason="test zero proposal",
+                confidence=0.9,
+            )
+        }
+
+    fast_decide = decide
+
+
 class _Mutation:
     def __init__(self, *, fail: bool = False):
         self.fail = fail
@@ -139,6 +154,142 @@ def test_weight_change_blocks_large_delta_without_replay(monkeypatch, tmp_path):
     assert result["legacy_status"] == "blocked_by_replay_admission"
     assert result["applications"] == {}
     assert mutation.calls == []
+
+
+def _portfolio_config(count: int) -> tuple[dict, dict]:
+    names = ["alpha_x", *[f"alpha_{idx}" for idx in range(1, count)]]
+    configs = {
+        name: {
+            "role": "alpha",
+            "enabled": True,
+            "lifecycle_status": "ACTIVE",
+            "health_gate_exempt": True,
+        }
+        for name in names
+    }
+    return configs, {name: 0.1 for name in names}
+
+
+def test_balanced_demo_normalizes_active_alpha_to_canary_floor(monkeypatch, tmp_path):
+    _path, service = _service(monkeypatch, tmp_path, _Mutation())
+    monkeypatch.setattr(runtime_config, "bounded_demo_mode_active", lambda _cfg=None: True)
+    configs, weights = _portfolio_config(3)
+
+    plan = service.plan(
+        factor_configs=configs,
+        current_weights=weights,
+        decision_policy=_ZeroPolicy(),
+    )
+
+    assert plan["status"] == "planned"
+    assert plan["proposed_weights"]["alpha_x"] == 0.05
+    assert plan["weight_normalizations"]["alpha_x"] == {
+        "reason": "balanced_demo_min_live_weight",
+        "requested_weight": 0.0,
+        "effective_weight": 0.05,
+    }
+    assert plan["directional_portfolio_guard"]["status"] == "healthy"
+
+
+def test_exact_committed_rollback_keeps_original_weight(monkeypatch, tmp_path):
+    _path, service = _service(monkeypatch, tmp_path, _Mutation())
+    monkeypatch.setattr(runtime_config, "bounded_demo_mode_active", lambda _cfg=None: True)
+    configs, weights = _portfolio_config(4)
+
+    plan = service.plan(
+        factor_configs=configs,
+        current_weights=weights,
+        decision_policy=_ZeroPolicy(),
+        exact_committed_rollback=True,
+    )
+
+    assert plan["status"] == "planned"
+    assert plan["proposed_weights"]["alpha_x"] == 0.0
+    assert plan["weight_normalizations"] == {}
+    assert plan["directional_portfolio_guard"]["voter_count"] == 3
+
+
+def test_strict_live_keeps_zero_semantics_when_three_voters_remain(monkeypatch, tmp_path):
+    _path, service = _service(monkeypatch, tmp_path, _Mutation())
+    monkeypatch.setattr(runtime_config, "bounded_demo_mode_active", lambda _cfg=None: False)
+    configs, weights = _portfolio_config(4)
+
+    plan = service.plan(
+        factor_configs=configs,
+        current_weights=weights,
+        decision_policy=_ZeroPolicy(),
+    )
+
+    assert plan["status"] == "planned"
+    assert plan["proposed_weights"]["alpha_x"] == 0.0
+    assert plan["weight_normalizations"] == {}
+    assert plan["directional_portfolio_guard"]["voter_count"] == 3
+
+
+def test_weight_guard_blocks_before_any_durable_side_effect(monkeypatch, tmp_path):
+    mutation = _Mutation()
+    path, service = _service(monkeypatch, tmp_path, mutation)
+    monkeypatch.setattr(runtime_config, "bounded_demo_mode_active", lambda _cfg=None: False)
+    configs, weights = _portfolio_config(3)
+
+    result = service.execute(
+        source="test_guarded_weight",
+        producer="test",
+        run_id="guard-block",
+        actor="system:test",
+        reason="guard test",
+        factor_configs=configs,
+        current_weights=weights,
+        decision_policy=_ZeroPolicy(),
+        risk_check=lambda _plan: {"allowed": True},
+    )
+
+    assert result["status"] == "blocked_by_directional_portfolio_guard"
+    assert result["applications"] == {}
+    assert mutation.calls == []
+    conn = connect_sqlite(path, read_only=True)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM learning_application_log").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM learning_experiment_reservation").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM runtime_config_overlay").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_weight_change_forwards_v16_evidence_binding_to_mutation(monkeypatch, tmp_path):
+    mutation = _Mutation()
+    _path, service = _service(monkeypatch, tmp_path, mutation)
+    monkeypatch.setattr(runtime_config, "bounded_demo_mode_active", lambda _cfg=None: False)
+    monkeypatch.setattr(
+        "backend.core.static_feature_flags.shared_static_feature_flags",
+        lambda: SimpleNamespace(
+            governance_mutation_coordinator_v2_mode="dual_record"
+        ),
+    )
+    configs, weights = _portfolio_config(4)
+    weights["alpha_x"] = 0.7
+
+    result = service.execute(
+        source="factor_governance_active_canary_restore",
+        producer="factor_governance_restore",
+        run_id="v16-binding",
+        actor="system:factor_governance",
+        reason="binding test",
+        factor_configs=configs,
+        current_weights=weights,
+        decision_policy=_ExpansionPolicy(),
+        risk_check=lambda _plan: {"allowed": True},
+        v16_command_id="cmd-1",
+        v16_candidate_id="candidate-1",
+        v16_posterior_fingerprint="posterior-1",
+        v16_evidence_fingerprint="evidence-1",
+    )
+
+    assert result["status"] == "applied"
+    mutation_kwargs = mutation.calls[0][1]
+    assert mutation_kwargs["v16_candidate_id"] == "candidate-1"
+    assert mutation_kwargs["v16_posterior_fingerprint"] == "posterior-1"
+    assert mutation_kwargs["governance_evidence_fingerprint"] == "evidence-1"
 
 
 def _execute(service):

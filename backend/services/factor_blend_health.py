@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 
@@ -11,6 +11,16 @@ DEFAULT_TARGET_MAX_ACTIVE_ALPHA = 80
 DEFAULT_WARN_MAX_ACTIVE_ALPHA = 120
 DEFAULT_WARN_MAX_NOISE_FAMILY_COUNT = 40
 DEFAULT_LOW_WEIGHT_THRESHOLD = 0.02
+DIRECTIONAL_PORTFOLIO_MIN_VOTERS = 3
+DIRECTIONAL_PORTFOLIO_MIN_INDEPENDENT_GROUPS = 2
+_TERMINAL_LIFECYCLE_STAGES = {
+    "DEAD",
+    "SHADOW",
+    "PROMOTION_PREPARED",
+    "QUARANTINE",
+    "QUARANTINED",
+    "RETIRED",
+}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -77,6 +87,96 @@ class FactorBlendHealthService:
             "weight_writes_remain_decision_policy": True,
         }
 
+    @staticmethod
+    def evaluate_directional_portfolio_guard(
+        *,
+        selected_factor_ids: Sequence[str] | None,
+        factor_configs: Mapping[str, Any],
+        weights: Mapping[str, Any],
+        enforced: bool = True,
+    ) -> dict[str, Any]:
+        """Evaluate the one canonical directional-portfolio sufficiency fact."""
+
+        if selected_factor_ids is None:
+            return {
+                "schema_version": "directional_portfolio_guard.v1",
+                "status": "unavailable",
+                "enforced": bool(enforced),
+                "min_voters": DIRECTIONAL_PORTFOLIO_MIN_VOTERS,
+                "min_independent_groups": DIRECTIONAL_PORTFOLIO_MIN_INDEPENDENT_GROUPS,
+                "voter_count": 0,
+                "independent_group_count": 0,
+                "voter_ids": [],
+                "independent_group_keys": [],
+                "reason_codes": ["directional_portfolio_evidence_unavailable"],
+            }
+
+        from alpha.portfolio_compositor import resolve_factor_role
+        from alpha.runtime_factor_selection import runtime_factor_enabled
+
+        voter_ids: list[str] = []
+        group_keys: set[str] = set()
+        for raw_name in selected_factor_ids:
+            name = str(raw_name or "")
+            if not name:
+                continue
+            raw_entry = factor_configs.get(name, {})
+            entry = raw_entry if isinstance(raw_entry, dict) else {}
+            if resolve_factor_role(name, entry) != "alpha":
+                continue
+            if not runtime_factor_enabled(entry):
+                continue
+            lifecycle = str(entry.get("lifecycle_status") or "ACTIVE").upper()
+            if lifecycle in _TERMINAL_LIFECYCLE_STAGES:
+                continue
+            raw_weight = weights.get(name, entry.get("weight", 0.0))
+            weight = _safe_float(
+                raw_weight.get("weight") if isinstance(raw_weight, dict) else raw_weight,
+                0.0,
+            )
+            if weight <= 0.0:
+                continue
+            voter_ids.append(name)
+            redundancy_group = str(entry.get("redundancy_group") or "").strip()
+            group_keys.add(redundancy_group or f"factor:{name}")
+
+        voter_ids = sorted(set(voter_ids))
+        independent_groups = sorted(group_keys)
+        reasons: list[str] = []
+        if len(voter_ids) < DIRECTIONAL_PORTFOLIO_MIN_VOTERS:
+            reasons.append("insufficient_directional_alpha_voters")
+        if len(independent_groups) < DIRECTIONAL_PORTFOLIO_MIN_INDEPENDENT_GROUPS:
+            reasons.append("insufficient_directional_alpha_groups")
+        return {
+            "schema_version": "directional_portfolio_guard.v1",
+            "status": "healthy" if not reasons else "degraded",
+            "enforced": bool(enforced),
+            "min_voters": DIRECTIONAL_PORTFOLIO_MIN_VOTERS,
+            "min_independent_groups": DIRECTIONAL_PORTFOLIO_MIN_INDEPENDENT_GROUPS,
+            "voter_count": len(voter_ids),
+            "independent_group_count": len(independent_groups),
+            "voter_ids": voter_ids,
+            "independent_group_keys": independent_groups,
+            "reason_codes": reasons,
+        }
+
+    @staticmethod
+    def guard_allows_transition(
+        before: Mapping[str, Any],
+        after: Mapping[str, Any],
+    ) -> bool:
+        """Allow a healthy result, or a non-worsening change during recovery."""
+
+        if str(after.get("status") or "") == "unavailable":
+            return False
+        if str(before.get("status") or "") == "healthy":
+            return str(after.get("status") or "") == "healthy"
+        return bool(
+            int(after.get("voter_count") or 0) >= int(before.get("voter_count") or 0)
+            and int(after.get("independent_group_count") or 0)
+            >= int(before.get("independent_group_count") or 0)
+        )
+
     def build(self, cfg: Any | None = None, *, use_catalog: bool | None = None) -> dict[str, Any]:
         cfg_was_none = cfg is None
         if cfg is None:
@@ -87,7 +187,7 @@ class FactorBlendHealthService:
             use_catalog = cfg_was_none
         if use_catalog:
             active = self._active_from_factor_catalog(cfg)
-            if active:
+            if active is not None:
                 return self._build_from_active(cfg, active, active_count_source="factor_catalog.used_in_score")
         return self._build_from_runtime_config(cfg, active_count_source="runtime_config")
 
@@ -97,21 +197,30 @@ class FactorBlendHealthService:
 
             cfg = runtime_config()
         active = self._active_from_factor_catalog(cfg)
-        if active:
+        if active is not None:
             return self._build_from_active(cfg, active, active_count_source="factor_catalog.used_in_score")
         return self._build_from_runtime_config(cfg, active_count_source="runtime_config_fallback")
 
-    def _active_from_factor_catalog(self, cfg: Any) -> list[dict[str, Any]]:
+    def _active_from_factor_catalog(self, cfg: Any) -> list[dict[str, Any]] | None:
         try:
             from backend.services.factor_catalog import build_factor_catalog
         except Exception:
-            return []
+            return None
         signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
         active: list[dict[str, Any]] = []
         try:
             catalog = build_factor_catalog(self.db_path)
         except Exception:
-            return []
+            return None
+        unavailable_reasons = {
+            "factor_admission_unavailable",
+            "registry_metadata_unavailable",
+        }
+        if any(
+            str(item.get("reason_excluded") or "") in unavailable_reasons
+            for item in catalog
+        ):
+            return None
         for item in catalog:
             if not bool(item.get("used_in_score")):
                 continue
@@ -168,6 +277,7 @@ class FactorBlendHealthService:
             active,
             active_count_source=active_count_source,
             configured_alpha_count=configured_alpha,
+            selection_authoritative=False,
         )
 
     def _build_from_active(
@@ -177,6 +287,7 @@ class FactorBlendHealthService:
         *,
         active_count_source: str,
         configured_alpha_count: int | None = None,
+        selection_authoritative: bool = True,
     ) -> dict[str, Any]:
         if configured_alpha_count is None:
             from alpha.portfolio_compositor import resolve_factor_role
@@ -193,6 +304,21 @@ class FactorBlendHealthService:
         redundancy_stats = self._redundancy_stats(active, total_abs_weight)
         low_weight = [item for item in active if item["abs_weight"] <= DEFAULT_LOW_WEIGHT_THRESHOLD]
         health_stats = self._health_stats({item["factor"] for item in active})
+        signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
+        configured_weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
+        guard_weights = {
+            **configured_weights,
+            **{str(item["factor"]): float(item["weight"]) for item in active},
+        }
+        directional_guard = self.evaluate_directional_portfolio_guard(
+            selected_factor_ids=(
+                [str(item["factor"]) for item in active]
+                if selection_authoritative
+                else None
+            ),
+            factor_configs=signal_cfg,
+            weights=guard_weights,
+        )
         issues = self._issues(
             active=active,
             family_stats=family_stats,
@@ -202,18 +328,30 @@ class FactorBlendHealthService:
             health_stats=health_stats,
             cfg=cfg,
         )
+        if directional_guard["status"] != "healthy":
+            issues.extend(
+                {
+                    "severity": "error",
+                    "code": reason,
+                    "value": directional_guard["voter_count"],
+                }
+                for reason in directional_guard["reason_codes"]
+            )
         status = "ok"
-        if any(item.get("severity") == "error" for item in issues):
+        if directional_guard["status"] != "healthy":
+            status = "critical"
+        elif any(item.get("severity") == "error" for item in issues):
             status = "degraded"
         elif issues:
             status = "watch"
         return {
-            "ok": True,
+            "ok": directional_guard["status"] == "healthy",
             "schema_version": "factor_blend_health.v1",
             "status": status,
             "configured_alpha_count": configured_alpha_count,
             "active_alpha_count": len(active),
             "active_count_source": active_count_source,
+            "directional_portfolio_guard": directional_guard,
             "target_max_active_alpha": DEFAULT_TARGET_MAX_ACTIVE_ALPHA,
             "warn_max_active_alpha": DEFAULT_WARN_MAX_ACTIVE_ALPHA,
             "total_abs_weight": round(total_abs_weight, 6),

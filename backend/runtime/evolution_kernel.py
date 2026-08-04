@@ -108,12 +108,13 @@ class EvolutionKernel:
             ),
         )
 
-        # 15 分钟: 因子 V3 自治治理 (发现晋升、降权、禁用、退役、审计)
+        # 非整点的 15 分钟节拍: 因子 V3 自治治理。整点由 minute 2
+        # 的完整 health -> V16 -> governance 链拥有，避免 single-flight 抢占。
         try:
             from backend.runtime.factor_governance_orchestrator import run_autonomous_factor_governance_cycle
-            from config.runtime_config import shared as _runtime_shared
+            from config.runtime_config import effective_factor_governance_cron
 
-            cron = str(getattr(_runtime_shared(), "factor_governance_cron", "*/15 * * * *") or "*/15 * * * *")
+            cron = effective_factor_governance_cron()
             sched.add_job(
                 "factor_governance_autonomous",
                 cron,

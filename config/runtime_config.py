@@ -74,6 +74,25 @@ def bounded_demo_mode_active(cfg: Any | None = None) -> bool:
     return resolve_bounded_demo_mode(current, broker_cfg)
 
 
+def effective_factor_governance_cron(cfg: Any | None = None) -> str:
+    """Resolve the worker schedule without changing persisted config hashes.
+
+    The historical default included minute 0, where it races the hourly
+    health -> V16 -> governance owner at minute 2. Preserve explicit custom
+    schedules, but migrate that exact old default to the non-overlapping
+    effective cadence.
+    """
+
+    current = cfg if cfg is not None else shared()
+    configured = str(
+        getattr(current, "factor_governance_cron", "*/15 * * * *")
+        or "*/15 * * * *"
+    ).strip()
+    if configured == "*/15 * * * *":
+        return "15,30,45 * * * *"
+    return configured
+
+
 def operator_bounded_demo_control_exempt(
     *,
     actor: str,

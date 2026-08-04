@@ -45,7 +45,9 @@ def test_factor_blend_health_flags_large_noisy_alpha_population(tmp_path):
     result = FactorBlendHealthService(db_path).build(_cfg(signal_cfg, weights))
 
     assert result["schema_version"] == "factor_blend_health.v1"
-    assert result["status"] == "degraded"
+    assert result["status"] == "critical"
+    assert result["ok"] is False
+    assert result["directional_portfolio_guard"]["status"] == "unavailable"
     assert result["active_alpha_count"] == 177
     codes = {item["code"] for item in result["issues"]}
     assert "too_many_active_alpha_factors" in codes
@@ -66,7 +68,10 @@ def test_factor_blend_health_keeps_context_out_of_active_alpha(tmp_path):
 
     result = FactorBlendHealthService(tmp_path / "state.db").build(_cfg(signal_cfg, weights))
 
-    assert result["status"] == "ok"
+    assert result["status"] == "critical"
+    assert result["directional_portfolio_guard"]["reason_codes"] == [
+        "directional_portfolio_evidence_unavailable"
+    ]
     assert result["configured_alpha_count"] == 1
     assert result["active_alpha_count"] == 1
     assert result["family_exposure"]["core"]["count"] == 1
@@ -105,3 +110,46 @@ def test_factor_blend_health_current_uses_catalog_used_in_score(tmp_path, monkey
     assert result["configured_alpha_count"] == 2
     assert result["active_alpha_count"] == 1
     assert result["family_exposure"]["core"]["sample"] == ["live_alpha"]
+    assert result["directional_portfolio_guard"]["voter_count"] == 1
+
+
+def test_directional_portfolio_guard_requires_three_voters_and_two_groups():
+    configs = {
+        "alpha_a": {"role": "alpha", "enabled": True, "lifecycle_status": "ACTIVE", "redundancy_group": "trend"},
+        "alpha_b": {"role": "alpha", "enabled": True, "lifecycle_status": "ACTIVE", "redundancy_group": "trend"},
+        "alpha_c": {"role": "alpha", "enabled": True, "lifecycle_status": "ACTIVE", "redundancy_group": "trend"},
+    }
+    same_group = FactorBlendHealthService.evaluate_directional_portfolio_guard(
+        selected_factor_ids=list(configs),
+        factor_configs=configs,
+        weights={name: 0.1 for name in configs},
+    )
+    assert same_group["voter_count"] == 3
+    assert same_group["independent_group_count"] == 1
+    assert same_group["reason_codes"] == ["insufficient_directional_alpha_groups"]
+
+    configs["alpha_c"]["redundancy_group"] = "reversal"
+    healthy = FactorBlendHealthService.evaluate_directional_portfolio_guard(
+        selected_factor_ids=list(configs),
+        factor_configs=configs,
+        weights={name: 0.1 for name in configs},
+    )
+    assert healthy["status"] == "healthy"
+
+
+def test_directional_portfolio_guard_treats_ungrouped_factors_as_independent():
+    configs = {
+        name: {"role": "alpha", "enabled": True, "lifecycle_status": "ACTIVE"}
+        for name in ("alpha_a", "alpha_b", "alpha_c")
+    }
+    result = FactorBlendHealthService.evaluate_directional_portfolio_guard(
+        selected_factor_ids=list(configs),
+        factor_configs=configs,
+        weights={name: 0.1 for name in configs},
+    )
+    assert result["status"] == "healthy"
+    assert result["independent_group_keys"] == [
+        "factor:alpha_a",
+        "factor:alpha_b",
+        "factor:alpha_c",
+    ]

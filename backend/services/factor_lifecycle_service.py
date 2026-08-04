@@ -619,7 +619,10 @@ class FactorLifecycleService:
             stable_boot_id = str(boot_id or "").strip()
             if not stable_boot_id:
                 raise FactorLifecycleError("projection_boot_id_required")
-            states = self.list_states(stages={FactorLifecycleStage.PROMOTION_PREPARED.value})
+            states = self.list_states(stages={
+                FactorLifecycleStage.PROMOTION_PREPARED.value,
+                FactorLifecycleStage.ACTIVE.value,
+            })
         except Exception as exc:
             return {
                 "ok": False,
@@ -636,6 +639,7 @@ class FactorLifecycleService:
         for state in states:
             factor_id = str(state.get("factor_id") or "")
             name = str(state.get("factor_name") or "")
+            stage = str(state.get("lifecycle_stage") or "")
             try:
                 definition = self._definition_from_state(state)
                 origin = str(state.get("origin") or "dsl").strip().lower()
@@ -647,8 +651,10 @@ class FactorLifecycleService:
                     # live proof below succeeds.
                     self._project_registry(state)
                 meta = self.adapter.get_meta(name)
-                expected_source = (
-                    SOURCE_BUILTIN if origin == SOURCE_BUILTIN else SOURCE_SHADOW
+                expected_source = SOURCE_BUILTIN if origin == SOURCE_BUILTIN else (
+                    SOURCE_DISCOVERED
+                    if stage == FactorLifecycleStage.ACTIVE.value
+                    else SOURCE_SHADOW
                 )
                 if not meta or str(meta.get("source") or "") != expected_source:
                     raise FactorLifecycleError("prepared_factor_source_mismatch")
@@ -684,7 +690,10 @@ class FactorLifecycleService:
                     raise FactorLifecycleError(
                         f"prepared_factor_load_validation_failed:{validation.get('status', 'unknown')}"
                     )
-                if bool(validation.get("voting_admitted")):
+                if (
+                    stage == FactorLifecycleStage.PROMOTION_PREPARED.value
+                    and bool(validation.get("voting_admitted"))
+                ):
                     raise FactorLifecycleError("prepared_factor_unexpectedly_voting")
                 result = self.acknowledge_projection(
                     factor_id=factor_id,
@@ -705,6 +714,7 @@ class FactorLifecycleService:
                     {
                         **result,
                         "factor_name": name,
+                        "lifecycle_stage": stage,
                         "generation": int(state.get("generation") or 0),
                         "mutation_id": str(state.get("mutation_id") or ""),
                         "artifact_hash": definition.artifact_hash,
@@ -724,7 +734,18 @@ class FactorLifecycleService:
         return {
             "ok": True,
             "status": "projection_ack_complete",
-            "prepared_count": len(states),
+            "prepared_count": sum(
+                1
+                for state in states
+                if str(state.get("lifecycle_stage") or "")
+                == FactorLifecycleStage.PROMOTION_PREPARED.value
+            ),
+            "active_count": sum(
+                1
+                for state in states
+                if str(state.get("lifecycle_stage") or "")
+                == FactorLifecycleStage.ACTIVE.value
+            ),
             "acknowledged_count": acknowledged,
             "blocked_count": len(states) - acknowledged,
             "results": results,
@@ -1105,7 +1126,11 @@ class FactorLifecycleService:
             entry = {
                 **existing,
                 "role": str(existing.get("role") or "alpha"),
-                "source": str(existing.get("source") or "discovered"),
+                "source": (
+                    SOURCE_BUILTIN
+                    if mutation.definition.origin == SOURCE_BUILTIN
+                    else SOURCE_DISCOVERED
+                ),
                 "expression": mutation.definition.expression,
                 "factor_id": mutation.definition.factor_id,
                 "definition_fingerprint": mutation.definition.definition_fingerprint,
@@ -1117,6 +1142,11 @@ class FactorLifecycleService:
             if mutation.new_generation:
                 entry.pop("disabled_at", None)
                 entry.pop("quarantined_at", None)
+                if (
+                    mutation.definition.origin == SOURCE_BUILTIN
+                    and target is FactorLifecycleStage.SHADOW
+                ):
+                    entry["autonomous_activation"] = True
         else:
             # A restrictive operation must remain classifiable from before and
             # after facts even for a legacy factor missing RuntimeConfig data.

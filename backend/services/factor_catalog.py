@@ -533,6 +533,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         items.append({
             "factor_id": name,
             "lifecycle_factor_id": lifecycle_factor_id,
+            "lifecycle_origin": lifecycle_origin,
             "source": source,
             "role": role,
             "enabled": bool(enabled),
@@ -546,9 +547,25 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "lifecycle_expression": str(
                 lifecycle_fact.get("expression") or ""
             ),
+            "lifecycle_definition_fingerprint": str(
+                lifecycle_fact.get("definition_fingerprint") or ""
+            ),
             "lifecycle_artifact_hash": str(
                 lifecycle_fact.get("artifact_hash") or ""
             ),
+            "lifecycle_generation": int(
+                lifecycle_fact.get("generation") or 0
+            ),
+            "lifecycle_updated_at": float(
+                lifecycle_fact.get("updated_at") or 0.0
+            ),
+            "lifecycle_terminal_at": float(
+                lifecycle_fact.get("retired_at")
+                or lifecycle_fact.get("updated_at")
+                or 0.0
+            )
+            if lifecycle_status in {"QUARANTINED", "RETIRED"}
+            else 0.0,
             "eligible_for_live": bool(eligible),
             "used_in_score": used_in_score,
             "weight": weight,
