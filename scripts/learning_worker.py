@@ -215,7 +215,7 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
     _add_job(
         scheduler,
         "evolution_hourly",
-        "8,23,38,53 * * * *",
+        "23,53,58 * * * *",
         _coordinated_mutation_job(
             "evolution_hourly",
             scheduled_evolution_with_governance_handoff,

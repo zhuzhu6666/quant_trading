@@ -481,7 +481,7 @@ def test_learning_worker_registers_factor_governance_job(monkeypatch):
     assert "awe_adapt" not in names
     assert (
         "evolution_hourly",
-        "8,23,38,53 * * * *",
+        "23,53,58 * * * *",
         "coordinated_evolution_hourly",
     ) in registered
     assert any(
