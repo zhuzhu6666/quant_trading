@@ -789,3 +789,182 @@ def test_coordinator_audit_does_not_create_second_executable_fact(
     )
 
     assert suggestion_id == ""
+
+
+# ── 批次 C: 降权条件化 (当前 regime 下弱才降权, 否则 regime_mismatch 不动权重) ──────────
+
+def test_regime_mismatch_verdict_marks_when_global_weak_but_current_regime_fit_good():
+    """全局模型弱点高、但当前 regime 条件适配好时可暂停降权 (声明确认工具)."""
+    verdict = FactorGovernanceOrchestrator._regime_mismatch_verdict(
+        True,
+        current_regime_id="trend=strong|volatility=high",
+        regime_fit_score=0.82,
+        regime_fit_ok_threshold=0.5,
+    )
+
+    assert verdict["regime_mismatch"] is True
+    assert verdict["reason"] == "current_regime_fit_ok"
+    assert verdict["current_regime_id"] == "trend=strong|volatility=high"
+
+
+def test_regime_mismatch_verdict_allows_downweight_when_current_regime_weak_too():
+    """当前 regime 下适配同样弱时, 不标记 mismatch, 保留降权路径."""
+    verdict = FactorGovernanceOrchestrator._regime_mismatch_verdict(
+        True,
+        current_regime_id="trend=weak|volatility=low",
+        regime_fit_score=0.15,
+        regime_fit_ok_threshold=0.5,
+    )
+
+    assert verdict["regime_mismatch"] is False
+    assert verdict["reason"] == "current_regime_weak_too"
+
+
+def test_regime_mismatch_verdict_is_fail_safe_when_no_regime_evidence():
+    """无当前 regime 投影或无 regime 适配证据时, 不得侵蚀安全: 沿用全局降权路径."""
+    no_regime = FactorGovernanceOrchestrator._regime_mismatch_verdict(
+        True,
+        current_regime_id="",
+        regime_fit_score=0.9,
+    )
+    assert no_regime["regime_mismatch"] is False
+    assert no_regime["reason"] == "no_current_regime"
+
+    no_fit = FactorGovernanceOrchestrator._regime_mismatch_verdict(
+        True,
+        current_regime_id="trend=strong|volatility=high",
+        regime_fit_score=None,
+    )
+    assert no_fit["regime_mismatch"] is False
+    assert no_fit["reason"] == "no_regime_fit_evidence"
+
+
+def test_regime_mismatch_verdict_ignores_when_not_globally_weak():
+    """因子全局并不弱时, 直接放行降权路径不做 mismatch 判定."""
+    verdict = FactorGovernanceOrchestrator._regime_mismatch_verdict(
+        False,
+        current_regime_id="trend=strong|volatility=high",
+        regime_fit_score=0.1,
+    )
+
+    assert verdict["regime_mismatch"] is False
+    assert verdict["reason"] == "not_globally_weak"
+
+
+def test_downweight_skipped_when_current_regime_fit_good_for_weak_factor(monkeypatch, tmp_path):
+    """批C接入: 模型判弱但当前 regime 适配好 -> regime_mismatch, 权重不变."""
+    rc.reset_for_tests()
+    rc.patch({
+        "factor_signal_config": {
+            "regime_ok_factor": {"role": "alpha", "enabled": True, "tags": ["技术"]},
+        },
+        "factor_portfolio_weights": {"regime_ok_factor": 0.3},
+        "factor_governance_model_min_samples": 3,
+        "factor_governance_model_weakness_threshold": 0.65,
+        "awe_max_single_change": 0.15,
+    })
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+
+    # setup local sqlite state with experience_memory carrying current regime
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(tmp_path / "state.db")
+    conn.executescript(
+        """
+        CREATE TABLE experience_memory (
+            regime_id TEXT,
+            created_at REAL,
+            trade_id TEXT
+        );
+        INSERT INTO experience_memory (regime_id, created_at, trade_id)
+        VALUES ('trend=strong|volatility=high', 1600000.0, 't1'),
+               ('trend=strong|volatility=high', 1600010.0, 't2'),
+               ('trend=strong|volatility=high', 1600020.0, 't3');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    catalog = [{
+        "factor_id": "regime_ok_factor",
+        "source": "builtin",
+        "role": "alpha",
+        "enabled": True,
+        "eligible_for_live": True,
+        "used_in_score": True,
+        "weight": 0.3,
+        "health_score": 0.0,
+        "health_status": "UNKNOWN",
+        "factor_governance_shadow": {
+            "sample_count": 4,
+            "weak_sample_count": 4,
+            "avg_weakness_score": 0.78,
+            "weakness_score": 0.8,
+            "model_type": "factor_governance_lightgbm",
+            "latest_inference_id": "fg_weak_2",
+            "payload": {"features": {"current_regime_fit_score": 0.85}},
+        },
+    }]
+
+    actions = orch._downweight_weak_alpha(catalog, {"run_id": "test-run"})
+
+    # no downweight patch applied -> weight unchanged
+    assert rc.shared().factor_portfolio_weights.get("regime_ok_factor", 0.3) == 0.3
+    assert not any(a["status"] == "applied" for a in actions)
+
+
+def test_downweight_applied_when_current_regime_weak_too(monkeypatch, tmp_path):
+    """批C接入: 当前 regime 适配也弱 -> 保留降权路径."""
+    rc.reset_for_tests()
+    rc.patch({
+        "factor_signal_config": {
+            "weak_in_current_regime": {"role": "alpha", "enabled": True, "tags": ["技术"]},
+        },
+        "factor_portfolio_weights": {"weak_in_current_regime": 0.3},
+        "factor_governance_model_min_samples": 3,
+        "factor_governance_model_weakness_threshold": 0.65,
+        "awe_max_single_change": 0.15,
+    })
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(tmp_path / "state.db")
+    conn.executescript(
+        """
+        CREATE TABLE experience_memory (
+            regime_id TEXT, created_at REAL, trade_id TEXT
+        );
+        INSERT INTO experience_memory (regime_id, created_at, trade_id)
+        VALUES ('trend=weak|volatility=low', 1600000.0, 't1'),
+               ('trend=weak|volatility=low', 1600010.0, 't2'),
+               ('trend=weak|volatility=low', 1600020.0, 't3');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    catalog = [{
+        "factor_id": "weak_in_current_regime",
+        "source": "builtin",
+        "role": "alpha",
+        "enabled": True,
+        "eligible_for_live": True,
+        "used_in_score": True,
+        "weight": 0.3,
+        "health_score": 0.0,
+        "health_status": "UNKNOWN",
+        "factor_governance_shadow": {
+            "sample_count": 4,
+            "weak_sample_count": 4,
+            "avg_weakness_score": 0.78,
+            "weakness_score": 0.8,
+            "model_type": "factor_governance_lightgbm",
+            "latest_inference_id": "fg_weak_3",
+            "payload": {"features": {"current_regime_fit_score": 0.1}},
+        },
+    }]
+
+    actions = orch._downweight_weak_alpha(catalog, {"run_id": "test-run"})
+
+    assert any(a["status"] == "applied" for a in actions)
+    assert rc.shared().factor_portfolio_weights.get("weak_in_current_regime") == 0.255

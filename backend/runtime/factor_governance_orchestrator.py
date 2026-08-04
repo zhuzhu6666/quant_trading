@@ -1914,6 +1914,14 @@ class FactorGovernanceOrchestrator:
         profile = profile or self._governance_profile(cfg)
         watch = float(getattr(cfg, "factor_health_watch_threshold", 40.0) or 40.0)
         max_delta = float(getattr(cfg, "awe_max_single_change", 0.15) or 0.15)
+        regime_fit_ok = float(
+            getattr(cfg, "factor_governance_regime_fit_ok_threshold", 0.5) or 0.5
+        )
+        # Batch C: resolve current market regime once (single-point fact owner),
+        # then per-factor regime-fit decides whether global model weakness is a
+        # true current-regime weakness or a regime mismatch.
+        current_regime = self._current_market_regime_projection()
+        current_regime_id = str(current_regime.get("regime_id") or "")
         current_weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
         factor_configs = self._portfolio_configs(cfg)
         patches: dict[str, dict[str, Any]] = {}
@@ -1933,6 +1941,38 @@ class FactorGovernanceOrchestrator:
                 continue
             old_w = float(current_weights.get(name, item.get("weight", 0.0)) or 0.0)
             if old_w <= 0:
+                continue
+            # Batch C: when the model calls this factor globally weak, check
+            # whether it actually fits the *current* regime.  If its recent
+            # regime-fit is good, global weakness is concentrated elsewhere ->
+            # regime_mismatch: keep the weight, record the reason, do not drop it.
+            regime_fit_score: float | None = None
+            shadow_payload = (item.get("factor_governance_shadow") or {}).get("payload") or {}
+            shadow_features = shadow_payload.get("features") or {}
+            if isinstance(shadow_features, dict):
+                candidate = shadow_features.get("current_regime_fit_score")
+                if candidate is not None:
+                    try:
+                        regime_fit_score = float(candidate)
+                    except (TypeError, ValueError):
+                        regime_fit_score = None
+            mismatch = self._regime_mismatch_verdict(
+                model_weak,
+                current_regime_id=current_regime_id,
+                regime_fit_score=regime_fit_score,
+                regime_fit_ok_threshold=regime_fit_ok,
+            )
+            if mismatch.get("regime_mismatch"):
+                evidence_by_factor[name] = {
+                    "health_score": score,
+                    "health_status": status,
+                    "health_weak": health_weak,
+                    "model_governance": model_evidence,
+                    "old_weight": old_w,
+                    "regime_mismatch": mismatch,
+                    "current_regime_projection": current_regime,
+                    "governance_profile": profile.name,
+                }
                 continue
             target = max(
                 profile.min_live_weight,
@@ -3022,6 +3062,112 @@ class FactorGovernanceOrchestrator:
             + 0.01 * float(perf.get("hit_rate") or 0.0)
             - abs(float(perf.get("max_drawdown") or 0.0))
         )
+
+    def _current_market_regime_projection(self) -> dict[str, Any]:
+        """Read-only projection of the current market regime (batch B).
+
+        Single fact owner: consumes `experience_memory.regime_id` (the only
+        persisted regime label source) and resolves a low-cardinality regime
+        via market_regime.project_current_market_regime().  No new writer,
+        no new table.  Returns an `unavailable` projection when no data.
+        """
+        try:
+            from backend.services.market_regime import project_current_market_regime
+
+            db_path = self.overlay.db_path
+            production_state = is_state_db_path(db_path)
+            if not production_state and not Path(db_path).exists():
+                return {
+                    "regime_id": "",
+                    "confidence": 0.0,
+                    "source": "unavailable",
+                    "dimensions": {},
+                }
+            conn = (
+                get_state_pg_conn(read_only=True)
+                if production_state
+                else connect_sqlite(db_path, read_only=True)
+            )
+            if not production_state:
+                conn.row_factory = sqlite3.Row
+            try:
+                if not state_table_exists(conn, "experience_memory"):
+                    return {
+                        "regime_id": "",
+                        "confidence": 0.0,
+                        "source": "unavailable",
+                        "dimensions": {},
+                    }
+                rows = conn.execute(
+                    """
+                    SELECT regime_id, created_at, trade_id
+                    FROM experience_memory
+                    WHERE regime_id IS NOT NULL AND regime_id <> ''
+                    ORDER BY created_at DESC
+                    LIMIT 15
+                    """
+                ).fetchall()
+                experience_rows = [
+                    {
+                        "regime_id": str(row["regime_id"] or ""),
+                        "created_at": float(row["created_at"] or 0.0),
+                        "trade_id": str(row["trade_id"] or ""),
+                    }
+                    for row in rows
+                ]
+                projection = project_current_market_regime(experience_rows)
+                return projection
+            finally:
+                conn.close()
+        except Exception:
+            return {
+                "regime_id": "",
+                "confidence": 0.0,
+                "source": "unavailable",
+                "dimensions": {},
+            }
+
+    @staticmethod
+    def _regime_mismatch_verdict(
+        model_weak: bool,
+        *,
+        current_regime_id: str,
+        regime_fit_score: float | None,
+        regime_fit_ok_threshold: float = 0.5,
+    ) -> dict[str, Any]:
+        """Batch C: decide whether a globally-weak factor should pause downweight.
+
+        A factor that the model calls weak globally may still fit the *current*
+        market regime well (batch-A regime features make the model regime-aware;
+        the factor's shadow payload carries `current_regime_fit_score`).  When
+        the current-regime fit is good, global weakness is likely concentrated
+        in other regimes -> mark `regime_mismatch` and leave the weight alone
+        ("not suited to today's market" is not "never usable again").
+
+        Fail-safe: missing current regime projection or missing fit evidence
+        never erodes safety - both fall through to the existing global-weak
+        downweight path.
+        """
+        if not model_weak:
+            return {"regime_mismatch": False, "reason": "not_globally_weak"}
+        if not current_regime_id:
+            return {"regime_mismatch": False, "reason": "no_current_regime"}
+        if regime_fit_score is None:
+            return {"regime_mismatch": False, "reason": "no_regime_fit_evidence"}
+        fit = float(regime_fit_score)
+        if fit >= float(regime_fit_ok_threshold):
+            return {
+                "regime_mismatch": True,
+                "reason": "current_regime_fit_ok",
+                "current_regime_id": current_regime_id,
+                "regime_fit_score": round(fit, 4),
+            }
+        return {
+            "regime_mismatch": False,
+            "reason": "current_regime_weak_too",
+            "current_regime_id": current_regime_id,
+            "regime_fit_score": round(fit, 4),
+        }
 
     def _model_governance_evidence(self, item: dict[str, Any], cfg: Any) -> dict[str, Any]:
         shadow = item.get("factor_governance_shadow") or {}
