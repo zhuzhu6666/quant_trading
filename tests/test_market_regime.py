@@ -5,7 +5,10 @@ import sqlite3
 from types import SimpleNamespace
 
 from backend.ledger.service import DecisionLedger
-from backend.services.market_regime import resolve_market_regime
+from backend.services.market_regime import (
+    project_current_market_regime,
+    resolve_market_regime,
+)
 
 
 def _composite(**overrides):
@@ -98,3 +101,68 @@ def test_composite_decision_preserves_abstain_null_values(tmp_path):
     assert row["normalized_value"] is None
     assert row["gated"] == 1
     assert row["gated_reason"] == "abstain"
+
+
+# ── 批次 B: market_regime 权威投影 (当前市场状态可查询) ──────────
+
+def _make_experience_rows(regimes: list[tuple[str, float]]) -> list[dict]:
+    """构造 experience_memory 风格的只读行 (regime_id + created_at)."""
+    return [
+        {
+            "regime_id": regime_id,
+            "created_at": created_at,
+            "trade_id": f"trade_{i}",
+        }
+        for i, (regime_id, created_at) in enumerate(regimes)
+    ]
+
+
+def test_project_current_market_regime_returns_latest_regime():
+    """最新 regime 是窗口多数时, 返回该 regime 且高置信 (稳定状态)."""
+    rows = _make_experience_rows([
+        ("trend=strong|volatility=high", 100.0),
+        ("trend=weak|volatility=low", 200.0),
+        ("trend=weak|volatility=low", 210.0),
+    ])
+    projection = project_current_market_regime(rows)
+
+    assert projection["regime_id"] == "trend=weak|volatility=low"
+    assert projection["source"] == "experience_memory.latest"
+    assert projection["confidence"] == 0.6667
+
+
+def test_project_current_market_regime_handles_empty_history():
+    """无 experience 记录时返回 unavailable, 不抛异常。"""
+    projection = project_current_market_regime([])
+
+    assert projection["regime_id"] == ""
+    assert projection["source"] == "unavailable"
+    assert projection["confidence"] == 0.0
+
+
+def test_project_current_market_regime_falls_back_to_recent_majority():
+    """最新是单条新经验、窗口多数仍是旧 regime 时, 用多数避免 regime 抖动."""
+    rows = _make_experience_rows([
+        ("trend=strong|volatility=high", 100.0),
+        ("trend=strong|volatility=high", 200.0),
+        ("trend=strong|volatility=high", 300.0),
+        ("trend=weak|volatility=low", 400.0),
+    ])
+    projection = project_current_market_regime(rows)
+
+    assert projection["regime_id"] == "trend=strong|volatility=high"
+    assert projection["source"] == "experience_memory.recent_majority"
+    assert projection["confidence"] == 0.75
+
+
+def test_project_current_market_regime_rejects_unknown_regime():
+    """空/unknown regime_id 不算有效事实, 不会成为投影。"""
+    rows = _make_experience_rows([
+        ("", 100.0),
+        ("unknown", 200.0),
+        ("trend=normal|volatility=normal", 300.0),
+    ])
+    projection = project_current_market_regime(rows)
+
+    assert projection["regime_id"] == "trend=normal|volatility=normal"
+    assert projection["confidence"] == 1.0

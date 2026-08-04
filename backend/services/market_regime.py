@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 
@@ -16,6 +17,60 @@ def _field(value: Any, name: str, default: Any = None) -> Any:
 def _known(value: Any) -> str:
     normalized = str(value or "").strip().lower()
     return "" if normalized in _UNKNOWN else normalized
+
+
+def project_current_market_regime(
+    experience_rows: Sequence[Mapping[str, Any]],
+    *,
+    recent_window: int = 5,
+) -> dict[str, Any]:
+    """Project the current market regime from recent experience memory rows.
+
+    Read-only consumer of the existing `experience_memory.regime_id` fact source
+    (no new writer, no new table).  Latest known regime wins; when the latest
+    `recent_window` rows do not share one regime, fall back to a recent-majority
+    projection with reduced confidence.  Unknown/empty regime ids are ignored.
+    """
+    known = [
+        row
+        for row in experience_rows
+        if _known(_field(row, "regime_id", ""))
+    ]
+    if not known:
+        return {
+            "regime_id": "",
+            "confidence": 0.0,
+            "source": "unavailable",
+            "dimensions": {},
+        }
+    ordered = sorted(known, key=lambda row: float(_field(row, "created_at", 0.0) or 0.0))
+    latest = ordered[-1]
+    latest_regime = _known(_field(latest, "regime_id", ""))
+    window = ordered[-max(1, int(recent_window)):]
+    window_regimes = [_known(_field(row, "regime_id", "")) for row in window]
+    counts = Counter(regime for regime in window_regimes if regime)
+    if not counts:
+        return {
+            "regime_id": "",
+            "confidence": 0.0,
+            "source": "unavailable",
+            "dimensions": {},
+        }
+    majority_regime, majority_count = counts.most_common(1)[0]
+    if majority_regime == latest_regime:
+        confidence = min(1.0, majority_count / max(1, len(window)))
+        return {
+            "regime_id": majority_regime,
+            "confidence": round(confidence, 4),
+            "source": "experience_memory.latest",
+            "dimensions": {},
+        }
+    return {
+        "regime_id": majority_regime,
+        "confidence": round(majority_count / max(1, len(window)), 4),
+        "source": "experience_memory.recent_majority",
+        "dimensions": {},
+    }
 
 
 def resolve_market_regime(composite: Any) -> dict[str, Any]:
