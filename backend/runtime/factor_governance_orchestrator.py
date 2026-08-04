@@ -63,11 +63,11 @@ def factor_governance_health_max_age_seconds(
             getattr(
                 current,
                 "factor_governance_demo_health_max_age_seconds",
-                300.0,
+                900.0,
             )
-            or 300.0
+            or 900.0
         )
-    return 180.0
+    return 900.0
 
 
 @dataclass(frozen=True)

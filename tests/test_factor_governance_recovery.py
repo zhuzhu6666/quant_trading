@@ -625,7 +625,7 @@ def test_prepared_discovered_gp_candidate_reaches_preflight_and_activation(monke
     assert len(calls) == 1
     assert calls[0]["name"] == factor_id
     assert calls[0]["weight"] == 0.05
-    assert lifecycle_options == [{"health_stale_after_sec": 300.0}]
+    assert lifecycle_options == [{"health_stale_after_sec": 900.0}]
 
     catalog[0]["runtime_admission"] = "awaiting_projection_ack"
     assert orchestrator._is_dsl_promotion_lifecycle_candidate(catalog[0]) is False

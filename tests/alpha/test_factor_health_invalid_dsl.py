@@ -46,6 +46,59 @@ def test_evaluate_factors_skips_invalid_dsl_expression_before_execution(caplog):
         factor_registry._factors.update(original)
 
 
+def test_evaluate_factors_writes_dead_snapshot_for_retired_factor(
+    monkeypatch,
+    caplog,
+):
+    """Retired (DEAD) factors must keep a timestamped DEAD health snapshot.
+
+    The recovery chain requires ``health_updated_at > disabled_at``; skipping
+    retired factors lets the write_report orphan cleanup delete their health
+    row, so the freshness timeline can never advance. A DEAD snapshot keeps
+    the row alive (status=DEAD never triggers recovery by itself).
+    """
+    original = dict(factor_registry._factors)
+
+    def retired_factor(df):
+        return df["close"].pct_change().fillna(0.0)
+
+    retired_factor._factor_desc = "rank(close)"
+
+    class _DeadAdapter:
+        def dead_names(self):
+            return ["dsl_auto_retired"]
+
+    try:
+        factor_registry._factors.clear()
+        factor_registry._factors["dsl_auto_retired"] = retired_factor
+        monkeypatch.setattr(
+            "alpha.registry_adapter.RegistryAdapter.shared",
+            lambda: _DeadAdapter(),
+        )
+        caplog.set_level(logging.WARNING)
+
+        df = pd.DataFrame(
+            {
+                "open": np.linspace(100.0, 120.0, 140),
+                "high": np.linspace(101.0, 121.0, 140),
+                "low": np.linspace(99.0, 119.0, 140),
+                "close": np.linspace(100.0, 120.0, 140),
+                "volume": np.ones(140) * 100.0,
+            }
+        )
+
+        result = evaluate_factors(df, exclude_dead=True)
+
+        by_name = {f["factor"]: f for f in result["factors"]}
+        assert "dsl_auto_retired" in by_name
+        assert by_name["dsl_auto_retired"]["status"] == "DEAD"
+        assert by_name["dsl_auto_retired"]["score"] == 0.0
+        assert "retired_factor" in by_name["dsl_auto_retired"]["components"]
+    finally:
+        factor_registry._factors.clear()
+        factor_registry._factors.update(original)
+
+
 def test_evaluate_factors_includes_committed_prepared_dsl_after_registry_restart(
     monkeypatch,
 ):

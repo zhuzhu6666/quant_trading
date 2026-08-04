@@ -130,13 +130,24 @@ def _prepare_and_ack(service: FactorLifecycleService, name: str, *, now: float) 
 
 
 def _write_health(service: FactorLifecycleService, name: str, *, now: float) -> None:
+    _write_health_with(service, name, now=now, score=85.0, status="HEALTHY")
+
+
+def _write_health_with(
+    service: FactorLifecycleService,
+    name: str,
+    *,
+    now: float,
+    score: float,
+    status: str,
+) -> None:
     conn = sqlite3.connect(service.db_path)
     try:
         conn.execute(
             """INSERT OR REPLACE INTO factor_health
                (factor, score, status, n_obs, rolling_ic, updated_at)
-               VALUES (?, 85.0, 'HEALTHY', 250, 0.03, ?)""",
-            (name, now),
+               VALUES (?, ?, ?, 250, 0.03, ?)""",
+            (name, score, status, now),
         )
         conn.commit()
     finally:
@@ -453,6 +464,38 @@ def test_activation_requires_fresh_bound_projection_and_health(lifecycle):
     cfg = runtime_config.shared()
     assert cfg.factor_signal_config[name]["enabled"] is True
     assert cfg.factor_portfolio_weights[name] == 0.25
+
+
+def test_activation_accepts_fresh_watch_health_above_watch_threshold(lifecycle):
+    """Activation must align with promotion evidence: WATCH + score >= watch
+    threshold (40) is acceptable, not only HEALTHY + >=70. IC/n_obs/freshness
+    hard checks remain.
+    """
+    service, adapter, name, _expression = lifecycle
+    now = time.time()
+    _prepare_and_ack(service, name, now=now)
+    _write_health_with(service, name, now=now, score=55.0, status="WATCH")
+
+    result = service.activate(name=name, weight=0.25, now=now)
+
+    assert result["ok"] is True
+    assert adapter.promote_calls == 1
+    state = service.get_state(factor_name=name)
+    assert state["lifecycle_stage"] == "ACTIVE"
+    assert state["runtime_admission"] == "admitted"
+
+
+def test_activation_rejects_watch_health_below_watch_threshold(lifecycle):
+    service, adapter, name, _expression = lifecycle
+    now = time.time()
+    _prepare_and_ack(service, name, now=now)
+    _write_health_with(service, name, now=now, score=35.0, status="WATCH")
+
+    result = service.activate(name=name, weight=0.25, now=now)
+
+    assert result["ok"] is False
+    assert result["reason"] == "fresh_valid_factor_health_required"
+    assert adapter.promote_calls == 0
 
 
 def test_fresh_live_process_acknowledges_active_discovered_generation(

@@ -1654,9 +1654,19 @@ class FactorLifecycleService:
         score = float(health.get("score") or 0.0)
         n_obs = int(health.get("n_obs") or 0)
         rolling_ic = abs(float(health.get("rolling_ic") or 0.0))
+        # Activation health gate is aligned with promotion evidence: WATCH +
+        # score >= watch threshold is acceptable, not only HEALTHY + >=70.
+        # The promotion evidence check (factor_governance_orchestrator
+        # _promotion_evidence) already accepts {UNKNOWN, HEALTHY, WATCH} or
+        # score >= watch(40); requiring HEALTHY + >=70 at the final lifecycle
+        # gate makes promotion evidence pass but activation impossible for
+        # healthy-enough WATCH factors. IC/n_obs/freshness stay hard checks.
+        status_ok = (
+            str(health.get("status") or "").upper() in {"HEALTHY", "WATCH"}
+            and score >= float(cfg.factor_health_watch_threshold)
+        )
         valid = (
-            str(health.get("status") or "").upper() == "HEALTHY"
-            and score >= float(cfg.factor_health_healthy_threshold)
+            status_ok
             and n_obs >= int(cfg.factor_health_min_n_obs)
             and rolling_ic >= float(cfg.factor_health_ic_active_threshold)
             and updated_at > 0

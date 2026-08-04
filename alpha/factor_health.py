@@ -568,9 +568,28 @@ def evaluate_factors(
     n_dead_skipped = 0
     for i, name in enumerate(factor_names):
         if name in dead_names_set:
+            # Retired/DEAD factors must keep a timestamped DEAD snapshot so the
+            # recovery chain's health_updated_at > disabled_at can advance.
+            # The write_report orphan cleanup deletes any row not in this run's
+            # evaluated set, so skipping retired factors would wipe their health
+            # timeline and permanently block time-based recovery. status=DEAD
+            # never triggers recovery by itself (recovery still requires
+            # HEALTHY/WATCH + score gate), so writing it is safe.
             n_dead_skipped += 1
+            all_status.append(
+                FactorHealthStatus(
+                    factor=name,
+                    score=0.0,
+                    status="DEAD",
+                    n_obs=0,
+                    components={
+                        "evaluation_reason": "retired_factor",
+                        "retired_factor": True,
+                    },
+                )
+            )
             if n_factors > 0 and (i + 1) % 5 == 0:
-                cb("evaluating", 35 + 50 * (i + 1) / n_factors, f"{i+1}/{n_factors} factors ({n_dead_skipped} DEAD skipped)")
+                cb("evaluating", 35 + 50 * (i + 1) / n_factors, f"{i+1}/{n_factors} factors ({n_dead_skipped} DEAD kept)")
             continue
         try:
             fn = factor_functions.get(name)
