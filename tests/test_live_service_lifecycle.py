@@ -2655,6 +2655,75 @@ def test_final_close_retry_does_not_treat_stored_deal_as_new_baseline():
     }
 
 
+def test_final_close_ignores_stale_baseline_left_in_durable_latch():
+    """回归:final_close 忽略 latch 里残留的 baseline,强制空 baseline。
+
+    生产死锁(2026-08-05):no_new_risk_latch 持久化,重启前旧 defer 写入的
+    baseline_deal_ids=[已入库的 close deal] 仍留在 requirements 里。
+    若 cursor_overrides 透传该残留 baseline, sync_close_deals_batch 的
+    observed_ids - baseline_ids 恒为空集,平仓确认永远无法完成。
+    """
+    position_id = 779
+
+    assert live_service._pending_close_cursor_overrides(
+        {position_id},
+        active_rows_by_id={
+            position_id: {
+                "position_id": position_id,
+                "volume": 100.0,
+                "recovery_meta_json": "{}",
+            }
+        },
+        pending_close_causes={
+            position_id: {
+                "pending_kind": "final_close",
+                "baseline_cursor_available": True,
+                "baseline_deal_ids": [327972131],
+                "baseline_closed_volume": 100.0,
+                "required_closed_volume_delta": 100.0,
+            }
+        },
+        broker="ctrader",
+    ) == {
+        position_id: {
+            "baseline_cursor_available": True,
+            "baseline_deal_ids": [],
+            "baseline_closed_volume": 0.0,
+        }
+    }
+
+
+def test_partial_close_still_passes_baseline_through():
+    """partial_close 仍应透传 baseline(减仓 RPC 需证明新 leg)。"""
+    position_id = 779
+
+    assert live_service._pending_close_cursor_overrides(
+        {position_id},
+        active_rows_by_id={
+            position_id: {
+                "position_id": position_id,
+                "volume": 100.0,
+                "recovery_meta_json": "{}",
+            }
+        },
+        pending_close_causes={
+            position_id: {
+                "pending_kind": "partial_close",
+                "baseline_cursor_available": True,
+                "baseline_deal_ids": [9401],
+                "baseline_closed_volume": 50.0,
+            }
+        },
+        broker="ctrader",
+    ) == {
+        position_id: {
+            "baseline_cursor_available": True,
+            "baseline_deal_ids": [9401],
+            "baseline_closed_volume": 50.0,
+        }
+    }
+
+
 def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
     class _SyncHealth:
         def snapshot(self):

@@ -3111,7 +3111,27 @@ def _pending_close_cursor_overrides(
             state,
             latch_evidence=pending_close_causes.get(pid),
         )
-        if (
+        pending_kind = str(requirements.get("pending_kind") or "")
+        if pid in active_rows_by_id and pending_kind != "partial_close":
+            # A durable position that has disappeared at the broker is a
+            # final-close recovery, not a new reduction RPC.  A close deal
+            # already fetched by an earlier retry remains valid evidence; do
+            # not promote it to the retry baseline and wait for a nonexistent
+            # second close leg.  Timestamp and required-volume checks still
+            # guard against accepting an old partial close.
+            #
+            # Must run BEFORE the generic baseline passthrough below: the
+            # no_new_risk_latch is durable and may still carry baseline_deal_ids
+            # captured by an earlier (pre-fix) defer that pointed at the very
+            # close deal now in the store.  Using that stale baseline makes
+            # observed_ids - baseline_ids empty forever and deadlocks close
+            # confirmation (281067702 stuck 2026-08-05).
+            result[pid] = {
+                "baseline_cursor_available": True,
+                "baseline_deal_ids": [],
+                "baseline_closed_volume": 0.0,
+            }
+        elif (
             "baseline_deal_ids" in requirements
             or "baseline_closed_volume" in requirements
         ):
@@ -3126,20 +3146,6 @@ def _pending_close_cursor_overrides(
                 "baseline_closed_volume": float(
                     requirements.get("baseline_closed_volume") or 0.0
                 ),
-            }
-        elif pid in active_rows_by_id and str(
-            requirements.get("pending_kind") or ""
-        ) != "partial_close":
-            # A durable position that has disappeared at the broker is a
-            # final-close recovery, not a new reduction RPC.  A close deal
-            # already fetched by an earlier retry remains valid evidence; do
-            # not promote it to the retry baseline and wait for a nonexistent
-            # second close leg.  Timestamp and required-volume checks still
-            # guard against accepting an old partial close.
-            result[pid] = {
-                "baseline_cursor_available": True,
-                "baseline_deal_ids": [],
-                "baseline_closed_volume": 0.0,
             }
     return result
 
