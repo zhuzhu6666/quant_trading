@@ -808,6 +808,201 @@ class FactorGovernanceLightGBMService:
             },
         }
 
+    def re_review_quarantined_factor(
+        self,
+        *,
+        factor: str,
+        artifact_path: str | Path | None = None,
+        mode: str = "quarantine_review",
+    ) -> dict[str, Any]:
+        """Re-score one quarantined factor with the newest model artifact.
+
+        Quarantined factors produce no new trade reviews, so the routine
+        score_samples() sweep (bounded to the most recent rows) never reaches
+        them and their model evidence freezes at the pre-quarantine verdict.
+        This rebuilds the factor's rolling samples from its full historical
+        review rows (bypassing the recent-rows limit) and runs the latest
+        artifact over them, so the restore path can read a fresh verdict
+        instead of a stale 0.97 weakness.
+
+        Idempotent per (artifact, factor): skips when the latest artifact has
+        already scored this factor in quarantine_review mode.  This is the
+        automated replacement for a human re-evaluating a frozen factor.
+        """
+        dep_error = _dependency_error()
+        if dep_error:
+            return {
+                "ok": False,
+                "error": "dependency_missing",
+                "detail": dep_error,
+            }
+        import joblib
+
+        resolved_artifact = str(artifact_path or self.latest_artifact_path())
+        if not resolved_artifact:
+            return {
+                "ok": False,
+                "error": "artifact_missing",
+                "artifact_path": "",
+            }
+        path = Path(resolved_artifact)
+        if not path.exists():
+            return {
+                "ok": False,
+                "error": "artifact_missing",
+                "artifact_path": str(path),
+            }
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+        permission = validate_model_artifact(
+            artifact,
+            model_type=MODEL_TYPE,
+            db_path=self.db_path,
+            context={
+                "mode": mode,
+                "operation": "factor_governance_quarantine_review",
+            },
+        )
+        if not permission.get("ok"):
+            return {
+                "ok": False,
+                "error": "model_permission_violation",
+                "artifact_path": str(path),
+                "permission": permission,
+            }
+        model_file = Path(str(artifact.get("model_file") or ""))
+        if not model_file.exists():
+            return {
+                "ok": False,
+                "error": "model_file_missing",
+                "model_file": str(model_file),
+            }
+        bundle = joblib.load(model_file)
+        model = bundle["model"]
+        feature_names = list(bundle.get("feature_names") or FEATURE_NAMES)
+        artifact_ref = str(artifact.get("artifact_path") or str(path))
+        conn = self._conn()
+        try:
+            rows = self._execute(
+                conn,
+                """
+                SELECT inference_id
+                FROM factor_governance_shadow_audit
+                WHERE factor=? AND artifact_path=? AND mode=?
+                """,
+                (factor, artifact_ref, mode),
+            ).fetchall()
+        finally:
+            conn.close()
+        if rows:
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "already_reviewed_by_latest_artifact",
+                "factor": factor,
+                "artifact_path": artifact_ref,
+            }
+        samples = self._load_factor_review_samples(factor)
+        if not samples:
+            return {
+                "ok": False,
+                "error": "no_historical_review_samples",
+                "factor": factor,
+            }
+        import pandas as pd
+
+        x = pd.DataFrame(
+            [item["features"] for item in samples],
+            columns=feature_names,
+        )
+        probs = model.predict_proba(x)[:, 1]
+        items = []
+        for sample, prob in zip(samples, probs):
+            items.append(
+                self._persist_inference(artifact, sample, float(prob), mode=mode)
+            )
+        weakness = max(
+            float(item.get("weakness_score") or 0.0) for item in items
+        )
+        return {
+            "ok": True,
+            "model_type": MODEL_TYPE,
+            "model_version": str(artifact.get("model_version") or MODEL_VERSION),
+            "artifact_path": artifact_ref,
+            "factor": factor,
+            "count": len(items),
+            "weakness": weakness,
+            "positive_score": min(
+                float(item.get("positive_score") or 0.0) for item in items
+            ),
+            "inference_id": str(items[-1].get("inference_id") or ""),
+            "items": items,
+            "capabilities": {
+                "live_trading": False,
+                "advisory_only": True,
+                "shadow_only": True,
+            },
+        }
+
+    def _load_factor_review_samples(
+        self, factor: str, *, limit: int = 400
+    ) -> list[dict[str, Any]]:
+        """Load one factor's full historical review rows and rebuild rolling
+        samples (same feature pipeline as load_samples, unbounded by the
+        recent-rows limit so quarantined factors are reachable)."""
+        conn = self._conn()
+        try:
+            rows = self._execute(
+                conn,
+                """
+                SELECT f.id, f.review_id, f.trade_id, f.factor, f.entry_contribution,
+                       f.hold_contribution, f.exit_contribution, f.net_contribution,
+                       f.confidence, f.notes, r.position_id, r.entry_quality, r.hold_quality,
+                       r.exit_quality, r.regime_fit_score, r.execution_quality,
+                       r.pnl, r.mae, r.mfe, r.outcome_label, r.review_json, r.created_at,
+                       dl.regime_id AS regime_id,
+                       dl.regime_confidence AS regime_confidence,
+                       dl.decision_ts AS decision_ts
+                FROM decision_factor_snapshot dfs
+                JOIN decision_ledger dl ON dl.decision_id = dfs.decision_id
+                JOIN trade_outcome_review r ON r.entry_decision_id = dfs.decision_id
+                JOIN factor_contribution_review f
+                  ON f.review_id = r.review_id AND f.factor = dfs.factor
+                WHERE dl.regime_id IS NOT NULL AND dl.regime_id <> ''
+                  AND dfs.factor = ?
+                ORDER BY dl.decision_ts ASC, dfs.id ASC
+                LIMIT ?
+                """,
+                (factor, int(limit)),
+            ).fetchall()
+            row_items = [dict(row) for row in rows]
+            row_items = [
+                item for item in row_items if not _row_system_contaminated(item)
+            ]
+            ordered = sorted(
+                row_items,
+                key=lambda item: (
+                    _safe_float(item.get("decision_ts") or item.get("created_at")),
+                    int(item.get("id") or 0),
+                ),
+            )
+            samples = []
+            for idx, item in enumerate(ordered[:-1]):
+                if idx < 2:
+                    continue
+                future = ordered[idx + 1]
+                samples.append(
+                    _sample_from_row(
+                        item,
+                        label=_current_row_label(future),
+                        label_source="next_same_factor_outcome_from_rolling_history",
+                        rolling_history=ordered[max(0, idx - 4):idx + 1],
+                    )
+                )
+            samples.sort(key=lambda item: (item["created_at"], item["factor"]))
+            return samples
+        finally:
+            conn.close()
+
     def _persist_inference(
         self,
         artifact: dict[str, Any],

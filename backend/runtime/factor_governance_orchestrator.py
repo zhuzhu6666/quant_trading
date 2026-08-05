@@ -2753,6 +2753,66 @@ class FactorGovernanceOrchestrator:
             )
         ]
 
+    def _ensure_quarantine_review(
+        self,
+        item: dict[str, Any],
+        *,
+        disabled_at: float,
+        cfg: Any,
+    ) -> dict[str, Any]:
+        """Guarantee a quarantined factor has a post-quarantine model verdict.
+
+        The routine model sweep (score_samples) only covers factors that
+        still produce trade reviews, so a quarantined factor's evidence stays
+        frozen at the pre-quarantine verdict forever.  When no inference
+        newer than the quarantine exists, run the latest model artifact over
+        the factor's full historical review samples (mode=quarantine_review)
+        and persist the fresh verdict.
+
+        Returns {"reviewed": True, "weakness": ...} when a post-quarantine
+        verdict exists (already in the audit trail or just written).
+        Returns {"reviewed": False} when re-review is impossible (missing
+        dependency, no historical samples) so callers keep the strict path
+        and never widen risk on unverifiable evidence.
+        """
+        shadow = item.get("factor_governance_shadow") or {}
+        latest_ts = float(shadow.get("latest_created_at") or 0.0)
+        if latest_ts > 0.0 and latest_ts >= disabled_at:
+            return {
+                "reviewed": True,
+                "weakness": float(shadow.get("weakness_score") or 0.0),
+                "source": "latest_inference",
+                "latest_created_at": latest_ts,
+            }
+        try:
+            from research.factor_governance_lightgbm import (
+                FactorGovernanceLightGBMService,
+            )
+
+            svc = FactorGovernanceLightGBMService(db_path=self.overlay.db_path)
+            result = svc.re_review_quarantined_factor(
+                factor=str(item.get("factor_id") or ""),
+                mode="quarantine_review",
+            )
+        except Exception as exc:  # noqa: BLE001 - never crash the governance cycle
+            return {
+                "reviewed": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        if not result.get("ok"):
+            return {
+                "reviewed": False,
+                "error": str(result.get("error") or result.get("reason") or ""),
+                "result": result,
+            }
+        return {
+            "reviewed": True,
+            "weakness": float(result.get("weakness") or 0.0),
+            "source": "quarantine_review",
+            "inference_id": str(result.get("inference_id") or ""),
+            "count": int(result.get("count") or 0),
+        }
+
     def _restore_quarantined_builtin_alpha(
         self,
         catalog: list[dict[str, Any]],
@@ -2796,26 +2856,69 @@ class FactorGovernanceOrchestrator:
                 or health_updated_at <= disabled_at
                 or health_age < -5.0
                 or health_age > profile.health_max_age_seconds
-                or str(item.get("health_status") or "").upper()
-                not in {"HEALTHY", "WATCH"}
-                or float(item.get("health_score") or 0.0)
-                < profile.restore_min_health_score
-                or int(item.get("health_n_obs") or 0) < profile.restore_min_n_obs
             ):
                 continue
+            health_status = str(item.get("health_status") or "").upper()
+            health_ok = (
+                health_status in {"HEALTHY", "WATCH"}
+                and float(item.get("health_score") or 0.0)
+                >= profile.restore_min_health_score
+                and int(item.get("health_n_obs") or 0) >= profile.restore_min_n_obs
+            )
+            # Batch re-review: a quarantined factor must be re-scored by a
+            # model artifact newer than its quarantine before its evidence can
+            # speak again.  The routine sweep never covers quarantined factors
+            # (no new trade reviews), so stale pre-quarantine verdicts would
+            # otherwise freeze the restore path forever.  This is the
+            # automated replacement for a human re-evaluating the freeze.
+            review = self._ensure_quarantine_review(
+                item, disabled_at=disabled_at, cfg=cfg
+            )
+            fresh_weakness = (
+                float(review.get("weakness") or 0.0)
+                if review.get("reviewed")
+                else None
+            )
             model = self._model_governance_evidence(item, cfg)
-            has_model_evidence = (
-                int(model.get("sample_count") or 0) >= profile.restore_model_min_samples
-                or int(model.get("weak_sample_count") or 0)
-                >= profile.restore_model_min_samples
+            if fresh_weakness is not None:
+                # New-model verdict wins: it can both acquit (weakness below
+                # threshold -> eligible) and confirm (weakness above
+                # threshold -> stay quarantined).
+                if fresh_weakness >= profile.restore_max_weakness:
+                    continue
+                if float(item.get("health_score") or 0.0) < profile.hard_health_score:
+                    # Re-entry still needs a live factor: health scored below
+                    # the hard floor is not worth a new shadow generation.
+                    continue
+            else:
+                # Re-review unavailable (dependency missing / no historical
+                # samples): keep the strict path.  Only a healthy factor
+                # whose old model evidence does not veto may come back; this
+                # never widens risk on unverifiable evidence.
+                if not health_ok:
+                    continue
+                has_model_evidence = (
+                    int(model.get("sample_count") or 0)
+                    >= profile.restore_model_min_samples
+                    or int(model.get("weak_sample_count") or 0)
+                    >= profile.restore_model_min_samples
+                )
+                observed_weakness = max(
+                    float(model.get("avg_weakness_score") or 0.0),
+                    float(model.get("latest_weakness_score") or 0.0),
+                )
+                if (
+                    has_model_evidence
+                    and observed_weakness >= profile.restore_max_weakness
+                ):
+                    continue
+            candidates.append(
+                {
+                    **item,
+                    "_model_governance": model,
+                    "_quarantine_review": review,
+                }
             )
-            observed_weakness = max(
-                float(model.get("avg_weakness_score") or 0.0),
-                float(model.get("latest_weakness_score") or 0.0),
-            )
-            if has_model_evidence and observed_weakness >= profile.restore_max_weakness:
-                continue
-            candidates.append({**item, "_model_governance": model})
         candidates.sort(
             key=lambda item: (
                 -float(item.get("health_score") or 0.0),
@@ -2833,6 +2936,7 @@ class FactorGovernanceOrchestrator:
             "health_status": str(item.get("health_status") or "UNKNOWN"),
             "health_n_obs": int(item.get("health_n_obs") or 0),
             "model_governance": item.get("_model_governance") or {},
+            "quarantine_review": item.get("_quarantine_review") or {},
             "governance_profile": profile.name,
         }
         verdict = self._risk("promote_factor", item, evidence)

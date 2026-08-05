@@ -537,3 +537,99 @@ def test_batch_a_train_schema_bump(tmp_path, monkeypatch):
     assert result["feature_schema_version"].startswith("pit.v4")
     assert result["metrics"]["feature_count"] == len(FEATURE_NAMES)
     assert REGIME_FEATURES.issubset(set(FEATURE_NAMES))
+
+
+def test_re_review_quarantined_factor_reuses_newest_model(tmp_path, monkeypatch):
+    """A quarantined factor whose model evidence is frozen at an old verdict
+    is re-scored by the newest artifact (mode=quarantine_review), idempotently.
+
+    This is the automated replacement for a human re-evaluating a freeze:
+    no new trade reviews exist for quarantined factors, so the routine sweep
+    never reaches them and only this path refreshes their model evidence.
+    """
+    import time
+
+    db_path = tmp_path / "state.db"
+    artifact_dir = tmp_path / "artifacts"
+    _create_factor_reviews(db_path)
+
+    service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=artifact_dir)
+    result = service.train(limit=20, min_samples=6, register=False)
+    if not result["ok"]:
+        assert result["error"] == "dependency_missing"
+        return
+    artifact_path = result["artifact_path"]
+
+    # 模拟 7月2日那次 manual_shadow_eval_final:weak_factor 被旧模型打成 0.97
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        INSERT INTO factor_governance_shadow_audit
+        (inference_id, model_type, model_version, artifact_path, review_id,
+         trade_id, position_id, factor, mode, positive_score, weakness_score,
+         prediction, payload_json, result_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "factor_governance_lightgbm:rev_1:weak_factor:1782979155085",
+            MODEL_TYPE,
+            "5.0",
+            "old_artifact_7_2",
+            "rev_1",
+            "trade_1",
+            "pos_1",
+            "weak_factor",
+            "manual_shadow_eval_final_1782979134",
+            0.03,
+            0.97,
+            0,
+            "{}",
+            "{}",
+            1000.0,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    review = service.re_review_quarantined_factor(
+        factor="weak_factor",
+        artifact_path=artifact_path,
+    )
+    assert review["ok"] is True
+    assert review["factor"] == "weak_factor"
+    assert review["count"] >= 1
+    assert review["artifact_path"] == artifact_path
+
+    again = service.re_review_quarantined_factor(
+        factor="weak_factor",
+        artifact_path=artifact_path,
+    )
+    assert again["ok"] is True
+    assert again.get("skipped") is True
+
+    rows = sqlite3.connect(str(db_path)).execute(
+        """
+        SELECT mode, weakness_score, artifact_path
+        FROM factor_governance_shadow_audit
+        WHERE factor='weak_factor'
+        ORDER BY created_at DESC
+        """
+    ).fetchall()
+    assert rows[0][0] == "quarantine_review"
+    assert rows[0][2] == artifact_path
+    # 新推断的 weakness 来自最新模型,不是旧的 0.97 硬编码
+    assert 0.0 <= rows[0][1] <= 1.0
+
+
+def test_re_review_quarantined_factor_reports_no_historical_samples(tmp_path):
+    """A factor with no historical review rows cannot be re-reviewed; the
+    caller keeps the strict restore path (never widens risk)."""
+    import sqlite3
+
+    db_path = tmp_path / "state.db"
+    artifact_dir = tmp_path / "artifacts"
+    service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=artifact_dir)
+
+    result = service.re_review_quarantined_factor(factor="never_traded")
+    assert result["ok"] is False
+    assert result["error"] in {"artifact_missing", "no_historical_review_samples"}

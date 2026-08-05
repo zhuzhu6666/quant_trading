@@ -55,6 +55,10 @@ def _runtime_config(disabled_at: float) -> RuntimeConfig:
 
 
 def _catalog(now: float, *, health_updated_at: float | None = None, shadow: dict | None = None) -> list[dict]:
+    shadow = dict(shadow or {})
+    # Default: the latest model inference happened after the quarantine.
+    # Tests that want the strict path pass an explicit stale/weak shadow.
+    shadow.setdefault("latest_created_at", now)
     return [{
         "factor_id": "pin_bar",
         "source": "builtin",
@@ -67,7 +71,7 @@ def _catalog(now: float, *, health_updated_at: float | None = None, shadow: dict
         "health_score": 65.0,
         "health_n_obs": 2000,
         "health_updated_at": health_updated_at if health_updated_at is not None else now,
-        "factor_governance_shadow": shadow or {},
+        "factor_governance_shadow": shadow,
     }]
 
 
@@ -90,6 +94,154 @@ def test_quarantined_builtin_alpha_requires_cooldown_fresh_health_and_cleared_mo
     actions = orchestrator._restore_quarantined_builtin_alpha(
         _catalog(now, health_updated_at=disabled_at + health_updated_at_offset, shadow=shadow),
         {"run_id": "restore_gate_test"},
+    )
+
+    assert actions == []
+
+
+def test_quarantine_review_acquits_frozen_factor_without_health_ok(monkeypatch):
+    """A new-model verdict below the weakness threshold reopens the restore
+    path even when health degraded during quarantine (the stoch_k scenario:
+    frozen by a 6-sample model, health kept decaying while quarantined)."""
+    now = time.time()
+    disabled_at = now - 8 * 86400
+    rc.replace(_runtime_config(disabled_at))
+    calls: list[dict] = []
+
+    class _FakeLifecycle:
+        def __init__(self, _db_path, adapter=None, **_options):
+            self.adapter = adapter
+
+        def reenroll_quarantined_builtin(self, **kwargs):
+            calls.append(dict(kwargs))
+            return {
+                "ok": True,
+                "status": "committed",
+                "lifecycle_stage": "SHADOW",
+                "generation": 2,
+            }
+
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _FakeLifecycle)
+    orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(
+        orchestrator,
+        "_ensure_quarantine_review",
+        lambda item, disabled_at, cfg: {
+            "reviewed": True,
+            "weakness": 0.3,
+            "source": "quarantine_review",
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_audit_action",
+        lambda *_args, **_kwargs: {"status": "applied"},
+    )
+    catalog = _catalog(now)
+    catalog[0]["health_status"] = "DECAYING"
+    catalog[0]["health_score"] = 34.79
+    catalog[0]["factor_governance_shadow"] = {
+        "sample_count": 6,
+        "avg_weakness_score": 0.97,
+        "weakness_score": 0.97,
+        "latest_created_at": disabled_at - 100,
+    }
+
+    actions = orchestrator._restore_quarantined_builtin_alpha(
+        catalog,
+        {"run_id": "review_acquit"},
+    )
+
+    assert actions == [{"status": "applied"}]
+    assert len(calls) == 1
+    assert calls[0]["name"] == "pin_bar"
+    assert calls[0]["reason"] == "evidence-qualified builtin re-enrollment"
+
+
+def test_quarantine_review_confirms_weak_factor_stays_frozen(monkeypatch):
+    """A new-model verdict still above the weakness threshold keeps the
+    factor quarantined (the system confirms the freeze instead of acquitting)."""
+    now = time.time()
+    rc.replace(_runtime_config(now - 8 * 86400))
+    orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(
+        orchestrator,
+        "_ensure_quarantine_review",
+        lambda item, disabled_at, cfg: {
+            "reviewed": True,
+            "weakness": 0.92,
+            "source": "quarantine_review",
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_audit_action",
+        lambda *_args, **_kwargs: {"status": "applied"},
+    )
+
+    actions = orchestrator._restore_quarantined_builtin_alpha(
+        _catalog(now),
+        {"run_id": "review_confirm"},
+    )
+
+    assert actions == []
+
+
+def test_quarantine_review_acquitted_factor_below_hard_health_floor_stays_frozen(monkeypatch):
+    """Re-review can acquit a factor, but a health score under the hard floor
+    (e.g. low-frequency factors rated 5.0 on thin observations) still blocks a
+    new shadow generation: there is nothing live to re-observe."""
+    now = time.time()
+    rc.replace(_runtime_config(now - 8 * 86400))
+    orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(
+        orchestrator,
+        "_ensure_quarantine_review",
+        lambda item, disabled_at, cfg: {
+            "reviewed": True,
+            "weakness": 0.3,
+            "source": "quarantine_review",
+        },
+    )
+    catalog = _catalog(now)
+    catalog[0]["health_status"] = "DECAYING"
+    catalog[0]["health_score"] = 5.0
+
+    actions = orchestrator._restore_quarantined_builtin_alpha(
+        catalog,
+        {"run_id": "review_hard_floor"},
+    )
+
+    assert actions == []
+
+
+def test_quarantine_review_unavailable_keeps_strict_path(monkeypatch):
+    """When batch re-review cannot run (dependency missing, no historical
+    samples), the restore path stays strict: healthy factor + no old-model
+    veto may return, and a stale strong-weakness verdict still blocks."""
+    now = time.time()
+    rc.replace(_runtime_config(now - 8 * 86400))
+    orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(
+        orchestrator,
+        "_ensure_quarantine_review",
+        lambda item, disabled_at, cfg: {
+            "reviewed": False,
+            "error": "dependency_missing",
+        },
+    )
+    catalog = _catalog(now)
+    catalog[0]["factor_governance_shadow"] = {
+        "sample_count": 12,
+        "weak_sample_count": 12,
+        "avg_weakness_score": 0.97,
+        "weakness_score": 0.97,
+        "latest_created_at": now - 100,
+    }
+
+    actions = orchestrator._restore_quarantined_builtin_alpha(
+        catalog,
+        {"run_id": "review_unavailable"},
     )
 
     assert actions == []
