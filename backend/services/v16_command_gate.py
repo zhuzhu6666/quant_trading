@@ -532,7 +532,20 @@ class V16CommandGate:
         if not cls._scope_matches(item, scope_type=scope_type, scope_key=scope_key):
             return cls._blocked("v16_command_scope_mismatch", command_id=command_id)
         if action and not cls._action_matches(item, action):
-            return cls._blocked("v16_command_action_mismatch", command_id=command_id)
+            # 与 authorize()(:191-197)/claim()(:318-334) 保持一致:cycle 级 broad
+            # 命令(scope_type 为 factor_weight/parameter_template/context_policy/
+            # supervisor_template)授权给 specialist 控制面,事务内复验同样放行
+            # 窄 action claim。否则 claim 成功但 validate_claim_in_transaction 硬
+            # 失败 → GovernanceMutationError: v16_command_action_mismatch,
+            # apply_count=0,命令已 claim 却永远无法消费(死锁)。
+            command_scope = str(item.get("scope_type") or "")
+            if command_scope not in {
+                "factor_weight",
+                "parameter_template",
+                "context_policy",
+                "supervisor_template",
+            }:
+                return cls._blocked("v16_command_action_mismatch", command_id=command_id)
         for field, expected in (
             ("candidate_id", candidate_id),
             ("posterior_fingerprint", posterior_fingerprint),

@@ -252,3 +252,55 @@ def test_v16_claim_accepts_cycle_command_for_narrow_action(tmp_path):
     )
     assert claim["allowed"] is True
     assert claim["command_id"] == "cycle-cmd-1"
+
+
+def test_v16_validate_claim_accepts_cycle_command_for_narrow_action(tmp_path):
+    """cycle 级 broad 命令被窄 action claim 后,事务内复验必须放行。
+
+    回归:生产因子恢复链(FactorWeightChangeService.execute →
+    governance_mutation_coordinator)claim 成功后,coordinator 在同一事务里调
+    validate_claim_in_transaction 复验绑定。修复前这里没有 authorize()/claim()
+    的 broad-scope 宽限,action 匹配硬失败 → GovernanceMutationError:
+    v16_command_action_mismatch,apply_count=0 —— 命令已 claim 却永远无法消费,
+    零权重恢复(0.0→0.05)每小时全部 aborted(f091fcb 只修了 claim,漏了这里)。
+    """
+    db_path = tmp_path / "cycle-validate.db"
+    V16CommandGate.ensure_finalize_schema(db_path)
+    conn = connect(db_path)
+    now = time.time()
+    execute(
+        conn,
+        """INSERT INTO v16_brain_command
+           (command_id, target_agent, scope_type, scope_key, action, decision,
+            status, evidence_json, delegation_json, created_at, updated_at)
+           VALUES (?, 'factor_governance', 'factor_weight', 'alpha_weight_policy',
+                   'factor_governance_cycle', 'delegate', 'active', '{}', '{}', ?, ?)""",
+        ("cycle-cmd-validate", now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    claim = V16CommandGate.claim(
+        db_path,
+        target_agent="factor_governance",
+        scope_type="factor_weight",
+        scope_key="fib_rejection_confirmation",
+        action="update_weight",
+    )
+    assert claim["allowed"] is True
+
+    conn = connect(db_path)
+    try:
+        result = V16CommandGate.validate_claim_in_transaction(
+            conn,
+            command_id=claim["command_id"],
+            claim_token=claim["claim_token"],
+            target_agent="factor_governance",
+            scope_type="factor_weight",
+            scope_key="fib_rejection_confirmation",
+            action="update_weight",
+        )
+    finally:
+        conn.close()
+    assert result["allowed"] is True
+    assert result["status"] == "v16_command_claim_binding_valid"
