@@ -53,7 +53,19 @@ def handle_closed_positions_after_tick(
         real_pnl = real_pnls.get(pid)
         try:
             if not runtime.authoritative_close_pnl(real_pnl):
+                # 不要把"库里已存在的 close deal"当作 baseline 写进 latch:
+                # observed_close_cursor_out 的 baseline_deal_ids 来自当前库里
+                # 的 close deal 本身,若把它作为 recovery_evidence 传入,
+                # _pending_close_cursor_overrides 会读到被污染的 baseline,
+                # 导致 sync_close_deals_batch 的 observed_ids - baseline_ids
+                # 恒为空集,delta_proven 永远失败 -> 平仓确认死锁。
                 cursor = dict((close_deal_cursors or {}).get(pid) or {})
+                for _key in (
+                    "baseline_cursor_available",
+                    "baseline_deal_ids",
+                    "baseline_closed_volume",
+                ):
+                    cursor.pop(_key, None)
                 runtime.defer_close(
                     pid,
                     broker=broker,

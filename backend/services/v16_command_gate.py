@@ -316,7 +316,22 @@ class V16CommandGate:
                 if not cls._scope_matches(item, scope_type=scope_type, scope_key=scope_key):
                     continue
                 if action and not cls._action_matches(item, action):
-                    continue
+                    # 与 authorize() 保持一致:cycle 级 broad 命令(scope_type 为
+                    # factor_weight/parameter_template/context_policy/
+                    # supervisor_template)授权给 specialist 控制面,specialist
+                    # 内部再走更窄的 RiskPolicy/DecisionPolicy action 门。
+                    # 若这里直接 continue,cycle 命令(如 factor_governance_cycle)
+                    # 永远无法被 update_weight/promote_factor 消费 —— 命令创建、
+                    # 授权全部通过,但 runtime_mutation claim 必败
+                    # (aborted:v16_command_required,apply_count=0 死锁)。
+                    command_scope = str(item.get("scope_type") or "")
+                    if command_scope not in {
+                        "factor_weight",
+                        "parameter_template",
+                        "context_policy",
+                        "supervisor_template",
+                    }:
+                        continue
                 if candidate_id and str(item.get("candidate_id") or "") != str(candidate_id):
                     continue
                 if posterior_fingerprint and str(item.get("posterior_fingerprint") or "") != str(posterior_fingerprint):

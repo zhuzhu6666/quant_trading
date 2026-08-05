@@ -215,4 +215,40 @@ def test_expired_claim_recovery_cannot_refresh_stale_v16_authority(
            FROM v16_brain_command""",
     ).fetchone()
     conn.close()
+    assert row[0] == "available"
     assert tuple(row) == ("available", 2_000.0, 2_140.0)
+
+
+def test_v16_claim_accepts_cycle_command_for_narrow_action(tmp_path):
+    """cycle 级 broad 命令可被 update_weight claim(authorize/claim 一致)。
+
+    回归:生产命令 action='factor_governance_cycle'(scope_type='factor_weight'),
+    而 FactorWeightChangeService.execute 用 action='update_weight' claim。
+    修复前 claim 在 action 不匹配时直接 continue,导致命令永远无法消费
+    (apply_count=0 / aborted:v16_command_required 死锁)。
+    """
+    db_path = tmp_path / "cycle-claim.db"
+    V16CommandGate.ensure_finalize_schema(db_path)
+    conn = connect(db_path)
+    now = time.time()
+    execute(
+        conn,
+        """INSERT INTO v16_brain_command
+           (command_id, target_agent, scope_type, scope_key, action, decision,
+            status, evidence_json, delegation_json, created_at, updated_at)
+           VALUES (?, 'factor_governance', 'factor_weight', 'alpha_weight_policy',
+                   'factor_governance_cycle', 'delegate', 'active', '{}', '{}', ?, ?)""",
+        ("cycle-cmd-1", now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    claim = V16CommandGate.claim(
+        db_path,
+        target_agent="factor_governance",
+        scope_type="factor_weight",
+        scope_key="fib_rejection_confirmation",
+        action="update_weight",
+    )
+    assert claim["allowed"] is True
+    assert claim["command_id"] == "cycle-cmd-1"

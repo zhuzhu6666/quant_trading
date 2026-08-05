@@ -95,6 +95,51 @@ def test_close_without_authoritative_deal_defers_every_consumer():
     }
 
 
+def test_final_close_defer_strips_baseline_fields_from_cursor():
+    """回归:final_close defer 不再把"库里已有 close deal"当作 baseline 写进 latch。
+
+    生产死锁(2026-08-05):observed_close_cursor_out 的 baseline_deal_ids
+    来自当前库里的 close deal 本身,若原样传入 recovery_evidence,
+    _pending_close_cursor_overrides 读到被污染的 baseline 后
+    observed_ids - baseline_ids 恒为空集,平仓确认永远无法完成。
+    """
+    calls = _calls()
+    runtime = _runtime(
+        calls,
+        reconcile_account=lambda _bridge: None,
+    )
+
+    handle_closed_positions_after_tick(
+        closed_pids={7},
+        real_pnls={},
+        attr_engine=object(),
+        bar={},
+        cfg=object(),
+        account={},
+        broker="ctrader",
+        tick=5,
+        log=lambda _message: None,
+        runtime=runtime,
+        broker_open_position_ids=set(),
+        bridge=object(),
+        close_deal_cursors={
+            7: {
+                "from_ts": 90,
+                "baseline_cursor_available": True,
+                "baseline_deal_ids": [327972131],
+                "baseline_closed_volume": 100.0,
+            }
+        },
+    )
+
+    assert calls["deferred"][0][1]["recovery_evidence"] == {
+        "pending_kind": "final_close",
+        "from_ts": 90,
+    }
+    assert "baseline_deal_ids" not in calls["deferred"][0][1]["recovery_evidence"]
+    assert "baseline_closed_volume" not in calls["deferred"][0][1]["recovery_evidence"]
+
+
 def test_confirmed_close_rebuilds_session_before_releasing_cursor():
     calls = _calls()
     real_pnl = {"net": 4.5, "deal_ids": [88], "exec_timestamp": 100.0}

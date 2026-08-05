@@ -10123,6 +10123,11 @@ def _process_tick_existing_decision_bar(
 
             _sconn = _get_state_pg_conn()
             try:
+                # tick 路径检测到的 closed_pids 语义 = broker 仓位已消失
+                # (final close)。必须传空 baseline:若缺省, sync_close_deals_batch
+                # 会把"当前库里已有的 close deal"当作 baseline(observed_baseline),
+                # 导致 observed_ids - baseline_ids 恒为空集、delta_proven 永远
+                # False —— 平仓成交已入库但永远无法确认的死锁。
                 real_pnls = sync_close_deals_batch(
                     bridge,
                     _sconn,
@@ -10133,6 +10138,14 @@ def _process_tick_existing_decision_bar(
                     required_closed_volume_delta_by_position=(
                         _recovery_remaining_volume_by_position(closed_pids)
                     ),
+                    baseline_close_cursor_by_position={
+                        int(pid): {
+                            "baseline_cursor_available": True,
+                            "baseline_deal_ids": [],
+                            "baseline_closed_volume": 0.0,
+                        }
+                        for pid in closed_pids
+                    },
                     observed_close_cursor_out=close_deal_cursors,
                 )
             finally:
