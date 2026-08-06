@@ -967,8 +967,7 @@ class FactorGovernanceLightGBMService:
                 JOIN trade_outcome_review r ON r.entry_decision_id = dfs.decision_id
                 JOIN factor_contribution_review f
                   ON f.review_id = r.review_id AND f.factor = dfs.factor
-                WHERE dl.regime_id IS NOT NULL AND dl.regime_id <> ''
-                  AND dfs.factor = ?
+                WHERE dfs.factor = ?
                 ORDER BY dl.decision_ts ASC, dfs.id ASC
                 LIMIT ?
                 """,
