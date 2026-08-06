@@ -195,6 +195,14 @@ class FactorGovernanceOrchestrator:
         actions: list[dict[str, Any]] = []
         status = "completed"
         try:
+            shadow_refresh = self._refresh_shadow_model_evidence()
+            if shadow_refresh.get("status") in ("ok", "failed"):
+                logger.info(
+                    "[governance] shadow evidence refresh %s count=%s error=%s",
+                    shadow_refresh.get("status"),
+                    shadow_refresh.get("count"),
+                    shadow_refresh.get("error"),
+                )
             catalog = build_factor_catalog()
             actions.extend(self._rollback_failed_actions(run))
             catalog_snapshot = persist_factor_catalog_snapshot(
@@ -1253,6 +1261,39 @@ class FactorGovernanceOrchestrator:
         }
         projection_ready = bool(payload.get("ok")) and status != "committed_projection_degraded"
         return committed, projection_ready, status or "mutation_blocked"
+
+    def _refresh_shadow_model_evidence(self) -> dict[str, Any]:
+        """Refresh factor-governance shadow evidence on every cycle.
+
+        Runs score_samples over the most recent review samples with the
+        latest artifact (skip_existing dedupes by artifact+sample). This
+        decouples governance evidence freshness from the weekend-only
+        offmarket full-profile training window. Never blocks the cycle.
+        """
+        try:
+            from research.factor_governance_lightgbm import (
+                FactorGovernanceLightGBMService,
+            )
+
+            svc = FactorGovernanceLightGBMService(db_path=self.overlay.db_path)
+            result = svc.score_samples(
+                mode="shadow",
+                skip_existing=True,
+                limit=200,
+            )
+            return {
+                "status": "ok" if result.get("ok") else "skipped",
+                "error": str(result.get("error") or result.get("reason") or ""),
+                "count": int(result.get("count") or 0),
+                "skipped": bool(result.get("skipped")),
+                "model_version": str(result.get("model_version") or ""),
+            }
+        except Exception as exc:  # noqa: BLE001 - never crash the governance cycle
+            return {
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "count": 0,
+            }
 
     def _rollback_failed_actions(self, run: dict[str, Any]) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
