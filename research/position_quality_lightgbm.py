@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,25 @@ from backend.core.state_store import (
 )
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
-from backend.services.review_contract import review_has_system_contamination
+from backend.services.review_contract import SYSTEM_CONTAMINATION_LABELS
+
+
+def _review_text_contaminated(review_json: str) -> bool:
+    """Fast contamination check on the serialized review text.
+
+    New-format reviews carry system_issue_context with an explicit
+    contaminates_learning flag; a single regex scan beats a full JSON
+    parse of the (large) review payload. Legacy rows without that
+    context fall back to a quoted-label substring check for the
+    failure-tag path (responsibility_labels/failure_tags arrays are
+    serialized with quoted members), never a full parse.
+    """
+    if not review_json:
+        return False
+    match = re.search(r'"contaminates_learning"\s*:\s*(true|false)', review_json)
+    if match is not None:
+        return match.group(1) == "true"
+    return any(f'"{label}"' in review_json for label in SYSTEM_CONTAMINATION_LABELS)
 
 
 MODEL_TYPE = "position_quality_lightgbm"
@@ -262,9 +281,22 @@ class PositionQualityLightGBMService:
                        t.verdict_json, t.context_json, t.template_id,
                        t.template_version, t.config_version, t.config_hash,
                        r.review_id, r.pnl, r.outcome_label, r.failure_tags_json,
-                       r.review_json, r.created_at AS review_created_at
+                       -- contamination is decided server-side so the large
+                       -- review_json column never crosses the wire; keep the
+                       -- quoted-label set in sync with SYSTEM_CONTAMINATION_LABELS
+                       -- (backend/services/review_contract.py)
+                       (r.review_json LIKE '%"contaminates_learning":%true%'
+                        OR (r.review_json NOT LIKE '%"contaminates_learning":%'
+                            AND (r.review_json LIKE '%"bar_data_degraded"%'
+                                 OR r.review_json LIKE '%"broker_close_price_unknown"%'
+                                 OR r.review_json LIKE '%"data_quality_issue"%'
+                                 OR r.review_json LIKE '%"decision_bar_stale"%'
+                                 OR r.review_json LIKE '%"market_data_stale"%'
+                                 OR r.review_json LIKE '%"signal_execution_delay"%')))
+                       AS review_contaminated,
+                       r.created_at AS review_created_at
                 FROM position_supervisor_trace t
-                JOIN trade_outcome_review r ON CAST(r.position_id AS TEXT)=CAST(t.position_id AS TEXT)
+                JOIN trade_outcome_review r ON r.position_id = t.position_id
                 WHERE t.stage='evaluated' AND COALESCE(t.trace_integrity, 'full')='full'
                 ORDER BY t.event_ts DESC
                 """,
@@ -273,9 +305,26 @@ class PositionQualityLightGBMService:
             clean_items = [
                 dict(row)
                 for row in rows
-                if not review_has_system_contamination(_loads(row["review_json"], {}))
+                if not bool(row["review_contaminated"])
             ]
-            items = clean_items[: max(int(limit) * 4, int(limit))]
+            # Trace density is high (hundreds of traces per position), so a
+            # trace-count bound (limit*4) collapses the window to the most
+            # recent 1-3 positions and starves the sample pool. Bound by
+            # position count instead: keep every trace of the most recent
+            # max_positions positions.
+            max_positions = max(20, int(limit) // 2)
+            seen_positions: set[str] = set()
+            bounded: list[dict[str, Any]] = []
+            for item in clean_items:  # rows are ordered event_ts DESC
+                position_id = str(item.get("position_id") or "")
+                if not position_id:
+                    continue
+                if position_id not in seen_positions:
+                    if len(seen_positions) >= max_positions:
+                        break
+                    seen_positions.add(position_id)
+                bounded.append(item)
+            items = bounded
             items.reverse()
             latest_template_version = str(items[-1].get("template_version") or "") if items else ""
             lineage_items = [

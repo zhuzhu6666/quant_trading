@@ -156,3 +156,29 @@ def test_position_quality_lightgbm_excludes_system_contaminated_reviews(tmp_path
     ).load_samples(limit=20)
 
     assert "rev_0" not in {sample["review_id"] for sample in samples}
+
+
+def test_review_text_contaminated_matches_sql_semantics():
+    from research.position_quality_lightgbm import _review_text_contaminated
+
+    # Standard separators
+    assert _review_text_contaminated(
+        '{"system_issue_context": {"contaminates_learning": true}}'
+    )
+    assert not _review_text_contaminated(
+        '{"system_issue_context": {"contaminates_learning": false}}'
+    )
+    # Compact separators
+    assert _review_text_contaminated(
+        '{"system_issue_context":{"contaminates_learning":true}}'
+    )
+    assert not _review_text_contaminated(
+        '{"system_issue_context":{"contaminates_learning":false}}'
+    )
+    # Legacy rows without the flag: quoted failure-tag fallback
+    assert _review_text_contaminated(
+        '{"failure_tags": ["decision_bar_stale", "other"]}'
+    )
+    assert not _review_text_contaminated('{"failure_tags": ["other_tag"]}')
+    assert not _review_text_contaminated("")
+    assert not _review_text_contaminated('{"summary_text": "clean review"}')
