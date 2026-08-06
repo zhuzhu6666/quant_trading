@@ -438,14 +438,30 @@ def run_offmarket_position_quality_job(
                 )
                 result["models"][model_type] = item
         else:
-            for model_type, _, _ in suite[1:]:
-                result["models"][model_type] = {
-                    "train": {
-                        "ok": False,
-                        "skipped": True,
-                        "reason": "profile_not_full",
+            for model_type, model_service, train_kwargs in suite[1:]:
+                if model_type != "factor_governance_lightgbm":
+                    result["models"][model_type] = {
+                        "train": {
+                            "ok": False,
+                            "skipped": True,
+                            "reason": "profile_not_full",
+                        }
                     }
-                }
+                    continue
+                # limited_with_positions: factor governance is a light
+                # model (seconds of training); keep its evidence fresh on
+                # every daily maintenance window instead of waiting for the
+                # weekend full profile.
+                trained = model_service.train(**train_kwargs)
+                item = {"train": trained}
+                item["shadow"] = _score_shadow_model(
+                    model_type=model_type,
+                    model_service=model_service,
+                    artifact_path=str(trained.get("artifact_path") or "") or None,
+                    limit=int(payload["shadow_limit"]),
+                    mode="offmarket_shadow_after_train",
+                )
+                result["models"][model_type] = item
 
         governance = ModelInfluenceGovernanceService(db_path)
         result["reconcile_before_training"] = governance.reconcile_active_models()

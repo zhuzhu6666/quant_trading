@@ -32,28 +32,52 @@ def test_offmarket_high_load_runs_training_when_closed(monkeypatch, tmp_path):
         "high_load_allowed": True,
         "high_load_profile": "limited_with_positions",
     }
+    trained = []
 
-    class FakeService:
-        def __init__(self, db_path=None):
-            self.db_path = db_path
+    def fake_service(model_type, train_limit):
+        class FakeService:
+            def __init__(self, db_path=None):
+                self.db_path = db_path
 
-        def train(self, **kwargs):
-            assert kwargs["limit"] == 250
-            assert kwargs["register"] is True
-            return {
-                "ok": True,
-                "artifact_path": str(tmp_path / "artifact.json"),
-                "metrics": {"sample_count": 20},
-            }
+            def train(self, **kwargs):
+                assert kwargs["limit"] == train_limit
+                assert kwargs["register"] is True
+                trained.append(model_type)
+                return {
+                    "ok": True,
+                    "artifact_path": str(tmp_path / f"{model_type}.json"),
+                    "metrics": {"sample_count": 20},
+                }
 
-        def score_samples(self, **kwargs):
-            assert kwargs["limit"] == 30
-            assert kwargs["mode"] == "offmarket_shadow_after_train"
-            return {"ok": True, "count": 30}
+            def score_samples(self, **kwargs):
+                assert kwargs["limit"] == 30
+                assert kwargs["mode"] == "offmarket_shadow_after_train"
+                return {"ok": True, "count": 30}
+
+        return FakeService
 
     monkeypatch.setattr(
         "research.position_quality_lightgbm.PositionQualityLightGBMService",
-        FakeService,
+        fake_service("position_quality_lightgbm", 250),
+    )
+    monkeypatch.setattr(
+        "research.factor_governance_lightgbm.FactorGovernanceLightGBMService",
+        fake_service("factor_governance_lightgbm", 5000),
+    )
+
+    class FakeGovernance:
+        def __init__(self, db_path=None):
+            self.db_path = db_path
+
+        def reconcile_active_models(self):
+            return {"ok": True}
+
+        def evaluate_artifact(self, artifact_path):
+            return {"passed": False, "artifact_path": artifact_path}
+
+    monkeypatch.setattr(
+        "backend.services.model_influence_governance.ModelInfluenceGovernanceService",
+        FakeGovernance,
     )
 
     result = live_service._scheduled_offmarket_position_quality_lightgbm(db_path=db_path)
@@ -62,6 +86,8 @@ def test_offmarket_high_load_runs_training_when_closed(monkeypatch, tmp_path):
     assert result["status"] == "done"
     assert result["audit"]["status"] == "done"
     assert result["audit"]["high_load_profile"] == "limited_with_positions"
+    assert trained == ["position_quality_lightgbm", "factor_governance_lightgbm"]
+    assert "shadow" in result["result"]["models"]["factor_governance_lightgbm"]
 
 
 def test_offmarket_high_load_scores_all_models_after_full_training(monkeypatch, tmp_path):
