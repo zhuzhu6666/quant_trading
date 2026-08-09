@@ -69,9 +69,6 @@ from backend.services.learning_fact_views import (
     lifecycle_fact_payload,
     model_canary_reviews_fact_payload,
     model_inference_audits_fact_payload,
-    model_meta_advisories_fact_payload,
-    model_meta_lightgbm_audits_fact_payload,
-    model_meta_lightgbm_shadow_report_fact_payload,
     model_offmarket_high_load_audits_fact_payload,
     model_open_quality_audits_fact_payload,
     model_permission_audits_fact_payload,
@@ -80,7 +77,6 @@ from backend.services.learning_fact_views import (
     observe_learning_dataset_source,
     suggestions_fact_payload,
 )
-from backend.services.meta_governance import MetaGovernanceService
 from research.features import (
     LearningDatasetBuilder,
     LearningDatasetReadiness,
@@ -97,8 +93,6 @@ from research.model_canary import ModelCanaryReviewer
 from research.model_canary_executor import ModelCanaryExecutor
 from research.model_inference_contract import ModelInferenceContract
 from research.model_pipeline import LearningModelPipeline
-from research.meta_model_sidecar import MetaModelSidecar
-from research.meta_model_lightgbm import MetaModelLightGBMService
 from research.llm_advisory import LLMAdvisoryService
 from research.factor_governance_lightgbm import FactorGovernanceLightGBMService
 from research.open_quality_lightgbm import OpenQualityLightGBMService
@@ -1668,48 +1662,6 @@ class FactorGovernanceLightGBMShadowRequest(BaseModel):
     min_weakness_score: float = 0.65
 
 
-class MetaModelLightGBMTrainRequest(BaseModel):
-    db_path: str | None = None
-    artifact_dir: str | None = None
-    registry_db_path: str | None = None
-    symbol: str = "XAUUSD+"
-    timeframe: str = "M5"
-    limit: int = 2000
-    window: int = 12
-    horizon: int = 3
-    holdout_ratio: float = 0.25
-    min_samples: int = 30
-    register_model: bool = True
-    run_shadow: bool = True
-    shadow_limit: int = 200
-    materialize_ledger: bool = False
-
-
-class MetaModelLightGBMShadowRequest(BaseModel):
-    db_path: str | None = None
-    artifact_dir: str | None = None
-    artifact_path: str | None = None
-    limit: int = 200
-    window: int = 12
-    horizon: int = 3
-    mode: str = "shadow"
-    materialize_ledger: bool = False
-
-
-class MetaModelLightGBMSnapshotRequest(BaseModel):
-    db_path: str | None = None
-    limit: int = 200
-    include_samples: bool = False
-    source: str = "manual"
-
-
-class MetaModelLightGBMGovernanceRequest(BaseModel):
-    db_path: str | None = None
-    limit: int = 200
-    snapshot: bool = True
-    source: str = "manual"
-
-
 class SupervisorCounterfactualRunRequest(BaseModel):
     db_path: str | None = None
     limit: int = 100
@@ -1742,17 +1694,6 @@ class ModelPermissionValidateRequest(BaseModel):
     model_type: str | None = None
     db_path: str | None = None
     require_shadow: bool = True
-
-
-class MetaModelContextRequest(BaseModel):
-    db_path: str | None = None
-    context: dict[str, Any] | None = None
-
-
-class MetaModelAdvisoryRunRequest(BaseModel):
-    db_path: str | None = None
-    context: dict[str, Any] | None = None
-    materialize: bool = True
 
 
 class LLMAdvisoryRunRequest(BaseModel):
@@ -3831,30 +3772,6 @@ def list_learning_model_inference_audits(
     return model_inference_audits_fact_payload({"items": items, "count": len(items)})
 
 
-@router.post("/model/meta/context")
-def build_learning_meta_model_context(_user: RequireUser, req: MetaModelContextRequest) -> dict:
-    return MetaModelSidecar(req.db_path or _state_db_path()).build_context(req.context)
-
-
-@router.post("/model/meta/advisory-run")
-def run_learning_meta_model_advisory(_user: RequireUser, req: MetaModelAdvisoryRunRequest) -> dict:
-    return MetaModelSidecar(req.db_path or _state_db_path()).run(
-        context=req.context,
-        materialize=bool(req.materialize),
-    )
-
-
-@router.get("/model/meta/advisories")
-def list_learning_meta_model_advisories(
-    _user: RequireUser,
-    limit: int = Query(default=50, ge=1, le=500),
-    db_path: str | None = Query(default=None),
-) -> dict:
-    return model_meta_advisories_fact_payload(
-        MetaModelSidecar(db_path or _state_db_path()).list_advisories(limit=limit)
-    )
-
-
 @router.post("/model/llm/advisory-run")
 def run_learning_llm_advisory(_user: RequireUser, req: LLMAdvisoryRunRequest) -> dict:
     max_output_tokens = max(1, int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "32768") or 32768))
@@ -4110,156 +4027,6 @@ def list_factor_governance_lightgbm_advisories(
         audit_observed_at=(audit_fact.get("_fact") or {}).get("observed_at"),
         audit_count=len(audits.get("items") or []),
     )
-
-
-@router.post("/model/meta-lightgbm/train")
-def train_meta_model_lightgbm(_user: RequireUser, req: MetaModelLightGBMTrainRequest) -> dict:
-    service = MetaModelLightGBMService(
-        db_path=req.db_path or _state_db_path(),
-        artifact_dir=req.artifact_dir,
-    )
-    result = service.train(
-        limit=max(1, int(req.limit)),
-        window=max(1, int(req.window)),
-        horizon=max(1, int(req.horizon)),
-        holdout_ratio=max(0.0, min(float(req.holdout_ratio), 0.8)),
-        min_samples=max(1, int(req.min_samples)),
-        register=bool(req.register_model),
-        registry_db_path=req.registry_db_path,
-        symbol=req.symbol,
-        timeframe=req.timeframe,
-    )
-    if result.get("ok") and req.run_shadow:
-        result["shadow"] = service.score_samples(
-            artifact_path=result.get("artifact_path"),
-            limit=max(1, int(req.shadow_limit)),
-            window=max(1, int(req.window)),
-            horizon=max(1, int(req.horizon)),
-            mode="shadow_after_train",
-            materialize_ledger=bool(req.materialize_ledger),
-        )
-    return result
-
-
-@router.post("/model/meta-lightgbm/shadow-run")
-def run_meta_model_lightgbm_shadow(_user: RequireUser, req: MetaModelLightGBMShadowRequest) -> dict:
-    service = MetaModelLightGBMService(
-        db_path=req.db_path or _state_db_path(),
-        artifact_dir=req.artifact_dir,
-    )
-    return service.score_samples(
-        artifact_path=req.artifact_path,
-        limit=max(1, int(req.limit)),
-        window=max(1, int(req.window)),
-        horizon=max(1, int(req.horizon)),
-        mode=req.mode or "shadow",
-        materialize_ledger=bool(req.materialize_ledger),
-    )
-
-
-@router.get("/model/meta-lightgbm/audits")
-def list_meta_model_lightgbm_audits(
-    _user: RequireUser,
-    limit: int = Query(default=100, ge=1, le=1000),
-    posture: str | None = Query(default=None),
-    db_path: str | None = Query(default=None),
-    artifact_dir: str | None = Query(default=None),
-) -> dict:
-    service = MetaModelLightGBMService(
-        db_path=db_path or _state_db_path(),
-        artifact_dir=artifact_dir,
-    )
-    return model_meta_lightgbm_audits_fact_payload(
-        service.list_audits(limit=limit, posture=posture)
-    )
-
-
-@router.get("/model/meta-lightgbm/shadow-report")
-def build_meta_model_lightgbm_shadow_report(
-    _user: RequireUser,
-    limit: int = Query(default=200, ge=1, le=2000),
-    posture: str | None = Query(default=None),
-    include_samples: bool = Query(default=True),
-    db_path: str | None = Query(default=None),
-    artifact_dir: str | None = Query(default=None),
-) -> dict:
-    service = MetaModelLightGBMService(
-        db_path=db_path or _state_db_path(),
-        artifact_dir=artifact_dir,
-    )
-    report = service.build_shadow_report(
-        limit=limit,
-        posture=posture,
-        include_samples=bool(include_samples),
-    )
-    latest = service.list_audits(limit=1, posture=posture)
-    latest_items = latest.get("items") if isinstance(latest, dict) else []
-    latest_item = latest_items[0] if isinstance(latest_items, list) and latest_items else {}
-    return model_meta_lightgbm_shadow_report_fact_payload(
-        report,
-        audit_observed_at=(latest_item or {}).get("created_at"),
-        audit_count=int(report.get("audit_count") or 0),
-    )
-
-
-@router.post("/model/meta-lightgbm/shadow-report/snapshot")
-def snapshot_meta_model_lightgbm_shadow_report(
-    _user: RequireUser,
-    req: MetaModelLightGBMSnapshotRequest,
-) -> dict:
-    report = MetaModelLightGBMService(db_path=req.db_path or _state_db_path()).build_shadow_report(
-        limit=max(1, int(req.limit)),
-        include_samples=bool(req.include_samples),
-    )
-    return MetaGovernanceService(req.db_path or _state_db_path()).create_shadow_report_snapshot(
-        report=report,
-        limit=max(1, int(req.limit)),
-        include_samples=bool(req.include_samples),
-        source=req.source or "manual",
-    )
-
-
-@router.get("/model/meta-lightgbm/shadow-report/snapshots")
-def list_meta_model_lightgbm_shadow_report_snapshots(
-    _user: RequireUser,
-    limit: int = Query(default=20, ge=1, le=200),
-    db_path: str | None = Query(default=None),
-) -> dict:
-    return MetaGovernanceService(db_path or _state_db_path()).list_shadow_report_snapshots(limit=limit)
-
-
-@router.post("/model/meta-lightgbm/governance-suggestion")
-def materialize_meta_model_lightgbm_governance_suggestion(
-    _user: RequireUser,
-    req: MetaModelLightGBMGovernanceRequest,
-    x_confirm: str | None = Header(default=None),
-) -> dict:
-    _require_governance_confirm(
-        user=_user,
-        endpoint="/api/learning/model/meta-lightgbm/governance-suggestion",
-        action="materialize_meta_governance_suggestion",
-        x_confirm=x_confirm,
-        result={"limit": req.limit, "snapshot": req.snapshot, "source": req.source},
-    )
-    report = MetaModelLightGBMService(db_path=req.db_path or _state_db_path()).build_shadow_report(
-        limit=max(1, int(req.limit)),
-        include_samples=False,
-    )
-    result = MetaGovernanceService(req.db_path or _state_db_path()).materialize_meta_governance_suggestion(
-        report=report,
-        limit=max(1, int(req.limit)),
-        snapshot=bool(req.snapshot),
-        source=req.source or "manual",
-    )
-    _learning_cache_invalidate("suggestions:", "summary")
-    _audit_governance_mutation(
-        user=_user,
-        endpoint="/api/learning/model/meta-lightgbm/governance-suggestion",
-        action="materialize_meta_governance_suggestion",
-        status="applied" if result.get("ok", True) else "blocked",
-        result=result,
-    )
-    return result
 
 
 @router.get("/model/offmarket-high-load/audits")

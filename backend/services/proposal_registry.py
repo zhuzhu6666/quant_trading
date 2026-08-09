@@ -56,7 +56,6 @@ IGNORED_MAINTENANCE_ACTIONS = {
     "upsert_samples",
     "rebuild_contract_json",
     "review_suggestion",
-    "meta_model_shadow_audit",
 }
 HIGH_IMPACTS = {"high", "critical", "live", "live_trading", "high_impact"}
 SOURCE_BASE_RELIABILITY = {
@@ -70,7 +69,6 @@ SOURCE_BASE_RELIABILITY = {
     "open_quality_shadow_audit": 0.36,
     "position_quality_shadow_audit": 0.36,
     "factor_governance_shadow_audit": 0.36,
-    "meta_model_shadow_audit": 0.36,
 }
 FRESHNESS_LIMIT_SECONDS = {
     "high": 2 * 3600.0,
@@ -1568,7 +1566,6 @@ class ProposalRegistryService:
             ("open_quality_shadow_audit", "inference_id", "open_quality_model", "decision_id", "quality_score", "risk_score"),
             ("position_quality_shadow_audit", "inference_id", "position_quality_model", "position_id", "quality_score", "risk_score"),
             ("factor_governance_shadow_audit", "inference_id", "factor_governance_model", "factor", "weakness_score", "positive_score"),
-            ("meta_model_shadow_audit", "audit_id", "meta_model", "model_type", "posture_score", "risk_score"),
         ]
         items: list[dict[str, Any]] = []
         for table, id_col, agent, target_col, primary_score, secondary_score in specs:

@@ -377,18 +377,6 @@ def autonomous_samples_fact_payload(
     )
 
 
-def model_meta_lightgbm_audits_fact_payload(
-    payload: Mapping[str, Any], *, now: float | None = None
-) -> dict[str, Any]:
-    return _durable_list_fact(
-        payload,
-        contract="learning.model-meta-lightgbm-audits.v2",
-        source="state_v1",
-        timestamp_fields=("created_at",),
-        now=now,
-    )
-
-
 def model_position_quality_audits_fact_payload(
     payload: Mapping[str, Any], *, now: float | None = None
 ) -> dict[str, Any]:
@@ -425,18 +413,6 @@ def model_inference_audits_fact_payload(
     )
 
 
-def model_meta_advisories_fact_payload(
-    payload: Mapping[str, Any], *, now: float | None = None
-) -> dict[str, Any]:
-    return _durable_list_fact(
-        payload,
-        contract="learning.model-meta-advisories.v2",
-        source="state_v1",
-        timestamp_fields=("created_at", "decision_ts"),
-        now=now,
-    )
-
-
 def model_offmarket_high_load_audits_fact_payload(
     payload: Mapping[str, Any], *, now: float | None = None
 ) -> dict[str, Any]:
@@ -446,48 +422,6 @@ def model_offmarket_high_load_audits_fact_payload(
         source="state_v1",
         timestamp_fields=("finished_at", "started_at"),
         now=now,
-    )
-
-
-def model_meta_lightgbm_shadow_report_fact_payload(
-    payload: Mapping[str, Any],
-    *,
-    audit_observed_at: Any,
-    audit_count: int,
-    now: float | None = None,
-) -> dict[str, Any]:
-    """Bind a rendered report to the underlying latest audit observation."""
-
-    generated_at = float(time.time() if now is None else now)
-    result = _copy(payload)
-    count = max(0, int(audit_count))
-    observed_at = audit_observed_at
-    if count == 0:
-        observed_at = _previous_observed_at(payload) or generated_at
-    source_error = _payload_error(payload)
-    return dict(
-        attach_fact(
-            result,
-            contract="learning.model-meta-lightgbm-shadow-report.v2",
-            source="state_v1",
-            observed_at=observed_at,
-            stale_after_sec=LEARNING_STALE_AFTER_SEC,
-            error=source_error,
-            reason_code=(
-                source_error
-                or (
-                    "persisted_audit_timestamp_missing"
-                    if count > 0 and observed_epoch(observed_at) <= 0
-                    else None
-                )
-            ),
-            components={
-                "source_audit_count": count,
-                "authoritative_empty": count == 0,
-                "timestamp_fields": ["created_at"],
-            },
-            now=generated_at,
-        )
     )
 
 

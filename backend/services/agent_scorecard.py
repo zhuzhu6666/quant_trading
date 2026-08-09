@@ -545,7 +545,6 @@ class AgentScorecardService:
             ("open_quality_shadow_audit", "inference_id", "lightgbm_shadow_models", "created_at", "result_json"),
             ("position_quality_shadow_audit", "inference_id", "lightgbm_shadow_models", "created_at", "result_json"),
             ("factor_governance_shadow_audit", "inference_id", "lightgbm_shadow_models", "created_at", "result_json"),
-            ("meta_model_shadow_audit", "inference_id", "lightgbm_shadow_models", "created_at", "result_json"),
         ]
         for table, _id_col, source_agent, ts_col, result_col in specs:
             if not state_table_exists(conn, table):

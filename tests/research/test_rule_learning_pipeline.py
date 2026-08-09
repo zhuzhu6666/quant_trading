@@ -1050,57 +1050,6 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
 
 
 def test_lightgbm_promotion_gate_requires_baseline_lift_and_safe_capabilities(tmp_path):
-    artifact_path = tmp_path / "meta_model_lightgbm.json"
-    artifact_path.write_text(
-        json.dumps(
-            {
-                "model_type": "meta_model_lightgbm",
-                "model_version": "1.1",
-                "metrics": {
-                    "sample_count": 260,
-                    "feature_count": 8,
-                    "holdout": {
-                        "count": 65,
-                        "accuracy": 0.23,
-                        "balanced_accuracy": 0.27,
-                        "majority_baseline_accuracy": 0.54,
-                        "majority_baseline_balanced_accuracy": 0.33,
-                    },
-                    "governance_readiness": {
-                        "status": "blocked_by_baseline",
-                        "recommended_source": "simple_baseline_observer",
-                        "model_ready_for_governance": False,
-                        "baseline_margin": 0.02,
-                    },
-                },
-                "capabilities": {
-                    "live_trading": False,
-                    "advisory_only": True,
-                    "shadow_only": True,
-                    "can_place_orders": False,
-                    "can_close_positions": False,
-                    "can_change_risk_limits": False,
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    gate = ModelPromotionGate().evaluate(
-        model_type="meta_model_lightgbm",
-        artifact_path=artifact_path,
-        min_samples=20,
-        min_holdout_samples=5,
-        min_oos_acc=0.0,
-        min_features=1,
-    )
-
-    assert gate["ok"] is False
-    assert gate["decision"] == "needs_more_data"
-    codes = {issue["code"] for issue in gate["issues"]}
-    assert "does_not_beat_majority_baseline" in codes
-    assert "governance_readiness_blocked" in codes
-
     thin_lift_path = tmp_path / "factor_governance_lightgbm.json"
     thin_lift_path.write_text(
         json.dumps(

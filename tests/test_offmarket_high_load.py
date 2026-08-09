@@ -132,11 +132,6 @@ def test_offmarket_high_load_scores_all_models_after_full_training(monkeypatch, 
         "research.factor_governance_lightgbm.FactorGovernanceLightGBMService",
         fake_service("factor_governance_lightgbm"),
     )
-    monkeypatch.setattr(
-        "research.meta_model_lightgbm.MetaModelLightGBMService",
-        fake_service("meta_model_lightgbm"),
-    )
-
     class FakeGovernance:
         def __init__(self, db_path=None):
             self.db_path = db_path
@@ -160,7 +155,6 @@ def test_offmarket_high_load_scores_all_models_after_full_training(monkeypatch, 
         "position_quality_lightgbm",
         "open_quality_lightgbm",
         "factor_governance_lightgbm",
-        "meta_model_lightgbm",
     }
     assert all("shadow" in result["result"]["models"][model_type] for model_type, _ in scored)
 
@@ -206,11 +200,6 @@ def test_offmarket_high_load_trains_once_per_closed_window(monkeypatch, tmp_path
         "research.factor_governance_lightgbm.FactorGovernanceLightGBMService",
         fake_service("factor_governance_lightgbm"),
     )
-    monkeypatch.setattr(
-        "research.meta_model_lightgbm.MetaModelLightGBMService",
-        fake_service("meta_model_lightgbm"),
-    )
-
     class FakeGovernance:
         def __init__(self, db_path=None):
             self.db_path = db_path
@@ -232,4 +221,4 @@ def test_offmarket_high_load_trains_once_per_closed_window(monkeypatch, tmp_path
     assert first["status"] == "done"
     assert second["skipped"] is True
     assert second["reason"] == "training_window_already_completed"
-    assert calls["train"] == 4
+    assert calls["train"] == 3

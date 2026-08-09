@@ -261,9 +261,10 @@ observation/research 链路，但不能触发 mutation。
 - `open_quality_lightgbm`: 开仓时机质量影子评分，来源为 matured `shadow_open_decision` + `open_outcome`，必须通过 evidence contract supervised-training gate
 - `position_quality_lightgbm`: 持仓质量影子评分，来源为 `trade_outcome_review`，输出 hold/exit risk shadow audit
 - `factor_governance_lightgbm`: 因子弱化、因子治理建议，来源为 `factor_contribution_review` + `trade_outcome_review`
-- `meta_model_lightgbm`: 全局姿态/元模型影子报告，来源为 rolling `trade_outcome_review`、position/factor shadow weak rates 和治理状态
 - `ModelShadowQueue` 通用 shadow 候选: 来源为 dataset snapshot artifact，只能通过 promotion gate 进入 shadow validation
 - LLM advisory: 结构化复盘、治理说明、人工覆盖审计辅助；不进入执行层
+
+Meta 模型已退役。历史 `meta_model_shadow_audit` 和 `meta_shadow_report_snapshot` 表及记录仅作为审计留存，不再训练、推理、生成治理建议、参与 readiness 或影响仓位。
 
 所有 LightGBM 训练必须记录 `split=time_ordered`、holdout 指标、规则基线和 majority baseline 对照。模型未通过基线比较时，只能继续 shadow/advisory。
 
@@ -297,14 +298,11 @@ lifecycle 前跳过并保留 `shadow_register_invalid_dsl_skipped` 审计事件�
 | `open_quality_lightgbm` | `open_quality_shadow_audit` | `quality_score/risk_score/prediction_label` |
 | `position_quality_lightgbm` | `position_quality_shadow_audit` | `hold_score/exit_risk_score/risk_bucket` |
 | `factor_governance_lightgbm` | `factor_governance_shadow_audit` | `positive_score/weakness_score/weakness_bucket` |
-| `meta_model_lightgbm` | `meta_model_shadow_audit` | `posture/posture_score/risk_budget_advice/trade_frequency_advice` |
 | 通用 inference | `model_inference_audit` | canary-ready advisory score |
 
 `factor_governance_lightgbm` 可以把高 weakness score 转成 `policy_suggestion`，但该建议仍是 advisory/governance 输入。`demo_nursery` 下，`FactorGovernanceLightGBMService.materialize_demo_governance_advisories` 仅把当前仍启用且可进入 live 的活跃 alpha 因子、至少两条弱样本且平均 weakness 不低于 0.85 的强证据规范化为白名单 `downweight`；这不是模型直接写权重。若因子在桥接后被 quarantine/disabled，建议自动 supersede，避免把历史建议误报为采用。真正降权、禁用、退役或回滚必须由 `RuleEvolutionGovernor`、`FactorGovernanceOrchestrator`、`DecisionPolicy`、`RiskPolicyService`、`FactorWeightChangeService` 和 runtime overlay/snapshot 链路执行，并进入 `learning_application_log/effect` 后验观察。
 
 `demo_nursery` 的 effect reconcile 对超过 24 小时仍没有可比较 baseline 的旧 observing 窗口标记为 `inconclusive`，不把它当作成功或失败经验；该终态只释放同 scope 的实验准入，后续建议仍须重新经过 Governor、DecisionPolicy、RiskPolicy 和效果观察。
-
-`meta_model_lightgbm` 可以 materialize advisory ledger，但不能直接改变风险预算、交易频率、因子权重或 hard risk limits。
 
 通用模型 promotion gate 只输出：
 
@@ -385,8 +383,5 @@ lifecycle 前跳过并保留 `shadow_register_invalid_dsl_skipped` 审计事件�
 | `POST /api/learning/model/factor-governance-lightgbm/shadow-run` | 因子治理 shadow 打分 |
 | `GET /api/learning/model/factor-governance-lightgbm/audits` | 因子治理 shadow 审计 |
 | `GET /api/learning/model/factor-governance-lightgbm/advisories` | 因子治理模型建议 |
-| `POST /api/learning/model/meta-lightgbm/train` | 训练元模型 |
-| `POST /api/learning/model/meta-lightgbm/shadow-run` | 元模型 shadow 打分 |
-| `GET /api/learning/model/meta-lightgbm/shadow-report` | 元模型 shadow 报告 |
 | `POST /api/learning/model/llm/advisory-run` | LLM advisory |
 | `GET /api/learning/model/llm/audits` | LLM advisory 审计 |

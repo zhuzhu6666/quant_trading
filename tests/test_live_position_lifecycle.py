@@ -1641,6 +1641,27 @@ def test_classify_close_source_maps_supervisor_and_legacy_evidence():
         assert result["inferred_close_supervisor"]["event_type"] == event_type
 
 
+def test_classify_close_source_compacts_recursive_supervisor_evidence():
+    evidence = {
+        "event_type": "legacy_awe_trailing",
+        "decision_ts": 1.0,
+        "action": "tighten",
+    }
+    evidence["candidate"] = {"position": evidence}
+
+    result = classify_close_source_from_evidence(
+        close_reason="broker_close",
+        evidence=evidence,
+    )
+
+    assert json.dumps(result, ensure_ascii=False)
+    assert result["inferred_close_supervisor"] == {
+        "event_type": "legacy_awe_trailing",
+        "decision_ts": 1.0,
+        "action": "tighten",
+    }
+
+
 def test_build_close_position_risk_context_payload_computes_holding_timeout_fields():
     payload = build_close_position_risk_context_payload(
         position_id=268,

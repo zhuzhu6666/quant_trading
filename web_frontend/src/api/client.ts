@@ -566,12 +566,6 @@ export async function getAutonomousLearningSamples(limit = 10): Promise<Learning
   return getJson<LearningPayload>(`/api/learning/autonomous/samples?limit=${encodeURIComponent(String(limit))}`);
 }
 
-export async function getMetaLightgbmShadowReport(limit = 80): Promise<LearningPayload> {
-  return getJson<LearningPayload>(
-    `/api/learning/model/meta-lightgbm/shadow-report?limit=${encodeURIComponent(String(limit))}&include_samples=false`,
-  );
-}
-
 export async function getModelPermissionAudits(limit = 10): Promise<LearningPayload> {
   return getJson<LearningPayload>(`/api/learning/model/permissions/audits?limit=${encodeURIComponent(String(limit))}`);
 }
@@ -594,14 +588,6 @@ export async function getModelCanaryReviews(limit = 30): Promise<LearningPayload
 
 export async function getModelInferenceAudits(limit = 30): Promise<LearningPayload> {
   return getJson<LearningPayload>(`/api/learning/model/inference?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getMetaModelAdvisories(limit = 30): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/model/meta/advisories?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getMetaLightgbmAudits(limit = 30): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/model/meta-lightgbm/audits?limit=${encodeURIComponent(String(limit))}`);
 }
 
 export async function getPositionQualityLightgbmAudits(limit = 30): Promise<LearningPayload> {

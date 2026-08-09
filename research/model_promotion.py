@@ -8,7 +8,6 @@ from typing import Any
 from research.offline_trainer import MODEL_TYPE
 
 LIGHTGBM_MODEL_TYPES = {
-    "meta_model_lightgbm",
     "position_quality_lightgbm",
     "factor_governance_lightgbm",
 }

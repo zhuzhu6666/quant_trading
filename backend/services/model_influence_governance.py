@@ -33,17 +33,12 @@ MODEL_EFFECTS: dict[str, dict[str, Any]] = {
     "factor_governance_lightgbm": {
         "allowed_effects": ["suggest_downweight"],
     },
-    "meta_model_lightgbm": {
-        "allowed_effects": ["risk_budget_cap"], "contract_threshold": 0.60,
-        "risk_budget_multiplier": 0.80, "max_evidence_age_seconds": 1800.0,
-    },
 }
 
 MODEL_FEATURE_SCHEMAS = {
     "open_quality_lightgbm": "pit.v2.open_lineage",
     "position_quality_lightgbm": "pit.v2.position_h30",
     "factor_governance_lightgbm": "pit.v4.factor_regime_decision_lineage",
-    "meta_model_lightgbm": "pit.v2.meta_residual_rate",
 }
 
 
@@ -149,17 +144,6 @@ class ModelInfluenceGovernanceService:
             check("auc", auc >= 0.65, auc, ">=0.65")
             check("majority_lift", accuracy >= majority + 0.03, accuracy - majority, ">=0.03")
             check("generalization_gap", _safe_float(train.get("accuracy")) - accuracy <= 0.15, _safe_float(train.get("accuracy")) - accuracy, "<=0.15")
-        elif model_type == "meta_model_lightgbm":
-            readiness = dict(metrics.get("governance_readiness") or {})
-            check("sample_count", sample_count >= 400, sample_count, ">=400")
-            check("holdout_count", holdout_count >= 80, holdout_count, ">=80")
-            check("balanced_accuracy", balanced >= 0.45, balanced, ">=0.45")
-            check("majority_lift", accuracy >= majority + 0.03, accuracy - majority, ">=0.03")
-            check("rule_lift", accuracy >= rule + 0.03, accuracy - rule, ">=0.03")
-            check("walk_forward", bool((metrics.get("walk_forward") or {}).get("ready")), (metrics.get("walk_forward") or {}).get("ready"), True)
-            check("distribution_stability", bool((metrics.get("distribution_stability") or {}).get("ready")), (metrics.get("distribution_stability") or {}).get("ready"), True)
-            check("governance_ready", bool(readiness.get("model_ready_for_governance")), readiness.get("status"), True)
-
         passed = bool(checks) and all(item["passed"] for item in checks)
         return {
             "schema_version": "model_promotion_gate.v1",
@@ -340,7 +324,6 @@ class ModelInfluenceGovernanceService:
                 "open_quality_lightgbm": 0.30,
                 "position_quality_lightgbm": 0.35,
                 "factor_governance_lightgbm": 0.25,
-                "meta_model_lightgbm": 0.50,
             }.get(model_type, 0.30)
             if not reason and decisions >= 20 and action_rate > max_rate:
                 reason = "active_model_action_rate_exceeded"

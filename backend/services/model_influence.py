@@ -26,7 +26,6 @@ MODEL_SURFACES = {
     "open_quality_lightgbm": "open_veto",
     "position_quality_lightgbm": "position_supervision",
     "factor_governance_lightgbm": "factor_weight_candidate",
-    "meta_model_lightgbm": "global_risk_cap_candidate",
 }
 
 
@@ -304,84 +303,6 @@ class ModelInfluenceService:
             applied=applied, reason=reason,
         )
         return {**fused, "influence_id": audit["influence_id"]}
-
-    def apply_meta_risk_cap(
-        self,
-        *,
-        volume: float,
-        subject_id: str,
-        cfg: Any,
-    ) -> dict[str, Any]:
-        """Apply the latest promoted meta-model contraction as a sizing cap.
-
-        The cap can only reduce a volume already approved by the ordinary
-        sizing/risk chain.  Stale, missing, non-contract, or mismatched model
-        evidence is a no-op.
-        """
-        model_type = "meta_model_lightgbm"
-        policy = self.active_policy(model_type, cfg)
-        original = max(0.0, float(volume or 0.0))
-        if not policy or "risk_budget_cap" not in set(policy.get("allowed_effects") or []):
-            return {"volume": original, "applied": False, "reason": "meta_model_influence_inactive"}
-        conn = self._conn()
-        try:
-            row = self._execute(conn, """
-                SELECT inference_id, artifact_path, posture, posture_score,
-                       contract_score, observe_score, recover_score, created_at
-                FROM meta_model_shadow_audit
-                WHERE artifact_path=?
-                ORDER BY created_at DESC LIMIT 1
-            """, (str(policy.get("artifact_path") or ""),)).fetchone()
-        finally:
-            conn.close()
-        if row is None:
-            return {"volume": original, "applied": False, "reason": "meta_model_evidence_missing"}
-
-        def value(key: str, index: int, default: Any = None) -> Any:
-            try:
-                return row[key]
-            except (KeyError, TypeError, IndexError):
-                try:
-                    return row[index]
-                except (TypeError, IndexError):
-                    return default
-
-        created_at = float(value("created_at", 7, 0.0) or 0.0)
-        max_age = max(60.0, float(policy.get("max_evidence_age_seconds") or 1800.0))
-        contract_score = float(value("contract_score", 4, 0.0) or 0.0)
-        threshold = float(policy.get("contract_threshold") or 0.60)
-        posture = str(value("posture", 2, "") or "")
-        eligible = time.time() - created_at <= max_age and posture == "contract" and contract_score >= threshold
-        multiplier = min(1.0, max(0.50, float(policy.get("risk_budget_multiplier") or 0.80)))
-        capped = original * multiplier if eligible else original
-        reason = "meta_model_contract_risk_cap" if eligible else "meta_model_did_not_contract"
-        model_result = {
-            "inference_id": str(value("inference_id", 0, "") or ""),
-            "posture": posture,
-            "posture_score": float(value("posture_score", 3, 0.0) or 0.0),
-            "contract_score": contract_score,
-            "observe_score": float(value("observe_score", 5, 0.0) or 0.0),
-            "recover_score": float(value("recover_score", 6, 0.0) or 0.0),
-            "created_at": created_at,
-        }
-        audit = self.audit(
-            model_type=model_type,
-            policy=policy,
-            subject_id=subject_id,
-            rule_decision={"approved_volume": original},
-            model_result=model_result,
-            fused_decision={"approved_volume": capped, "multiplier": multiplier if eligible else 1.0},
-            applied=eligible,
-            reason=reason,
-        )
-        return {
-            "volume": capped,
-            "applied": eligible,
-            "reason": reason,
-            "multiplier": multiplier if eligible else 1.0,
-            "influence_id": audit["influence_id"],
-            "model_result": model_result,
-        }
 
     def status(self, cfg: Any) -> dict[str, Any]:
         config = normalized_model_influence_config(getattr(cfg, "model_influence_config", {}) or {})

@@ -748,8 +748,6 @@ class BrainMemoryService:
                                            "risk": "exit_risk_score", "summary": "position quality shadow audit"},
         "factor_governance_shadow_audit": {"id": "inference_id", "score": "positive_score",
                                             "risk": "weakness_score", "summary": "factor governance shadow audit"},
-        "meta_model_shadow_audit": {"id": "inference_id", "score": "posture_score",
-                                     "risk": "contract_score", "summary": "meta model shadow audit"},
     }
 
     def __init__(self, db_path: str | Path = STATE_DB):

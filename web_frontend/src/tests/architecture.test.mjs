@@ -85,7 +85,7 @@ assert.match(modelsPage, /className="dashboard models-dashboard"/);
 assert.doesNotMatch(modelsPage, /models-dashboard \$\{modelFactsKnown \? "" : "fact-unverified"\}/, "单个模型接口不得把整页正常卡片染黄");
 assert.match(modelsPage, /部分数据更新中/);
 assert.match(modelsPage, /部分数据待确认/);
-for (const queryName of ["factorAdvisories", "metaAdvisories", "highLoadAudits"]) {
+for (const queryName of ["factorAdvisories", "highLoadAudits"]) {
   assert.match(modelsPage, new RegExp(`${queryName}Query,`), `Models ${queryName} 也必须参与事实与错误边界`);
 }
 for (const queryName of ["position-quality/audits", "open-quality/audits", "canary-reviews", "inference-audits", "dataset-quality"]) {
@@ -93,8 +93,6 @@ for (const queryName of ["position-quality/audits", "open-quality/audits", "cana
 }
 for (const contract of [
   "learning.dataset-readiness.v2",
-  "learning.model-meta-lightgbm-shadow-report.v2",
-  "learning.model-meta-lightgbm-audits.v2",
   "learning.model-position-quality-audits.v2",
   "learning.model-open-quality-audits.v2",
   "learning.factor-governance-lightgbm-audits.v2",
@@ -103,7 +101,6 @@ for (const contract of [
   "learning.model-canary-reviews.v2",
   "learning.model-inference-audits.v2",
   "learning.model-permission-audits.v2",
-  "learning.model-meta-advisories.v2",
   "learning.model-offmarket-high-load-audits.v2",
   "learning.dataset-quality-health.v2",
 ]) {

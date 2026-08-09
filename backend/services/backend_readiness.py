@@ -20,11 +20,9 @@ from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.agent_governance import AgentBriefingContextService, AgentScorecardService
 from backend.services.autonomous_evolution_cycle import AutonomousEvolutionCycleService
 from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC
-from backend.services.meta_governance import MetaGovernanceService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.stability import measure, record_timing, timing_snapshot
-from research.meta_model_lightgbm import MetaModelLightGBMService
 
 
 KNOWN_OBSERVATION_COMPONENTS = {
@@ -367,9 +365,6 @@ class BackendReadinessService:
                 "live_autonomy_unlock_evaluate": "/api/ops/autonomy/live-unlock/evaluate",
                 "live_autonomy_unlock": "/api/ops/autonomy/live-unlock",
                 "live_autonomy_revoke": "/api/ops/autonomy/live-unlock/revoke",
-                "model_shadow_report": "/api/learning/model/meta-lightgbm/shadow-report",
-                "model_shadow_report_snapshots": "/api/learning/model/meta-lightgbm/shadow-report/snapshots",
-                "model_governance_materialize": "/api/learning/model/meta-lightgbm/governance-suggestion",
                 "offmarket_high_load_audits": "/api/learning/model/offmarket-high-load/audits",
                 "must_not_call_live_mutation_from_model_pages": True,
             },
@@ -872,25 +867,10 @@ class BackendReadinessService:
         from research.open_quality_lightgbm import OpenQualityLightGBMService
         from research.position_quality_lightgbm import PositionQualityLightGBMService
 
-        service = MetaModelLightGBMService(db_path=self.db_path)
-        report = service.build_shadow_report(limit=200, include_samples=False)
-        artifact = dict(report.get("artifact_summary") or {})
-        metrics = dict(artifact.get("metrics") or {})
-        holdout = dict(metrics.get("holdout") or {})
-        holdout_accuracy = _safe_float(holdout.get("accuracy"))
-        evaluated_count = int(report.get("evaluated_count") or 0)
-        permission = self._latest_permission_audit("meta_model_lightgbm")
-        eligible = (
-            evaluated_count >= 200
-            and holdout_accuracy >= 0.6
-            and bool(permission.get("ok", True))
-            and bool((metrics or {}).get("safe_for_live_trading", False))
-        )
         artifact_services = {
             "open_quality_lightgbm": OpenQualityLightGBMService(db_path=self.db_path),
             "position_quality_lightgbm": PositionQualityLightGBMService(db_path=self.db_path),
             "factor_governance_lightgbm": FactorGovernanceLightGBMService(db_path=self.db_path),
-            "meta_model_lightgbm": service,
         }
         gate_service = ModelInfluenceGovernanceService(self.db_path)
         promotion_gates = {}
@@ -902,27 +882,9 @@ class BackendReadinessService:
             )
         influence_status = ModelInfluenceService(self.db_path).status(runtime_config())
         return {
-            "meta_lightgbm": {
-                "report": report,
-                "promotion_gate": {
-                    "eligible_for_live": False,
-                    "eligible_for_governor_review": bool(evaluated_count >= 30),
-                    "computed_live_eligibility_would_be": eligible,
-                    "reason": (
-                        "shadow_only_artifact"
-                        if not eligible
-                        else "would_require_governance_contract_change_before_live"
-                    ),
-                    "min_holdout_accuracy": 0.6,
-                    "holdout_accuracy": holdout_accuracy,
-                    "min_evaluated_count": 200,
-                    "evaluated_count": evaluated_count,
-                },
-            },
+            "model_count": len(artifact_services),
             "promotion_gates": promotion_gates,
             "influence": influence_status,
-            "permission_ok": bool(permission.get("ok", True)),
-            "latest_permission_audit": permission,
         }
 
     def _latest_permission_audit(self, model_type: str) -> dict[str, Any]:
@@ -990,14 +952,12 @@ class BackendReadinessService:
                 counted = count_policy_suggestion_statuses([dict(row) for row in rows])
                 counts = counted["raw"]
                 normalized_counts = counted["normalized"]
-            snapshots = MetaGovernanceService(self.db_path).list_shadow_report_snapshots(limit=5)
             return {
                 "policy_suggestion_counts": counts,
                 "policy_suggestion_counts_raw": counts,
                 "policy_suggestion_counts_normalized": normalized_counts,
                 "pending_review_count": int(counts.get("proposed", 0)) + int(counts.get("pending_review", 0)),
                 "autonomous_pending_count": int(normalized_counts.get("proposed", 0)),
-                "meta_shadow_report_snapshots": snapshots,
                 "automatic_execution_enabled": automatic_execution_enabled,
                 "autonomy_mode": autonomy_mode,
                 "autonomy_demo_auto_apply": demo_auto_apply,
@@ -1177,7 +1137,6 @@ class BackendReadinessService:
 
     def _governance_freshness_status(self) -> dict[str, Any]:
         tables = [
-            "meta_model_shadow_audit",
             "factor_governance_shadow_audit",
             "position_quality_shadow_audit",
             "shadow_factor_perf",
@@ -2198,17 +2157,12 @@ class BackendReadinessService:
             age = item.get("age_seconds") if isinstance(item, dict) else None
             if isinstance(age, (int, float)):
                 max_age = max(max_age, float(age))
-        meta_report = (((model_status.get("meta_lightgbm") or {}).get("report") or {}))
-        evaluated_count = int(meta_report.get("evaluated_count") or 0)
         status = "ok" if not stale_tables else "degraded"
-        if evaluated_count <= 0:
-            status = "degraded"
         return {
             "status": status,
             "stale_table_count": len(stale_tables),
             "stale_tables": stale_tables,
             "max_table_age_seconds": round(max_age, 3),
-            "meta_shadow_evaluated_count": evaluated_count,
             "blocks_live_model_permission": True,
             "advisory_only": True,
         }

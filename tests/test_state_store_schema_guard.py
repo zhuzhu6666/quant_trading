@@ -255,7 +255,6 @@ def test_backend_and_learning_worker_schema_ensures_are_catalog_validations() ->
         "backend/services/trade_lesson_memory.py",
         "research/factor_governance_lightgbm.py",
         "research/llm_advisory.py",
-        "research/meta_model_lightgbm.py",
         "research/open_quality_lightgbm.py",
         "research/position_quality_lightgbm.py",
     )

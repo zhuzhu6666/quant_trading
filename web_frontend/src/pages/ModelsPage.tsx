@@ -9,9 +9,6 @@ import {
   getFactorGovernanceLightgbmAudits,
   getLearningDatasetQualityHealth,
   getLearningDatasetReadiness,
-  getMetaLightgbmAudits,
-  getMetaLightgbmShadowReport,
-  getMetaModelAdvisories,
   getModelCanaryReviews,
   getModelInferenceAudits,
   getModelPermissionAudits,
@@ -36,10 +33,6 @@ function shortText(value: unknown, fallback = "", maxLength = 96): string {
   const text = String(value || "").trim();
   if (!text) return fallback;
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
-}
-
-function countItems(payload: unknown): number {
-  return pickNumber(payload, ["count"], pickArray(payload, ["items"]).length);
 }
 
 function statusTone(status: string): Tone {
@@ -82,14 +75,6 @@ function objectSummary(value: unknown): string {
   }
 }
 
-function distributionSummary(record: unknown): string {
-  const dist = asRecord(record);
-  const entries = Object.entries(dist)
-    .filter(([, value]) => Number(value) > 0)
-    .map(([key, value]) => `${translateDisplayValue(key)} ${formatDecimal(Number(value), 0)}`);
-  return entries.length ? entries.join(" · ") : "";
-}
-
 function backtestReasonLabel(value: unknown): string {
   const reason = String(value || "");
   const labels: Record<string, string> = {
@@ -112,12 +97,6 @@ function localInputToIso(value: string): string | undefined {
 }
 
 const MODEL_DEFINITIONS = [
-  {
-    type: "meta_model_lightgbm",
-    name: "综合判断模型",
-    purpose: "综合交易与复盘证据，判断整体策略应保持、收紧还是恢复。",
-    output: "策略姿态建议",
-  },
   {
     type: "open_quality_lightgbm",
     name: "开仓质量模型",
@@ -242,18 +221,6 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
     queryFn: getLearningDatasetReadiness,
     staleTime: 20_000,
   });
-  const metaReportQuery = useQuery({
-    queryKey: ["models-meta-lightgbm-report"],
-    queryFn: () => getMetaLightgbmShadowReport(200),
-    refetchInterval: 60_000,
-    staleTime: 20_000,
-  });
-  const metaAuditsQuery = useQuery({
-    queryKey: ["models-meta-lightgbm-audits"],
-    queryFn: () => getMetaLightgbmAudits(20),
-    refetchInterval: 60_000,
-    staleTime: 20_000,
-  });
   const positionAuditsQuery = useQuery({
     queryKey: ["models-position-quality-audits"],
     queryFn: () => getPositionQualityLightgbmAudits(20),
@@ -302,12 +269,6 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
     refetchInterval: 60_000,
     staleTime: 20_000,
   });
-  const metaAdvisoriesQuery = useQuery({
-    queryKey: ["models-meta-advisories"],
-    queryFn: () => getMetaModelAdvisories(20),
-    refetchInterval: 60_000,
-    staleTime: 20_000,
-  });
   const highLoadAuditsQuery = useQuery({
     queryKey: ["models-offmarket-high-load"],
     queryFn: () => getOffmarketHighLoadAudits(20),
@@ -326,49 +287,27 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
   const readinessRequestFailed = readinessQuery.isError || readinessQuery.isRefetchError;
   const readinessKnown = factIsKnown(readinessFact, readinessRequestFailed);
   const models = asRecord(pick(readiness, ["models"]));
-  const metaLightgbm = asRecord(pick(models, ["meta_lightgbm"]));
-  const promotionGate = asRecord(pick(metaLightgbm, ["promotion_gate"]));
   const modelInfluence = asRecord(pick(models, ["influence"]));
   const modelInfluencePolicies = asRecord(pick(modelInfluence, ["models"]));
   const promotionGates = asRecord(pick(models, ["promotion_gates"]));
   const modelInfluenceEnabled = pickBoolean(modelInfluence, ["demo_enabled"], false);
   const highLoad = asRecord(pick(readiness, ["high_load"]));
   const dataset = asRecord(datasetQuery.data);
-  const metaReport = asRecord(metaReportQuery.data);
-  const artifactSummary = asRecord(pick(metaReport, ["artifact_summary"]));
-  const artifactMetrics = asRecord(pick(artifactSummary, ["metrics"]));
-  const holdoutMetrics = asRecord(pick(artifactMetrics, ["holdout"]));
-  const governanceReadiness = asRecord(pick(artifactMetrics, ["governance_readiness"]));
-  const ruleComparison = asRecord(pick(metaReport, ["rule_comparison"]));
-  const capabilities = asRecord(pick(metaReport, ["capabilities"]));
 
-  const metaAudits = pickArray(metaAuditsQuery.data, ["items"]);
   const positionAudits = pickArray(positionAuditsQuery.data, ["items"]);
   const openAudits = pickArray(openAuditsQuery.data, ["items"]);
   const factorAudits = pickArray(factorAuditsQuery.data, ["items"]);
+  const factorAdvisories = pickArray(factorAdvisoriesQuery.data, ["items"]);
   const shadowQueue = pickArray(shadowQueueQuery.data, ["items"]);
   const canaryReviews = pickArray(canaryQuery.data, ["items"]);
   const inferenceAudits = pickArray(inferenceQuery.data, ["items"]);
   const permissionAudits = pickArray(permissionsQuery.data, ["items"]);
-  const metaAdvisories = pickArray(metaAdvisoriesQuery.data, ["items"]);
-  const topFeatures = pickArray(artifactSummary, ["top_features"]);
   const qualityHealth = asRecord(qualityHealthQuery.data);
   const entryContext = asRecord(pick(qualityHealth, ["entry_context"]));
   const entryCoverageRatio = asRecord(pick(entryContext, ["coverage_ratio"]));
   const evidenceHealth = asRecord(pick(qualityHealth, ["evidence_contract"]));
   const evidenceCounts = asRecord(pick(evidenceHealth, ["counts"]));
 
-  const evaluatedCount = pickNumber(metaReport, ["evaluated_count"], pickNumber(metaLightgbm, ["report.evaluated_count"], 0));
-  const auditCount = pickNumber(metaReport, ["audit_count"], countItems(metaAuditsQuery.data));
-  const accuracy = pickNumber(metaReport, ["accuracy"], pickNumber(metaLightgbm, ["report.accuracy"], 0));
-  const holdoutAccuracy = pickNumber(holdoutMetrics, ["accuracy"], 0);
-  const holdoutRuleAccuracy = pickNumber(holdoutMetrics, ["rule_accuracy"], 0);
-  const holdoutMajorityAccuracy = pickNumber(holdoutMetrics, ["majority_baseline_accuracy"], 0);
-  const ruleLiftVsMajority = pickNumber(holdoutMetrics, ["rule_lift_vs_majority"], 0);
-  const governanceReadinessStatus = pickString(governanceReadiness, ["status"], "");
-  const recommendedSource = pickString(governanceReadiness, ["recommended_source"], "");
-  const degradationReason = pickString(governanceReadiness, ["degradation_reason"], "");
-  const ruleAgreement = pickNumber(ruleComparison, ["agreement_rate"], 0);
   const modelReady = pickNumber(dataset, ["model_ready", "ready", "quality.model_ready"], 0);
   const needsAttention = pickNumber(dataset, ["needs_attention", "not_ready", "quality.needs_attention"], 0);
   const sampleTotal = pickNumber(dataset, ["total", "count", "sample_count"], modelReady + needsAttention);
@@ -378,13 +317,9 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
   const entryExecutionCoverage = pickNumber(entryCoverageRatio, ["execution_context"], 0);
   const entryMicroCoverage = pickNumber(entryCoverageRatio, ["market_micro_context"], 0);
   const evidenceBadTotal = pickNumber(evidenceCounts, ["bad_total"], 0);
-  const gateEligible = pickBoolean(promotionGate, ["eligible_for_live", "eligible_for_governor_review", "ok"], false);
-  const gateDecision = pickString(promotionGate, ["decision", "status"], gateEligible ? "eligible" : "shadow_only");
   const highLoadProfile = pickString(highLoad, ["profile", "status"], "");
-  const advisoryOnly = pickBoolean(capabilities, ["advisory_only"], true);
 
   const auditsByModel: Record<string, unknown[]> = {
-    meta_model_lightgbm: metaAudits,
     open_quality_lightgbm: openAudits,
     position_quality_lightgbm: positionAudits,
     factor_governance_lightgbm: factorAudits,
@@ -420,6 +355,7 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
     ].filter(Boolean);
     return {
       ...definition,
+      gatePassed,
       affectsTrading,
       participation: affectsTrading ? "已接入受控决策" : "未参与交易决策",
       participationTone: (affectsTrading ? "ok" : "warn") as Tone,
@@ -435,12 +371,16 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
   });
   const participatingModelCount = modelRows.filter((model) => model.affectsTrading).length;
   const observedModelCount = modelRows.filter((model) => model.latestOutputAt > 0).length;
+  const passedModelCount = modelRows.filter((model) => model.gatePassed).length;
+  const modelAuditCount = modelRows.reduce((total, model) => total + model.auditCount, 0);
+  const latestModelOutputAt = modelRows.reduce((latest, model) => Math.max(latest, model.latestOutputAt), 0);
+  const gateEligible = modelRows.length > 0 && passedModelCount === modelRows.length;
+  const gateDecision = gateEligible ? "eligible" : "shadow_only";
+  const advisoryOnly = !modelInfluenceEnabled;
 
   const modelQueries = [
     readinessQuery,
     datasetQuery,
-    metaReportQuery,
-    metaAuditsQuery,
     positionAuditsQuery,
     openAuditsQuery,
     factorAuditsQuery,
@@ -449,7 +389,6 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
     canaryQuery,
     inferenceQuery,
     permissionsQuery,
-    metaAdvisoriesQuery,
     highLoadAuditsQuery,
     qualityHealthQuery,
   ];
@@ -457,8 +396,6 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
   const isRefreshing = modelQueries.some((query) => query.isFetching);
   const modelFactsKnown = readinessKnown && [
     factIsKnown(readFact(datasetQuery.data, "learning.dataset-readiness.v2"), datasetQuery.isError || datasetQuery.isRefetchError),
-    factIsKnown(readFact(metaReportQuery.data, "learning.model-meta-lightgbm-shadow-report.v2"), metaReportQuery.isError || metaReportQuery.isRefetchError),
-    factIsKnown(readFact(metaAuditsQuery.data, "learning.model-meta-lightgbm-audits.v2"), metaAuditsQuery.isError || metaAuditsQuery.isRefetchError),
     factIsKnown(readFact(positionAuditsQuery.data, "learning.model-position-quality-audits.v2"), positionAuditsQuery.isError || positionAuditsQuery.isRefetchError),
     factIsKnown(readFact(openAuditsQuery.data, "learning.model-open-quality-audits.v2"), openAuditsQuery.isError || openAuditsQuery.isRefetchError),
     factIsKnown(readFact(factorAuditsQuery.data, "learning.factor-governance-lightgbm-audits.v2"), factorAuditsQuery.isError || factorAuditsQuery.isRefetchError),
@@ -467,7 +404,6 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
     factIsKnown(readFact(canaryQuery.data, "learning.model-canary-reviews.v2"), canaryQuery.isError || canaryQuery.isRefetchError),
     factIsKnown(readFact(inferenceQuery.data, "learning.model-inference-audits.v2"), inferenceQuery.isError || inferenceQuery.isRefetchError),
     factIsKnown(readFact(permissionsQuery.data, "learning.model-permission-audits.v2"), permissionsQuery.isError || permissionsQuery.isRefetchError),
-    factIsKnown(readFact(metaAdvisoriesQuery.data, "learning.model-meta-advisories.v2"), metaAdvisoriesQuery.isError || metaAdvisoriesQuery.isRefetchError),
     factIsKnown(readFact(highLoadAuditsQuery.data, "learning.model-offmarket-high-load-audits.v2"), highLoadAuditsQuery.isError || highLoadAuditsQuery.isRefetchError),
     factIsKnown(readFact(qualityHealthQuery.data, "learning.dataset-quality-health.v2"), qualityHealthQuery.isError || qualityHealthQuery.isRefetchError),
   ].every(Boolean);
@@ -484,7 +420,7 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
         <div>
           <div className="eyebrow">模型学习</div>
           <h1>模型能力观察</h1>
-          <p>只观察模型、样本准备度、审计轨迹和准入队列集中展示；这些模型不会直接接管交易或治理。</p>
+          <p>开仓质量、持仓质量和因子治理三类模型集中展示；模型不下单、不改硬风控，最终动作仍由规则链负责。</p>
         </div>
         <div className="header-status">
           <StatusPill status={modelFactsKnown ? (advisoryOnly ? "只建议/只观察" : "治理候选") : "模型事实待接入"} tone={modelFactsKnown ? (advisoryOnly ? "warn" : "ok") : "warn"} />
@@ -612,9 +548,10 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
 
         <MetricCard title="模型验证与数据" className="wide-panel model-control-panel">
           <div className="model-mini-grid">
-            <ModelMiniMetric label="治理模式" value={advisoryOnly ? "只建议/只观察" : "治理候选"} detail={translateDisplayValue(gateDecision)} tone={advisoryOnly ? "warn" : "ok"} />
-            <ModelMiniMetric label="综合准确率" value={formatPct(accuracy)} detail={`${formatDecimal(evaluatedCount, 0)} 样本 · ${formatDecimal(auditCount, 0)} 审计`} tone={numberTone(accuracy - 0.5)} />
-            <ModelMiniMetric label="独立样本验证" value={holdoutAccuracy > 0 ? formatPct(holdoutAccuracy) : ""} detail={`规则 ${formatPct(holdoutRuleAccuracy)} · 简单基线 ${formatPct(holdoutMajorityAccuracy)}`} tone={holdoutAccuracy >= 0.55 ? "ok" : "mute"} />
+            <ModelMiniMetric label="模型准入" value={`${formatDecimal(passedModelCount, 0)}/${formatDecimal(modelRows.length, 0)}`} detail={translateDisplayValue(gateDecision)} tone={gateEligible ? "ok" : "warn"} />
+            <ModelMiniMetric label="治理模式" value={advisoryOnly ? "只建议/只观察" : "受控候选"} detail="不直接接管交易" tone={advisoryOnly ? "warn" : "ok"} />
+            <ModelMiniMetric label="最近输出" value={latestModelOutputAt > 0 ? formatTime(latestModelOutputAt) : "暂无"} detail={`${formatDecimal(observedModelCount, 0)} 个模型有输出`} tone={observedModelCount > 0 ? "ok" : "mute"} />
+            <ModelMiniMetric label="模型审计" value={formatDecimal(modelAuditCount, 0)} detail="当前加载的三类模型审计" tone={modelAuditCount > 0 ? "ok" : "mute"} />
             <ModelMiniMetric label="样本准备" value={`${formatDecimal(modelReady, 0)}/${formatDecimal(sampleTotal || modelReady + needsAttention, 0)}`} detail={`${formatDecimal(needsAttention, 0)} 需处理`} tone={needsAttention > 0 ? "warn" : modelReady > 0 ? "ok" : "mute"} />
             <ModelMiniMetric label="开仓上下文" value={formatPct(Math.min(entryBarCoverage, entryExecutionCoverage, entryMicroCoverage))} detail={`${formatDecimal(entryOpenDecisions, 0)} 决策`} tone={entryContextStatus === "ok" ? "ok" : entryContextStatus === "warming" ? "mute" : "warn"} />
             <ModelMiniMetric label="数据检查异常" value={formatDecimal(evidenceBadTotal, 0)} detail={`${formatDecimal(pickNumber(evidenceCounts, ["checked"], 0), 0)} 已检查`} tone={evidenceBadTotal > 0 ? "bad" : "ok"} />
@@ -624,28 +561,28 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
             <section className="model-control-section">
               <div className="learning-section-head">
                 <h3>准入与权限</h3>
-                <StatusPill status={translateDisplayValue(governanceReadinessStatus || gateDecision)} tone={statusTone(governanceReadinessStatus || gateDecision)} />
+                <StatusPill status={translateDisplayValue(gateDecision)} tone={statusTone(gateDecision)} />
               </div>
               <div className="field-list model-compact-fields">
-                <Field label="最低标准" value={translateDisplayValue(governanceReadinessStatus)} tone={statusTone(governanceReadinessStatus)} />
-                <Field label="推荐来源" value={translateDisplayValue(recommendedSource)} />
-                <Field label="实时权限" value={pickBoolean(capabilities, ["can_place_orders"], false) ? "允许下单" : "禁止下单"} tone={pickBoolean(capabilities, ["can_place_orders"], false) ? "bad" : "ok"} />
-                <Field label="风险权限" value={pickBoolean(capabilities, ["can_change_risk_limits"], false) ? "允许改风控" : "禁止改风控"} tone={pickBoolean(capabilities, ["can_change_risk_limits"], false) ? "bad" : "ok"} />
-                <Field label="未通过原因" value={degradationReason ? translateDisplayValue(degradationReason) : ""} />
+                <Field label="模型数量" value={formatDecimal(modelRows.length, 0)} />
+                <Field label="准入通过" value={`${formatDecimal(passedModelCount, 0)} / ${formatDecimal(modelRows.length, 0)}`} tone={gateEligible ? "ok" : "warn"} />
+                <Field label="实时权限" value="禁止下单" tone="ok" />
+                <Field label="风险权限" value="禁止改硬风控" tone="ok" />
+                <Field label="最终仓位" value="由 RiskPolicy 统一计算" />
               </div>
             </section>
 
             <section className="model-control-section">
               <div className="learning-section-head">
-                <h3>只观察模型报告</h3>
-                <StatusPill status={accuracy >= 0.55 ? "可观察" : "继续积累"} tone={accuracy >= 0.55 ? "ok" : "warn"} />
+                <h3>模型输出概览</h3>
+                <StatusPill status={observedModelCount > 0 ? "可观察" : "继续积累"} tone={observedModelCount > 0 ? "ok" : "warn"} />
               </div>
               <div className="field-list model-compact-fields">
-                <Field label="规则提升" value={formatPct(ruleLiftVsMajority)} tone={numberTone(ruleLiftVsMajority)} />
-                <Field label="规则一致率" value={ruleAgreement > 0 ? formatPct(ruleAgreement) : ""} tone={ruleAgreement >= 0.55 ? "ok" : "mute"} />
-                <Field label="预测分布" value={distributionSummary(pick(metaReport, ["posture_distribution"]))} />
-                <Field label="标签分布" value={distributionSummary(pick(metaReport, ["label_distribution"]))} />
-                <Field label="模型文件" value={shortText(pickString(artifactSummary, ["artifact_path"], ""), "", 58)} />
+                <Field label="最近输出" value={latestModelOutputAt > 0 ? formatTime(latestModelOutputAt) : "暂无"} />
+                <Field label="审计数量" value={formatDecimal(modelAuditCount, 0)} />
+                <Field label="影响交易" value={`${formatDecimal(participatingModelCount, 0)} 个模型`} />
+                <Field label="历史 Meta" value="已退役，仅保留数据库审计" />
+                <Field label="治理方式" value="V16 编排，规则链执行" />
               </div>
             </section>
 
@@ -669,48 +606,26 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
           <div className="model-workbench-grid">
             <div className="model-signal-zone">
               <section className="model-workbench-section">
-                <div className="mini-section-title">综合模型重要特征</div>
-                <div className="model-feature-list">
-                  {!topFeatures.length ? <div className="empty-state-small">暂无特征解释</div> : null}
-                  {topFeatures.slice(0, 10).map((raw, index) => {
+                <div className="mini-section-title">因子治理建议</div>
+                <div className="model-event-list">
+                  {!factorAdvisories.length ? <div className="empty-state-small">暂无因子治理建议</div> : null}
+                  {factorAdvisories.slice(0, 8).map((raw, index) => {
                     const item = asRecord(raw);
-                    const value = pickNumber(item, ["importance", "gain", "value", "weight"], 0);
-                    const width = `${Math.max(8, Math.min(100, Math.abs(value) * 100))}%`;
+                    const status = pickString(item, ["status", "decision", "recommendation"], "");
                     return (
-                      <div className="model-feature-row" key={keyFor(item, index, ["feature", "name"])}>
-                        <div>
-                          <strong>{pickString(item, ["feature", "name"], "")}</strong>
-                          <span>{value > 0 ? "增强" : value < 0 ? "抑制" : "中性"}</span>
-                        </div>
-                        <b>{formatDecimal(value, 4)}</b>
-                        <i style={{ width }} />
-                      </div>
+                      <ModelEventItem
+                        key={keyFor(item, index, ["advisory_id", "inference_id", "factor", "id"])}
+                        title={translateDisplayValue(pickString(item, ["factor", "target_factor"], "因子"))}
+                        meta={formatTime(pick(item, ["created_at", "event_ts", "updated_at"]))}
+                        status={status}
+                        detail={shortText(pickString(item, ["reason", "summary", "rationale"], ""), "", 140)}
+                      />
                     );
                   })}
                 </div>
               </section>
 
               <div className="model-signal-side">
-                <section className="model-workbench-section">
-                  <div className="mini-section-title">综合模型建议记录</div>
-                  <div className="model-event-list">
-                    {!metaAdvisories.length ? <div className="empty-state-small">暂无顾问记录</div> : null}
-                    {metaAdvisories.slice(0, 6).map((raw, index) => {
-                      const item = asRecord(raw);
-                      const status = pickString(item, ["status", "decision", "posture"], "");
-                      return (
-                        <ModelEventItem
-                          key={keyFor(item, index, ["advisory_id", "decision_id", "id"])}
-                          title={translateDisplayValue(pickString(item, ["posture", "target_posture"], ""))}
-                          meta={formatTime(pick(item, ["created_at", "ts"]))}
-                          status={status}
-                          detail={shortText(pickString(item, ["summary", "reason", "rationale"], ""), "", 140)}
-                        />
-                      );
-                    })}
-                  </div>
-                </section>
-
                 <section className="model-workbench-section">
                   <div className="mini-section-title">观察候选与小范围验证</div>
                   <div className="model-event-list">
@@ -772,12 +687,12 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
             </div>
 
             <section className="model-workbench-section model-audit-zone">
-              <div className="mini-section-title">综合 / 仓位 / 因子只观察审计</div>
+              <div className="mini-section-title">开仓 / 持仓 / 因子只观察审计</div>
               <div className="model-event-list model-audit-list">
-                {[...metaAudits.slice(0, 3), ...openAudits.slice(0, 3), ...positionAudits.slice(0, 3), ...factorAudits.slice(0, 3)].length ? null : (
+                {[...openAudits.slice(0, 3), ...positionAudits.slice(0, 3), ...factorAudits.slice(0, 3)].length ? null : (
                   <div className="empty-state-small">暂无模型审计</div>
                 )}
-                {[...metaAudits.slice(0, 3), ...openAudits.slice(0, 3), ...positionAudits.slice(0, 3), ...factorAudits.slice(0, 3)].map((raw, index) => {
+                {[...openAudits.slice(0, 3), ...positionAudits.slice(0, 3), ...factorAudits.slice(0, 3)].map((raw, index) => {
                   const item = asRecord(raw);
                   const modelType = pickString(item, ["model_type", "type"], "shadow_model");
                   const score = pickNumber(item, ["posture_score", "score", "quality_score", "weakness_score", "confidence"], 0);
@@ -803,8 +718,6 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
             <QueryErrorList queries={[
               { label: "backend-readiness", query: readinessQuery },
               { label: "dataset/readiness", query: datasetQuery },
-              { label: "meta-lightgbm/report", query: metaReportQuery },
-              { label: "meta-lightgbm/audits", query: metaAuditsQuery },
               { label: "position-quality/audits", query: positionAuditsQuery },
               { label: "open-quality/audits", query: openAuditsQuery },
               { label: "factor-governance/audits", query: factorAuditsQuery },
@@ -813,7 +726,6 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
               { label: "canary-reviews", query: canaryQuery },
               { label: "inference-audits", query: inferenceQuery },
               { label: "permissions", query: permissionsQuery },
-              { label: "meta-advisories", query: metaAdvisoriesQuery },
               { label: "offmarket-high-load", query: highLoadAuditsQuery },
               { label: "dataset-quality", query: qualityHealthQuery },
             ]} />

@@ -111,7 +111,7 @@ AGENTS: dict[str, dict[str, Any]] = {
         "source_kind": "model_shadow_audit",
         "capability_scope": "shadow_or_advisory",
         "allowed_writes": ["open_quality_shadow_audit", "position_quality_shadow_audit",
-                           "factor_governance_shadow_audit", "meta_model_shadow_audit"],
+                           "factor_governance_shadow_audit"],
         "control_surfaces": ["model_stage", "factor_weight", "trade_execution", "position_sizing"],
         "policy_suggestion_write": "only_through_existing_governance_services",
         "requires_v16_command": False,
@@ -140,7 +140,6 @@ SOURCE_ALIASES = {
     "open_quality_model": "lightgbm_shadow_models",
     "position_quality_model": "lightgbm_shadow_models",
     "factor_governance_model": "lightgbm_shadow_models",
-    "meta_model": "lightgbm_shadow_models",
     "evolution_decision": "factor_governance",
 }
 
@@ -300,13 +299,9 @@ def infer_policy_suggestion_source_agent(evidence: dict[str, Any], *, scope_type
         return explicit
     schema = text(evidence.get("schema_version"), "").lower()
     model_type = text(evidence.get("model_type"), "").lower()
-    scope = text(scope_type).lower()
-    act = text(action).lower()
-    if schema in {"factor_governance_advisory.v1", "meta_model_governance_advisory.v1"}:
+    if schema == "factor_governance_advisory.v1":
         return "lightgbm_shadow_models"
-    if "lightgbm" in model_type or model_type in {"factor_governance", "meta_model"}:
-        return "lightgbm_shadow_models"
-    if scope == "meta_model" or "meta_model" in act:
+    if "lightgbm" in model_type or model_type == "factor_governance":
         return "lightgbm_shadow_models"
     return "autonomous_learning"
 

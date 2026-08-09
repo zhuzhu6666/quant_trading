@@ -433,11 +433,11 @@ def test_readiness_stability_status_reports_phase_h_guards(tmp_path):
     status = service._stability_status(
         governance_freshness={
             "tables": {
-                "meta_model_shadow_audit": {"status": "fresh", "age_seconds": 10.0},
+                "position_quality_shadow_audit": {"status": "fresh", "age_seconds": 10.0},
                 "factor_health": {"status": "stale_or_empty", "age_seconds": 400000.0},
             }
         },
-        model_status={"meta_lightgbm": {"report": {"evaluated_count": 40}}},
+        model_status={},
     )
 
     assert status["schema_version"] == "backend_stability.v1"

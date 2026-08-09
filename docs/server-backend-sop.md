@@ -247,7 +247,6 @@ POST /api/learning/model/open-quality-lightgbm/shadow-run
 GET  /api/learning/model/open-quality-lightgbm/audits
 GET  /api/learning/model/position-quality-lightgbm/audits
 GET  /api/learning/model/factor-governance-lightgbm/audits
-GET  /api/learning/model/meta-lightgbm/shadow-report
 ```
 
 判断原则：

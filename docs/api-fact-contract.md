@@ -113,14 +113,11 @@ session 只有 `source` 为权威 `ctrader_deals*` 时才可 known；`degraded_c
 | `GET /api/learning/model/shadow-queue` | `learning.model-shadow-queue.v2` | 最新 `updated_at/created_at` |
 | `GET /api/learning/model/canary-review` | `learning.model-canary-reviews.v2` | 最新 `created_at` |
 | `GET /api/learning/model/inference` | `learning.model-inference-audits.v2` | `model_registry` 最新持久化时间 |
-| `GET /api/learning/model/meta/advisories` | `learning.model-meta-advisories.v2` | 最新 advisory 持久化时间 |
 | `GET /api/learning/model/permissions/audits` | `learning.model-permission-audits.v2` | 最新 `created_at` |
 | `GET /api/learning/model/position-quality-lightgbm/audits` | `learning.model-position-quality-audits.v2` | 最新 audit `created_at` |
 | `GET /api/learning/model/open-quality-lightgbm/audits` | `learning.model-open-quality-audits.v2` | 最新 audit `created_at` |
 | `GET /api/learning/model/factor-governance-lightgbm/audits` | `learning.factor-governance-lightgbm-audits.v2` | 最新 audit `created_at` |
 | `GET /api/learning/model/factor-governance-lightgbm/advisories` | `learning.factor-governance-lightgbm-advisories.v2` | 继承源 audit 观测时间，不使用 advisory render 时间 |
-| `GET /api/learning/model/meta-lightgbm/audits` | `learning.model-meta-lightgbm-audits.v2` | 最新 audit `created_at` |
-| `GET /api/learning/model/meta-lightgbm/shadow-report` | `learning.model-meta-lightgbm-shadow-report.v2` | 继承输入 audit 观测时间，不使用 report render 时间 |
 | `GET /api/learning/model/offmarket-high-load/audits` | `learning.model-offmarket-high-load-audits.v2` | 最新 audit 持久化时间 |
 
 权威查询证明结果集为空时，可在首次查询时记为 known empty；30 秒缓存重新渲染必须保留首次 `observed_at`，不得每次续鲜。非空记录缺持久化时间必须 unknown；返回 last-good 但当次源读失败时必须 error，旧业务字段仍保留。

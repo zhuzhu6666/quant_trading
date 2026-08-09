@@ -13,9 +13,6 @@ from backend.services.learning_fact_views import (
     learning_summary_fact_payload,
     lifecycle_fact_payload,
     model_inference_audits_fact_payload,
-    model_meta_advisories_fact_payload,
-    model_meta_lightgbm_audits_fact_payload,
-    model_meta_lightgbm_shadow_report_fact_payload,
     model_offmarket_high_load_audits_fact_payload,
     model_open_quality_audits_fact_payload,
     model_position_quality_audits_fact_payload,
@@ -137,40 +134,28 @@ def test_learning_and_model_console_contracts_use_explicit_endpoint_timestamps()
             992.0,
         ),
         (
-            model_meta_lightgbm_audits_fact_payload,
+            model_position_quality_audits_fact_payload,
             {"items": [{"created_at": 993.0}]},
-            "learning.model-meta-lightgbm-audits.v2",
+            "learning.model-position-quality-audits.v2",
             993.0,
         ),
         (
-            model_position_quality_audits_fact_payload,
+            model_open_quality_audits_fact_payload,
             {"items": [{"created_at": 994.0}]},
-            "learning.model-position-quality-audits.v2",
+            "learning.model-open-quality-audits.v2",
             994.0,
         ),
         (
-            model_open_quality_audits_fact_payload,
+            model_inference_audits_fact_payload,
             {"items": [{"created_at": 995.0}]},
-            "learning.model-open-quality-audits.v2",
+            "learning.model-inference-audits.v2",
             995.0,
         ),
         (
-            model_inference_audits_fact_payload,
-            {"items": [{"created_at": 996.0}]},
-            "learning.model-inference-audits.v2",
-            996.0,
-        ),
-        (
-            model_meta_advisories_fact_payload,
-            {"items": [{"decision_ts": 997.0}]},
-            "learning.model-meta-advisories.v2",
-            997.0,
-        ),
-        (
             model_offmarket_high_load_audits_fact_payload,
-            {"items": [{"started_at": 980.0, "finished_at": 998.0}]},
+            {"items": [{"started_at": 980.0, "finished_at": 996.0}]},
             "learning.model-offmarket-high-load-audits.v2",
-            998.0,
+            996.0,
         ),
     ]
     for adapter, payload, contract, observed_at in cases:
@@ -178,26 +163,6 @@ def test_learning_and_model_console_contracts_use_explicit_endpoint_timestamps()
         assert result["_fact"]["contract"] == contract
         assert result["_fact"]["observed_at"] == observed_at
         assert result["_fact"]["state"] == "known"
-
-
-def test_meta_shadow_report_uses_latest_audit_not_render_time() -> None:
-    stale = model_meta_lightgbm_shadow_report_fact_payload(
-        {"ok": True, "generated_at": 1000.0, "audit_count": 2},
-        audit_observed_at=700.0,
-        audit_count=2,
-        now=1000.0,
-    )
-    empty = model_meta_lightgbm_shadow_report_fact_payload(
-        {"ok": True, "generated_at": 1000.0, "audit_count": 0},
-        audit_observed_at=None,
-        audit_count=0,
-        now=1000.0,
-    )
-
-    assert stale["_fact"]["state"] == "stale"
-    assert stale["_fact"]["observed_at"] == 700.0
-    assert empty["_fact"]["state"] == "known"
-    assert empty["_fact"]["components"]["authoritative_empty"] is True
 
 
 def _create_dataset_source(path: str) -> None:
@@ -388,41 +353,27 @@ def test_learning_console_routes_attach_every_consumed_model_contract(monkeypatc
         def list_audits(**_kwargs):
             return [{"created_at": 991.0}]
 
-    class _MetaSidecar:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        @staticmethod
-        def list_advisories(**_kwargs):
-            return {"items": [{"created_at": 992.0}], "count": 1}
-
     monkeypatch.setattr(
         learning_api,
         "list_autonomous_learning_samples",
         lambda **_kwargs: {"items": [{"updated_at": 989.0}], "count": 1},
     )
     monkeypatch.setattr(learning_api, "ModelInferenceContract", _Inference)
-    monkeypatch.setattr(learning_api, "MetaModelSidecar", _MetaSidecar)
     monkeypatch.setattr(learning_api, "PositionQualityLightGBMService", _AuditService)
     monkeypatch.setattr(learning_api, "OpenQualityLightGBMService", _AuditService)
-    monkeypatch.setattr(learning_api, "MetaModelLightGBMService", _AuditService)
+    monkeypatch.setattr(learning_api, "FactorGovernanceLightGBMService", _AuditService)
 
     samples = learning_api.get_learning_autonomous_samples(None)
     inference = learning_api.list_learning_model_inference_audits(None)
-    advisories = learning_api.list_learning_meta_model_advisories(None)
     position = learning_api.list_position_quality_lightgbm_audits(None)
     open_quality = learning_api.list_open_quality_lightgbm_audits(None)
-    meta_audits = learning_api.list_meta_model_lightgbm_audits(None)
-    report = learning_api.build_meta_model_lightgbm_shadow_report(None)
+    factor = learning_api.list_factor_governance_lightgbm_audits(None)
 
     assert samples["_fact"]["contract"] == "learning.autonomous-samples.v2"
     assert inference["_fact"]["contract"] == "learning.model-inference-audits.v2"
-    assert advisories["_fact"]["contract"] == "learning.model-meta-advisories.v2"
     assert position["_fact"]["contract"] == "learning.model-position-quality-audits.v2"
     assert open_quality["_fact"]["contract"] == "learning.model-open-quality-audits.v2"
-    assert meta_audits["_fact"]["contract"] == "learning.model-meta-lightgbm-audits.v2"
-    assert report["_fact"]["contract"] == "learning.model-meta-lightgbm-shadow-report.v2"
-    assert report["_fact"]["observed_at"] == 990.0
+    assert factor["_fact"]["contract"] == "learning.factor-governance-lightgbm-audits.v2"
 
 
 def test_dataset_readiness_endpoint_uses_explicit_source_observation(monkeypatch) -> None:

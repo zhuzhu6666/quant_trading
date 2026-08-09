@@ -406,7 +406,7 @@ release preflight 和前端只能复用该结果，不得通过再次读取原�
 - `ProbabilityCalibrator` 校准组合信号置信度；校准结果通过 context policy 只允许缩仓，不允许放大原始仓位，缺失或损坏 artifact 时退化为 identity。
 - `PositionQualityLightGBMService.score_position_context` 使用 trace-time PIT v2 特征；未晋级时只写 supervisor evidence，晋级后也只能把 rule `hold` 收紧为 tighten 或最多 25% reduce，并显式禁止 full-close fallback。
 - `FactorGovernanceLightGBMService.materialize_demo_governance_advisories` 只有在对应 PIT v2 工件已晋级时，才为当前 `used_in_score=true` 的 alpha 生成 `downweight` suggestion；实际权重变化仍经过 Governor、DecisionPolicy、RiskPolicy、FactorWeightChangeService、overlay/snapshot 和 learning effect。目标失活时旧建议自动 supersede。
-- open quality 晋级后位于 RiskPolicy 与成本边际检查之后，只能额外 veto；meta model 晋级后只能对规则已经算出的 API volume 乘以不大于 1 的收缩系数。任一工件漂移、晋级门回退或 24 小时动作率越界会自动 quarantine。
+- open quality 晋级后位于 RiskPolicy 与成本边际检查之后，只能额外 veto；position quality 只能在仓位监督边界内收紧或有限减仓；factor governance 只能生成治理建议。模型不得计算最终仓位、修改硬风控或绕过 RiskPolicy。
 - `trade_outcome_review` 会成熟 supervisor trajectory；成熟 open outcome 同步进入 `shadow_trades.factor='__portfolio_shadow__'`，用于组合级而非单因子级后验统计。
 - 因子权重单次最大变化达到 `0.10` 时，`FactorWeightChangeService` 要求最近 replay 为 `completed`、无错误且 evidence grade 为 A/B；否则变更停在应用账本写入之前。
 - 上述最终动作仍必须经过 `RiskPolicyService`、runtime mutation overlay/snapshot 和 learning application effect observation，不允许模型或经验直接绕过权力边界。

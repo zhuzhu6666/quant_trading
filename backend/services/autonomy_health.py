@@ -987,7 +987,6 @@ class AutonomyHealthService:
     def _shadow_freshness(governance_freshness: dict[str, Any], model_status: dict[str, Any]) -> float:
         tables = governance_freshness.get("tables") or {}
         shadow_tables = [
-            "meta_model_shadow_audit",
             "factor_governance_shadow_audit",
             "position_quality_shadow_audit",
             "shadow_factor_perf",
@@ -998,10 +997,6 @@ class AutonomyHealthService:
             if item.get("status") == "missing_table":
                 continue
             scores.append(1.0 if item.get("status") == "fresh" else 0.0)
-        meta_report = (((model_status.get("meta_lightgbm") or {}).get("report") or {}))
-        evaluated_count = _safe_int(meta_report.get("evaluated_count"))
-        if evaluated_count > 0:
-            scores.append(min(1.0, evaluated_count / 200.0))
         return sum(scores) / len(scores) if scores else 0.5
 
     @staticmethod

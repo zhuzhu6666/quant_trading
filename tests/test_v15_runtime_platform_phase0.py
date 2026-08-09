@@ -471,11 +471,11 @@ def test_autonomy_health_v1_is_machine_readable_and_read_only(tmp_path):
         },
         governance_freshness={
             "tables": {
-                "meta_model_shadow_audit": {"status": "fresh"},
+                "position_quality_shadow_audit": {"status": "fresh"},
                 "factor_governance_shadow_audit": {"status": "fresh"},
             }
         },
-        model_status={"meta_lightgbm": {"report": {"evaluated_count": 40}}},
+        model_status={},
         persist_min_interval_sec=0.0,
     )
     health_2 = service.build(
@@ -500,11 +500,11 @@ def test_autonomy_health_v1_is_machine_readable_and_read_only(tmp_path):
         },
         governance_freshness={
             "tables": {
-                "meta_model_shadow_audit": {"status": "fresh"},
+                "position_quality_shadow_audit": {"status": "fresh"},
                 "factor_governance_shadow_audit": {"status": "fresh"},
             }
         },
-        model_status={"meta_lightgbm": {"report": {"evaluated_count": 40}}},
+        model_status={},
         persist_min_interval_sec=0.0,
     )
 

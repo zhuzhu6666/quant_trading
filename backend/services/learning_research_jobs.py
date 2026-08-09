@@ -169,7 +169,6 @@ def _record_offmarket_audit(
 
 def _build_shadow_model_suite(db_path: str | Path):
     from research.factor_governance_lightgbm import FactorGovernanceLightGBMService
-    from research.meta_model_lightgbm import MetaModelLightGBMService
     from research.open_quality_lightgbm import OpenQualityLightGBMService
     from research.position_quality_lightgbm import PositionQualityLightGBMService
 
@@ -201,18 +200,6 @@ def _build_shadow_model_suite(db_path: str | Path):
             FactorGovernanceLightGBMService(db_path=db_path),
             {
                 "limit": 5000,
-                "holdout_ratio": 0.25,
-                "min_samples": 100,
-                "register": True,
-            },
-        ),
-        (
-            "meta_model_lightgbm",
-            MetaModelLightGBMService(db_path=db_path),
-            {
-                "limit": 3000,
-                "window": 12,
-                "horizon": 3,
                 "holdout_ratio": 0.25,
                 "min_samples": 100,
                 "register": True,

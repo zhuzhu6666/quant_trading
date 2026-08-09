@@ -1,6 +1,6 @@
 """research/model_registry.py — ML 模型版本注册器.
 
-跟踪每个模型 (meta_model_lightgbm, position_quality_lightgbm 等) 的版本: 训练参数、性能指标、artifact 路径。
+跟踪各类模型版本: 训练参数、性能指标、artifact 路径。
 支持版本回滚: list_versions() → load_version().
 
 用法:
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 class ModelVersion:
     """单个模型版本记录."""
     id: int = 0
-    model_type: str = ""            # meta_model_lightgbm / position_quality_lightgbm / etc.
+    model_type: str = ""            # open_quality_lightgbm / position_quality_lightgbm / etc.
     symbol: str = "XAUUSD+"
     timeframe: str = "M5"
     version: int = 0                 # 自增版本号

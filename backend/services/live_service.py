@@ -8926,23 +8926,6 @@ def _prepare_open_trade_candidate(
         composite=composite,
         bridge_meta=bridge_meta,
     )
-    try:
-        from backend.services.model_influence import shared_model_influence_service
-
-        meta_cap = shared_model_influence_service().apply_meta_risk_cap(
-            volume=volume,
-            subject_id=f"XAUUSD+:{int(float(bar.get('time') or time.time()))}",
-            cfg=cfg,
-        )
-        capped_volume = float(meta_cap.get("volume") or 0.0)
-        if capped_volume < volume:
-            volume = _floor_api_volume_to_step(capped_volume, bridge_meta)
-        sizing_trace["meta_model_risk_cap"] = {**meta_cap, "rounded_api_volume": volume}
-    except Exception as exc:
-        sizing_trace["meta_model_risk_cap"] = {
-            "applied": False,
-            "reason": f"meta_model_cap_unavailable:{type(exc).__name__}",
-        }
 
     log(
         f"tick {tick}: v4 {direction_name} req_api_volume={volume:.0f} "
