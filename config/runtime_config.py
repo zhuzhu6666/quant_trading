@@ -517,6 +517,10 @@ class RuntimeConfig:
     factor_governance_restore_max_weakness: float = 0.65
     factor_governance_max_restores_per_cycle: int = 1
     factor_governance_model_min_samples: int = 3
+    # Model-derived factor mutation requires real per-factor coverage in
+    # addition to the global artifact promotion gate. Sparse factors remain
+    # shadow/advisory only.
+    factor_governance_model_min_factor_samples: int = 20
     factor_governance_model_weakness_threshold: float = 0.65
     factor_governance_model_disable_threshold: float = 0.85
     factor_governance_rollback_min_trades: int = 3

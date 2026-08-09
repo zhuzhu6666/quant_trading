@@ -2628,6 +2628,48 @@ def test_demo_autonomous_enabled_accepts_demo_nursery(monkeypatch):
     assert al._demo_autonomous_enabled() is True
 
 
+def test_factor_model_bridge_runs_in_demo_autonomous(monkeypatch, tmp_path):
+    monkeypatch.setattr(al, "_autonomy_mode", lambda: "demo_autonomous")
+
+    class _FactorModel:
+        def __init__(self, db_path=None):
+            self.db_path = db_path
+
+        def materialize_demo_governance_advisories(self, **kwargs):
+            return {"materialized": False, "count": 0, "reason": "no_candidates"}
+
+    class _Pruning:
+        def __init__(self, db_path):
+            self.db_path = db_path
+
+        def materialize_latest(self, **kwargs):
+            return {"status": "no_candidates"}
+
+        def promote_ready(self, **kwargs):
+            return {"status": "no_candidates"}
+
+        def bridge_ready_candidates(self, **kwargs):
+            assert kwargs["require_demo_nursery"] is True
+            return {"status": "no_candidates", "items": []}
+
+    monkeypatch.setattr(
+        "research.factor_governance_lightgbm.FactorGovernanceLightGBMService",
+        _FactorModel,
+    )
+    monkeypatch.setattr(
+        "backend.services.factor_pruning_governance.FactorPruningGovernanceService",
+        _Pruning,
+    )
+
+    result = al._run_demo_nursery_factor_pruning_governance(
+        db_path=tmp_path / "state.db",
+    )
+
+    assert result["enabled"] is True
+    assert result["mode"] == "demo_autonomous"
+    assert result["bridge"]["status"] == "no_candidates"
+
+
 def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     al.ensure_autonomous_learning_tables(db_path)

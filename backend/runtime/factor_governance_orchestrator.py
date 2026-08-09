@@ -726,7 +726,7 @@ class FactorGovernanceOrchestrator:
                 ):
                     continue
                 model = self._model_governance_evidence(item, cfg)
-                if (
+                if bool(model.get("mutation_eligible")) and (
                     int(model.get("sample_count") or 0)
                     or int(model.get("weak_sample_count") or 0)
                 ) and float(model.get("avg_weakness_score") or 0.0) >= float(
@@ -793,7 +793,7 @@ class FactorGovernanceOrchestrator:
                 ):
                     continue
                 model = self._model_governance_evidence(item, cfg)
-                has_model_evidence = (
+                has_model_evidence = bool(model.get("mutation_eligible")) and (
                     int(model.get("sample_count") or 0)
                     >= profile.restore_model_min_samples
                     or int(model.get("weak_sample_count") or 0)
@@ -857,7 +857,7 @@ class FactorGovernanceOrchestrator:
                 ):
                     continue
                 model = self._model_governance_evidence(item, cfg)
-                has_model_evidence = (
+                has_model_evidence = bool(model.get("mutation_eligible")) and (
                     int(model.get("sample_count") or 0)
                     >= profile.restore_model_min_samples
                     or int(model.get("weak_sample_count") or 0)
@@ -2206,6 +2206,8 @@ class FactorGovernanceOrchestrator:
                 >= profile.hard_health_min_n_obs
             )
             model_severe = (
+                bool(model_evidence.get("mutation_eligible"))
+                and
                 health_fresh
                 and score < profile.hard_model_health_ceiling
                 and int(model_evidence.get("sample_count") or 0)
@@ -2493,7 +2495,7 @@ class FactorGovernanceOrchestrator:
             model_evidence = self._model_governance_evidence(item, cfg)
             model_samples = int(model_evidence.get("sample_count") or 0)
             model_weak_samples = int(model_evidence.get("weak_sample_count") or 0)
-            if (model_samples or model_weak_samples) and (
+            if bool(model_evidence.get("mutation_eligible")) and (model_samples or model_weak_samples) and (
                 float(model_evidence.get("avg_weakness_score") or 0.0)
                 >= float(getattr(cfg, "factor_governance_builtin_activation_max_weakness", 0.65) or 0.65)
             ):
@@ -2700,7 +2702,7 @@ class FactorGovernanceOrchestrator:
             ):
                 continue
             model = self._model_governance_evidence(item, cfg)
-            has_model_evidence = (
+            has_model_evidence = bool(model.get("mutation_eligible")) and (
                 int(model.get("sample_count") or 0) >= profile.restore_model_min_samples
                 or int(model.get("weak_sample_count") or 0)
                 >= profile.restore_model_min_samples
@@ -2938,7 +2940,7 @@ class FactorGovernanceOrchestrator:
                 # never widens risk on unverifiable evidence.
                 if not health_ok:
                     continue
-                has_model_evidence = (
+                has_model_evidence = bool(model.get("mutation_eligible")) and (
                     int(model.get("sample_count") or 0)
                     >= profile.restore_model_min_samples
                     or int(model.get("weak_sample_count") or 0)
@@ -3402,6 +3404,11 @@ class FactorGovernanceOrchestrator:
 
     def _model_governance_evidence(self, item: dict[str, Any], cfg: Any) -> dict[str, Any]:
         shadow = item.get("factor_governance_shadow") or {}
+        result = shadow.get("result") or {}
+        promotion_gate = result.get("promotion_gate") or shadow.get("promotion_gate") or {}
+        model_type = str(
+            shadow.get("model_type") or result.get("model_type") or ""
+        )
         sample_count = int(shadow.get("sample_count") or 0)
         weak_sample_count = int(shadow.get("weak_sample_count") or 0)
         latest_weakness = float(shadow.get("weakness_score") or item.get("model_weakness_score") or 0.0)
@@ -3409,9 +3416,22 @@ class FactorGovernanceOrchestrator:
         latest_positive = float(shadow.get("positive_score") or item.get("model_positive_score") or 0.0)
         avg_positive = float(shadow.get("avg_positive_score") or latest_positive or 0.0)
         min_samples = int(getattr(cfg, "factor_governance_model_min_samples", 3) or 3)
+        min_factor_samples = int(
+            getattr(cfg, "factor_governance_model_min_factor_samples", 20) or 20
+        )
         down_th = float(getattr(cfg, "factor_governance_model_weakness_threshold", 0.65) or 0.65)
         disable_th = float(getattr(cfg, "factor_governance_model_disable_threshold", 0.85) or 0.85)
-        enough = sample_count >= min_samples or weak_sample_count >= min_samples
+        promotion_gate_passed = bool(promotion_gate.get("passed"))
+        factor_coverage_ready = sample_count >= min_factor_samples
+        mutation_eligible = (
+            model_type == "factor_governance_lightgbm"
+            and promotion_gate_passed
+            and result.get("mutation_eligible") is True
+            and factor_coverage_ready
+        )
+        enough = mutation_eligible and (
+            sample_count >= min_samples or weak_sample_count >= min_samples
+        )
         weak_for_downweight = enough and max(avg_weakness, latest_weakness) >= down_th
         weak_for_disable = enough and max(avg_weakness, latest_weakness) >= disable_th
         return {
@@ -3422,12 +3442,28 @@ class FactorGovernanceOrchestrator:
             "latest_positive_score": latest_positive,
             "avg_positive_score": avg_positive,
             "min_samples": min_samples,
+            "min_factor_samples": min_factor_samples,
+            "factor_coverage_ready": factor_coverage_ready,
+            "promotion_gate_passed": promotion_gate_passed,
+            "promotion_gate_reason": str(
+                promotion_gate.get("reason") or "promotion_gate_not_passed"
+            ),
+            "mutation_eligible": mutation_eligible,
+            "artifact_sha256": str(
+                result.get("artifact_sha256") or shadow.get("artifact_sha256") or ""
+            ),
+            "factor_generation": str(
+                result.get("factor_generation") or shadow.get("factor_generation") or ""
+            ),
+            "lineage_hash": str(
+                result.get("lineage_hash") or shadow.get("lineage_hash") or ""
+            ),
             "downweight_threshold": down_th,
             "disable_threshold": disable_th,
             "weak_for_downweight": weak_for_downweight,
             "weak_for_disable": weak_for_disable,
             "latest_inference_id": str(shadow.get("latest_inference_id") or ""),
-            "model_type": str(shadow.get("model_type") or ""),
+            "model_type": model_type,
         }
 
     def _portfolio_configs(self, cfg: Any, *, signal_cfg: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:

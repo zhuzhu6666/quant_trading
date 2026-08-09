@@ -84,6 +84,13 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _stable_sha256(value: Any) -> str:
+    """Hash a JSON-compatible value without depending on dict ordering."""
+
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _dependency_error() -> str:
     try:
         import joblib  # noqa: F401
@@ -381,9 +388,31 @@ class FactorGovernanceLightGBMService:
                 for item in samples
                 if str(item.get("trade_id") or item.get("review_id") or "")
             }
-            factor_sample_counts = {
-                factor: len(items) for factor, items in by_factor.items()
-            }
+            factor_sample_counts: dict[str, int] = {}
+            for sample in samples:
+                factor = str(sample.get("factor") or "")
+                if factor:
+                    factor_sample_counts[factor] = factor_sample_counts.get(factor, 0) + 1
+            factors_below_20 = sorted(
+                factor for factor, count in factor_sample_counts.items() if count < 20
+            )
+            lineage_fingerprint = [
+                {
+                    "id": int(item.get("id") or 0),
+                    "review_id": str(item.get("review_id") or ""),
+                    "trade_id": str(item.get("trade_id") or ""),
+                    "factor": str(item.get("factor") or ""),
+                    "decision_ts": _safe_float(item.get("decision_ts") or item.get("created_at")),
+                    "factor_generation": str(item.get("factor_generation") or ""),
+                }
+                for item in sorted(
+                    lineage_items,
+                    key=lambda value: (
+                        _safe_float(value.get("decision_ts") or value.get("created_at")),
+                        int(value.get("id") or 0),
+                    ),
+                )
+            ]
             self.last_data_quality = {
                 "schema_version": "model_training_data_quality.v1",
                 "candidate_row_count": len(rows),
@@ -400,6 +429,16 @@ class FactorGovernanceLightGBMService:
                 "excluded_other_generation_count": len(row_items) - len(lineage_items),
                 "factors_below_10_samples": sum(count < 10 for count in factor_sample_counts.values()),
                 "factors_below_20_samples": sum(count < 20 for count in factor_sample_counts.values()),
+                "factors_below_20_sample_ids": factors_below_20,
+                "factor_sample_counts": dict(sorted(factor_sample_counts.items())),
+                "sample_watermark": max(
+                    (_safe_float(item.get("created_at")) for item in samples),
+                    default=0.0,
+                ),
+                "lineage_hash": _stable_sha256({
+                    "factor_generation": latest_generation,
+                    "rows": lineage_fingerprint,
+                }),
                 "rolling_window": 5,
                 "min_history": 3,
                 "removed_constant_features": ["hold_contribution", "exit_contribution"],
@@ -423,10 +462,12 @@ class FactorGovernanceLightGBMService:
         if dep_error:
             return {
                 "ok": False,
+                "status": "failed",
                 "model_type": MODEL_TYPE,
                 "model_version": MODEL_VERSION,
                 "error": "dependency_missing",
                 "detail": dep_error,
+                "reason_codes": ["dependency_missing"],
                 "required": ["lightgbm", "scikit-learn", "joblib", "pandas"],
             }
 
@@ -436,6 +477,21 @@ class FactorGovernanceLightGBMService:
         from sklearn.metrics import accuracy_score, balanced_accuracy_score, recall_score, roc_auc_score
 
         samples = self.load_samples(limit=limit)
+        if not samples:
+            return {
+                "ok": False,
+                "status": "skipped",
+                "skipped": True,
+                "model_type": MODEL_TYPE,
+                "model_version": MODEL_VERSION,
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                "sample_count": 0,
+                "distinct_trade_count": 0,
+                "replay_distinct_trade_count": 0,
+                "data_quality": dict(self.last_data_quality),
+                "reason": "no_new_matured_samples",
+                "reason_codes": ["no_new_matured_samples"],
+            }
         from backend.services.parity_replay import load_parity_learning_samples
 
         replay_samples = load_parity_learning_samples("factor")
@@ -449,12 +505,10 @@ class FactorGovernanceLightGBMService:
             for item in replay_samples
             if str(item.get("trade_id") or item.get("review_id") or "")
         }
-        if (
-            len(distinct_trade_ids) < 2
-            or len(distinct_trade_ids | replay_trade_ids) < int(min_samples)
-        ):
+        if len(distinct_trade_ids) < max(2, int(min_samples)):
             return {
                 "ok": False,
+                "status": "blocked",
                 "model_type": MODEL_TYPE,
                 "model_version": MODEL_VERSION,
                 "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -463,16 +517,19 @@ class FactorGovernanceLightGBMService:
                 "replay_distinct_trade_count": len(replay_trade_ids),
                 "data_quality": dict(self.last_data_quality),
                 "error": "insufficient_distinct_factor_trades",
+                "reason_codes": ["insufficient_distinct_factor_trades"],
             }
         labels = [int(item["label"]) for item in samples]
         if len(set(labels)) < 2:
             return {
                 "ok": False,
+                "status": "blocked",
                 "model_type": MODEL_TYPE,
                 "model_version": MODEL_VERSION,
                 "sample_count": len(samples),
                 "positive_count": sum(labels),
                 "error": "single_class_training_data",
+                "reason_codes": ["single_class_training_data"],
             }
 
         ordered_trades: list[str] = []
@@ -485,7 +542,13 @@ class FactorGovernanceLightGBMService:
         train_samples = [item for item in samples if str(item.get("trade_id") or item.get("review_id") or "") not in holdout_trade_ids]
         holdout_samples = [item for item in samples if str(item.get("trade_id") or item.get("review_id") or "") in holdout_trade_ids]
         if not train_samples or not holdout_samples:
-            return {"ok": False, "model_type": MODEL_TYPE, "error": "grouped_time_split_empty"}
+            return {
+                "ok": False,
+                "status": "blocked",
+                "model_type": MODEL_TYPE,
+                "error": "grouped_time_split_empty",
+                "reason_codes": ["grouped_time_split_empty"],
+            }
 
         x_holdout = pd.DataFrame([item["features"] for item in holdout_samples], columns=FEATURE_NAMES)
         y_holdout = [int(item["label"]) for item in holdout_samples]
@@ -590,11 +653,29 @@ class FactorGovernanceLightGBMService:
 
         feature_importance = [
             {"feature": name, "importance": int(value)}
-            for name, value in sorted(
+                for name, value in sorted(
                 zip(FEATURE_NAMES, model.feature_importances_),
                 key=lambda item: (-int(item[1]), item[0]),
             )
         ]
+        label_contract = {
+            "label": "next_same_factor_outcome_from_rolling_history",
+            "trade_balanced_training_weight": True,
+            "recency_half_life_days": 14.0,
+            "factor_generation": self.last_data_quality.get("factor_generation"),
+        }
+        training_data_quality = dict(self.last_data_quality)
+        training_data_quality.update(
+            {
+                "real_distinct_trade_count": len(distinct_trade_ids),
+                "real_holdout_trade_count": len(holdout_trade_ids),
+                "replay_distinct_trade_count": len(replay_trade_ids),
+                "sample_maturity_watermark": self.last_data_quality.get(
+                    "sample_watermark", 0.0
+                ),
+                "label_contract_hash": _stable_sha256(label_contract),
+            }
+        )
         metrics = {
             "train": _metrics([int(item["label"]) for item in selected_train], train_prob),
             "holdout": _metrics(y_holdout, holdout_prob),
@@ -624,13 +705,8 @@ class FactorGovernanceLightGBMService:
             "holdout_count": len(holdout_samples),
             "label_distribution": {"negative": labels.count(0), "positive": labels.count(1)},
             "safe_for_live_trading": False,
-            "data_quality": dict(self.last_data_quality),
-            "label_contract": {
-                "label": "next_same_factor_outcome_from_rolling_history",
-                "trade_balanced_training_weight": True,
-                "recency_half_life_days": 14.0,
-                "factor_generation": self.last_data_quality.get("factor_generation"),
-            },
+            "data_quality": training_data_quality,
+            "label_contract": label_contract,
         }
         now = time.time()
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -650,8 +726,46 @@ class FactorGovernanceLightGBMService:
             "feature_names": FEATURE_NAMES,
             "label": "next_same_factor_positive_contribution_from_rolling_history",
             "sample_window": {"limit": int(limit), "sample_count": len(samples)},
-            "training_lineage": dict(self.last_data_quality),
+            "training_lineage": dict(training_data_quality),
             "metrics": metrics,
+            "lineage": {
+                "factor_generation": str(
+                    self.last_data_quality.get("factor_generation") or ""
+                ),
+                "lineage_hash": str(self.last_data_quality.get("lineage_hash") or ""),
+                "label_contract_hash": str(
+                    training_data_quality.get("label_contract_hash") or ""
+                ),
+                "sample_maturity_watermark": float(
+                    training_data_quality.get("sample_maturity_watermark") or 0.0
+                ),
+            },
+            "coverage": {
+                "factor_sample_counts": dict(
+                    training_data_quality.get("factor_sample_counts") or {}
+                ),
+                "factors_below_20_samples": list(
+                    training_data_quality.get("factors_below_20_sample_ids") or []
+                ),
+                "factor_count": len(
+                    training_data_quality.get("factor_sample_counts") or {}
+                ),
+            },
+            "walk_forward": {
+                "schema_version": "walk_forward.v1",
+                "status": "observed",
+                "window_count": 1,
+                "windows": [
+                    {
+                        "window_id": "time_ordered_holdout",
+                        "train_trade_count": len(
+                            set(ordered_trades) - holdout_trade_ids
+                        ),
+                        "holdout_trade_count": len(holdout_trade_ids),
+                        "metrics": dict(augmented_holdout if use_augmented else baseline_holdout),
+                    }
+                ],
+            },
             "explainability": {
                 "feature_importance": feature_importance,
                 "summary": "LightGBM shadow-only factor governance model. Labels use the next same-factor outcome, not the current row, to avoid same-row leakage. Scores are advisory and logged.",
@@ -672,6 +786,67 @@ class FactorGovernanceLightGBMService:
                 "MUST write audit records before suggestions are reviewed",
             ],
         }
+        metadata_path.write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        try:
+            from backend.services.model_influence_governance import ModelInfluenceGovernanceService
+
+            quality_gate = ModelInfluenceGovernanceService(self.db_path).evaluate_artifact(
+                metadata_path
+            )
+        except Exception as exc:
+            quality_gate = {
+                "schema_version": "model_promotion_gate.v1",
+                "passed": False,
+                "reason": "promotion_gate_evaluation_error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "checks": [],
+                "failed_checks": ["promotion_gate_evaluation_error"],
+            }
+        artifact["quality_gate"] = {
+            "schema_version": str(quality_gate.get("schema_version") or "model_promotion_gate.v1"),
+            "passed": bool(quality_gate.get("passed")),
+            "reason": str(quality_gate.get("reason") or "promotion_gate_failed"),
+            "reason_codes": list(
+                quality_gate.get("reason_codes")
+                or quality_gate.get("failed_checks")
+                or []
+            ),
+            "failed_checks": list(quality_gate.get("failed_checks") or []),
+            "checks": list(quality_gate.get("checks") or []),
+            "generation": str(self.last_data_quality.get("factor_generation") or ""),
+            "lineage_hash": str(self.last_data_quality.get("lineage_hash") or ""),
+        }
+        artifact["metrics"]["data_quality"].update(
+            {
+                "quality_gate": {
+                    "passed": bool(quality_gate.get("passed")),
+                    "reason": str(
+                        quality_gate.get("reason") or "promotion_gate_failed"
+                    ),
+                    "reason_codes": list(
+                        quality_gate.get("reason_codes")
+                        or quality_gate.get("failed_checks")
+                        or []
+                    ),
+                },
+                "real_distinct_trade_count": int(
+                    quality_gate.get("real_distinct_trade_count")
+                    or len(distinct_trade_ids)
+                ),
+                "real_holdout_trade_count": int(
+                    quality_gate.get("real_holdout_trade_count")
+                    or len(holdout_trade_ids)
+                ),
+                "replay_distinct_trade_count": int(
+                    quality_gate.get("replay_distinct_trade_count")
+                    or len(replay_trade_ids)
+                ),
+            }
+        )
         metadata_path.write_text(
             json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -706,6 +881,7 @@ class FactorGovernanceLightGBMService:
 
         return {
             "ok": True,
+            "status": "trained",
             "model_type": MODEL_TYPE,
             "model_version": MODEL_VERSION,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -713,6 +889,7 @@ class FactorGovernanceLightGBMService:
             "artifact_sha256": artifact["artifact_sha256"],
             "model_file": str(model_path),
             "metrics": metrics,
+            "quality_gate": artifact["quality_gate"],
             "explainability": artifact["explainability"],
             "capabilities": artifact["capabilities"],
             "registry_version": registry_version,
@@ -721,6 +898,13 @@ class FactorGovernanceLightGBMService:
     def latest_artifact_path(self) -> str:
         paths = sorted(self.artifact_dir.glob(f"{MODEL_TYPE}_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         return str(paths[0]) if paths else ""
+
+    def _promotion_gate(self, artifact_path: str | Path) -> dict[str, Any]:
+        """Read the canonical model gate without creating a second gate owner."""
+
+        from backend.services.model_influence_governance import ModelInfluenceGovernanceService
+
+        return ModelInfluenceGovernanceService(self.db_path).evaluate_artifact(artifact_path)
 
     def _existing_shadow_sample_ids(self, *, artifact_path: str) -> set[str]:
         conn = self._conn()
@@ -767,6 +951,9 @@ class FactorGovernanceLightGBMService:
         if not path.exists():
             return {"ok": False, "error": "artifact_missing", "artifact_path": str(path)}
         artifact = json.loads(path.read_text(encoding="utf-8"))
+        artifact["artifact_sha256"] = _sha256(path)
+        promotion_gate = self._promotion_gate(path)
+        mutation_eligible = bool(promotion_gate.get("passed"))
         permission = validate_model_artifact(
             artifact,
             model_type=MODEL_TYPE,
@@ -817,11 +1004,20 @@ class FactorGovernanceLightGBMService:
         probs = model.predict_proba(x)[:, 1]
         items = []
         for sample, prob in zip(samples, probs):
-            items.append(self._persist_inference(artifact, sample, float(prob), mode=mode))
+            items.append(
+                self._persist_inference(
+                    artifact,
+                    sample,
+                    float(prob),
+                    mode=mode,
+                    promotion_gate=promotion_gate,
+                )
+            )
         suggestions = self.build_advisories(
             items=items,
-            materialize=materialize,
+            materialize=materialize and mutation_eligible,
             min_weakness_score=min_weakness_score,
+            min_factor_sample_count=20,
         )
         return {
             "ok": True,
@@ -831,6 +1027,13 @@ class FactorGovernanceLightGBMService:
             "count": len(items),
             "items": items,
             "suggestions": suggestions,
+            "promotion_gate": promotion_gate,
+            "mutation_eligible": mutation_eligible,
+            "materialization_blocked_reason": (
+                "blocked_by_model_quality_gate"
+                if materialize and not mutation_eligible
+                else ""
+            ),
             "capabilities": {
                 "live_trading": False,
                 "advisory_only": True,
@@ -883,6 +1086,8 @@ class FactorGovernanceLightGBMService:
                 "artifact_path": str(path),
             }
         artifact = json.loads(path.read_text(encoding="utf-8"))
+        artifact["artifact_sha256"] = _sha256(path)
+        promotion_gate = self._promotion_gate(path)
         permission = validate_model_artifact(
             artifact,
             model_type=MODEL_TYPE,
@@ -948,7 +1153,13 @@ class FactorGovernanceLightGBMService:
         items = []
         for sample, prob in zip(samples, probs):
             items.append(
-                self._persist_inference(artifact, sample, float(prob), mode=mode)
+                self._persist_inference(
+                    artifact,
+                    sample,
+                    float(prob),
+                    mode=mode,
+                    promotion_gate=promotion_gate,
+                )
             )
         weakness = max(
             float(item.get("weakness_score") or 0.0) for item in items
@@ -966,6 +1177,8 @@ class FactorGovernanceLightGBMService:
             ),
             "inference_id": str(items[-1].get("inference_id") or ""),
             "items": items,
+            "promotion_gate": promotion_gate,
+            "mutation_eligible": bool(promotion_gate.get("passed")),
             "capabilities": {
                 "live_trading": False,
                 "advisory_only": True,
@@ -1043,6 +1256,7 @@ class FactorGovernanceLightGBMService:
         positive_score: float,
         *,
         mode: str,
+        promotion_gate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = time.time()
         weakness = max(0.0, min(1.0, 1.0 - float(positive_score)))
@@ -1065,6 +1279,24 @@ class FactorGovernanceLightGBMService:
             },
             "guardrails": list(artifact.get("guardrails") or []),
         }
+        gate = dict(promotion_gate or artifact.get("quality_gate") or {})
+        result["promotion_gate"] = {
+            "passed": bool(gate.get("passed")),
+            "reason": str(gate.get("reason") or "promotion_gate_unknown"),
+            "failed_checks": list(gate.get("failed_checks") or []),
+        }
+        result["mutation_eligible"] = bool(gate.get("passed"))
+        result["artifact_sha256"] = str(artifact.get("artifact_sha256") or "")
+        result["factor_generation"] = str(
+            (artifact.get("training_lineage") or {}).get("factor_generation")
+            or (artifact.get("quality_gate") or {}).get("generation")
+            or ""
+        )
+        result["lineage_hash"] = str(
+            (artifact.get("training_lineage") or {}).get("lineage_hash")
+            or (artifact.get("quality_gate") or {}).get("lineage_hash")
+            or ""
+        )
         result["source_agent"] = "lightgbm_shadow_models"
         result["authority_verdict"] = AgentAuthorityRegistryService().evaluate(
             "lightgbm_shadow_models",
@@ -1087,6 +1319,11 @@ class FactorGovernanceLightGBMService:
             "label_source": sample.get("label_source", ""),
             "source_agent": "lightgbm_shadow_models",
             "authority_verdict": result["authority_verdict"],
+            "artifact_sha256": result["artifact_sha256"],
+            "promotion_gate": result["promotion_gate"],
+            "mutation_eligible": result["mutation_eligible"],
+            "factor_generation": result["factor_generation"],
+            "lineage_hash": result["lineage_hash"],
         }
         inference_id = f"{MODEL_TYPE}:{sample['sample_id']}:{int(now * 1000)}"
         conn = self._conn()
@@ -1141,6 +1378,7 @@ class FactorGovernanceLightGBMService:
         min_weakness_score: float = 0.65,
         governed_action: str = "review_factor_weight_or_template",
         min_weak_sample_count: int = 1,
+        min_factor_sample_count: int = 20,
         factor_allowlist: set[str] | None = None,
         evidence_context_by_factor: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -1154,7 +1392,11 @@ class FactorGovernanceLightGBMService:
                 continue
             grouped.setdefault(factor, []).append(item)
         suggestions = []
+        low_coverage_factors: dict[str, int] = {}
         for factor, factor_items in sorted(grouped.items()):
+            if materialize and len(factor_items) < max(1, int(min_factor_sample_count)):
+                low_coverage_factors[factor] = len(factor_items)
+                continue
             weak_items = [
                 item for item in factor_items
                 if _safe_float(item.get("weakness_score")) >= float(min_weakness_score)
@@ -1163,6 +1405,18 @@ class FactorGovernanceLightGBMService:
                 continue
             avg_weakness = sum(_safe_float(item.get("weakness_score")) for item in weak_items) / max(len(weak_items), 1)
             confidence = min(0.92, max(0.55, avg_weakness * min(1.0, len(weak_items) / 5.0)))
+            review_ids = sorted(
+                {
+                    str(item.get("review_id") or "")
+                    for item in factor_items
+                    if str(item.get("review_id") or "")
+                }
+            )
+            counter_items = [
+                item
+                for item in factor_items
+                if _safe_float(item.get("weakness_score")) < float(min_weakness_score)
+            ]
             identity = f"{factor}:{len(weak_items)}:{round(avg_weakness, 4)}"
             if governed_action != "review_factor_weight_or_template" or min_weak_sample_count > 1:
                 identity = ":".join(
@@ -1182,9 +1436,53 @@ class FactorGovernanceLightGBMService:
                 "avg_weakness_score": round(avg_weakness, 6),
                 "min_weakness_score": float(min_weakness_score),
                 "latest_inference_ids": [str(item.get("inference_id") or "") for item in weak_items[:5]],
+                "review_ids": review_ids,
+                "review_reference_ids": review_ids,
+                "review_id": review_ids[0] if review_ids else "",
+                "counter_evidence_refs": {
+                    "schema_version": "factor_governance_counter_evidence_refs.v1",
+                    "source": "factor_governance_shadow_audit",
+                    "review_ids": sorted(
+                        {
+                            str(item.get("review_id") or "")
+                            for item in counter_items
+                            if str(item.get("review_id") or "")
+                        }
+                    ),
+                    "inference_ids": [
+                        str(item.get("inference_id") or "")
+                        for item in counter_items
+                        if str(item.get("inference_id") or "")
+                    ],
+                    "observed_count": len(counter_items),
+                    "status": "observed" if counter_items else "pending_candidate_review",
+                    "required_before_bridge": True,
+                },
                 "advisory_only": True,
                 "approval_path": "governor_review_then_offline_replay",
             }
+            audit_result = next(
+                (
+                    dict(item.get("result") or {})
+                    for item in factor_items
+                    if isinstance(item.get("result"), dict)
+                    and item.get("result")
+                ),
+                {},
+            )
+            if audit_result:
+                evidence.setdefault(
+                    "promotion_gate",
+                    dict(audit_result.get("promotion_gate") or {}),
+                )
+                for name in (
+                    "mutation_eligible",
+                    "artifact_sha256",
+                    "factor_generation",
+                    "lineage_hash",
+                ):
+                    if name in audit_result:
+                        evidence.setdefault(name, audit_result.get(name))
             evidence.update(dict((evidence_context_by_factor or {}).get(factor) or {}))
             suggestions.append(
                 {
@@ -1209,13 +1507,39 @@ class FactorGovernanceLightGBMService:
                     "advisory_only": True,
                 }
             )
+        materialization_blocked_reason = ""
+        materialization: dict[str, Any] = {
+            "candidate_count": 0,
+            "blocked_count": 0,
+            "blocked_reasons": {},
+            "items": [],
+        }
         if materialize and suggestions:
-            self._materialize_suggestions(suggestions)
+            model_gate_ready = all(
+                bool(((item.get("evidence") or {}).get("promotion_gate") or {}).get("passed"))
+                and bool((item.get("evidence") or {}).get("mutation_eligible"))
+                for item in suggestions
+            )
+            if not model_gate_ready:
+                materialize = False
+                materialization_blocked_reason = "blocked_by_model_quality_gate"
+        if materialize and suggestions:
+            materialization = self._materialize_suggestions(suggestions)
+            if not materialization.get("candidate_count"):
+                materialize = False
+                materialization_blocked_reason = str(
+                    materialization.get("blocked_reason")
+                    or "no_governance_candidate_materialized"
+                )
         return {
             "schema_version": "factor_governance_advisory_set.v1",
             "model_type": MODEL_TYPE,
             "advisory_only": True,
             "materialized": bool(materialize),
+            "materialization_blocked_reason": materialization_blocked_reason,
+            "candidate_count": int(materialization.get("candidate_count") or 0),
+            "materialization": materialization,
+            "low_coverage_factors": low_coverage_factors,
             "items": suggestions,
             "count": len(suggestions),
         }
@@ -1227,21 +1551,48 @@ class FactorGovernanceLightGBMService:
         min_weakness_score: float = 0.85,
         min_weak_sample_count: int = 2,
         max_factors: int = 10,
+        min_factor_sample_count: int = 20,
     ) -> dict[str, Any]:
         """Bridge strong model evidence into the guarded demo governance queue.
 
         The LightGBM model remains advisory-only.  This method only creates a
-        factor-scoped ``policy_suggestion`` with a concrete, whitelisted
-        ``downweight`` action.  Approval and application remain owned by the
-        existing governor, DecisionPolicy, RiskPolicyService, and weight
-        mutation service.
+        factor-scoped governance candidate with a concrete, whitelisted
+        ``downweight`` action.  Candidate review, counter-evidence, the
+        existing policy bridge, DecisionPolicy, RiskPolicyService, and weight
+        mutation service remain downstream authorities.
         """
         from backend.services.factor_catalog import build_factor_catalog
         from backend.services.model_influence import ModelInfluenceService
+        from backend.services.model_influence_governance import ModelInfluenceGovernanceService
         from config.runtime_config import shared as runtime_config
 
         cfg = runtime_config()
         influence = ModelInfluenceService(self.db_path)
+        configured_policy = influence.policy_for(MODEL_TYPE, cfg)
+        configured_artifact_path = str(configured_policy.get("artifact_path") or "")
+        artifact_path = configured_artifact_path or self.latest_artifact_path()
+        promotion_gate = (
+            ModelInfluenceGovernanceService(self.db_path).evaluate_artifact(artifact_path)
+            if artifact_path
+            else {
+                "schema_version": "model_promotion_gate.v1",
+                "passed": False,
+                "reason": "artifact_missing",
+                "failed_checks": ["artifact_missing"],
+                "checks": [],
+            }
+        )
+        if not promotion_gate.get("passed"):
+            return {
+                "schema_version": "factor_governance_demo_bridge.v1",
+                "enabled": False,
+                "materialized": False,
+                "count": 0,
+                "reason": "blocked_by_model_quality_gate",
+                "artifact_path": artifact_path,
+                "promotion_gate": promotion_gate,
+                "mutation_eligible": False,
+            }
         policy = influence.active_policy(MODEL_TYPE, cfg)
 
         catalog = build_factor_catalog(self.db_path)
@@ -1281,12 +1632,16 @@ class FactorGovernanceLightGBMService:
             }
 
         grouped: dict[str, list[dict[str, Any]]] = {}
+        low_coverage: dict[str, int] = {}
         for item in audits:
             factor = str(item.get("factor") or "")
             if factor in active:
                 grouped.setdefault(factor, []).append(item)
         ranked: list[tuple[float, str]] = []
         for factor, items in grouped.items():
+            if len(items) < max(1, int(min_factor_sample_count)):
+                low_coverage[factor] = len(items)
+                continue
             weak = [
                 item for item in items
                 if _safe_float(item.get("weakness_score")) >= float(min_weakness_score)
@@ -1297,19 +1652,68 @@ class FactorGovernanceLightGBMService:
             ranked.append((avg_weakness, factor))
         ranked.sort(key=lambda item: (-item[0], item[1]))
         selected = {factor for _, factor in ranked[:max(1, int(max_factors))]}
+        gate_data_quality = dict(
+            (promotion_gate.get("metrics") or {}).get("data_quality") or {}
+        )
+        model_version = str(
+            policy.get("model_version")
+            or next(
+                (
+                    str(item.get("model_version") or "")
+                    for item in audits
+                    if str(item.get("model_version") or "")
+                ),
+                "",
+            )
+        )
+        factor_generation = str(
+            gate_data_quality.get("factor_generation")
+            or promotion_gate.get("generation")
+            or ""
+        )
+        lineage_hash = str(
+            gate_data_quality.get("lineage_hash")
+            or promotion_gate.get("lineage_hash")
+            or ""
+        )
+        label_contract_hash = str(
+            gate_data_quality.get("label_contract_hash") or ""
+        )
         context = {
             factor: {
                 "bridge_schema_version": "factor_governance_demo_bridge.v1",
                 "bridge": {
                     "automatic_demo": True,
-                    "demo_nursery": True,
+                    "demo_nursery": str(getattr(cfg, "autonomy_mode", "")) == "demo_nursery",
+                    "autonomy_mode": str(getattr(cfg, "autonomy_mode", "") or ""),
                     "actor": "system:autonomous_learning.demo_nursery_model_governance",
                     "service": "FactorGovernanceLightGBMService.materialize_demo_governance_advisories",
                     "manual_only": False,
                 },
                 "model_advisory": True,
                 "model_influence_active": True,
+                "mutation_eligible": True,
+                "model_version": model_version,
                 "model_stage": str(policy.get("stage") or ""),
+                "artifact_path": artifact_path,
+                "artifact_sha256": str(promotion_gate.get("artifact_sha256") or ""),
+                "factor_generation": factor_generation,
+                "lineage_hash": lineage_hash,
+                "label_contract_hash": label_contract_hash,
+                "v16_command_id": "",
+                "mutation_id": "",
+                "application_id": "",
+                "promotion_gate": {
+                    "passed": True,
+                    "reason": str(promotion_gate.get("reason") or "promotion_gate_passed"),
+                    "reason_codes": list(
+                        promotion_gate.get("reason_codes")
+                        or promotion_gate.get("failed_checks")
+                        or []
+                    ),
+                    "failed_checks": list(promotion_gate.get("failed_checks") or []),
+                },
+                "training_lineage": gate_data_quality,
                 "feature_schema_version": str(policy.get("feature_schema_version") or ""),
                 "model_action": "review_factor_weight_or_template",
                 "governed_action": "downweight",
@@ -1334,7 +1738,7 @@ class FactorGovernanceLightGBMService:
         }
         result = self.build_advisories(
             items=audits,
-            materialize=False,
+            materialize=True,
             min_weakness_score=min_weakness_score,
             governed_action="downweight",
             min_weak_sample_count=min_weak_sample_count,
@@ -1343,36 +1747,66 @@ class FactorGovernanceLightGBMService:
         )
         suggestions = list(result.get("items") or [])
         if suggestions:
-            self._materialize_suggestions(suggestions)
+            audit_policy = {
+                **policy,
+                "artifact_sha256": str(
+                    policy.get("artifact_sha256")
+                    or promotion_gate.get("artifact_sha256")
+                    or ""
+                ),
+                "model_version": model_version,
+            }
             for suggestion in suggestions:
+                evidence = dict(suggestion.get("evidence") or {})
+                evidence.setdefault("review_id", "")
+                evidence.setdefault("candidate_review_id", "")
+                evidence.setdefault("v16_command_id", "")
+                evidence.setdefault("mutation_id", "")
+                evidence.setdefault("application_id", "")
+                evidence.setdefault("application_state", "candidate_only")
+                suggestion["evidence"] = evidence
+            for suggestion in suggestions:
+                if not str((suggestion.get("evidence") or {}).get("candidate_id") or ""):
+                    continue
                 influence.audit(
                     model_type=MODEL_TYPE,
-                    policy=policy,
+                    policy=audit_policy,
                     subject_id=str(suggestion.get("scope_key") or ""),
                     rule_decision={"governance_required": True, "direct_weight_change": False},
                     model_result=dict(suggestion.get("evidence") or {}),
                     fused_decision={
                         "suggestion_id": suggestion.get("suggestion_id"),
+                        "candidate_id": (suggestion.get("evidence") or {}).get("candidate_id", ""),
+                        "review_id": (suggestion.get("evidence") or {}).get("candidate_review_id", ""),
+                        "v16_command_id": (suggestion.get("evidence") or {}).get("v16_command_id", ""),
+                        "mutation_id": (suggestion.get("evidence") or {}).get("mutation_id", ""),
+                        "application_id": (suggestion.get("evidence") or {}).get("application_id", ""),
                         "action": "downweight",
-                        "status": "proposed",
+                        "status": "candidate_only",
                     },
-                    applied=True,
-                    reason="model_factor_downweight_suggestion",
+                    applied=False,
+                    reason="model_factor_downweight_candidate_materialized",
                 )
         return {
             **result,
             "schema_version": "factor_governance_demo_bridge.v1",
             "enabled": True,
-            "materialized": bool(suggestions),
+            "materialized": bool(result.get("candidate_count") or 0),
             "eligible_active_factors": len(active),
             "selected_factors": sorted(selected),
             "stale_superseded": stale_superseded,
+            "promotion_gate": promotion_gate,
+            "mutation_eligible": True,
+            "low_coverage_factors": low_coverage,
+            "min_factor_sample_count": int(min_factor_sample_count),
             "min_weakness_score": float(min_weakness_score),
             "min_weak_sample_count": int(min_weak_sample_count),
         }
 
     def _supersede_inactive_demo_suggestions(self, active_factors: set[str]) -> int:
         """Close stale model bridges after their factor leaves the runtime score."""
+        from config.runtime_config import DEMO_AUTONOMY_MODES
+
         changed = 0
         conn = self._conn()
         try:
@@ -1395,7 +1829,11 @@ class FactorGovernanceLightGBMService:
                     and evidence.get("model_type") == MODEL_TYPE
                     and isinstance(bridge, dict)
                     and bridge.get("automatic_demo") is True
-                    and bridge.get("demo_nursery") is True
+                    and (
+                        bridge.get("demo_nursery") is True
+                        or str(bridge.get("autonomy_mode") or "").strip().lower()
+                        in DEMO_AUTONOMY_MODES
+                    )
                 ):
                     continue
                 if str(row["scope_key"] or "") in active_factors:
@@ -1416,49 +1854,278 @@ class FactorGovernanceLightGBMService:
         finally:
             conn.close()
 
-    def _materialize_suggestions(self, suggestions: list[dict[str, Any]]) -> None:
-        conn = self._conn()
-        try:
-            now = time.time()
-            for item in suggestions:
-                self._execute(conn,
-                    """
-                    INSERT INTO policy_suggestion
-                    (suggestion_id, scope_type, scope_key, action, confidence, reason,
-                     evidence_json, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(
-                        (SELECT status FROM policy_suggestion WHERE suggestion_id=?),
-                        'proposed'
-                    ), COALESCE(
-                        (SELECT created_at FROM policy_suggestion WHERE suggestion_id=?),
-                        ?
-                    ))
-                    ON CONFLICT(suggestion_id) DO UPDATE SET
-                        scope_type=excluded.scope_type,
-                        scope_key=excluded.scope_key,
-                        action=excluded.action,
-                        confidence=excluded.confidence,
-                        reason=excluded.reason,
-                        evidence_json=excluded.evidence_json,
-                        status=excluded.status,
-                        created_at=excluded.created_at
-                    """,
-                    (
-                        item["suggestion_id"],
-                        item["scope_type"],
-                        item["scope_key"],
-                        item["action"],
-                        float(item["confidence"]),
-                        item["reason"],
-                        json.dumps(item["evidence"], ensure_ascii=False, sort_keys=True),
-                        item["suggestion_id"],
-                        item["suggestion_id"],
-                        now,
-                    ),
-                )
-            conn.commit()
-        finally:
-            conn.close()
+    def _materialize_suggestions(
+        self, suggestions: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Materialize model output into the existing candidate lane only.
+
+        ``lightgbm_shadow_models`` is advisory-only and is not registered as a
+        policy writer.  The candidate is attributed to the existing
+        ``factor_pruning_governance`` authority so that the already deployed
+        counter-evidence, candidate-review, and policy-suggestion bridge remain
+        the only downstream mutation path.
+        """
+        from alpha.decision_policy import DecisionPolicy
+        from backend.services.brain_governance_candidates import (
+            BrainGovernanceCandidateService,
+            ensure_brain_governance_candidate_table,
+        )
+        from risk.policy_service import RiskPolicyService
+
+        ensure_brain_governance_candidate_table(self.db_path)
+        candidate_service = BrainGovernanceCandidateService(self.db_path)
+        now = time.time()
+        candidates: list[dict[str, Any]] = []
+        blocked: list[dict[str, Any]] = []
+
+        def block(item: dict[str, Any], reason: str, **extra: Any) -> None:
+            blocked.append(
+                {
+                    "status": "blocked_model_candidate",
+                    "suggestion_id": str(item.get("suggestion_id") or ""),
+                    "factor": str(item.get("scope_key") or ""),
+                    "reason": reason,
+                    **extra,
+                }
+            )
+
+        for item in suggestions:
+            evidence = dict(item.get("evidence") or {})
+            factor = str(item.get("scope_key") or "")
+            if str(item.get("action") or "") != "downweight":
+                block(item, "unsupported_model_governance_action")
+                continue
+            gate = dict(evidence.get("promotion_gate") or {})
+            missing: list[str] = []
+            if gate.get("passed") is not True:
+                missing.append("model_quality_gate")
+            if evidence.get("mutation_eligible") is not True:
+                missing.append("mutation_eligibility")
+            for name in (
+                "artifact_sha256",
+                "factor_generation",
+                "lineage_hash",
+                "label_contract_hash",
+            ):
+                if not str(evidence.get(name) or ""):
+                    missing.append(name)
+            if str(evidence.get("factor_generation") or "") != "runtime_bounded_v1":
+                missing.append("current_factor_generation")
+            review_ids = [
+                str(value)
+                for value in (evidence.get("review_reference_ids") or evidence.get("review_ids") or [])
+                if str(value)
+            ]
+            if not review_ids:
+                missing.append("review_reference")
+            counter_refs = evidence.get("counter_evidence_refs")
+            if not isinstance(counter_refs, dict) or not counter_refs.get("required_before_bridge"):
+                missing.append("counter_evidence_contract")
+            active_context = dict(evidence.get("active_factor_context") or {})
+            if active_context.get("used_in_score") is not True or str(active_context.get("role") or "") != "alpha":
+                missing.append("active_alpha_factor")
+            if int(evidence.get("sample_count") or 0) < 20:
+                missing.append("factor_sample_count")
+            if int(evidence.get("weak_sample_count") or 0) < 2:
+                missing.append("weak_sample_count")
+            if missing:
+                block(item, "missing_model_candidate_contract", missing=sorted(set(missing)))
+                continue
+
+            current_weight = _safe_float(active_context.get("weight"))
+            if not factor or current_weight <= 0.0:
+                block(item, "missing_current_runtime_weight")
+                continue
+            target_weight = max(0.0, min(current_weight * 0.89, current_weight * 0.95))
+            risk_result = RiskPolicyService.shared().evaluate(
+                "update_weight",
+                {
+                    "required_mode": "autonomous_governance",
+                    "session": {"drawdown_pct": 0.0},
+                    "evidence": {"factor_governance_model_candidate": evidence},
+                    "suggestion_status": "candidate",
+                    "autonomous_apply": False,
+                    "factor": factor,
+                    "current_weight": current_weight,
+                    "target_weight": target_weight,
+                },
+            )
+            risk_verdict = (
+                dict(risk_result.to_dict())
+                if hasattr(risk_result, "to_dict")
+                else dict(risk_result or {})
+            )
+            if not bool(risk_verdict.get("allowed")):
+                block(item, "risk_policy_not_allowed", risk_verdict=risk_verdict)
+                continue
+
+            decision = DecisionPolicy().decide(
+                awe_patches={factor: {"weight": target_weight, "reason": "factor_model_candidate"}},
+                weight_policy_weights={factor: target_weight},
+                shadow_perfs={},
+                factor_configs={factor: {"enabled": True, "role": "alpha"}},
+                current_weights={factor: current_weight},
+            ).get(factor)
+            decision_preview = {
+                "schema_version": "factor_model_decision_policy_preview.v1",
+                "required": True,
+                "decision": decision.to_api() if decision else {},
+                "applied": False,
+                "owner": "FactorWeightChangeService",
+            }
+            if not decision_preview["decision"]:
+                block(item, "missing_decision_policy_preview")
+                continue
+
+            model_evidence = dict(evidence)
+            suggestion_id = str(item.get("suggestion_id") or "")
+            candidate_id = f"factor_model:{suggestion_id}"
+            model_evidence["source_advisory_id"] = suggestion_id
+            model_evidence["candidate_id"] = candidate_id
+            model_evidence["candidate_only"] = True
+            expected_effect = {
+                "schema_version": "factor_governance_model_expected_effect.v1",
+                "candidate_only": True,
+                "applied": False,
+                "current_weight": current_weight,
+                "suggested_target_weight": target_weight,
+                "estimated_weight_delta": round(target_weight - current_weight, 8),
+                "reasons": [
+                    {
+                        "code": "recent_live_decision_participation",
+                        "decision_review_count": len(review_ids),
+                        "source": "factor_governance_shadow_audit",
+                    },
+                    {
+                        "code": "model_quality_gate_passed",
+                        "artifact_sha256": str(evidence.get("artifact_sha256") or ""),
+                    },
+                    {
+                        "code": "model_counter_evidence_required",
+                        "required_before_bridge": True,
+                    },
+                ],
+                "source_presence": {
+                    "artifact_sha256": bool(evidence.get("artifact_sha256")),
+                    "factor_generation": str(evidence.get("factor_generation") or "") == "runtime_bounded_v1",
+                    "lineage_hash": bool(evidence.get("lineage_hash")),
+                    "label_contract_hash": bool(evidence.get("label_contract_hash")),
+                    "model_quality_gate": gate.get("passed") is True,
+                    "factor_sample_coverage": int(evidence.get("sample_count") or 0) >= 20,
+                    "counter_evidence": bool(counter_refs),
+                },
+                "model_evidence": {
+                    "artifact_sha256": str(evidence.get("artifact_sha256") or ""),
+                    "model_version": str(evidence.get("model_version") or ""),
+                    "factor_generation": str(evidence.get("factor_generation") or ""),
+                    "lineage_hash": str(evidence.get("lineage_hash") or ""),
+                    "label_contract_hash": str(evidence.get("label_contract_hash") or ""),
+                },
+                "application_state": "candidate_only",
+            }
+            evidence_refs = {
+                "schema_version": "factor_governance_model_candidate_evidence_refs.v1",
+                "model_evidence": model_evidence,
+                "artifact_sha256": str(evidence.get("artifact_sha256") or ""),
+                "model_version": str(evidence.get("model_version") or ""),
+                "factor_generation": str(evidence.get("factor_generation") or ""),
+                "lineage_hash": str(evidence.get("lineage_hash") or ""),
+                "label_contract_hash": str(evidence.get("label_contract_hash") or ""),
+                "review_reference_ids": review_ids,
+                "counter_evidence_refs": counter_refs,
+            }
+            candidate = candidate_service.create_candidate(
+                candidate_id=candidate_id,
+                source_agent="factor_pruning_governance",
+                source_kind="factor_governance_model_candidate",
+                source_ref_type="factor_governance_shadow_advisory",
+                source_ref_id=suggestion_id,
+                proposal_stage="brain_candidate",
+                capability_scope="factor_catalog_runtime_governance",
+                scope_type="factor",
+                scope_key=factor,
+                action="downweight",
+                confidence=_safe_float(item.get("confidence"), 0.55),
+                evidence_score=min(
+                    0.99,
+                    max(0.90, _safe_float(evidence.get("avg_weakness_score"), 0.90)),
+                ),
+                risk_class="medium",
+                max_impact="medium_impact",
+                expected_effect=expected_effect,
+                evidence_refs=evidence_refs,
+                counter_evidence_refs={
+                    "schema_version": "factor_governance_model_counter_evidence_refs.v1",
+                    "model_counter_evidence": counter_refs,
+                    "required_before_bridge": True,
+                },
+                risk_verdict=risk_verdict,
+                decision_policy=decision_preview,
+                rollback_plan={
+                    "schema_version": "factor_governance_model_rollback_plan.v1",
+                    "candidate_lane_only": True,
+                    "runtime_mutation": False,
+                    "restore_weight": current_weight,
+                    "requires_application_effect": True,
+                    "effect_missing_blocks_active_promotion": True,
+                },
+                lineage={
+                    "schema_version": "factor_governance_model_candidate_lineage.v1",
+                    "phase": "factor_governance_model_candidate_materialization",
+                    "source_agent": "lightgbm_shadow_models",
+                    "source_advisory_id": suggestion_id,
+                    "artifact_sha256": str(evidence.get("artifact_sha256") or ""),
+                    "model_version": str(evidence.get("model_version") or ""),
+                    "factor_generation": str(evidence.get("factor_generation") or ""),
+                    "lineage_hash": str(evidence.get("lineage_hash") or ""),
+                    "label_contract_hash": str(evidence.get("label_contract_hash") or ""),
+                    "mapped_action": {
+                        "policy_action": "downweight",
+                        "risk_action": "update_weight",
+                        "current_weight": current_weight,
+                        "target_weight": target_weight,
+                    },
+                    "bridge": {
+                        "policy_suggestion_direct_write": False,
+                        "candidate_review_required": True,
+                        "counter_evidence_required": True,
+                        "v16_coordinator_application_effect_required": True,
+                    },
+                },
+                now=now,
+                persist=True,
+            )
+            evidence["candidate_id"] = str(candidate.get("candidate_id") or candidate_id)
+            evidence["candidate_stage"] = str(candidate.get("proposal_stage") or "brain_candidate")
+            evidence["candidate_review_required"] = True
+            evidence["candidate_materialization_status"] = "candidate_only"
+            evidence["candidate_review_id"] = ""
+            evidence["v16_command_id"] = ""
+            evidence["mutation_id"] = ""
+            evidence["application_id"] = ""
+            item["evidence"] = evidence
+            candidates.append(
+                {
+                    "status": "candidate_materialized",
+                    "candidate_id": str(candidate.get("candidate_id") or candidate_id),
+                    "suggestion_id": suggestion_id,
+                    "factor": factor,
+                    "proposal_stage": str(candidate.get("proposal_stage") or "brain_candidate"),
+                }
+            )
+
+        blocked_reasons: dict[str, int] = {}
+        for item in blocked:
+            reason = str(item.get("reason") or "blocked")
+            blocked_reasons[reason] = blocked_reasons.get(reason, 0) + 1
+        return {
+            "schema_version": "factor_governance_model_candidate_materialization.v1",
+            "candidate_count": len(candidates),
+            "blocked_count": len(blocked),
+            "blocked_reasons": dict(sorted(blocked_reasons.items())),
+            "blocked_reason": next(iter(sorted(blocked_reasons)), ""),
+            "items": candidates + blocked,
+        }
 
     def list_audits(self, *, limit: int = 100, factor: str | None = None) -> dict[str, Any]:
         clauses = []

@@ -866,6 +866,31 @@ class BrainGovernanceCandidateService:
             "bridge": bridge,
             "boundary": self.boundary(),
         }
+        model_evidence = evidence_refs.get("model_evidence") or {}
+        if not isinstance(model_evidence, dict):
+            model_evidence = {}
+        for field in (
+            "artifact_sha256",
+            "model_version",
+            "factor_generation",
+            "lineage_hash",
+            "label_contract_hash",
+        ):
+            base_evidence[field] = str(
+                evidence_refs.get(field)
+                or model_evidence.get(field)
+                or ""
+            )
+        base_evidence.update(
+            {
+                "review_id": str((candidate_review or {}).get("review_id") or ""),
+                "candidate_review_id": str((candidate_review or {}).get("review_id") or ""),
+                "v16_command_id": str(expected_effect.get("v16_command_id") or ""),
+                "mutation_id": str(expected_effect.get("mutation_id") or ""),
+                "application_id": str(expected_effect.get("application_id") or ""),
+                "application_state": "candidate_only",
+            }
+        )
 
         if scope_type == "supervisor_template" and action == "switch_position_supervisor_template":
             replay_summary = dict(expected_effect.get("replay") or {})

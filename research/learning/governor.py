@@ -309,30 +309,96 @@ class RuleEvolutionGovernor:
         authority advisory-only while preventing the governor from treating a
         valid model proposal as an unknown legacy action.
         """
-        if str(evidence.get("source_agent") or "") != "lightgbm_shadow_models":
+        refs = evidence.get("evidence_refs") or {}
+        if not isinstance(refs, dict):
+            refs = {}
+        model_evidence = refs.get("model_evidence") or refs.get("model_contract") or {}
+        if not isinstance(model_evidence, dict):
+            model_evidence = {}
+
+        def value(name: str, default: Any = "") -> Any:
+            # A reviewed candidate bridge has its writer identity at the
+            # top-level (factor_pruning_governance), while the model contract
+            # remains nested under evidence_refs.model_evidence.  Prefer the
+            # nested model contract for model-owned fields.
+            for source in (model_evidence, evidence, refs):
+                if name in source and source.get(name) not in (None, ""):
+                    return source.get(name)
+            return default
+
+        if str(value("source_agent") or "") != "lightgbm_shadow_models":
             return False
-        if str(evidence.get("model_type") or "") != "factor_governance_lightgbm":
+        if str(value("model_type") or "") != "factor_governance_lightgbm":
             return False
-        if evidence.get("advisory_only") is not True:
+        if value("advisory_only") is not True:
             return False
         bridge = evidence.get("bridge") or {}
-        if not (bridge.get("automatic_demo") is True and bridge.get("demo_nursery") is True):
+        from config.runtime_config import DEMO_AUTONOMY_MODES
+
+        autonomy_mode = str(bridge.get("autonomy_mode") or "").strip().lower()
+        if not (
+            bridge.get("automatic_demo") is True
+            and (
+                bridge.get("demo_nursery") is True
+                or autonomy_mode in DEMO_AUTONOMY_MODES
+            )
+        ):
             return False
-        if not str(bridge.get("actor") or "").startswith("system:autonomous_learning.demo_nursery"):
+        actor = str(bridge.get("actor") or "")
+        if not (
+            actor.startswith("system:autonomous_learning.demo_nursery")
+            or actor.startswith("system:factor_pruning_governance.demo_nursery")
+        ):
             return False
-        if str(evidence.get("governed_action") or "") != "downweight":
+        if str(value("governed_action") or "") != "downweight":
             return False
-        active_context = evidence.get("active_factor_context") or {}
+        promotion_gate = value("promotion_gate") or {}
+        if not isinstance(promotion_gate, dict):
+            return False
+        if promotion_gate.get("passed") is not True:
+            return False
+        if value("mutation_eligible") is not True:
+            return False
+        if not str(value("artifact_sha256") or ""):
+            return False
+        if str(value("factor_generation") or "") != "runtime_bounded_v1":
+            return False
+        if not str(value("lineage_hash") or ""):
+            return False
+        if not str(value("label_contract_hash") or ""):
+            return False
+        candidate_id = str(evidence.get("candidate_id") or refs.get("candidate_id") or "")
+        if not candidate_id:
+            return False
+        candidate_review = bridge.get("candidate_review") or {}
+        if not (
+            bridge.get("candidate_review_required_before_submit") is True
+            and isinstance(candidate_review, dict)
+            and candidate_review.get("bridge_ready") is True
+            and str(candidate_review.get("review_id") or "")
+        ):
+            return False
+        counter_evidence = evidence.get("counter_evidence_refs") or {}
+        if not isinstance(counter_evidence, dict):
+            return False
+        factor_counter_evidence = counter_evidence.get("factor_counter_evidence")
+        if not isinstance(factor_counter_evidence, dict) or not factor_counter_evidence:
+            return False
+        if str(factor_counter_evidence.get("status") or "").lower() in {"superseded", "rolled_back"}:
+            return False
+        active_context = value("active_factor_context") or {}
+        if not isinstance(active_context, dict):
+            return False
         if active_context.get("used_in_score") is not True or str(active_context.get("role") or "") != "alpha":
             return False
         if float(confidence) < 0.55:
             return False
-        sample_count = int(evidence.get("sample_count") or 0)
-        weak_sample_count = int(evidence.get("weak_sample_count") or 0)
-        min_weakness = float(evidence.get("min_weakness_score") or 0.0)
-        avg_weakness = float(evidence.get("avg_weakness_score") or 0.0)
+        sample_count = int(value("sample_count") or 0)
+        weak_sample_count = int(value("weak_sample_count") or 0)
+        min_weakness = float(value("min_weakness_score") or 0.0)
+        avg_weakness = float(value("avg_weakness_score") or 0.0)
         return (
-            sample_count >= 2
+            sample_count >= 20
             and weak_sample_count >= 2
             and min_weakness >= 0.85
             and avg_weakness >= 0.85

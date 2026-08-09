@@ -496,12 +496,19 @@ def test_orchestrator_downweights_from_model_weakness_evidence(monkeypatch, tmp_
         "health_score": 0.0,
         "health_status": "UNKNOWN",
         "factor_governance_shadow": {
-            "sample_count": 4,
-            "weak_sample_count": 4,
+            "sample_count": 20,
+            "weak_sample_count": 20,
             "avg_weakness_score": 0.78,
             "weakness_score": 0.8,
             "model_type": "factor_governance_lightgbm",
             "latest_inference_id": "fg_weak_1",
+            "result": {
+                "promotion_gate": {"passed": True, "reason": "promotion_gate_passed"},
+                "mutation_eligible": True,
+                "artifact_sha256": "test-artifact",
+                "factor_generation": "runtime_bounded_v1",
+                "lineage_hash": "test-lineage",
+            },
         },
     }]
 
@@ -512,6 +519,57 @@ def test_orchestrator_downweights_from_model_weakness_evidence(monkeypatch, tmp_
     evidence = audited[0]["evidence"]
     assert evidence["health_weak"] is False
     assert evidence["model_governance"]["weak_for_downweight"] is True
+
+
+def test_orchestrator_blocks_model_mutation_before_quality_gate_or_coverage(monkeypatch, tmp_path):
+    rc.reset_for_tests()
+    rc.patch({
+        "factor_signal_config": {
+            "model_weak_factor": {"role": "alpha", "enabled": True, "tags": ["技术"]},
+        },
+        "factor_portfolio_weights": {"model_weak_factor": 0.3},
+        "factor_governance_model_min_samples": 3,
+        "factor_governance_model_min_factor_samples": 20,
+        "factor_governance_model_weakness_threshold": 0.65,
+    })
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+    item = {
+        "factor_id": "model_weak_factor",
+        "source": "builtin",
+        "role": "alpha",
+        "enabled": True,
+        "eligible_for_live": True,
+        "used_in_score": True,
+        "weight": 0.3,
+        "health_score": 0.0,
+        "health_status": "UNKNOWN",
+        "factor_governance_shadow": {
+            "sample_count": 19,
+            "weak_sample_count": 19,
+            "avg_weakness_score": 0.95,
+            "weakness_score": 0.95,
+            "model_type": "factor_governance_lightgbm",
+            "result": {
+                "promotion_gate": {
+                    "passed": False,
+                    "reason": "promotion_gate_failed",
+                },
+                "mutation_eligible": False,
+                "artifact_sha256": "test-artifact",
+                "factor_generation": "runtime_bounded_v1",
+                "lineage_hash": "test-lineage",
+            },
+        },
+    }
+
+    evidence = orch._model_governance_evidence(item, rc.shared())
+    actions = orch._downweight_weak_alpha([item], {"run_id": "test-run"})
+
+    assert evidence["mutation_eligible"] is False
+    assert evidence["weak_for_downweight"] is False
+    assert actions == []
+    assert rc.shared().factor_portfolio_weights["model_weak_factor"] == 0.3
 
 
 def test_orchestrator_defers_factor_mutation_while_effect_is_pending(monkeypatch):
@@ -978,12 +1036,19 @@ def test_downweight_skipped_when_current_regime_fit_good_for_weak_factor(monkeyp
         "health_score": 0.0,
         "health_status": "UNKNOWN",
         "factor_governance_shadow": {
-            "sample_count": 4,
-            "weak_sample_count": 4,
+            "sample_count": 20,
+            "weak_sample_count": 20,
             "avg_weakness_score": 0.78,
             "weakness_score": 0.8,
             "model_type": "factor_governance_lightgbm",
             "latest_inference_id": "fg_weak_2",
+            "result": {
+                "promotion_gate": {"passed": True, "reason": "promotion_gate_passed"},
+                "mutation_eligible": True,
+                "artifact_sha256": "test-artifact",
+                "factor_generation": "runtime_bounded_v1",
+                "lineage_hash": "test-lineage",
+            },
             "payload": {"features": {"current_regime_fit_score": 0.85}},
         },
     }]
@@ -1036,12 +1101,19 @@ def test_downweight_applied_when_current_regime_weak_too(monkeypatch, tmp_path):
         "health_score": 0.0,
         "health_status": "UNKNOWN",
         "factor_governance_shadow": {
-            "sample_count": 4,
-            "weak_sample_count": 4,
+            "sample_count": 20,
+            "weak_sample_count": 20,
             "avg_weakness_score": 0.78,
             "weakness_score": 0.8,
             "model_type": "factor_governance_lightgbm",
             "latest_inference_id": "fg_weak_3",
+            "result": {
+                "promotion_gate": {"passed": True, "reason": "promotion_gate_passed"},
+                "mutation_eligible": True,
+                "artifact_sha256": "test-artifact",
+                "factor_generation": "runtime_bounded_v1",
+                "lineage_hash": "test-lineage",
+            },
             "payload": {"features": {"current_regime_fit_score": 0.1}},
         },
     }]
@@ -1113,12 +1185,19 @@ def test_expansion_preflight_blocks_restore_when_current_regime_weak(monkeypatch
         "health_score": 85.0,
         "health_n_obs": 40,
         "factor_governance_shadow": {
-            "sample_count": 4,
-            "weak_sample_count": 4,
+            "sample_count": 20,
+            "weak_sample_count": 20,
             "avg_weakness_score": 0.78,
             "weakness_score": 0.8,
             "model_type": "factor_governance_lightgbm",
             "latest_inference_id": "fg_restore_1",
+            "result": {
+                "promotion_gate": {"passed": True, "reason": "promotion_gate_passed"},
+                "mutation_eligible": True,
+                "artifact_sha256": "test-artifact",
+                "factor_generation": "runtime_bounded_v1",
+                "lineage_hash": "test-lineage",
+            },
             "payload": {"features": {"current_regime_fit_score": 0.1}},
         },
     }]

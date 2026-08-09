@@ -87,6 +87,12 @@ class ModelInfluenceGovernanceService:
         def check(name: str, passed: bool, actual: Any, required: Any) -> None:
             checks.append({"name": name, "passed": bool(passed), "actual": actual, "required": required})
 
+        data_quality = dict(
+            metrics.get("data_quality")
+            or artifact.get("training_lineage")
+            or {}
+        )
+
         # Pass the whole artifact whenever trust metadata is present so an
         # outer legacy envelope cannot be hidden by optimistic nested claims.
         research_evidence = (
@@ -144,7 +150,57 @@ class ModelInfluenceGovernanceService:
             check("auc", auc >= 0.65, auc, ">=0.65")
             check("majority_lift", accuracy >= majority + 0.03, accuracy - majority, ">=0.03")
             check("generalization_gap", _safe_float(train.get("accuracy")) - accuracy <= 0.15, _safe_float(train.get("accuracy")) - accuracy, "<=0.15")
+            check(
+                "factor_generation",
+                str(data_quality.get("factor_generation") or "") == "runtime_bounded_v1",
+                data_quality.get("factor_generation"),
+                "runtime_bounded_v1",
+            )
+            check(
+                "lineage_hash",
+                bool(str(data_quality.get("lineage_hash") or "")),
+                data_quality.get("lineage_hash"),
+                "non_empty",
+            )
+            check(
+                "label_contract_hash",
+                bool(str(data_quality.get("label_contract_hash") or "")),
+                data_quality.get("label_contract_hash"),
+                "non_empty",
+            )
+            walk_forward = dict(artifact.get("walk_forward") or {})
+            check(
+                "walk_forward",
+                int(walk_forward.get("window_count") or 0) >= 1
+                and bool(walk_forward.get("windows")),
+                walk_forward.get("window_count"),
+                ">=1",
+            )
         passed = bool(checks) and all(item["passed"] for item in checks)
+        failed_checks = [item["name"] for item in checks if not item["passed"]]
+        reason_codes = ["promotion_gate_passed"] if passed else failed_checks
+        quality_gate = {
+            "schema_version": "model_promotion_gate.v1",
+            "passed": passed,
+            "reason": "promotion_gate_passed" if passed else "promotion_gate_failed",
+            "reason_codes": reason_codes,
+            "generation": str(
+                data_quality.get("factor_generation")
+                or (artifact.get("quality_gate") or {}).get("generation")
+                or ""
+            ),
+            "lineage_hash": str(
+                data_quality.get("lineage_hash")
+                or (artifact.get("quality_gate") or {}).get("lineage_hash")
+                or ""
+            ),
+            "real_distinct_trade_count": int(metrics.get("distinct_trade_count") or 0),
+            "real_holdout_trade_count": int(metrics.get("holdout_trade_count") or 0),
+            "replay_distinct_trade_count": int(metrics.get("replay_distinct_trade_count") or 0),
+            "factor_sample_counts": dict(data_quality.get("factor_sample_counts") or {}),
+            "factors_below_20_samples": int(data_quality.get("factors_below_20_samples") or 0),
+            "checks": checks,
+        }
         return {
             "schema_version": "model_promotion_gate.v1",
             "passed": passed,
@@ -156,7 +212,9 @@ class ModelInfluenceGovernanceService:
             "metrics": metrics,
             "research_evidence_verdict": research_verdict.to_dict() if research_verdict else {},
             "checks": checks,
-            "failed_checks": [item["name"] for item in checks if not item["passed"]],
+            "reason_codes": reason_codes,
+            "failed_checks": failed_checks,
+            "quality_gate": quality_gate,
         }
 
     def promote(

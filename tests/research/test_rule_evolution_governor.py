@@ -89,16 +89,34 @@ def test_governor_accepts_eligible_demo_model_bridge_without_experience_stats(tm
         "source_agent": "lightgbm_shadow_models",
         "model_type": "factor_governance_lightgbm",
         "advisory_only": True,
-        "sample_count": 2,
+        "sample_count": 20,
         "weak_sample_count": 2,
         "min_weakness_score": 0.85,
         "avg_weakness_score": 0.92,
         "governed_action": "downweight",
+        "promotion_gate": {"passed": True, "reason": "promotion_gate_passed"},
+        "mutation_eligible": True,
+        "artifact_sha256": "test-artifact",
+        "factor_generation": "runtime_bounded_v1",
+        "lineage_hash": "test-lineage",
+        "label_contract_hash": "test-label-contract",
+        "candidate_id": "factor_model:model_bridge_1",
+        "counter_evidence_refs": {
+            "factor_counter_evidence": {
+                "status": "observed",
+                "recommended_stage": "governance_ready",
+            }
+        },
         "active_factor_context": {"used_in_score": True, "role": "alpha"},
         "bridge": {
             "automatic_demo": True,
             "demo_nursery": True,
             "actor": "system:autonomous_learning.demo_nursery_model_governance",
+            "candidate_review_required_before_submit": True,
+            "candidate_review": {
+                "review_id": "brain_candidate_review_model_bridge_1",
+                "bridge_ready": True,
+            },
         },
     }
     conn = _connect(db_path)

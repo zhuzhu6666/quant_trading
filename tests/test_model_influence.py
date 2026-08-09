@@ -203,19 +203,29 @@ def test_factor_governance_v5_artifact_passes_feature_schema_gate(tmp_path):
         "created_at": __import__("time").time(),
         "model_file": str(model_file),
         "model_file_sha256": __import__("hashlib").sha256(b"test-model").hexdigest(),
-        "metrics": {
-            "split": "time_ordered_grouped_purged",
-            "distinct_trade_count": 350,
-            "holdout_trade_count": 80,
+            "metrics": {
+                "split": "time_ordered_grouped_purged",
+                "distinct_trade_count": 350,
+                "holdout_trade_count": 80,
             "holdout": {
                 "accuracy": 0.70,
                 "balanced_accuracy": 0.66,
                 "auc": 0.70,
                 "majority_baseline_accuracy": 0.55,
+                },
+                "train": {"accuracy": 0.75},
+                "data_quality": {
+                    "factor_generation": "runtime_bounded_v1",
+                    "lineage_hash": "test-lineage",
+                    "label_contract_hash": "test-label-contract",
+                },
             },
-            "train": {"accuracy": 0.75},
-        },
-    }), encoding="utf-8")
+            "walk_forward": {
+                "schema_version": "walk_forward.v1",
+                "window_count": 1,
+                "windows": [{"window_id": "time_ordered_holdout"}],
+            },
+        }), encoding="utf-8")
 
     gate = ModelInfluenceGovernanceService(tmp_path / "state.db").evaluate_artifact(artifact_path)
 
@@ -254,6 +264,40 @@ def test_factor_governance_v4_artifact_rejected_by_feature_schema_gate(tmp_path)
 
     assert gate["passed"] is False
     assert "feature_schema" in gate["failed_checks"]
+
+
+def test_factor_v6_artifact_without_current_lineage_is_gate_failure(tmp_path):
+    """A numerically strong legacy v6 envelope cannot become mutation-ready."""
+    model_file = tmp_path / "model.joblib"
+    model_file.write_bytes(b"test-model")
+    artifact_path = tmp_path / "legacy-v6.json"
+    artifact_path.write_text(json.dumps({
+        "model_type": "factor_governance_lightgbm",
+        "model_version": "6.0",
+        "feature_schema_version": "pit.v4.factor_regime_decision_lineage",
+        "created_at": __import__("time").time(),
+        "model_file": str(model_file),
+        "model_file_sha256": __import__("hashlib").sha256(b"test-model").hexdigest(),
+        "metrics": {
+            "split": "time_ordered_grouped_purged",
+            "distinct_trade_count": 350,
+            "holdout_trade_count": 80,
+            "holdout": {
+                "accuracy": 0.70,
+                "balanced_accuracy": 0.66,
+                "auc": 0.70,
+                "majority_baseline_accuracy": 0.55,
+            },
+            "train": {"accuracy": 0.75},
+        },
+    }), encoding="utf-8")
+
+    gate = ModelInfluenceGovernanceService(tmp_path / "state.db").evaluate_artifact(artifact_path)
+
+    assert gate["passed"] is False
+    assert {"factor_generation", "lineage_hash", "label_contract_hash", "walk_forward"} <= set(
+        gate["failed_checks"]
+    )
 
 
 def test_v16_only_delegates_model_promotion_after_gate_passes(tmp_path):

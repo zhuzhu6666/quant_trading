@@ -238,6 +238,62 @@ def _score_shadow_model(
     return result
 
 
+def _train_and_score_model(
+    *,
+    model_type: str,
+    model_service: Any,
+    train_kwargs: dict[str, Any],
+    shadow_limit: int,
+    mode: str,
+) -> dict[str, Any]:
+    """Keep one model's training failure isolated from the other models.
+
+    The off-market job is a suite, not a single model transaction: a sparse
+    position-quality window must not hide a usable factor-governance result.
+    Each item therefore owns its stable status and its optional shadow score.
+    """
+    try:
+        trained = dict(model_service.train(**dict(train_kwargs)) or {})
+    except Exception as exc:  # noqa: BLE001 - report per-model failure
+        trained = {
+            "ok": False,
+            "status": "failed",
+            "reason_codes": ["model_training_error"],
+            "error": "model_training_error",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+        logger.warning(
+            "[offmarket_high_load] %s training failed: %s",
+            model_type,
+            trained["detail"],
+        )
+    trained.setdefault(
+        "status",
+        "trained" if bool(trained.get("ok")) else "failed",
+    )
+    trained.setdefault("reason_codes", [])
+    item: dict[str, Any] = {"train": trained}
+    if not trained.get("ok"):
+        item["shadow"] = {
+            "ok": False,
+            "skipped": True,
+            "model_type": model_type,
+            "reason": str(
+                trained.get("reason")
+                or (trained.get("reason_codes") or ["training_not_ready"])[0]
+            ),
+        }
+        return item
+    item["shadow"] = _score_shadow_model(
+        model_type=model_type,
+        model_service=model_service,
+        artifact_path=str(trained.get("artifact_path") or "") or None,
+        limit=int(shadow_limit),
+        mode=mode,
+    )
+    return item
+
+
 def _offmarket_training_window_key(session: dict[str, Any], profile: str) -> str:
     """Build a stable key for one closed window from the shared session state."""
     try:
@@ -395,60 +451,48 @@ def run_offmarket_position_quality_job(
         from backend.services.model_influence_governance import ModelInfluenceGovernanceService
         from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
         suite = _build_shadow_model_suite(db_path)
-        service = suite[0][1]
-        train = service.train(
-            limit=int(payload["limit"]), holdout_ratio=0.2,
-            min_samples=int(payload["min_samples"]), register=True,
-            symbol="XAUUSD+", timeframe="M5",
-        )
-        result: dict[str, Any] = {"train": train, "models": {"position_quality_lightgbm": {"train": train}}}
-        position_shadow = _score_shadow_model(
-            model_type="position_quality_lightgbm",
-            model_service=service,
-            artifact_path=str(train.get("artifact_path") or "") or None,
-            limit=int(payload["shadow_limit"]),
-            mode="offmarket_shadow_after_train",
-        )
-        result["models"]["position_quality_lightgbm"]["shadow"] = position_shadow
-        # Preserve the existing top-level position shadow field for API callers.
-        result["shadow"] = position_shadow
-        if profile == "full":
-            for model_type, model_service, train_kwargs in suite[1:]:
-                trained = model_service.train(**train_kwargs)
-                item = {"train": trained}
-                item["shadow"] = _score_shadow_model(
-                    model_type=model_type,
-                    model_service=model_service,
-                    artifact_path=str(trained.get("artifact_path") or "") or None,
-                    limit=int(payload["shadow_limit"]),
-                    mode="offmarket_shadow_after_train",
-                )
-                result["models"][model_type] = item
-        else:
-            for model_type, model_service, train_kwargs in suite[1:]:
-                if model_type != "factor_governance_lightgbm":
-                    result["models"][model_type] = {
-                        "train": {
-                            "ok": False,
-                            "skipped": True,
-                            "reason": "profile_not_full",
-                        }
+        result: dict[str, Any] = {"models": {}}
+        for model_type, model_service, train_kwargs in suite:
+            if model_type != "position_quality_lightgbm" and (
+                profile != "full" and model_type != "factor_governance_lightgbm"
+            ):
+                result["models"][model_type] = {
+                    "train": {
+                        "ok": False,
+                        "status": "skipped",
+                        "skipped": True,
+                        "reason": "profile_not_full",
+                        "reason_codes": ["profile_not_full"],
+                    },
+                    "shadow": {
+                        "ok": False,
+                        "skipped": True,
+                        "model_type": model_type,
+                        "reason": "profile_not_full",
+                    },
+                }
+                continue
+            item = _train_and_score_model(
+                model_type=model_type,
+                model_service=model_service,
+                train_kwargs=(
+                    {
+                        **train_kwargs,
+                        "limit": int(payload["limit"]),
+                        "min_samples": int(payload["min_samples"]),
                     }
-                    continue
-                # limited_with_positions: factor governance is a light
-                # model (seconds of training); keep its evidence fresh on
-                # every daily maintenance window instead of waiting for the
-                # weekend full profile.
-                trained = model_service.train(**train_kwargs)
-                item = {"train": trained}
-                item["shadow"] = _score_shadow_model(
-                    model_type=model_type,
-                    model_service=model_service,
-                    artifact_path=str(trained.get("artifact_path") or "") or None,
-                    limit=int(payload["shadow_limit"]),
-                    mode="offmarket_shadow_after_train",
-                )
-                result["models"][model_type] = item
+                    if model_type == "position_quality_lightgbm"
+                    else train_kwargs
+                ),
+                shadow_limit=int(payload["shadow_limit"]),
+                mode="offmarket_shadow_after_train",
+            )
+            result["models"][model_type] = item
+
+        position_item = result["models"].get("position_quality_lightgbm") or {}
+        result["train"] = dict(position_item.get("train") or {})
+        # Preserve the existing top-level position shadow field for API callers.
+        result["shadow"] = dict(position_item.get("shadow") or {})
 
         governance = ModelInfluenceGovernanceService(db_path)
         result["reconcile_before_training"] = governance.reconcile_active_models()
@@ -476,9 +520,15 @@ def run_offmarket_position_quality_job(
         result["promoted_models"] = promoted
         trained_ok = [bool((item.get("train") or {}).get("ok")) for item in result["models"].values()]
         status = "done" if any(trained_ok) else "failed"
+        model_errors = [
+            f"{model_type}:{str((item.get('train') or {}).get('error') or (item.get('train') or {}).get('reason') or '')}"
+            for model_type, item in result["models"].items()
+            if not bool((item.get("train") or {}).get("ok"))
+            and str((item.get("train") or {}).get("error") or (item.get("train") or {}).get("reason") or "")
+        ]
         audit = _record_offmarket_audit(
             job_name=job_name, status=status, session=session or {}, payload=payload,
-            result=result, error=str(train.get("error") or ""),
+            result=result, error=";".join(model_errors),
             started_at=started_at, db_path=db_path,
         )
         return {"ok": status == "done", "status": status, "audit": audit, "result": result}

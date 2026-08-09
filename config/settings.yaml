@@ -729,6 +729,7 @@ runtime:
   factor_governance_builtin_activation_weight: 0.05
   factor_governance_max_builtin_activations_per_cycle: 1
   factor_governance_model_min_samples: 3
+  factor_governance_model_min_factor_samples: 20
   factor_governance_model_weakness_threshold: 0.65
   factor_governance_model_disable_threshold: 0.85
   factor_governance_rollback_min_trades: 3

@@ -90,6 +90,71 @@ def test_offmarket_high_load_runs_training_when_closed(monkeypatch, tmp_path):
     assert "shadow" in result["result"]["models"]["factor_governance_lightgbm"]
 
 
+def test_offmarket_position_failure_does_not_hide_factor_model_result(monkeypatch, tmp_path):
+    db_path = tmp_path / "offmarket-isolated-models.db"
+    live_service._live_state["market_session"] = {
+        "status": "closed_pending_positions",
+        "high_load_allowed": True,
+        "high_load_profile": "limited_with_positions",
+    }
+
+    def fake_service(model_type):
+        class FakeService:
+            def __init__(self, db_path=None):
+                self.db_path = db_path
+
+            def train(self, **kwargs):
+                if model_type == "position_quality_lightgbm":
+                    raise RuntimeError("position samples are sparse")
+                return {
+                    "ok": True,
+                    "status": "trained",
+                    "artifact_path": str(tmp_path / f"{model_type}.json"),
+                    "metrics": {"sample_count": 100},
+                }
+
+            def score_samples(self, **kwargs):
+                return {"ok": True, "count": 1, "model_type": model_type}
+
+        return FakeService
+
+    monkeypatch.setattr(
+        "research.position_quality_lightgbm.PositionQualityLightGBMService",
+        fake_service("position_quality_lightgbm"),
+    )
+    monkeypatch.setattr(
+        "research.open_quality_lightgbm.OpenQualityLightGBMService",
+        fake_service("open_quality_lightgbm"),
+    )
+    monkeypatch.setattr(
+        "research.factor_governance_lightgbm.FactorGovernanceLightGBMService",
+        fake_service("factor_governance_lightgbm"),
+    )
+
+    class FakeGovernance:
+        def __init__(self, db_path=None):
+            self.db_path = db_path
+
+        def reconcile_active_models(self):
+            return {"ok": True}
+
+        def evaluate_artifact(self, artifact_path):
+            return {"passed": False, "artifact_path": artifact_path}
+
+    monkeypatch.setattr(
+        "backend.services.model_influence_governance.ModelInfluenceGovernanceService",
+        FakeGovernance,
+    )
+
+    result = live_service._scheduled_offmarket_position_quality_lightgbm(db_path=db_path)
+
+    assert result["ok"] is True
+    assert result["status"] == "done"
+    assert result["result"]["models"]["position_quality_lightgbm"]["train"]["status"] == "failed"
+    assert result["result"]["models"]["factor_governance_lightgbm"]["train"]["status"] == "trained"
+    assert result["result"]["models"]["factor_governance_lightgbm"]["shadow"]["ok"] is True
+
+
 def test_offmarket_high_load_scores_all_models_after_full_training(monkeypatch, tmp_path):
     db_path = tmp_path / "offmarket-full-training.db"
     live_service._live_state["market_session"] = {

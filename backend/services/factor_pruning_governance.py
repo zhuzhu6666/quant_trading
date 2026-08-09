@@ -364,7 +364,7 @@ class FactorPruningGovernanceService:
             rows = _execute(
                 conn,
                 """
-                SELECT candidate_id, proposal_stage, status, scope_key, action,
+                SELECT candidate_id, source_kind, proposal_stage, status, scope_key, action,
                        confidence, evidence_score, expected_effect_json,
                        evidence_refs_json, risk_verdict_json, decision_policy_json,
                        submitted_suggestion_id
@@ -507,6 +507,8 @@ class FactorPruningGovernanceService:
         require_weak_health: bool,
     ) -> dict[str, Any]:
         candidate_id = str(row["candidate_id"] or "")
+        source_kind = str(row["source_kind"] or "") if "source_kind" in row.keys() else ""
+        is_model_candidate = source_kind == "factor_governance_model_candidate"
         stage = str(row["proposal_stage"] or "")
         if stage == "governance_ready":
             return {"status": "already_governance_ready", "candidate_id": candidate_id}
@@ -518,6 +520,8 @@ class FactorPruningGovernanceService:
         risk_verdict = _loads(row["risk_verdict_json"], {})
         decision_policy = _loads(row["decision_policy_json"], {})
         decision = dict(decision_policy.get("decision") or {})
+        evidence_refs = _loads(row["evidence_refs_json"], {})
+        model_evidence = dict(evidence_refs.get("model_evidence") or {}) if is_model_candidate else {}
         current_weight = _safe_float(expected.get("current_weight"))
         target_weight = _safe_float(expected.get("suggested_target_weight"))
         runtime_weights = self._runtime_weights()
@@ -533,11 +537,44 @@ class FactorPruningGovernanceService:
         blockers = []
         if evidence_score < min_evidence_score:
             blockers.append("evidence_score_below_threshold")
-        if "recent_live_decision_participation" not in reason_codes:
-            blockers.append("missing_recent_live_decision_participation")
-        has_live_loss_pressure = "recent_loss_contribution_pressure" in reason_codes and "recent_live_decision_participation" in reason_codes
-        if require_weak_health and "weak_factor_health" not in reason_codes and not has_live_loss_pressure:
-            blockers.append("missing_weak_health_or_live_loss_pressure")
+        if is_model_candidate:
+            model_gate = dict(model_evidence.get("promotion_gate") or {})
+            if model_gate.get("passed") is not True:
+                blockers.append("model_quality_gate_not_passed")
+            if model_evidence.get("mutation_eligible") is not True:
+                blockers.append("model_mutation_not_eligible")
+            if str(model_evidence.get("factor_generation") or "") != "runtime_bounded_v1":
+                blockers.append("model_generation_mismatch")
+            for name in ("artifact_sha256", "lineage_hash", "label_contract_hash"):
+                if not str(model_evidence.get(name) or ""):
+                    blockers.append(f"missing_model_{name}")
+            if int(model_evidence.get("sample_count") or 0) < 20:
+                blockers.append("insufficient_factor_sample_coverage")
+            if int(model_evidence.get("weak_sample_count") or 0) < 2:
+                blockers.append("insufficient_weak_factor_samples")
+            if _safe_float(model_evidence.get("min_weakness_score")) < 0.85:
+                blockers.append("model_factor_weakness_below_threshold")
+            if _safe_float(model_evidence.get("avg_weakness_score")) < 0.85:
+                blockers.append("model_factor_average_weakness_below_threshold")
+            model_active_context = model_evidence.get("active_factor_context") or {}
+            if (
+                not isinstance(model_active_context, dict)
+                or model_active_context.get("used_in_score") is not True
+                or str(model_active_context.get("role") or "") != "alpha"
+            ):
+                blockers.append("model_factor_not_active_alpha")
+            review_refs = model_evidence.get("review_reference_ids") or model_evidence.get("review_ids") or []
+            if not any(str(value) for value in review_refs):
+                blockers.append("missing_model_review_reference")
+            counter_contract = model_evidence.get("counter_evidence_refs")
+            if not isinstance(counter_contract, dict) or not counter_contract.get("required_before_bridge"):
+                blockers.append("missing_model_counter_evidence_contract")
+        else:
+            if "recent_live_decision_participation" not in reason_codes:
+                blockers.append("missing_recent_live_decision_participation")
+            has_live_loss_pressure = "recent_loss_contribution_pressure" in reason_codes and "recent_live_decision_participation" in reason_codes
+            if require_weak_health and "weak_factor_health" not in reason_codes and not has_live_loss_pressure:
+                blockers.append("missing_weak_health_or_live_loss_pressure")
         if not bool(risk_verdict.get("allowed")):
             blockers.append("risk_policy_not_allowed")
         if not bool(decision_policy.get("required")) or not decision:

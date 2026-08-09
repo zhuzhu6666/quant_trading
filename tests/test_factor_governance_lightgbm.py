@@ -266,14 +266,9 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
     rows = sqlite3.connect(str(db_path)).execute(
         "SELECT scope_type, action, status, evidence_json FROM policy_suggestion"
     ).fetchall()
-    assert rows
-    assert rows[0][0] == "factor"
-    assert rows[0][1] == "review_factor_weight_or_template"
-    assert rows[0][2] == "proposed"
-    evidence = json.loads(rows[0][3])
-    assert evidence["source_agent"] == "lightgbm_shadow_models"
-    assert evidence["agent_context"]["schema_version"] == "agent_generation_context.v1"
-    assert evidence["agent_context"]["authority_verdict"]["advisory_only"] is True
+    assert rows == []
+    assert shadow["mutation_eligible"] is False
+    assert shadow["materialization_blocked_reason"] == "blocked_by_model_quality_gate"
 
 
 def test_factor_governance_lightgbm_skips_system_contaminated_reviews(tmp_path):
@@ -315,6 +310,40 @@ def test_factor_governance_lightgbm_skips_system_contaminated_reviews(tmp_path):
     assert all(sample["review_id"] != "rev_1" for sample in samples)
 
 
+def test_factor_replay_samples_cannot_satisfy_real_distinct_trade_gate(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    _create_factor_reviews(db_path)
+    service = FactorGovernanceLightGBMService(
+        db_path=db_path,
+        artifact_dir=tmp_path / "artifacts",
+    )
+    samples = service.load_samples(limit=20)
+    replay_samples = [
+        {
+            **samples[index % len(samples)],
+            "sample_id": f"replay-{index}",
+            "trade_id": f"replay-trade-{index}",
+            "review_id": f"replay-review-{index}",
+            "source": "historical_replay",
+        }
+        for index in range(25)
+    ]
+    monkeypatch.setattr(
+        "backend.services.parity_replay.load_parity_learning_samples",
+        lambda kind: replay_samples if kind == "factor" else [],
+    )
+
+    result = service.train(limit=20, min_samples=20, register=False)
+
+    if result.get("error") == "dependency_missing":
+        return
+    assert result["ok"] is False
+    assert result["status"] == "blocked"
+    assert result["error"] == "insufficient_distinct_factor_trades"
+    assert result["distinct_trade_count"] == 12
+    assert result["replay_distinct_trade_count"] == 25
+
+
 def test_factor_governance_demo_bridge_emits_whitelisted_downweight(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     _create_factor_reviews(db_path)
@@ -330,8 +359,17 @@ def test_factor_governance_demo_bridge_emits_whitelisted_downweight(tmp_path, mo
             VALUES (?, ?, ?, ?, ?, 'shadow', ?, ?, 0, ?)
             """,
             [
-                ("fg_demo_1", MODEL_TYPE, "1.0", "rev_1", "weak_factor", 0.10, 0.90, 10.0),
-                ("fg_demo_2", MODEL_TYPE, "1.0", "rev_3", "weak_factor", 0.05, 0.95, 11.0),
+                (
+                    f"fg_demo_{i}",
+                    MODEL_TYPE,
+                    "1.0",
+                    f"rev_{i % 18}",
+                    "weak_factor",
+                    0.10 if i % 2 else 0.05,
+                    0.90 if i % 2 else 0.95,
+                    10.0 + i,
+                )
+                for i in range(20)
             ],
         )
         conn.commit()
@@ -360,23 +398,63 @@ def test_factor_governance_demo_bridge_emits_whitelisted_downweight(tmp_path, mo
             "artifact_path": "",
         }),
     )
+    monkeypatch.setattr(
+        "backend.services.model_influence.ModelInfluenceService.policy_for",
+        classmethod(lambda cls, model_type, cfg: {
+            "artifact_path": "test-artifact.json",
+        }),
+    )
+    monkeypatch.setattr(
+        "backend.services.model_influence_governance.ModelInfluenceGovernanceService.evaluate_artifact",
+        lambda self, path: {
+            "schema_version": "model_promotion_gate.v1",
+            "passed": True,
+            "reason": "promotion_gate_passed",
+            "artifact_sha256": "test-artifact",
+            "failed_checks": [],
+            "checks": [],
+            "metrics": {
+                "data_quality": {
+                    "factor_generation": "runtime_bounded_v1",
+                    "lineage_hash": "test-lineage",
+                    "label_contract_hash": "test-label-contract",
+                }
+            },
+        },
+    )
 
-    result = service.materialize_demo_governance_advisories()
+    result = service.materialize_demo_governance_advisories(min_factor_sample_count=2)
 
     assert result["materialized"] is True
     assert result["count"] == 1
     assert result["items"][0]["action"] == "downweight"
     evidence = result["items"][0]["evidence"]
     assert evidence["bridge"]["automatic_demo"] is True
-    assert evidence["bridge"]["demo_nursery"] is True
+    assert evidence["bridge"]["demo_nursery"] is False
+    assert evidence["bridge"]["autonomy_mode"] == "demo_autonomous"
     assert evidence["governed_action"] == "downweight"
     assert evidence["direct_model_application"] is False
+    assert evidence["candidate_id"] == "factor_model:" + result["items"][0]["suggestion_id"]
 
-    row = sqlite3.connect(str(db_path)).execute(
-        "SELECT action, status FROM policy_suggestion WHERE suggestion_id=?",
-        (result["items"][0]["suggestion_id"],),
-    ).fetchone()
-    assert row == ("downweight", "proposed")
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT source_agent, source_kind, proposal_stage, action "
+            "FROM brain_governance_candidate WHERE candidate_id=?",
+            (evidence["candidate_id"],),
+        ).fetchone()
+        policy_suggestion_count = conn.execute(
+            "SELECT COUNT(*) FROM policy_suggestion"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert row == (
+        "factor_pruning_governance",
+        "factor_governance_model_candidate",
+        "brain_candidate",
+        "downweight",
+    )
+    assert policy_suggestion_count == 0
 
 
 def test_factor_governance_demo_bridge_supersedes_inactive_target(tmp_path, monkeypatch):
@@ -407,11 +485,71 @@ def test_factor_governance_demo_bridge_supersedes_inactive_target(tmp_path, monk
     monkeypatch.setattr("backend.services.factor_catalog.build_factor_catalog", lambda _db_path: [])
     result = service.materialize_demo_governance_advisories()
 
-    assert result["stale_superseded"] == 1
+    assert result["reason"] == "blocked_by_model_quality_gate"
+    assert result["mutation_eligible"] is False
     row = sqlite3.connect(str(db_path)).execute(
         "SELECT status, review_note FROM policy_suggestion WHERE suggestion_id='fgm_stale'"
     ).fetchone()
-    assert row == ("superseded", "superseded: factor is no longer active in runtime score")
+    assert row == ("approved", "")
+
+
+def test_factor_model_candidate_hard_blocks_factor_coverage_below_20(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_factor_reviews(db_path)
+    service = FactorGovernanceLightGBMService(
+        db_path=db_path,
+        artifact_dir=tmp_path / "artifacts",
+    )
+    items = [
+        {
+            "inference_id": f"low_coverage_{index}",
+            "factor": "weak_factor",
+            "review_id": f"rev_{index}",
+            "weakness_score": 0.92,
+            "result": {
+                "promotion_gate": {"passed": True},
+                "mutation_eligible": True,
+            },
+        }
+        for index in range(2)
+    ]
+    result = service.build_advisories(
+        items=items,
+        materialize=True,
+        governed_action="downweight",
+        min_weak_sample_count=2,
+        min_factor_sample_count=1,
+        evidence_context_by_factor={
+            "weak_factor": {
+                "promotion_gate": {"passed": True},
+                "mutation_eligible": True,
+                "artifact_sha256": "artifact",
+                "model_version": "6.0",
+                "factor_generation": "runtime_bounded_v1",
+                "lineage_hash": "lineage",
+                "label_contract_hash": "label",
+                "sample_count": 19,
+                "weak_sample_count": 2,
+                "min_weakness_score": 0.85,
+                "avg_weakness_score": 0.92,
+                "active_factor_context": {
+                    "used_in_score": True,
+                    "role": "alpha",
+                    "weight": 0.25,
+                },
+                "counter_evidence_refs": {"required_before_bridge": True},
+            }
+        },
+    )
+
+    assert result["materialized"] is False
+    assert result["candidate_count"] == 0
+    assert result["materialization"]["blocked_reasons"] == {
+        "missing_model_candidate_contract": 1
+    }
+    assert sqlite3.connect(str(db_path)).execute(
+        "SELECT COUNT(*) FROM policy_suggestion"
+    ).fetchone()[0] == 0
 
 
 # ── 批次 A: regime 特征进入治理模型 ─────────────────────────────

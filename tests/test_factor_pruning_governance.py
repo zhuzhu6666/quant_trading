@@ -573,3 +573,127 @@ def test_factor_pruning_governance_live_harm_bridge_binds_reviewed_governance_el
     evidence = json.loads(reviewed_status[3])
     assert evidence["bridge"]["candidate_review_required_before_submit"] is True
     assert evidence["bridge"]["candidate_review"]["bridge_ready"] is True
+
+
+def test_factor_governance_model_candidate_uses_existing_review_bridge(monkeypatch, tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    factor = "model_factor_test"
+    current_weight = 0.25
+    target_weight = 0.22
+    service = FactorPruningGovernanceService(db_path)
+    model_evidence = {
+        "source_agent": "lightgbm_shadow_models",
+        "model_type": "factor_governance_lightgbm",
+        "advisory_only": True,
+        "sample_count": 20,
+        "weak_sample_count": 2,
+        "min_weakness_score": 0.85,
+        "avg_weakness_score": 0.92,
+        "governed_action": "downweight",
+        "promotion_gate": {"passed": True, "reason": "promotion_gate_passed"},
+        "mutation_eligible": True,
+        "artifact_sha256": "model-artifact",
+        "factor_generation": "runtime_bounded_v1",
+        "lineage_hash": "model-lineage",
+        "label_contract_hash": "model-label-contract",
+        "review_reference_ids": ["review-model-1"],
+        "active_factor_context": {
+            "used_in_score": True,
+            "role": "alpha",
+            "weight": current_weight,
+        },
+        "counter_evidence_refs": {"required_before_bridge": True},
+    }
+    expected_effect = {
+        "schema_version": "factor_governance_model_expected_effect.v1",
+        "candidate_only": True,
+        "current_weight": current_weight,
+        "suggested_target_weight": target_weight,
+        "reasons": [{"code": "recent_live_decision_participation"}],
+        "source_presence": {
+            "artifact_sha256": True,
+            "factor_generation": True,
+            "lineage_hash": True,
+            "label_contract_hash": True,
+            "model_quality_gate": True,
+            "factor_sample_coverage": True,
+            "counter_evidence": True,
+        },
+    }
+    decision_policy = service._decision_policy_preview(
+        factor=factor,
+        current_weight=current_weight,
+        target_weight=target_weight,
+    )
+    BrainGovernanceCandidateService(db_path).create_candidate(
+        candidate_id="factor_model:model_bridge_test",
+        source_agent="factor_pruning_governance",
+        source_kind="factor_governance_model_candidate",
+        source_ref_type="factor_governance_shadow_advisory",
+        source_ref_id="model_advisory_test",
+        proposal_stage="brain_candidate",
+        capability_scope="factor_catalog_runtime_governance",
+        scope_type="factor",
+        scope_key=factor,
+        action="downweight",
+        confidence=0.55,
+        evidence_score=0.92,
+        risk_class="medium",
+        max_impact="medium_impact",
+        expected_effect=expected_effect,
+        evidence_refs={"model_evidence": model_evidence},
+        counter_evidence_refs={
+            "model_counter_evidence": model_evidence["counter_evidence_refs"]
+        },
+        risk_verdict={"allowed": True, "reason": "test_allowed"},
+        decision_policy=decision_policy,
+        rollback_plan={"restore_weight": current_weight},
+        lineage={"mapped_action": {"policy_action": "downweight"}},
+    )
+
+    promoted = service.promote_ready(
+        limit=5,
+        min_evidence_score=0.9,
+        require_weak_health=True,
+    )
+    assert promoted["promoted_count"] == 1
+    conn = connect_sqlite(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM policy_suggestion").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        "config.runtime_config.shared",
+        lambda: type("Cfg", (), {"autonomy_mode": "demo_nursery"})(),
+    )
+    bridge = service.bridge_ready_candidates(limit=5, require_demo_nursery=True)
+    assert bridge["submitted_count"] == 1
+
+    conn = connect_sqlite(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status, evidence_json FROM policy_suggestion"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "proposed"
+    bridge_evidence = json.loads(row[1])
+    assert bridge_evidence["candidate_id"] == "factor_model:model_bridge_test"
+    assert bridge_evidence["artifact_sha256"] == "model-artifact"
+    assert bridge_evidence["factor_generation"] == "runtime_bounded_v1"
+    assert bridge_evidence["v16_command_id"] == ""
+    assert bridge_evidence["mutation_id"] == ""
+    assert bridge_evidence["application_id"] == ""
+    assert bridge_evidence["review_id"]
+    assert bridge_evidence["evidence_refs"]["model_evidence"]["artifact_sha256"] == "model-artifact"
+    assert bridge_evidence["bridge"]["candidate_review"]["bridge_ready"] is True
+    reviewed = RuleEvolutionGovernor(str(db_path)).review_pending()
+    assert reviewed["approved"] == 1

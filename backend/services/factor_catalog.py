@@ -39,6 +39,14 @@ def _loads(raw: Any, default: Any) -> Any:
         return default
 
 
+def _safe_float(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if parsed == parsed else 0.0
+
+
 def _dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
@@ -323,6 +331,81 @@ def _factor_governance_shadow_by_factor(db_path: str | Path = STATE_DB) -> dict[
                     "result": _loads(row["result_json"], {}),
                     "created_at": float(row["created_at"] or 0.0),
                 })
+                result_payload = item.get("result") or {}
+                item["artifact_sha256"] = str(
+                    result_payload.get("artifact_sha256") or ""
+                )
+                item["factor_generation"] = str(
+                    result_payload.get("factor_generation")
+                    or (item.get("payload") or {}).get("factor_generation")
+                    or ""
+                )
+                item["lineage_hash"] = str(
+                    result_payload.get("lineage_hash")
+                    or (item.get("payload") or {}).get("lineage_hash")
+                    or ""
+                )
+                item["promotion_gate"] = dict(
+                    result_payload.get("promotion_gate") or {}
+                )
+
+            # A factor may have accumulated audits from several artifacts or
+            # generations.  Only the newest artifact/generation is evidence
+            # for a current mutation decision; historical rows remain useful
+            # for audit/replay but cannot satisfy the coverage gate.
+            for factor, item in result.items():
+                target_artifact = str(item.get("artifact_path") or "")
+                target_generation = str(item.get("factor_generation") or "")
+                if not target_artifact and not target_generation:
+                    continue
+                scoped_rows = conn.execute(
+                    _p(
+                        db_path,
+                        """
+                    SELECT artifact_path, positive_score, weakness_score,
+                           payload_json, result_json
+                    FROM factor_governance_shadow_audit
+                    WHERE factor=?
+                    """,
+                    ),
+                    (factor,),
+                ).fetchall()
+                scoped = []
+                for scoped_row in scoped_rows:
+                    scoped_result = _loads(scoped_row["result_json"], {})
+                    scoped_payload = _loads(scoped_row["payload_json"], {})
+                    row_artifact = str(scoped_row["artifact_path"] or "")
+                    row_generation = str(
+                        scoped_result.get("factor_generation")
+                        or scoped_payload.get("factor_generation")
+                        or ""
+                    )
+                    if target_artifact and row_artifact != target_artifact:
+                        continue
+                    if target_generation and row_generation != target_generation:
+                        continue
+                    scoped.append(scoped_row)
+                if scoped:
+                    item["sample_count"] = len(scoped)
+                    item["weak_sample_count"] = sum(
+                        _safe_float(row["weakness_score"]) >= 0.65
+                        for row in scoped
+                    )
+                    item["avg_weakness_score"] = sum(
+                        _safe_float(row["weakness_score"]) for row in scoped
+                    ) / len(scoped)
+                    item["avg_positive_score"] = sum(
+                        _safe_float(row["positive_score"]) for row in scoped
+                    ) / len(scoped)
+                else:
+                    item.update(
+                        {
+                            "sample_count": 0,
+                            "weak_sample_count": 0,
+                            "avg_weakness_score": 0.0,
+                            "avg_positive_score": 0.0,
+                        }
+                    )
             return result
         finally:
             conn.close()

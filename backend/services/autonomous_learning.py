@@ -5367,7 +5367,9 @@ def _auto_rollback_position_supervisor_template(
 
 def _run_demo_nursery_factor_pruning_governance(*, db_path: str | Path, bridge_limit: int = 5) -> dict[str, Any]:
     mode = _autonomy_mode()
-    if mode != "demo_nursery":
+    from config.runtime_config import DEMO_AUTONOMY_MODES
+
+    if mode not in DEMO_AUTONOMY_MODES:
         return {
             "schema_version": "demo_nursery_factor_pruning_governance.v1",
             "enabled": False,
@@ -5435,7 +5437,9 @@ def apply_demo_autonomy(
         finish_evolution_run(str(run.get("run_id") or experiment_id), status="skipped", summary=payload, db_path=db_path)
         return payload
     demo_effect_reconcile = {}
-    if _autonomy_mode() == "demo_nursery":
+    from config.runtime_config import DEMO_AUTONOMY_MODES
+
+    if _autonomy_mode() in DEMO_AUTONOMY_MODES:
         from research.learning.governor import RuleEvolutionGovernor
 
         # Demo nursery must not let an old observation-only window occupy a
