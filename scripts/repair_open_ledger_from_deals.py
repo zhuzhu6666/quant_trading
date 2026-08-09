@@ -276,7 +276,7 @@ def repair(
                         ELSE entry_decision_id
                     END,
                     context_integrity=CASE
-                        WHEN context_integrity='' THEN 'partial'
+                        WHEN context_integrity IN ('', 'full') THEN 'partial'
                         ELSE context_integrity
                     END
                 WHERE position_id=?

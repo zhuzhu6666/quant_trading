@@ -17,8 +17,10 @@ from backend.services.model_permissions import validate_model_artifact
 
 
 MODEL_TYPE = "open_quality_lightgbm"
-MODEL_VERSION = "3.0"
+MODEL_VERSION = "3.1"
 FEATURE_SCHEMA_VERSION = "pit.v2.open_lineage"
+OPEN_TARGET_KEY = "open_target_v2"
+OPEN_TARGET_VERSION = "open_target.v2"
 
 FEATURE_NAMES = [
     "action_score",
@@ -95,14 +97,29 @@ def _dependency_error() -> str:
 
 
 def _allowed_supervised(contract: dict[str, Any]) -> bool:
-    return bool(contract.get("model_ready")) and "supervised_training" in set(contract.get("allowed_uses") or [])
+    if bool(contract.get("model_ready")) and "supervised_training" in set(contract.get("allowed_uses") or []):
+        return True
+    consumer_map = contract.get("consumer_eligibility")
+    consumer_map = consumer_map if isinstance(consumer_map, dict) else {}
+    consumer = consumer_map.get(MODEL_TYPE)
+    consumer = consumer if isinstance(consumer, dict) else {}
+    return bool(consumer.get("model_ready")) and "supervised_training" in set(
+        consumer.get("allowed_uses") or []
+    )
 
 
 def _label_from_open_outcome(label: dict[str, Any]) -> int:
-    outcome = str(label.get("outcome_label") or "").lower()
-    if outcome in {"good_win", "good_loss"}:
+    target = label.get(OPEN_TARGET_KEY)
+    target = target if isinstance(target, dict) else {}
+    financial_label = str(target.get("financial_label") or "").strip().lower()
+    if financial_label == "profit":
         return 1
-    if outcome in {"bad_loss", "lucky_win", "small_loss", "loss"}:
+    if financial_label in {"loss", "flat", "neutral"}:
+        return 0
+    outcome = str(label.get("outcome_label") or "").lower()
+    if outcome in {"good_win", "lucky_win"}:
+        return 1
+    if outcome in {"good_loss", "bad_loss", "small_loss", "loss", "flat", "neutral"}:
         return 0
     return 1 if _safe_float(label.get("pnl")) > 0 else 0
 
@@ -111,6 +128,20 @@ def _rule_baseline_label(features: dict[str, float]) -> int:
     # Mirrors the current conservative rule intuition: stronger score and no
     # crowded same-direction pyramid is treated as a better open.
     return 1 if features["abs_action_score"] >= 0.55 and features["same_direction_open_count"] < 2 else 0
+
+
+def _open_sample_is_trainable(item: dict[str, Any]) -> bool:
+    target = item.get("open_target_v2")
+    target = target if isinstance(target, dict) else {}
+    financial_label = str(target.get("financial_label") or "").strip().lower()
+    return (
+        str(target.get("schema_version") or "") == OPEN_TARGET_VERSION
+        and financial_label in {"profit", "loss"}
+        and target.get("trainable") is True
+        and str(target.get("execution_evidence_state") or "").strip().lower()
+        in {"full", "replay_verified"}
+        and not bool(target.get("contaminated"))
+    )
 
 
 def _features_from_sample(row: Any) -> dict[str, float]:
@@ -200,6 +231,19 @@ def _sample_from_row(row: Any) -> dict[str, Any] | None:
         quality_errors.append("decision_bar_not_complete")
     if micro.get("quote_fresh") is False:
         quality_errors.append("stale_entry_quote")
+    open_target = label_json.get(OPEN_TARGET_KEY)
+    open_target = open_target if isinstance(open_target, dict) else {}
+    if str(open_target.get("schema_version") or "") != OPEN_TARGET_VERSION:
+        quality_errors.append("missing_open_target_v2")
+    if str(open_target.get("financial_label") or "").strip().lower() not in {"profit", "loss"}:
+        quality_errors.append("flat_or_invalid_open_outcome")
+    if open_target.get("trainable") is not True:
+        quality_errors.append("open_target_not_trainable")
+    if str(open_target.get("execution_evidence_state") or "").strip().lower() not in {
+        "full",
+        "replay_verified",
+    }:
+        quality_errors.append("incomplete_execution_evidence")
     features = _features_from_sample(row)
     return {
         "sample_id": str(row["sample_id"] or ""),
@@ -210,6 +254,7 @@ def _sample_from_row(row: Any) -> dict[str, Any] | None:
         "outcome_label": str(label_json.get("outcome_label") or ""),
         "pnl": _safe_float(label_json.get("pnl")),
         "label": _label_from_open_outcome(label_json),
+        "open_target_v2": open_target,
         "rule_label": _rule_baseline_label(features),
         "features": features,
         "config_hash": config_hash,
@@ -361,7 +406,10 @@ class OpenQualityLightGBMService:
         samples = self.load_samples(limit=limit)
         from backend.services.parity_replay import load_parity_learning_samples
 
-        replay_samples = load_parity_learning_samples("open")
+        replay_samples = [
+            item for item in load_parity_learning_samples("open")
+            if _open_sample_is_trainable(item)
+        ]
         if len(samples) < 2 or len(samples) + len(replay_samples) < int(min_samples):
             return {
                 "ok": False, "model_type": MODEL_TYPE, "model_version": MODEL_VERSION,
@@ -514,7 +562,7 @@ class OpenQualityLightGBMService:
             "model_file": str(model_path),
             "model_file_sha256": _sha256(model_path),
             "feature_names": FEATURE_NAMES,
-            "label": "acceptable_open_outcome",
+            "label": "profitable_open_outcome_v2",
             "sample_window": {"limit": int(limit), "sample_count": len(samples)},
             "training_lineage": dict(self.last_data_quality),
             "metrics": metrics,
@@ -620,7 +668,7 @@ class OpenQualityLightGBMService:
             return {"ok": False, "error": "artifact_feature_schema_not_pit_v2"}
         permission = validate_model_artifact(
             artifact, model_type=MODEL_TYPE, db_path=self.db_path,
-            context={"mode": "demo_influence_candidate", "operation": "open_quality_live_score"},
+            context={"mode": "demo_influence_candidate", "operation": "open_quality_demo_score"},
         )
         if not permission.get("ok"):
             return {"ok": False, "error": "model_permission_violation", "permission": permission}
@@ -634,7 +682,7 @@ class OpenQualityLightGBMService:
         quality_score = float(bundle["model"].predict_proba(frame)[:, 1][0])
         return {
             "ok": True,
-            "schema_version": "open_quality_live_score.v2",
+            "schema_version": "open_quality_demo_score.v2",
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "quality_score": round(quality_score, 8),
             "risk_score": round(1.0 - quality_score, 8),

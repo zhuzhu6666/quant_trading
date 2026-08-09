@@ -14,6 +14,7 @@ from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
 from backend.services.review_contract import (
     build_entry_timing_context,
+    build_execution_quality_evidence,
     extract_decision_freshness_context,
     normalize_trade_review_contract,
     trusted_broker_close_price,
@@ -340,6 +341,18 @@ class TradeReviewer:
                     (entry_decision_id, entry_decision_id, trade_id, trade_id),
                 )
             ) if entry_decision_id or trade_id else []
+            broker_entry = self._execute(
+                conn,
+                """
+                SELECT deal_id, exec_price, raw_execution_price, price_quality,
+                       exec_timestamp, entry_price, trade_side
+                FROM ctrader_deals
+                WHERE position_id=? AND is_close=0
+                ORDER BY exec_timestamp ASC
+                LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
 
         top_weight_factor = ""
         top_weight = 0.0
@@ -488,7 +501,13 @@ class TradeReviewer:
         hold_quality = 0.5
         exit_quality = 0.5
         regime_fit_score = 0.5
-        execution_quality = _clamp(0.60 if real_pnl else 0.45)
+        execution_quality_evidence = build_execution_quality_evidence(
+            order_events=[dict(row) for row in order_events],
+            entry_action=entry_action if isinstance(entry_action, dict) else {},
+            broker_deal=dict(broker_entry) if broker_entry else {},
+            direction=(entry_action or {}).get("direction") if isinstance(entry_action, dict) else 0,
+        )
+        execution_quality = _safe_float(execution_quality_evidence.get("score"))
         close_ts = float(close_ts or time.time())
         risk_verdict = (
             entry_action.get("risk_verdict")
@@ -640,6 +659,8 @@ class TradeReviewer:
             "bar_context": (entry_action or {}).get("bar_context", {}) if isinstance(entry_action, dict) else {},
             "event_context": event_context or {},
             "execution_context": execution_context or {},
+            "execution_quality_evidence": execution_quality_evidence,
+            "execution_quality_state": str(execution_quality_evidence.get("evidence_state") or "unknown"),
             "summary_consistency": _review_consistency(
                 entry_action if isinstance(entry_action, dict) else {},
                 [dict(row) for row in order_events],
@@ -677,6 +698,8 @@ class TradeReviewer:
                 },
                 "execution": {
                     "execution_quality": round(execution_quality, 4),
+                    "evidence_state": str(execution_quality_evidence.get("evidence_state") or "unknown"),
+                    "issues": list(execution_quality_evidence.get("issues") or []),
                 },
                 "context": {
                     "eligible_factors": sorted(context_contributions),

@@ -15,6 +15,10 @@ from backend.core.state_store import (
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.review_contract import (
+    review_execution_evidence_is_trainable,
+    review_has_system_contamination,
+)
 
 
 MODEL_TYPE = "factor_governance_lightgbm"
@@ -106,6 +110,11 @@ def _current_row_label(item: dict[str, Any]) -> int:
 def _row_system_contaminated(item: dict[str, Any]) -> bool:
     notes = _loads(item.get("notes"), {})
     review = _loads(item.get("review_json"), {})
+    failure_tags = _loads(item.get("failure_tags_json"), [])
+    review_for_checks = {
+        **review,
+        "failure_tags": failure_tags if isinstance(failure_tags, list) else [],
+    }
     system_issue = review.get("system_issue_context") if isinstance(review, dict) else {}
     return bool(
         (isinstance(notes, dict) and notes.get("system_contaminated"))
@@ -113,6 +122,18 @@ def _row_system_contaminated(item: dict[str, Any]) -> bool:
             isinstance(system_issue, dict)
             and system_issue.get("contaminates_learning")
         )
+        or review_has_system_contamination(review_for_checks)
+    )
+
+
+def _row_execution_evidence_complete(item: dict[str, Any]) -> bool:
+    review = _loads(item.get("review_json"), {})
+    failure_tags = _loads(item.get("failure_tags_json"), [])
+    return review_execution_evidence_is_trainable(
+        {
+            **review,
+            "failure_tags": failure_tags if isinstance(failure_tags, list) else [],
+        }
     )
 
 
@@ -285,7 +306,8 @@ class FactorGovernanceLightGBMService:
                            f.hold_contribution, f.exit_contribution, f.net_contribution,
                            f.confidence, f.notes, r.position_id, r.entry_quality, r.hold_quality,
                            r.exit_quality, r.regime_fit_score, r.execution_quality,
-                           r.pnl, r.mae, r.mfe, r.outcome_label, r.review_json, r.created_at,
+                           r.pnl, r.mae, r.mfe, r.outcome_label, r.failure_tags_json,
+                           r.review_json, r.created_at,
                            dl.regime_id AS regime_id,
                            dl.regime_confidence AS regime_confidence,
                            dl.decision_ts AS decision_ts
@@ -302,7 +324,13 @@ class FactorGovernanceLightGBMService:
                 (int(limit),),
             ).fetchall()
             row_items = [dict(row) for row in rows]
-            row_items = [item for item in row_items if not _row_system_contaminated(item)]
+            system_clean_count = sum(1 for item in row_items if not _row_system_contaminated(item))
+            row_items = [
+                item
+                for item in row_items
+                if not _row_system_contaminated(item)
+                and _row_execution_evidence_complete(item)
+            ]
             review_row_counts: dict[str, int] = {}
             for item in row_items:
                 review_id = str(item.get("review_id") or item.get("trade_id") or "")
@@ -360,6 +388,9 @@ class FactorGovernanceLightGBMService:
                 "schema_version": "model_training_data_quality.v1",
                 "candidate_row_count": len(rows),
                 "uncontaminated_row_count": len(row_items),
+                "system_clean_row_count": system_clean_count,
+                "excluded_system_contaminated_count": len(rows) - system_clean_count,
+                "excluded_execution_incomplete_count": system_clean_count - len(row_items),
                 "lineage_row_count": len(lineage_items),
                 "selected_count": len(samples),
                 "selected_distinct_trade_count": len(selected_trades),
@@ -957,7 +988,8 @@ class FactorGovernanceLightGBMService:
                        f.hold_contribution, f.exit_contribution, f.net_contribution,
                        f.confidence, f.notes, r.position_id, r.entry_quality, r.hold_quality,
                        r.exit_quality, r.regime_fit_score, r.execution_quality,
-                       r.pnl, r.mae, r.mfe, r.outcome_label, r.review_json, r.created_at,
+                       r.pnl, r.mae, r.mfe, r.outcome_label, r.failure_tags_json,
+                       r.review_json, r.created_at,
                        dl.regime_id AS regime_id,
                        dl.regime_confidence AS regime_confidence,
                        dl.decision_ts AS decision_ts
@@ -974,7 +1006,10 @@ class FactorGovernanceLightGBMService:
             ).fetchall()
             row_items = [dict(row) for row in rows]
             row_items = [
-                item for item in row_items if not _row_system_contaminated(item)
+                item
+                for item in row_items
+                if not _row_system_contaminated(item)
+                and _row_execution_evidence_complete(item)
             ]
             ordered = sorted(
                 row_items,

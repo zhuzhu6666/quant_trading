@@ -15,7 +15,10 @@ from backend.core.state_store import (
 )
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
-from backend.services.review_contract import SYSTEM_CONTAMINATION_LABELS
+from backend.services.review_contract import (
+    SYSTEM_CONTAMINATION_LABELS,
+    review_execution_evidence_is_trainable,
+)
 
 
 def _review_text_contaminated(review_json: str) -> bool:
@@ -67,6 +70,17 @@ def _loads(raw: str | None, default: Any) -> Any:
         return json.loads(raw)
     except Exception:
         return default
+
+
+def _review_execution_evidence_complete(row: Any) -> bool:
+    review = _loads(row.get("review_json") if isinstance(row, dict) else row["review_json"], {})
+    failure_tags = _loads(
+        row.get("failure_tags_json") if isinstance(row, dict) else row["failure_tags_json"],
+        [],
+    )
+    if isinstance(failure_tags, list):
+        review = {**review, "failure_tags": failure_tags}
+    return review_execution_evidence_is_trainable(review)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -203,7 +217,7 @@ class PositionQualityLightGBMService:
     ):
         self.db_path = Path(db_path)
         self.artifact_dir = Path(artifact_dir) if artifact_dir else DATA_DIR / "model_artifacts" / MODEL_TYPE
-        self._live_bundle_cache: tuple[str, int, dict[str, Any], Any] | None = None
+        self._inference_bundle_cache: tuple[str, int, dict[str, Any], Any] | None = None
         self.last_data_quality: dict[str, Any] = {}
         self._ensure_audit_table()
 
@@ -281,6 +295,7 @@ class PositionQualityLightGBMService:
                        t.verdict_json, t.context_json, t.template_id,
                        t.template_version, t.config_version, t.config_hash,
                        r.review_id, r.pnl, r.outcome_label, r.failure_tags_json,
+                       r.review_json,
                        -- contamination is decided server-side so the large
                        -- review_json column never crosses the wire; keep the
                        -- quoted-label set in sync with SYSTEM_CONTAMINATION_LABELS
@@ -306,6 +321,7 @@ class PositionQualityLightGBMService:
                 dict(row)
                 for row in rows
                 if not bool(row["review_contaminated"])
+                and _review_execution_evidence_complete(row)
             ]
             # Trace density is high (hundreds of traces per position), so a
             # trace-count bound (limit*4) collapses the window to the most
@@ -405,7 +421,16 @@ class PositionQualityLightGBMService:
                 "horizon_minutes": int(horizon_minutes),
                 "pnl_tolerance": float(pnl_tolerance),
                 "excluded_other_lineage_count": len(items) - len(lineage_items),
-                "excluded_system_contaminated_count": candidate_count - len(clean_items),
+                "excluded_system_contaminated_count": sum(
+                    1 for row in rows if bool(row["review_contaminated"])
+                ),
+                "excluded_execution_incomplete_count": sum(
+                    1
+                    for row in rows
+                    if not bool(row["review_contaminated"])
+                    and not _review_execution_evidence_complete(row)
+                ),
+                "excluded_other_non_trainable_count": candidate_count - len(clean_items),
             }
             return samples
         finally:
@@ -675,9 +700,9 @@ class PositionQualityLightGBMService:
         *,
         artifact_path: str | Path | None = None,
     ) -> dict[str, Any]:
-        """Score a live position as an advisory, risk-reducing-only input.
+        """Score a current position as an advisory, risk-reducing-only input.
 
-        The model remains unable to close or amend positions.  Callers may
+        The model remains unable to call the broker or amend risk parameters. Callers may
         only use high exit risk to tighten an existing rule-based verdict.
         """
         dep_error = _dependency_error()
@@ -690,9 +715,9 @@ class PositionQualityLightGBMService:
         if not path.exists():
             return {"ok": False, "error": "artifact_missing"}
         cache_key = (str(path), path.stat().st_mtime_ns)
-        if self._live_bundle_cache and self._live_bundle_cache[:2] == cache_key:
-            artifact = self._live_bundle_cache[2]
-            bundle = self._live_bundle_cache[3]
+        if self._inference_bundle_cache and self._inference_bundle_cache[:2] == cache_key:
+            artifact = self._inference_bundle_cache[2]
+            bundle = self._inference_bundle_cache[3]
         else:
             artifact = json.loads(path.read_text(encoding="utf-8"))
             bundle = None
@@ -700,7 +725,7 @@ class PositionQualityLightGBMService:
             return {"ok": False, "error": "artifact_feature_schema_not_pit_v2"}
         permission = validate_model_artifact(
             artifact, model_type=MODEL_TYPE, db_path=self.db_path,
-            context={"mode": "advisory", "operation": "position_quality_live_advisory"},
+            context={"mode": "advisory", "operation": "position_quality_demo_advisory"},
         )
         if not permission.get("ok"):
             return {"ok": False, "error": "model_permission_violation", "permission": permission}
@@ -709,7 +734,7 @@ class PositionQualityLightGBMService:
             return {"ok": False, "error": "model_file_missing"}
         if bundle is None:
             bundle = joblib.load(model_file)
-            self._live_bundle_cache = (cache_key[0], cache_key[1], artifact, bundle)
+            self._inference_bundle_cache = (cache_key[0], cache_key[1], artifact, bundle)
         model = bundle["model"]
         feature_names = list(bundle.get("feature_names") or FEATURE_NAMES)
         risk = dict(position_context.get("risk") or {})
@@ -734,7 +759,7 @@ class PositionQualityLightGBMService:
         exit_risk = max(0.0, min(1.0, 1.0 - hold_score))
         return {
             "ok": True,
-            "schema_version": "position_quality_live_advisory.v1",
+            "schema_version": "position_quality_demo_advisory.v1",
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "hold_score": round(hold_score, 8),
             "exit_risk_score": round(exit_risk, 8),

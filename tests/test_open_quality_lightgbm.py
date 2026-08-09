@@ -1,7 +1,12 @@
 import json
 import sqlite3
 
-from research.open_quality_lightgbm import MODEL_TYPE, OpenQualityLightGBMService
+from research.open_quality_lightgbm import (
+    MODEL_TYPE,
+    OpenQualityLightGBMService,
+    _allowed_supervised,
+    _label_from_open_outcome,
+)
 
 
 def _init_db(path):
@@ -82,6 +87,15 @@ def _init_db(path):
             "label": "open_outcome",
             "outcome_label": "good_win" if good else "bad_loss",
             "pnl": 1.0 if good else -1.0,
+            "open_target_v2": {
+                "schema_version": "open_target.v2",
+                "objective": "profitable_open_outcome",
+                "financial_label": "profit" if good else "loss",
+                "legacy_outcome_label": "good_win" if good else "bad_loss",
+                "execution_evidence_state": "full",
+                "contaminated": False,
+                "trainable": True,
+            },
         }
         conn.execute(
             """
@@ -160,3 +174,45 @@ def test_open_quality_lightgbm_trains_or_reports_dependency(tmp_path, monkeypatc
     assert shadow["count"] == 5
     audits = service.list_audits(limit=10)
     assert audits["count"] == 5
+
+
+def test_good_loss_is_not_a_positive_open_target():
+    assert _label_from_open_outcome({"outcome_label": "good_loss", "pnl": 10.0}) == 0
+    assert _label_from_open_outcome(
+        {
+            "outcome_label": "good_win",
+            "pnl": 10.0,
+            "open_target_v2": {
+                "schema_version": "open_target.v2",
+                "financial_label": "loss",
+                "trainable": True,
+            },
+        }
+    ) == 0
+
+
+def test_open_model_can_use_its_consumer_scope_without_global_factor_grade():
+    assert _allowed_supervised(
+        {
+            "model_ready": False,
+            "allowed_uses": ["audit"],
+            "consumer_eligibility": {
+                MODEL_TYPE: {
+                    "model_ready": True,
+                    "allowed_uses": ["supervised_training"],
+                }
+            },
+        }
+    ) is True
+    assert _allowed_supervised(
+        {
+            "model_ready": False,
+            "allowed_uses": ["audit"],
+            "consumer_eligibility": {
+                MODEL_TYPE: {
+                    "model_ready": False,
+                    "allowed_uses": [],
+                }
+            },
+        }
+    ) is False

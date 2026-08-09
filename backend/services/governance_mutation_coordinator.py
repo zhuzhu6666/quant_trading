@@ -151,13 +151,9 @@ def classify_governance_risk(before: Mapping[str, Any], target: Mapping[str, Any
     }
     model_stage_rank = {
         "shadow": 0,
-        "demo_shadow": 0,
-        "canary": 0,
         "demo_canary": 0,
-        "active": 0,
         "demo_active": 0,
         "quarantined": 1,
-        "retired": 2,
     }
     autonomy_mode_rank = {
         "manual": 0,

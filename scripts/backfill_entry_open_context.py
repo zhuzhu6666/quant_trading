@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 from backend.core.db import get_state_pg_conn
 from backend.services.autonomous_learning import materialize_autonomous_learning_samples
 from backend.services.failure_taxonomy import build_failure_taxonomy
+from backend.services.review_contract import build_execution_quality_evidence
 from research.learning.experience_builder import ExperienceBuilder
 
 
@@ -221,11 +222,213 @@ def _update_review_from_entry(conn: Any, review_row: Any, entry_action: dict[str
     return True
 
 
+def _rebuild_factor_attribution(
+    conn: Any,
+    review_row: Any,
+    *,
+    dry_run: bool,
+) -> dict[str, int]:
+    """Rebuild only attribution that is present in both durable sources.
+
+    A decision factor snapshot proves the entry-side value, not the outcome
+    attribution.  Therefore rows are inserted only when the review already
+    contains durable factor contributions.  Otherwise the review remains
+    explicitly missing attribution and downstream quality gates exclude it.
+    """
+
+    review_id = str(review_row["review_id"] or "")
+    entry_decision_id = str(review_row["entry_decision_id"] or "")
+    if not review_id or not entry_decision_id:
+        return {"recovered": 0, "marked_missing": 0, "skipped": 1}
+    existing = conn.execute(
+        "SELECT 1 FROM state_v1.factor_contribution_review WHERE review_id=%s LIMIT 1",
+        (review_id,),
+    ).fetchone()
+    if existing is not None:
+        return {"recovered": 0, "marked_missing": 0, "skipped": 1}
+    current_review = conn.execute(
+        "SELECT review_json, failure_tags_json FROM state_v1.trade_outcome_review WHERE review_id=%s LIMIT 1",
+        (review_id,),
+    ).fetchone()
+    review_source = current_review or review_row
+    review = _loads(review_source["review_json"], {})
+    review = review if isinstance(review, dict) else {}
+    contributions = review.get("factor_contributions")
+    contributions = contributions if isinstance(contributions, dict) else {}
+    snapshots = conn.execute(
+        """
+        SELECT factor, contribution_score, policy_weight
+        FROM state_v1.decision_factor_snapshot
+        WHERE decision_id=%s
+        ORDER BY ABS(contribution_score) DESC, factor ASC
+        """,
+        (entry_decision_id,),
+    ).fetchall()
+    valid: list[tuple[str, float, float]] = []
+    for snapshot in snapshots:
+        factor = str(snapshot["factor"] or "")
+        if not factor or factor not in contributions:
+            continue
+        net = _safe_float(contributions.get(factor), float("nan"))
+        if net != net:
+            continue
+        valid.append(
+            (
+                factor,
+                _safe_float(snapshot["contribution_score"]),
+                net,
+            )
+        )
+    if not valid:
+        changed = str(review.get("attribution_integrity") or "") != "missing"
+        review["attribution_integrity"] = "missing"
+        review.setdefault("factor_attribution", {})
+        review["factor_attribution"].update(
+            {
+                "schema_version": "factor_attribution.v1",
+                "rebuild_status": "missing_outcome_contribution",
+                "source": "backfill_entry_open_context",
+            }
+        )
+        tags = list(_loads(review_source["failure_tags_json"], []))
+        if "attribution_missing" not in tags:
+            tags.append("attribution_missing")
+            changed = True
+        if changed and not dry_run:
+            conn.execute(
+                """
+                UPDATE state_v1.trade_outcome_review
+                SET review_json=%s, failure_tags_json=%s
+                WHERE review_id=%s
+                """,
+                (_dumps(review), _dumps(tags), review_id),
+            )
+        return {"recovered": 0, "marked_missing": 1, "skipped": 0}
+
+    if not dry_run:
+        for factor, entry_contribution, net_contribution in valid:
+            conn.execute(
+                """
+                INSERT INTO state_v1.factor_contribution_review
+                (review_id, trade_id, factor, entry_contribution, hold_contribution,
+                 exit_contribution, net_contribution, confidence, notes)
+                VALUES (%s, %s, %s, %s, 0.0, 0.0, %s, %s, %s)
+                """,
+                (
+                    review_id,
+                    str(review_row["trade_id"] or ""),
+                    factor,
+                    entry_contribution,
+                    net_contribution,
+                    0.2,
+                    _dumps(
+                        {
+                            "source": "backfill_entry_open_context",
+                            "rebuild_status": "entry_snapshot_plus_review_contribution",
+                            "attribution_integrity": "partial",
+                        }
+                    ),
+                ),
+            )
+        review["attribution_integrity"] = "partial"
+        review.setdefault("factor_attribution", {})
+        review["factor_attribution"].update(
+            {
+                "schema_version": "factor_attribution.v1",
+                "rebuild_status": "recovered_entry_and_net_only",
+                "source": "backfill_entry_open_context",
+                "recovered_factor_count": len(valid),
+            }
+        )
+        conn.execute(
+            "UPDATE state_v1.trade_outcome_review SET review_json=%s WHERE review_id=%s",
+            (_dumps(review), review_id),
+        )
+    return {"recovered": len(valid), "marked_missing": 0, "skipped": 0}
+
+
+def _refresh_execution_quality(
+    conn: Any,
+    review_row: Any,
+    *,
+    dry_run: bool,
+) -> dict[str, int]:
+    review_id = str(review_row["review_id"] or "")
+    decision_id = str(review_row["entry_decision_id"] or "")
+    trade_id = str(review_row["trade_id"] or review_row["position_id"] or "")
+    if not review_id:
+        return {"refreshed": 0, "unknown": 0}
+    current_review = conn.execute(
+        "SELECT execution_quality, review_json FROM state_v1.trade_outcome_review WHERE review_id=%s LIMIT 1",
+        (review_id,),
+    ).fetchone()
+    review_source = current_review or review_row
+    review = _loads(review_source["review_json"], {})
+    review = review if isinstance(review, dict) else {}
+    decision = conn.execute(
+        "SELECT action_json FROM state_v1.decision_ledger WHERE decision_id=%s LIMIT 1",
+        (decision_id,),
+    ).fetchone() if decision_id else None
+    entry_action = _loads(decision["action_json"], {}) if decision else review.get("entry_action")
+    entry_action = entry_action if isinstance(entry_action, dict) else {}
+    events = conn.execute(
+        """
+        SELECT event_type, event_ts, price, volume, status, details_json
+        FROM state_v1.order_lifecycle_event
+        WHERE (%s <> '' AND decision_id=%s)
+           OR (%s <> '' AND trade_id=%s)
+        ORDER BY event_ts ASC
+        """,
+        (decision_id, decision_id, trade_id, trade_id),
+    ).fetchall()
+    broker = conn.execute(
+        """
+        SELECT deal_id, exec_price, raw_execution_price, price_quality,
+               exec_timestamp, entry_price, trade_side
+        FROM state_v1.ctrader_deals
+        WHERE position_id=%s AND is_close=0
+        ORDER BY exec_timestamp ASC
+        LIMIT 1
+        """,
+        (int(_safe_int(review_row["position_id"])),),
+    ).fetchone()
+    evidence = build_execution_quality_evidence(
+        order_events=[dict(item) for item in events],
+        entry_action=entry_action,
+        broker_deal=dict(broker) if broker else {},
+        direction=entry_action.get("direction", review.get("direction", 0)),
+    )
+    score = _safe_float(evidence.get("score"))
+    state = str(evidence.get("evidence_state") or "unknown")
+    changed = (
+        _safe_float(review_source["execution_quality"]) != score
+        or str(review.get("execution_quality_state") or "") != state
+        or review.get("execution_quality_evidence") != evidence
+    )
+    if changed and not dry_run:
+        review["execution_quality"] = score
+        review["execution_quality_state"] = state
+        review["execution_quality_evidence"] = evidence
+        conn.execute(
+            """
+            UPDATE state_v1.trade_outcome_review
+            SET execution_quality=%s, review_json=%s
+            WHERE review_id=%s
+            """,
+            (score, _dumps(review), review_id),
+        )
+    return {"refreshed": 1 if changed else 0, "unknown": 1 if state != "full" else 0}
+
+
 def run_backfill(*, limit: int, force: bool, dry_run: bool, materialize: bool) -> dict[str, Any]:
     conn = get_state_pg_conn(read_only=False)
     updated_decisions = 0
     updated_reviews = 0
     rebuilt_experiences = 0
+    attribution_recovered = 0
+    attribution_marked_missing = 0
+    execution_quality_refreshed = 0
+    execution_quality_unknown = 0
     try:
         reviews = conn.execute(
             """
@@ -284,10 +487,14 @@ def run_backfill(*, limit: int, force: bool, dry_run: bool, materialize: bool) -
         for review in reviews:
             entry_id = str(review["entry_decision_id"] or "")
             action = entry_actions.get(entry_id)
-            if not action:
-                continue
-            if _update_review_from_entry(conn, review, action, force=force):
+            if action and _update_review_from_entry(conn, review, action, force=force):
                 updated_reviews += 1
+            execution_quality = _refresh_execution_quality(conn, review, dry_run=dry_run)
+            execution_quality_refreshed += int(execution_quality["refreshed"])
+            execution_quality_unknown += int(execution_quality["unknown"])
+            attribution = _rebuild_factor_attribution(conn, review, dry_run=dry_run)
+            attribution_recovered += int(attribution["recovered"])
+            attribution_marked_missing += int(attribution["marked_missing"])
 
         if dry_run:
             conn.rollback()
@@ -339,6 +546,10 @@ def run_backfill(*, limit: int, force: bool, dry_run: bool, materialize: bool) -
         "limit": int(limit),
         "updated_decisions": updated_decisions,
         "updated_reviews": updated_reviews,
+        "execution_quality_refreshed": execution_quality_refreshed,
+        "execution_quality_unknown": execution_quality_unknown,
+        "attribution_recovered": attribution_recovered,
+        "attribution_marked_missing": attribution_marked_missing,
         "rebuilt_experiences": rebuilt_experiences,
         "materialized": materialized,
     }

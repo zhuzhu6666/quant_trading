@@ -8,12 +8,16 @@ without changing execution behavior.
 from __future__ import annotations
 
 import json
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, MutableMapping
 
 from backend.services.market_regime import resolve_market_regime
-from backend.services.review_contract import trusted_broker_close_price
+from backend.services.review_contract import (
+    build_execution_quality_event_details,
+    trusted_broker_close_price,
+)
 from risk.runtime_policy import RiskLimitSnapshot
 
 
@@ -689,6 +693,127 @@ def build_entry_data_quality_context(
     return payload
 
 
+OPEN_LEARNING_CONTEXT_SCHEMA_VERSION = "open_learning_context.v2"
+OPEN_LEARNING_CONTEXT_REQUIRED_FIELDS = (
+    "entry_cluster",
+    "market_micro_context",
+    "bar_context",
+    "execution_context",
+    "decision_quality_context",
+    "event_context",
+    "data_quality_context",
+    "market_session",
+)
+
+
+def _positive_finite(value: Any) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(number) and number > 0.0
+
+
+def validate_open_learning_context(
+    payload: Mapping[str, Any] | None,
+    *,
+    require_fill: bool = True,
+) -> dict[str, Any]:
+    """Validate the single producer contract used by future open decisions.
+
+    ``require_fill=False`` is used immediately before broker submission: all
+    entry facts must exist, while the broker fill is not known yet.  Filled
+    ledger/recovery payloads use the default and require the actual fill.
+    """
+
+    context = dict(payload or {})
+    missing: list[str] = []
+    invalid: list[str] = []
+
+    contexts: dict[str, dict[str, Any]] = {}
+    for field in OPEN_LEARNING_CONTEXT_REQUIRED_FIELDS:
+        value = context.get(field)
+        if not isinstance(value, dict) or not value:
+            missing.append(field)
+            continue
+        contexts[field] = value
+
+    cluster = contexts.get("entry_cluster")
+    if cluster is not None:
+        if str(cluster.get("schema_version") or "") != "entry_cluster_context.v1":
+            invalid.append("entry_cluster.schema_version")
+        try:
+            direction = int(cluster.get("direction") or 0)
+        except (TypeError, ValueError, OverflowError):
+            direction = 0
+        if direction == 0:
+            invalid.append("entry_cluster.direction")
+
+    micro = contexts.get("market_micro_context")
+    if micro is not None:
+        for field in ("bid", "ask", "mid", "spread", "quote_ts", "signal_price"):
+            if not _positive_finite(micro.get(field)):
+                invalid.append(f"market_micro_context.{field}")
+        if micro.get("quote_fresh") is not True:
+            invalid.append("market_micro_context.quote_fresh")
+
+    bar = contexts.get("bar_context")
+    if bar is not None:
+        if bar.get("complete") is not True:
+            invalid.append("bar_context.complete")
+        for field in ("bar_ts", "open", "high", "low", "close"):
+            if not _positive_finite(bar.get(field)):
+                invalid.append(f"bar_context.{field}")
+
+    execution = contexts.get("execution_context")
+    if execution is not None:
+        for field in ("requested_volume", "actual_api_volume", "signal_price"):
+            if not _positive_finite(execution.get(field)):
+                invalid.append(f"execution_context.{field}")
+        if require_fill and not _positive_finite(execution.get("fill_price")):
+            invalid.append("execution_context.fill_price")
+
+    decision_quality = contexts.get("decision_quality_context")
+    if decision_quality is not None:
+        if str(decision_quality.get("schema_version") or "") != "decision_quality_context.v1":
+            invalid.append("decision_quality_context.schema_version")
+        if not str(decision_quality.get("composer_version") or ""):
+            invalid.append("decision_quality_context.composer_version")
+        if not isinstance(decision_quality.get("factor_roles"), dict) or not decision_quality.get("factor_roles"):
+            invalid.append("decision_quality_context.factor_roles")
+        if not _positive_finite(decision_quality.get("n_active_alpha_factors")):
+            invalid.append("decision_quality_context.n_active_alpha_factors")
+
+    event = contexts.get("event_context")
+    if event is not None:
+        try:
+            multiplier = float(event.get("multiplier"))
+        except (TypeError, ValueError, OverflowError):
+            multiplier = -1.0
+        if not math.isfinite(multiplier) or multiplier < 0.0:
+            invalid.append("event_context.multiplier")
+
+    data_quality = contexts.get("data_quality_context")
+    if data_quality is not None:
+        if str(data_quality.get("schema_version") or "") != "entry_data_quality_context.v1":
+            invalid.append("data_quality_context.schema_version")
+        if data_quality.get("quote_fresh") is not True:
+            invalid.append("data_quality_context.quote_fresh")
+
+    session = contexts.get("market_session")
+    if session is not None and not str(session.get("status") or ""):
+        invalid.append("market_session.status")
+
+    return {
+        "schema_version": OPEN_LEARNING_CONTEXT_SCHEMA_VERSION,
+        "ready": not missing and not invalid,
+        "required_fields": list(OPEN_LEARNING_CONTEXT_REQUIRED_FIELDS),
+        "missing_fields": list(dict.fromkeys(missing)),
+        "invalid_fields": list(dict.fromkeys(invalid)),
+        "require_fill": bool(require_fill),
+    }
+
+
 def build_open_learning_context_payload(
     *,
     entry_cluster: dict[str, Any],
@@ -728,7 +853,7 @@ def build_open_learning_context_payload(
         sl_dist=sl_dist,
         tp_dist=tp_dist,
     )
-    return {
+    payload = {
         "entry_cluster": entry_cluster,
         "same_direction_open_count": entry_cluster["same_direction_open_count_before"],
         "recent_same_direction_entries": entry_cluster["recent_same_direction_entries"],
@@ -751,6 +876,10 @@ def build_open_learning_context_payload(
         "decision_freshness": dict(decision_freshness or {}),
         "entry_timing_context": dict(entry_timing_context or {}),
     }
+    capture_quality = validate_open_learning_context(payload, require_fill=True)
+    if capture_quality["ready"]:
+        payload["open_context_quality"] = capture_quality
+    return payload
 
 
 def build_open_trade_risk_context_payload(
@@ -932,7 +1061,13 @@ def build_filled_open_ledger_payloads(
             "price": float(current_price or 0.0),
             "volume": float(actual_api_volume or 0.0),
             "status": "submitted",
-            "details": {"tick": int(tick or 0), "direction": direction},
+            "details": build_execution_quality_event_details(
+                tick=tick,
+                direction=direction,
+                requested_price=current_price,
+                fill_price=0.0,
+                learning_context=learning_context,
+            ),
         },
         "filled_order_payload": {
             "event_type": "filled",
@@ -942,7 +1077,13 @@ def build_filled_open_ledger_payloads(
             "price": float(fill_price or 0.0),
             "volume": float(actual_api_volume or 0.0),
             "status": "filled",
-            "details": {"tick": int(tick or 0), "direction": direction},
+            "details": build_execution_quality_event_details(
+                tick=tick,
+                direction=direction,
+                requested_price=current_price,
+                fill_price=fill_price,
+                learning_context=learning_context,
+            ),
         },
         "position_event_payload": {
             "position_id": pid_str,

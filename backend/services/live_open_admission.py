@@ -157,6 +157,11 @@ def evaluate_final_open_admission(
             quote_values.append(0.0)
     if not any(value > 0 for value in quote_values):
         blockers.append("spot_quote_invalid")
+    bid, ask, mid = quote_values
+    if bid <= 0.0 or ask <= 0.0 or mid <= 0.0 or ask < bid:
+        blockers.append("spot_quote_bid_ask_invalid")
+    elif ask - bid <= 0.0:
+        blockers.append("spot_quote_spread_invalid")
 
     normalized = tuple(sorted(set(blockers)))
     return FinalOpenAdmissionResult(

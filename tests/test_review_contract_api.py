@@ -2,7 +2,10 @@ import json
 
 from backend.api import learning as learning_api
 from backend.api import risk as risk_api
-from backend.services.review_contract import build_system_issue_context
+from backend.services.review_contract import (
+    build_execution_quality_evidence,
+    build_system_issue_context,
+)
 
 
 def test_unknown_broker_close_price_contaminates_learning_without_hiding_money_pnl():
@@ -19,6 +22,66 @@ def test_unknown_broker_close_price_contaminates_learning_without_hiding_money_p
     assert issue["contaminates_learning"] is True
     assert "broker_close_price_unknown" in issue["labels"]
     assert issue["evidence"]["broker_close_price"]["price_quality"] == "unknown"
+
+
+def test_execution_quality_requires_broker_chain_and_uses_observed_cost():
+    evidence = build_execution_quality_evidence(
+        order_events=[
+            {"event_type": "submitted", "price": 100.0},
+            {"event_type": "filled", "price": 101.0},
+        ],
+        entry_action={
+            "direction": 1,
+            "market_micro_context": {"spread": 2.0},
+        },
+        broker_deal={
+            "deal_id": 7,
+            "exec_price": 101.0,
+            "price_quality": "broker_reported",
+        },
+        direction=1,
+    )
+
+    assert evidence["evidence_state"] == "full"
+    assert evidence["broker_deal_fill_match"] is True
+    assert evidence["score"] == 0.5
+    assert evidence["score_formula"].startswith("clamp(1-")
+
+    incomplete = build_execution_quality_evidence(
+        entry_action={"direction": 1},
+        direction=1,
+    )
+    assert incomplete["evidence_state"] == "unknown"
+    assert incomplete["score"] == 0.0
+
+
+def test_execution_quality_treats_broker_slippage_as_observation_not_missing_evidence():
+    evidence = build_execution_quality_evidence(
+        order_events=[
+            {
+                "event_type": "submitted",
+                "price": 100.0,
+                "details": {
+                    "direction": 1,
+                    "market_micro_context": {"bid": 99.0, "ask": 101.0},
+                },
+            },
+            {"event_type": "filled", "price": 100.0, "details": {"direction": 1}},
+        ],
+        broker_deal={
+            "deal_id": 8,
+            "exec_price": 100.5,
+            "price_quality": "broker_reported",
+        },
+        direction=1,
+    )
+
+    assert evidence["evidence_state"] == "full"
+    assert evidence["broker_deal_fill_match"] is False
+    assert evidence["fill_price_source"] == "broker_deal"
+    assert evidence["lifecycle_broker_fill_delta_points"] == 0.5
+    assert "broker_deal_fill_mismatch" not in evidence["issues"]
+    assert "lifecycle_fill_differs_from_broker_fill" in evidence["observations"]
 
 
 def test_learning_parse_review_row_normalizes_phase_d_contract_fields():

@@ -40,11 +40,11 @@ class ModelCanaryReview:
 
 
 class ModelCanaryReviewer:
-    """Review shadow-passed model candidates for canary readiness.
+    """Review shadow-passed model candidates for Demo Canary readiness.
 
-    This is still a pre-live gate. A `canary_ready` decision means the model has
-    enough offline shadow evidence to enter a future controlled canary runner,
-    not that it may participate in live order execution.
+    A ``canary_ready`` decision means the model has enough offline shadow
+    evidence to enter a controlled Demo runner. It never grants broker
+    execution or account-level permissions.
     """
 
     def __init__(self, db_path: str | None = None):
@@ -152,7 +152,7 @@ class ModelCanaryReviewer:
             "candidate": self.queue.get_candidate(candidate_id),
             "capabilities": {
                 "live_trading": False,
-                "requires_live_inference_contract": True,
+                "requires_demo_inference_contract": True,
                 "requires_controlled_canary_runner": True,
             },
         }

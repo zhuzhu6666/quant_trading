@@ -151,13 +151,13 @@ class ModelInferenceContract:
             "features": features,
             "explainability": {
                 "top_terms": top_terms,
-                "summary": "Advisory-only model score; not an order, not a weight update, not live execution.",
+                "summary": "Advisory-only model score; not an order, not a weight update, and not broker execution.",
                 "evidence_bullets": list(((sample or {}).get("llm_context") or {}).get("evidence_bullets") or [])[:8],
             },
             "capabilities": {
                 "live_trading": False,
                 "advisory_only": True,
-                "canary_required_before_live": True,
+                "demo_canary_required_before_influence": True,
             },
             "guardrails": [
                 "MUST NOT place orders",

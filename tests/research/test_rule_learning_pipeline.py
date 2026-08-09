@@ -717,7 +717,7 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
     assert result["model_type"] == "learning_statistical_baseline"
     assert result["metrics"]["sample_count"] == 4
     assert result["metrics"]["feature_count"] > 0
-    assert result["promotion"]["eligible_for_live"] is False
+    assert result["promotion"]["eligible_for_demo_influence"] is False
     assert result["registry_version"]["metrics"]["safe_for_live_trading"] is False
     assert (artifact_dir / "trainer_dataset_learning_statistical_baseline.json").exists()
     assert any(item["feature"].startswith("factor:stat_factor") for item in result["explainability"]["top_weights"])
@@ -762,7 +762,7 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
         ),
     )
     assert api_result["ok"] is True
-    assert api_result["promotion"]["eligible_for_live"] is False
+    assert api_result["promotion"]["eligible_for_demo_influence"] is False
     assert api_result["registry_version"]["model_type"] == "learning_statistical_baseline"
     assert (api_artifact_dir / "trainer_dataset_learning_statistical_baseline.json").exists()
 
@@ -928,7 +928,7 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
     assert advisory["guardrails"]
     assert advisory["audit"]["candidate_id"] == queued_again["candidate"]["candidate_id"]
 
-    live_advisory = score_learning_model_inference(
+    demo_advisory = score_learning_model_inference(
         None,
         ModelInferenceRequest(
             candidate_id=queued_again["candidate"]["candidate_id"],
@@ -938,9 +938,9 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
             composite_score=0.7,
         ),
     )
-    assert live_advisory["ok"] is True
-    assert live_advisory["capabilities"]["advisory_only"] is True
-    assert live_advisory["explainability"]["top_terms"]
+    assert demo_advisory["ok"] is True
+    assert demo_advisory["capabilities"]["advisory_only"] is True
+    assert demo_advisory["explainability"]["top_terms"]
     audits = list_learning_model_inference_audits(
         None,
         candidate_id=queued_again["candidate"]["candidate_id"],

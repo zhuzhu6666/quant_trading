@@ -2,7 +2,12 @@ import json
 import sqlite3
 from types import SimpleNamespace
 
-from backend.services.model_influence import ModelInfluenceService, default_model_influence_config
+from backend.services.model_influence import (
+    MODEL_STAGES,
+    ModelInfluenceService,
+    default_model_influence_config,
+    normalized_model_influence_config,
+)
 from backend.services.model_influence_governance import ModelInfluenceGovernanceService
 from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
 from risk.policy_service import RiskPolicyService
@@ -107,6 +112,22 @@ def test_open_model_is_veto_only_and_inactive_model_does_not_duplicate_audit(tmp
     assert count == 1
 
 
+def test_model_influence_is_inactive_outside_demo_autonomy(tmp_path):
+    service = ModelInfluenceService(tmp_path / "state.db")
+    cfg = _cfg("open_quality_lightgbm", {"allowed_effects": ["veto"], "veto_threshold": 0.25})
+    cfg.autonomy_mode = "manual"
+
+    assert ModelInfluenceService.active_policy("open_quality_lightgbm", cfg) is None
+    result = service.evaluate_open_veto(
+        score={"ok": True, "quality_score": 0.1},
+        subject_id="manual:1",
+        cfg=cfg,
+        rule_decision={"passed": True},
+    )
+    assert result["passed"] is True
+    assert result["reason"] == "model_open_veto_not_applied"
+
+
 def test_model_promotion_policy_requires_demo_pit_gate_and_safe_capabilities():
     verdict = RiskPolicyService().evaluate("promote_model_influence", {
         "autonomy_mode": "demo_nursery",
@@ -130,6 +151,24 @@ def test_model_promotion_policy_requires_demo_pit_gate_and_safe_capabilities():
     })
     assert unsafe.allowed is False
     assert unsafe.reason == "unsafe_model_influence_capability"
+
+
+def test_model_stages_are_demo_only_and_live_stage_promotion_is_rejected(tmp_path):
+    assert MODEL_STAGES == {"shadow", "demo_canary", "demo_active", "quarantined"}
+    normalized = normalized_model_influence_config({
+        "models": {
+            "open_quality_lightgbm": {"stage": "live_" + "active"},
+        }
+    })
+    assert normalized["models"]["open_quality_lightgbm"]["stage"] == "quarantined"
+
+    result = ModelInfluenceGovernanceService(tmp_path / "state.db").promote(
+        tmp_path / "missing-artifact.json",
+        stage="live_" + "canary",
+    )
+    assert result["ok"] is False
+    assert result["status"] == "invalid_stage"
+    assert result["allowed_stages"] == ["demo_canary"]
 
 
 def test_model_promotion_gate_rejects_legacy_generic_pit_v2_schema(tmp_path):

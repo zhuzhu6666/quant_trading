@@ -231,6 +231,12 @@ def _create_sample_db(path):
         "close_ts": 180.0,
         "close_reason_source": "supervisor_tighten_stopout",
         "attribution_integrity": "recovered",
+        "execution_quality_state": "replay_verified",
+        "execution_quality_evidence": {
+            "schema_version": "execution_quality_evidence.v2",
+            "evidence_state": "replay_verified",
+            "replay_verified": True,
+        },
     }
     conn.execute(
         """
@@ -441,6 +447,73 @@ def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path
     assert stale_count == 0
     assert ("autonomous_learning_samples",) in events
     assert ("autonomous_learning_samples", "completed") in runs
+
+
+def test_open_consumer_eligibility_does_not_require_factor_attribution():
+    item = {
+        "sample_type": "shadow_open_decision",
+        "source_table": "decision_ledger",
+        "source_id": "dec_open_consumer_scope",
+        "sample_id": "als_open_consumer_scope",
+        "config_hash": "cfg-current",
+        "label_status": "matured",
+        "integrity": "missing",
+        "train_weight": 1.0,
+        "trace": {
+            "decision_id": "dec_open_consumer_scope",
+            "position_id": "position-open-consumer-scope",
+        },
+        "features": {
+            "entry_cluster": {"schema_version": "entry_cluster_context.v1", "direction": 1},
+            "market_micro_context": {
+                "schema_version": "market_micro_context.v1",
+                "bid": 4000.0,
+                "ask": 4000.2,
+                "mid": 4000.1,
+                "spread": 0.2,
+                "signal_price": 4000.1,
+                "quote_fresh": True,
+            },
+            "bar_context": {"schema_version": "entry_bar_context.v1", "complete": True},
+            "execution_context": {
+                "requested_volume": 100.0,
+                "actual_api_volume": 100.0,
+                "signal_price": 4000.1,
+                "fill_price": 4000.2,
+            },
+            "decision_quality_context": {
+                "schema_version": "decision_quality_context.v1",
+                "composer_version": "factor_roles.v2",
+                "factor_roles": {"rsi": "alpha"},
+                "n_active_alpha_factors": 1,
+            },
+            "event_context": {"multiplier": 1.0},
+            "data_quality_context": {
+                "schema_version": "entry_data_quality_context.v1",
+                "quote_fresh": True,
+            },
+        },
+        "label": {
+            "label": "open_outcome",
+            "open_target_v2": {
+                "schema_version": "open_target.v2",
+                "financial_label": "profit",
+                "execution_evidence_state": "full",
+                "trainable": True,
+                "contaminated": False,
+            },
+        },
+        "verdict": {},
+        "executable_governance_allowed": True,
+    }
+
+    _, contract, _ = al._build_sample_evidence_contract(item)
+
+    assert contract["model_ready"] is False
+    assert "supervised_training" not in contract["allowed_uses"]
+    consumer = contract["consumer_eligibility"]["open_quality_lightgbm"]
+    assert consumer["model_ready"] is True
+    assert consumer["allowed_uses"] == ["supervised_training"]
 
 
 def test_counterfactual_materialization_filters_before_limit(tmp_path):
@@ -703,6 +776,15 @@ def test_entry_cluster_governance_materializes_policy_suggestion(tmp_path):
                 "outcome_label": "bad_loss",
                 "pnl": -8.0 - idx,
                 "failure_tags": ["entry_cluster_risk"],
+                "open_target_v2": {
+                    "schema_version": "open_target.v2",
+                    "objective": "profitable_open_outcome",
+                    "financial_label": "loss",
+                    "legacy_outcome_label": "bad_loss",
+                    "execution_evidence_state": "full",
+                    "contaminated": False,
+                    "trainable": True,
+                },
             }
             conn.execute(
                 """
@@ -786,6 +868,15 @@ def test_event_window_governance_materializes_policy_suggestion(tmp_path):
                 "outcome_label": "bad_loss",
                 "pnl": -7.0 - idx,
                 "failure_tags": ["event_window_bad_entry"],
+                "open_target_v2": {
+                    "schema_version": "open_target.v2",
+                    "objective": "profitable_open_outcome",
+                    "financial_label": "loss",
+                    "legacy_outcome_label": "bad_loss",
+                    "execution_evidence_state": "full",
+                    "contaminated": False,
+                    "trainable": True,
+                },
             }
             conn.execute(
                 """

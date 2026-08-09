@@ -18,6 +18,7 @@ from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.position_metrics import update_position_path_metrics
 from backend.services.review_contract import (
+    build_execution_quality_evidence,
     normalize_trade_review_contract,
     review_has_system_contamination,
 )
@@ -376,6 +377,7 @@ def fetch_missing_positions(
         d.regime_id,
         d.action_score AS entry_score,
         d.decision_ts AS entry_ts,
+        d.action_json AS entry_action_json,
         d.symbol,
         d.timeframe,
         m.broker_entry_ts,
@@ -398,7 +400,50 @@ def fetch_missing_positions(
         raise
 
 
-def build_review_record(row: sqlite3.Row) -> dict:
+def _execution_evidence_for_row(conn: Any, row: sqlite3.Row) -> dict[str, Any]:
+    decision_id = str(row["entry_decision_id"] or "")
+    trade_id = str(row["trade_id"] or row["position_id"] or "")
+    events = list(
+        _execute(
+            conn,
+            """
+            SELECT event_type, event_ts, price, volume, status, details_json
+            FROM order_lifecycle_event
+            WHERE (? <> '' AND decision_id=?)
+               OR (? <> '' AND trade_id=?)
+            ORDER BY event_ts ASC
+            """,
+            (decision_id, decision_id, trade_id, trade_id),
+        ).fetchall()
+    )
+    broker = _execute(
+        conn,
+        """
+        SELECT deal_id, exec_price, raw_execution_price, price_quality,
+               exec_timestamp, entry_price, trade_side
+        FROM ctrader_deals
+        WHERE position_id=? AND is_close=0
+        ORDER BY exec_timestamp ASC
+        LIMIT 1
+        """,
+        (int(row["position_id"] or 0),),
+    ).fetchone()
+    try:
+        entry_action = json.loads(str(row["entry_action_json"] or "{}"))
+    except Exception:
+        entry_action = {}
+    return {
+        "order_events": [dict(item) for item in events],
+        "entry_action": entry_action if isinstance(entry_action, dict) else {},
+        "broker_deal": dict(broker) if broker else {},
+    }
+
+
+def build_review_record(
+    row: sqlite3.Row,
+    *,
+    execution_evidence: dict[str, Any] | None = None,
+) -> dict:
     position_id = str(row["position_id"])
     trade_id = str(row["trade_id"] or position_id)
     pnl = float(row["net_pnl"] or 0.0)
@@ -423,6 +468,14 @@ def build_review_record(row: sqlite3.Row) -> dict:
         pnl=pnl,
     )
     inferred_close_reason = _infer_close_reason(row, path_metrics)
+    execution_evidence = execution_evidence or {}
+    execution_quality_evidence = build_execution_quality_evidence(
+        order_events=list(execution_evidence.get("order_events") or []),
+        entry_action=dict(execution_evidence.get("entry_action") or {}),
+        broker_deal=dict(execution_evidence.get("broker_deal") or {}),
+        direction=(execution_evidence.get("entry_action") or {}).get("direction", 0),
+    )
+    execution_quality = _safe_float(execution_quality_evidence.get("score"))
     outcome_label = classify_outcome(entry_score, pnl)
     summary = (
         f"trade {position_id} closed pnl={pnl:.2f}; "
@@ -487,7 +540,9 @@ def build_review_record(row: sqlite3.Row) -> dict:
         "exit_quality": 0.55,
         "regime_fit_score": round(0.70 if pnl > 0 else (0.35 + (0.10 if outcome_label == "good_loss" else 0.0)), 4),
         "regime_fit": round(0.70 if pnl > 0 else (0.35 + (0.10 if outcome_label == "good_loss" else 0.0)), 4),
-        "execution_quality": 0.60,
+        "execution_quality_evidence": execution_quality_evidence,
+        "execution_quality_state": str(execution_quality_evidence.get("evidence_state") or "unknown"),
+        "execution_quality": execution_quality,
     }
     context_integrity = "full" if row["entry_decision_id"] else ("partial" if broker_entry_ts > 0 else "minimal")
     review_json["context_integrity"] = context_integrity
@@ -518,7 +573,7 @@ def build_review_record(row: sqlite3.Row) -> dict:
         "hold_quality": 0.55 if pnl > 0 else 0.40,
         "exit_quality": 0.55,
         "regime_fit_score": 0.70 if pnl > 0 else (0.35 + (0.10 if outcome_label == "good_loss" else 0.0)),
-        "execution_quality": 0.60,
+        "execution_quality": execution_quality,
         "pnl": round(pnl, 6),
         "mae": round(_safe_float(path_metrics.get("mae"), abs(min(pnl, 0.0))), 6),
         "mfe": round(_safe_float(path_metrics.get("mfe"), max(pnl, 0.0)), 6),
@@ -902,7 +957,10 @@ def run_learning_backfill(
         rows = fetch_missing_positions(conn, limit=limit, require_decision=not allow_partial)
         inserted = []
         for row in rows:
-            record = build_review_record(row)
+            record = build_review_record(
+                row,
+                execution_evidence=_execution_evidence_for_row(conn, row),
+            )
             insert_review(conn, record)
             inserted.append(
                 {

@@ -25,6 +25,7 @@ from backend.services.live_position_lifecycle import (
     build_holding_timeout_verdict_payload,
     build_market_micro_context_payload,
     build_portfolio_exposure_context,
+    validate_open_learning_context,
     build_position_path_metrics_result,
     build_position_path_metrics_inputs,
     build_position_path_metrics_update,
@@ -593,6 +594,53 @@ def test_build_open_learning_context_payload_preserves_live_shape():
     assert payload["entry_timing_context"]["signal_to_fill_delay_seconds"] == 1.0
 
 
+def test_validate_open_learning_context_requires_all_future_training_inputs():
+    payload = {
+        "entry_cluster": {"schema_version": "entry_cluster_context.v1", "direction": 1},
+        "market_micro_context": {
+            "bid": 4000.0,
+            "ask": 4000.2,
+            "mid": 4000.1,
+            "spread": 0.2,
+            "quote_ts": 1000.0,
+            "signal_price": 4000.1,
+            "quote_fresh": True,
+        },
+        "bar_context": {
+            "bar_ts": 999.0,
+            "open": 3999.0,
+            "high": 4001.0,
+            "low": 3998.5,
+            "close": 4000.0,
+            "complete": True,
+        },
+        "execution_context": {
+            "requested_volume": 100.0,
+            "actual_api_volume": 100.0,
+            "signal_price": 4000.1,
+            "fill_price": 4000.2,
+        },
+        "decision_quality_context": {
+            "schema_version": "decision_quality_context.v1",
+            "composer_version": "factor_roles.v2",
+            "factor_roles": {"rsi": "alpha"},
+            "n_active_alpha_factors": 1,
+        },
+        "event_context": {"multiplier": 1.0},
+        "data_quality_context": {
+            "schema_version": "entry_data_quality_context.v1",
+            "quote_fresh": True,
+        },
+        "market_session": {"status": "open_confirmed"},
+    }
+
+    assert validate_open_learning_context(payload)["ready"] is True
+    payload["market_micro_context"] = dict(payload["market_micro_context"], spread=0.0)
+    invalid = validate_open_learning_context(payload)
+    assert invalid["ready"] is False
+    assert "market_micro_context.spread" in invalid["invalid_fields"]
+
+
 def test_build_open_trade_risk_context_payload_preserves_live_shape():
     payload = build_open_trade_risk_context_payload(
         cfg=SimpleNamespace(
@@ -792,10 +840,23 @@ def test_build_filled_open_ledger_payloads_preserves_live_shape():
         "price": 4001.55,
         "volume": 100.0,
         "status": "submitted",
-        "details": {"tick": 9, "direction": 1},
+        "details": {
+            "tick": 9,
+            "direction": 1,
+            "requested_price": 4001.55,
+            "fill_price": 0.0,
+            "capture_schema": "execution_quality_event.v1",
+        },
     }
     assert payloads["filled_order_payload"]["event_type"] == "filled"
     assert payloads["filled_order_payload"]["price"] == 4001.37
+    assert payloads["filled_order_payload"]["details"] == {
+        "tick": 9,
+        "direction": 1,
+        "requested_price": 4001.55,
+        "fill_price": 4001.37,
+        "capture_schema": "execution_quality_event.v1",
+    }
     assert payloads["position_event_payload"] == {
         "position_id": "268",
         "trade_id": "268",

@@ -219,6 +219,25 @@ def test_final_open_admission_requires_fresh_pg_session_and_spot_facts():
 
 
 @pytest.mark.parametrize(
+    ("quote", "expected"),
+    [
+        ({"bid": 4000.0, "ask": 0.0, "mid": 4000.0, "ts": 1000.0}, "spot_quote_bid_ask_invalid"),
+        ({"bid": 4000.0, "ask": 4000.0, "mid": 4000.0, "ts": 1000.0}, "spot_quote_spread_invalid"),
+    ],
+)
+def test_final_open_admission_requires_trainable_quote_inputs(quote, expected):
+    result = evaluate_final_open_admission(
+        postgres={"ok": True, "observed_at": 1000.0},
+        market_session=_fresh_session(1000.0),
+        spot_quote=quote,
+        now_ts=1000.0,
+    )
+
+    assert result.ok is False
+    assert expected in result.blockers
+
+
+@pytest.mark.parametrize(
     ("postgres", "session", "quote", "expected"),
     [
         (

@@ -6,6 +6,8 @@ from collections.abc import Callable, Iterable, Mapping
 import time
 from typing import Any
 
+from backend.services.review_contract import build_execution_quality_event_details
+
 
 def _normalize_close_source(close_source: Mapping[str, Any] | str | None) -> dict[str, Any]:
     if isinstance(close_source, Mapping):
@@ -610,7 +612,13 @@ def build_open_ledger_payloads(
             "price": float(current_price or 0.0),
             "volume": float(actual_api_volume or 0.0),
             "status": "submitted",
-            "details": {"tick": int(tick or 0), "direction": direction},
+            "details": build_execution_quality_event_details(
+                tick=tick,
+                direction=direction,
+                requested_price=current_price,
+                fill_price=0.0,
+                learning_context=learning_context,
+            ),
         },
         "filled_order": {
             "event_type": "filled",
@@ -621,8 +629,13 @@ def build_open_ledger_payloads(
             "volume": float(actual_api_volume or 0.0),
             "status": "filled",
             "details": {
-                "tick": int(tick or 0),
-                "direction": direction,
+                **build_execution_quality_event_details(
+                    tick=tick,
+                    direction=direction,
+                    requested_price=current_price,
+                    fill_price=fill_price,
+                    learning_context=learning_context,
+                ),
                 "event_sizing": dict(event_sizing_context or {}),
             },
         },

@@ -345,6 +345,7 @@ from backend.services.live_position_lifecycle import (
     build_holding_timeout_verdict_payload as _lifecycle_build_holding_timeout_verdict_payload,
     build_market_micro_context_payload as _lifecycle_build_market_micro_context_payload,
     build_open_learning_context_payload as _lifecycle_build_open_learning_context_payload,
+    validate_open_learning_context as _lifecycle_validate_open_learning_context,
     build_open_trade_risk_context_payload as _lifecycle_build_open_trade_risk_context_payload,
     build_position_path_metrics_update as _lifecycle_build_position_path_metrics_update,
     build_position_path_metrics_inputs as _lifecycle_build_position_path_metrics_inputs,
@@ -9036,6 +9037,57 @@ def _prepare_open_trade_candidate(
                 "block_reason": "model_open_quality_veto",
                 "skip_stage": "model_influence",
             }
+    if not bool(order_block.get("order_blocked")):
+        # Build the same canonical context that the filled-open ledger will
+        # persist.  The broker fill is intentionally allowed to be unknown at
+        # this point, but every other training input must already be present;
+        # otherwise the order is rejected before broker mutation instead of
+        # creating another permanently untrainable open sample.
+        try:
+            pre_open_context = _open_learning_context_payload(
+                bridge=bridge,
+                bar=bar,
+                positions_before=positions,
+                composite=composite,
+                symbol="XAUUSD+",
+                pid=0,
+                actual_api_volume=volume,
+                requested_volume=volume,
+                base_requested_volume=base_volume,
+                current_price=current_price,
+                fill_price=0.0,
+                sl_price=sl_price,
+                tp_price=tp_price,
+                sl_dist=sl_dist,
+                tp_dist=tp_dist,
+                event_sizing_context=event_sizing_context,
+                sizing_trace=sizing_trace,
+                risk_verdict=risk_verdict,
+                market_session=market_session,
+            )
+            context_quality = _lifecycle_validate_open_learning_context(
+                pre_open_context,
+                require_fill=False,
+            )
+        except Exception as exc:
+            context_quality = {
+                "schema_version": "open_learning_context.v2",
+                "ready": False,
+                "missing_fields": [],
+                "invalid_fields": [f"capture_exception:{type(exc).__name__}"],
+                "require_fill": False,
+            }
+        audit_payload = dict(getattr(risk_verdict, "audit_payload", {}) or {})
+        audit_payload["open_learning_context_quality"] = context_quality
+        risk_verdict.audit_payload = audit_payload
+        if not bool(context_quality.get("ready")):
+            order_block = {
+                **order_block,
+                "order_blocked": True,
+                "block_reason": "open_learning_context_incomplete",
+                "skip_stage": "learning_context",
+                "learning_context_quality": context_quality,
+            }
     nursery_reservation_id = ""
     audit_payload = dict(getattr(risk_verdict, "audit_payload", {}) or {})
     observations = list(audit_payload.get("demo_nursery_observations") or [])
@@ -9662,6 +9714,11 @@ def _probe_final_open_admission(
         market_session=getattr(candidate, "market_session", None),
         spot_quote=quote,
     ).to_dict()
+    # Keep the exact pre-submit quote available to post-fill context capture;
+    # a transient bridge read failure after the broker accepts the order must
+    # not erase the execution inputs already observed at the open boundary.
+    if quote:
+        _live_state_update(spot_quote=quote)
     _live_state_update(final_open_admission=result)
     return result
 

@@ -44,6 +44,15 @@ def _sample(index: int, *, integrity: str = "full", contaminated: bool = False) 
             "pnl": -10.0,
             "failure_tags": ["entry_cluster_risk"],
             "system_contaminated": contaminated,
+            "open_target_v2": {
+                "schema_version": "open_target.v2",
+                "objective": "profitable_open_outcome",
+                "financial_label": "loss",
+                "legacy_outcome_label": "bad_loss",
+                "execution_evidence_state": "full",
+                "contaminated": contaminated,
+                "trainable": not contaminated,
+            },
         },
         "trace": {
             "decision_id": decision_id,

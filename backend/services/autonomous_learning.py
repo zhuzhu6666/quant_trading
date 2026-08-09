@@ -63,6 +63,17 @@ EXECUTABLE_GOVERNANCE_SAMPLE_TYPES = {
     "post_close_counterfactual",
 }
 
+OPEN_QUALITY_CONSUMER = "open_quality_lightgbm"
+OPEN_QUALITY_CONTEXT_FIELDS = (
+    "entry_cluster",
+    "market_micro_context",
+    "bar_context",
+    "execution_context",
+    "decision_quality_context",
+    "event_context",
+    "data_quality_context",
+)
+
 
 def _loads(raw: Any, default: Any) -> Any:
     if raw is None:
@@ -445,6 +456,145 @@ def _sample_is_system_contaminated(item: dict[str, Any]) -> bool:
     )
 
 
+def _open_target_blockers(item: dict[str, Any]) -> list[str]:
+    """Return fail-closed blockers for the versioned open target.
+
+    The opening model may only consume a matured financial outcome with a
+    trusted execution chain.  Legacy ``outcome_label`` remains in the label
+    payload for audit, but it cannot silently restore training or governance
+    eligibility when the versioned target is absent or incomplete.
+    """
+    if str(item.get("sample_type") or "") != "shadow_open_decision":
+        return []
+    label = item.get("label") if isinstance(item.get("label"), dict) else {}
+    if str(label.get("label") or "") != "open_outcome":
+        return []
+    target = label.get("open_target_v2")
+    target = target if isinstance(target, dict) else {}
+    blockers: list[str] = []
+    if str(target.get("schema_version") or "") != "open_target.v2":
+        blockers.append("missing_open_target_v2")
+    financial_label = str(target.get("financial_label") or "").strip().lower()
+    if financial_label not in {"profit", "loss"}:
+        blockers.append("flat_or_invalid_open_outcome")
+    if target.get("trainable") is not True:
+        blockers.append("open_target_not_trainable")
+    if str(target.get("execution_evidence_state") or "").strip().lower() not in {
+        "full",
+        "replay_verified",
+    }:
+        blockers.append("incomplete_execution_evidence")
+    if bool(target.get("contaminated")):
+        blockers.append("open_target_contaminated")
+    return blockers
+
+
+def _positive_number(value: Any) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(number) and number > 0.0
+
+
+def _open_quality_consumer_eligibility(item: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate the entry model against entry evidence, not factor attribution.
+
+    The common evidence contract intentionally remains strict for factor and
+    governance consumers.  ``open_quality_lightgbm`` only needs the entry
+    decision context, a matured versioned target, and a trusted execution
+    chain.  Keeping this scope explicit prevents missing outcome-factor
+    attribution from blocking a sample whose open-model features are complete,
+    without turning that sample into a factor-governance sample.
+    """
+
+    blockers: list[str] = []
+    sample_type = str(item.get("sample_type") or "")
+    label = item.get("label") if isinstance(item.get("label"), dict) else {}
+    features = item.get("features") if isinstance(item.get("features"), dict) else {}
+    if sample_type != "shadow_open_decision":
+        return {
+            "schema_version": "consumer_eligibility.v1",
+            "model_ready": False,
+            "allowed_uses": [],
+            "blockers": ["not_open_model_sample"],
+        }
+    if str(label.get("label") or "") != "open_outcome":
+        blockers.append("not_matured_open_outcome")
+    if str(item.get("label_status") or "") != "matured":
+        blockers.append("label_not_matured")
+    blockers.extend(_open_target_blockers(item))
+    if _sample_is_system_contaminated(item):
+        blockers.append("system_contaminated")
+    if not features:
+        blockers.append("missing_features")
+    if not item.get("trace"):
+        blockers.append("missing_trace")
+    if not str(item.get("config_hash") or ""):
+        blockers.append("missing_config_hash")
+
+    contexts = {
+        field: features.get(field)
+        for field in OPEN_QUALITY_CONTEXT_FIELDS
+    }
+    for field, value in contexts.items():
+        if not isinstance(value, dict) or not value:
+            blockers.append(f"missing_{field}")
+
+    micro = contexts.get("market_micro_context") or {}
+    if isinstance(micro, dict) and micro:
+        for field in ("bid", "ask", "mid", "spread", "signal_price"):
+            if not _positive_number(micro.get(field)):
+                blockers.append(f"invalid_market_micro_context_{field}")
+        if micro.get("quote_fresh") is not True:
+            blockers.append("stale_or_unknown_entry_quote")
+
+    bar = contexts.get("bar_context") or {}
+    if isinstance(bar, dict) and bar and bar.get("complete") is not True:
+        blockers.append("decision_bar_not_complete")
+
+    execution = contexts.get("execution_context") or {}
+    if isinstance(execution, dict) and execution:
+        for field in ("requested_volume", "actual_api_volume", "signal_price", "fill_price"):
+            if not _positive_number(execution.get(field)):
+                blockers.append(f"invalid_execution_context_{field}")
+
+    decision_quality = contexts.get("decision_quality_context") or {}
+    if isinstance(decision_quality, dict) and decision_quality:
+        if str(decision_quality.get("schema_version") or "") != "decision_quality_context.v1":
+            blockers.append("invalid_decision_quality_schema")
+        if not str(decision_quality.get("composer_version") or ""):
+            blockers.append("missing_composer_version")
+        if not isinstance(decision_quality.get("factor_roles"), dict) or not decision_quality.get("factor_roles"):
+            blockers.append("missing_factor_roles")
+        if not _positive_number(decision_quality.get("n_active_alpha_factors")):
+            blockers.append("missing_active_alpha_universe")
+
+    data_quality = contexts.get("data_quality_context") or {}
+    if isinstance(data_quality, dict) and data_quality:
+        if str(data_quality.get("schema_version") or "") != "entry_data_quality_context.v1":
+            blockers.append("invalid_data_quality_schema")
+        if data_quality.get("quote_fresh") is not True:
+            blockers.append("data_quality_quote_not_fresh")
+
+    # New captures publish this marker after the filled-open context is built.
+    # Historical rows do not have it, so the structural checks above remain
+    # the compatibility path for already materialized evidence.
+    capture_quality = features.get("open_context_quality")
+    if isinstance(capture_quality, dict) and capture_quality and capture_quality.get("ready") is not True:
+        blockers.append("open_context_capture_incomplete")
+
+    unique_blockers = list(dict.fromkeys(blockers))
+    ready = not unique_blockers
+    return {
+        "schema_version": "consumer_eligibility.v1",
+        "consumer": OPEN_QUALITY_CONSUMER,
+        "model_ready": ready,
+        "allowed_uses": ["supervised_training"] if ready else [],
+        "blockers": unique_blockers,
+    }
+
+
 def _sample_lineage(item: dict[str, Any]) -> tuple[list[str], bool, bool]:
     source_table = str(item.get("source_table") or "").strip()
     source_id = str(item.get("source_id") or "").strip()
@@ -560,6 +710,9 @@ def _canonical_sample_evidence_inputs(
         contaminated = bool(stored_system_contaminated)
     normalized["system_contaminated"] = contaminated
     model_ready = model_ready and not contaminated
+    target_blockers = _open_target_blockers(normalized)
+    normalized["open_target_blockers"] = target_blockers
+    model_ready = model_ready and not target_blockers
 
     existing_contract = normalized.get("evidence_contract")
     existing_contract = existing_contract if isinstance(existing_contract, dict) else {}
@@ -574,14 +727,14 @@ def _canonical_sample_evidence_inputs(
         explicit_executable = False
     # Contamination can never advertise executable governance, even though
     # the evaluator independently fail-closes the sample.
-    executable_allowed = bool(explicit_executable) and not contaminated
+    executable_allowed = bool(explicit_executable) and not contaminated and not target_blockers
     normalized["executable_governance_allowed"] = executable_allowed
     normalized["model_ready"] = model_ready
     normalized["quality"] = {
         "quality_score": max(0.0, min(1.0, train_weight)),
         "model_ready": model_ready,
         "executable_governance_allowed": executable_allowed,
-        "missing": [],
+        "missing": list(target_blockers),
     }
     return normalized
 
@@ -612,10 +765,14 @@ def _build_sample_evidence_contract(
         label_status=str(normalized.get("label_status") or "pending"),
         explanation={"verdict": normalized["verdict"]},
     )
+    contract_blockers = list(normalized.get("open_target_blockers") or [])
     if normalized.get("system_contaminated"):
+        contract_blockers.append("system_contaminated")
+    if contract_blockers:
         # Keep the v1 contract shape, but remove strong uses from contaminated
-        # evidence so health/readiness cannot describe it as trainable even
-        # before the eligibility columns are inspected.
+        # or otherwise invalid open evidence so health/readiness cannot
+        # describe it as trainable even before the eligibility columns are
+        # inspected.
         strong_uses = {
             "supervised_training",
             "strong_governance",
@@ -625,8 +782,9 @@ def _build_sample_evidence_contract(
             use for use in list(contract.get("allowed_uses") or []) if use not in strong_uses
         ]
         blockers = list(contract.get("blockers") or [])
-        if "system_contaminated" not in blockers:
-            blockers.append("system_contaminated")
+        for blocker in contract_blockers:
+            if blocker not in blockers:
+                blockers.append(blocker)
         contract["blockers"] = blockers
         contract["quality"]["model_ready"] = False
         contract["quality"]["executable_governance_allowed"] = False
@@ -637,6 +795,10 @@ def _build_sample_evidence_contract(
         evidence_contract=contract,
     )
     contract["governance_eligibility"] = eligibility.to_dict()
+    if str(normalized.get("sample_type") or "") == "shadow_open_decision":
+        contract.setdefault("consumer_eligibility", {})[OPEN_QUALITY_CONSUMER] = (
+            _open_quality_consumer_eligibility(normalized)
+        )
     return normalized, contract, eligibility
 
 
@@ -904,6 +1066,51 @@ def _review_system_contamination(review_json: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _open_target_v2(
+    *,
+    review_json: dict[str, Any],
+    outcome_label: str,
+    pnl: float,
+) -> dict[str, Any]:
+    """Build the versioned financial target consumed by the open model.
+
+    The legacy outcome label remains unchanged for audit.  The new target is
+    explicitly financial: profit is positive, loss and flat are not.  A
+    missing/partial execution chain is retained as evidence but cannot be a
+    supervised open sample.
+    """
+
+    review = review_json if isinstance(review_json, dict) else {}
+    execution = review.get("execution_quality_evidence")
+    execution = execution if isinstance(execution, dict) else {}
+    execution_state = str(
+        review.get("execution_quality_state")
+        or execution.get("evidence_state")
+        or "unknown"
+    ).strip().lower()
+    execution_evidence_valid = (
+        str(execution.get("schema_version") or "") == "execution_quality_evidence.v2"
+        and str(execution.get("evidence_state") or "").strip().lower() == execution_state
+    )
+    financial_label = "profit" if float(pnl or 0.0) > 0.0 else "loss" if float(pnl or 0.0) < 0.0 else "flat"
+    contaminated = _review_system_contamination(review).get("contaminated", False)
+    trainable = (
+        financial_label in {"profit", "loss"}
+        and execution_evidence_valid
+        and execution_state in {"full", "replay_verified"}
+        and not bool(contaminated)
+    )
+    return {
+        "schema_version": "open_target.v2",
+        "objective": "profitable_open_outcome",
+        "financial_label": financial_label,
+        "legacy_outcome_label": str(outcome_label or ""),
+        "execution_evidence_state": execution_state,
+        "contaminated": bool(contaminated),
+        "trainable": trainable,
+    }
+
+
 def _counterfactual_source_is_clean(row: Any) -> bool:
     source_review_id = str(_row_value(row, "source_review_id", "") or "")
     if not source_review_id:
@@ -972,6 +1179,11 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
                         "failure_tags": _loads(outcome_review["failure_tags_json"], []),
                         "close_ts": float(review_json.get("close_ts") or outcome_review["created_at"] or 0.0),
                         "system_contamination": contamination,
+                        "open_target_v2": _open_target_v2(
+                            review_json=review_json,
+                            outcome_label=str(outcome_review["outcome_label"] or ""),
+                            pnl=float(outcome_review["pnl"] or 0.0),
+                        ),
                     }
                 )
         else:
@@ -1036,6 +1248,8 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
             "decision_freshness_context": action_json.get("decision_freshness") or {},
             "entry_timing_context": action_json.get("entry_timing_context") or {},
             "decision_quality_context": action_json.get("decision_quality_context") or {},
+            "market_session": action_json.get("market_session") or {},
+            "open_context_quality": action_json.get("open_context_quality") or {},
         },
         "verdict": {
             "risk_verdict": risk_verdict,
@@ -1107,6 +1321,11 @@ def _sample_from_review(row: Any) -> dict[str, Any]:
             "pnl": float(row["pnl"] or 0.0),
             "failure_tags": _loads(row["failure_tags_json"], []),
             "system_contaminated": contamination["contaminated"],
+            "open_target_v2": _open_target_v2(
+                review_json=review,
+                outcome_label=str(row["outcome_label"] or ""),
+                pnl=float(row["pnl"] or 0.0),
+            ),
         },
         "trace": {
             "review_id": str(row["review_id"] or ""),
@@ -3001,6 +3220,8 @@ def _rebuilt_evidence_contract_from_sample(row: Any) -> dict[str, Any]:
         "label_status": str(row["label_status"] or "pending"),
         "integrity": row["integrity"] or "missing",
         "train_weight": row["train_weight"] if row["train_weight"] is not None else 0.0,
+        "config_version": int(row["config_version"] or 0) if "config_version" in row.keys() else 0,
+        "config_hash": str(row["config_hash"] or "") if "config_hash" in row.keys() else "",
         "features": _loads(row["features_json"], {}),
         "verdict": _loads(row["verdict_json"], {}),
         "label": _loads(row["label_json"], {}),
@@ -3034,6 +3255,14 @@ def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: 
         "contaminated_governance_eligible": 0,
         "contaminated_quality_model_ready": 0,
         "contaminated_quality_executable_governance": 0,
+        "open_outcome_missing_target": 0,
+        "open_outcome_invalid_or_flat": 0,
+        "open_outcome_incomplete_execution": 0,
+        "open_outcome_not_trainable": 0,
+        "open_outcome_governance_eligible": 0,
+        "open_outcome_model_ready": 0,
+        "open_consumer_model_ready": 0,
+        "open_consumer_not_ready": 0,
         "parse_errors": 0,
     }
     examples: list[dict[str, Any]] = []
@@ -3064,8 +3293,38 @@ def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: 
             integrity = str(row["integrity"] or "")
             system_contaminated = bool(row["system_contaminated"] or 0)
             governance_eligible = bool(row["governance_eligible"] or 0)
-            complete = bool(_loads(row["features_json"], {})) and bool(_loads(row["label_json"], {})) and bool(_loads(row["trace_json"], {}))
+            label_json = _loads(row["label_json"], {})
+            complete = bool(_loads(row["features_json"], {})) and bool(label_json) and bool(_loads(row["trace_json"], {}))
             bad_codes = []
+            target_blockers = _open_target_blockers(
+                {
+                    "sample_type": str(row["sample_type"] or ""),
+                    "label": label_json,
+                }
+            )
+            if str(row["sample_type"] or "") == "shadow_open_decision" and str(label_json.get("label") or "") == "open_outcome":
+                if "missing_open_target_v2" in target_blockers:
+                    counts["open_outcome_missing_target"] += 1
+                if "flat_or_invalid_open_outcome" in target_blockers:
+                    counts["open_outcome_invalid_or_flat"] += 1
+                if "incomplete_execution_evidence" in target_blockers:
+                    counts["open_outcome_incomplete_execution"] += 1
+                if "open_target_not_trainable" in target_blockers:
+                    counts["open_outcome_not_trainable"] += 1
+                if target_blockers and governance_eligible:
+                    counts["open_outcome_governance_eligible"] += 1
+                    bad_codes.append("open_outcome_governance_eligible")
+                if target_blockers and model_ready:
+                    counts["open_outcome_model_ready"] += 1
+                    bad_codes.append("open_outcome_model_ready")
+                consumer_map = contract.get("consumer_eligibility")
+                consumer_map = consumer_map if isinstance(consumer_map, dict) else {}
+                open_consumer = consumer_map.get(OPEN_QUALITY_CONSUMER)
+                open_consumer = open_consumer if isinstance(open_consumer, dict) else {}
+                if bool(open_consumer.get("model_ready")):
+                    counts["open_consumer_model_ready"] += 1
+                elif open_consumer:
+                    counts["open_consumer_not_ready"] += 1
             if label_status != "matured" and "supervised_training" in allowed:
                 counts["non_matured_allows_supervised_training"] += 1
                 bad_codes.append("non_matured_allows_supervised_training")
@@ -3118,6 +3377,8 @@ def validate_evidence_contract_health(*, db_path: str | Path = STATE_DB, limit: 
                 "contaminated_governance_eligible",
                 "contaminated_quality_model_ready",
                 "contaminated_quality_executable_governance",
+                "open_outcome_governance_eligible",
+                "open_outcome_model_ready",
                 "parse_errors",
             )
         )
@@ -3146,6 +3407,7 @@ def entry_context_quality_report(*, db_path: str | Path = STATE_DB, limit: int =
         "matured_open_outcome": 0,
         "model_ready_open_outcome": 0,
         "with_supervised_training": 0,
+        "open_consumer_ready_open_outcome": 0,
     }
     try:
         if state_table_exists(conn, "decision_ledger"):
@@ -3205,6 +3467,11 @@ def entry_context_quality_report(*, db_path: str | Path = STATE_DB, limit: int =
                 sample_counts["model_ready_open_outcome"] += 1
             if "supervised_training" in allowed:
                 sample_counts["with_supervised_training"] += 1
+            consumer_map = contract.get("consumer_eligibility")
+            consumer_map = consumer_map if isinstance(consumer_map, dict) else {}
+            open_consumer = consumer_map.get(OPEN_QUALITY_CONSUMER)
+            if isinstance(open_consumer, dict) and bool(open_consumer.get("model_ready")):
+                sample_counts["open_consumer_ready_open_outcome"] += 1
         ratios = {
             field: round(coverage[field] / max(open_count, 1), 6) if open_count else 0.0
             for field in fields

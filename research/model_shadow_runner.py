@@ -165,7 +165,7 @@ class ModelShadowRunner:
             "decision": "passed" if passed else "failed",
             "capabilities": {
                 "live_trading": False,
-                "canary_required_before_live": True,
+                "demo_canary_required_before_influence": True,
             },
             "explainability": {
                 "summary": (

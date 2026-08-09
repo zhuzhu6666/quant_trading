@@ -50,6 +50,11 @@ def _create_reviews(path):
     for i in range(8):
         positive = i % 2 == 0
         payload = {
+            "execution_quality_state": "full",
+            "execution_quality_evidence": {
+                "schema_version": "execution_quality_evidence.v2",
+                "evidence_state": "full",
+            },
             "holding_seconds": 1252 if i == 0 else 120 + i * 10,
             "mfe": 3.0 if positive else 0.2,
             "mae": 0.5 if positive else 3.0,

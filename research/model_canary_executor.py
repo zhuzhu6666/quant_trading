@@ -186,7 +186,7 @@ class ModelCanaryExecutor:
             "capabilities": {
                 "live_trading": False,
                 "advisory_only": True,
-                "requires_manual_promotion_before_live": True,
+                "requires_manual_demo_influence_promotion": True,
             },
         }
 

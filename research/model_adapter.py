@@ -104,7 +104,7 @@ class DatasetSummaryAdapter:
             "notes": [
                 "Baseline adapter summarizes verified datasets only.",
                 "Evidence contract statistics are preserved for downstream model and audit consumers.",
-                "It must not be wired directly into live execution.",
+                "It must not be wired directly into broker execution.",
             ],
         }
 

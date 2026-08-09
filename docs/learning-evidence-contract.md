@@ -1,7 +1,7 @@
 # Learning Evidence Contract
 
 > Status: active
-> Last verified: 2026-07-31
+> Last verified: 2026-08-09
 > Scope: evidence semantics for learning samples, model training, governance, and autonomous replay/audit.
 
 状态：第一版已落地，2026-06-29；训练准入语义已收紧，2026-06-30；开仓质量、反事实训练契约、数据健康检查、动态仓位 trace 与事件窗口治理已补齐，2026-07-02；自治治理 V3 继续沿用本文作为证据等级 contract；2026-07-06 补齐学习系统、影子模型和数据精度关系。
@@ -191,7 +191,9 @@ readiness 状态语义：
 
 ## Open Outcome Samples
 
-开仓质量学习使用 `autonomous_learning_sample.sample_type=shadow_open_decision`，只有开仓样本与 `trade_outcome_review` 对齐并成熟后，才能转换为 `label.label=open_outcome`。
+开仓质量学习使用 `autonomous_learning_sample.sample_type=shadow_open_decision`，只有开仓样本与 `trade_outcome_review` 对齐并成熟后，才能转换为 `label.label=open_outcome`。开仓模型使用
+`consumer_eligibility.open_quality_lightgbm` 作为其专项资格；全局 contract 的因子归因/治理要求不能
+反向阻断只需要开仓证据的 `open_quality_lightgbm`，但污染、未成熟、错误目标和执行事实不足仍然阻断训练。
 
 每条 open outcome 训练样本至少应保留：
 
@@ -212,6 +214,12 @@ readiness 状态语义：
 复盘摘要的附加口径：`factor_attribution` 必须标注 `causal_level=observational`，`largest_contribution_factor` 只表示最大观测贡献，不表示因果责任；`summary_consistency` 用于记录 sizing trace、执行量、成交量和事件上下文之间的可比性。发现 mismatch 或 different scopes 时只能增加 evidence gap/审计提示，不能直接生成因子惩罚或策略结论。因子治理建议只消费已有责任域、最差因子、冲突、贡献复核和 counter-evidence；责任域为 `exit`、`holding`、`data_quality` 或 `parameter` 时不得生成因子惩罚。
 
 历史样本不得伪造不可恢复的实时上下文。旧 open decision 可以回填同向簇和组合暴露，但 `bar_context / execution_context / market_micro_context / event_context / sizing_trace` 等只能从真实新单开始自然积累；缺少事件距离或窗口桶的旧样本不得事后猜测补造。
+
+未来开仓由唯一的 live producer 在送 broker 前生成并校验 `open_learning_context.v2`。该校验要求上述
+开仓训练字段和 `market_session` 全部存在、schema 正确、quote fresh、bar complete、active alpha
+count 有效、请求量/成交价可验证；预开仓阶段不要求尚未发生的 fill price，成交后必须重新校验真实
+fill price，并把结果写入 `open_context_quality.ready=true`。任一字段缺失时订单在 broker mutation
+前拒绝，避免产生新的“已成交但永远不可训练”样本；因此历史缺口只会继续隔离，不会通过伪造补齐。
 
 如果 `system_issue_context.contaminates_learning=true`：
 
@@ -256,9 +264,12 @@ observation/research 链路，但不能触发 mutation。
 
 模型输出默认仍为 `shadow_only / advisory_only`，不能绕过 `RiskPolicyService`。
 
+模型影响阶段唯一允许 `shadow -> demo_canary -> demo_active -> quarantined`；任何模型工件
+不得声明或进入 Live 阶段，账户切换只改变运行账户，不改变模型阶段。
+
 当前数学模型清单：
 
-- `open_quality_lightgbm`: 开仓时机质量影子评分，来源为 matured `shadow_open_decision` + `open_outcome`，必须通过 evidence contract supervised-training gate
+- `open_quality_lightgbm`: 开仓时机质量影子评分，来源为 matured `shadow_open_decision` + `open_outcome`；使用 evidence contract 中针对该消费者的 `consumer_eligibility`，要求开仓上下文、版本化目标和执行证据完整，不把因子结果归因要求错误施加到开仓模型
 - `position_quality_lightgbm`: 持仓质量影子评分，来源为 `trade_outcome_review`，输出 hold/exit risk shadow audit
 - `factor_governance_lightgbm`: 因子弱化、因子治理建议，来源为 `factor_contribution_review` + `trade_outcome_review`
 - `ModelShadowQueue` 通用 shadow 候选: 来源为 dataset snapshot artifact，只能通过 promotion gate 进入 shadow validation
@@ -266,13 +277,19 @@ observation/research 链路，但不能触发 mutation。
 
 Meta 模型已退役。历史 `meta_model_shadow_audit` 和 `meta_shadow_report_snapshot` 表及记录仅作为审计留存，不再训练、推理、生成治理建议、参与 readiness 或影响仓位。
 
+开仓监督目标使用版本化 `open_target.v2`：`financial_label=profit` 才是正样本，`loss` 和 `flat` 均不是正样本；旧 `outcome_label` 继续作为审计事实保留。目标只有在成熟、无系统污染且 `execution_quality_evidence.v2.evidence_state` 为 `full`（或冻结 replay 的 `replay_verified`）时才允许开仓模型训练。
+
+执行质量只接受订单生命周期的 submitted/filled、请求价、成交价、记录点差和 broker open deal。链条字段缺失时保留 review 与审计链，状态为 `partial/unknown`，不得进入模型训练或治理；生命周期成交价与 broker deal 价的差异是可观察滑点，不再误报为缺证据。position/factor 消费者也必须复用同一 `execution_quality_evidence.v2` 状态，不能仅凭 review 标签或数值质量分数放行。
+
+未来 Demo 开仓统一由 `build_open_learning_context_payload()` 生成 `open_learning_context.v2`：开仓前验证 entry cluster、quote/spread、闭合 bar、执行参数、decision quality、事件、数据质量和 market session；任一字段缺失即在 broker mutation 前 fail-closed。成交后再用实际 fill 完成同一上下文，训练消费者只接受结构完整且 `open_context_quality.ready=true` 的新样本。
+
 所有 LightGBM 训练必须记录 `split=time_ordered`、holdout 指标、规则基线和 majority baseline 对照。模型未通过基线比较时，只能继续 shadow/advisory。
 
-学习 worker 仍只有既有的 `offmarket_position_quality_lightgbm` 任务负责这组模型的重任务调度：`full` profile 在训练后为 position、open、factor、meta 四类模型各写一次影子评分；市场开盘或本轮不满足训练条件时，任务不训练，只用现有 artifact 以小批量、按 artifact 与来源样本去重的方式刷新 shadow audit。该刷新不进入 promotion、不物化治理建议，也不改变交易权限。
+学习 worker 仍只有既有的 `offmarket_position_quality_lightgbm` 任务负责这组模型的重任务调度：`full` profile 在训练后为 position、open、factor 三类模型各写一次影子评分；市场开盘或本轮不满足训练条件时，任务不训练，只用现有 artifact 以小批量、按 artifact 与来源样本去重的方式刷新 shadow audit。该刷新不进入 promotion、不物化治理建议，也不改变交易权限。
 
 Shadow candidate 的 DSL 仍只由既有 `parse_dsl()` 校验；malformed expression 在进入 Registry/
 lifecycle 前跳过并保留 `shadow_register_invalid_dsl_skipped` 审计事件。没有真实 shadow performance 的候选
-保持当前 stage，不得用合成分数推进 promotion 或 active；该约束不新增冷启动阈值，也不关闭 valid shadow
+保持当前 stage，不得用合成分数推进 promotion 或 `demo_active`；该约束不新增冷启动阈值，也不关闭 valid shadow
 注册能力。
 
 ## Shadow Model Boundaries
@@ -300,7 +317,7 @@ lifecycle 前跳过并保留 `shadow_register_invalid_dsl_skipped` 审计事件�
 | `factor_governance_lightgbm` | `factor_governance_shadow_audit` | `positive_score/weakness_score/weakness_bucket` |
 | 通用 inference | `model_inference_audit` | canary-ready advisory score |
 
-`factor_governance_lightgbm` 可以把高 weakness score 转成 `policy_suggestion`，但该建议仍是 advisory/governance 输入。`demo_nursery` 下，`FactorGovernanceLightGBMService.materialize_demo_governance_advisories` 仅把当前仍启用且可进入 live 的活跃 alpha 因子、至少两条弱样本且平均 weakness 不低于 0.85 的强证据规范化为白名单 `downweight`；这不是模型直接写权重。若因子在桥接后被 quarantine/disabled，建议自动 supersede，避免把历史建议误报为采用。真正降权、禁用、退役或回滚必须由 `RuleEvolutionGovernor`、`FactorGovernanceOrchestrator`、`DecisionPolicy`、`RiskPolicyService`、`FactorWeightChangeService` 和 runtime overlay/snapshot 链路执行，并进入 `learning_application_log/effect` 后验观察。
+`factor_governance_lightgbm` 可以把高 weakness score 转成 `policy_suggestion`，但该建议仍是 advisory/governance 输入。`demo_nursery` 下，`FactorGovernanceLightGBMService.materialize_demo_governance_advisories` 仅把当前仍启用且可进入 active factor lifecycle 的活跃 alpha 因子、至少两条弱样本且平均 weakness 不低于 0.85 的强证据规范化为白名单 `downweight`；这不是模型直接写权重。若因子在桥接后被 quarantine/disabled，建议自动 supersede，避免把历史建议误报为采用。真正降权、禁用、退役或回滚必须由 `RuleEvolutionGovernor`、`FactorGovernanceOrchestrator`、`DecisionPolicy`、`RiskPolicyService`、`FactorWeightChangeService` 和 runtime overlay/snapshot 链路执行，并进入 `learning_application_log/effect` 后验观察。
 
 `demo_nursery` 的 effect reconcile 对超过 24 小时仍没有可比较 baseline 的旧 observing 窗口标记为 `inconclusive`，不把它当作成功或失败经验；该终态只释放同 scope 的实验准入，后续建议仍须重新经过 Governor、DecisionPolicy、RiskPolicy 和效果观察。
 
@@ -310,7 +327,7 @@ lifecycle 前跳过并保留 `shadow_register_invalid_dsl_skipped` 审计事件�
 - `action=queue_shadow_validation`
 - `capabilities.live_trading=false`
 - `shadow_validation_required=true`
-- `canary_required_before_live=true`
+- `demo_canary_required_before_influence=true`
 
 它不授予实盘执行权限。
 

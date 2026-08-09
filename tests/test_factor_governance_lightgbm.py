@@ -120,7 +120,14 @@ def _create_factor_reviews(path):
                 0.4 if positive else 2.4,
                 2.8 if positive else 0.3,
                 "small_win" if positive else "bad_loss",
-                json.dumps({"case": i}),
+                json.dumps({
+                    "case": i,
+                    "execution_quality_state": "full",
+                    "execution_quality_evidence": {
+                        "schema_version": "execution_quality_evidence.v2",
+                        "evidence_state": "full",
+                    },
+                }),
                 1000.0 + i,
             ),
         )

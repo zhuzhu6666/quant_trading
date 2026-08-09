@@ -355,15 +355,40 @@ def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
             }
             features = _features_from_sample(row)
             trade_id = f"{binding_hash}:{decision_index}"
+            financial_label = "profit" if pnl > 0.0 else "loss" if pnl < 0.0 else "flat"
+            replay_execution = {
+                "schema_version": "execution_quality_evidence.v2",
+                "evidence_state": "replay_verified",
+                "source": "parity_replay",
+                "broker_price_trusted": False,
+                "requested_price": _safe_float(trade.get("raw_entry_price")),
+                "fill_price": _safe_float(trade.get("entry_price")),
+                "spread_points": _safe_float(
+                    (learning_context.get("market_micro_context") or {}).get("spread")
+                ),
+                "slippage_points": _safe_float(trade.get("entry_price"))
+                - _safe_float(trade.get("raw_entry_price")),
+                "modelled_execution": True,
+            }
             open_samples.append({
                 "sample_id": _sample_id(binding_hash, decision_index),
                 "decision_id": trade_id,
                 "trade_id": trade_id,
                 "position_id": trade_id,
                 "created_at": _safe_float(trade.get("exit_ts")),
-                "outcome_label": "good_win" if pnl > 0.0 else "bad_loss",
+                "outcome_label": "good_win" if pnl > 0.0 else "bad_loss" if pnl < 0.0 else "flat",
                 "pnl": pnl,
                 "label": 1 if pnl > 0.0 else 0,
+                "open_target_v2": {
+                    "schema_version": "open_target.v2",
+                    "objective": "profitable_open_outcome",
+                    "financial_label": financial_label,
+                    "legacy_outcome_label": "good_win" if pnl > 0.0 else "bad_loss" if pnl < 0.0 else "flat",
+                    "execution_evidence_state": "replay_verified",
+                    "contaminated": False,
+                    "trainable": financial_label in {"profit", "loss"},
+                },
+                "execution_quality_evidence": replay_execution,
                 "rule_label": _rule_baseline_label(features),
                 "features": {name: _safe_float(features.get(name)) for name in OPEN_FEATURE_NAMES},
                 "source": "historical_replay",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -81,6 +82,205 @@ def _first_nonempty_dict(*values: Any) -> dict[str, Any]:
         if isinstance(value, dict) and value:
             return dict(value)
     return {}
+
+
+def build_execution_quality_event_details(
+    *,
+    tick: int,
+    direction: Any,
+    requested_price: Any,
+    fill_price: Any = 0.0,
+    learning_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist the execution inputs beside each submitted/filled event.
+
+    The decision ledger remains the primary learning-context source.  These
+    event details are a durable fallback for execution reconstruction when a
+    consumer has to replay only the order lifecycle chain.
+    """
+
+    context = _as_dict(learning_context)
+    direction_value = _safe_float(direction)
+    details: dict[str, Any] = {
+        "tick": int(tick or 0),
+        "direction": 1 if direction_value > 0 else -1 if direction_value < 0 else 0,
+        "requested_price": _safe_float(requested_price),
+        "fill_price": _safe_float(fill_price),
+        "capture_schema": "execution_quality_event.v1",
+    }
+    for key in (
+        "market_micro_context",
+        "execution_context",
+        "data_quality_context",
+    ):
+        value = context.get(key)
+        if isinstance(value, dict):
+            details[key] = dict(value)
+    return details
+
+
+def build_execution_quality_evidence(
+    *,
+    order_events: list[dict[str, Any]] | None = None,
+    entry_action: dict[str, Any] | None = None,
+    broker_deal: dict[str, Any] | None = None,
+    direction: Any = 0,
+) -> dict[str, Any]:
+    """Calculate entry execution quality from recorded execution evidence.
+
+    The numeric score is deliberately secondary to ``evidence_state``.  A
+    historical row without a complete request/fill/spread/broker chain is
+    retained for audit, but it must not be treated as model-ready evidence.
+    ``full`` requires a submitted event, a filled event, a broker-reported
+    open deal, a direction, and a recorded spread.  The broker deal price is
+    the authoritative fill; a different lifecycle-event price is recorded as
+    observed slippage rather than treated as a missing-evidence error.
+    """
+
+    action = _as_dict(entry_action)
+    events = [dict(item) for item in (order_events or []) if isinstance(item, dict)]
+    broker = _as_dict(broker_deal)
+
+    def _event(event_type: str) -> dict[str, Any]:
+        for item in events:
+            if str(item.get("event_type") or "").strip().lower() != event_type:
+                continue
+            details = item.get("details_json") or item.get("details") or {}
+            if isinstance(details, str):
+                try:
+                    details = json.loads(details)
+                except Exception:
+                    details = {}
+            details = details if isinstance(details, dict) else {}
+            return {**item, "details": details}
+        return {}
+
+    submitted = _event("submitted")
+    filled = _event("filled")
+    submitted_details = _as_dict(submitted.get("details"))
+    filled_details = _as_dict(filled.get("details"))
+    details = _as_dict(filled_details or submitted_details)
+    execution = _first_nonempty_dict(
+        action.get("execution_context"),
+        submitted_details.get("execution_context"),
+        filled_details.get("execution_context"),
+    )
+    market = _first_nonempty_dict(
+        action.get("market_micro_context"),
+        submitted_details.get("market_micro_context"),
+        filled_details.get("market_micro_context"),
+    )
+    direction_value = _safe_float(
+        direction,
+        _safe_float(action.get("direction"), _safe_float(details.get("direction"))),
+    )
+    direction_sign = 1 if direction_value > 0 else -1 if direction_value < 0 else 0
+
+    requested_price = _first_float(
+        submitted.get("price"),
+        submitted_details.get("requested_price"),
+        execution.get("requested_price"),
+        execution.get("signal_price"),
+        action.get("requested_price"),
+        default=0.0,
+    )
+    lifecycle_fill_price = _first_float(
+        filled.get("price"),
+        filled_details.get("fill_price"),
+        filled_details.get("avg_price"),
+        default=0.0,
+    )
+    broker_price = _first_float(
+        broker.get("exec_price"),
+        broker.get("raw_execution_price"),
+        default=0.0,
+    )
+    broker_price_quality = str(broker.get("price_quality") or "").strip().lower()
+    broker_price_trusted = broker_price > 0.0 and broker_price_quality in {
+        "broker_reported",
+        "broker_reconciled",
+    }
+    fill_price = broker_price if broker_price_trusted else lifecycle_fill_price
+
+    bid = _first_float(market.get("bid"), action.get("bid"), default=0.0)
+    ask = _first_float(market.get("ask"), action.get("ask"), default=0.0)
+    spread_points = _first_float(
+        market.get("spread"),
+        action.get("spread"),
+        ask - bid if ask > 0.0 and bid > 0.0 else None,
+        default=0.0,
+    )
+    spread_points = max(0.0, spread_points)
+
+    issues: list[str] = []
+    if not submitted:
+        issues.append("missing_submitted_event")
+    if not filled:
+        issues.append("missing_filled_event")
+    if requested_price <= 0.0:
+        issues.append("missing_requested_price")
+    if fill_price <= 0.0:
+        issues.append("missing_fill_price")
+    if direction_sign == 0:
+        issues.append("missing_direction")
+    if not broker_price_trusted:
+        issues.append("missing_broker_open_deal")
+    if spread_points <= 0.0:
+        issues.append("missing_spread")
+
+    broker_match = None
+    observations: list[str] = []
+    lifecycle_broker_fill_delta = 0.0
+    if broker_price_trusted and lifecycle_fill_price > 0.0:
+        broker_match = abs(broker_price - lifecycle_fill_price) <= max(1e-6, abs(broker_price) * 1e-8)
+        if not broker_match:
+            # The order lifecycle price is the request/observed quote in the
+            # current open path.  cTrader's deal exec_price is the actual
+            # execution fact and is intentionally allowed to differ.
+            lifecycle_broker_fill_delta = broker_price - lifecycle_fill_price
+            observations.append("lifecycle_fill_differs_from_broker_fill")
+
+    signed_slippage = 0.0
+    adverse_slippage = 0.0
+    if requested_price > 0.0 and fill_price > 0.0 and direction_sign:
+        signed_slippage = (fill_price - requested_price) * direction_sign
+        adverse_slippage = max(0.0, signed_slippage)
+
+    observed = bool(submitted or filled or requested_price > 0.0 or fill_price > 0.0)
+    evidence_state = "full" if not issues else ("partial" if observed else "unknown")
+    score = 0.0
+    if requested_price > 0.0 and fill_price > 0.0 and direction_sign:
+        # Half-spread plus adverse slippage is the observed entry cost.  The
+        # denominator is two spreads, with a one-basis-point fallback only
+        # when the recorded spread is zero; no constant quality is injected.
+        fair_cost = max(spread_points * 2.0, abs(requested_price) * 0.0001, 1e-9)
+        observed_cost = adverse_slippage + spread_points / 2.0
+        score = max(0.0, min(1.0, 1.0 - observed_cost / fair_cost))
+
+    return {
+        "schema_version": "execution_quality_evidence.v2",
+        "evidence_state": evidence_state,
+        "issues": list(dict.fromkeys(issues)),
+        "observations": list(dict.fromkeys(observations)),
+        "submitted_event": bool(submitted),
+        "filled_event": bool(filled),
+        "broker_deal_id": _safe_float(broker.get("deal_id"), 0.0),
+        "broker_price_quality": broker_price_quality,
+        "broker_price_trusted": broker_price_trusted,
+        "broker_deal_fill_match": broker_match,
+        "fill_price_source": "broker_deal" if broker_price_trusted else "lifecycle_filled_event",
+        "requested_price": round(requested_price, 8),
+        "lifecycle_fill_price": round(lifecycle_fill_price, 8),
+        "broker_fill_price": round(broker_price, 8),
+        "lifecycle_broker_fill_delta_points": round(lifecycle_broker_fill_delta, 8),
+        "fill_price": round(fill_price, 8),
+        "direction": direction_sign,
+        "spread_points": round(spread_points, 8),
+        "slippage_points": round(signed_slippage, 8),
+        "adverse_slippage_points": round(adverse_slippage, 8),
+        "score_formula": "clamp(1-(max(adverse_slippage,0)+spread/2)/max(2*spread,abs(requested)*0.0001,1e-9),0,1)",
+        "score": round(score, 6),
+    }
 
 
 def _append_label(labels: list[str], label: str) -> None:
@@ -310,6 +510,29 @@ def review_has_system_contamination(review_payload: dict[str, Any] | None) -> bo
         return _safe_bool(system_context.get("contaminates_learning"), False)
     labels = set(review.get("responsibility_labels") or []) | set(review.get("failure_tags") or [])
     return bool(labels & SYSTEM_CONTAMINATION_LABELS)
+
+
+def review_execution_evidence_is_trainable(review_payload: dict[str, Any] | None) -> bool:
+    """Return whether a matured review has a complete execution chain.
+
+    Consumers share the state written by ``build_execution_quality_evidence``;
+    they must not infer training permission from the numeric quality score or
+    from a legacy review label.
+    """
+    review = _as_dict(review_payload)
+    evidence = _as_dict(review.get("execution_quality_evidence"))
+    state = str(
+        review.get("execution_quality_state")
+        or evidence.get("evidence_state")
+        or "unknown"
+    ).strip().lower()
+    evidence_state = str(evidence.get("evidence_state") or "").strip().lower()
+    return (
+        str(evidence.get("schema_version") or "") == "execution_quality_evidence.v2"
+        and state in {"full", "replay_verified"}
+        and evidence_state == state
+        and not review_has_system_contamination(review)
+    )
 
 
 def normalize_trade_review_contract(

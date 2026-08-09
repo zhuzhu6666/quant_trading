@@ -1,22 +1,20 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-08-03
+> Last verified: 2026-08-09
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读后面的对应合同。
 
 ## 1. 当前结论
 
-- 当前分支：`main`；工作区当前有未提交的链路收敛修复：唯一 live tick owner、
-  canonical readiness health 投影、Coordinator 治理写入边界均已落地；目标测试
-  `210 passed`，运行态 PostgreSQL 只读验收待服务器连接恢复后补做。
+- 当前分支：`main`；工作区当前有未提交的 Demo-only 模型治理与历史证据收敛修复：
+  模型阶段仅允许 `shadow -> demo_canary -> demo_active -> quarantined`，模型不得接入
+  Live 阶段；真实 Demo `live_service`/live loop 执行链保留。
 - P0 已完成。
-- P1 代码和历史污染修复已完成；2026-07-31 受控重启后已产生 post-repair
-  新成交与完整生命周期（280363885 / 280379926 / 280411506 / 280452088，
-  开仓→保护→平仓→deal sync→review→sample 均落库），review 现 641 条、
-  learning sample 现 18,641 条；仍继续等待更多真实 broker deal 与完整
-  持仓生命周期运行验收。
+- P1 代码和历史污染修复已完成；本批复核后 `trade_outcome_review=679`、
+  `autonomous_learning_sample=34,328`。污染样本保留审计但不得训练/治理；
+  仍继续等待更多真实 broker deal 与完整持仓生命周期运行验收。
 - P2 代码和合同已完成，schema 已到 v12；运行验收仍继续，静态发布顺序不推进。
 - P3 writer/identity 收敛已完成：current 与历史 review memory 均只保留
   `trade_lesson_memory.v1` canonical projection；application/effect 当前 16 个 active scope
@@ -34,6 +32,23 @@
 - 账户已切换：cTrader demo 账户 47276606（login 5817896）现为 USD 计价，
   当前权益约 `$344.76`（2026-08-01 实测 balance/equity=344.76，
   非旧文档记录的 EUR €10,982）；风控与 Kelly sizing 均以当前权益为基准。
+
+2026-08-09 Demo-only 模型治理批次（全部为本次实查）：
+
+- runtime 当前 `autonomy_mode=demo_autonomous`、`demo_model_influence_enabled=false`，
+  三个模型均为 `shadow`；代码/配置不存在任何模型 Live 阶段标记。
+- `close_without_open=0`；修复脚本默认不允许 close-only 推断，当前无剩余候选。
+- 679 条 review 均带 `execution_quality_evidence.v2`；full 405、partial 272、unknown 2，
+  不再用固定 `0.60` 作为有效执行质量证据。
+- 34,328 条样本中污染 3,406 条，污染样本允许训练/治理均为 0；636 条开仓后验全部带
+  `open_target.v2`。开仓消费者资格已按其实际职责单独计算：289 条可进入
+  `open_quality_lightgbm`，其余因 flat、执行证据不足、未成熟或字段质量问题隔离；全局严格
+  contract 仍保留 272 条，避免把因子归因要求误加到开仓模型。
+- 当前 `open_quality_lightgbm` loader 候选 291 条、最终选中 289 条，另外 2 条因缺
+  `composer_version`/`active_alpha_universe` 被质量门排除；历史污染样本不进入训练或治理。
+- 新开仓在 broker 提交前必须通过 `open_learning_context.v2`：缺少 entry cluster、行情微观、
+  完整 bar、执行、决策质量、事件、数据质量或 market session 任一项都会在 broker mutation
+  前 fail-closed；成交后再要求真实 fill price 并写入 `open_context_quality.ready=true`。
 
 2026-08-01 运行核对（全部为本次实查）：
 
@@ -135,8 +150,7 @@ learning worker
 当前只做 P1/P2 运行验收与兼容删除；有界 Demo 可直接产生验收交易：
 
 1. 继续核对 post-repair 新的真实 broker deal、开仓、保护、平仓、同步、复盘与学习
-   生命周期（2026-07-31 重启后已有 4 笔完整闭环：280363885 / 280379926 /
-   280411506 / 280452088，review 641 条、sample 18,641 条，证据持续积累）；
+   生命周期（当前已复核 review 679 条、sample 34,328 条，证据持续积累）；
 2. 完成 Safety shadow 的完整生命周期或 24 小时无仓观察与故障矩阵；
 3. 对每条仍在迁移的兼容路径收集退出证据，同批删除旧 authority、旧重算、旧字段回退或无意义 wrapper；
 4. P4 已完成，不再扩展 V16 调度层；下一步只处理真实运行验收与 P6 Demo 观察。

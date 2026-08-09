@@ -295,7 +295,7 @@ def test_learning_worker_filters_contamination_before_position_dedupe_and_limit(
     assert json.loads(row[1])["evidence"]["counterfactual_id"] == "cf_1"
 
 
-def test_readiness_ignores_legacy_live_canary_shadow_trace(tmp_path) -> None:
+def test_readiness_ignores_legacy_canary_shadow_trace(tmp_path) -> None:
     db_path = tmp_path / "state.db"
     _seed_candidate_observation_facts(db_path)
     conn = connect_sqlite(db_path)

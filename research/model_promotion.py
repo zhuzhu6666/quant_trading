@@ -33,9 +33,8 @@ def _sha256(path: Path) -> str:
 class ModelPromotionGate:
     """Safety gate for moving offline model artifacts toward shadow validation.
 
-    This gate intentionally does not promote a model into live execution. A
-    passing artifact becomes a shadow candidate only, preserving the existing
-    governor/canary/live boundaries.
+    A passing artifact becomes a shadow candidate only. Demo influence still
+    requires the explicit Demo Canary and active-stage gates.
     """
 
     def evaluate(
@@ -145,7 +144,7 @@ class ModelPromotionGate:
                 "oos_acc": holdout.get("accuracy"),
                 "feature_count": int(metrics.get("feature_count") or 0),
                 "declares_live_trading": bool(capabilities.get("live_trading")),
-                "declares_live_eligible": bool(promotion.get("eligible_for_live")),
+                "declares_demo_influence_eligible": bool(promotion.get("eligible_for_demo_influence")),
                 "advisory_only": bool(capabilities.get("advisory_only")),
                 "shadow_only": bool(capabilities.get("shadow_only")),
                 "can_place_orders": bool(capabilities.get("can_place_orders")),
@@ -184,8 +183,8 @@ class ModelPromotionGate:
             issues.append({"code": "insufficient_features", "required": int(min_features), "actual": checks["feature_count"]})
         if checks["declares_live_trading"]:
             issues.append({"code": "live_trading_not_allowed", "message": "offline artifacts cannot bypass live execution gates"})
-        if checks["declares_live_eligible"]:
-            warnings.append({"code": "live_eligibility_ignored", "message": "gate only grants shadow candidacy, not live eligibility"})
+        if checks["declares_demo_influence_eligible"]:
+            warnings.append({"code": "demo_influence_eligibility_ignored", "message": "gate only grants shadow candidacy, not Demo influence"})
         if is_lightgbm_artifact:
             if not checks["advisory_only"] or not checks["shadow_only"]:
                 issues.append({"code": "shadow_advisory_contract_missing", "message": "LightGBM governance artifacts must declare advisory_only and shadow_only"})
@@ -250,7 +249,7 @@ class ModelPromotionGate:
             "capabilities": {
                 "live_trading": False,
                 "shadow_validation_required": True,
-                "canary_required_before_live": True,
+                "demo_canary_required_before_influence": True,
             },
             "explainability": {
                 "top_weights": list((artifact.get("explainability") or {}).get("top_weights") or [])[:10],

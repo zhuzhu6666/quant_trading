@@ -166,13 +166,18 @@ class ModelInfluenceGovernanceService:
         stage: str = "demo_canary",
         v16_command_id: str = "",
     ) -> dict[str, Any]:
+        if str(stage or "") != "demo_canary":
+            return {
+                "ok": False,
+                "status": "invalid_stage",
+                "stage": str(stage or ""),
+                "allowed_stages": ["demo_canary"],
+            }
         gate = self.evaluate_artifact(artifact_path)
         if not gate.get("passed"):
             return {"ok": False, "status": "blocked_by_promotion_gate", "gate": gate}
-        # Initial promotion is always canary.  A future canary-to-active
+        # Initial promotion is always Demo Canary.  A future canary-to-active
         # transition must use matured effect evidence, not this artifact gate.
-        if stage != "demo_canary":
-            return {"ok": False, "status": "invalid_stage", "stage": stage, "gate": gate}
         cfg = runtime_config()
         model_type = str(gate.get("model_type") or "")
         effects = dict(MODEL_EFFECTS[model_type])

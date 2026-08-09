@@ -215,7 +215,7 @@ class ModelInfluenceService:
             # model may advise a risk-reducing action, but it must not bypass
             # the supervisor's observation window or act on unknown position
             # components.  Direct callers without this field retain the
-            # historical model-service contract; the live supervisor runtime
+            # Historical model-service contract; the Demo supervisor runtime
             # always supplies it.
             model_action_boundary_ready = bool(
                 (original.get("evidence") or {}).get(
