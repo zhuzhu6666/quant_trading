@@ -162,3 +162,46 @@ def test_risk_parse_review_row_normalizes_phase_d_contract_fields():
     assert parsed["time_in_profit"] == 1200.0
     assert parsed["primary_responsibility"] == "holding"
     assert parsed["responsibility_labels"] == ["holding_inefficient"]
+
+
+def test_restart_replay_close_contaminates_learning():
+    issue = build_system_issue_context(
+        {
+            "close_reason": "restart_replay",
+            "close_reason_source": "restart_replay",
+            "real_pnl": {
+                "net": -1.29,
+                "price_quality": "broker_reconciled",
+            },
+        }
+    )
+
+    assert issue["contaminates_learning"] is True
+    assert "restart_replay" in issue["labels"]
+    assert issue["primary_responsibility"] == "operator_intervention"
+    assert issue["system_contaminated"] is True
+
+
+def test_manual_close_contaminates_learning():
+    issue = build_system_issue_context(
+        {
+            "close_reason": "manual_close",
+            "real_pnl": {"net": 0.5, "price_quality": "broker_reconciled"},
+        }
+    )
+
+    assert issue["contaminates_learning"] is True
+    assert "manual_close" in issue["labels"]
+    assert issue["primary_responsibility"] == "operator_intervention"
+
+
+def test_normal_close_does_not_contaminate():
+    issue = build_system_issue_context(
+        {
+            "close_reason": "broker_close",
+            "real_pnl": {"net": 3.0, "price_quality": "broker_reconciled"},
+        }
+    )
+
+    assert issue["contaminates_learning"] is False
+    assert issue["labels"] == []

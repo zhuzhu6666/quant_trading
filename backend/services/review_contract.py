@@ -12,6 +12,9 @@ SYSTEM_CONTAMINATION_LABELS = {
     "decision_bar_stale",
     "market_data_stale",
     "signal_execution_delay",
+    # 外部/回放终止的持仓不是策略自然生命周期，禁止进入学习
+    "restart_replay",
+    "manual_close",
 }
 
 ADVISORY_ONLY_HEALTH_COMPONENTS: set[str] = set()
@@ -406,6 +409,16 @@ def build_system_issue_context(review_payload: dict[str, Any] | None) -> dict[st
     review = _as_dict(review_payload)
     labels: list[str] = []
     evidence: dict[str, Any] = {}
+    # 外部/回放终止的持仓（operator 手动平仓、重启回放 close）不是策略
+    # 自然生命周期产物，持有期与退出价格不代表策略演化，禁止进入学习。
+    close_reason = str(
+        review.get("close_reason")
+        or review.get("close_reason_source")
+        or ""
+    ).strip().lower()
+    if close_reason in {"restart_replay", "manual_close"}:
+        _append_label(labels, close_reason)
+        evidence["close_reason"] = str(review.get("close_reason") or "")
     timing = _as_dict(review.get("entry_timing_context"))
     freshness = _as_dict(review.get("decision_freshness_context"))
     data_quality = _as_dict(review.get("data_quality_context"))
@@ -488,7 +501,9 @@ def build_system_issue_context(review_payload: dict[str, Any] | None) -> dict[st
         evidence["signal_delay_threshold_seconds"] = stale_threshold
 
     primary = ""
-    if any(label in labels for label in ("decision_bar_stale", "market_data_stale", "data_quality_issue", "bar_data_degraded")):
+    if "restart_replay" in labels or "manual_close" in labels:
+        primary = "operator_intervention"
+    elif any(label in labels for label in ("decision_bar_stale", "market_data_stale", "data_quality_issue", "bar_data_degraded")):
         primary = "data_quality"
     elif "signal_execution_delay" in labels:
         primary = "execution_timing"
