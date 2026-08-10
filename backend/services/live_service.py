@@ -10716,6 +10716,7 @@ def _process_tick_factor_pipeline(
         position_to_dict=_position_to_dict,
     )
     current_price = float(last_bar["close"])
+    signal_decision_id = ""
     if _LEDGER and composite.direction != 0:
         try:
             signal_decision_id = _LEDGER.log_composite_decision(
