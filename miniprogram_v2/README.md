@@ -1,7 +1,7 @@
 # Quant Agent Mini Program V2
 
 > Status: active
-> Last verified: 2026-07-06
+> Last verified: 2026-08-10
 > Scope: lightweight mobile status surface.
 
 This mini-program is now the lightweight mobile status surface for the trading system.
@@ -54,8 +54,6 @@ This mini-program only depends on the lightweight live/auth surface:
 - `/ws/state`
 
 ## Status
-
-Current status as of 2026-07-02:
 
 - Web frontend is the complete console.
 - Mini-program is a compact mobile status card.

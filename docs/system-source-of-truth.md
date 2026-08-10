@@ -1,7 +1,7 @@
 # System Source Of Truth
 
 > Status: active
-> Last verified: 2026-08-09
+> Last verified: 2026-08-10
 > Scope: authoritative sources for runtime state, configuration, governance, data, and frontend contracts.
 
 本文回答一个问题：当文档、注释、接口、数据库和历史理解冲突时，到底以哪里为准。
@@ -45,7 +45,7 @@ release preflight 和前端只能复用该结果，不得通过再次读取原�
 | 分期发布预检 | `backend.services.phased_repair_release_gate` + `scripts/phased_repair_release_gate.py` | 固定顺序为 `safety_enforce -> generation_enable -> execution_outcome_enable -> governance_enforce -> pg_job_queue_enable -> pg_job_queue_verify`；前五项是逐开关前态门禁，最后一项是不改变开关的 post-deploy 事实验证。每个 target 必须精确匹配对应静态 flags，跳级或乱序均 fail-closed。预检只读聚合 shadow continuity/lifecycle gate（仅 Safety 首次 enforce 必需）、当前静态 flags、所需 systemd service、local latch、本地与 PostgreSQL unresolved execution intent、持久化 release readiness、worker freshness 及 config/overlay hash；`execution_outcome_enable` 还必须持有当前代码绑定的 execution fault-matrix passed attestation。`governance_enforce` 及以后还必须通过治理完整性检查。`pg_job_queue_enable` 另须通过 canonical YAML、最低 schema、handler registry、unsupported runnable kind 与 pre-existing active lease 检查；`pg_job_queue_verify` 则要求 job worker service active 及其 durable capability 新鲜、身份完整、handler 精确且 loaded flags 为最终态。任一事实未知或不一致都返回非零；门禁本身不写配置、不 claim job、不重启服务，也不拥有开关提交权 |
 | Safety fault-matrix 证据 | `backend.services.live_safety_fault_matrix` + `scripts/safety_fault_matrix.py` + `data/safety/safety_fault_matrix_attestations.jsonl` | 无持仓的 Safety enforce 路径除 24 小时连续 shadow 外，必须运行 12 类故障矩阵：bar/factor/circuit、PG loss、reconcile、spot stale、order timeout/delayed/unknown、amend projection、emergency reconcile/audit、stop/open draining、session cache、partial close、outbox failure、heartbeat stale。runner 以当前 Python/pytest 执行固定 nodeids，随后 fsync 追加 schema/scenario/nodeid/source+test binding hash/结果 record；release gate 重算 hash，缺失、失败、场景不全、记录篡改或 Safety 代码变化均 fail-closed。完整真实持仓生命周期路径不以合成矩阵替代 broker lifecycle 证据，也不强制重复无仓矩阵 |
 | Execution outcome fault-matrix 证据 | `backend.services.execution_outcome_fault_matrix` + `scripts/execution_outcome_fault_matrix.py` + `data/safety/execution_outcome_fault_matrix_attestations.jsonl` | execution outcome v2 发布前必须运行 8 类故障矩阵：RPC timeout、延迟回执恢复、未知 protobuf、amend projection 未落地、重启防重复、intent 提交/恢复边界、PG 故障下风险缩减、confirmed open 后 post-fill/reconcile 双故障 fail-closed。runner 固定执行 15 个 nodeid 并 fsync 追加 record hash 与 execution source/test binding hash；binding 必须覆盖 open submission/open protection/open processing state machine 与 `live_service` façade wiring，`execution_outcome_enable` 重算 binding，缺失、最近失败、场景/nodeid 不全、记录篡改或相关代码变化一律以 `execution_outcome_fault_matrix_incomplete` 阻断。该证明只验证故障语义，不自动切 flag、不重启服务、不替代受控 demo 观察 |
-| Backend readiness 持久化投影 | `BackendReadinessSnapshotService` + `InProcessScheduler[backend_readiness_refresh]` + `runtime_kv[backend_readiness.snapshot.v1]` | backend 启动先异步构建一次，之后由既有进程 scheduler 每两分钟触发、以 30 秒 max-age single-flight 刷新；该提前量覆盖当前约 30～120 秒完整构建耗时，使快照保持在 180 秒 contract 内。投影同时公开 refresh start/finish/in-progress/error；scheduler 不直接构建图，只触发现有非 daemon owner；并发触发复用同一 worker，shutdown 由 BackendRuntimeLifecycle 停止接单并 join，失败保留旧投影且 readiness/preflight fail-closed。2026-07-31 受控重启后最终投影为 `ready_for_live_execution=true`、`incident_mode=normal`、live blockers 为空。 |
+| Backend readiness 持久化投影 | `BackendReadinessSnapshotService` + `InProcessScheduler[backend_readiness_refresh]` + `runtime_kv[backend_readiness_snapshot.v1]` | backend 启动先异步构建一次，之后由既有进程 scheduler 每两分钟触发、以 30 秒 max-age single-flight 刷新；该提前量覆盖完整构建耗时，使快照保持在 180 秒 contract 内。投影同时公开 refresh start/finish/in-progress/error；scheduler 不直接构建图，只触发现有非 daemon owner；并发触发复用同一 worker，shutdown 由 BackendRuntimeLifecycle 停止接单并 join，失败保留旧投影且 readiness/preflight fail-closed。 |
 | 治理提交事实 | PostgreSQL `governance_mutation_intent` | 状态只允许 `reserved -> prepared -> committed/aborted`、`committed -> rolled_back/superseded`；projection 独立为 `pending/current/degraded`。幂等键和同 scope advisory lock 防止双 worker 重复提交；committed 后 publish 失败只标 degraded，可按 committed snapshot 重放，不能重做领域 mutation |
 - 治理 abort 诊断只读复用 `governance_mutation_intent.error_stage`：`v16_claim` 与真实 transaction/recovery failure 分开统计；该分类不改变 Coordinator 状态机，不把 approved suggestion 或 bridge review 解释为 applied，实际应用仍须有 `applied_mutation_id`、application/effect log 和 V16 finalize 证据。
 | V16 委派授权 | PostgreSQL `v16_brain_command.authority_issued_at` + `V16CommandGate` | `V16CommandGate.is_actionable()` 是 readiness、stepper、authorize 和 claim 共用的唯一 actionable predicate，只允许未过期、`available` 且未达到 apply 上限的 delegate command。可执行授权状态为 `available -> claimed -> finalized`，未领取且候选失效或授权过期时进入 `available -> cancelled`；observe 只留在 plan/eval 审计，不写可 claim 命令。`authority_issued_at` 是不可变的授权起点，claim/release/recovery 只更新运行状态，不得通过 `updated_at` 续期。若 active candidate 的旧命令因过期取消，只有取消后产生新的 `bridge_ready` review、且不存在可用/已领取/已完成命令时，V16 command writer 才可新建一次命令；永不复活旧行。只有 Coordinator 事务内 finalize 才增加 `apply_count` 并绑定 `mutation_id + config_hash + domain_hash`；cancelled 保持 `apply_count=0` |
@@ -422,20 +422,7 @@ release preflight 和前端只能复用该结果，不得通过再次读取原�
 
 历史 planning 文档和旧注释只能提供背景，不能单独作为实现依据。
 
-## 10. 2026-07-10 智能体层模块合并记录
-
-本文档中 V16 和 Agent Governance 的模块路径已更新，对应以下实际合并：
-
-| 旧模块 | 新模块 | 说明 |
-|---|---|---|
-| `brain_state.py` (579行) + `brain_memory.py` (592行) | `v16_brain_snapshot.py` (~690行) | 合并后消除 ~400 行重复样板代码 |
-| `brain_action_planner.py` (460行) + `brain_action_evaluator.py` (498行) + `brain_low_impact_executor.py` (384行) + `brain_medium_impact_governance.py` (470行) + `brain_live_ready_guardrail.py` (505行) | `v16_brain_planning.py` (~1,500行) | 5个文件合并为1个，共享 DB helper 来自 `_brain_helpers.py` |
-| `agent_authority_registry.py` (540行) | `agent_authority.py` (~280行) | 保留核心 evaluate/control_surface/required_gate 逻辑，移除 ~300 行序列化样板 |
-| `agent_governance.py` (新) | 统一导入入口 | 从 `agent_authority` + `agent_scorecard` + `agent_briefing` 整理 re-export |
-
-旧模块路径保留为向后兼容的 import stub（重导出到新模块），新代码应直接使用新路径。
-
-## 11. 2026-07-14 学习闭环修复期事实源
+## 10. 当前自治与学习闭环约束
 
 - `RuntimeConfig.autonomy_expansion_frozen` 是非 Demo/实盘权限面的 fail-closed 开关；在 `demo_nursery` / `demo_autonomous` 中配置值可以继续保留为 `true`，但 effective freeze 固定为 `false`，AWE、因子生命周期晋升、Canary 阶段上升和 supervisor template auto-apply 继续运行。非 Demo 的 learning-repair auto-unfreeze 只能提交 `AutonomyControlPlan`，不得通过 caller `risk_reduction`、action 名或未被 overlay 接受的假成功绕过 Coordinator + V16；mutation 未 committed 时 freeze 必须保持。Demo 激进治理仍不得绕过 RiskPolicy、DecisionPolicy、V16 单次委派、runtime snapshot、实验 admission、后验 effect reconcile 和自动回滚/隔离。
 - learning-repair readiness 的 supervisor 候选证据只接受 learning worker 生成且与当前 approved suggestion 精确绑定的 `learning_shadow` recovered trace；live loop 不读取 approved suggestion，也不再生产 `canary_shadow`。观察缺失、lineage 不匹配或只存在历史 live shadow 时 readiness 与 auto-unfreeze 均 fail-closed；最终解冻仍要求 Coordinator committed mutation + V16 finalize。

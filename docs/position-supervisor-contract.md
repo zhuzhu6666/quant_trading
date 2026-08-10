@@ -1,6 +1,6 @@
 # Position Supervisor Contract
 
-> Last updated: 2026-07-31
+> Last updated: 2026-08-10
 > Phase: C-H
 > Status: adaptive posture implemented, Demo discretionary execution observation-only
 
@@ -583,7 +583,7 @@ finalize 为准；普通 learning candidate 不能自动打开 `governed_execute
 - 证据存储继续复用 `backend/ledger/service.py`
 - 运维查询继续复用 `backend/api/risk.py` 的 `trade-trace`
 - supervisor 反事实审计走 `backend.services.supervisor_counterfactual`
-- 自动物化调度走 `backend.services.supervisor_learning_scheduler`
+- supervisor 反事实/observation 调度走 `backend.services.supervisor_learning_scheduler`；该调度器不自动 materialize legacy advisory
 
 这意味着后续不应重造平行 supervisor 链路，只应扩展这些既有骨架。
 

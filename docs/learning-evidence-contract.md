@@ -1,10 +1,8 @@
 # Learning Evidence Contract
 
 > Status: active
-> Last verified: 2026-08-09
+> Last verified: 2026-08-10
 > Scope: evidence semantics for learning samples, model training, governance, and autonomous replay/audit.
-
-状态：第一版已落地，2026-06-29；训练准入语义已收紧，2026-06-30；开仓质量、反事实训练契约、数据健康检查、动态仓位 trace 与事件窗口治理已补齐，2026-07-02；自治治理 V3 继续沿用本文作为证据等级 contract；2026-07-06 补齐学习系统、影子模型和数据精度关系。
 
 目标：让规则系统产生的数据、训练样本、模型产出都具备同一种可解释、可追溯、可被机器识别的证据语义。
 
@@ -34,17 +32,16 @@
 - `governance_eligibility_fingerprint`
 - `governance_ineligible_reason`
 
-本批（2026-07-31）进一步收敛证据合同的唯一计算路径：样本物化与
+证据合同的唯一计算路径：样本物化与
 `repair_evidence_contracts()` 共用同一 canonical normalization/evaluator。repair 只能复用样本
 实际保存的 `quality.executable_governance_allowed`，不能从 `sample_type` 推断可执行治理；污染、缺
 lineage、未验证 recovered、pending 或未成熟样本继续 fail-closed，且同一批数据第二次 repair 应为零修复。
 `allowed_uses`、`model_ready`、`governance_eligible` 与资格列必须由同一份 v1 contract 保持一致，不新增
 schema、列或旁路 writer。
 
-部署后验收（2026-07-31）：`autonomous_learning_sample` 全量 `18521` 行的 contract/资格列无漂移，
-污染样本无 `model_ready` 或 `executable_governance_allowed` 放行；最终 repair 为 `42` 行，重复
-repair 为 `0`，`evidence_contract_health.bad_total=0`。这些是既有 repair ledger 与只读 PostgreSQL
-检查结果，不改变 `learning_evidence_contract.v1` 或 `governance_eligibility.v1`。
+运行验收必须分别核对 contract/资格列无漂移、污染样本无 `model_ready` 或
+`executable_governance_allowed` 放行，以及重复 repair 为零；具体运行结果只记录在 rollout status、
+repair ledger 和 PostgreSQL 审计中，不在本合同固化历史行数。
 
 ## Learning Data Flow
 
@@ -145,14 +142,14 @@ train_weight = quality_score * integrity_weight * causal_weight * label_weight
 - `integrity in {full, recovered}`
 - `trace / features / label` 非空
 
-2026-06-30 起，`supervised_training` 只有在以下条件同时满足时才允许出现：
+`supervised_training` 只有在以下条件同时满足时才允许出现：
 
 - `label_status=matured`
 - `integrity in {full, recovered}`
 - `causal_level in {replay_validated, intervention_observed}`
 - 没有 `missing_trace / missing_features / missing_label` blocker
 
-2026-07-02 起，高置信 post-close counterfactual 可以作为低权重训练样本进入模型训练契约：
+高置信 post-close counterfactual 可以作为低权重训练样本进入模型训练契约：
 
 - `causal_level=counterfactual`
 - `label_status=matured`
@@ -367,7 +364,7 @@ lifecycle 前跳过并保留 `shadow_register_invalid_dsl_skipped` 审计事件�
 
 ## Evolution Traceability
 
-2026-06-30 起，学习样本必须能追溯到统一进化账本：
+学习样本必须能追溯到统一进化账本：
 
 - `evolution_run`: 本轮为什么运行，例如样本物化、trace 回填、trace 成熟化、demo 自动治理
 - `evolution_decision`: 本轮做了哪些关键判断，例如审批、应用、回滚、成熟标签

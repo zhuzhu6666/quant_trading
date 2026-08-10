@@ -1,7 +1,7 @@
 # Server Backend SOP
 
 > Status: active
-> Last verified: 2026-07-26
+> Last verified: 2026-08-10
 > Scope: Linux unified workspace startup, logs, PostgreSQL, cTrader, frontend build, restart, and runtime acceptance.
 
 这份文档只服务一个目标：
@@ -350,7 +350,7 @@ systemctl status quant-backend.service --no-pager
 - bridge 状态是否正确释放
 - 后端是否存在旧 loop 或旧连接未退出
 
-### 2026-06-26 新增经验
+### 退役链路恢复检查
 
 如果现象是：
 

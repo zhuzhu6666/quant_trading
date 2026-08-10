@@ -1,7 +1,7 @@
 # Documentation Governance
 
 > Status: active
-> Last verified: 2026-07-26
+> Last verified: 2026-08-10
 > Scope: 文档职责、更新与删除规则。
 
 ## 1. 原则

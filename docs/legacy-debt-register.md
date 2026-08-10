@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-08-03
+> Last verified: 2026-08-10
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -79,13 +79,13 @@
 
 ## 3. 治理、研究与客户端
 
-### 因子扩张缺少后验防抖（已接入）
+### 因子扩张后验降级应用未完成
 
 - 状态：`active`
-- canonical：`FactorGovernanceOrchestrator._posterior_expansion_guard` + `posterior_expansion_verdict`，复用 `learning_application_effect`（scope_type=factor、最新非 rolled_back/superseded effect）作为唯一后验事实源。`delta_avg_reward < factor_governance_posterior_block_delta`（默认 -0.05）且 `observed_trade_count >= factor_governance_posterior_min_samples`（默认 10）→ `blocked_by_posterior` 剔除扩张候选；样本不足 → `posterior_degraded` 保留但标记；无记录/非负 → `posterior_ok`。四类扩张候选（builtin activation、active zero-weight restore、quarantined builtin restore、shadow promotion）统一在 preflight 过闸，preflight 输出 `posterior_blocked_ids`/`posterior_degraded_ids` 只读投影；V16 delegate 粒度不变（批轮次、specialist 选因子），生产查询不确定 fail-closed 阻断扩张。
-- 剩余：`posterior_degraded` 的降级应用路径（受限权重/scope）尚未在 apply 侧实现，当前仅标记不阻断。
-- 已关闭（2026-08-05 L4/L5 批次）：因子×regime 条件绩效缺口由批次 A（lightgbm v5.0 新增 `current_regime_fit_score`/`rolling_regime_fit_avg`/`rolling_regime_fit_min` 特征，消费 `trade_outcome_review.regime_fit_score`）+ 批次 B（`project_current_market_regime()` 从 `experience_memory.regime_id` 只读投影当前 regime）补链，**未改 ic_tracker 签名**（Q1 拍板）；factor_health 的 `regime_consistency` 保持 5 段分桶近似，真实 regime 条件绩效唯一由 lightgbm 承担。批次 C/D 在此基础上实现降权/恢复条件化。**批次 F（v6.0 / pit.v4）进一步把训练数据源切换为 `decision_factor_snapshot JOIN decision_ledger`（因子决策时点真实 regime_id，开仓时 resolve_market_regime 写入），新增 `same_regime_positive_rate`/`same_regime_pnl_avg`/`same_regime_sample_count` 因子×regime 条件绩效特征**——v5.0 的交易级 regime_fit_score 全因子共享、无区分度，v6.0 的因子级特征可区分"因子A在趋势市好、因子B在震荡市好"；条件化闸优先消费因子级特征（回退交易级）。
-- 退出：degraded 降级应用落地且连续真实周期验证后，将本条目转为 `migrating`。
+- canonical：`FactorGovernanceOrchestrator._posterior_expansion_guard` + `posterior_expansion_verdict`，复用 `learning_application_effect` 的最新有效 factor effect；V16 delegate 粒度和既有后验阈值不变。
+- 当前：因子扩张候选已统一经过 posterior preflight；`blocked_by_posterior` 会阻断，样本不足只标记 `posterior_degraded`，查询不确定时 fail-closed。
+- 剩余：`posterior_degraded` 的受限权重/scope 应用路径尚未落地，不能把标记解释为已执行降级治理。
+- 退出：降级应用经过现有 RiskPolicy、V16、Coordinator 和 effect observation 连续真实周期验证后，从本登记册删除。
 
 ### 治理 mutation 跨账本提交兼容
 
@@ -98,7 +98,7 @@
 
 - 状态：`migrating`
 - canonical：持仓模板的自动切换只从 V16 candidate bridge 进入，`V16CommandGate.claim` 与 `PositionSupervisorGovernanceMutationService` 的 Coordinator transaction 共同完成单次授权和 finalize。
-- 当前：历史/显式旧 worker 写入的 non-V16 `position_supervisor_template` advisory 仍可留作审计记录；它们已不再拥有 approve/apply 或 candidate conflict 权力，并将在既有 demo review/apply 路径中 terminalize。2026-08-10 起 `supervisor_learning_scheduler` 只运行反事实证据，不再自动 materialize 旧 advisory；显式 materialize API 仍仅作为 legacy audit 入口保留。新生成候选只能针对一个 control 和一个 regime stratum，完整快照必须能由 evidence 中的单 scalar patch 证明。2026-08-01 已修正正常 V16 `posterior_not_selected` rotation 的 scorecard 统计、claim evidence 传递和 aborted mutation 的 command-bound retry；首个真实 V16 bridge 已完成 `claim -> Coordinator finalize -> application`，旧失败审计保留。
+- 当前：历史/显式旧 worker 写入的 non-V16 `position_supervisor_template` advisory 仍可留作审计记录；它们已不再拥有 approve/apply 或 candidate conflict 权力，并将在既有 demo review/apply 路径中 terminalize。`supervisor_learning_scheduler` 只运行反事实证据，不自动 materialize 旧 advisory；显式 materialize API 仅作为 legacy audit 入口保留。新生成候选只能针对一个 control 和一个 regime stratum，完整快照必须能由 evidence 中的单 scalar patch 证明。
 - 剩余：已应用 suggestion 仍需经过 effect observation 与既有 maturity counting，不能据此解锁自治或删除旧 advisory writer。`legacy_awe_trailing` 的非 Demo 兼容 planner/trace/close attribution 仍存在；Demo 已在 protection cycle 中标记 `observed/superseded`，不得与 canonical supervisor 同时 applied。Parity replay 仍是 diagnostic-only，不能替代 broker lifecycle 证据。
 - 退出：历史 active advisory 全部 terminalize，连续真实 demo cycle 证明 V16 bridge、claim、Coordinator finalize 和 effect observation 连通后，删除旧 advisory 生成路径；另在 replay、trace、effect 证明 trailing 行为等价后，删除 legacy AWE trailing 执行分支、兼容配置和不再需要的耦合测试。不得通过 SQL 改写历史 review、补 command 或补成熟样本提前满足退出条件。
 
@@ -108,13 +108,6 @@
 - 当前：复用 closed-bar、RiskPolicy 与保护纯原语，并绑定 config/data/code/factor artifact hash，但缺 broker/tick/safety/account/cost/projection-ack 的完整 PIT 事实。
 - 权限：固定 `diagnostic_only`、治理数量为零；runner 永不自授权。
 - 退出：只有独立 certification 重验完整 live lifecycle 后才能讨论 live-parity evidence。
-
-### 历史参数扫描回测
-
-- 状态：`retired`
-- canonical：`ParityReplayRunner` 经 `/api/backtest/run`、CLI 和参数模板离线验证统一调用。
-- 已删除：12 组参数扫描、旧文本报告解析、`strategy/backtest.py`、`alpha/backtest/vectorized.py` 和重复 `/api/ops/replay/parity-run` 执行入口。
-- 边界：回测工件只提供隔离模拟训练样本，不写真实学习/后验/治理账本，也不计入模型晋级。
 
 ### API/frontend 旧事实字段
 

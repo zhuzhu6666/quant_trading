@@ -1,7 +1,7 @@
 # Change Impact Checklist
 
 > Status: active
-> Last verified: 2026-07-26
+> Last verified: 2026-08-10
 > Scope: mandatory admission, impact, deletion, verification, and documentation closure for every production change.
 
 本文是后续修复的唯一执行清单。目标不是让每批增加更多保护层，而是确认事实、
@@ -195,7 +195,7 @@ canonical 路径完成但旧路径仍在，批次状态只能是 `migrating`，�
 按固定职责更新：
 
 1. `system-source-of-truth.md`：只更新当前 authority 和合同。
-2. `legacy-debt-register.md`：记录仍未删除的兼容/冗余，完成后改为 fixed/deprecated。
+2. `legacy-debt-register.md`：只记录仍未删除的兼容/冗余；完成后从登记册删除，追溯通过 Git、测试和审计事实保留。
 3. `production-autonomy-repair-optimization-plan.md`：只更新阶段和剩余目标。
 4. `phased-repair-rollout-status.md`：只更新当前状态、下一批和运行证据。
 5. `phased-repair-acceptance-matrix.md`：只更新可重复测试/命令和未满足证据。

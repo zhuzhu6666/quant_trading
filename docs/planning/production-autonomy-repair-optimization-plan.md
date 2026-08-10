@@ -1,7 +1,7 @@
 # 生产自治修复与架构收敛总方案
 
 > Status: implementation active — P0 complete, P1 runtime acceptance active, P2/P3/P4 complete
-> Last verified: 2026-07-31
+> Last verified: 2026-08-10
 > Scope: production correctness repair, authority convergence, legacy deletion, runtime acceptance, and autonomy graduation
 > Source of truth: 本文只定义阶段、流程和退出条件；当前生产事实以 `docs/system-source-of-truth.md`、代码、PostgreSQL 和运行服务为准
 
