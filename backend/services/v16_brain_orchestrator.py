@@ -901,6 +901,10 @@ class V16BrainOrchestratorService:
         scope = dict(plan.get("scope") or {})
         delegation = dict(scope.get("delegation") or {})
         posterior = dict((evaluation.get("comparison") or {}).get("posterior_arbitration") or {})
+        correction_contract = dict(posterior.get("correction_contract") or {})
+        parent_policy_decision_id = str(
+            correction_contract.get("policy_decision_id") or ""
+        )
         candidate_id = str(governance.get("candidate_id") or "")
         decision = "delegate" if candidate_id and governance.get("status") == "candidate_materialized" else "observe"
         action = str(governance.get("governance_action") or evaluation.get("action_type") or "observe")
@@ -928,6 +932,7 @@ class V16BrainOrchestratorService:
             "scope_type": governance.get("scope_type") or evaluation.get("scope_type"),
             "scope_key": governance.get("scope_key") or scope.get("scope_key"),
             "action": action,
+            "parent_policy_decision_id": parent_policy_decision_id,
         }).encode("utf-8")).hexdigest()
         identity = "|".join(
             [
@@ -954,6 +959,8 @@ class V16BrainOrchestratorService:
             "status": status,
             "evidence": {
                 "posterior_arbitration": posterior,
+                "correction_contract": correction_contract,
+                "parent_policy_decision_id": parent_policy_decision_id,
                 "evaluation": {
                     "eval_id": evaluation.get("eval_id", ""),
                     "comparison_verdict": evaluation.get("comparison_verdict", ""),
@@ -969,10 +976,12 @@ class V16BrainOrchestratorService:
                 **delegation,
                 "target_agent": target_agent,
                 "delegated_by": "v16_brain",
+                "parent_policy_decision_id": parent_policy_decision_id,
                 "specialist_must_use": required_gates,
                 "specialist_must_not": ["bypass_risk_policy", "bypass_decision_policy", "write_broker_directly"],
             },
             "posterior_fingerprint": posterior_fingerprint,
+            "parent_policy_decision_id": parent_policy_decision_id,
             "evidence_fingerprint": evidence_fingerprint,
             "max_apply_count": 1,
             "created_at": time.time(),

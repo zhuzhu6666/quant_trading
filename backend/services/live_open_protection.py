@@ -78,6 +78,12 @@ def _failure_context(
         "sl_dist": request.sl_dist,
         "tp_dist": request.tp_dist,
         "log": request.log,
+        "parent_decision_id": str(
+            getattr(candidate, "open_decision_id", "") or ""
+        ),
+        "execution_intent_id": str(
+            getattr(candidate, "execution_intent_id", "") or ""
+        ),
     }
 
 

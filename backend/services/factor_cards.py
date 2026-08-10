@@ -180,9 +180,9 @@ class FactorCardService:
         with self._conn() as conn:
             ids = self._factor_ids(conn=conn)
             catalog_by_factor: dict[str, dict[str, Any]] = {}
+            runtime_projection: dict[str, Any] = {}
             try:
                 from backend.services.factor_catalog import build_factor_catalog
-
                 catalog_items = build_factor_catalog(self.db_path)
                 catalog_by_factor = {
                     str(item.get("factor_id") or ""): item
@@ -192,13 +192,38 @@ class FactorCardService:
                 ids = sorted(set(ids) | set(catalog_by_factor))
             except Exception:
                 catalog_by_factor = {}
+            try:
+                from backend.services.runtime_factor_selection_projection import (
+                    RuntimeFactorSelectionProjectionService,
+                )
+
+                runtime_projection = RuntimeFactorSelectionProjectionService(
+                    self.db_path
+                ).latest(max_age_seconds=900.0)
+            except Exception:
+                runtime_projection = {"status": "unavailable", "ok": False}
             if factor_id:
                 ids = [factor_id]
             else:
                 candidate_cap = max(_CANDIDATE_MIN_LIMIT, int(limit) * (10 if (source or lifecycle_status or factor_family) else 5))
                 ids = self._rank_candidate_ids(ids, catalog_by_factor, candidate_cap)
+            evidence_by_factor: dict[str, dict[str, Any]] = {}
+            try:
+                from research.features.feature_provider import LearningFeatureProvider
+
+                evidence_by_factor = LearningFeatureProvider(
+                    self.db_path
+                ).factor_evidence_summary(ids)
+            except Exception:
+                evidence_by_factor = {}
             built = [
-                self._build_card(name, conn=conn, catalog_item=catalog_by_factor.get(name))
+                self._build_card(
+                    name,
+                    conn=conn,
+                    catalog_item=catalog_by_factor.get(name),
+                    runtime_projection=runtime_projection,
+                    evidence_counts=evidence_by_factor.get(name),
+                )
                 for name in ids
             ]
         items = []
@@ -277,7 +302,15 @@ class FactorCardService:
         names.update(str(row["value"] or "") for row in rows if str(row["value"] or ""))
         return sorted(name for name in names if name)
 
-    def _build_card(self, factor_id: str, *, conn=None, catalog_item: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _build_card(
+        self,
+        factor_id: str,
+        *,
+        conn=None,
+        catalog_item: dict[str, Any] | None = None,
+        runtime_projection: dict[str, Any] | None = None,
+        evidence_counts: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         adapter = RegistryAdapter.shared()
         catalog_item = catalog_item or {}
         meta = adapter.get_meta(factor_id)
@@ -300,6 +333,29 @@ class FactorCardService:
         parameter_version = str(meta.get("parameter_version") or self._default_parameter_version(source))
         evidence = self._evidence_summary(factor_id, description, conn=conn)
         governance = self._governance_state(factor_id, evidence=evidence, conn=conn)
+        evidence_counts = self._evidence_counts(
+            factor_id,
+            evidence=evidence,
+            summary=evidence_counts,
+        )
+        runtime_binding = self._runtime_binding(
+            factor_id,
+            catalog_item=catalog_item,
+            projection=runtime_projection,
+        )
+        definition_lineage = self._definition_lineage(catalog_item)
+        direction_contract = {
+            "raw_sign": None,
+            "normalized_sign": None,
+            "polarity": None,
+            "signed_ic": None,
+            "status": "unavailable",
+        }
+        posterior_summary = self._posterior_summary(
+            factor_id,
+            governance=governance,
+            catalog_item=catalog_item,
+        )
         failure_modes = list(evidence.get("recent_responsibility_labels") or [])
         if not failure_modes and evidence.get("last_primary_responsibility") == "parameter":
             failure_modes = ["factor_logic_ok_but_param_suspect"]
@@ -342,6 +398,11 @@ class FactorCardService:
                 "latest_template_candidate_trace": governance["latest_template_candidate_trace"],
                 "latest_template_recommendation": governance["latest_template_recommendation"],
             },
+            "runtime_binding": runtime_binding,
+            "definition_lineage": definition_lineage,
+            "evidence_counts": evidence_counts,
+            "direction_contract": direction_contract,
+            "posterior_summary": posterior_summary,
             "evidence_summary": {
                 "description": description,
                 "health_score": evidence["health_score"],
@@ -353,9 +414,135 @@ class FactorCardService:
                 "last_primary_responsibility": evidence["last_primary_responsibility"],
                 "recent_responsibility_labels": evidence["recent_responsibility_labels"],
                 "sample_count": evidence["sample_count"],
+                "factor_linked_trade_reviews": evidence_counts["factor_linked_trade_reviews"],
+                "governance_eligible_mature": evidence_counts["governance_eligible_mature"],
+                "contaminated_or_ineligible": evidence_counts["contaminated_or_ineligible"],
+                "effects_observed": evidence_counts["effects_observed"],
             },
             "updated_at": governance["updated_at"] or evidence["updated_at"] or None,
             "updated_at_ts": updated_at_ts,
+        }
+
+    @staticmethod
+    def _runtime_binding(
+        factor_id: str,
+        *,
+        catalog_item: dict[str, Any],
+        projection: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        projection = dict(projection or {})
+        selected = {
+            str(item)
+            for item in list(projection.get("selected_factor_ids") or [])
+            if str(item)
+        }
+        projection_status = str(projection.get("status") or "unknown").lower()
+        if bool(projection.get("ok")):
+            status = "bound" if factor_id in selected else "unavailable"
+        elif projection_status in {"stale", "unavailable"}:
+            status = projection_status
+        elif projection_status == "missing":
+            status = "unavailable"
+        else:
+            status = "unknown"
+        roles = projection.get("selected_factor_roles") or {}
+        weights = projection.get("selected_factor_weights") or {}
+        is_bound = bool(projection.get("ok")) and factor_id in selected
+        role = str(roles.get(factor_id) or "") if is_bound else None
+        raw_weight = weights.get(factor_id) if is_bound else None
+        try:
+            weight = round(float(raw_weight), 8) if raw_weight is not None else None
+        except (TypeError, ValueError):
+            weight = None
+        return {
+            "status": status,
+            "selection_fingerprint": projection.get("selection_fingerprint") or None,
+            "config_version": projection.get("config_version"),
+            "config_hash": projection.get("config_hash") or None,
+            "live_generation_id": projection.get("live_generation_id") or None,
+            "selection_source": (
+                catalog_item.get("runtime_selection_source")
+                or projection.get("source")
+                or None
+            ),
+            "role": role,
+            "weight": weight,
+        }
+
+    @staticmethod
+    def _definition_lineage(catalog_item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "generation": catalog_item.get("lifecycle_generation") or None,
+            "definition_fingerprint": catalog_item.get("lifecycle_definition_fingerprint") or None,
+            "artifact_hash": catalog_item.get("lifecycle_artifact_hash") or None,
+            "mutation_id": catalog_item.get("governance_mutation_id")
+            or catalog_item.get("lifecycle_mutation_id")
+            or None,
+            "catalog_snapshot_id": catalog_item.get("latest_catalog_snapshot_id") or None,
+        }
+
+    @staticmethod
+    def _posterior_summary(
+        factor_id: str,
+        *,
+        governance: dict[str, Any],
+        catalog_item: dict[str, Any],
+    ) -> dict[str, Any]:
+        effect_status = str(governance.get("application_effect_status") or "").lower()
+        if effect_status in {"effective", "reinforced", "validated_effective"}:
+            state = "probable"
+        elif effect_status in {"mixed", "ineffective", "inconclusive"}:
+            state = "inconclusive"
+        else:
+            state = "unobservable"
+        action = "rollback" if effect_status == "rolled_back" else "no_change"
+        refs: list[str] = []
+        mutation_id = str(
+            catalog_item.get("governance_mutation_id")
+            or catalog_item.get("lifecycle_mutation_id")
+            or ""
+        )
+        if mutation_id:
+            refs.append(f"mutation:{mutation_id}")
+        snapshot_id = str(catalog_item.get("latest_catalog_snapshot_id") or "")
+        if snapshot_id:
+            refs.append(f"catalog_snapshot:{snapshot_id}")
+        return {
+            "state": state,
+            "action": action,
+            "confidence": None,
+            "evidence_refs": refs,
+            "candidate_id": None,
+            "review_id": None,
+            "reason": f"factor={factor_id}; effect_status={effect_status or 'missing'}",
+        }
+
+    def _evidence_counts(
+        self,
+        factor_id: str,
+        *,
+        evidence: dict[str, Any],
+        summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if isinstance(summary, dict):
+            return {
+                "decision_observations": summary.get(
+                    "decision_observations",
+                    int(evidence.get("sample_count") or 0),
+                ),
+                "factor_linked_trade_reviews": summary.get("factor_linked_trade_reviews"),
+                "governance_eligible_mature": summary.get("governance_eligible_mature"),
+                "contaminated_or_ineligible": summary.get("contaminated_or_ineligible"),
+                "effects_observed": summary.get("effects_observed"),
+                "status": str(summary.get("status") or "unknown"),
+            }
+        return {
+            "decision_observations": int(evidence.get("sample_count") or 0),
+            "factor_linked_trade_reviews": None,
+            "governance_eligible_mature": None,
+            "contaminated_or_ineligible": None,
+            "effects_observed": None,
+            "status": "unavailable",
         }
 
     def _evidence_summary(self, factor_id: str, description: str, *, conn=None) -> dict[str, Any]:

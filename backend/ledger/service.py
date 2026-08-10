@@ -342,6 +342,8 @@ class DecisionLedger:
         position_id: str = "",
         portfolio_state: dict | None = None,
         risk_state: dict | None = None,
+        policy_version: str = "",
+        factor_set_version: str = "",
         action_reason: str = "",
         action_json: dict | None = None,
     ) -> str:
@@ -425,6 +427,8 @@ class DecisionLedger:
             position_id=position_id,
             portfolio_state=portfolio_state,
             risk_state=risk_state,
+            policy_version=policy_version,
+            factor_set_version=factor_set_version,
             action_score=float(getattr(composite, "score", 0.0) or 0.0),
             action_reason=action_reason or gate_reason or event_type,
             action_json=action_payload,

@@ -67,6 +67,17 @@ _NON_ACTIONABLE_POLICY_STATUSES = {
     "blocked_by_evidence",
 }
 
+_POSTERIOR_DIMENSIONS = (
+    "signal",
+    "factor",
+    "entry_threshold",
+    "position_sizing",
+    "execution",
+    "supervision",
+    "data",
+    "market",
+)
+
 
 def _review_fact_projection(
     review: Any,
@@ -109,10 +120,97 @@ def _review_fact_projection(
     return projected
 
 
+def _build_correction_contract(
+    *,
+    fingerprint: str,
+    selected: dict[str, Any],
+    dimension_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project posterior evidence into the existing V16 policy JSON boundary.
+
+    The default is deliberately non-executable.  A caller may provide an
+    already governed dimension fact, but it must explicitly prove that the
+    downstream effect is executable; source coverage alone never becomes a
+    production patch here.
+    """
+    refs: list[str] = []
+    for key in ("source_ref_id", "review_id", "trade_id", "position_id"):
+        value = str(selected.get(key) or "")
+        if value:
+            refs.append(f"{key}:{value}")
+    dimensions: dict[str, dict[str, Any]] = {}
+    for name in _POSTERIOR_DIMENSIONS:
+        dimensions[name] = {
+            "evidence_status": "missing",
+            "causal_state": "unobservable",
+            "action": "no_change",
+            "confidence": None,
+            "applicable_generation": None,
+            "applicable_regime": None,
+            "evidence_refs": [],
+            "expected_effect": None,
+            "rollback_plan": None,
+            "reason": "no_canonical_dimension_evidence",
+        }
+
+    selected_scope = str(selected.get("causal_scope") or "")
+    if selected_scope in {"entry", "supervisor"}:
+        dimension_name = "signal" if selected_scope == "entry" else "supervision"
+        dimensions[dimension_name].update(
+            {
+                "evidence_status": "observed",
+                "causal_state": "inconclusive",
+                "confidence": safe_float(selected.get("confidence")) or None,
+                "evidence_refs": list(refs),
+                "expected_effect": {
+                    "recommended_action": str(selected.get("recommended_action") or "")
+                },
+                "reason": "single_review_or_counterfactual_is_a_lead_only",
+            }
+        )
+
+    for name, raw in dict(dimension_evidence or {}).items():
+        if name not in dimensions or not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        evidence_status = str(item.get("evidence_status") or "missing")
+        causal_state = str(item.get("causal_state") or "unobservable")
+        requested_action = str(item.get("action") or "no_change")
+        executable_allowed = bool(item.get("executable_allowed"))
+        action = requested_action if executable_allowed else "no_change"
+        reason = str(item.get("reason") or "")
+        if requested_action != "no_change" and not executable_allowed:
+            reason = reason or "dimension_evidence_not_governed_for_execution"
+        dimensions[name] = {
+            "evidence_status": evidence_status,
+            "causal_state": causal_state,
+            "action": action,
+            "confidence": item.get("confidence"),
+            "applicable_generation": item.get("applicable_generation"),
+            "applicable_regime": item.get("applicable_regime"),
+            "evidence_refs": list(item.get("evidence_refs") or []),
+            "expected_effect": item.get("expected_effect"),
+            "rollback_plan": item.get("rollback_plan"),
+            "reason": reason or "dimension_fact_projected_without_direct_mutation",
+        }
+
+    policy_decision_id = "pd_" + hashlib.sha256(
+        f"{fingerprint}:v16_brain_policy_decision.v1".encode("utf-8")
+    ).hexdigest()[:24]
+    return {
+        "schema": "v16_brain_policy_decision.v1",
+        "policy_decision_id": policy_decision_id,
+        "posterior_fingerprint": str(fingerprint or ""),
+        "evidence_refs": refs,
+        "dimensions": dimensions,
+    }
+
+
 def build_posterior_arbitration(
     *,
     trade_reviews: list[dict[str, Any]] | None = None,
     counterfactuals: list[dict[str, Any]] | None = None,
+    dimension_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Select the strongest post-close conclusion by causal scope.
 
@@ -251,6 +349,11 @@ def build_posterior_arbitration(
             if supervisor else "trade_outcome_review_is_current_best_source" if entry_actionable else "no_actionable_posterior"
         ),
         "fingerprint": fingerprint,
+        "correction_contract": _build_correction_contract(
+            fingerprint=fingerprint,
+            selected=selected,
+            dimension_evidence=dimension_evidence,
+        ),
         "authority": {
             "v16_role": "judge_and_dispatch_only",
             "entry_agent": "autonomous_learning",

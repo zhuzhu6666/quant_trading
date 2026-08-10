@@ -298,14 +298,16 @@ class BaseBrokerBridge(ABC):
     @abstractmethod
     def market_buy(self, symbol: str, volume: float,
                    sl: float = 0.0, tp: float = 0.0,
-                   comment: str = "") -> OrderResult:
+                   comment: str = "", *, decision_id: str = "",
+                   trade_id: str = "", risk_verdict: dict | None = None) -> OrderResult:
         """市价买入"""
         ...
 
     @abstractmethod
     def market_sell(self, symbol: str, volume: float,
                     sl: float = 0.0, tp: float = 0.0,
-                    comment: str = "") -> OrderResult:
+                    comment: str = "", *, decision_id: str = "",
+                    trade_id: str = "", risk_verdict: dict | None = None) -> OrderResult:
         """市价卖出"""
         ...
 

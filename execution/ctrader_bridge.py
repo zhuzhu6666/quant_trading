@@ -1432,16 +1432,26 @@ class CTraderBridge(BaseBrokerBridge):
 
     def market_buy(self, symbol: str = "", volume: float = 0.0,
                    sl: float = 0.0, tp: float = 0.0,
-                   comment: str = "") -> OrderResult:
+                   comment: str = "", *, decision_id: str = "",
+                   trade_id: str = "", risk_verdict: dict | None = None) -> OrderResult:
         _sym = symbol or self.symbol
-        r = self._send_market_order(TRADE_SIDE["BUY"], volume, sl, tp, comment)
+        r = self._send_market_order(
+            TRADE_SIDE["BUY"], volume, sl, tp, comment,
+            decision_id=decision_id, trade_id=trade_id,
+            risk_verdict=risk_verdict,
+        )
         return _to_order_result(r)
 
     def market_sell(self, symbol: str = "", volume: float = 0.0,
                     sl: float = 0.0, tp: float = 0.0,
-                    comment: str = "") -> OrderResult:
+                    comment: str = "", *, decision_id: str = "",
+                    trade_id: str = "", risk_verdict: dict | None = None) -> OrderResult:
         _sym = symbol or self.symbol
-        r = self._send_market_order(TRADE_SIDE["SELL"], volume, sl, tp, comment)
+        r = self._send_market_order(
+            TRADE_SIDE["SELL"], volume, sl, tp, comment,
+            decision_id=decision_id, trade_id=trade_id,
+            risk_verdict=risk_verdict,
+        )
         return _to_order_result(r)
 
     def amend_position_sltp(self, position_id: int,
@@ -2619,12 +2629,20 @@ class CTraderBridge(BaseBrokerBridge):
         return {**self.execution_intent_recovery_status(), "recovered": recovered}
 
     def _send_market_order(self, side: int, volume: float, sl: float, tp: float,
-                           comment: str) -> CTraderOrderResult:
+                           comment: str, *, decision_id: str = "",
+                           trade_id: str = "",
+                           risk_verdict: dict | None = None) -> CTraderOrderResult:
         with self._broker_mutation_lock:
-            return self._send_market_order_serial(side, volume, sl, tp, comment)
+            return self._send_market_order_serial(
+                side, volume, sl, tp, comment,
+                decision_id=decision_id, trade_id=trade_id,
+                risk_verdict=risk_verdict,
+            )
 
     def _send_market_order_serial(self, side: int, volume: float, sl: float, tp: float,
-                                  comment: str) -> CTraderOrderResult:
+                                  comment: str, *, decision_id: str = "",
+                                  trade_id: str = "",
+                                  risk_verdict: dict | None = None) -> CTraderOrderResult:
         if not self._connected or not self._account_authed:
             return CTraderOrderResult(
                 success=False, outcome="rejected", error_code="not_connected",
@@ -2701,6 +2719,15 @@ class CTraderBridge(BaseBrokerBridge):
         pre_deals: dict[str, dict[str, Any]] = {}
         pre_deals_available = False
         store = None
+        if hasattr(risk_verdict, "to_dict"):
+            try:
+                risk_payload = dict(risk_verdict.to_dict())
+            except Exception:
+                risk_payload = dict(getattr(risk_verdict, "__dict__", {}) or {})
+        elif isinstance(risk_verdict, dict):
+            risk_payload = dict(risk_verdict)
+        else:
+            risk_payload = dict(getattr(risk_verdict, "__dict__", {}) or {})
         if self._execution_outcome_v2_enabled:
             try:
                 store = self._intent_store()
@@ -2744,6 +2771,8 @@ class CTraderBridge(BaseBrokerBridge):
                     requested_volume=float(req.volume),
                     target_stop_loss=float(sl or 0.0),
                     target_take_profit=float(tp or 0.0),
+                    decision_id=str(decision_id or ""),
+                    trade_id=str(trade_id or ""),
                     request={
                         "schema": "broker_execution_request.v2",
                         "symbol_id": int(self._symbol_id or 0),
@@ -2755,6 +2784,9 @@ class CTraderBridge(BaseBrokerBridge):
                         "deals_before": pre_deals,
                         "deals_before_available": pre_deals_available,
                         "pre_reconcile_id": pre_result.reconcile_id,
+                        "decision_id": str(decision_id or ""),
+                        "trade_id": str(trade_id or ""),
+                        "risk_verdict": risk_payload,
                     },
                 )
                 intent_id = prepared.intent_id
@@ -2788,6 +2820,12 @@ class CTraderBridge(BaseBrokerBridge):
                 try:
                     store.complete(
                         intent_id, outcome="rejected", broker_response=response,
+                        trade_id=str(
+                            trade_id
+                            or response.get("trade_id")
+                            or response.get("position_id")
+                            or ""
+                        ),
                         error={"error_code": broker_code, "description": response.get("description")},
                     )
                 except Exception as exc:
@@ -2881,6 +2919,14 @@ class CTraderBridge(BaseBrokerBridge):
             store.complete(
                 intent_id, outcome=outcome,
                 position_id=int(resolution.get("position_id") or 0),
+                trade_id=str(
+                    trade_id
+                    or resolution.get("trade_id")
+                    or response.get("trade_id")
+                    or resolution.get("position_id")
+                    or response.get("position_id")
+                    or ""
+                ),
                 broker_order_id=int(resolution.get("order_id") or 0),
                 broker_response={
                     **response, "resolution": resolution,

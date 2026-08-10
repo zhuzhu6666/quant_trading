@@ -630,6 +630,8 @@ class _OpenTradeCandidate:
     market_session: dict[str, Any]
     order_block: dict[str, Any]
     nursery_reservation_id: str = ""
+    open_decision_id: str = ""
+    execution_intent_id: str = ""
 
 _local_positions: dict[int, _LocalSLTP] = {}
 _local_positions_lock = threading.Lock()
@@ -2197,6 +2199,7 @@ def _run_position_supervision(
     tick: int,
     log,
     skip_position_ids: set[int] | None = None,
+    preaudited_skip_position_ids: set[int] | None = None,
     record_partial_close_execution=None,
     decision_ts: float | None = None,
     candidate_recorder=None,
@@ -2275,6 +2278,7 @@ def _run_position_supervision(
         log=log,
         runtime=runtime,
         skip_position_ids=skip_position_ids,
+        preaudited_skip_position_ids=preaudited_skip_position_ids,
         record_partial_close_execution=record_partial_close_execution,
         decision_ts=decision_ts,
         candidate_recorder=candidate_recorder,
@@ -2534,13 +2538,20 @@ def _lookup_entry_decision_id(position_id: int) -> str:
         row = _state_execute(
             conn,
             """
-            SELECT decision_id FROM decision_ledger
+            SELECT decision_id, action_json FROM decision_ledger
             WHERE position_id=? AND event_type='open'
             ORDER BY decision_ts DESC LIMIT 1
             """,
             (str(position_id),),
         ).fetchone()
-        return str(row["decision_id"]) if row and row["decision_id"] else ""
+        if not row:
+            return ""
+        child_decision_id = str(row["decision_id"] or "")
+        try:
+            action = json.loads(row["action_json"] or "{}")
+        except Exception:
+            action = {}
+        return str(action.get("parent_decision_id") or child_decision_id)
     finally:
         conn.close()
 
@@ -7957,6 +7968,8 @@ def _log_filled_open_ledger(
     learning_context: dict[str, Any],
     risk_verdict: Any = None,
     sizing_trace: dict[str, Any] | None = None,
+    parent_decision_id: str = "",
+    execution_intent_id: str = "",
 ) -> str:
     if not _LEDGER:
         return ""
@@ -7987,20 +8000,53 @@ def _log_filled_open_ledger(
             decision_ts_fallback=time.time(),
             event_ts=time.time(),
         )
+        lineage = {
+            "parent_decision_id": str(parent_decision_id or ""),
+            "execution_intent_id": str(execution_intent_id or ""),
+        }
+        decision_payload = ledger_payloads["composite_decision_payload"]
+        decision_payload["action_json"] = {
+            **dict(decision_payload.get("action_json") or {}),
+            **lineage,
+            "event_stage": "fill",
+        }
+        for payload_key in ("submitted_order_payload", "filled_order_payload"):
+            order_payload = ledger_payloads[payload_key]
+            order_payload["details"] = {
+                **dict(order_payload.get("details") or {}),
+                **lineage,
+            }
+        ledger_payloads["position_event_payload"]["details"] = {
+            **dict(ledger_payloads["position_event_payload"].get("details") or {}),
+            **lineage,
+        }
         entry_decision_id = _LEDGER.log_composite_decision(
             **ledger_payloads["composite_decision_payload"]
         )
-        _pos_entry_decisions[int(pid)] = entry_decision_id
+        lineage_decision_id = str(parent_decision_id or entry_decision_id or "")
+        for payload_key in ("submitted_order_payload", "filled_order_payload"):
+            order_payload = ledger_payloads[payload_key]
+            order_payload["details"] = {
+                **dict(order_payload.get("details") or {}),
+                "decision_id": lineage_decision_id,
+                "child_decision_id": str(entry_decision_id or ""),
+            }
+        ledger_payloads["position_event_payload"]["details"] = {
+            **dict(ledger_payloads["position_event_payload"].get("details") or {}),
+            "decision_id": lineage_decision_id,
+            "child_decision_id": str(entry_decision_id or ""),
+        }
+        _pos_entry_decisions[int(pid)] = lineage_decision_id
         _LEDGER.log_order_event(
-            decision_id=entry_decision_id,
+            decision_id=lineage_decision_id,
             **ledger_payloads["submitted_order_payload"],
         )
         _LEDGER.log_order_event(
-            decision_id=entry_decision_id,
+            decision_id=lineage_decision_id,
             **ledger_payloads["filled_order_payload"],
         )
         _LEDGER.log_position_event(**ledger_payloads["position_event_payload"])
-        return entry_decision_id
+        return lineage_decision_id
     except Exception as ledger_err:
         logger.debug("[live] ledger open persist failed for pos %s: %s", pid, ledger_err)
         return ""
@@ -8021,6 +8067,7 @@ def _upsert_filled_open_recovery(
     entry_decision_id: str,
     trade_attribution_payload: dict[str, Any],
     learning_context: dict[str, Any],
+    execution_intent_id: str = "",
 ) -> None:
     try:
         entry_protection_plan = _entry_protection_plan_payload(
@@ -8052,6 +8099,11 @@ def _upsert_filled_open_recovery(
             learning_context=learning_context,
             context_integrity=_RECOVERY_CONTEXT_FULL,
         )
+        recovery_payloads["meta"] = {
+            **dict(recovery_payloads.get("meta") or {}),
+            "parent_decision_id": str(entry_decision_id or ""),
+            "execution_intent_id": str(execution_intent_id or ""),
+        }
         _upsert_recovery_position_state(
             recovery_payloads["state_payload"],
             **recovery_payloads["state_kwargs"],
@@ -8098,6 +8150,8 @@ def _record_filled_position_open_context(
     sl_dist: float = 0.0,
     tp_dist: float = 0.0,
     bridge: Any = None,
+    parent_decision_id: str = "",
+    execution_intent_id: str = "",
 ) -> str:
     return _runtime_record_filled_open(
         FilledOpenRequest(
@@ -8125,6 +8179,8 @@ def _record_filled_position_open_context(
             sl_dist=sl_dist,
             tp_dist=tp_dist,
             bridge=bridge,
+            parent_decision_id=parent_decision_id,
+            execution_intent_id=execution_intent_id,
         ),
         runtime=_filled_open_processing_runtime(),
     )
@@ -8450,6 +8506,8 @@ def _log_amended_open_ledger(
     event_sizing_context: dict[str, Any],
     sizing_trace: dict[str, Any],
     learning_context: dict[str, Any],
+    parent_decision_id: str = "",
+    execution_intent_id: str = "",
 ) -> str:
     if not _LEDGER:
         return ""
@@ -8479,22 +8537,54 @@ def _log_amended_open_ledger(
             decision_ts_fallback=time.time(),
             event_ts=time.time(),
         )
+        decision_payload = open_ledger_payloads["decision"]
+        decision_payload["action_json"] = {
+            **dict(decision_payload.get("action_json") or {}),
+            "parent_decision_id": str(parent_decision_id or ""),
+            "execution_intent_id": str(execution_intent_id or ""),
+            "event_stage": "protection_confirmed",
+        }
+        for payload_key in ("submitted_order", "filled_order"):
+            order_payload = open_ledger_payloads[payload_key]
+            order_payload["details"] = {
+                **dict(order_payload.get("details") or {}),
+                "parent_decision_id": str(parent_decision_id or ""),
+                "execution_intent_id": str(execution_intent_id or ""),
+            }
+        open_ledger_payloads["position_event"]["details"] = {
+            **dict(open_ledger_payloads["position_event"].get("details") or {}),
+            "parent_decision_id": str(parent_decision_id or ""),
+            "execution_intent_id": str(execution_intent_id or ""),
+        }
         entry_decision_id = _LEDGER.log_composite_decision(
             **open_ledger_payloads["decision"]
         )
-        _pos_entry_decisions[int(pid)] = entry_decision_id
+        lineage_decision_id = str(parent_decision_id or entry_decision_id or "")
+        for payload_key in ("submitted_order", "filled_order"):
+            order_payload = open_ledger_payloads[payload_key]
+            order_payload["details"] = {
+                **dict(order_payload.get("details") or {}),
+                "decision_id": lineage_decision_id,
+                "child_decision_id": str(entry_decision_id or ""),
+            }
+        open_ledger_payloads["position_event"]["details"] = {
+            **dict(open_ledger_payloads["position_event"].get("details") or {}),
+            "decision_id": lineage_decision_id,
+            "child_decision_id": str(entry_decision_id or ""),
+        }
+        _pos_entry_decisions[int(pid)] = lineage_decision_id
         _LEDGER.log_order_event(
-            decision_id=entry_decision_id,
+            decision_id=lineage_decision_id,
             **open_ledger_payloads["submitted_order"],
         )
         _LEDGER.log_order_event(
-            decision_id=entry_decision_id,
+            decision_id=lineage_decision_id,
             **open_ledger_payloads["filled_order"],
         )
         _LEDGER.log_position_event(
             **open_ledger_payloads["position_event"],
         )
-        return entry_decision_id
+        return lineage_decision_id
     except Exception as _ledger_err:
         logger.debug("[live] ledger open failed for pos %s: %s", pid, _ledger_err)
         return ""
@@ -8518,6 +8608,7 @@ def _upsert_amended_open_recovery(
     event_sizing_context: dict[str, Any],
     sizing_trace: dict[str, Any],
     learning_context: dict[str, Any],
+    execution_intent_id: str = "",
 ) -> None:
     try:
         recovery_payloads = _lifecycle_build_filled_open_recovery_payloads(
@@ -8547,6 +8638,11 @@ def _upsert_amended_open_recovery(
             },
             context_integrity=_RECOVERY_CONTEXT_FULL,
         )
+        recovery_payloads["meta"] = {
+            **dict(recovery_payloads.get("meta") or {}),
+            "parent_decision_id": str(entry_decision_id or ""),
+            "execution_intent_id": str(execution_intent_id or ""),
+        }
         _upsert_recovery_position_state(
             recovery_payloads["state_payload"],
             **recovery_payloads["state_kwargs"],
@@ -8645,6 +8741,8 @@ def _record_amended_open_success_context(
     log,
     submit_started_at: float | None = None,
     fill_received_at: float | None = None,
+    parent_decision_id: str = "",
+    execution_intent_id: str = "",
 ) -> None:
     _runtime_record_amended_success(
         AmendedOpenSuccessRequest(
@@ -8677,6 +8775,8 @@ def _record_amended_open_success_context(
             log=log,
             submit_started_at=submit_started_at,
             fill_received_at=fill_received_at,
+            parent_decision_id=parent_decision_id,
+            execution_intent_id=execution_intent_id,
         ),
         runtime=_amended_open_success_processing_runtime(),
     )
@@ -8740,6 +8840,8 @@ def _record_amend_failure_after_fill(
     ledger_debug_message: str = "[live] ledger amend failed event failed for pos %s: %s",
     failure_log: str = "",
     log=None,
+    parent_decision_id: str = "",
+    execution_intent_id: str = "",
 ) -> None:
     _runtime_record_amend_failure(
         AmendFailureRequest(
@@ -8774,6 +8876,8 @@ def _record_amend_failure_after_fill(
             ledger_debug_message=ledger_debug_message,
             failure_log=failure_log,
             log=log,
+            parent_decision_id=parent_decision_id,
+            execution_intent_id=execution_intent_id,
         ),
         runtime=_amend_failure_processing_runtime(),
     )
@@ -9326,11 +9430,209 @@ def _record_open_trade_admission_blocked(
         )
 
 
-def _submit_open_trade_order(bridge: Any, composite: Any, volume: float):
+def _serialize_open_risk_verdict(verdict: Any) -> dict[str, Any]:
+    if verdict is None:
+        return {}
+    if hasattr(verdict, "to_dict"):
+        try:
+            payload = verdict.to_dict()
+            return dict(payload) if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+    if isinstance(verdict, dict):
+        return dict(verdict)
+    payload = getattr(verdict, "__dict__", {})
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _open_runtime_factor_lineage() -> dict[str, Any]:
+    try:
+        from backend.services.runtime_factor_selection_projection import (
+            RuntimeFactorSelectionProjectionService,
+        )
+
+        projection = RuntimeFactorSelectionProjectionService().latest(
+            max_age_seconds=900.0
+        )
+    except Exception as exc:
+        return {
+            "schema_version": "runtime_factor_selection.v1",
+            "status": "unavailable",
+            "error": f"{type(exc).__name__}:{exc}",
+            "live_generation_id": _current_generation_id(),
+        }
+    status = str(projection.get("status") or "unknown")
+    return {
+        "schema_version": "runtime_factor_selection.v1",
+        "status": status,
+        "source": str(projection.get("source") or ""),
+        "selection_fingerprint": str(
+            projection.get("selection_fingerprint") or ""
+        ),
+        "config_version": int(projection.get("config_version") or 0),
+        "config_hash": str(projection.get("config_hash") or ""),
+        "live_generation_id": str(
+            projection.get("live_generation_id") or _current_generation_id()
+        ),
+        "published_at": float(projection.get("published_at") or 0.0),
+        "age_seconds": float(projection.get("age_seconds") or 0.0),
+    }
+
+
+def _open_causal_timing(*, decision_ts: float, intent_prepared_at: float) -> dict[str, Any]:
+    """Describe the known hot-path timestamps without inferring later success."""
+    def known(ts: float) -> dict[str, Any]:
+        return {"ts": float(ts or 0.0) or None, "status": "known", "reason": ""}
+
+    def unknown(reason: str) -> dict[str, Any]:
+        return {"ts": None, "status": "unknown", "reason": str(reason or "unknown")}
+
+    return {
+        "schema_version": "causal_timing.v1",
+        "stages": {
+            "decision": known(decision_ts),
+            "intent_prepared": known(intent_prepared_at),
+            "intent_submitted": unknown("broker_submission_pending"),
+            "broker_ack": unknown("broker_ack_pending"),
+            "order_position": unknown("broker_identity_pending"),
+            "supervisor": unknown("position_supervision_pending"),
+            "review": unknown("trade_review_pending"),
+            "learning": unknown("learning_application_pending"),
+            "effect": unknown("learning_effect_not_observed"),
+        },
+        "path": {
+            "hot": [
+                "factor_selection",
+                "open_intent",
+                "risk_policy",
+                "broker_execution_intent",
+                "protection",
+                "supervision",
+            ],
+            "warm": ["trade_review", "feature_provider", "posterior", "candidate_review"],
+            "cold": ["v16_command", "governance_coordinator", "mutation_effect"],
+        },
+    }
+
+
+def _prepare_open_trade_intent(
+    *,
+    bridge: Any,
+    broker: str,
+    cfg: Any,
+    bar: dict[str, Any],
+    tick: int,
+    account: dict[str, Any],
+    positions: list[Any],
+    composite: Any,
+    gate_result: Any,
+    candidate: _OpenTradeCandidate,
+    current_price: float,
+    signal_decision_id: str = "",
+) -> str:
+    """Persist the root decision immediately before broker submission."""
+    if not _LEDGER:
+        raise RuntimeError("decision_ledger_unavailable")
+    decision_ts = float((bar or {}).get("time") or time.time())
+    intent_prepared_at = time.time()
+    risk_payload = _serialize_open_risk_verdict(candidate.risk_verdict)
+    audit_payload = dict(risk_payload.get("audit_payload") or {})
+    runtime_binding = _open_runtime_factor_lineage()
+    factor_set_version = str(
+        runtime_binding.get("selection_fingerprint") or ""
+    )
+    config_version = int(runtime_binding.get("config_version") or 0)
+    action_json = {
+        "schema_version": "open_intent.v1",
+        "tick": int(tick or 0),
+        "decision_ts": decision_ts,
+        "signal_decision_id": str(signal_decision_id or ""),
+        "runtime_binding": runtime_binding,
+        "factor_set_version": factor_set_version,
+        "config_version": config_version,
+        "config_hash": str(runtime_binding.get("config_hash") or ""),
+        "policy_version": str(getattr(cfg, "policy_version", "") or ""),
+        "evidence_refs": [
+            ref
+            for ref in (
+                f"signal_decision:{signal_decision_id}" if signal_decision_id else "",
+                f"factor_selection:{factor_set_version}" if factor_set_version else "",
+            )
+            if ref
+        ],
+        "causal_timing": _open_causal_timing(
+            decision_ts=decision_ts,
+            intent_prepared_at=intent_prepared_at,
+        ),
+        "requested_direction": int(getattr(composite, "direction", 0) or 0),
+        "current_price": float(current_price or 0.0),
+        "risk_verdict": risk_payload,
+        "sizing": {
+            "base_volume": float(candidate.base_volume or 0.0),
+            "requested_volume": float(candidate.volume or 0.0),
+            "event_multiplier": float(candidate.event_multiplier or 0.0),
+            "sizing_trace": dict(candidate.sizing_trace or {}),
+        },
+        "learning_context_quality": dict(
+            audit_payload.get("open_learning_context_quality") or {}
+        ),
+        "execution_intent_created": False,
+    }
+    return _LEDGER.log_composite_decision(
+        event_type="open_intent",
+        composite=composite,
+        gate_result=gate_result,
+        symbol="XAUUSD+",
+        timeframe=str(getattr(cfg, "timeframe", "") or ""),
+        decision_ts=decision_ts,
+        portfolio_state={
+            "balance": (account or {}).get("balance", 0),
+            "equity": (account or {}).get("equity", 0),
+            "n_positions": len(positions or []),
+            "session_pnl": _live_state_get("session_pnl", 0),
+        },
+        risk_state=_risk_state_with_verdict(candidate.risk_verdict),
+        policy_version=str(getattr(cfg, "policy_version", "") or ""),
+        factor_set_version=factor_set_version,
+        action_reason="open_intent",
+        action_json={
+            **action_json,
+            "config_version": config_version,
+            "config_hash": str(runtime_binding.get("config_hash") or ""),
+        },
+    )
+
+
+def _submit_open_trade_order(
+    bridge: Any,
+    composite: Any,
+    volume: float,
+    *,
+    decision_id: str = "",
+    trade_id: str = "",
+    risk_verdict: Any = None,
+):
+    risk_payload = _serialize_open_risk_verdict(risk_verdict)
     if composite.direction == 1:
-        return bridge.market_buy(volume=volume, sl=0.0, tp=0.0, comment="quant-v4")
+        return bridge.market_buy(
+            volume=volume,
+            sl=0.0,
+            tp=0.0,
+            comment="quant-v4",
+            decision_id=str(decision_id or ""),
+            trade_id=str(trade_id or ""),
+            risk_verdict=risk_payload,
+        )
     if composite.direction == -1:
-        return bridge.market_sell(volume=volume, sl=0.0, tp=0.0, comment="quant-v4")
+        return bridge.market_sell(
+            volume=volume,
+            sl=0.0,
+            tp=0.0,
+            comment="quant-v4",
+            decision_id=str(decision_id or ""),
+            trade_id=str(trade_id or ""),
+            risk_verdict=risk_payload,
+        )
     return None
 
 
@@ -9346,6 +9648,8 @@ def _persist_pending_entry_protection_plan(
     tp_price: float,
     entry_protection_plan: dict[str, Any],
     tick: int,
+    entry_decision_id: str = "",
+    execution_intent_id: str = "",
 ) -> None:
     try:
         _upsert_recovery_position_state(
@@ -9355,7 +9659,9 @@ def _persist_pending_entry_protection_plan(
                 "direction": composite.direction,
                 "open_price": float(fill_price or current_price),
                 "volume": float(actual_api_volume),
-                "entry_decision_id": _lookup_entry_decision_id(int(position_id)),
+                "entry_decision_id": str(
+                    entry_decision_id or _lookup_entry_decision_id(int(position_id))
+                ),
             },
             broker=broker,
             strategy_name=str(_loop_strategy_name or "factor_v4"),
@@ -9365,6 +9671,8 @@ def _persist_pending_entry_protection_plan(
                 "sl": round(sl_price, 2),
                 "tp": round(tp_price, 2),
                 "entry_protection_plan": entry_protection_plan,
+                "entry_decision_id": str(entry_decision_id or ""),
+                "execution_intent_id": str(execution_intent_id or ""),
             },
         )
     except Exception as _protection_plan_err:
@@ -9463,6 +9771,7 @@ def _record_open_trade_order_failure(
     current_price: float,
     tick: int,
     log,
+    decision_id: str = "",
 ) -> None:
     log(
         f"tick {tick}: v4 {candidate.direction_name} ORDER FAILED: "
@@ -9488,12 +9797,23 @@ def _record_open_trade_order_failure(
             comment=str(getattr(result, "comment", "") or ""),
             decision_ts_fallback=time.time(),
         )
-        failed_decision_id = _LEDGER.log_composite_decision(
-            **order_failed_payloads["decision"]
-        )
+        failed_decision_id = str(decision_id or "")
+        if not failed_decision_id:
+            failed_decision_id = _LEDGER.log_composite_decision(
+                **order_failed_payloads["decision"]
+            )
+        order_event = dict(order_failed_payloads["order_event"])
+        order_event["details"] = {
+            **dict(order_event.get("details") or {}),
+            "decision_id": failed_decision_id,
+            "execution_intent_id": str(
+                getattr(result, "intent_id", "") or ""
+            ),
+            "parent_decision_id": str(decision_id or ""),
+        }
         _LEDGER.log_order_event(
             decision_id=failed_decision_id,
-            **order_failed_payloads["order_event"],
+            **order_event,
         )
     except Exception as _ledger_err:
         logger.debug("[live] ledger order failed event failed: %s", _ledger_err)
@@ -9517,9 +9837,21 @@ def _handle_open_trade_order_success(
     log,
     submit_started_at: float | None = None,
     fill_received_at: float | None = None,
+    decision_id: str = "",
 ) -> None:
     fill_price = _tick_resolve_order_fill_price(result, current_price=current_price)
     position_id = _tick_resolve_order_position_id(result, positions_before=positions)
+    try:
+        candidate.open_decision_id = str(
+            decision_id or getattr(candidate, "open_decision_id", "") or ""
+        )
+        candidate.execution_intent_id = str(
+            getattr(result, "intent_id", "")
+            or getattr(candidate, "execution_intent_id", "")
+            or ""
+        )
+    except Exception:
+        pass
     if position_id <= 0:
         failure = _persist_safety_fail_closed(
             blockers=("confirmed_open_position_identity_missing",),
@@ -9603,6 +9935,10 @@ def _handle_open_trade_order_success(
         sl_price=sl_price,
         tp_price=tp_price,
         entry_protection_plan=entry_protection_plan,
+        entry_decision_id=str(decision_id or ""),
+        execution_intent_id=str(
+            getattr(result, "intent_id", "") or ""
+        ),
         tick=tick,
     )
     _attach_open_trade_protection(
@@ -9649,6 +9985,7 @@ def _submit_open_trade_candidate(
     candidate: _OpenTradeCandidate,
     current_price: float,
     log,
+    signal_decision_id: str = "",
     stop_requested=None,
 ) -> bool:
     return _runtime_submit_open_trade_candidate(
@@ -9665,6 +10002,7 @@ def _submit_open_trade_candidate(
         candidate=candidate,
         current_price=current_price,
         log=log,
+        signal_decision_id=signal_decision_id,
         stop_requested=stop_requested,
         runtime=OpenSubmissionRuntime(
             probe_final_admission=_probe_final_open_admission,
@@ -9672,6 +10010,15 @@ def _submit_open_trade_candidate(
             open_trade_draining=_open_trade_draining,
             persist_safety_fail_closed=_persist_safety_fail_closed,
             submit_order=_submit_open_trade_order,
+            # Test/dry-run bridges without a broker mutation method do not
+            # cross the production boundary; a real bridge must have the
+            # intent callback so ledger unavailability remains fail-closed.
+            prepare_open_intent=(
+                _prepare_open_trade_intent
+                if callable(getattr(bridge, "market_buy", None))
+                or callable(getattr(bridge, "market_sell", None))
+                else None
+            ),
             handle_order_success=_handle_open_trade_order_success,
             record_order_failure=_record_open_trade_order_failure,
             reconcile_positions=_explicit_position_reconcile,
@@ -9890,6 +10237,7 @@ def _run_open_trade_pipeline(
     send: bool,
     tick: int,
     log,
+    signal_decision_id: str = "",
     stop_requested=None,
 ):
     if not (composite.direction != 0 and gate_result.passed and send):
@@ -9980,6 +10328,7 @@ def _run_open_trade_pipeline(
         candidate=candidate,
         current_price=current_price,
         log=log,
+        signal_decision_id=signal_decision_id,
         stop_requested=stop_requested,
     )
     if not admitted:
@@ -10002,6 +10351,7 @@ def _remember_or_clear_pending_open_retry(
             "factor_values": dict(factor_values),
             "composite": composite,
             "gate_result": signal_gate_result,
+            "signal_decision_id": str(pipeline.get("last_signal_decision_id") or ""),
         }
         return
     pipeline.pop("pending_open_retry", None)
@@ -10093,6 +10443,7 @@ def _retry_pending_open_trade(
         send=_should_send_orders(broker),
         tick=tick,
         log=log,
+        signal_decision_id=str(pending.get("signal_decision_id") or ""),
         stop_requested=stop_requested,
     )
     if bool(getattr(result, "retryable_watchdog_freshness", False)):
@@ -10134,6 +10485,7 @@ def _process_tick_existing_decision_bar(
     )
 
     current_price = float(last_bar["close"])
+    signal_decision_id = ""
     if bridge is not None and hasattr(bridge, "get_spot_quote"):
         price_guard = _tick_guard_current_price_with_spot_quote(
             current_price=current_price,
@@ -10366,7 +10718,7 @@ def _process_tick_factor_pipeline(
     current_price = float(last_bar["close"])
     if _LEDGER and composite.direction != 0:
         try:
-            _LEDGER.log_composite_decision(
+            signal_decision_id = _LEDGER.log_composite_decision(
                 event_type="signal",
                 composite=composite,
                 gate_result=gate_result,
@@ -10383,8 +10735,12 @@ def _process_tick_factor_pipeline(
                 action_reason="signal_detected",
                 action_json={"tick": tick},
             )
+            pipeline["last_signal_decision_id"] = str(signal_decision_id or "")
         except Exception as _ledger_err:
             logger.debug("[live] ledger signal failed: %s", _ledger_err)
+            pipeline["last_signal_decision_id"] = ""
+    else:
+        pipeline["last_signal_decision_id"] = ""
 
     # ── 平仓检测: 对比 _prev_position_ids 找出被 broker 关闭的仓位 ──
     current_pids = _tick_collect_position_ids(pos)
@@ -10498,6 +10854,7 @@ def _process_tick_factor_pipeline(
         send=send,
         tick=tick,
         log=log,
+        signal_decision_id=signal_decision_id,
         stop_requested=stop_requested,
     )
     _remember_or_clear_pending_open_retry(

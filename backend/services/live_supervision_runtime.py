@@ -409,6 +409,7 @@ def run_position_supervision(
     log: Any,
     runtime: LiveSupervisionRuntime,
     skip_position_ids: set[int] | None = None,
+    preaudited_skip_position_ids: set[int] | None = None,
     record_partial_close_execution: Any = None,
     decision_ts: float | None = None,
     candidate_recorder: Any = None,
@@ -418,6 +419,7 @@ def run_position_supervision(
 
     handled: set[int] = set()
     skipped = set(skip_position_ids or set())
+    preaudited_skips = set(preaudited_skip_position_ids or set())
     cycle_ts = float(decision_ts if decision_ts is not None else time.time())
     if not positions or bridge is None:
         return handled
@@ -431,6 +433,30 @@ def run_position_supervision(
             continue
         if position_id in skipped:
             handled.add(position_id)
+            if position_id not in preaudited_skips:
+                runtime.log_trace(
+                    position=position,
+                    verdict={
+                        "action": "hold",
+                        "requested_action": "hold",
+                        "recommended_action": "hold",
+                        "effective_action": "hold",
+                        "summary_reason": "position_already_handled_by_higher_priority_stage",
+                        "execution_class": "superseded",
+                        "decision_ts": cycle_ts,
+                    },
+                    cfg=cfg,
+                    tick=tick,
+                    stage="supervisor_superseded",
+                    outcome="superseded",
+                    execution_status="superseded",
+                    execution_reason="position_already_handled_by_higher_priority_stage",
+                    execution={
+                        "superseded": True,
+                        "reason_code": "position_already_handled_by_higher_priority_stage",
+                    },
+                    acct=account,
+                )
             continue
         try:
             if planned_verdicts is not None and position_id in planned_verdicts:
@@ -457,6 +483,25 @@ def run_position_supervision(
                 "[live] supervisor evaluation unavailable for pos %s; other safety stages continue: %s",
                 position_id,
                 exc,
+            )
+            runtime.log_trace(
+                position=position,
+                verdict={
+                    "action": "hold",
+                    "requested_action": "hold",
+                    "recommended_action": "hold",
+                    "effective_action": "hold",
+                    "summary_reason": "position_supervisor_evaluation_failed",
+                    "decision_ts": cycle_ts,
+                },
+                cfg=cfg,
+                tick=tick,
+                stage="evaluation_failed",
+                outcome="failed",
+                execution_status="failed",
+                execution_reason="position_supervisor_evaluation_failed",
+                execution={"error": f"{type(exc).__name__}: {exc}"},
+                acct=account,
             )
             continue
 
@@ -535,27 +580,29 @@ def run_position_supervision(
                     direction=int(position.get("direction", 0) or 0),
                     controls=controls,
                 )
-                if not runtime.noop_fingerprint_seen(position_id, fingerprint):
-                    runtime.log_trace(
-                        position=position,
-                        verdict=verdict,
-                        cfg=cfg,
-                        tick=tick,
-                        stage="no_op_suppressed",
-                        outcome="skipped",
-                        execution_status="no_op",
-                        execution_reason=str(
-                            reduce_execution_plan.get("reason")
-                            or "reduce_not_tradeable"
-                        ),
-                        execution={
-                            **reduce_execution_plan,
-                            "action_fingerprint": fingerprint,
-                            "requested_action": "reduce",
-                            "applied_controls": controls,
-                        },
-                        acct=account,
-                    )
+                noop_seen = runtime.noop_fingerprint_seen(position_id, fingerprint)
+                runtime.log_trace(
+                    position=position,
+                    verdict=verdict,
+                    cfg=cfg,
+                    tick=tick,
+                    stage="no_op_suppressed",
+                    outcome="skipped",
+                    execution_status="no_op",
+                    execution_reason=str(
+                        reduce_execution_plan.get("reason")
+                        or "reduce_not_tradeable"
+                    ),
+                    execution={
+                        **reduce_execution_plan,
+                        "action_fingerprint": fingerprint,
+                        "requested_action": "reduce",
+                        "applied_controls": controls,
+                        "duplicate_audit": bool(noop_seen),
+                    },
+                    acct=account,
+                )
+                if not noop_seen:
                     runtime.remember_noop(
                         position,
                         verdict,
@@ -775,23 +822,25 @@ def run_position_supervision(
                     direction=int(position.get("direction", 0) or 0),
                     controls=controls,
                 )
-                if not runtime.noop_fingerprint_seen(position_id, fingerprint):
-                    runtime.log_trace(
-                        position=position,
-                        verdict=verdict,
-                        cfg=cfg,
-                        tick=tick,
-                        stage="no_op_suppressed",
-                        outcome="skipped",
-                        execution_status="no_op",
-                        execution_reason="target_already_applied",
-                        execution={
-                            "action_fingerprint": fingerprint,
-                            "sl_plan": sl_plan,
-                            "applied_controls": controls,
-                        },
-                        acct=account,
-                    )
+                noop_seen = runtime.noop_fingerprint_seen(position_id, fingerprint)
+                runtime.log_trace(
+                    position=position,
+                    verdict=verdict,
+                    cfg=cfg,
+                    tick=tick,
+                    stage="no_op_suppressed",
+                    outcome="skipped",
+                    execution_status="no_op",
+                    execution_reason="target_already_applied",
+                    execution={
+                        "action_fingerprint": fingerprint,
+                        "sl_plan": sl_plan,
+                        "applied_controls": controls,
+                        "duplicate_audit": bool(noop_seen),
+                    },
+                    acct=account,
+                )
+                if not noop_seen:
                     runtime.remember_noop(
                         position,
                         verdict,

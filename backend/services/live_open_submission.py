@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import Any, Callable
 
 
@@ -11,7 +12,7 @@ class OpenSubmissionRuntime:
     admission_lock: Any
     open_trade_draining: Callable[[Any], bool]
     persist_safety_fail_closed: Callable[..., Any]
-    submit_order: Callable[[Any, Any, float], Any]
+    submit_order: Callable[..., Any]
     handle_order_success: Callable[..., Any]
     record_order_failure: Callable[..., Any]
     reconcile_positions: Callable[[Any], Any]
@@ -19,6 +20,43 @@ class OpenSubmissionRuntime:
     append_safety_outbox: Callable[..., Any]
     finalize_nursery_reservation: Callable[[str, bool], Any]
     now: Callable[[], float]
+    prepare_open_intent: Callable[..., str] | None = None
+
+
+def _submit_order_with_lineage(
+    submit_order: Callable[..., Any],
+    bridge: Any,
+    composite: Any,
+    volume: float,
+    *,
+    decision_id: str,
+    trade_id: str,
+    risk_verdict: Any,
+) -> Any:
+    """Call the context-aware callback without double-submitting legacy stubs."""
+    supports_context = True
+    try:
+        parameters = list(inspect.signature(submit_order).parameters.values())
+        supports_context = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        ) or {
+            "decision_id",
+            "trade_id",
+            "risk_verdict",
+        }.issubset({parameter.name for parameter in parameters})
+    except (TypeError, ValueError):
+        pass
+    if supports_context:
+        return submit_order(
+            bridge,
+            composite,
+            volume,
+            decision_id=decision_id,
+            trade_id=trade_id,
+            risk_verdict=risk_verdict,
+        )
+    return submit_order(bridge, composite, volume)
 
 
 def submit_open_trade_candidate(
@@ -37,6 +75,7 @@ def submit_open_trade_candidate(
     current_price: float,
     log: Callable[[str], Any],
     runtime: OpenSubmissionRuntime,
+    signal_decision_id: str = "",
     stop_requested: Any = None,
 ) -> bool:
     """Submit once under admission ownership, then finish post-fill linearly."""
@@ -80,15 +119,54 @@ def submit_open_trade_candidate(
             )
             finalize_nursery(False)
             return False
+        intent_prepare_attempted = runtime.prepare_open_intent is not None
+        decision_id = ""
         try:
+            if runtime.prepare_open_intent is not None:
+                decision_id = str(
+                    runtime.prepare_open_intent(
+                        bridge=bridge,
+                        broker=broker,
+                        cfg=cfg,
+                        bar=bar,
+                        tick=tick,
+                        account=account,
+                        positions=positions,
+                        composite=composite,
+                        gate_result=gate_result,
+                        candidate=candidate,
+                        current_price=current_price,
+                        signal_decision_id=signal_decision_id,
+                    )
+                    or ""
+                )
+                if not decision_id:
+                    raise RuntimeError("open_intent_not_persisted")
+                try:
+                    candidate.open_decision_id = decision_id
+                except Exception:
+                    pass
             submit_started_at = runtime.now()
-            result = runtime.submit_order(
+            result = _submit_order_with_lineage(
+                runtime.submit_order,
                 bridge,
                 composite,
                 float(candidate.volume),
+                decision_id=decision_id,
+                trade_id="",
+                risk_verdict=getattr(candidate, "risk_verdict", None),
             )
             fill_received_at = runtime.now()
         except Exception as exc:
+            if intent_prepare_attempted and not decision_id:
+                runtime.persist_safety_fail_closed(
+                    blockers=("open_intent_persist_failed",),
+                    source="open_intent",
+                    error=f"{type(exc).__name__}:{exc}",
+                )
+                finalize_nursery(False)
+                log(f"tick {tick}: v4 open SKIP (open_intent_persist_failed: {exc})")
+                return True
             log(
                 f"tick {tick}: v4 {candidate.direction_name} "
                 f"order exception: {exc}"
@@ -121,6 +199,7 @@ def submit_open_trade_candidate(
                 log=log,
                 submit_started_at=submit_started_at,
                 fill_received_at=fill_received_at,
+                decision_id=decision_id,
             )
         elif result is not None:
             finalize_nursery(False)
@@ -136,6 +215,7 @@ def submit_open_trade_candidate(
                 current_price=current_price,
                 tick=tick,
                 log=log,
+                decision_id=decision_id,
             )
         else:
             finalize_nursery(False)

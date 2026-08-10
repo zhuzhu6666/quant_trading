@@ -1462,6 +1462,130 @@ class LearningFeatureProvider:
             samples = [s for s in samples if s["quality"]["model_ready"]]
         return samples
 
+    def factor_evidence_summary(
+        self,
+        factor_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Summarize persisted factor evidence using the learning contract.
+
+        This is intentionally a warm, read-only projection.  Matured,
+        uncontaminated, governance-eligible counts come from the same
+        ``autonomous_learning_sample`` eligibility fields populated by this
+        provider's evidence-contract pipeline; decision snapshots remain
+        observations and are never promoted to mature-trade evidence.
+        """
+        ids = list(dict.fromkeys(str(item) for item in factor_ids if str(item)))
+        if not ids:
+            return {}
+        result = {
+            factor_id: {
+                "decision_observations": 0,
+                "factor_linked_trade_reviews": 0,
+                "governance_eligible_mature": 0,
+                "contaminated_or_ineligible": 0,
+                "effects_observed": 0,
+                "status": "available",
+            }
+            for factor_id in ids
+        }
+        try:
+            with self._conn() as conn:
+                p = self._p()
+                placeholders = ",".join(p for _ in ids)
+                rows = conn.execute(
+                    f"""
+                    SELECT factor, COUNT(*) AS n
+                    FROM decision_factor_snapshot
+                    WHERE factor IN ({placeholders})
+                    GROUP BY factor
+                    """,
+                    tuple(ids),
+                ).fetchall()
+                for row in rows:
+                    factor_id = str(row["factor"] or "")
+                    if factor_id in result:
+                        result[factor_id]["decision_observations"] = int(row["n"] or 0)
+
+                rows = conn.execute(
+                    f"""
+                    SELECT f.factor, COUNT(DISTINCT f.review_id) AS n
+                    FROM factor_contribution_review f
+                    JOIN trade_outcome_review r ON r.review_id=f.review_id
+                    WHERE f.factor IN ({placeholders})
+                    GROUP BY f.factor
+                    """,
+                    tuple(ids),
+                ).fetchall()
+                for row in rows:
+                    factor_id = str(row["factor"] or "")
+                    if factor_id in result:
+                        result[factor_id]["factor_linked_trade_reviews"] = int(row["n"] or 0)
+
+                rows = conn.execute(
+                    f"""
+                    SELECT factor,
+                           COUNT(DISTINCT CASE
+                               WHEN label_status='matured'
+                                AND COALESCE(governance_eligible, 0)=1
+                                AND COALESCE(system_contaminated, 0)=0
+                               THEN sample_id END) AS mature_n,
+                           COUNT(DISTINCT CASE
+                               WHEN COALESCE(governance_eligible, 0)=0
+                                 OR COALESCE(system_contaminated, 0)=1
+                               THEN sample_id END) AS ineligible_n
+                    FROM (
+                        SELECT s.sample_id, s.label_status,
+                               s.governance_eligible, s.system_contaminated,
+                               d.factor AS factor
+                        FROM autonomous_learning_sample s
+                        JOIN decision_factor_snapshot d
+                          ON d.decision_id=s.decision_id
+                        WHERE d.factor IN ({placeholders})
+                        UNION
+                        SELECT s.sample_id, s.label_status,
+                               s.governance_eligible, s.system_contaminated,
+                               f.factor AS factor
+                        FROM autonomous_learning_sample s
+                        JOIN trade_outcome_review r
+                          ON r.review_id=s.source_id
+                         AND s.source_table='trade_outcome_review'
+                        JOIN factor_contribution_review f
+                          ON f.review_id=r.review_id
+                        WHERE f.factor IN ({placeholders})
+                    ) linked
+                    GROUP BY factor
+                    """,
+                    tuple(ids) + tuple(ids),
+                ).fetchall()
+                for row in rows:
+                    factor_id = str(row["factor"] or "")
+                    if factor_id in result:
+                        result[factor_id]["governance_eligible_mature"] = int(row["mature_n"] or 0)
+                        result[factor_id]["contaminated_or_ineligible"] = int(row["ineligible_n"] or 0)
+
+                rows = conn.execute(
+                    f"""
+                    SELECT scope_key AS factor, COUNT(*) AS n
+                    FROM learning_application_effect
+                    WHERE scope_type='factor' AND scope_key IN ({placeholders})
+                    GROUP BY scope_key
+                    """,
+                    tuple(ids),
+                ).fetchall()
+                for row in rows:
+                    factor_id = str(row["factor"] or "")
+                    if factor_id in result:
+                        result[factor_id]["effects_observed"] = int(row["n"] or 0)
+        except Exception:
+            for item in result.values():
+                item["decision_observations"] = None
+                item["factor_linked_trade_reviews"] = None
+                item["governance_eligible_mature"] = None
+                item["contaminated_or_ineligible"] = None
+                item["effects_observed"] = None
+                item["status"] = "unavailable"
+        return result
+
     def build_decision_samples(
         self,
         *,

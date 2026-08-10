@@ -187,6 +187,9 @@ def run_position_protection_cycle(
             tick=tick,
             log=log,
             skip_position_ids=set(timeout_handled) | set(entry_repair_applied),
+            preaudited_skip_position_ids=(
+                set(timeout_handled) | set(entry_repair_applied)
+            ),
             decision_ts=cycle_ts,
             candidate_recorder=lambda candidate: record_selected(
                 candidate,

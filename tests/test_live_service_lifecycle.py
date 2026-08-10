@@ -3388,12 +3388,12 @@ def test_supervisor_tighten_noop_is_deduplicated_before_risk_policy(monkeypatch)
             log=lambda msg: None,
         ) == {706}
 
-    assert len(traces) == 1
-    assert traces[0]["stage"] == "no_op_suppressed"
-    assert traces[0]["outcome"] == "skipped"
-    assert traces[0]["execution_status"] == "no_op"
-    assert traces[0]["execution"]["execution_class"] == "skipped"
-    assert traces[0]["execution"]["is_real_execution"] is False
+    assert len(traces) == 2
+    assert all(trace["stage"] == "no_op_suppressed" for trace in traces)
+    assert all(trace["outcome"] == "skipped" for trace in traces)
+    assert all(trace["execution_status"] == "no_op" for trace in traces)
+    assert all(trace["execution"]["execution_class"] == "skipped" for trace in traces)
+    assert all(trace["execution"]["is_real_execution"] is False for trace in traces)
 
 
 def test_demo_adaptive_supervisor_action_is_observed_without_risk_or_broker_mutation(monkeypatch):
@@ -3619,13 +3619,19 @@ def test_supervisor_minimum_position_reduce_is_deduplicated_before_policy(monkey
             log=lambda _msg: None,
         ) == {707}
 
-    assert len(traces) == 1
-    assert traces[0]["stage"] == "no_op_suppressed"
-    assert traces[0]["execution_reason"] == "risk_evidence_not_strong_enough"
-    assert traces[0]["execution"]["effective_action"] == "hold"
-    assert traces[0]["execution"]["requested_action"] == "reduce"
-    assert traces[0]["execution"]["reason"] == "risk_evidence_not_strong_enough"
-    assert traces[0]["execution"]["is_real_execution"] is False
+    assert len(traces) == 2
+    assert all(trace["stage"] == "no_op_suppressed" for trace in traces)
+    assert all(
+        trace["execution_reason"] == "risk_evidence_not_strong_enough"
+        for trace in traces
+    )
+    assert all(trace["execution"]["effective_action"] == "hold" for trace in traces)
+    assert all(trace["execution"]["requested_action"] == "reduce" for trace in traces)
+    assert all(
+        trace["execution"]["reason"] == "risk_evidence_not_strong_enough"
+        for trace in traces
+    )
+    assert all(trace["execution"]["is_real_execution"] is False for trace in traces)
 
 
 def test_supervisor_dynamic_tpsl_sends_extended_take_profit(monkeypatch):

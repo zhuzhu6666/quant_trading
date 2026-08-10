@@ -287,6 +287,34 @@ def execute_supervisor_tighten_action(
 
     planned_sl = float(tighten_plan.get("planned_sl") or 0.0)
     if planned_sl <= 0:
+        result_payloads = build_tighten_result_payloads(
+            result="failed",
+            action="tighten",
+            verdict=verdict,
+            risk_action=risk_action,
+            risk_verdict=risk_verdict,
+            decision_id=decision_id,
+            controls=controls,
+            sl_plan={
+                **dict(sl_plan or {}),
+                "allowed": False,
+                "reason": "planned_stop_missing",
+            },
+            failure_reason="planned_stop_missing",
+        )
+        log_supervisor_position_event(
+            position=position,
+            event_type=result_payloads["position_event_type"],
+            details=result_payloads["position_event_details"],
+        )
+        log_supervisor_trace(
+            position=position,
+            verdict=verdict,
+            cfg=cfg,
+            tick=tick,
+            **result_payloads["trace_fields"],
+            acct=acct,
+        )
         return
     amend_res = bridge.amend_position_sltp(pid, sl=planned_sl, tp=planned_tp)
     if getattr(amend_res, "success", False):

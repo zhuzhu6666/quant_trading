@@ -2664,13 +2664,14 @@ def build_supervisor_trace_ledger_payload(
         execution_class = "shadow"
     elif str(outcome or "") == "blocked" or str(execution_status or "") == "blocked":
         execution_class = "blocked"
+    elif str(outcome or "") == "superseded" or str(execution_status or "") == "superseded":
+        execution_class = "superseded"
     elif str(outcome or "") in {"skipped", "hold"} or str(execution_status or "") in {
         "cooldown",
         "invalid_action",
         "not_required",
         "no_op",
         "skipped",
-        "superseded",
     }:
         execution_class = "skipped"
     elif str(outcome or "") == "failed" or str(execution_status or "") in {"exception", "failed"}:

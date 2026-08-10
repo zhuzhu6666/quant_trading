@@ -31,6 +31,8 @@ class FilledOpenRequest:
     sl_dist: float = 0.0
     tp_dist: float = 0.0
     bridge: Any = None
+    parent_decision_id: str = ""
+    execution_intent_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,8 @@ def record_filled_position_open_context(
                 learning_context=ledger_learning_context,
                 risk_verdict=request.risk_verdict,
                 sizing_trace=request.sizing_trace,
+                parent_decision_id=request.parent_decision_id,
+                execution_intent_id=request.execution_intent_id,
             )
         except Exception as exc:
             runtime.debug(
@@ -148,6 +152,7 @@ def record_filled_position_open_context(
             tp_price=request.tp_price,
             composite=request.composite,
             entry_decision_id=entry_decision_id,
+            execution_intent_id=request.execution_intent_id,
             trade_attribution_payload=trade_attribution_payload,
             learning_context=recovery_learning_context,
         )
@@ -191,6 +196,8 @@ class AmendedOpenSuccessRequest:
     log: Callable[[str], Any]
     submit_started_at: float | None = None
     fill_received_at: float | None = None
+    parent_decision_id: str = ""
+    execution_intent_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -282,6 +289,8 @@ def record_amended_open_success_context(
             event_sizing_context=request.event_sizing_context,
             sizing_trace=request.sizing_trace,
             learning_context=learning_context,
+            parent_decision_id=request.parent_decision_id,
+            execution_intent_id=request.execution_intent_id,
         )
         runtime.upsert_recovery(
             broker=request.broker,
@@ -295,6 +304,7 @@ def record_amended_open_success_context(
             tp_price=request.tp_price,
             composite=request.composite,
             entry_decision_id=entry_decision_id,
+            execution_intent_id=request.execution_intent_id,
             entry_protection_plan=request.entry_protection_plan,
             trade_attr=trade_attribution,
             event_sizing_context=request.event_sizing_context,
@@ -356,6 +366,8 @@ class AmendFailureRequest:
     )
     failure_log: str = ""
     log: Callable[[str], Any] | None = None
+    parent_decision_id: str = ""
+    execution_intent_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -429,6 +441,8 @@ def record_amend_failure_after_fill(
             sl_dist=request.sl_dist,
             tp_dist=request.tp_dist,
             bridge=request.bridge,
+            parent_decision_id=request.parent_decision_id,
+            execution_intent_id=request.execution_intent_id,
         )
     )
     runtime.update_plan_status(
@@ -460,12 +474,28 @@ def record_amend_failure_after_fill(
             error=request.ledger_error,
             decision_ts_fallback=runtime.now(),
         )
+        decision_payload = dict(payloads["decision"])
+        decision_payload["action_json"] = {
+            **dict(decision_payload.get("action_json") or {}),
+            "parent_decision_id": str(request.parent_decision_id or ""),
+            "execution_intent_id": str(request.execution_intent_id or ""),
+            "event_stage": "protection_failed",
+        }
         decision_id = runtime.log_composite_decision(
-            **payloads["decision"]
+            **decision_payload
         )
+        lineage_decision_id = str(request.parent_decision_id or decision_id or "")
+        order_event = dict(payloads["order_event"])
+        order_event["details"] = {
+            **dict(order_event.get("details") or {}),
+            "decision_id": lineage_decision_id,
+            "child_decision_id": str(decision_id or ""),
+            "parent_decision_id": str(request.parent_decision_id or ""),
+            "execution_intent_id": str(request.execution_intent_id or ""),
+        }
         runtime.log_order_event(
-            decision_id=decision_id,
-            **payloads["order_event"],
+            decision_id=lineage_decision_id,
+            **order_event,
         )
     except Exception as exc:
         runtime.debug(

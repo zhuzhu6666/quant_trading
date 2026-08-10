@@ -960,6 +960,10 @@ class BrainMediumImpactGovernanceService:
         mapped = self._map_action(evaluation=evaluation, plan=plan)
         comparison = dict(evaluation.get("comparison") or {})
         arbitration = dict(comparison.get("posterior_arbitration") or {})
+        correction_contract = dict(arbitration.get("correction_contract") or {})
+        parent_policy_decision_id = str(
+            correction_contract.get("policy_decision_id") or ""
+        )
         selected_scope = str(arbitration.get("selected_scope") or "")
         scope_causal = {
             "factor_weight": "factor",
@@ -983,14 +987,23 @@ class BrainMediumImpactGovernanceService:
                 "comparison_verdict": str(evaluation.get("comparison_verdict") or ""),
                 "risk_verdict": {}, "decision_policy": {},
                 "rollback_plan": self._rollback_plan(mapped),
-                "posterior_refs": evaluation.get("evidence_refs") or {},
+                "posterior_refs": {
+                    **dict(evaluation.get("evidence_refs") or {}),
+                    "correction_contract": correction_contract,
+                    "parent_policy_decision_id": parent_policy_decision_id,
+                },
                 "autonomy_guard": autonomy_guard, "boundary": self.boundary(),
                 "created_at": now, "updated_at": time.time(),
             }
         evidence_score = safe_float(evaluation.get("coverage_score"))
         critic_verdict = str(plan.get("critic_verdict") or "")
         comparison_verdict = str(evaluation.get("comparison_verdict") or "")
-        decision_policy = self._decision_policy_preview(mapped)
+        decision_policy = self._decision_policy_preview(
+            {
+                **mapped,
+                "parent_policy_decision_id": parent_policy_decision_id,
+            }
+        )
         risk_verdict = RiskPolicyService.shared().evaluate(mapped["risk_action"], {
             "required_mode": "autonomous_governance", "session": {"drawdown_pct": 0.0},
             "evidence": {"brain_eval": evaluation.get("evidence_refs") or {},
@@ -1026,8 +1039,13 @@ class BrainMediumImpactGovernanceService:
                 confidence=max(0.1, min(0.95, evidence_score)), evidence_score=evidence_score,
                 risk_class="medium", max_impact="medium_impact",
                 expected_effect=comparison,
-                evidence_refs={"plan_id": evaluation.get("plan_id", ""), "eval_id": evaluation.get("eval_id", ""),
-                               "posterior": evaluation.get("evidence_refs") or {}},
+                evidence_refs={
+                    "plan_id": evaluation.get("plan_id", ""),
+                    "eval_id": evaluation.get("eval_id", ""),
+                    "posterior": evaluation.get("evidence_refs") or {},
+                    "correction_contract": correction_contract,
+                    "parent_policy_decision_id": parent_policy_decision_id,
+                },
                 counter_evidence_refs=dict(plan.get("counter_evidence_refs") or {}),
                 risk_verdict=risk_verdict, decision_policy=decision_policy,
                 rollback_plan=self._rollback_plan(mapped),
@@ -1036,6 +1054,8 @@ class BrainMediumImpactGovernanceService:
                          "plan_id": evaluation.get("plan_id", ""), "eval_id": evaluation.get("eval_id", ""),
                          "critic_verdict": critic_verdict, "comparison_verdict": comparison_verdict,
                          "mapped_action": mapped, "posterior_arbitration": arbitration,
+                         "correction_contract": correction_contract,
+                         "parent_policy_decision_id": parent_policy_decision_id,
                          "delegation": {**delegation, "target_agent": target_agent,
                                         "command_owner": "v16_brain",
                                         "execution_owner": target_agent},
@@ -1053,7 +1073,11 @@ class BrainMediumImpactGovernanceService:
                 "suggestion_id": "", "evidence_score": evidence_score, "critic_verdict": critic_verdict,
                 "comparison_verdict": comparison_verdict, "risk_verdict": risk_verdict,
                 "decision_policy": decision_policy, "rollback_plan": self._rollback_plan(mapped),
-                "posterior_refs": evaluation.get("evidence_refs") or {},
+                "posterior_refs": {
+                    **dict(evaluation.get("evidence_refs") or {}),
+                    "correction_contract": correction_contract,
+                    "parent_policy_decision_id": parent_policy_decision_id,
+                },
                 "autonomy_guard": autonomy_guard, "boundary": self.boundary(),
                 "created_at": now, "updated_at": time.time()}
 
@@ -1072,7 +1096,7 @@ class BrainMediumImpactGovernanceService:
         return f"brain_candidate_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:16]}"
 
     @staticmethod
-    def _map_action(*, evaluation: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
+    def _map_action(*, evaluation: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
         scope = str(evaluation.get("scope_type") or (plan.get("scope") or {}).get("scope_type") or "")
         if scope == "parameter_template":
             return {"scope_type": "parameter_template", "scope_key": "online_light:default",
@@ -1097,21 +1121,137 @@ class BrainMediumImpactGovernanceService:
                     "policy_action": "switch_position_supervisor_template",
                     "risk_action": "switch_position_supervisor_template",
                     "target_template_id": target}
-        return {"scope_type": "factor", "scope_key": "alpha_weight_policy",
-                "policy_action": "update_weight", "risk_action": "update_weight", "target_template_id": ""}
+        plan_scope = dict(plan.get("scope") or {})
+        arbitration = dict((evaluation.get("comparison") or {}).get("posterior_arbitration") or {})
+        selected = dict(arbitration.get("selected_conclusion") or {})
+        correction_contract = dict(arbitration.get("correction_contract") or {})
+        factor_dimension = dict(
+            (correction_contract.get("dimensions") or {}).get("factor") or {}
+        )
+        factor_id = str(
+            evaluation.get("factor_id")
+            or plan_scope.get("factor_id")
+            or selected.get("factor_id")
+            or factor_dimension.get("factor_id")
+            or ""
+        ).strip()
+        if not factor_id:
+            candidate_scope_key = str(plan_scope.get("scope_key") or "").strip()
+            if candidate_scope_key and candidate_scope_key != "alpha_weight_policy":
+                factor_id = candidate_scope_key
+        factor_binding = dict(
+            selected.get("factor_binding")
+            or selected.get("runtime_binding")
+            or plan_scope.get("factor_binding")
+            or factor_dimension.get("factor_binding")
+            or {}
+        )
+        expected_effect = dict(factor_dimension.get("expected_effect") or {})
+        return {
+            "scope_type": "factor",
+            "scope_key": factor_id or "alpha_weight_policy",
+            "factor_id": factor_id,
+            "generation": factor_binding.get("generation")
+            or factor_binding.get("live_generation_id")
+            or factor_dimension.get("applicable_generation"),
+            "selection_fingerprint": factor_binding.get("selection_fingerprint")
+            or factor_dimension.get("selection_fingerprint"),
+            "artifact_hash": factor_binding.get("artifact_hash")
+            or factor_dimension.get("artifact_hash"),
+            "evidence_refs": factor_binding.get("evidence_refs")
+            or selected.get("evidence_refs")
+            or factor_dimension.get("evidence_refs")
+            or {},
+            "target_weight": factor_binding.get("target_weight")
+            or factor_dimension.get("target_weight")
+            or expected_effect.get("target_weight"),
+            "current_weight": factor_binding.get("current_weight")
+            or factor_dimension.get("current_weight"),
+            "causal_state": factor_dimension.get("causal_state"),
+            "executable_allowed": bool(factor_dimension.get("executable_allowed")),
+            "policy_action": "update_weight",
+            "risk_action": "update_weight",
+            "target_template_id": "",
+        }
 
     @staticmethod
-    def _decision_policy_preview(mapped: dict[str, str]) -> dict[str, Any]:
+    def _decision_policy_preview(mapped: dict[str, Any]) -> dict[str, Any]:
         if mapped["policy_action"] != "update_weight":
             return {"schema_version": "decision_policy_preview.v1", "required": False}
+        factor_id = str(mapped.get("factor_id") or "").strip()
+        if not factor_id:
+            return {
+                "schema_version": "decision_policy_preview.v1",
+                "required": True,
+                "factor_id": "",
+                "action": "no_change",
+                "reason": "factor_id_unavailable_for_weight_patch",
+                "executable_patch": False,
+                "review_candidate": True,
+                "applied": False,
+                "parent_policy_decision_id": str(
+                    mapped.get("parent_policy_decision_id") or ""
+                ),
+            }
+        binding_fields = {
+            "generation": mapped.get("generation") or mapped.get("live_generation_id"),
+            "selection_fingerprint": mapped.get("selection_fingerprint"),
+            "artifact_hash": mapped.get("artifact_hash"),
+            "evidence_refs": mapped.get("evidence_refs"),
+            "target_weight": mapped.get("target_weight"),
+        }
+        causal_state = str(mapped.get("causal_state") or "").lower()
+        if (
+            not all(binding_fields.values())
+            or causal_state not in {"confirmed", "probable"}
+            or not bool(mapped.get("executable_allowed"))
+        ):
+            return {
+                "schema_version": "decision_policy_preview.v1",
+                "required": True,
+                "factor_id": factor_id,
+                "action": "no_change",
+                "reason": "factor_binding_or_governed_evidence_unavailable",
+                "executable_patch": False,
+                "review_candidate": True,
+                "applied": False,
+                "parent_policy_decision_id": str(
+                    mapped.get("parent_policy_decision_id") or ""
+                ),
+            }
+        try:
+            target_weight = float(binding_fields["target_weight"])
+        except (TypeError, ValueError):
+            target_weight = 0.0
+        if target_weight <= 0.0:
+            return {
+                "schema_version": "decision_policy_preview.v1",
+                "required": True,
+                "factor_id": factor_id,
+                "action": "no_change",
+                "reason": "governed_target_weight_unavailable",
+                "executable_patch": False,
+                "review_candidate": True,
+                "applied": False,
+            }
         decisions = DecisionPolicy().decide(
-            awe_patches={mapped["scope_key"]: {"weight": 0.1, "reason": "v16_p4_downweight_candidate"}},
-            weight_policy_weights={mapped["scope_key"]: 0.1}, shadow_perfs={},
-            factor_configs={mapped["scope_key"]: {"enabled": True, "role": "alpha"}},
-            current_weights={mapped["scope_key"]: 0.2})
-        decision = decisions.get(mapped["scope_key"])
-        return {"schema_version": "decision_policy_preview.v1", "required": True,
-                "decision": decision.to_api() if decision else {}, "applied": False}
+            awe_patches={factor_id: {"weight": target_weight, "reason": "v16_governed_factor_candidate"}},
+            weight_policy_weights={factor_id: target_weight}, shadow_perfs={},
+            factor_configs={factor_id: {"enabled": True, "role": "alpha"}},
+            current_weights={factor_id: float(mapped.get("current_weight") or 0.0)})
+        decision = decisions.get(factor_id)
+        return {
+            "schema_version": "decision_policy_preview.v1",
+            "required": True,
+            "factor_id": factor_id,
+            "decision": decision.to_api() if decision else {},
+            "executable_patch": False,
+            "review_candidate": True,
+            "applied": False,
+            "parent_policy_decision_id": str(
+                mapped.get("parent_policy_decision_id") or ""
+            ),
+        }
 
     @staticmethod
     def _rollback_plan(mapped: dict[str, str]) -> dict[str, Any]:

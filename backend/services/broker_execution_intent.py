@@ -47,6 +47,8 @@ class BrokerExecutionIntent:
     side: str
     requested_volume: float
     status: str
+    decision_id: str = ""
+    trade_id: str = ""
     requested_price: float = 0.0
     target_stop_loss: float = 0.0
     target_take_profit: float = 0.0
@@ -139,7 +141,8 @@ class BrokerExecutionIntentStore:
                        position_id, broker_order_id, request_json,
                        broker_response_json, error_json, prepared_at,
                        submitted_at, completed_at, updated_at,
-                       requested_price, target_stop_loss, target_take_profit
+                       requested_price, target_stop_loss, target_take_profit,
+                       decision_id, trade_id
                 FROM broker_execution_intent
                 WHERE idempotency_key=%s
                 """,
@@ -207,6 +210,7 @@ class BrokerExecutionIntentStore:
         *,
         outcome: str,
         position_id: int | str = "",
+        trade_id: int | str = "",
         broker_order_id: int | str = "",
         broker_response: Mapping[str, Any] | None = None,
         error: Mapping[str, Any] | None = None,
@@ -221,13 +225,16 @@ class BrokerExecutionIntentStore:
             conn.execute(
                 """
                 UPDATE broker_execution_intent
-                SET status=%s, position_id=%s, broker_order_id=%s,
+                SET status=%s, position_id=%s,
+                    trade_id=COALESCE(NULLIF(%s, ''), trade_id),
+                    broker_order_id=%s,
                     broker_response_json=%s, error_json=%s,
                     completed_at=%s, updated_at=%s
                 WHERE intent_id=%s AND status IN ('prepared', 'submitting', 'unknown')
                 """,
                 (
-                    status, str(position_id or ""), str(broker_order_id or ""),
+                    status, str(position_id or ""), str(trade_id or ""),
+                    str(broker_order_id or ""),
                     _json(dict(broker_response or {})), _json(dict(error or {})),
                     completed_at, now, str(intent_id),
                 ),
@@ -272,7 +279,8 @@ class BrokerExecutionIntentStore:
                        position_id, broker_order_id, request_json,
                        broker_response_json, error_json, prepared_at,
                        submitted_at, completed_at, updated_at,
-                       requested_price, target_stop_loss, target_take_profit
+                       requested_price, target_stop_loss, target_take_profit,
+                       decision_id, trade_id
                 FROM broker_execution_intent
                 WHERE {' AND '.join(clauses)}
                 ORDER BY prepared_at ASC
@@ -318,7 +326,8 @@ class BrokerExecutionIntentStore:
                    position_id, broker_order_id, request_json,
                    broker_response_json, error_json, prepared_at,
                    submitted_at, completed_at, updated_at,
-                   requested_price, target_stop_loss, target_take_profit
+                   requested_price, target_stop_loss, target_take_profit,
+                   decision_id, trade_id
             FROM broker_execution_intent
             WHERE intent_id=%s
             """,
@@ -338,6 +347,8 @@ class BrokerExecutionIntentStore:
         return BrokerExecutionIntent(
             intent_id=str(_row_value(row, "intent_id", 0, "") or ""),
             idempotency_key=str(_row_value(row, "idempotency_key", 1, "") or ""),
+            decision_id=str(_row_value(row, "decision_id", 22, "") or ""),
+            trade_id=str(_row_value(row, "trade_id", 23, "") or ""),
             broker=str(_row_value(row, "broker", 2, "") or ""),
             account_id=str(_row_value(row, "account_id", 3, "") or ""),
             symbol=str(_row_value(row, "symbol", 4, "") or ""),
@@ -377,6 +388,9 @@ def execution_intent_recovery_status(
         "unresolved": [
             {
                 "intent_id": item.intent_id,
+                "decision_id": item.decision_id,
+                "trade_id": item.trade_id,
+                "timing": _intent_causal_timing(item),
                 "status": item.status,
                 "attempt_count": item.attempt_count,
                 "account_id": item.account_id,
@@ -389,4 +403,62 @@ def execution_intent_recovery_status(
             }
             for item in items
         ],
+    }
+
+
+def _intent_causal_timing(item: BrokerExecutionIntent) -> dict[str, Any]:
+    """Expose intent timestamps without treating unresolved work as success."""
+    def stage(ts: float, *, status: str, reason: str = "") -> dict[str, Any]:
+        return {
+            "ts": float(ts or 0.0) or None,
+            "status": str(status),
+            "reason": str(reason or ""),
+        }
+
+    submitted_status = "known" if float(item.submitted_at or 0.0) > 0.0 else "unknown"
+    completed_status = "known" if float(item.completed_at or 0.0) > 0.0 else "unknown"
+    return {
+        "schema_version": "causal_timing.v1",
+        "stages": {
+            "decision": stage(
+                0.0,
+                status="unknown" if not item.decision_id else "partial",
+                reason=("decision_timestamp_not_carried_on_intent" if item.decision_id
+                        else "decision_id_missing"),
+            ),
+            "intent_prepared": stage(
+                item.prepared_at,
+                status="known" if item.prepared_at > 0.0 else "unknown",
+                reason="" if item.prepared_at > 0.0 else "prepared_timestamp_missing",
+            ),
+            "intent_submitted": stage(
+                item.submitted_at,
+                status=submitted_status,
+                reason="" if submitted_status == "known" else "intent_not_submitted_or_timestamp_missing",
+            ),
+            "broker_ack": stage(
+                item.completed_at,
+                status=completed_status,
+                reason=(
+                    ""
+                    if completed_status == "known"
+                    else "broker_outcome_unknown"
+                    if item.status == "unknown"
+                    else "broker_ack_timestamp_missing"
+                ),
+            ),
+            "order_position": stage(
+                item.completed_at,
+                status="known" if item.position_id or item.trade_id else "unknown",
+                reason=(
+                    ""
+                    if item.position_id or item.trade_id
+                    else "order_or_position_identity_missing"
+                ),
+            ),
+            "supervisor": stage(0.0, status="unknown", reason="position_supervision_pending"),
+            "review": stage(0.0, status="unknown", reason="trade_review_pending"),
+            "learning": stage(0.0, status="unknown", reason="learning_application_pending"),
+            "effect": stage(0.0, status="unknown", reason="learning_effect_not_observed"),
+        },
     }
