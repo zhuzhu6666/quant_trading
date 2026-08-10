@@ -306,15 +306,42 @@ export function BlueprintOverview({
   chainHealth: Record<string, unknown>;
   liveAutonomy: Record<string, unknown>;
 }) {
-  const checks = pickArray(blueprint, ["checks"]);
-  const blockers = pickArray(blueprint, ["blockers"]);
-  const deviationGuard = asRecord(pick(blueprint, ["deviation_guard"]));
-  const boundary = asRecord(pick(blueprint, ["boundary"]));
+  const controlPlane = asRecord(
+    pick(blueprint, ["control_plane_boundaries"]),
+  );
+  const blockerCount = pickNumber(blueprint, ["blocker_count"], 0);
   const chainChecks = pickArray(chainHealth, ["checks"]);
+  const boundaryChecks = [
+    {
+      component: "agent_authority",
+      label: "权限未扩大",
+      ok: pickBoolean(controlPlane, ["does_not_expand_agent_authority"], false),
+    },
+    {
+      component: "risk_policy",
+      label: "风控未绕过",
+      ok: pickBoolean(controlPlane, ["does_not_bypass_risk_policy"], false),
+    },
+    {
+      component: "execution_path",
+      label: "唯一执行路径",
+      ok: pickBoolean(
+        controlPlane,
+        ["does_not_create_second_execution_path"],
+        false,
+      ),
+    },
+    {
+      component: "read_only_projection",
+      label: "Readiness 只读",
+      ok: pickBoolean(controlPlane, ["read_only"], false)
+        && !pickBoolean(controlPlane, ["affects_trading"], true),
+    },
+  ];
   return (
     <>
       <div className="v16-blueprint-summary">
-        <CompactMetric label="大纲" value={displayValue(pickString(blueprint, ["status"], ""))} detail={`阻断 ${blockers.length}`} tone={pickBoolean(blueprint, ["ok"], false) ? "ok" : "warn"} />
+        <CompactMetric label="大纲" value={displayValue(pickString(blueprint, ["status"], ""))} detail={`阻断 ${formatDecimal(blockerCount, 0)}`} tone={pickBoolean(blueprint, ["ok"], false) ? "ok" : "warn"} />
         <CompactMetric label="智能体" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={`${countOf(pick(agentAuthority, ["unknown_sources"]))} 未知 / ${countOf(pick(agentAuthority, ["contract_violations"]))} 违规`} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
         <CompactMetric label="提案上下文" value={displayValue(pickString(proposalContext, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(proposalContext, ["status"], ""))} />
         <CompactMetric label="候选上下文" value={displayValue(pickString(candidateContext, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(candidateContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(candidateContext, ["status"], ""))} />
@@ -326,34 +353,33 @@ export function BlueprintOverview({
         <ChainStep icon={UsersRound} label="智能体" status={pickString(agentAuthority, ["status"], "")} detail={`已登记 ${formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)}`} />
         <ChainStep icon={Route} label="提案" status={pickString(proposalContext, ["status"], "")} detail={`缺失 ${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)}`} />
         <ChainStep icon={ListChecks} label="候选" status={pickString(candidateReview, ["status"], "")} detail={`可交接 ${formatDecimal(pickNumber(candidateReview, ["candidate_bridge_count"], 0), 0)}`} />
-        <ChainStep icon={ShieldCheck} label="风险与决策检查" status={pickString(blueprint, ["status"], "")} detail={pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false) ? "保留风控与决策边界" : "决策检查需关注"} />
-        <ChainStep icon={Activity} label="执行" status={pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false) ? "ok" : "attention"} detail={pickString(liveAutonomy, ["autonomy_mode"], "manual")} />
+        <ChainStep icon={ShieldCheck} label="风险与决策检查" status={pickString(blueprint, ["status"], "")} detail={boundaryChecks[1].ok ? "保留风控与决策边界" : "决策检查需关注"} />
+        <ChainStep icon={Activity} label="执行" status={boundaryChecks[2].ok ? "ok" : "attention"} detail={pickString(liveAutonomy, ["autonomy_mode"], "manual")} />
         <ChainStep icon={BookOpenCheck} label="记忆" status={pickString(chainHealth, ["status"], "")} detail={`经验 ${formatDecimal(pickNumber(chainHealth, ["trade_feedback_summary.lesson_count"], 0), 0)}`} />
       </div>
 
       <div className="v16-blueprint-checks">
-        {checks.slice(0, 9).map((raw, index) => {
-          const item = asRecord(raw);
-          const component = pickString(item, ["component"], `check_${index}`);
-          const ok = pickBoolean(item, ["ok"], false);
-          return (
-            <div className="v16-check-row" key={`${component}-${index}`}>
-              {ok ? <CheckCircle2 size={16} aria-hidden="true" /> : <AlertTriangle size={16} aria-hidden="true" />}
-              <div>
-                <strong>{displayValue(component)}</strong>
-                <span>{displayValue(pickString(item, ["status"], ok ? "ok" : "attention"))}</span>
-              </div>
-              <StatusPill status={ok ? "正常" : "需关注"} tone={ok ? "ok" : "warn"} />
+        {boundaryChecks.map((item) => (
+          <div className="v16-check-row" key={item.component}>
+            {item.ok ? <CheckCircle2 size={16} aria-hidden="true" /> : <AlertTriangle size={16} aria-hidden="true" />}
+            <div>
+              <strong>{item.label}</strong>
+              <span>{item.ok ? "ok" : "attention"}</span>
             </div>
-          );
-        })}
+            <StatusPill status={item.ok ? "正常" : "需关注"} tone={item.ok ? "ok" : "warn"} />
+          </div>
+        ))}
       </div>
 
       <div className="v16-boundary v16-boundary-tight">
-        <Field label="权限未扩大" value={pickBoolean(deviationGuard, ["does_not_expand_agent_authority"], false) ? "是" : "否"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_expand_agent_authority"], false))} />
-        <Field label="风控未绕过" value={pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false) ? "是" : "否"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_bypass_risk_policy"], false))} />
-        <Field label="唯一执行路径" value={pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false) ? "是" : "否"} tone={boolTone(pickBoolean(deviationGuard, ["does_not_create_second_execution_path"], false))} />
-        <Field label="只读状态已对齐" value={pickBoolean(boundary, ["read_only_alignment_status"], false) ? "是" : "否"} tone={boolTone(pickBoolean(boundary, ["read_only_alignment_status"], false))} />
+        {boundaryChecks.map((item) => (
+          <Field
+            key={item.component}
+            label={item.label}
+            value={item.ok ? "是" : "否"}
+            tone={boolTone(item.ok)}
+          />
+        ))}
       </div>
     </>
   );

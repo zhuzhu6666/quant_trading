@@ -683,7 +683,10 @@ class ReplayHarnessService:
                         """
                         SELECT factor, source, raw_value, normalized_value, direction,
                                base_weight, policy_weight, shadow_score, health_score,
-                               gated, gated_reason, contribution_score
+                               gated, gated_reason, contribution_score,
+                               generation, artifact_hash, definition_fingerprint,
+                               runtime_selection_fingerprint, config_hash,
+                               lineage_status
                         FROM decision_factor_snapshot
                         WHERE decision_id = ?
                         ORDER BY ABS(contribution_score) DESC, factor ASC

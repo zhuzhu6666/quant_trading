@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -80,7 +81,14 @@ def risk_kelly_sizing(
         return {"volume": default_vol, "trace": trace}
 
     kelly_payload = dict(kelly_data or {})
-    kelly_f = kelly_payload.get("kelly_fraction", 0) or 0
+    kelly_raw = kelly_payload.get("kelly_fraction", 0)
+    try:
+        kelly_f = float(kelly_raw or 0.0)
+    except (TypeError, ValueError):
+        kelly_f = 0.0
+    kelly_value_valid = math.isfinite(kelly_f)
+    if not kelly_value_valid:
+        kelly_f = 0.0
     min_closed_trades = int(getattr(cfg, "kelly_min_closed_trades", 0) or 0)
     canary_max_api = float(getattr(cfg, "kelly_canary_max_api_volume", 0.0) or 0.0)
     closed_trades_raw = kelly_payload.get("closed_trades", kelly_payload.get("trades"))
@@ -102,60 +110,6 @@ def risk_kelly_sizing(
     autonomy_mode = str(getattr(cfg, "autonomy_mode", "") or "")
     demo_exploration_mode = autonomy_mode in {"demo_nursery", "demo_autonomous"}
     demo_nursery_exploration = autonomy_mode == "demo_nursery"
-    # Demo must be able to bootstrap its own Kelly sample set.  A positive but
-    # tiny Kelly edge before the minimum sample count is reached can otherwise
-    # floor below the broker minimum forever, so use the same bounded minimum
-    # exploration lot as the non-positive-Kelly bootstrap path.
-    if demo_exploration_mode and (kelly_f <= 0 or kelly_canary_active):
-        exploration_prefix = "demo_nursery" if demo_nursery_exploration else "demo_autonomous"
-        exploration_reason = (
-            "insufficient_closed_trades" if kelly_canary_active else "non_positive_kelly"
-        )
-        if max_order_api > 0 and default_vol > max_order_api:
-            trace.update(
-                {
-                    "reason": f"{exploration_prefix}_min_volume_exceeds_cap",
-                    "kelly_fraction": float(kelly_f or 0.0),
-                    "raw_api_volume": default_vol,
-                    "base_api_volume": 0.0,
-                    "final_api_volume": 0.0,
-                    "blocked_reason": f"{exploration_prefix}_min_volume_exceeds_cap",
-                    "demo_exploration": True,
-                    "demo_nursery_exploration": demo_nursery_exploration,
-                    "exploration_reason": exploration_reason,
-                    "exploration_api_volume": default_vol,
-                }
-            )
-            return {"volume": 0.0, "trace": trace}
-        trace.update(
-            {
-                "reason": f"{exploration_prefix}_min_volume_exploration",
-                "kelly_fraction": float(kelly_f or 0.0),
-                "raw_api_volume": default_vol,
-                "base_api_volume": default_vol,
-                "final_api_volume": default_vol,
-                "blocked_reason": "",
-                "demo_exploration": True,
-                "demo_nursery_exploration": demo_nursery_exploration,
-                "exploration_reason": exploration_reason,
-                "exploration_api_volume": default_vol,
-            }
-        )
-        return {"volume": default_vol, "trace": trace}
-
-    if kelly_f <= 0:
-        trace.update(
-            {
-                "reason": "kelly_fraction_non_positive",
-                "kelly_fraction": float(kelly_f or 0.0),
-                "raw_api_volume": 0.0,
-                "base_api_volume": 0.0,
-                "final_api_volume": 0.0,
-                "blocked_reason": "kelly_fraction_non_positive",
-            }
-        )
-        return {"volume": 0.0, "trace": trace}
-
     equity = float((account or {}).get("equity", 0) or 0)
     if equity <= 0:
         trace.update(
@@ -171,15 +125,121 @@ def risk_kelly_sizing(
         )
         return {"volume": 0.0, "trace": trace}
 
+    try:
+        entry_price = float(current_price)
+        stop_price = float(sl_price)
+    except (TypeError, ValueError):
+        entry_price = 0.0
+        stop_price = 0.0
+    protective_stop_valid = (
+        math.isfinite(entry_price)
+        and math.isfinite(stop_price)
+        and entry_price > 0.0
+        and stop_price > 0.0
+        and int(direction or 0) in {-1, 1}
+        and (
+            (int(direction) > 0 and stop_price < entry_price)
+            or (int(direction) < 0 and stop_price > entry_price)
+        )
+    )
+    if not protective_stop_valid:
+        trace.update(
+            {
+                "reason": "invalid_protective_stop",
+                "equity": equity,
+                "entry_price": entry_price,
+                "stop_price": stop_price,
+                "protective_stop_valid": False,
+                "kelly_fraction": float(kelly_f or 0.0),
+                "raw_api_volume": 0.0,
+                "base_api_volume": 0.0,
+                "final_api_volume": 0.0,
+                "blocked_reason": "invalid_protective_stop",
+                "exploration_eligible": False,
+            }
+        )
+        return {"volume": 0.0, "trace": trace}
+
     kelly_mult = getattr(cfg, "kelly_fraction", 0.5)
-    f_star = kelly_f * kelly_mult
     risk_pct_raw = float(getattr(cfg, "kelly_risk_per_trade_pct", 0.01) or 0.0)
     risk_pct = risk_pct_raw / 100.0 if risk_pct_raw > 1.0 else risk_pct_raw
-    effective_risk_fraction = min(max(0.0, float(f_star or 0.0)), max(0.0, risk_pct))
+    risk_pct = max(0.0, risk_pct)
     risk_capital = equity * risk_pct
+    sl_dist = abs(entry_price - stop_price)
+    min_volume_display_units = default_vol / api_units_per_display_unit
+    min_volume_stop_risk = sl_dist * min_volume_display_units
+    min_volume_stop_risk_fraction = min_volume_stop_risk / equity
+    trace.update(
+        {
+            "entry_price": entry_price,
+            "stop_price": stop_price,
+            "protective_stop_valid": True,
+            "sl_distance": sl_dist,
+            "risk_per_trade_pct": risk_pct,
+            "risk_capital": risk_capital,
+            "min_volume_stop_risk": min_volume_stop_risk,
+            "min_volume_stop_risk_fraction": min_volume_stop_risk_fraction,
+        }
+    )
+
+    if not kelly_value_valid:
+        trace.update(
+            {
+                "reason": "invalid_kelly_fraction",
+                "kelly_fraction": 0.0,
+                "raw_api_volume": 0.0,
+                "base_api_volume": 0.0,
+                "final_api_volume": 0.0,
+                "blocked_reason": "invalid_kelly_fraction",
+                "exploration_eligible": False,
+            }
+        )
+        return {"volume": 0.0, "trace": trace}
+
+    if kelly_f <= 0:
+        if demo_exploration_mode:
+            exploration_prefix = (
+                "demo_nursery" if demo_nursery_exploration else "demo_autonomous"
+            )
+            blocked_reason = ""
+            if max_order_api > 0 and default_vol > max_order_api:
+                blocked_reason = f"{exploration_prefix}_min_volume_exceeds_cap"
+            elif min_volume_stop_risk > risk_capital + 1e-12:
+                blocked_reason = f"{exploration_prefix}_min_volume_risk_budget_exceeded"
+            exploration_eligible = not blocked_reason
+            trace.update(
+                {
+                    "reason": blocked_reason or f"{exploration_prefix}_min_volume_exploration",
+                    "kelly_fraction": kelly_f,
+                    "raw_api_volume": default_vol if exploration_eligible else 0.0,
+                    "base_api_volume": default_vol if exploration_eligible else 0.0,
+                    "final_api_volume": default_vol if exploration_eligible else 0.0,
+                    "blocked_reason": blocked_reason,
+                    "demo_exploration": True,
+                    "demo_nursery_exploration": demo_nursery_exploration,
+                    "exploration_reason": "non_positive_kelly",
+                    "exploration_api_volume": default_vol,
+                    "exploration_eligible": exploration_eligible,
+                    "exploration_risk_budget": risk_capital,
+                }
+            )
+            return {"volume": default_vol if exploration_eligible else 0.0, "trace": trace}
+        trace.update(
+            {
+                "reason": "kelly_fraction_non_positive",
+                "kelly_fraction": kelly_f,
+                "raw_api_volume": 0.0,
+                "base_api_volume": 0.0,
+                "final_api_volume": 0.0,
+                "blocked_reason": "kelly_fraction_non_positive",
+                "exploration_eligible": False,
+            }
+        )
+        return {"volume": 0.0, "trace": trace}
+
+    f_star = kelly_f * kelly_mult
+    effective_risk_fraction = min(max(0.0, float(f_star or 0.0)), max(0.0, risk_pct))
     risk_budget = equity * effective_risk_fraction
-    sl_dist = abs(float(current_price or 0.0) - float(sl_price or 0.0))
-    sl_dist = max(sl_dist, float(current_price or 0.0) * 0.001)
     raw_display_units = risk_budget / sl_dist if sl_dist > 0 else 0.0
     raw_api_volume = raw_display_units * api_units_per_display_unit
     max_pct = getattr(cfg, "kelly_max_pct", 0.25)
@@ -222,7 +282,6 @@ def risk_kelly_sizing(
             "risk_per_trade_pct": risk_pct,
             "risk_capital": risk_capital,
             "risk_budget": risk_budget,
-            "sl_distance": sl_dist,
             "raw_display_units": raw_display_units,
             "raw_api_volume": raw_api_volume,
             "max_api_volume_by_capital": max_api_volume_calc,
@@ -256,12 +315,6 @@ def apply_entry_event_sizing(
     if base <= 0:
         final_volume = 0.0
         blocked_reason = upstream_blocked_reason or "non_positive_base_volume"
-    elif multiplier < 1.0 and bool(
-        trace.get("demo_exploration") or trace.get("demo_nursery_exploration")
-    ):
-        final_volume = base
-        blocked_reason = upstream_blocked_reason
-        trace["event_sizing_demo_nursery_min_preserved"] = True
     elif multiplier < 1.0:
         final_volume = floor_api_volume_to_step(raw_after_event, bridge_meta)
         blocked_reason = upstream_blocked_reason

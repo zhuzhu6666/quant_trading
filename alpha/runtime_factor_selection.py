@@ -160,6 +160,19 @@ def _discovered_admission_reason(name: str, cfg: object) -> str:
             return "stable_factor_identity_mismatch"
     except Exception:
         return "stable_factor_identity_invalid"
+    if (
+        str(cfg.get("admission_evidence_version") or "")
+        != "factor_admission_evidence.v1"
+        or cfg.get("activation_canary") is not True
+    ):
+        return "legacy_evidence_incomplete"
+    if str(cfg.get("role") or "alpha").lower() == "alpha":
+        try:
+            direction = int(cfg.get("direction") or 0)
+        except (TypeError, ValueError):
+            direction = 0
+        if direction not in {-1, 1}:
+            return "direction_contract_invalid"
     try:
         weight = float(cfg.get("weight"))
     except (TypeError, ValueError):

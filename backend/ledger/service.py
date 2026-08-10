@@ -224,6 +224,8 @@ class DecisionLedger:
         action_reason: str = "",
         action_json: dict | None = None,
         factor_snapshots: list[dict] | None = None,
+        runtime_selection_fingerprint: str = "",
+        config_hash: str = "",
     ) -> str:
         now = time.time()
         decision_id = self.new_id("dec")
@@ -253,6 +255,21 @@ class DecisionLedger:
             "action_json": _json_dumps(normalized_action_json),
             "created_at": now,
         }
+        normalized_action = dict(normalized_action_json or {})
+        runtime_binding = dict(normalized_action.get("runtime_binding") or {})
+        selection_fingerprint = str(
+            runtime_selection_fingerprint
+            or runtime_binding.get("selection_fingerprint")
+            or normalized_action.get("factor_set_version")
+            or factor_set_version
+            or ""
+        )
+        bound_config_hash = str(
+            config_hash
+            or runtime_binding.get("config_hash")
+            or normalized_action.get("config_hash")
+            or ""
+        )
         factor_payloads: list[dict[str, Any]] = []
         for row in factor_snapshots or []:
             factor_payloads.append(
@@ -270,9 +287,68 @@ class DecisionLedger:
                     "gated": int(1 if row.get("gated") else 0),
                     "gated_reason": str(row.get("gated_reason", "")),
                     "contribution_score": float(row.get("contribution_score", 0.0) or 0.0),
+                    "generation": int(row.get("generation", 0) or 0),
+                    "artifact_hash": str(row.get("artifact_hash", "") or ""),
+                    "definition_fingerprint": str(
+                        row.get("definition_fingerprint", "") or ""
+                    ),
+                    "runtime_selection_fingerprint": str(
+                        row.get("runtime_selection_fingerprint")
+                        or selection_fingerprint
+                        or ""
+                    ),
+                    "config_hash": str(row.get("config_hash") or bound_config_hash or ""),
                 }
             )
         with self._conn() as conn:
+            lifecycle_by_name: dict[str, dict[str, Any]] = {}
+            factor_names = sorted(
+                {str(row.get("factor") or "") for row in factor_payloads if str(row.get("factor") or "")}
+            )
+            if factor_names:
+                placeholders = ",".join("?" for _ in factor_names)
+                try:
+                    lifecycle_rows = self._execute(
+                        conn,
+                        f"""SELECT factor_name, generation, artifact_hash,
+                                   definition_fingerprint
+                            FROM factor_lifecycle_state
+                            WHERE factor_name IN ({placeholders})""",
+                        tuple(factor_names),
+                    ).fetchall()
+                    lifecycle_by_name = {
+                        str(item["factor_name"] or ""): {
+                            "generation": int(item["generation"] or 0),
+                            "artifact_hash": str(item["artifact_hash"] or ""),
+                            "definition_fingerprint": str(
+                                item["definition_fingerprint"] or ""
+                            ),
+                        }
+                        for item in lifecycle_rows
+                    }
+                except Exception:
+                    # Isolated legacy fixtures may not carry lifecycle tables.
+                    # The row remains explicit lineage_missing; values are never
+                    # guessed from a mutable Registry object.
+                    lifecycle_by_name = {}
+            for row in factor_payloads:
+                lineage = lifecycle_by_name.get(row["factor"], {})
+                row["generation"] = int(row["generation"] or lineage.get("generation") or 0)
+                row["artifact_hash"] = str(row["artifact_hash"] or lineage.get("artifact_hash") or "")
+                row["definition_fingerprint"] = str(
+                    row["definition_fingerprint"]
+                    or lineage.get("definition_fingerprint")
+                    or ""
+                )
+                row["lineage_status"] = (
+                    "bound"
+                    if row["generation"] > 0
+                    and bool(row["artifact_hash"])
+                    and bool(row["definition_fingerprint"])
+                    and bool(row["runtime_selection_fingerprint"])
+                    and bool(row["config_hash"])
+                    else "lineage_missing"
+                )
             self._execute(conn,
                 """
                 INSERT INTO decision_ledger
@@ -308,8 +384,10 @@ class DecisionLedger:
                     INSERT INTO decision_factor_snapshot
                     (decision_id, factor, source, raw_value, normalized_value, direction,
                      base_weight, policy_weight, shadow_score, health_score, gated,
-                     gated_reason, contribution_score)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     gated_reason, contribution_score, generation, artifact_hash,
+                     definition_fingerprint, runtime_selection_fingerprint,
+                     config_hash, lineage_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -325,6 +403,12 @@ class DecisionLedger:
                         row["gated"],
                         row["gated_reason"],
                         row["contribution_score"],
+                        row["generation"],
+                        row["artifact_hash"],
+                        row["definition_fingerprint"],
+                        row["runtime_selection_fingerprint"],
+                        row["config_hash"],
+                        row["lineage_status"],
                     ),
                 )
         return decision_id
@@ -416,6 +500,7 @@ class DecisionLedger:
         }
         if action_json:
             action_payload.update(action_json)
+        runtime_binding = dict(action_payload.get("runtime_binding") or {})
         return self.log_decision(
             event_type=event_type,
             symbol=symbol,
@@ -433,6 +518,12 @@ class DecisionLedger:
             action_reason=action_reason or gate_reason or event_type,
             action_json=action_payload,
             factor_snapshots=factor_snapshots,
+            runtime_selection_fingerprint=str(
+                runtime_binding.get("selection_fingerprint")
+                or factor_set_version
+                or ""
+            ),
+            config_hash=str(runtime_binding.get("config_hash") or ""),
         )
 
     def log_order_event(

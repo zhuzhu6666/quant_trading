@@ -186,6 +186,9 @@ def classify_governance_risk(before: Mapping[str, Any], target: Mapping[str, Any
                 "definition_fingerprint",
                 "artifact_hash",
                 "committed_mutation_id",
+                "direction",
+                "polarity",
+                "normalizer",
             }:
                 factor_name = path[1]
                 target_entry = (

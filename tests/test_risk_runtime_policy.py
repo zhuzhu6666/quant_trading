@@ -3,6 +3,16 @@ from types import SimpleNamespace
 from risk.runtime_policy import RiskLimitSnapshot
 
 
+def test_risk_limit_snapshot_fail_closed_defaults_match_production_budget():
+    snapshot = RiskLimitSnapshot.from_runtime_config(
+        SimpleNamespace(autonomy_mode="demo_autonomous")
+    )
+
+    assert snapshot.max_daily_loss_pct == 2.0
+    assert snapshot.max_drawdown_pct == 8.0
+    assert snapshot.max_daily_trades == 10
+
+
 def test_demo_autonomous_uses_demo_learning_daily_trade_limit():
     cfg = SimpleNamespace(
         autonomy_mode="demo_autonomous",

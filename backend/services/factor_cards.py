@@ -27,6 +27,10 @@ _EVIDENCE_SNAPSHOT_LIMIT = 2000
 _CANDIDATE_MIN_LIMIT = 250
 _CARD_CACHE_LOCK = threading.Lock()
 _CARD_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_ADMISSION_MIN_MATURE_EVIDENCE = 20
+_TERMINAL_EFFECT_STATUSES = frozenset(
+    {"effective", "ineffective", "mixed", "inconclusive", "rolled_back", "superseded"}
+)
 
 
 def _use_pg(db_path: str | Path) -> bool:
@@ -74,6 +78,324 @@ def _round(value: Any, digits: int = 6) -> float:
         return round(float(value), digits)
     except Exception:
         return 0.0
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed else None
+
+
+def build_factor_admission_evidence(
+    *,
+    factor_id: str,
+    catalog_item: dict[str, Any],
+    evidence_counts: dict[str, Any],
+    governance: dict[str, Any],
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    """Build one fail-closed Candidate Card admission projection.
+
+    This is a pure projection over existing lifecycle, health, Canary,
+    runtime-selection and learning-effect facts.  It does not calculate a new
+    lifecycle decision and never writes state.
+    """
+
+    now = float(time.time() if now_ts is None else now_ts)
+    lifecycle_evidence = dict(catalog_item.get("lifecycle_evidence") or {})
+    persisted = dict(lifecycle_evidence.get("admission_evidence") or {})
+    validation_source = dict(
+        lifecycle_evidence.get("candidate_validation")
+        or persisted.get("validation")
+        or {}
+    )
+    role = str(catalog_item.get("role") or "").lower()
+    direction = catalog_item.get("direction")
+    try:
+        direction = 1 if float(direction) > 0 else -1 if float(direction) < 0 else 0
+    except (TypeError, ValueError):
+        direction = 0
+    signed_ic = _optional_float(
+        validation_source.get("signed_ic_mean")
+        if validation_source.get("signed_ic_mean") is not None
+        else catalog_item.get("health_rolling_ic")
+    )
+    directional_vote_allowed = role == "alpha"
+    normalized_signed_ic = (
+        float(signed_ic) * int(direction)
+        if directional_vote_allowed
+        and signed_ic is not None
+        and direction in {-1, 1}
+        else None
+    )
+    if not directional_vote_allowed:
+        direction_status = "non_directional"
+    elif direction not in {-1, 1}:
+        direction_status = "missing_explicit_direction"
+    elif signed_ic is None or abs(float(signed_ic)) <= 1e-12:
+        direction_status = "signed_ic_unavailable"
+    elif float(normalized_signed_ic or 0.0) <= 0.0:
+        direction_status = "signed_ic_direction_mismatch"
+    else:
+        direction_status = "validated"
+    direction_contract = {
+        "role": role or "unknown",
+        "directional_vote_allowed": directional_vote_allowed,
+        "raw_sign": (
+            1 if (signed_ic or 0.0) > 0 else -1 if (signed_ic or 0.0) < 0 else None
+        ),
+        "normalized_sign": (
+            1
+            if (normalized_signed_ic or 0.0) > 0
+            else -1
+            if (normalized_signed_ic or 0.0) < 0
+            else None
+        ),
+        "direction": (
+            direction
+            if directional_vote_allowed and direction in {-1, 1}
+            else None
+        ),
+        "polarity": (
+            "positive"
+            if directional_vote_allowed and direction == 1
+            else "negative"
+            if directional_vote_allowed and direction == -1
+            else None
+        ),
+        "normalizer": str(catalog_item.get("normalizer") or "") or None,
+        "signed_ic": _round(signed_ic) if signed_ic is not None else None,
+        "magnitude_ic": _round(abs(signed_ic)) if signed_ic is not None else None,
+        "normalized_signed_ic": (
+            _round(normalized_signed_ic) if normalized_signed_ic is not None else None
+        ),
+        "status": direction_status,
+    }
+
+    loaded = dict(catalog_item.get("loaded_projection") or {})
+    generation = int(catalog_item.get("lifecycle_generation") or 0)
+    artifact_hash = str(catalog_item.get("lifecycle_artifact_hash") or "")
+    definition_fingerprint = str(
+        catalog_item.get("lifecycle_definition_fingerprint") or ""
+    )
+    loaded_matches = bool(
+        loaded.get("loaded")
+        and str(loaded.get("status") or "").lower() in {"loaded", "current", "healthy"}
+        and int(loaded.get("generation") or 0) == generation
+        and str(loaded.get("artifact_hash") or "") == artifact_hash
+    )
+    lineage = {
+        "factor_id": str(catalog_item.get("lifecycle_factor_id") or factor_id),
+        "generation": generation or None,
+        "artifact_hash": artifact_hash or None,
+        "definition_fingerprint": definition_fingerprint or None,
+        "loaded_projection": {
+            "status": str(loaded.get("status") or "unavailable"),
+            "projection_id": str(loaded.get("projection_id") or "") or None,
+            "process_role": str(loaded.get("process_role") or "") or None,
+            "loaded": bool(loaded.get("loaded")),
+            "matches_generation": loaded_matches,
+        },
+        "factor_set_fingerprint": (
+            catalog_item.get("runtime_selection_fingerprint") or None
+        ),
+        "config_hash": (
+            catalog_item.get("lifecycle_config_hash")
+            or catalog_item.get("runtime_config_hash")
+            or None
+        ),
+    }
+    lineage_complete = bool(
+        generation > 0
+        and artifact_hash
+        and definition_fingerprint
+        and lineage["factor_set_fingerprint"]
+        and lineage["config_hash"]
+    )
+
+    shadow = dict(catalog_item.get("shadow_perf") or {})
+    canary = dict(catalog_item.get("canary") or {})
+    mature_reviews = evidence_counts.get("governance_eligible_mature")
+    try:
+        mature_reviews_int = int(mature_reviews) if mature_reviews is not None else 0
+    except (TypeError, ValueError):
+        mature_reviews_int = 0
+    shadow_mature = int(shadow.get("n_valid") or 0) if shadow.get("evidence_hash") and shadow.get("dataset_hash") else 0
+    mature_count = max(mature_reviews_int, shadow_mature)
+    contaminated = evidence_counts.get("contaminated_or_ineligible")
+    contamination_known = contaminated is not None
+    try:
+        contaminated_count = int(contaminated) if contaminated is not None else 0
+    except (TypeError, ValueError):
+        contaminated_count = 0
+    contamination_status = str(
+        validation_source.get("contamination_status")
+        or ("clean" if contamination_known and contaminated_count == 0 else "contaminated" if contaminated_count > 0 else "unknown")
+    ).lower()
+    execution_complete = bool(
+        validation_source.get("execution_evidence_complete")
+        or (mature_reviews_int >= _ADMISSION_MIN_MATURE_EVIDENCE and contamination_status == "clean")
+    )
+    regime_ids = [
+        str(item)
+        for item in list(validation_source.get("regime_ids") or [])
+        if str(item)
+    ]
+    validation = {
+        "pit_passed": bool(validation_source.get("pit_passed")),
+        "walk_forward_passed": bool(validation_source.get("walk_forward_passed")),
+        "multi_forward_passed": bool(validation_source.get("multi_forward_passed")),
+        "cost_test_passed": bool(validation_source.get("cost_test_passed")),
+        "bar_oos": {
+            "stage": str(canary.get("stage") or ""),
+            "oos_bars": int(shadow.get("oos_bars") or canary.get("oos_bars") or 0),
+            "n_valid": int(shadow.get("n_valid") or 0),
+            "evidence_hash": str(shadow.get("evidence_hash") or canary.get("evidence_hash") or "") or None,
+            "dataset_hash": str(shadow.get("dataset_hash") or canary.get("dataset_hash") or "") or None,
+            "research_only": True,
+        },
+        "independent_mature_evidence_count": mature_count,
+        "required_independent_mature_evidence_count": _ADMISSION_MIN_MATURE_EVIDENCE,
+        "execution_evidence_complete": execution_complete,
+        "contamination_status": contamination_status,
+        "contaminated_or_ineligible": contaminated_count if contamination_known else None,
+        "regime_coverage": {
+            "count": len(set(regime_ids)),
+            "regime_ids": sorted(set(regime_ids)),
+        },
+        "signed_ic_mean": signed_ic,
+        "multi_forward": dict(validation_source.get("multi_forward") or {}),
+        "walk_forward": dict(validation_source.get("walk_forward") or {}),
+        "cost_test": dict(validation_source.get("cost_test") or {}),
+    }
+
+    health_updated_at = float(catalog_item.get("health_updated_at") or 0.0)
+    health_age = now - health_updated_at if health_updated_at > 0.0 else float("inf")
+    try:
+        from config.runtime_config import shared as _runtime_config
+
+        health_max_age = float(
+            getattr(_runtime_config(), "factor_governance_health_max_age_seconds", 900.0)
+            or 900.0
+        )
+    except Exception:
+        health_max_age = 900.0
+    health_status = str(catalog_item.get("health_status") or "UNKNOWN").upper()
+    health_fresh = bool(-5.0 <= health_age <= health_max_age)
+    health_valid = bool(health_fresh and health_status in {"HEALTHY", "WATCH"})
+    lifecycle_stage = str(catalog_item.get("lifecycle_status") or "UNKNOWN").upper()
+    v16 = dict(lifecycle_evidence.get("v16") or persisted.get("governance", {}).get("v16") or {})
+    v16_bound = bool(v16.get("command_id") and v16.get("candidate_id"))
+    coordinator_bound = bool(
+        catalog_item.get("lifecycle_mutation_id")
+        and str(catalog_item.get("runtime_admission") or "").lower()
+        in {"projection_acknowledged", "admitted"}
+    )
+    governance_projection = {
+        "lifecycle": lifecycle_stage,
+        "health": {
+            "status": health_status,
+            "score": _round(catalog_item.get("health_score")),
+            "n_obs": int(catalog_item.get("health_n_obs") or 0),
+            "updated_at": health_updated_at or None,
+            "age_seconds": _round(health_age) if health_age != float("inf") else None,
+            "fresh": health_fresh,
+        },
+        "prepared": lifecycle_stage == "PROMOTION_PREPARED",
+        "v16": {**v16, "bound": v16_bound},
+        "coordinator": {
+            "mutation_id": str(catalog_item.get("lifecycle_mutation_id") or "") or None,
+            "runtime_admission": str(catalog_item.get("runtime_admission") or "") or None,
+            "bound": coordinator_bound,
+        },
+        "canary": {"stage": str(canary.get("stage") or "") or None},
+    }
+
+    effect_status = str(governance.get("application_effect_status") or "").lower()
+    effect_decision = dict(governance.get("application_effect_decision") or {})
+    effect_quality = dict(effect_decision.get("evidence_quality") or {})
+    effect_positive_mature = bool(
+        effect_status == "effective"
+        and effect_quality.get("bounded_attribution_allowed") is True
+    )
+    effect = {
+        "application_id": governance.get("latest_application_id") or None,
+        "application_status": governance.get("latest_application_status") or None,
+        "status": effect_status or "missing",
+        "maturity": "mature" if effect_status in _TERMINAL_EFFECT_STATUSES else "observing" if effect_status else "missing",
+        "conclusion": effect_status or "unknown",
+        "observed_trade_count": int(governance.get("application_effect_trade_count") or 0),
+        "delta_avg_reward": governance.get("application_effect_delta"),
+        "bounded_attribution_allowed": effect_quality.get("bounded_attribution_allowed"),
+        "positive_mature": effect_positive_mature,
+    }
+
+    preflight_blockers: list[str] = []
+    if directional_vote_allowed and direction_status != "validated":
+        preflight_blockers.append("direction_contract_invalid")
+    if not lineage_complete:
+        preflight_blockers.append("lineage_missing")
+    for field, code in (
+        ("pit_passed", "pit_evidence_missing"),
+        ("walk_forward_passed", "walk_forward_evidence_missing"),
+        ("multi_forward_passed", "multi_forward_evidence_missing"),
+        ("cost_test_passed", "cost_evidence_missing"),
+    ):
+        if not validation[field]:
+            preflight_blockers.append(code)
+    if str(canary.get("stage") or "").upper() != "ACTIVE":
+        preflight_blockers.append("bar_oos_canary_incomplete")
+    if mature_count < _ADMISSION_MIN_MATURE_EVIDENCE:
+        preflight_blockers.append("independent_mature_evidence_below_20")
+    if not execution_complete:
+        preflight_blockers.append("execution_evidence_incomplete")
+    if contamination_status != "clean":
+        preflight_blockers.append("contamination_unresolved")
+    if not health_valid:
+        preflight_blockers.append("factor_health_invalid_or_stale")
+    if not regime_ids:
+        preflight_blockers.append("regime_coverage_missing")
+    preflight_blockers = sorted(set(preflight_blockers))
+    activation_blockers = list(preflight_blockers)
+    if lifecycle_stage == "PROMOTION_PREPARED":
+        if not loaded_matches:
+            activation_blockers.append("loaded_projection_missing_or_mismatched")
+        if not v16_bound:
+            activation_blockers.append("v16_binding_missing")
+        if not coordinator_bound:
+            activation_blockers.append("coordinator_binding_missing")
+    elif lifecycle_stage != "ACTIVE":
+        activation_blockers.append("promotion_not_prepared")
+    weight_blockers: list[str] = []
+    if lifecycle_stage != "ACTIVE":
+        weight_blockers.append("factor_not_active")
+    if not bool(catalog_item.get("activation_canary")):
+        weight_blockers.append("controlled_active_canary_contract_missing")
+    if not effect_positive_mature:
+        weight_blockers.append("application_effect_not_mature_positive")
+    if not lineage_complete:
+        weight_blockers.append("lineage_missing")
+    activation_blockers = sorted(set(activation_blockers))
+    weight_blockers = sorted(set(weight_blockers))
+    return {
+        "schema_version": "factor_admission_evidence.v1",
+        "direction": direction_contract,
+        "lineage": lineage,
+        "validation": validation,
+        "governance": governance_projection,
+        "effect": effect,
+        "eligible_for_preparation": not preflight_blockers,
+        "eligible_for_activation": (
+            lifecycle_stage == "PROMOTION_PREPARED" and not activation_blockers
+        ),
+        "eligible_for_weight_expansion": not weight_blockers,
+        "preflight_blocker_codes": preflight_blockers,
+        "activation_blocker_codes": activation_blockers,
+        "weight_expansion_blocker_codes": weight_blockers,
+        "blocker_codes": sorted(set(activation_blockers + weight_blockers)),
+    }
 
 
 _FAMILY_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -344,13 +666,19 @@ class FactorCardService:
             projection=runtime_projection,
         )
         definition_lineage = self._definition_lineage(catalog_item)
-        direction_contract = {
-            "raw_sign": None,
-            "normalized_sign": None,
-            "polarity": None,
-            "signed_ic": None,
-            "status": "unavailable",
-        }
+        admission_evidence = build_factor_admission_evidence(
+            factor_id=factor_id,
+            catalog_item={
+                **catalog_item,
+                "runtime_selection_fingerprint": runtime_binding.get(
+                    "selection_fingerprint"
+                ),
+                "runtime_config_hash": runtime_binding.get("config_hash"),
+            },
+            evidence_counts=evidence_counts,
+            governance=governance,
+        )
+        direction_contract = dict(admission_evidence["direction"])
         posterior_summary = self._posterior_summary(
             factor_id,
             governance=governance,
@@ -402,6 +730,14 @@ class FactorCardService:
             "definition_lineage": definition_lineage,
             "evidence_counts": evidence_counts,
             "direction_contract": direction_contract,
+            "admission_evidence": admission_evidence,
+            "eligible_for_activation": bool(
+                admission_evidence["eligible_for_activation"]
+            ),
+            "eligible_for_weight_expansion": bool(
+                admission_evidence["eligible_for_weight_expansion"]
+            ),
+            "blocker_codes": list(admission_evidence["blocker_codes"]),
             "posterior_summary": posterior_summary,
             "evidence_summary": {
                 "description": description,
@@ -639,7 +975,8 @@ class FactorCardService:
         app = _execute(
             conn,
             """
-            SELECT action, status, created_at
+            SELECT application_id, action, status, old_weight, new_weight,
+                   details_json, mutation_id, created_at
             FROM learning_application_log
             WHERE scope_type='factor' AND scope_key=?
             ORDER BY created_at DESC
@@ -647,17 +984,31 @@ class FactorCardService:
             """,
             (factor_id,),
         ).fetchone()
-        effect = _execute(
-            conn,
-            """
-            SELECT status, updated_at
-            FROM learning_application_effect
-            WHERE scope_type='factor' AND scope_key=?
-            ORDER BY updated_at DESC
-            LIMIT 1
-            """,
-            (factor_id,),
-        ).fetchone()
+        if app:
+            effect = _execute(
+                conn,
+                """
+                SELECT application_id, status, observed_trade_count,
+                       delta_avg_reward, decision_json, mutation_id, updated_at
+                FROM learning_application_effect
+                WHERE application_id=?
+                LIMIT 1
+                """,
+                (str(app["application_id"] or ""),),
+            ).fetchone()
+        else:
+            effect = _execute(
+                conn,
+                """
+                SELECT application_id, status, observed_trade_count,
+                       delta_avg_reward, decision_json, mutation_id, updated_at
+                FROM learning_application_effect
+                WHERE scope_type='factor' AND scope_key=?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (factor_id,),
+            ).fetchone()
         active_template = _execute(
             conn,
             """
@@ -745,7 +1096,28 @@ class FactorCardService:
             "review_status": review_status,
             "latest_suggestion_action": str(suggestion["action"] or "") if suggestion else "",
             "latest_application_action": app_action,
+            "latest_application_id": (
+                str(app["application_id"] or "") if app else ""
+            ),
+            "latest_application_status": (
+                str(app["status"] or "") if app else ""
+            ),
+            "latest_application_old_weight": (
+                float(app["old_weight"] or 0.0) if app else 0.0
+            ),
+            "latest_application_new_weight": (
+                float(app["new_weight"] or 0.0) if app else 0.0
+            ),
             "application_effect_status": effect_status,
+            "application_effect_trade_count": (
+                int(effect["observed_trade_count"] or 0) if effect else 0
+            ),
+            "application_effect_delta": (
+                float(effect["delta_avg_reward"] or 0.0) if effect else None
+            ),
+            "application_effect_decision": (
+                _loads(effect["decision_json"], {}) if effect else {}
+            ),
             "latest_template_candidate_trace": latest_candidate_trace,
             "latest_template_recommendation": latest_recommendation,
             "updated_at_ts": updated_at_ts,

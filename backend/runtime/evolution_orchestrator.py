@@ -13,6 +13,7 @@ v3 修复 (audit 2026-06-22), PG 迁移更新 (2026-07-01):
 
 from __future__ import annotations
 
+import hashlib
 import json as _json
 import logging
 import os
@@ -34,6 +35,7 @@ from backend.services.autonomous_learning import _autonomy_mode
 
 
 _CANARY_DB = None
+_EVOLUTION_WATERMARK_KEY = "evolution_cycle_watermark.v1"
 
 
 def _state_conn(*, read_only: bool = False):
@@ -164,6 +166,10 @@ class EvolutionReport:
         self.ts: float = _time.time()
         self.gp_new_candidates: int = 0
         self.gp_registered_shadow: int = 0
+        self.gp_status: str = "pending"
+        self.gp_skip_reason: str = ""
+        self.canary_backpressure: dict[str, Any] = {}
+        self.evolution_watermark: dict[str, Any] = {}
         self.oos_passed: int = 0
         self.canary_promotions: list[str] = []
         self.canary_rollbacks: list[str] = []
@@ -187,6 +193,10 @@ class EvolutionReport:
             "ts_iso": datetime.fromtimestamp(self.ts, tz=timezone.utc).isoformat(),
             "gp_new_candidates": self.gp_new_candidates,
             "gp_registered_shadow": self.gp_registered_shadow,
+            "gp_status": self.gp_status,
+            "gp_skip_reason": self.gp_skip_reason,
+            "canary_backpressure": self.canary_backpressure,
+            "evolution_watermark": self.evolution_watermark,
             "oos_passed": self.oos_passed,
             "canary_promotions": self.canary_promotions,
             "canary_rollbacks": self.canary_rollbacks,
@@ -203,6 +213,216 @@ class EvolutionReport:
             "factor_governance_handoff": self.factor_governance_handoff,
             "duration_sec": round(self.duration_sec, 1),
             "error": self.error,
+        }
+
+
+def _evolution_input_watermark(
+    df: pd.DataFrame,
+    *,
+    symbol: str,
+    timeframe: str,
+) -> dict[str, Any]:
+    from backend.services.replay_harness import _code_version
+    from config import runtime_config
+
+    cfg = runtime_config.shared()
+    config_payload = runtime_config.canonical_runtime_config_payload(
+        cfg.to_dict()
+    )
+    config_hash = hashlib.sha256(
+        _json.dumps(
+            config_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    digest = hashlib.sha256()
+    digest.update(
+        _json.dumps(
+            {
+                "columns": [str(column) for column in df.columns],
+                "dtypes": [str(dtype) for dtype in df.dtypes],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    try:
+        digest.update(
+            pd.util.hash_pandas_object(
+                df,
+                index=True,
+                categorize=True,
+            ).values.tobytes()
+        )
+    except Exception:
+        digest.update(
+            df.to_json(
+                orient="split",
+                date_format="iso",
+                date_unit="ns",
+                default_handler=str,
+            ).encode("utf-8")
+        )
+    last_bar_value: Any = df.index[-1]
+    for column in (
+        "close_time",
+        "timestamp",
+        "time",
+        "datetime",
+        "open_time",
+    ):
+        if column in df.columns:
+            last_bar_value = df[column].iloc[-1]
+            break
+    last_closed_bar = (
+        last_bar_value.isoformat()
+        if hasattr(last_bar_value, "isoformat")
+        else str(last_bar_value)
+    )
+    payload = {
+        "schema_version": _EVOLUTION_WATERMARK_KEY,
+        "symbol": str(symbol),
+        "timeframe": str(timeframe),
+        "last_closed_bar": last_closed_bar,
+        "input_fingerprint": digest.hexdigest(),
+        "config_hash": config_hash,
+        "code_version": _code_version(),
+    }
+    payload["watermark_fingerprint"] = hashlib.sha256(
+        _json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    return payload
+
+
+def _load_evolution_cycle_watermark() -> dict[str, Any]:
+    conn = None
+    try:
+        conn = _state_conn(read_only=True)
+        row = conn.execute(
+            "SELECT value_json, updated_at FROM runtime_kv WHERE key=%s",
+            (_EVOLUTION_WATERMARK_KEY,),
+        ).fetchone()
+        if not row:
+            return {"read_status": "missing"}
+        raw = row["value_json"]
+        payload = (
+            dict(raw)
+            if isinstance(raw, dict)
+            else _json.loads(str(raw or "{}"))
+        )
+        return {
+            **payload,
+            "read_status": "known",
+            "updated_at": float(row["updated_at"] or 0.0),
+        }
+    except Exception as exc:
+        return {
+            "read_status": "unavailable",
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _persist_evolution_cycle_watermark(
+    watermark: dict[str, Any],
+) -> dict[str, Any]:
+    conn = _state_conn()
+    completed_at = _time.time()
+    payload = {
+        **watermark,
+        "schema_version": _EVOLUTION_WATERMARK_KEY,
+        "completed_at": completed_at,
+    }
+    try:
+        validate_runtime_state_schema(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS runtime_kv (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL DEFAULT '{}',
+                updated_at REAL NOT NULL DEFAULT 0.0
+            )
+            """,
+        )
+        conn.execute(
+            """
+            INSERT INTO runtime_kv (key, value_json, updated_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json=excluded.value_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                _EVOLUTION_WATERMARK_KEY,
+                _json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                completed_at,
+            ),
+        )
+        conn.commit()
+        return {**payload, "write_status": "completed"}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _canary_registration_backpressure() -> dict[str, Any]:
+    evaluation_limit = max(
+        10,
+        min(
+            int(os.getenv("QUANT_CANARY_EVALUATION_LIMIT", "200") or 200),
+            1000,
+        ),
+    )
+    try:
+        from alpha.registry_adapter import RegistryAdapter
+        from deployment.canary import TERMINAL_STAGES
+
+        adapter = RegistryAdapter.shared()
+        states = _load_canary_states()
+        candidate_ids: list[str] = []
+        for name in list(adapter._meta.keys()):
+            meta = adapter.get_meta(name) or {}
+            if str(meta.get("source") or "") not in {"shadow", "discovered"}:
+                continue
+            stage = str(
+                (states.get(name) or {}).get("stage") or "SHADOW"
+            ).upper()
+            if stage not in TERMINAL_STAGES:
+                candidate_ids.append(str(name))
+        candidate_ids = sorted(set(candidate_ids))
+        blocked = len(candidate_ids) >= evaluation_limit
+        return {
+            "ok": True,
+            "status": "backpressured" if blocked else "available",
+            "can_register": not blocked,
+            "nonterminal_candidate_count": len(candidate_ids),
+            "evaluation_limit": evaluation_limit,
+            "reason_code": (
+                "canary_evaluation_backlog_at_budget" if blocked else ""
+            ),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "unavailable",
+            "can_register": False,
+            "nonterminal_candidate_count": None,
+            "evaluation_limit": evaluation_limit,
+            "reason_code": "canary_backpressure_unavailable",
+            "error": f"{type(exc).__name__}:{exc}",
         }
 
 
@@ -260,16 +480,78 @@ def scheduled_evolution_cycle(
             report.duration_sec = _time.time() - t0
             return report
 
-        # ── Step 2: GP 搜索 ──
-        if gp_pop > 0 and gp_gen > 0:
+        # ── Step 2: GP 搜索（learning worker 单写 watermark） ──
+        input_watermark = _evolution_input_watermark(
+            df,
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+        watermark_owner = (
+            str(os.getenv("QUANT_PROCESS_ROLE") or "").strip().lower()
+            == "learning_worker"
+        )
+        previous_watermark = (
+            _load_evolution_cycle_watermark()
+            if watermark_owner
+            else {"read_status": "not_owner"}
+        )
+        same_input = bool(
+            watermark_owner
+            and previous_watermark.get("read_status") == "known"
+            and str(previous_watermark.get("watermark_fingerprint") or "")
+            == str(input_watermark["watermark_fingerprint"])
+        )
+        report.evolution_watermark = {
+            **input_watermark,
+            "read_status": str(
+                previous_watermark.get("read_status") or "unknown"
+            ),
+            "write_owner": "learning_worker",
+            "write_enabled": watermark_owner,
+            "same_input": same_input,
+        }
+        report.canary_backpressure = _canary_registration_backpressure()
+        can_run_gp = bool(
+            gp_pop > 0
+            and gp_gen > 0
+            and report.canary_backpressure.get("can_register")
+            and not same_input
+            and (
+                not watermark_owner
+                or previous_watermark.get("read_status")
+                in {"known", "missing"}
+            )
+        )
+        if can_run_gp:
             cb("gp_search", 15, f"GP search pop={gp_pop} gen={gp_gen}")
             expressions = _run_gp(research_df, pop=gp_pop, gen=gp_gen, top_k=gp_top_k)
+            report.gp_status = "completed"
             report.gp_new_candidates = len(expressions)
             logger.info("[Evolve] GP found %d candidates", len(expressions))
             cb("gp_done", 40, f"GP found {len(expressions)} candidates")
+        elif same_input:
+            expressions = []
+            report.gp_status = "skipped_same_input"
+            report.gp_skip_reason = "evolution_input_already_completed"
+            cb("gp_skip", 40, "GP skipped: input watermark already completed")
+        elif not report.canary_backpressure.get("can_register"):
+            expressions = []
+            report.gp_status = "blocked_by_backpressure"
+            report.gp_skip_reason = str(
+                report.canary_backpressure.get("reason_code")
+                or "canary_backpressure_unavailable"
+            )
+            cb("gp_skip", 40, f"GP skipped: {report.gp_skip_reason}")
+        elif watermark_owner and previous_watermark.get("read_status") == "unavailable":
+            expressions = []
+            report.gp_status = "blocked_by_watermark"
+            report.gp_skip_reason = "evolution_watermark_unavailable"
+            cb("gp_skip", 40, "GP skipped: watermark unavailable")
         else:
             expressions = []
-            cb("gp_skip", 40, "GP skipped")
+            report.gp_status = "disabled"
+            report.gp_skip_reason = "gp_search_disabled"
+            cb("gp_skip", 40, "GP skipped: search disabled")
 
         if expressions:
             cb("register", 42, f"registering {len(expressions)} shadow factors")
@@ -282,6 +564,21 @@ def scheduled_evolution_cycle(
             cb("register_done", 50, f"registered {registered} factors")
         else:
             logger.info("[Evolve] no new GP candidates")
+        if report.gp_status == "completed" and watermark_owner:
+            try:
+                report.evolution_watermark = (
+                    _persist_evolution_cycle_watermark(input_watermark)
+                )
+            except Exception as exc:
+                report.evolution_watermark = {
+                    **input_watermark,
+                    "write_status": "failed",
+                    "error": f"{type(exc).__name__}:{exc}",
+                }
+                logger.exception(
+                    "[Evolve] evolution watermark write failed: %s",
+                    exc,
+                )
 
         # ── Step 3: Shadow 绩效刷新 + Canary 候选评估 ──
         cb("shadow_perf", 52, "refreshing shadow factor performance")
@@ -504,7 +801,7 @@ def _run_gp(df: pd.DataFrame, pop: int = 50, gen: int = 20, top_k: int = 10) -> 
         return results if results else []
     except Exception as e:
         logger.exception("[Evolve] GP search failed: %s", e)
-        return []
+        raise
 
 
 def _register_shadow_factors(expressions: list[Any]) -> int:
@@ -610,6 +907,29 @@ def _register_shadow_factors(expressions: list[Any]) -> int:
                             "producer": "evolution_orchestrator",
                             "proposed_name": proposed_name,
                             "definition_fingerprint": fingerprint,
+                            "direction": int(
+                                getattr(expr_score, "direction", 0) or 0
+                            ),
+                            "polarity": str(
+                                getattr(expr_score, "polarity", "unknown")
+                                or "unknown"
+                            ),
+                            "signed_ic_mean": float(
+                                getattr(expr_score, "signed_ic_mean", 0.0)
+                                or 0.0
+                            ),
+                            "magnitude_ic_mean": float(
+                                getattr(expr_score, "abs_ic_mean", 0.0)
+                                or 0.0
+                            ),
+                            "candidate_validation": dict(
+                                getattr(
+                                    expr_score,
+                                    "candidate_validation",
+                                    {},
+                                )
+                                or {}
+                            ),
                         },
                         idempotency_key=f"evolution-shadow:{fingerprint}",
                     )

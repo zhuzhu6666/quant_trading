@@ -158,3 +158,31 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 针对性测试是每批默认要求。全量测试只在 P1/P2/P3/P4 阶段收口、静态发布门、公共 authority 或大范围 dead-code 删除、影响面无法可靠隔离，或 operator 明确要求时运行。
 
 运行全量测试时记录 commit/worktree fingerprint、命令、passed/skipped/deselected 和 PostgreSQL isolation。旧全量结果只能作为基线，不能证明后续源码。
+
+## 10. 智能自主进化合同批次
+
+本批新增的固定验收面：
+
+| 合同 | 针对性证据 |
+|---|---|
+| Demo 最小量仍受实际止损风险预算 | `tests/test_live_risk_sizing.py`、`tests/test_risk_runtime_policy.py`、`tests/test_runtime_config.py` |
+| Readiness 不调用重型构建器、投影 stale/missing fail-closed | `tests/test_backend_readiness_contract.py`、`tests/test_readiness_dimensions_v2.py`、`tests/test_v16_read_only_brain.py` |
+| Web V16 无 `readiness.v16.*` 详情 fallback | `web_frontend` production build 与架构测试 |
+| evolution watermark、积压背压、单 owner/cron | `tests/test_evolution_cycle_watermark_v1.py`、`tests/test_live_scheduler_jobs.py`、`tests/test_factor_autonomy_hardening.py` |
+| blocked/no-change 不制造 snapshot | `tests/test_evolution_config_snapshot_idempotency.py` |
+| Candidate Card 方向、lineage、成熟证据和 effect 门 | `tests/test_factor_cards_api.py`、`tests/alpha/test_factor_score_evaluator.py` |
+| legacy ACTIVE 排除与同 generation 退回 | `tests/alpha/test_runtime_factor_selection.py`、`tests/test_factor_lifecycle_service.py` |
+| effect 成熟前不可扩权 | `tests/test_factor_weight_change_service.py` |
+| 新 decision factor lineage 绑定或显式 missing | `tests/test_decision_factor_lineage.py`；schema migration `0013` |
+| execution intent 兼容标记与故障恢复 | `tests/test_ctrader_execution_outcome.py`、`tests/test_broker_execution_intent.py`、`scripts/execution_outcome_fault_matrix.py` |
+
+代码测试通过仍不能替代以下运行验收：
+
+- 连续 30 次完整 readiness 构建的 p95<15 秒，且无 refresh 重叠、单核长期占满或 Safety freshness 抖动；
+- PostgreSQL schema 13 的受控应用与新 lineage 写入；
+- backlog 达预算后真实新 GP 注册数为 0，并持续排空；
+- legacy ACTIVE 在 live selection 中排除并完成 `demote_to_shadow`；
+- `execution_outcome_enable` 后新开仓 execution intent 覆盖率 100%，并完成一次 `open -> close -> learning/effect` 全链生命周期；
+- 六个静态发布目标逐项通过 release gate、受控重启和观察窗口。
+
+这些证据完成前，P6 和后续静态开关保持关闭；历史缺失 intent/lineage 保持显式缺失，不回填猜测值。

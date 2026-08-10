@@ -74,6 +74,10 @@ class FakeAdapter:
         self.meta[name]["source"] = new_source
         return True
 
+    def demote(self, name: str, new_source: str, reason: str = "") -> bool:
+        self.meta[name]["source"] = new_source
+        return True
+
     def unregister(self, name: str, reason: str = "") -> bool:
         self.unregister_calls += 1
         factor_registry._factors.pop(name, None)
@@ -104,12 +108,58 @@ def lifecycle(tmp_path: Path):
         projection_stale_after_sec=75,
         health_stale_after_sec=180,
     )
+    registered = service.register_shadow(
+        name=name,
+        expression=expression,
+        evidence_refs={
+            "candidate_validation": {
+                "direction": 1,
+                "signed_ic_mean": 0.03,
+            }
+        },
+    )
+    assert registered["ok"] is True
     yield service, adapter, name, expression
     factor_registry._factors.pop(name, None)
 
 
+def _candidate_admission_refs() -> dict:
+    return {
+        "admission_evidence": {
+            "schema_version": "factor_admission_evidence.v1",
+            "direction": {"direction": 1, "status": "validated"},
+            "eligible_for_preparation": True,
+            "eligible_for_activation": True,
+            "preflight_blocker_codes": [],
+            "activation_blocker_codes": [],
+        }
+    }
+
+
+def _prepare_candidate(service: FactorLifecycleService, name: str) -> dict:
+    return service.prepare_promotion(
+        name=name,
+        evidence_refs=_candidate_admission_refs(),
+    )
+
+
+def _activate_candidate(
+    service: FactorLifecycleService,
+    name: str,
+    *,
+    weight,
+    now: float | None = None,
+) -> dict:
+    return service.activate(
+        name=name,
+        weight=weight,
+        now=now,
+        evidence_refs=_candidate_admission_refs(),
+    )
+
+
 def _prepare_and_ack(service: FactorLifecycleService, name: str, *, now: float) -> dict:
-    prepared = service.prepare_promotion(name=name)
+    prepared = _prepare_candidate(service, name)
     assert prepared["ok"] is True
     assert prepared["lifecycle_stage"] == "PROMOTION_PREPARED"
     state = service.get_state(factor_name=name)
@@ -163,7 +213,7 @@ def test_state_machine_has_linear_promotion_and_terminal_states():
 
 def test_prepare_uses_canonical_sha256_and_never_promotes_registry(lifecycle):
     service, adapter, name, expression = lifecycle
-    result = service.prepare_promotion(name=name)
+    result = _prepare_candidate(service, name)
 
     assert result["ok"] is True
     assert result["lifecycle_stage"] == "PROMOTION_PREPARED"
@@ -186,11 +236,47 @@ def test_prepare_uses_canonical_sha256_and_never_promotes_registry(lifecycle):
     ]
 
 
+def test_candidate_prepare_preflight_failure_has_no_governance_side_effect(lifecycle):
+    service, adapter, name, _expression = lifecycle
+    conn = sqlite3.connect(service.db_path)
+    try:
+        before = {
+            "intents": conn.execute(
+                "SELECT COUNT(*) FROM governance_mutation_intent"
+            ).fetchone()[0],
+            "snapshots": conn.execute(
+                "SELECT COUNT(*) FROM runtime_config_snapshot"
+            ).fetchone()[0],
+        }
+    finally:
+        conn.close()
+
+    result = service.prepare_promotion(name=name, evidence_refs={})
+
+    assert result["ok"] is False
+    assert result["reason"] == "candidate_admission_evidence_missing"
+    assert adapter.promote_calls == 0
+    assert service.get_state(factor_name=name)["lifecycle_stage"] == "SHADOW"
+    conn = sqlite3.connect(service.db_path)
+    try:
+        after = {
+            "intents": conn.execute(
+                "SELECT COUNT(*) FROM governance_mutation_intent"
+            ).fetchone()[0],
+            "snapshots": conn.execute(
+                "SELECT COUNT(*) FROM runtime_config_snapshot"
+            ).fetchone()[0],
+        }
+    finally:
+        conn.close()
+    assert after == before
+
+
 def test_coordinator_projection_uses_stable_identity_and_prunes_pid_rows(
     lifecycle,
 ):
     service, _adapter, name, _expression = lifecycle
-    assert service.prepare_promotion(name=name)["ok"] is True
+    assert _prepare_candidate(service, name)["ok"] is True
     state = service.get_state(factor_name=name)
     conn = sqlite3.connect(service.db_path)
     try:
@@ -260,14 +346,14 @@ def test_coordinator_projection_uses_stable_identity_and_prunes_pid_rows(
 
 def test_activation_fails_closed_without_projection_health_or_explicit_weight(lifecycle):
     service, _adapter, name, _expression = lifecycle
-    prepared = service.prepare_promotion(name=name)
+    prepared = _prepare_candidate(service, name)
     assert prepared["ok"] is True
 
-    missing_weight = service.activate(name=name, weight=None)
+    missing_weight = _activate_candidate(service, name, weight=None)
     assert missing_weight["ok"] is False
     assert missing_weight["reason"] == "explicit_positive_weight_required"
 
-    missing_projection = service.activate(name=name, weight=0.2)
+    missing_projection = _activate_candidate(service, name, weight=0.2)
     assert missing_projection["ok"] is False
     assert missing_projection["reason"] == "fresh_loaded_projection_ack_required"
     assert service.get_state(factor_name=name)["lifecycle_stage"] == "PROMOTION_PREPARED"
@@ -277,7 +363,7 @@ def test_live_ack_loads_committed_prepared_dsl_when_registry_is_cold(
     lifecycle, monkeypatch
 ):
     service, adapter, name, _expression = lifecycle
-    assert service.prepare_promotion(name=name)["ok"] is True
+    assert _prepare_candidate(service, name)["ok"] is True
 
     # Simulate a live process that booted before this committed definition was
     # projected.  The ACK owner must load the committed shadow callable, but
@@ -322,7 +408,7 @@ def test_live_warm_engine_acknowledges_prepared_without_adding_it_to_votes(
     lifecycle, monkeypatch
 ):
     service, adapter, name, _expression = lifecycle
-    assert service.prepare_promotion(name=name)["ok"] is True
+    assert _prepare_candidate(service, name)["ok"] is True
     monkeypatch.setattr(
         "alpha.registry_adapter.RegistryAdapter.shared",
         classmethod(lambda cls: adapter),
@@ -376,7 +462,7 @@ def test_live_warm_engine_acknowledges_prepared_without_adding_it_to_votes(
 
 def test_wrong_artifact_and_old_generation_cannot_ack(lifecycle):
     service, _adapter, name, _expression = lifecycle
-    assert service.prepare_promotion(name=name)["ok"] is True
+    assert _prepare_candidate(service, name)["ok"] is True
     state = service.get_state(factor_name=name)
 
     wrong_artifact = service.acknowledge_projection(
@@ -406,12 +492,12 @@ def test_wrong_artifact_and_old_generation_cannot_ack(lifecycle):
     )
     assert old_generation["ok"] is False
     assert old_generation["reason"] == "projection_generation_mismatch"
-    assert service.activate(name=name, weight=0.2)["ok"] is False
+    assert _activate_candidate(service, name, weight=0.2)["ok"] is False
 
 
 def test_registry_artifact_mismatch_blocks_automatic_live_ack(lifecycle, monkeypatch):
     service, adapter, name, _expression = lifecycle
-    assert service.prepare_promotion(name=name)["ok"] is True
+    assert _prepare_candidate(service, name)["ok"] is True
     adapter.meta[name]["artifact_hash"] = "e" * 64
     monkeypatch.setattr(
         "alpha.registry_adapter.RegistryAdapter.shared",
@@ -451,7 +537,7 @@ def test_activation_requires_fresh_bound_projection_and_health(lifecycle):
     _prepare_and_ack(service, name, now=now)
     _write_health(service, name, now=now)
 
-    result = service.activate(name=name, weight=0.25, now=now)
+    result = _activate_candidate(service, name, weight=0.25, now=now)
 
     assert result["ok"] is True
     assert result["risk_classification"]["risk_class"] == "risk_expanding"
@@ -466,6 +552,73 @@ def test_activation_requires_fresh_bound_projection_and_health(lifecycle):
     assert cfg.factor_portfolio_weights[name] == 0.25
 
 
+def test_candidate_activation_creates_exactly_one_observing_application(lifecycle):
+    service, _adapter, name, _expression = lifecycle
+    now = time.time()
+    _prepare_and_ack(service, name, now=now)
+    _write_health(service, name, now=now)
+
+    first = _activate_candidate(service, name, weight=0.25, now=now)
+    second = _activate_candidate(service, name, weight=0.25, now=now)
+
+    assert first["ok"] is True
+    assert first["application_id"]
+    assert second["ok"] is True
+    assert second["status"] == "already_active"
+    conn = sqlite3.connect(service.db_path)
+    try:
+        applications = conn.execute(
+            """SELECT l.application_id, l.status, e.status
+               FROM learning_application_log l
+               JOIN learning_application_effect e
+                 ON e.application_id=l.application_id
+               WHERE l.scope_type='factor' AND l.scope_key=?""",
+            (name,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert applications == [(first["application_id"], "applied", "observing")]
+
+
+def test_demote_to_shadow_preserves_generation_and_terminalizes_effect(lifecycle):
+    service, adapter, name, _expression = lifecycle
+    now = time.time()
+    _prepare_and_ack(service, name, now=now)
+    _write_health(service, name, now=now)
+    activated = _activate_candidate(service, name, weight=0.25, now=now)
+    assert activated["ok"] is True
+    active_state = service.get_state(factor_name=name)
+
+    demoted = service.demote_to_shadow(
+        name=name,
+        reason="legacy_evidence_incomplete",
+        evidence_refs={"blocker_code": "legacy_evidence_incomplete"},
+    )
+
+    assert demoted["ok"] is True
+    shadow_state = service.get_state(factor_name=name)
+    assert shadow_state["lifecycle_stage"] == "SHADOW"
+    assert shadow_state["generation"] == active_state["generation"]
+    assert adapter.get_meta(name)["source"] == SOURCE_SHADOW
+    cfg = runtime_config.shared()
+    assert cfg.factor_signal_config[name]["enabled"] is False
+    assert cfg.factor_signal_config[name]["activation_canary"] is False
+    assert cfg.factor_portfolio_weights[name] == 0.0
+    conn = sqlite3.connect(service.db_path)
+    try:
+        application = conn.execute(
+            """SELECT l.status, e.status
+               FROM learning_application_log l
+               JOIN learning_application_effect e
+                 ON e.application_id=l.application_id
+               WHERE l.application_id=?""",
+            (activated["application_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert application == ("rolled_back", "rolled_back")
+
+
 def test_activation_accepts_fresh_watch_health_above_watch_threshold(lifecycle):
     """Activation must align with promotion evidence: WATCH + score >= watch
     threshold (40) is acceptable, not only HEALTHY + >=70. IC/n_obs/freshness
@@ -476,7 +629,7 @@ def test_activation_accepts_fresh_watch_health_above_watch_threshold(lifecycle):
     _prepare_and_ack(service, name, now=now)
     _write_health_with(service, name, now=now, score=55.0, status="WATCH")
 
-    result = service.activate(name=name, weight=0.25, now=now)
+    result = _activate_candidate(service, name, weight=0.25, now=now)
 
     assert result["ok"] is True
     assert adapter.promote_calls == 1
@@ -491,7 +644,7 @@ def test_activation_rejects_watch_health_below_watch_threshold(lifecycle):
     _prepare_and_ack(service, name, now=now)
     _write_health_with(service, name, now=now, score=35.0, status="WATCH")
 
-    result = service.activate(name=name, weight=0.25, now=now)
+    result = _activate_candidate(service, name, weight=0.25, now=now)
 
     assert result["ok"] is False
     assert result["reason"] == "fresh_valid_factor_health_required"
@@ -505,7 +658,7 @@ def test_fresh_live_process_acknowledges_active_discovered_generation(
     now = time.time()
     _prepare_and_ack(service, name, now=now)
     _write_health(service, name, now=now)
-    assert service.activate(name=name, weight=0.25, now=now)["ok"] is True
+    assert _activate_candidate(service, name, weight=0.25, now=now)["ok"] is True
     monkeypatch.setattr(
         "alpha.registry_adapter.RegistryAdapter.shared",
         classmethod(lambda cls: adapter),
@@ -559,7 +712,7 @@ def test_backend_bootstrap_rebuilds_active_registry_from_committed_state_only(
     now = time.time()
     _prepare_and_ack(service, name, now=now)
     _write_health(service, name, now=now)
-    assert service.activate(name=name, weight=0.25, now=now)["ok"] is True
+    assert _activate_candidate(service, name, weight=0.25, now=now)["ok"] is True
 
     # Simulate a fresh process: the durable rows remain, process-local
     # Registry/meta do not.  No lifecycle_events fallback is involved.
@@ -582,7 +735,7 @@ def test_backend_bootstrap_prioritizes_prepared_over_recent_shadow_volume(
     lifecycle, monkeypatch
 ):
     service, _adapter, name, _expression = lifecycle
-    assert service.prepare_promotion(name=name)["ok"] is True
+    assert _prepare_candidate(service, name)["ok"] is True
 
     now = time.time()
     conn = sqlite3.connect(service.db_path)
@@ -654,7 +807,7 @@ def test_stale_projection_or_health_blocks_activation(lifecycle):
     _prepare_and_ack(service, name, now=now - 80)
     _write_health(service, name, now=now)
 
-    stale_projection = service.activate(name=name, weight=0.2, now=now)
+    stale_projection = _activate_candidate(service, name, weight=0.2, now=now)
     assert stale_projection["ok"] is False
     assert stale_projection["reason"] == "projection_ack_stale"
 
@@ -664,7 +817,7 @@ def test_quarantine_is_v16_exempt_and_registry_projection_is_post_commit(lifecyc
     now = time.time()
     _prepare_and_ack(service, name, now=now)
     _write_health(service, name, now=now)
-    assert service.activate(name=name, weight=0.2, now=now)["ok"] is True
+    assert _activate_candidate(service, name, weight=0.2, now=now)["ok"] is True
 
     result = service.quarantine(name=name, reason="health decay")
 
@@ -792,7 +945,7 @@ def test_registry_projection_failure_keeps_commit_and_marks_recovery(lifecycle):
     _write_health(service, name, now=now)
     adapter.fail_promote = True
 
-    result = service.activate(name=name, weight=0.2, now=now)
+    result = _activate_candidate(service, name, weight=0.2, now=now)
 
     assert result["ok"] is False
     assert result["status"] == "committed_projection_degraded"

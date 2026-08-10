@@ -551,7 +551,13 @@ CREATE TABLE IF NOT EXISTS decision_factor_snapshot (
     health_score REAL DEFAULT 0.0,
     gated INTEGER DEFAULT 0,
     gated_reason TEXT DEFAULT '',
-    contribution_score REAL DEFAULT 0.0
+    contribution_score REAL DEFAULT 0.0,
+    generation INTEGER NOT NULL DEFAULT 0,
+    artifact_hash TEXT NOT NULL DEFAULT '',
+    definition_fingerprint TEXT NOT NULL DEFAULT '',
+    runtime_selection_fingerprint TEXT NOT NULL DEFAULT '',
+    config_hash TEXT NOT NULL DEFAULT '',
+    lineage_status TEXT NOT NULL DEFAULT 'lineage_missing'
 );
 
 CREATE TABLE IF NOT EXISTS order_lifecycle_event (

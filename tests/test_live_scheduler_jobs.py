@@ -179,7 +179,7 @@ def test_external_data_sync_job_preserves_force_flag_by_source(tmp_path):
     assert calls[1][1]["timeout"] == 180
 
 
-def test_startup_catch_up_jobs_preserves_legacy_light_and_heavy_order():
+def test_startup_catch_up_jobs_excludes_learning_worker_evolution_owner():
     immediate, deferred = startup_catch_up_jobs(run_heavy_jobs=False)
 
     assert immediate == ["data_sync", "events_sync"]
@@ -187,7 +187,6 @@ def test_startup_catch_up_jobs_preserves_legacy_light_and_heavy_order():
 
     _immediate_heavy, deferred_heavy = startup_catch_up_jobs(run_heavy_jobs=True)
     assert deferred_heavy == [
-        (480.0, "evolution_hourly"),
         (720.0, "awe_adapt"),
         (1200.0, "feature_eng"),
     ]
@@ -260,7 +259,6 @@ def test_start_scheduler_catch_up_includes_heavy_jobs_when_enabled():
     assert sched.ran == [
         "data_sync",
         "events_sync",
-        "evolution_hourly",
         "awe_adapt",
         "feature_eng",
     ]

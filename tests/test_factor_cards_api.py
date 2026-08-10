@@ -10,7 +10,10 @@ import pytest
 from alpha.registry_adapter import reset_shared
 from backend.api import learning as learning_api
 from backend.core.db import STATE_DB_DDL
-from backend.services.factor_cards import FactorCardService
+from backend.services.factor_cards import (
+    FactorCardService,
+    build_factor_admission_evidence,
+)
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.parameter_template_validation import (
     ParameterTemplateValidationService,
@@ -244,6 +247,153 @@ def _seed_factor_card_state(db_path: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _complete_candidate_catalog(now: float, *, role: str = "alpha") -> dict:
+    return {
+        "role": role,
+        "direction": 1,
+        "normalizer": "robust_zscore",
+        "lifecycle_factor_id": "dsl:candidate",
+        "lifecycle_status": "PROMOTION_PREPARED",
+        "lifecycle_generation": 3,
+        "lifecycle_artifact_hash": "a" * 64,
+        "lifecycle_definition_fingerprint": "d" * 64,
+        "lifecycle_config_hash": "c" * 64,
+        "lifecycle_mutation_id": "mutation-3",
+        "runtime_admission": "projection_acknowledged",
+        "runtime_selection_fingerprint": "s" * 64,
+        "loaded_projection": {
+            "loaded": True,
+            "status": "loaded",
+            "generation": 3,
+            "artifact_hash": "a" * 64,
+            "projection_id": "projection-3",
+            "process_role": "live_alpha",
+        },
+        "health_status": "HEALTHY",
+        "health_score": 85.0,
+        "health_n_obs": 500,
+        "health_updated_at": now,
+        "shadow_perf": {
+            "n_valid": 20,
+            "oos_bars": 600,
+            "evidence_hash": "evidence-hash",
+            "dataset_hash": "dataset-hash",
+        },
+        "canary": {"stage": "ACTIVE", "oos_bars": 600},
+        "lifecycle_evidence": {
+            "candidate_validation": {
+                "signed_ic_mean": 0.04,
+                "pit_passed": True,
+                "walk_forward_passed": True,
+                "multi_forward_passed": True,
+                "cost_test_passed": True,
+                "execution_evidence_complete": True,
+                "contamination_status": "clean",
+                "regime_ids": ["trend", "range"],
+            },
+            "v16": {"command_id": "cmd-3", "candidate_id": "candidate-3"},
+        },
+    }
+
+
+def _complete_evidence_counts() -> dict:
+    return {
+        "governance_eligible_mature": 20,
+        "contaminated_or_ineligible": 0,
+    }
+
+
+def test_candidate_card_signed_ic_direction_mismatch_is_fail_closed():
+    now = time.time()
+    catalog = _complete_candidate_catalog(now)
+    catalog["direction"] = -1
+
+    evidence = build_factor_admission_evidence(
+        factor_id="candidate",
+        catalog_item=catalog,
+        evidence_counts=_complete_evidence_counts(),
+        governance={},
+        now_ts=now,
+    )
+
+    assert evidence["direction"]["status"] == "signed_ic_direction_mismatch"
+    assert evidence["eligible_for_preparation"] is False
+    assert "direction_contract_invalid" in evidence["preflight_blocker_codes"]
+
+
+@pytest.mark.parametrize("role", ["context", "gate"])
+def test_candidate_card_non_alpha_roles_never_publish_directional_vote(role):
+    now = time.time()
+    evidence = build_factor_admission_evidence(
+        factor_id=f"{role}-candidate",
+        catalog_item=_complete_candidate_catalog(now, role=role),
+        evidence_counts=_complete_evidence_counts(),
+        governance={},
+        now_ts=now,
+    )
+
+    assert evidence["direction"]["directional_vote_allowed"] is False
+    assert evidence["direction"]["direction"] is None
+    assert evidence["direction"]["polarity"] is None
+    assert evidence["direction"]["status"] == "non_directional"
+    assert "direction_contract_invalid" not in evidence["preflight_blocker_codes"]
+
+
+def test_candidate_card_complete_prepared_evidence_is_activation_eligible():
+    now = time.time()
+    evidence = build_factor_admission_evidence(
+        factor_id="candidate",
+        catalog_item=_complete_candidate_catalog(now),
+        evidence_counts=_complete_evidence_counts(),
+        governance={},
+        now_ts=now,
+    )
+
+    assert evidence["eligible_for_preparation"] is True
+    assert evidence["eligible_for_activation"] is True
+    assert evidence["activation_blocker_codes"] == []
+    assert evidence["validation"]["bar_oos"]["research_only"] is True
+
+
+def test_candidate_card_active_canary_waits_for_mature_positive_real_effect():
+    now = time.time()
+    catalog = _complete_candidate_catalog(now)
+    catalog["lifecycle_status"] = "ACTIVE"
+    catalog["activation_canary"] = True
+    observing = build_factor_admission_evidence(
+        factor_id="candidate",
+        catalog_item=catalog,
+        evidence_counts=_complete_evidence_counts(),
+        governance={
+            "latest_application_id": "app-1",
+            "latest_application_status": "applied",
+            "application_effect_status": "observing",
+            "application_effect_trade_count": 7,
+        },
+        now_ts=now,
+    )
+    effective = build_factor_admission_evidence(
+        factor_id="candidate",
+        catalog_item=catalog,
+        evidence_counts=_complete_evidence_counts(),
+        governance={
+            "latest_application_id": "app-1",
+            "latest_application_status": "applied",
+            "application_effect_status": "effective",
+            "application_effect_trade_count": 20,
+            "application_effect_decision": {
+                "evidence_quality": {"bounded_attribution_allowed": True}
+            },
+        },
+        now_ts=now,
+    )
+
+    assert observing["eligible_for_weight_expansion"] is False
+    assert "application_effect_not_mature_positive" in observing["weight_expansion_blocker_codes"]
+    assert effective["eligible_for_weight_expansion"] is True
+    assert effective["weight_expansion_blocker_codes"] == []
 
 
 def test_factor_card_service_assembles_governance_and_responsibility_evidence(tmp_path):

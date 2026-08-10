@@ -44,6 +44,10 @@ from backend.services.governance_mutation_coordinator import (
     GovernanceMutationCoordinator,
     GovernanceMutationPlan,
 )
+from backend.services.learning_experiment_admission import (
+    ACTIVE_APPLICATION_STATUSES,
+    ACTIVE_EFFECT_STATUSES,
+)
 from config import runtime_config
 from config.runtime_config import RuntimeConfig, canonical_runtime_config_payload
 
@@ -80,12 +84,15 @@ ALLOWED_TRANSITIONS: Mapping[FactorLifecycleStage, frozenset[FactorLifecycleStag
     ),
     FactorLifecycleStage.PROMOTION_PREPARED: frozenset(
         {
+            FactorLifecycleStage.SHADOW,
             FactorLifecycleStage.ACTIVE,
             FactorLifecycleStage.QUARANTINED,
             FactorLifecycleStage.RETIRED,
         }
     ),
-    FactorLifecycleStage.ACTIVE: TERMINAL_STAGES,
+    FactorLifecycleStage.ACTIVE: frozenset(
+        {FactorLifecycleStage.SHADOW, *TERMINAL_STAGES}
+    ),
     FactorLifecycleStage.QUARANTINED: frozenset(),
     FactorLifecycleStage.RETIRED: frozenset(),
 }
@@ -236,6 +243,8 @@ class FactorLifecycleService:
             definition = self._definition(name, expression, artifact_hash)
             current = self.get_state(factor_id=definition.factor_id, factor_name=name)
             if not current:
+                if definition.origin != SOURCE_BUILTIN:
+                    raise FactorLifecycleError("shadow_lifecycle_state_required")
                 registered = self.register_shadow(
                     name=name,
                     expression=definition.expression,
@@ -264,6 +273,12 @@ class FactorLifecycleService:
                         "lifecycle_stage": FactorLifecycleStage.PROMOTION_PREPARED.value,
                         "mutation_id": str(current.get("mutation_id") or ""),
                     }
+            if definition.origin != SOURCE_BUILTIN:
+                self._require_admission_evidence(
+                    evidence_refs,
+                    eligibility_field="eligible_for_preparation",
+                    rejected_code="candidate_admission_preflight_failed",
+                )
             self._require_transition(current, FactorLifecycleStage.PROMOTION_PREPARED)
             mutation = FactorLifecycleMutation(
                 definition=definition,
@@ -420,6 +435,7 @@ class FactorLifecycleService:
             if explicit_weight <= 0.0:
                 raise FactorLifecycleError("explicit_positive_weight_required")
             checked_at = float(now or time.time())
+            admission_evidence: dict[str, Any] = {}
             if direct_builtin_activation:
                 self._require_direct_builtin_activation(name=name, actor=actor)
                 projection = {
@@ -430,7 +446,15 @@ class FactorLifecycleService:
                     "status": "direct_builtin_activation",
                     "source": "operator_requested_bounded_demo_seed",
                 }
+            elif definition.origin == SOURCE_BUILTIN:
+                projection = self._require_loaded_projection(current, now=checked_at)
+                health = self._require_fresh_health(current, now=checked_at)
             else:
+                admission_evidence = self._require_admission_evidence(
+                    evidence_refs,
+                    eligibility_field="eligible_for_activation",
+                    rejected_code="candidate_activation_admission_failed",
+                )
                 projection = self._require_loaded_projection(current, now=checked_at)
                 health = self._require_fresh_health(current, now=checked_at)
             mutation = FactorLifecycleMutation(
@@ -441,6 +465,7 @@ class FactorLifecycleService:
                 source="factor_lifecycle.activate",
                 evidence_refs={
                     **dict(evidence_refs or {}),
+                    "admission_evidence": admission_evidence,
                     "projection": projection,
                     "health": health,
                 },
@@ -452,6 +477,75 @@ class FactorLifecycleService:
             return self._execute(mutation, current=current)
         except Exception as exc:
             return self._failure(exc, name=name)
+
+    def demote_to_shadow(
+        self,
+        *,
+        name: str,
+        actor: str = "system:factor_governance",
+        reason: str = "factor evidence invalidated",
+        evidence_refs: Mapping[str, Any] | None = None,
+        idempotency_key: str = "",
+        v16: FactorV16Binding | None = None,
+    ) -> dict[str, Any]:
+        """Restrict PREPARED/ACTIVE to SHADOW in the same generation."""
+        try:
+            current = self.get_state(factor_name=name)
+            if not current:
+                raise FactorLifecycleError("factor_lifecycle_state_missing")
+            if str(current.get("origin") or "") == SOURCE_BUILTIN:
+                raise FactorLifecycleError("builtin_factor_demotion_not_supported")
+            if current.get("lifecycle_stage") == FactorLifecycleStage.SHADOW.value:
+                return {
+                    "ok": True,
+                    "status": "already_shadow",
+                    "factor_id": str(current.get("factor_id") or ""),
+                    "factor_name": name,
+                    "lifecycle_stage": FactorLifecycleStage.SHADOW.value,
+                    "mutation_id": str(current.get("mutation_id") or ""),
+                }
+            self._require_transition(current, FactorLifecycleStage.SHADOW)
+            mutation = FactorLifecycleMutation(
+                definition=self._definition_from_state(current),
+                target_stage=FactorLifecycleStage.SHADOW,
+                actor=actor,
+                reason=reason,
+                source="factor_lifecycle.demote_to_shadow",
+                evidence_refs={
+                    **dict(evidence_refs or {}),
+                    "previous_lifecycle_stage": str(
+                        current.get("lifecycle_stage") or ""
+                    ),
+                },
+                idempotency_key=idempotency_key,
+                v16=v16 or FactorV16Binding(),
+            )
+            return self._execute(mutation, current=current)
+        except Exception as exc:
+            return self._failure(exc, name=name)
+
+    @staticmethod
+    def _require_admission_evidence(
+        evidence_refs: Mapping[str, Any] | None,
+        *,
+        eligibility_field: str,
+        rejected_code: str,
+    ) -> dict[str, Any]:
+        evidence = dict((evidence_refs or {}).get("admission_evidence") or {})
+        if str(evidence.get("schema_version") or "") != "factor_admission_evidence.v1":
+            raise FactorLifecycleError("candidate_admission_evidence_missing")
+        blockers_field = (
+            "preflight_blocker_codes"
+            if eligibility_field == "eligible_for_preparation"
+            else "activation_blocker_codes"
+        )
+        blockers = sorted(
+            {str(item) for item in list(evidence.get(blockers_field) or []) if str(item)}
+        )
+        if evidence.get(eligibility_field) is not True or blockers:
+            suffix = ",".join(blockers) if blockers else "eligibility_false"
+            raise FactorLifecycleError(f"{rejected_code}:{suffix}")
+        return evidence
 
     def activate_classic_builtin_factors(
         self,
@@ -1207,6 +1301,8 @@ class FactorLifecycleService:
             FactorLifecycleStage.QUARANTINED: "retire_factor",
             FactorLifecycleStage.RETIRED: "retire_factor",
         }
+        if mutation.source == "factor_lifecycle.demote_to_shadow":
+            action_by_stage[FactorLifecycleStage.SHADOW] = "retire_factor"
         plan = GovernanceMutationPlan(
             patch=patch,
             source=mutation.source,
@@ -1246,11 +1342,13 @@ class FactorLifecycleService:
             )
 
         result = self.coordinator.execute(plan, transaction_writer=writer)
+        domain_result = dict(result.get("domain_result") or {})
         return {
             **result,
             "factor_id": mutation.definition.factor_id,
             "factor_name": mutation.definition.name,
             "lifecycle_stage": mutation.target_stage.value,
+            "application_id": str(domain_result.get("application_id") or ""),
         }
 
     def _runtime_patch(
@@ -1264,6 +1362,23 @@ class FactorLifecycleService:
         name = mutation.definition.name
         existing = dict((cfg.factor_signal_config or {}).get(name) or {})
         target = mutation.target_stage
+        evidence_refs = dict(mutation.evidence_refs or {})
+        admission_evidence = dict(evidence_refs.get("admission_evidence") or {})
+        direction_evidence = dict(admission_evidence.get("direction") or {})
+        candidate_validation = dict(evidence_refs.get("candidate_validation") or {})
+        declared_direction = direction_evidence.get("direction")
+        if declared_direction is None:
+            declared_direction = candidate_validation.get("direction")
+        try:
+            declared_direction = (
+                1
+                if float(declared_direction) > 0
+                else -1
+                if float(declared_direction) < 0
+                else 0
+            )
+        except (TypeError, ValueError):
+            declared_direction = 0
         if target in {
             FactorLifecycleStage.SHADOW,
             FactorLifecycleStage.PROMOTION_PREPARED,
@@ -1292,6 +1407,11 @@ class FactorLifecycleService:
                 "enabled": target is FactorLifecycleStage.ACTIVE or observation_enabled,
                 "committed_mutation_id": str(mutation_id),
             }
+            if declared_direction in {-1, 1}:
+                entry["direction"] = declared_direction
+                entry["polarity"] = (
+                    "positive" if declared_direction == 1 else "negative"
+                )
             if mutation.new_generation:
                 entry.pop("disabled_at", None)
                 entry.pop("quarantined_at", None)
@@ -1313,8 +1433,31 @@ class FactorLifecycleService:
         if target is FactorLifecycleStage.ACTIVE:
             if mutation.weight is None or float(mutation.weight) <= 0:
                 raise FactorLifecycleError("explicit_positive_weight_required")
+            if mutation.definition.origin != SOURCE_BUILTIN:
+                if declared_direction not in {-1, 1}:
+                    raise FactorLifecycleError("explicit_factor_direction_required")
+                if (
+                    str(admission_evidence.get("schema_version") or "")
+                    != "factor_admission_evidence.v1"
+                    or admission_evidence.get("eligible_for_activation") is not True
+                ):
+                    raise FactorLifecycleError("candidate_activation_admission_failed")
+                entry["activation_canary"] = True
+                entry["activation_canary_initial_weight"] = float(mutation.weight)
+                entry["admission_evidence_version"] = (
+                    "factor_admission_evidence.v1"
+                )
             entry["weight"] = float(mutation.weight)
             patch["factor_portfolio_weights"] = {name: float(mutation.weight)}
+        elif target is FactorLifecycleStage.SHADOW and current:
+            current_stage = str(current.get("lifecycle_stage") or "")
+            if current_stage in {
+                FactorLifecycleStage.PROMOTION_PREPARED.value,
+                FactorLifecycleStage.ACTIVE.value,
+            }:
+                entry["weight"] = 0.0
+                entry["activation_canary"] = False
+                patch["factor_portfolio_weights"] = {name: 0.0}
         elif target in TERMINAL_STAGES:
             patch["factor_portfolio_weights"] = {name: 0.0}
         return patch
@@ -1397,6 +1540,14 @@ class FactorLifecycleService:
             **dict(mutation.evidence_refs),
             "reason": mutation.reason,
             "actor": mutation.actor,
+            "v16": {
+                "command_id": mutation.v16.command_id,
+                "claim_token_present": bool(mutation.v16.claim_token),
+                "target_agent": mutation.v16.target_agent,
+                "candidate_id": mutation.v16.candidate_id,
+                "posterior_fingerprint": mutation.v16.posterior_fingerprint,
+                "evidence_fingerprint": mutation.v16.evidence_fingerprint,
+            },
         }
         metadata = {
             **_loads(current.get("metadata_json")),
@@ -1463,6 +1614,36 @@ class FactorLifecycleService:
                 now,
             ),
         )
+        application_id = ""
+        if (
+            mutation.target_stage is FactorLifecycleStage.ACTIVE
+            and definition.origin != SOURCE_BUILTIN
+        ):
+            application_id = self._write_activation_canary_effect(
+                conn,
+                mutation_id=mutation_id,
+                mutation=mutation,
+                generation=generation,
+                now=now,
+            )
+        elif current and (
+            mutation.target_stage in TERMINAL_STAGES
+            or (
+                mutation.target_stage is FactorLifecycleStage.SHADOW
+                and str(current.get("lifecycle_stage") or "")
+                in {
+                    FactorLifecycleStage.PROMOTION_PREPARED.value,
+                    FactorLifecycleStage.ACTIVE.value,
+                }
+            )
+        ):
+            self._terminalize_factor_effects_for_demotion(
+                conn,
+                factor_name=definition.name,
+                mutation_id=mutation_id,
+                reason=mutation.reason,
+                now=now,
+            )
         return {
             "factor_id": definition.factor_id,
             "factor_name": definition.name,
@@ -1470,7 +1651,179 @@ class FactorLifecycleService:
             "generation": generation,
             "artifact_hash": definition.artifact_hash,
             "mutation_id": mutation_id,
+            "application_id": application_id,
         }
+
+    def _write_activation_canary_effect(
+        self,
+        conn: Any,
+        *,
+        mutation_id: str,
+        mutation: FactorLifecycleMutation,
+        generation: int,
+        now: float,
+    ) -> str:
+        """Create the one observing real-effect window in the lifecycle commit."""
+        rows = conn.execute(
+            _p(
+                self.db_path,
+                """SELECT l.application_id,
+                          l.status AS application_status,
+                          e.status AS effect_status
+                   FROM learning_application_log l
+                   LEFT JOIN learning_application_effect e
+                     ON e.application_id=l.application_id
+                   WHERE l.scope_type='factor' AND l.scope_key=?""",
+            ),
+            (mutation.definition.name,),
+        ).fetchall()
+        for row in rows:
+            item = _row_dict(row)
+            if (
+                str(item.get("application_status") or "")
+                in ACTIVE_APPLICATION_STATUSES
+                or str(item.get("effect_status") or "")
+                in ACTIVE_EFFECT_STATUSES
+            ):
+                raise FactorLifecycleError("factor_active_application_exists")
+
+        admission = dict(mutation.evidence_refs.get("admission_evidence") or {})
+        validation = dict(admission.get("validation") or {})
+        application_id = "lapp_" + _hash(
+            {
+                "schema_version": "factor_activation_canary_application.v1",
+                "factor_id": mutation.definition.factor_id,
+                "generation": int(generation),
+                "mutation_id": mutation_id,
+            }
+        )[:24]
+        details = {
+            "schema_version": "factor_activation_canary_application.v1",
+            "source": mutation.source,
+            "factor_id": mutation.definition.factor_id,
+            "generation": int(generation),
+            "artifact_hash": mutation.definition.artifact_hash,
+            "definition_fingerprint": mutation.definition.definition_fingerprint,
+            "admission_evidence": admission,
+            "effect_boundary": "real_application_required_for_weight_expansion",
+        }
+        conn.execute(
+            _p(
+                self.db_path,
+                """INSERT INTO learning_application_log
+                   (application_id, cycle_ts, scope_type, scope_key, action,
+                    bias_multiplier, old_weight, new_weight,
+                    suggestion_ids_json, status, details_json, mutation_id,
+                    governance_eligibility_version, created_at)
+                   VALUES (?, ?, 'factor', ?, 'activate_factor_canary', 1.0,
+                           0.0, ?, '[]', 'applied', ?, ?,
+                           'factor_admission_evidence.v1', ?)""",
+            ),
+            (
+                application_id,
+                now,
+                mutation.definition.name,
+                float(mutation.weight or 0.0),
+                _json(details),
+                mutation_id,
+                now,
+            ),
+        )
+        decision = {
+            "schema_version": "factor_activation_canary_effect.v1",
+            "status": "observing",
+            "bar_oos_is_research_only": True,
+            "activation_weight": float(mutation.weight or 0.0),
+            "admission_evidence_fingerprint": _hash(admission),
+            "evidence_quality": {
+                "bounded_attribution_allowed": False,
+                "reason": "real_application_effect_not_mature",
+            },
+        }
+        conn.execute(
+            _p(
+                self.db_path,
+                """INSERT INTO learning_application_effect
+                   (application_id, scope_type, scope_key, action, status,
+                    observed_trade_count, baseline_trade_count, decision_json,
+                    mutation_id, governance_eligibility_version,
+                    last_review_at, updated_at, created_at)
+                   VALUES (?, 'factor', ?, 'activate_factor_canary',
+                           'observing', 0, ?, ?, ?,
+                           'factor_admission_evidence.v1', 0.0, ?, ?)""",
+            ),
+            (
+                application_id,
+                mutation.definition.name,
+                int(validation.get("independent_mature_evidence_count") or 0),
+                _json(decision),
+                mutation_id,
+                now,
+                now,
+            ),
+        )
+        return application_id
+
+    def _terminalize_factor_effects_for_demotion(
+        self,
+        conn: Any,
+        *,
+        factor_name: str,
+        mutation_id: str,
+        reason: str,
+        now: float,
+    ) -> None:
+        rows = conn.execute(
+            _p(
+                self.db_path,
+                """SELECT l.application_id, l.status AS application_status,
+                          e.status AS effect_status, e.decision_json
+                   FROM learning_application_log l
+                   LEFT JOIN learning_application_effect e
+                     ON e.application_id=l.application_id
+                   WHERE l.scope_type='factor' AND l.scope_key=?""",
+            ),
+            (factor_name,),
+        ).fetchall()
+        for row in rows:
+            item = _row_dict(row)
+            active = (
+                str(item.get("application_status") or "")
+                in ACTIVE_APPLICATION_STATUSES
+                or str(item.get("effect_status") or "")
+                in ACTIVE_EFFECT_STATUSES
+            )
+            if not active:
+                continue
+            application_id = str(item.get("application_id") or "")
+            decision = _loads(item.get("decision_json"))
+            decision.update(
+                {
+                    "status": "rolled_back",
+                    "terminal_reason": str(reason or "factor_demoted_to_shadow"),
+                    "terminal_mutation_id": mutation_id,
+                    "terminalized_at": now,
+                }
+            )
+            conn.execute(
+                _p(
+                    self.db_path,
+                    """UPDATE learning_application_effect
+                       SET status='rolled_back', decision_json=?, mutation_id=?,
+                           last_review_at=?, updated_at=?
+                       WHERE application_id=?""",
+                ),
+                (_json(decision), mutation_id, now, now, application_id),
+            )
+            conn.execute(
+                _p(
+                    self.db_path,
+                    """UPDATE learning_application_log
+                       SET status='rolled_back', mutation_id=?
+                       WHERE application_id=?""",
+                ),
+                (mutation_id, application_id),
+            )
 
     def _publish_committed(self, config: RuntimeConfig, transaction: dict[str, Any]) -> None:
         mutation_id = str(transaction.get("mutation_id") or "")
@@ -1552,6 +1905,19 @@ class FactorLifecycleService:
             FactorLifecycleStage.PROMOTION_PREPARED.value,
             FactorLifecycleStage.ACTIVE.value,
         }:
+            if stage == FactorLifecycleStage.SHADOW.value:
+                current_source = str(
+                    (self.adapter.get_meta(name) or {}).get("source") or ""
+                )
+                if current_source == SOURCE_DISCOVERED and not self.adapter.demote(
+                    name,
+                    new_source=SOURCE_SHADOW,
+                    reason=(
+                        "committed lifecycle demotion "
+                        f"{state.get('mutation_id', '')}"
+                    ),
+                ):
+                    raise FactorLifecycleError("registry_demotion_failed")
             allowed_sources = (
                 {SOURCE_SHADOW, SOURCE_DISCOVERED}
                 if stage == FactorLifecycleStage.ACTIVE.value
@@ -2042,6 +2408,42 @@ class FactorLifecycleService:
                     n_obs INTEGER DEFAULT 0,
                     rolling_ic REAL DEFAULT 0.0,
                     updated_at REAL
+                );
+                CREATE TABLE IF NOT EXISTS learning_application_log (
+                    application_id TEXT PRIMARY KEY,
+                    cycle_ts REAL NOT NULL DEFAULT 0.0,
+                    scope_type TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    bias_multiplier REAL DEFAULT 1.0,
+                    old_weight REAL DEFAULT 0.0,
+                    new_weight REAL DEFAULT 0.0,
+                    suggestion_ids_json TEXT DEFAULT '[]',
+                    status TEXT DEFAULT 'applied',
+                    details_json TEXT DEFAULT '{}',
+                    mutation_id TEXT NOT NULL DEFAULT '',
+                    governance_eligibility_version TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT 0.0
+                );
+                CREATE TABLE IF NOT EXISTS learning_application_effect (
+                    application_id TEXT PRIMARY KEY,
+                    scope_type TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    status TEXT DEFAULT 'observing',
+                    observed_trade_count INTEGER DEFAULT 0,
+                    baseline_trade_count INTEGER DEFAULT 0,
+                    post_avg_reward REAL DEFAULT 0.0,
+                    baseline_avg_reward REAL DEFAULT 0.0,
+                    delta_avg_reward REAL DEFAULT 0.0,
+                    post_win_rate REAL DEFAULT 0.0,
+                    baseline_win_rate REAL DEFAULT 0.0,
+                    decision_json TEXT DEFAULT '{}',
+                    mutation_id TEXT NOT NULL DEFAULT '',
+                    governance_eligibility_version TEXT NOT NULL DEFAULT '',
+                    last_review_at REAL DEFAULT 0.0,
+                    updated_at REAL NOT NULL DEFAULT 0.0,
+                    created_at REAL NOT NULL DEFAULT 0.0
                 );
                 """
             )

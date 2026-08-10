@@ -306,6 +306,130 @@ def _execute(service):
     )
 
 
+def _insert_activation_effect(
+    path,
+    *,
+    status: str,
+    bounded_attribution_allowed: bool,
+) -> None:
+    now = time.time()
+    conn = connect_sqlite(path)
+    try:
+        conn.execute(
+            """INSERT INTO learning_application_log
+               (application_id, cycle_ts, scope_type, scope_key, action,
+                old_weight, new_weight, status, created_at)
+               VALUES ('activation-app', ?, 'factor', 'alpha_x',
+                       'activate_factor_canary', 0.0, 0.7, 'applied', ?)""",
+            (now, now),
+        )
+        conn.execute(
+            """INSERT INTO learning_application_effect
+               (application_id, scope_type, scope_key, action, status,
+                observed_trade_count, decision_json, updated_at, created_at)
+               VALUES ('activation-app', 'factor', 'alpha_x',
+                       'activate_factor_canary', ?, 20, ?, ?, ?)""",
+            (
+                status,
+                json.dumps(
+                    {
+                        "evidence_quality": {
+                            "bounded_attribution_allowed": bounded_attribution_allowed
+                        }
+                    }
+                ),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _activation_canary_config() -> dict:
+    return {
+        "alpha_x": {
+            "role": "alpha",
+            "enabled": True,
+            "lifecycle_status": "ACTIVE",
+            "activation_canary": True,
+            "admission_evidence_version": "factor_admission_evidence.v1",
+            "health_gate_exempt": True,
+        }
+    }
+
+
+@pytest.mark.parametrize("effect_status", ["observing", "ineffective", "degraded"])
+def test_activation_canary_expansion_blocks_until_effect_is_mature_positive(
+    monkeypatch,
+    tmp_path,
+    effect_status,
+):
+    path, service = _service(monkeypatch, tmp_path, _Mutation())
+    monkeypatch.setattr(runtime_config, "bounded_demo_mode_active", lambda _cfg=None: False)
+    _insert_activation_effect(
+        path,
+        status=effect_status,
+        bounded_attribution_allowed=False,
+    )
+
+    plan = service.plan(
+        factor_configs=_activation_canary_config(),
+        current_weights={"alpha_x": 0.7},
+        decision_policy=_ExpansionPolicy(),
+    )
+
+    assert plan["status"] == "no_admitted_change"
+    assert plan["admitted_decisions"] == {}
+    assert plan["admissions"]["alpha_x"]["status"] == (
+        "application_effect_not_mature_positive"
+    )
+
+
+def test_activation_canary_expansion_allows_effective_bounded_attribution(
+    monkeypatch,
+    tmp_path,
+):
+    path, service = _service(monkeypatch, tmp_path, _Mutation())
+    monkeypatch.setattr(runtime_config, "bounded_demo_mode_active", lambda _cfg=None: False)
+    _insert_activation_effect(
+        path,
+        status="effective",
+        bounded_attribution_allowed=True,
+    )
+
+    plan = service.plan(
+        factor_configs=_activation_canary_config(),
+        current_weights={"alpha_x": 0.7},
+        decision_policy=_ExpansionPolicy(),
+    )
+
+    assert "alpha_x" in plan["admitted_decisions"]
+    effect = plan["admissions"]["alpha_x"]["activation_canary_effect"]
+    assert effect["status"] == "mature_positive_application_effect"
+    assert effect["bounded_attribution_allowed"] is True
+
+
+def test_activation_canary_downweight_does_not_require_positive_effect(
+    monkeypatch,
+    tmp_path,
+):
+    _path, service = _service(monkeypatch, tmp_path, _Mutation())
+    monkeypatch.setattr(runtime_config, "bounded_demo_mode_active", lambda _cfg=None: False)
+
+    plan = service.plan(
+        factor_configs=_activation_canary_config(),
+        current_weights={"alpha_x": 1.0},
+        decision_policy=_Policy(),
+    )
+
+    assert "alpha_x" in plan["admitted_decisions"]
+    assert plan["admissions"]["alpha_x"]["activation_canary_effect"]["status"] == (
+        "not_activation_canary_expansion"
+    )
+
+
 def test_weight_change_prepares_before_mutation_and_enters_observation(monkeypatch, tmp_path):
     mutation = _Mutation()
     path, service = _service(monkeypatch, tmp_path, mutation)

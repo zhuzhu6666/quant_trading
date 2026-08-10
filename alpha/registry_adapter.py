@@ -203,6 +203,32 @@ class RegistryAdapter:
         logger.info(f"[RegistryAdapter] promote {name}: {old_source} -> {new_source}")
         return True
 
+    def demote(self, name: str, new_source: str = SOURCE_SHADOW,
+               reason: str = "") -> bool:
+        """Restrict a runtime factor without deleting its callable or history."""
+        if name not in self._meta or name not in factor_registry:
+            logger.warning("[RegistryAdapter] demote: %s is not loaded", name)
+            return False
+        old_source = self._meta[name].get("source", SOURCE_BUILTIN)
+        if old_source == new_source:
+            return True
+        if old_source in {SOURCE_BUILTIN, SOURCE_REMOVED}:
+            logger.warning(
+                "[RegistryAdapter] demote: %s source %s cannot be demoted",
+                name,
+                old_source,
+            )
+            return False
+        self._meta[name]["source"] = new_source
+        self._meta[name]["demote_time"] = _time.time()
+        self._meta[name]["prev_source"] = old_source
+        self._log_event(FactorLifecycleEvent(
+            timestamp=_time.time(), event="demote", factor=name,
+            source=new_source, reason=reason or f"{old_source} -> {new_source}",
+        ))
+        logger.info("[RegistryAdapter] demote %s: %s -> %s", name, old_source, new_source)
+        return True
+
     def force_unregister(self, name: str, reason: str = "") -> bool:
         """强制删除 (包括 builtin)"""
         if name not in factor_registry:

@@ -5518,12 +5518,13 @@ def _start_live_scheduler():
     sched.add_job("awe_adapt", "8,38 * * * *", _scheduled_awe_adapt)
 
     if run_heavy_jobs:
-        # ★ 初始化 EvolutionKernel (注册中枢 + quality gate + governor)
+        # EvolutionKernel now owns backend-local health only. Evolution and
+        # factor governance remain exclusive to the learning worker.
         from backend.runtime.evolution_kernel import EvolutionKernel
 
         kernel = EvolutionKernel.shared()
         kernel.set_pipeline(_factor_pipeline)
-        kernel.start()  # registers evolution_hourly + factor governance + system_health
+        kernel.start()
     else:
         try:
             from monitor.system_health import shared as _sh_shared
@@ -5560,7 +5561,6 @@ def _start_live_scheduler():
     )
     _register_backend_readiness_refresh_job(sched, logger=logger)
     if run_heavy_jobs:
-        # evolution_hourly / factor governance / system_health 由 EvolutionKernel 注册;
         # awe_adapt 始终由持有 live pipeline 的 backend 注册。
         # Phase 3: 特征工程 (03:05 UTC, 避开 :00 治理和 :02 evolution)
         sched.add_job("feature_eng", "5 3 * * *", _scheduled_feature_engineering)

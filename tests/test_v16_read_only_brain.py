@@ -100,7 +100,7 @@ def test_brain_state_persists_read_only_world_model_snapshot(tmp_path):
     assert status["affects_trading"] is False
 
 
-def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp_path):
+def test_backend_readiness_exposes_compact_v16_contract(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)
     try:
@@ -109,127 +109,214 @@ def test_backend_readiness_exposes_v16_read_only_brain_contract(monkeypatch, tmp
     finally:
         conn.close()
 
-    monkeypatch.setattr(BackendReadinessService, "_live_status", staticmethod(lambda: _readiness_fixture()["live"] | {"market_session": {"status": "open"}}))
-    monkeypatch.setattr(BackendReadinessService, "_system_health", staticmethod(lambda: _readiness_fixture()["system_health"]))
-    monkeypatch.setattr(BackendReadinessService, "_model_status", staticmethod(lambda: {"permission_ok": True}))
-    monkeypatch.setattr(BackendReadinessService, "_high_load_status", staticmethod(lambda market_session: {"status": "ok"}))
-    monkeypatch.setattr(BackendReadinessService, "_governance_status", lambda self: _readiness_fixture()["governance"])
-    monkeypatch.setattr(BackendReadinessService, "_factor_data_status", lambda self: {"status": "ok"})
-    monkeypatch.setattr(BackendReadinessService, "_governance_freshness_status", lambda self: _readiness_fixture()["governance_freshness"])
-    monkeypatch.setattr(BackendReadinessService, "_runtime_weight_integrity_status", staticmethod(lambda: {"ok": True}))
-    monkeypatch.setattr(BackendReadinessService, "_execution_semantics_status", staticmethod(lambda: {"effective_send_orders": False, "blocking_components": []}))
-    monkeypatch.setattr(BackendReadinessService, "_startup_status", lambda self: {"blocking_components": [], "known_observations": []})
-    monkeypatch.setattr(BackendReadinessService, "_config_runtime_drift_status", staticmethod(lambda: {"known_observations": []}))
-    monkeypatch.setattr(BackendReadinessService, "_audit_health_status", staticmethod(lambda: {"ok": True, "known_observations": []}))
-    monkeypatch.setattr(BackendReadinessService, "_background_jobs_status", lambda self: {"ok": True})
-    monkeypatch.setattr(BackendReadinessService, "_replay_status", lambda self: _readiness_fixture()["replay"])
-    monkeypatch.setattr(BackendReadinessService, "_incident_control_status", lambda self: _readiness_fixture()["incident_control"])
-    monkeypatch.setattr(BackendReadinessService, "_release_status", lambda self: _readiness_fixture()["release"])
-    monkeypatch.setattr(BackendReadinessService, "_stability_status", lambda self, **kwargs: {"runtime_config_overlay": {}, "runtime_config_snapshot": {"ok": True, "config_hash": "cfg"}})
-    monkeypatch.setattr(BackendReadinessService, "_autonomy_health_status", lambda self, **kwargs: _readiness_fixture()["autonomy_health"])
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_live_status",
+        staticmethod(
+            lambda: _readiness_fixture()["live"]
+            | {"market_session": {"status": "open"}}
+        ),
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_system_health",
+        staticmethod(lambda: _readiness_fixture()["system_health"]),
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_model_status",
+        staticmethod(lambda: {"permission_ok": True}),
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_high_load_status",
+        staticmethod(lambda market_session: {"status": "ok"}),
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_governance_status",
+        lambda self: _readiness_fixture()["governance"],
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_factor_data_status",
+        lambda self: {"status": "ok"},
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_governance_freshness_status",
+        lambda self: _readiness_fixture()["governance_freshness"],
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_runtime_weight_integrity_status",
+        staticmethod(lambda: {"ok": True}),
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_factor_blend_health_status",
+        lambda self: {
+            "ok": True,
+            "status": "healthy",
+            "projection_status": "fresh",
+            "directional_portfolio_guard": {"status": "healthy"},
+        },
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_execution_semantics_status",
+        staticmethod(
+            lambda: {"effective_send_orders": False, "blocking_components": []}
+        ),
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_startup_status",
+        lambda self: {"blocking_components": [], "known_observations": []},
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_config_runtime_drift_status",
+        staticmethod(lambda: {"known_observations": []}),
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_audit_health_status",
+        staticmethod(lambda: {"ok": True, "known_observations": []}),
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_background_jobs_status",
+        lambda self: {"ok": True},
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_replay_status",
+        lambda self: _readiness_fixture()["replay"],
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_incident_control_status",
+        lambda self: _readiness_fixture()["incident_control"],
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_release_status",
+        lambda self: _readiness_fixture()["release"],
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_stability_status",
+        lambda self, **kwargs: {
+            "runtime_config_overlay": {},
+            "runtime_config_snapshot": {"ok": True, "config_hash": "cfg"},
+        },
+    )
+    monkeypatch.setattr(
+        BackendReadinessService,
+        "_autonomy_health_status",
+        lambda self, **kwargs: _readiness_fixture()["autonomy_health"],
+    )
 
     result = BackendReadinessService(db_path=db_path).build()
 
-    assert result["learning_effect_quality"]["boundary"]["read_only"] is True
-    assert result["v16"]["learning_effect_quality"]["boundary"]["retry_requires_governor_decision"] is True
-    assert result["v16"]["runtime_factor_budget"]["schema_version"] == "runtime_factor_budget.v1"
-    assert result["frontend_contract"]["learning_effect_quality"] == "/api/learning/effect-quality"
-    assert result["frontend_contract"]["v16_brain_state"] == "/api/ops/brain/state"
-    assert result["frontend_contract"]["v16_brain_memory"] == "/api/ops/brain/memory"
-    assert result["frontend_contract"]["v16_brain_action_plans"] == "/api/ops/brain/action-plans"
-    assert result["frontend_contract"]["v16_brain_action_plan_evals"] == "/api/ops/brain/action-plan-evals"
-    assert result["frontend_contract"]["v16_brain_low_impact_executions"] == "/api/ops/brain/low-impact-executions"
-    assert result["frontend_contract"]["v16_brain_low_impact_execution_run"] == "/api/ops/brain/low-impact-executions/run"
-    assert result["frontend_contract"]["v16_brain_medium_impact_governance"] == "/api/ops/brain/medium-impact-governance"
-    assert result["frontend_contract"]["v16_brain_medium_impact_governance_materialize"] == "/api/ops/brain/medium-impact-governance/materialize"
-    assert result["frontend_contract"]["v16_brain_governance_candidates"] == "/api/ops/brain/governance-candidates"
-    assert result["frontend_contract"]["v16_brain_governance_candidate_submit"] == "/api/ops/brain/governance-candidates/{candidate_id}/submit"
-    assert result["frontend_contract"]["v16_brain_governance_candidate_reviews"] == "/api/ops/brain/governance-candidate-reviews"
-    assert result["frontend_contract"]["v16_brain_governance_candidate_review_run"] == "/api/ops/brain/governance-candidates/review"
-    assert result["frontend_contract"]["v16_brain_live_ready_guardrails"] == "/api/ops/brain/live-ready-guardrails"
-    assert result["frontend_contract"]["v16_brain_live_ready_guardrail_evaluate"] == "/api/ops/brain/live-ready-guardrails/evaluate"
-    assert result["frontend_contract"]["v16_brain_live_ready_guardrail_tighten"] == "/api/ops/brain/live-ready-guardrails/tighten"
-    assert result["frontend_contract"]["agent_authority"] == "/api/ops/agent-authority"
-    assert result["frontend_contract"]["agent_scorecard"] == "/api/ops/agent-scorecard"
-    assert result["frontend_contract"]["agent_briefing"] == "/api/ops/agent-briefing"
-    assert result["frontend_contract"]["agent_trade_attribution"] == "/api/ops/agent-trade-attribution"
-    assert result["frontend_contract"]["agent_chain_health"] == "/api/ops/agent-chain-health"
-    assert result["v16"]["schema_version"] == "v16_readiness_contract.v1"
-    assert result["v16"]["phase"] == "phase5_live_ready_guardrails"
-    assert result["v16"]["control_plane_boundaries"]["read_only"] is True
-    assert result["v16"]["control_plane_boundaries"]["shadow_action_plans_record_only"] is True
-    assert result["v16"]["control_plane_boundaries"]["shadow_action_evals_record_only"] is True
-    assert result["v16"]["control_plane_boundaries"]["low_impact_execution_requires_risk_policy"] is True
-    assert result["v16"]["control_plane_boundaries"]["medium_impact_governance_candidates_only"] is True
-    assert result["v16"]["control_plane_boundaries"]["medium_impact_governance_suggestions_only"] is False
-    assert result["v16"]["control_plane_boundaries"]["medium_impact_policy_suggestion_bridge_manual_only"] is True
-    assert result["v16"]["control_plane_boundaries"]["candidate_generation_context_required"] is True
-    assert result["v16"]["control_plane_boundaries"]["candidate_review_bridge_preview_only"] is True
-    assert result["v16"]["control_plane_boundaries"]["candidate_review_llm_advisory_only"] is True
-    assert result["v16"]["control_plane_boundaries"]["candidate_bridge_requires_review"] is True
-    assert result["v16"]["control_plane_boundaries"]["proposal_generation_context_required"] is True
-    assert result["v16"]["control_plane_boundaries"]["live_ready_guardrails_only"] is True
-    assert result["v16"]["control_plane_boundaries"]["live_ready_tightening_only"] is True
-    assert result["v16"]["control_plane_boundaries"]["agent_authority_registry_is_source_of_truth"] is True
-    assert result["v16"]["control_plane_boundaries"]["agent_scorecard_read_only"] is True
-    assert result["v16"]["control_plane_boundaries"]["agent_briefing_read_only"] is True
-    assert result["v16"]["control_plane_boundaries"]["agent_trade_feedback_read_only"] is True
-    apply_step = next(
-        step
-        for step in result["autonomous_evolution_cycle"]["steps"]
-        if step["step"] == "single_apply_boundary"
+    assert result["frontend_contract"]["learning_effect_quality"] == (
+        "/api/learning/effect-quality"
     )
-    assert apply_step == {
-        "step": "single_apply_boundary",
-        "status": "ok",
-        "ok": True,
+    assert result["frontend_contract"]["v16_brain_state"] == (
+        "/api/ops/brain/state"
+    )
+    assert result["frontend_contract"]["v16_brain_memory"] == (
+        "/api/ops/brain/memory"
+    )
+    assert result["frontend_contract"]["agent_authority"] == (
+        "/api/ops/agent-authority"
+    )
+    assert result["frontend_contract"]["agent_scorecard"] == (
+        "/api/ops/agent-scorecard"
+    )
+    assert result["frontend_contract"]["agent_briefing"] == (
+        "/api/ops/agent-briefing"
+    )
+    assert result["frontend_contract"]["agent_chain_health"] == (
+        "/api/ops/agent-chain-health"
+    )
+
+    v16 = result["v16"]
+    assert v16["schema_version"] == "v16_readiness_contract.v1"
+    assert v16["phase"] == "phase5_live_ready_guardrails"
+    assert v16["control_plane_boundaries"]["read_only"] is True
+    assert (
+        v16["control_plane_boundaries"]["v16_direct_runtime_mutation"] is False
+    )
+    assert (
+        v16["detail_endpoints"]["governance_candidates"]
+        == "/api/ops/brain/governance-candidates"
+    )
+    assert (
+        v16["detail_endpoints"]["agent_briefing"]
+        == "/api/ops/agent-briefing"
+    )
+
+    removed_heavy_fields = {
+        "brain_state",
+        "brain_action_plans",
+        "brain_action_plan_evals",
+        "brain_low_impact_executions",
+        "brain_medium_impact_governance",
+        "brain_governance_candidates",
+        "learning_effect_quality",
+        "runtime_factor_budget",
+        "factor_pruning_candidates",
+        "agent_authority",
+        "agent_scorecard",
+        "agent_briefing",
+        "agent_chain_health",
+        "autonomous_evolution_cycle",
+        "autonomous_blueprint",
     }
-    assert result["v16"]["autonomous_evolution_cycle"] is result["autonomous_evolution_cycle"]
-    assert result["brain_state"]["ok"] is True
-    assert result["brain_state"]["latest_snapshot"]["affects_trading"] is False
-    assert result["brain_action_plans"]["schema_version"] == "brain_action_plan_readiness.v1"
-    assert result["brain_action_plans"]["affects_trading"] is False
-    assert result["brain_action_plan_evals"]["schema_version"] == "brain_action_plan_eval_readiness.v1"
-    assert result["brain_action_plan_evals"]["affects_trading"] is False
-    assert result["brain_low_impact_executions"]["schema_version"] == "brain_low_impact_execution_readiness.v1"
-    assert result["brain_low_impact_executions"]["low_impact_only"] is True
-    assert result["brain_medium_impact_governance"]["schema_version"] == "brain_medium_impact_governance_readiness.v1"
-    assert result["brain_medium_impact_governance"]["medium_impact_governance"] is True
-    assert result["brain_governance_candidates"]["schema_version"] == "brain_governance_candidate_readiness.v1"
-    assert result["brain_governance_candidates"]["candidate_lane_isolated"] is True
-    assert result["candidate_generation_context_coverage"]["schema_version"] == "candidate_generation_context_coverage.v1"
-    assert result["candidate_generation_context_coverage"]["status"] == "ok"
-    assert result["v16"]["candidate_generation_context_coverage"]["status"] == "ok"
-    assert result["brain_governance_candidate_reviews"]["schema_version"] == "brain_governance_candidate_review_readiness.v1"
-    assert result["brain_governance_candidate_reviews"]["bridge_preview_only"] is True
-    assert result["candidate_bridge_review_coverage"]["schema_version"] == "candidate_bridge_review_coverage.v1"
-    assert result["candidate_bridge_review_coverage"]["status"] == "ok"
-    assert result["v16"]["candidate_bridge_review_coverage"]["status"] == "ok"
-    assert result["proposal_generation_context_coverage"]["schema_version"] == "proposal_generation_context_coverage.v1"
-    assert result["proposal_generation_context_coverage"]["status"] == "ok"
-    assert result["v16"]["proposal_generation_context_coverage"]["status"] == "ok"
-    assert result["brain_live_ready_guardrails"]["schema_version"] == "brain_live_ready_guardrail_readiness.v1"
-    assert result["brain_live_ready_guardrails"]["live_ready_guardrails"] is True
-    assert result["agent_authority"]["schema_version"] == "agent_authority_status.v1"
-    assert result["agent_authority"]["registered_agents"] == 7
-    assert result["v16"]["agent_authority"]["status"] == "ok"
-    assert result["agent_scorecard"]["schema_version"] == "agent_scorecard_readiness.v1"
-    assert len(result["agent_scorecard"]["agents"]) == 7
-    assert {item["source_agent"] for item in result["agent_scorecard"]["agents"]} == {
-        "autonomous_learning",
-        "factor_governance",
-        "factor_pruning_governance",
-        "lightgbm_shadow_models",
-        "llm_advisory",
-        "position_supervisor_governance",
-        "v16_brain",
-    }
-    assert "top_agents" not in result["agent_scorecard"]
-    assert result["agent_briefing"]["schema_version"] == "agent_briefing_readiness.v1"
-    assert result["agent_chain_health"]["schema_version"] == "agent_chain_health.v1"
-    assert result["autonomous_blueprint"]["schema_version"] == "autonomous_trading_blueprint_status.v1"
-    assert result["autonomous_blueprint"]["deviation_guard"]["does_not_create_second_execution_path"] is True
-    assert result["v16"]["autonomous_blueprint"]["schema_version"] == "autonomous_trading_blueprint_status.v1"
+    assert removed_heavy_fields.isdisjoint(result)
+    assert removed_heavy_fields.isdisjoint(v16)
+
+
+def test_backend_readiness_factor_health_reads_runtime_projection_only(
+    monkeypatch, tmp_path
+):
+    from backend.services.factor_blend_health import FactorBlendHealthService
+    from backend.services.runtime_factor_selection_projection import (
+        RuntimeFactorSelectionProjectionService,
+    )
+
+    def fail_if_rebuilt(*args, **kwargs):
+        raise AssertionError("full factor blend rebuild is forbidden in readiness")
+
+    monkeypatch.setattr(FactorBlendHealthService, "build", fail_if_rebuilt)
+    monkeypatch.setattr(
+        RuntimeFactorSelectionProjectionService,
+        "latest",
+        lambda self, *, max_age_seconds: {
+            "ok": True,
+            "status": "fresh",
+            "age_seconds": 3.0,
+            "selected_factor_ids": ["alpha_a", "alpha_b", "alpha_c"],
+            "alpha_voter_count": 3,
+            "config_version": 7,
+            "config_hash": "cfg",
+            "selection_fingerprint": "selection",
+            "directional_portfolio_guard": {"status": "healthy"},
+        },
+    )
+
+    result = BackendReadinessService(
+        db_path=tmp_path / "state.db"
+    )._factor_blend_health_status()
+
+    assert result["ok"] is True
+    assert result["status"] == "healthy"
+    assert result["source"] == "runtime_kv:runtime_factor_selection.v1"
+    assert result["projection_status"] == "fresh"
+    assert result["selected_factor_count"] == 3
+
 
 
 def test_brain_memory_retrieves_negative_memory_and_counter_evidence(tmp_path):

@@ -25,7 +25,15 @@ from backend.core.state_store import validate_runtime_state_schema
 
 
 ACTIVE_APPLICATION_STATUSES = {"prepared", "applied", "observing", "effective", "mixed"}
-ACTIVE_EFFECT_STATUSES = {"prepared", "observing", "mixed"}
+ACTIVE_EFFECT_STATUSES = {"prepared", "observing"}
+TERMINAL_EFFECT_STATUSES = {
+    "effective",
+    "ineffective",
+    "inconclusive",
+    "mixed",
+    "rolled_back",
+    "superseded",
+}
 STRUCTURAL_AUDIT_ACTIONS = {"update_redundancy_groups"}
 WEIGHT_ACTIONS = {"update_weight", "downweight", "boost_small"}
 
@@ -107,7 +115,14 @@ class LearningExperimentAdmissionService:
             return False
         application_status = str(row["application_status"] or "")
         effect_status = str(row["effect_status"] or "")
-        return application_status in ACTIVE_APPLICATION_STATUSES or effect_status in ACTIVE_EFFECT_STATUSES
+        # Once an effect row exists it is the maturity authority.  A terminal
+        # effect must release the scope even if the application log keeps its
+        # historical ``applied`` status.
+        if effect_status in TERMINAL_EFFECT_STATUSES:
+            return False
+        if effect_status in ACTIVE_EFFECT_STATUSES:
+            return True
+        return application_status in ACTIVE_APPLICATION_STATUSES
 
     def active(self, *, scope_type: str, scope_key: str) -> dict[str, Any] | None:
         if not scope_type or not scope_key:

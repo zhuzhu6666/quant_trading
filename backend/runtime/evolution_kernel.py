@@ -84,47 +84,15 @@ class EvolutionKernel:
     # ── Job 注册 ────────────────────────────────────────────────────
 
     def _register_jobs(self) -> None:
-        """注册演化相关的 cron jobs (evolution_hourly, factor_governance, system_health).
+        """Register backend-local health only.
 
-        注意: InProcessScheduler 是单例, 此处注册的 job 与
-        live_service._start_live_scheduler 中的数据 job 共享同一调度器.
+        Evolution and factor-governance heavy jobs are owned exclusively by
+        quant-learning-worker.service. The backend keeps no compatibility
+        scheduler for those mutation paths.
         """
         sched = self._scheduler
         if sched is None:
             return
-
-        # 每小时: 完整自进化循环 (GP + OOS + Canary + 退役 + 权重)
-        from backend.runtime.evolution_orchestrator import (
-            scheduled_evolution_with_governance_handoff,
-        )
-        from backend.services.evolution_work_coordinator import coordinated_job
-
-        sched.add_job(
-            "evolution_hourly",
-            "23,53,58 * * * *",
-            coordinated_job(
-                "evolution_hourly",
-                scheduled_evolution_with_governance_handoff,
-            ),
-        )
-
-        # 非整点的 15 分钟节拍: 因子 V3 自治治理。整点由 minute 2
-        # 的完整 health -> V16 -> governance 链拥有，避免 single-flight 抢占。
-        try:
-            from backend.runtime.factor_governance_orchestrator import run_autonomous_factor_governance_cycle
-            from config.runtime_config import effective_factor_governance_cron
-
-            cron = effective_factor_governance_cron()
-            sched.add_job(
-                "factor_governance_autonomous",
-                cron,
-                coordinated_job(
-                    "factor_governance_autonomous",
-                    run_autonomous_factor_governance_cycle,
-                ),
-            )
-        except Exception as e:
-            logger.warning("[EvolutionKernel] factor_governance registration failed: %s", e)
 
         # 每分钟: 系统总健康检查 (桥/数据/调度器/磁盘/内存)
         try:

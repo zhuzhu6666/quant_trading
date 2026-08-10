@@ -121,6 +121,27 @@ def test_directional_portfolio_degradation_blocks_only_live_alpha() -> None:
     assert any(item["reason"] == "directional_portfolio_degraded" for item in blockers)
 
 
+def test_stale_factor_projection_uses_one_stable_live_alpha_blocker() -> None:
+    rc.reset_for_tests()
+    try:
+        result = _dimensions(
+            factor_blend_health={
+                "ok": False,
+                "status": "critical",
+                "projection_status": "stale",
+                "directional_portfolio_guard": {},
+            }
+        )
+    finally:
+        rc.reset_for_tests()
+
+    reasons = [
+        item["reason"] for item in result["blockers"]["live_alpha"]
+        if item["component"] == "factor_blend_health"
+    ]
+    assert reasons == ["runtime_factor_selection_projection_unavailable"]
+
+
 def test_blocked_factor_governance_runtime_blocks_autonomous_mutation() -> None:
     rc.reset_for_tests()
     try:

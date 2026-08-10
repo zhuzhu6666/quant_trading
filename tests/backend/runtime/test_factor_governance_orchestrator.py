@@ -3,6 +3,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 import time
 
+import pytest
+
 import backend.runtime.factor_governance_orchestrator as governance_module
 from backend.runtime.factor_governance_orchestrator import FactorGovernanceOrchestrator
 from backend.services.factor_identity import (
@@ -28,6 +30,57 @@ class _AllowRisk:
 def _strict_profile(orch):
     profile = orch._governance_profile(rc.shared())
     return replace(profile, name="strict_live", balanced_demo=False)
+
+
+def _with_candidate_admission(item: dict, *, prepared: bool = False) -> dict:
+    artifact_hash = str(item["lifecycle_artifact_hash"])
+    validation = {
+        "direction": 1,
+        "signed_ic_mean": 0.03,
+        "pit_passed": True,
+        "walk_forward_passed": True,
+        "multi_forward_passed": True,
+        "cost_test_passed": True,
+        "execution_evidence_complete": True,
+        "contamination_status": "clean",
+        "regime_ids": ["trend"],
+    }
+    return {
+        **item,
+        "direction": 1,
+        "normalizer": "zscore",
+        "lifecycle_generation": 1,
+        "lifecycle_config_hash": "c" * 64,
+        "runtime_selection_fingerprint": "s" * 64,
+        "lifecycle_mutation_id": "mutation-prepared" if prepared else "mutation-shadow",
+        "runtime_admission": "projection_acknowledged" if prepared else "blocked",
+        "lifecycle_evidence": {
+            "candidate_validation": validation,
+            "v16": (
+                {"command_id": "v16-prepare", "candidate_id": "candidate-1"}
+                if prepared
+                else {}
+            ),
+        },
+        "loaded_projection": (
+            {
+                "loaded": True,
+                "status": "loaded",
+                "generation": 1,
+                "artifact_hash": artifact_hash,
+            }
+            if prepared
+            else {}
+        ),
+    }
+
+
+def _mature_clean_counts(_factor_id: str) -> dict:
+    return {
+        "governance_eligible_mature": 20,
+        "contaminated_or_ineligible": 0,
+        "status": "available",
+    }
 
 
 def test_orchestrator_prepares_eligible_shadow_through_lifecycle_service(monkeypatch, tmp_path):
@@ -64,6 +117,11 @@ def test_orchestrator_prepares_eligible_shadow_through_lifecycle_service(monkeyp
     monkeypatch.setattr(governance_module, "FactorLifecycleService", _Lifecycle)
     monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
     monkeypatch.setattr(
+        orch,
+        "_factor_admission_evidence_counts",
+        _mature_clean_counts,
+    )
+    monkeypatch.setattr(
         "backend.services.factor_weight_change.FactorWeightChangeService._replay_admission",
         lambda _self, _decisions: {
             "required": True,
@@ -81,7 +139,7 @@ def test_orchestrator_prepares_eligible_shadow_through_lifecycle_service(monkeyp
         ) or audited[-1],
     )
 
-    catalog = [{
+    catalog = [_with_candidate_admission({
         "factor_id": "shadow_alpha_1",
         "lifecycle_factor_id": canonical_factor_id("ts_mean(close, 5)"),
         "lifecycle_origin": "shadow",
@@ -99,9 +157,10 @@ def test_orchestrator_prepares_eligible_shadow_through_lifecycle_service(monkeyp
             "hit_rate": 0.55,
             "max_drawdown": 0.01,
         },
-        "health_status": "UNKNOWN",
-        "health_score": 0.0,
-    }]
+        "health_status": "HEALTHY",
+        "health_score": 80.0,
+        "health_updated_at": time.time(),
+    })]
 
     actions = orch._promote_shadow_candidates(catalog, {"run_id": "test-run"})
 
@@ -146,13 +205,18 @@ def test_orchestrator_activates_only_prepared_factor_with_explicit_weight(monkey
     monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
     monkeypatch.setattr(
         orch,
+        "_factor_admission_evidence_counts",
+        _mature_clean_counts,
+    )
+    monkeypatch.setattr(
+        orch,
         "_audit_action",
         lambda _run, item, action, status, *_args, **_kwargs: {
             "factor_id": item["factor_id"], "action": action, "status": status
         },
     )
 
-    catalog = [{
+    catalog = [_with_candidate_admission({
         "factor_id": "shadow_alpha_1",
         "lifecycle_factor_id": canonical_factor_id("ts_mean(close, 5)"),
         "lifecycle_origin": "shadow",
@@ -171,9 +235,10 @@ def test_orchestrator_activates_only_prepared_factor_with_explicit_weight(monkey
             "hit_rate": 0.55,
             "max_drawdown": 0.01,
         },
-        "health_status": "UNKNOWN",
-        "health_score": 0.0,
-    }]
+        "health_status": "HEALTHY",
+        "health_score": 80.0,
+        "health_updated_at": time.time(),
+    }, prepared=True)]
 
     actions = orch._promote_shadow_candidates(
         catalog,
@@ -464,6 +529,75 @@ def test_orchestrator_requires_active_canary_before_shadow_promotion():
     assert orch._promote_shadow_candidates(catalog, {"run_id": "test-run"}) == []
 
 
+@pytest.mark.parametrize(
+    ("health_status", "health_score", "health_age", "blocker"),
+    [
+        ("UNKNOWN", 90.0, 0.0, "factor_health_unknown"),
+        ("DECAYING", 90.0, 0.0, "factor_health_decaying"),
+        ("HEALTHY", 90.0, 86_400.0, "factor_health_stale"),
+        ("WATCH", 39.0, 0.0, "factor_health_watch_below_threshold"),
+    ],
+)
+def test_promotion_evidence_fails_closed_for_unhealthy_or_stale_facts(
+    health_status,
+    health_score,
+    health_age,
+    blocker,
+):
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    item = {
+        "health_status": health_status,
+        "health_score": health_score,
+        "health_updated_at": time.time() - health_age,
+        "canary": {"stage": "ACTIVE"},
+        "shadow_perf": {
+            "oos_bars": 500,
+            "n_valid": 500,
+            "cumulative_pnl": 2.0,
+            "hit_rate": 0.70,
+            "max_drawdown": 0.01,
+        },
+    }
+
+    evidence = orch._promotion_evidence(item, rc.shared())
+
+    assert evidence["eligible"] is False
+    assert blocker in evidence["blocker_codes"]
+
+
+def test_promotion_evidence_accepts_fresh_watch_at_existing_threshold():
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    expression = "ts_mean(close, 5)"
+    item = _with_candidate_admission({
+        "factor_id": "watch_candidate",
+        "lifecycle_factor_id": canonical_factor_id(expression),
+        "lifecycle_origin": "shadow",
+        "lifecycle_status": "SHADOW",
+        "lifecycle_expression": expression,
+        "lifecycle_definition_fingerprint": factor_definition_fingerprint(expression),
+        "lifecycle_artifact_hash": hashlib.sha256(expression.encode()).hexdigest(),
+        "health_status": "WATCH",
+        "health_score": rc.shared().factor_health_watch_threshold,
+        "health_updated_at": time.time(),
+        "canary": {"stage": "ACTIVE"},
+        "shadow_perf": {
+            "oos_bars": 500,
+            "n_valid": 500,
+            "cumulative_pnl": 2.0,
+            "hit_rate": 0.70,
+            "max_drawdown": 0.01,
+        },
+    })
+    orch._factor_admission_evidence_counts = _mature_clean_counts
+
+    evidence = orch._promotion_evidence(item, rc.shared())
+
+    assert evidence["eligible"] is True
+    assert evidence["blocker_codes"] == []
+
+
 def test_orchestrator_downweights_from_model_weakness_evidence(monkeypatch, tmp_path):
     rc.reset_for_tests()
     rc.patch({
@@ -662,7 +796,7 @@ def test_pending_effect_gate_releases_factor_after_final_effect(monkeypatch):
     assert orchestrator._factor_has_pending_effect("rsi_14") is False
 
     row.update(application_status="applied", effect_status="mixed")
-    assert orchestrator._factor_has_pending_effect("rsi_14") is True
+    assert orchestrator._factor_has_pending_effect("rsi_14") is False
 
     row.update(application_status="observing", effect_status="reinforced")
     assert orchestrator._factor_has_pending_effect("rsi_14") is True

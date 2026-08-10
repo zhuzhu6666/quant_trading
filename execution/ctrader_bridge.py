@@ -177,6 +177,7 @@ class CTraderOrderResult:
     volume: float = 0.0
     outcome: str = ""
     intent_id: str = ""
+    execution_intent_status: str = ""
     client_order_id: str = ""
     client_msg_id: str = ""
 
@@ -199,6 +200,7 @@ def _to_order_result(r: CTraderOrderResult) -> "OrderResult":
         success=r.success, order_id=r.order_id, position_id=r.position_id,
         error_code=r.error_code, comment=r.comment, price=r.price, volume=r.volume,
         outcome=r.outcome, intent_id=r.intent_id,
+        execution_intent_status=r.execution_intent_status,
         client_order_id=r.client_order_id, client_msg_id=r.client_msg_id,
     )
 
@@ -1586,6 +1588,9 @@ class CTraderBridge(BaseBrokerBridge):
                 error_code="DUPLICATE_MUTATION_BLOCKED",
                 comment="unresolved amend intent must be recovered before resubmission",
                 intent_id=intent_id,
+                execution_intent_status=(
+                    "persisted" if store is not None else "compat_missing_intent"
+                ),
             )
         req = TradeMsg.ProtoOAAmendPositionSLTPReq()
         req.ctidTraderAccountId = self.account_id
@@ -1633,6 +1638,9 @@ class CTraderBridge(BaseBrokerBridge):
                 error_code=err_code,
                 comment=f"amend rejected: {err_code} — {response.get('description') or ''}",
                 intent_id=intent_id if store is not None else "",
+                execution_intent_status=(
+                    "persisted" if store is not None else "compat_missing_intent"
+                ),
                 client_msg_id=client_msg_id,
             )
 
@@ -1659,6 +1667,7 @@ class CTraderBridge(BaseBrokerBridge):
                     if confirmed
                     else str(send_error or f"unexpected response: {response.get('response_type') or 'none'}")
                 ),
+                execution_intent_status="compat_missing_intent",
                 client_msg_id=client_msg_id,
             )
 
@@ -1705,6 +1714,9 @@ class CTraderBridge(BaseBrokerBridge):
             error_code="" if confirmed else "AMEND_OUTCOME_UNKNOWN",
             comment="amend verified by fresh broker reconcile" if confirmed else "amend not freshly verified",
             intent_id=intent_id if store is not None else "",
+            execution_intent_status=(
+                "persisted" if store is not None else "compat_missing_intent"
+            ),
             client_msg_id=client_msg_id,
         )
 
@@ -2750,6 +2762,7 @@ class CTraderBridge(BaseBrokerBridge):
                         success=False, outcome="rejected",
                         error_code="unresolved_execution_intent",
                         comment=f"blocked: {unresolved} unresolved broker execution intent(s)",
+                        execution_intent_status="persisted",
                         client_order_id=client_order_id, client_msg_id=client_msg_id,
                     )
                 pre_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
@@ -2800,6 +2813,7 @@ class CTraderBridge(BaseBrokerBridge):
                     success=False, outcome="rejected",
                     error_code="execution_intent_persist_failed", comment=str(exc),
                     intent_id=intent_id,
+                    execution_intent_status="persist_failed",
                     client_order_id=client_order_id, client_msg_id=client_msg_id,
                 )
 
@@ -2843,12 +2857,16 @@ class CTraderBridge(BaseBrokerBridge):
                     return CTraderOrderResult(
                         success=False, outcome="unknown", error_code="INTENT_FINALIZE_FAILED",
                         comment=str(exc), intent_id=intent_id,
+                        execution_intent_status="persisted",
                         client_order_id=client_order_id, client_msg_id=client_msg_id,
                     )
             return CTraderOrderResult(
                 success=False, outcome="rejected", error_code=broker_code,
                 comment=f"broker rejected: {broker_code} — {response.get('description') or ''}",
                 intent_id=intent_id if store is not None else "",
+                execution_intent_status=(
+                    "persisted" if store is not None else "compat_missing_intent"
+                ),
                 client_order_id=client_order_id, client_msg_id=client_msg_id,
             )
 
@@ -2863,6 +2881,7 @@ class CTraderBridge(BaseBrokerBridge):
                     success=True, outcome="confirmed",
                     order_id=int(response.get("order_id") or 0), position_id=response_pid,
                     comment=f"filled: orderId={int(response.get('order_id') or 0)} posId={response_pid}",
+                    execution_intent_status="compat_missing_intent",
                     client_order_id=client_order_id, client_msg_id=client_msg_id,
                 )
             self._latch_unknown_broker_outcome(
@@ -2880,6 +2899,7 @@ class CTraderBridge(BaseBrokerBridge):
                 order_id=int(response.get("order_id") or 0),
                 error_code="SEND_OUTCOME_UNKNOWN",
                 comment=str(send_error or f"unexpected response: {response.get('response_type') or 'none'}"),
+                execution_intent_status="compat_missing_intent",
                 client_order_id=client_order_id, client_msg_id=client_msg_id,
             )
 
@@ -2956,6 +2976,7 @@ class CTraderBridge(BaseBrokerBridge):
                 order_id=int(resolution.get("order_id") or 0),
                 error_code="INTENT_FINALIZE_FAILED", comment=str(exc),
                 intent_id=intent_id,
+                execution_intent_status="persisted",
                 client_order_id=client_order_id, client_msg_id=client_msg_id,
             )
         if outcome == "unknown":
@@ -2972,6 +2993,7 @@ class CTraderBridge(BaseBrokerBridge):
             error_code="" if outcome == "confirmed" else "SEND_OUTCOME_UNKNOWN",
             comment=str(resolution.get("reason") or outcome),
             intent_id=intent_id,
+            execution_intent_status="persisted",
             client_order_id=client_order_id, client_msg_id=client_msg_id,
         )
 
@@ -3158,6 +3180,9 @@ class CTraderBridge(BaseBrokerBridge):
                 error_code="DUPLICATE_MUTATION_BLOCKED",
                 comment="unresolved close intent must be recovered before resubmission",
                 intent_id=intent_id,
+                execution_intent_status=(
+                    "persisted" if store is not None else "compat_missing_intent"
+                ),
             )
         req = TradeMsg.ProtoOAClosePositionReq()
         req.ctidTraderAccountId = self.account_id
@@ -3191,6 +3216,9 @@ class CTraderBridge(BaseBrokerBridge):
                 error_code=err_code,
                 comment=f"close rejected: {err_code} — {response.get('description') or ''}",
                 intent_id=intent_id if store is not None else "",
+                execution_intent_status=(
+                    "persisted" if store is not None else "compat_missing_intent"
+                ),
                 client_msg_id=client_msg_id,
             )
 
@@ -3227,6 +3255,7 @@ class CTraderBridge(BaseBrokerBridge):
                     if confirmed
                     else str(send_error or f"unexpected response: {response.get('response_type') or 'none'}")
                 ),
+                execution_intent_status="compat_missing_intent",
                 client_msg_id=client_msg_id,
             )
 
@@ -3282,6 +3311,9 @@ class CTraderBridge(BaseBrokerBridge):
             error_code="" if confirmed else "CLOSE_OUTCOME_UNKNOWN",
             comment="close verified by fresh broker reconcile" if confirmed else "close not freshly verified",
             intent_id=intent_id if store is not None else "",
+            execution_intent_status=(
+                "persisted" if store is not None else "compat_missing_intent"
+            ),
             client_msg_id=client_msg_id,
         )
 

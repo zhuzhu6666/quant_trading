@@ -174,6 +174,116 @@ class FactorWeightChangeService:
             weights=weights,
         )
 
+    def _activation_canary_expansion_admission(
+        self,
+        *,
+        factor_id: str,
+        factor_config: Mapping[str, Any],
+        old_weight: float,
+        new_weight: float,
+    ) -> dict[str, Any]:
+        """Require a mature positive real effect before Canary expansion."""
+        if new_weight <= old_weight or factor_config.get("activation_canary") is not True:
+            return {
+                "ok": True,
+                "allowed": True,
+                "status": "not_activation_canary_expansion",
+            }
+        if (
+            str(factor_config.get("admission_evidence_version") or "")
+            != "factor_admission_evidence.v1"
+        ):
+            return {
+                "ok": True,
+                "allowed": False,
+                "status": "controlled_active_canary_contract_missing",
+                "reason": "legacy_evidence_incomplete",
+            }
+        conn = None
+        try:
+            conn = (
+                get_state_pg_conn(read_only=True)
+                if is_state_db_path(self.db_path)
+                else connect_sqlite(self.db_path, read_only=True)
+            )
+            row = _execute(
+                conn,
+                """SELECT l.application_id,
+                          l.status AS application_status,
+                          e.status AS effect_status,
+                          e.observed_trade_count,
+                          e.decision_json,
+                          e.updated_at
+                   FROM learning_application_log l
+                   LEFT JOIN learning_application_effect e
+                     ON e.application_id=l.application_id
+                   WHERE l.scope_type='factor' AND l.scope_key=?
+                   ORDER BY l.cycle_ts DESC, l.created_at DESC
+                   LIMIT 1""",
+                (factor_id,),
+            ).fetchone()
+        except Exception as exc:
+            return {
+                "ok": True,
+                "allowed": False,
+                "status": "application_effect_unavailable",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        finally:
+            if conn is not None:
+                conn.close()
+        if not row:
+            return {
+                "ok": True,
+                "allowed": False,
+                "status": "application_effect_missing",
+                "reason": "real_application_effect_required",
+            }
+        columns = (
+            "application_id",
+            "application_status",
+            "effect_status",
+            "observed_trade_count",
+            "decision_json",
+            "updated_at",
+        )
+        item = (
+            {key: row[key] for key in columns}
+            if hasattr(row, "keys")
+            else {key: row[index] for index, key in enumerate(columns)}
+        )
+        try:
+            decision = json.loads(str(item.get("decision_json") or "{}"))
+        except Exception:
+            decision = {}
+        quality = dict((decision or {}).get("evidence_quality") or {})
+        effect_status = str(item.get("effect_status") or "").lower()
+        allowed = bool(
+            effect_status == "effective"
+            and quality.get("bounded_attribution_allowed") is True
+        )
+        return {
+            "ok": True,
+            "allowed": allowed,
+            "status": (
+                "mature_positive_application_effect"
+                if allowed
+                else "application_effect_not_mature_positive"
+            ),
+            "reason": (
+                "mature_positive_real_effect"
+                if allowed
+                else "weight_expansion_requires_effective_bounded_attribution"
+            ),
+            "application_id": str(item.get("application_id") or ""),
+            "application_status": str(item.get("application_status") or ""),
+            "effect_status": effect_status,
+            "observed_trade_count": int(item.get("observed_trade_count") or 0),
+            "bounded_attribution_allowed": quality.get(
+                "bounded_attribution_allowed"
+            ),
+        }
+
     @staticmethod
     def boundary() -> dict[str, Any]:
         return {
@@ -182,6 +292,7 @@ class FactorWeightChangeService:
             "decision_policy_required": True,
             "experience_prior_bounded": True,
             "experiment_admission_required": True,
+            "activation_canary_expansion_requires_mature_positive_effect": True,
             "risk_verdict_required": True,
             "coordinator_domain_transaction_required": True,
             "application_effect_reservation_atomic_in_coordinator_modes": True,
@@ -515,14 +626,30 @@ class FactorWeightChangeService:
         admissions: dict[str, dict[str, Any]] = {}
         admitted: dict[str, Any] = {}
         for name, decision in decisions.items():
-            admission = self.admission.evaluate(
-                scope_type="factor",
-                scope_key=name,
-                action="update_weight",
+            effect_admission = self._activation_canary_expansion_admission(
+                factor_id=name,
+                factor_config=(
+                    factor_configs.get(name, {})
+                    if isinstance(factor_configs.get(name), dict)
+                    else {}
+                ),
                 old_weight=float(decision.old_weight),
                 new_weight=float(decision.new_weight),
-                bypass_for_risk_reduction=bypass_for_risk_reduction,
             )
+            admission = effect_admission
+            if effect_admission.get("allowed"):
+                admission = self.admission.evaluate(
+                    scope_type="factor",
+                    scope_key=name,
+                    action="update_weight",
+                    old_weight=float(decision.old_weight),
+                    new_weight=float(decision.new_weight),
+                    bypass_for_risk_reduction=bypass_for_risk_reduction,
+                )
+                admission = {
+                    **admission,
+                    "activation_canary_effect": effect_admission,
+                }
             admissions[name] = admission
             if admission.get("allowed"):
                 admitted[name] = decision

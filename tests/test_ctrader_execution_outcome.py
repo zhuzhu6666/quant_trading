@@ -362,6 +362,8 @@ def test_compat_mode_unknown_protobuf_is_not_reported_success(monkeypatch):
     assert result.success is False
     assert result.outcome == "unknown"
     assert result.position_id == 0
+    assert result.intent_id == ""
+    assert result.execution_intent_status == "compat_missing_intent"
     assert no_new_risk_latch_status()["active"] is True
 
     rpc_calls = []
@@ -371,6 +373,26 @@ def test_compat_mode_unknown_protobuf_is_not_reported_success(monkeypatch):
     assert retry.outcome == "rejected"
     assert retry.error_code == "no_new_risk_latched"
     assert rpc_calls == []
+
+
+def test_compat_confirmed_receipt_reports_missing_intent_explicitly(monkeypatch):
+    bridge = _bridge(enabled=False)
+    monkeypatch.setattr(
+        bridge,
+        "_send",
+        lambda *_args, **_kwargs: ProtoOAExecutionEvent(
+            position_id=9010,
+            order_id=8010,
+        ),
+    )
+
+    result = bridge.market_buy("XAUUSD", 100)
+
+    assert result.success is True
+    assert result.outcome == "confirmed"
+    assert result.position_id == 9010
+    assert result.intent_id == ""
+    assert result.execution_intent_status == "compat_missing_intent"
 
 
 def test_v2_unknown_protobuf_with_position_shaped_fields_is_not_a_broker_receipt(monkeypatch):
@@ -689,8 +711,10 @@ def test_compat_unknown_close_blocks_same_mutation_without_postgres(monkeypatch)
     second = bridge.close_position(778, volume=100)
 
     assert first.outcome == "unknown"
+    assert first.execution_intent_status == "compat_missing_intent"
     assert second.outcome == "unknown"
     assert second.error_code == "DUPLICATE_MUTATION_BLOCKED"
+    assert second.execution_intent_status == "compat_missing_intent"
     assert len(rpc_calls) == 1
     recovery = bridge.execution_intent_recovery_status()
     assert recovery["ready"] is False

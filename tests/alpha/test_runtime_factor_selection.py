@@ -20,6 +20,10 @@ def _active_discovered_config(expression: str) -> dict:
         "definition_fingerprint": fingerprint,
         "artifact_hash": fingerprint,
         "weight": 0.1,
+        "role": "alpha",
+        "direction": 1,
+        "activation_canary": True,
+        "admission_evidence_version": "factor_admission_evidence.v1",
     }
 
 
@@ -114,6 +118,46 @@ def test_discovered_factor_without_committed_active_projection_is_excluded(monke
     assert selection is not None
     assert name not in selection.selected_factor_ids
     assert selection.reason_excluded[name] == "committed_mutation_required"
+
+
+def test_legacy_active_discovered_factor_is_excluded_before_health_or_voting(monkeypatch):
+    name = "disc_legacy_active"
+    factor_registry._factors[name] = lambda df: np.ones(len(df))
+
+    class _Adapter:
+        def list_by_source(self, source):
+            return [name] if source == "discovered" else []
+
+        def dead_names(self):
+            return []
+
+        def get_meta(self, _name):
+            return {"source": "discovered"}
+
+        def all_statuses(self):
+            return [
+                SimpleNamespace(
+                    factor=name,
+                    status="HEALTHY",
+                    score=90.0,
+                    n_obs=1000,
+                    rolling_ic=0.05,
+                    updated_at=time.time(),
+                )
+            ]
+
+    config = _active_discovered_config("ts_mean(close, 17)")
+    config.pop("activation_canary")
+    config.pop("admission_evidence_version")
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
+    try:
+        selection = select_runtime_factors({name: config})
+    finally:
+        factor_registry._factors.pop(name, None)
+
+    assert selection is not None
+    assert name not in selection.selected_factor_ids
+    assert selection.reason_excluded[name] == "legacy_evidence_incomplete"
 
 
 def test_alpha_without_health_evidence_is_fail_closed(monkeypatch):

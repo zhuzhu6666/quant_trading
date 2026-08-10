@@ -15,7 +15,13 @@ from alpha.runtime_factor_selection import (
     runtime_factor_enabled,
     select_runtime_factors,
 )
-from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.db import (
+    STATE_DB,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+)
 from backend.core.state_store import validate_runtime_state_schema
 from config.runtime_config import shared as runtime_config
 
@@ -185,11 +191,22 @@ def _lifecycle_by_factor_name(
     try:
         conn = _connect_state(db_path, read_only=True)
         try:
+            columns = state_table_columns(conn, "factor_lifecycle_state")
+            config_version_expr = (
+                "config_version" if "config_version" in columns else "0 AS config_version"
+            )
+            config_hash_expr = (
+                "config_hash" if "config_hash" in columns else "'' AS config_hash"
+            )
+            evidence_expr = (
+                "evidence_json" if "evidence_json" in columns else "'{}' AS evidence_json"
+            )
             rows = conn.execute(
-                """
+                f"""
                 SELECT factor_id, factor_name, origin, lifecycle_stage,
                        runtime_admission, mutation_id, generation,
-                       definition_fingerprint, artifact_hash, metadata_json,
+                       definition_fingerprint, artifact_hash, {config_version_expr},
+                       {config_hash_expr}, {evidence_expr}, metadata_json,
                        activated_at, retired_at, updated_at
                 FROM factor_lifecycle_state
                 ORDER BY updated_at DESC
@@ -212,6 +229,9 @@ def _lifecycle_by_factor_name(
                         row["definition_fingerprint"] or ""
                     ),
                     "artifact_hash": str(row["artifact_hash"] or ""),
+                    "config_version": int(row["config_version"] or 0),
+                    "config_hash": str(row["config_hash"] or ""),
+                    "evidence": _loads(row["evidence_json"], {}),
                     "expression": str(
                         metadata.get("expression") or ""
                         if isinstance(metadata, dict)
@@ -222,6 +242,52 @@ def _lifecycle_by_factor_name(
                     "updated_at": float(row["updated_at"] or 0.0),
                 }
             return result
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+
+
+def _runtime_projection_by_factor_name(
+    db_path: str | Path = STATE_DB,
+) -> dict[str, dict[str, Any]]:
+    """Return the newest existing load projection for each factor name."""
+
+    try:
+        conn = _connect_state(db_path, read_only=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT projection_id, factor_name, process_role, process_id,
+                       boot_id, generation, artifact_hash, mutation_id,
+                       config_version, config_hash, loaded, status,
+                       heartbeat_at, loaded_at, updated_at
+                FROM factor_runtime_projection
+                ORDER BY updated_at DESC, heartbeat_at DESC
+                """
+            ).fetchall()
+            latest: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                name = str(row["factor_name"] or "")
+                if not name or name in latest:
+                    continue
+                latest[name] = {
+                    "projection_id": str(row["projection_id"] or ""),
+                    "process_role": str(row["process_role"] or ""),
+                    "process_id": str(row["process_id"] or ""),
+                    "boot_id": str(row["boot_id"] or ""),
+                    "generation": int(row["generation"] or 0),
+                    "artifact_hash": str(row["artifact_hash"] or ""),
+                    "mutation_id": str(row["mutation_id"] or ""),
+                    "config_version": int(row["config_version"] or 0),
+                    "config_hash": str(row["config_hash"] or ""),
+                    "loaded": bool(row["loaded"]),
+                    "status": str(row["status"] or ""),
+                    "heartbeat_at": float(row["heartbeat_at"] or 0.0),
+                    "loaded_at": float(row["loaded_at"] or 0.0),
+                    "updated_at": float(row["updated_at"] or 0.0),
+                }
+            return latest
         finally:
             conn.close()
     except Exception:
@@ -463,6 +529,8 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
     selected = set(selection.selected_factor_ids if selection is not None else factor_registry.list())
     excluded_reasons = dict(selection.reason_excluded if selection is not None else {})
     selection_source = "local_fallback"
+    selection_fingerprint = ""
+    runtime_selection_config_hash = ""
     selected_roles: dict[str, str] = {}
     selected_weights: dict[str, float] = {}
     try:
@@ -493,6 +561,12 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
                     name: float(projected_weights[name] or 0.0)
                     for name in projected_selected
                 }
+                selection_fingerprint = str(
+                    projection.get("selection_fingerprint") or ""
+                )
+                runtime_selection_config_hash = str(
+                    projection.get("config_hash") or ""
+                )
                 selection_source = "live_runtime_projection"
             else:
                 selection_source = "local_selection_projection_incomplete"
@@ -514,6 +588,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
     canary = _canary_by_factor(db_path)
     latest_policy = _latest_policy_by_factor_for_db(db_path)
     lifecycle = _lifecycle_by_factor_name(db_path)
+    runtime_projections = _runtime_projection_by_factor_name(db_path)
     latest_mutation = _latest_committed_mutation_by_factor(db_path)
     factor_governance_shadow = _factor_governance_shadow_by_factor(db_path)
     latest_snapshot = _latest_catalog_snapshot_meta(db_path)
@@ -613,6 +688,11 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
                 reason = "observe_only"
         h = health.get(name, {})
         fg_shadow = factor_governance_shadow.get(name, {})
+        direction = cfg_dict.get("direction")
+        try:
+            direction = 1 if float(direction) > 0 else -1 if float(direction) < 0 else 0
+        except (TypeError, ValueError):
+            direction = None
         items.append({
             "factor_id": name,
             "lifecycle_factor_id": lifecycle_factor_id,
@@ -636,6 +716,15 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "lifecycle_artifact_hash": str(
                 lifecycle_fact.get("artifact_hash") or ""
             ),
+            "lifecycle_config_version": int(
+                lifecycle_fact.get("config_version") or 0
+            ),
+            "lifecycle_config_hash": str(
+                lifecycle_fact.get("config_hash") or ""
+            ),
+            "lifecycle_evidence": dict(
+                lifecycle_fact.get("evidence") or {}
+            ),
             "lifecycle_generation": int(
                 lifecycle_fact.get("generation") or 0
             ),
@@ -653,6 +742,19 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "used_in_score": used_in_score,
             "weight": weight,
             "explicit_weight": bool(explicit_weight),
+            "normalizer": str(cfg_dict.get("mode") or ""),
+            "direction": direction,
+            "polarity": (
+                "positive"
+                if direction == 1
+                else "negative"
+                if direction == -1
+                else None
+            ),
+            "activation_canary": bool(cfg_dict.get("activation_canary")),
+            "admission_evidence_version": str(
+                cfg_dict.get("admission_evidence_version") or ""
+            ),
             "cadence": cadence,
             "history_sample_policy": sample_policy,
             "health_status": str(h.get("status") or "UNKNOWN"),
@@ -660,6 +762,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "health_n_obs": int(h.get("n_obs") or 0),
             "health_updated_at": float(h.get("updated_at") or 0.0),
             "canary": canary.get(name, {}),
+            "loaded_projection": runtime_projections.get(name, {}),
             "shadow_perf": _shadow_perf(name) if source in {"shadow", "discovered"} else {},
             "factor_governance_shadow": fg_shadow,
             "model_weakness_score": float(fg_shadow.get("weakness_score") or fg_shadow.get("avg_weakness_score") or 0.0),
@@ -674,6 +777,8 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "rollback_state": "available" if governance else "",
             "reason_excluded": reason,
             "runtime_selection_source": selection_source,
+            "runtime_selection_fingerprint": selection_fingerprint,
+            "runtime_config_hash": runtime_selection_config_hash,
             "catalog_ts": now,
             "latest_catalog_snapshot_id": str(latest_snapshot.get("snapshot_id") or ""),
             "latest_catalog_snapshot_run_id": str(latest_snapshot.get("run_id") or ""),

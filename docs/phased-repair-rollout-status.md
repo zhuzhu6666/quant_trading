@@ -71,6 +71,15 @@ P2 已删除重复 root risk、live 内联统计、API 平行重算和前端旧�
 - Agent Authority 提供唯一 execution owner/required gate；同一命令最多一个 committed mutation。
 - autonomous learning、factor governance、position supervisor governance 三条 lane 继续复用现有 RiskPolicy、V16、Candidate Review 和 Coordinator；不新增第二套 command queue 或 mutation writer。
 
+### 2026-08-10 智能自主进化代码批次
+
+- Canonical authority：风险只经 `RiskLimitSnapshot/risk_kelly_sizing`；Readiness 只读已有投影；learning worker 单写 evolution watermark；Factor Cards/lifecycle/effect 负责因子准入；broker intent 复用既有状态机。
+- Deleted paths：无条件最小量、readiness 重型 V16/因子重算、Web readiness 详情 fallback、`:58` evolution 档、Backend evolution 注册/启动 catch-up 和同 hash snapshot 放大语义已删除。
+- Targeted verification：风险/Readiness/执行组合 170 passed；生命周期/Candidate Card/evolution/config/lineage 组合 125 passed；Web 4 组合同测试与 production build 通过。
+- Migration：`decision_factor_snapshot_lineage` migration 13 已由正式迁移器应用并复核 6 个 lineage 列；历史默认 `lineage_missing`。
+- Runtime posture：在线 backend/learning worker 未因迁移重启；本批代码尚未部署到在线进程，五项静态 flags 未推进。
+- Unresolved live evidence：30 次 readiness p95/无重叠、有效 RuntimeConfig `1%/4%/16%/20`、watermark/backpressure 实际排空、legacy ACTIVE 退回、execution intent 100% 和完整 broker lifecycle。
+
 ## 4. 仍需真实运行证明
 
 以下证据不能由单测、历史快照或 readiness 替代：

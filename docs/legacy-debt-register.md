@@ -20,9 +20,9 @@
 ### shadow/discovered/live 生命周期兼容
 
 - 状态：`migrating`
-- canonical：`factor_lifecycle_state` + `factor_runtime_projection`；ACTIVE 必须经 typed Coordinator/V16、稳定 artifact、fresh health 和 loaded ack。
-- 当前：Catalog 已以 lifecycle row 覆盖 Registry/RuntimeConfig stage/admission，审计和 canary 名称不再独立创建目录条目；coordinator projection 已改用稳定身份并在 backend 恢复时删除同 factor 历史 PID 行。invalid DSL 只保留 `shadow_register_invalid_dsl_skipped` 审计，不进入 Registry/lifecycle；缺真实 shadow performance 的候选留在当前 stage，不用 fallback 分数推进。旧版治理形成的 terminal builtin quarantine 已接入证据化 `generation+1` SHADOW 重入，旧 terminal 行和 mutation 保持不可变，不再保留 no-op 自动恢复钩子。
-- 剩余：切入 typed lifecycle 前已存在的 native ACTIVE builtin 尚无 lifecycle row，Catalog 对这组代码内置因子保留 Registry/RuntimeConfig 兼容；2026-08-10 源配置已为 9 个经典 builtin 补齐显式 ACTIVE/health-exempt/来源/独立分组基线，Demo 账户另已通过 `FactorLifecycleService` 的六因子经典种入完成 ACTIVE/admitted/load。该入口仍经 Coordinator 写入生命周期、overlay、snapshot 和审计，生产账户与其他 builtin 仍须按 V16/Coordinator、prepared、loaded acknowledgement 和 fresh health 的标准链路受控重投影。领域服务的 coordinator-off 隔离兼容仍在，但生产状态库已禁止回退到直接 overlay 写入。2026-08-04 已删除自动晋升对 catalog `source=shadow`、runtime name 等于 canonical DSL ID 及 builtin 重入对旧 `governance_action=disable_factor_live` 的依赖，统一按 canonical lifecycle origin/stage/definition 判定；同时删除 preflight 300 秒、最终 lifecycle 180 秒的 freshness 错位（统一为 900 秒，与 15 分钟 health 刷新节拍对齐），evolution_hourly cron 由 `2 * * * *` 提升为 `23,53,58 * * * *`（唯一不与独立治理 15/30/45、nursery 7/22/37/52、supervisor 9/39、autonomous 12/42、offmarket :20 任一 single-flight 运行窗口重叠的 3 档排布）使完整治理链每小时 3 次且不互斥跳过，退役因子保留 DEAD 健康快照以推进恢复时间线，activate 健康门槛与晋升证据对齐（WATCH + score≥40）。真实 V16 链已创建 `vol_ma_ratio`、`obv_slope` generation 2 SHADOW，并把 prepared GP `dsl_auto_a3eeb...` 激活为 ACTIVE/admitted。
+- canonical：`factor_lifecycle_state` + `factor_runtime_projection` + Factor Card `factor_admission_evidence.v1`；ACTIVE 必须经 typed Coordinator/V16、稳定 artifact、fresh health、loaded ack、至少 20 个独立成熟干净证据和受控 observing effect，成熟正向真实 effect 前不得扩权。
+- 当前：代码已使 legacy ACTIVE 缺完整准入证据时以 `legacy_evidence_incomplete` 排除选择，并由治理 owner 使用同 generation `demote_to_shadow`；context/gate 不投方向票，alpha 以 signed IC 校验方向。Evolution 只由 learning worker 在 `23,53` 运行，使用 `evolution_cycle_watermark.v1` 幂等 GP，并按 `QUANT_CANARY_EVALUATION_LIMIT` 背压；Backend 重任务注册和启动补偿已删除。
+- 剩余：运行态尚需应用代码/迁移并观察遗留 ACTIVE 的真实排除与退回；切入 typed lifecycle 前的 native builtin fallback、领域服务 coordinator-off 隔离兼容和静态开关关闭兼容仍在。不得通过数据库回填 ACTIVE 或伪造 PIT/walk-forward/cost/lineage/effect 证据。
 - 退出：现有 ACTIVE builtin 按 code-bound identity、V16、prepared、真实 loaded ack 和 fresh health 分批重入 lifecycle 后删除 builtin fallback；稳定 enforce 发布后删除领域服务的 generic restore 兼容。启动层的旧 template/supervisor/Registry restore 已删除；除六因子有界 Demo 经典种入外，不得用直接数据库回填 ACTIVE 绕过晋升证据。
 
 ### 历史 runtime overlay 缺少 committed mutation 绑定
@@ -38,7 +38,7 @@
 
 - 状态：`migrating`
 - canonical：PG Job Queue 开启后，八类重任务由 PostgreSQL durable job + 独立 worker 执行。
-- 当前：静态开关默认关闭，job worker inactive；flag-off 仍有本地 executor 兼容。
+- 当前：静态开关默认关闭，job worker inactive；learning worker 是 evolution 重任务唯一生产 owner，Backend 的 evolution 注册和启动 catch-up 已删除。其他 flag-off 本地 executor 兼容仍待 PG queue 分期发布后退出。
 - 退出：受控开启、lease/recovery 稳定发布后删除本地重任务执行路径。
 
 ### emergency close 严格完成语义
@@ -52,7 +52,7 @@
 
 - 状态：`migrating`
 - canonical：结果只允许 confirmed/rejected/unknown/simulated；unknown 立即锁存、禁止重发，必须由 broker recovery/reconcile 唯一消解。
-- 当前：Execution Outcome v2 静态开关默认关闭，故障矩阵已建立，仍需受控 demo 观察。
+- 当前：Execution Outcome v2 静态开关默认关闭；关闭分支现在显式返回 `execution_intent_status=compat_missing_intent`，不再用空 ID 冒充完整追踪。故障矩阵代码合同已覆盖 intent prepare/submitting/complete/unknown 和恢复边界，仍需当前源码绑定 attestation 与受控 Demo 真实生命周期。
 - 退出：通过发布门后删除 position-ID 猜测和旧 result 兼容；unknown 语义永久保留。
 
 ### cTrader deal price 修复运行验收

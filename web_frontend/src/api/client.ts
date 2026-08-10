@@ -713,6 +713,25 @@ export async function getBrainMemory(refresh = false, limit = 50): Promise<Recor
   return getJson<Record<string, unknown>>(`/api/ops/brain/memory?${params.toString()}`);
 }
 
+export async function getAgentAuthority(): Promise<Record<string, unknown>> {
+  return getJson<Record<string, unknown>>("/api/ops/agent-authority");
+}
+
+export async function getAgentScorecard(limit = 300): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return getJson<Record<string, unknown>>(`/api/ops/agent-scorecard?${params.toString()}`);
+}
+
+export async function getAgentBriefing(limit = 20): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return getJson<Record<string, unknown>>(`/api/ops/agent-briefing?${params.toString()}`);
+}
+
+export async function getAgentChainHealth(limit = 300): Promise<Record<string, unknown>> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return getJson<Record<string, unknown>>(`/api/ops/agent-chain-health?${params.toString()}`);
+}
+
 export async function getBrainActionPlans(refresh = false, limit = 50): Promise<Record<string, unknown>> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (refresh) params.set("refresh", "true");

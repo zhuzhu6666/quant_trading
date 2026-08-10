@@ -437,3 +437,57 @@ Demo 恢复仍采用已确认 profile：
 具备安全监督、审计、记忆和有限治理能力；
 生产级无人自治资格尚未获得。
 ```
+
+## 13. 2026-08-10 智能自主进化收敛实施批次
+
+本节是本计划的追加实施记录，不建立第二份活跃方案。代码先在现有静态开关姿态下完成，运行发布仍严格遵守第 9 节顺序。
+
+### 13.1 Canonical authority 与已实施合同
+
+| 批次 | Canonical authority | 已实施结果 |
+|---|---|---|
+| 风险与 Demo 探索 | `RiskLimitSnapshot -> risk_kelly_sizing -> live_risk_sizing` | 默认 profile 收敛为 `1% / 4% / 16% / 20`；Kelly≤0 的 Demo 最小量探索必须有有效 entry/SL 且实际止损风险≤1.0%，正 Kelly 低于最小量只在原风险预算内进位；所有既有 Safety、Readiness、日亏损、回撤和次数门继续生效 |
+| Backend Readiness | `runtime_kv[backend_readiness_snapshot.v1]` 只读 canonical projections | Factor Blend 只读 `runtime_factor_selection.v1`，缺失/过期统一 fail-closed；V16 只保留状态、边界和详情端点索引，Web 详情直接读取领域 API |
+| 进化调度 | learning worker + `runtime_kv[evolution_cycle_watermark.v1]` | cron 收敛为 `23,53`；相同闭合输入只跳过 GP，维护继续；候选达到 `QUANT_CANARY_EVALUATION_LIMIT` 后停止注册并排空；watermark 仅由 learning worker 在 GP 成功或确认无候选后推进 |
+| 配置版本 | `RuntimeConfigMutationService` / Coordinator + `runtime_config_snapshot` | 有效配置 hash 不变时不生成新 snapshot；blocked/no-change/重复候选只保留治理或进化审计；一次真实配置变化对应一个版本 |
+| 因子准入 | Factor Cards `factor_admission_evidence.v1` + `FactorLifecycleService` | signed IC 校验方向，context/gate 不投方向票；PIT、walk-forward、成本、lineage、fresh health、V16、Coordinator、至少 20 个独立成熟干净证据和真实 effect 均 fail-closed；初次 ACTIVE 使用现有新因子权重并创建唯一 observing application，成熟正向 effect 前禁止扩权 |
+| 遗留 ACTIVE | `runtime_factor_selection` + `FactorGovernanceOrchestrator` | 缺完整准入证据的 ACTIVE 先以 `legacy_evidence_incomplete` 排除，随后同 generation `demote_to_shadow`；不伪造历史证据 |
+| 决策 lineage | `decision_factor_snapshot` + `DecisionLedgerService` | 新决策绑定 generation、artifact、definition、runtime selection 和 config hash；无法权威绑定时显式 `lineage_missing`，不猜测回填 |
+| broker intent | `BrokerExecutionIntentStore.prepare -> submitting -> complete/unknown` | 静态开关关闭时结果显式 `compat_missing_intent`；开关开启后的 timeout、未知回执、重连、重复提交和 UNKNOWN latch 继续复用既有故障状态机 |
+
+### 13.2 替代对象与删除清单
+
+- 删除 Kelly≤0/Canary 无条件提前返回最小量的路径及耦合预期。
+- 删除 readiness 内完整 Factor Blend、裁剪候选和 V16/Brain/action/effect/agent 明细构建；删除 Web 对 `readiness.v16.*` 的详情回退。
+- 删除 `:58` evolution 档、Backend `EvolutionKernel` 重任务注册和 Backend 启动 catch-up；learning worker 是当前唯一重任务 owner。
+- 删除“source/run id 不同即可生成同 hash 配置快照”的放大语义。
+- 遗留 ACTIVE 缺完整证据不再进入 live selection；通过既有生命周期命令退回 SHADOW。
+
+### 13.3 不新增项与 schema 边界
+
+- 唯一新增运行投影是 `evolution_cycle_watermark.v1`。
+- `0013_decision_factor_snapshot_lineage.sql` 只向现有表增加 lineage 列，不新增表、服务、线程、writer 或调度器；历史行保持 `lineage_missing`。
+- 不恢复历史 tick、L2、SQLite state、旧 Web 路线，也不增加 RL/LLM/自动工具直写生产路径。
+
+### 13.4 发布姿态与未完成运行证据
+
+代码和合同完成不自动授权运行开关。当前必须保持：
+
+```text
+live_safety_plane_v2_mode=shadow
+live_generation_controller_v2_enabled=false
+ctrader_execution_outcome_v2_enabled=false
+governance_mutation_coordinator_v2_mode=dual_record
+pg_job_queue_v2_enabled=false
+```
+
+运行推进顺序仍为 `safety_enforce -> generation_enable -> execution_outcome_enable -> governance_enforce -> pg_job_queue_enable -> pg_job_queue_verify`。每次只推进一个开关，先进入既有 `no_new_risk` 运维姿态并通过对应 release gate、受控重启、配置/投影/日志一致性和观察窗口；失败回退上一静态值并用 Coordinator 回滚 RuntimeConfig，禁止直接 SQL。
+
+尚不能由代码测试替代的证据：readiness 连续 30 次完整构建 p95<15 秒且无重叠/单核占满、Safety freshness 不抖动、迁移 0013 受控应用、遗留 ACTIVE 真实退回、execution intent 启用后覆盖率 100%，以及一次真实 `open -> close -> learning/effect` 全链生命周期。上述证据完成前不删除静态关闭兼容分支，不推进 P6。
+
+### 13.5 回滚点
+
+- 风险/RuntimeConfig：只通过现有 Coordinator 按上一 snapshot/hash 回滚。
+- 生命周期：用 `demote_to_shadow`、降权、退休等既有收紧命令，不直接写 lifecycle/overlay 表。
+- execution intent：UNKNOWN 保持 no-new-risk，恢复只由 broker reconcile/intent recovery 消解。
+- schema：forward-only additive repair；不依赖 destructive down migration，也不回填猜测 lineage。

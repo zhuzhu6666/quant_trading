@@ -33,6 +33,10 @@ class OrderResult:
     # confirmed/rejected/unknown/simulated; legacy bridges may leave it empty.
     outcome: str = ""
     intent_id: str = ""
+    # Explicit tracking contract.  In compatibility mode this is
+    # ``compat_missing_intent`` instead of allowing an empty intent_id to be
+    # mistaken for complete broker lineage.
+    execution_intent_status: str = ""
     client_order_id: str = ""
     client_msg_id: str = ""
 

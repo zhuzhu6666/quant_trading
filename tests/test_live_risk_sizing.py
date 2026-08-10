@@ -72,7 +72,7 @@ def test_risk_kelly_sizing_caps_early_positive_edge_to_canary_volume():
         cfg=cfg,
         direction=-1,
         current_price=4000.0,
-        sl_price=3990.0,
+        sl_price=4010.0,
         bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
         account={"equity": 1000.0},
         kelly_data={"kelly_fraction": 1.0, "closed_trades": 1},
@@ -158,7 +158,7 @@ def test_demo_nursery_non_positive_kelly_uses_min_volume_exploration():
         autonomy_mode="demo_nursery",
         kelly_enabled=True,
         kelly_fraction=1.0,
-        kelly_risk_per_trade_pct=0.10,
+        kelly_risk_per_trade_pct=0.005,
         kelly_max_pct=0.25,
         max_position_api_volume=1000.0,
         dynamic_sizing_enabled=True,
@@ -170,7 +170,7 @@ def test_demo_nursery_non_positive_kelly_uses_min_volume_exploration():
         cfg=cfg,
         direction=1,
         current_price=4000.0,
-        sl_price=3990.0,
+        sl_price=3996.0,
         bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
         account={"equity": 1000.0},
         kelly_data={"kelly_fraction": 0.0},
@@ -179,15 +179,18 @@ def test_demo_nursery_non_positive_kelly_uses_min_volume_exploration():
     assert result["volume"] == 100.0
     assert result["trace"]["reason"] == "demo_nursery_min_volume_exploration"
     assert result["trace"]["demo_nursery_exploration"] is True
+    assert result["trace"]["exploration_eligible"] is True
+    assert result["trace"]["min_volume_stop_risk"] == pytest.approx(4.0)
+    assert result["trace"]["exploration_risk_budget"] == pytest.approx(5.0)
     assert result["trace"]["blocked_reason"] == ""
 
 
-def test_demo_autonomous_low_kelly_uses_min_volume_until_sample_floor():
+def test_demo_autonomous_non_positive_kelly_exploration_is_not_sample_limited():
     cfg = SimpleNamespace(
         autonomy_mode="demo_autonomous",
         kelly_enabled=True,
         kelly_fraction=0.5,
-        kelly_risk_per_trade_pct=0.06,
+        kelly_risk_per_trade_pct=0.005,
         kelly_max_pct=0.25,
         kelly_min_closed_trades=20,
         kelly_canary_max_api_volume=100.0,
@@ -201,33 +204,90 @@ def test_demo_autonomous_low_kelly_uses_min_volume_until_sample_floor():
         cfg=cfg,
         direction=1,
         current_price=3350.0,
-        sl_price=3300.0,
+        sl_price=3349.0,
         bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
         account={"equity": 434.62},
-        kelly_data={"kelly_fraction": 0.004, "closed_trades": 5},
+        kelly_data={"kelly_fraction": 0.0, "closed_trades": 199},
     )
 
     assert result["volume"] == 100.0
     assert result["trace"]["reason"] == "demo_autonomous_min_volume_exploration"
     assert result["trace"]["demo_exploration"] is True
     assert result["trace"]["demo_nursery_exploration"] is False
-    assert result["trace"]["exploration_reason"] == "insufficient_closed_trades"
-    assert result["trace"]["kelly_closed_trades"] == 5
+    assert result["trace"]["exploration_reason"] == "non_positive_kelly"
+    assert result["trace"]["kelly_closed_trades"] == 199
+    assert result["trace"]["min_volume_stop_risk"] == pytest.approx(1.0)
+    assert result["trace"]["exploration_risk_budget"] == pytest.approx(2.1731)
     assert result["trace"]["blocked_reason"] == ""
 
-    released = risk_kelly_sizing(
+
+def test_demo_autonomous_minimum_volume_cannot_exceed_stop_risk_budget():
+    cfg = SimpleNamespace(
+        autonomy_mode="demo_autonomous",
+        kelly_enabled=True,
+        kelly_fraction=0.5,
+        kelly_risk_per_trade_pct=0.005,
+        kelly_max_pct=0.25,
+        kelly_min_closed_trades=20,
+        kelly_canary_max_api_volume=100.0,
+        max_position_api_volume=1000.0,
+        dynamic_sizing_enabled=True,
+        dynamic_sizing_max_api_volume=1000.0,
+        dynamic_sizing_api_units_per_display_unit=100.0,
+    )
+
+    blocked = risk_kelly_sizing(
         cfg=cfg,
         direction=1,
         current_price=3350.0,
         sl_price=3300.0,
         bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
         account={"equity": 434.62},
-        kelly_data={"kelly_fraction": 0.004, "closed_trades": 20},
+        kelly_data={"kelly_fraction": 0.0, "closed_trades": 199},
     )
 
-    assert released["volume"] == 0.0
-    assert released["trace"]["reason"] == "kelly_sizing_below_min"
-    assert released["trace"]["blocked_reason"].startswith("kelly_sizing_below_min")
+    assert blocked["volume"] == 0.0
+    assert blocked["trace"]["reason"] == "demo_autonomous_min_volume_risk_budget_exceeded"
+    assert blocked["trace"]["exploration_eligible"] is False
+    assert blocked["trace"]["min_volume_stop_risk"] == pytest.approx(50.0)
+    assert blocked["trace"]["exploration_risk_budget"] == pytest.approx(2.1731)
+
+
+@pytest.mark.parametrize(
+    ("direction", "entry", "stop"),
+    [
+        (1, 4000.0, 0.0),
+        (1, 4000.0, 4010.0),
+        (-1, 4000.0, 3990.0),
+        (0, 4000.0, 3990.0),
+    ],
+)
+def test_demo_exploration_requires_a_valid_protective_stop(direction, entry, stop):
+    cfg = SimpleNamespace(
+        autonomy_mode="demo_autonomous",
+        kelly_enabled=True,
+        kelly_fraction=0.5,
+        kelly_risk_per_trade_pct=0.005,
+        kelly_max_pct=0.25,
+        max_position_api_volume=1000.0,
+        dynamic_sizing_enabled=True,
+        dynamic_sizing_max_api_volume=1000.0,
+        dynamic_sizing_api_units_per_display_unit=100.0,
+    )
+
+    result = risk_kelly_sizing(
+        cfg=cfg,
+        direction=direction,
+        current_price=entry,
+        sl_price=stop,
+        bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
+        account={"equity": 1000.0},
+        kelly_data={"kelly_fraction": 0.0, "closed_trades": 199},
+    )
+
+    assert result["volume"] == 0.0
+    assert result["trace"]["reason"] == "invalid_protective_stop"
+    assert result["trace"]["exploration_eligible"] is False
 
 
 def test_risk_kelly_sizing_can_scale_to_demo_hard_cap_from_equity_budget():
@@ -337,7 +397,7 @@ def test_apply_entry_event_sizing_floors_reduced_volume_without_lifting_to_min()
     assert tradeable["blocked_reason"] == ""
 
 
-def test_apply_entry_event_sizing_preserves_demo_nursery_exploration_min_volume():
+def test_apply_entry_event_sizing_does_not_lift_demo_exploration_back_to_minimum():
     result = apply_entry_event_sizing(
         base_volume=100.0,
         event_multiplier=0.2,
@@ -348,9 +408,9 @@ def test_apply_entry_event_sizing_preserves_demo_nursery_exploration_min_volume(
         },
     )
 
-    assert result["volume"] == 100.0
-    assert result["blocked_reason"] == ""
-    assert result["trace"]["event_sizing_demo_nursery_min_preserved"] is True
+    assert result["volume"] == 0.0
+    assert result["blocked_reason"].startswith("event_sizing_below_min")
+    assert "event_sizing_demo_nursery_min_preserved" not in result["trace"]
 
 
 def test_apply_entry_event_sizing_preserves_non_positive_upstream_block():

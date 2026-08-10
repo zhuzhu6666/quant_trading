@@ -123,8 +123,9 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(10, "proposal_registry_source_ref_contract", "0010_proposal_registry_source_ref_contract.sql"),
     StateSchemaMigration(11, "execution_price_repair_ledger", "0011_execution_price_repair_ledger.sql"),
     StateSchemaMigration(12, "risk_daily_equity", "0012_risk_daily_equity.sql"),
+    StateSchemaMigration(13, "decision_factor_snapshot_lineage", "0013_decision_factor_snapshot_lineage.sql"),
 )
-STATE_SCHEMA_MIN_VERSION: Final[int] = 12
+STATE_SCHEMA_MIN_VERSION: Final[int] = 13
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
 
 

@@ -22,6 +22,7 @@ from alpha.portfolio_compositor import resolve_factor_role
 from alpha.registry_adapter import RegistryAdapter
 from backend.core.db import connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
+from backend.services.factor_cards import build_factor_admission_evidence
 from backend.services.factor_blend_health import FactorBlendHealthService
 from backend.services.factor_identity import (
     canonical_factor_id,
@@ -159,6 +160,7 @@ class FactorGovernanceOrchestrator:
     def __init__(self, risk_policy: RiskPolicyService | None = None):
         self.risk_policy = risk_policy or RiskPolicyService.shared()
         self.overlay = RuntimeConfigOverlayService()
+        self._admission_evidence_count_cache: dict[str, dict[str, Any]] = {}
 
     @classmethod
     def shared(cls) -> "FactorGovernanceOrchestrator":
@@ -177,6 +179,7 @@ class FactorGovernanceOrchestrator:
         v16_handoff: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         cfg = runtime_config.shared()
+        self._admission_evidence_count_cache = {}
         profile = self._governance_profile(cfg)
         if not bool(getattr(cfg, "factor_governance_enabled", True)):
             return {"status": "disabled", "actions": []}
@@ -211,6 +214,15 @@ class FactorGovernanceOrchestrator:
                 source="factor_governance_cycle",
             )
             actions.extend(self._rollback_canary_regressions(catalog, run))
+            if actions:
+                catalog = build_factor_catalog()
+            actions.extend(
+                self._demote_invalid_candidate_evidence(
+                    catalog,
+                    run,
+                    cfg=cfg,
+                )
+            )
             if actions:
                 catalog = build_factor_catalog()
             # Tightening is always evaluated before any expansion posture or
@@ -1735,6 +1747,7 @@ class FactorGovernanceOrchestrator:
             authority = dict(v16_authority or {})
             binding = FactorV16Binding(
                 command_id=str(authority.get("command_id") or ""),
+                claim_token=str(authority.get("claim_token") or ""),
                 target_agent=str(authority.get("target_agent") or "factor_governance"),
                 candidate_id=str(authority.get("candidate_id") or ""),
                 posterior_fingerprint=str(authority.get("posterior_fingerprint") or ""),
@@ -1865,6 +1878,125 @@ class FactorGovernanceOrchestrator:
                     rollback={"target_stage": FactorLifecycleStage.QUARANTINED.value},
                     result={"error": str(exc)},
                 ))
+        return actions
+
+    def _demote_invalid_candidate_evidence(
+        self,
+        catalog: list[dict[str, Any]],
+        run: dict[str, Any],
+        *,
+        cfg: Any,
+    ) -> list[dict[str, Any]]:
+        """Cancel stale prepared candidates and quarantine legacy ACTIVE risk."""
+        actions: list[dict[str, Any]] = []
+        lifecycle = FactorLifecycleService(
+            self.overlay.db_path,
+            adapter=RegistryAdapter.shared(),
+            health_stale_after_sec=factor_governance_health_max_age_seconds(cfg),
+        )
+        for item in catalog:
+            factor_id = str(item.get("factor_id") or "")
+            stage = str(item.get("lifecycle_status") or "").upper()
+            if (
+                not factor_id
+                or str(item.get("lifecycle_origin") or "").lower()
+                not in {"dsl", "shadow", "discovered"}
+                or stage
+                not in {
+                    FactorLifecycleStage.PROMOTION_PREPARED.value,
+                    FactorLifecycleStage.ACTIVE.value,
+                }
+            ):
+                continue
+            if stage == FactorLifecycleStage.PROMOTION_PREPARED.value:
+                evidence = self._promotion_evidence(item, cfg)
+                blockers = list(evidence.get("blocker_codes") or [])
+                if evidence.get("eligible") is True:
+                    continue
+                reason_code = "prepared_evidence_invalidated"
+            else:
+                persisted = dict(
+                    (item.get("lifecycle_evidence") or {}).get(
+                        "admission_evidence"
+                    )
+                    or {}
+                )
+                config_complete = bool(
+                    item.get("activation_canary")
+                    and str(item.get("admission_evidence_version") or "")
+                    == "factor_admission_evidence.v1"
+                    and int(item.get("direction") or 0) in {-1, 1}
+                )
+                evidence_complete = bool(
+                    str(persisted.get("schema_version") or "")
+                    == "factor_admission_evidence.v1"
+                    and persisted.get("eligible_for_activation") is True
+                    and not list(persisted.get("activation_blocker_codes") or [])
+                )
+                if config_complete and evidence_complete:
+                    continue
+                blockers = ["legacy_evidence_incomplete"]
+                evidence = {
+                    "eligible": False,
+                    "admission_evidence": persisted,
+                    "blocker_codes": blockers,
+                }
+                reason_code = "legacy_evidence_incomplete"
+            verdict = self._risk("retire_factor", item, evidence)
+            if not verdict.allowed:
+                actions.append(
+                    self._audit_action(
+                        run,
+                        item,
+                        "demote_to_shadow",
+                        "blocked_by_risk",
+                        evidence,
+                        verdict,
+                    )
+                )
+                continue
+            result = lifecycle.demote_to_shadow(
+                name=factor_id,
+                actor="system:factor_governance",
+                reason=reason_code,
+                evidence_refs={
+                    **evidence,
+                    "blocker_codes": blockers,
+                    "cancellation_command": "demote_to_shadow",
+                },
+                idempotency_key=(
+                    f"factor_demote:{factor_id}:"
+                    f"{item.get('lifecycle_mutation_id') or reason_code}"
+                ),
+            )
+            committed, projection_ready, _status = self._mutation_commit_state(
+                result
+            )
+            actions.append(
+                self._audit_action(
+                    run,
+                    item,
+                    "demote_to_shadow",
+                    (
+                        "demoted_to_shadow"
+                        if projection_ready
+                        else "projection_degraded"
+                        if committed
+                        else "blocked_by_evidence"
+                    ),
+                    evidence,
+                    verdict,
+                    before={"lifecycle_stage": stage},
+                    after={
+                        "lifecycle_stage": str(
+                            result.get("lifecycle_stage") or stage
+                        ),
+                        "mutation_id": str(result.get("mutation_id") or ""),
+                    },
+                    rollback={"target_stage": stage},
+                    result=result,
+                )
+            )
         return actions
 
     def _rollback_canary_regressions(
@@ -3178,25 +3310,90 @@ class FactorGovernanceOrchestrator:
         hit_rate = float(perf.get("hit_rate") or 0.0)
         max_drawdown = abs(float(perf.get("max_drawdown") or 0.0))
         health_score = float(item.get("health_score") or 0.0)
-        health_status = str(item.get("health_status") or "UNKNOWN")
+        health_status = str(item.get("health_status") or "UNKNOWN").upper()
+        health_updated_at = float(item.get("health_updated_at") or 0.0)
+        health_age_seconds = (
+            time.time() - health_updated_at
+            if health_updated_at > 0.0
+            else float("inf")
+        )
         canary_stage = str((item.get("canary") or {}).get("stage") or "").upper()
         min_oos = int(getattr(cfg, "factor_governance_shadow_min_oos_bars", 100) or 100)
         min_valid = int(getattr(cfg, "factor_governance_shadow_min_valid", 80) or 80)
         min_hit = float(getattr(cfg, "factor_governance_shadow_min_hit_rate", 0.5) or 0.5)
         max_dd = float(getattr(cfg, "factor_governance_shadow_max_drawdown", 0.05) or 0.05)
         watch = float(getattr(cfg, "factor_health_watch_threshold", 40.0) or 40.0)
-        health_ok = health_status in {"UNKNOWN", "HEALTHY", "WATCH"} or health_score >= watch
-        eligible = (
-            canary_stage == "ACTIVE"
-            and oos_bars >= min_oos
-            and n_valid >= min_valid
-            and cumulative_pnl > 0.0
-            and hit_rate >= min_hit
-            and max_drawdown <= max_dd
-            and health_ok
+        health_max_age_seconds = factor_governance_health_max_age_seconds(cfg)
+        health_fresh = bool(
+            health_updated_at > 0.0
+            and health_age_seconds >= -5.0
+            and health_age_seconds <= health_max_age_seconds
         )
+        health_ok = bool(
+            health_fresh
+            and (
+                health_status == "HEALTHY"
+                or (
+                    health_status == "WATCH"
+                    and health_score >= watch
+                )
+            )
+        )
+        legacy_blockers = [
+            code
+            for code, blocked in (
+                ("bar_oos_canary_incomplete", canary_stage != "ACTIVE"),
+                ("bar_oos_below_minimum", oos_bars < min_oos),
+                ("bar_valid_samples_below_minimum", n_valid < min_valid),
+                ("bar_oos_pnl_non_positive", cumulative_pnl <= 0.0),
+                ("bar_oos_hit_rate_below_minimum", hit_rate < min_hit),
+                ("bar_oos_drawdown_above_maximum", max_drawdown > max_dd),
+                ("factor_health_invalid_or_stale", not health_ok),
+            )
+            if blocked
+        ]
+        legacy_blockers.extend(
+            code
+            for code, blocked in (
+                ("factor_health_unknown", health_status == "UNKNOWN"),
+                ("factor_health_decaying", health_status == "DECAYING"),
+                ("factor_health_stale", not health_fresh),
+                (
+                    "factor_health_watch_below_threshold",
+                    health_status == "WATCH" and health_score < watch,
+                ),
+            )
+            if blocked
+        )
+        factor_id = str(item.get("factor_id") or "")
+        admission = build_factor_admission_evidence(
+            factor_id=factor_id,
+            catalog_item=item,
+            evidence_counts=self._factor_admission_evidence_counts(factor_id),
+            governance={},
+        )
+        stage = str(item.get("lifecycle_status") or "").upper()
+        eligibility_field = (
+            "eligible_for_activation"
+            if stage == FactorLifecycleStage.PROMOTION_PREPARED.value
+            else "eligible_for_preparation"
+        )
+        admission_blocker_field = (
+            "activation_blocker_codes"
+            if eligibility_field == "eligible_for_activation"
+            else "preflight_blocker_codes"
+        )
+        blockers = sorted(
+            set(
+                legacy_blockers
+                + list(admission.get(admission_blocker_field) or [])
+            )
+        )
+        eligible = bool(admission.get(eligibility_field) is True and not blockers)
         return {
             "eligible": eligible,
+            "eligibility_field": eligibility_field,
+            "admission_evidence": admission,
             "oos_bars": oos_bars,
             "n_valid": n_valid,
             "cumulative_pnl": cumulative_pnl,
@@ -3204,15 +3401,46 @@ class FactorGovernanceOrchestrator:
             "max_drawdown": max_drawdown,
             "health_score": health_score,
             "health_status": health_status,
+            "health_updated_at": health_updated_at,
+            "health_age_seconds": health_age_seconds,
+            "health_fresh": health_fresh,
             "canary_stage": canary_stage,
+            "blocker_codes": blockers,
             "thresholds": {
                 "min_oos_bars": min_oos,
                 "min_valid": min_valid,
                 "min_hit_rate": min_hit,
                 "max_drawdown": max_dd,
                 "watch_health": watch,
+                "health_max_age_seconds": health_max_age_seconds,
             },
         }
+
+    def _factor_admission_evidence_counts(
+        self,
+        factor_id: str,
+    ) -> dict[str, Any]:
+        if factor_id in self._admission_evidence_count_cache:
+            return dict(self._admission_evidence_count_cache[factor_id])
+        unavailable = {
+            "decision_observations": None,
+            "factor_linked_trade_reviews": None,
+            "governance_eligible_mature": None,
+            "contaminated_or_ineligible": None,
+            "effects_observed": None,
+            "status": "unavailable",
+        }
+        try:
+            from research.features.feature_provider import LearningFeatureProvider
+
+            summary = LearningFeatureProvider(
+                str(self.overlay.db_path)
+            ).factor_evidence_summary([factor_id])
+            resolved = dict(summary.get(factor_id) or unavailable)
+        except Exception:
+            resolved = unavailable
+        self._admission_evidence_count_cache[factor_id] = dict(resolved)
+        return resolved
 
     def _shadow_score(self, item: dict[str, Any]) -> float:
         perf = item.get("shadow_perf") or {}

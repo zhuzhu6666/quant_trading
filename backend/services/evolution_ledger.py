@@ -264,11 +264,7 @@ def persist_runtime_config_snapshot(
             existing_hash = existing["config_hash"] if hasattr(existing, "keys") else existing[1]
             existing_source_value = existing["source"] if hasattr(existing, "keys") else existing[2]
             existing_run_value = existing["run_id"] if hasattr(existing, "keys") else existing[3]
-            if (
-                str(existing_hash or "") == config_hash
-                and str(existing_source_value or "") == str(source or "")
-                and str(existing_run_value or "") == str(run_id or "")
-            ):
+            if str(existing_hash or "") == config_hash:
                 config_version = existing["config_version"] if hasattr(existing, "keys") else existing[0]
                 existing_source = existing_source_value
                 existing_run_id = existing_run_value
@@ -281,6 +277,7 @@ def persist_runtime_config_snapshot(
                     "created_at": float(existing_created_at or 0.0),
                     "reused": True,
                     "requested_source": str(source or ""),
+                    "requested_run_id": str(run_id or ""),
                 }
         cur = active_conn.execute(
             _p(db_path, """

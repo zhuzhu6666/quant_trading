@@ -28,10 +28,10 @@ commission:
   type: fixed
   value: 6.0
 risk:
-  max_daily_loss_pct: 50.0
+  max_daily_loss_pct: 4.0
   max_position_lots: 0.5
-  max_trades_per_day: 100
-  single_trade_risk_usd: 2.0
+  max_trades_per_day: 20
+  single_trade_risk_usd: 4.0
   circuit_breaker:
     consecutive_losses: 5
     slippage_pct: 0.5
@@ -129,10 +129,10 @@ runtime:
   ctrader_send_orders: true
   risk_sl_atr: 1.5
   risk_tp_atr: 2.5
-  risk_max_drawdown_pct: 15.0
+  risk_max_drawdown_pct: 16.0
   risk_max_consecutive_losses: 8
-  risk_max_daily_loss_pct: 50.0
-  risk_max_daily_trades: 100
+  risk_max_daily_loss_pct: 4.0
+  risk_max_daily_trades: 20
   risk_data_lag_max_seconds: 3600.0
   risk_circuit_breaker_bypass: false
   risk_cooldown_bars: 3
@@ -150,7 +150,7 @@ runtime:
   autonomy_demo_auto_apply: true
   live_autonomy_unlocked: false
   live_autonomy_unlock_id: ''
-  demo_learning_max_daily_trades: 100
+  demo_learning_max_daily_trades: 20
   # Fail-closed default for non-demo/live authority. Demo nursery/autonomous
   # keeps governed exploration active through RuntimeConfig mode semantics.
   autonomy_expansion_frozen: true
@@ -846,7 +846,7 @@ runtime:
   kelly_enabled: true
   kelly_fraction: 0.5
   kelly_max_pct: 0.25
-  kelly_risk_per_trade_pct: 0.06
+  kelly_risk_per_trade_pct: 0.01
   kelly_min_closed_trades: 20
   kelly_canary_max_api_volume: 100.0
   dynamic_sizing_enabled: true

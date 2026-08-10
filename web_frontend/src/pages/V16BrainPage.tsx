@@ -19,6 +19,10 @@ import {
 import {
   evaluateLiveAutonomyUnlock,
   evaluateBrainLiveReadyGuardrail,
+  getAgentAuthority,
+  getAgentBriefing,
+  getAgentChainHealth,
+  getAgentScorecard,
   getAutonomyProposals,
   getBrainActionPlanEvals,
   getBrainActionPlans,
@@ -95,6 +99,10 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
   const [activeTab, setActiveTab] = useState<ChainTab>("overview");
   const queryClient = useQueryClient();
   const readinessQuery = useBackendReadinessQuery();
+  const agentAuthorityQuery = useQuery({ queryKey: ["v16", "agent-authority"], queryFn: getAgentAuthority, enabled: activeTab === "overview", refetchInterval: 30_000, staleTime: 10_000 });
+  const agentScorecardQuery = useQuery({ queryKey: ["v16", "agent-scorecard"], queryFn: () => getAgentScorecard(300), enabled: activeTab === "overview", refetchInterval: 30_000, staleTime: 10_000 });
+  const agentBriefingQuery = useQuery({ queryKey: ["v16", "agent-briefing"], queryFn: () => getAgentBriefing(20), enabled: activeTab === "overview", refetchInterval: 30_000, staleTime: 10_000 });
+  const agentChainHealthQuery = useQuery({ queryKey: ["v16", "agent-chain-health"], queryFn: () => getAgentChainHealth(300), enabled: activeTab === "overview", refetchInterval: 30_000, staleTime: 10_000 });
   const brainStateQuery = useQuery({ queryKey: ["v16", "brain-state"], queryFn: () => getBrainState(false), enabled: activeTab === "overview" || activeTab === "evidence", refetchInterval: 20_000, staleTime: 8_000 });
   const brainMemoryQuery = useQuery({ queryKey: ["v16", "brain-memory"], queryFn: () => getBrainMemory(false, 24), enabled: activeTab === "overview" || activeTab === "evidence", refetchInterval: 30_000, staleTime: 10_000 });
   const brainActionPlansQuery = useQuery({ queryKey: ["v16", "brain-action-plans"], queryFn: () => getBrainActionPlans(false, 24), enabled: activeTab === "evidence", refetchInterval: 30_000, staleTime: 10_000 });
@@ -104,13 +112,19 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
   const candidateReviewsQuery = useQuery({ queryKey: ["v16", "brain-governance-candidate-reviews"], queryFn: () => getBrainGovernanceCandidateReviews(24), enabled: activeTab === "proposals", refetchInterval: 30_000, staleTime: 10_000 });
   const liveReadyGuardrailsQuery = useQuery({ queryKey: ["v16", "brain-live-ready-guardrails"], queryFn: () => getBrainLiveReadyGuardrails(24), enabled: activeTab === "control", refetchInterval: 30_000, staleTime: 10_000 });
   const proposalRegistryQuery = useQuery({ queryKey: ["autonomy", "proposal-registry"], queryFn: () => getAutonomyProposals(false, 24), enabled: activeTab === "proposals", refetchInterval: 30_000, staleTime: 10_000 });
-  const liveAutonomyQuery = useQuery({ queryKey: ["autonomy", "live-status"], queryFn: () => getLiveAutonomyStatus(false), enabled: activeTab === "control", refetchInterval: 20_000, staleTime: 8_000 });
+  const liveAutonomyQuery = useQuery({ queryKey: ["autonomy", "live-status"], queryFn: () => getLiveAutonomyStatus(false), enabled: activeTab === "overview" || activeTab === "control", refetchInterval: 20_000, staleTime: 8_000 });
 
   const refreshMutation = useMutation({
     mutationFn: async () => {
       if (activeTab === "overview") {
-        await getBrainState(true);
-        await getBrainMemory(true, 24);
+        await Promise.all([
+          getBrainState(true),
+          getBrainMemory(true, 24),
+          getAgentAuthority(),
+          getAgentScorecard(300),
+          getAgentBriefing(20),
+          getAgentChainHealth(300),
+        ]);
       } else if (activeTab === "proposals") {
         await getBrainMediumImpactGovernance(24);
         await getBrainGovernanceCandidateReviews(24);
@@ -227,10 +241,7 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
   const readinessRequestFailed = readinessQuery.isError || readinessQuery.isRefetchError;
   const readinessKnown = factIsKnown(readinessFact, readinessRequestFailed);
   const v16Readiness = asRecord(pick(readiness, ["v16"]));
-  const directBrainState = asRecord(pick(brainStateQuery.data, ["brain_state"]));
-  const hasDirectBrainState = Object.keys(directBrainState).length > 0;
-  const readinessBrainState = asRecord(pick(v16Readiness, ["brain_state.latest_snapshot"]));
-  const brainState = hasDirectBrainState ? directBrainState : readinessBrainState;
+  const brainState = asRecord(pick(brainStateQuery.data, ["brain_state"]));
   const brainStateFact = readFact(brainStateQuery.data, "ops.v16-brain-state.v2");
   const brainStateRequestFailed = brainStateQuery.isError || brainStateQuery.isRefetchError;
   const brainStateKnown = factIsKnown(brainStateFact, brainStateRequestFailed);
@@ -252,59 +263,38 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
   const evidenceRefs = asRecord(pick(brainState, ["evidence_refs"]));
   const boundary = asRecord(pick(brainState, ["boundary"]));
   const sourceGaps = pickArray(memory, ["source_gaps"]);
-  const directActionPlanRun = asRecord(pick(brainActionPlansQuery.data, ["action_plans"]));
-  const hasDirectActionPlanRun = Object.keys(directActionPlanRun).length > 0;
-  const readinessActionPlans = asRecord(pick(v16Readiness, ["action_plans"]));
-  const actionPlanRun = hasDirectActionPlanRun ? directActionPlanRun : readinessActionPlans;
+  const actionPlanRun = asRecord(pick(brainActionPlansQuery.data, ["action_plans"]));
   const actionPlanFact = readFact(brainActionPlansQuery.data, "ops.v16-action-plans.v2");
   const actionPlanRequestFailed = brainActionPlansQuery.isError || brainActionPlansQuery.isRefetchError;
   const actionPlanKnown = factIsKnown(actionPlanFact, actionPlanRequestFailed);
   const actionPlans = pickArray(actionPlanRun, ["plans"]);
-  const directActionPlanEvals = asRecord(pick(brainActionPlanEvalsQuery.data, ["action_plan_evals"]));
-  const hasDirectActionPlanEvals = Object.keys(directActionPlanEvals).length > 0;
-  const readinessActionPlanEvals = asRecord(pick(v16Readiness, ["action_plan_evals"]));
-  const actionPlanEvalRun = hasDirectActionPlanEvals ? directActionPlanEvals : readinessActionPlanEvals;
+  const actionPlanEvalRun = asRecord(pick(brainActionPlanEvalsQuery.data, ["action_plan_evals"]));
   const actionPlanEvalFact = readFact(brainActionPlanEvalsQuery.data, "ops.v16-action-plan-evals.v2");
   const actionPlanEvalRequestFailed = brainActionPlanEvalsQuery.isError || brainActionPlanEvalsQuery.isRefetchError;
   const actionPlanEvalKnown = factIsKnown(actionPlanEvalFact, actionPlanEvalRequestFailed);
   const actionPlanEvals = pickArray(actionPlanEvalRun, ["evals"]);
-  const directLowImpactExecutions = asRecord(pick(lowImpactExecutionsQuery.data, ["low_impact_executions"]));
-  const hasDirectLowImpactExecutions = Object.keys(directLowImpactExecutions).length > 0;
-  const readinessLowImpactExecutions = asRecord(pick(v16Readiness, ["low_impact_executions"]));
-  const lowImpactExecutionRun = hasDirectLowImpactExecutions ? directLowImpactExecutions : readinessLowImpactExecutions;
+  const lowImpactExecutionRun = asRecord(pick(lowImpactExecutionsQuery.data, ["low_impact_executions"]));
   const lowImpactFact = readFact(lowImpactExecutionsQuery.data, "ops.v16-low-impact-executions.v2");
   const lowImpactRequestFailed = lowImpactExecutionsQuery.isError || lowImpactExecutionsQuery.isRefetchError;
   const lowImpactKnown = factIsKnown(lowImpactFact, lowImpactRequestFailed);
   const lowImpactExecutions = pickArray(lowImpactExecutionRun, ["executions"]);
-  const directMediumImpactGovernance = asRecord(pick(mediumImpactGovernanceQuery.data, ["medium_impact_governance"]));
-  const hasDirectMediumImpactGovernance = Object.keys(directMediumImpactGovernance).length > 0;
-  const readinessMediumImpactGovernance = asRecord(pick(v16Readiness, ["medium_impact_governance"]));
-  const mediumImpactGovernanceRun = hasDirectMediumImpactGovernance ? directMediumImpactGovernance : readinessMediumImpactGovernance;
+  const mediumImpactGovernanceRun = asRecord(pick(mediumImpactGovernanceQuery.data, ["medium_impact_governance"]));
   const mediumImpactFact = readFact(mediumImpactGovernanceQuery.data, "ops.v16-medium-impact-governance.v2");
   const mediumImpactRequestFailed = mediumImpactGovernanceQuery.isError || mediumImpactGovernanceQuery.isRefetchError;
   const mediumImpactKnown = factIsKnown(mediumImpactFact, mediumImpactRequestFailed);
   const mediumImpactGovernance = pickArray(mediumImpactGovernanceRun, ["items"]);
-  const directCandidateReviews = asRecord(pick(candidateReviewsQuery.data, ["candidate_reviews"]));
-  const hasDirectCandidateReviews = Object.keys(directCandidateReviews).length > 0;
-  const readinessCandidateReviews = asRecord(pick(v16Readiness, ["governance_candidate_reviews"]));
-  const candidateReviewRun = hasDirectCandidateReviews ? directCandidateReviews : readinessCandidateReviews;
+  const candidateReviewRun = asRecord(pick(candidateReviewsQuery.data, ["candidate_reviews"]));
   const candidateReviewFact = readFact(candidateReviewsQuery.data, "ops.v16-governance-candidate-reviews.v2");
   const candidateReviewRequestFailed = candidateReviewsQuery.isError || candidateReviewsQuery.isRefetchError;
   const candidateReviewKnown = factIsKnown(candidateReviewFact, candidateReviewRequestFailed);
   const candidateReviews = pickArray(candidateReviewRun, ["items"]);
-  const directLiveReadyGuardrails = asRecord(pick(liveReadyGuardrailsQuery.data, ["live_ready_guardrails"]));
-  const hasDirectLiveReadyGuardrails = Object.keys(directLiveReadyGuardrails).length > 0;
-  const readinessLiveReadyGuardrails = asRecord(pick(v16Readiness, ["live_ready_guardrails"]));
-  const liveReadyGuardrailRun = hasDirectLiveReadyGuardrails ? directLiveReadyGuardrails : readinessLiveReadyGuardrails;
+  const liveReadyGuardrailRun = asRecord(pick(liveReadyGuardrailsQuery.data, ["live_ready_guardrails"]));
   const liveReadyGuardrailFact = readFact(liveReadyGuardrailsQuery.data, "ops.v16-live-ready-guardrails.v2");
   const liveReadyGuardrailRequestFailed = liveReadyGuardrailsQuery.isError || liveReadyGuardrailsQuery.isRefetchError;
   const liveReadyGuardrailKnown = factIsKnown(liveReadyGuardrailFact, liveReadyGuardrailRequestFailed);
   const liveReadyGuardrails = pickArray(liveReadyGuardrailRun, ["items"]);
   const latestGuardrail = asRecord(liveReadyGuardrails[0]);
-  const directProposalRegistry = asRecord(pick(proposalRegistryQuery.data, ["proposals"]));
-  const hasDirectProposalRegistry = Object.keys(directProposalRegistry).length > 0;
-  const readinessProposalRegistry = asRecord(pick(v16Readiness, ["proposal_registry"]));
-  const proposalRegistry = hasDirectProposalRegistry ? directProposalRegistry : readinessProposalRegistry;
+  const proposalRegistry = asRecord(pick(proposalRegistryQuery.data, ["proposals"]));
   const proposalRegistryFact = readFact(proposalRegistryQuery.data, "ops.autonomy-proposals.v2");
   const proposalRegistryRequestFailed = proposalRegistryQuery.isError || proposalRegistryQuery.isRefetchError;
   const proposalRegistryKnown = factIsKnown(proposalRegistryFact, proposalRegistryRequestFailed);
@@ -331,29 +321,26 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
   const unlockAllowed = liveAutonomyKnown
     && (latestEvaluationView?.unlockAllowed ?? liveAutonomyView.unlockAllowed);
   const liveAutonomyBlockers = pickArray(liveAutonomyEvaluation, ["blockers"]);
-  const liveAutonomyLatestEvent = asRecord(pick(liveAutonomy, ["latest_event"]));
   const liveAutonomyPosture = asRecord(pick(liveAutonomy, ["operational_posture"]));
-  const directAutonomousBlueprint = asRecord(pick(readiness, ["autonomous_blueprint"]));
-  const v16AutonomousBlueprint = asRecord(pick(v16Readiness, ["autonomous_blueprint"]));
-  const autonomousBlueprint = Object.keys(directAutonomousBlueprint).length ? directAutonomousBlueprint : v16AutonomousBlueprint;
-  const directAgentAuthority = asRecord(pick(readiness, ["agent_authority"]));
-  const v16AgentAuthority = asRecord(pick(v16Readiness, ["agent_authority"]));
-  const agentAuthority = Object.keys(directAgentAuthority).length ? directAgentAuthority : v16AgentAuthority;
-  const agentScorecard = asRecord(pick(readiness, ["agent_scorecard"]));
-  const agentBriefing = asRecord(pick(readiness, ["agent_briefing"]));
-  const directAgentChainHealth = asRecord(pick(readiness, ["agent_chain_health"]));
-  const v16AgentChainHealth = asRecord(pick(v16Readiness, ["agent_chain_health"]));
-  const agentChainHealth = Object.keys(directAgentChainHealth).length ? directAgentChainHealth : v16AgentChainHealth;
-  const directProposalContext = asRecord(pick(readiness, ["proposal_generation_context_coverage"]));
-  const v16ProposalContext = asRecord(pick(v16Readiness, ["proposal_generation_context_coverage"]));
-  const proposalContextCoverage = Object.keys(directProposalContext).length ? directProposalContext : v16ProposalContext;
-  const directCandidateContext = asRecord(pick(readiness, ["candidate_generation_context_coverage"]));
-  const v16CandidateContext = asRecord(pick(v16Readiness, ["candidate_generation_context_coverage"]));
-  const candidateContextCoverage = Object.keys(directCandidateContext).length ? directCandidateContext : v16CandidateContext;
-  const directCandidateBridgeReview = asRecord(pick(readiness, ["candidate_bridge_review_coverage"]));
-  const v16CandidateBridgeReview = asRecord(pick(v16Readiness, ["candidate_bridge_review_coverage"]));
-  const candidateBridgeReviewCoverage = Object.keys(directCandidateBridgeReview).length ? directCandidateBridgeReview : v16CandidateBridgeReview;
-  const blueprintBlockers = pickArray(autonomousBlueprint, ["blockers"]);
+  const autonomousBlueprint = v16Readiness;
+  const agentAuthority = asRecord(pick(agentAuthorityQuery.data, ["status"]));
+  const agentScorecard = asRecord(pick(agentScorecardQuery.data, ["scorecard"]));
+  const agentBriefing = asRecord(pick(agentBriefingQuery.data, ["briefing"]));
+  const agentChainHealth = asRecord(
+    pick(agentChainHealthQuery.data, ["agent_chain_health"]),
+  );
+  const governanceCoverage = asRecord(
+    pick(agentBriefing, ["governance_coverage"]),
+  );
+  const proposalContextCoverage = asRecord(
+    pick(governanceCoverage, ["proposal_generation_context_coverage"]),
+  );
+  const candidateContextCoverage = asRecord(
+    pick(governanceCoverage, ["candidate_generation_context_coverage"]),
+  );
+  const candidateBridgeReviewCoverage = asRecord(
+    pick(governanceCoverage, ["candidate_bridge_review_coverage"]),
+  );
 
   const statTone = useMemo<Tone>(() => {
     const posture = pickString(worldModel, ["strategy_posture"], "");
@@ -420,7 +407,7 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
                 candidateContext={candidateContextCoverage}
                 candidateReview={candidateBridgeReviewCoverage}
                 chainHealth={agentChainHealth}
-                liveAutonomy={asRecord(pick(readiness, ["live_autonomy"]))}
+                liveAutonomy={liveAutonomy}
               />
             </div>
           </MetricCard>

@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -31,7 +31,10 @@ logger = logging.getLogger(__name__)
 class ExpressionScore:
     """一个 DSL 表达式的评分结果"""
     expression: str
+    signed_ic_mean: float = 0.0
     abs_ic_mean: float = 0.0
+    direction: int = 0
+    polarity: str = "unknown"
     ic_stability: float = 0.0
     ic_decay_rate: float = 0.0
     n_obs: int = 0
@@ -39,6 +42,7 @@ class ExpressionScore:
     status: str = "UNKNOWN"     # HEALTHY / WATCH / DECAYING / DEAD / UNKNOWN
     computation_time_sec: float = 0.0
     forward_period: int = 1
+    candidate_validation: dict[str, Any] = field(default_factory=dict)
     error: str = ""
 
     def to_dict(self) -> dict:
@@ -95,7 +99,22 @@ class FactorScoreEvaluator:
                 score.error = f"n_obs={score.n_obs} < min_n_obs={self.min_n_obs}"
                 return score
             # 3. 多维评分
+            score.signed_ic_mean = float(np.mean(ic_series))
             score.abs_ic_mean = float(np.mean(np.abs(ic_series)))
+            score.direction = 1 if score.signed_ic_mean > 0.0 else -1 if score.signed_ic_mean < 0.0 else 0
+            score.polarity = (
+                "positive"
+                if score.direction > 0
+                else "negative"
+                if score.direction < 0
+                else "unknown"
+            )
+            score.candidate_validation = self._candidate_validation(
+                values,
+                ic_series,
+                direction=score.direction,
+                signed_ic_mean=score.signed_ic_mean,
+            )
             score.ic_stability = self._stability(ic_series)
             score.ic_decay_rate = self._decay_rate(ic_series)
             # 4. 综合分 (跟 FactorHealth 公式一致, 简化版: 只用 mean_abs + stability + decay)
@@ -117,6 +136,107 @@ class FactorScoreEvaluator:
         finally:
             score.computation_time_sec = _time.time() - t0
         return score
+
+    def _candidate_validation(
+        self,
+        values: np.ndarray,
+        primary_ic_series: np.ndarray,
+        *,
+        direction: int,
+        signed_ic_mean: float,
+    ) -> dict[str, Any]:
+        """Attach reproducible research evidence without granting admission."""
+        index = self.df.index
+        pit_passed = bool(
+            self.forward_period > 0
+            and index.is_monotonic_increasing
+            and index.is_unique
+        )
+        multi_forward: dict[str, dict[str, Any]] = {}
+        for period in (1, 3, 5):
+            if len(self.df) <= period + 30:
+                continue
+            series = self._compute_ic_series(
+                values,
+                self._compute_forward_returns(self.df, period),
+            )
+            mean_ic = float(np.mean(series)) if len(series) else 0.0
+            multi_forward[str(period)] = {
+                "signed_ic_mean": mean_ic,
+                "magnitude_ic_mean": abs(mean_ic),
+                "n_obs": int(len(series)),
+                "direction_consistent": bool(
+                    direction in {-1, 1}
+                    and mean_ic * direction > 0.0
+                    and len(series) >= self.min_n_obs
+                ),
+            }
+        consistent_forward = sum(
+            bool(item["direction_consistent"])
+            for item in multi_forward.values()
+        )
+        multi_forward_passed = bool(
+            len(multi_forward) >= 2
+            and consistent_forward == len(multi_forward)
+        )
+
+        folds = [chunk for chunk in np.array_split(primary_ic_series, 3) if len(chunk)]
+        fold_results = [
+            {
+                "signed_ic_mean": float(np.mean(chunk)),
+                "n_obs": int(len(chunk)),
+                "direction_consistent": bool(
+                    direction in {-1, 1}
+                    and float(np.mean(chunk)) * direction > 0.0
+                ),
+            }
+            for chunk in folds
+        ]
+        walk_forward_passed = bool(
+            len(fold_results) == 3
+            and sum(bool(item["direction_consistent"]) for item in fold_results)
+            >= 2
+        )
+        regime_column = (
+            "regime_id"
+            if "regime_id" in self.df.columns
+            else "regime"
+            if "regime" in self.df.columns
+            else ""
+        )
+        regime_ids = (
+            sorted(
+                {
+                    str(item)
+                    for item in self.df[regime_column].dropna().tolist()
+                    if str(item)
+                }
+            )
+            if regime_column
+            else []
+        )
+        return {
+            "schema_version": "factor_candidate_validation.v1",
+            "direction": direction if direction in {-1, 1} else None,
+            "polarity": (
+                "positive" if direction == 1 else "negative" if direction == -1 else None
+            ),
+            "signed_ic_mean": float(signed_ic_mean),
+            "magnitude_ic_mean": abs(float(signed_ic_mean)),
+            "pit_passed": pit_passed,
+            "walk_forward_passed": walk_forward_passed,
+            "multi_forward_passed": multi_forward_passed,
+            "cost_test_passed": False,
+            "execution_evidence_complete": False,
+            "contamination_status": "unknown",
+            "regime_ids": regime_ids,
+            "walk_forward": {"folds": fold_results},
+            "multi_forward": multi_forward,
+            "cost_test": {
+                "status": "not_evaluated",
+                "reason": "requires_cost_aware_oos_or_parity_evidence",
+            },
+        }
 
     def score_batch(self, expressions: list[str], verbose: bool = False) -> list[ExpressionScore]:
         """批量评估"""

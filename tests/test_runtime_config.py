@@ -182,9 +182,13 @@ def test_from_yaml_uses_defaults_for_missing_keys() -> None:
     assert cfg.ctrader_send_orders is False
     assert cfg.dynamic_sizing_enabled is True
     assert cfg.dynamic_sizing_max_api_volume == 1000.0
-    assert cfg.kelly_risk_per_trade_pct == 0.06
+    assert cfg.kelly_risk_per_trade_pct == 0.01
     assert cfg.kelly_min_closed_trades == 20
     assert cfg.kelly_canary_max_api_volume == 100.0
+    assert cfg.risk_max_daily_loss_pct == 4.0
+    assert cfg.risk_max_drawdown_pct == 16.0
+    assert cfg.risk_max_daily_trades == 20
+    assert cfg.demo_learning_max_daily_trades == 20
 
 
 def test_macro_factor_defaults_preserve_directional_semantics() -> None:
@@ -298,8 +302,18 @@ def test_runtime_config_snapshot_hash_stable_and_reuses_identical_event(tmp_path
     assert second["reused"] is True
 
     third = persist_runtime_config_snapshot(cfg, source="different_event", db_path=db_path)
-    assert third["config_version"] == first["config_version"] + 1
-    assert third["reused"] is False
+    assert third["config_version"] == first["config_version"]
+    assert third["reused"] is True
+    assert third["requested_source"] == "different_event"
+
+    changed = rc.RuntimeConfig(shadow_vote_weight=0.34)
+    fourth = persist_runtime_config_snapshot(
+        changed,
+        source="real_config_change",
+        db_path=db_path,
+    )
+    assert fourth["config_version"] == first["config_version"] + 1
+    assert fourth["reused"] is False
 
 
 def test_runtime_mutation_refreshes_yaml_base_before_overlay_snapshot(monkeypatch, tmp_path) -> None:
