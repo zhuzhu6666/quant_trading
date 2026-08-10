@@ -244,7 +244,9 @@ def persist_runtime_config_snapshot(
     """
     if conn is None:
         ensure_evolution_ledger_tables(db_path)
-    payload = _as_dict(config)
+    from config.runtime_config import canonical_runtime_config_payload
+
+    payload = canonical_runtime_config_payload(_as_dict(config))
     config_hash = _stable_hash(payload)
     now = time.time()
     owned_conn = conn is None

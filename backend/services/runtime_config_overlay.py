@@ -61,7 +61,7 @@ def _hash(value: Any) -> str:
 
 def _governance_config_hash(value: Any) -> str:
     payload = json.dumps(
-        value if value is not None else {},
+        runtime_config.canonical_runtime_config_payload(value),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

@@ -35,7 +35,7 @@ from backend.services.runtime_config_overlay import (
     _sanitize_patch,
 )
 from config import runtime_config
-from config.runtime_config import RuntimeConfig
+from config.runtime_config import RuntimeConfig, canonical_runtime_config_payload
 
 
 INTENT_STATUSES = frozenset(
@@ -62,6 +62,12 @@ def _json(value: Any) -> str:
 
 def _hash(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _runtime_config_hash(value: Any) -> str:
+    """Hash the shared canonical runtime-config representation."""
+
+    return _hash(canonical_runtime_config_payload(value))
 
 
 def _p(db_path: str | Path, sql: str) -> str:
@@ -583,7 +589,7 @@ class GovernanceMutationCoordinator:
                     "risk_classification": classification.to_dict(),
                     "boundary": self.boundary(),
                 }
-            target_hash = _hash(target_config.to_dict())
+            target_hash = _runtime_config_hash(target_config.to_dict())
             domain_hash = _hash(
                 {
                     "control_surface": plan.control_surface,
@@ -900,7 +906,7 @@ class GovernanceMutationCoordinator:
                     raise GovernanceMutationError("before_state_changed")
             target_overlay = _deep_merge(current_overlay, patch)
             effective_config = runtime_config.config_from_overlay(target_overlay, self.db_path)
-            target_hash = _hash(effective_config.to_dict())
+            target_hash = _runtime_config_hash(effective_config.to_dict())
             if target_hash != str(intent.get("target_config_hash") or ""):
                 raise GovernanceMutationError("target_config_hash_changed")
             now = time.time()
@@ -1187,7 +1193,7 @@ class GovernanceMutationCoordinator:
             "latest_committed_config_version": int(
                 latest_item.get("committed_config_version") or 0
             ),
-            "effective_config_hash": _hash(config.to_dict()),
+            "effective_config_hash": _runtime_config_hash(config.to_dict()),
         }
         return config, token
 
@@ -1536,8 +1542,8 @@ class GovernanceMutationCoordinator:
         mutation_id: str,
         created_at: float,
     ) -> dict[str, Any]:
-        payload = config.to_dict()
-        config_hash = _hash(payload)
+        payload = canonical_runtime_config_payload(config)
+        config_hash = _runtime_config_hash(payload)
         row = conn.execute(
             _p(
                 self.db_path,

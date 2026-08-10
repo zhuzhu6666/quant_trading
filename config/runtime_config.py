@@ -18,7 +18,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -613,6 +613,19 @@ class RuntimeConfig:
         for k, v in d.items():
             if k not in cls.__dataclass_fields__ and k != "extra":
                 extra[k] = v
+        # ``factor_governance_model_min_factor_samples`` was first persisted
+        # as an extension key and later promoted to a typed field.  Rehydrate
+        # the legacy location before constructing the dataclass so historical
+        # snapshots keep their effective value instead of falling back to the
+        # current default.  A disagreement is unsafe: the two representations
+        # cannot be treated as the same runtime configuration.
+        for key in RUNTIME_CONFIG_HASH_COMPAT_FIELDS:
+            if key not in extra:
+                continue
+            legacy_value = extra.pop(key)
+            if key in known and known[key] != legacy_value:
+                raise ValueError(f"runtime_config_legacy_alias_conflict:{key}")
+            known.setdefault(key, legacy_value)
         if "runtime_incident_mode" in known:
             incident_mode = str(known["runtime_incident_mode"] or "").strip().lower()
             if incident_mode not in VALID_RUNTIME_INCIDENT_MODES:
@@ -653,6 +666,56 @@ class RuntimeConfig:
         """导出为可写回 settings.yaml 的 runtime 段。"""
         d = self.to_dict()
         return {"runtime": d}
+
+
+# These fields were historically stored below ``extra``.  Keep one narrow,
+# shared serialization rule for hashes and durable snapshots while allowing
+# the typed RuntimeConfig surface to remain the current runtime API.
+RUNTIME_CONFIG_HASH_COMPAT_FIELDS = frozenset(
+    {"factor_governance_model_min_factor_samples"}
+)
+
+
+def canonical_runtime_config_payload(value: Any) -> Dict[str, Any]:
+    """Return the stable config payload used by runtime-config hash bindings.
+
+    The helper only canonicalizes the known promoted-field compatibility case;
+    it does not change the live ``RuntimeConfig.to_dict()`` contract.  Callers
+    that receive a conflicting top-level/legacy value fail closed instead of
+    silently choosing one authority.
+    """
+
+    if isinstance(value, RuntimeConfig):
+        payload = value.to_dict()
+    elif isinstance(value, dict):
+        payload = copy.deepcopy(value)
+    elif is_dataclass(value):
+        payload = asdict(value)
+    elif hasattr(value, "to_dict"):
+        payload = copy.deepcopy(dict(value.to_dict()))
+    else:
+        raise TypeError("runtime_config_payload_requires_mapping")
+
+    extra_value = payload.get("extra")
+    if extra_value is None:
+        extra: Dict[str, Any] = {}
+    elif isinstance(extra_value, dict):
+        extra = copy.deepcopy(extra_value)
+    else:
+        raise ValueError("runtime_config_extra_must_be_mapping")
+
+    for key in RUNTIME_CONFIG_HASH_COMPAT_FIELDS:
+        if key not in payload:
+            continue
+        current_value = payload[key]
+        if key in extra and extra[key] != current_value:
+            raise ValueError(f"runtime_config_legacy_alias_conflict:{key}")
+        extra[key] = copy.deepcopy(current_value)
+        del payload[key]
+
+    if "extra" in payload or extra:
+        payload["extra"] = extra
+    return payload
 
 
 # ----- 单例管理 -----

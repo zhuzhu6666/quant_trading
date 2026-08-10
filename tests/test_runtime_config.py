@@ -201,6 +201,50 @@ def test_unknown_keys_go_to_extra() -> None:
     assert cfg.extra.get("made_up_field") == 999
 
 
+def test_promoted_runtime_field_rehydrates_legacy_extra_and_keeps_snapshot_hash(
+    tmp_path,
+) -> None:
+    key = "factor_governance_model_min_factor_samples"
+    current = rc.RuntimeConfig(**{key: 37}).to_dict()
+    legacy = dict(current)
+    legacy_extra = dict(legacy.get("extra") or {})
+    legacy_extra[key] = legacy.pop(key)
+    legacy["extra"] = legacy_extra
+
+    restored = rc.RuntimeConfig.from_dict(legacy)
+    assert getattr(restored, key) == 37
+    assert key not in restored.extra
+    assert rc.canonical_runtime_config_payload(current) == (
+        rc.canonical_runtime_config_payload(legacy)
+    )
+
+    first = persist_runtime_config_snapshot(
+        current,
+        source="legacy_alias_compat",
+        db_path=tmp_path / "state.db",
+    )
+    second = persist_runtime_config_snapshot(
+        legacy,
+        source="legacy_alias_compat",
+        db_path=tmp_path / "state.db",
+    )
+    assert second["config_hash"] == first["config_hash"]
+    assert second["config_version"] == first["config_version"]
+    assert second["reused"] is True
+
+
+def test_promoted_runtime_field_conflict_fails_closed() -> None:
+    with pytest.raises(ValueError, match="runtime_config_legacy_alias_conflict"):
+        rc.RuntimeConfig.from_dict(
+            {
+                "factor_governance_model_min_factor_samples": 37,
+                "extra": {
+                    "factor_governance_model_min_factor_samples": 20,
+                },
+            }
+        )
+
+
 def test_invalid_incident_mode_is_rejected_while_loading() -> None:
     with pytest.raises(ValueError, match="invalid_runtime_incident_mode"):
         rc.RuntimeConfig.from_yaml({"runtime": {"runtime_incident_mode": "unsafe_typo"}})

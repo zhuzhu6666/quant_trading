@@ -104,6 +104,36 @@ def test_committed_current_hash_bound_overlay_restores_in_every_mode(
     assert restored["authority"]["checks"]["projection_current"] is True
 
 
+def test_committed_authority_accepts_promoted_runtime_field_compatibility_hash(
+    tmp_path, monkeypatch
+):
+    _set_mode(monkeypatch, "dual_record")
+    db_path = tmp_path / "state.db"
+    base = RuntimeConfig(factor_governance_model_min_factor_samples=37)
+    runtime_config.register_overlay_base(base, db_path)
+
+    result = GovernanceMutationCoordinator(db_path).execute(
+        GovernanceMutationPlan(
+            patch={"governance_expansion_paused": True},
+            source="promoted_field_compatibility",
+            actor="operator:test",
+            action="pause_governance_expansion",
+            control_surface="operator_governance_pause",
+            scope_type="operator_governance_pause",
+            scope_key="global",
+            run_id="promoted_field_compatibility",
+        )
+    )
+    assert result["ok"] is True
+
+    restored = RuntimeConfigOverlayService(db_path).restore_on_startup(base)
+
+    assert restored["restored"] is True
+    assert restored["config"].factor_governance_model_min_factor_samples == 37
+    assert restored["authority"]["checks"]["target_hash_bound"] is True
+    assert restored["authority"]["checks"]["committed_hash_bound"] is True
+
+
 @pytest.mark.parametrize("mode", ["off", "dual_record", "enforce"])
 def test_dangling_mutation_overlay_retains_only_derived_tightening_controls(
     tmp_path, monkeypatch, mode

@@ -120,8 +120,10 @@ def _runtime_config_hash(value: Any) -> str:
     create a permanent false mismatch despite identical configuration.
     """
 
+    from config.runtime_config import canonical_runtime_config_payload
+
     raw = json.dumps(
-        value if value is not None else {},
+        canonical_runtime_config_payload(value),
         ensure_ascii=False,
         sort_keys=True,
         default=str,

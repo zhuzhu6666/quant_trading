@@ -45,7 +45,7 @@ from backend.services.governance_mutation_coordinator import (
     GovernanceMutationPlan,
 )
 from config import runtime_config
-from config.runtime_config import RuntimeConfig
+from config.runtime_config import RuntimeConfig, canonical_runtime_config_payload
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -1298,7 +1298,10 @@ class FactorLifecycleService:
                 admission,
                 mutation_id,
                 int(snapshot_item.get("config_version") or 0),
-                str(snapshot_item.get("config_hash") or _hash(effective_config.to_dict())),
+                str(
+                    snapshot_item.get("config_hash")
+                    or _hash(canonical_runtime_config_payload(effective_config))
+                ),
                 _json(evidence),
                 _json(metadata),
                 activated_at,
