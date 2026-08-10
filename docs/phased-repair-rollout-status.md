@@ -24,7 +24,7 @@
 2026-08-11 部署与运行核对结果：
 
 - 2026-08-11 智能自主进化代码批次已部署：`quant-backend.service`（PID 3236037→重启后新 PID）、`quant-learning-worker.service` 均 active；`/api/health` 为 `db=connected`；learning worker 启动日志确认 `RuntimeConfig autonomous overlay restored`，overlay authority 恢复。
-- 风险默认 profile 按 operator 指示放宽并已生效（`RuntimeConfig` 有效值）：单笔 Kelly 止损风险 `1.0%`、日亏损 `4%`、最大回撤 `16%`、普通及 Demo 每日开仓 `20`；`risk_cvar_threshold_pct` 保持 overlay `2.5`。settings.yaml/runtime_config.py 静态基值同步，`docs/system-source-of-truth.md` 风险 profile 描述已更新。
+- 风险默认 profile 按 operator 指示放宽并已生效（`RuntimeConfig` 有效值）：单笔 Kelly 止损风险 `5.0%`、日亏损 `10%`、最大回撤 `16%`、普通及 Demo 每日开仓 `30`；`risk_cvar_threshold_pct` 保持 overlay `2.5`。settings.yaml/runtime_config.py 静态基值同步，`docs/system-source-of-truth.md` 风险 profile 描述已更新。
 - 部署重绑定：静态基值放宽使 effective config hash 变化，原 committed mutation（`gmut_252ffe...`，绑定 `c5936aa9...`）失配，learning worker 按设计 fail-closed。已通过 `RuntimeConfigMutationService` + `GovernanceMutationCoordinator`（operator:zhu，dual_record，risk_tightening 免 V16）重新提交 cvar 2.5 确认 mutation `gmut_a8a90e...`，绑定新 effective hash，overlay 恢复 committed/current；审计与备份在 `logs/rebind_20260811/`。
 - live loop 保持 operator 手动停止（`live.loop.desired_state.enabled=false, reason=manual`），当前无持仓（operator 已手动平仓）；readiness 因 loop 停止处于 `no_new_risk` 姿态：blockers 为 ctrader warming_up / incident_control no_new_risk / risk_metrics stale，均为 loop 未运行的预期结果，待 operator 处理完成后按 SOP 恢复 loop。
 - learning worker capability 为 `boot_status=ready`、`recovery_status=complete`；overlay 权威恢复后无 quarantine 记录。
@@ -79,7 +79,7 @@ P2 已删除重复 root risk、live 内联统计、API 平行重算和前端旧�
 - Targeted verification：风险/Readiness/执行组合 170 passed；生命周期/Candidate Card/evolution/config/lineage 组合 125 passed；Web 4 组合同测试与 production build 通过。
 - Migration：`decision_factor_snapshot_lineage` migration 13 已由正式迁移器应用并复核 6 个 lineage 列；历史默认 `lineage_missing`。
 - Runtime posture：2026-08-11 已受控重启部署本批代码；overlay authority 经 operator re-bind mutation 恢复（见第 2 节）；五项静态 flags 未推进。
-- Unresolved live evidence：30 次 readiness p95/无重叠、有效 RuntimeConfig `1%/4%/16%/20`、watermark/backpressure 实际排空、legacy ACTIVE 退回、execution intent 100% 和完整 broker lifecycle。
+- Unresolved live evidence：30 次 readiness p95/无重叠、有效 RuntimeConfig `5%/10%/16%/30`、watermark/backpressure 实际排空、legacy ACTIVE 退回、execution intent 100% 和完整 broker lifecycle。
 
 ## 4. 仍需真实运行证明
 

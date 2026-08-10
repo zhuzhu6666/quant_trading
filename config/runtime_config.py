@@ -302,8 +302,8 @@ class RuntimeConfig:
     risk_tp_atr: float = 2.5
     risk_max_drawdown_pct: float = 16.0
     risk_max_consecutive_losses: int = 8
-    risk_max_daily_loss_pct: float = 4.0
-    risk_max_daily_trades: int = 20
+    risk_max_daily_loss_pct: float = 10.0
+    risk_max_daily_trades: int = 30
     risk_data_lag_max_seconds: float = 3600.0
     risk_circuit_breaker_bypass: bool = False
     risk_cooldown_bars: int = 3
@@ -321,7 +321,7 @@ class RuntimeConfig:
     autonomy_demo_auto_apply: bool = True
     live_autonomy_unlocked: bool = False
     live_autonomy_unlock_id: str = ""
-    demo_learning_max_daily_trades: int = 20
+    demo_learning_max_daily_trades: int = 30
     # Effective only outside demo_nursery/demo_autonomous. Demo keeps governed
     # exploration active while RiskPolicy/V16/effect rollback remain mandatory.
     autonomy_expansion_frozen: bool = True
@@ -659,7 +659,7 @@ class RuntimeConfig:
     kelly_enabled: bool = True                   # 是否启用 Kelly 仓位
     kelly_fraction: float = 0.5                  # 半凯利 = 0.5, 四分之一 = 0.25
     kelly_max_pct: float = 0.25                  # 最大资本占比上限
-    kelly_risk_per_trade_pct: float = 0.01       # 动态 Kelly 单笔/探索实际止损风险上限 1.0%
+    kelly_risk_per_trade_pct: float = 0.05       # 动态 Kelly 单笔/探索实际止损风险上限 5.0%
     kelly_min_closed_trades: int = 20            # 样本不足时 demo 仅最小探索，非 demo 不放大
     kelly_canary_max_api_volume: float = 100.0   # Kelly 育苗期单笔 API volume 上限
     dynamic_sizing_enabled: bool = True          # 是否启用实盘阶梯式动态仓位

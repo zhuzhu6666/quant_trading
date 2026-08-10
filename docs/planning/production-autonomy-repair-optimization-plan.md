@@ -446,7 +446,7 @@ Demo 恢复仍采用已确认 profile：
 
 | 批次 | Canonical authority | 已实施结果 |
 |---|---|---|
-| 风险与 Demo 探索 | `RiskLimitSnapshot -> risk_kelly_sizing -> live_risk_sizing` | 默认 profile 收敛为 `1% / 4% / 16% / 20`；Kelly≤0 的 Demo 最小量探索必须有有效 entry/SL 且实际止损风险≤1.0%，正 Kelly 低于最小量只在原风险预算内进位；所有既有 Safety、Readiness、日亏损、回撤和次数门继续生效 |
+| 风险与 Demo 探索 | `RiskLimitSnapshot -> risk_kelly_sizing -> live_risk_sizing` | 默认 profile 收敛为 `5% / 10% / 16% / 30`；Kelly≤0 的 Demo 最小量探索必须有有效 entry/SL 且实际止损风险≤5.0%，正 Kelly 低于最小量只在原风险预算内进位；所有既有 Safety、Readiness、日亏损、回撤和次数门继续生效 |
 | Backend Readiness | `runtime_kv[backend_readiness_snapshot.v1]` 只读 canonical projections | Factor Blend 只读 `runtime_factor_selection.v1`，缺失/过期统一 fail-closed；V16 只保留状态、边界和详情端点索引，Web 详情直接读取领域 API |
 | 进化调度 | learning worker + `runtime_kv[evolution_cycle_watermark.v1]` | cron 收敛为 `23,53`；相同闭合输入只跳过 GP，维护继续；候选达到 `QUANT_CANARY_EVALUATION_LIMIT` 后停止注册并排空；watermark 仅由 learning worker 在 GP 成功或确认无候选后推进 |
 | 配置版本 | `RuntimeConfigMutationService` / Coordinator + `runtime_config_snapshot` | 有效配置 hash 不变时不生成新 snapshot；blocked/no-change/重复候选只保留治理或进化审计；一次真实配置变化对应一个版本 |
