@@ -10097,6 +10097,37 @@ def _new_risk_reconciliation_blockers(*, now_ts: float | None = None) -> list[st
     return list(result["blockers"])
 
 
+def _bar_open_already_recorded(bar_ts: float) -> bool:
+    """True if the durable ledger already has a successful open for this bar.
+
+    Same-bar dedup guard: stale decision bar repair replays and pending open
+    retry re-entry must not open a second position for a bar that already
+    filled.  Fail-open by design (this is a duplicate guard, not a risk
+    gate): an unreadable ledger logs and allows the open rather than
+    silently blocking a legitimate signal.
+    """
+
+    if not bar_ts or bar_ts <= 0:
+        return False
+    conn = _get_state_read_conn()
+    try:
+        row = _state_execute(
+            conn,
+            """
+            SELECT 1 FROM decision_ledger
+            WHERE event_type='open' AND decision_ts=?
+            LIMIT 1
+            """,
+            (float(bar_ts),),
+        ).fetchone()
+        return row is not None
+    except Exception as exc:
+        logger.warning("[live] bar open dedup check failed: %s", exc)
+        return False
+    finally:
+        conn.close()
+
+
 def _open_trade_admission_blockers(stop_requested=None) -> tuple[str, ...]:
     blockers: list[str] = []
     if _process_shutdown_requested:
@@ -10253,6 +10284,11 @@ def _run_open_trade_pipeline(
             wait_for_lock_sec=5.0,
         )
         admission_blockers = _open_trade_admission_blockers(stop_requested)
+    # ★ same-bar dedup: a bar that already filled must not open a second
+    # position (stale decision bar repair replay / pending open retry re-entry).
+    # Distinct bars may still open concurrently; this only blocks the same bar.
+    if _bar_open_already_recorded(float(bar.get("time") or 0.0)):
+        admission_blockers = list(admission_blockers) + ["bar_already_opened"]
     if admission_blockers:
         admission_result = _open_admission_gate_result(
             tick=tick,
