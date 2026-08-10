@@ -15,7 +15,7 @@ import pandas as pd
 
 from alpha.registry import factor_registry
 from alpha.runtime_factor_selection import runtime_factor_ids
-from alpha.technical_indicators import adx_wilder
+from alpha.technical_indicators import adx_wilder, rsi_wilder
 from data.factor_frame import FactorFrameBuilder
 
 logger = logging.getLogger(__name__)
@@ -482,14 +482,7 @@ class StreamingFactorEngine:
 
     @staticmethod
     def _factor_rsi(df: pd.DataFrame, *, length: int = 14):
-        close = df["close"].values
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = pd.Series(gain).ewm(span=length, min_periods=length).mean().values
-        avg_loss = pd.Series(loss).ewm(span=length, min_periods=length).mean().values
-        rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 100.0), where=avg_loss != 0)
-        return 100 - 100 / (1 + rs)
+        return rsi_wilder(df["close"].values, period=length)
 
     @staticmethod
     def _factor_macd_hist(

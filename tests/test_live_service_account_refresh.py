@@ -382,7 +382,7 @@ def test_readiness_cannot_be_green_when_loop_or_safety_blocks_new_risk(monkeypat
     assert readiness["safety_ready"] is False
     assert readiness["loop_accepting_new_risk"] is False
     assert "position_reconcile_failed" in readiness["reasons"]
-    assert "safety_position_reconcile_not_fresh" in readiness["reasons"]
+    assert "safety_position_reconcile_not_fresh" not in readiness["reasons"]
 
 
 def test_readiness_recovers_missed_bridge_edge_from_accepting_generation(monkeypatch):

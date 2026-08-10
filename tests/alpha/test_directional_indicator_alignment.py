@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
 
-from alpha.registry import factor_adx, factor_atr_ratio, factor_di_spread
+from alpha.registry import factor_adx, factor_atr_ratio, factor_di_spread, factor_rsi_14
 from alpha.streaming_factor_engine import StreamingFactorEngine
+from alpha.technical_indicators import rsi_wilder
 from risk import regime
 
 
@@ -60,3 +61,33 @@ def test_streaming_adx_override_matches_risk_regime_wilder_adx():
 
     actual = StreamingFactorEngine._factor_adx(df, length=7)
     np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
+def test_rsi_uses_shared_wilder_smoothing_and_preserves_warmup():
+    close = np.array([100.0, 101.0, 100.0, 102.0, 101.0, 103.0, 102.0, 104.0])
+    expected = np.array([
+        np.nan,
+        np.nan,
+        50.0,
+        80.0,
+        55.17241379310345,
+        76.78571428571429,
+        56.39344262295083,
+        75.72992700729927,
+    ])
+
+    actual = rsi_wilder(close, period=3)
+
+    np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
+def test_registry_and_streaming_rsi_use_the_same_wilder_implementation():
+    df = _ohlc_frame()
+    expected = rsi_wilder(df["close"].values, period=14)
+
+    np.testing.assert_allclose(factor_rsi_14(df), expected, equal_nan=True)
+    np.testing.assert_allclose(
+        StreamingFactorEngine._factor_rsi(df, length=14),
+        expected,
+        equal_nan=True,
+    )

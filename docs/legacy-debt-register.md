@@ -12,6 +12,7 @@
 
 - 状态：`active`
 - canonical：一个事实只有一个生产计算者和一个写入者；Safety、Risk、Readiness、API、前端不得平行重算同一授权事实。
+- 当前：2026-08-10 已将账户/持仓 freshness blocker 收敛到 `live_reconciliation.evaluate_reconciliation_snapshot`，最终开仓 admission 与 readiness 复用同一结果；loop/readiness 只投影一个失败 blocker，`loop_status()` 不再通过读状态写入诊断事实。持仓对账、unknown execution、no-new-risk latch、generation 和 authority 校验仍保持独立 fail-closed。
 - 剩余：Safety/Generation/Execution Outcome/Governance/PG Job Queue 仍有发布期开关或旧兼容；客户端仍有少量旧 fact 字段迁移。
 - 退出：新路径通过各自运行门后，同批删除旧 authority、fallback、同义 blocker 和 pass-through wrapper。
 - 验证：调用链、静态入口扫描、合同测试、运行 snapshot 与 `git diff --stat`。
@@ -21,8 +22,8 @@
 - 状态：`migrating`
 - canonical：`factor_lifecycle_state` + `factor_runtime_projection`；ACTIVE 必须经 typed Coordinator/V16、稳定 artifact、fresh health 和 loaded ack。
 - 当前：Catalog 已以 lifecycle row 覆盖 Registry/RuntimeConfig stage/admission，审计和 canary 名称不再独立创建目录条目；coordinator projection 已改用稳定身份并在 backend 恢复时删除同 factor 历史 PID 行。invalid DSL 只保留 `shadow_register_invalid_dsl_skipped` 审计，不进入 Registry/lifecycle；缺真实 shadow performance 的候选留在当前 stage，不用 fallback 分数推进。旧版治理形成的 terminal builtin quarantine 已接入证据化 `generation+1` SHADOW 重入，旧 terminal 行和 mutation 保持不可变，不再保留 no-op 自动恢复钩子。
-- 剩余：切入 typed lifecycle 前已存在的 native ACTIVE builtin 尚无 lifecycle row，Catalog 对这组代码内置因子保留 Registry/RuntimeConfig 兼容；领域服务的 coordinator-off 隔离兼容仍在，但生产状态库已禁止回退到直接 overlay 写入。2026-08-04 已删除自动晋升对 catalog `source=shadow`、runtime name 等于 canonical DSL ID 及 builtin 重入对旧 `governance_action=disable_factor_live` 的依赖，统一按 canonical lifecycle origin/stage/definition 判定；同时删除 preflight 300 秒、最终 lifecycle 180 秒的 freshness 错位（统一为 900 秒，与 15 分钟 health 刷新节拍对齐），evolution_hourly cron 由 `2 * * * *` 提升为 `23,53,58 * * * *`（唯一不与独立治理 15/30/45、nursery 7/22/37/52、supervisor 9/39、autonomous 12/42、offmarket :20 任一 single-flight 运行窗口重叠的 3 档排布）使完整治理链每小时 3 次且不互斥跳过，退役因子保留 DEAD 健康快照以推进恢复时间线，activate 健康门槛与晋升证据对齐（WATCH + score≥40）。真实 V16 链已创建 `vol_ma_ratio`、`obv_slope` generation 2 SHADOW，并把 prepared GP `dsl_auto_a3eeb...` 激活为 ACTIVE/admitted。
-- 退出：现有 ACTIVE builtin 按 code-bound identity、V16、prepared、真实 loaded ack 和 fresh health 分批重入 lifecycle 后删除 builtin fallback；稳定 enforce 发布后删除领域服务的 generic restore 兼容。启动层的旧 template/supervisor/Registry restore 已删除，不得用直接数据库回填 ACTIVE 绕过晋升证据。
+- 剩余：切入 typed lifecycle 前已存在的 native ACTIVE builtin 尚无 lifecycle row，Catalog 对这组代码内置因子保留 Registry/RuntimeConfig 兼容；2026-08-10 源配置已为 9 个经典 builtin 补齐显式 ACTIVE/health-exempt/来源/独立分组基线，Demo 账户另已通过 `FactorLifecycleService` 的六因子经典种入完成 ACTIVE/admitted/load。该入口仍经 Coordinator 写入生命周期、overlay、snapshot 和审计，生产账户与其他 builtin 仍须按 V16/Coordinator、prepared、loaded acknowledgement 和 fresh health 的标准链路受控重投影。领域服务的 coordinator-off 隔离兼容仍在，但生产状态库已禁止回退到直接 overlay 写入。2026-08-04 已删除自动晋升对 catalog `source=shadow`、runtime name 等于 canonical DSL ID 及 builtin 重入对旧 `governance_action=disable_factor_live` 的依赖，统一按 canonical lifecycle origin/stage/definition 判定；同时删除 preflight 300 秒、最终 lifecycle 180 秒的 freshness 错位（统一为 900 秒，与 15 分钟 health 刷新节拍对齐），evolution_hourly cron 由 `2 * * * *` 提升为 `23,53,58 * * * *`（唯一不与独立治理 15/30/45、nursery 7/22/37/52、supervisor 9/39、autonomous 12/42、offmarket :20 任一 single-flight 运行窗口重叠的 3 档排布）使完整治理链每小时 3 次且不互斥跳过，退役因子保留 DEAD 健康快照以推进恢复时间线，activate 健康门槛与晋升证据对齐（WATCH + score≥40）。真实 V16 链已创建 `vol_ma_ratio`、`obv_slope` generation 2 SHADOW，并把 prepared GP `dsl_auto_a3eeb...` 激活为 ACTIVE/admitted。
+- 退出：现有 ACTIVE builtin 按 code-bound identity、V16、prepared、真实 loaded ack 和 fresh health 分批重入 lifecycle 后删除 builtin fallback；稳定 enforce 发布后删除领域服务的 generic restore 兼容。启动层的旧 template/supervisor/Registry restore 已删除；除六因子有界 Demo 经典种入外，不得用直接数据库回填 ACTIVE 绕过晋升证据。
 
 ### 历史 runtime overlay 缺少 committed mutation 绑定
 

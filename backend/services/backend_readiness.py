@@ -1355,12 +1355,28 @@ class BackendReadinessService:
             )
         loop = dict(live_status.get("loop") or {})
         loop_readiness = dict(live_status.get("readiness") or {})
-        if bool(loop.get("running")) and loop_readiness.get("ok") is False:
-            execution_blockers.append(
-                blocker("live_loop", "running_loop_not_ready", details=loop_readiness)
-            )
-        if bool(loop.get("running")) and loop.get("accepting_new_risk") is False:
-            execution_blockers.append(blocker("live_loop", "not_accepting_new_risk"))
+        if bool(loop.get("running")):
+            # The loop/readiness pair describes one lifecycle authority.  Do
+            # not publish both ``running_loop_not_ready`` and
+            # ``not_accepting_new_risk`` for the same failed admission.
+            if loop_readiness.get("ok") is False:
+                execution_blockers.append(
+                    blocker("live_loop", "not_ready", details=loop_readiness)
+                )
+            elif loop.get("accepting_new_risk") is False:
+                execution_blockers.append(
+                    blocker(
+                        "live_loop",
+                        "not_accepting_new_risk",
+                        blockers=sorted(
+                            {
+                                str(item)
+                                for item in list(loop.get("blockers") or [])
+                                if str(item)
+                            }
+                        ),
+                    )
+                )
         if is_runtime_state_db and risk_metrics.get("ok") is not True:
             execution_blockers.append(
                 blocker(

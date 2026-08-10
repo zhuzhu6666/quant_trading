@@ -38,6 +38,27 @@ OPERATOR_BOUNDED_DEMO_CONTROL_KEYS = frozenset(
     }
 )
 
+# These are the stable, code-owned directional primitives that may be seeded
+# directly in the bounded Demo account.  They are deliberately explicit: a
+# generic builtin or discovered factor must still use the normal lifecycle and
+# V16 promotion path.
+CLASSIC_DIRECTIONAL_FACTOR_IDS = (
+    "di_spread",
+    "ema_slope",
+    "supertrend_str",
+    "macd_hist",
+    "stoch_k",
+    "rsi_14",
+)
+CLASSIC_DIRECTIONAL_FACTOR_WEIGHTS = {
+    "di_spread": 1.75,
+    "ema_slope": 0.5,
+    "supertrend_str": 0.8,
+    "macd_hist": 0.5,
+    "stoch_k": 1.0,
+    "rsi_14": 1.0,
+}
+
 
 def resolve_bounded_demo_mode(cfg: Any, broker_cfg: Any) -> bool:
     """Purely resolve bounded Demo semantics from caller-owned snapshots."""
@@ -126,6 +147,57 @@ def operator_bounded_demo_control_exempt(
             return False
         return 0.0 < cvar_limit <= var_limit
     return "risk_cvar_threshold_pct" not in keys
+
+
+def operator_classic_builtin_factor_activation_exempt(
+    *,
+    actor: str,
+    patch: Any,
+    cfg: Any,
+) -> bool:
+    """Allow the explicit classic-factor seed only inside bounded Demo.
+
+    Lifecycle services still write the durable factor state and audit record.
+    This exemption only prevents the generic V16 expansion claim from
+    blocking a user-requested seed of the six code-owned classic direction
+    factors in the Demo account.
+    """
+
+    if not (
+        str(actor or "").startswith("operator:")
+        and bounded_demo_mode_active(cfg)
+    ):
+        return False
+    payload = dict(patch or {})
+    allowed_keys = {"factor_signal_config", "factor_portfolio_weights"}
+    if not payload or not set(payload) <= allowed_keys:
+        return False
+    signal_patch = payload.get("factor_signal_config")
+    if not isinstance(signal_patch, dict) or not signal_patch:
+        return False
+    allowed_names = set(CLASSIC_DIRECTIONAL_FACTOR_IDS)
+    names = set(signal_patch)
+    if not names or not names <= allowed_names:
+        return False
+    for entry in signal_patch.values():
+        if not isinstance(entry, dict):
+            return False
+        if (
+            str(entry.get("source") or "").lower() != "builtin"
+            or entry.get("direct_activation") is not True
+        ):
+            return False
+    weight_patch = payload.get("factor_portfolio_weights")
+    if weight_patch is not None:
+        if not isinstance(weight_patch, dict) or set(weight_patch) != names:
+            return False
+        for value in weight_patch.values():
+            try:
+                if float(value) <= 0.0:
+                    return False
+            except (TypeError, ValueError):
+                return False
+    return True
 
 
 def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
@@ -301,19 +373,25 @@ class RuntimeConfig:
     timeframe: str = "M5"                    # 主交易周期
 
     # --- Signal Normalizer 配置 ---
+    # 经典内置因子是 live alpha 的稳定基线：它们保留健康观测和治理审计，
+    # 但不能因为尚未落一条 factor_health 行就从方向组合中全部消失。
+    # ``health_gate_exempt`` 只豁免“缺健康证据”的 admission gate，不能
+    # 绕过显式 disabled/terminal lifecycle，也不授予任何配置写权限。
     factor_signal_config: dict = field(default_factory=lambda: {
         # 模式 A: zscore_tanh（连续有界因子）
-        "rsi_14":         {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "均值回归"]},
-        "di_spread":      {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "趋势"]},
-        "stoch_k":        {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "动量"]},
+        "rsi_14":         {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "alpha", "direction": -1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "oscillator", "tags": ["技术", "均值回归"]},
+        "di_spread":      {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "trend", "tags": ["技术", "趋势"]},
+        "stoch_k":        {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "oscillator", "tags": ["技术", "动量"]},
         "adx":            {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["技术", "趋势强度"]},
         "atr_ratio":      {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["技术", "波动率"]},
-        "ema_slope":       {"mode": "zscore_tanh", "window": 50,  "min_samples": 30, "tags": ["技术", "趋势"]},
-        "supertrend_str":  {"mode": "zscore_tanh", "window": 50,  "min_samples": 30, "tags": ["技术", "趋势"]},
+        "ema_slope":       {"mode": "zscore_tanh", "window": 50,  "min_samples": 30, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "trend", "tags": ["技术", "趋势"]},
+        "supertrend_str":  {"mode": "zscore_tanh", "window": 50,  "min_samples": 30, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "trend", "tags": ["技术", "趋势"]},
         "keltner_width":   {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["技术", "波动率"]},
-        "obv_slope":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["量价"]},
-        "vol_ma_ratio":    {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["量价"]},
-        "macd_hist":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "tags": ["技术", "动量"]},
+        "obv_slope":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "source": "builtin", "redundancy_group": "volume_direction", "tags": ["量价"]},
+        # Volume / volume-MA 只有强弱，没有天然多空方向；保留为 context，
+        # 避免“放量”被组合器误读为看多、“缩量”误读为看空。
+        "vol_ma_ratio":    {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["量价", "成交量强度"]},
+        "macd_hist":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "momentum", "tags": ["技术", "动量"]},
 
         # 结构/高周期候选：先 shadow 观察，健康后由治理循环自动启用。
         "htf_trend_alignment": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
@@ -384,9 +462,10 @@ class RuntimeConfig:
         "cot_extreme_signal":      {"mode": "discrete", "value_map": {"-1": -1.0, "0": 0.0, "1": 1.0}, "tags": ["COT", "反转", "综合"]},
 
         # 模式 C: discrete（形态/事件因子）
-        "engulfing":               {"mode": "discrete", "value_map": {"-1": -1.0, "0": 0.0, "1": 1.0},    "tags": ["形态", "反转"]},
-        "pin_bar":                 {"mode": "discrete", "value_map": {"-1": -0.8, "0": 0.0, "1": 0.8},    "tags": ["形态", "反转"]},
-        "inside_bar":              {"mode": "discrete", "value_map": {"0": 0.0, "1": -0.3},                "tags": ["形态", "整理"]},
+        "engulfing":               {"mode": "discrete", "value_map": {"-1": -1.0, "0": 0.0, "1": 1.0}, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "source": "builtin", "redundancy_group": "price_action", "tags": ["形态", "反转"]},
+        "pin_bar":                 {"mode": "discrete", "value_map": {"-1": -0.8, "0": 0.0, "1": 0.8}, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "source": "builtin", "redundancy_group": "price_action", "tags": ["形态", "反转"]},
+        # 当前实现只表达“inside bar 出现”，并没有突破方向；不作为 alpha。
+        "inside_bar":              {"mode": "discrete", "value_map": {"0": 0.0, "1": -0.3}, "role": "context", "tags": ["形态", "整理"]},
         "bb_width":                {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["技术", "波动率", "布林带"]},
         "hour_utc":                {"mode": "discrete", "value_map": "hour_weights", "role": "context",   "tags": ["日历", "时段"]},
         "day_of_week":             {"mode": "discrete", "value_map": "day_weights", "role": "context",    "tags": ["日历", "周内"]},
@@ -411,7 +490,7 @@ class RuntimeConfig:
         "vol_ma_ratio":    0.3,
         "engulfing":       1.0,
         "pin_bar":         0.8,
-        "inside_bar":      0.3,
+        "inside_bar":      0.0,   # context-only: 当前值没有可靠的多空方向
         # 新增结构因子初始权重为 0；通过后验健康门槛后由治理服务设置小权重。
         "htf_trend_alignment": 0.0,
         "donchian_breakout_20": 0.0,

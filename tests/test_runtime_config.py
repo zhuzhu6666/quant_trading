@@ -195,6 +195,42 @@ def test_macro_factor_defaults_preserve_directional_semantics() -> None:
     assert cfg.factor_signal_config["slv_gld_ratio"]["direction"] == -1
 
 
+def test_classic_builtin_baseline_has_directional_coverage_and_roles() -> None:
+    cfg = rc.RuntimeConfig.from_yaml({})
+    classic = {
+        "rsi_14",
+        "di_spread",
+        "stoch_k",
+        "ema_slope",
+        "supertrend_str",
+        "macd_hist",
+        "obv_slope",
+        "engulfing",
+        "pin_bar",
+    }
+
+    assert classic <= set(cfg.factor_signal_config)
+    assert all(
+        cfg.factor_signal_config[name]["health_gate_exempt"] is True
+        for name in classic
+    )
+    assert all(
+        cfg.factor_signal_config[name]["role"] == "alpha"
+        for name in classic
+    )
+    assert {
+        cfg.factor_signal_config[name]["redundancy_group"] for name in classic
+    } == {"trend", "oscillator", "momentum", "volume_direction", "price_action"}
+    assert cfg.factor_signal_config["rsi_14"]["direction"] == -1
+    assert all(
+        cfg.factor_signal_config[name]["direction"] == 1
+        for name in classic - {"rsi_14"}
+    )
+    assert cfg.factor_signal_config["vol_ma_ratio"]["role"] == "context"
+    assert cfg.factor_signal_config["inside_bar"]["role"] == "context"
+    assert cfg.factor_portfolio_weights["inside_bar"] == 0.0
+
+
 def test_unknown_keys_go_to_extra() -> None:
     cfg = rc.RuntimeConfig.from_dict({"shadow_vote_weight": 0.3, "made_up_field": 999})
     assert cfg.shadow_vote_weight == 0.3

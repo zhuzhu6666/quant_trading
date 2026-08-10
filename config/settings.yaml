@@ -184,10 +184,20 @@ runtime:
   factor_dry_run: false
   timeframe: M5
   factor_signal_config:
+    # 经典内置因子是 live alpha 的稳定基线：保留健康观测与治理审计，
+    # 但不因尚未落 factor_health 行而整体退出方向组合。
     rsi_14:
       mode: zscore_tanh
       window: 100
       min_samples: 50
+      role: alpha
+      direction: -1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      direct_activation: true
+      source: builtin
+      redundancy_group: oscillator
       tags:
       - 技术
       - 均值回归
@@ -195,6 +205,14 @@ runtime:
       mode: zscore_tanh
       window: 100
       min_samples: 50
+      role: alpha
+      direction: 1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      direct_activation: true
+      source: builtin
+      redundancy_group: trend
       tags:
       - 技术
       - 趋势
@@ -202,6 +220,14 @@ runtime:
       mode: zscore_tanh
       window: 100
       min_samples: 50
+      role: alpha
+      direction: 1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      direct_activation: true
+      source: builtin
+      redundancy_group: oscillator
       tags:
       - 技术
       - 动量
@@ -225,6 +251,14 @@ runtime:
       mode: zscore_tanh
       window: 50
       min_samples: 30
+      role: alpha
+      direction: 1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      direct_activation: true
+      source: builtin
+      redundancy_group: trend
       tags:
       - 技术
       - 趋势
@@ -232,6 +266,14 @@ runtime:
       mode: zscore_tanh
       window: 50
       min_samples: 30
+      role: alpha
+      direction: 1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      direct_activation: true
+      source: builtin
+      redundancy_group: trend
       tags:
       - 技术
       - 趋势
@@ -247,18 +289,35 @@ runtime:
       mode: zscore_tanh
       window: 100
       min_samples: 50
+      role: alpha
+      direction: 1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      source: builtin
+      redundancy_group: volume_direction
       tags:
       - 量价
     vol_ma_ratio:
       mode: zscore_tanh
       window: 100
       min_samples: 50
+      role: context
       tags:
       - 量价
+      - 成交量强度
     macd_hist:
       mode: zscore_tanh
       window: 100
       min_samples: 50
+      role: alpha
+      direction: 1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      direct_activation: true
+      source: builtin
+      redundancy_group: momentum
       tags:
       - 技术
       - 动量
@@ -580,6 +639,13 @@ runtime:
         '-1': -1.0
         '0': 0.0
         '1': 1.0
+      role: alpha
+      direction: 1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      source: builtin
+      redundancy_group: price_action
       tags:
       - 形态
       - 反转
@@ -589,6 +655,13 @@ runtime:
         '-1': -0.8
         '0': 0.0
         '1': 0.8
+      role: alpha
+      direction: 1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      source: builtin
+      redundancy_group: price_action
       tags:
       - 形态
       - 反转
@@ -597,6 +670,7 @@ runtime:
       value_map:
         '0': 0.0
         '1': -0.3
+      role: context
       tags:
       - 形态
       - 整理
@@ -652,7 +726,7 @@ runtime:
     vol_ma_ratio: 0.3
     engulfing: 1.0
     pin_bar: 0.8
-    inside_bar: 0.3
+    inside_bar: 0.0
     htf_trend_alignment: 0.0
     donchian_breakout_20: 0.0
     range_expansion_20: 0.0

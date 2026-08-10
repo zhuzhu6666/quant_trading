@@ -338,11 +338,17 @@ V16 effect 的只读投影，不产生新的因子选择或治理写入者：
 - 当前 LightGBM 因子治理模型的职责是已有因子的治理建议、弱化或降权，不是开仓信号生成器，
   也不是新因子认证器。
 
-2026-08-10 的运行投影中，选择集有 15 个因子，其中真正有正权重并参与方向合成的 alpha
-只有 5 个：`vol_ma_ratio`、`wick_rejection`、`morning_evening_star`、
-`fib_rejection_confirmation`、`pin_bar`。其余主要是 context/gate，或因权重为零而不投票；
-当前发现型 DSL 因子没有进入实际选择集。这个数量是运行快照，不是永久配置，必须以
+2026-08-10 重启后的只读运行投影中，选择集有 21 个因子，方向 voter 为 12 个，guard 为
+`healthy`，独立组为 9 个，且已覆盖 `trend`、`momentum`、`oscillator`、`price_action` 和
+`volume_direction` 等 family。这个数量和角色是运行快照，不是永久配置，必须以
 `runtime_factor_selection.v1` 为准，不能用新进程加载的默认 `RuntimeConfig` 代替。
+
+本批源配置修复已把 9 个经典 builtin 方向因子（RSI、DI spread、Stoch、EMA slope、SuperTrend、
+OBV slope、MACD histogram、Engulfing、Pin bar）声明为可复用的 alpha 基线，并把
+`vol_ma_ratio`、`inside_bar` 收敛为 context。源配置静态选择预期为 19 个因子、9 个正权重方向
+voter、5 个 redundancy group；当前 Demo 另已通过 `FactorLifecycleService` 的显式经典内置
+种入完成六个经典方向因子的 ACTIVE/admitted 投影。该入口仍写入同一 lifecycle、overlay、
+snapshot 和审计 authority，且仅限有界 Demo；生产因子扩张仍走标准 V16/Coordinator 链。
 
 ### 7.2 已具备的能力
 
@@ -354,10 +360,20 @@ V16 effect 的只读投影，不产生新的因子选择或治理写入者：
 - 新因子存在 SHADOW、prepared/loaded acknowledgement、V16、Coordinator、Canary 和 ACTIVE
   的生命周期权力链，`auto_register` 不能直接写 ACTIVE。
 - 实时因子、RiskPolicy、执行、持仓监督和后验在架构上已经分层，因子模块没有直接下单权限。
+- 2026-08-10 已补齐经典 builtin 的显式 `role`/`redundancy_group`/生命周期基线，
+  `zscore_tanh` 也开始按显式 `direction` 保持多空语义；live wiring 会保留独立性分组，
+  signal ledger 会绑定运行时因子集和 policy 版本。Demo 账户已将趋势（DI spread、EMA
+  slope、SuperTrend）、动量（MACD histogram）和振荡（RSI、Stoch）六个内置因子完成
+  ACTIVE/admitted/load；这不是对发现因子的通用免检。
 
 ### 7.3 尚未达标的核心缺口
 
-#### A. 因子方向语义没有形成强合同
+#### A. 因子方向语义合同已部分收敛，尚未完全达标
+
+2026-08-10 已完成三项最小修复：`zscore_tanh` 按显式 `direction` 处理反转因子；
+`vol_ma_ratio` 不再作为方向 alpha；`inside_bar` 不再以没有可靠突破方向的当前值投票。
+经典 builtin 还补齐了明确的生命周期、来源和 redundancy group 元数据。剩余工作是把该语义
+继续下沉到因子卡片/注册表校验，并覆盖 discrete 因子的方向声明和运行时合同测试：
 
 当前缺少一个由因子卡片、注册表、归一化器和组合器共同遵守的强制合同：
 
@@ -372,11 +388,10 @@ raw_value 的含义
 
 具体风险：
 
-- `vol_ma_ratio` 的原始含义是成交量相对均值的偏离，本身没有价格方向；当前却作为 alpha
-  参与合成，容易把“放量”直接解释成看多，把量能确认误当成方向信号。
-- `SignalNormalizer` 的 `zscore_tanh` 以滚动均值为中心，因子原始值的正负不必然等于归一化后
-  的多空含义。历史决策快照中已经观察到部分因子存在 raw/normalized 符号变化。
-- `direction` 现在更多是组合结果，而不是每个因子都经过显式方向契约验证后的结果。
+- 旧 `state_v1` 投影中的 `vol_ma_ratio` 仍是 alpha；在进程重载并完成受控重投影前，运行态仍
+  可能把“放量”直接解释成看多，把量能确认误当成方向信号。源配置已将其固定为 context。
+- 历史决策快照中已经观察到部分因子存在 raw/normalized 符号变化；当前只在 z-score 入口
+  落地了显式 polarity，完整的每因子方向契约校验仍未完成。
 
 因此，当前因子“数值可用”不等于“方向语义可信”。在方向契约落地前，任何自动调权都可能
 放大方向反转、角色误标或归一化漂移。
@@ -421,9 +436,10 @@ bar observations
 
 当前快照能重建当次分数，但交易级账本仍有以下追溯缺口：
 
-- 部分 `decision_ledger` 的 `factor_set_version`、`policy_version` 为空。
-- 决策未稳定绑定当时的 `runtime_factor_selection.v1` hash、因子 generation、artifact hash
-  和加载确认投影。
+- 旧的 `decision_ledger` 记录中部分 `factor_set_version`、`policy_version` 为空；本批新的
+  signal root event 已开始继承与 open intent 相同的 runtime selection fingerprint 和 policy
+  version，历史记录不会被回填。
+- 决策仍未稳定绑定当时的因子 generation、artifact hash 和完整加载确认投影。
 - 新进程的静态默认配置与生产进程的 live overlay 不是同一事实；如果调用方读取错误入口，
   会得到“看似合理但不是当时生效”的因子权重。
 

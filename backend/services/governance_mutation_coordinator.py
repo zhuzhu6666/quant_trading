@@ -574,6 +574,11 @@ class GovernanceMutationCoordinator:
                     patch=sanitized,
                     cfg=current_config,
                 )
+                or runtime_config.operator_classic_builtin_factor_activation_exempt(
+                    actor=plan.actor,
+                    patch=sanitized,
+                    cfg=current_config,
+                )
             )
             if (
                 current_paused

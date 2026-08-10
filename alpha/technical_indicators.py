@@ -31,6 +31,39 @@ def wilder_smooth(series: np.ndarray, period: int) -> np.ndarray:
     return out
 
 
+def rsi_wilder(close: np.ndarray, period: int = 14) -> np.ndarray:
+    """Return the classic RSI using Wilder's recursive smoothing.
+
+    The first gain/loss average is seeded from the first ``period`` bars,
+    matching :func:`wilder_smooth` and the other shared Wilder indicators.
+    Flat windows are explicitly mapped to 50, while one-sided windows map to
+    the corresponding 0/100 boundary instead of an artificial near-boundary
+    value.
+    """
+    close = np.asarray(close, dtype=float)
+    if len(close) == 0:
+        return np.asarray([], dtype=float)
+
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = wilder_smooth(gain, period)
+    avg_loss = wilder_smooth(loss, period)
+
+    result = np.full(len(close), np.nan, dtype=float)
+    valid = np.isfinite(avg_gain) & np.isfinite(avg_loss)
+    flat = valid & (avg_gain == 0.0) & (avg_loss == 0.0)
+    rising_only = valid & (avg_gain > 0.0) & (avg_loss == 0.0)
+    falling_only = valid & (avg_gain == 0.0) & (avg_loss > 0.0)
+    mixed = valid & ~(flat | rising_only | falling_only)
+
+    result[flat] = 50.0
+    result[rising_only] = 100.0
+    result[falling_only] = 0.0
+    result[mixed] = 100.0 - 100.0 / (1.0 + avg_gain[mixed] / avg_loss[mixed])
+    return result
+
+
 def atr_wilder(
     high: np.ndarray,
     low: np.ndarray,

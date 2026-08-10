@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from backend.services.backend_readiness import BackendReadinessService
+from backend.services.live_readiness import build_live_readiness
 from config import runtime_config as rc
 
 
@@ -163,6 +164,73 @@ def test_unknown_canonical_var_is_projected_as_live_readiness_blocker() -> None:
         item["reason"] for item in result["blockers"]["live_execution"]
     }
     assert "canonical_forward_var_not_ready" in reasons
+
+
+def test_live_loop_readiness_does_not_duplicate_one_failed_admission() -> None:
+    rc.reset_for_tests()
+    try:
+        result = _dimensions(
+            live_status={
+                "ctrader": {"status": "connected"},
+                "loop": {
+                    "running": True,
+                    "accepting_new_risk": False,
+                    "blockers": ["no_new_risk_latched"],
+                },
+                "readiness": {
+                    "ok": False,
+                    "reasons": ["loop_not_accepting_new_risk"],
+                },
+            }
+        )
+    finally:
+        rc.reset_for_tests()
+
+    loop_blockers = [
+        item for item in result["blockers"]["live_execution"]
+        if item["component"] == "live_loop"
+    ]
+    assert len(loop_blockers) == 1
+    assert loop_blockers[0]["reason"] == "not_ready"
+
+
+def test_live_readiness_keeps_specific_safety_reasons_without_generic_duplicates() -> None:
+    result = build_live_readiness(
+        loop={
+            "running": True,
+            "phase": "running",
+            "ready": True,
+            "accepting_new_risk": False,
+            "blockers": ["no_new_risk_latched"],
+            "safety_heartbeat_age_sec": 1.0,
+            "safety": {
+                "accepting_new_risk": False,
+                "reconciliation_state": "stale",
+                "unknown_execution_count": 1,
+                "blockers": ["positions_reconciliation_failed", "unknown_execution"],
+            },
+        },
+        state={
+            "diag": {"bridge_ready": True},
+            "account_reconciled": {"ok": True},
+            "account_updated_at": 100.0,
+            "account_reconcile_id": "account-1",
+            "positions_updated_at": 100.0,
+            "positions_reconcile_id": "positions-1",
+        },
+        positions=[],
+        checked_at=100.0,
+        v2_active=True,
+        broker_status="connected",
+        broker_error=None,
+    )
+
+    assert "no_new_risk_latched" in result["reasons"]
+    assert "positions_reconciliation_failed" in result["reasons"]
+    assert "unknown_execution" in result["reasons"]
+    assert "loop_not_accepting_new_risk" not in result["reasons"]
+    assert "safety_position_reconcile_not_fresh" not in result["reasons"]
+    assert "unresolved_execution_intent" not in result["reasons"]
 
 
 def test_global_operator_pause_blocks_all_mode_autonomous_expansion() -> None:

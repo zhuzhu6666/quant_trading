@@ -182,10 +182,17 @@ class RuntimeConfigMutationService:
                     "mutation_source": source,
                     "mutation_action": action or source,
                 }
-        operator_demo_control = runtime_config.operator_bounded_demo_control_exempt(
-            actor=actor,
-            patch=patch,
-            cfg=current_config,
+        operator_demo_control = (
+            runtime_config.operator_bounded_demo_control_exempt(
+                actor=actor,
+                patch=patch,
+                cfg=current_config,
+            )
+            or runtime_config.operator_classic_builtin_factor_activation_exempt(
+                actor=actor,
+                patch=patch,
+                cfg=current_config,
+            )
         )
         operator_pause_resume = (
             set(patch or {}) == {"governance_expansion_paused"}

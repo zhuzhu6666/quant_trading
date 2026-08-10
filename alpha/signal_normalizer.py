@@ -211,11 +211,23 @@ class SignalNormalizer:
             # 按模式归一化
             mode = cfg.get("mode", "rank_mapping")
             if mode == "zscore_tanh":
-                signals[name] = _normalize_zscore_tanh(
+                normalized = _normalize_zscore_tanh(
                     raw_value,
                     self._histories[name],
                     window=cfg.get("window", 100),
                     min_samples=cfg.get("min_samples", 30),
+                )
+                # z-score 只表达“高于/低于自身历史均值”，不自动表达
+                # 多空语义。显式 direction=-1 的经典反转因子（例如 RSI）
+                # 必须在统一归一化边界反转，避免把超买直接当成看多。
+                try:
+                    polarity = -1.0 if float(cfg.get("direction", 1)) < 0 else 1.0
+                except (TypeError, ValueError):
+                    polarity = 1.0
+                signals[name] = (
+                    float(normalized) * polarity
+                    if normalized is not None
+                    else None
                 )
             elif mode == "rank_mapping":
                 signals[name] = _normalize_rank(

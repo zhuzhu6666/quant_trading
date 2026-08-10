@@ -134,7 +134,7 @@ def test_merge_portfolio_configs_includes_active_discovered_factor(monkeypatch):
 
     try:
         merged = live_service._merge_portfolio_configs(
-            {"rsi_14": {"mode": "zscore_tanh", "tags": ["技术"]}},
+            {"rsi_14": {"mode": "zscore_tanh", "tags": ["技术"], "redundancy_group": "oscillator"}},
             {"rsi_14": 1.0},
             0.7,
             0.3,
@@ -150,6 +150,7 @@ def test_merge_portfolio_configs_includes_active_discovered_factor(monkeypatch):
     assert merged[discovered]["source"] == "discovered"
     assert merged[discovered]["tags"] == ["GP发现"]
     assert merged[discovered]["role"] == "alpha"
+    assert merged["rsi_14"]["redundancy_group"] == "oscillator"
 
 
 def test_merge_portfolio_configs_does_not_activate_cold_weight_only_factor(monkeypatch):

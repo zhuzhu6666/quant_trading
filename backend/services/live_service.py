@@ -72,6 +72,7 @@ from backend.services.live_safety_watchdog import (
     evaluate_safety_freshness,
 )
 from backend.services.live_reconciliation import (
+    evaluate_reconciliation_snapshot as _evaluate_reconciliation_snapshot,
     explicit_account_reconcile as _explicit_account_reconcile,
     explicit_position_reconcile as _explicit_position_reconcile,
     fresh_observation_timestamp as _fresh_observation_timestamp,
@@ -4541,6 +4542,9 @@ def get_live_readiness(broker: str = "ctrader") -> dict:
             _live_state_get("account_reconciled", {}, clone=True) or {}
         ),
         "account_updated_at": _live_state_get("account_updated_at", 0.0),
+        "positions_reconciled": _live_state_get(
+            "positions_reconciled", [], clone=True
+        ),
         "positions_updated_at": _live_state_get("positions_updated_at", 0.0),
         "account_reconcile_id": _live_state_get("account_reconcile_id", ""),
         "positions_reconcile_id": _live_state_get("positions_reconcile_id", ""),
@@ -5682,7 +5686,6 @@ def loop_status() -> dict:
             local_blockers.append("no_new_risk_latched")
         if bool(generation.get("thread_alive")):
             reconcile_blockers = _new_risk_reconciliation_blockers()
-            _live_state_update(new_risk_reconcile_blockers=reconcile_blockers)
             local_blockers.extend(reconcile_blockers)
             session_status = str(
                 _live_state_get("session_state_status", "unknown") or "unknown"
@@ -10074,34 +10077,24 @@ def _new_risk_reconciliation_blockers(*, now_ts: float | None = None) -> list[st
     """Validate broker facts at the final open-order admission boundary."""
 
     checked_at = float(time.time() if now_ts is None else now_ts)
-    blockers: list[str] = []
     account = _live_state_get("account_reconciled", {}, clone=True) or {}
-    account_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
-    account_id = str(_live_state_get("account_reconcile_id", "") or "")
-    account_failed_at = float(
-        _live_state_get("account_reconcile_failed_at", 0.0) or 0.0
-    )
-    if not account or not bool(account.get("ok")) or account_at <= 0 or not account_id:
-        blockers.append("account_reconcile_unknown")
-    elif checked_at < account_at - 1.0 or checked_at - account_at > 15.0:
-        blockers.append("account_reconcile_stale")
-    if account_failed_at > account_at:
-        blockers.append("account_reconcile_failed")
-
     positions = _live_state_get("positions_reconciled", None, clone=True)
-    positions_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
-    positions_id = str(_live_state_get("positions_reconcile_id", "") or "")
-    positions_failed_at = float(
-        _live_state_get("positions_reconcile_failed_at", 0.0) or 0.0
+    result = _evaluate_reconciliation_snapshot(
+        account=account,
+        account_updated_at=_live_state_get("account_updated_at", 0.0),
+        account_reconcile_id=_live_state_get("account_reconcile_id", ""),
+        account_reconcile_failed_at=_live_state_get(
+            "account_reconcile_failed_at", 0.0
+        ),
+        positions=positions,
+        positions_updated_at=_live_state_get("positions_updated_at", 0.0),
+        positions_reconcile_id=_live_state_get("positions_reconcile_id", ""),
+        positions_reconcile_failed_at=_live_state_get(
+            "positions_reconcile_failed_at", 0.0
+        ),
+        checked_at=checked_at,
     )
-    if not isinstance(positions, list) or positions_at <= 0 or not positions_id:
-        blockers.append("positions_reconcile_unknown")
-    elif checked_at < positions_at - 1.0 or checked_at - positions_at > 15.0:
-        blockers.append("positions_reconcile_stale")
-    if positions_failed_at > positions_at:
-        blockers.append("positions_reconcile_failed")
-
-    return sorted(set(blockers))
+    return list(result["blockers"])
 
 
 def _open_trade_admission_blockers(stop_requested=None) -> tuple[str, ...]:
@@ -10719,6 +10712,15 @@ def _process_tick_factor_pipeline(
     signal_decision_id = ""
     if _LEDGER and composite.direction != 0:
         try:
+            # Signal events are the root of the durable factor lineage. Bind
+            # them to the same runtime selection projection later used by the
+            # open-intent record; otherwise the ledger has a contribution
+            # snapshot but cannot prove which factor set produced it.
+            runtime_binding = _open_runtime_factor_lineage()
+            factor_set_version = str(
+                runtime_binding.get("selection_fingerprint") or ""
+            )
+            policy_version = str(getattr(cfg, "policy_version", "") or "")
             signal_decision_id = _LEDGER.log_composite_decision(
                 event_type="signal",
                 composite=composite,
@@ -10733,8 +10735,15 @@ def _process_tick_factor_pipeline(
                     "session_pnl": _live_state_get("session_pnl", 0),
                 },
                 risk_state=_live_state_get("risk", {}, clone=True) or {},
+                policy_version=policy_version,
+                factor_set_version=factor_set_version,
                 action_reason="signal_detected",
-                action_json={"tick": tick},
+                action_json={
+                    "tick": tick,
+                    "runtime_binding": runtime_binding,
+                    "factor_set_version": factor_set_version,
+                    "policy_version": policy_version,
+                },
             )
             pipeline["last_signal_decision_id"] = str(signal_decision_id or "")
         except Exception as _ledger_err:

@@ -11,7 +11,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from alpha.technical_indicators import adx_wilder, atr_wilder
+from alpha.technical_indicators import adx_wilder, atr_wilder, rsi_wilder
 
 logger = logging.getLogger(__name__)
 
@@ -52,15 +52,8 @@ factor_registry = FactorRegistry()
 
 @factor_registry.register("rsi_14", "RSI(14)")
 def factor_rsi_14(df):
-    """RSI 14周期"""
-    close = df["close"].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 100.0), where=avg_loss != 0)
-    return 100 - 100 / (1 + rs)
+    """RSI 14周期，使用经典 Wilder 平滑。"""
+    return rsi_wilder(df["close"].values, period=14)
 
 
 @factor_registry.register("macd_hist", "MACD柱 (12,26,9)")

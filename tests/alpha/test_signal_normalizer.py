@@ -208,6 +208,24 @@ class TestSignalNormalize:
         assert result["dxy_corr_20"] is not None
         assert -1.0 <= result["dxy_corr_20"] <= 1.0
 
+    def test_zscore_direction_reverses_declared_polarity(self):
+        """zscore 只负责标准化，反转语义由显式 direction 决定。"""
+        base = {
+            "mode": "zscore_tanh",
+            "window": 100,
+            "min_samples": 30,
+        }
+        positive = SignalNormalizer({"factor": {**base, "direction": 1}})
+        negative = SignalNormalizer({"factor": {**base, "direction": -1}})
+        for value in range(40):
+            positive.normalize({"factor": float(value)})
+            negative.normalize({"factor": float(value)})
+
+        pos_signal = positive.normalize({"factor": 50.0})["factor"]
+        neg_signal = negative.normalize({"factor": 50.0})["factor"]
+        assert pos_signal is not None
+        assert neg_signal == pytest.approx(-pos_signal)
+
     def test_unknown_factor_uses_default_gp_config(self):
         """未配置因子可积累历史，但默认配置不能形成可执行投票。"""
         normalizer = SignalNormalizer(SAMPLE_CONFIG)

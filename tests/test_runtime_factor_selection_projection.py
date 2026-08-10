@@ -110,3 +110,50 @@ def test_runtime_factor_selection_projection_fails_closed_when_admission_unavail
     assert guard["reason_codes"] == [
         "directional_portfolio_evidence_unavailable"
     ]
+
+
+def test_runtime_factor_selection_projection_preserves_roles_and_groups(tmp_path):
+    runtime_config.reset_for_tests()
+    runtime_config.replace(
+        RuntimeConfig(
+            factor_signal_config={
+                "trend_a": {
+                    "enabled": True,
+                    "lifecycle_status": "ACTIVE",
+                    "role": "alpha",
+                    "redundancy_group": "trend",
+                },
+                "momentum_a": {
+                    "enabled": True,
+                    "lifecycle_status": "ACTIVE",
+                    "role": "alpha",
+                    "redundancy_group": "momentum",
+                },
+                "volume_context": {
+                    "enabled": True,
+                    "lifecycle_status": "ACTIVE",
+                    "role": "context",
+                },
+            },
+            factor_portfolio_weights={
+                "trend_a": 0.5,
+                "momentum_a": 0.5,
+                "volume_context": 0.5,
+            },
+        )
+    )
+    selection = SimpleNamespace(
+        selected_factor_ids=["trend_a", "momentum_a", "volume_context"],
+        excluded_factor_ids=[],
+        reason_excluded={},
+    )
+
+    published = RuntimeFactorSelectionProjectionService(
+        tmp_path / "state.db"
+    ).publish(selection)
+
+    guard = published["directional_portfolio_guard"]
+    assert published["selected_factor_roles"]["volume_context"] == "context"
+    assert guard["voter_ids"] == ["momentum_a", "trend_a"]
+    assert guard["independent_group_keys"] == ["momentum", "trend"]
+    assert guard["independent_group_count"] == 2

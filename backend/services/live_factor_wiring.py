@@ -84,6 +84,11 @@ def merge_portfolio_configs(
                 "source",
                 "discovered" if name in discovered_names else "builtin",
             ),
+            # Preserve the canonical family into the compositor.  Dropping it
+            # here silently turned every alpha into a distinct fallback
+            # redundancy bucket, overstating directional independence in
+            # live snapshots and replay.
+            "redundancy_group": str(factor.get("redundancy_group") or ""),
         }
     merged["_tactical_alpha"] = tactical_alpha
     merged["_macro_direction_cap"] = macro_direction_cap

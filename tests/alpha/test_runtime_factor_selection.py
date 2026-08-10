@@ -139,6 +139,38 @@ def test_alpha_without_health_evidence_is_fail_closed(monkeypatch):
     assert selection.reason_excluded["unknown"] == "missing_health_evidence"
 
 
+def test_explicit_classic_builtin_baseline_can_run_without_health_row(monkeypatch):
+    class _Adapter:
+        def list_by_source(self, _source):
+            return []
+
+        def dead_names(self):
+            return []
+
+        def all_statuses(self):
+            return []
+
+        def get_meta(self, _name):
+            return {"source": "builtin"}
+
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter()))
+    config = {
+        name: {
+            "role": "alpha",
+            "enabled": True,
+            "lifecycle_status": "ACTIVE",
+            "source": "builtin",
+            "health_gate_exempt": True,
+        }
+        for name in ("rsi_14", "di_spread", "macd_hist")
+    }
+
+    selection = select_runtime_factors(config)
+
+    assert selection is not None
+    assert selection.selected_factor_ids == ["rsi_14", "di_spread", "macd_hist"]
+
+
 def test_registry_adapter_failure_rejects_alpha_but_keeps_non_directional_roles(monkeypatch):
     monkeypatch.setattr(
         RegistryAdapter,

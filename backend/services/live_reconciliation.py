@@ -1,8 +1,9 @@
 """Explicit broker reconciliation contracts used by live safety paths.
 
 This module is deliberately independent from PostgreSQL and the live service
-state cache.  It only normalizes fresh broker observations; callers decide how
-to publish those observations into compatibility state.
+state cache.  It normalizes fresh broker observations and evaluates the
+published account/positions snapshot contract; callers decide how to publish
+those observations into compatibility state.
 """
 from __future__ import annotations
 
@@ -11,6 +12,84 @@ import uuid
 from typing import Any, Mapping
 
 from execution.base import PositionReconcileResult
+
+
+def _epoch(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def evaluate_reconciliation_snapshot(
+    *,
+    account: Any,
+    account_updated_at: Any,
+    account_reconcile_id: Any,
+    account_reconcile_failed_at: Any,
+    positions: Any,
+    positions_updated_at: Any,
+    positions_reconcile_id: Any,
+    positions_reconcile_failed_at: Any,
+    checked_at: float,
+    freshness_seconds: float = 15.0,
+) -> dict[str, Any]:
+    """Evaluate the canonical account/positions snapshot contract.
+
+    Final open admission and API readiness must not each implement a subtly
+    different freshness policy.  This pure evaluator is the single owner of
+    the blocker codes for the published broker facts; callers only project its
+    result into their own response or admission shape.
+    """
+
+    account_map = account if isinstance(account, Mapping) else {}
+    account_at = _epoch(account_updated_at)
+    account_failed_at = _epoch(account_reconcile_failed_at)
+    account_id = str(account_reconcile_id or "")
+    account_age = (
+        max(0.0, float(checked_at) - account_at) if account_at > 0 else None
+    )
+    freshness = max(0.0, _epoch(freshness_seconds))
+    account_blockers: list[str] = []
+    if (
+        not account_map
+        or not bool(account_map.get("ok"))
+        or account_at <= 0
+        or not account_id
+    ):
+        account_blockers.append("account_reconcile_unknown")
+    elif account_age is None or account_age > freshness:
+        account_blockers.append("account_reconcile_stale")
+    if account_failed_at > account_at:
+        account_blockers.append("account_reconcile_failed")
+
+    positions_at = _epoch(positions_updated_at)
+    positions_failed_at = _epoch(positions_reconcile_failed_at)
+    positions_id = str(positions_reconcile_id or "")
+    positions_age = (
+        max(0.0, float(checked_at) - positions_at)
+        if positions_at > 0
+        else None
+    )
+    positions_blockers: list[str] = []
+    if not isinstance(positions, list) or positions_at <= 0 or not positions_id:
+        positions_blockers.append("positions_reconcile_unknown")
+    elif positions_age is None or positions_age > freshness:
+        positions_blockers.append("positions_reconcile_stale")
+    if positions_failed_at > positions_at:
+        positions_blockers.append("positions_reconcile_failed")
+
+    account_blockers = sorted(set(account_blockers))
+    positions_blockers = sorted(set(positions_blockers))
+    return {
+        "account_ready": not account_blockers,
+        "positions_ready": not positions_blockers,
+        "account_age_sec": account_age,
+        "positions_age_sec": positions_age,
+        "account_blockers": account_blockers,
+        "positions_blockers": positions_blockers,
+        "blockers": sorted(set(account_blockers + positions_blockers)),
+    }
 
 
 def reconcile_value(value: Any, field: str, default: Any = None) -> Any:

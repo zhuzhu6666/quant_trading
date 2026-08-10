@@ -1,14 +1,52 @@
 """Pure live execution readiness projection.
 
 Broker probes and in-memory state reads remain in the live façade.  This
-module owns freshness, loop-generation and Safety heartbeat interpretation so
-the authorization contract can be tested without touching broker or database
-state.
+module projects the canonical reconciliation, loop-generation and Safety
+heartbeat contracts so the authorization contract can be tested without
+touching broker or database state.
 """
 
 from __future__ import annotations
 
 from typing import Any, Mapping
+
+from backend.services.live_reconciliation import evaluate_reconciliation_snapshot
+
+
+def _canonical_loop_blockers(
+    *,
+    loop: Mapping[str, Any],
+    loop_running: bool,
+    loop_ready: bool,
+    loop_accepting_new_risk: bool,
+) -> list[str]:
+    """Return the loop owner's blockers without adding duplicate summaries.
+
+    ``LiveLoopController`` already makes ``accepting_new_risk`` depend on the
+    startup barrier, runtime blockers, and the safety heartbeat.  Readiness
+    must not append a second generic blocker for the same false value; it only
+    supplies a fallback when the owner did not publish a specific reason.
+    """
+
+    blockers = sorted(
+        {
+            str(item)
+            for item in list(loop.get("blockers") or [])
+            if str(item)
+        }
+    )
+    if loop_running and not blockers:
+        if not loop_ready:
+            blockers.append("loop_not_ready")
+        elif not loop_accepting_new_risk:
+            blockers.append("loop_not_accepting_new_risk")
+    return blockers
+
+
+def _has_safety_reason(blockers: list[str], *reasons: str) -> bool:
+    """Match a safety fact across its legacy and v2 reason spellings."""
+
+    return bool(set(blockers).intersection(reasons))
 
 
 def build_live_readiness(
@@ -39,16 +77,20 @@ def build_live_readiness(
         state.get("positions_reconcile_error") or ""
     )
     loop_running = bool(loop.get("running"))
-    account_age = (
-        max(0.0, checked_at - account_updated_at)
-        if account_updated_at > 0
-        else None
+    reconciliation = evaluate_reconciliation_snapshot(
+        account=account,
+        account_updated_at=account_updated_at,
+        account_reconcile_id=account_reconcile_id,
+        account_reconcile_failed_at=account_reconcile_failed_at,
+        positions=state.get("positions_reconciled", positions),
+        positions_updated_at=positions_updated_at,
+        positions_reconcile_id=positions_reconcile_id,
+        positions_reconcile_failed_at=positions_reconcile_failed_at,
+        checked_at=checked_at,
+        freshness_seconds=freshness_seconds,
     )
-    positions_age = (
-        max(0.0, checked_at - positions_updated_at)
-        if positions_updated_at > 0
-        else None
-    )
+    account_age = reconciliation["account_age_sec"]
+    positions_age = reconciliation["positions_age_sec"]
     safety_age_raw = loop.get("safety_heartbeat_age_sec")
     safety_age = float(safety_age_raw) if safety_age_raw is not None else None
     safety_payload = (
@@ -75,22 +117,8 @@ def build_live_readiness(
     except (TypeError, ValueError):
         unknown_execution_count = None
 
-    account_ready = bool(
-        account
-        and account.get("ok")
-        and account_updated_at > 0
-        and bool(account_reconcile_id)
-        and account_age is not None
-        and account_age <= freshness_seconds
-        and account_reconcile_failed_at <= account_updated_at
-    )
-    positions_ready = bool(
-        positions_updated_at > 0
-        and bool(positions_reconcile_id)
-        and positions_age is not None
-        and positions_age <= freshness_seconds
-        and positions_reconcile_failed_at <= positions_updated_at
-    )
+    account_ready = bool(reconciliation["account_ready"])
+    positions_ready = bool(reconciliation["positions_ready"])
     safety_ready = bool(
         not loop_running
         or (
@@ -119,13 +147,15 @@ def build_live_readiness(
             and loop_accepting_new_risk
         )
     )
-    loop_blockers = sorted(
-        {str(item) for item in list(loop.get("blockers") or []) if str(item)}
+    loop_blockers = _canonical_loop_blockers(
+        loop=loop,
+        loop_running=loop_running,
+        loop_ready=loop_ready,
+        loop_accepting_new_risk=loop_accepting_new_risk,
     )
     loop_contract_ready = bool(
         loop_running
         and loop_phase == "running"
-        and loop_ready
         and loop_accepting_new_risk
         and not loop_blockers
     )
@@ -160,40 +190,39 @@ def build_live_readiness(
         reasons.append("bridge_not_ready")
     if loop_running and loop_phase != "running":
         reasons.append(f"loop_phase_{loop_phase}")
-    if loop_running and not loop_ready:
-        reasons.append("loop_not_ready")
-    if loop_running and not loop_accepting_new_risk:
-        reasons.append("loop_not_accepting_new_risk")
     reasons.extend(loop_blockers)
-    if not account_ready:
-        if not account_reconcile_id or account_updated_at <= 0 or not account:
-            reasons.append("account_reconcile_unknown")
-        elif account_age is None or account_age > freshness_seconds:
-            reasons.append("account_reconcile_stale")
-        elif not account.get("ok"):
-            reasons.append("account_reconcile_invalid")
-        elif account_reconcile_failed_at > account_updated_at:
-            reasons.append("account_reconcile_failed")
-    if positions_updated_at <= 0:
-        reasons.append("positions_reconcile_unknown")
-    elif not positions_reconcile_id:
-        reasons.append("positions_reconcile_identity_missing")
-    elif positions_age is None or positions_age > freshness_seconds:
-        reasons.append("positions_reconcile_stale")
-    elif positions_reconcile_failed_at > positions_updated_at:
-        reasons.append("positions_reconcile_failed")
+    reasons.extend(reconciliation["blockers"])
     if loop_running and not safety_ready:
         if safety_age is None:
             reasons.append("safety_heartbeat_unknown")
         elif safety_age > freshness_seconds:
             reasons.append("safety_heartbeat_stale")
         if unknown_execution_count is None:
-            reasons.append("unknown_execution_status_unavailable")
+            if not _has_safety_reason(
+                safety_blockers,
+                "unknown_execution",
+                "unresolved_execution_intent",
+                "unknown_execution_status_unavailable",
+            ):
+                reasons.append("unknown_execution_status_unavailable")
         elif unknown_execution_count > 0:
-            reasons.append("unresolved_execution_intent")
+            if not _has_safety_reason(
+                safety_blockers,
+                "unknown_execution",
+                "unresolved_execution_intent",
+                "unknown_execution_status_unavailable",
+            ):
+                reasons.append("unresolved_execution_intent")
         if safety_reconciliation_state != "fresh":
-            reasons.append("safety_position_reconcile_not_fresh")
-        if not safety_accepting_new_risk:
+            if not _has_safety_reason(
+                safety_blockers,
+                "positions_reconciliation_failed",
+                "position_reconcile_failed",
+                "positions_reconcile_failed",
+                "position_reconciliation_failed",
+            ):
+                reasons.append("safety_position_reconcile_not_fresh")
+        if not safety_accepting_new_risk and not safety_blockers:
             reasons.append("safety_not_accepting_new_risk")
         reasons.extend(safety_blockers)
     if broker_error:

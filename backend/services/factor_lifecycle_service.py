@@ -127,6 +127,7 @@ class FactorLifecycleMutation:
     v16: FactorV16Binding = field(default_factory=FactorV16Binding)
     weight: float | None = None
     new_generation: bool = False
+    direct_builtin_activation: bool = False
 
 
 def _json(value: Any) -> str:
@@ -389,8 +390,9 @@ class FactorLifecycleService:
         idempotency_key: str = "",
         v16: FactorV16Binding | None = None,
         now: float | None = None,
+        direct_builtin_activation: bool = False,
     ) -> dict[str, Any]:
-        """Activate only after durable, fresh projection and health proofs."""
+        """Activate after proofs, or use the bounded-Demo builtin seed path."""
         try:
             current = self.get_state(factor_name=name)
             if not current:
@@ -418,8 +420,19 @@ class FactorLifecycleService:
             if explicit_weight <= 0.0:
                 raise FactorLifecycleError("explicit_positive_weight_required")
             checked_at = float(now or time.time())
-            projection = self._require_loaded_projection(current, now=checked_at)
-            health = self._require_fresh_health(current, now=checked_at)
+            if direct_builtin_activation:
+                self._require_direct_builtin_activation(name=name, actor=actor)
+                projection = {
+                    "status": "direct_builtin_activation",
+                    "source": "code_owned_classic_factor",
+                }
+                health = {
+                    "status": "direct_builtin_activation",
+                    "source": "operator_requested_bounded_demo_seed",
+                }
+            else:
+                projection = self._require_loaded_projection(current, now=checked_at)
+                health = self._require_fresh_health(current, now=checked_at)
             mutation = FactorLifecycleMutation(
                 definition=definition,
                 target_stage=FactorLifecycleStage.ACTIVE,
@@ -434,10 +447,150 @@ class FactorLifecycleService:
                 idempotency_key=idempotency_key,
                 v16=v16 or FactorV16Binding(),
                 weight=explicit_weight,
+                direct_builtin_activation=direct_builtin_activation,
             )
             return self._execute(mutation, current=current)
         except Exception as exc:
             return self._failure(exc, name=name)
+
+    def activate_classic_builtin_factors(
+        self,
+        *,
+        weights: Mapping[str, float] | None = None,
+        actor: str = "operator:classic_builtin_factors",
+        reason: str = "enable classic directional builtin factors",
+        evidence_refs: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Seed the six classic direction factors in the bounded Demo.
+
+        The method intentionally delegates every state/config write to the
+        existing lifecycle coordinator.  It only removes the inappropriate
+        research-health prerequisite for code-owned classic indicators; it
+        does not create a second runtime selection or lifecycle authority.
+        """
+
+        try:
+            cfg = self._effective_config()
+            if not runtime_config.bounded_demo_mode_active(cfg):
+                raise FactorLifecycleError("classic_builtin_activation_demo_only")
+            requested = tuple(runtime_config.CLASSIC_DIRECTIONAL_FACTOR_IDS)
+            configured = dict(getattr(cfg, "factor_signal_config", {}) or {})
+            requested_weights = dict(
+                runtime_config.CLASSIC_DIRECTIONAL_FACTOR_WEIGHTS
+                if weights is None
+                else weights
+            )
+            invalid: list[str] = []
+            for name in requested:
+                entry = configured.get(name)
+                try:
+                    target_weight = float(requested_weights.get(name, 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    target_weight = 0.0
+                if (
+                    not isinstance(entry, dict)
+                    or str(entry.get("source") or "").lower() != SOURCE_BUILTIN
+                    or entry.get("direct_activation") is not True
+                    or target_weight <= 0.0
+                    or factor_registry.get(name) is None
+                ):
+                    invalid.append(name)
+            if invalid:
+                raise FactorLifecycleError(
+                    "classic_builtin_activation_contract_invalid:"
+                    + ",".join(invalid)
+                )
+
+            results: list[dict[str, Any]] = []
+            for name in requested:
+                target_weight = float(requested_weights[name])
+                current = self.get_state(factor_name=name)
+                stage = str(current.get("lifecycle_stage") or "") if current else ""
+                if not current:
+                    bootstrap = self.register_shadow(
+                        name=name,
+                        expression=name,
+                        actor=actor,
+                        reason=f"{reason}: initialize builtin lifecycle",
+                        evidence_refs={
+                            **dict(evidence_refs or {}),
+                            "activation_mode": "classic_builtin_demo_seed",
+                        },
+                        idempotency_key=f"classic_builtin_shadow:{name}",
+                    )
+                elif stage == FactorLifecycleStage.QUARANTINED.value:
+                    bootstrap = self.reenroll_quarantined_builtin(
+                        name=name,
+                        actor=actor,
+                        reason=f"{reason}: re-enroll quarantined builtin",
+                        evidence_refs={
+                            **dict(evidence_refs or {}),
+                            "activation_mode": "classic_builtin_demo_seed",
+                        },
+                        idempotency_key=f"classic_builtin_reenroll:{name}",
+                    )
+                else:
+                    bootstrap = {
+                        "ok": True,
+                        "status": "lifecycle_already_initialized",
+                        "lifecycle_stage": stage,
+                    }
+                if not bootstrap.get("ok"):
+                    results.append({"factor_name": name, "bootstrap": bootstrap})
+                    continue
+                current = self.get_state(factor_name=name)
+                if (
+                    str(current.get("lifecycle_stage") or "")
+                    == FactorLifecycleStage.SHADOW.value
+                ):
+                    prepared = self.prepare_promotion(
+                        name=name,
+                        expression=name,
+                        actor=actor,
+                        reason=f"{reason}: prepare builtin lifecycle",
+                        evidence_refs={
+                            **dict(evidence_refs or {}),
+                            "activation_mode": "classic_builtin_demo_seed",
+                            "bootstrap": bootstrap,
+                        },
+                        idempotency_key=f"classic_builtin_prepare:{name}",
+                    )
+                    bootstrap = {**bootstrap, "promotion": prepared}
+                    if not prepared.get("ok"):
+                        results.append({"factor_name": name, "bootstrap": bootstrap})
+                        continue
+                activated = self.activate(
+                    name=name,
+                    weight=target_weight,
+                    actor=actor,
+                    reason=reason,
+                    evidence_refs={
+                        **dict(evidence_refs or {}),
+                        "activation_mode": "classic_builtin_demo_seed",
+                        "bootstrap": bootstrap,
+                    },
+                    idempotency_key=f"classic_builtin_activate:{name}",
+                    direct_builtin_activation=True,
+                )
+                results.append(
+                    {
+                        "factor_name": name,
+                        "target_weight": target_weight,
+                        "bootstrap": bootstrap,
+                        "activation": activated,
+                    }
+                )
+            return {
+                "ok": all(
+                    bool(item.get("activation", {}).get("ok"))
+                    for item in results
+                ),
+                "status": "classic_builtin_activation_complete",
+                "factor_ids": list(requested),
+                "results": results,
+            }
+        except Exception as exc:
+            return self._failure(exc, factor_ids=list(runtime_config.CLASSIC_DIRECTIONAL_FACTOR_IDS))
 
     def quarantine(
         self,
@@ -1685,6 +1838,24 @@ class FactorLifecycleService:
             "rolling_ic": float(health.get("rolling_ic") or 0.0),
             "updated_at": updated_at,
         }
+
+    def _require_direct_builtin_activation(self, *, name: str, actor: str) -> None:
+        """Validate the narrow operator/Demo exception before activation."""
+
+        if not str(actor or "").startswith("operator:"):
+            raise FactorLifecycleError("classic_builtin_activation_operator_required")
+        cfg = self._effective_config()
+        if not runtime_config.bounded_demo_mode_active(cfg):
+            raise FactorLifecycleError("classic_builtin_activation_demo_only")
+        if name not in set(runtime_config.CLASSIC_DIRECTIONAL_FACTOR_IDS):
+            raise FactorLifecycleError("classic_builtin_factor_not_allowlisted")
+        entry = dict((getattr(cfg, "factor_signal_config", {}) or {}).get(name) or {})
+        if (
+            str(entry.get("source") or "").lower() != SOURCE_BUILTIN
+            or entry.get("direct_activation") is not True
+            or entry.get("health_gate_exempt") is not True
+        ):
+            raise FactorLifecycleError("classic_builtin_activation_contract_invalid")
 
     def _definition(self, name: str, expression: str, artifact_hash: str) -> FactorDefinition:
         clean_name = str(name or "").strip()
