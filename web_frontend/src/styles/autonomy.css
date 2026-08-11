@@ -36,9 +36,7 @@
 .brain-list-row strong,
 .brain-list-row span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .brain-list-row strong {
@@ -64,11 +62,9 @@
 .brain-memory-row .status-pill {
   flex: 0 0 auto;
   justify-self: end;
-  max-width: 72px;
+  max-width: 100%;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .v16-dashboard .dashboard-header {
@@ -79,11 +75,9 @@
   align-items: start;
 }
 
-.v16-blueprint-summary,
 .v16-agent-strip {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .v16-agent-strip {
@@ -95,111 +89,368 @@
   container-type: inline-size;
 }
 
-.v16-chain-map {
-  align-items: stretch;
-  display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  margin-top: 12px;
+.v16-overview-disclosure {
+  grid-column: 1 / -1;
 }
 
-.v16-chain-step {
-  align-content: start;
-  background: #f8fafc;
-  border: 1px solid rgba(203, 213, 225, 0.86);
+.v16-overview-disclosure .v16-overview-detail {
+  margin-top: 0;
+}
+
+.v16-inline-disclosure {
+  margin-top: 8px;
+}
+
+/* V16 子页面统一使用日志行，阶段信息不再拆成互相重复的卡片。 */
+.v16-runtime-log,
+.v16-pipeline,
+.v16-detail-grid {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.v16-runtime-row {
+  align-items: start;
+  background: #fbfdff;
+  border: 1px solid rgba(203, 213, 225, 0.82);
   border-radius: 8px;
   display: grid;
   gap: 8px;
-  grid-template-rows: auto 1fr auto;
-  min-height: 132px;
+  grid-template-columns: minmax(132px, 0.72fr) minmax(180px, 1.1fr) minmax(180px, 1fr) minmax(180px, 1fr) max-content;
   min-width: 0;
-  padding: 10px;
-  position: relative;
+  padding: 9px 10px;
 }
 
-.v16-chain-step::after {
-  background: rgba(100, 116, 139, 0.34);
-  content: "";
-  height: 1px;
-  position: absolute;
-  right: -8px;
-  top: 28px;
-  width: 8px;
-}
-
-.v16-chain-step:last-child::after {
-  display: none;
-}
-
-.v16-chain-step > div {
+.v16-runtime-stage,
+.v16-runtime-cell,
+.v16-runtime-status,
+.v16-runtime-evidence {
   min-width: 0;
 }
 
-.v16-chain-step strong,
-.v16-chain-step span {
-  display: block;
-  min-width: 0;
+.v16-runtime-stage {
+  align-items: center;
+  color: #1e3a8a;
+  display: flex;
+  gap: 6px;
+  min-height: 28px;
+}
+
+.v16-runtime-stage strong,
+.v16-runtime-cell strong {
+  color: #0f172a;
+  font-size: 12px;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
-.v16-chain-step strong {
-  color: #0f172a;
-  font-size: 13px;
-  line-height: 1.25;
+.v16-runtime-index {
+  align-items: center;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  color: #1d4ed8;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 900;
+  height: 20px;
+  justify-content: center;
+  width: 20px;
 }
 
-.v16-chain-step span {
+.v16-runtime-cell {
+  display: grid;
+  gap: 2px;
+}
+
+.v16-runtime-cell > span,
+.v16-runtime-evidence {
   color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.v16-runtime-status {
+  justify-self: end;
+}
+
+.v16-runtime-evidence {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  grid-column: 2 / -1;
+  overflow-wrap: anywhere;
+}
+
+.v16-pipeline-summary,
+.v16-evidence-summary {
+  display: grid;
+  gap: 7px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  min-width: 0;
+}
+
+.v16-pipeline-fact-note {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.v16-pipeline-fact-note strong,
+.v16-pipeline-fact-note span,
+.v16-pipeline-fact-note small {
+  overflow-wrap: anywhere;
+}
+
+.v16-pipeline-fact-note strong { color: #172033; }
+.v16-pipeline-fact-note small { color: var(--ink-soft); }
+.v16-pipeline-fact-note-stale {
+  border-color: color-mix(in srgb, var(--amber) 45%, #cbd5e1);
+  background: color-mix(in srgb, var(--amber) 7%, #fff);
+}
+.v16-pipeline-fact-note-pending {
+  border-color: color-mix(in srgb, var(--primary) 35%, #cbd5e1);
+  background: color-mix(in srgb, var(--primary) 6%, #fff);
+}
+.v16-pipeline-fact-note-bad {
+  border-color: color-mix(in srgb, var(--red) 38%, #cbd5e1);
+  background: color-mix(in srgb, var(--red) 5%, #fff);
+}
+
+.v16-pipeline-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.v16-pipeline-row {
+  align-items: start;
+  background: #fbfdff;
+  border: 1px solid rgba(203, 213, 225, 0.82);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(150px, 1fr) minmax(270px, 1.55fr) minmax(180px, 1.2fr) minmax(180px, 1fr) minmax(150px, 0.8fr);
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.v16-pipeline-object,
+.v16-pipeline-blocker,
+.v16-pipeline-next,
+.v16-pipeline-meta,
+.v16-pipeline-stages,
+.v16-pipeline-stage-wrap,
+.v16-pipeline-stage {
+  min-width: 0;
+}
+
+.v16-pipeline-object,
+.v16-pipeline-blocker,
+.v16-pipeline-next {
+  display: grid;
+  gap: 2px;
+}
+
+.v16-pipeline-object > span,
+.v16-pipeline-blocker > span,
+.v16-pipeline-next > span,
+.v16-pipeline-stage > span {
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.v16-pipeline-object strong,
+.v16-pipeline-blocker strong,
+.v16-pipeline-next strong,
+.v16-pipeline-object small {
+  color: #0f172a;
   font-size: 12px;
   line-height: 1.35;
-  margin-top: 3px;
+  overflow-wrap: anywhere;
 }
 
-.v16-chain-icon {
-  align-items: center;
-  border-radius: 7px;
-  display: inline-flex;
-  height: 30px;
-  justify-content: center;
-  width: 30px;
+.v16-pipeline-object small {
+  color: var(--ink-soft);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
-.v16-chain-ok {
-  background: #ecfdf5;
-  border-color: rgba(16, 185, 129, 0.34);
+.v16-pipeline-blocker strong {
+  color: #9a3412;
 }
 
-.v16-chain-ok .v16-chain-icon {
-  background: #d1fae5;
+.v16-pipeline-blocker-clear strong {
   color: #047857;
 }
 
-.v16-chain-warn {
-  background: #fffbeb;
-  border-color: rgba(245, 158, 11, 0.4);
+.v16-pipeline-stages {
+  align-items: center;
+  display: flex;
+  gap: 4px;
 }
 
-.v16-chain-warn .v16-chain-icon {
-  background: #fef3c7;
-  color: #b45309;
+.v16-pipeline-stage-wrap {
+  align-items: center;
+  display: flex;
+  flex: 1 1 0;
+  gap: 4px;
 }
 
-.v16-chain-bad {
-  background: #fef2f2;
-  border-color: rgba(248, 113, 113, 0.42);
+.v16-pipeline-stage-wrap > svg {
+  color: #94a3b8;
+  flex: 0 0 auto;
 }
 
-.v16-chain-bad .v16-chain-icon {
-  background: #fee2e2;
-  color: #b91c1c;
+.v16-pipeline-stage {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
-.v16-chain-mute .v16-chain-icon {
-  background: #e2e8f0;
-  color: #475569;
+.v16-pipeline-stage .status-pill {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
-.v16-blueprint-checks,
+.v16-pipeline-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.v16-pipeline-meta > small {
+  align-items: center;
+  color: var(--ink-soft);
+  display: flex;
+  gap: 4px;
+  font-size: 10px;
+}
+
+.v16-pipeline-empty {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px dashed rgba(148, 163, 184, 0.8);
+  border-radius: 8px;
+  color: var(--ink-soft);
+  display: flex;
+  gap: 7px;
+  min-height: 46px;
+  padding: 10px;
+}
+
+.v16-evidence-summary {
+  margin-bottom: 8px;
+}
+
+.v16-detail-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.v16-detail-section {
+  background: #fbfdff;
+  border: 1px solid rgba(203, 213, 225, 0.78);
+  border-radius: 7px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 8px;
+}
+
+.v16-detail-section > *,
+.v16-detail-section .brain-list,
+.v16-detail-section .brain-hypothesis-list,
+.v16-detail-section .brain-action-plan-list {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.v16-detail-section .section-head {
+  margin-bottom: 6px;
+}
+
+.v16-detail-section .brain-action-plan-list,
+.v16-detail-section .brain-hypothesis-list {
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* These lists live inside one of four narrow detail columns. The old three
+   fixed minimum tracks (220 + 260 + 180px) forced every card wider than its
+   parent and made badges escape the panel. Keep the information dense, but
+   let the log item follow the column width. */
+.v16-detail-section .brain-action-plan-compact {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 100%;
+}
+
+.v16-detail-section .brain-hypothesis-head > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.v16-detail-section .brain-hypothesis-head .status-pill {
+  flex: 0 1 auto;
+  max-width: 44%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.v16-detail-section .brain-compact-facts,
+.v16-detail-section .brain-plan-services,
+.v16-detail-section .brain-ref-row {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.v16-control-lead {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid rgba(203, 213, 225, 0.8);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  padding: 9px 10px;
+}
+
+.v16-control-lead > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.v16-control-lead span,
+.v16-control-lead small {
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.v16-control-lead strong {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.v16-control-guardrail-facts {
+  margin-top: 6px;
+}
+
 .v16-agent-list,
 .v16-coverage-list {
   display: grid;
@@ -207,11 +458,6 @@
   margin-top: 12px;
 }
 
-.v16-blueprint-checks {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.v16-check-row,
 .v16-agent-row,
 .v16-coverage-row {
   align-items: center;
@@ -224,25 +470,20 @@
   padding: 9px 10px;
 }
 
-.v16-check-row,
 .v16-agent-row {
   grid-template-columns: auto minmax(0, 1fr) auto;
 }
 
-.v16-check-row svg,
 .v16-agent-row svg {
   color: #2563eb;
   flex: 0 0 auto;
 }
 
-.v16-check-row > div,
 .v16-agent-row > div,
 .v16-coverage-row > div {
   min-width: 0;
 }
 
-.v16-check-row strong,
-.v16-check-row span,
 .v16-agent-row strong,
 .v16-agent-row span,
 .v16-coverage-row strong,
@@ -252,7 +493,6 @@
   overflow-wrap: anywhere;
 }
 
-.v16-check-row strong,
 .v16-agent-row strong,
 .v16-coverage-row strong {
   color: #0f172a;
@@ -260,7 +500,6 @@
   line-height: 1.25;
 }
 
-.v16-check-row span,
 .v16-agent-row span,
 .v16-coverage-row span {
   color: var(--ink-soft);
@@ -543,19 +782,13 @@
 
   .v16-boundary,
   .v16-boundary-tight,
-  .v16-blueprint-summary,
   .v16-agent-strip,
-  .v16-chain-map,
-  .v16-blueprint-checks,
   .v16-agent-list,
   .v16-coverage-row,
   .brain-action-plan-compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .v16-chain-step:nth-child(2n)::after {
-    display: none;
-  }
 }
 
 @media (max-width: 640px) {
@@ -575,10 +808,7 @@
 
   .v16-boundary,
   .v16-boundary-tight,
-  .v16-blueprint-summary,
   .v16-agent-strip,
-  .v16-chain-map,
-  .v16-blueprint-checks,
   .v16-agent-list,
   .v16-coverage-row,
   .brain-json-grid,
@@ -586,11 +816,90 @@
     grid-template-columns: 1fr;
   }
 
-  .v16-chain-step {
-    min-height: 104px;
+}
+
+@media (max-width: 1080px) {
+  .v16-runtime-row {
+    grid-template-columns: minmax(135px, 0.75fr) minmax(0, 1fr) max-content;
   }
 
-  .v16-chain-step::after {
-    display: none;
+  .v16-runtime-reason,
+  .v16-runtime-next {
+    grid-column: 2;
+  }
+
+  .v16-runtime-status {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .v16-runtime-evidence {
+    grid-column: 1 / -1;
+  }
+
+  .v16-pipeline-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .v16-pipeline-object,
+  .v16-pipeline-stages,
+  .v16-pipeline-meta {
+    grid-column: 1 / -1;
+  }
+
+  .v16-pipeline-blocker {
+    grid-column: span 2;
+  }
+
+  .v16-pipeline-next {
+    grid-column: span 1;
+  }
+
+  .v16-detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .v16-runtime-row,
+  .v16-pipeline-row,
+  .v16-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .v16-runtime-reason,
+  .v16-runtime-next,
+  .v16-runtime-status,
+  .v16-runtime-evidence,
+  .v16-pipeline-object,
+  .v16-pipeline-stages,
+  .v16-pipeline-blocker,
+  .v16-pipeline-next,
+  .v16-pipeline-meta {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .v16-runtime-status {
+    justify-self: start;
+  }
+
+  .v16-pipeline-stages {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .v16-pipeline-stage-wrap {
+    min-width: min(145px, 100%);
+  }
+
+  .v16-pipeline-summary,
+  .v16-evidence-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .v16-control-lead {
+    align-items: start;
+    grid-template-columns: 1fr;
   }
 }

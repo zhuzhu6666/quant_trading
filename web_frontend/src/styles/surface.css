@@ -530,7 +530,7 @@ tbody tr:hover {
 }
 
 .dashboard-grid {
-  align-items: stretch;
+  align-items: start;
 }
 
 .dashboard-grid > .panel,
@@ -540,7 +540,7 @@ tbody tr:hover {
 }
 
 .dashboard-grid > .panel {
-  height: 100%;
+  height: auto;
 }
 
 .panel {
@@ -1420,9 +1420,7 @@ td > .status-pill {
   padding: 14px;
 }
 
-.risk-control-overview {
-  overflow: hidden;
-}
+.risk-control-overview { overflow: visible; }
 
 .risk-control-overview > div,
 .risk-control-overview .panel > div {
@@ -1560,15 +1558,13 @@ td > .status-pill {
   min-width: 0;
   color: #5f6d80;
   font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .risk-inline-badges {
   margin-top: 8px;
-  max-height: 62px;
-  overflow: hidden;
+  max-height: none;
+  overflow: visible;
 }
 
 .risk-inline-badges .data-badge {
@@ -1683,9 +1679,7 @@ td > .status-pill {
 .policy-item-action span,
 .policy-item-reason {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .policy-item-reason {
@@ -1755,9 +1749,8 @@ td > .status-pill {
 }
 
 .trace-verdict > span:not(.status-pill) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .trace-responsibility {
@@ -1770,9 +1763,7 @@ td > .status-pill {
   max-width: 100%;
   color: var(--text);
   font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .trace-meta {

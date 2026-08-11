@@ -1,5 +1,4 @@
 import time
-from datetime import datetime, timezone
 
 import pytest
 
@@ -29,20 +28,20 @@ def test_timer_scheduler_cron_fallback_preserves_frequency(cron_expr, expected):
     assert _interval(cron_expr) == expected
 
 
-def test_supervisor_advisory_days_use_explicit_business_timezone(monkeypatch):
-    class FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            assert tz is not None
-            return datetime(2026, 7, 1, 16, 30, tzinfo=timezone.utc).astimezone(tz)
+def test_supervisor_learning_cycle_keeps_advisories_observation_only(monkeypatch):
+    monkeypatch.setattr(
+        supervisor_learning_scheduler,
+        "evaluate_counterfactuals",
+        lambda **_: {"count": 3},
+    )
 
-    monkeypatch.setenv("QUANT_ADVISORY_TZ", "Asia/Shanghai")
-    monkeypatch.setattr(supervisor_learning_scheduler, "datetime", FixedDateTime)
+    result = supervisor_learning_scheduler.run_supervisor_learning_cycle(
+        materialize_advisories=True,
+    )
 
-    assert supervisor_learning_scheduler._local_days_for_advisory() == [
-        "2026-07-02",
-        "2026-07-01",
-    ]
+    assert result["counterfactual_count"] == 3
+    assert result["advisory_days"] == []
+    assert result["advisory_count"] == 0
 
 
 def test_learning_backfill_stop_cancels_delayed_run(monkeypatch):

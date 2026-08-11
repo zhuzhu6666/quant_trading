@@ -10,6 +10,7 @@ from typing import Any
 from backend.core.db import STATE_DB, is_state_db_path, state_table_exists
 from backend.services._brain_helpers import connect, dumps, execute, loads
 from backend.services.autonomous_learning import ensure_autonomous_learning_tables
+from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.governance_mutation_coordinator import (
     GovernanceMutationCoordinator,
@@ -267,6 +268,13 @@ class EntryQualityGovernanceService:
                 WHERE suggestion_id=?
                 """,
                 (now, mutation_id, suggestion_id),
+            )
+            sync_candidate_suggestion_lifecycle(
+                conn,
+                suggestion_id=suggestion_id,
+                suggestion_status="applied",
+                applied_mutation_id=mutation_id,
+                now=now,
             )
             execute(
                 conn,

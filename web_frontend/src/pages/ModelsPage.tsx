@@ -430,7 +430,9 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
       </div> : null}
 
       <div className="dashboard-grid">
-        <MetricCard title="历史回测" className="wide-panel historical-backtest-panel">
+        <details className="detail-disclosure wide-panel model-detail-disclosure">
+          <summary>历史回测与训练样本（按需运行，不改变线上权限）</summary>
+          <MetricCard title="历史回测" className="historical-backtest-panel model-detail-card">
           <div className="historical-backtest-layout">
             <form
               className="historical-backtest-form"
@@ -484,9 +486,10 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
               {backtestMutation.isError || backtestJobQuery.isError ? <p className="historical-backtest-error">回测任务提交或读取失败，请查看后端任务错误。</p> : null}
             </div>
           </div>
-        </MetricCard>
+          </MetricCard>
+        </details>
 
-        <MetricCard title="模型能力与参与状态" className="wide-panel model-capability-panel">
+        <MetricCard title="模型结论：观察、候选还是参与" className="wide-panel model-capability-panel">
           <div className="model-participation-summary">
             <div>
               <span>已登记模型</span>
@@ -546,7 +549,9 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
           </div>
         </MetricCard>
 
-        <MetricCard title="模型验证与数据" className="wide-panel model-control-panel">
+        <details className="detail-disclosure wide-panel model-detail-disclosure">
+          <summary>展开模型准入、数据质量和权限边界</summary>
+          <MetricCard title="模型验证与数据" className="model-control-panel model-detail-card">
           <div className="model-mini-grid">
             <ModelMiniMetric label="模型准入" value={`${formatDecimal(passedModelCount, 0)}/${formatDecimal(modelRows.length, 0)}`} detail={translateDisplayValue(gateDecision)} tone={gateEligible ? "ok" : "warn"} />
             <ModelMiniMetric label="治理模式" value={advisoryOnly ? "只建议/只观察" : "受控候选"} detail="不直接接管交易" tone={advisoryOnly ? "warn" : "ok"} />
@@ -600,9 +605,10 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
               </div>
             </section>
           </div>
-        </MetricCard>
+          </MetricCard>
+        </details>
 
-        <MetricCard title="模型工作台" className="wide-panel model-workbench-panel">
+        <MetricCard title="模型事件流：建议 → 观察 → 审计" className="wide-panel model-workbench-panel">
           <div className="model-workbench-grid">
             <div className="model-signal-zone">
               <section className="model-workbench-section">

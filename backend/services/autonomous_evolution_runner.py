@@ -341,6 +341,11 @@ class AutonomousEvolutionNurseryRunner:
         return {
             "schema_version": "autonomous_evolution_runner_light_readiness.v1",
             "governance": {"autonomy_mode": str(getattr(cfg, "autonomy_mode", "") or "manual")},
+            "runtime_targets": {
+                "position_supervisor_template_id": str(
+                    getattr(cfg, "position_supervisor_template_id", "") or ""
+                ),
+            },
             "autonomy_health": {
                 "posture": str(health.get("posture") or "unknown"),
                 "snapshot_id": str(health.get("snapshot_id") or ""),

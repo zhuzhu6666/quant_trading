@@ -199,33 +199,21 @@ export function LearningPage({ embedded = false }: { embedded?: boolean }) {
       </div> : null}
 
       <div className="dashboard-grid">
-        <MetricCard title="学习闭环质量" className="wide-panel learning-control-panel">
-          <div className="learning-mini-grid">
-            <LearningMiniMetric label="闭环率" value={formatPct(effectClosure)} detail={`终态 ${pickNumber(effectQuality, ["terminal_count"], 0)}`} tone={effectClosure >= 0.7 ? "ok" : "warn"} />
-            <LearningMiniMetric label="开放窗口" value={formatDecimal(effectActive, 0)} detail={`观察 ${pickNumber(effectStatuses, ["observing"], 0)} · 混合 ${pickNumber(effectStatuses, ["mixed"], 0)}`} tone={effectActive ? "warn" : "ok"} />
-            <LearningMiniMetric label="并发积压" value={formatDecimal(confoundedEffects, 0)} detail="目标为 0" tone={confoundedEffects ? "warn" : "ok"} />
-            <LearningMiniMetric label="证据不足" value={formatDecimal(pickNumber(effectStatuses, ["inconclusive"], 0), 0)} detail={`受控重试候选 ${retryCandidates}`} tone={retryCandidates ? "warn" : "mute"} />
-            <LearningMiniMetric label="已强化" value={formatDecimal(pickNumber(effectStatuses, ["reinforced"], 0), 0)} detail={`无效 ${pickNumber(effectStatuses, ["ineffective"], 0)}`} tone={pickNumber(effectStatuses, ["reinforced"], 0) ? "ok" : "mute"} />
-            <LearningMiniMetric label="经验先验" value={formatDecimal(pickNumber(effectPrior, ["eligible_count"], 0), 0)} detail={`有界因子 ${pickNumber(effectPrior, ["bounded_factor_count"], 0)}`} tone={pickNumber(effectPrior, ["eligible_count"], 0) ? "ok" : "warn"} />
-            <LearningMiniMetric label="权重自适应记录" value={aweCoverageEnforced ? formatPct(pickNumber(aweMutationCoverage, ["coverage_ratio"], 0)) : "待新周期"} detail={`历史缺口 ${pickNumber(aweMutationCoverage, ["legacy_missing_count"], 0)}`} tone={aweCoverageEnforced ? toneFromStatus(pickString(aweMutationCoverage, ["status"], "")) : "mute"} />
-            <LearningMiniMetric label="生产因子" value={formatDecimal(pickNumber(runtimeFactorBudget, ["selected_count"], 0), 0)} detail={`冷尾部 ${pickNumber(runtimeFactorBudget, ["budget_excluded_count"], 0)}`} tone={pickBoolean(runtimeFactorBudget, ["ok"], false) ? "ok" : "warn"} />
-            <LearningMiniMetric label="效果评估" value={translateDisplayValue(pickString(effectSlo, ["status"], pickString(effectQuality, ["status"], "")))} detail="只读质量检查" tone={toneFromStatus(pickString(effectSlo, ["status"], ""))} />
-          </div>
-          <div className="learning-note">只有出现新的复盘证据，并且期间没有新的配置应用时，系统才会重新评估；看板不会自动改权重、参数或智能体权限。</div>
-        </MetricCard>
-
-        <MetricCard title="学习控制台" className="wide-panel learning-control-panel">
+        <MetricCard title="学习结果：证据 → 候选 → 应用" className="wide-panel learning-control-panel learning-result-panel">
           <div className="learning-mini-grid">
             <LearningMiniMetric label="治理待办" value={formatDecimal(proposed + pendingCandidates, 0)} detail={`建议 ${proposed} · 候选 ${pendingCandidates}`} tone={proposed + pendingCandidates > 0 ? "warn" : "ok"} />
-            <LearningMiniMetric label="建议流转" value={`${formatDecimal(applied, 0)} 应用`} detail={`批准 ${approved} · 回滚 ${rolledBack}`} tone={rolledBack > 0 ? "warn" : applied > 0 ? "ok" : "mute"} />
+            <LearningMiniMetric label="建议已应用" value={formatDecimal(applied, 0)} detail={`批准 ${approved} · 回滚 ${rolledBack}`} tone={rolledBack > 0 ? "warn" : applied > 0 ? "ok" : "mute"} />
             <LearningMiniMetric label="样本池" value={formatDecimal(sampleCount, 0)} detail={`复盘 ${reviews.length} · 应用 ${applicationsCount}`} tone={sampleCount > 0 ? "ok" : "mute"} />
             <LearningMiniMetric label="因子健康" value={`${healthyFactors}/${totalFactors || ""}`} detail={`观察 ${watchFactors}`} tone={watchFactors > 0 ? "warn" : healthyFactors > 0 ? "ok" : "mute"} />
+            <LearningMiniMetric label="闭环率" value={formatPct(effectClosure)} detail={`终态 ${pickNumber(effectQuality, ["terminal_count"], 0)}`} tone={effectClosure >= 0.7 ? "ok" : "warn"} />
+            <LearningMiniMetric label="开放窗口" value={formatDecimal(effectActive, 0)} detail={`观察 ${pickNumber(effectStatuses, ["observing"], 0)} · 混合 ${pickNumber(effectStatuses, ["mixed"], 0)}`} tone={effectActive ? "warn" : "ok"} />
+            <LearningMiniMetric label="证据不足" value={formatDecimal(pickNumber(effectStatuses, ["inconclusive"], 0), 0)} detail={`受控重试候选 ${retryCandidates}`} tone={retryCandidates ? "warn" : "mute"} />
+            <LearningMiniMetric label="效果评估" value={translateDisplayValue(pickString(effectSlo, ["status"], pickString(effectQuality, ["status"], "")))} detail="只读质量检查" tone={toneFromStatus(pickString(effectSlo, ["status"], ""))} />
           </div>
-
           <div className="learning-control-grid">
             <section className="learning-control-section">
               <div className="learning-section-head">
-                <h3>治理摘要</h3>
+                <h3>当前治理结论</h3>
                 <StatusPill status={automaticExecution ? "自动应用" : "人工审核"} tone={automaticExecution ? "warn" : "ok"} />
               </div>
               <div className="learning-note">{fullText(pickString(summary, ["parameter_template_ops_summary"], pickString(overview, ["headline"], "")), "")}</div>
@@ -233,6 +221,16 @@ export function LearningPage({ embedded = false }: { embedded?: boolean }) {
                 <span className="data-badge">推荐 {countFrom(recommendationCounts, "total")}</span>
                 <span className="data-badge">在线 {countFrom(recommendationCounts, "online_light")}</span>
                 <span className="data-badge">离线 {countFrom(recommendationCounts, "offline_deep")}</span>
+              </div>
+            </section>
+
+            <section className="learning-control-section">
+              <div className="learning-section-head">
+                <h3>最近复盘</h3>
+                <StatusPill status={latestReview.review_id ? translateDisplayValue(pickString(latestReview, ["outcome_label"], "")) : "暂无"} tone={latestReview.review_id ? numberTone(pickNumber(latestReview, ["pnl"], 0)) : "mute"} />
+              </div>
+              <div className="learning-note">
+                {latestReview.review_id ? `${formatDecimal(pickNumber(latestReview, ["pnl"], 0), 2)} · ${fullText(pickString(latestReview, ["summary_text", "review_summary"], ""))}` : fullText(pickString(todo, ["title", "summary"], "暂无复盘任务"))}
               </div>
             </section>
 
@@ -246,20 +244,22 @@ export function LearningPage({ embedded = false }: { embedded?: boolean }) {
                 <Field label="因子更新" value={formatTime(pick(latestFactorUpdate, ["updated_at", "ts"]))} tone={pickBoolean(latestFactorUpdate, ["ok"], true) ? "ok" : "bad"} />
               </div>
             </section>
-
-            <section className="learning-control-section">
-              <div className="learning-section-head">
-                <h3>最近复盘</h3>
-                <StatusPill status={latestReview.review_id ? translateDisplayValue(pickString(latestReview, ["outcome_label"], "")) : "暂无"} tone={latestReview.review_id ? numberTone(pickNumber(latestReview, ["pnl"], 0)) : "mute"} />
-              </div>
-              <div className="learning-note">
-                {latestReview.review_id ? `${formatDecimal(pickNumber(latestReview, ["pnl"], 0), 2)} · ${fullText(pickString(latestReview, ["summary_text", "review_summary"], ""))}` : fullText(pickString(todo, ["title", "summary"], "暂无复盘任务"))}
-              </div>
-            </section>
           </div>
+
+          <details className="detail-disclosure learning-quality-disclosure">
+            <summary>展开学习质量明细（并发、强化、经验、权重和生产因子）</summary>
+            <div className="learning-mini-grid">
+              <LearningMiniMetric label="并发积压" value={formatDecimal(confoundedEffects, 0)} detail="目标为 0" tone={confoundedEffects ? "warn" : "ok"} />
+              <LearningMiniMetric label="已强化" value={formatDecimal(pickNumber(effectStatuses, ["reinforced"], 0), 0)} detail={`无效 ${pickNumber(effectStatuses, ["ineffective"], 0)}`} tone={pickNumber(effectStatuses, ["reinforced"], 0) ? "ok" : "mute"} />
+              <LearningMiniMetric label="经验先验" value={formatDecimal(pickNumber(effectPrior, ["eligible_count"], 0), 0)} detail={`有界因子 ${pickNumber(effectPrior, ["bounded_factor_count"], 0)}`} tone={pickNumber(effectPrior, ["eligible_count"], 0) ? "ok" : "warn"} />
+              <LearningMiniMetric label="权重自适应记录" value={aweCoverageEnforced ? formatPct(pickNumber(aweMutationCoverage, ["coverage_ratio"], 0)) : "待新周期"} detail={`历史缺口 ${pickNumber(aweMutationCoverage, ["legacy_missing_count"], 0)}`} tone={aweCoverageEnforced ? toneFromStatus(pickString(aweMutationCoverage, ["status"], "")) : "mute"} />
+              <LearningMiniMetric label="生产因子" value={formatDecimal(pickNumber(runtimeFactorBudget, ["selected_count"], 0), 0)} detail={`冷尾部 ${pickNumber(runtimeFactorBudget, ["budget_excluded_count"], 0)}`} tone={pickBoolean(runtimeFactorBudget, ["ok"], false) ? "ok" : "warn"} />
+            </div>
+          </details>
+          <div className="learning-note">只有出现新的复盘证据，并且期间没有新的配置应用时，系统才会重新评估；看板不会自动改权重、参数或智能体权限。</div>
         </MetricCard>
 
-        <MetricCard title="策略建议队列" className="wide-panel">
+        <MetricCard title="策略建议队列" className="learning-side-panel">
           {!suggestions.length ? (
             <div className="empty-state-small">暂无建议</div>
           ) : (
@@ -288,7 +288,7 @@ export function LearningPage({ embedded = false }: { embedded?: boolean }) {
           )}
         </MetricCard>
 
-        <MetricCard title="复盘样本流" className="wide-panel">
+        <MetricCard title="复盘样本流" className="learning-side-panel">
           <div className="learning-stream-grid">
             <section>
               <div className="mini-section-title"><FileCheck2 size={14} /> 最近交易复盘</div>

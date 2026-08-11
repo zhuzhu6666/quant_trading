@@ -24,7 +24,9 @@ def test_circuit_breaker_starts_false():
 def test_circuit_breaker_triggers_at_5_percent_drawdown():
     live_service._live_state_update(session_pnl=-50.0, session_start_balance=1000.0)
 
-    result = live_service._evaluate_daily_drawdown()
+    result = live_service._evaluate_daily_drawdown(
+        risk_limits=RiskLimitSnapshot(max_daily_loss_pct=5.0)
+    )
 
     assert result["tripped"] is True
     assert result["dd_pct"] == 5.0

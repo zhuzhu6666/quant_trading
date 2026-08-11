@@ -916,8 +916,17 @@ class BrainMediumImpactGovernanceService:
                     "status": "missing_action_plan_evals", "items": [], "boundary": self.boundary()}
         now = time.time()
         autonomy_guard = self._autonomy_guard(readiness=readiness or {}, allow_tighten_low_health=allow_tighten_low_health)
-        items = [self._materialize_eval(evaluation=e, now=now, autonomy_guard=autonomy_guard, persist_candidate=persist)
-                 for e in evals[:limit]]
+        runtime_targets = dict((readiness or {}).get("runtime_targets") or {})
+        items = [
+            self._materialize_eval(
+                evaluation=e,
+                now=now,
+                autonomy_guard=autonomy_guard,
+                persist_candidate=persist,
+                runtime_targets=runtime_targets,
+            )
+            for e in evals[:limit]
+        ]
         if persist:
             self._persist(items)
         return {"ok": any(i.get("status") == "candidate_materialized" for i in items),
@@ -954,8 +963,15 @@ class BrainMediumImpactGovernanceService:
                 "statuses": sorted({str(i.get("status") or "") for i in items}), "medium_impact_governance": True,
                 "governance_candidates": BrainGovernanceCandidateService(self.db_path).status(limit=limit)}
 
-    def _materialize_eval(self, *, evaluation: dict[str, Any], now: float,
-                          autonomy_guard: dict[str, Any], persist_candidate: bool) -> dict[str, Any]:
+    def _materialize_eval(
+        self,
+        *,
+        evaluation: dict[str, Any],
+        now: float,
+        autonomy_guard: dict[str, Any],
+        persist_candidate: bool,
+        runtime_targets: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         plan = self._load_plan(str(evaluation.get("plan_id") or ""))
         mapped = self._map_action(evaluation=evaluation, plan=plan)
         comparison = dict(evaluation.get("comparison") or {})
@@ -994,6 +1010,48 @@ class BrainMediumImpactGovernanceService:
                 },
                 "autonomy_guard": autonomy_guard, "boundary": self.boundary(),
                 "created_at": now, "updated_at": time.time(),
+            }
+        no_op_reason = self._supervisor_no_op_reason(
+            mapped,
+            runtime_targets=dict(runtime_targets or {}),
+        )
+        if no_op_reason:
+            return {
+                "governance_id": f"brain_p4_gov_{uuid.uuid4().hex[:16]}",
+                "schema_version": "brain_medium_impact_governance.v1",
+                "plan_id": str(evaluation.get("plan_id") or ""),
+                "eval_id": str(evaluation.get("eval_id") or ""),
+                "governance_action": mapped["policy_action"],
+                "scope_type": mapped["scope_type"],
+                "scope_key": mapped["scope_key"],
+                "status": "no_op",
+                "decision_intent": "no_op",
+                "no_op_reason": no_op_reason,
+                "candidate_id": "",
+                "suggestion_id": "",
+                "evidence_score": safe_float(evaluation.get("coverage_score")),
+                "critic_verdict": str(plan.get("critic_verdict") or ""),
+                "comparison_verdict": str(evaluation.get("comparison_verdict") or ""),
+                "risk_verdict": {"allowed": True, "status": "no_op", "reason": no_op_reason},
+                "decision_policy": {
+                    "schema_version": "decision_policy_preview.v1",
+                    "required": False,
+                    "action": "no_change",
+                    "applied": False,
+                    "reason": no_op_reason,
+                },
+                "rollback_plan": self._rollback_plan(mapped),
+                "posterior_refs": {
+                    **dict(evaluation.get("evidence_refs") or {}),
+                    "correction_contract": correction_contract,
+                    "parent_policy_decision_id": parent_policy_decision_id,
+                    "decision_intent": "no_op",
+                    "no_op_reason": no_op_reason,
+                },
+                "autonomy_guard": autonomy_guard,
+                "boundary": self.boundary(),
+                "created_at": now,
+                "updated_at": time.time(),
             }
         evidence_score = safe_float(evaluation.get("coverage_score"))
         critic_verdict = str(plan.get("critic_verdict") or "")
@@ -1082,6 +1140,25 @@ class BrainMediumImpactGovernanceService:
                 "created_at": now, "updated_at": time.time()}
 
     @staticmethod
+    def _supervisor_no_op_reason(
+        mapped: dict[str, Any],
+        *,
+        runtime_targets: dict[str, Any],
+    ) -> str:
+        if str(mapped.get("scope_type") or "") != "supervisor_template":
+            return ""
+        recommended = str(mapped.get("recommended_action") or "").strip().lower()
+        if recommended in {"keep", "no_change", "hold", "observe", "watch"}:
+            return f"posterior_recommended_{recommended}"
+        target_template_id = str(mapped.get("target_template_id") or "")
+        current_template_id = str(
+            runtime_targets.get("position_supervisor_template_id") or ""
+        )
+        if target_template_id and current_template_id and target_template_id == current_template_id:
+            return "target_template_already_active"
+        return ""
+
+    @staticmethod
     def _candidate_id(*, evaluation: dict[str, Any], mapped: dict[str, str]) -> str:
         comparison = dict(evaluation.get("comparison") or {})
         arbitration = dict(comparison.get("posterior_arbitration") or {})
@@ -1120,7 +1197,8 @@ class BrainMediumImpactGovernanceService:
             return {"scope_type": "supervisor_template", "scope_key": "position_supervisor",
                     "policy_action": "switch_position_supervisor_template",
                     "risk_action": "switch_position_supervisor_template",
-                    "target_template_id": target}
+                    "target_template_id": target,
+                    "recommended_action": recommended}
         plan_scope = dict(plan.get("scope") or {})
         arbitration = dict((evaluation.get("comparison") or {}).get("posterior_arbitration") or {})
         selected = dict(arbitration.get("selected_conclusion") or {})
@@ -1313,6 +1391,9 @@ class BrainMediumImpactGovernanceService:
 
     @staticmethod
     def _row_to_governance(row: Any) -> dict[str, Any]:
+        posterior_refs = loads(row["posterior_refs_json"], {})
+        if not isinstance(posterior_refs, dict):
+            posterior_refs = {}
         return {"governance_id": str(row["governance_id"] or ""), "schema_version": "brain_medium_impact_governance.v1",
                 "plan_id": str(row["plan_id"] or ""), "eval_id": str(row["eval_id"] or ""),
                 "governance_action": str(row["governance_action"] or ""),
@@ -1325,7 +1406,9 @@ class BrainMediumImpactGovernanceService:
                 "risk_verdict": loads(row["risk_verdict_json"], {}),
                 "decision_policy": loads(row["decision_policy_json"], {}),
                 "rollback_plan": loads(row["rollback_plan_json"], {}),
-                "posterior_refs": loads(row["posterior_refs_json"], {}),
+                "posterior_refs": posterior_refs,
+                "decision_intent": str(posterior_refs.get("decision_intent") or ""),
+                "no_op_reason": str(posterior_refs.get("no_op_reason") or ""),
                 "autonomy_guard": loads(row["autonomy_guard_json"], {}),
                 "boundary": loads(row["boundary_json"], BrainMediumImpactGovernanceService.boundary()),
                 "created_at": safe_float(row["created_at"]), "updated_at": safe_float(row["updated_at"])}

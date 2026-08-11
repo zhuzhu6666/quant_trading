@@ -17,6 +17,7 @@ from backend.core.db import (
     is_state_db_path,
     state_table_columns,
 )
+from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.position_supervisor import evaluate_position_supervisor
@@ -474,6 +475,13 @@ def _write_supervisor_switch_domain(
         )
         if int(suggestion_update.rowcount or 0) != 1:
             raise RuntimeError("supervisor_suggestion_not_approved")
+        sync_candidate_suggestion_lifecycle(
+            conn,
+            suggestion_id=suggestion_id,
+            suggestion_status="applied",
+            applied_mutation_id=mutation_id,
+            now=now,
+        )
     return {
         "application_id": application_id,
         "reservation_id": reservation_id,

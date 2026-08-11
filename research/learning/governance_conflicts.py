@@ -115,7 +115,31 @@ def _factor_surface_priority(row: dict[str, Any]) -> int:
     return 10
 
 
-def suggestion_priority(row: dict[str, Any], surface: str) -> tuple[int, float, float, float]:
+def _bridge_lineage_priority(row: dict[str, Any], evidence: dict[str, Any]) -> tuple[int, int, int]:
+    """Prefer current governed lineage before legacy action priority."""
+    bridge = evidence.get("bridge") or {}
+    v16_bridge = bool(
+        str(evidence.get("candidate_id") or "")
+        and str(evidence.get("source_agent") or "") == "v16_brain"
+        and str(bridge.get("command_owner") or "") == "v16_brain"
+    )
+    review = bridge.get("candidate_review") or {}
+    bridge_ready = bool(isinstance(review, dict) and review.get("bridge_ready"))
+    eligible = bool(
+        int(row.get("governance_eligible") or 0) == 1
+        and str(row.get("governance_eligibility_version") or "")
+        and str(row.get("governance_eligibility_fingerprint") or "")
+    )
+    return (
+        1 if v16_bridge else 0,
+        1 if bridge_ready else 0,
+        1 if eligible else 0,
+    )
+
+
+def suggestion_priority(row: dict[str, Any], surface: str) -> tuple[int, int, int, int, float, float, float]:
+    evidence = _evidence(row)
+    lineage_priority = _bridge_lineage_priority(row, evidence)
     if surface == "position_supervisor_template":
         priority = _position_supervisor_priority(row)
     elif surface.startswith("factor:"):
@@ -123,6 +147,7 @@ def suggestion_priority(row: dict[str, Any], surface: str) -> tuple[int, float, 
     else:
         priority = 10
     return (
+        *lineage_priority,
         priority,
         _safe_float(row.get("confidence")),
         _safe_float(row.get("reviewed_at")),
@@ -147,7 +172,10 @@ class GovernanceConflictResolver:
         for row in suggestions:
             status = _text(row, "status").lower()
             suggestion_id = _text(row, "suggestion_id")
+            evidence = _evidence(row)
             if not suggestion_id or status not in ACTIVE_CONFLICT_STATUSES:
+                continue
+            if str(evidence.get("decision_intent") or "").lower() in {"no_op", "no_change"}:
                 continue
             surface = control_surface(row)
             if not surface:
@@ -166,7 +194,11 @@ class GovernanceConflictResolver:
                 "suggestion_id": winner_id,
                 "surface": surface,
                 "decision": "winner",
-                "reason": "highest_priority_active_suggestion",
+                "reason": (
+                    "highest_evidence_lineage_priority"
+                    if _bridge_lineage_priority(winner, _evidence(winner)) != (0, 0, 0)
+                    else "highest_priority_active_suggestion"
+                ),
                 "winner_id": winner_id,
             }
             for row in ordered[1:]:

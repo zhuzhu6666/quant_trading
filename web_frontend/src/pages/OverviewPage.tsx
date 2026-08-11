@@ -332,7 +332,10 @@ export function OverviewPage() {
           <p>先看数据、交易、风控和自治链路走到哪里，再按节点进入详细页面。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={connected ? "WS 实时连接" : "WS 重连中"} tone={connected ? "ok" : "warn"} />
+          <StatusPill
+            status={connected ? "WS 实时连接" : source === "http-fallback" ? "HTTP 快照回退 · WS 重连中" : "WS 连接中"}
+            tone={connected ? "ok" : "warn"}
+          />
           {hasLoopData ? <StatusPill status={loopRunning ? "交易运行中" : "交易未运行"} tone={loopKnown && loopRunning ? "ok" : "warn"} /> : <StatusPill status="循环状态未知" tone="warn" />}
           <StatusPill status={healthKnown ? `接口 ${healthStatus}` : "接口状态未知"} tone={healthKnown ? toneFromStatus(healthStatus) : "warn"} />
         </div>
@@ -433,7 +436,7 @@ export function OverviewPage() {
               io={riskKnown ? `VaR95 ${formatDecimal(canonicalRisk.var95.varPct ?? 0, 4)}%` : "等待权威风险输入"}
               status={riskOverallKnown ? (circuitBreaker ? "已阻断" : "风险已知") : "未知"}
               tone={circuitBreaker ? "bad" : statusTone(riskOverallKnown, riskOverallKnown)}
-              to="/performance/risk"
+              to="/trading"
               kind="authority"
             />
             <FlowConnector label="允许 / 拒绝 + 仓位" />

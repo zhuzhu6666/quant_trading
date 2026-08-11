@@ -1175,6 +1175,66 @@ def test_governor_approves_online_light_parameter_template_switch(tmp_path):
     assert "online_light" in row["review_note"]
 
 
+def test_conflict_resolver_prefers_current_v16_lineage_over_legacy_supervisor_priority(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    gov = RuleEvolutionGovernor(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, reason,
+             evidence_json, status, governance_eligible,
+             governance_eligibility_version, governance_eligibility_fingerprint,
+             created_at)
+            VALUES
+            ('legacy_auto_tpsl', 'position_supervisor_template',
+             'position_supervisor:auto_tpsl.v2', 'switch_position_supervisor_template',
+             0.95, 'legacy',
+             '{"target_template_id":"position_supervisor:auto_tpsl.v2"}',
+             'approved', 1, ?, 'legacy-fingerprint', 200.0),
+            ('v16_current_bridge', 'position_supervisor_template',
+             'position_supervisor:conservative.v1', 'switch_position_supervisor_template',
+             0.55, 'v16', ?, 'approved', 1, ?, 'v16-fingerprint', 100.0)
+            """,
+            (
+                GOVERNANCE_ELIGIBILITY_VERSION,
+                json.dumps(
+                    {
+                        "candidate_id": "brain_candidate_current",
+                        "source_agent": "v16_brain",
+                        "target_template_id": "position_supervisor:conservative.v1",
+                        "bridge": {
+                            "command_owner": "v16_brain",
+                            "candidate_review": {"bridge_ready": True},
+                        },
+                        "lineage": {"parent_policy_decision_id": "parent-current"},
+                    }
+                ),
+                GOVERNANCE_ELIGIBILITY_VERSION,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = gov.resolve_conflicts()
+
+    assert result["superseded"] == 1
+    conn = _connect(db_path)
+    try:
+        rows = {
+            row["suggestion_id"]: row["status"]
+            for row in conn.execute(
+                "SELECT suggestion_id, status FROM policy_suggestion"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert rows["v16_current_bridge"] == "approved"
+    assert rows["legacy_auto_tpsl"] == "superseded"
+
+
 def test_conflict_resolver_keeps_auto_tpsl_over_stale_supervisor_template(tmp_path):
     db_path = str(tmp_path / "state.db")
     gov = RuleEvolutionGovernor(db_path)

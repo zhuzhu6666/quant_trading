@@ -1,16 +1,13 @@
 import {
-  Activity,
-  AlertTriangle,
-  BookOpenCheck,
-  CheckCircle2,
-  ListChecks,
+  ArrowRight,
+  CircleDot,
+  Clock3,
   Network,
-  Route,
-  ShieldCheck,
   UsersRound,
 } from "lucide-react";
 import { CompactMetric, Field, type Tone } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
+import type { FactState } from "@/api/fact";
 import { formatDecimal } from "@/lib/format";
 
 export function asRecord(value: unknown): Record<string, unknown> {
@@ -50,6 +47,8 @@ export function pickArray(value: unknown, path: string[]): unknown[] {
   const raw = pick(value, path);
   return Array.isArray(raw) ? raw : [];
 }
+
+type PipelineFact = { state: FactState; failed: boolean };
 
 export function formatTime(raw: unknown): string {
   const value = Number(raw);
@@ -262,126 +261,50 @@ export function CompactFacts({ facts }: { facts: Array<{ label: string; value: s
   );
 }
 
-export function ChainStep({
-  icon: Icon,
-  label,
-  status,
-  detail,
-  tone,
-}: {
+export type RuntimeLogEntry = {
   icon: typeof Network;
   label: string;
   status: string;
-  detail?: string;
-  tone?: Tone;
-}) {
+  conclusion: string;
+  reason: string;
+  next: string;
+  evidence: string;
+  tone: Tone;
+};
+
+export function RuntimeLog({ rows }: { rows: RuntimeLogEntry[] }) {
+  if (!rows.length) return <div className="empty-state-small">暂无运行日志</div>;
   return (
-    <div className={`v16-chain-step v16-chain-${tone || statusTone(status)}`}>
-      <div className="v16-chain-icon">
-        <Icon size={16} aria-hidden="true" />
-      </div>
-      <div>
-        <strong>{label}</strong>
-        <span>{detail || displayValue(status)}</span>
-      </div>
-      <StatusPill status={displayValue(status)} tone={tone || statusTone(status)} />
-    </div>
-  );
-}
-
-export function BlueprintOverview({
-  blueprint,
-  agentAuthority,
-  proposalContext,
-  candidateContext,
-  candidateReview,
-  chainHealth,
-  liveAutonomy,
-}: {
-  blueprint: Record<string, unknown>;
-  agentAuthority: Record<string, unknown>;
-  proposalContext: Record<string, unknown>;
-  candidateContext: Record<string, unknown>;
-  candidateReview: Record<string, unknown>;
-  chainHealth: Record<string, unknown>;
-  liveAutonomy: Record<string, unknown>;
-}) {
-  const controlPlane = asRecord(
-    pick(blueprint, ["control_plane_boundaries"]),
-  );
-  const blockerCount = pickNumber(blueprint, ["blocker_count"], 0);
-  const chainChecks = pickArray(chainHealth, ["checks"]);
-  const boundaryChecks = [
-    {
-      component: "agent_authority",
-      label: "权限未扩大",
-      ok: pickBoolean(controlPlane, ["does_not_expand_agent_authority"], false),
-    },
-    {
-      component: "risk_policy",
-      label: "风控未绕过",
-      ok: pickBoolean(controlPlane, ["does_not_bypass_risk_policy"], false),
-    },
-    {
-      component: "execution_path",
-      label: "唯一执行路径",
-      ok: pickBoolean(
-        controlPlane,
-        ["does_not_create_second_execution_path"],
-        false,
-      ),
-    },
-    {
-      component: "read_only_projection",
-      label: "Readiness 只读",
-      ok: pickBoolean(controlPlane, ["read_only"], false)
-        && !pickBoolean(controlPlane, ["affects_trading"], true),
-    },
-  ];
-  return (
-    <>
-      <div className="v16-blueprint-summary">
-        <CompactMetric label="大纲" value={displayValue(pickString(blueprint, ["status"], ""))} detail={`阻断 ${formatDecimal(blockerCount, 0)}`} tone={pickBoolean(blueprint, ["ok"], false) ? "ok" : "warn"} />
-        <CompactMetric label="智能体" value={formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)} detail={`${countOf(pick(agentAuthority, ["unknown_sources"]))} 未知 / ${countOf(pick(agentAuthority, ["contract_violations"]))} 违规`} tone={pickBoolean(agentAuthority, ["ok"], false) ? "ok" : "warn"} />
-        <CompactMetric label="提案上下文" value={displayValue(pickString(proposalContext, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(proposalContext, ["status"], ""))} />
-        <CompactMetric label="候选上下文" value={displayValue(pickString(candidateContext, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(candidateContext, ["missing_required_context_count"], 0), 0)}`} tone={statusTone(pickString(candidateContext, ["status"], ""))} />
-        <CompactMetric label="交接审查" value={displayValue(pickString(candidateReview, ["status"], ""))} detail={`缺 ${formatDecimal(pickNumber(candidateReview, ["missing_required_review_count"], 0), 0)}`} tone={statusTone(pickString(candidateReview, ["status"], ""))} />
-        <CompactMetric label="反馈" value={displayValue(pickString(chainHealth, ["status"], ""))} detail={`检查 ${chainChecks.length}`} tone={statusTone(pickString(chainHealth, ["status"], ""))} />
-      </div>
-
-      <div className="v16-chain-map" aria-label="自治治理链路">
-        <ChainStep icon={UsersRound} label="智能体" status={pickString(agentAuthority, ["status"], "")} detail={`已登记 ${formatDecimal(pickNumber(agentAuthority, ["registered_agents"], 0), 0)}`} />
-        <ChainStep icon={Route} label="提案" status={pickString(proposalContext, ["status"], "")} detail={`缺失 ${formatDecimal(pickNumber(proposalContext, ["missing_required_context_count"], 0), 0)}`} />
-        <ChainStep icon={ListChecks} label="候选" status={pickString(candidateReview, ["status"], "")} detail={`可交接 ${formatDecimal(pickNumber(candidateReview, ["candidate_bridge_count"], 0), 0)}`} />
-        <ChainStep icon={ShieldCheck} label="风险与决策检查" status={pickString(blueprint, ["status"], "")} detail={boundaryChecks[1].ok ? "保留风控与决策边界" : "决策检查需关注"} />
-        <ChainStep icon={Activity} label="执行" status={boundaryChecks[2].ok ? "ok" : "attention"} detail={pickString(liveAutonomy, ["autonomy_mode"], "manual")} />
-        <ChainStep icon={BookOpenCheck} label="记忆" status={pickString(chainHealth, ["status"], "")} detail={`经验 ${formatDecimal(pickNumber(chainHealth, ["trade_feedback_summary.lesson_count"], 0), 0)}`} />
-      </div>
-
-      <div className="v16-blueprint-checks">
-        {boundaryChecks.map((item) => (
-          <div className="v16-check-row" key={item.component}>
-            {item.ok ? <CheckCircle2 size={16} aria-hidden="true" /> : <AlertTriangle size={16} aria-hidden="true" />}
-            <div>
-              <strong>{item.label}</strong>
-              <span>{item.ok ? "ok" : "attention"}</span>
+    <div className="v16-runtime-log" aria-label="自治治理运行日志">
+      {rows.map((row, index) => {
+        const Icon = row.icon;
+        return (
+          <article className="v16-runtime-row" key={`${row.label}-${index}`}>
+            <div className="v16-runtime-stage">
+              <span className="v16-runtime-index">{index + 1}</span>
+              <Icon size={15} aria-hidden="true" />
+              <strong>{row.label}</strong>
             </div>
-            <StatusPill status={item.ok ? "正常" : "需关注"} tone={item.ok ? "ok" : "warn"} />
-          </div>
-        ))}
-      </div>
-
-      <div className="v16-boundary v16-boundary-tight">
-        {boundaryChecks.map((item) => (
-          <Field
-            key={item.component}
-            label={item.label}
-            value={item.ok ? "是" : "否"}
-            tone={boolTone(item.ok)}
-          />
-        ))}
-      </div>
-    </>
+            <div className="v16-runtime-cell v16-runtime-conclusion">
+              <span>结论</span>
+              <strong>{row.conclusion}</strong>
+            </div>
+            <div className="v16-runtime-cell v16-runtime-reason">
+              <span>原因 / 依据</span>
+              <strong>{row.reason}</strong>
+            </div>
+            <div className="v16-runtime-cell v16-runtime-next">
+              <span>下一步</span>
+              <strong>{row.next}</strong>
+            </div>
+            <div className="v16-runtime-status">
+              <StatusPill status={row.status} tone={row.tone} />
+            </div>
+            <div className="v16-runtime-evidence"><Clock3 size={12} aria-hidden="true" />{row.evidence}</div>
+          </article>
+        );
+      })}
+    </div>
   );
 }
 
@@ -486,6 +409,298 @@ export function CoveragePanel({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+export function GovernancePipeline({
+  proposalItems,
+  governanceItems,
+  reviewItems,
+  proposalFact,
+  governanceFact,
+  reviewFact,
+  onReview,
+  reviewing,
+}: {
+  proposalItems: unknown[];
+  governanceItems: unknown[];
+  reviewItems: unknown[];
+  proposalFact: PipelineFact;
+  governanceFact: PipelineFact;
+  reviewFact: PipelineFact;
+  onReview: (proposalId: string, route: string) => void;
+  reviewing: boolean;
+}) {
+  type PipelineGroup = {
+    refs: Set<string>;
+    proposal?: Record<string, unknown>;
+    governance?: Record<string, unknown>;
+    review?: Record<string, unknown>;
+    createdAt: number;
+  };
+
+  const groups: PipelineGroup[] = [];
+  const add = (kind: "proposal" | "governance" | "review", raw: unknown, index: number) => {
+    const item = asRecord(raw);
+    const aliases = kind === "proposal"
+      ? [
+          pickString(item, ["proposal_id"]),
+          pickString(item, ["source_ref_id"]),
+          pickString(item, ["evidence_refs.candidate_id"]),
+          pickString(item, ["evidence_refs.eval_id"]),
+        ]
+      : kind === "governance"
+        ? [
+            pickString(item, ["candidate_id"]),
+            pickString(item, ["eval_id"]),
+            pickString(item, ["plan_id"]),
+            pickString(item, ["governance_id"]),
+          ]
+        : [pickString(item, ["candidate_id"]), pickString(item, ["review_id"])];
+    const usableAliases = [...new Set(aliases.filter(Boolean))];
+    const group = usableAliases.length
+      ? groups.find((candidate) => usableAliases.some((alias) => candidate.refs.has(alias)))
+      : undefined;
+    const target = group || {
+      refs: new Set<string>(),
+      createdAt: pickNumber(item, ["updated_at"], pickNumber(item, ["created_at"], index)),
+    };
+    usableAliases.forEach((alias) => target.refs.add(alias));
+    if (kind === "proposal") target.proposal = item;
+    if (kind === "governance") target.governance = item;
+    if (kind === "review") target.review = item;
+    target.createdAt = Math.max(target.createdAt, pickNumber(item, ["updated_at"], pickNumber(item, ["created_at"], index)));
+    if (!group) groups.push(target);
+  };
+
+  proposalItems.forEach((item, index) => add("proposal", item, index));
+  governanceItems.forEach((item, index) => add("governance", item, index));
+  reviewItems.forEach((item, index) => add("review", item, index));
+  groups.sort((a, b) => b.createdAt - a.createdAt);
+
+  const factIsUnavailable = (fact: PipelineFact): boolean => fact.failed || fact.state === "error";
+  const factIsUnconfirmed = (fact: PipelineFact): boolean => fact.state === "unknown";
+
+  const phase = (
+    item: Record<string, unknown> | undefined,
+    fact: PipelineFact,
+    kind: "proposal" | "governance" | "review",
+  ) => {
+    if (factIsUnavailable(fact)) {
+      return {
+        label: "读取错误",
+        tone: "bad" as Tone,
+      };
+    }
+    if (factIsUnconfirmed(fact)) return { label: "待确认", tone: "pending" as Tone };
+    if (!item) {
+      return fact.state === "stale"
+        ? { label: "未确认 · 数据已过期", tone: "stale" as Tone }
+        : { label: "未形成", tone: "mute" as Tone };
+    }
+    const status = kind === "review"
+      ? pickString(item, ["review_status"], "")
+      : pickString(item, ["status"], "");
+    const normalized = status.toLowerCase();
+    const tone: Tone = kind === "review"
+      ? pickBoolean(item, ["bridge_ready"], false)
+        ? "ok"
+        : normalized.includes("conflict")
+          ? "bad"
+          : "warn"
+      : normalized === "reviewed" || normalized === "candidate_materialized"
+        ? "ok"
+        : normalized.includes("blocked") || normalized.includes("failed")
+          ? "bad"
+          : "warn";
+    const label = displayValue(status || "已记录");
+    return fact.state === "stale"
+      ? { label: `${label} · 数据已过期`, tone: tone === "ok" ? "stale" as Tone : tone }
+      : { label, tone };
+  };
+
+  const factBlocker = (fact: PipelineFact, item: Record<string, unknown> | undefined, label: string): string => {
+    if (factIsUnavailable(fact)) return `${label}接口读取错误`;
+    if (factIsUnconfirmed(fact)) return `${label}数据待确认`;
+    if (fact.state === "stale" && !item) return `${label}数据已过期，无法确认`;
+    return "";
+  };
+
+  const describeBlocker = (group: PipelineGroup): string => {
+    // A governance row without candidate_id was not selected for bridging;
+    // its missing review is not a review freshness failure. Only a concrete
+    // candidate (or an existing review row) enters the review gate.
+    const reviewRequired = Boolean(group.review) || Boolean(pickString(group.governance, ["candidate_id"]));
+    const reviewDataBlocker = reviewRequired ? factBlocker(reviewFact, group.review, "审查") : "";
+    if (reviewDataBlocker && (group.review || group.governance)) return reviewDataBlocker;
+    const governanceDataBlocker = factBlocker(governanceFact, group.governance, "候选");
+    if (governanceDataBlocker && (group.governance || group.proposal)) return governanceDataBlocker;
+    const proposalDataBlocker = factBlocker(proposalFact, group.proposal, "提案");
+    if (proposalDataBlocker && (group.proposal || group.governance || group.review)) return proposalDataBlocker;
+    const review = group.review;
+    if (review) {
+      const conflict = asRecord(pick(review, ["conflict"]));
+      const gaps = pickArray(review, ["evidence_gaps"]);
+      if (pickBoolean(conflict, ["has_conflict"], pickBoolean(conflict, ["conflict"], false))) {
+        return pickString(conflict, ["surface"], "存在候选冲突");
+      }
+      if (gaps.length) return `缺证据：${gaps.slice(0, 2).map(String).join("、")}`;
+      if (!pickBoolean(review, ["bridge_ready"], false)) {
+        return pickString(review, ["bridge_reason"], "候选交接未就绪");
+      }
+    }
+    const governance = group.governance;
+    if (governance) {
+      const status = pickString(governance, ["status"], "");
+      if (status.includes("blocked")) {
+        const risk = asRecord(pick(governance, ["risk_verdict"]));
+        return pickString(risk, ["reason"], displayValue(status));
+      }
+      if (!pickString(governance, ["candidate_id"])) return "候选尚未形成";
+    }
+    const proposal = group.proposal;
+    if (proposal) {
+      const conflict = asRecord(pick(proposal, ["conflict"]));
+      if (pickBoolean(conflict, ["conflict"], false)) return pickString(conflict, ["severity"], "提案存在冲突");
+      if (pickString(proposal, ["route_recommendation"]) === "request_review") return "提案等待人工审查";
+    }
+    if (!group.proposal) return "等待提案进入链路";
+    if (!group.governance) return "提案已记录，尚未形成治理候选";
+    if (!group.review) return "候选已形成，尚未完成交接审查";
+    return "当前无阻断";
+  };
+
+  const nextStep = (group: PipelineGroup): string => {
+    const proposal = group.proposal;
+    const governance = group.governance;
+    const review = group.review;
+    if (factIsUnavailable(proposalFact)) return "先恢复提案接口";
+    if (factIsUnconfirmed(proposalFact)) return "等待提案数据确认";
+    if (proposalFact.state === "stale" && !proposal) return "刷新提案数据后确认";
+    if (!proposal) return "等待提案形成";
+    if (pickString(proposal, ["status"]) !== "reviewed") return "先记录提案审查";
+    if (factIsUnavailable(governanceFact)) return "先恢复候选接口";
+    if (factIsUnconfirmed(governanceFact)) return "等待候选数据确认";
+    if (governanceFact.state === "stale" && !governance) return "刷新候选数据后确认";
+    if (!governance) return "生成治理候选";
+    if (!pickString(governance, ["candidate_id"])) return "修复候选生成阻断";
+    if (factIsUnavailable(reviewFact)) return "先恢复审查接口";
+    if (factIsUnconfirmed(reviewFact)) return "等待审查数据确认";
+    if (reviewFact.state === "stale" && !review) return "刷新审查数据后确认";
+    if (!review) return "运行候选交接审查";
+    if (!pickBoolean(review, ["bridge_ready"], false)) return "补齐审查缺口";
+    return "可交接；仍需治理审核";
+  };
+
+  if (!groups.length) {
+    return (
+      <div className="v16-pipeline-empty">
+        <CircleDot size={16} aria-hidden="true" />
+        <span>当前没有可关联的提案、候选或审查记录。先刷新或运行对应阶段。</span>
+      </div>
+    );
+  }
+
+  const blockedCount = groups.filter((group) => describeBlocker(group) !== "当前无阻断").length;
+  const waitingCount = groups.filter((group) => nextStep(group).includes("等待")).length;
+  const pipelineFacts = [
+    ["提案", proposalFact],
+    ["候选", governanceFact],
+    ["审查", reviewFact],
+  ] as const;
+  const factStatus = pipelineFacts.map(([label, fact]) => {
+    if (factIsUnavailable(fact)) return `${label}读取错误`;
+    if (factIsUnconfirmed(fact)) return `${label}待确认`;
+    if (fact.state === "stale") return `${label}已过期`;
+    return `${label}已确认`;
+  }).join(" · ");
+  const factTone: Tone = pipelineFacts.some(([, fact]) => factIsUnavailable(fact))
+    ? "bad"
+    : pipelineFacts.some(([, fact]) => factIsUnconfirmed(fact))
+      ? "pending"
+      : pipelineFacts.some(([, fact]) => fact.state === "stale")
+        ? "stale"
+        : "ok";
+  return (
+    <div className="v16-pipeline">
+      <div className={`v16-pipeline-fact-note v16-pipeline-fact-note-${factTone}`}>
+        <strong>账本状态</strong>
+        <span>{factStatus}</span>
+        <small>{factTone === "stale" ? "保留已读取记录，但不把过期记录当作当前确认" : factTone === "pending" ? "没有可验证观测，不能推断阶段是否已完成" : factTone === "bad" ? "接口读取失败，不能用缓存代替当前事实" : "三段账本均有当前观测"}</small>
+      </div>
+      <div className="v16-pipeline-summary">
+        <CompactMetric label="合并对象" value={formatDecimal(groups.length, 0)} detail="同一对象只保留一行" tone="mute" />
+        <CompactMetric label="当前阻断" value={formatDecimal(blockedCount, 0)} detail="按最具体阶段归因" tone={blockedCount ? "warn" : "ok"} />
+        <CompactMetric label="等待形成" value={formatDecimal(waitingCount, 0)} detail="尚未进入下一阶段" tone={waitingCount ? "warn" : "ok"} />
+        <CompactMetric label="阅读顺序" value="提案 → 候选 → 审查" detail="不代表已授权执行" tone="mute" />
+      </div>
+      <div className="v16-pipeline-list" aria-label="待治理链路日志">
+        {groups.map((group, index) => {
+          const proposal = group.proposal;
+          const governance = group.governance;
+          const review = group.review;
+          const proposalPhase = phase(proposal, proposalFact, "proposal");
+          const governancePhase = phase(governance, governanceFact, "governance");
+          const reviewRequired = Boolean(review) || Boolean(pickString(governance, ["candidate_id"]));
+          const reviewPhase = reviewRequired
+            ? phase(review, reviewFact, "review")
+            : { label: "不适用", tone: "mute" as Tone };
+          const subject = pickString(governance, ["scope_key"])
+            || pickString(review, ["candidate.scope_key"])
+            || pickString(proposal, ["target_scope"])
+            || "待关联治理对象";
+          const action = pickString(governance, ["governance_action"])
+            || pickString(review, ["candidate.action"])
+            || pickString(proposal, ["proposal_action"])
+            || "治理记录";
+          const blocker = describeBlocker(group);
+          const proposalId = pickString(proposal, ["proposal_id"]);
+          const route = pickString(proposal, ["route_recommendation"], "observe");
+          const ids = [
+            proposalId ? `提案 ${proposalId}` : "",
+            pickString(governance, ["candidate_id"]) ? `候选 ${pickString(governance, ["candidate_id"])}` : "",
+            pickString(review, ["review_id"]) ? `审查 ${pickString(review, ["review_id"])}` : "",
+          ].filter(Boolean);
+          return (
+            <article className="v16-pipeline-row" key={`${Array.from(group.refs).join("|") || "pipeline"}-${index}`}>
+              <div className="v16-pipeline-object">
+                <span>治理对象</span>
+                <strong>{displayAction(action)}</strong>
+                <small title={subject}>{subject}</small>
+              </div>
+              <div className="v16-pipeline-stages">
+                {[{ label: "提案", value: proposalPhase }, { label: "候选", value: governancePhase }, { label: "审查", value: reviewPhase }].map((stage, stageIndex) => (
+                  <div className="v16-pipeline-stage-wrap" key={stage.label}>
+                    <div className="v16-pipeline-stage">
+                      <span>{stage.label}</span>
+                      <StatusPill status={stage.value.label} tone={stage.value.tone} />
+                    </div>
+                    {stageIndex < 2 ? <ArrowRight size={13} aria-hidden="true" /> : null}
+                  </div>
+                ))}
+              </div>
+              <div className={`v16-pipeline-blocker ${blocker === "当前无阻断" ? "v16-pipeline-blocker-clear" : ""}`.trim()}>
+                <span>当前停点</span>
+                <strong>{blocker}</strong>
+              </div>
+              <div className="v16-pipeline-next">
+                <span>下一步</span>
+                <strong>{nextStep(group)}</strong>
+              </div>
+              <div className="v16-pipeline-meta">
+                <div className="brain-ref-row">{ids.map((id) => <span key={id}>{id}</span>)}</div>
+                <small><Clock3 size={12} aria-hidden="true" />{formatTime(group.createdAt) || "时间未提供"}</small>
+                {proposal && pickString(proposal, ["status"]) !== "reviewed" ? (
+                  <button className="brain-inline-button" type="button" disabled={!proposalId || reviewing} onClick={() => onReview(proposalId, route)}>
+                    {reviewing ? "记录中" : "记录审查"}
+                  </button>
+                ) : null}
+              </div>
+            </article>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -660,82 +875,6 @@ export function ExecutionList({ items }: { items: unknown[] }) {
   );
 }
 
-export function GovernanceList({ items }: { items: unknown[] }) {
-  if (!items.length) return <div className="empty-state-small">暂无治理候选</div>;
-  return (
-    <div className="brain-action-plan-list">
-      {items.slice(0, 8).map((raw, index) => {
-        const item = asRecord(raw);
-        const status = pickString(item, ["status"], "");
-        const riskVerdict = asRecord(pick(item, ["risk_verdict"]));
-        const decisionPolicy = asRecord(pick(item, ["decision_policy"]));
-        return (
-          <article className="brain-action-plan brain-action-plan-compact" key={`${pickString(item, ["governance_id"], "governance")}-${index}`}>
-            <div className="brain-hypothesis-head">
-              <div>
-                <strong>{displayAction(pickString(item, ["governance_action"], "governance_action"))}</strong>
-                <span>{pickString(item, ["scope_type"], "scope")} · {pickString(item, ["scope_key"], "")}</span>
-              </div>
-              <StatusPill status={displayValue(status)} tone={status === "candidate_materialized" ? "ok" : status.includes("blocked") ? "warn" : "mute"} />
-            </div>
-            <CompactFacts facts={[
-              { label: "证据", value: `${formatDecimal(scorePct(pickNumber(item, ["evidence_score"], 0)), 1)}%`, tone: "ok" },
-              { label: "风险检查", value: displayValue(pickBoolean(riskVerdict, ["allowed"], false) ? "allow" : "block"), tone: boolTone(pickBoolean(riskVerdict, ["allowed"], false)) },
-              { label: "决策检查", value: pickBoolean(decisionPolicy, ["required"], false) ? "需要预审" : "不适用", tone: "mute" },
-              { label: "候选", value: pickString(item, ["candidate_id"], ""), tone: pickString(item, ["candidate_id"], "") ? "ok" : "mute" },
-              { label: "建议", value: pickString(item, ["suggestion_id"], ""), tone: pickString(item, ["suggestion_id"], "") ? "ok" : "mute" },
-            ]} />
-            <div className="brain-ref-row">
-              <span>{displayValue(pickString(item, ["comparison_verdict"], ""))}</span>
-              <span>{pickString(riskVerdict, ["reason"], "")}</span>
-              <span>会修改运行配置 {pickBoolean(item, ["rollback_plan.runtime_mutation"], false) ? "是" : "否"}</span>
-            </div>
-          </article>
-        );
-      })}
-    </div>
-  );
-}
-
-export function CandidateReviewList({ items }: { items: unknown[] }) {
-  if (!items.length) return <div className="empty-state-small">暂无候选审查</div>;
-  return (
-    <div className="brain-action-plan-list">
-      {items.slice(0, 8).map((raw, index) => {
-        const item = asRecord(raw);
-        const status = pickString(item, ["review_status"], "");
-        const conflict = asRecord(pick(item, ["conflict"]));
-        const bridgePreview = asRecord(pick(item, ["bridge_preview"]));
-        const gaps = pickArray(item, ["evidence_gaps"]);
-        const bridgeReady = pickBoolean(item, ["bridge_ready"], false);
-        const tone: Tone = bridgeReady ? "ok" : status === "conflict_detected" ? "bad" : gaps.length ? "warn" : "mute";
-        return (
-          <article className="brain-action-plan brain-action-plan-compact" key={`${pickString(item, ["review_id"], "review")}-${index}`}>
-            <div className="brain-hypothesis-head">
-              <div>
-                <strong>{displayValue(status)}</strong>
-                <span>{pickString(item, ["candidate.scope_type"], "scope")} · {displayAction(pickString(item, ["candidate.action"], "action"))}</span>
-              </div>
-              <StatusPill status={displayValue(status)} tone={tone} />
-            </div>
-            <CompactFacts facts={[
-              { label: "交接", value: bridgeReady ? "就绪" : "受阻", tone: bridgeReady ? "ok" : "warn" },
-              { label: "缺口", value: `${gaps.length}`, tone: gaps.length ? "warn" : "ok" },
-              { label: "冲突", value: pickBoolean(conflict, ["has_conflict"], false) ? "有" : "无", tone: pickBoolean(conflict, ["has_conflict"], false) ? "bad" : "ok" },
-              { label: "LLM 顾问", value: pickBoolean(item, ["llm_advisory.enabled"], false) ? displayValue(pickString(item, ["llm_advisory.status"], "enabled")) : "未启用", tone: "mute" },
-            ]} />
-            <div className="brain-ref-row">
-              <span>{pickString(conflict, ["surface"], "")}</span>
-              <span>{pickString(bridgePreview, ["reason"], pickString(item, ["bridge_reason"], ""))}</span>
-              <span>{gaps.slice(0, 2).map(String).join(", ") || "证据齐全"}</span>
-            </div>
-          </article>
-        );
-      })}
-    </div>
-  );
-}
-
 export function GuardrailList({ items }: { items: unknown[] }) {
   if (!items.length) return <div className="empty-state-small">暂无实盘护栏</div>;
   return (
@@ -769,64 +908,6 @@ export function GuardrailList({ items }: { items: unknown[] }) {
               <span>broker {pickString(divergence, ["broker_open_count"], "")}</span>
               <span>local {pickString(divergence, ["local_open_count"], "")}</span>
               <span>{pickArray(recommendation, ["reasons"]).slice(0, 2).map(String).join(", ") || "no blocker"}</span>
-            </div>
-          </article>
-        );
-      })}
-    </div>
-  );
-}
-
-export function ProposalRegistryList({
-  items,
-  onReview,
-  reviewing,
-}: {
-  items: unknown[];
-  onReview: (proposalId: string, route: string) => void;
-  reviewing: boolean;
-}) {
-  if (!items.length) return <div className="empty-state-small">暂无提案</div>;
-  return (
-    <div className="brain-action-plan-list">
-      {items.slice(0, 10).map((raw, index) => {
-        const item = asRecord(raw);
-        const proposalId = pickString(item, ["proposal_id"], "");
-        const status = pickString(item, ["status"], "");
-        const conflict = asRecord(pick(item, ["conflict"]));
-        const hasConflict = pickBoolean(conflict, ["conflict"], false);
-        const route = pickString(item, ["route_recommendation"], "observe");
-        const reliability = asRecord(pick(item, ["source_reliability"]));
-        const freshness = asRecord(pick(item, ["evidence_freshness"]));
-        const reliabilityBand = pickString(reliability, ["band"], "");
-        const freshnessStatus = pickString(freshness, ["status"], "");
-        return (
-          <article className="brain-action-plan brain-action-plan-compact" key={`${proposalId || "proposal"}-${index}`}>
-            <div className="brain-hypothesis-head">
-              <div>
-                <strong>{displayValue(pickString(item, ["control_surface"], "proposal_registry"))}</strong>
-                <span title={pickString(item, ["target_scope"], "")}>{pickString(item, ["target_scope"], "")}</span>
-              </div>
-              <StatusPill status={displayValue(status)} tone={status.includes("blocked") || hasConflict ? "bad" : status === "reviewed" ? "ok" : "warn"} />
-            </div>
-            <CompactFacts facts={[
-              { label: "来源", value: displayValue(pickString(item, ["source_agent"], "")), tone: "mute" },
-              { label: "影响", value: displayValue(pickString(item, ["impact_level"], "observe")), tone: riskTone(pickString(item, ["impact_level"], "observe")) },
-              { label: "可信", value: `${displayValue(reliabilityBand)} ${formatDecimal(scorePct(pickNumber(reliability, ["score"], 0)), 0)}%`, tone: reliabilityBand === "low" ? "warn" : reliabilityBand === "high" ? "ok" : "mute" },
-              { label: "新鲜", value: displayValue(freshnessStatus), tone: freshnessStatus === "fresh" ? "ok" : "warn" },
-              { label: "路由", value: displayValue(route), tone: route === "request_review" ? "warn" : "mute" },
-            ]} />
-            <div className="brain-ref-row brain-ref-row-actions">
-              <span title={proposalId}>{proposalId || ""}</span>
-              <span>{hasConflict ? displayValue(pickString(conflict, ["severity"], "conflict_detected")) : "无冲突"}</span>
-              <button
-                className="brain-inline-button"
-                type="button"
-                disabled={!proposalId || reviewing}
-                onClick={() => onReview(proposalId, route)}
-              >
-                {reviewing ? "记录中" : "记录审查"}
-              </button>
             </div>
           </article>
         );

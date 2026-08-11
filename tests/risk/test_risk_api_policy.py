@@ -68,6 +68,27 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
                 json.dumps({"policy_verdict": {"allowed": False, "reason": "仓位上限: 3/3", "audit_payload": {"action": "open_trade"}}}),
                 100.0,
             ),
+            (
+                "dec_pre_policy",
+                "skip",
+                175.0,
+                "no_new_risk_latched",
+                json.dumps({
+                    "tick": 7,
+                    "direction": 1,
+                    "gate_passed": True,
+                    "gate_reason": "passed",
+                    "skip_stage": "before_candidate",
+                    "risk_stage": "not_reached",
+                    "risk_policy_reached": False,
+                    "admission_gate_passed": False,
+                    "blockers": ["no_new_risk_latched", "accepting_new_risk_false"],
+                    "execution_intent_created": False,
+                    "action_reason": "no_new_risk_latched",
+                }),
+                "{}",
+                175.0,
+            ),
         ],
     )
     conn.executemany(
@@ -123,6 +144,15 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
     }
     assert result["by_action"] == {"open_trade": 2, "reduce_position": 1}
     assert result["by_reason"]["ok"] == 1
+    assert len(result["pre_policy_skips"]) == 1
+    assert result["pre_policy_skips"][0]["decision_id"] == "dec_pre_policy"
+    assert result["pre_policy_skips"][0]["gate_passed"] is True
+    assert result["pre_policy_skips"][0]["risk_policy_reached"] is False
+    assert result["pre_policy_skips"][0]["admission_owner"] == "safety+live_loop"
+    assert result["pre_policy_skips"][0]["blockers"] == [
+        "no_new_risk_latched",
+        "accepting_new_risk_false",
+    ]
     assert result["items"][0]["decision_id"] == "dec_allowed"
     assert result["items"][0]["execution_applied"] is True
     assert result["items"][1]["decision_id"] == "dec_skipped"

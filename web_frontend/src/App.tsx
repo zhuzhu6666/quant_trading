@@ -44,7 +44,7 @@ export function App() {
           <Route path="/autonomy/:section" element={<AutonomyWorkspace />} />
           <Route path="/ops/:section" element={<SystemWorkspace />} />
           <Route path="/pnl" element={<Navigate to="/performance/pnl" replace />} />
-          <Route path="/risk" element={<Navigate to="/performance/risk" replace />} />
+          <Route path="/risk" element={<Navigate to="/trading" replace />} />
           <Route path="/learning" element={<Navigate to="/autonomy/learning" replace />} />
           <Route path="/models" element={<Navigate to="/autonomy/models" replace />} />
           <Route path="/governance/:section" element={<Navigate to="/autonomy/learning" replace />} />

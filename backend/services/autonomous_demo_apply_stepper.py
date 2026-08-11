@@ -609,18 +609,28 @@ class AutonomousDemoApplyStepper:
                   ON candidate.candidate_id=command.candidate_id
                 WHERE command.decision='delegate'
                   AND command.claim_status='available'
-                  AND candidate.status='active'
+                  AND candidate.status IN ('active', 'brain_candidate', 'governance_ready',
+                                           'applyable', 'candidate_materialized',
+                                           'bridge_pending', 'awaiting_execution', 'submitted')
                 ORDER BY command.created_at ASC
                 """,
             ).fetchall()
-            command = next(
-                (
-                    dict(row)
-                    for row in rows
-                    if V16CommandGate.is_actionable(dict(row))
-                ),
-                {},
-            )
+            command = {}
+            for row in rows:
+                item = dict(row)
+                if not V16CommandGate.is_actionable(item):
+                    continue
+                authority = V16CommandGate.authorize(
+                    self.db_path,
+                    target_agent=str(item.get("target_agent") or ""),
+                    scope_type=str(item.get("scope_type") or ""),
+                    scope_key=str(item.get("scope_key") or ""),
+                    action=str(item.get("action") or ""),
+                    command_id=str(item.get("command_id") or ""),
+                )
+                if authority.get("allowed"):
+                    command = item
+                    break
         finally:
             conn.close()
         if not command:
@@ -630,30 +640,38 @@ class AutonomousDemoApplyStepper:
             }
 
         candidate_id = str(command["candidate_id"])
-        review_result = BrainGovernanceCandidateReviewService(
-            self.db_path
-        ).review_candidate(
-            candidate_id,
-            run_llm=False,
-            llm_dry_run=True,
-            persist=True,
-        )
-        review = dict(review_result.get("review") or {})
-        if not bool(review.get("bridge_ready")):
-            return {
-                "ok": True,
-                "status": "waiting_for_candidate_evidence",
-                "command_id": command["command_id"],
-                "candidate_id": candidate_id,
-                "target_agent": command["target_agent"],
-                "review": review,
-            }
-        submitted = BrainGovernanceCandidateService(
-            self.db_path
-        ).submit_candidate_to_policy_suggestion(
-            candidate_id,
-            actor="system:autonomous_demo_apply_stepper.v16_dispatch",
-        )
+        candidate_service = BrainGovernanceCandidateService(self.db_path)
+        candidate = candidate_service.load_candidate(candidate_id)
+        if candidate.get("submitted_suggestion_id"):
+            # The bridge already owns the candidate lifecycle.  Do not review
+            # a pending execution as if it were a fresh active candidate.
+            submitted = candidate_service.submit_candidate_to_policy_suggestion(
+                candidate_id,
+                actor="system:autonomous_demo_apply_stepper.v16_dispatch",
+            )
+        else:
+            review_result = BrainGovernanceCandidateReviewService(
+                self.db_path
+            ).review_candidate(
+                candidate_id,
+                run_llm=False,
+                llm_dry_run=True,
+                persist=True,
+            )
+            review = dict(review_result.get("review") or {})
+            if not bool(review.get("bridge_ready")):
+                return {
+                    "ok": True,
+                    "status": "waiting_for_candidate_evidence",
+                    "command_id": command["command_id"],
+                    "candidate_id": candidate_id,
+                    "target_agent": command["target_agent"],
+                    "review": review,
+                }
+            submitted = candidate_service.submit_candidate_to_policy_suggestion(
+                candidate_id,
+                actor="system:autonomous_demo_apply_stepper.v16_dispatch",
+            )
         return {
             "ok": bool(submitted.get("ok", True)),
             "status": str(submitted.get("status") or "routed_to_specialist"),
@@ -683,6 +701,7 @@ class AutonomousDemoApplyStepper:
             conn.close()
 
     def _run_resolve_conflicts(self, *, limit: int) -> dict[str, Any]:
+        from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
         from research.learning.governance_conflicts import GovernanceConflictResolver
 
         conn = _connect(self.db_path)
@@ -691,9 +710,11 @@ class AutonomousDemoApplyStepper:
                 conn,
                 """
                 SELECT suggestion_id, scope_type, scope_key, action, confidence,
-                       evidence_json, status, reviewed_at, created_at
+                       evidence_json, status, reviewed_at, created_at,
+                       governance_eligible, governance_eligibility_version,
+                       governance_eligibility_fingerprint, applied_mutation_id
                 FROM policy_suggestion
-                WHERE status IN ('proposed', 'approved', 'applied')
+                WHERE status IN ('proposed', 'approved')
                   AND governance_eligible=1
                   AND governance_eligibility_version=?
                   AND COALESCE(governance_eligibility_fingerprint, '') <> ''
@@ -711,13 +732,19 @@ class AutonomousDemoApplyStepper:
                     """
                     UPDATE policy_suggestion
                     SET status='superseded', reviewed_at=?, review_note=?
-                    WHERE suggestion_id=? AND status IN ('proposed', 'approved', 'applied')
+                    WHERE suggestion_id=? AND status IN ('proposed', 'approved')
                     """,
                     (
                         now,
                         str(item.get("reason") or "superseded by governance conflict resolver"),
                         str(item.get("suggestion_id") or ""),
                     ),
+                )
+                sync_candidate_suggestion_lifecycle(
+                    conn,
+                    suggestion_id=str(item.get("suggestion_id") or ""),
+                    suggestion_status="superseded",
+                    now=now,
                 )
             conn.commit()
             return {

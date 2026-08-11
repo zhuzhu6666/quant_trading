@@ -1037,7 +1037,10 @@ def test_update_weight_blocks_when_drawdown_near_limit():
 
     verdict = service.evaluate(
         "update_weight",
-        {"session": {"drawdown_pct": 12.0}},
+        {
+            "session": {"drawdown_pct": 12.0},
+            "risk_limits": {"max_drawdown_pct": 15.0},
+        },
     )
 
     assert verdict.allowed is False
@@ -1050,7 +1053,11 @@ def test_switch_parameter_template_uses_template_switch_governor_thresholds():
 
     verdict = service.evaluate(
         "switch_parameter_template",
-        {"session": {"drawdown_pct": 12.0}, "required_mode": "governed"},
+        {
+            "session": {"drawdown_pct": 12.0},
+            "required_mode": "governed",
+            "risk_limits": {"max_drawdown_pct": 15.0},
+        },
     )
 
     assert verdict.allowed is False
@@ -1336,8 +1343,15 @@ def test_tighten_position_blocks_tp_extension_after_position_limit():
 def test_promote_and_register_factor_use_governor_thresholds():
     service = _service()
 
-    promote = service.evaluate("promote_factor", {"session": {"drawdown_pct": 11.0}})
-    register = service.evaluate("register_factor", {"session": {"drawdown_pct": 10.0}})
+    risk_limits = {"max_drawdown_pct": 15.0}
+    promote = service.evaluate(
+        "promote_factor",
+        {"session": {"drawdown_pct": 11.0}, "risk_limits": risk_limits},
+    )
+    register = service.evaluate(
+        "register_factor",
+        {"session": {"drawdown_pct": 10.0}, "risk_limits": risk_limits},
+    )
 
     assert promote.allowed is False
     assert promote.reason == "drawdown_too_high_for_promotion"

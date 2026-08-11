@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-08-10
+> Last verified: 2026-08-11
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -99,8 +99,8 @@
 
 - 状态：`migrating`
 - canonical：持仓模板的自动切换只从 V16 candidate bridge 进入，`V16CommandGate.claim` 与 `PositionSupervisorGovernanceMutationService` 的 Coordinator transaction 共同完成单次授权和 finalize。
-- 当前：历史/显式旧 worker 写入的 non-V16 `position_supervisor_template` advisory 仍可留作审计记录；它们已不再拥有 approve/apply 或 candidate conflict 权力，并将在既有 demo review/apply 路径中 terminalize。`supervisor_learning_scheduler` 只运行反事实证据，不自动 materialize 旧 advisory；显式 materialize API 仅作为 legacy audit 入口保留。新生成候选只能针对一个 control 和一个 regime stratum，完整快照必须能由 evidence 中的单 scalar patch 证明。
-- 剩余：已应用 suggestion 仍需经过 effect observation 与既有 maturity counting，不能据此解锁自治或删除旧 advisory writer。`legacy_awe_trailing` 的非 Demo 兼容 planner/trace/close attribution 仍存在；Demo 已在 protection cycle 中标记 `observed/superseded`，不得与 canonical supervisor 同时 applied。Parity replay 仍是 diagnostic-only，不能替代 broker lifecycle 证据。
+- 当前：历史/显式旧 worker 写入的 non-V16 `position_supervisor_template` advisory 仍可留作审计记录；它们已不再拥有 approve/apply 或 candidate conflict 权力，并将在既有 demo review/apply 路径中 terminalize。`supervisor_learning_scheduler` 只运行反事实证据，不自动 materialize 旧 advisory；显式 materialize API 仅作为 legacy audit 入口保留。新生成候选只能针对一个 control 和一个 regime stratum，完整快照必须能由 evidence 中的单 scalar patch 证明。V16 candidate bridge 已统一为 `active -> bridge_pending -> awaiting_execution -> applied/superseded/rejected`，bridge 事务同时绑定 candidate、suggestion 和 command predicate；`keep/no_change` 或当前模板目标不会进入候选 lane。
+- 剩余：已应用 suggestion 仍需经过 effect observation 与既有 maturity counting，不能据此解锁自治或删除旧 advisory writer。`legacy_awe_trailing` 的非 Demo 兼容 planner/trace/close attribution 仍存在；Demo 已在 protection cycle 中标记 `observed/superseded`，不得与 canonical supervisor 同时 applied。Parity replay 仍是 diagnostic-only，不能替代 broker lifecycle 证据。遗留 `submitted` 行需要通过 service-backed reconciliation 迁移到显式 pending/terminal 状态，禁止 SQL 直接恢复 active。
 - 退出：历史 active advisory 全部 terminalize，连续真实 demo cycle 证明 V16 bridge、claim、Coordinator finalize 和 effect observation 连通后，删除旧 advisory 生成路径；另在 replay、trace、effect 证明 trailing 行为等价后，删除 legacy AWE trailing 执行分支、兼容配置和不再需要的耦合测试。不得通过 SQL 改写历史 review、补 command 或补成熟样本提前满足退出条件。
 
 ### parity replay 尚非 live-equivalent

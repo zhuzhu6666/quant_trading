@@ -17,6 +17,11 @@ from typing import Any
 from backend.core.db import STATE_DB, is_state_db_path, state_table_columns, state_table_exists
 from backend.services._brain_helpers import connect, dumps, execute, loads, safe_float
 from backend.services.agent_authority import control_surface, execution_owner, required_gate
+from backend.services.brain_governance_candidates import (
+    CANDIDATE_EXECUTION_PENDING_STATUSES,
+    CANDIDATE_REVIEWABLE_STATUSES,
+    BrainGovernanceCandidateService,
+)
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.v16_brain_planning import (
     BrainActionPlanEvaluatorService,
@@ -169,6 +174,11 @@ class V16BrainOrchestratorService:
         persist: bool = True,
     ) -> dict[str, Any]:
         ensure_v16_brain_command_table(self.db_path)
+        bridge_reconciliation = (
+            BrainGovernanceCandidateService(self.db_path).reconcile_submitted_bridges()
+            if persist
+            else {"reconciled_count": 0, "missing_bridge_count": 0}
+        )
         limit = max(4, min(int(limit or 20), 50))
         if readiness is None:
             from backend.services.backend_readiness import BackendReadinessService
@@ -246,6 +256,7 @@ class V16BrainOrchestratorService:
             "cancelled_stale_delegate_count": int(
                 cancelled.get("stale_delegate_count") or 0
             ),
+            "candidate_bridge_reconciliation": bridge_reconciliation,
             "superseded_candidate_count": len(superseded),
             "superseded_candidate_ids": superseded,
             "commands": commands,
@@ -265,12 +276,16 @@ class V16BrainOrchestratorService:
             if not state_table_exists(conn, "brain_governance_candidate"):
                 return set()
             placeholders = ",".join("?" for _ in candidate_ids)
+            candidate_statuses = "', '".join(
+                sorted(CANDIDATE_REVIEWABLE_STATUSES | CANDIDATE_EXECUTION_PENDING_STATUSES)
+            )
             rows = execute(
                 conn,
                 f"""
                 SELECT candidate_id
                 FROM brain_governance_candidate
-                WHERE status='active' AND candidate_id IN ({placeholders})
+                WHERE status IN ('{candidate_statuses}')
+                  AND candidate_id IN ({placeholders})
                 """,
                 tuple(candidate_ids),
             ).fetchall()
@@ -296,7 +311,7 @@ class V16BrainOrchestratorService:
                     "stale_delegate_count": 0,
                     "expired_delegate_count": 0,
                 }
-            submitted_bridge_exemption = "1=0"
+            pending_bridge_exemption = "1=0"
             policy_suggestion_columns = (
                 set(state_table_columns(conn, "policy_suggestion"))
                 if state_table_exists(conn, "policy_suggestion")
@@ -307,18 +322,22 @@ class V16BrainOrchestratorService:
                 "governance_eligible",
                 "applied_mutation_id",
             }.issubset(policy_suggestion_columns):
-                submitted_bridge_exemption = """
-                            candidate.status='submitted'
+                pending_statuses = "', '".join(sorted(CANDIDATE_EXECUTION_PENDING_STATUSES))
+                pending_bridge_exemption = f"""
+                            candidate.status IN ('{pending_statuses}')
                             AND COALESCE(candidate.submitted_suggestion_id, '')<>''
                             AND EXISTS (
                                 SELECT 1
                                 FROM policy_suggestion suggestion
                                 WHERE suggestion.suggestion_id=candidate.submitted_suggestion_id
-                                  AND suggestion.status='approved'
+                                  AND suggestion.status IN ('proposed', 'approved')
                                   AND COALESCE(suggestion.governance_eligible, 0)=1
                                   AND COALESCE(suggestion.applied_mutation_id, '')=''
                             )
                 """
+            actionable_statuses = "', '".join(
+                sorted(CANDIDATE_REVIEWABLE_STATUSES | CANDIDATE_EXECUTION_PENDING_STATUSES)
+            )
             now = time.time()
             observation = execute(
                 conn,
@@ -345,9 +364,14 @@ class V16BrainOrchestratorService:
                       SELECT 1
                       FROM brain_governance_candidate candidate
                       WHERE candidate.candidate_id=v16_brain_command.candidate_id
-                        AND candidate.status<>'active'
-                        AND NOT (
-                            {submitted_bridge_exemption}
+                        AND (
+                            candidate.status NOT IN ('{actionable_statuses}')
+                            OR (
+                                candidate.status IN ('bridge_pending', 'awaiting_execution', 'submitted')
+                                AND NOT (
+                                    {pending_bridge_exemption}
+                                )
+                            )
                         )
                   )
                 """,
@@ -680,10 +704,23 @@ class V16BrainOrchestratorService:
                 "boundary": self.boundary(),
             }
 
+        health_cycle_id = str(gate.get("health_cycle_id") or "")
+        batch_manifest = {
+            "schema_version": "factor_governance_batch_manifest.v1",
+            "snapshot_id": snapshot_id,
+            "health_cycle_id": health_cycle_id,
+            "candidate_count": candidate_count,
+            "preflight_fingerprint": hashlib.sha256(
+                dumps(preflight).encode("utf-8")
+            ).hexdigest(),
+            "fixed_after_issue": True,
+            "scope": "factor_governance_cycle",
+        }
         evidence = {
             "schema_version": "v16_factor_governance_preflight.v1",
             "snapshot_id": snapshot_id,
-            "health_cycle_id": str(gate.get("health_cycle_id") or ""),
+            "health_cycle_id": health_cycle_id,
+            "batch_manifest": batch_manifest,
             "expansion_preflight": preflight,
         }
         evidence_fingerprint = hashlib.sha256(
@@ -712,6 +749,7 @@ class V16BrainOrchestratorService:
             "delegation": {
                 "target_agent": "factor_governance",
                 "delegated_by": "v16_brain",
+                "authorization_granularity": "run_batch_fixed_manifest",
                 "specialist_must_use": [
                     "RiskPolicyService",
                     "DecisionPolicy",
@@ -1013,12 +1051,12 @@ class V16BrainOrchestratorService:
         )[:limit]
 
     def _reviewed_expired_delegate_reissues(self, *, limit: int) -> list[dict[str, Any]]:
-        """Refresh only reviewed V16 delegates whose downstream bridge is pending.
+        """Refresh reviewed V16 delegates whose downstream bridge is pending.
 
-        The second branch is deliberately narrow: a submitted, approved and
-        unapplied policy suggestion may recover the command that was
-        terminalized when the first bridge transaction aborted.  It does not
-        revive ordinary stale candidates or arbitrary failed commands.
+        A command cancelled by lifecycle reconciliation is recoverable only
+        when its candidate still has a valid, unapplied reviewed bridge.  The
+        cancellation reason is diagnostic; it is not an authorization to
+        revive arbitrary failed commands.
         """
         now = time.time()
         conn = connect(self.db_path, read_only=True)
@@ -1045,8 +1083,7 @@ class V16BrainOrchestratorService:
                 submitted_bridge_recovery = """
                     OR (
                         command.failure_reason='candidate_not_active'
-                        AND command.last_release_reason='governance_transaction_aborted'
-                        AND candidate.status='submitted'
+                        AND candidate.status IN ('bridge_pending', 'awaiting_execution', 'submitted')
                         AND COALESCE(candidate.submitted_suggestion_id, '')<>''
                         AND EXISTS (
                             SELECT 1
@@ -1155,12 +1192,10 @@ class V16BrainOrchestratorService:
                 existing_is_reissuable = bool(
                     existing
                     and (
-                        str(existing["failure_reason"] or "") == "authority_expired"
-                        or (
-                            str(existing["failure_reason"] or "") == "candidate_not_active"
-                            and str(existing["last_release_reason"] or "")
-                            == "governance_transaction_aborted"
-                        )
+                        str(existing["failure_reason"] or "") in {
+                            "authority_expired",
+                            "candidate_not_active",
+                        }
                     )
                 )
                 if (
@@ -1185,11 +1220,7 @@ class V16BrainOrchestratorService:
                              AND NOT (
                                  claim_status='cancelled'
                                  AND (
-                                     failure_reason='authority_expired'
-                                     OR (
-                                         failure_reason='candidate_not_active'
-                                         AND last_release_reason='governance_transaction_aborted'
-                                     )
+                                     failure_reason IN ('authority_expired', 'candidate_not_active')
                                  )
                              )
                            ORDER BY created_at DESC

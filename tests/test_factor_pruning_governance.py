@@ -410,8 +410,8 @@ def test_factor_pruning_governance_bridge_binds_governance_eligibility(monkeypat
     assert proposed[3] == "downweight"
     assert proposed[4] == "proposed"
     assert "factor_pruning_governance" in proposed[5]
-    assert candidate[0] == "submitted_to_policy_suggestion"
-    assert candidate[1] == "submitted"
+    assert candidate[0] == "bridge_pending"
+    assert candidate[1] == "bridge_pending"
     assert candidate[2] == proposed[0]
     reviewed = RuleEvolutionGovernor(str(db_path)).review_pending()
 

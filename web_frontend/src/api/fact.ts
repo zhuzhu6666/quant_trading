@@ -176,12 +176,14 @@ export function factIsKnown(fact: FactEnvelope, requestFailed = false): boolean 
   return !requestFailed && fact.state === "known";
 }
 
-export type FactBoundTone = "ok" | "warn" | "bad" | "mute" | "pending";
+export type FactBoundTone = "ok" | "warn" | "bad" | "mute" | "pending" | "stale";
 
 /**
  * Preserve the business tone for retained values, but never render a green
  * success state unless the endpoint fact is currently known. Pending freshness
  * is separate from a business warning so the UI never says "正常" in yellow.
+ * A retained-but-expired value is useful context, but must be marked stale
+ * rather than presented as if the endpoint never returned data.
  * React Query may keep the previous payload after a refetch failure, so request
  * failure is an explicit input instead of being inferred from the cached envelope.
  */
@@ -191,6 +193,7 @@ export function factBoundTone(
   requestFailed = false,
 ): FactBoundTone {
   if (requestFailed || fact.state === "error") return "bad";
+  if (tone === "ok" && fact.state === "stale") return "stale";
   if (tone === "ok" && fact.state !== "known") return "pending";
   return tone;
 }

@@ -10,6 +10,7 @@ from typing import Any
 
 from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.review_contract import review_has_system_contamination
@@ -486,6 +487,12 @@ class RuleEvolutionGovernor:
                                 row["suggestion_id"],
                             ),
                         )
+                        sync_candidate_suggestion_lifecycle(
+                            conn,
+                            suggestion_id=str(row["suggestion_id"] or ""),
+                            suggestion_status="rejected",
+                            now=now,
+                        )
                         rejected += 1
                         continue
                     status = "proposed"
@@ -536,6 +543,12 @@ class RuleEvolutionGovernor:
                         """,
                         (status, now, note, row["suggestion_id"]),
                     )
+                    sync_candidate_suggestion_lifecycle(
+                        conn,
+                        suggestion_id=str(row["suggestion_id"] or ""),
+                        suggestion_status=status,
+                        now=now,
+                    )
                     continue
 
                 stats_version = str(stats["governance_eligibility_version"] or "")
@@ -563,6 +576,12 @@ class RuleEvolutionGovernor:
                         WHERE suggestion_id=?
                         """,
                         (now, note, "eligibility_contract_invalid", row["suggestion_id"]),
+                    )
+                    sync_candidate_suggestion_lifecycle(
+                        conn,
+                        suggestion_id=str(row["suggestion_id"] or ""),
+                        suggestion_status="rejected",
+                        now=now,
                     )
                     rejected += 1
                     continue
@@ -653,6 +672,12 @@ class RuleEvolutionGovernor:
                     """,
                     (status, now, note, row["suggestion_id"]),
                 )
+                sync_candidate_suggestion_lifecycle(
+                    conn,
+                    suggestion_id=str(row["suggestion_id"] or ""),
+                    suggestion_status=status,
+                    now=now,
+                )
         conflict_result = self.resolve_conflicts()
         return {
             "approved": approved,
@@ -669,7 +694,9 @@ class RuleEvolutionGovernor:
                 conn,
                 """
                 SELECT suggestion_id, scope_type, scope_key, action, confidence,
-                       evidence_json, status, reviewed_at, created_at
+                       evidence_json, status, reviewed_at, created_at,
+                       governance_eligible, governance_eligibility_version,
+                       governance_eligibility_fingerprint, applied_mutation_id
                 FROM policy_suggestion
                 WHERE status IN ('proposed', 'approved')
                 ORDER BY created_at ASC
@@ -690,6 +717,12 @@ class RuleEvolutionGovernor:
                         str(item.get("reason") or "superseded by governance conflict resolver"),
                         str(item.get("suggestion_id") or ""),
                     ),
+                )
+                sync_candidate_suggestion_lifecycle(
+                    conn,
+                    suggestion_id=str(item.get("suggestion_id") or ""),
+                    suggestion_status="superseded",
+                    now=now,
                 )
         return {
             "winners": len(result.get("winners", [])),
@@ -775,6 +808,12 @@ class RuleEvolutionGovernor:
                         """,
                         (now, note, row["suggestion_id"]),
                     )
+                    sync_candidate_suggestion_lifecycle(
+                        conn,
+                        suggestion_id=str(row["suggestion_id"] or ""),
+                        suggestion_status="rolled_back",
+                        now=now,
+                    )
                     rolled_back += 1
                 else:
                     kept += 1
@@ -784,13 +823,20 @@ class RuleEvolutionGovernor:
         if status not in {"approved", "rejected", "rolled_back", "proposed", "superseded"}:
             raise ValueError(f"unsupported status: {status}")
         with self._conn() as conn:
+            now = time.time()
             cur = self._execute(conn,
                 """
                 UPDATE policy_suggestion
                 SET status=?, reviewed_at=?, review_note=?
                 WHERE suggestion_id=?
                 """,
-                (status, time.time(), note, suggestion_id),
+                (status, now, note, suggestion_id),
+            )
+            sync_candidate_suggestion_lifecycle(
+                conn,
+                suggestion_id=suggestion_id,
+                suggestion_status=status,
+                now=now,
             )
             return cur.rowcount > 0
 

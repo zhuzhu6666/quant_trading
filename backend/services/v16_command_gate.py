@@ -22,6 +22,10 @@ from backend.core.db import (
     state_table_exists,
 )
 from backend.services._brain_helpers import connect, execute, loads, safe_float
+from backend.services.brain_governance_candidates import (
+    CANDIDATE_EXECUTION_PENDING_STATUSES,
+    CANDIDATE_REVIEWABLE_STATUSES,
+)
 
 
 class V16CommandGate:
@@ -64,6 +68,8 @@ class V16CommandGate:
             "command_state_machine": ["available", "claimed", "finalized"],
             "apply_count_increments_on_finalize_only": True,
             "evidence_binding_supported": True,
+            "candidate_lifecycle_binding": True,
+            "factor_authorization_granularity": "run_batch_fixed_manifest",
             "fail_closed_when_command_missing": True,
             "does_not_mutate_runtime": True,
             "does_not_submit_orders": True,
@@ -185,6 +191,8 @@ class V16CommandGate:
                     now=now,
                     max_age_seconds=age_limit,
                 ):
+                    continue
+                if not cls._candidate_binding_is_valid(conn, item):
                     continue
                 if not cls._scope_matches(item, scope_type=scope_type, scope_key=scope_key):
                     continue
@@ -312,6 +320,8 @@ class V16CommandGate:
             for row in rows:
                 item = {key: row[key] for key in row.keys()} if hasattr(row, "keys") else dict(row)
                 if not cls.is_actionable(item, now=now):
+                    continue
+                if not cls._candidate_binding_is_valid(conn, item):
                     continue
                 if not cls._scope_matches(item, scope_type=scope_type, scope_key=scope_key):
                     continue
@@ -497,6 +507,7 @@ class V16CommandGate:
         candidate_id: str = "",
         posterior_fingerprint: str = "",
         evidence_fingerprint: str = "",
+        mutation_id: str = "",
         now: float | None = None,
     ) -> dict[str, Any]:
         """Revalidate all delegation bindings inside the mutation transaction."""
@@ -515,6 +526,12 @@ class V16CommandGate:
             return cls._blocked("v16_command_claim_not_found", command_id=command_id)
         item = {key: row[key] for key in row.keys()} if hasattr(row, "keys") else dict(row)
         current_time = float(now if now is not None else time.time())
+        if not cls._candidate_binding_is_valid(
+            conn,
+            item,
+            mutation_id=mutation_id,
+        ):
+            return cls._blocked("v16_command_candidate_binding_invalid", command_id=command_id)
         if str(item.get("claim_status") or "") != "claimed":
             return cls._blocked("v16_command_not_claimed", command_id=command_id)
         if str(item.get("claim_token") or "") != str(claim_token):
@@ -803,6 +820,67 @@ class V16CommandGate:
         """Return V16-owned issuance time, never mutable claim timestamps."""
         return safe_float(row.get("authority_issued_at")) or safe_float(
             row.get("created_at")
+        )
+
+    @classmethod
+    def _candidate_binding_is_valid(
+        cls,
+        conn: Any,
+        row: dict[str, Any],
+        *,
+        mutation_id: str = "",
+    ) -> bool:
+        """Validate linked candidate lifecycle without constraining synthetic commands.
+
+        Factor batch commands and other specialist commands may use a
+        preflight identifier without a brain candidate row.  When a row does
+        exist, terminal candidates or superseded bridges must never be
+        claimable, even if command cleanup has not run yet.
+        """
+        candidate_id = str(row.get("candidate_id") or "")
+        if not candidate_id or not state_table_exists(conn, "brain_governance_candidate"):
+            return True
+        candidate = execute(
+            conn,
+            """SELECT status, submitted_suggestion_id
+               FROM brain_governance_candidate
+               WHERE candidate_id=?
+               LIMIT 1""",
+            (candidate_id,),
+        ).fetchone()
+        if not candidate:
+            # Synthetic specialist command; it is still protected by its
+            # command evidence and mutation transaction.
+            return True
+        status = str(candidate["status"] or "")
+        suggestion_id = str(candidate["submitted_suggestion_id"] or "")
+        if status in CANDIDATE_REVIEWABLE_STATUSES and not suggestion_id:
+            return True
+        if status not in CANDIDATE_EXECUTION_PENDING_STATUSES and status != "applied":
+            return False
+        if not suggestion_id or not state_table_exists(conn, "policy_suggestion"):
+            return False
+        columns = set(state_table_columns(conn, "policy_suggestion"))
+        required = {"status", "governance_eligible", "applied_mutation_id"}
+        if not required.issubset(columns):
+            return False
+        suggestion = execute(
+            conn,
+            """SELECT status, governance_eligible, applied_mutation_id
+               FROM policy_suggestion
+               WHERE suggestion_id=?
+               LIMIT 1""",
+            (suggestion_id,),
+        ).fetchone()
+        suggestion_status = str(suggestion["status"] or "") if suggestion else ""
+        suggestion_mutation_id = str(suggestion["applied_mutation_id"] or "") if suggestion else ""
+        if suggestion_status == "applied":
+            return bool(mutation_id and suggestion_mutation_id == str(mutation_id))
+        return bool(
+            suggestion
+            and suggestion_status in {"proposed", "approved"}
+            and int(suggestion["governance_eligible"] or 0) == 1
+            and not suggestion_mutation_id
         )
 
     @classmethod

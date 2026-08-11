@@ -30,6 +30,10 @@ def _active_discovered_config(expression="ts_mean(close, 5)"):
         "definition_fingerprint": fingerprint,
         "artifact_hash": fingerprint,
         "weight": 0.1,
+        "role": "alpha",
+        "direction": 1,
+        "activation_canary": True,
+        "admission_evidence_version": "factor_admission_evidence.v1",
     }
 
 def _make_bar(close=4500.0, open_=4495.0, high=4505.0, low=4490.0,

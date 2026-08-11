@@ -160,6 +160,7 @@ def classify_governance_risk(before: Mapping[str, Any], target: Mapping[str, Any
         "demo_canary": 0,
         "demo_active": 0,
         "quarantined": 1,
+        "retired": 2,
     }
     autonomy_mode_rank = {
         "manual": 0,
@@ -1033,6 +1034,7 @@ class GovernanceMutationCoordinator:
                     candidate_id=str(plan.v16_candidate_id or ""),
                     posterior_fingerprint=str(plan.v16_posterior_fingerprint or ""),
                     evidence_fingerprint=str(reserved.get("evidence_fingerprint") or ""),
+                    mutation_id=mutation_id,
                 )
                 if not validation.get("allowed"):
                     raise GovernanceMutationError(str(validation.get("status") or "v16_claim_binding_failed"))

@@ -649,6 +649,7 @@ def test_build_open_trade_risk_context_payload_preserves_live_shape():
             max_position_count=4,
             max_position_api_volume=1200.0,
             pyramid_enabled=False,
+            risk_max_daily_loss_pct=5.0,
             risk_loss_cooldown_after_losses=2,
             risk_loss_cooldown_bars=5,
             risk_block_on_disk_critical=False,

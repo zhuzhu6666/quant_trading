@@ -213,6 +213,14 @@ def test_versioned_state_migration_executes_in_disposable_pg_temp_schema() -> No
                         created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
                     )"""
                 )
+            elif table == "decision_factor_snapshot":
+                conn.execute(
+                    """CREATE TEMP TABLE decision_factor_snapshot (
+                        id BIGSERIAL PRIMARY KEY,
+                        decision_id TEXT NOT NULL DEFAULT '',
+                        factor TEXT NOT NULL DEFAULT ''
+                    )"""
+                )
             elif table == "factor_catalog_snapshot":
                 conn.execute(
                     """CREATE TEMP TABLE factor_catalog_snapshot (

@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 import { StatusPill } from "@/components/StatusPill";
 
-export type Tone = "ok" | "warn" | "bad" | "mute" | "pending";
+export type Tone = "ok" | "warn" | "bad" | "mute" | "pending" | "stale";
 
 export function hasDisplayValue(value: ReactNode): boolean {
   if (value === null || value === undefined || value === false) return false;
@@ -14,7 +14,8 @@ export function toneFromStatus(status: string): Tone {
   const normalized = status.toLowerCase();
   if (["ok", "healthy", "connected", "ready", "running", "active", "online"].includes(normalized)) return "ok";
   if (["degraded", "unknown", "idle", "warming", "limited", "warn"].includes(normalized)) return "warn";
-  if (["error", "failed", "blocked", "down", "offline", "missing", "stale"].includes(normalized)) return "bad";
+  if (["error", "failed", "blocked", "down", "offline", "missing"].includes(normalized)) return "bad";
+  if (normalized === "stale") return "stale";
   return "mute";
 }
 
@@ -45,7 +46,7 @@ export function StatTile({
         <span>{label}</span>
       </div>
       <div className="stat-value">{value}</div>
-      {hasDisplayValue(detail) || tone === "pending" ? <div className="stat-detail">{detail}{hasDisplayValue(detail) && tone === "pending" ? " · " : null}{tone === "pending" ? "数据待确认" : null}</div> : null}
+      {hasDisplayValue(detail) || tone === "pending" || tone === "stale" ? <div className="stat-detail">{detail}{hasDisplayValue(detail) && (tone === "pending" || tone === "stale") ? " · " : null}{tone === "pending" ? "数据待确认" : tone === "stale" ? "数据已过期" : null}</div> : null}
     </div>
   );
 }
@@ -78,7 +79,7 @@ export function CompactMetric({
     <div className={`compact-metric compact-metric-${tone} ${className}`.trim()}>
       <span>{label}</span>
       <strong>{value}</strong>
-      {hasDisplayValue(detail) || tone === "pending" ? <small>{detail}{hasDisplayValue(detail) && tone === "pending" ? " · " : null}{tone === "pending" ? "数据待确认" : null}</small> : null}
+      {hasDisplayValue(detail) || tone === "pending" || tone === "stale" ? <small>{detail}{hasDisplayValue(detail) && (tone === "pending" || tone === "stale") ? " · " : null}{tone === "pending" ? "数据待确认" : tone === "stale" ? "数据已过期" : null}</small> : null}
     </div>
   );
 }
@@ -99,7 +100,7 @@ export function ProgressMetric({
     <div className={`progress-metric progress-${tone}`}>
       <div><span>{label}</span><strong>{safeValue.toFixed(0)}%</strong></div>
       <i aria-hidden="true"><b style={{ width: `${safeValue}%` }} /></i>
-      {detail || tone === "pending" ? <small>{detail}{detail && tone === "pending" ? " · " : null}{tone === "pending" ? "数据待确认" : null}</small> : null}
+      {detail || tone === "pending" || tone === "stale" ? <small>{detail}{detail && (tone === "pending" || tone === "stale") ? " · " : null}{tone === "pending" ? "数据待确认" : tone === "stale" ? "数据已过期" : null}</small> : null}
     </div>
   );
 }

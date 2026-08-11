@@ -7,13 +7,26 @@ import os
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, state_table_columns, state_table_exists
+from backend.core.db import STATE_DB, is_state_db_path, state_table_columns, state_table_exists
 from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 
 
 BRIDGE_READY_STAGES = {"governance_ready", "applyable"}
+
+# These sets form the shared candidate lifecycle contract.  In particular,
+# ``submitted`` remains a legacy read value, while new bridges use explicit
+# bridge_pending/awaiting_execution states.
+CANDIDATE_REVIEWABLE_STATUSES = frozenset(
+    {"active", "brain_candidate", "governance_ready", "applyable", "candidate_materialized"}
+)
+CANDIDATE_EXECUTION_PENDING_STATUSES = frozenset(
+    {"bridge_pending", "awaiting_execution", "submitted"}
+)
+CANDIDATE_TERMINAL_STATUSES = frozenset(
+    {"applied", "superseded", "rejected", "expired", "no_op"}
+)
 
 
 def is_v16_candidate_bridge_evidence(evidence: dict[str, Any] | None) -> bool:
@@ -25,6 +38,83 @@ def is_v16_candidate_bridge_evidence(evidence: dict[str, Any] | None) -> bool:
         and str(payload.get("source_agent") or "") == "v16_brain"
         and str(bridge.get("command_owner") or "") == "v16_brain"
     )
+
+
+def sync_candidate_suggestion_lifecycle(
+    conn: Any,
+    *,
+    suggestion_id: str,
+    suggestion_status: str,
+    applied_mutation_id: str = "",
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Project a policy-suggestion transition onto its linked candidate.
+
+    The policy queue remains the downstream governance authority.  This
+    helper only keeps the candidate audit lane aligned and never revives a
+    terminal candidate.
+    """
+    suggestion_id = str(suggestion_id or "")
+    if not suggestion_id or not state_table_exists(conn, "brain_governance_candidate"):
+        return {"ok": True, "status": "candidate_table_unavailable", "changed": False}
+    row = _execute(
+        conn,
+        """SELECT candidate_id, status
+           FROM brain_governance_candidate
+           WHERE submitted_suggestion_id=?
+           LIMIT 1""",
+        (suggestion_id,),
+    ).fetchone()
+    if not row:
+        return {"ok": True, "status": "candidate_not_linked", "changed": False}
+
+    normalized = str(suggestion_status or "").lower()
+    mutation_id = str(applied_mutation_id or "")
+    if mutation_id:
+        candidate_status, proposal_stage = "applied", "applied"
+    elif normalized == "applied":
+        # An applied label without a committed mutation is not proof of
+        # runtime change; quarantine the candidate as an incomplete bridge.
+        candidate_status, proposal_stage = "superseded", "applied_without_committed_mutation"
+    elif normalized == "proposed":
+        candidate_status, proposal_stage = "bridge_pending", "bridge_pending"
+    elif normalized == "approved":
+        candidate_status, proposal_stage = "awaiting_execution", "awaiting_execution"
+    elif normalized in {"superseded", "rolled_back", "invalidated_evidence"}:
+        candidate_status, proposal_stage = "superseded", "superseded_by_governance"
+    elif normalized == "rejected":
+        candidate_status, proposal_stage = "rejected", "rejected_by_governance"
+    else:
+        return {"ok": True, "status": "candidate_lifecycle_unchanged", "changed": False}
+
+    current_status = str(row["status"] or "")
+    if current_status in CANDIDATE_TERMINAL_STATUSES and candidate_status != current_status:
+        return {
+            "ok": True,
+            "status": "candidate_terminal_state_preserved",
+            "candidate_id": str(row["candidate_id"] or ""),
+            "changed": False,
+        }
+    changed = _execute(
+        conn,
+        """UPDATE brain_governance_candidate
+           SET proposal_stage=?, status=?, updated_at=?
+           WHERE candidate_id=?
+             AND status NOT IN ('applied', 'superseded', 'rejected', 'expired', 'no_op')""",
+        (
+            proposal_stage,
+            candidate_status,
+            float(now if now is not None else time.time()),
+            str(row["candidate_id"] or ""),
+        ),
+    )
+    return {
+        "ok": True,
+        "status": candidate_status,
+        "candidate_id": str(row["candidate_id"] or ""),
+        "changed": int(getattr(changed, "rowcount", 0) or 0) == 1,
+    }
+
 
 def ensure_brain_governance_candidate_table(db_path: str | Path = STATE_DB) -> None:
     conn = _connect(db_path)
@@ -131,6 +221,12 @@ class BrainGovernanceCandidateService:
             "demo_nursery_bridge_stays_in_existing_governance_services": True,
             "bridge_requires_existing_governor_compatible_payload": True,
             "bridge_ready_stages": sorted(BRIDGE_READY_STAGES),
+            "candidate_lifecycle": {
+                "reviewable": sorted(CANDIDATE_REVIEWABLE_STATUSES),
+                "execution_pending": sorted(CANDIDATE_EXECUTION_PENDING_STATUSES),
+                "terminal": sorted(CANDIDATE_TERMINAL_STATUSES),
+            },
+            "bridge_transaction_atomic": True,
         }
 
     @staticmethod
@@ -181,7 +277,10 @@ class BrainGovernanceCandidateService:
         except Exception:
             candidate_ttl = 86400.0
         effective_expires_at = _safe_float(expires_at)
-        if effective_expires_at <= 0.0 and str(status or "active") not in {"submitted", "superseded", "rejected"}:
+        if effective_expires_at <= 0.0 and str(status or "active") not in {
+            *CANDIDATE_EXECUTION_PENDING_STATUSES,
+            *CANDIDATE_TERMINAL_STATUSES,
+        }:
             effective_expires_at = created_at + candidate_ttl
         agent_context = self._agent_generation_context(
             source_agent=source_agent,
@@ -281,6 +380,82 @@ class BrainGovernanceCandidateService:
                 "boundary": {"pre_generation_context_only": True},
             }
 
+    def reconcile_submitted_bridges(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        """Reconcile legacy submitted rows from the downstream suggestion state.
+
+        This is a service-backed repair projection for rows created before the
+        explicit lifecycle.  It never activates a candidate: missing or
+        terminal bridges are closed, while proposed/approved/applied bridges
+        are projected to the corresponding pending/terminal state.
+        """
+        ensure_brain_governance_candidate_table(self.db_path)
+        ensure_policy_suggestion_table(self.db_path)
+        current = float(now if now is not None else time.time())
+        conn = _connect(self.db_path)
+        try:
+            if not state_table_exists(conn, "policy_suggestion"):
+                return {
+                    "ok": True,
+                    "schema_version": "brain_governance_candidate_bridge_reconcile.v1",
+                    "reconciled_count": 0,
+                    "missing_bridge_count": 0,
+                }
+            rows = _execute(
+                conn,
+                """SELECT candidate.candidate_id,
+                          candidate.submitted_suggestion_id,
+                          candidate.status,
+                          suggestion.status AS suggestion_status,
+                          suggestion.applied_mutation_id
+                   FROM brain_governance_candidate candidate
+                   LEFT JOIN policy_suggestion suggestion
+                     ON suggestion.suggestion_id=candidate.submitted_suggestion_id
+                   WHERE candidate.status IN ('bridge_pending', 'awaiting_execution', 'submitted')
+                   ORDER BY candidate.updated_at ASC
+                   LIMIT ?""",
+                (max(1, min(int(limit), 5000)),),
+            ).fetchall()
+            reconciled = 0
+            missing = 0
+            for row in rows:
+                suggestion_id = str(row["submitted_suggestion_id"] or "")
+                if not suggestion_id or not row["suggestion_status"]:
+                    changed = _execute(
+                        conn,
+                        """UPDATE brain_governance_candidate
+                           SET status='superseded', proposal_stage='bridge_missing', updated_at=?
+                           WHERE candidate_id=?
+                             AND status IN ('bridge_pending', 'awaiting_execution', 'submitted')""",
+                        (current, str(row["candidate_id"] or "")),
+                    )
+                    if int(getattr(changed, "rowcount", 0) or 0) == 1:
+                        missing += 1
+                        reconciled += 1
+                    continue
+                result = sync_candidate_suggestion_lifecycle(
+                    conn,
+                    suggestion_id=suggestion_id,
+                    suggestion_status=str(row["suggestion_status"] or ""),
+                    applied_mutation_id=str(row["applied_mutation_id"] or ""),
+                    now=current,
+                )
+                if result.get("changed"):
+                    reconciled += 1
+            conn.commit()
+            return {
+                "ok": True,
+                "schema_version": "brain_governance_candidate_bridge_reconcile.v1",
+                "reconciled_count": reconciled,
+                "missing_bridge_count": missing,
+            }
+        finally:
+            conn.close()
+
     def reconcile_expired_candidates(
         self,
         *,
@@ -300,8 +475,8 @@ class BrainGovernanceCandidateService:
             ttl = 86400.0
         conn = _connect(self.db_path)
         try:
-            active_statuses = (
-                "active", "brain_candidate", "governance_ready", "applyable", "candidate_materialized"
+            active_statuses = tuple(
+                sorted(CANDIDATE_REVIEWABLE_STATUSES | CANDIDATE_EXECUTION_PENDING_STATUSES)
             )
             placeholders = ",".join("?" for _ in active_statuses)
             _execute(
@@ -354,6 +529,7 @@ class BrainGovernanceCandidateService:
         limit: int = 50,
         status: str = "",
         include_expired: bool = False,
+        include_execution_pending: bool = False,
     ) -> dict[str, Any]:
         ensure_brain_governance_candidate_table(self.db_path)
         limit = max(1, min(int(limit), 200))
@@ -367,9 +543,11 @@ class BrainGovernanceCandidateService:
                 clauses.append("status = ?")
                 params.append(status)
             else:
-                clauses.append(
-                    "status IN ('active', 'brain_candidate', 'governance_ready', 'applyable', 'candidate_materialized')"
-                )
+                statuses = set(CANDIDATE_REVIEWABLE_STATUSES)
+                if include_execution_pending:
+                    statuses.update(CANDIDATE_EXECUTION_PENDING_STATUSES)
+                status_sql = "', '".join(sorted(statuses))
+                clauses.append(f"status IN ('{status_sql}')")
             if not include_expired:
                 clauses.append("(expires_at<=0 OR expires_at>?)")
                 params.append(time.time())
@@ -481,14 +659,54 @@ class BrainGovernanceCandidateService:
         }
 
     def status(self, *, limit: int = 50) -> dict[str, Any]:
-        latest = self.latest_candidates(limit=limit)
+        latest = self.latest_candidates(limit=limit, include_execution_pending=True)
         items = list(latest.get("items") or [])
+        reviewable_count = sum(
+            1 for item in items
+            if str(item.get("status") or "") in CANDIDATE_REVIEWABLE_STATUSES
+        )
+        pending_items = [
+            item for item in items
+            if str(item.get("status") or "") in CANDIDATE_EXECUTION_PENDING_STATUSES
+        ]
+        valid_pending_ids: set[str] = set()
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            if (
+                pending_items
+                and state_table_exists(conn, "policy_suggestion")
+                and {"status", "governance_eligible", "applied_mutation_id"}.issubset(
+                    set(state_table_columns(conn, "policy_suggestion"))
+                )
+            ):
+                rows = _execute(
+                    conn,
+                    """SELECT candidate.candidate_id
+                       FROM brain_governance_candidate candidate
+                       JOIN policy_suggestion suggestion
+                         ON suggestion.suggestion_id=candidate.submitted_suggestion_id
+                       WHERE candidate.status IN ('bridge_pending', 'awaiting_execution', 'submitted')
+                         AND suggestion.status IN ('proposed', 'approved')
+                         AND COALESCE(suggestion.governance_eligible, 0)=1
+                         AND COALESCE(suggestion.applied_mutation_id, '')=''""",
+                ).fetchall()
+                valid_pending_ids = {str(row["candidate_id"] or "") for row in rows}
+        finally:
+            conn.close()
+        execution_pending_count = sum(
+            1 for item in pending_items
+            if str(item.get("candidate_id") or "") in valid_pending_ids
+        )
+        invalid_pending_count = max(0, len(pending_items) - execution_pending_count)
         if not items:
             return {
                 "ok": False,
                 "schema_version": "brain_governance_candidate_readiness.v1",
                 "status": latest.get("status", "missing_candidates"),
                 "candidate_count": 0,
+                "reviewable_candidate_count": 0,
+                "execution_pending_count": 0,
+                "bridge_reconciliation_required_count": 0,
                 "candidate_lane_isolated": True,
                 "policy_suggestion_bridge_manual_only": self._manual_bridge_only(),
                 "demo_nursery_system_bridge_enabled": not self._manual_bridge_only(),
@@ -504,8 +722,17 @@ class BrainGovernanceCandidateService:
         return {
             "ok": True,
             "schema_version": "brain_governance_candidate_readiness.v1",
-            "status": "available",
+            "status": (
+                "execution_pending"
+                if reviewable_count == 0 and execution_pending_count
+                else "bridge_reconciliation_required"
+                if reviewable_count == 0 and invalid_pending_count
+                else "available"
+            ),
             "candidate_count": len(items),
+            "reviewable_candidate_count": reviewable_count,
+            "execution_pending_count": execution_pending_count,
+            "bridge_reconciliation_required_count": invalid_pending_count,
             "latest_created_at": max(_safe_float(item.get("created_at")) for item in items),
             "stages": dict(sorted(stages.items())),
             "statuses": dict(sorted(statuses.items())),
@@ -588,7 +815,46 @@ class BrainGovernanceCandidateService:
         now = time.time()
         conn = _connect(self.db_path)
         try:
-            _execute(
+            # Bridge creation is a lifecycle handoff, not two independent
+            # writes.  Serialize the candidate row before creating the
+            # suggestion so a scheduler retry cannot create an orphaned
+            # command/suggestion pair.
+            if is_state_db_path(self.db_path):
+                _execute(conn, "SELECT pg_advisory_xact_lock(821640243)")
+            else:
+                conn.execute("BEGIN IMMEDIATE")
+            current_row = _execute(
+                conn,
+                """SELECT status, submitted_suggestion_id, proposal_stage
+                   FROM brain_governance_candidate
+                   WHERE candidate_id=?
+                   LIMIT 1""",
+                (candidate_id,),
+            ).fetchone()
+            if not current_row:
+                conn.rollback()
+                return {
+                    "ok": False,
+                    "schema_version": "brain_governance_candidate_submit.v1",
+                    "status": "missing_candidate",
+                    "candidate_id": candidate_id,
+                }
+            existing_suggestion_id = str(current_row["submitted_suggestion_id"] or "")
+            if existing_suggestion_id:
+                conn.commit()
+                current = self.load_candidate(candidate_id) or candidate
+                return {
+                    "ok": True,
+                    "schema_version": "brain_governance_candidate_submit.v1",
+                    "status": "already_submitted",
+                    "candidate": current,
+                    "suggestion_id": existing_suggestion_id,
+                    "boundary": self.boundary(),
+                }
+            if str(current_row["status"] or "") not in CANDIDATE_REVIEWABLE_STATUSES:
+                conn.rollback()
+                return self._blocked_submit(candidate, "candidate_not_active")
+            inserted = _execute(
                 conn,
                 """
                 INSERT INTO policy_suggestion
@@ -598,6 +864,7 @@ class BrainGovernanceCandidateService:
                  governance_eligibility_fingerprint, governance_ineligible_reason,
                  created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', 0, '', 1, ?, ?, '', ?)
+                ON CONFLICT(suggestion_id) DO NOTHING
                 """,
                 (
                     suggestion_id,
@@ -612,20 +879,51 @@ class BrainGovernanceCandidateService:
                     now,
                 ),
             )
-            _execute(
+            if int(getattr(inserted, "rowcount", 0) or 0) != 1:
+                conn.rollback()
+                current = self.load_candidate(candidate_id) or candidate
+                if current.get("submitted_suggestion_id"):
+                    return {
+                        "ok": True,
+                        "schema_version": "brain_governance_candidate_submit.v1",
+                        "status": "already_submitted",
+                        "candidate": current,
+                        "suggestion_id": current.get("submitted_suggestion_id", ""),
+                        "boundary": self.boundary(),
+                    }
+                return self._blocked_submit(candidate, "bridge_conflict_retry")
+            updated = _execute(
                 conn,
                 """
                 UPDATE brain_governance_candidate
-                SET proposal_stage='submitted_to_policy_suggestion',
-                    status='submitted',
+                SET proposal_stage='bridge_pending',
+                    status='bridge_pending',
                     submitted_suggestion_id=?,
                     submitted_at=?,
                     updated_at=?
                 WHERE candidate_id=?
+                  AND status IN ('active', 'brain_candidate', 'governance_ready', 'applyable', 'candidate_materialized')
+                  AND COALESCE(submitted_suggestion_id, '')=''
                 """,
                 (suggestion_id, now, now, candidate_id),
             )
+            if int(getattr(updated, "rowcount", 0) or 0) != 1:
+                conn.rollback()
+                current = self.load_candidate(candidate_id) or candidate
+                if current.get("submitted_suggestion_id"):
+                    return {
+                        "ok": True,
+                        "schema_version": "brain_governance_candidate_submit.v1",
+                        "status": "already_submitted",
+                        "candidate": current,
+                        "suggestion_id": current.get("submitted_suggestion_id", ""),
+                        "boundary": self.boundary(),
+                    }
+                return self._blocked_submit(candidate, "candidate_not_active")
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -715,7 +1013,10 @@ class BrainGovernanceCandidateService:
                     source_ref_type=excluded.source_ref_type,
                     source_ref_id=excluded.source_ref_id,
                     proposal_stage=CASE
-                        WHEN brain_governance_candidate.status IN ('submitted', 'superseded', 'rejected')
+                        WHEN brain_governance_candidate.status IN (
+                            'bridge_pending', 'awaiting_execution', 'submitted',
+                            'applied', 'superseded', 'rejected', 'expired', 'no_op'
+                        )
                         THEN brain_governance_candidate.proposal_stage
                         ELSE excluded.proposal_stage
                     END,

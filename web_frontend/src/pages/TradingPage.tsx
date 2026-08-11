@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, Gauge, Play, PowerOff, RefreshCw, RotateCcw, ShieldAlert, Wallet } from "lucide-react";
 import { ActionButton } from "@/components/ActionButton";
@@ -22,7 +22,7 @@ import {
   startTrading,
   stopTrading,
 } from "@/api/client";
-import { factBoundTone, factHasDisplayValue, factIsKnown, readFact, readFactComponent, readFactNestedComponent } from "@/api/fact";
+import { factBoundTone, factHasDisplayValue, factIsKnown, factStatusLabel, readFact, readFactComponent, readFactNestedComponent } from "@/api/fact";
 import { formatDecimal, formatMoney } from "@/lib/format";
 import {
   asRecord,
@@ -37,6 +37,7 @@ import {
 import { translateDisplayValue } from "@/lib/display";
 import { decodeCanonicalRiskSnapshot, knownMetric } from "@/api/riskSnapshot";
 import { queryKeys } from "@/api/queryKeys";
+import { RiskPanel } from "@/pages/RiskPage";
 
 type PositionRow = {
   symbol: string;
@@ -57,15 +58,6 @@ function optionalNumber(row: Record<string, unknown>, keys: string[]): number | 
   if (raw === null || raw === undefined || raw === "") return null;
   const numeric = Number(raw);
   return Number.isFinite(numeric) ? numeric : null;
-}
-
-function formatOptionalDecimal(
-  row: Record<string, unknown>,
-  keys: string[],
-  digits: number,
-): string {
-  const value = optionalNumber(row, keys);
-  return value === null ? "未知" : formatDecimal(value, digits);
 }
 
 function componentValueAllowed(
@@ -208,6 +200,7 @@ export function TradingPage() {
   const [startBusy, setStartBusy] = useState(false);
   const [stopBusy, setStopBusy] = useState(false);
   const [closeBusy, setCloseBusy] = useState(false);
+  const [stopRequested, setStopRequested] = useState(false);
 
   const loopFact = readFact(loopQuery.data, "live.loop.v2");
   const accountFact = readFact(accountQuery.data, "live.account.v2");
@@ -244,6 +237,13 @@ export function TradingPage() {
   const riskKnown = factIsKnown(riskInputsFact, riskRequestFailed)
     && canonicalRisk.contractKnown
     && knownMetric(canonicalRisk.var95.status);
+  const riskDisplayable = factHasDisplayValue(riskInputsFact) && canonicalRisk.contractKnown;
+  const riskVarDisplayable = riskDisplayable
+    && knownMetric(canonicalRisk.var95.status)
+    && canonicalRisk.var95.varPct !== null;
+  const riskCvarDisplayable = riskDisplayable
+    && knownMetric(canonicalRisk.var95.status)
+    && canonicalRisk.var95.cvarPct !== null;
   const riskHealthKnown = factIsKnown(riskHealthFact, riskRequestFailed);
 
   const loop = asRecord(loopQuery.data);
@@ -341,6 +341,16 @@ export function TradingPage() {
   const loopRunning = pickBoolean(loop, ["running", "is_running", "pipeline_active", "alive", "status"], false);
   const broker = pickString(loop, ["broker", "broker_name", "exchange"], pickString(account, ["broker"], ""));
   const strategy = pickString(loop, ["strategy_name", "strategy", "strategyName", "active_strategy"], "");
+  const loopPhase = pickString(loop, ["phase"], loopRunning ? "running" : "stopped").trim().toLowerCase();
+  const loopDraining = loopPhase === "draining" || pickBoolean(loop, ["draining"], false);
+  const loopStopping = stopRequested || loopDraining;
+  const loopDisplayLabel = loopStopping ? "停止中" : loopRunning ? "运行中" : "未运行";
+  const loopDisplayStatus = `循环${loopDisplayLabel}`;
+  const loopStatusTone = loopKnown && loopRunning && !loopStopping ? "ok" : "warn";
+  const startDisabled = !loopKnown || loopRunning || loopDraining || stopRequested || startBusy;
+  const startConfirmMessage = startFactsKnown
+    ? `将使用 ${broker || "服务端配置"}${strategy ? ` · ${strategy}` : ""} 启动交易循环。请确认账户与风控状态正常。`
+    : `当前部分账户、持仓、风险或行情事实尚未确认。提交后服务端会重新校验，未满足条件时将拒绝启动。将使用 ${broker || "服务端配置"}${strategy ? ` · ${strategy}` : ""}。`;
   const reason = pickString(loop, ["reason", "status", "stop_reason", "message", "state"], loopRunning ? "running" : "");
   const loopPid = pickNumber(loop, ["pid", "process_id", "pid_file"], 0);
   const loopStarted = formatReadableTime(pick(loop, ["started_at", "startedAt", "loop_started_at", "started", "start_time"]));
@@ -370,8 +380,29 @@ export function TradingPage() {
   const session = asRecord(pick(snapshot, ["session_stats", "daily", "session"]));
   const sessionPnl = pickNumber(session, ["pnl_today", "pnl", "session_pnl"], 0);
   const riskSystemHealth = asRecord(pick(risk, ["system_health"]));
-  const totalRisk = riskKnown ? canonicalRisk.var95.varPct : null;
+  const totalRisk = riskVarDisplayable ? canonicalRisk.var95.varPct : null;
   const circuitBreaker = riskHealthKnown && pickBoolean(riskSystemHealth, ["trading_blocked"], false);
+  const riskFactLabel = factStatusLabel(riskInputsFact);
+  const riskFactTone = riskRequestFailed
+    ? "bad" as const
+    : riskInputsFact.state === "stale"
+      ? "pending" as const
+      : riskKnown
+        ? "mute" as const
+        : "warn" as const;
+  const riskGateLabel = !riskHealthKnown
+    ? "未知"
+    : circuitBreaker
+      ? "阻断"
+      : riskKnown
+        ? "已知"
+        : riskDisplayable && riskInputsFact.state === "stale"
+          ? "已过期"
+          : "待确认";
+  const riskGateTone = circuitBreaker ? "bad" : riskHealthKnown && riskKnown ? "ok" : "warn";
+  const riskGateDetail = riskCvarDisplayable && totalRisk !== null
+    ? `VaR ${formatDecimal(totalRisk, 4)}% · CVaR ${formatDecimal(canonicalRisk.var95.cvarPct, 4)}%${riskInputsFact.state === "stale" ? ` · 最后观测 ${formatReadableTime(riskInputsFact.observed_at)}` : ""}`
+    : `风险事实 ${riskFactLabel}`;
   const consecutiveLoss = pickNumber(session, ["consecutive_loss", "session_consecutive_loss"], 0);
   const attempts = pickNumber(liveExecutionSummary, ["attempts", "attempt_count"], 0);
   const successes = pickNumber(liveExecutionSummary, ["successes", "success", "wire_sends"], 0);
@@ -387,18 +418,30 @@ export function TradingPage() {
   const overallWinRate = pickNumber(factorSummary, ["overall_win_rate"], 0);
   const hasLoopData = factHasDisplayValue(loopFact) && Object.keys(loop).length > 0;
   const hasAccountData = factHasDisplayValue(accountViewFact) && pick(account, ["balance", "equity"]) !== undefined;
+
+  useEffect(() => {
+    if (stopRequested && loopKnown && !loopRunning && !loopDraining) {
+      setStopRequested(false);
+    }
+  }, [loopDraining, loopKnown, loopRunning, stopRequested]);
   const hasPositionData = positionsDisplayable && (positionsQuery.data !== undefined || positions.length > 0);
 
   const refreshAll = async () => {
     await refresh();
-    await queryClient.invalidateQueries({ queryKey: queryKeys.loopStatus });
-    await queryClient.invalidateQueries({ queryKey: queryKeys.account });
-    await queryClient.invalidateQueries({ queryKey: queryKeys.positions });
-    await queryClient.invalidateQueries({ queryKey: queryKeys.liveStatus });
-    await queryClient.invalidateQueries({ queryKey: queryKeys.strategyStatus });
-    await queryClient.invalidateQueries({ queryKey: queryKeys.riskSummary });
-    await queryClient.invalidateQueries({ queryKey: ["factor-v4-stats", "trading"] });
-    await queryClient.invalidateQueries({ queryKey: ["factor-v4-recent-ticks", "trading"] });
+    await Promise.all([
+      queryKeys.loopStatus,
+      queryKeys.account,
+      queryKeys.positions,
+      queryKeys.liveStatus,
+      queryKeys.strategyStatus,
+      queryKeys.riskSummary,
+      queryKeys.riskPolicyVerdicts,
+      queryKeys.riskTradeTraces,
+      queryKeys.dbHealth,
+      queryKeys.readiness,
+      ["factor-v4-stats", "trading"],
+      ["factor-v4-recent-ticks", "trading"],
+    ].map((queryKey) => queryClient.invalidateQueries({ queryKey })));
   };
 
   const runStart = async () => {
@@ -406,6 +449,7 @@ export function TradingPage() {
     setStartBusy(true);
     try {
       await startTrading("ctrader", strategy || "live", true);
+      setStopRequested(false);
       await refreshAll();
     } catch (exc) {
       if (!isStepUpRequiredError(exc)) {
@@ -421,9 +465,13 @@ export function TradingPage() {
     setStopError(null);
     setStopBusy(true);
     try {
-      await stopTrading();
+      const stopResult = await stopTrading();
+      if (pickBoolean(stopResult, ["ok"], true)) {
+        setStopRequested(true);
+      }
       await refreshAll();
     } catch (exc) {
+      setStopRequested(false);
       setStopError(exc instanceof Error ? exc.message : "停止失败");
     } finally {
       setStopBusy(false);
@@ -444,29 +492,34 @@ export function TradingPage() {
   };
 
   return (
-    <section className="dashboard">
+    <section className="dashboard trading-risk-dashboard">
       <div className="dashboard-header">
         <div>
-          <div className="eyebrow">交易台</div>
-          <h1>交易控制与持仓</h1>
-          <p>启动、停止、紧急平仓和持仓监控集中在这一页，所有数值以实时接口为准。</p>
+          <div className="eyebrow">交易与风控</div>
+          <h1>交易控制与风险中枢</h1>
+          <p>循环控制、持仓、开仓门控和权威风险事实集中展示，所有数值以实时接口为准。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={connected ? "WS 实时连接" : "WS 重连中"} tone={connectionTone} />
-          {hasLoopData ? <StatusPill status={loopRunning ? "循环运行中" : "循环未运行"} tone={loopKnown && loopRunning ? "ok" : "warn"} /> : <StatusPill status="循环状态未知" tone="warn" />}
+          <StatusPill
+            status={connected ? "WS 实时连接" : source === "http-fallback" ? "HTTP 快照回退 · WS 重连中" : "WS 连接中"}
+            tone={connectionTone}
+          />
+          {hasLoopData ? <StatusPill status={loopDisplayStatus} tone={loopStatusTone} /> : <StatusPill status="循环状态未知" tone="warn" />}
           <StatusPill status={factHasDisplayValue(statusFact) ? `市场 ${translateDisplayValue(marketStatus)}` : "市场状态未知"} tone={factBoundTone(statusFact, toneFromStatus(marketStatus), statusRequestFailed)} />
           <StatusPill status={broker} tone="mute" />
         </div>
       </div>
 
       <div className="trading-toolbar">
-        <ActionButton icon={Play} label="启动" variant="primary" disabled={!startFactsKnown || loopRunning || startBusy} loading={startBusy} error={startError} confirmTitle="确认启动实盘交易" confirmMessage={`将使用 ${broker || "服务端配置"}${strategy ? ` · ${strategy}` : ""} 启动交易循环。请确认账户与风控状态正常。`} stepUpOnDemand onAction={runStart} />
-        <ActionButton icon={PowerOff} label="停止" variant="danger" disabled={stopBusy} loading={stopBusy} error={stopError} confirmTitle="确认停止交易循环" confirmMessage="停止请求在状态未知时仍可执行；停止后不再产生新订单，已有持仓不会因此自动平仓。" onAction={runStop} />
-        <ActionButton icon={RotateCcw} label="紧急平仓" variant="danger" disabled={closeBusy} loading={closeBusy} error={closeError} confirmTitle="确认紧急平仓" confirmMessage={positionsKnown && unrealized !== null ? `服务端将严格对账当前 ${formatDecimal(positionCount, 0)} 个持仓，当前浮动盈亏 ${formatMoney(unrealized, currency)}。该操作不可撤销。` : "当前持仓事实或浮盈事实未知；紧急操作仍可提交，服务端会先锁定 no_new_risk 并执行 fresh broker 对账。"} onAction={runEmergency} />
-        <button className="action-btn action-ghost refresh-inline" type="button" onClick={() => void refreshAll()}>
-          <RefreshCw size={15} />
-          <span>刷新</span>
-        </button>
+        <div className="trading-actions" aria-label="交易操作">
+          <ActionButton icon={Play} label="启动" variant="primary" disabled={startDisabled} loading={startBusy} error={startError} confirmTitle="确认启动实盘交易" confirmMessage={startConfirmMessage} stepUpOnDemand onAction={runStart} />
+          <ActionButton icon={PowerOff} label={loopStopping ? "停止中" : "停止"} variant="danger" disabled={stopBusy || stopRequested || loopDraining} loading={stopBusy} error={stopError} confirmTitle="确认停止交易循环" confirmMessage="停止请求在状态未知时仍可执行；停止后不再产生新订单，已有持仓不会因此自动平仓。" onAction={runStop} />
+          <ActionButton icon={RotateCcw} label="紧急平仓" variant="danger" disabled={closeBusy} loading={closeBusy} error={closeError} confirmTitle="确认紧急平仓" confirmMessage={positionsKnown && unrealized !== null ? `服务端将严格对账当前 ${formatDecimal(positionCount, 0)} 个持仓，当前浮动盈亏 ${formatMoney(unrealized, currency)}。该操作不可撤销。` : "当前持仓事实或浮盈事实未知；紧急操作仍可提交，服务端会先锁定 no_new_risk 并执行 fresh broker 对账。"} onAction={runEmergency} />
+          <button className="action-btn action-ghost refresh-inline" type="button" onClick={() => void refreshAll()}>
+            <RefreshCw size={15} />
+            <span>刷新</span>
+          </button>
+        </div>
         <FactBoundary fact={accountViewFact} label="账户事实">
           <div className="toolbar-account-strip">
             <span>币种 <strong>{currency}</strong></span>
@@ -479,10 +532,12 @@ export function TradingPage() {
       </div>
 
       <div className="stat-grid">
-        {hasLoopData ? <StatTile icon={Activity} label="交易循环" value={loopRunning ? "运行中" : "未运行"} detail={translateDisplayValue(reason)} tone={loopKnown && loopRunning ? "ok" : "warn"} /> : null}
+        {hasLoopData ? <StatTile icon={Activity} label="交易循环" value={loopDisplayLabel} detail={translateDisplayValue(reason)} tone={loopStatusTone} /> : null}
         {hasAccountData ? <StatTile icon={Wallet} label="账户权益" value={formatMoney(equity, currency)} detail={`余额 ${formatMoney(balance, currency)}`} tone={accountKnown && equity > 0 ? "ok" : accountViewFact.state === "stale" ? "warn" : "mute"} /> : null}
         <StatTile icon={Gauge} label="XAU 现价" value={spotMid > 0 ? formatDecimal(spotMid, 2) : "未知"} detail={spotBid && spotAsk ? `买 ${formatDecimal(spotBid, 2)} · 卖 ${formatDecimal(spotAsk, 2)}${spotObservedAt ? ` · ${spotObservedAt}` : ""}` : spotObservedAt ? `最后观测 ${spotObservedAt}` : "等待 spot 事实"} tone={spotKnown && spotMid > 0 ? "ok" : "warn"} />
         {hasPositionData ? <StatTile icon={ShieldAlert} label="浮动盈亏" value={unrealized === null ? "未知" : formatMoney(unrealized, currency)} detail={`${positionsPnlFact.state === "stale" && pnlObservedAt ? `最后观测 ${pnlObservedAt} · ` : ""}会话 ${formatMoney(sessionPnl, currency)}`} tone={!factIsKnown(positionsPnlFact) || unrealized === null ? "warn" : unrealized > 0 ? "ok" : unrealized < 0 ? "bad" : "mute"} /> : null}
+        <StatTile icon={Gauge} label="CVaR 95%" value={riskCvarDisplayable ? `${formatDecimal(canonicalRisk.var95.cvarPct, 4)}%` : riskFactLabel} detail={riskGateDetail} tone={riskFactTone} />
+        <StatTile icon={ShieldAlert} label="风险面" value={riskGateLabel} detail={riskGateDetail} tone={riskGateTone} />
       </div>
 
       <MetricCard title="运行总览" className="wide-panel trading-status-overview">
@@ -490,7 +545,7 @@ export function TradingPage() {
           <section className="trading-status-section" aria-label="循环摘要">
             <div className="trading-status-head">
               <h3>循环摘要</h3>
-              <StatusPill status={loopRunning ? "运行中" : "未运行"} tone={loopKnown && loopRunning ? "ok" : "warn"} />
+              <StatusPill status={loopDisplayLabel} tone={loopStatusTone} />
             </div>
             <div className="field-list trading-compact-fields">
               <Field label="经纪商" value={broker} />
@@ -543,16 +598,16 @@ export function TradingPage() {
 
           <section className="trading-status-section" aria-label="风控与执行">
             <div className="trading-status-head">
-              <h3>风控与执行</h3>
+              <h3>开仓门控与执行</h3>
               <StatusPill
-                status={riskHealthKnown ? (circuitBreaker ? "健康面阻断" : riskKnown ? "风险输入已知" : "风险输入未知") : "状态未知"}
+                status={riskHealthKnown ? (circuitBreaker ? "健康面阻断" : riskKnown ? "风险输入已知" : riskDisplayable && riskInputsFact.state === "stale" ? "风险输入已过期" : "风险输入待确认") : "状态未知"}
                 tone={circuitBreaker ? "bad" : riskHealthKnown && riskKnown ? "ok" : "warn"}
               />
             </div>
             <div className="field-list trading-compact-fields">
               <Field label="连续亏损" value={formatDecimal(consecutiveLoss, 0)} tone={consecutiveLoss >= 3 ? "warn" : "mute"} />
-              <Field label="前瞻 VaR 95%" value={totalRisk === null ? "未知" : `${formatDecimal(totalRisk, 4)}%`} tone={riskKnown ? "mute" : "warn"} />
-              <Field label="前瞻 CVaR 95%" value={riskKnown && canonicalRisk.var95.cvarPct !== null ? `${formatDecimal(canonicalRisk.var95.cvarPct, 4)}%` : "未知"} tone={riskKnown ? "mute" : "warn"} />
+              <Field label="前瞻 VaR 95%" value={totalRisk === null ? riskFactLabel : `${formatDecimal(totalRisk, 4)}%`} tone={riskFactTone} />
+              <Field label="前瞻 CVaR 95%" value={riskCvarDisplayable ? `${formatDecimal(canonicalRisk.var95.cvarPct, 4)}%` : riskFactLabel} tone={riskFactTone} />
               <Field label="执行尝试" value={formatDecimal(attempts, 0)} />
               <Field label="下单成功" value={formatDecimal(successes, 0)} tone={executionKnown && successes > 0 ? "ok" : successes > 0 ? "pending" : "mute"} />
               <Field label="失败" value={formatDecimal(failures, 0)} tone={failures > 0 ? "bad" : executionKnown ? "ok" : "pending"} />
@@ -573,43 +628,17 @@ export function TradingPage() {
         </div>
       </MetricCard>
 
-      <MetricCard title="最近因子信号 Tick" className="wide-panel">
-        <div className="table-wrap">
-          <table className="mobile-card-table factor-ticks-table">
-            <thead>
-              <tr>
-                <th scope="col">时间</th>
-                <th scope="col">Tick</th>
-                <th scope="col">战术分</th>
-                <th scope="col">宏观分</th>
-                <th scope="col">贡献因子</th>
-                <th scope="col">弃权</th>
-                <th scope="col">决策条件原因</th>
-              </tr>
-            </thead>
-            <tbody>
-              {!factorTicks.length ? (
-                <tr><td colSpan={7} className="empty-state-small">暂无因子 tick</td></tr>
-              ) : null}
-              {factorTicks.slice(0, 8).map((item, index) => {
-                return (
-                  <tr key={`${pickString(item, ["tick"], String(index))}-${index}`}>
-                    <td>{formatReadableTime(pick(item, ["ts", "time"]))}</td>
-                    <td>{formatOptionalDecimal(item, ["tick"], 0)}</td>
-                    <td>{formatOptionalDecimal(item, ["tactical_score", "signal.tactical_score"], 4)}</td>
-                    <td>{formatOptionalDecimal(item, ["macro_score", "signal.macro_score"], 4)}</td>
-                    <td>{formatOptionalDecimal(item, ["n_contributing", "n_contributing_factors", "signal.n_contributing"], 0)}</td>
-                    <td>{formatOptionalDecimal(item, ["n_abstain", "signal.n_abstain"], 0)}</td>
-                    <td>{translateDisplayValue(pickString(item, ["gate_reason", "gate_result.reason"], ""))}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </MetricCard>
-
-      <MetricCard title="持仓表" className="wide-panel">
+      <RiskPanel
+        riskData={riskQuery.data}
+        riskRequestFailed={riskRequestFailed}
+        embedded
+        factorSignals={factorTicks}
+        factorSignalsPending={recentTicksQuery.isPending && !recentTicksQuery.data}
+        factorSignalsRequestFailed={recentTicksQuery.isError || recentTicksQuery.isRefetchError}
+        currentPositionIds={positions.map((item) => item.id)}
+        currentPositionsKnown={positionsKnown}
+        positionsContent={(
+          <MetricCard title="持仓表" className="risk-audit-card risk-position-card">
         <div className="table-wrap">
           <table className="mobile-card-table positions-table">
             <thead>
@@ -658,7 +687,9 @@ export function TradingPage() {
         {positions.length ? (
           <p className="summary-note">{pnlComplete && worstUnrealized !== null && bestUnrealized !== null ? `浮盈区间：${formatMoney(worstUnrealized, currency)} 到 ${formatMoney(bestUnrealized, currency)}` : `浮盈事实${positionsPnlFact.state === "error" ? "读取错误" : "未知"}${pnlObservedAt ? ` · 最后观测 ${pnlObservedAt}` : ""}`}</p>
         ) : null}
-      </MetricCard>
+          </MetricCard>
+        )}
+      />
 
       {wsError || loopQuery.isError || accountQuery.isError || positionsQuery.isError || liveStatusQuery.isError || strategyStatusQuery.isError || riskQuery.isError ? (
         <MetricCard title="错误状态" className="wide-panel">

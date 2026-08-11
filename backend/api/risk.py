@@ -82,6 +82,34 @@ def _coerce_direction(value: Any) -> int:
     return 0
 
 
+def _admission_owner_code(blockers: list[Any]) -> str:
+    owners: list[str] = []
+    for blocker in blockers:
+        code = str(blocker or "").strip().lower()
+        if not code:
+            continue
+        if (
+            "safety" in code
+            or "freshness" in code
+            or "reconcile" in code
+            or code == "no_new_risk_latched"
+        ):
+            owner = "safety"
+        elif (
+            code == "accepting_new_risk_false"
+            or "generation_not_accepting" in code
+            or "loop_stop" in code
+            or "process_shutdown" in code
+            or "session_" in code
+        ):
+            owner = "live_loop"
+        else:
+            owner = "open_admission"
+        if owner not in owners:
+            owners.append(owner)
+    return "+".join(owners) or "open_admission"
+
+
 def _direction_from_policy_payload(action_json: dict[str, Any], verdict: dict[str, Any]) -> int:
     audit_payload = verdict.get("audit_payload") or {}
     if not isinstance(audit_payload, dict):
@@ -197,6 +225,92 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
                 """),
                 (limit,),
             ).fetchall()
+        # A signal can pass the factor gate and still be stopped by the live
+        # open-admission gate before RiskPolicy is called. Those observations
+        # deliberately have no policy_verdict, so keep them as a separate
+        # read-only projection instead of counting them as policy decisions.
+        pre_policy_limit = min(max(limit * 4, limit), 1000)
+        pre_policy_query = """
+            SELECT decision_id, position_id, event_type, symbol, timeframe, decision_ts,
+                   action_reason, action_json, risk_state_json
+            FROM decision_ledger
+            WHERE event_type = 'skip'
+              AND action_json LIKE '%before_candidate%'
+            ORDER BY decision_ts DESC, created_at DESC
+            LIMIT ?
+            """
+        try:
+            pre_policy_rows = conn.execute(
+                _state_sql(pre_policy_query), (pre_policy_limit,)
+            ).fetchall()
+        except Exception as exc:
+            if "position_id" not in str(exc).lower():
+                raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            pre_policy_rows = conn.execute(
+                _state_sql("""
+                SELECT decision_id, '' AS position_id, event_type, symbol, timeframe, decision_ts,
+                       action_reason, action_json, risk_state_json
+                FROM decision_ledger
+                WHERE event_type = 'skip'
+                  AND action_json LIKE '%before_candidate%'
+                ORDER BY decision_ts DESC, created_at DESC
+                LIMIT ?
+                """),
+                (pre_policy_limit,),
+            ).fetchall()
+
+        pre_policy_skips: list[dict[str, Any]] = []
+        for row in pre_policy_rows:
+            action_json = _loads_json(row["action_json"], {})
+            if not isinstance(action_json, dict):
+                continue
+            # These fields are written by build_skip_ledger_payload when
+            # RiskPolicy was not reached. Do not infer this from a missing
+            # verdict: the explicit stage and boolean are the authority.
+            if action_json.get("skip_stage") != "before_candidate":
+                continue
+            if action_json.get("risk_stage") != "not_reached":
+                continue
+            if action_json.get("risk_policy_reached") is not False:
+                continue
+            blockers = action_json.get("blockers") or []
+            if not isinstance(blockers, list):
+                blockers = [blockers]
+            pre_policy_skips.append({
+                "decision_id": row["decision_id"],
+                "position_id": str(row["position_id"] or ""),
+                "event_type": row["event_type"],
+                "symbol": row["symbol"],
+                "timeframe": row["timeframe"],
+                "decision_ts": row["decision_ts"],
+                "action_reason": str(
+                    action_json.get("action_reason")
+                    or row["action_reason"]
+                    or "open_admission_blocked"
+                ),
+                "direction": _coerce_direction(
+                    action_json.get("direction") or action_json.get("side")
+                ),
+                "tick": action_json.get("tick"),
+                "gate_passed": bool(action_json.get("gate_passed", False)),
+                "gate_reason": str(action_json.get("gate_reason") or ""),
+                "skip_stage": "before_candidate",
+                "risk_stage": "not_reached",
+                "risk_policy_reached": False,
+                "admission_gate_passed": bool(
+                    action_json.get("admission_gate_passed", False)
+                ),
+                "blockers": [str(blocker) for blocker in blockers if blocker],
+                "admission_owner": _admission_owner_code(blockers),
+                "execution_intent_created": bool(
+                    action_json.get("execution_intent_created", False)
+                ),
+            })
+
         parsed: list[tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any], int, str]] = []
         position_ids: set[str] = set()
         for row in rows:
@@ -334,6 +448,7 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
         "by_reason": by_reason,
         "by_action": by_action,
         "items": items,
+        "pre_policy_skips": pre_policy_skips,
     }
 
 

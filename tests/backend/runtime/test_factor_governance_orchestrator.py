@@ -341,6 +341,31 @@ def test_v16_delegates_only_concrete_factor_expansion_preflight(tmp_path):
     assert command["target_agent"] == "factor_governance"
     assert command["action"] == "factor_governance_cycle"
     assert command["evidence"]["expansion_preflight"]["candidate_count"] == 1
+    assert command["evidence"]["batch_manifest"]["fixed_after_issue"] is True
+    assert command["delegation"]["authorization_granularity"] == "run_batch_fixed_manifest"
+
+
+def test_factor_batch_manifest_must_match_current_preflight():
+    from backend.runtime.factor_governance_orchestrator import factor_batch_manifest_verdict
+    from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+    preflight = {
+        "required": True,
+        "candidate_count": 1,
+        "reasons": {"shadow_promotion": ["shadow-alpha"]},
+    }
+    delegated = V16BrainOrchestratorService().delegate_factor_governance_cycle(
+        {
+            "snapshot_id": "brain-1",
+            "health_cycle_id": "factor_health:1",
+            "expansion_preflight": preflight,
+        },
+        persist=False,
+    )
+    authority = {"evidence": delegated["command"]["evidence"]}
+    assert factor_batch_manifest_verdict(authority, preflight)["allowed"] is True
+    mismatch = {**preflight, "candidate_count": 2}
+    assert factor_batch_manifest_verdict(authority, mismatch)["status"] == "factor_batch_manifest_mismatch"
 
 
 def test_factor_governance_cycle_authorizes_shadow_enrollment_step():

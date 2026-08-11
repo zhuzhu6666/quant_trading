@@ -11,6 +11,7 @@ from backend.services.agent_governance import AgentBriefingContextService, Agent
 from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
 from backend.services.brain_governance_candidates import (
     BRIDGE_READY_STAGES,
+    CANDIDATE_EXECUTION_PENDING_STATUSES,
     BrainGovernanceCandidateService,
     ensure_brain_governance_candidate_table,
     is_v16_candidate_bridge_evidence,
@@ -116,6 +117,22 @@ class BrainGovernanceCandidateReviewService:
         latest = self.candidates.latest_candidates(limit=limit)
         candidates = list(latest.get("items") or [])
         if not candidates:
+            candidate_status = self.candidates.status(limit=limit)
+            pending_count = int(candidate_status.get("execution_pending_count") or 0)
+            reconciliation_count = int(
+                candidate_status.get("bridge_reconciliation_required_count") or 0
+            )
+            if pending_count > 0 or reconciliation_count > 0:
+                return {
+                    "ok": pending_count > 0,
+                    "schema_version": "brain_governance_candidate_review_run.v1",
+                    "status": "execution_pending" if pending_count > 0 else "bridge_reconciliation_required",
+                    "item_count": 0,
+                    "execution_pending_count": pending_count,
+                    "bridge_reconciliation_required_count": reconciliation_count,
+                    "items": [],
+                    "boundary": self.boundary(),
+                }
             return {
                 "ok": False,
                 "schema_version": "brain_governance_candidate_review_run.v1",
@@ -186,6 +203,18 @@ class BrainGovernanceCandidateReviewService:
                 "candidate_id": str(candidate_id or ""),
                 "items": [],
                 "boundary": self.boundary(),
+            }
+        if str(candidate.get("status") or "") in CANDIDATE_EXECUTION_PENDING_STATUSES:
+            return {
+                "ok": True,
+                "schema_version": "brain_governance_candidate_review_run.v1",
+                "status": "execution_pending",
+                "item_count": 0,
+                "candidate_id": str(candidate_id or ""),
+                "candidate_status": str(candidate.get("status") or ""),
+                "items": [],
+                "boundary": self.boundary(),
+                "created_at": time.time(),
             }
         now = time.time()
         context = self._review_context()
@@ -259,11 +288,24 @@ class BrainGovernanceCandidateReviewService:
         latest = self.latest_reviews(limit=limit)
         items = list(latest.get("items") or [])
         if not items:
+            candidate_status = self.candidates.status(limit=limit)
+            pending_count = int(candidate_status.get("execution_pending_count") or 0)
+            reconciliation_count = int(
+                candidate_status.get("bridge_reconciliation_required_count") or 0
+            )
             return {
-                "ok": False,
+                "ok": pending_count > 0,
                 "schema_version": "brain_governance_candidate_review_readiness.v1",
-                "status": latest.get("status", "missing_reviews"),
+                "status": (
+                    "execution_pending"
+                    if pending_count > 0
+                    else "bridge_reconciliation_required"
+                    if reconciliation_count > 0
+                    else latest.get("status", "missing_reviews")
+                ),
                 "review_count": 0,
+                "execution_pending_count": pending_count,
+                "bridge_reconciliation_required_count": reconciliation_count,
                 "review_only": True,
                 "bridge_preview_only": True,
             }

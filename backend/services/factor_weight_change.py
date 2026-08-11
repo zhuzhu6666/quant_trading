@@ -18,6 +18,7 @@ from backend.core.db import (
     is_state_db_path,
     state_table_columns,
 )
+from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
 from backend.services.experience_prior import ExperiencePriorService
 from backend.services.factor_blend_health import FactorBlendHealthService
 from backend.services.learning_application_state import LearningApplicationStateService
@@ -484,6 +485,13 @@ class FactorWeightChangeService:
                     + ", ".join(assignments)
                     + " WHERE suggestion_id=?",
                     params,
+                )
+                sync_candidate_suggestion_lifecycle(
+                    conn,
+                    suggestion_id=suggestion_id,
+                    suggestion_status="applied",
+                    applied_mutation_id=mutation_id,
+                    now=now,
                 )
 
             effect_values: dict[str, Any] = {

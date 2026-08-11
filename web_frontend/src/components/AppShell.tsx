@@ -10,8 +10,8 @@ import { queryKeys } from "@/api/queryKeys";
 const navGroups = [
   { label: "交易", items: [
     { to: "/overview", match: "/overview", label: "运行地图", icon: Network },
-    { to: "/trading", match: "/trading", label: "交易", icon: Activity },
-    { to: "/performance/pnl", match: "/performance", label: "收益风控", icon: ShieldAlert },
+    { to: "/trading", match: "/trading", label: "交易与风控", icon: Activity },
+    { to: "/performance/pnl", match: "/performance", label: "收益", icon: ShieldAlert },
   ] },
   { label: "治理", items: [
     { to: "/autonomy/chain", match: "/autonomy", label: "智能系统", icon: BrainCircuit },

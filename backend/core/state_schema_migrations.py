@@ -32,6 +32,7 @@ STATE_SCHEMA_BASELINE_TABLES: Final[tuple[str, ...]] = (
     "brain_state_snapshot",
     "ctrader_deals",
     "decision_ledger",
+    "decision_factor_snapshot",
     "experience_memory",
     "experience_pattern_stats",
     "factor_catalog_snapshot",

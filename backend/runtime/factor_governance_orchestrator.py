@@ -7,6 +7,7 @@ evolution ledger plus learning/policy audit tables.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -150,6 +151,47 @@ def _loads(raw: Any, default: Any) -> Any:
         return json.loads(str(raw))
     except Exception:
         return default
+
+
+def factor_batch_manifest_verdict(
+    authority: dict[str, Any],
+    expansion_preflight: dict[str, Any],
+) -> dict[str, Any]:
+    """Ensure a factor run consumes the exact V16-issued batch manifest."""
+    evidence = dict(authority.get("evidence") or {})
+    manifest = dict(evidence.get("batch_manifest") or {})
+    expected_fingerprint = hashlib.sha256(
+        _dumps(dict(expansion_preflight or {})).encode("utf-8")
+    ).hexdigest()
+    if str(manifest.get("schema_version") or "") != "factor_governance_batch_manifest.v1":
+        return {
+            "allowed": False,
+            "status": "factor_batch_manifest_missing",
+            "reason": "v16_factor_batch_manifest_required",
+        }
+    if str(manifest.get("preflight_fingerprint") or "") != expected_fingerprint:
+        return {
+            "allowed": False,
+            "status": "factor_batch_manifest_mismatch",
+            "reason": "v16_factor_preflight_fingerprint_mismatch",
+            "expected_fingerprint": expected_fingerprint,
+            "authority_fingerprint": str(manifest.get("preflight_fingerprint") or ""),
+        }
+    if int(manifest.get("candidate_count") or 0) != int(
+        expansion_preflight.get("candidate_count") or 0
+    ):
+        return {
+            "allowed": False,
+            "status": "factor_batch_manifest_mismatch",
+            "reason": "v16_factor_candidate_count_mismatch",
+            "expected_candidate_count": int(expansion_preflight.get("candidate_count") or 0),
+            "authority_candidate_count": int(manifest.get("candidate_count") or 0),
+        }
+    return {
+        "allowed": True,
+        "status": "factor_batch_manifest_bound",
+        "manifest": manifest,
+    }
 
 
 class FactorGovernanceOrchestrator:
@@ -341,6 +383,32 @@ class FactorGovernanceOrchestrator:
                         "expansion_preflight": expansion_preflight,
                         "v16_delegation": v16_delegation,
                         "v16_authority": v16_authority,
+                    }
+                    finish_evolution_run(
+                        run["run_id"],
+                        status="blocked_by_v16_command",
+                        summary=summary,
+                    )
+                    return summary
+                v16_manifest_verdict = factor_batch_manifest_verdict(
+                    v16_authority,
+                    expansion_preflight,
+                )
+                if not v16_manifest_verdict.get("allowed"):
+                    summary = {
+                        "status": "waiting_v16_command",
+                        "reason": str(
+                            v16_manifest_verdict.get("reason")
+                            or "factor_v16_batch_manifest_mismatch"
+                        ),
+                        "catalog_count": len(catalog),
+                        "actions": actions,
+                        "catalog_snapshot": catalog_snapshot,
+                        "redundancy_report": redundancy_report,
+                        "expansion_preflight": expansion_preflight,
+                        "v16_delegation": v16_delegation,
+                        "v16_authority": v16_authority,
+                        "v16_manifest_verdict": v16_manifest_verdict,
                     }
                     finish_evolution_run(
                         run["run_id"],
@@ -3072,7 +3140,12 @@ class FactorGovernanceOrchestrator:
                 # never widens risk on unverifiable evidence.
                 if not health_ok:
                     continue
-                has_model_evidence = bool(model.get("mutation_eligible")) and (
+                # A strict model mutation gate is required to authorize a new
+                # mutation, but an existing sufficiently sampled weak
+                # observation remains a valid veto when fresh review is
+                # unavailable.  Missing artifact metadata must not erase a
+                # recorded strong-weakness quarantine signal.
+                has_observation_evidence = (
                     int(model.get("sample_count") or 0)
                     >= profile.restore_model_min_samples
                     or int(model.get("weak_sample_count") or 0)
@@ -3083,7 +3156,7 @@ class FactorGovernanceOrchestrator:
                     float(model.get("latest_weakness_score") or 0.0),
                 )
                 if (
-                    has_model_evidence
+                    has_observation_evidence
                     and observed_weakness >= profile.restore_max_weakness
                 ):
                     continue

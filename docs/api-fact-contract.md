@@ -68,7 +68,7 @@
 | `GET /api/live/realized-pnl-series` | `live.realized-pnl.v2` |
 | WebSocket state snapshot | `live.state.v2`，components 含 account/positions/loop/spot |
 | `GET /api/risk/summary` | `risk.summary.v2`，components 含 `system.runtime-health.v1` 和 `risk.inputs.v1` |
-| `GET /api/risk/policy/verdicts` | `risk.policy-verdicts.v2`；成功 PostgreSQL 查询的 `observed_at` 是本次读取时间，item `decision_ts` 只表示事件发生时间，历史长期无新事件不得使当前列表变 stale |
+| `GET /api/risk/policy/verdicts` | `risk.policy-verdicts.v2`；成功 PostgreSQL 查询的 `observed_at` 是本次读取时间，item `decision_ts` 只表示事件发生时间，历史长期无新事件不得使当前列表变 stale；`items` 只含已到 `RiskPolicyService` 的裁决，`pre_policy_skips` 单独投影 `decision_ledger` 中 `skip_stage=before_candidate` 且 `risk_policy_reached=false` 的开仓前置拦截，包含 `admission_owner`、`blockers`、`execution_intent_created`，不计入政策允许/拦截统计 |
 | `GET /api/risk/trade-trace/recent` | `risk.trade-trace-recent.v2` |
 | `GET /api/sync/status` | `ops.sync-status.v2` |
 | `GET /api/ctrader/token-status` | `ops.ctrader-token-status.v2` |
@@ -187,8 +187,8 @@ session 只有 `source` 为权威 `ctrader_deals*` 时才可 known；`degraded_c
 | `POST /api/ops/factor/pruning-governance/bridge-ready` | `ops.factor-pruning-governance-bridge-ready.v2` | 未写后回读，兼容 unknown |
 | `GET /api/ops/factor/governance-effects` | `ops.factor-governance-effects.v2` | application/effect ledger item 时间 |
 | `POST /api/ops/factor/governance-effects/reconcile` | `ops.factor-governance-effects-reconcile.v2` | reconcile 后 effect ledger item 时间 |
-| `GET /api/ops/brain/governance-candidates` | `ops.v16-governance-candidates.v2` | candidate `updated_at/created_at` |
-| `POST /api/ops/brain/governance-candidates/{candidate_id}/submit` | `ops.v16-governance-candidate-submit.v2` | suggestion ID + candidate readback 时间；blocked 为 unknown |
+| `GET /api/ops/brain/governance-candidates` | `ops.v16-governance-candidates.v2` | candidate `updated_at/created_at`；状态同时区分 `reviewable_candidate_count` 与 `execution_pending_count`，pending bridge 不解释为 stale review |
+| `POST /api/ops/brain/governance-candidates/{candidate_id}/submit` | `ops.v16-governance-candidate-submit.v2` | suggestion ID + candidate readback 时间；bridge 后 candidate 为 `bridge_pending`，approved 后为 `awaiting_execution`；blocked 为 unknown |
 | `GET /api/ops/replay/latest` | `ops.replay-latest.v2` | `replay_report.created_at` |
 | `POST /api/ops/replay/run` | `ops.replay-run.v2` | durable replay report ID + 时间 |
 | `POST /api/ops/replay/bar-run` | `ops.replay-bar-run.v2` | durable replay report ID + 时间 |

@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Snapshot: 2026-08-10
+> Snapshot: 2026-08-12
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -71,6 +71,7 @@ P2 已删除重复 root risk、live 内联统计、API 平行重算和前端旧�
 - `V16CommandGate.is_actionable()` 是 readiness、stepper、authorize 和 claim 共用的唯一 actionable predicate。
 - Agent Authority 提供唯一 execution owner/required gate；同一命令最多一个 committed mutation。
 - autonomous learning、factor governance、position supervisor governance 三条 lane 继续复用现有 RiskPolicy、V16、Candidate Review 和 Coordinator；不新增第二套 command queue 或 mutation writer。
+- 本批新增 candidate lifecycle binding 后，V16 command gate 还会校验已存在 candidate 的 pending bridge；synthetic factor batch command 仍不受 brain candidate 表误约束。Factor batch command 现在携带固定 preflight fingerprint/candidate count，Factor Governance 在 apply 前重验 manifest。
 
 ### 2026-08-10 智能自主进化代码批次
 
@@ -80,6 +81,17 @@ P2 已删除重复 root risk、live 内联统计、API 平行重算和前端旧�
 - Migration：`decision_factor_snapshot_lineage` migration 13 已由正式迁移器应用并复核 6 个 lineage 列；历史默认 `lineage_missing`。
 - Runtime posture：2026-08-11 已受控重启部署本批代码；overlay authority 经 operator re-bind mutation 恢复（见第 2 节）；五项静态 flags 未推进。
 - Unresolved live evidence：30 次 readiness p95/无重叠、有效 RuntimeConfig `5%/10%/16%/30`、watermark/backpressure 实际排空、legacy ACTIVE 退回、execution intent 100% 和完整 broker lifecycle。
+
+### 2026-08-11 V16 bridge/lifecycle repair batch
+
+- Canonical authority：`BrainGovernanceCandidateService` 负责 candidate lifecycle projection；`V16CommandGate` 负责 candidate/suggestion/command binding；Governor 和领域 Coordinator 复用同一 projection。
+- Code changes：`keep/no_change` 或当前 supervisor template 目标不再 materialize candidate；bridge 使用 `bridge_pending -> awaiting_execution`；bridge transaction 原子写 suggestion/candidate；cleanup、claim、reissue 统一 pending predicate；冲突解析先看 V16 lineage/evidence；应用后同步 candidate 为 `applied`。
+- Legacy repair：V16 run 会通过 service-backed reconciliation 将已 superseded/missing 的 legacy submitted bridge terminalize，不直接 SQL 恢复 active。
+- Targeted verification：V16/candidate/governor/coordinator/领域 mutation/factor batch 组合 `178 passed`；`git diff --check`、Python compile 和 code graph re-index 通过。
+- Runtime posture：2026-08-12 受控重启 `quant-backend.service`（PID `2333271`）和 `quant-learning-worker.service`（PID `2342495`），Caddy active；本地/公网 `/api/health` 均为 `db=connected, ctrader=connected`。learning worker 重启时旧进程优雅停止超过 90 秒并被 systemd 按超时 SIGKILL，随后新 PID 正常启动并恢复 overlay hash；本批部署和 reconciliation 未直接写 runtime overlay。重启后的既有 evolution hourly 正常执行一次 `factor_lifecycle.register_shadow`，写入 mutation `da29931c-5049-5e75-b4d1-a70bc4b70fc2` 的 shadow factor overlay，未由 V16 command 执行。
+- Legacy repair：通过 `BrainGovernanceCandidateService.reconcile_submitted_bridges()` 完成 `108` 条 bridge reconciliation；`brain_candidate_544c1b8f18691c68` 按 superseded suggestion terminalize 为 `superseded/superseded_by_governance`，未恢复 active。随后通过 `expire_stale_evolution_runs()` 将因 worker 重启中断且超过 900 秒的 `evorun_2922ae8d33dd438b` 标记 `expired`，不修改样本、decision、runtime config 或交易状态。
+- Runtime evidence：重启后 nursery 正常完成，后续 factor governance run `evorun_cc957412ff7544a0` 完成；新 V16 factor command 携带 `factor_governance_batch_manifest.v1`，无 committed action 时按 `factor_governance_cycle_no_committed_action` 取消且 `apply_count=0`。当前 readiness 保持 `ready_for_autonomous_mutation=true`，但 `incident_control.effective_mode=no_new_risk`、`ready_for_live_execution=false`，未扩大交易风险权限。
+- Full-suite verification：全量 `2712 passed, 9 skipped`。本轮关闭的失败包括：discovered factor admission fixture、PostgreSQL migration baseline、RiskLimitSnapshot 显式测试输入、quarantined factor 弱证据 veto、prepared DSL candidate admission evidence、model `retired` tightening classification、live facade wiring、以及 supervisor scheduler 的 advisory-only contract；无失败项。
 
 ## 4. 仍需真实运行证明
 

@@ -235,6 +235,75 @@ def test_v16_orchestrator_dispatches_without_direct_runtime_mutation(tmp_path):
         conn.close()
 
 
+def test_bridge_pending_candidate_keeps_command_until_governor_review(tmp_path):
+    db_path = tmp_path / "state.db"
+    _seed_posterior_facts(db_path, time.time())
+    service = V16BrainOrchestratorService(db_path)
+    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
+
+    from backend.services.autonomous_demo_apply_stepper import AutonomousDemoApplyStepper
+
+    dispatched = AutonomousDemoApplyStepper(db_path)._run_dispatch_v16_delegation()
+    assert dispatched["status"] == "submitted_to_policy_suggestion"
+
+    cancelled = service._cancel_non_actionable_commands(persist=True)
+    assert cancelled["stale_delegate_count"] == 0
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        command = conn.execute(
+            "SELECT claim_status FROM v16_brain_command WHERE decision='delegate'"
+        ).fetchone()
+        candidate = conn.execute(
+            "SELECT proposal_stage, status FROM brain_governance_candidate"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert command[0] == "available"
+    assert candidate == ("bridge_pending", "bridge_pending")
+    from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
+
+    review_status = BrainGovernanceCandidateReviewService(db_path).review_latest(
+        limit=20,
+        persist=False,
+    )
+    assert review_status["status"] == "execution_pending"
+
+
+def test_superseded_bridge_is_reconciled_without_reviving_candidate(tmp_path):
+    db_path = tmp_path / "state.db"
+    _seed_posterior_facts(db_path, time.time())
+    service = V16BrainOrchestratorService(db_path)
+    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
+
+    from backend.services.autonomous_demo_apply_stepper import AutonomousDemoApplyStepper
+
+    dispatched = AutonomousDemoApplyStepper(db_path)._run_dispatch_v16_delegation()
+    suggestion_id = dispatched["suggestion_id"]
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            "UPDATE policy_suggestion SET status='superseded' WHERE suggestion_id=?",
+            (suggestion_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        candidate = conn.execute(
+            "SELECT proposal_stage, status FROM brain_governance_candidate"
+        ).fetchone()
+        command = conn.execute(
+            "SELECT claim_status, failure_reason FROM v16_brain_command WHERE decision='delegate' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert candidate == ("superseded_by_governance", "superseded")
+    assert command == ("cancelled", "candidate_not_active")
+
+
 def test_expired_delegate_gets_a_fresh_command_without_reviving_terminal_row(tmp_path):
     db_path = tmp_path / "state.db"
     now = time.time()
@@ -337,7 +406,7 @@ def test_reviewed_expired_delegate_reissues_when_bridge_becomes_ready(tmp_path):
     assert service._reviewed_expired_delegate_reissues(limit=20) == []
 
 
-def test_aborted_submitted_bridge_reissues_only_pending_approved_suggestion(tmp_path):
+def test_cancelled_submitted_bridge_reissues_only_pending_approved_suggestion(tmp_path):
     db_path = tmp_path / "state.db"
     _seed_posterior_facts(db_path, time.time())
     service = V16BrainOrchestratorService(db_path)
@@ -377,7 +446,6 @@ def test_aborted_submitted_bridge_reissues_only_pending_approved_suggestion(tmp_
         conn.execute(
             """UPDATE v16_brain_command
                SET claim_status='cancelled', failure_reason='candidate_not_active',
-                   last_release_reason='governance_transaction_aborted',
                    finalized_at=?, updated_at=?
                WHERE command_id=?""",
             (cancelled_at, cancelled_at, command[0]),

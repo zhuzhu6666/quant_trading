@@ -9973,6 +9973,38 @@ def _handle_open_trade_order_success(
     )
 
 
+def _open_submission_runtime(bridge: Any) -> OpenSubmissionRuntime:
+    """Assemble live callbacks for the canonical open-submission service."""
+    return OpenSubmissionRuntime(
+        probe_final_admission=_probe_final_open_admission,
+        admission_lock=_OPEN_TRADE_ADMISSION_LOCK,
+        open_trade_draining=_open_trade_draining,
+        persist_safety_fail_closed=_persist_safety_fail_closed,
+        submit_order=_submit_open_trade_order,
+        # Test/dry-run bridges without a broker mutation method do not cross
+        # the production boundary; real bridges require the intent callback.
+        prepare_open_intent=(
+            _prepare_open_trade_intent
+            if callable(getattr(bridge, "market_buy", None))
+            or callable(getattr(bridge, "market_sell", None))
+            else None
+        ),
+        handle_order_success=_handle_open_trade_order_success,
+        record_order_failure=_record_open_trade_order_failure,
+        reconcile_positions=_explicit_position_reconcile,
+        publish_positions=_publish_fresh_position_reconcile,
+        append_safety_outbox=append_safety_outbox,
+        finalize_nursery_reservation=lambda reservation_id, consumed: (
+            _runtime_finalize_nursery_reservation(
+                reservation_id,
+                consumed,
+                warning=logger.warning,
+            )
+        ),
+        now=time.time,
+    )
+
+
 def _submit_open_trade_candidate(
     *,
     bridge: Any,
@@ -10007,35 +10039,7 @@ def _submit_open_trade_candidate(
         log=log,
         signal_decision_id=signal_decision_id,
         stop_requested=stop_requested,
-        runtime=OpenSubmissionRuntime(
-            probe_final_admission=_probe_final_open_admission,
-            admission_lock=_OPEN_TRADE_ADMISSION_LOCK,
-            open_trade_draining=_open_trade_draining,
-            persist_safety_fail_closed=_persist_safety_fail_closed,
-            submit_order=_submit_open_trade_order,
-            # Test/dry-run bridges without a broker mutation method do not
-            # cross the production boundary; a real bridge must have the
-            # intent callback so ledger unavailability remains fail-closed.
-            prepare_open_intent=(
-                _prepare_open_trade_intent
-                if callable(getattr(bridge, "market_buy", None))
-                or callable(getattr(bridge, "market_sell", None))
-                else None
-            ),
-            handle_order_success=_handle_open_trade_order_success,
-            record_order_failure=_record_open_trade_order_failure,
-            reconcile_positions=_explicit_position_reconcile,
-            publish_positions=_publish_fresh_position_reconcile,
-            append_safety_outbox=append_safety_outbox,
-            finalize_nursery_reservation=lambda reservation_id, consumed: (
-                _runtime_finalize_nursery_reservation(
-                    reservation_id,
-                    consumed,
-                    warning=logger.warning,
-                )
-            ),
-            now=time.time,
-        ),
+        runtime=_open_submission_runtime(bridge),
     )
 
 

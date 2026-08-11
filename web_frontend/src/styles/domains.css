@@ -459,9 +459,7 @@ body::before {
   gap: 12px;
 }
 
-.learning-control-panel {
-  overflow: hidden;
-}
+.learning-control-panel { overflow: visible; }
 
 .learning-control-grid,
 .learning-stream-grid {
@@ -789,13 +787,9 @@ body::before {
   color: var(--red);
 }
 
-.model-control-panel {
-  overflow: hidden;
-}
+.model-control-panel { overflow: visible; }
 
-.model-capability-panel {
-  overflow: hidden;
-}
+.model-capability-panel { overflow: visible; }
 
 .model-participation-summary {
   display: grid;
@@ -952,7 +946,7 @@ body::before {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
-  overflow: hidden;
+  overflow: visible;
   padding: 9px 10px;
   border: 1px solid rgba(203, 213, 225, 0.72);
   border-radius: 8px;
@@ -1067,9 +1061,7 @@ body::before {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.model-workbench-panel {
-  overflow: hidden;
-}
+.model-workbench-panel { overflow: visible; }
 
 .model-workbench-grid {
   display: grid;
@@ -1220,12 +1212,10 @@ body::before {
 
 .pnl-window-summary .field-row > .status-pill {
   justify-self: start;
-  white-space: nowrap;
+  white-space: normal;
 }
 
-.trading-status-overview {
-  overflow: hidden;
-}
+.trading-status-overview { overflow: visible; }
 
 .trading-status-grid {
   display: grid;
@@ -1291,13 +1281,13 @@ body::before {
 
 .trading-compact-fields .field-row > .status-pill {
   justify-self: end;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .trading-inline-badges {
   margin-top: 8px;
-  max-height: 58px;
-  overflow: hidden;
+  max-height: none;
+  overflow: visible;
 }
 
 .trading-inline-badges .data-badge {
@@ -1423,9 +1413,7 @@ body::before {
   display: block;
   max-width: 100%;
   color: var(--ink-soft);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .field-list-spaced {
@@ -1437,9 +1425,7 @@ body::before {
 }
 
 .ops-control-panel,
-.ops-db-panel {
-  overflow: hidden;
-}
+.ops-db-panel { overflow: visible; }
 
 .ops-mini-grid,
 .ops-db-summary {
@@ -1493,8 +1479,8 @@ body::before {
 }
 
 .ops-inline-badges {
-  max-height: 58px;
-  overflow: hidden;
+  max-height: none;
+  overflow: visible;
 }
 
 .ops-inline-badges .data-badge {

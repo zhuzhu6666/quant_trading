@@ -825,6 +825,76 @@ def test_brain_medium_impact_governance_materializes_governance_candidates_only(
     assert status["governance_candidates"]["candidate_lane_isolated"] is True
 
 
+def test_v16_supervisor_keep_is_observation_only(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    service = BrainMediumImpactGovernanceService(db_path)
+    result = service._materialize_eval(
+        evaluation={
+            "eval_id": "eval_keep",
+            "plan_id": "plan_keep",
+            "scope_type": "supervisor_template",
+            "coverage_score": 0.9,
+            "comparison_verdict": "supported",
+            "comparison": {
+                "posterior_arbitration": {
+                    "selected_scope": "supervisor",
+                    "supervisor_conclusion": {"recommended_action": "keep"},
+                }
+            },
+        },
+        now=time.time(),
+        autonomy_guard={},
+        persist_candidate=False,
+    )
+
+    assert result["status"] == "no_op"
+    assert result["decision_intent"] == "no_op"
+    assert result["candidate_id"] == ""
+    assert result["no_op_reason"] == "posterior_recommended_keep"
+
+
+def test_v16_supervisor_target_equal_to_runtime_is_observation_only(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    service = BrainMediumImpactGovernanceService(db_path)
+    result = service._materialize_eval(
+        evaluation={
+            "eval_id": "eval_same_target",
+            "plan_id": "plan_same_target",
+            "scope_type": "supervisor_template",
+            "coverage_score": 0.9,
+            "comparison_verdict": "supported",
+            "comparison": {
+                "posterior_arbitration": {
+                    "selected_scope": "supervisor",
+                    "supervisor_conclusion": {"recommended_action": "less_tighten"},
+                }
+            },
+        },
+        now=time.time(),
+        autonomy_guard={},
+        runtime_targets={
+            "position_supervisor_template_id": "position_supervisor:conservative.v1"
+        },
+        persist_candidate=False,
+    )
+
+    assert result["status"] == "no_op"
+    assert result["no_op_reason"] == "target_template_already_active"
+    assert result["candidate_id"] == ""
+
+
 def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)
@@ -926,9 +996,23 @@ def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tm
     assert evidence["lineage"]["agent_generation_context"]["schema_version"] == "agent_generation_context.v1"
     assert evidence["agent_generation_context"]["source_agent"] == "v16_brain"
     assert evidence["agent_context_required"] is True
-    assert candidate[0] == "submitted_to_policy_suggestion"
-    assert candidate[1] == "submitted"
+    assert candidate[0] == "bridge_pending"
+    assert candidate[1] == "bridge_pending"
     assert candidate[2] == submit_result["suggestion_id"]
+
+    from research.learning.governor import RuleEvolutionGovernor
+
+    reviewed = RuleEvolutionGovernor(str(db_path)).review_pending()
+    assert reviewed["approved"] == 1
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        lifecycle = conn.execute(
+            "SELECT proposal_stage, status FROM brain_governance_candidate WHERE candidate_id=?",
+            (ready["candidate_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert lifecycle == ("awaiting_execution", "awaiting_execution")
 
 
 def test_brain_governance_candidate_review_classifies_bridge_readiness(monkeypatch, tmp_path):

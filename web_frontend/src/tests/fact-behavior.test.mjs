@@ -79,7 +79,7 @@ const retainedHealthy = {
 const retainedHealthyFact = readFact(retainedHealthy, "system.health.v2");
 assert.equal(retainedHealthyFact.state, "stale");
 assert.equal(retainedHealthy.status, "healthy", "stale endpoint data remains available for display");
-assert.equal(factBoundTone(retainedHealthyFact, "ok"), "pending", "stale retained success must be labeled as pending instead of a business warning");
+assert.equal(factBoundTone(retainedHealthyFact, "ok"), "stale", "stale retained success must remain visible but be labeled as expired");
 
 const cachedKnownFact = readFact({ _fact: envelope("system.health.v2", "backend") }, "system.health.v2");
 assert.equal(factBoundTone(cachedKnownFact, "ok", true), "bad", "refetch failure must suppress cached green success");
@@ -97,7 +97,7 @@ const retainedPnl = {
 const retainedPnlFact = readFact(retainedPnl, "live.realized-pnl.v2");
 assert.equal(retainedPnl.summary.realized_pnl, 12.5, "stale PnL remains available as retained display data");
 assert.equal(retainedPnlFact.state, "stale");
-assert.equal(factBoundTone(retainedPnlFact, "ok"), "pending", "retained positive PnL must expose pending freshness");
+assert.equal(factBoundTone(retainedPnlFact, "ok"), "stale", "retained positive PnL must expose expired freshness");
 assert.equal(factIsKnown(readFact({ ...retainedPnl, _fact: envelope("live.realized-pnl.v2") }, "live.realized-pnl.v2"), true), false, "PnL refetch failure must suppress a cached known envelope");
 
 for (const contract of ["ops.backend-readiness.v2", "risk.summary.v2"]) {
@@ -108,7 +108,7 @@ for (const contract of ["ops.backend-readiness.v2", "risk.summary.v2"]) {
   const retainedV15Fact = readFact(retainedV15Payload, contract);
   assert.equal(retainedV15Payload.status, "healthy", `${contract} retained value remains displayable`);
   assert.equal(retainedV15Fact.state, "stale", `${contract} retained fact must expire`);
-  assert.equal(factBoundTone(retainedV15Fact, "ok"), "pending", `${contract} retained success must expose pending freshness`);
+  assert.equal(factBoundTone(retainedV15Fact, "ok"), "stale", `${contract} retained success must expose expired freshness`);
   assert.equal(factBoundTone(readFact({ _fact: envelope(contract, "postgresql") }, contract), "ok", true), "bad", `${contract} refetch failure must suppress V15 cached green`);
 }
 

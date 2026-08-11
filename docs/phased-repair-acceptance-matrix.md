@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active acceptance index
-> Snapshot: 2026-08-10
+> Snapshot: 2026-08-11
 > Scope: reproducible acceptance evidence and unresolved live evidence
 
 本文只记录“如何证明”和当前未满足的运行证据。架构事实见 `system-source-of-truth.md`，实施阶段见 `planning/production-autonomy-repair-optimization-plan.md`，当前状态见 `phased-repair-rollout-status.md`。已完成批次的详细流水通过 Git 历史追溯，不在本矩阵重复保存。
@@ -87,7 +87,7 @@
 | current/final signed notional | `tests/risk/test_backend_risk_metrics.py::test_forward_var_projects_current_and_final_candidate_notional` |
 | unknown price 不变零敞口 | `tests/risk/test_backend_risk_metrics.py::test_snapshot_does_not_turn_unknown_position_price_into_zero_exposure` |
 | Policy 不把 unknown/stale 当零 | `tests/risk/test_policy_service.py::test_open_trade_blocks_unknown_var_instead_of_treating_it_as_zero` |
-| 风险 API/前端区分政策许可与真实执行 | `tests/risk/test_risk_api_policy.py::test_recent_policy_verdicts_summarizes_decision_ledger`、`web_frontend/src/tests/architecture.test.mjs` |
+| 风险 API/前端区分开仓前置拦截、政策许可与真实执行 | `tests/risk/test_risk_api_policy.py::test_recent_policy_verdicts_summarizes_decision_ledger`、`web_frontend/src/tests/architecture.test.mjs` |
 | live/replay 同输入 | `tests/test_research_parity_boundaries.py::test_parity_replay_freezes_closed_bar_returns_for_candidate_var` |
 | readiness 只读投影 | `tests/test_backend_readiness_contract.py::test_readiness_projects_canonical_forward_var_snapshot` |
 | API 只读 canonical | `tests/test_risk_summary_inputs.py::test_risk_summary_uses_canonical_snapshot` |
@@ -116,8 +116,17 @@ P2 complete 不授权清锁或切换静态 flag。
 - scope -> agent -> required gate 只有一个 authority；
 - autonomous learning、factor governance、position supervisor governance 三条 lane 均覆盖 success、noop/reject、retry、rollback、effect；
 - V16、模型和候选层不能直接写 runtime、factor weight、order 或 broker；生产 mutation 只能经过现有 Candidate Review、RiskPolicy、V16CommandGate 和 Coordinator。
+- `keep/no_change` 不生成 candidate/suggestion/command；有效 bridge 必须通过 `active -> bridge_pending -> awaiting_execution -> applied/superseded/rejected`，且 bridge、command cleanup、claim、reissue 共用同一 lifecycle predicate。
 
 因子后验必须同时区分 evidence coverage 与 causal certainty；单笔交易只能形成 lead/inconclusive，不产生 executable patch；没有足够证据的维度显式 `no_change`。
+
+本批针对性证据：
+
+- `tests/test_v16_read_only_brain.py::test_v16_supervisor_keep_is_observation_only`
+- `tests/test_v16_read_only_brain.py::test_v16_supervisor_target_equal_to_runtime_is_observation_only`
+- `tests/test_v16_brain_orchestrator.py::test_bridge_pending_candidate_keeps_command_until_governor_review`
+- `tests/test_v16_brain_orchestrator.py::test_cancelled_submitted_bridge_reissues_only_pending_approved_suggestion`
+- `tests/research/test_rule_evolution_governor.py::test_conflict_resolver_prefers_current_v16_lineage_over_legacy_supervisor_priority`
 
 ## 7. 发布和运行验收
 
