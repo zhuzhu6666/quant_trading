@@ -2,6 +2,7 @@ name: quality-gates
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches: [main]
 
@@ -63,8 +64,10 @@ jobs:
       - name: Verify migrated PostgreSQL state schema
         run: python scripts/state_schema_migrate.py --check
       - name: Full pytest suite
+        if: ${{ github.event_name != 'push' }}
         run: pytest -q -m "not postgres_integration" --timeout=120
       - name: PostgreSQL integration
+        if: ${{ github.event_name != 'push' }}
         run: pytest -q -m postgres_integration --timeout=30
 
   frontend:
@@ -81,6 +84,7 @@ jobs:
         working-directory: web_frontend
         run: npm ci
       - name: Web tests
+        if: ${{ github.event_name != 'push' }}
         working-directory: web_frontend
         run: npm run test
       - name: Web typecheck
