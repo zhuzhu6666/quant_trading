@@ -109,6 +109,14 @@ docs/             当前事实源、合同、SOP、阶段和验收矩阵
 - [服务器后端 SOP](docs/server-backend-sop.md)
 - [分期修复验收矩阵](docs/phased-repair-acceptance-matrix.md)
 
+## 开源协作与安全
+
+- [贡献指南](CONTRIBUTING.md)
+- [安全政策](SECURITY.md)
+- [Apache License 2.0](LICENSE)
+
+请勿提交 broker/API 凭证、`.env`、运行数据、日志、数据库、真实账户信息或模型产物。真实账户操作必须遵循当前发布门、风险合同、服务器 SOP 和 operator 审批。
+
 ## 本地验证
 
 后端、数据库和运行态验证以 Linux 服务器 SOP 为准；以下是常用的最小检查示例：
