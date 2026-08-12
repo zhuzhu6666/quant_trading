@@ -182,6 +182,40 @@ def risk_kelly_sizing(
         }
     )
 
+    def apply_demo_min_volume_exploration(exploration_reason: str) -> float:
+        """Reuse the existing demo Kelly exploration path for broker granularity.
+
+        Kelly remains the single sizing calculation.  This bounded fallback only
+        expresses a target below the broker's discrete minimum as one minimum
+        order in demo mode, provided the existing hard stop-risk budget allows it.
+        Non-demo modes stay fail-closed at zero; no parallel live sizing route is
+        introduced here.
+        """
+
+        exploration_prefix = "demo_nursery" if demo_nursery_exploration else "demo_autonomous"
+        blocked_reason = ""
+        if max_order_api > 0 and default_vol > max_order_api:
+            blocked_reason = f"{exploration_prefix}_min_volume_exceeds_cap"
+        elif min_volume_stop_risk > risk_capital + 1e-12:
+            blocked_reason = f"{exploration_prefix}_min_volume_risk_budget_exceeded"
+        exploration_eligible = not blocked_reason
+        trace.update(
+            {
+                "reason": blocked_reason or f"{exploration_prefix}_min_volume_exploration",
+                "raw_api_volume": default_vol if exploration_eligible else 0.0,
+                "base_api_volume": default_vol if exploration_eligible else 0.0,
+                "final_api_volume": default_vol if exploration_eligible else 0.0,
+                "blocked_reason": blocked_reason,
+                "demo_exploration": True,
+                "demo_nursery_exploration": demo_nursery_exploration,
+                "exploration_reason": exploration_reason,
+                "exploration_api_volume": default_vol,
+                "exploration_eligible": exploration_eligible,
+                "exploration_risk_budget": risk_capital,
+            }
+        )
+        return default_vol if exploration_eligible else 0.0
+
     if not kelly_value_valid:
         trace.update(
             {
@@ -198,32 +232,9 @@ def risk_kelly_sizing(
 
     if kelly_f <= 0:
         if demo_exploration_mode:
-            exploration_prefix = (
-                "demo_nursery" if demo_nursery_exploration else "demo_autonomous"
-            )
-            blocked_reason = ""
-            if max_order_api > 0 and default_vol > max_order_api:
-                blocked_reason = f"{exploration_prefix}_min_volume_exceeds_cap"
-            elif min_volume_stop_risk > risk_capital + 1e-12:
-                blocked_reason = f"{exploration_prefix}_min_volume_risk_budget_exceeded"
-            exploration_eligible = not blocked_reason
-            trace.update(
-                {
-                    "reason": blocked_reason or f"{exploration_prefix}_min_volume_exploration",
-                    "kelly_fraction": kelly_f,
-                    "raw_api_volume": default_vol if exploration_eligible else 0.0,
-                    "base_api_volume": default_vol if exploration_eligible else 0.0,
-                    "final_api_volume": default_vol if exploration_eligible else 0.0,
-                    "blocked_reason": blocked_reason,
-                    "demo_exploration": True,
-                    "demo_nursery_exploration": demo_nursery_exploration,
-                    "exploration_reason": "non_positive_kelly",
-                    "exploration_api_volume": default_vol,
-                    "exploration_eligible": exploration_eligible,
-                    "exploration_risk_budget": risk_capital,
-                }
-            )
-            return {"volume": default_vol if exploration_eligible else 0.0, "trace": trace}
+            exploration_volume = apply_demo_min_volume_exploration("non_positive_kelly")
+            trace["kelly_fraction"] = kelly_f
+            return {"volume": exploration_volume, "trace": trace}
         trace.update(
             {
                 "reason": "kelly_fraction_non_positive",
@@ -293,6 +304,23 @@ def risk_kelly_sizing(
             "blocked_reason": blocked_reason,
         }
     )
+    if volume <= 0 and demo_exploration_mode:
+        # A positive Kelly target can still be smaller than one broker lot.  In
+        # demo mode, use the same existing minimum-lot exploration budget as the
+        # non-positive Kelly path so the system can learn from real executions.
+        target_raw_api_volume = raw_api_volume
+        target_capped_api_volume = capped_raw
+        exploration_volume = apply_demo_min_volume_exploration(
+            "positive_kelly_below_broker_minimum"
+        )
+        trace.update(
+            {
+                "kelly_target_api_volume": target_raw_api_volume,
+                "kelly_target_capped_api_volume": target_capped_api_volume,
+                "kelly_target_below_broker_minimum": True,
+            }
+        )
+        return {"volume": exploration_volume, "trace": trace}
     return {"volume": volume, "trace": trace}
 
 

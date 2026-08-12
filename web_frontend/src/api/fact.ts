@@ -37,6 +37,12 @@ function epochSeconds(value: unknown): number {
   return 0;
 }
 
+export function factAgeSeconds(fact: FactEnvelope, now = Date.now() / 1000): number | null {
+  const observedAt = epochSeconds(fact.observed_at);
+  if (observedAt <= 0 || !Number.isFinite(now)) return null;
+  return Math.max(0, now - observedAt);
+}
+
 function unknownFact(expectedContract: string, reasonCode: string): FactEnvelope {
   return {
     envelope: "fact.v1",
@@ -179,11 +185,50 @@ export function factIsKnown(fact: FactEnvelope, requestFailed = false): boolean 
 export type FactBoundTone = "ok" | "warn" | "bad" | "mute" | "pending" | "stale";
 
 /**
- * Preserve the business tone for retained values, but never render a green
- * success state unless the endpoint fact is currently known. Pending freshness
- * is separate from a business warning so the UI never says "正常" in yellow.
- * A retained-but-expired value is useful context, but must be marked stale
- * rather than presented as if the endpoint never returned data.
+ * UI freshness is deliberately separate from the endpoint's business value.
+ * A cached known value with a failed refresh is not a current fact. Pages use
+ * this helper as the single display boundary so stale/error payloads cannot
+ * leak old business values into the console.
+ */
+export type FactViewState = "known" | "stale" | "pending" | "error";
+
+export function factViewState(fact: FactEnvelope, requestFailed = false): FactViewState {
+  if (requestFailed || fact.state === "error") return "error";
+  if (fact.state === "stale") return "stale";
+  if (fact.state === "known") return "known";
+  return "pending";
+}
+
+export type FactViewEntry = {
+  fact: FactEnvelope;
+  requestFailed?: boolean;
+};
+
+export function aggregateFactViewState(entries: readonly FactViewEntry[]): FactViewState {
+  if (entries.some(({ fact, requestFailed }) => factViewState(fact, requestFailed) === "error")) return "error";
+  if (entries.some(({ fact, requestFailed }) => factViewState(fact, requestFailed) === "stale")) return "stale";
+  if (entries.some(({ fact, requestFailed }) => factViewState(fact, requestFailed) === "pending")) return "pending";
+  return "known";
+}
+
+export function factViewStateLabel(state: FactViewState): string {
+  if (state === "known") return "已确认";
+  if (state === "stale") return "数据已过期";
+  if (state === "error") return "接口刷新失败";
+  return "数据待确认";
+}
+
+export function factViewLabel(fact: FactEnvelope, requestFailed = false): string {
+  const state = factViewState(fact, requestFailed);
+  if (state === "error" && requestFailed) return "读取失败，暂无实时数据";
+  if (state === "error") return "读取错误";
+  return factViewStateLabel(state);
+}
+
+/**
+ * A live control-plane value is displayable only while its authoritative fact
+ * is known. Stale/unknown/error facts remain available for diagnostics, but
+ * their old business value must not be rendered as current data.
  * React Query may keep the previous payload after a refetch failure, so request
  * failure is an explicit input instead of being inferred from the cached envelope.
  */
@@ -198,11 +243,12 @@ export function factBoundTone(
   return tone;
 }
 
-export function factHasDisplayValue(fact: FactEnvelope): boolean {
-  return fact.state === "known" || fact.state === "stale";
+export function factHasDisplayValue(fact: FactEnvelope, requestFailed = false): boolean {
+  return !requestFailed && fact.state === "known";
 }
 
-export function factStatusLabel(fact: FactEnvelope): string {
+export function factStatusLabel(fact: FactEnvelope, requestFailed = false): string {
+  if (requestFailed) return "暂无实时数据";
   if (fact.state === "known") return "已确认";
   if (fact.state === "stale") return "已过期";
   if (fact.state === "error") return "读取错误";

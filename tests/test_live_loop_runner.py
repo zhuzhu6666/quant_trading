@@ -111,6 +111,7 @@ def test_tick_exception_blocks_risk_and_retries_safety_in_five_seconds():
 
 def test_normal_tick_updates_risk_metrics_before_sixty_second_wait():
     risk_updates = []
+    diagnostics = []
     stop_flag = _StopFlag(wait_results=[True])
 
     result = run_serial_live_ticks(
@@ -127,16 +128,19 @@ def test_normal_tick_updates_risk_metrics_before_sixty_second_wait():
                 "wait_seconds": None,
             },
             risk_updates=risk_updates,
+            diagnostics=diagnostics,
         ),
     )
 
     assert risk_updates[0]["tick"] == 1
+    assert diagnostics == [(1, "checking"), (1, None)]
     assert stop_flag.wait_calls == [60.0]
     assert result["exit_reason"] == "stop_during_alpha_wait"
 
 
 def test_tick_specific_wait_updates_risk_before_wait():
     risk_updates = []
+    diagnostics = []
     stop_flag = _StopFlag(wait_results=[True])
 
     result = run_serial_live_ticks(
@@ -153,10 +157,12 @@ def test_tick_specific_wait_updates_risk_before_wait():
                 "wait_seconds": 10.0,
             },
             risk_updates=risk_updates,
+            diagnostics=diagnostics,
         ),
     )
 
     assert stop_flag.wait_calls == [10.0]
+    assert diagnostics == [(1, "checking"), (1, None)]
     assert len(risk_updates) == 1
     assert risk_updates[0]["tick"] == 1
     assert result["exit_reason"] == "stop_during_tick_wait"

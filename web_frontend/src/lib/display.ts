@@ -34,7 +34,6 @@ const DISPLAY_TRANSLATIONS: Record<string, string> = {
   blocked: "已阻断",
   down: "离线",
   offline: "离线",
-  "http-fallback": "HTTP 快照回退",
   missing: "缺失",
   stale: "过期",
   old: "过旧",

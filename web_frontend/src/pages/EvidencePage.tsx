@@ -26,6 +26,7 @@ import {
 } from "@/api/client";
 import { ActionButton } from "@/components/ActionButton";
 import { MetricCard } from "@/components/Card";
+import { FactBoundary } from "@/components/FactBoundary";
 import { Field, PageHeader, SectionHead, toneFromStatus, type Tone } from "@/components/DashboardBits";
 import { JsonBlock } from "@/components/JsonBlock";
 import { StatusPill } from "@/components/StatusPill";
@@ -169,42 +170,36 @@ export function EvidencePage() {
     queryKey: ["evidence", "replay-latest"],
     queryFn: getReplayLatest,
     enabled: activeTab === "replay",
-    refetchInterval: 30_000,
     staleTime: 10_000,
   });
   const replayChoicesQuery = useQuery({
     queryKey: ["evidence", "replay-decisions"],
     queryFn: () => getReplayBarDecisions(30),
     enabled: activeTab === "replay",
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
   const incidentQuery = useQuery({
     queryKey: ["evidence", "incident-control"],
     queryFn: getIncidentControl,
     enabled: activeTab === "incident",
-    refetchInterval: 15_000,
     staleTime: 5_000,
   });
   const playbookQuery = useQuery({
     queryKey: ["evidence", "incident-playbook"],
     queryFn: getIncidentPlaybookLatest,
     enabled: activeTab === "incident",
-    refetchInterval: 30_000,
     staleTime: 10_000,
   });
   const enforcementQuery = useQuery({
     queryKey: ["evidence", "scope-enforcement"],
     queryFn: getAutonomyScopeEnforcementLatest,
     enabled: activeTab === "incident",
-    refetchInterval: 45_000,
     staleTime: 15_000,
   });
   const releaseQuery = useQuery({
     queryKey: ["evidence", "release-latest"],
     queryFn: getReleaseLatest,
     enabled: activeTab === "release",
-    refetchInterval: 30_000,
     staleTime: 10_000,
   });
 
@@ -214,7 +209,6 @@ export function EvidencePage() {
     queryKey: ["evidence", "release-approvals", releaseRunIdRaw],
     queryFn: () => getReleaseApprovals(releaseRunIdRaw),
     enabled: activeTab === "release" && Boolean(releaseRunIdRaw),
-    refetchInterval: 45_000,
     staleTime: 15_000,
   });
 
@@ -259,7 +253,7 @@ export function EvidencePage() {
   const releaseFailed = releaseQuery.isError || releaseQuery.isRefetchError;
   const approvalsFailed = releaseApprovalsQuery.isError || releaseApprovalsQuery.isRefetchError;
 
-  const latestReplay = factHasDisplayValue(replayFact)
+  const latestReplay = factHasDisplayValue(replayFact, replayFailed)
     ? asRecord(pick(replayQuery.data, ["replay", "latest_report", "report"]))
     : {};
   const previewReport = asRecord(pick(replayPreviewData, ["report"]));
@@ -267,7 +261,7 @@ export function EvidencePage() {
   const replayReport = hasReplayPreview ? previewReport : latestReplay;
   const replayDisplayFact = hasReplayPreview ? replayPreviewFact : replayFact;
   const replayDisplayFailed = hasReplayPreview ? false : replayFailed;
-  const replayChoices = factHasDisplayValue(replayChoicesFact)
+  const replayChoices = factHasDisplayValue(replayChoicesFact, replayChoicesFailed)
     ? pickArray(replayChoicesQuery.data, ["items", "choices"])
     : [];
   const replayMetrics = asRecord(pick(replayReport, ["metric_summary"]));
@@ -300,14 +294,14 @@ export function EvidencePage() {
     [replayMetrics],
   );
 
-  const incident = factHasDisplayValue(incidentFact) ? asRecord(pick(incidentQuery.data, ["incident_control"])) : {};
-  const playbook = factHasDisplayValue(playbookFact) ? asRecord(pick(playbookQuery.data, ["playbook"])) : {};
-  const enforcement = factHasDisplayValue(enforcementFact) ? asRecord(pick(enforcementQuery.data, ["enforcement_event"])) : {};
-  const release = factHasDisplayValue(releaseFact) ? releaseRaw : {};
+  const incident = factHasDisplayValue(incidentFact, incidentFailed) ? asRecord(pick(incidentQuery.data, ["incident_control"])) : {};
+  const playbook = factHasDisplayValue(playbookFact, playbookFailed) ? asRecord(pick(playbookQuery.data, ["playbook"])) : {};
+  const enforcement = factHasDisplayValue(enforcementFact, enforcementFailed) ? asRecord(pick(enforcementQuery.data, ["enforcement_event"])) : {};
+  const release = factHasDisplayValue(releaseFact, releaseFailed) ? releaseRaw : {};
   const releaseRunId = pickString(release, ["run_id"], "");
   const incidentKnown = factIsKnown(incidentFact, incidentFailed);
   const incidentMode = pickString(incident, ["mode"], "");
-  const approvals = factHasDisplayValue(approvalsFact)
+  const approvals = factHasDisplayValue(approvalsFact, approvalsFailed)
     ? pickArray(releaseApprovalsQuery.data, ["events", "approvals", "approval_events"])
     : [];
 
@@ -317,7 +311,7 @@ export function EvidencePage() {
 
   return (
     <section className="dashboard evidence-dashboard">
-      <PageHeader eyebrow="系统运维" title="运行证据" description="回放、事故控制和发布审计各归其位；未打开的分区不会轮询。">
+      <PageHeader eyebrow="系统运维" title="运行证据" description="回放、事故控制和发布审计各归其位；进入分区或手动刷新时读取。">
         <button className="header-refresh" type="button" onClick={refreshActive}>
           <RefreshCw size={15} aria-hidden="true" />刷新当前分区
         </button>
@@ -341,7 +335,8 @@ export function EvidencePage() {
       </nav>
 
       {activeTab === "replay" ? (
-        <div className={`dashboard-grid ${factIsKnown(replayDisplayFact, replayDisplayFailed) ? "" : "fact-unverified"}`.trim()}>
+        <FactBoundary fact={replayDisplayFact} label="回放事实" requestFailed={replayDisplayFailed}>
+        <div className="dashboard-grid">
           <MetricCard title="证据窗口" className="wide-panel">
             <div className="evidence-toolbar">
               <label>
@@ -409,6 +404,8 @@ export function EvidencePage() {
                   <StatusPill
                     status={translateDisplayValue(tradeResult || tradeStatus)}
                     tone={factBoundTone(replayDisplayFact, outcomeTone(tradeResult, tradeStatus), replayDisplayFailed)}
+                    fact={replayDisplayFact}
+                    requestFailed={replayDisplayFailed}
                   />
                 </div>
                 <div className="evidence-summary">
@@ -459,17 +456,20 @@ export function EvidencePage() {
             <JsonBlock value={replayReport} />
           </details>
         </div>
+        </FactBoundary>
       ) : null}
 
       {activeTab === "incident" ? (
-        <div className={`dashboard-grid ${incidentKnown ? "" : "fact-unverified"}`.trim()}>
+        <div className="dashboard-grid">
           <MetricCard title="当前事故姿态">
-            <div className={incidentKnown ? "field-list" : "field-list fact-unverified"}>
+            <FactBoundary fact={incidentFact} label="事故控制事实" requestFailed={incidentFailed}>
+            <div className="field-list">
               <Field label="当前模式" value={incidentMode} tone={factBoundTone(incidentFact, incidentMode === "normal" ? "ok" : "warn", incidentFailed)} />
               <Field label="原因" value={pickString(incident, ["reason"], "")} />
               <Field label="更新时间" value={formatTime(pick(incident, ["updated_at", "created_at"]))} />
               <Field label="最近范围收紧" value={pickString(enforcement, ["status"], "")} tone={factBoundTone(enforcementFact, toneFromStatus(pickString(enforcement, ["status"], "")), enforcementFailed)} />
             </div>
+            </FactBoundary>
           </MetricCard>
 
           <MetricCard title="风险收紧">
@@ -507,11 +507,12 @@ export function EvidencePage() {
       ) : null}
 
       {activeTab === "release" ? (
-        <div className={`dashboard-grid ${factIsKnown(releaseFact, releaseFailed) ? "" : "fact-unverified"}`.trim()}>
+        <div className="dashboard-grid">
           <MetricCard title="发布记录">
             <div className="page-action-bar">
               <ActionButton icon={Rocket} label="开始发布记录" variant="primary" loading={releaseMutation.isPending} error={releaseMutation.isError ? "启动失败" : null} onAction={() => releaseMutation.mutateAsync()} />
             </div>
+            <FactBoundary fact={releaseFact} label="发布事实" requestFailed={releaseFailed}>
             <div className="field-list">
               <Field label="发布编号" value={releaseRunId} />
               <Field label="状态" value={pickString(release, ["status"], "")} tone={factBoundTone(releaseFact, toneFromStatus(pickString(release, ["status"], "")), releaseFailed)} />
@@ -519,6 +520,7 @@ export function EvidencePage() {
               <Field label="就绪姿态" value={pickString(release, ["readiness_posture"], "")} />
               <Field label="创建时间" value={formatTime(pick(release, ["created_at"]))} />
             </div>
+            </FactBoundary>
           </MetricCard>
 
           <MetricCard title="审批轨迹">

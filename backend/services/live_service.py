@@ -2347,12 +2347,38 @@ def _live_state_get(key: str, default=None, *, clone: bool = False):
     return _runtime_state_get(_live_state, _LIVE_STATE_LOCK, key, default, clone=clone)
 
 
+def _live_state_snapshot() -> dict:
+    """Return one immutable projection for API/WS serialization.
+
+    Related fields are published in one locked state update. API readers must
+    copy that projection once; reading ``_live_state`` field by field can
+    otherwise combine the previous value with the next update and manufacture
+    a mixed freshness envelope.
+    """
+    with _LIVE_STATE_LOCK:
+        return _safe_container_snapshot(_live_state)
+
+
 def _live_state_set(key: str, value) -> None:
     _runtime_state_set(_live_state, _LIVE_STATE_LOCK, key, value)
+    _notify_live_state_change()
 
 
 def _live_state_update(**kwargs) -> None:
     _runtime_state_update(_live_state, _LIVE_STATE_LOCK, **kwargs)
+    _notify_live_state_change()
+
+
+def _notify_live_state_change() -> None:
+    """Wake the event-driven /ws/state projection after a state write."""
+    try:
+        from backend.ws.manager import get_connection_manager
+
+        get_connection_manager().notify("state")
+    except Exception:
+        # WebSocket delivery is an observation surface.  Its availability
+        # must never affect the live loop or risk/effect state writers.
+        return
 
 
 def _mark_account_reconcile_failed(error: str) -> None:
@@ -3923,6 +3949,7 @@ def _record_session_trade(
             session_observed_at=observed_at,
             session_recorded_position_ids=sorted(recorded_ids)[-1000:],
         )
+    _notify_live_state_change()
     _persist_session_state()
     return {
         "session_trades": trades,
@@ -3946,12 +3973,12 @@ def _set_factor_snapshot(votes: dict, composite: dict) -> None:
     _live_state_update(last_factor_votes=votes, last_composite=composite)
 
 
-def _set_loop_diagnostic(tick: int, bridge_status: str, *, bridge_ready: bool | None = None) -> None:
+def _set_loop_diagnostic(tick: int, bridge_status: str | None = None, *, bridge_ready: bool | None = None) -> None:
     previous = _live_state_get("_diag", {}, clone=True) or {}
     snapshot = {
         "tick": tick,
         "ts": time.time(),
-        "bridge": bridge_status,
+        "bridge": bridge_status or previous.get("bridge", ""),
         "last_error": previous.get("last_error", ""),
     }
     if bridge_ready is not None:
@@ -4162,7 +4189,7 @@ def _install_ctrader_live_listener(bridge) -> None:
                         "mid": price,
                         "ts": float(payload.get("ts") or now_ts),
                         "changed_at": quote_changed_at,
-                        "source": "spot",
+                        "source": "ctrader_spot",
                     }
                     # Spot/event projections are useful for display, but they
                     # are not a full broker position reconciliation.  Patch a
@@ -4343,6 +4370,9 @@ def warmup_ctrader(timeout_sec: float = 0.0) -> None:
 
 
 _last_spot_subscription_attempt_ts: float = 0.0
+# Internal market-context cache tolerance only. Public spot facts and final
+# open admission use the 15-second contract; this longer window must never be
+# used to label the UI quote as realtime or authorize a new open.
 _SPOT_QUOTE_STALE_SECONDS = 300.0
 
 
@@ -5266,6 +5296,88 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
     ):
         updates["safety_failure"] = {}
     _live_state_update(**updates)
+
+    # The watchdog owns the durable recovery edge, but the live loop owns a
+    # separate in-memory admission projection.  Keep the two projections
+    # linearized here: otherwise a cleared latch can leave the loop degraded
+    # until a later tick happens to republish the positive edge.  Recovery is
+    # still fail-closed: every current safety/reconcile fact must be known and
+    # no independent latch cause may remain before the projection can reopen.
+    recovery_blockers: list[str] = []
+    recovery_ready = bool(
+        result.enabled
+        and result.running
+        and result.ok
+        and result.state == "current"
+    )
+    if recovery_ready:
+        recovery_blockers.extend(str(item) for item in result.blockers if str(item))
+        if bool(released.get("active")):
+            recovery_blockers.append("no_new_risk_latched")
+
+        projected_failure = (
+            {}
+            if updates.get("safety_failure") == {}
+            else safety_failure
+        )
+        if projected_failure:
+            recovery_blockers.extend(
+                str(item)
+                for item in (projected_failure.get("blockers") or [])
+                if str(item)
+            )
+            if not projected_failure.get("blockers"):
+                recovery_blockers.append(
+                    f"safety_failure:{failure_source or 'unknown'}"
+                )
+
+        safety_payload = _live_state_get("safety_plane", {}, clone=True) or {}
+        if not isinstance(safety_payload, dict) or not bool(
+            safety_payload.get("accepting_new_risk")
+        ):
+            recovery_blockers.extend(
+                str(item)
+                for item in (
+                    safety_payload.get("blockers", [])
+                    if isinstance(safety_payload, dict)
+                    else []
+                )
+                if str(item)
+            )
+            if not recovery_blockers or recovery_blockers[-1] != "no_new_risk_latched":
+                recovery_blockers.append("safety_not_accepting_new_risk")
+
+        recovery_blockers.extend(_new_risk_reconciliation_blockers())
+        if (
+            str(_live_state_get("session_state_status", "unknown") or "unknown")
+            != "available"
+        ):
+            recovery_blockers.append("session_state_unavailable")
+        if bool(_live_state_get("circuit_breaker", False)):
+            recovery_blockers.append("session_circuit_breaker")
+
+    normalized_recovery_blockers = sorted(set(recovery_blockers))
+    if _generation_controller_enabled():
+        current = _LIVE_LOOP_CONTROLLER.current()
+        if current is not None:
+            try:
+                _LIVE_LOOP_CONTROLLER.update_runtime_health(
+                    current.generation_id,
+                    blockers=tuple(normalized_recovery_blockers)
+                    if recovery_ready
+                    else ("safety_recovery_not_ready",),
+                )
+                _live_state_update(
+                    accepting_new_risk=_LIVE_LOOP_CONTROLLER.accepting_new_risk(
+                        current.generation_id
+                    )
+                )
+            except RuntimeError:
+                pass
+    elif bool(_live_state_get("loop_running", False)):
+        _live_state_update(
+            accepting_new_risk=bool(recovery_ready and not normalized_recovery_blockers)
+        )
 
 
 def _start_live_safety_watchdog() -> bool:
@@ -7616,13 +7728,13 @@ _cross_asset_covar: "CrossAssetCovariance | None" = None  # 跨品种协方差
 import json as _json
 
 
-def _should_send_orders(broker: str) -> bool:
-    """True = 真发单; False = dry-run (记 log, 不下单)."""
+def _should_send_orders(broker: str, *, log_blocking: bool = True) -> bool:
+    """True = 真发单; False = dry-run; optionally suppress repeat read logs."""
     if broker == "ctrader":
         from backend.services.execution_semantics import current_execution_semantics
 
         semantics = current_execution_semantics()
-        if semantics.blocking_reason:
+        if semantics.blocking_reason and log_blocking:
             logger.warning("[live] send-orders blocked by execution semantics: {}", semantics.blocking_reason)
             return False
         return bool(semantics.effective_send_orders)

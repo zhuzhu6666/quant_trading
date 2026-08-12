@@ -31,6 +31,10 @@ const autonomyDecoder = read("src/api/fact.ts");
 const riskDecoder = read("src/api/riskSnapshot.ts");
 const presentationSources = pages.join("\n") + v16Views + tradingPage + read("src/pages/PnlPage.tsx") + workspaces;
 
+for (const source of [...pages, workspaces]) {
+  assert.doesNotMatch(source, /refetchInterval/, "前端页面不得自行创建自动轮询");
+}
+
 assert.equal((app.match(/<ProtectedAppLayout/g) ?? []).length, 1, "受保护页面应共用一个布局壳");
 assert.ok((app.match(/lazy\(\(\) => import/g) ?? []).length >= 6, "一级页面应按路由懒加载");
 assert.ok((workspaces.match(/lazy\(\(\) => import/g) ?? []).length >= 6, "合并工作区的二级页面应继续懒加载");
@@ -42,7 +46,7 @@ assert.match(workspaces, /if \(section === "risk"\) return <Navigate to="\/tradi
 assert.doesNotMatch(workspaces, /import .*RiskPage/);
 assert.match(workspaces, /AutonomyFlowSummary/);
 assert.match(workspaces, /运行事实 → 智能体分析 → 模型观察 → 学习形成候选 → 治理决定是否写回/);
-assert.match(workspaces, /factStatusLabel\(readinessFact\)/);
+assert.match(workspaces, /factStatusLabel\(readinessFact, requestFailed\)/);
 assert.match(workspaces, /1\. 运行与裁决/);
 assert.match(workspaces, /2\. 学习与候选/);
 assert.match(workspaces, /3\. 模型与数据/);
@@ -82,7 +86,7 @@ assert.match(learningPage, /runtime_factor_budget/);
 assert.match(learningPage, /readFact\(readinessQuery\.data, "ops\.backend-readiness\.v2"\)/);
 assert.match(learningPage, /const readinessRequestFailed = readinessQuery\.isError \|\| readinessQuery\.isRefetchError/);
 assert.match(learningPage, /const hasError = learningQueries\.some\(\(query\) => query\.isError \|\| query\.isRefetchError\)/);
-assert.match(learningPage, /const learningFactsKnown = readinessKnown && \[/);
+assert.match(learningPage, /const learningFactsKnown = learningViewState === "known"/);
 for (const contract of [
   "learning.summary.v2",
   "learning.suggestions.v2",
@@ -99,23 +103,22 @@ assert.doesNotMatch(learningPage, /title="学习控制台"/, "学习控制台摘
 assert.match(learningPage, /learning-quality-disclosure/);
 assert.match(learningPage, /className="learning-side-panel"/);
 assert.doesNotMatch(learningPage, /learning-dashboard \$\{learningFactsKnown \? "" : "fact-unverified"\}/, "单个学习接口不得把整页正常卡片染黄");
-assert.match(learningPage, /部分数据更新中/);
-assert.match(learningPage, /部分数据待确认/);
+assert.match(learningPage, /学习\$\{factViewStateLabel\(learningViewState\)\}/);
 for (const queryName of ["lifecycle", "reviews", "samples", "backend-readiness"]) {
   assert.match(learningPage, new RegExp(`label: "${queryName}"`), `Learning ${queryName} 错误必须可见`);
 }
 assert.match(modelsPage, /readFact\(readinessQuery\.data, "ops\.backend-readiness\.v2"\)/);
 assert.match(modelsPage, /const readinessRequestFailed = readinessQuery\.isError \|\| readinessQuery\.isRefetchError/);
 assert.match(modelsPage, /const hasError = modelQueries\.some\(\(query\) => query\.isError \|\| query\.isRefetchError\)/);
-assert.match(modelsPage, /const modelFactsKnown = readinessKnown && \[/);
+assert.match(modelsPage, /const modelFactsKnown = modelViewState === "known"/);
 assert.match(modelsPage, /className="dashboard models-dashboard"/);
 assert.match(modelsPage, /模型结论：观察、候选还是参与/);
 assert.match(modelsPage, /历史回测与训练样本（按需运行，不改变线上权限）/);
 assert.match(modelsPage, /展开模型准入、数据质量和权限边界/);
 assert.match(modelsPage, /模型事件流：建议 → 观察 → 审计/);
 assert.doesNotMatch(modelsPage, /models-dashboard \$\{modelFactsKnown \? "" : "fact-unverified"\}/, "单个模型接口不得把整页正常卡片染黄");
-assert.match(modelsPage, /部分数据更新中/);
-assert.match(modelsPage, /部分数据待确认/);
+assert.match(modelsPage, /模型\$\{factViewStateLabel\(modelViewState\)\}/);
+assert.doesNotMatch(modelsPage, /queryFn: getLearningDatasetReadiness,[\s\S]*?refetchInterval/);
 for (const queryName of ["factorAdvisories", "highLoadAudits"]) {
   assert.match(modelsPage, new RegExp(`${queryName}Query,`), `Models ${queryName} 也必须参与事实与错误边界`);
 }
@@ -160,8 +163,9 @@ assert.match(autonomyCss, /\.v16-pipeline-row[\s\S]*grid-template-columns:/, "�
 assert.match(autonomyCss, /\.v16-detail-section \.brain-action-plan-compact\s*\{[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\)/, "窄明细列中的计划、评价和执行卡必须服从父容器宽度");
 assert.match(autonomyCss, /\.v16-detail-section \.brain-hypothesis-head \.status-pill\s*\{[\s\S]*max-width:\s*44%/, "窄明细列中的状态徽章不得撑破卡片");
 assert.match(v16Page, /<MetricCard title="执行边界：能否执行 \/ 当前护栏"[\s\S]*?<FactBoundary fact=\{liveAutonomyView\.fact\}/, "执行边界控制必须位于 Fact 边界内");
-assert.match(v16Page, /proposalRegistryKnown \? "" : "fact-unverified"/);
-assert.match(v16Page, /liveReadyGuardrailKnown \? "" : "fact-unverified"/);
+assert.match(v16Page, /<FactBoundary fact=\{proposalRegistryFact\}/);
+assert.match(v16Page, /<FactBoundary fact=\{liveReadyGuardrailFact\}/);
+assert.doesNotMatch(v16Page, /fact-unverified/, "旧的无语义 fact-unverified 样式路径必须删除");
 assert.doesNotMatch(
   v16Page,
   /Fact\s*=.*:\s*readinessFact/,
@@ -213,14 +217,14 @@ assert.match(autonomyDecoder, /LIVE_AUTONOMY_STATUS_CONTRACT/);
 assert.match(autonomyDecoder, /factIsKnown\(fact, requestFailed\)/);
 assert.doesNotMatch(autonomyDecoder, /pick\(|pickValue|WRAPPER_KEYS/);
 assert.match(autonomyDecoder, /export function factBoundTone/);
-assert.match(tradingPage, /readFact\(strategyStatusQuery\.data, "live\.strategy\.v2"\)/);
-assert.match(tradingPage, /readFactComponent\(riskQuery\.data, "risk_inputs", "risk\.inputs\.v1"\)/);
-assert.match(tradingPage, /decodeCanonicalRiskSnapshot\(riskQuery\.data\)/);
+assert.match(tradingPage, /readFactComponent\(snapshot, "strategy", "live\.strategy\.v2"\)/);
+assert.match(tradingPage, /readFactComponent\(snapshot, "risk_inputs", "risk\.inputs\.v1"\)/);
+assert.match(tradingPage, /decodeCanonicalRiskSnapshot\(snapshot\)/);
 assert.match(tradingPage, /const loopKnown = factIsKnown\(loopFact, loopRequestFailed\)/);
 assert.match(tradingPage, /const positionsKnown = factIsKnown\(positionsViewFact, positionsViewRequestFailed\)/);
 assert.match(
   tradingPage,
-  /<RiskPanel[\s\S]*?riskData=\{riskQuery\.data\}[\s\S]*?riskRequestFailed=\{riskRequestFailed\}[\s\S]*?embedded[\s\S]*?factorSignals=\{factorTicks\}[\s\S]*?positionsContent=/,
+  /<RiskPanel[\s\S]*?riskData=\{risk\}[\s\S]*?riskRequestFailed=\{riskRequestFailed\}[\s\S]*?embedded[\s\S]*?factorSignals=\{factorTicks\}[\s\S]*?positionsContent=/,
   "交易页必须复用同一份风险事实并把因子信号和仓位数据交给开仓决策链",
 );
 assert.match(tradingPage, /factorSignalsPending=\{recentTicksQuery\.isPending && !recentTicksQuery\.data\}/);
@@ -247,11 +251,16 @@ assert.match(pnlPage, /const seriesRequestFailed = seriesQuery\.isError \|\| ser
 assert.match(pnlPage, /\(\) => seriesDisplayable[\s\S]*?pickArray\(seriesQuery\.data/, "PnL unknown/error payload 不得作为事实值展示");
 assert.match(pnlPage, /tone=\{factBoundTone\(seriesFact, numberTone\(realized\), seriesRequestFailed\)\}/);
 assert.match(pnlPage, /seriesKnown \? "status-ok" : "status-warn"/, "收益 retained data 不得继续显示绿色行");
-for (const endpoint of ["health", "loop", "account", "session", "db", "readiness"]) {
+for (const endpoint of ["health", "db", "readiness"]) {
   assert.match(overviewPage, new RegExp(`const ${endpoint}RequestFailed = queries\\.${endpoint}\\.isError \\|\\| queries\\.${endpoint}\\.isRefetchError`));
   assert.match(overviewPage, new RegExp(`const ${endpoint}Known = factIsKnown\\(${endpoint}Fact, ${endpoint}RequestFailed\\)`));
 }
-assert.match(overviewPage, /readFactComponent\(queries\.risk\.data, "risk_inputs", "risk\.inputs\.v1"\)/);
+assert.match(overviewPage, /const loopRequestFailed = snapshotRequestFailed/);
+assert.match(overviewPage, /const accountRequestFailed = snapshotRequestFailed/);
+assert.match(overviewPage, /const sessionRequestFailed = snapshotRequestFailed/);
+assert.match(overviewPage, /const riskRequestFailed = snapshotRequestFailed/);
+assert.match(overviewPage, /const sessionKnown = factIsKnown\(sessionFact, sessionRequestFailed\)/);
+assert.match(overviewPage, /const riskKnown = factIsKnown\(riskInputsFact, riskRequestFailed\)/);
 assert.match(overviewPage, /系统数据流与智能体自治闭环/);
 assert.match(overviewPage, /Demo 自动演化协调器/);
 assert.match(overviewPage, /后台学习任务定时驱动/);
@@ -272,7 +281,9 @@ for (const obsoleteLabel of ["世界模型与 Critic", "刷新大脑", 'label="C
   assert.ok(!presentationSources.includes(obsoleteLabel), `前端不得继续展示内部术语：${obsoleteLabel}`);
 }
 assert.doesNotMatch(overviewPage, /function TopologyNode|runtime-node-track/, "旧卡片式拓扑必须删除");
-assert.match(overviewPage, /decodeCanonicalRiskSnapshot\(queries\.risk\.data\)/);
+assert.match(overviewPage, /decodeCanonicalRiskSnapshot\(snapshot\)/);
+assert.match(overviewPage, /readFactComponent\(snapshot, "session", "live\.session-risk\.v2"\)/);
+assert.match(overviewPage, /readFactComponent\(snapshot, "risk_inputs", "risk\.inputs\.v1"\)/);
 assert.match(overviewPage, /const positionsKnown = factIsKnown\(positionsFact, snapshotRequestFailed\)/);
 assert.match(overviewPage, /const priceKnown = factIsKnown\(spotFact, snapshotRequestFailed\)/);
 assert.doesNotMatch(overviewPage, /Fact\.state === "known"/, "Overview 绿灯不得绕过 request failure 边界");
@@ -354,10 +365,7 @@ assert.match(riskPage, /tradeTracesQuery\.isPending && !tradeTracesQuery\.data/,
 assert.match(riskPage, /executionCategory === "applied"/, "策略裁决行必须使用后端执行状态");
 assert.match(riskPage, /真实执行/);
 assert.match(riskPage, /未执行/);
-assert.match(tradingPage, /queryKeys\.riskPolicyVerdicts/);
-assert.match(tradingPage, /queryKeys\.riskTradeTraces/);
-assert.match(tradingPage, /queryKeys\.dbHealth/);
-assert.match(tradingPage, /queryKeys\.readiness/);
+assert.doesNotMatch(tradingPage, /queryKeys\.(riskPolicyVerdicts|riskTradeTraces|dbHealth|readiness)/, "交易运行态不得再通过独立 HTTP 查询驱动");
 assert.match(evidencePage, /type EvidenceTab = "replay" \| "incident" \| "release"/);
 assert.doesNotMatch(evidencePage, /tone="ok"/, "运行证据页不得绕过端点 Fact 直接渲染绿色");
 for (const [queryName, contract] of Object.entries({

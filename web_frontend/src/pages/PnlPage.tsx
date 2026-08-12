@@ -48,13 +48,12 @@ export function PnlPage() {
   const seriesQuery = useQuery({
     queryKey: ["realized-pnl", scope],
     queryFn: () => getRealizedPnlSeries(scope),
-    refetchInterval: 10_000,
     staleTime: 5_000,
   });
   const seriesFact = readFact(seriesQuery.data, "live.realized-pnl.v2");
   const seriesRequestFailed = seriesQuery.isError || seriesQuery.isRefetchError;
   const seriesKnown = factIsKnown(seriesFact, seriesRequestFailed);
-  const seriesDisplayable = factHasDisplayValue(seriesFact);
+  const seriesDisplayable = factHasDisplayValue(seriesFact, seriesRequestFailed);
 
   const points = useMemo(
     () => seriesDisplayable
@@ -94,8 +93,10 @@ export function PnlPage() {
         <div className="header-status">
           <StatusPill status={`窗口 ${translateScope(scope)}`} tone="mute" />
           <StatusPill
-            status={seriesRequestFailed ? "刷新失败，保留上次事实" : seriesQuery.isFetching ? "刷新中" : seriesKnown ? "已同步" : seriesFact.state === "stale" ? "事实已过期" : "事实未知"}
+            status={seriesRequestFailed ? "暂无实时数据" : seriesKnown ? "已同步" : seriesFact.state === "stale" ? "事实已过期" : "事实未知"}
             tone={factBoundTone(seriesFact, seriesKnown ? "ok" : "warn", seriesRequestFailed)}
+            fact={seriesFact}
+            requestFailed={seriesRequestFailed}
           />
         </div>
       </div>

@@ -5,7 +5,7 @@ def test_default_freshness_matches_fact_v1_contract_categories():
     assert DEFAULT_STALE_AFTER_SEC == {
         "ws": 5.0,
         "state": 5.0,
-        "spot": 5.0,
+        "spot": 15.0,
         "account": 15.0,
         "positions": 15.0,
         "loop": 15.0,

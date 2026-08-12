@@ -1,30 +1,25 @@
 import { ReactNode } from "react";
-import { AlertTriangle, Clock3 } from "lucide-react";
-import { FactEnvelope, factStatusLabel } from "@/api/fact";
+import { AlertTriangle } from "lucide-react";
+import { FactEnvelope, factViewState } from "@/api/fact";
 import { formatTime } from "@/lib/format";
 
 export function FactBoundary({
   fact,
   label,
+  requestFailed = false,
   children,
 }: {
   fact: FactEnvelope;
   label: string;
+  requestFailed?: boolean;
   children: ReactNode;
 }) {
-  if (fact.state === "known") return <>{children}</>;
-  if (fact.state === "stale") {
-    return (
-      <div className="fact-boundary fact-boundary-stale">
-        <div className="fact-boundary-note"><Clock3 size={13} />{label}已过期 · {formatTime(fact.observed_at)}</div>
-        {children}
-      </div>
-    );
-  }
+  const viewState = factViewState(fact, requestFailed);
+  if (viewState === "known") return <>{children}</>;
   return (
-    <div className="fact-boundary fact-boundary-unknown" role="status">
+    <div className={`fact-boundary ${viewState === "stale" ? "fact-boundary-stale" : "fact-boundary-unknown"}`} role="status">
       <AlertTriangle size={14} />
-      <span>{label}{factStatusLabel(fact)}{fact.reason_code ? ` · ${fact.reason_code}` : ""}</span>
+      <span>{label}暂无实时数据{fact.reason_code ? ` · ${fact.reason_code}` : ""}{fact.observed_at ? ` · 最后观测 ${formatTime(fact.observed_at)}` : ""}</span>
     </div>
   );
 }

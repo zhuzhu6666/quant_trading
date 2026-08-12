@@ -11,7 +11,10 @@ FACT_STATES = frozenset({"known", "unknown", "stale", "error"})
 DEFAULT_STALE_AFTER_SEC = {
     "ws": 5.0,
     "state": 5.0,
-    "spot": 5.0,
+    # Public spot freshness follows the final open admission contract.  The
+    # observation must still come from a real cTrader quote event; transport
+    # heartbeats must not refresh it.
+    "spot": 15.0,
     "account": 15.0,
     "positions": 15.0,
     "loop": 15.0,

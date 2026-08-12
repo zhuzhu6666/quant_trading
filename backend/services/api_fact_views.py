@@ -275,11 +275,19 @@ def _loop_fact(
     running = bool(payload.get("running"))
     phase = str(payload.get("phase") or ("running" if running else "stopped"))
     if running:
-        observed_at = (
-            payload.get("safety_heartbeat_at")
-            or payload.get("heartbeat_at")
-            or diagnostic_ts
-        )
+        # Public loop/strategy freshness is liveness, not open authorization.
+        # Prefer the latest completed-loop observation when available; the
+        # Safety heartbeat remains a separate fail-closed authority.
+        heartbeat_candidates = [
+            value
+            for value in (
+                diagnostic_ts,
+                payload.get("heartbeat_at"),
+                payload.get("safety_heartbeat_at"),
+            )
+            if observed_epoch(value) > 0
+        ]
+        observed_at = max(heartbeat_candidates, key=observed_epoch, default=None)
         reason_code = None if observed_epoch(observed_at) > 0 else "loop_heartbeat_missing"
     else:
         # A stopped/draining status is read synchronously from process/thread
@@ -352,11 +360,7 @@ def live_status_fact_payload(
         "loop": loop_fact,
     }
     if loop.get("running"):
-        loop_observed_at = (
-            loop.get("safety_heartbeat_at")
-            or loop.get("heartbeat_at")
-            or diagnostic_ts
-        )
+        loop_observed_at = loop_fact.get("observed_at") or diagnostic_ts
     else:
         loop_observed_at = loop.get("updated_at") or generated_at
     observed_at = _positive_min([account_ts, positions_ts, loop_observed_at])
@@ -877,6 +881,56 @@ def state_snapshot_fact_payload(
         ),
         "transport": {"mode": raw_source},
     }
+    strategy_payload = result.get("strategy_status")
+    strategy_mapping = strategy_payload if isinstance(strategy_payload, Mapping) else {}
+    strategy_v4 = strategy_mapping.get("v4_status")
+    strategy_v4_mapping = strategy_v4 if isinstance(strategy_v4, Mapping) else {}
+    strategy_active = bool(strategy_v4_mapping.get("pipeline_active"))
+    components["strategy"] = _component(
+        contract="live.strategy.v2",
+        source="factor_pipeline" if strategy_active else "none",
+        observed_at=diagnostic_ts,
+        stale_after_sec=DEFAULT_STALE_AFTER_SEC["loop"],
+        reason_code=None if strategy_active else "factor_pipeline_inactive",
+        now=generated_at,
+    )
+    components["session"] = _component(
+        contract="live.session-risk.v2",
+        source="live_process" if diagnostic_ts else "none",
+        observed_at=diagnostic_ts,
+        stale_after_sec=DEFAULT_STALE_AFTER_SEC["loop"],
+        reason_code=None if diagnostic_ts else "session_observation_missing",
+        now=generated_at,
+    )
+    risk_payload = result.get("risk")
+    risk_mapping = risk_payload if isinstance(risk_payload, Mapping) else {}
+    risk_snapshot = risk_mapping.get("snapshot")
+    risk_snapshot_mapping = risk_snapshot if isinstance(risk_snapshot, Mapping) else {}
+    risk_observed_at = risk_snapshot_mapping.get("as_of")
+    risk_status = str(risk_snapshot_mapping.get("status") or "")
+    risk_fact = _component(
+        contract="risk.inputs.v1",
+        source="live_risk_metrics" if observed_epoch(risk_observed_at) > 0 else "none",
+        observed_at=risk_observed_at,
+        stale_after_sec=DEFAULT_STALE_AFTER_SEC["risk"],
+        error="risk_metrics_snapshot_error" if risk_status == "error" else None,
+        reason_code=(str((risk_snapshot_mapping.get("blockers") or [""])[0]) or None)
+        if risk_status not in {"", "known"}
+        else None,
+        now=generated_at,
+    )
+    if risk_status in {"stale", "error"}:
+        risk_fact["state"] = risk_status
+    components["risk_inputs"] = risk_fact
+    risk_health = result.get("risk_health")
+    risk_health_mapping = risk_health if isinstance(risk_health, Mapping) else {}
+    components["risk_health"] = _component(
+        contract="system.runtime-health.v1",
+        source="live_process" if risk_health_mapping else "none",
+        observed_at=diagnostic_ts if risk_health_mapping else None,
+        stale_after_sec=DEFAULT_STALE_AFTER_SEC["system_health"],
+        now=generated_at,
+    )
     return dict(attach_fact(
         result,
         contract="live.state.v2",

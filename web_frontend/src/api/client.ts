@@ -610,10 +610,6 @@ export async function getOffmarketHighLoadAudits(limit = 30): Promise<LearningPa
   return getJson<LearningPayload>(`/api/learning/model/offmarket-high-load/audits?limit=${encodeURIComponent(String(limit))}`);
 }
 
-export async function getStateSnapshot(): Promise<StateSnapshot> {
-  return getJson<StateSnapshot>("/api/state");
-}
-
 export async function getReplayLatest(): Promise<Record<string, unknown>> {
   return getJson<Record<string, unknown>>("/api/ops/replay/latest");
 }

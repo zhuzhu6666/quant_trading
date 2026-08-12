@@ -10,8 +10,12 @@ from dataclasses import asdict, dataclass
 import time
 from typing import Any, Callable, Mapping
 
+from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC
 
-FINAL_OPEN_FACT_MAX_AGE_SECONDS = 15.0
+# Keep final open quote admission on the same canonical freshness contract
+# exposed by live.spot-quote.v1.  The admission result remains an independent
+# fail-closed safety decision.
+FINAL_OPEN_FACT_MAX_AGE_SECONDS = DEFAULT_STALE_AFTER_SEC["spot"]
 
 
 @dataclass(frozen=True)

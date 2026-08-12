@@ -107,20 +107,22 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
   const [activeTab, setActiveTab] = useState<ChainTab>("overview");
   const queryClient = useQueryClient();
   const readinessQuery = useBackendReadinessQuery();
-  const agentAuthorityQuery = useQuery({ queryKey: ["v16", "agent-authority"], queryFn: getAgentAuthority, enabled: activeTab === "overview", refetchInterval: 30_000, staleTime: 10_000 });
-  const agentScorecardQuery = useQuery({ queryKey: ["v16", "agent-scorecard"], queryFn: () => getAgentScorecard(300), enabled: activeTab === "overview", refetchInterval: 30_000, staleTime: 10_000 });
-  const agentBriefingQuery = useQuery({ queryKey: ["v16", "agent-briefing"], queryFn: () => getAgentBriefing(20), enabled: activeTab === "overview" || activeTab === "proposals", refetchInterval: 30_000, staleTime: 10_000 });
-  const agentChainHealthQuery = useQuery({ queryKey: ["v16", "agent-chain-health"], queryFn: () => getAgentChainHealth(300), enabled: activeTab === "overview", refetchInterval: 30_000, staleTime: 10_000 });
-  const brainStateQuery = useQuery({ queryKey: ["v16", "brain-state"], queryFn: () => getBrainState(false), enabled: activeTab === "overview" || activeTab === "evidence", refetchInterval: 20_000, staleTime: 8_000 });
-  const brainMemoryQuery = useQuery({ queryKey: ["v16", "brain-memory"], queryFn: () => getBrainMemory(false, 24), enabled: activeTab === "overview" || activeTab === "evidence", refetchInterval: 30_000, staleTime: 10_000 });
-  const brainActionPlansQuery = useQuery({ queryKey: ["v16", "brain-action-plans"], queryFn: () => getBrainActionPlans(false, 24), enabled: activeTab === "evidence", refetchInterval: 30_000, staleTime: 10_000 });
-  const brainActionPlanEvalsQuery = useQuery({ queryKey: ["v16", "brain-action-plan-evals"], queryFn: () => getBrainActionPlanEvals(false, 24), enabled: activeTab === "evidence", refetchInterval: 30_000, staleTime: 10_000 });
-  const lowImpactExecutionsQuery = useQuery({ queryKey: ["v16", "brain-low-impact-executions"], queryFn: () => getBrainLowImpactExecutions(24), enabled: activeTab === "evidence", refetchInterval: 30_000, staleTime: 10_000 });
-  const mediumImpactGovernanceQuery = useQuery({ queryKey: ["v16", "brain-medium-impact-governance"], queryFn: () => getBrainMediumImpactGovernance(24), enabled: activeTab === "proposals", refetchInterval: 30_000, staleTime: 10_000 });
-  const candidateReviewsQuery = useQuery({ queryKey: ["v16", "brain-governance-candidate-reviews"], queryFn: () => getBrainGovernanceCandidateReviews(24), enabled: activeTab === "proposals", refetchInterval: 30_000, staleTime: 10_000 });
-  const liveReadyGuardrailsQuery = useQuery({ queryKey: ["v16", "brain-live-ready-guardrails"], queryFn: () => getBrainLiveReadyGuardrails(24), enabled: activeTab === "control", refetchInterval: 30_000, staleTime: 10_000 });
-  const proposalRegistryQuery = useQuery({ queryKey: ["autonomy", "proposal-registry"], queryFn: () => getAutonomyProposals(false, 24), enabled: activeTab === "proposals", refetchInterval: 30_000, staleTime: 10_000 });
-  const liveAutonomyQuery = useQuery({ queryKey: ["autonomy", "live-status"], queryFn: () => getLiveAutonomyStatus(false), enabled: activeTab === "overview" || activeTab === "control", refetchInterval: 20_000, staleTime: 8_000 });
+  // Governance and learning data are page-entry/manual snapshots. The live
+  // runtime channel is /ws/state; these queries must not create timers.
+  const agentAuthorityQuery = useQuery({ queryKey: ["v16", "agent-authority"], queryFn: getAgentAuthority, enabled: activeTab === "overview", staleTime: 10_000 });
+  const agentScorecardQuery = useQuery({ queryKey: ["v16", "agent-scorecard"], queryFn: () => getAgentScorecard(300), enabled: activeTab === "overview", staleTime: 10_000 });
+  const agentBriefingQuery = useQuery({ queryKey: ["v16", "agent-briefing"], queryFn: () => getAgentBriefing(20), enabled: activeTab === "overview" || activeTab === "proposals", staleTime: 10_000 });
+  const agentChainHealthQuery = useQuery({ queryKey: ["v16", "agent-chain-health"], queryFn: () => getAgentChainHealth(300), enabled: activeTab === "overview", staleTime: 10_000 });
+  const brainStateQuery = useQuery({ queryKey: ["v16", "brain-state"], queryFn: () => getBrainState(false), enabled: activeTab === "overview" || activeTab === "evidence", staleTime: 8_000 });
+  const brainMemoryQuery = useQuery({ queryKey: ["v16", "brain-memory"], queryFn: () => getBrainMemory(false, 24), enabled: activeTab === "overview" || activeTab === "evidence", staleTime: 10_000 });
+  const brainActionPlansQuery = useQuery({ queryKey: ["v16", "brain-action-plans"], queryFn: () => getBrainActionPlans(false, 24), enabled: activeTab === "evidence", staleTime: 10_000 });
+  const brainActionPlanEvalsQuery = useQuery({ queryKey: ["v16", "brain-action-plan-evals"], queryFn: () => getBrainActionPlanEvals(false, 24), enabled: activeTab === "evidence", staleTime: 10_000 });
+  const lowImpactExecutionsQuery = useQuery({ queryKey: ["v16", "brain-low-impact-executions"], queryFn: () => getBrainLowImpactExecutions(24), enabled: activeTab === "evidence", staleTime: 10_000 });
+  const mediumImpactGovernanceQuery = useQuery({ queryKey: ["v16", "brain-medium-impact-governance"], queryFn: () => getBrainMediumImpactGovernance(24), enabled: activeTab === "proposals", staleTime: 10_000 });
+  const candidateReviewsQuery = useQuery({ queryKey: ["v16", "brain-governance-candidate-reviews"], queryFn: () => getBrainGovernanceCandidateReviews(24), enabled: activeTab === "proposals", staleTime: 10_000 });
+  const liveReadyGuardrailsQuery = useQuery({ queryKey: ["v16", "brain-live-ready-guardrails"], queryFn: () => getBrainLiveReadyGuardrails(24), enabled: activeTab === "control", staleTime: 10_000 });
+  const proposalRegistryQuery = useQuery({ queryKey: ["autonomy", "proposal-registry"], queryFn: () => getAutonomyProposals(false, 24), enabled: activeTab === "proposals", staleTime: 10_000 });
+  const liveAutonomyQuery = useQuery({ queryKey: ["autonomy", "live-status"], queryFn: () => getLiveAutonomyStatus(false), enabled: activeTab === "overview" || activeTab === "control", staleTime: 8_000 });
 
   const refreshMutation = useMutation({
     mutationFn: async () => {
@@ -510,8 +512,8 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
           <p>运行日志、待治理链路、依据反馈和执行边界。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={displayValue(pickString(autonomousBlueprint, ["status"], ""))} tone={factBoundTone(readinessFact, pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn", readinessRequestFailed)} />
-          <StatusPill status={displayStage(pickString(v16Readiness, ["phase"], ""))} tone={factBoundTone(readinessFact, "ok", readinessRequestFailed)} />
+          <StatusPill status={displayValue(pickString(autonomousBlueprint, ["status"], ""))} tone={factBoundTone(readinessFact, pickBoolean(autonomousBlueprint, ["ok"], false) ? "ok" : "warn", readinessRequestFailed)} fact={readinessFact} requestFailed={readinessRequestFailed} />
+          <StatusPill status={displayStage(pickString(v16Readiness, ["phase"], ""))} tone={factBoundTone(readinessFact, "ok", readinessRequestFailed)} fact={readinessFact} requestFailed={readinessRequestFailed} />
           {activeTab === "overview" || activeTab === "evidence" ? (
             <StatusPill status={brainStateKnown ? (readOnly && !affectsTrading ? "交易边界正常" : "边界异常") : "交易边界未知"} tone={factBoundTone(brainStateFact, readOnly && !affectsTrading ? "ok" : "bad", brainStateRequestFailed)} />
           ) : null}
@@ -553,9 +555,9 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
           <details className="detail-disclosure wide-panel v16-overview-disclosure">
             <summary><UsersRound size={15} aria-hidden="true" />查看智能体权限明细（默认收起）</summary>
             <MetricCard title="智能体权限" className="v16-overview-detail">
-              <div className={agentFactsKnown && agentScorecardKnown && agentBriefingKnown ? "" : "fact-unverified"}>
+              <FactBoundary fact={agentAuthorityFact} label="智能体权限事实" requestFailed={agentAuthorityRequestFailed}>
                 <AgentAuthorityPanel agentAuthority={agentAuthority} agentScorecard={agentScorecard} agentBriefing={agentBriefing} chainHealth={agentChainHealth} />
-              </div>
+              </FactBoundary>
             </MetricCard>
           </details>
         </div>
@@ -564,17 +566,19 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
       {activeTab === "proposals" ? (
         <div className="dashboard-grid v16-grid">
           <MetricCard title="待治理链路：提案 → 候选 → 审查" className="wide-panel">
-            <div className={`v16-boundary ${proposalRegistryKnown ? "" : "fact-unverified"}`.trim()}>
+            <FactBoundary fact={proposalRegistryFact} label="提案登记事实" requestFailed={proposalRegistryRequestFailed}>
+            <div className="v16-boundary">
               <Field label="提案" value={formatDecimal(pickNumber(proposalSummary, ["proposal_count"], proposalItems.length), 0)} />
               <Field label="活跃" value={formatDecimal(pickNumber(proposalSummary, ["active_count"], 0), 0)} />
               <Field label="冲突" value={formatDecimal(pickNumber(proposalSummary, ["conflict_count"], 0), 0)} tone={factBoundTone(proposalRegistryFact, pickNumber(proposalSummary, ["conflict_count"], 0) ? "warn" : "ok", proposalRegistryRequestFailed)} />
               <Field label="高危未解" value={formatDecimal(pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0), 0)} tone={factBoundTone(proposalRegistryFact, pickNumber(proposalSummary, ["high_unresolved_conflict_count"], 0) ? "bad" : "ok", proposalRegistryRequestFailed)} />
             </div>
+            </FactBoundary>
             <details className="detail-disclosure v16-inline-disclosure">
               <summary>展开上下文覆盖与交接检查（主链不重复显示）</summary>
-              <div className={agentBriefingKnown ? "" : "fact-unverified"}>
+              <FactBoundary fact={agentBriefingFact} label="智能体简报事实" requestFailed={agentBriefingRequestFailed}>
                 <CoveragePanel proposalContext={proposalContextCoverage} candidateContext={candidateContextCoverage} candidateReview={candidateBridgeReviewCoverage} />
-              </div>
+              </FactBoundary>
             </details>
             <div className="brain-card-actions">
               <button className="header-refresh" type="button" disabled={proposalRefreshMutation.isPending} onClick={() => proposalRefreshMutation.mutate()}><RefreshCw size={15} />{proposalRefreshMutation.isPending ? "刷新中" : "刷新提案"}</button>
@@ -598,12 +602,14 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
       {activeTab === "evidence" ? (
         <div className="dashboard-grid v16-grid">
           <MetricCard title="依据与反馈：当前结论 → 证据缺口 → 后验" className="wide-panel">
-            <div className={`v16-evidence-summary ${brainStateKnown ? "" : "fact-unverified"}`.trim()}>
+            <FactBoundary fact={brainStateFact} label="V16 状态事实" requestFailed={brainStateRequestFailed}>
+            <div className="v16-evidence-summary">
               <CompactMetric label="市场状态" value={displayValue(pickString(worldModel, ["market_regime"], ""))} />
               <CompactMetric label="建议策略" value={displayValue(pickString(worldModel, ["strategy_posture"], ""))} tone={factBoundTone(brainStateFact, statTone, brainStateRequestFailed)} />
               <CompactMetric label="执行状态" value={displayValue(pickString(worldModel, ["execution_posture"], ""))} tone={factBoundTone(brainStateFact, toneFromStatus(pickString(worldModel, ["execution_posture"], "")), brainStateRequestFailed)} />
               <CompactMetric label="证据审查" value={displayValue(criticVerdict)} detail={displayValue(pickString(critic, ["max_allowed_action_scope"], ""))} tone={factBoundTone(brainStateFact, criticVerdict === "pass" ? "ok" : "warn", brainStateRequestFailed)} />
             </div>
+            </FactBoundary>
             <div className="v16-boundary">
               <Field label="运行方式" value={readOnly ? "只读观察" : "可执行"} tone={factBoundTone(brainStateFact, boolTone(readOnly), brainStateRequestFailed)} />
               <Field label="交易权限" value={affectsTrading ? "会影响交易" : "不影响交易"} tone={factBoundTone(brainStateFact, affectsTrading ? "bad" : "ok", brainStateRequestFailed)} />
@@ -619,23 +625,23 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
               <div className="v16-detail-grid">
                 <section className="v16-detail-section">
                   <SectionHead title="假设与负面记忆" status={`${hypotheses.length + negativeMemory.length}`} tone={factBoundTone(brainStateFact, hypotheses.length || negativeMemory.length ? "warn" : "mute", brainStateRequestFailed)} />
-                  <div className={brainStateKnown ? "" : "fact-unverified"}><HypothesisList items={hypotheses} /></div>
-                  <div className={memoryKnown ? "" : "fact-unverified"}><MemoryList items={negativeMemory} empty="暂无负面记忆" /></div>
+                  <FactBoundary fact={brainStateFact} label="V16 假设事实" requestFailed={brainStateRequestFailed}><HypothesisList items={hypotheses} /></FactBoundary>
+                  <FactBoundary fact={memoryFact} label="负面记忆事实" requestFailed={memoryRequestFailed}><MemoryList items={negativeMemory} empty="暂无负面记忆" /></FactBoundary>
                 </section>
                 <section className="v16-detail-section">
                   <SectionHead title="反证与最近索引" status={`${counterEvidence.length + memoryItems.length}`} tone={factBoundTone(memoryFact, counterEvidence.length ? "warn" : "mute", memoryRequestFailed)} />
-                  <div className={memoryKnown ? "" : "fact-unverified"}><MemoryList items={counterEvidence} empty="暂无反证" /></div>
-                  <div className={memoryKnown ? "" : "fact-unverified"}><MemoryList items={memoryItems.slice(0, 8)} empty="暂无索引记忆" /></div>
+                  <FactBoundary fact={memoryFact} label="反证事实" requestFailed={memoryRequestFailed}><MemoryList items={counterEvidence} empty="暂无反证" /></FactBoundary>
+                  <FactBoundary fact={memoryFact} label="索引记忆事实" requestFailed={memoryRequestFailed}><MemoryList items={memoryItems.slice(0, 8)} empty="暂无索引记忆" /></FactBoundary>
                 </section>
                 <section className="v16-detail-section">
                   <SectionHead title="只观察计划" status={`${actionPlans.length}`} tone={factBoundTone(actionPlanFact, actionPlans.length ? "ok" : "mute", actionPlanRequestFailed)} />
-                  <div className={actionPlanKnown ? "" : "fact-unverified"}><ActionPlanList items={actionPlans} /></div>
+                  <FactBoundary fact={actionPlanFact} label="观察计划事实" requestFailed={actionPlanRequestFailed}><ActionPlanList items={actionPlans} /></FactBoundary>
                   <SectionHead title="后验评价" status={`${actionPlanEvals.length}`} tone={factBoundTone(actionPlanEvalFact, actionPlanEvals.length ? "ok" : "mute", actionPlanEvalRequestFailed)} />
-                  <div className={actionPlanEvalKnown ? "" : "fact-unverified"}><EvaluationList items={actionPlanEvals} /></div>
+                  <FactBoundary fact={actionPlanEvalFact} label="后验评价事实" requestFailed={actionPlanEvalRequestFailed}><EvaluationList items={actionPlanEvals} /></FactBoundary>
                 </section>
                 <section className="v16-detail-section">
                   <SectionHead title="低影响执行" status={`${lowImpactExecutions.length}`} tone={factBoundTone(lowImpactFact, lowImpactExecutions.length ? "ok" : "mute", lowImpactRequestFailed)} />
-                  <div className={lowImpactKnown ? "" : "fact-unverified"}><ExecutionList items={lowImpactExecutions} /></div>
+                  <FactBoundary fact={lowImpactFact} label="低影响执行事实" requestFailed={lowImpactRequestFailed}><ExecutionList items={lowImpactExecutions} /></FactBoundary>
                 </section>
               </div>
             </details>
@@ -656,9 +662,9 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
                 <strong>{liveAutonomyKnown ? (unlockAllowed ? "服务端评估允许一次解锁" : "当前不允许自治解锁") : "无法确认是否允许执行"}</strong>
                 <small>{liveAutonomyKnown ? `${displayValue(pickString(liveAutonomy, ["autonomy_mode"], "manual"))} · 阻断 ${formatDecimal(liveAutonomyBlockers.length, 0)} 项` : "执行边界事实未确认，不能把缓存值当成当前权限"}</small>
               </div>
-              <StatusPill status={liveAutonomyKnown ? (unlockAllowed ? "可评估解锁" : "保持锁定") : "数据待确认"} tone={factBoundTone(liveAutonomyView.fact, unlockAllowed ? "ok" : "warn", liveAutonomyRequestFailed)} />
+            <StatusPill status={liveAutonomyKnown ? (unlockAllowed ? "可评估解锁" : "保持锁定") : "数据待确认"} tone={factBoundTone(liveAutonomyView.fact, unlockAllowed ? "ok" : "warn", liveAutonomyRequestFailed)} fact={liveAutonomyView.fact} requestFailed={liveAutonomyRequestFailed} />
             </div>
-            <FactBoundary fact={liveAutonomyView.fact} label="实盘自治事实">
+            <FactBoundary fact={liveAutonomyView.fact} label="实盘自治事实" requestFailed={liveAutonomyRequestFailed}>
               <div className="v16-boundary">
                 <Field label="模式" value={displayValue(pickString(liveAutonomy, ["autonomy_mode"], "manual"))} tone={factBoundTone(liveAutonomyView.fact, pickBoolean(liveAutonomy, ["live_autonomy_unlocked"], false) ? "ok" : "warn", liveAutonomyRequestFailed)} />
                 <Field label="评估" value={displayValue(pickString(liveAutonomyEvaluation, ["status"], "blocked"))} tone={factBoundTone(liveAutonomyView.fact, unlockAllowed ? "ok" : "warn", liveAutonomyRequestFailed)} />
@@ -666,12 +672,14 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
                 <Field label="建议模式" value={displayValue(pickString(liveAutonomyPosture, ["recommended_incident_mode"], "normal"))} />
               </div>
             </FactBoundary>
-            <div className={`v16-boundary v16-control-guardrail-facts ${liveReadyGuardrailKnown ? "" : "fact-unverified"}`.trim()}>
+            <FactBoundary fact={liveReadyGuardrailFact} label="实时护栏事实" requestFailed={liveReadyGuardrailRequestFailed}>
+            <div className="v16-boundary v16-control-guardrail-facts">
               <Field label="能力锁" value={displayValue(pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "locked" : "unlocked")} tone={factBoundTone(liveReadyGuardrailFact, pickBoolean(latestGuardrail, ["live_capability_lock.locked"], false) ? "ok" : "warn", liveReadyGuardrailRequestFailed)} />
               <Field label="经纪商偏差" value={displayValue(pickString(latestGuardrail, ["broker_local_divergence.status"], ""))} />
               <Field label="事故模式" value={displayValue(pickString(latestGuardrail, ["incident_control.mode"], ""))} />
               <Field label="回滚" value={displayValue(pickBoolean(latestGuardrail, ["release_rollback.rollback_ready"], false) ? "ready" : "missing")} />
             </div>
+            </FactBoundary>
             <div className="brain-card-actions">
               <button className="header-refresh" type="button" disabled={liveUnlockEvaluateMutation.isPending} onClick={() => liveUnlockEvaluateMutation.mutate()}><ShieldCheck size={15} />{liveUnlockEvaluateMutation.isPending ? "评估中" : "评估解锁"}</button>
               <ActionButton icon={ShieldCheck} label="一次解锁" variant="danger" disabled={liveUnlockMutation.isPending || !unlockAllowed} loading={liveUnlockMutation.isPending} confirmTitle="确认解锁实盘自治" confirmMessage="只有服务端评估通过且事实仍新鲜时才能执行。" stepUpOnDemand onAction={runLiveUnlock} />
@@ -684,7 +692,8 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
             <details className="detail-disclosure v16-inline-disclosure">
               <summary><ShieldCheck size={15} aria-hidden="true" />展开阻断项与最近护栏记录（控制动作仍受服务端事实约束）</summary>
               <div className="v16-detail-grid v16-control-detail-grid">
-                <section className={`v16-detail-section ${liveAutonomyKnown ? "" : "fact-unverified"}`.trim()}>
+                <FactBoundary fact={liveAutonomyView.fact} label="自治解锁事实" requestFailed={liveAutonomyRequestFailed}>
+                <section className="v16-detail-section">
                   <SectionHead title="自治解锁阻断" status={`${liveAutonomyBlockers.length}`} tone={factBoundTone(liveAutonomyView.fact, liveAutonomyBlockers.length ? "warn" : "ok", liveAutonomyRequestFailed)} />
                   <div className="brain-list">
                     {liveAutonomyBlockers.slice(0, 8).map((raw, index) => {
@@ -696,10 +705,13 @@ export function V16BrainPage({ embedded = false }: { embedded?: boolean }) {
                     {!liveAutonomyBlockers.length ? <div className="empty-state-small">当前没有返回自治阻断项</div> : null}
                   </div>
                 </section>
-                <section className={`v16-detail-section ${liveReadyGuardrailKnown ? "" : "fact-unverified"}`.trim()}>
+                </FactBoundary>
+                <FactBoundary fact={liveReadyGuardrailFact} label="护栏记录事实" requestFailed={liveReadyGuardrailRequestFailed}>
+                <section className="v16-detail-section">
                   <SectionHead title="护栏记录" status={`${liveReadyGuardrails.length}`} tone={factBoundTone(liveReadyGuardrailFact, liveReadyGuardrails.length ? "ok" : "warn", liveReadyGuardrailRequestFailed)} />
                   <GuardrailList items={liveReadyGuardrails} />
                 </section>
+                </FactBoundary>
               </div>
             </details>
           </MetricCard>

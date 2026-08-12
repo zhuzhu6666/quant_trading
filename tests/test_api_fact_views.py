@@ -175,6 +175,17 @@ def test_running_loop_requires_a_heartbeat_but_stopped_is_directly_observed():
     assert stopped["_fact"]["state"] == "known"
 
 
+def test_public_loop_fact_prefers_latest_completed_observation_over_safety_age():
+    payload = loop_fact_payload(
+        {"running": True, "safety_heartbeat_at": 80.0},
+        diagnostic_ts=99.0,
+        now=100.0,
+    )
+
+    assert payload["_fact"]["state"] == "known"
+    assert payload["_fact"]["observed_at"] == 99.0
+
+
 def test_composite_live_status_cannot_be_known_with_missing_loop_heartbeat():
     payload = live_status_fact_payload(
         {
@@ -379,6 +390,31 @@ def test_state_reports_stale_when_underlying_broker_snapshots_are_old():
 
     assert payload["_fact"]["state"] == "stale"
     assert payload["_fact"]["components"]["spot"]["state"] == "known"
+
+
+def test_state_spot_fact_uses_the_final_open_freshness_window():
+    fresh = state_snapshot_fact_payload(
+        {"source": "live", "balance": 1000.0, "equity": 1001.0},
+        account={"ok": True},
+        account_updated_at=114.9,
+        positions_updated_at=114.9,
+        diagnostic_ts=114.9,
+        spot_quote={"ts": 100.0, "source": "ctrader_spot"},
+        now=114.9,
+    )
+    stale = state_snapshot_fact_payload(
+        {"source": "live", "balance": 1000.0, "equity": 1001.0},
+        account={"ok": True},
+        account_updated_at=115.1,
+        positions_updated_at=115.1,
+        diagnostic_ts=115.1,
+        spot_quote={"ts": 100.0, "source": "ctrader_spot"},
+        now=115.1,
+    )
+
+    assert fresh["_fact"]["components"]["spot"]["state"] == "known"
+    assert fresh["_fact"]["components"]["spot"]["stale_after_sec"] == 15.0
+    assert stale["_fact"]["components"]["spot"]["state"] == "stale"
 
 
 def test_readiness_warming_and_unregistered_recovery_are_explicitly_unknown():

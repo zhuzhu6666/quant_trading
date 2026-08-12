@@ -241,6 +241,54 @@ def test_live_loop_cause_requires_normal_cycle_and_reconciled_facts(monkeypatch)
     assert no_new_risk_latch_status()["causes"] == []
 
 
+def test_watchdog_recovery_refreshes_legacy_live_admission_projection(monkeypatch):
+    now = time.time()
+    activate_no_new_risk_latch(
+        reason="safety freshness failed",
+        actor="system:safety_watchdog",
+        cause="safety_freshness",
+        cause_id="safety_watchdog",
+    )
+    live_service._live_state_update(
+        loop_running=True,
+        accepting_new_risk=False,
+        session_state_status="available",
+        safety_plane={
+            "status": "completed",
+            "accepting_new_risk": True,
+            "blockers": [],
+        },
+        account_reconciled={"ok": True},
+        account_updated_at=now,
+        account_reconcile_id="account-r1",
+        positions_reconciled=[],
+        positions_updated_at=now,
+        positions_reconcile_id="positions-r1",
+        account_reconcile_failed_at=0.0,
+        positions_reconcile_failed_at=0.0,
+    )
+    monkeypatch.setattr(
+        live_service, "_generation_controller_enabled", lambda: False
+    )
+    result = evaluate_safety_freshness(
+        {
+            "enabled": True,
+            "running": True,
+            "started_at": now - 60.0,
+            "safety_heartbeat_at": now,
+            "account_updated_at": now,
+            "positions_updated_at": now,
+            "unknown_execution_count": 0,
+        },
+        now=now,
+    )
+
+    live_service._on_live_safety_watchdog_recovery(result)
+
+    assert no_new_risk_latch_status()["active"] is False
+    assert live_service._live_state_get("accepting_new_risk") is True
+
+
 def test_live_loop_cause_stays_latched_when_safety_cycle_is_not_ready():
     now = time.time()
     activate_no_new_risk_latch(

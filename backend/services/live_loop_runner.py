@@ -57,6 +57,11 @@ def run_serial_live_ticks(
                 exit_reason = "tick_requested_break"
                 break
             runtime.update_risk_metrics(tick=tick, log=log)
+            # Refresh the public loop-observation clock only after the serial
+            # tick has completed. This is a liveness/display observation;
+            # Safety keeps its own heartbeat and remains the authority for
+            # accepting new risk.
+            runtime.set_loop_diagnostic(tick, None)
             wait_seconds = tick_result.get("wait_seconds")
             if wait_seconds is not None:
                 if stop_flag.wait(float(wait_seconds)):

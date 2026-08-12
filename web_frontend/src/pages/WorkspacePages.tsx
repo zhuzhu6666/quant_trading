@@ -64,7 +64,7 @@ type AutonomyFlowStage = {
 };
 
 function AutonomyFlowSummary({ active }: { active: string }) {
-  const readinessQuery = useBackendReadinessQuery(15_000);
+  const readinessQuery = useBackendReadinessQuery();
   const readiness = asRecord(readinessQuery.data);
   const readinessFact = readFact(readinessQuery.data, "ops.backend-readiness.v2");
   const requestFailed = readinessQuery.isError || readinessQuery.isRefetchError;
@@ -185,7 +185,7 @@ function AutonomyFlowSummary({ active }: { active: string }) {
           <p>{conclusionNote}</p>
         </div>
         <div className="autonomy-flow-meta">
-          <StatusPill status={`事实 ${factStatusLabel(readinessFact)}`} tone={factBoundTone(readinessFact, known ? "ok" : "warn", requestFailed)} />
+          <StatusPill status={`事实 ${factStatusLabel(readinessFact, requestFailed)}`} tone={factBoundTone(readinessFact, known ? "ok" : "warn", requestFailed)} fact={readinessFact} requestFailed={requestFailed} />
           <span>当前页：{activePageLabel}</span>
         </div>
       </div>

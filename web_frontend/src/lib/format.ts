@@ -33,6 +33,16 @@ export const formatDecimal = (value: unknown, digits = 2): string =>
     minimumFractionDigits: 0,
   });
 
+export const formatAgeSeconds = (value: unknown): string => {
+  const seconds = safeNumber(value, -1);
+  if (seconds < 0) return "等待观测";
+  if (seconds < 1) return "刚刚";
+  if (seconds < 60) return `${Math.floor(seconds)}秒前`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}分钟前`;
+  return `${Math.floor(minutes / 60)}小时前`;
+};
+
 export const formatRate = (value: unknown): string => `${formatDecimal(value, 2)}%`;
 
 const toDate = (value: unknown): Date | null => {

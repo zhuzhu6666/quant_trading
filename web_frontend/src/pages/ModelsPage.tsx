@@ -23,7 +23,7 @@ import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickStr
 import { translateDisplayValue } from "@/lib/display";
 import { formatDecimal, formatTime } from "@/lib/format";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
-import { factBoundTone, factIsKnown, readFact } from "@/api/fact";
+import { aggregateFactViewState, factBoundTone, factIsKnown, factViewStateLabel, readFact } from "@/api/fact";
 
 function formatPct(value: number): string {
   return `${formatDecimal(value * 100, 1)}%`;
@@ -209,13 +209,9 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
     queryKey: ["historical-backtest", backtestJobId],
     queryFn: () => getHistoricalBacktestJob(backtestJobId),
     enabled: Boolean(backtestJobId),
-    refetchInterval: (query) => {
-      const status = pickString(query.state.data, ["status"], "");
-      return ["done", "error", "cancelled"].includes(status) ? false : 5000;
-    },
     retry: false,
   });
-  const readinessQuery = useBackendReadinessQuery(60_000);
+  const readinessQuery = useBackendReadinessQuery();
   const datasetQuery = useQuery({
     queryKey: ["learning-dataset-readiness"],
     queryFn: getLearningDatasetReadiness,
@@ -224,61 +220,51 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
   const positionAuditsQuery = useQuery({
     queryKey: ["models-position-quality-audits"],
     queryFn: () => getPositionQualityLightgbmAudits(20),
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
   const openAuditsQuery = useQuery({
     queryKey: ["models-open-quality-audits"],
     queryFn: () => getOpenQualityLightgbmAudits(20),
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
   const factorAuditsQuery = useQuery({
     queryKey: ["models-factor-governance-audits"],
     queryFn: () => getFactorGovernanceLightgbmAudits(20),
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
   const factorAdvisoriesQuery = useQuery({
     queryKey: ["models-factor-governance-advisories"],
     queryFn: () => getFactorGovernanceLightgbmAdvisories(20),
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
   const shadowQueueQuery = useQuery({
     queryKey: ["models-shadow-queue"],
     queryFn: () => getModelShadowQueue(20),
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
   const canaryQuery = useQuery({
     queryKey: ["models-canary-reviews"],
     queryFn: () => getModelCanaryReviews(20),
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
   const inferenceQuery = useQuery({
     queryKey: ["models-inference-audits"],
     queryFn: () => getModelInferenceAudits(20),
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
   const permissionsQuery = useQuery({
     queryKey: ["models-permission-audits"],
     queryFn: () => getModelPermissionAudits(20),
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
   const highLoadAuditsQuery = useQuery({
     queryKey: ["models-offmarket-high-load"],
     queryFn: () => getOffmarketHighLoadAudits(20),
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
   const qualityHealthQuery = useQuery({
     queryKey: ["models-quality-health"],
     queryFn: () => getLearningDatasetQualityHealth(1000),
-    refetchInterval: 60_000,
     staleTime: 20_000,
   });
 
@@ -393,20 +379,24 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
     qualityHealthQuery,
   ];
   const hasError = modelQueries.some((query) => query.isError || query.isRefetchError);
-  const isRefreshing = modelQueries.some((query) => query.isFetching);
-  const modelFactsKnown = readinessKnown && [
-    factIsKnown(readFact(datasetQuery.data, "learning.dataset-readiness.v2"), datasetQuery.isError || datasetQuery.isRefetchError),
-    factIsKnown(readFact(positionAuditsQuery.data, "learning.model-position-quality-audits.v2"), positionAuditsQuery.isError || positionAuditsQuery.isRefetchError),
-    factIsKnown(readFact(openAuditsQuery.data, "learning.model-open-quality-audits.v2"), openAuditsQuery.isError || openAuditsQuery.isRefetchError),
-    factIsKnown(readFact(factorAuditsQuery.data, "learning.factor-governance-lightgbm-audits.v2"), factorAuditsQuery.isError || factorAuditsQuery.isRefetchError),
-    factIsKnown(readFact(factorAdvisoriesQuery.data, "learning.factor-governance-lightgbm-advisories.v2"), factorAdvisoriesQuery.isError || factorAdvisoriesQuery.isRefetchError),
-    factIsKnown(readFact(shadowQueueQuery.data, "learning.model-shadow-queue.v2"), shadowQueueQuery.isError || shadowQueueQuery.isRefetchError),
-    factIsKnown(readFact(canaryQuery.data, "learning.model-canary-reviews.v2"), canaryQuery.isError || canaryQuery.isRefetchError),
-    factIsKnown(readFact(inferenceQuery.data, "learning.model-inference-audits.v2"), inferenceQuery.isError || inferenceQuery.isRefetchError),
-    factIsKnown(readFact(permissionsQuery.data, "learning.model-permission-audits.v2"), permissionsQuery.isError || permissionsQuery.isRefetchError),
-    factIsKnown(readFact(highLoadAuditsQuery.data, "learning.model-offmarket-high-load-audits.v2"), highLoadAuditsQuery.isError || highLoadAuditsQuery.isRefetchError),
-    factIsKnown(readFact(qualityHealthQuery.data, "learning.dataset-quality-health.v2"), qualityHealthQuery.isError || qualityHealthQuery.isRefetchError),
-  ].every(Boolean);
+  const modelFactEntries = [
+    { fact: readinessFact, requestFailed: readinessRequestFailed },
+    { fact: readFact(datasetQuery.data, "learning.dataset-readiness.v2"), requestFailed: datasetQuery.isError || datasetQuery.isRefetchError },
+    { fact: readFact(positionAuditsQuery.data, "learning.model-position-quality-audits.v2"), requestFailed: positionAuditsQuery.isError || positionAuditsQuery.isRefetchError },
+    { fact: readFact(openAuditsQuery.data, "learning.model-open-quality-audits.v2"), requestFailed: openAuditsQuery.isError || openAuditsQuery.isRefetchError },
+    { fact: readFact(factorAuditsQuery.data, "learning.factor-governance-lightgbm-audits.v2"), requestFailed: factorAuditsQuery.isError || factorAuditsQuery.isRefetchError },
+    { fact: readFact(factorAdvisoriesQuery.data, "learning.factor-governance-lightgbm-advisories.v2"), requestFailed: factorAdvisoriesQuery.isError || factorAdvisoriesQuery.isRefetchError },
+    { fact: readFact(shadowQueueQuery.data, "learning.model-shadow-queue.v2"), requestFailed: shadowQueueQuery.isError || shadowQueueQuery.isRefetchError },
+    { fact: readFact(canaryQuery.data, "learning.model-canary-reviews.v2"), requestFailed: canaryQuery.isError || canaryQuery.isRefetchError },
+    { fact: readFact(inferenceQuery.data, "learning.model-inference-audits.v2"), requestFailed: inferenceQuery.isError || inferenceQuery.isRefetchError },
+    { fact: readFact(permissionsQuery.data, "learning.model-permission-audits.v2"), requestFailed: permissionsQuery.isError || permissionsQuery.isRefetchError },
+    { fact: readFact(highLoadAuditsQuery.data, "learning.model-offmarket-high-load-audits.v2"), requestFailed: highLoadAuditsQuery.isError || highLoadAuditsQuery.isRefetchError },
+    { fact: readFact(qualityHealthQuery.data, "learning.dataset-quality-health.v2"), requestFailed: qualityHealthQuery.isError || qualityHealthQuery.isRefetchError },
+  ] as const;
+  const modelViewState = aggregateFactViewState(modelFactEntries);
+  const modelFactsKnown = modelViewState === "known";
+  const modelViewTone = modelViewState === "known" ? "ok" : modelViewState === "stale" ? "stale" : modelViewState === "error" ? "bad" : "warn";
+  const modelViewLabel = modelViewState === "known" ? "模型链路在线" : `模型${factViewStateLabel(modelViewState)}`;
   const backtestJob = asRecord(backtestJobQuery.data);
   const backtestStatus = pickString(backtestJob, ["status"], backtestMutation.isPending ? "queued" : "");
   const backtestReport = pickRecord(backtestJob, ["result"]);
@@ -424,8 +414,8 @@ export function ModelsPage({ embedded = false }: { embedded?: boolean }) {
         </div>
         <div className="header-status">
           <StatusPill status={modelFactsKnown ? (advisoryOnly ? "只建议/只观察" : "治理候选") : "模型事实待接入"} tone={modelFactsKnown ? (advisoryOnly ? "warn" : "ok") : "warn"} />
-          <StatusPill status={`准入 ${translateDisplayValue(gateDecision)}`} tone={factBoundTone(readinessFact, statusTone(gateDecision), readinessRequestFailed)} />
-          <StatusPill status={hasError ? "模型接口异常" : modelFactsKnown ? "模型链路在线" : isRefreshing ? "部分数据更新中" : "部分数据待确认"} tone={hasError ? "bad" : modelFactsKnown ? "ok" : "warn"} />
+          <StatusPill status={`准入 ${translateDisplayValue(gateDecision)}`} tone={factBoundTone(readinessFact, statusTone(gateDecision), readinessRequestFailed)} fact={readinessFact} requestFailed={readinessRequestFailed} />
+          <StatusPill status={modelViewLabel} tone={modelViewTone} />
         </div>
       </div> : null}
 

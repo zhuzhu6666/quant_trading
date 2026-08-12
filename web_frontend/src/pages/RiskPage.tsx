@@ -236,20 +236,17 @@ export function RiskPanel({
   const dbQuery = useQuery({
     queryKey: queryKeys.dbHealth,
     queryFn: getSystemDbHealth,
-    refetchInterval: 15_000,
     staleTime: 5_000,
   });
   const readinessQuery = useBackendReadinessQuery();
   const policyQuery = useQuery({
     queryKey: queryKeys.riskPolicyVerdicts,
     queryFn: () => getRiskPolicyVerdicts(50),
-    refetchInterval: 10_000,
     staleTime: 5_000,
   });
   const tradeTracesQuery = useQuery({
     queryKey: queryKeys.riskTradeTraces,
     queryFn: () => getRecentTradeTraces(20),
-    refetchInterval: 30_000,
     staleTime: 10_000,
   });
 
@@ -279,10 +276,10 @@ export function RiskPanel({
   const dbKnown = factIsKnown(dbFact, dbRequestFailed);
   const readinessKnown = factIsKnown(readinessFact, readinessRequestFailed);
   const traceKnown = factIsKnown(traceFact, traceRequestFailed);
-  const riskDisplayable = factHasDisplayValue(riskInputsFact) && canonicalRisk.contractKnown;
-  const healthDisplayable = factHasDisplayValue(systemHealthFact);
-  const dbDisplayable = factHasDisplayValue(dbFact);
-  const readinessDisplayable = factHasDisplayValue(readinessFact);
+  const riskDisplayable = factHasDisplayValue(riskInputsFact, riskRequestFailed) && canonicalRisk.contractKnown;
+  const healthDisplayable = factHasDisplayValue(systemHealthFact, riskRequestFailed);
+  const dbDisplayable = factHasDisplayValue(dbFact, dbRequestFailed);
+  const readinessDisplayable = factHasDisplayValue(readinessFact, readinessRequestFailed);
   const riskFactLabel = factStatusLabel(riskInputsFact);
   const riskMetricLabel = (status: string, displayable: boolean): string => {
     if (displayable) return status === "known" ? "暂无数值" : translateDisplayValue(status || "unknown");
@@ -293,13 +290,7 @@ export function RiskPanel({
     : riskKnown
       ? "当前权威风险事实"
       : "等待权威风险输入";
-  const riskFactTone = riskRequestFailed
-    ? "bad" as const
-    : riskInputsFact.state === "stale"
-      ? "pending" as const
-      : riskKnown
-        ? "mute" as const
-        : "warn" as const;
+  const riskFactTone = factBoundTone(riskInputsFact, riskKnown ? "mute" : "warn", riskRequestFailed);
   const varKnown = riskKnown && knownMetric(canonicalRisk.var95.status);
   const stressKnown = riskKnown && knownMetric(canonicalRisk.stress.status);
   const concentrationKnown = riskKnown && knownMetric(canonicalRisk.concentration.status);
@@ -429,35 +420,35 @@ export function RiskPanel({
           <p>展示后端权威的前瞻风险分布、策略裁决和运行阻断，不在浏览器重算风险。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={riskDisplayable ? `风险 ${riskFactLabel}` : "风险状态未知"} tone={riskFactTone} />
-          <StatusPill status={healthDisplayable ? (riskBlocked ? "交易阻断" : "健康面未阻断") : "交易许可未知"} tone={factBoundTone(systemHealthFact, riskBlocked ? "bad" : "ok", riskRequestFailed)} />
-          <StatusPill status={readinessDisplayable ? (frontendReadyReported ? "前端读取就绪" : "前端读取受限") : "前端读取状态未知"} tone={factBoundTone(readinessFact, frontendReadyReported ? "ok" : "warn", readinessRequestFailed)} />
+          <StatusPill status={riskDisplayable ? `风险 ${riskFactLabel}` : "风险状态未知"} tone={riskFactTone} fact={riskInputsFact} requestFailed={riskRequestFailed} />
+          <StatusPill status={healthDisplayable ? (riskBlocked ? "交易阻断" : "健康面未阻断") : "交易许可未知"} tone={factBoundTone(systemHealthFact, riskBlocked ? "bad" : "ok", riskRequestFailed)} fact={systemHealthFact} requestFailed={riskRequestFailed} />
+          <StatusPill status={readinessDisplayable ? (frontendReadyReported ? "前端读取就绪" : "前端读取受限") : "前端读取状态未知"} tone={factBoundTone(readinessFact, frontendReadyReported ? "ok" : "warn", readinessRequestFailed)} fact={readinessFact} requestFailed={readinessRequestFailed} />
         </div>
       </div> : null}
 
       {!embedded ? <div className="stat-grid">
-        <StatTile icon={ShieldCheck} label="系统健康" value={healthDisplayable ? translateDisplayValue(riskHealth) : "未知"} detail={translateDisplayValue(impact)} tone={factBoundTone(systemHealthFact, toneFromStatus(riskHealth), riskRequestFailed)} />
-        <StatTile icon={ShieldAlert} label="策略拦截" value={formatDecimal(blocked, 0)} detail={`政策允许 ${formatDecimal(allowed, 0)} · 许可率 ${formatDecimal(policyAllowedRate, 1)}%`} tone={factBoundTone(policyFact, blocked ? "warn" : "ok", policyRequestFailed)} />
-        <StatTile icon={Gauge} label="前瞻 VaR 95%" value={varDisplayable ? metricValue(canonicalRisk.var95.varPct, 4, "%") : riskMetricLabel(canonicalRisk.var95.status, varDisplayable)} detail={varDisplayable ? `CVaR ${metricValue(canonicalRisk.var95.cvarPct, 4, "%")} · ${canonicalRisk.var95.timeframe}` : riskFactDetail} tone={riskFactTone} />
-        <StatTile icon={AlertTriangle} label="阻断组件" value={formatDecimal(critical.length + blockers.length, 0)} detail={`退化 ${formatDecimal(degraded.length, 0)} · DB 过期 ${formatDecimal(dbStaleCount, 0)} · 错误 ${formatDecimal(dbErrorCount, 0)}`} tone={!systemFactsKnown ? "pending" : critical.length || blockers.length || dbErrorCount || dbMissingCount ? "bad" : degraded.length || dbStaleCount ? "warn" : "ok"} />
+        <StatTile icon={ShieldCheck} label="系统健康" value={healthDisplayable ? translateDisplayValue(riskHealth) : "未知"} detail={translateDisplayValue(impact)} tone={toneFromStatus(riskHealth)} fact={systemHealthFact} requestFailed={riskRequestFailed} />
+        <StatTile icon={ShieldAlert} label="策略拦截" value={formatDecimal(blocked, 0)} detail={`政策允许 ${formatDecimal(allowed, 0)} · 许可率 ${formatDecimal(policyAllowedRate, 1)}%`} tone={blocked ? "warn" : "ok"} fact={policyFact} requestFailed={policyRequestFailed} />
+        <StatTile icon={Gauge} label="前瞻 VaR 95%" value={varDisplayable ? metricValue(canonicalRisk.var95.varPct, 4, "%") : riskMetricLabel(canonicalRisk.var95.status, varDisplayable)} detail={varDisplayable ? `CVaR ${metricValue(canonicalRisk.var95.cvarPct, 4, "%")} · ${canonicalRisk.var95.timeframe}` : riskFactDetail} tone={riskKnown ? "mute" : "warn"} fact={riskInputsFact} requestFailed={riskRequestFailed} />
+        <StatTile icon={AlertTriangle} label="阻断组件" value={formatDecimal(critical.length + blockers.length, 0)} detail={`退化 ${formatDecimal(degraded.length, 0)} · DB 过期 ${formatDecimal(dbStaleCount, 0)} · 错误 ${formatDecimal(dbErrorCount, 0)}`} tone={!systemFactsKnown ? "pending" : critical.length || blockers.length || dbErrorCount || dbMissingCount ? "bad" : degraded.length || dbStaleCount ? "warn" : "ok"} fact={readinessFact} requestFailed={readinessRequestFailed} />
       </div> : null}
 
       <div className="dashboard-grid">
         <MetricCard title="Canonical 风险快照" className="wide-panel risk-control-overview">
           <div className="risk-mini-grid">
-            <RiskMiniMetric label="95% VaR / CVaR" value={varDisplayable ? `${metricValue(canonicalRisk.var95.varPct, 4, "%")} / ${metricValue(canonicalRisk.var95.cvarPct, 4, "%")}` : riskMetricLabel(canonicalRisk.var95.status, varDisplayable)} detail={varDisplayable ? `${metricValue(canonicalRisk.var95.varUsd, 2, " USD")} / ${metricValue(canonicalRisk.var95.cvarUsd, 2, " USD")}` : riskFactDetail} tone={riskFactTone} />
-            <RiskMiniMetric label="99% 只读对照" value={var99Displayable ? `${metricValue(canonicalRisk.var99.varPct, 4, "%")} / ${metricValue(canonicalRisk.var99.cvarPct, 4, "%")}` : riskMetricLabel(canonicalRisk.var99.status, var99Displayable)} detail={var99Displayable ? "只做对照，不增加风险阈值" : riskFactDetail} tone={riskFactTone} />
-            <RiskMiniMetric label="凯利仓位系数" value={kellyDisplayable ? metricValue(canonicalRisk.kelly.fraction, 4) : riskMetricLabel(canonicalRisk.kelly.status, kellyDisplayable)} detail={kellyDisplayable ? `样本 ${metricValue(canonicalRisk.kelly.closedTrades, 0)} · 胜率 ${metricValue(canonicalRisk.kelly.winRate === null ? null : canonicalRisk.kelly.winRate * 100, 1, "%")}` : riskFactDetail} tone={riskFactTone} />
-            <RiskMiniMetric label="政策许可率（前端计算）" value={`${formatDecimal(policyAllowedRate, 1)}%`} detail={`政策允许 ${formatDecimal(allowed, 0)} / 政策拦截 ${formatDecimal(blocked, 0)}`} tone={factBoundTone(policyFact, blocked ? "warn" : "ok", policyRequestFailed)} />
-            <RiskMiniMetric label="组件异常" value={formatDecimal(riskBlockers.length + degraded.length, 0)} detail={`阻断 ${formatDecimal(riskBlockers.length, 0)} · 退化 ${formatDecimal(degraded.length, 0)}`} tone={!systemFactsKnown ? "pending" : riskBlockers.length ? "bad" : degraded.length ? "warn" : "ok"} />
-            <RiskMiniMetric label="数据健康" value={dbHealthDisplay} detail={`库 ${dbDisplayable ? formatDecimal(dbList.length, 0) : "未知"} · 过期 ${dbDisplayable ? formatDecimal(dbStaleCount, 0) : "未知"} · 缺失 ${dbDisplayable ? formatDecimal(dbMissingCount, 0) : "未知"} · 错误 ${dbDisplayable ? formatDecimal(dbErrorCount, 0) : "未知"} · 合约 ${schema}${dbRequestFailed ? " · 接口异常" : ""}`} tone={factBoundTone(dbFact, dbHealthTone, dbRequestFailed)} />
+            <RiskMiniMetric label="95% VaR / CVaR" value={varDisplayable ? `${metricValue(canonicalRisk.var95.varPct, 4, "%")} / ${metricValue(canonicalRisk.var95.cvarPct, 4, "%")}` : riskMetricLabel(canonicalRisk.var95.status, varDisplayable)} detail={varDisplayable ? `${metricValue(canonicalRisk.var95.varUsd, 2, " USD")} / ${metricValue(canonicalRisk.var95.cvarUsd, 2, " USD")}` : riskFactDetail} tone={riskFactTone} fact={riskInputsFact} requestFailed={riskRequestFailed} />
+            <RiskMiniMetric label="99% 只读对照" value={var99Displayable ? `${metricValue(canonicalRisk.var99.varPct, 4, "%")} / ${metricValue(canonicalRisk.var99.cvarPct, 4, "%")}` : riskMetricLabel(canonicalRisk.var99.status, var99Displayable)} detail={var99Displayable ? "只做对照，不增加风险阈值" : riskFactDetail} tone={riskFactTone} fact={riskInputsFact} requestFailed={riskRequestFailed} />
+            <RiskMiniMetric label="凯利仓位系数" value={kellyDisplayable ? metricValue(canonicalRisk.kelly.fraction, 4) : riskMetricLabel(canonicalRisk.kelly.status, kellyDisplayable)} detail={kellyDisplayable ? `样本 ${metricValue(canonicalRisk.kelly.closedTrades, 0)} · 胜率 ${metricValue(canonicalRisk.kelly.winRate === null ? null : canonicalRisk.kelly.winRate * 100, 1, "%")}` : riskFactDetail} tone={riskFactTone} fact={riskInputsFact} requestFailed={riskRequestFailed} />
+            <RiskMiniMetric label="政策许可率（前端计算）" value={`${formatDecimal(policyAllowedRate, 1)}%`} detail={`政策允许 ${formatDecimal(allowed, 0)} / 政策拦截 ${formatDecimal(blocked, 0)}`} tone={factBoundTone(policyFact, blocked ? "warn" : "ok", policyRequestFailed)} fact={policyFact} requestFailed={policyRequestFailed} />
+            <RiskMiniMetric label="组件异常" value={formatDecimal(riskBlockers.length + degraded.length, 0)} detail={`阻断 ${formatDecimal(riskBlockers.length, 0)} · 退化 ${formatDecimal(degraded.length, 0)}`} tone={!systemFactsKnown ? "pending" : riskBlockers.length ? "bad" : degraded.length ? "warn" : "ok"} fact={systemHealthFact} requestFailed={riskRequestFailed} />
+            <RiskMiniMetric label="数据健康" value={dbHealthDisplay} detail={`库 ${dbDisplayable ? formatDecimal(dbList.length, 0) : "未知"} · 过期 ${dbDisplayable ? formatDecimal(dbStaleCount, 0) : "未知"} · 缺失 ${dbDisplayable ? formatDecimal(dbMissingCount, 0) : "未知"} · 错误 ${dbDisplayable ? formatDecimal(dbErrorCount, 0) : "未知"} · 合约 ${schema}${dbRequestFailed ? " · 接口异常" : ""}`} tone={factBoundTone(dbFact, dbHealthTone, dbRequestFailed)} fact={dbFact} requestFailed={dbRequestFailed} />
           </div>
 
           <div className="risk-control-grid">
             <section className="risk-control-section">
               <div className="risk-section-head">
                 <h3>前瞻分布</h3>
-                <StatusPill status={varKnown ? "已确认" : varDisplayable ? "已过期 · 仅展示" : riskMetricLabel(canonicalRisk.var95.status, varDisplayable)} tone={varKnown ? "ok" : riskFactTone} />
+                <StatusPill status={varKnown ? "已确认" : varDisplayable ? "已过期 · 仅展示" : riskMetricLabel(canonicalRisk.var95.status, varDisplayable)} tone={varKnown ? "ok" : riskFactTone} fact={riskInputsFact} requestFailed={riskRequestFailed} />
               </div>
               <div className="field-list risk-compact-fields">
                 <Field label="周期" value={varDisplayable ? `${canonicalRisk.var95.horizon} · ${canonicalRisk.var95.timeframe}` : riskMetricLabel(canonicalRisk.var95.status, varDisplayable)} />
@@ -472,7 +463,7 @@ export function RiskPanel({
             <section className="risk-control-section">
               <div className="risk-section-head">
                 <h3>压力与集中</h3>
-                <StatusPill status={stressKnown && concentrationKnown ? "已知" : "未确认"} tone={factBoundTone(riskInputsFact, stressKnown && concentrationKnown ? "ok" : "warn", riskRequestFailed)} />
+                <StatusPill status={stressKnown && concentrationKnown ? "已知" : "未确认"} tone={factBoundTone(riskInputsFact, stressKnown && concentrationKnown ? "ok" : "warn", riskRequestFailed)} fact={riskInputsFact} requestFailed={riskRequestFailed} />
               </div>
               <div className="field-list risk-compact-fields">
                 <Field label="压力损失" value={stressDisplayable ? metricValue(canonicalRisk.stress.lossPct, 4, "%") : riskMetricLabel(canonicalRisk.stress.status, stressDisplayable)} />
@@ -487,7 +478,7 @@ export function RiskPanel({
             <section className="risk-control-section">
               <div className="risk-section-head">
                 <h3>系统组件</h3>
-                <StatusPill status={!riskDisplayable ? "未知" : hasSystemQueryError || riskBlockers.length ? "异常" : degraded.length ? "退化" : "正常"} tone={!systemFactsKnown && riskDisplayable ? "pending" : !systemFactsKnown ? "warn" : hasSystemQueryError || riskBlockers.length ? "bad" : degraded.length ? "warn" : "ok"} />
+                <StatusPill status={!riskDisplayable ? "未知" : hasSystemQueryError || riskBlockers.length ? "异常" : degraded.length ? "退化" : "正常"} tone={!systemFactsKnown && riskDisplayable ? "pending" : !systemFactsKnown ? "warn" : hasSystemQueryError || riskBlockers.length ? "bad" : degraded.length ? "warn" : "ok"} fact={systemHealthFact} requestFailed={riskRequestFailed} />
               </div>
               <div className="field-list risk-compact-fields">
                 <Field label="前端读取就绪" value={readinessDisplayable ? (frontendReadyReported ? "是" : "否") : "未知"} tone={factBoundTone(readinessFact, frontendReadyReported ? "ok" : "warn", readinessRequestFailed)} />

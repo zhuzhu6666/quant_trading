@@ -375,6 +375,72 @@ def test_risk_kelly_sizing_skips_positive_edge_when_below_broker_minimum():
     assert result["trace"]["raw_api_volume"] < 100.0
 
 
+def test_demo_autonomous_positive_kelly_below_minimum_uses_min_volume_exploration():
+    cfg = SimpleNamespace(
+        autonomy_mode="demo_autonomous",
+        kelly_enabled=True,
+        kelly_fraction=0.5,
+        kelly_risk_per_trade_pct=0.05,
+        kelly_max_pct=0.25,
+        kelly_min_closed_trades=20,
+        kelly_canary_max_api_volume=100.0,
+        max_position_api_volume=1000.0,
+        dynamic_sizing_enabled=True,
+        dynamic_sizing_max_api_volume=1000.0,
+        dynamic_sizing_api_units_per_display_unit=100.0,
+    )
+
+    result = risk_kelly_sizing(
+        cfg=cfg,
+        direction=1,
+        current_price=4000.0,
+        sl_price=3993.02,
+        bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
+        account={"equity": 436.18},
+        kelly_data={"kelly_fraction": 0.0099, "closed_trades": 197},
+    )
+
+    assert result["volume"] == 100.0
+    assert result["trace"]["reason"] == "demo_autonomous_min_volume_exploration"
+    assert result["trace"]["exploration_reason"] == "positive_kelly_below_broker_minimum"
+    assert result["trace"]["exploration_eligible"] is True
+    assert result["trace"]["kelly_target_below_broker_minimum"] is True
+    assert result["trace"]["kelly_target_api_volume"] == pytest.approx(30.93, abs=0.1)
+    assert result["trace"]["blocked_reason"] == ""
+
+
+def test_demo_autonomous_positive_kelly_below_minimum_respects_stop_risk_budget():
+    cfg = SimpleNamespace(
+        autonomy_mode="demo_autonomous",
+        kelly_enabled=True,
+        kelly_fraction=0.5,
+        kelly_risk_per_trade_pct=0.005,
+        kelly_max_pct=0.25,
+        kelly_min_closed_trades=20,
+        kelly_canary_max_api_volume=100.0,
+        max_position_api_volume=1000.0,
+        dynamic_sizing_enabled=True,
+        dynamic_sizing_max_api_volume=1000.0,
+        dynamic_sizing_api_units_per_display_unit=100.0,
+    )
+
+    result = risk_kelly_sizing(
+        cfg=cfg,
+        direction=1,
+        current_price=3350.0,
+        sl_price=3300.0,
+        bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
+        account={"equity": 434.62},
+        kelly_data={"kelly_fraction": 0.08, "closed_trades": 197},
+    )
+
+    assert result["volume"] == 0.0
+    assert result["trace"]["reason"] == "demo_autonomous_min_volume_risk_budget_exceeded"
+    assert result["trace"]["exploration_reason"] == "positive_kelly_below_broker_minimum"
+    assert result["trace"]["exploration_eligible"] is False
+    assert result["trace"]["kelly_target_below_broker_minimum"] is True
+
+
 def test_apply_entry_event_sizing_floors_reduced_volume_without_lifting_to_min():
     meta = {"api_min_volume": 100, "api_step_volume": 100}
 

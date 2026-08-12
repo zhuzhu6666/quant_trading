@@ -1,7 +1,7 @@
 # API Fact Contract
 
 > Status: active
-> Last verified: 2026-07-23
+> Last verified: 2026-08-13
 > Scope: additive `fact.v1` provenance and freshness contract for public API and WebSocket read models.
 
 本文只定义“这个值来自哪里、观测于何时、现在是否可信”，不改变各端点原有业务字段。运行与治理权力边界仍以 `system-source-of-truth.md` 为准。
@@ -44,7 +44,8 @@
 
 | 事实类型 | `stale_after_sec` |
 |---|---:|
-| WS / 组合 state / spot | 5 秒 |
+| WS / 组合 state | 5 秒 |
+| spot / account / positions / loop | 15 秒 |
 | account / positions / loop | 15 秒 |
 | risk / session / 风险性治理投影 | 30 秒 |
 | system runtime health | 75 秒 |
@@ -66,7 +67,7 @@
 | `GET /api/live/strategy-status` | `live.strategy.v2` |
 | `GET /api/live/session-stats` | `live.session-risk.v2` |
 | `GET /api/live/realized-pnl-series` | `live.realized-pnl.v2` |
-| WebSocket state snapshot | `live.state.v2`，components 含 account/positions/loop/spot |
+| WebSocket state snapshot | `live.state.v2`，components 含 account/positions/loop/spot/session/strategy/risk_inputs/risk_health |
 | `GET /api/risk/summary` | `risk.summary.v2`，components 含 `system.runtime-health.v1` 和 `risk.inputs.v1` |
 | `GET /api/risk/policy/verdicts` | `risk.policy-verdicts.v2`；成功 PostgreSQL 查询的 `observed_at` 是本次读取时间，item `decision_ts` 只表示事件发生时间，历史长期无新事件不得使当前列表变 stale；`items` 只含已到 `RiskPolicyService` 的裁决，`pre_policy_skips` 单独投影 `decision_ledger` 中 `skip_stage=before_candidate` 且 `risk_policy_reached=false` 的开仓前置拦截，包含 `admission_owner`、`blockers`、`execution_intent_created`，不计入政策允许/拦截统计 |
 | `GET /api/risk/trade-trace/recent` | `risk.trade-trace-recent.v2` |
@@ -83,11 +84,11 @@
 
 account/positions 的 `observed_at` 与 reconcile ID 必须来自显式 fresh broker RPC；HTTP 读取和 cTrader push event 都不得刷新。push event 只进入 `event_projection` 子事实，供兼容展示和诊断，不能满足 startup、safety 或新增风险 admission。
 
-live loop 的串行 broker owner 在空仓时也必须每 5 秒醒来完成 freshness 所需的显式对账，给两次 RPC 和调度抖动预留空间，避免健康账户跨过 15 秒 account/positions 门槛。Web 端全应用只保留一个 `/ws/state` 连接；页面切换不得重建连接，WS/HTTP fallback 按 `_fact.generated_at` 单调合并，旧轮询响应不得覆盖更新的 WS 快照。WS 在线时 account/positions/loop/live-status 的 HTTP 端点每 10 秒做一次权威校验，断线时恢复 3 秒 fallback；两档周期都必须短于 15 秒 freshness。短暂传输重连只改变 transport 状态，不得把已经保留的业务事实改写为 unknown。
+live loop 的串行 broker owner 在空仓时也必须每 5 秒醒来完成 freshness 所需的显式对账，给两次 RPC 和调度抖动预留空间，避免健康账户跨过 15 秒 account/positions 门槛。Web 端全应用只保留一个 `/ws/state` 连接；页面切换不得重建连接，每条消息都是完整快照。该连接由 canonical live state 写入事件驱动，不发送定时空快照，不做 HTTP fallback、旧快照合并或 live endpoint 轮询。WS 只有在真实断线或认证失败时才清空实时业务值，并按有界 backoff 重连；恢复后以第一条完整 WS 快照重新显示。非实时学习、治理和历史页面只在进入页面或用户明确刷新时读取各自 HTTP 事实。
 
-cTrader bridge 的报价快照固定携带 `source=ctrader_spot`。有来源但超过 5 秒的最后报价必须表现为 stale 并保留数值与时间；只有从未收到报价或来源不可用时才是 unknown。
+cTrader bridge 的报价快照固定携带 `source=ctrader_spot`。有来源但超过 15 秒的最后报价必须表现为 stale 并保留数值与时间；只有从未收到报价或来源不可用时才是 unknown。该 15 秒窗口与最终开仓事实准入共用，但不改变内部非授权的市场上下文缓存窗口。
 
-Web 概览的 `system.health.v2` 轮询周期必须严格短于其 5 秒 freshness，当前固定为 3 秒；不得再次使用 10 秒轮询造成“接口正常/接口未知”周期抖动。
+Web 概览的 `system.health.v2` 只在页面进入或用户明确刷新时读取；不得通过轮询制造“接口正常/接口未知”周期抖动。交易运行态、账户、持仓、会话、策略和风险输入统一使用同一条 `/ws/state` 快照。
 
 `risk.summary.v2` 是组件级 fail-closed 组合事实：`system.runtime-health.v1` 由每分钟健康检查产出，允许 75 秒新鲜度以覆盖调度抖动；`risk.inputs.v1` 仍保持 30 秒。父级使用 75 秒自描述窗口，但任一组件为 `error/unknown/stale` 时必须投影为同类非 known 状态，不能用较宽的健康检查窗口掩盖风险输入过期。
 

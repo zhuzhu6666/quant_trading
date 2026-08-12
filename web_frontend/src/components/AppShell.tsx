@@ -50,8 +50,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const systemLoadQuery = useQuery({
     queryKey: queryKeys.systemLoad,
     queryFn: getSystemLoad,
-    refetchInterval: 5_000,
-    staleTime: 2_500,
+    staleTime: Infinity,
     retry: false,
     enabled: location.pathname !== "/login",
   });

@@ -8,10 +8,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { getStateSnapshot, getWsTicket, getWsUrl, SessionStats, StateSnapshot } from "@/api/client";
+import { getWsTicket, getWsUrl, SessionStats, StateSnapshot } from "@/api/client";
 import { factHasDisplayValue, readFactComponent } from "@/api/fact";
 
-type SourceType = "websocket" | "http-fallback" | "offline";
+type SourceType = "websocket" | "offline";
 
 type LiveStateHookOptions = {
   enabled: boolean;
@@ -20,6 +20,7 @@ type LiveStateHookOptions = {
 type LiveStateValue = {
   snapshot: StateSnapshot | null;
   error: string | null;
+  snapshotRequestFailed: boolean;
   source: SourceType;
   connected: boolean;
   refresh: () => Promise<boolean>;
@@ -27,21 +28,7 @@ type LiveStateValue = {
 
 const LiveStateContext = createContext<LiveStateValue | null>(null);
 
-export const LIVE_HTTP_ENDPOINT_VERIFY_INTERVAL_MS = 10_000;
-export const LIVE_HTTP_ENDPOINT_FALLBACK_INTERVAL_MS = 5_000;
-export const LIVE_HTTP_SNAPSHOT_FALLBACK_INTERVAL_MS = 5_000;
 export const LIVE_WS_RECONNECT_BASE_DELAY_MS = 3_000;
-export const LIVE_WS_SILENCE_TIMEOUT_MS = 8_000;
-const LIVE_WS_WATCHDOG_INTERVAL_MS = 1_000;
-
-// HTTP endpoints verify the canonical fact while WS is healthy and provide an
-// explicit read-only fallback while WS is reconnecting. The UI keeps the
-// transport state visible, so the fallback cannot masquerade as a live socket.
-export function liveEndpointRefetchInterval(connected: boolean): number {
-  return connected
-    ? LIVE_HTTP_ENDPOINT_VERIFY_INTERVAL_MS
-    : LIVE_HTTP_ENDPOINT_FALLBACK_INTERVAL_MS;
-}
 
 function epochSeconds(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -71,78 +58,18 @@ export function shouldApplyLiveSnapshot(
   return currentSequence <= 0 || incomingSequence <= 0 || incomingSequence >= currentSequence;
 }
 
-type SnapshotFactRecord = Record<string, unknown>;
-
-function isSnapshotFactRecord(value: unknown): value is SnapshotFactRecord {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function mergeSnapshotFactNode(
-  current: SnapshotFactRecord | undefined,
-  incoming: SnapshotFactRecord | undefined,
-): SnapshotFactRecord {
-  const merged = { ...(current || {}), ...(incoming || {}) };
-  const currentComponents = current?.components;
-  const incomingComponents = incoming?.components;
-  if (isSnapshotFactRecord(currentComponents) || isSnapshotFactRecord(incomingComponents)) {
-    const mergedComponents: SnapshotFactRecord = {
-      ...(isSnapshotFactRecord(currentComponents) ? currentComponents : {}),
-      ...(isSnapshotFactRecord(incomingComponents) ? incomingComponents : {}),
-    };
-    for (const key of Object.keys(mergedComponents)) {
-      const currentNode = isSnapshotFactRecord(currentComponents)
-        ? currentComponents[key]
-        : undefined;
-      const incomingNode = isSnapshotFactRecord(incomingComponents)
-        ? incomingComponents[key]
-        : undefined;
-      if (isSnapshotFactRecord(currentNode) && isSnapshotFactRecord(incomingNode)) {
-        mergedComponents[key] = mergeSnapshotFactNode(currentNode, incomingNode);
-      }
-    }
-    merged.components = mergedComponents;
-  }
-  return merged;
-}
-
-/**
- * WS updates are normally full snapshots, but reconnects and older servers can
- * emit a partial payload. Preserve the last component fact when the new
- * payload does not carry that component; otherwise a shallow spread briefly
- * turns retained account/position data into an unknown value.
- */
-export function mergeLiveSnapshot(
-  current: StateSnapshot | null,
-  incoming: StateSnapshot,
-): StateSnapshot {
-  const merged = { ...(current || {}), ...(incoming || {}) } as StateSnapshot & { _fact?: SnapshotFactRecord };
-  const currentFact = isSnapshotFactRecord((current as { _fact?: unknown } | null)?._fact)
-    ? (current as { _fact: SnapshotFactRecord })._fact
-    : undefined;
-  const incomingFact = isSnapshotFactRecord((incoming as { _fact?: unknown })._fact)
-    ? (incoming as { _fact: SnapshotFactRecord })._fact
-    : undefined;
-  if (currentFact || incomingFact) {
-    merged._fact = mergeSnapshotFactNode(currentFact, incomingFact);
-  }
-  return merged;
-}
-
 function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateValue {
   const [snapshot, setSnapshot] = useState<StateSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [snapshotRequestFailed, setSnapshotRequestFailed] = useState(false);
   const [source, setSource] = useState<SourceType>("offline");
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
-  const refreshInFlightRef = useRef<Promise<boolean> | null>(null);
   const retryTimerRef = useRef<number | null>(null);
-  const fallbackTimerRef = useRef<number | null>(null);
-  const watchdogTimerRef = useRef<number | null>(null);
   const retryRef = useRef<number>(0);
   const socketGenerationRef = useRef(0);
   const lifecycleGenerationRef = useRef(0);
   const connectedRef = useRef(false);
-  const lastMessageAtRef = useRef(0);
   const hasSnapshotRef = useRef(false);
   const snapshotRef = useRef<StateSnapshot | null>(null);
   const enabledRef = useRef(enabled);
@@ -199,29 +126,12 @@ function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateVal
     return merged;
   };
 
-  const stopFallbackSnapshotPolling = () => {
-    if (fallbackTimerRef.current !== null) {
-      window.clearInterval(fallbackTimerRef.current);
-      fallbackTimerRef.current = null;
-    }
-  };
-
-  const stopSocketWatchdog = () => {
-    if (watchdogTimerRef.current !== null) {
-      window.clearTimeout(watchdogTimerRef.current);
-      watchdogTimerRef.current = null;
-    }
-    lastMessageAtRef.current = 0;
-  };
-
   const stopSocket = () => {
     // Invalidate every pending ticket request and every old socket callback.
     // WebSocket close events are asynchronous and may arrive after a new
     // socket has already been created.
     socketGenerationRef.current += 1;
     connectedRef.current = false;
-    stopSocketWatchdog();
-    stopFallbackSnapshotPolling();
     retryRef.current = 0;
     if (retryTimerRef.current !== null) {
       window.clearTimeout(retryTimerRef.current);
@@ -233,72 +143,35 @@ function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateVal
     }
   };
 
+  const clearLiveSnapshot = () => {
+    snapshotRef.current = null;
+    hasSnapshotRef.current = false;
+    setSnapshot(null);
+    setSnapshotRequestFailed(false);
+  };
+
   const applySnapshot = (incoming: StateSnapshot, incomingSource: SourceType) => {
     const normalized = normalizeSnapshot(incoming || {});
     const current = snapshotRef.current;
     if (!shouldApplyLiveSnapshot(current, normalized)) return false;
-    const next = mergeLiveSnapshot(current, normalized);
+    // /ws/state is the sole live authority. Each message is a complete
+    // snapshot; absent fields must not be resurrected from an older message.
+    const next = normalized;
     snapshotRef.current = next;
     hasSnapshotRef.current = true;
     setSnapshot(next);
+    setSnapshotRequestFailed(false);
     setSource(incomingSource);
     setError(null);
     return true;
   };
 
-  const refreshSnapshot = (): Promise<boolean> => {
-    if (!enabledRef.current) return Promise.resolve(false);
-    if (refreshInFlightRef.current) return refreshInFlightRef.current;
-
-    const lifecycleGeneration = lifecycleGenerationRef.current;
-    const request = (async () => {
-      try {
-        const next = await getStateSnapshot();
-        if (!enabledRef.current || lifecycleGeneration !== lifecycleGenerationRef.current) {
-          return false;
-        }
-        return applySnapshot(next, connectedRef.current ? "websocket" : "http-fallback");
-      } catch (exc: unknown) {
-        if (!enabledRef.current || lifecycleGeneration !== lifecycleGenerationRef.current) {
-          return false;
-        }
-        const message = exc instanceof Error ? exc.message : String(exc);
-        if (!hasSnapshotRef.current) {
-          setError(message);
-        }
-        return false;
-      }
-    })();
-    refreshInFlightRef.current = request;
-    void request.then(
-      () => {
-        if (refreshInFlightRef.current === request) refreshInFlightRef.current = null;
-      },
-      () => {
-        if (refreshInFlightRef.current === request) refreshInFlightRef.current = null;
-      },
-    );
-    return request;
-  };
-
-  const startFallbackSnapshotPolling = () => {
-    if (
-      !enabledRef.current
-      || !localStorage.getItem("quant.auth.token")
-      || fallbackTimerRef.current !== null
-    ) return;
-    void refreshSnapshot();
-    fallbackTimerRef.current = window.setInterval(() => {
-      if (
-        !enabledRef.current
-        || !localStorage.getItem("quant.auth.token")
-        || connectedRef.current
-      ) {
-        stopFallbackSnapshotPolling();
-        return;
-      }
-      void refreshSnapshot();
-    }, LIVE_HTTP_SNAPSHOT_FALLBACK_INTERVAL_MS);
+  const refreshSnapshot = async (): Promise<boolean> => {
+    if (!enabledRef.current) return false;
+    clearLiveSnapshot();
+    stopSocket();
+    void startSocket();
+    return true;
   };
 
   function scheduleSocketRetry(generation: number): void {
@@ -338,40 +211,6 @@ function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateVal
       const isCurrentSocket = () => (
         generation === socketGenerationRef.current && wsRef.current === socket
       );
-      const startSocketWatchdog = () => {
-        stopSocketWatchdog();
-        lastMessageAtRef.current = Date.now();
-        const checkSocketSilence = () => {
-          watchdogTimerRef.current = null;
-          if (!isCurrentSocket()) return;
-          const silenceMs = Date.now() - lastMessageAtRef.current;
-          if (silenceMs >= LIVE_WS_SILENCE_TIMEOUT_MS) {
-            connectedRef.current = false;
-            setConnected(false);
-            setSource("offline");
-            setError("WebSocket 长时间无消息，已切换 HTTP 快照并重连");
-            socketGenerationRef.current += 1;
-            wsRef.current = null;
-            stopSocketWatchdog();
-            try {
-              socket.close();
-            } catch {
-              // The socket may already be closing; the fallback remains active.
-            }
-            startFallbackSnapshotPolling();
-            scheduleSocketRetry(socketGenerationRef.current);
-            return;
-          }
-          watchdogTimerRef.current = window.setTimeout(
-            checkSocketSilence,
-            LIVE_WS_WATCHDOG_INTERVAL_MS,
-          );
-        };
-        watchdogTimerRef.current = window.setTimeout(
-          checkSocketSilence,
-          LIVE_WS_WATCHDOG_INTERVAL_MS,
-        );
-      };
       socket.onopen = () => {
         if (!isCurrentSocket()) {
           socket.close();
@@ -386,12 +225,9 @@ function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateVal
         setSource("websocket");
         setConnected(true);
         setError(null);
-        stopFallbackSnapshotPolling();
-        startSocketWatchdog();
       };
       socket.onmessage = (event) => {
         if (!isCurrentSocket()) return;
-        lastMessageAtRef.current = Date.now();
         try {
           const payload = JSON.parse(event.data);
           applySnapshot(payload as StateSnapshot, "websocket");
@@ -401,12 +237,11 @@ function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateVal
       };
       socket.onclose = (e) => {
         if (!isCurrentSocket()) return;
-        stopSocketWatchdog();
         connectedRef.current = false;
         setConnected(false);
         setSource("offline");
         wsRef.current = null;
-        startFallbackSnapshotPolling();
+        clearLiveSnapshot();
         if (e.code === 4001) {
           setError("WebSocket 认证失败，等待重连");
           scheduleSocketRetry(generation);
@@ -419,10 +254,10 @@ function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateVal
       };
       socket.onerror = () => {
         if (!isCurrentSocket()) return;
-        stopSocketWatchdog();
         connectedRef.current = false;
         setConnected(false);
         setSource("offline");
+        clearLiveSnapshot();
         if (!hasSnapshotRef.current) {
           setError("WebSocket 连接异常，等待重连");
         }
@@ -431,7 +266,6 @@ function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateVal
         // callback cannot tear down the replacement socket.
         socketGenerationRef.current += 1;
         wsRef.current = null;
-        startFallbackSnapshotPolling();
         try {
           socket.close();
         } catch {
@@ -444,7 +278,7 @@ function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateVal
       connectedRef.current = false;
       setConnected(false);
       setSource("offline");
-      startFallbackSnapshotPolling();
+      clearLiveSnapshot();
       if (!hasSnapshotRef.current) {
         setError("WebSocket 创建失败，等待重连");
       }
@@ -459,17 +293,16 @@ function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateVal
       setSource("offline");
       setConnected(false);
       connectedRef.current = false;
-      hasSnapshotRef.current = false;
-      snapshotRef.current = null;
-      setSnapshot(null);
+      setSnapshotRequestFailed(false);
+      clearLiveSnapshot();
       return;
     }
     setSource("offline");
-    startFallbackSnapshotPolling();
     void startSocket();
     const onAuthInvalidated = () => {
       lifecycleGenerationRef.current += 1;
       stopSocket();
+      clearLiveSnapshot();
       setSource("offline");
       setConnected(false);
     };
@@ -478,6 +311,7 @@ function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateVal
       window.removeEventListener("quant-auth-invalidated", onAuthInvalidated);
       lifecycleGenerationRef.current += 1;
       stopSocket();
+      clearLiveSnapshot();
     };
   // Access-token rotation refreshes the one-time ticket request but must not
   // tear down an already-authenticated WS session and start a second one.
@@ -486,6 +320,7 @@ function useLiveStateConnection({ enabled }: LiveStateHookOptions): LiveStateVal
   return {
     snapshot,
     error,
+    snapshotRequestFailed,
     source,
     connected,
     refresh: refreshSnapshot,

@@ -15,7 +15,7 @@ def test_state_snapshot_reports_consecutive_not_total_session_losses(monkeypatch
     )
     monkeypatch.setattr(endpoints, "_live_loop_status", lambda: {"running": True})
     monkeypatch.setattr(endpoints, "_live_get_latest_price", lambda: 3300.0)
-    monkeypatch.setattr(endpoints, "_read_closed_loop_status", lambda: {})
+    monkeypatch.setattr(endpoints, "_read_closed_loop_status", lambda *_args: {})
 
     snapshot = endpoints._read_state_snapshot()
 

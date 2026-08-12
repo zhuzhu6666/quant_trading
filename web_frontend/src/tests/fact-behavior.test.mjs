@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import {
+  aggregateFactViewState,
   factAllowsNewRisk,
+  factAgeSeconds,
   factBoundTone,
+  factHasDisplayValue,
   factIsKnown,
+  factViewLabel,
+  factViewState,
   mergeFactRecord,
   readFact,
   readFactComponent,
@@ -78,12 +83,25 @@ const retainedHealthy = {
 };
 const retainedHealthyFact = readFact(retainedHealthy, "system.health.v2");
 assert.equal(retainedHealthyFact.state, "stale");
-assert.equal(retainedHealthy.status, "healthy", "stale endpoint data remains available for display");
-assert.equal(factBoundTone(retainedHealthyFact, "ok"), "stale", "stale retained success must remain visible but be labeled as expired");
+assert.equal(retainedHealthy.status, "healthy", "the raw response remains available for diagnostics");
+assert.equal(factHasDisplayValue(retainedHealthyFact), false, "stale endpoint data must not be displayed as current");
+assert.equal(factBoundTone(retainedHealthyFact, "ok"), "stale", "stale data remains explicitly labeled as expired");
 
 const cachedKnownFact = readFact({ _fact: envelope("system.health.v2", "backend") }, "system.health.v2");
 assert.equal(factBoundTone(cachedKnownFact, "ok", true), "bad", "refetch failure must suppress cached green success");
 assert.equal(factBoundTone(cachedKnownFact, "bad", true), "bad", "request failure must preserve a dangerous business tone");
+assert.equal(factViewState(cachedKnownFact), "known", "a known fact remains known without a failed refresh");
+assert.equal(factViewState(cachedKnownFact, true), "error", "a failed refresh is an independent UI error state");
+assert.equal(factViewLabel(cachedKnownFact, true), "读取失败，暂无实时数据");
+assert.equal(factViewLabel(retainedHealthyFact, true), "读取失败，暂无实时数据");
+assert.equal(
+  aggregateFactViewState([
+    { fact: cachedKnownFact },
+    { fact: retainedHealthyFact },
+  ]),
+  "stale",
+  "aggregate freshness must expose stale data even when another fact is known",
+);
 
 const backendError = {
   _fact: { ...envelope("system.health.v2", "backend"), state: "error" },
@@ -95,8 +113,9 @@ const retainedPnl = {
   _fact: envelope("live.realized-pnl.v2", "ctrader_deals", now - 31, 30),
 };
 const retainedPnlFact = readFact(retainedPnl, "live.realized-pnl.v2");
-assert.equal(retainedPnl.summary.realized_pnl, 12.5, "stale PnL remains available as retained display data");
+assert.equal(retainedPnl.summary.realized_pnl, 12.5, "stale PnL remains available for diagnostics");
 assert.equal(retainedPnlFact.state, "stale");
+assert.equal(factHasDisplayValue(retainedPnlFact), false, "stale PnL must not be displayed as current");
 assert.equal(factBoundTone(retainedPnlFact, "ok"), "stale", "retained positive PnL must expose expired freshness");
 assert.equal(factIsKnown(readFact({ ...retainedPnl, _fact: envelope("live.realized-pnl.v2") }, "live.realized-pnl.v2"), true), false, "PnL refetch failure must suppress a cached known envelope");
 
@@ -106,15 +125,16 @@ for (const contract of ["ops.backend-readiness.v2", "risk.summary.v2"]) {
     _fact: envelope(contract, "postgresql", now - 181, 180),
   };
   const retainedV15Fact = readFact(retainedV15Payload, contract);
-  assert.equal(retainedV15Payload.status, "healthy", `${contract} retained value remains displayable`);
+  assert.equal(retainedV15Payload.status, "healthy", `${contract} raw value remains available for diagnostics`);
   assert.equal(retainedV15Fact.state, "stale", `${contract} retained fact must expire`);
+  assert.equal(factHasDisplayValue(retainedV15Fact), false, `${contract} stale value must not be displayed as current`);
   assert.equal(factBoundTone(retainedV15Fact, "ok"), "stale", `${contract} retained success must expose expired freshness`);
   assert.equal(factBoundTone(readFact({ _fact: envelope(contract, "postgresql") }, contract), "ok", true), "bad", `${contract} refetch failure must suppress V15 cached green`);
 }
 
 const staleSpotState = {
   _fact: envelope("live.state.v2", "ctrader", now, 30, {
-    spot: envelope("live.spot-quote.v1", "ctrader_spot", now - 10, 5),
+    spot: envelope("live.spot-quote.v1", "ctrader_spot", now - 16, 15),
   }),
 };
 assert.equal(readFact(staleSpotState, "live.state.v2").state, "known");
@@ -122,6 +142,11 @@ assert.equal(
   readFactComponent(staleSpotState, "spot", "live.spot-quote.v1").state,
   "stale",
   "spot freshness must be evaluated independently of its parent state",
+);
+assert.equal(
+  factAgeSeconds(envelope("live.spot-quote.v1", "ctrader_spot", 100), 115),
+  15,
+  "spot age must use the broker observation timestamp",
 );
 
 const positionsWithComponents = {

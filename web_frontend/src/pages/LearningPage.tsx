@@ -16,7 +16,7 @@ import { asRecord, pick, pickArray, pickBoolean, pickNumber, pickRecord, pickStr
 import { translateDisplayValue, translateReasonText, translateScopeLabel } from "@/lib/display";
 import { formatDecimal, formatTime } from "@/lib/format";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
-import { factBoundTone, factIsKnown, readFact } from "@/api/fact";
+import { aggregateFactViewState, factBoundTone, factIsKnown, factViewStateLabel, readFact } from "@/api/fact";
 
 function countFrom(record: unknown, key: string): number {
   return pickNumber(record, [key], 0);
@@ -54,40 +54,34 @@ export function LearningPage({ embedded = false }: { embedded?: boolean }) {
   const summaryQuery = useQuery({
     queryKey: ["learning-summary"],
     queryFn: getLearningSummary,
-    refetchInterval: 30_000,
     staleTime: 10_000,
   });
   const suggestionsQuery = useQuery({
     queryKey: ["learning-suggestions"],
     queryFn: () => getLearningSuggestions(20),
-    refetchInterval: 30_000,
     staleTime: 10_000,
   });
   const applicationsQuery = useQuery({
     queryKey: ["learning-applications"],
     queryFn: () => getLearningApplications(20),
-    refetchInterval: 30_000,
     staleTime: 10_000,
   });
   const lifecycleQuery = useQuery({
     queryKey: ["learning-lifecycle"],
     queryFn: () => getLearningLifecycle(30),
-    refetchInterval: 30_000,
     staleTime: 10_000,
   });
   const reviewsQuery = useQuery({
     queryKey: ["learning-reviews"],
     queryFn: () => getLearningReviews(10),
-    refetchInterval: 30_000,
     staleTime: 10_000,
   });
   const samplesQuery = useQuery({
     queryKey: ["learning-autonomous-samples"],
     queryFn: () => getAutonomousLearningSamples(10),
-    refetchInterval: 30_000,
     staleTime: 10_000,
   });
-  const readinessQuery = useBackendReadinessQuery(30_000);
+  const readinessQuery = useBackendReadinessQuery();
 
   const summary = asRecord(summaryQuery.data);
   const suggestionCounts = asRecord(pick(summary, ["suggestions"]));
@@ -149,15 +143,19 @@ export function LearningPage({ embedded = false }: { embedded?: boolean }) {
     readinessQuery,
   ];
   const hasError = learningQueries.some((query) => query.isError || query.isRefetchError);
-  const isRefreshing = learningQueries.some((query) => query.isFetching);
-  const learningFactsKnown = readinessKnown && [
-    factIsKnown(readFact(summaryQuery.data, "learning.summary.v2"), summaryQuery.isError || summaryQuery.isRefetchError),
-    factIsKnown(readFact(suggestionsQuery.data, "learning.suggestions.v2"), suggestionsQuery.isError || suggestionsQuery.isRefetchError),
-    factIsKnown(readFact(applicationsQuery.data, "learning.applications.v2"), applicationsQuery.isError || applicationsQuery.isRefetchError),
-    factIsKnown(readFact(lifecycleQuery.data, "learning.lifecycle.v2"), lifecycleQuery.isError || lifecycleQuery.isRefetchError),
-    factIsKnown(readFact(reviewsQuery.data, "learning.reviews.v2"), reviewsQuery.isError || reviewsQuery.isRefetchError),
-    factIsKnown(readFact(samplesQuery.data, "learning.autonomous-samples.v2"), samplesQuery.isError || samplesQuery.isRefetchError),
-  ].every(Boolean);
+  const learningFactEntries = [
+    { fact: readinessFact, requestFailed: readinessRequestFailed },
+    { fact: readFact(summaryQuery.data, "learning.summary.v2"), requestFailed: summaryQuery.isError || summaryQuery.isRefetchError },
+    { fact: readFact(suggestionsQuery.data, "learning.suggestions.v2"), requestFailed: suggestionsQuery.isError || suggestionsQuery.isRefetchError },
+    { fact: readFact(applicationsQuery.data, "learning.applications.v2"), requestFailed: applicationsQuery.isError || applicationsQuery.isRefetchError },
+    { fact: readFact(lifecycleQuery.data, "learning.lifecycle.v2"), requestFailed: lifecycleQuery.isError || lifecycleQuery.isRefetchError },
+    { fact: readFact(reviewsQuery.data, "learning.reviews.v2"), requestFailed: reviewsQuery.isError || reviewsQuery.isRefetchError },
+    { fact: readFact(samplesQuery.data, "learning.autonomous-samples.v2"), requestFailed: samplesQuery.isError || samplesQuery.isRefetchError },
+  ] as const;
+  const learningViewState = aggregateFactViewState(learningFactEntries);
+  const learningFactsKnown = learningViewState === "known";
+  const learningViewTone = learningViewState === "known" ? "ok" : learningViewState === "stale" ? "stale" : learningViewState === "error" ? "bad" : "warn";
+  const learningViewLabel = learningViewState === "known" ? "学习链路在线" : `学习${factViewStateLabel(learningViewState)}`;
 
   return (
     <section className="dashboard learning-dashboard">
@@ -168,9 +166,9 @@ export function LearningPage({ embedded = false }: { embedded?: boolean }) {
           <p>复盘、样本、策略建议、参数治理和只观察模型统一在这里查看。</p>
         </div>
         <div className="header-status">
-          <StatusPill status={readinessKnown ? (automaticExecution ? "自动应用已开" : "人工审核") : "治理状态待确认"} tone={factBoundTone(readinessFact, automaticExecution ? "warn" : "ok", readinessRequestFailed)} />
+          <StatusPill status={readinessKnown ? (automaticExecution ? "自动应用已开" : "人工审核") : "治理状态待确认"} tone={factBoundTone(readinessFact, automaticExecution ? "warn" : "ok", readinessRequestFailed)} fact={readinessFact} requestFailed={readinessRequestFailed} />
           <StatusPill status={`模式 ${translateDisplayValue(autonomyMode)}`} tone="mute" />
-          <StatusPill status={hasError ? "接口异常" : learningFactsKnown ? "学习链路在线" : isRefreshing ? "部分数据更新中" : "部分数据待确认"} tone={hasError ? "bad" : learningFactsKnown ? "ok" : "warn"} />
+          <StatusPill status={learningViewLabel} tone={learningViewTone} />
         </div>
       </div> : null}
 

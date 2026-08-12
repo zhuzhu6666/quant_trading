@@ -1,10 +1,11 @@
-"""Verify /ws/state broadcasts a snapshot on connect + every 1s."""
+"""Verify /ws/state sends an initial snapshot and event-driven updates."""
 import json
 
 from fastapi.testclient import TestClient
 
 from backend.app import app
 from backend.core.auth import create_token
+from backend.ws.manager import get_connection_manager
 
 client = TestClient(app)
 
@@ -28,13 +29,15 @@ def test_ws_state_sends_snapshot_on_connect():
         assert snapshot["_fact"]["state"] in {"known", "unknown", "stale", "error"}
 
 
-def test_ws_state_sends_followup_after_1s():
+def test_ws_state_sends_followup_after_state_change():
     token = _ws_token()
     with client.websocket_connect(f"/ws/state?token={token}") as ws:
         first = json.loads(ws.receive_text())
-        second = json.loads(ws.receive_text())  # wait 1s for next tick
+        get_connection_manager().notify("state")
+        second = json.loads(ws.receive_text())
         assert "equity" in second
-        # server_time should differ
+        # The second snapshot is caused by the explicit state event, not by a
+        # per-connection timer.
         assert first["server_time"] != second["server_time"]
 
 

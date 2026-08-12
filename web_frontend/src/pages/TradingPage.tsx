@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Activity, Gauge, Play, PowerOff, RefreshCw, RotateCcw, ShieldAlert, Wallet } from "lucide-react";
 import { ActionButton } from "@/components/ActionButton";
 import { MetricCard } from "@/components/Card";
@@ -7,23 +7,17 @@ import { Field, StatTile, toneFromStatus } from "@/components/DashboardBits";
 import { StatusPill } from "@/components/StatusPill";
 import { FactBoundary } from "@/components/FactBoundary";
 import { useAuth } from "@/contexts/AuthContext";
-import { liveEndpointRefetchInterval, useLiveState } from "@/hooks/useLiveState";
+import { useLiveState } from "@/hooks/useLiveState";
 import {
   emergencyClose,
-  getAccount,
   getFactorV4RecentTicks,
   getFactorV4Stats,
-  getLiveStatus,
-  getLoopStatus,
-  getPositions,
-  getRiskSummary,
-  getStrategyStatus,
   isStepUpRequiredError,
   startTrading,
   stopTrading,
 } from "@/api/client";
-import { factBoundTone, factHasDisplayValue, factIsKnown, factStatusLabel, readFact, readFactComponent, readFactNestedComponent } from "@/api/fact";
-import { formatDecimal, formatMoney, formatTimeRange } from "@/lib/format";
+import { factAgeSeconds, factBoundTone, factHasDisplayValue, factIsKnown, factStatusLabel, readFactComponent, readFactNestedComponent } from "@/api/fact";
+import { formatAgeSeconds, formatDecimal, formatMoney, formatTimeRange } from "@/lib/format";
 import {
   asRecord,
   formatDirection,
@@ -36,7 +30,6 @@ import {
 } from "@/lib/compat";
 import { translateDisplayValue } from "@/lib/display";
 import { decodeCanonicalRiskSnapshot, knownMetric } from "@/api/riskSnapshot";
-import { queryKeys } from "@/api/queryKeys";
 import { RiskPanel } from "@/pages/RiskPage";
 
 type PositionRow = {
@@ -125,71 +118,22 @@ function normalizePositionCount(raw: unknown): number {
 
 export function TradingPage() {
   const { authenticated } = useAuth();
-  const { snapshot, source, connected, refresh, error: wsError } = useLiveState({ enabled: authenticated });
-  const queryClient = useQueryClient();
-  const liveEndpointInterval = liveEndpointRefetchInterval(connected);
-  const liveEndpointStaleTime = 5_000;
-
-  const loopQuery = useQuery({
-    queryKey: queryKeys.loopStatus,
-    queryFn: getLoopStatus,
-    refetchInterval: liveEndpointInterval,
-    staleTime: liveEndpointStaleTime,
-    retry: false,
-    enabled: authenticated,
-  });
-
-  const accountQuery = useQuery({
-    queryKey: queryKeys.account,
-    queryFn: getAccount,
-    refetchInterval: liveEndpointInterval,
-    staleTime: liveEndpointStaleTime,
-    retry: false,
-    enabled: authenticated,
-  });
-
-  const positionsQuery = useQuery({
-    queryKey: queryKeys.positions,
-    queryFn: getPositions,
-    refetchInterval: liveEndpointInterval,
-    staleTime: liveEndpointStaleTime,
-    retry: false,
-    enabled: authenticated,
-  });
-  const liveStatusQuery = useQuery({
-    queryKey: queryKeys.liveStatus,
-    queryFn: getLiveStatus,
-    refetchInterval: liveEndpointInterval,
-    staleTime: liveEndpointStaleTime,
-    retry: false,
-    enabled: authenticated,
-  });
-  const strategyStatusQuery = useQuery({
-    queryKey: queryKeys.strategyStatus,
-    queryFn: getStrategyStatus,
-    refetchInterval: 5000,
-    staleTime: 2500,
-    retry: false,
-    enabled: authenticated,
-  });
-  const riskQuery = useQuery({
-    queryKey: queryKeys.riskSummary,
-    queryFn: getRiskSummary,
-    refetchInterval: 10_000,
-    staleTime: 5_000,
-    enabled: authenticated,
-  });
+  const {
+    snapshot,
+    connected,
+    refresh,
+    error: wsError,
+    snapshotRequestFailed,
+  } = useLiveState({ enabled: authenticated });
   const factorStatsQuery = useQuery({
     queryKey: ["factor-v4-stats", "trading"],
     queryFn: getFactorV4Stats,
-    refetchInterval: 15_000,
     staleTime: 5_000,
     enabled: authenticated,
   });
   const recentTicksQuery = useQuery({
     queryKey: ["factor-v4-recent-ticks", "trading"],
     queryFn: getFactorV4RecentTicks,
-    refetchInterval: 10_000,
     staleTime: 5_000,
     enabled: authenticated,
   });
@@ -202,42 +146,37 @@ export function TradingPage() {
   const [closeBusy, setCloseBusy] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
 
-  const loopFact = readFact(loopQuery.data, "live.loop.v2");
-  const accountFact = readFact(accountQuery.data, "live.account.v2");
-  const positionsFact = readFact(positionsQuery.data, "live.positions.v2");
-  const statusFact = readFact(liveStatusQuery.data, "live.status.v2");
-  const strategyFact = readFact(strategyStatusQuery.data, "live.strategy.v2");
-  const riskInputsFact = readFactComponent(riskQuery.data, "risk_inputs", "risk.inputs.v1");
-  const riskHealthFact = readFactComponent(riskQuery.data, "system_health", "system.runtime-health.v1");
+  const loopFact = readFactComponent(snapshot, "loop", "live.loop.v2");
+  const accountFact = readFactComponent(snapshot, "account", "live.account.v2");
+  // The parent live.state envelope is an aggregate of broker fields that may
+  // legitimately update at different rates. Market status follows the
+  // heartbeat-owned loop fact so an unchanged position cannot age the whole
+  // control header out of view.
+  const statusFact = loopFact;
+  const strategyFact = readFactComponent(snapshot, "strategy", "live.strategy.v2");
+  const riskInputsFact = readFactComponent(snapshot, "risk_inputs", "risk.inputs.v1");
+  const riskHealthFact = readFactComponent(snapshot, "risk_health", "system.runtime-health.v1");
   const accountComponentFact = readFactComponent(snapshot, "account", "live.account.v2");
   const positionsComponentFact = readFactComponent(snapshot, "positions", "live.positions.v2");
-  const endpointIdentityFact = readFactNestedComponent(positionsQuery.data, ["broker_reconcile", "identity"], "live.positions.identity.v1");
-  const endpointProtectionFact = readFactNestedComponent(positionsQuery.data, ["broker_reconcile", "protection"], "live.positions.protection.v1");
-  const endpointPriceFact = readFactNestedComponent(positionsQuery.data, ["broker_reconcile", "price"], "live.positions.price.v1");
-  const endpointPnlFact = readFactNestedComponent(positionsQuery.data, ["broker_reconcile", "pnl"], "live.positions.pnl.v1");
   const snapshotIdentityFact = readFactNestedComponent(snapshot, ["positions", "identity"], "live.positions.identity.v1");
   const snapshotProtectionFact = readFactNestedComponent(snapshot, ["positions", "protection"], "live.positions.protection.v1");
   const snapshotPriceFact = readFactNestedComponent(snapshot, ["positions", "price"], "live.positions.price.v1");
   const snapshotPnlFact = readFactNestedComponent(snapshot, ["positions", "pnl"], "live.positions.pnl.v1");
   const spotFact = readFactComponent(snapshot, "spot", "live.spot-quote.v1");
-  const loopRequestFailed = loopQuery.isError || loopQuery.isRefetchError;
-  const accountRequestFailed = accountQuery.isError || accountQuery.isRefetchError;
-  const positionsRequestFailed = positionsQuery.isError || positionsQuery.isRefetchError;
-  const statusRequestFailed = liveStatusQuery.isError || liveStatusQuery.isRefetchError;
-  const strategyRequestFailed = strategyStatusQuery.isError || strategyStatusQuery.isRefetchError;
+  const loopRequestFailed = snapshotRequestFailed;
+  const statusRequestFailed = snapshotRequestFailed;
+  const strategyRequestFailed = snapshotRequestFailed;
   const loopKnown = factIsKnown(loopFact, loopRequestFailed);
-  const accountEndpointKnown = factIsKnown(accountFact, accountRequestFailed);
-  const accountComponentKnown = factIsKnown(accountComponentFact);
-  const positionsEndpointKnown = factIsKnown(positionsFact, positionsRequestFailed);
-  const positionsComponentKnown = factIsKnown(positionsComponentFact);
+  const accountComponentKnown = factIsKnown(accountComponentFact, snapshotRequestFailed);
+  const positionsComponentKnown = factIsKnown(positionsComponentFact, snapshotRequestFailed);
   const statusKnown = factIsKnown(statusFact, statusRequestFailed);
   const strategyKnown = factIsKnown(strategyFact, strategyRequestFailed);
-  const riskRequestFailed = riskQuery.isError || riskQuery.isRefetchError;
-  const canonicalRisk = decodeCanonicalRiskSnapshot(riskQuery.data);
+  const riskRequestFailed = snapshotRequestFailed;
+  const canonicalRisk = decodeCanonicalRiskSnapshot(snapshot);
   const riskKnown = factIsKnown(riskInputsFact, riskRequestFailed)
     && canonicalRisk.contractKnown
     && knownMetric(canonicalRisk.var95.status);
-  const riskDisplayable = factHasDisplayValue(riskInputsFact) && canonicalRisk.contractKnown;
+  const riskDisplayable = factHasDisplayValue(riskInputsFact, riskRequestFailed) && canonicalRisk.contractKnown;
   const riskVarDisplayable = riskDisplayable
     && knownMetric(canonicalRisk.var95.status)
     && canonicalRisk.var95.varPct !== null;
@@ -246,52 +185,42 @@ export function TradingPage() {
     && canonicalRisk.var95.cvarPct !== null;
   const riskHealthKnown = factIsKnown(riskHealthFact, riskRequestFailed);
 
-  const loop = asRecord(loopQuery.data);
-  const useEndpointAccount = accountEndpointKnown
-    || (!accountComponentKnown && factHasDisplayValue(accountFact));
-  const account = useEndpointAccount
-    ? asRecord(accountQuery.data)
-    : asRecord(pick(snapshot, ["account"]));
-  const accountViewFact = useEndpointAccount ? accountFact : accountComponentFact;
-  const accountKnown = useEndpointAccount ? accountEndpointKnown : accountComponentKnown;
-  const endpointIdentityDisplayable = factHasDisplayValue(endpointIdentityFact);
-  const snapshotIdentityDisplayable = factHasDisplayValue(snapshotIdentityFact);
-  const useEndpointPositions = positionsEndpointKnown
-    || endpointIdentityDisplayable
-    || (!snapshotIdentityDisplayable && factHasDisplayValue(positionsFact));
-  const positionsViewFact = useEndpointPositions ? positionsFact : positionsComponentFact;
-  const positionsIdentityFact = useEndpointPositions ? endpointIdentityFact : snapshotIdentityFact;
-  const positionsProtectionFact = useEndpointPositions ? endpointProtectionFact : snapshotProtectionFact;
-  const positionsPriceFact = useEndpointPositions ? endpointPriceFact : snapshotPriceFact;
-  const positionsPnlFact = useEndpointPositions ? endpointPnlFact : snapshotPnlFact;
-  const positionsViewRequestFailed = useEndpointPositions && positionsRequestFailed;
-  const positionsIdentityDisplayable = factHasDisplayValue(positionsIdentityFact)
+  const loop = asRecord(pick(snapshot, ["loop_status"]));
+  const account = asRecord(pick(snapshot, ["account"]));
+  const accountViewFact = accountComponentFact;
+  const accountKnown = accountComponentKnown;
+  const accountViewRequestFailed = snapshotRequestFailed;
+  const snapshotIdentityDisplayable = factHasDisplayValue(snapshotIdentityFact, snapshotRequestFailed);
+  const useEndpointPositions = false;
+  const positionsViewFact = positionsComponentFact;
+  const positionsIdentityFact = snapshotIdentityFact;
+  const positionsProtectionFact = snapshotProtectionFact;
+  const positionsPriceFact = snapshotPriceFact;
+  const positionsPnlFact = snapshotPnlFact;
+  const positionsViewRequestFailed = snapshotRequestFailed;
+  const positionsIdentityDisplayable = factHasDisplayValue(positionsIdentityFact, positionsViewRequestFailed)
     || factIsKnown(positionsViewFact, positionsViewRequestFailed);
-  const positionsProtectionDisplayable = factHasDisplayValue(positionsProtectionFact);
-  const positionsPriceDisplayable = factHasDisplayValue(positionsPriceFact);
-  const positionsPnlDisplayable = factHasDisplayValue(positionsPnlFact);
+  const positionsProtectionDisplayable = factHasDisplayValue(positionsProtectionFact, positionsViewRequestFailed);
+  const positionsPriceDisplayable = factHasDisplayValue(positionsPriceFact, positionsViewRequestFailed);
+  const positionsPnlDisplayable = factHasDisplayValue(positionsPnlFact, positionsViewRequestFailed);
   const positions = useMemo(() => {
     const access = {
       protection: positionsProtectionDisplayable,
       price: positionsPriceDisplayable,
       pnl: positionsPnlDisplayable,
     };
-    if (useEndpointPositions && positionsIdentityDisplayable) {
-      return normalizePositions(positionsQuery.data, access);
-    }
     if (!useEndpointPositions && positionsIdentityDisplayable) {
       return normalizePositions(pick(snapshot, ["positions_list", "positions"]), access);
     }
     return [];
-  }, [positionsIdentityDisplayable, positionsPnlDisplayable, positionsPriceDisplayable, positionsProtectionDisplayable, positionsQuery.data, snapshot, useEndpointPositions]);
+  }, [positionsIdentityDisplayable, positionsPnlDisplayable, positionsPriceDisplayable, positionsProtectionDisplayable, snapshot, useEndpointPositions]);
 
-  const risk = asRecord(riskQuery.data);
+  const risk = asRecord(pick(snapshot, ["risk"]));
   const closedLoop = asRecord(pick(snapshot, ["closed_loop"]));
   const executionSummary = { ...closedLoop, ...asRecord(pick(snapshot, ["execution_summary", "execution"])) };
-  const liveStatus = asRecord(liveStatusQuery.data);
-  const marketSession = asRecord(pick(liveStatus, ["market_session"]));
-  const spotQuote = factHasDisplayValue(spotFact) ? asRecord(pick(snapshot, ["spot_quote"])) : {};
-  const strategyStatus = asRecord(strategyStatusQuery.data);
+  const marketSession = asRecord(pick(snapshot, ["market_session"]));
+  const spotQuote = factHasDisplayValue(spotFact, snapshotRequestFailed) ? asRecord(pick(snapshot, ["spot_quote"])) : {};
+  const strategyStatus = asRecord(pick(snapshot, ["strategy_status"]));
   const lastComposite = asRecord(pick(strategyStatus, ["last_composite"]));
   const v4Status = asRecord(pick(strategyStatus, ["v4_status"]));
   const factorSummary = asRecord(pick(factorStatsQuery.data, ["summary"]));
@@ -327,20 +256,19 @@ export function TradingPage() {
   const factorSnapshotAt = formatReadableTime(pick(lastComposite, ["ts"]));
   const executionEvents = pickArray(strategyStatus, ["execution_events"]);
   const liveExecutionSummary = { ...executionSummary, ...asRecord(pick(strategyStatus, ["execution_summary"])) };
-  const strategyDisplayable = factHasDisplayValue(strategyFact);
+  const strategyDisplayable = factHasDisplayValue(strategyFact, strategyRequestFailed);
   const executionKnown = strategyKnown;
 
-  const spotKnown = factIsKnown(spotFact);
+  const spotKnown = factIsKnown(spotFact, snapshotRequestFailed);
   const startFactsKnown = loopKnown
-    && accountEndpointKnown
-    && positionsEndpointKnown
+    && accountKnown
+    && positionsComponentKnown
     && statusKnown
     && riskKnown
     && riskHealthKnown
     && spotKnown;
   const positionsKnown = factIsKnown(positionsViewFact, positionsViewRequestFailed);
 
-  const connectionTone = connected ? "ok" : "warn";
   const loopRunning = pickBoolean(loop, ["running", "is_running", "pipeline_active", "alive", "status"], false);
   const broker = pickString(loop, ["broker", "broker_name", "exchange"], pickString(account, ["broker"], ""));
   const strategy = pickString(loop, ["strategy_name", "strategy", "strategyName", "active_strategy"], "");
@@ -363,15 +291,17 @@ export function TradingPage() {
   const balance = pickNumber(account, ["balance", "account_balance"], 0);
   const equity = pickNumber(account, ["equity", "account_equity"], 0);
   const leverage = pickString(account, ["leverage", "leverage_ratio"], "");
-  const spotDisplayable = factHasDisplayValue(spotFact);
+  const spotDisplayable = factHasDisplayValue(spotFact, snapshotRequestFailed);
   const spotMid = spotDisplayable ? pickNumber(spotQuote, ["mid"], pickNumber(snapshot, ["current_price"], 0)) : 0;
   const spotBid = spotDisplayable ? pickNumber(spotQuote, ["bid"], 0) : 0;
   const spotAsk = spotDisplayable ? pickNumber(spotQuote, ["ask"], 0) : 0;
   const spotObservedAt = spotFact.observed_at ? formatReadableTime(spotFact.observed_at) : "";
+  const spotAgeLabel = formatAgeSeconds(spotDisplayable ? factAgeSeconds(spotFact) : null);
+  const spotTone = factBoundTone(spotFact, spotMid > 0 ? "ok" : "warn", snapshotRequestFailed);
   const marketStatus = pickString(marketSession, ["status"], "");
 
   const positionsDisplayable = positionsIdentityDisplayable;
-  const positionCount = positions.length || (useEndpointPositions && positionsIdentityDisplayable ? normalizePositionCount(positionsQuery.data) : 0);
+  const positionCount = positions.length;
   const cumulativeVolume = positions.reduce((sum, p) => sum + Math.abs(p.volume), 0);
   const pnlValues = positions.flatMap((position) => position.unrealized === null ? [] : [position.unrealized]);
   const pnlComplete = positionsPnlDisplayable && pnlValues.length === positions.length;
@@ -382,17 +312,11 @@ export function TradingPage() {
 
   const session = asRecord(pick(snapshot, ["session_stats", "daily", "session"]));
   const sessionPnl = pickNumber(session, ["pnl_today", "pnl", "session_pnl"], 0);
-  const riskSystemHealth = asRecord(pick(risk, ["system_health"]));
+  const riskSystemHealth = asRecord(pick(snapshot, ["risk_health"]));
   const totalRisk = riskVarDisplayable ? canonicalRisk.var95.varPct : null;
   const circuitBreaker = riskHealthKnown && pickBoolean(riskSystemHealth, ["trading_blocked"], false);
-  const riskFactLabel = factStatusLabel(riskInputsFact);
-  const riskFactTone = riskRequestFailed
-    ? "bad" as const
-    : riskInputsFact.state === "stale"
-      ? "pending" as const
-      : riskKnown
-        ? "mute" as const
-        : "warn" as const;
+  const riskFactLabel = factStatusLabel(riskInputsFact, riskRequestFailed);
+  const riskFactTone = factBoundTone(riskInputsFact, riskKnown ? "mute" : "warn", riskRequestFailed);
   const riskGateLabel = !riskHealthKnown
     ? "未知"
     : circuitBreaker
@@ -419,32 +343,18 @@ export function TradingPage() {
   const aweConviction = pickNumber(v4Status, ["awe_conviction"], 0);
   const attributedTrades = pickNumber(v4Status, ["n_attribution_trades"], pickNumber(factorSummary, ["total_voted"], 0));
   const overallWinRate = pickNumber(factorSummary, ["overall_win_rate"], 0);
-  const hasLoopData = factHasDisplayValue(loopFact) && Object.keys(loop).length > 0;
-  const hasAccountData = factHasDisplayValue(accountViewFact) && pick(account, ["balance", "equity"]) !== undefined;
+  const hasLoopData = factHasDisplayValue(loopFact, loopRequestFailed) && Object.keys(loop).length > 0;
+  const hasAccountData = factHasDisplayValue(accountViewFact, accountViewRequestFailed) && pick(account, ["balance", "equity"]) !== undefined;
 
   useEffect(() => {
     if (stopRequested && loopKnown && !loopRunning && !loopDraining) {
       setStopRequested(false);
     }
   }, [loopDraining, loopKnown, loopRunning, stopRequested]);
-  const hasPositionData = positionsDisplayable && (positionsQuery.data !== undefined || positions.length > 0);
+  const hasPositionData = positionsDisplayable;
 
   const refreshAll = async () => {
     await refresh();
-    await Promise.all([
-      queryKeys.loopStatus,
-      queryKeys.account,
-      queryKeys.positions,
-      queryKeys.liveStatus,
-      queryKeys.strategyStatus,
-      queryKeys.riskSummary,
-      queryKeys.riskPolicyVerdicts,
-      queryKeys.riskTradeTraces,
-      queryKeys.dbHealth,
-      queryKeys.readiness,
-      ["factor-v4-stats", "trading"],
-      ["factor-v4-recent-ticks", "trading"],
-    ].map((queryKey) => queryClient.invalidateQueries({ queryKey })));
   };
 
   const runStart = async () => {
@@ -504,11 +414,11 @@ export function TradingPage() {
         </div>
         <div className="header-status">
           <StatusPill
-            status={connected ? "WS 实时连接" : source === "http-fallback" ? "HTTP 快照回退 · WS 重连中" : "WS 连接中"}
-            tone={connectionTone}
+            status={connected && snapshot ? "WS 实时连接" : "暂无实时快照"}
+            tone={connected && snapshot ? "ok" : "warn"}
           />
-          {hasLoopData ? <StatusPill status={loopDisplayStatus} tone={loopStatusTone} /> : <StatusPill status="循环状态未知" tone="warn" />}
-          <StatusPill status={factHasDisplayValue(statusFact) ? `市场 ${translateDisplayValue(marketStatus)}` : "市场状态未知"} tone={factBoundTone(statusFact, toneFromStatus(marketStatus), statusRequestFailed)} />
+          {hasLoopData ? <StatusPill status={loopDisplayStatus} tone={loopStatusTone} fact={loopFact} requestFailed={loopRequestFailed} /> : <StatusPill status="循环状态未知" tone="warn" fact={loopFact} requestFailed={loopRequestFailed} />}
+          <StatusPill status={factHasDisplayValue(statusFact, statusRequestFailed) ? `市场 ${translateDisplayValue(marketStatus)}` : "市场状态未知"} tone={factBoundTone(statusFact, toneFromStatus(marketStatus), statusRequestFailed)} fact={statusFact} requestFailed={statusRequestFailed} />
           <StatusPill status={broker} tone="mute" />
         </div>
       </div>
@@ -523,7 +433,7 @@ export function TradingPage() {
             <span>刷新</span>
           </button>
         </div>
-        <FactBoundary fact={accountViewFact} label="账户事实">
+        <FactBoundary fact={accountViewFact} label="账户事实" requestFailed={accountViewRequestFailed}>
           <div className="toolbar-account-strip">
             <span>币种 <strong>{currency}</strong></span>
             <span>余额 <strong>{formatMoney(balance, currency)}</strong></span>
@@ -535,12 +445,12 @@ export function TradingPage() {
       </div>
 
       <div className="stat-grid">
-        {hasLoopData ? <StatTile icon={Activity} label="交易循环" value={loopDisplayLabel} detail={translateDisplayValue(reason)} tone={loopStatusTone} /> : null}
-        {hasAccountData ? <StatTile icon={Wallet} label="账户权益" value={formatMoney(equity, currency)} detail={`余额 ${formatMoney(balance, currency)}`} tone={accountKnown && equity > 0 ? "ok" : accountViewFact.state === "stale" ? "warn" : "mute"} /> : null}
-        <StatTile icon={Gauge} label="XAU 现价" value={spotMid > 0 ? formatDecimal(spotMid, 2) : "未知"} detail={spotBid && spotAsk ? `买 ${formatDecimal(spotBid, 2)} · 卖 ${formatDecimal(spotAsk, 2)}${spotObservedAt ? ` · ${spotObservedAt}` : ""}` : spotObservedAt ? `最后观测 ${spotObservedAt}` : "等待 spot 事实"} tone={spotKnown && spotMid > 0 ? "ok" : "warn"} />
-        {hasPositionData ? <StatTile icon={ShieldAlert} label="浮动盈亏" value={unrealized === null ? "未知" : formatMoney(unrealized, currency)} detail={`${positionsPnlFact.state === "stale" && pnlObservedAt ? `最后观测 ${pnlObservedAt} · ` : ""}会话 ${formatMoney(sessionPnl, currency)}`} tone={!factIsKnown(positionsPnlFact) || unrealized === null ? "warn" : unrealized > 0 ? "ok" : unrealized < 0 ? "bad" : "mute"} /> : null}
-        <StatTile icon={Gauge} label="CVaR 95%" value={riskCvarDisplayable ? `${formatDecimal(canonicalRisk.var95.cvarPct, 4)}%` : riskFactLabel} detail={riskGateDetail} tone={riskFactTone} />
-        <StatTile icon={ShieldAlert} label="风险面" value={riskGateLabel} detail={riskGateDetail} tone={riskGateTone} />
+        {hasLoopData ? <StatTile icon={Activity} label="交易循环" value={loopDisplayLabel} detail={translateDisplayValue(reason)} tone={loopStatusTone} fact={loopFact} requestFailed={loopRequestFailed} /> : null}
+        {hasAccountData ? <StatTile icon={Wallet} label="账户权益" value={formatMoney(equity, currency)} detail={`余额 ${formatMoney(balance, currency)}`} tone={equity > 0 ? "ok" : "mute"} fact={accountViewFact} requestFailed={accountViewRequestFailed} /> : null}
+        <StatTile icon={Gauge} label="XAU 最新报价" value={spotMid > 0 ? formatDecimal(spotMid, 2) : "未知"} detail={spotBid && spotAsk ? `买 ${formatDecimal(spotBid, 2)} · 卖 ${formatDecimal(spotAsk, 2)} · 最后观测 ${spotAgeLabel}` : spotObservedAt ? `最后观测 ${spotAgeLabel}` : "等待 spot 事实"} tone={spotMid > 0 ? "ok" : "warn"} fact={spotFact} requestFailed={snapshotRequestFailed} />
+        {hasPositionData ? <StatTile icon={ShieldAlert} label="浮动盈亏" value={unrealized === null ? "未知" : formatMoney(unrealized, currency)} detail={`${positionsPnlFact.state === "stale" && pnlObservedAt ? `最后观测 ${pnlObservedAt} · ` : ""}会话 ${formatMoney(sessionPnl, currency)}`} tone={unrealized === null ? "warn" : unrealized > 0 ? "ok" : unrealized < 0 ? "bad" : "mute"} fact={positionsPnlFact} requestFailed={positionsViewRequestFailed} /> : null}
+        <StatTile icon={Gauge} label="CVaR 95%" value={riskCvarDisplayable ? `${formatDecimal(canonicalRisk.var95.cvarPct, 4)}%` : riskFactLabel} detail={riskGateDetail} tone={riskKnown ? "mute" : "warn"} fact={riskInputsFact} requestFailed={riskRequestFailed} />
+        <StatTile icon={ShieldAlert} label="风险面" value={riskGateLabel} detail={riskGateDetail} tone={riskGateTone} fact={riskHealthFact} requestFailed={riskRequestFailed} />
       </div>
 
       <MetricCard title="运行总览" className="wide-panel trading-status-overview">
@@ -548,7 +458,7 @@ export function TradingPage() {
           <section className="trading-status-section" aria-label="循环摘要">
             <div className="trading-status-head">
               <h3>循环摘要</h3>
-              <StatusPill status={loopDisplayLabel} tone={loopStatusTone} />
+              <StatusPill status={loopDisplayLabel} tone={loopStatusTone} fact={loopFact} requestFailed={loopRequestFailed} />
             </div>
             <div className="field-list trading-compact-fields">
               <Field label="经纪商" value={broker} />
@@ -563,7 +473,7 @@ export function TradingPage() {
           <section className="trading-status-section" aria-label="策略信号">
             <div className="trading-status-head">
               <h3>策略信号</h3>
-              <StatusPill status={strategyDisplayable ? (gatePassed ? "信号通过" : "信号未通过") : "状态未知"} tone={factBoundTone(strategyFact, gatePassed ? "ok" : "warn", strategyRequestFailed)} />
+              <StatusPill status={strategyDisplayable ? (gatePassed ? "信号通过" : "信号未通过") : "状态未知"} tone={factBoundTone(strategyFact, gatePassed ? "ok" : "warn", strategyRequestFailed)} fact={strategyFact} requestFailed={strategyRequestFailed} />
             </div>
             <div className="field-list trading-compact-fields">
               <Field label="实单发送" value={strategyDisplayable ? (pickBoolean(strategyStatus, ["send_orders"], false) ? "开启" : "关闭") : "未知"} tone={factBoundTone(strategyFact, pickBoolean(strategyStatus, ["send_orders"], false) ? "ok" : "warn", strategyRequestFailed)} />
@@ -578,7 +488,7 @@ export function TradingPage() {
           <section className="trading-status-section" aria-label="因子管道">
             <div className="trading-status-head">
               <h3>因子管道</h3>
-              <StatusPill status={strategyDisplayable ? (engineWarm ? "已预热" : "预热中") : "状态未知"} tone={factBoundTone(strategyFact, engineWarm ? "ok" : "warn", strategyRequestFailed)} />
+              <StatusPill status={strategyDisplayable ? (engineWarm ? "已预热" : "预热中") : "状态未知"} tone={factBoundTone(strategyFact, engineWarm ? "ok" : "warn", strategyRequestFailed)} fact={strategyFact} requestFailed={strategyRequestFailed} />
             </div>
             <div className="field-list trading-compact-fields">
               <Field label="缓冲区" value={formatDecimal(bufferSize, 0)} />
@@ -607,6 +517,8 @@ export function TradingPage() {
               <StatusPill
                 status={riskHealthKnown ? (circuitBreaker ? "健康面阻断" : riskKnown ? "风险输入已知" : riskDisplayable && riskInputsFact.state === "stale" ? "风险输入已过期" : "风险输入待确认") : "状态未知"}
                 tone={circuitBreaker ? "bad" : riskHealthKnown && riskKnown ? "ok" : "warn"}
+                fact={riskInputsFact}
+                requestFailed={riskRequestFailed}
               />
             </div>
             <div className="field-list trading-compact-fields">
@@ -634,7 +546,7 @@ export function TradingPage() {
       </MetricCard>
 
       <RiskPanel
-        riskData={riskQuery.data}
+        riskData={risk}
         riskRequestFailed={riskRequestFailed}
         embedded
         factorSignals={factorTicks}
@@ -678,7 +590,7 @@ export function TradingPage() {
                   <td>{formatDecimal(item.volume, 2)}</td>
                   <td>{item.entry ? formatDecimal(item.entry, 5) : ""}</td>
                   <td>{item.current === null ? "未知" : formatDecimal(item.current, 5)}</td>
-                  <td className={item.unrealized !== null && item.unrealized >= 0 && factIsKnown(positionsPnlFact) ? "status-ok" : item.unrealized !== null && item.unrealized < 0 ? "status-bad" : "status-neutral"}>{item.unrealized === null ? "未知" : formatMoney(item.unrealized, currency)}</td>
+                  <td className={item.unrealized !== null && item.unrealized >= 0 && factIsKnown(positionsPnlFact, positionsViewRequestFailed) ? "status-ok" : item.unrealized !== null && item.unrealized < 0 ? "status-bad" : "status-neutral"}>{item.unrealized === null ? "未知" : formatMoney(item.unrealized, currency)}</td>
                   <td>{item.stop === null ? "未知" : formatDecimal(item.stop, 5)}</td>
                   <td>{item.take === null ? "未知" : formatDecimal(item.take, 5)}</td>
                   <td>{item.id}</td>
@@ -696,16 +608,12 @@ export function TradingPage() {
         )}
       />
 
-      {wsError || loopQuery.isError || accountQuery.isError || positionsQuery.isError || liveStatusQuery.isError || strategyStatusQuery.isError || riskQuery.isError ? (
+      {wsError || factorStatsQuery.isError || recentTicksQuery.isError ? (
         <MetricCard title="错误状态" className="wide-panel">
           <ul className="error-list">
             {wsError ? <li>WS：{wsError}</li> : null}
-            {loopQuery.isError ? <li>loop-status：{loopQuery.error instanceof Error ? loopQuery.error.message : "请求失败"}</li> : null}
-            {accountQuery.isError ? <li>account：{accountQuery.error instanceof Error ? accountQuery.error.message : "请求失败"}</li> : null}
-            {positionsQuery.isError ? <li>positions：{positionsQuery.error instanceof Error ? positionsQuery.error.message : "请求失败"}</li> : null}
-            {liveStatusQuery.isError ? <li>live-status：{liveStatusQuery.error instanceof Error ? liveStatusQuery.error.message : "请求失败"}</li> : null}
-            {strategyStatusQuery.isError ? <li>strategy-status：{strategyStatusQuery.error instanceof Error ? strategyStatusQuery.error.message : "请求失败"}</li> : null}
-            {riskQuery.isError ? <li>risk-summary：{riskQuery.error instanceof Error ? riskQuery.error.message : "请求失败"}</li> : null}
+            {factorStatsQuery.isError ? <li>factor-stats：{factorStatsQuery.error instanceof Error ? factorStatsQuery.error.message : "请求失败"}</li> : null}
+            {recentTicksQuery.isError ? <li>recent-ticks：{recentTicksQuery.error instanceof Error ? recentTicksQuery.error.message : "请求失败"}</li> : null}
           </ul>
         </MetricCard>
       ) : null}
