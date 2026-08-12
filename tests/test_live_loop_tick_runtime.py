@@ -130,7 +130,7 @@ def _runtime(
         ensure_spot_subscription=lambda _bridge, **_kwargs: order.append(
             "spot_subscription"
         ),
-        warmup_from_local_db=lambda *_args: _frame(),
+        get_live_bars=lambda *_args: _frame(),
         ensure_decision_bars_fresh=lambda **kwargs: kwargs["df_new"],
         get_safety_plane=lambda _generation_id: plane,
         retry_pending_open=lambda **kwargs: retry_calls.append(kwargs),
@@ -141,7 +141,7 @@ def _runtime(
     return runtime, controller, plane
 
 
-def test_safety_exception_fails_closed_before_account_or_alpha():
+def test_safety_exception_fails_closed_before_alpha_after_account_fact_attempt():
     order = []
     persisted = []
     process_calls = []
@@ -163,14 +163,19 @@ def test_safety_exception_fails_closed_before_account_or_alpha():
         runtime=runtime,
     )
 
-    assert order == ["positions", "safety"]
+    assert order == [
+        "positions",
+        "account",
+        "account_failed:fresh_account_unavailable",
+        "safety",
+    ]
     assert result["wait_seconds"] == 5.0
     assert result["safety"]["accepting_new_risk"] is False
     assert persisted[0]["blockers"] == ("safety_cycle_exception",)
     assert process_calls == []
 
 
-def test_account_failure_occurs_after_safety_and_blocks_alpha():
+def test_account_failure_still_runs_safety_and_blocks_alpha():
     order = []
     process_calls = []
     state_updates = []
@@ -194,9 +199,9 @@ def test_account_failure_occurs_after_safety_and_blocks_alpha():
 
     assert order == [
         "positions",
-        "safety",
         "account",
         "account_failed:fresh_account_unavailable",
+        "safety",
         "spot_subscription",
         "recovery",
     ]
@@ -234,8 +239,8 @@ def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
 
     assert order == [
         "positions",
-        "safety",
         "account",
+        "safety",
         "spot_subscription",
         "recovery",
     ]

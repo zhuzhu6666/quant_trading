@@ -32,7 +32,7 @@ class LiveLoopTickRuntime:
     evaluate_daily_drawdown: Any
     market_session_snapshot: Any
     ensure_spot_subscription: Any
-    warmup_from_local_db: Any
+    get_live_bars: Any
     ensure_decision_bars_fresh: Any
     get_safety_plane: Any
     retry_pending_open: Any
@@ -68,14 +68,9 @@ def run_live_loop_tick_body(
     bridge_ready = safety_result["bridge_ready"]
     broker_error = safety_result["broker_error"]
     reconcile = safety_result["reconcile"]
+    account_reconcile = safety_result["account_reconcile"]
+    account_blockers = safety_result["account_blockers"]
     safety = safety_result["safety"]
-
-    account_reconcile, account_blockers = _reconcile_alpha_account(
-        bridge=bridge if bridge_ready else None,
-        broker=broker,
-        positions_reconcile=reconcile,
-        runtime=runtime,
-    )
     wait_seconds = _safety_wait_seconds(safety)
     if account_blockers:
         runtime.live_state_update(accepting_new_risk=False)
@@ -118,7 +113,11 @@ def run_live_loop_tick_body(
     # recover without a process restart.  Subscription failure is advisory;
     # safety and reconciliation must continue to run fail-closed.
     try:
-        runtime.ensure_spot_subscription(bridge, log=log)
+        runtime.ensure_spot_subscription(
+            bridge,
+            log=log,
+            timeframe=timeframe,
+        )
     except Exception as exc:
         log(f"tick {tick}: spot subscription refresh failed (non-fatal): {exc}")
 
@@ -208,9 +207,9 @@ def run_live_loop_tick_body(
             safety=safety,
         )
 
-    frame = runtime.warmup_from_local_db("XAUUSD+", timeframe, 5)
+    frame = runtime.get_live_bars("XAUUSD+", timeframe, 5)
     if frame is None or len(frame) == 0:
-        log(f"tick {tick}: local DB has no bars; safety remains active")
+        log(f"tick {tick}: online trendbar feed has no bars; safety remains active")
         return _tick_result(
             recovery_bootstrapped=recovery_bootstrapped,
             wait_seconds=wait_seconds,
@@ -314,6 +313,17 @@ def _run_safety_boundary(
         reconcile = runtime.reconcile_positions(
             bridge if bridge_ready else None
         )
+        # Publish both broker facts before Safety evaluates freshness.  The
+        # previous order refreshed account after the safety cycle, so a normal
+        # positions/protection RPC span could make the watchdog observe an
+        # account older than the 15-second contract even though this tick had
+        # not yet attempted its account reconcile.
+        account_reconcile, account_blockers = _reconcile_alpha_account(
+            bridge=bridge if bridge_ready else None,
+            broker=broker,
+            positions_reconcile=reconcile,
+            runtime=runtime,
+        )
         safety = runtime.run_safety_cycle(
             bridge=bridge if bridge_ready else None,
             broker=broker,
@@ -328,6 +338,8 @@ def _run_safety_boundary(
             "bridge_ready": bridge_ready,
             "broker_error": broker_error,
             "reconcile": reconcile,
+            "account_reconcile": account_reconcile,
+            "account_blockers": account_blockers,
             "safety": safety,
         }
     except Exception as exc:

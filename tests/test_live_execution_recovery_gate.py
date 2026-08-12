@@ -119,7 +119,7 @@ def test_execution_outcome_flag_alone_selects_safety_first_loop(monkeypatch):
     assert live_service._phase2_v2_active() is True
 
 
-def test_loop_recovers_delayed_fill_and_runs_safety_before_alpha(monkeypatch):
+def test_loop_recovers_delayed_fill_and_runs_safety_before_online_bars(monkeypatch):
     monkeypatch.setattr(live_service, "_phase2_feature_flags", lambda: _flags())
     bridge = _RecoveryBridge(
         recovery_status={
@@ -143,7 +143,7 @@ def test_loop_recovers_delayed_fill_and_runs_safety_before_alpha(monkeypatch):
 
     assert bridge.calls == ["positions", "account", "execution_recovery", "positions"]
     assert order[:2] == [("safety", [], 1), ("safety", [901], 0)]
-    assert order[2:] == [("session",), ("bars",)]
+    assert order[2:] == [("session",)]
     assert result["safety"]["position_ids"] == [901]
     assert result["safety"]["unknown_execution_count"] == 0
     assert result["wait_seconds"] == 5.0

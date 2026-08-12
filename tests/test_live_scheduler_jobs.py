@@ -1,16 +1,12 @@
 from types import SimpleNamespace
 
-import pandas as pd
-
 from backend.services.live_scheduler_jobs import (
     make_backend_readiness_refresh_job,
-    make_initial_ctrader_data_pull,
     make_events_sync_job,
     make_external_data_sync_job,
     register_external_sync_jobs,
     register_factor_selection_heartbeat_job,
     register_backend_readiness_refresh_job,
-    start_initial_ctrader_data_pull,
     start_scheduler_catch_up,
     startup_catch_up_jobs,
 )
@@ -37,14 +33,6 @@ class _FakeLogger:
 
     def warning(self, template, *args):
         self.messages.append(("warning", template, args))
-
-
-class _FakeStore:
-    def __init__(self):
-        self.inserts = []
-
-    def insert_bars(self, bars, symbol, timeframe):
-        self.inserts.append((bars, symbol, timeframe))
 
 
 def test_backend_readiness_refresh_job_is_periodic_and_single_flight_owned():
@@ -99,13 +87,6 @@ def test_backend_readiness_refresh_job_contains_failure_without_raising():
     assert result["ok"] is False
     assert result["status"] == "refresh_failed"
     assert logger.messages[-1][1] == "[backend_readiness_refresh] failed: {}"
-
-
-def _bar_df():
-    return pd.DataFrame(
-        [{"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 7}],
-        index=pd.to_datetime(["2026-07-04T00:00:00Z"]),
-    )
 
 
 def test_register_external_sync_jobs_keeps_legacy_names_and_crons(tmp_path):
@@ -262,112 +243,3 @@ def test_start_scheduler_catch_up_includes_heavy_jobs_when_enabled():
         "awe_adapt",
         "feature_eng",
     ]
-
-
-def test_initial_ctrader_data_pull_writes_store_bars_for_requested_timeframes():
-    store = _FakeStore()
-    logger = _FakeLogger()
-    fetch_calls = []
-
-    class _Bridge:
-        is_connected = True
-
-        def fetch_bars(self, timeframe, n_bars):
-            fetch_calls.append((timeframe, n_bars))
-            return _bar_df()
-
-    pull = make_initial_ctrader_data_pull(
-        get_ctrader=lambda: (_Bridge(), None, False),
-        logger=logger,
-        data_store_factory=lambda: store,
-    )
-
-    pull(["M1", "M5"], n_bars=1200, phase="fast")
-
-    assert fetch_calls == [("M1", 1200), ("M5", 1200)]
-    assert [tf for _bars, _symbol, tf in store.inserts] == ["M1", "M5"]
-    assert store.inserts[0][0][0] == {
-        "time": 1783123200,
-        "open": 1.0,
-        "high": 2.0,
-        "low": 0.5,
-        "close": 1.5,
-        "volume": 7,
-        "spread": 0,
-    }
-    assert logger.messages[-1] == ("info", "[init:{}] ✅ cTrader 初始数据补充完成", ("fast",))
-
-
-def test_initial_ctrader_data_pull_waits_for_warming_bridge_then_skips_after_timeout():
-    logger = _FakeLogger()
-    sleeps = []
-    clock = {"now": 0.0}
-
-    class _Bridge:
-        is_connected = False
-
-        def fetch_bars(self, timeframe, n_bars):
-            raise AssertionError("fetch_bars should not run when bridge never connects")
-
-    def _sleep(seconds):
-        sleeps.append(seconds)
-        clock["now"] += seconds
-
-    pull = make_initial_ctrader_data_pull(
-        get_ctrader=lambda: (_Bridge(), None, True),
-        logger=logger,
-        sleep_fn=_sleep,
-        now_fn=lambda: clock["now"],
-    )
-
-    pull(["M1"], n_bars=1200, phase="fast")
-
-    assert len(sleeps) == 30
-    assert logger.messages[-1] == (
-        "warning",
-        "[init:{}] cTrader bridge not connected after 30s, skip initial pull",
-        ("fast",),
-    )
-
-
-def test_start_initial_ctrader_data_pull_preserves_fast_and_deferred_schedule():
-    calls = []
-    thread_names = []
-    timers = []
-
-    class _ImmediateThread:
-        def __init__(self, *, target, name, daemon):
-            self.target = target
-            self.name = name
-            self.daemon = daemon
-
-        def start(self):
-            thread_names.append((self.name, self.daemon))
-            self.target()
-
-    class _ImmediateTimer:
-        def __init__(self, interval, function):
-            self.interval = interval
-            self.function = function
-            self.daemon = False
-
-        def start(self):
-            timers.append((self.interval, self.daemon))
-            self.function()
-
-    def _pull(timeframes, n_bars, phase):
-        calls.append((timeframes, n_bars, phase))
-
-    timer = start_initial_ctrader_data_pull(
-        _pull,
-        thread_factory=_ImmediateThread,
-        timer_factory=_ImmediateTimer,
-    )
-
-    assert thread_names == [("init-ctrader-fast", True)]
-    assert timers == [(30.0, True)]
-    assert calls == [
-        (["M1", "M5"], 1200, "fast"),
-        (["M15", "M30", "H1", "H4", "D1"], 5000, "deferred"),
-    ]
-    assert timer.daemon is True

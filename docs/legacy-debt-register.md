@@ -66,16 +66,16 @@
 ### live generation / Safety shadow 兼容
 
 - 状态：`migrating`
-- canonical：旧线程真实退出前保留 ownership；每 tick 先 reconcile/safety 后 alpha；Safety v2 与独立 legacy preview 比较。已通过门的同一 closed bar 仅在 watchdog 自有 freshness cause 短暂锁存时由现有 serial owner 保留一次内存 admission retry，下一轮 canonical safety/reconcile 后复用原 open pipeline；bar 推进或出现其他 cause 立即丢弃，不新增执行通道。
-- 当前：Safety 为 shadow，尚未满足完整持仓生命周期或 24 小时无仓观察；Generation 开关不变。
-- 退出：观察与故障矩阵通过、受控发布稳定后删除 loop globals、旧 safety 尾部执行和并发 refresh 兼容。
+- canonical：旧线程真实退出前保留 ownership；每 tick 由现有 serial owner 按 positions reconcile -> account reconcile/publish -> Safety -> alpha 排序，Safety v2 与独立 legacy preview 比较。broker fresh snapshot 与 active recovery row 不一致时，先复用既有 close-deal retirement/recovery 投影做一次有界确认，证据不足仍保持冲突 latch。已通过门的同一 closed bar 仅在 watchdog 自有 freshness cause 短暂锁存时由现有 serial owner 保留一次内存 admission retry，下一轮 canonical safety/reconcile 后复用原 open pipeline；bar 推进或出现其他 cause 立即丢弃，不新增执行通道。
+- 当前：2026-08-12 已完成代码、针对性/全量测试并完成受控重启；`safety_freshness` 仍按既有 shadow 观察，尚未满足完整持仓生命周期或 24 小时无仓观察；Generation 开关不变。live-loop 的并发 account/positions refresh 已删除，开仓 admission 不再执行同 tick 二次 reconcile，`make_initial_ctrader_data_pull` 并行历史 K 线 writer 已删除；本批进一步将 cTrader live trendbar 内存 feed 设为 live bar authority，月库改为每 30 分钟低频 durable replica。运行态已确认 broker-first warmup、live trendbar 订阅和跨 M5 闭合边界推进。
+- 退出：重启后确认无 legacy startup history pull，完成共享 deadline/阶段耗时验证，观察与故障矩阵通过、受控发布稳定后删除 loop globals 和旧 safety 尾部执行。
 
 ### live_service 领域重力
 
 - 状态：`migrating`
 - canonical 模块：reconciliation、serial loop、emergency、position protection、open submission/protection/processing、execution recovery 已分离；fresh position reconcile 是既有 `recovery_position_state.recovery_meta.position_path` 的唯一 live 累计写入边界，event/API 投影不写入。
 - 剩余：`live_service` 仍保留 process wiring、兼容状态发布和少量 lifecycle wiring；仓位路径持久化失败必须显式降级为 unknown，不得把单次观测伪装成累计 MFE/MAE。
-- 验证：月初当月月库为空时，暖机、DataStore 与 system_health 通过 `bars_monthly_read_paths()` 回读最近历史闭合 bar；未改变 bar freshness、风险或 readiness 门槛。
+- 验证：启动暖机优先使用 cTrader 在线历史，月初当月月库为空或 broker history 不可用时再通过 `bars_monthly_read_paths()` 回读最近历史闭合 bar；live bar freshness、风险和 readiness 以 online trendbar frame 为准，月库只作低频副本与离线兜底。
 - 退出：只迁出真实决策/状态机；不为“拆文件”新增 wrapper。稳定发布后删除旧 globals 和 compatibility authority。
 
 ## 3. 治理、研究与客户端

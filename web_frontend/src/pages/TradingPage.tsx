@@ -23,7 +23,7 @@ import {
   stopTrading,
 } from "@/api/client";
 import { factBoundTone, factHasDisplayValue, factIsKnown, factStatusLabel, readFact, readFactComponent, readFactNestedComponent } from "@/api/fact";
-import { formatDecimal, formatMoney } from "@/lib/format";
+import { formatDecimal, formatMoney, formatTimeRange } from "@/lib/format";
 import {
   asRecord,
   formatDirection,
@@ -322,6 +322,9 @@ export function TradingPage() {
       })
       .map(({ item }) => item);
   }, [recentTicks]);
+  const latestFactorSignal = factorTicks[0] || {};
+  const latestDecisionWindow = formatTimeRange(pick(latestFactorSignal, ["ts", "time"]), 5 * 60);
+  const factorSnapshotAt = formatReadableTime(pick(lastComposite, ["ts"]));
   const executionEvents = pickArray(strategyStatus, ["execution_events"]);
   const liveExecutionSummary = { ...executionSummary, ...asRecord(pick(strategyStatus, ["execution_summary"])) };
   const strategyDisplayable = factHasDisplayValue(strategyFact);
@@ -567,6 +570,7 @@ export function TradingPage() {
               <Field label="执行模式" value={translateDisplayValue(pickString(strategyStatus, ["execution_mode", "mode"], loopMode))} />
               <Field label="当前方向" value={translateDisplayValue(signalDirection)} />
               <Field label="综合分" value={formatDecimal(signalScore, 4)} />
+              <Field label="决策K线" value={latestDecisionWindow ? `${latestDecisionWindow} · 已收盘` : "未知"} />
               <Field label="决策条件原因" value={translateDisplayValue(gateReason)} />
             </div>
           </section>
@@ -582,6 +586,7 @@ export function TradingPage() {
               <Field label="评分因子" value={formatDecimal(pickNumber(lastComposite, ["n_scoring", "n_scoring_factors"], 0), 0)} />
               <Field label="贡献因子" value={formatDecimal(pickNumber(lastComposite, ["n_contributing", "n_contributing_factors"], 0), 0)} />
               <Field label="弃权因子" value={formatDecimal(pickNumber(lastComposite, ["n_abstain", "n_abstain_factors"], 0), 0)} />
+              <Field label="因子快照生成" value={factorSnapshotAt || "未知"} />
               <Field label="归因样本" value={formatDecimal(attributedTrades, 0)} />
               <Field label="自适应综合置信度" value={formatDecimal(aweConviction * 100, 1) + "%"} />
               <Field label="归因胜率" value={overallWinRate ? `${formatDecimal(overallWinRate * 100, 1)}%` : ""} />

@@ -169,6 +169,47 @@ def test_aligned_reconcile_releases_prior_recovery_conflict_latch(monkeypatch):
     assert live_service._new_risk_reconciliation_blockers(now_ts=now + 1.0) == []
 
 
+def test_fresh_empty_reconcile_resolves_broker_close_before_conflict_latch(
+    monkeypatch,
+):
+    now = time.time()
+    _publish_fresh_reconciles(now)
+    monkeypatch.setattr(
+        live_service,
+        "_enrich_positions_with_path_metrics",
+        lambda positions, **_kwargs: positions,
+    )
+    active_calls = {"count": 0}
+    retired: list[tuple[tuple, dict]] = []
+
+    def _active_rows(_broker):
+        active_calls["count"] += 1
+        return [{"position_id": 101}] if active_calls["count"] == 1 else []
+
+    monkeypatch.setattr(
+        live_service,
+        "_list_active_recovery_positions",
+        _active_rows,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_retire_broker_missing_position",
+        lambda *args, **kwargs: retired.append((args, kwargs)) or True,
+    )
+
+    positions = live_service._publish_fresh_position_reconcile(
+        _fresh_position_reconcile(now=now, positions=[]),
+        broker="ctrader",
+        bridge=SimpleNamespace(is_connected=True),
+    )
+
+    assert positions == []
+    assert retired and retired[0][0][1] == 101
+    assert retired[0][1]["persist_reconcile"] is False
+    assert no_new_risk_latch_status(fail_closed=True)["active"] is False
+    assert live_service._new_risk_reconciliation_blockers(now_ts=now) == []
+
+
 def test_final_open_admission_blocks_missing_reconcile_identity():
     now = time.time()
     _publish_fresh_reconciles(now)
@@ -215,33 +256,15 @@ def test_final_open_admission_preserves_specific_reconcile_reason():
     )
 
 
-def test_open_pipeline_refreshes_stale_reconcile_before_candidate(monkeypatch):
+def test_open_pipeline_blocks_stale_reconcile_without_same_tick_broker_refresh(monkeypatch):
     now = time.time()
     _publish_fresh_reconciles(now - 16.0)
     logs: list[str] = []
-    refreshes: list[float] = []
     candidate = SimpleNamespace(order_block={"order_blocked": True})
-    policy_gate = SimpleNamespace(passed=False, reason="policy_block")
-
-    def _refresh(_bridge, _broker, **_kwargs):
-        refreshes.append(time.time())
-        _publish_fresh_reconciles(time.time())
-        return True
-
-    monkeypatch.setattr(
-        live_service,
-        "_refresh_account_positions_sync",
-        _refresh,
-    )
     monkeypatch.setattr(
         live_service,
         "_prepare_open_trade_candidate",
         lambda **_kwargs: candidate,
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_record_open_trade_blocked_by_policy",
-        lambda **_kwargs: policy_gate,
     )
 
     result = live_service._run_open_trade_pipeline(
@@ -264,9 +287,9 @@ def test_open_pipeline_refreshes_stale_reconcile_before_candidate(monkeypatch):
         log=logs.append,
     )
 
-    assert result is policy_gate
-    assert len(refreshes) == 1
-    assert any("refreshing final open reconciles" in item for item in logs)
+    assert result.passed is False
+    assert result.reason == "account_reconcile_stale"
+    assert not any("refreshing final open reconciles" in item for item in logs)
 
 
 def test_signal_pass_admission_block_is_audited_without_risk_verdict(monkeypatch):

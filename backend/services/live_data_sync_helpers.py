@@ -6,11 +6,11 @@ import math
 from typing import Any, Mapping
 
 
-# Keep maintenance pulls one minute behind M5 decision boundaries. Running at
-# :00/:05/... contends for the primary cTrader bridge exactly while final
-# account/position admission facts are being validated.
-DATA_SYNC_CRON = "1-56/5 * * * *"
-DATA_SYNC_INTERVAL_SECONDS = 5 * 60
+# The live loop consumes cTrader's in-memory trendbar stream.  This job only
+# maintains the durable monthly replica, so pull at a bounded low frequency
+# and keep it away from the common M5 boundary minute.
+DATA_SYNC_CRON = "2,32 * * * *"
+DATA_SYNC_INTERVAL_SECONDS = 30 * 60
 
 
 BAR_FRESHNESS_THRESHOLDS: dict[str, float] = {

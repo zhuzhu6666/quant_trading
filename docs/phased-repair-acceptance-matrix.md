@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active acceptance index
-> Snapshot: 2026-08-11
+> Snapshot: 2026-08-12
 > Scope: reproducible acceptance evidence and unresolved live evidence
 
 本文只记录“如何证明”和当前未满足的运行证据。架构事实见 `system-source-of-truth.md`，实施阶段见 `planning/production-autonomy-repair-optimization-plan.md`，当前状态见 `phased-repair-rollout-status.md`。已完成批次的详细流水通过 Git 历史追溯，不在本矩阵重复保存。
@@ -39,6 +39,9 @@
 | bars/factor/session 失败 | Safety 先执行，alpha 阻断 |
 | PostgreSQL/audit 失败 | 新风险 fail-closed；close/reduce/tighten/emergency 继续 |
 | account/positions reconcile 非 fresh | 不解释为空仓或零账户 |
+| broker fresh snapshot 缺 active recovery row | 先做一次既有 close-deal/recovery retirement 确认；证据不完整时保留 recovery conflict latch |
+| live decision bar 缺最新已闭合 bar | cTrader live trendbar feed 是 live 热路径 source；live tick 只读 bridge 内存 frame，并以 `stale_waiting_for_live_trendbar` 阻断 alpha/开仓，不执行 history RPC、不读月库；启动历史在线优先、本地兜底；`data_sync` 每 30 分钟低频维护月库副本且仍是唯一 durable writer；代码验收确认 legacy startup history pull 已删除，运行验收需确认 live trendbar 订阅/重连、无 `init:fast`/`init:deferred` 拉取及本地副本延时不影响 live loop |
+| open admission reconcile 非 fresh | 在 canonical serial Safety/reconcile 之后直接阻断；不在同 tick 再发 account/positions broker RPC |
 | spot stale | final open admission 拒绝 |
 | order timeout/延迟/未知 protobuf | outcome unknown，禁止重发并 latch |
 | amend 无 fresh projection ack | 不报告 confirmed |

@@ -269,6 +269,30 @@ class SystemHealth:
         try:
             m1_ts = None
             m5_ts = None
+            online_sources: dict[str, str] = {}
+            if bridge is not None and hasattr(bridge, "get_live_bars"):
+                for timeframe in ("M1", "M5"):
+                    try:
+                        frame = bridge.get_live_bars(timeframe=timeframe, n_bars=1)
+                        if frame is not None and len(frame) > 0:
+                            latest = frame.index[-1]
+                            latest_ts = float(
+                                latest.timestamp()
+                                if hasattr(latest, "timestamp")
+                                else latest
+                            )
+                            if latest_ts > 0:
+                                if timeframe == "M1":
+                                    m1_ts = latest_ts
+                                else:
+                                    m5_ts = latest_ts
+                                online_sources[timeframe] = "ctrader_live"
+                    except Exception as exc:
+                        logger.debug(
+                            "[system_health] online %s trendbar read failed: {}",
+                            timeframe,
+                            exc,
+                        )
             for db_path in bars_monthly_read_paths(newest_first=True):
                 if m1_ts is not None and m5_ts is not None:
                     break
@@ -282,8 +306,10 @@ class SystemHealth:
                 for timeframe, latest_ts in rows:
                     if timeframe == "M1" and m1_ts is None:
                         m1_ts = latest_ts
+                        online_sources["M1"] = "monthly_replica"
                     elif timeframe == "M5" and m5_ts is None:
                         m5_ts = latest_ts
+                        online_sources["M5"] = "monthly_replica"
 
             try:
                 from backend.services.live_service import _market_session_snapshot
@@ -317,12 +343,12 @@ class SystemHealth:
                 if age < THRESHOLDS["m1_max_age"]:
                     components["bar_m1"] = ComponentStatus(
                         name="M1 Bar", status="ok", score=1.0,
-                        detail=f"{age/60:.0f} min ago", ts=now,
+                        detail=f"{age/60:.0f} min ago ({online_sources.get('M1', 'unknown')})", ts=now,
                     )
                 elif market_closed:
                     components["bar_m1"] = ComponentStatus(
                         name="M1 Bar", status="ok", score=1.0,
-                        detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
+                        detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail}; {online_sources.get('M1', 'unknown')})", ts=now,
                     )
                 elif maintenance["active"]:
                     components["bar_m1"] = ComponentStatus(
@@ -335,12 +361,12 @@ class SystemHealth:
                 elif age < THRESHOLDS["m1_warn_age"]:
                     components["bar_m1"] = ComponentStatus(
                         name="M1 Bar", status="degraded", score=0.5,
-                        detail=f"{age/60:.0f} min ago", ts=now,
+                        detail=f"{age/60:.0f} min ago ({online_sources.get('M1', 'unknown')})", ts=now,
                     )
                 else:
                     components["bar_m1"] = ComponentStatus(
                         name="M1 Bar", status="critical", score=0.0,
-                        detail=f"{age/60:.0f} min ago (stale)", ts=now,
+                        detail=f"{age/60:.0f} min ago (stale; {online_sources.get('M1', 'unknown')})", ts=now,
                     )
                     errors.append(f"M1 bar stale: {age/60:.0f} min")
             else:
@@ -364,12 +390,12 @@ class SystemHealth:
                 if age < THRESHOLDS["m5_max_age"]:
                     components["bar_m5"] = ComponentStatus(
                         name="M5 Bar", status="ok", score=1.0,
-                        detail=f"{age/60:.0f} min ago", ts=now,
+                        detail=f"{age/60:.0f} min ago ({online_sources.get('M5', 'unknown')})", ts=now,
                     )
                 elif market_closed:
                     components["bar_m5"] = ComponentStatus(
                         name="M5 Bar", status="ok", score=1.0,
-                        detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail})", ts=now,
+                        detail=f"market closed; last {age/60:.0f} min ago ({market_closed_detail}; {online_sources.get('M5', 'unknown')})", ts=now,
                     )
                 elif maintenance["active"]:
                     components["bar_m5"] = ComponentStatus(
@@ -382,12 +408,12 @@ class SystemHealth:
                 elif age < THRESHOLDS["m5_warn_age"]:
                     components["bar_m5"] = ComponentStatus(
                         name="M5 Bar", status="degraded", score=0.5,
-                        detail=f"{age/60:.0f} min ago", ts=now,
+                        detail=f"{age/60:.0f} min ago ({online_sources.get('M5', 'unknown')})", ts=now,
                     )
                 else:
                     components["bar_m5"] = ComponentStatus(
                         name="M5 Bar", status="critical", score=0.0,
-                        detail=f"{age/60:.0f} min ago (stale)", ts=now,
+                        detail=f"{age/60:.0f} min ago (stale; {online_sources.get('M5', 'unknown')})", ts=now,
                     )
                     errors.append(f"M5 bar stale: {age/60:.0f} min")
             else:

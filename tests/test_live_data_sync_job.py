@@ -149,6 +149,41 @@ def test_data_sync_fresh_bars_skip_bridge():
     assert health.successes == [{"last_bar_ts_by_tf": bar_latest}]
 
 
+def test_data_sync_pulls_decision_m5_when_latest_closed_bar_is_missing():
+    now = 1_000_000.0
+    lock = _FakeLock()
+    health = _FakeHealth()
+    store = _FakeStore()
+    bar_latest = {tf: now - 1 for tf in BAR_FRESHNESS_THRESHOLDS}
+    # Keep M5 inside its broad age budget while missing the latest closed
+    # decision bar.  The scheduler must still repair it after the M5 boundary.
+    bar_latest["M5"] = now - 600.0
+    fetch_calls = []
+
+    def _fetch_bars(timeframe, n_bars):
+        fetch_calls.append((timeframe, n_bars))
+        return _bar_df()
+
+    bridge = SimpleNamespace(is_connected=True, fetch_bars=_fetch_bars)
+    job = make_data_sync_job(
+        lock=lock,
+        logger=_FakeLogger(),
+        get_ctrader=lambda: (bridge, None, False),
+        market_session_snapshot=lambda _arg: {"status": "open"},
+        health_factory=lambda: health,
+        config_factory=lambda: SimpleNamespace(enabled_symbols=["XAUUSD+"]),
+        duckdb_runtime_factory=_duckdb_runtime(bar_latest=bar_latest),
+        data_store_factory=lambda: store,
+        now_fn=lambda: now,
+    )
+
+    job()
+
+    assert fetch_calls == [("M5", 5)]
+    assert [tf for _bars, _symbol, tf in store.inserts] == ["M5"]
+    assert lock.release_calls == 1
+
+
 def test_data_sync_stale_bars_skip_pull_when_market_closed():
     now = 1_000_000.0
     lock = _FakeLock()

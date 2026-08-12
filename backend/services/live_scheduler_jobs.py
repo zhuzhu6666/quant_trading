@@ -10,24 +10,14 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable
 
-from backend.services.live_data_sync_helpers import dataframe_to_store_bars
-
-
 Runner = Callable[..., Any]
 ThreadFactory = Callable[..., Any]
 SleepFn = Callable[[float], Any]
 MonotonicFn = Callable[[], float]
-TimerFactory = Callable[..., Any]
 
 
 def _python_executable() -> str:
     return sys.executable or "python"
-
-
-def _default_data_store_factory():
-    from data.store import DataStore
-
-    return DataStore()
 
 
 def _default_readiness_snapshot_service_factory():
@@ -308,87 +298,3 @@ def start_scheduler_catch_up(
         name="scheduler_catch_up",
         daemon=True,
     ).start()
-
-
-def make_initial_ctrader_data_pull(
-    *,
-    get_ctrader: Callable[[], tuple[Any, str | None, bool]],
-    logger,
-    data_store_factory: Callable[[], Any] = _default_data_store_factory,
-    sleep_fn: SleepFn = time.sleep,
-    now_fn: Callable[[], float] = time.time,
-    default_timeframes: list[str] | None = None,
-):
-    """Build the legacy startup cTrader bar pull function."""
-
-    def _initial_ctrader_data_pull(timeframes=None, n_bars: int = 5000, phase: str = "startup"):
-        """启动后立即从 cTrader 拉最近数据写入 DB."""
-        selected_timeframes = list(timeframes or default_timeframes or ["M1", "M5", "M15", "M30", "H1", "H4", "D1"])
-        try:
-            bridge, err, warming = get_ctrader()
-            if err:
-                logger.warning("[init:{}] cTrader bridge unavailable: {}, skip initial pull", phase, err)
-                return
-            if warming:
-                # bridge 还在后台连接中, 等最多 30s
-                t0 = now_fn()
-                while now_fn() - t0 < 30:
-                    if bridge.is_connected:
-                        break
-                    sleep_fn(1)
-                if not bridge.is_connected:
-                    logger.warning("[init:{}] cTrader bridge not connected after 30s, skip initial pull", phase)
-                    return
-            # 启动阶段优先保障交易所需周期, 其它周期延后错峰补齐.
-            store = data_store_factory()
-            for tf in selected_timeframes:
-                try:
-                    df = None
-                    for attempt in range(2):
-                        df = bridge.fetch_bars(tf, n_bars=n_bars)
-                        if df is not None and not df.empty:
-                            break
-                        if attempt == 0:
-                            sleep_fn(1.0)
-                    if df is None or df.empty:
-                        logger.warning("[init:{}] {} pull returned empty", phase, tf)
-                        continue
-                    bars = dataframe_to_store_bars(df)
-                    store.insert_bars(bars, "XAUUSD+", tf)
-                    logger.info(
-                        "[init:{}] {}: +{} bars ({} → {})",
-                        phase,
-                        tf,
-                        len(bars),
-                        time.strftime("%m-%d %H:%M", time.gmtime(bars[0]["time"])),
-                        time.strftime("%m-%d %H:%M", time.gmtime(bars[-1]["time"])),
-                    )
-                except Exception as e:
-                    logger.warning("[init:{}] {} pull failed: {}", phase, tf, e)
-            logger.info("[init:{}] ✅ cTrader 初始数据补充完成", phase)
-        except Exception as exc:
-            logger.warning("[init:{}] initial pull failed: {}", phase, exc)
-
-    return _initial_ctrader_data_pull
-
-
-def start_initial_ctrader_data_pull(
-    pull_func,
-    *,
-    thread_factory: ThreadFactory = threading.Thread,
-    timer_factory: TimerFactory = threading.Timer,
-):
-    """Start the legacy fast and deferred startup cTrader data pulls."""
-
-    thread_factory(
-        target=lambda: pull_func(["M1", "M5"], n_bars=1200, phase="fast"),
-        daemon=True,
-        name="init-ctrader-fast",
-    ).start()
-    deferred_timer = timer_factory(
-        30.0,
-        lambda: pull_func(["M15", "M30", "H1", "H4", "D1"], n_bars=5000, phase="deferred"),
-    )
-    deferred_timer.daemon = True
-    deferred_timer.start()
-    return deferred_timer

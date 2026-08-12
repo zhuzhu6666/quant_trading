@@ -119,49 +119,65 @@ def warmup_live_bars(
     requested_bars: int = 200,
     minimum_bars: int = 30,
 ) -> BarWarmupResult | None:
-    """Load startup bars from monthly truth, broker, then compatibility cache."""
+    """Load startup bars from cTrader, monthly fallback, then cache."""
 
     frame = None
     source = ""
     if broker == "ctrader":
-        frame = runtime.warmup_from_local_db(
-            symbol,
-            timeframe,
-            requested_bars,
-        )
-        if _has_minimum_bars(frame, minimum_bars):
-            source = "local_db"
-            _warn_if_local_bars_stale(frame, runtime=runtime)
-
-    if not _has_minimum_bars(frame, minimum_bars):
         try:
-            if broker != "ctrader":
-                log(f"FATAL: unknown broker {broker}")
-                return None
             bridge, error, warming = runtime.get_ctrader()
             if error:
-                log(f"FATAL: {error}")
-                return None
-            if warming or not bridge.is_connected:
-                wait_error = runtime.wait_ctrader_ready(
-                    bridge,
-                    timeout_sec=30.0,
-                )
-                if wait_error:
-                    log(f"FATAL: {wait_error}")
-                    return None
-            frame = runtime.fetch_bars_with_retry(
-                bridge,
-                timeframe=timeframe,
-                n_bars=requested_bars,
-            )
-            source = "broker"
+                log(f"online history unavailable; trying local fallback: {error}")
+            else:
+                if warming or not bridge.is_connected:
+                    wait_error = runtime.wait_ctrader_ready(
+                        bridge,
+                        timeout_sec=30.0,
+                    )
+                    if wait_error:
+                        log(
+                            "online history not ready; trying local fallback: "
+                            f"{wait_error}"
+                        )
+                    else:
+                        frame = runtime.fetch_bars_with_retry(
+                            bridge,
+                            timeframe=timeframe,
+                            n_bars=requested_bars,
+                        )
+                else:
+                    frame = runtime.fetch_bars_with_retry(
+                        bridge,
+                        timeframe=timeframe,
+                        n_bars=requested_bars,
+                    )
+                if _has_minimum_bars(frame, minimum_bars):
+                    source = "broker"
         except Exception as exc:
             log(
-                f"FATAL: warmup exception: {type(exc).__name__}: {exc}\n"
+                "online history warmup failed; trying local fallback: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    if not _has_minimum_bars(frame, minimum_bars):
+        if broker != "ctrader":
+            log(f"FATAL: unknown broker {broker}")
+            return None
+        try:
+            frame = runtime.warmup_from_local_db(
+                symbol,
+                timeframe,
+                requested_bars,
+            )
+            if _has_minimum_bars(frame, minimum_bars):
+                source = "local_db"
+                _warn_if_local_bars_stale(frame, runtime=runtime)
+        except Exception as exc:
+            log(
+                "local history fallback failed: "
+                f"{type(exc).__name__}: {exc}\n"
                 f"{traceback.format_exc()[-500:]}"
             )
-            return None
 
     if not _has_minimum_bars(frame, minimum_bars):
         cache_frame = runtime.load_bar_cache()

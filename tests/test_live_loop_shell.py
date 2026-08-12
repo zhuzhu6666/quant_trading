@@ -526,6 +526,21 @@ class _SpotBridge:
     def subscribe_spots(self):
         self.spot_subscriptions += 1
 
+
+class _OnlineSpotBridge(_SpotBridge):
+    def __init__(self, *, connected: bool):
+        super().__init__(connected=connected)
+        self.seed_calls: list[tuple[str, object]] = []
+        self.trendbar_subscriptions: list[tuple[str, ...]] = []
+
+    def seed_live_bars(self, timeframe, frame):
+        self.seed_calls.append((timeframe, frame))
+        return len(frame)
+
+    def subscribe_live_trendbars(self, timeframes):
+        self.trendbar_subscriptions.append(tuple(timeframes))
+        return True
+
 def test_subscribe_spot_once_skips_when_bridge_error():
     bridge = _SpotBridge(connected=True)
     logs: list[str] = []
@@ -560,6 +575,32 @@ def test_subscribe_spot_once_waits_then_subscribes_spot():
     assert waits == [(bridge, 7.5)]
     assert bridge.spot_subscriptions == 1
     assert logs == ["subscribed to cTrader spot events"]
+
+
+def test_subscribe_spot_once_seeds_and_subscribes_online_trendbars():
+    bridge = _OnlineSpotBridge(connected=True)
+    frame = pd.DataFrame(
+        [{"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 3}],
+        index=pd.to_datetime(["2026-07-05T00:00:00Z"]),
+    )
+    logs: list[str] = []
+
+    subscribe_spot_once(
+        get_ctrader=lambda: (bridge, "", False),
+        wait_ctrader_ready=lambda *_args, **_kwargs: "",
+        log=logs.append,
+        timeframe="M5",
+        seed_frame=frame,
+    )
+
+    assert bridge.spot_subscriptions == 1
+    assert bridge.seed_calls == [("M5", frame)]
+    assert bridge.trendbar_subscriptions == [("M5",)]
+    assert logs == [
+        "seeded online trendbar feed: timeframe=M5 bars=1",
+        "subscribed to cTrader live trendbars (timeframe=M5)",
+        "subscribed to cTrader spot events",
+    ]
 
 
 def test_subscribe_spot_once_skips_when_ready_wait_fails():

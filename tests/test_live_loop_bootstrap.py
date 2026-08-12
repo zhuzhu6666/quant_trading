@@ -119,7 +119,7 @@ def _warmup_runtime(
     )
 
 
-def test_local_monthly_bars_are_preferred_and_published():
+def test_local_monthly_bars_are_fallback_and_published():
     frame = _bars(last_close=2_410.0)
     published = []
     saved = []
@@ -139,10 +139,38 @@ def test_local_monthly_bars_are_preferred_and_published():
 
     assert result.frame is frame
     assert result.source == "local_db"
-    assert broker_calls == []
+    assert broker_calls == [True]
     assert published[0][0] == (2_410.0,)
     assert published[0][1]["source"] == "warmup_local_db"
     assert saved == [frame]
+
+
+def test_online_history_is_primary_and_seeds_startup_frame():
+    local = _bars(last_close=2_410.0)
+    broker = _bars(last_close=2_420.0)
+    published = []
+    saved = []
+    broker_calls = []
+
+    result = warmup_live_bars(
+        broker="ctrader",
+        timeframe="M5",
+        log=lambda _message: None,
+        runtime=_warmup_runtime(
+            local=local,
+            broker_frame=broker,
+            published=published,
+            saved=saved,
+            broker_calls=broker_calls,
+        ),
+    )
+
+    assert result.frame is broker
+    assert result.source == "broker"
+    assert broker_calls == [True]
+    assert published[0][0] == (2_420.0,)
+    assert published[0][1]["source"] == "warmup_broker"
+    assert saved == [broker]
 
 
 def test_broker_then_cache_fallback_preserves_minimum_bar_gate():

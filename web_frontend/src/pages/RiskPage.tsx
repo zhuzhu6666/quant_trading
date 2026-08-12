@@ -19,7 +19,7 @@ import {
   pickString,
 } from "@/lib/compat";
 import { translateDisplayValue, translateReasonText } from "@/lib/display";
-import { formatDecimal, formatTime } from "@/lib/format";
+import { formatDecimal, formatTime, formatTimeRange } from "@/lib/format";
 import { useBackendReadinessQuery } from "@/hooks/useCoreQueries";
 import { factBoundTone, factHasDisplayValue, factIsKnown, factStatusLabel, readFact, readFactComponent } from "@/api/fact";
 import { decodeCanonicalRiskSnapshot, knownMetric } from "@/api/riskSnapshot";
@@ -70,6 +70,8 @@ type ExecutionChainRow = {
   admissionSkips: Array<Record<string, unknown>>;
   policies: Array<Record<string, unknown>>;
 };
+
+const FACTOR_DECISION_BAR_SECONDS = 5 * 60;
 
 function eventTimestampMs(value: unknown): number {
   if (typeof value === "string" && value.trim()) {
@@ -611,13 +613,17 @@ export function RiskPanel({
                   outcome.detail,
                   reasons.length && !row.admissionSkips.length ? `原因：${reasons.join(" · ")}` : "",
                 ].filter(Boolean).join(" · ");
+                const isFactorDecision = row.factorSignals.length > 0;
+                const decisionWindow = isFactorDecision
+                  ? formatTimeRange(row.timeValue, FACTOR_DECISION_BAR_SECONDS)
+                  : "";
 
                 return (
                   <article className={`execution-chain-item execution-chain-item-${outcome.tone}`} key={row.key}>
                     <div className="execution-chain-line">
                       <div className="execution-chain-time">
-                        <strong>{formatTime(row.timeValue) || "时间未知"}</strong>
-                        <span>{recordSummary}</span>
+                        <strong>{decisionWindow || formatTime(row.timeValue) || "时间未知"}</strong>
+                        <span>{decisionWindow ? "M5 决策K线 · 已收盘" : recordSummary}</span>
                       </div>
                       <div className="execution-chain-status">
                         <StatusPill status={outcome.label} tone={factBoundTone(policyFact, outcome.tone, Boolean(row.policies.length && policyRequestFailed))} />

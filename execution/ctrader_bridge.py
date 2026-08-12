@@ -66,6 +66,30 @@ _RISK_REDUCTION_ACTIONS = frozenset({
 })
 _POSITION_SPOT_COMPONENT_MAX_AGE_SECONDS = 15.0
 
+# cTrader Open API period enum values used by both historical and live
+# trendbar requests.  Keep the mapping in one place so the online feed and
+# the low-frequency durable replica cannot disagree on timeframe identity.
+_CTRADER_PERIOD_MAP = {
+    "M1": 1,
+    "M2": 2,
+    "M3": 3,
+    "M4": 4,
+    "M5": 5,
+    "M10": 6,
+    "M15": 7,
+    "M30": 8,
+    "H1": 9,
+    "H4": 10,
+    "H12": 11,
+    "D1": 12,
+    "W1": 13,
+    "MN1": 14,
+}
+_CTRADER_PERIOD_TO_TIMEFRAME = {
+    value: key for key, value in _CTRADER_PERIOD_MAP.items()
+}
+_LIVE_TRENDBAR_CACHE_LIMIT = 5000
+
 
 def _parse_broker_raw_price(value: Any) -> float:
     """Parse protobuf double price fields without applying money scaling."""
@@ -140,6 +164,31 @@ def _parse_broker_relative_price(value: Any, symbol_digits: Any) -> float:
     if digits < 0 or not math.isfinite(raw) or raw <= 0.0:
         return 0.0
     return round(raw / 100_000.0, digits)
+
+
+def _trendbar_to_row(trendbar: Any, symbol_digits: Any) -> dict[str, Any] | None:
+    """Decode one cTrader relative-price trendbar into the shared bar shape."""
+    try:
+        ts = int(getattr(trendbar, "utcTimestampInMinutes", 0) or 0) * 60
+        low_raw = int(getattr(trendbar, "low", 0) or 0)
+        delta_open = int(getattr(trendbar, "deltaOpen", 0) or 0)
+        delta_close = int(getattr(trendbar, "deltaClose", 0) or 0)
+        delta_high = int(getattr(trendbar, "deltaHigh", 0) or 0)
+        volume = int(getattr(trendbar, "volume", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if ts <= 0 or low_raw <= 0:
+        return None
+    digits = int(symbol_digits or 2)
+    divisor = 100_000.0
+    return {
+        "time": ts,
+        "open": round((low_raw + delta_open) / divisor, digits),
+        "high": round((low_raw + delta_high) / divisor, digits),
+        "low": round(low_raw / divisor, digits),
+        "close": round((low_raw + delta_close) / divisor, digits),
+        "volume": volume,
+    }
 
 
 def _classify_broker_deal_price(
@@ -322,6 +371,12 @@ class CTraderBridge(BaseBrokerBridge):
         self._spot_ts: float = 0.0
         self._spot_lock = threading.Lock()
         self._spot_subscribed_symbol_ids: set[int] = set()
+        # Live trendbars are the hot-path market-data source.  They are kept
+        # in the bridge process only; data_sync remains the sole durable bar
+        # writer for the monthly DuckDB replica.
+        self._live_trendbars: dict[str, dict[int, dict[str, Any]]] = {}
+        self._live_trendbar_lock = threading.RLock()
+        self._live_trendbar_subscribed_periods: set[int] = set()
         # ── 熔断 / 退避 ──
         self._fail_count: int = 0
         self._last_fail_time: float = 0.0
@@ -480,6 +535,7 @@ class CTraderBridge(BaseBrokerBridge):
             self._connect_attempt_id += 1
             attempt_id = self._connect_attempt_id
             self._spot_subscribed_symbol_ids.clear()
+            self._live_trendbar_subscribed_periods.clear()
 
         try:
             self._apply_proxy_socket_patch()
@@ -760,6 +816,8 @@ class CTraderBridge(BaseBrokerBridge):
             self._connected = False
         self._app_authed = False
         self._account_authed = False
+        self._spot_subscribed_symbol_ids.clear()
+        self._live_trendbar_subscribed_periods.clear()
 
     def _should_backoff(self) -> bool:
         """指数退避检查: 连续失败越久, 跳过时间越长.
@@ -1044,6 +1102,7 @@ class CTraderBridge(BaseBrokerBridge):
             from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
             if not isinstance(payload, ProtoOASpotEvent):
                 return
+            self._handle_live_trendbar_event(payload)
             raw_bid = payload.bid or 0
             raw_ask = payload.ask or 0
             meta = getattr(self, '_symbol_meta', None) or {}
@@ -1087,6 +1146,72 @@ class CTraderBridge(BaseBrokerBridge):
                 )
         except Exception as e:
             logger.warning(f"spot event parse failed: {e}")
+
+    def _handle_live_trendbar_event(self, payload) -> None:
+        """Store the closed trendbar carried by a subscribed spot event."""
+        raw_trendbars = getattr(payload, "trendbar", None)
+        if raw_trendbars is None:
+            return
+        try:
+            trendbars = tuple(raw_trendbars)
+        except TypeError:
+            trendbars = (raw_trendbars,)
+        if not trendbars:
+            return
+        payload_symbol_id = int(getattr(payload, "symbolId", 0) or 0)
+        if (
+            payload_symbol_id
+            and self._symbol_id is not None
+            and payload_symbol_id != int(self._symbol_id)
+        ):
+            return
+        for trendbar in trendbars:
+            period = int(getattr(trendbar, "period", 0) or 0)
+            timeframe = _CTRADER_PERIOD_TO_TIMEFRAME.get(period, "")
+            if not timeframe:
+                with self._live_trendbar_lock:
+                    subscribed = tuple(self._live_trendbar_subscribed_periods)
+                if len(subscribed) == 1:
+                    timeframe = _CTRADER_PERIOD_TO_TIMEFRAME.get(subscribed[0], "")
+            if not timeframe:
+                logger.debug("live trendbar ignored: unknown period=%s", period)
+                continue
+            row = _trendbar_to_row(
+                trendbar,
+                (getattr(self, "_symbol_meta", None) or {}).get("digits", 2),
+            )
+            if row is None:
+                logger.debug(
+                    "live trendbar ignored: invalid payload timeframe=%s",
+                    timeframe,
+                )
+                continue
+            with self._live_trendbar_lock:
+                bars = self._live_trendbars.setdefault(timeframe, {})
+                is_new_bar = int(row["time"]) not in bars
+                bars[int(row["time"])] = dict(row)
+                if len(bars) > _LIVE_TRENDBAR_CACHE_LIMIT:
+                    oldest = sorted(bars)[: len(bars) - _LIVE_TRENDBAR_CACHE_LIMIT]
+                    for timestamp in oldest:
+                        bars.pop(timestamp, None)
+            log_fn = logger.info if is_new_bar else logger.debug
+            log_fn(
+                "live trendbar received: %s ts=%s close=%.5f%s",
+                timeframe,
+                int(row["time"]),
+                float(row["close"]),
+                "" if is_new_bar else " (update)",
+            )
+            self._emit_event(
+                "trendbar",
+                {
+                    "symbol": self.symbol,
+                    "timeframe": timeframe,
+                    "bar": dict(row),
+                    "source": "ctrader_live_trendbar",
+                    "observed_at": time.time(),
+                },
+            )
 
     def _handle_execution_event(self, payload) -> None:
         try:
@@ -1173,6 +1298,139 @@ class CTraderBridge(BaseBrokerBridge):
                 return True
             logger.warning(f"subscribe_spots failed: {e}")
             return False
+
+    def live_trendbars_need_subscription(
+        self,
+        timeframes: tuple[str, ...] | list[str] | str | None = None,
+    ) -> bool:
+        """Return whether any requested live trendbar stream is not active."""
+        if isinstance(timeframes, str):
+            requested = (timeframes,)
+        else:
+            requested = tuple(timeframes or ("M5",))
+        periods = {
+            _CTRADER_PERIOD_MAP.get(str(timeframe or "").upper(), 0)
+            for timeframe in requested
+        }
+        periods.discard(0)
+        with self._live_trendbar_lock:
+            return any(
+                period not in self._live_trendbar_subscribed_periods
+                for period in periods
+            )
+
+    def subscribe_live_trendbars(
+        self,
+        timeframes: tuple[str, ...] | list[str] | str | None = None,
+        symbol_id: int | None = None,
+    ) -> bool:
+        """Subscribe to cTrader live closed trendbars for the requested frames."""
+        if isinstance(timeframes, str):
+            requested = (timeframes,)
+        else:
+            requested = tuple(timeframes or ("M5",))
+        sid = symbol_id or self._symbol_id
+        if not sid:
+            logger.error("subscribe_live_trendbars: no symbol_id")
+            return False
+        ok = True
+        for raw_timeframe in requested:
+            timeframe = str(raw_timeframe or "").upper()
+            period = _CTRADER_PERIOD_MAP.get(timeframe)
+            if period is None:
+                logger.error("subscribe_live_trendbars: unknown timeframe=%s", timeframe)
+                ok = False
+                continue
+            with self._live_trendbar_lock:
+                if period in self._live_trendbar_subscribed_periods:
+                    continue
+            try:
+                req = TradeMsg.ProtoOASubscribeLiveTrendbarReq()
+                req.ctidTraderAccountId = self.account_id
+                req.symbolId = int(sid)
+                req.period = period
+                self._send(req, timeout=5.0)
+                with self._live_trendbar_lock:
+                    self._live_trendbar_subscribed_periods.add(period)
+                logger.info(
+                    "subscribe_live_trendbars OK: symbol_id=%s timeframe=%s",
+                    sid,
+                    timeframe,
+                )
+            except Exception as exc:
+                if "ALREADY_SUBSCRIBED" in str(exc):
+                    with self._live_trendbar_lock:
+                        self._live_trendbar_subscribed_periods.add(period)
+                    continue
+                ok = False
+                logger.warning(
+                    "subscribe_live_trendbars failed: timeframe=%s error=%s",
+                    timeframe,
+                    exc,
+                )
+        return ok
+
+    def seed_live_bars(self, timeframe: str, frame: Any) -> int:
+        """Seed the in-memory online feed from startup history without writing DuckDB."""
+        normalized_timeframe = str(timeframe or "").upper()
+        if normalized_timeframe not in _CTRADER_PERIOD_MAP or frame is None:
+            return 0
+        rows: dict[int, dict[str, Any]] = {}
+        try:
+            for index, row in frame.iterrows():
+                timestamp = int(
+                    index.timestamp()
+                    if hasattr(index, "timestamp")
+                    else float(index)
+                )
+                if timestamp <= 0:
+                    continue
+                rows[timestamp] = {
+                    "time": timestamp,
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": int(row.get("volume", 0) or 0),
+                }
+        except Exception as exc:
+            logger.warning(
+                "seed_live_bars failed: timeframe=%s error=%s",
+                normalized_timeframe,
+                exc,
+            )
+            return 0
+        if not rows:
+            return 0
+        with self._live_trendbar_lock:
+            bars = self._live_trendbars.setdefault(normalized_timeframe, {})
+            bars.update(rows)
+            if len(bars) > _LIVE_TRENDBAR_CACHE_LIMIT:
+                oldest = sorted(bars)[: len(bars) - _LIVE_TRENDBAR_CACHE_LIMIT]
+                for timestamp in oldest:
+                    bars.pop(timestamp, None)
+        return len(rows)
+
+    def get_live_bars(self, timeframe: str = "M5", n_bars: int = 500) -> Any:
+        """Return a copy of the in-memory online trendbar frame."""
+        normalized_timeframe = str(timeframe or "").upper()
+        try:
+            import pandas as pd
+        except ImportError:
+            return None
+        with self._live_trendbar_lock:
+            rows = [
+                dict(row)
+                for _, row in sorted(
+                    self._live_trendbars.get(normalized_timeframe, {}).items()
+                )[-max(1, int(n_bars or 1)) :]
+            ]
+        if not rows:
+            return None
+        frame = pd.DataFrame(rows)
+        frame["time"] = pd.to_datetime(frame["time"], unit="s", utc=True)
+        frame = frame.set_index("time").sort_index()
+        return frame[["open", "high", "low", "close", "volume"]]
 
     def get_spot_price(self) -> float | None:
         """线程安全读最新 spot 价."""
@@ -3894,13 +4152,7 @@ class CTraderBridge(BaseBrokerBridge):
         if self._symbol_id is None:
             logger.error("Symbol ID not resolved")
             return None
-        period_map = {
-            "M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5,
-            "M10": 6, "M15": 7, "M30": 8, "H1": 9, "H4": 10,
-            "H12": 11, "D1": 12, "W1": 13, "MN1": 14,
-            # 一些 broker 用了非官方 enum (e.g. TICK=15, QUOTE=16) —
-            # 这里只列主流 14 个, 避免给 server 报 Unknown enum value.
-        }
+        period_map = _CTRADER_PERIOD_MAP
         # protobuf enum ≠ minutes; need actual minutes for fromTimestamp calc
         period_minutes = {
             "M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5,
@@ -3951,18 +4203,9 @@ class CTraderBridge(BaseBrokerBridge):
         digits = getattr(self, '_symbol_meta', {}).get('digits', 2)
         rows = []
         for bar in resp.trendbar:
-            low = round(bar.low / 100000, digits)
-            open_ = round((bar.low + bar.deltaOpen) / 100000, digits)
-            high = round((bar.low + bar.deltaHigh) / 100000, digits)
-            close = round((bar.low + bar.deltaClose) / 100000, digits)
-            rows.append({
-                "time": bar.utcTimestampInMinutes * 60,  # unix minute → unix second
-                "open": open_,
-                "high": high,
-                "low": low,
-                "close": close,
-                "volume": bar.volume,
-            })
+            row = _trendbar_to_row(bar, digits)
+            if row is not None:
+                rows.append(row)
         if not rows:
             return None
         df = pd.DataFrame(rows)

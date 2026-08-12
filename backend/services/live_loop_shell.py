@@ -154,6 +154,7 @@ def collect_open_risk_runtime_health(
     positions_updated_at: float,
     sync_health_provider: Callable[[], Any] | None = None,
     system_report_provider: Callable[[], Any] | None = None,
+    decision_freshness_provider: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     sync_snapshot: dict[str, Any] = {}
     data_lag_seconds = UNKNOWN_STALE_AGE_SECONDS
@@ -177,6 +178,17 @@ def collect_open_risk_runtime_health(
         sync_snapshot = {}
         data_lag_seconds = UNKNOWN_STALE_AGE_SECONDS
         data_lag_state = "unknown"
+    if decision_freshness_provider is not None:
+        try:
+            decision_freshness = dict(decision_freshness_provider() or {})
+            latest_bar_ts = float(decision_freshness.get("latest_bar_ts") or 0.0)
+            if latest_bar_ts > 0.0:
+                online_data_lag = max(0.0, float(now_ts) - latest_bar_ts)
+                if math.isfinite(online_data_lag):
+                    data_lag_seconds = online_data_lag
+                    data_lag_state = "known"
+        except Exception:
+            pass
     try:
         if system_report_provider is None:
             from monitor.system_health import shared as _system_health_shared
@@ -391,6 +403,8 @@ def subscribe_spot_once(
     wait_ctrader_ready: Callable[..., str],
     log: Callable[[str], None],
     timeout_sec: float = 10.0,
+    timeframe: str = "M5",
+    seed_frame: Any = None,
 ) -> None:
     spot_bridge, spot_err, spot_warming = get_ctrader()
     if spot_err:
@@ -402,6 +416,31 @@ def subscribe_spot_once(
             log(f"subscribe_spots skipped: {wait_err}")
             return
     spot_bridge.subscribe_spots()
+    if seed_frame is not None and hasattr(spot_bridge, "seed_live_bars"):
+        seeded = int(
+            spot_bridge.seed_live_bars(
+                str(timeframe or "M5"),
+                seed_frame,
+            )
+            or 0
+        )
+        log(
+            f"seeded online trendbar feed: timeframe={str(timeframe or 'M5').upper()} "
+            f"bars={seeded}"
+        )
+    if hasattr(spot_bridge, "subscribe_live_trendbars"):
+        subscribed = bool(
+            spot_bridge.subscribe_live_trendbars(
+                (str(timeframe or "M5").upper(),)
+            )
+        )
+        if not subscribed:
+            log("subscribe_live_trendbars failed; live bar freshness remains fail-closed")
+        else:
+            log(
+                "subscribed to cTrader live trendbars "
+                f"(timeframe={str(timeframe or 'M5').upper()})"
+            )
     log("subscribed to cTrader spot events")
 
 

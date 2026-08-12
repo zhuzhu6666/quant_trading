@@ -60,6 +60,46 @@ def test_spot_event_still_updates_realtime_quote_after_depth_removal(monkeypatch
     assert quote["source"] == "ctrader_spot"
 
 
+def test_live_trendbar_event_is_decoded_into_online_feed(monkeypatch):
+    from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
+
+    bridge = _bridge(monkeypatch)
+    bridge._symbol_meta = {"digits": 2, "pip_position": 2}
+    event = ProtoOASpotEvent()
+    event.symbolId = 41
+    trendbar = event.trendbar.add()
+    trendbar.period = 5
+    trendbar.utcTimestampInMinutes = 1_783_395_600 // 60
+    trendbar.low = 412_000_000
+    trendbar.deltaOpen = 20_000
+    trendbar.deltaClose = 30_000
+    trendbar.deltaHigh = 50_000
+    trendbar.volume = 17
+
+    bridge._handle_spot_event(event)
+
+    frame = bridge.get_live_bars("M5", 1)
+    assert frame is not None
+    assert list(frame.index.astype(str)) == ["2026-07-07 03:40:00+00:00"]
+    assert frame.iloc[-1]["open"] == pytest.approx(4_120.2)
+    assert frame.iloc[-1]["close"] == pytest.approx(4_120.3)
+    assert frame.iloc[-1]["volume"] == 17
+
+
+def test_live_trendbar_subscription_is_idempotent(monkeypatch):
+    bridge = _bridge(monkeypatch)
+    sent = []
+    monkeypatch.setattr(bridge, "_send", lambda req, timeout=None: sent.append(req))
+
+    assert bridge.live_trendbars_need_subscription(("M5",)) is True
+    assert bridge.subscribe_live_trendbars(("M5",)) is True
+    assert bridge.subscribe_live_trendbars(("M5",)) is True
+    assert len(sent) == 1
+    assert sent[0].symbolId == 41
+    assert sent[0].period == 5
+    assert bridge.live_trendbars_need_subscription(("M5",)) is False
+
+
 def test_subscribe_spots_is_idempotent_per_connection(monkeypatch):
     bridge = _bridge(monkeypatch)
     sent = []

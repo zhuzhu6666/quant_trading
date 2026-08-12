@@ -17,6 +17,7 @@ trading loop from the browser.)
 """
 import copy
 from dataclasses import asdict, is_dataclass
+from functools import partial
 import json
 import threading
 import time
@@ -232,7 +233,6 @@ from backend.services.live_data_sync_job import make_data_sync_job as _make_data
 from backend.services.live_data_sync_helpers import (
     DATA_SYNC_CRON as _DATA_SYNC_CRON,
     classify_decision_bar_freshness as _sync_classify_decision_bar_freshness,
-    dataframe_to_store_bars as _sync_dataframe_to_store_bars,
 )
 from backend.services.live_decision_pipeline import (
     build_signal_decision_log_payload as _decision_build_signal_decision_log_payload,
@@ -435,11 +435,9 @@ from backend.services.live_position_lifecycle import (
     update_entry_protection_plan_payload as _lifecycle_update_entry_protection_plan_payload,
 )
 from backend.services.live_scheduler_jobs import (
-    make_initial_ctrader_data_pull as _make_initial_ctrader_data_pull,
     register_backend_readiness_refresh_job as _register_backend_readiness_refresh_job,
     register_external_sync_jobs as _register_external_sync_jobs,
     register_factor_selection_heartbeat_job as _register_factor_selection_heartbeat_job,
-    start_initial_ctrader_data_pull as _start_initial_ctrader_data_pull,
     start_scheduler_catch_up as _start_scheduler_catch_up,
 )
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
@@ -955,7 +953,10 @@ def _build_open_trade_risk_context(
 ) -> dict:
     runtime = OpenRiskContextRuntime(
         state_get=_live_state_get,
-        collect_runtime_health=_loop_collect_open_risk_runtime_health,
+        collect_runtime_health=partial(
+            _loop_collect_open_risk_runtime_health,
+            decision_freshness_provider=partial(_live_state_get, "decision_bar_freshness", {}, clone=True),
+        ),
         temporal_context_for_trade=_temporal_context_for_trade,
         active_supervisor_reentry_block=_active_supervisor_reentry_block,
         recent_review_reentry_block=_recent_review_reentry_block,
@@ -986,8 +987,7 @@ def _build_open_trade_risk_context(
         atr_price=atr_price,
         event_sizing_context=event_sizing_context,
         event_filter_context=event_filter_context,
-        decision_quality_context=decision_quality_context,
-        decision_ts=decision_ts,
+        decision_quality_context=decision_quality_context, decision_ts=decision_ts,
     )
 
 
@@ -2340,18 +2340,6 @@ _live_state: dict = default_live_state()
 
 # ★ 保护 _live_state 的读-改-写操作 (多线程: HTTP handler + live loop + scheduler)
 _LIVE_STATE_LOCK = threading.Lock()
-_ACCOUNT_REFRESH_LOCK = threading.Lock()
-# Legacy/off-mode keeps a compatibility refresh worker.  Its cadence must
-# still satisfy the public 15-second account/position fact contract: a 5s
-# worker poll with a 10s minimum RPC interval gives room for scheduler jitter
-# without pretending event-cache updates are reconciliations.
-# The worker wakes every five seconds.  A ten-second minimum lets scheduling
-# phase plus broker RPC latency push the recorded account age beyond the
-# 15-second live safety contract on alternating full cycles.  Refreshing once
-# per worker wake leaves explicit latency headroom while positions remain
-# authoritative through the serial safety reconcile.
-_ACCOUNT_REFRESH_MIN_INTERVAL = 5.0
-_POSITION_RECONCILE_MIN_INTERVAL = 10.0
 _DATA_SYNC_LOCK = threading.Lock()
 
 
@@ -3653,6 +3641,7 @@ def _retire_broker_missing_position(
     broker: str,
     strategy_name: str,
     reason: str,
+    persist_reconcile: bool = True,
     log=None,
 ) -> bool:
     from execution.deal_sync import sync_close_deals_batch
@@ -3665,7 +3654,10 @@ def _retire_broker_missing_position(
         reason=reason,
         log=log,
         runtime=MissingPositionRetirementRuntime(
-            read_positions=_read_positions_for_recovery,
+            read_positions=lambda current_bridge: _read_positions_for_recovery(
+                current_bridge,
+                persist=persist_reconcile,
+            ),
             normalize_position=_normalize_position_snapshot,
             load_recovery_position=_load_recovery_position_row,
             open_prices=_pos_open_prices,
@@ -3684,13 +3676,23 @@ def _retire_broker_missing_position(
     )
 
 
-def _read_positions_for_recovery(bridge) -> list[Any]:
+def _read_positions_for_recovery(
+    bridge,
+    *,
+    persist: bool = True,
+) -> list[Any]:
     result = _explicit_position_reconcile(bridge)
     if str(_reconcile_value(result, "status", "failed") or "failed") != "fresh":
         raise RuntimeError(
             str(_reconcile_value(result, "error_code", "") or "fresh broker reconcile unavailable")
         )
-    return list(_publish_fresh_position_reconcile(result, broker="ctrader"))
+    return list(
+        _publish_fresh_position_reconcile(
+            result,
+            broker="ctrader",
+            persist=persist,
+        )
+    )
 
 
 def _bootstrap_position_recovery(
@@ -4383,12 +4385,34 @@ def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str
     broker_connected = bool(getattr(bridge, "is_connected", False)) if bridge is not None else None
     latest_market_data_ts = 0.0
     try:
-        from data.live_sync.health import SyncHealth
+        try:
+            from config.runtime_config import shared as _runtime_cfg
 
-        bar_ts_by_tf = dict((SyncHealth.shared().record.last_bar_ts_by_tf or {}))
-        latest_market_data_ts = float(bar_ts_by_tf.get("M1") or bar_ts_by_tf.get("M5") or 0.0)
+            active_timeframe = str(
+                getattr(_runtime_cfg(), "timeframe", "M5") or "M5"
+            )
+        except Exception:
+            active_timeframe = "M5"
+        if bridge is not None and hasattr(bridge, "get_live_bars"):
+            online_frame = bridge.get_live_bars(
+                timeframe=active_timeframe,
+                n_bars=1,
+            )
+            latest_market_data_ts = _df_latest_epoch(online_frame)
     except Exception:
         latest_market_data_ts = 0.0
+    if latest_market_data_ts <= 0.0:
+        try:
+            # The durable replica remains a low-frequency session fallback;
+            # it is no longer the live market-data authority.
+            from data.live_sync.health import SyncHealth
+
+            bar_ts_by_tf = dict((SyncHealth.shared().record.last_bar_ts_by_tf or {}))
+            latest_market_data_ts = float(
+                bar_ts_by_tf.get("M1") or bar_ts_by_tf.get("M5") or 0.0
+            )
+        except Exception:
+            latest_market_data_ts = 0.0
     symbol_meta = getattr(bridge, "_symbol_meta", None) if bridge is not None else None
     broker_schedule = (symbol_meta or {}).get("broker_schedule") if isinstance(symbol_meta, dict) else None
     state = evaluate_market_session(
@@ -4428,8 +4452,9 @@ def _ensure_spot_subscription(
     *,
     log=None,
     market_session: dict[str, Any] | None = None,
+    timeframe: str = "M5",
 ) -> None:
-    """Restore the live spot stream whenever a connected bridge has no fresh quote.
+    """Restore spot and live trendbar streams on a connected bridge.
 
     ``market_session`` remains accepted for compatibility with the legacy tick
     runtime, but a maintenance/open-pending classification must never suppress
@@ -4450,15 +4475,45 @@ def _ensure_spot_subscription(
         float((quote or {}).get("ts") or 0.0) <= 0
         or not _quote_is_fresh(quote, now_ts=now_ts)
     )
-    if not spot_needed:
+    live_trendbar_needed = False
+    try:
+        needs_live_trendbars = getattr(
+            bridge,
+            "live_trendbars_need_subscription",
+            None,
+        )
+        if callable(needs_live_trendbars):
+            live_trendbar_needed = bool(
+                needs_live_trendbars((str(timeframe or "M5").upper(),))
+            )
+    except Exception:
+        live_trendbar_needed = True
+    if not spot_needed and not live_trendbar_needed:
         return
     if now_ts - _last_spot_subscription_attempt_ts < 60:
         return
     _last_spot_subscription_attempt_ts = now_ts
     try:
-        if spot_needed and hasattr(bridge, "subscribe_spots"):
+        if (spot_needed or live_trendbar_needed) and hasattr(bridge, "subscribe_spots"):
             bridge.subscribe_spots()
-        msg = "spot subscription refreshed after broker connection became ready"
+        if live_trendbar_needed and hasattr(bridge, "subscribe_live_trendbars"):
+            subscribed = bool(
+                bridge.subscribe_live_trendbars(
+                    (str(timeframe or "M5").upper(),)
+                )
+            )
+            if not subscribed:
+                msg = (
+                    "live trendbar subscription failed; "
+                    "decision-bar freshness remains fail-closed"
+                )
+            else:
+                msg = (
+                    "spot/live trendbar subscriptions refreshed after broker "
+                    "connection became ready"
+                )
+        else:
+            msg = "spot subscription refreshed after broker connection became ready"
         log(msg) if log else logger.info(msg)
     except Exception as exc:
         logger.debug("[market_session] spot subscription refresh failed: %s", exc)
@@ -5581,12 +5636,6 @@ def _start_live_scheduler():
     sched.start()
     logger.info("[live] InProcessScheduler started; heavy_jobs={}", run_heavy_jobs)
 
-    _initial_ctrader_data_pull = _make_initial_ctrader_data_pull(
-        get_ctrader=_get_ctrader,
-        logger=logger,
-        default_timeframes=_BAR_TIMEFRAMES,
-    )
-    _start_initial_ctrader_data_pull(_initial_ctrader_data_pull)
     _start_scheduler_catch_up(
         sched,
         run_heavy_jobs=run_heavy_jobs,
@@ -6099,8 +6148,8 @@ def _fetch_bars_with_retry(bridge, timeframe: str, n_bars: int, max_retries: int
     """fetch_bars 重试 wrapper. 失败 1 次不致命, 指数 backoff 2s/4s/8s.
     返 None 表示彻底失败 (调用方决定是否继续).
 
-    audit 2026-06-08: Pepperstone demo broker 不返 history bar. 这个函数主要
-    是 best-effort 取"最近几根"用作 sanity check. 真正预热走 _warmup_from_local_db.
+    Startup-only historical seed.  Runtime ticks consume the bridge's
+    in-memory live trendbar feed and never call this wrapper.
     """
     for attempt in range(max_retries):
         try:
@@ -6112,6 +6161,34 @@ def _fetch_bars_with_retry(bridge, timeframe: str, n_bars: int, max_retries: int
         if attempt < max_retries - 1:
             time.sleep(2 ** (attempt + 1))  # 2s, 4s, 8s
     return None
+
+
+def _get_live_bars(
+    symbol: str = "XAUUSD+",
+    timeframe: str = "M5",
+    n_bars: int = 500,
+) -> "pd.DataFrame | None":
+    """Read the in-memory cTrader trendbar feed without touching DuckDB."""
+    try:
+        bridge, error, warming = _get_ctrader()
+    except Exception as exc:
+        logger.debug("online trendbar bridge lookup failed: %s", exc)
+        return None
+    if error or warming or bridge is None:
+        return None
+    getter = getattr(bridge, "get_live_bars", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter(timeframe=str(timeframe or "M5"), n_bars=int(n_bars or 1))
+    except Exception as exc:
+        logger.debug(
+            "online trendbar read failed: symbol=%s timeframe=%s error=%s",
+            symbol,
+            timeframe,
+            exc,
+        )
+        return None
 
 
 def _df_latest_epoch(df: "pd.DataFrame | None") -> float:
@@ -6173,103 +6250,6 @@ def _record_decision_bar_freshness(snapshot: dict[str, Any]) -> None:
         logger.debug("[live] decision bar freshness snapshot update failed", exc_info=True)
 
 
-def _record_repaired_bar_sync_health(*, timeframe: str, latest_ts: float) -> None:
-    if latest_ts <= 0:
-        return
-    try:
-        from data.live_sync.health import SyncHealth
-
-        SyncHealth.shared().record_success(last_bar_ts_by_tf={str(timeframe or "M5"): float(latest_ts)})
-    except Exception:
-        logger.debug("[live] decision bar repair health update failed", exc_info=True)
-
-
-def _repair_live_decision_bars(
-    *,
-    bridge: Any,
-    symbol: str,
-    timeframe: str,
-    expected_closed_bar_ts: float,
-    tick: int,
-    log,
-) -> dict[str, Any]:
-    result = {
-        "attempted": False,
-        "status": "not_attempted",
-        "inserted_bars": 0,
-        "latest_repaired_bar_ts": 0.0,
-        "error": "",
-    }
-    if bridge is None or not bool(getattr(bridge, "is_connected", False)):
-        result["status"] = "bridge_unavailable"
-        return result
-    if not hasattr(bridge, "fetch_bars"):
-        result["status"] = "bridge_fetch_bars_unavailable"
-        return result
-
-    result["attempted"] = True
-    try:
-        fetched = bridge.fetch_bars(timeframe=timeframe, n_bars=200)
-    except TypeError:
-        try:
-            fetched = bridge.fetch_bars(timeframe, 200)
-        except Exception as exc:
-            result["status"] = "fetch_failed"
-            result["error"] = f"{type(exc).__name__}: {str(exc)[:220]}"
-            return result
-    except Exception as exc:
-        result["status"] = "fetch_failed"
-        result["error"] = f"{type(exc).__name__}: {str(exc)[:220]}"
-        return result
-
-    if fetched is None or len(fetched) == 0:
-        result["status"] = "fetch_empty"
-        return result
-
-    if expected_closed_bar_ts > 0:
-        try:
-            fetched = fetched.loc[
-                [
-                    (float(idx.timestamp()) if hasattr(idx, "timestamp") else float(idx))
-                    <= float(expected_closed_bar_ts)
-                    for idx in fetched.index
-                ]
-            ]
-        except Exception:
-            pass
-    bars = _sync_dataframe_to_store_bars(fetched)
-    if not bars:
-        result["status"] = "no_closed_bars"
-        return result
-
-    try:
-        from data.store import DataStore
-
-        DataStore().insert_bars(bars, symbol, timeframe)
-    except Exception as exc:
-        result["status"] = "insert_failed"
-        result["error"] = f"{type(exc).__name__}: {str(exc)[:220]}"
-        return result
-
-    latest_ts = float(bars[-1].get("time") or 0.0)
-    _record_repaired_bar_sync_health(timeframe=timeframe, latest_ts=latest_ts)
-    result.update(
-        {
-            "status": "inserted",
-            "inserted_bars": len(bars),
-            "latest_repaired_bar_ts": latest_ts,
-        }
-    )
-    try:
-        log(
-            f"tick {tick}: repaired stale decision bars {symbol} {timeframe} "
-            f"inserted={len(bars)} latest_ts={latest_ts:.0f}"
-        )
-    except Exception:
-        pass
-    return result
-
-
 def _ensure_live_decision_bars_fresh(
     *,
     bridge: Any,
@@ -6280,11 +6260,21 @@ def _ensure_live_decision_bars_fresh(
     log,
     market_session: dict[str, Any] | None = None,
 ) -> "pd.DataFrame":
+    # The serial live owner consumes only the bridge's in-memory live
+    # trendbar frame.  Historical RPCs and durable DuckDB writes stay outside
+    # this boundary so a slow broker history call cannot starve Safety.
+    del bridge
     now_ts = time.time()
     closed_df = _closed_decision_bar_frame(df_new, timeframe=timeframe, now_ts=now_ts)
     snapshot = _decision_bar_freshness_snapshot(closed_df, timeframe=timeframe, now_ts=now_ts)
     if bool(snapshot.get("fresh", False)):
-        snapshot.update({"repair_attempted": False, "repair_status": "fresh", "source": "live_decision_bar"})
+        snapshot.update(
+            {
+                "repair_attempted": False,
+                "repair_status": "fresh",
+                "source": "ctrader_live_trendbar",
+            }
+        )
         _record_decision_bar_freshness(snapshot)
         return closed_df if closed_df is not None and len(closed_df) > 0 else df_new
 
@@ -6293,7 +6283,9 @@ def _ensure_live_decision_bars_fresh(
         from backend.services.market_session import maintenance_wait_evidence
         from config.runtime_config import shared as _runtime_cfg
 
-        session = dict(market_session or _market_session_snapshot(bridge) or {})
+        # Production passes the already computed session snapshot.  Do not
+        # perform another broker/history read when the online bar is stale.
+        session = dict(market_session or {})
         session_status = str(session.get("status") or "")
         if session_status in {
             "closed_confirmed",
@@ -6313,51 +6305,37 @@ def _ensure_live_decision_bars_fresh(
     except Exception:
         logger.debug("[live] decision bar repair market-session check failed", exc_info=True)
 
-    if repair_suppressed:
-        snapshot.update(
-            {
-                "repair_attempted": False,
-                "repair_status": repair_suppressed,
-                "source": "live_decision_bar_repair_suppressed",
-            }
-        )
-        _record_decision_bar_freshness(snapshot)
-        return closed_df if closed_df is not None else df_new
-
-    repair = _repair_live_decision_bars(
-        bridge=bridge,
-        symbol=symbol,
-        timeframe=timeframe,
-        expected_closed_bar_ts=float(snapshot.get("expected_closed_bar_ts", 0.0) or 0.0),
-        tick=tick,
-        log=log,
-    )
-    repaired_df = _warmup_from_local_db(symbol, timeframe, max(5, len(df_new))) if repair.get("attempted") else None
-    if repaired_df is not None and len(repaired_df) > 0:
-        closed_df = _closed_decision_bar_frame(repaired_df, timeframe=timeframe, now_ts=time.time())
-    final_snapshot = _decision_bar_freshness_snapshot(closed_df, timeframe=timeframe, now_ts=time.time())
-    final_snapshot.update(
+    snapshot.update(
         {
-            "repair_attempted": bool(repair.get("attempted", False)),
-            "repair_status": str(repair.get("status") or ""),
-            "repair_inserted_bars": int(repair.get("inserted_bars") or 0),
-            "repair_latest_bar_ts": float(repair.get("latest_repaired_bar_ts") or 0.0),
-            "repair_error": str(repair.get("error") or ""),
-            "source": "live_decision_bar_repair",
+            "repair_attempted": False,
+            "repair_status": repair_suppressed or "stale_waiting_for_live_trendbar",
+            "repair_inserted_bars": 0,
+            "repair_latest_bar_ts": 0.0,
+            "repair_error": "",
+            "source": (
+                "live_trendbar_repair_suppressed"
+                if repair_suppressed
+                else "ctrader_live_trendbar_read_only"
+            ),
         }
     )
-    _record_decision_bar_freshness(final_snapshot)
-    if not bool(final_snapshot.get("fresh", False)):
-        try:
-            log(
-                f"tick {tick}: decision bars stale after repair "
-                f"{symbol} {timeframe} latest={final_snapshot.get('latest_bar_ts', 0):.0f} "
-                f"expected={final_snapshot.get('expected_closed_bar_ts', 0):.0f} "
-                f"status={final_snapshot.get('repair_status')}"
-            )
-        except Exception:
-            pass
-    return closed_df if closed_df is not None else df_new
+    _record_decision_bar_freshness(snapshot)
+    try:
+        log(
+            f"tick {tick}: online trendbars stale; alpha waits for cTrader live feed "
+            f"{symbol} {timeframe} latest={snapshot.get('latest_bar_ts', 0):.0f} "
+            f"expected={snapshot.get('expected_closed_bar_ts', 0):.0f} "
+            f"status={snapshot.get('repair_status')}"
+        )
+    except Exception:
+        pass
+    for frame in (closed_df, df_new):
+        if frame is not None:
+            try:
+                return frame.iloc[0:0]
+            except Exception:
+                break
+    return None
 
 
 # ★ v9-fix: 备份 bar 缓存 (防 DB 空/broker 无数据时死机)
@@ -6392,6 +6370,7 @@ def _publish_fresh_position_reconcile(
     *,
     broker: str,
     persist: bool = True,
+    bridge: Any | None = None,
 ) -> list[dict[str, Any]]:
     if str(_reconcile_value(result, "status", "failed") or "failed") != "fresh":
         return []
@@ -6480,6 +6459,36 @@ def _publish_fresh_position_reconcile(
             if int(position.get("position_id") or position.get("ticket") or 0) > 0
         }
         missing_recovery_ids = sorted(recovery_ids - broker_ids)
+        if missing_recovery_ids and bridge is not None and persist:
+            # A broker-side close can race this first fresh snapshot.  Resolve
+            # each missing durable row once through the existing close-deal
+            # retirement contract before turning the observation into a
+            # persistent recovery conflict.  Missing/ambiguous deal evidence
+            # deliberately leaves the fail-closed conflict in place.
+            retired_ids: list[int] = []
+            for position_id in missing_recovery_ids:
+                try:
+                    if _retire_broker_missing_position(
+                        bridge,
+                        position_id,
+                        broker=broker,
+                        strategy_name=str(_loop_strategy_name or "factor_v4"),
+                        reason="fresh_reconcile_missing_recovery_position",
+                        persist_reconcile=False,
+                    ):
+                        retired_ids.append(position_id)
+                except Exception as exc:
+                    logger.warning(
+                        "[live] missing recovery close reconciliation failed "
+                        "for pos %s: %s",
+                        position_id,
+                        exc,
+                    )
+            if retired_ids:
+                recovery_ids = _lifecycle_recovery_active_position_ids(
+                    _list_active_recovery_positions(broker)
+                )
+                missing_recovery_ids = sorted(recovery_ids - broker_ids)
         if missing_recovery_ids:
             conflict_reason = "broker_recovery_position_conflict:" + ",".join(
                 str(position_id) for position_id in missing_recovery_ids
@@ -6832,7 +6841,10 @@ def _run_live_safety_cycle(
         runtime=LiveSafetyCycleRuntime(
             get_safety_plane=_get_live_safety_plane,
             explicit_position_reconcile=_explicit_position_reconcile,
-            publish_fresh_positions=_publish_fresh_position_reconcile,
+            publish_fresh_positions=partial(
+                _publish_fresh_position_reconcile,
+                bridge=bridge,
+            ),
             get_live_state=_live_state_get,
             update_live_state=_live_state_update,
             runtime_config=_runtime_config,
@@ -6956,7 +6968,7 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
         evaluate_daily_drawdown=_evaluate_daily_drawdown,
         market_session_snapshot=_market_session_snapshot,
         ensure_spot_subscription=_ensure_spot_subscription,
-        warmup_from_local_db=_warmup_from_local_db,
+        get_live_bars=_get_live_bars,
         ensure_decision_bars_fresh=_ensure_live_decision_bars_fresh,
         get_safety_plane=_get_live_safety_plane,
         retry_pending_open=_retry_pending_open_trade,
@@ -7072,7 +7084,7 @@ def _closed_bar_forward_var_input(*, cfg, observed_at: float):
     timeframe = str(getattr(cfg, "timeframe", "M5") or "M5")
     lookback = max(2, int(getattr(cfg, "var_window", 500) or 500))
     try:
-        frame = _warmup_from_local_db(symbol, timeframe, lookback + 1)
+        frame = _get_live_bars(symbol, timeframe, lookback + 1)
         frame = _closed_decision_bar_frame(
             frame,
             timeframe=timeframe,
@@ -7109,7 +7121,7 @@ def _closed_bar_forward_var_input(*, cfg, observed_at: float):
             as_of=observed_at,
             lookback=lookback,
             invalid_reason=(
-                f"closed_bar_return_input_error:{type(exc).__name__}"
+                f"online_closed_bar_return_input_error:{type(exc).__name__}"
             ),
         )
 
@@ -7477,6 +7489,7 @@ def _run_loop_body_active(
         timeframe=TF,
         log=log,
         runtime=_bar_warmup_runtime(),
+        requested_bars=max(200, int(getattr(_rcfg, "var_window", 500) or 500) + 1),
     )
     if warmup is None:
         return
@@ -7532,7 +7545,7 @@ def _run_loop_body_active(
                 get_ctrader=_get_ctrader,
                 wait_ctrader_ready=_wait_ctrader_ready,
                 log=log,
-                timeout_sec=10.0,
+                timeout_sec=10.0, timeframe=TF, seed_frame=df,
             )
         except Exception as e:
             log(f"subscribe_spots failed (non-fatal): {e}")
@@ -7546,172 +7559,6 @@ def _run_loop_body_active(
         log=log,
         runtime=_serial_live_tick_runtime(),
     )
-
-
-# ── Background account/positions cache writer ─────────────────────────
-# audit 2026-06-10: 之前 _process_tick 每 60s 同步调 bridge.account_info() +
-# bridge.get_positions() 写共享缓存. 改读缓存后这个写路径被删了, WS 1s
-# 推送就拿到 start_loop 启动时的占位符 (balance=0, equity=0). 修复:
-# _run_loop 的 60s 等待期间, 兼容 worker 调显式 account/position reconcile
-# 并仅按 broker observed_at 写 _live_state。cache/event/failed 绝不刷新事实时间。
-# Phase2 safety plane 启用后不使用这个并发兼容 worker。
-def _refresh_account_positions_sync(
-    bridge,
-    broker: str,
-    *,
-    wait_for_lock_sec: float = 0.0,
-) -> bool:
-    """One-shot synchronous write to _live_state. Used by the background
-    thread; tests call this directly. Best-effort: never raises.
-
-    ★ v9-fix: 连接断开时立刻返回, 不做 API 调用防 timeout 风暴.
-    """
-    wait_seconds = max(0.0, float(wait_for_lock_sec or 0.0))
-    acquired = (
-        _ACCOUNT_REFRESH_LOCK.acquire(timeout=wait_seconds)
-        if wait_seconds > 0
-        else _ACCOUNT_REFRESH_LOCK.acquire(blocking=False)
-    )
-    if not acquired:
-        return False
-    try:
-        # 连接预检: 断开时不调用, 避免 10s timeout 堆积
-        if hasattr(bridge, 'is_connected') and not bridge.is_connected:
-            return False
-        now_ts = time.time()
-        acct = _live_state_get("account", {}, clone=True) or {}
-        account_updated_at = float(_live_state_get("account_updated_at") or 0.0)
-        positions_updated_at = float(_live_state_get("positions_updated_at") or 0.0)
-        account_fresh = account_updated_at > 0 and (now_ts - account_updated_at) < _ACCOUNT_REFRESH_MIN_INTERVAL
-        positions_fresh = (
-            positions_updated_at > 0
-            and (now_ts - positions_updated_at) < _POSITION_RECONCILE_MIN_INTERVAL
-        )
-        if account_fresh and positions_fresh:
-            return True
-        if not account_fresh:
-            try:
-                account_reconcile = _explicit_account_reconcile(bridge)
-            except Exception as e:
-                logger.warning(f"[{broker}] background account reconcile failed: {e}")
-                account_reconcile = None
-            raw = (
-                _reconcile_value(account_reconcile, "account", None)
-                if account_reconcile is not None
-                else None
-            )
-            account_observed_at = float(
-                _reconcile_value(account_reconcile, "observed_at", 0.0) or 0.0
-            )
-            if raw is not None and account_observed_at > 0:
-                # 统一转 dict: CTraderBridge 返 AccountInfo dataclass
-                acct = asdict(raw) if is_dataclass(raw) else dict(raw)
-                # audit 2026-06-10: ensure the cached account has `ok=True` so the
-                # WS snapshot doesn't mistake it for an error envelope.
-                acct.setdefault("ok", True)
-                acct.setdefault("broker", broker)
-                _live_state_update(
-                    account=acct,
-                    account_reconciled=copy.deepcopy(acct),
-                    account_updated_at=account_observed_at,
-                    account_reconcile_id=str(
-                        _reconcile_value(account_reconcile, "reconcile_id", "") or ""
-                    ),
-                    account_reconcile_failed_at=None,
-                    account_reconcile_error=None,
-                )
-            else:
-                _mark_account_reconcile_failed("background_account_reconcile_failed")
-        if not positions_fresh:
-            try:
-                positions_reconcile = _explicit_position_reconcile(bridge)
-                if str(
-                    _reconcile_value(positions_reconcile, "status", "failed") or "failed"
-                ) == "fresh":
-                    _publish_fresh_position_reconcile(
-                        positions_reconcile,
-                        broker=broker,
-                        persist=False,
-                    )
-                else:
-                    _mark_positions_reconcile_failed(
-                        str(
-                            _reconcile_value(positions_reconcile, "error_code", "")
-                            or "background_positions_reconcile_failed"
-                        )
-                    )
-            except Exception as e:
-                logger.warning(f"[{broker}] background positions reconcile failed: {e}")
-                _mark_positions_reconcile_failed(
-                    f"background_positions_reconcile_exception:{type(e).__name__}"
-                )
-        return not _new_risk_reconciliation_blockers()
-    finally:
-        _ACCOUNT_REFRESH_LOCK.release()
-
-
-def kickoff_account_refresh(bridge, broker: str, interval_sec: float = 5.0) -> threading.Thread:
-    """Spawn a daemon thread that periodically calls
-    _refresh_account_positions_sync. Used by _run_loop during its 60s
-    wait so the next WS tick has fresh account/positions data.
-
-    The thread loops: refresh once, then sleep interval_sec, until the
-    global _loop_stop_flag is set OR the process exits (daemon=True).
-
-    ★ v9-fix: 连接断开时不做 API 调用 + 指数退避, 防 timeout 风暴.
-    ★ v11-fix: 单例检查, 避免每 tick 创建新线程 (P0-4 线程泄漏).
-    """
-    global _refresh_thread
-    if _refresh_thread is not None and _refresh_thread.is_alive():
-        return _refresh_thread
-
-    stop_flag_ref = _loop_stop_flag  # captured at call time
-    _fail_count = 0
-    _MAX_BACKOFF = 300  # 最大退避 5min
-
-    def _worker():
-        nonlocal _fail_count
-        while True:
-            try:
-                if stop_flag_ref is not None and stop_flag_ref.is_set():
-                    break
-
-                # v9-fix: 连接断开时跳过调用, 不做 API 调用避免 timeout 风暴
-                if hasattr(bridge, 'is_connected') and not bridge.is_connected:
-                    _sleep_sliced(min(interval_sec, 5.0), stop_flag_ref)
-                    continue
-
-                _refresh_account_positions_sync(bridge, broker)
-                _fail_count = 0  # 成功后重置失败计数
-
-                # Sleep interval
-                _sleep_sliced(interval_sec, stop_flag_ref)
-            except Exception as e:
-                _fail_count += 1
-                backoff = min(_MAX_BACKOFF, interval_sec * (2 ** min(_fail_count, 5)))
-                logger.warning(
-                    f"[{broker}] account-refresh error #{_fail_count}: {e}, "
-                    f"backoff {backoff:.0f}s"
-                )
-                _sleep_sliced(backoff, stop_flag_ref)
-
-    def _sleep_sliced(duration: float, stop_flag) -> None:
-        """在 stop_flag 检查之间分片休眠, 保证快速响应停止信号."""
-        slept = 0.0
-        while slept < duration:
-            if stop_flag is not None and stop_flag.is_set():
-                return
-            chunk = min(0.5, duration - slept)
-            time.sleep(chunk)
-            slept += chunk
-
-    t = threading.Thread(
-        target=_worker, daemon=True,
-        name=f"acct-refresh-{broker}",
-    )
-    t.start()
-    _refresh_thread = t
-    return t
 
 
 @record_timed("live.process_tick")
@@ -7760,7 +7607,6 @@ _exec_quality = ExecutionQuality(max_records=500)
 
 # Phase 6: 多品种并行管道
 _factor_pipelines: dict[str, dict] = {}  # {symbol: {engine, normalizer, ...}}
-_refresh_thread: threading.Thread | None = None  # v11-fix (P0-4): account refresh 单例
 _cross_asset_covar: "CrossAssetCovariance | None" = None  # 跨品种协方差
 
 
@@ -10271,23 +10117,6 @@ def _run_open_trade_pipeline(
     if not (composite.direction != 0 and gate_result.passed and send):
         return gate_result
     admission_blockers = _open_trade_admission_blockers(stop_requested)
-    reconcile_blockers = {
-        blocker
-        for blocker in admission_blockers
-        if blocker.startswith("account_reconcile_")
-        or blocker.startswith("positions_reconcile_")
-    }
-    if reconcile_blockers and bridge is not None:
-        log(
-            f"tick {tick}: refreshing final open reconciles "
-            f"blockers={sorted(reconcile_blockers)}"
-        )
-        _refresh_account_positions_sync(
-            bridge,
-            broker,
-            wait_for_lock_sec=5.0,
-        )
-        admission_blockers = _open_trade_admission_blockers(stop_requested)
     # ★ same-bar dedup: a bar that already filled must not open a second
     # position (stale decision bar repair replay / pending open retry re-entry).
     # Distinct bars may still open concurrently; this only blocks the same bar.

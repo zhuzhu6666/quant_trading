@@ -1601,7 +1601,7 @@ def test_closed_decision_bar_frame_drops_current_partial_bar():
     assert list(closed.index) == list(pd.to_datetime(["2026-07-07T03:40:00Z", "2026-07-07T03:45:00Z"]))
 
 
-def test_ensure_live_decision_bars_repairs_from_primary_bridge(monkeypatch):
+def test_ensure_live_decision_bars_waits_for_live_trendbar_without_history_rpc(monkeypatch):
     import pandas as pd
 
     now_ts = 1_783_396_219.0  # 2026-07-07 11:50:19 Asia/Shanghai
@@ -1609,38 +1609,19 @@ def test_ensure_live_decision_bars_repairs_from_primary_bridge(monkeypatch):
         [{"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 1}],
         index=pd.to_datetime(["2026-07-07T03:40:00Z"]),
     )
-    fetched_df = pd.DataFrame(
-        [
-            {"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 1},
-            {"open": 2.0, "high": 2.1, "low": 1.9, "close": 2.0, "volume": 2},
-            {"open": 3.0, "high": 3.1, "low": 2.9, "close": 3.0, "volume": 3},
-        ],
-        index=pd.to_datetime(
-            [
-                "2026-07-07T03:40:00Z",
-                "2026-07-07T03:45:00Z",
-                "2026-07-07T03:50:00Z",
-            ]
-        ),
-    )
-    inserted = []
-
-    class _Store:
-        def insert_bars(self, bars, symbol, timeframe):
-            inserted.append((bars, symbol, timeframe))
+    fetch_calls = []
 
     class _Bridge:
         is_connected = True
 
         def fetch_bars(self, timeframe, n_bars):
-            return fetched_df
+            fetch_calls.append((timeframe, n_bars))
+            raise AssertionError("live decision-bar guard must not call broker history")
 
     monkeypatch.setattr(live_service.time, "time", lambda: now_ts)
-    monkeypatch.setattr("data.store.DataStore", lambda: _Store())
-    monkeypatch.setattr(live_service, "_warmup_from_local_db", lambda *_args, **_kwargs: fetched_df)
 
     logs: list[str] = []
-    repaired = live_service._ensure_live_decision_bars_fresh(
+    result = live_service._ensure_live_decision_bars_fresh(
         bridge=_Bridge(),
         symbol="XAUUSD+",
         timeframe="M5",
@@ -1650,14 +1631,13 @@ def test_ensure_live_decision_bars_repairs_from_primary_bridge(monkeypatch):
         market_session={"status": "open_confirmed"},
     )
 
-    assert repaired.index[-1] == pd.Timestamp("2026-07-07T03:45:00Z")
-    assert inserted[0][1:] == ("XAUUSD+", "M5")
-    assert inserted[0][0][-1]["time"] == 1_783_395_900
-    assert all(bar["time"] <= 1_783_395_900 for bar in inserted[0][0])
+    assert len(result) == 0
+    assert fetch_calls == []
     snapshot = live_service._live_state_get("decision_bar_freshness", {}, clone=True)
-    assert snapshot["fresh"] is True
-    assert snapshot["repair_attempted"] is True
-    assert snapshot["repair_status"] == "inserted"
+    assert snapshot["fresh"] is False
+    assert snapshot["repair_attempted"] is False
+    assert snapshot["repair_status"] == "stale_waiting_for_live_trendbar"
+    assert snapshot["source"] == "ctrader_live_trendbar_read_only"
 
 
 def test_ensure_live_decision_bars_suppresses_repair_during_maintenance(monkeypatch):
@@ -1679,16 +1659,6 @@ def test_ensure_live_decision_bars_suppresses_repair_during_maintenance(monkeypa
 
     monkeypatch.setattr(live_service.time, "time", lambda: now_ts)
     monkeypatch.setattr(
-        live_service,
-        "_market_session_snapshot",
-        lambda _bridge: {
-            "status": "open_pending_quote",
-            "api_available": True,
-            "broker_connected": True,
-            "evidence": ["market_data_stale"],
-        },
-    )
-    monkeypatch.setattr(
         "config.runtime_config.shared",
         lambda: SimpleNamespace(market_open_pending_quote_grace_seconds=4500.0),
     )
@@ -1700,9 +1670,15 @@ def test_ensure_live_decision_bars_suppresses_repair_during_maintenance(monkeypa
         df_new=stale_df,
         tick=100,
         log=lambda _msg: None,
+        market_session={
+            "status": "open_pending_quote",
+            "api_available": True,
+            "broker_connected": True,
+            "evidence": ["market_data_stale"],
+        },
     )
 
-    assert len(result) == 1
+    assert len(result) == 0
     assert fetch_calls == []
     snapshot = live_service._live_state_get("decision_bar_freshness", {}, clone=True)
     assert snapshot["repair_attempted"] is False
@@ -1771,6 +1747,7 @@ def test_ensure_live_decision_bars_does_not_fallback_to_current_partial(monkeypa
     assert snapshot["fresh"] is False
     assert snapshot["latest_bar_ts"] == 0.0
     assert snapshot["repair_attempted"] is False
+    assert snapshot["repair_status"] == "stale_waiting_for_live_trendbar"
 
 
 def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):

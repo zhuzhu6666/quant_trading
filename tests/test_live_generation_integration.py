@@ -92,7 +92,7 @@ def _enable_phase2(monkeypatch):
     )
 
 
-def test_phase2_runs_broker_snapshot_and_safety_before_missing_bars(monkeypatch):
+def test_phase2_runs_broker_snapshot_and_safety_before_missing_online_bars(monkeypatch):
     _enable_phase2(monkeypatch)
     bridge = _SnapshotBridge()
     order: list[str] = []
@@ -131,7 +131,7 @@ def test_phase2_runs_broker_snapshot_and_safety_before_missing_bars(monkeypatch)
         log=lambda _message: None,
     )
 
-    assert order == ["broker_snapshot", "account_snapshot", "session", "bars"]
+    assert order == ["broker_snapshot", "account_snapshot", "session"]
     assert result["safety"]["reconciliation_state"] == "fresh"
     assert result["safety"]["heartbeat_at"] > 0
     assert result["wait_seconds"] == 5.0

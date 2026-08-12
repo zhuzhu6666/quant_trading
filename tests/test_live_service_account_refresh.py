@@ -1,14 +1,12 @@
-"""Tests for the compatibility account/positions refresh.
+"""Tests for read-only account/position fact projections.
 
-The Phase2 safety plane owns durable position recovery writes. Compatibility
-refreshes and HTTP reads may publish fresh broker facts, but must not create
-durable recovery rows. Broker observed_at, not worker fetch time, remains the
-fact timestamp.
+The serial Safety owner is the sole live broker-fact writer. HTTP reads may
+consume or explicitly reconcile facts outside the live loop, but they must not
+create durable recovery rows or rejuvenate stale observations.
 """
-import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -84,7 +82,6 @@ def _reset_state():
     live_service._live_state["account_updated_at"] = None
     live_service._live_state["positions_updated_at"] = None
     live_service._live_state["loop_running"] = False
-    live_service._refresh_thread = None
     live_service._ACCOUNT_CACHE.clear()
     live_service._POSITIONS_CACHE.clear()
     live_service._probe_ctrader_cache = None
@@ -105,38 +102,9 @@ def _reset_state():
     live_service._live_state["account_updated_at"] = None
     live_service._live_state["positions_updated_at"] = None
     live_service._live_state["loop_running"] = False
-    live_service._refresh_thread = None
     live_service._ACCOUNT_CACHE.clear()
     live_service._POSITIONS_CACHE.clear()
     live_service._probe_ctrader_cache = None
-
-
-def _fake_bridge(balance=10000.0, equity=10050.0, currency="USD"):
-    b = MagicMock()
-    b.account_info.return_value = {
-        "balance": balance, "equity": equity, "currency": currency,
-        "margin": 0.0, "margin_free": 0.0, "leverage": 100,
-    }
-    b.refresh_account_info.return_value = b.account_info.return_value
-    b.get_positions.return_value = [
-        {"position_id": 42, "symbol_id": 1, "type": "buy", "volume": 0.01,
-         "price_open": 4500.0, "sl": 0.0, "tp": 0.0, "profit": 50.0,
-         "swap": 0.0, "commission": 0.0}
-    ]
-    b.refresh_positions.return_value = b.get_positions.return_value
-    b.reconcile_account.side_effect = lambda **_kwargs: SimpleNamespace(
-        status="fresh",
-        reconcile_id="account-refresh-test",
-        observed_at=time.time(),
-        account=dict(b.account_info.return_value),
-    )
-    b.reconcile_positions.side_effect = lambda **_kwargs: SimpleNamespace(
-        status="fresh",
-        reconcile_id="positions-refresh-test",
-        observed_at=time.time(),
-        positions=tuple(b.get_positions.return_value),
-    )
-    return b
 
 
 def _known_position_components(observed_at: float) -> dict:
@@ -205,21 +173,6 @@ def test_http_reads_preserve_fresh_broker_observation_timestamp(monkeypatch):
     assert persist_values and all(value is False for value in persist_values)
     assert account_fact_payload(account, now=observed_at + 3)["_fact"]["state"] == "known"
     assert positions_fact_payload(positions, now=observed_at + 3)["_fact"]["state"] == "known"
-
-
-def test_compat_refresh_does_not_persist_recovery_rows(monkeypatch):
-    bridge = _fake_bridge()
-    persist_values = []
-
-    def _enrich(positions, **kwargs):
-        persist_values.append(kwargs["persist"])
-        return list(positions)
-
-    monkeypatch.setattr(live_service, "_enrich_positions_with_path_metrics", _enrich)
-
-    live_service._refresh_account_positions_sync(bridge, "ctrader")
-
-    assert persist_values == [False]
 
 
 def test_live_http_positions_read_existing_projection_without_recomputing(monkeypatch):
@@ -498,266 +451,3 @@ def test_http_reads_do_not_rejuvenate_non_fresh_broker_cache(monkeypatch):
     assert live_service._live_state["positions_updated_at"] == old_observation
     assert account_fact_payload(account, now=now)["_fact"]["state"] == "stale"
     assert positions_fact_payload(positions, now=now)["_fact"]["state"] == "stale"
-
-
-def test_refresh_account_positions_writes_cache(monkeypatch):
-    monkeypatch.setattr(
-        live_service,
-        "_lookup_open_decision_context",
-        lambda _position_id: {"entry_ts": 0.0, "timeframe": "M5", "source": ""},
-    )
-    monkeypatch.setattr(live_service, "_load_recovery_position_row", lambda _position_id: None)
-    monkeypatch.setattr(live_service, "_lookup_entry_decision_id", lambda _position_id: None)
-    bridge = _fake_bridge()
-    # Synchronous call (no thread spawn) for test determinism
-    live_service._refresh_account_positions_sync(bridge, "ctrader")
-    acct = live_service._live_state["account"]
-    assert acct is not None
-    assert acct["balance"] == 10000.0
-    assert acct["equity"] == 10050.0
-    assert acct["currency"] == "USD"
-    # audit 2026-06-10: timestamps must be set so the WS snapshot knows the data is fresh
-    assert live_service._live_state["account_updated_at"] is not None
-    assert live_service._live_state["positions_updated_at"] is not None
-    assert live_service._live_state["account_reconciled"]["balance"] == 10000.0
-    assert live_service._live_state["positions_reconciled"][0]["position_id"] == 42
-    # timestamps should be very recent (within 5s of now)
-    assert abs(time.time() - live_service._live_state["account_updated_at"]) < 5
-    assert abs(time.time() - live_service._live_state["positions_updated_at"]) < 5
-    pos = live_service._live_state["positions"]
-    # positions stored as the wrapped endpoint format OR unwrapped list — accept either
-    if isinstance(pos, dict):
-        pos = pos.get("positions", [])
-    cached = next(p for p in pos if p.get("position_id") == 42)
-    assert cached["mfe"] == pytest.approx(50.0)
-    assert cached["profit_capture_ratio"] == pytest.approx(1.0)
-    assert cached["thesis_status"] in {"intact", "weakening"}
-
-
-def test_legacy_refresh_cadence_sustains_fifteen_second_fact_window(monkeypatch):
-    import inspect
-
-    clock = {"now": 100.0}
-    monkeypatch.setattr(live_service.time, "time", lambda: clock["now"])
-    monkeypatch.setattr(
-        live_service,
-        "_enrich_positions_with_path_metrics",
-        lambda positions, **_kwargs: list(positions),
-    )
-
-    class _Bridge:
-        is_connected = True
-
-        def __init__(self):
-            self.account_calls = 0
-            self.position_calls = 0
-
-        def reconcile_account(self, **_kwargs):
-            self.account_calls += 1
-            return SimpleNamespace(
-                status="fresh",
-                reconcile_id=f"account-{self.account_calls}",
-                observed_at=clock["now"],
-                account={"balance": 1000.0, "equity": 1000.0},
-            )
-
-        def reconcile_positions(self, **_kwargs):
-            self.position_calls += 1
-            return SimpleNamespace(
-                status="fresh",
-                reconcile_id=f"positions-{self.position_calls}",
-                observed_at=clock["now"],
-                positions=(),
-            )
-
-    bridge = _Bridge()
-    live_service._refresh_account_positions_sync(bridge, "ctrader")
-    clock["now"] = 104.9
-    live_service._refresh_account_positions_sync(bridge, "ctrader")
-    assert (bridge.account_calls, bridge.position_calls) == (1, 1)
-    clock["now"] = 105.1
-    live_service._refresh_account_positions_sync(bridge, "ctrader")
-    assert (bridge.account_calls, bridge.position_calls) == (2, 1)
-    clock["now"] = 110.1
-    live_service._refresh_account_positions_sync(bridge, "ctrader")
-
-    assert (bridge.account_calls, bridge.position_calls) == (3, 2)
-    assert clock["now"] - live_service._live_state["account_updated_at"] < 15.0
-    assert clock["now"] - live_service._live_state["positions_updated_at"] < 15.0
-    # The five-second worker cadence must leave latency headroom below the
-    # 15-second account freshness safety contract.
-    assert live_service._ACCOUNT_REFRESH_MIN_INTERVAL <= 5.0
-    assert live_service._POSITION_RECONCILE_MIN_INTERVAL <= 10.0
-    assert (
-        inspect.signature(live_service.kickoff_account_refresh)
-        .parameters["interval_sec"]
-        .default
-        <= 5.0
-    )
-
-
-def test_refresh_account_positions_fills_single_position_pnl_from_account_equity(monkeypatch):
-    monkeypatch.setattr(
-        live_service,
-        "_lookup_open_decision_context",
-        lambda _position_id: {"entry_ts": 0.0, "timeframe": "M5", "source": ""},
-    )
-    monkeypatch.setattr(live_service, "_load_recovery_position_row", lambda _position_id: None)
-    monkeypatch.setattr(live_service, "_lookup_entry_decision_id", lambda _position_id: None)
-    bridge = _fake_bridge(balance=503.24, equity=501.81)
-    bridge.get_positions.return_value = [
-        {"position_id": 88, "symbol_id": 1, "symbol": "XAUUSD", "type": "sell", "volume": 100.0,
-         "price_open": 3968.85, "price_current": 3970.22, "sl": 3986.08, "tp": 3943.01,
-         "profit": 0.0, "swap": 0.0, "commission": 0.0}
-    ]
-    bridge.refresh_positions.return_value = bridge.get_positions.return_value
-
-    live_service._refresh_account_positions_sync(bridge, "ctrader")
-
-    pos = live_service._live_state["positions"]
-    cached = next(p for p in pos if p.get("position_id") == 88)
-    assert cached["pnl"] == pytest.approx(-1.43)
-    assert cached["profit"] == pytest.approx(-1.43)
-    assert cached["unrealized_pnl"] == pytest.approx(-1.43)
-    assert cached["netUnrealizedPnL"] == pytest.approx(-1.43)
-    assert cached["pnl_source"] == "account_equity"
-
-
-def test_refresh_account_positions_swallows_bridge_errors():
-    """If bridge.account_info raises, we should NOT crash — just log and leave cache.
-    Same pattern as the original tick code: best-effort write, never raise."""
-    bridge = MagicMock()
-    bridge.account_info.side_effect = RuntimeError("network blip")
-    bridge.refresh_account_info.side_effect = RuntimeError("network blip")
-    bridge.get_positions.side_effect = RuntimeError("network blip")
-    bridge.refresh_positions.side_effect = RuntimeError("network blip")
-    bridge.reconcile_account.side_effect = RuntimeError("network blip")
-    bridge.reconcile_positions.side_effect = RuntimeError("network blip")
-    # Should NOT raise
-    live_service._refresh_account_positions_sync(bridge, "ctrader")
-    # Cache stays at whatever it was (None from fixture)
-    assert live_service._live_state["account"] is None
-
-
-def test_refresh_account_positions_skips_reconcile_when_positions_recent():
-    class _Bridge:
-        is_connected = True
-
-        def __init__(self):
-            self.account_calls = 0
-            self.position_calls = 0
-
-        def reconcile_account(self, *, force=True, allow_cache_fallback=False):
-            self.account_calls += 1
-            return SimpleNamespace(
-                status="fresh",
-                reconcile_id="account-skip-position",
-                observed_at=time.time(),
-                account={
-                    "balance": 10000.0,
-                    "equity": 10000.0,
-                    "currency": "USD",
-                    "margin": 0.0,
-                    "margin_free": 0.0,
-                    "leverage": 100,
-                },
-            )
-
-        def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
-            self.position_calls += 1
-            return SimpleNamespace(
-                status="fresh",
-                reconcile_id="positions-should-not-run",
-                observed_at=time.time(),
-                positions=({"position_id": 43, "symbol_id": 1, "type": "buy", "volume": 100.0},),
-            )
-
-    bridge = _Bridge()
-    live_service._live_state["account_updated_at"] = time.time() - 60.0
-    live_service._live_state["positions_updated_at"] = time.time()
-    live_service._live_state["positions"] = [{"position_id": 42, "symbol_id": 1, "type": "buy", "volume": 100.0}]
-
-    live_service._refresh_account_positions_sync(bridge, "ctrader")
-
-    assert bridge.account_calls == 1
-    assert bridge.position_calls == 0
-    assert live_service._live_state["positions"][0]["position_id"] == 42
-
-
-def test_refresh_account_positions_skips_position_write_when_reconcile_not_fresh():
-    class _Bridge:
-        is_connected = True
-
-        def reconcile_account(self, *, force=True, allow_cache_fallback=False):
-            raise AssertionError("account refresh should be skipped")
-
-        def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
-            return SimpleNamespace(
-                status="failed",
-                reconcile_id="positions-failed",
-                observed_at=0.0,
-                positions=(),
-                error_code="timeout",
-            )
-
-    live_service._live_state["account"] = {"balance": 10000.0, "equity": 10000.0}
-    live_service._live_state["account_updated_at"] = time.time()
-    live_service._live_state["positions"] = [{"position_id": 42, "symbol_id": 1, "type": "buy", "volume": 100.0}]
-    live_service._live_state["positions_updated_at"] = time.time() - 300.0
-
-    live_service._refresh_account_positions_sync(_Bridge(), "ctrader")
-
-    assert live_service._live_state["positions"][0]["position_id"] == 42
-
-
-def test_kickoff_refresh_spawns_daemon_thread(monkeypatch):
-    """kickoff_account_refresh() must return a thread that runs and exits.
-    We mock time.sleep so the worker can complete quickly, then join() and
-    verify it finished."""
-    bridge = _fake_bridge()
-    started = threading.Event()
-    # Pre-install a stoppable Event as _loop_stop_flag so the worker exits
-    # after the first refresh. Worker checks .is_set() BETWEEN sleeps in
-    # its slice-loop, so we set it on the first sleep.
-    fake_stop = threading.Event()
-    monkeypatch.setattr(live_service, "_loop_stop_flag", fake_stop)
-
-    def fake_sleep(s):
-        # First call: just record that the worker reached the sleep phase
-        # (refresh has already been called, cache is populated). After the
-        # first sleep, signal the worker to stop on its next stop_flag check.
-        if not started.is_set():
-            started.set()
-            fake_stop.set()
-
-    monkeypatch.setattr("time.sleep", fake_sleep)
-    monkeypatch.setattr("threading.Thread", lambda **kw: (
-        # Wrap so the target runs synchronously when we .start() it
-        _SyncThread(kw["target"], kw.get("args", ()), kw.get("daemon", False), kw.get("name", ""))
-    ))
-    # Use a regular synchronous thread so we can join()
-    live_service.kickoff_account_refresh(bridge, "ctrader", interval_sec=0.05)
-    # The helper should have updated _live_state by now (sync thread ran)
-    acct = live_service._live_state["account"]
-    assert acct is not None
-    assert acct["balance"] == 10000.0
-
-
-class _SyncThread:
-    """Stand-in for threading.Thread that runs the target immediately on .start()."""
-    def __init__(self, target, args, daemon, name):
-        self._target = target
-        self._args = args or ()
-        self.daemon = daemon
-        self.name = name
-        self._alive = False
-
-    def start(self):
-        self._alive = True
-        try:
-            self._target(*self._args)
-        finally:
-            self._alive = False
-
-    def is_alive(self):
-        return self._alive

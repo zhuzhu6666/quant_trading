@@ -47,6 +47,24 @@ readiness 的 ready 只表示当前事实和能力可用，不是开关提交权
 - unknown execution outcome 不进入价格归因、review、experience、counterfactual 或治理。
 - 代码修复完成不等于 P1 runtime acceptance 完成；运行验收仍以真实 post-repair lifecycle 为准。
 
+### 2026-08-12 Safety freshness / live admission repair（已受控部署，运行验收未通过）
+
+- Canonical authority（本批之前）：现有 `live_loop_tick_runtime` 串行 owner 负责 positions/account/Safety；现有 `data_sync` scheduler 是决策 K 线唯一 durable writer；不新增线程、服务、状态表或 Safety/Readiness/Risk sizing 平行裁决。
+- Code change（本批之前）：每 tick 在 Safety 前完成 positions/account fresh fact；live tick 不再执行 20 秒 history RPC 或写 K 线，stale 本地快照以 `stale_waiting_for_data_sync` 阻断 alpha/开仓；删除开仓 admission 同 tick 二次 reconcile 和旧 account/positions 并发兼容刷新器；broker 缺失 active recovery row 时仍复用既有 close-deal retirement/recovery 投影做一次有界确认，无法取得权威 close deal 继续 fail-closed。
+- Targeted verification：本批 live data-sync、lifecycle、open-admission、loop-runtime、Safety/账户事实组合 `116 passed`；全量测试 `2706 passed, 9 skipped`；`git diff --check` 和 Python compile 通过。
+- Runtime verification：2026-08-12 16:59:28 受控重启 `quant-backend.service`，PID `74540 -> 222088`；新进程加载当前工作区代码，cTrader 认证完成，local/public `/api/health` 在启动恢复后均为 `db=connected, ctrader=connected`。启动阶段保留 fail-closed，未放行新增风险。
+- Runtime result：新进程仍出现 `safety_freshness` activate/release 抖动；17:01:05 release 后 17:01:15 再次 activate，后续继续重复，当前 latch 仍为 `active`。日志同时显示 legacy `initial_ctrader_data_pull` 在 17:01:32、17:02:50、17:03:53 依次完成 M15/M30/H1 的 `n_bars=5000` 拉取；live tick 间隔仍约 20 秒，说明串行 Safety freshness 仍被启动/下游 broker 阶段拉穿。
+- Remaining：本批已删除 live decision-bar 热路径 writer、admission 二次 reconcile 和 legacy startup history pull；但当前 PID `222088` 尚未重启加载本批删除，运行态仍需确认无 `init:fast`/`init:deferred` 线程及其拉取日志。此前 `safety_freshness` 抖动的运行结论不因代码删除自动改写，Safety v2 保持 shadow，不推进 enforce；重启后再补共享 deadline/阶段耗时证据。
+- Residual deletion verification：本批针对性测试 `119 passed`，Python compile、`git diff --check` 通过，生产代码和测试中已无 legacy startup pull 符号；尚未重启，因此不把代码验收当作运行验收。
+
+### 2026-08-12 cTrader live trendbar 主路径（本批）
+
+- Canonical authority：`CTraderBridge` 的 cTrader live trendbar 内存 feed 是 live 决策和 live 风险历史窗口的唯一热路径 bar source；`data_sync` 保留为唯一 durable monthly writer，不新增第二个 bar 写入者。
+- Code change：接入 `ProtoOASubscribeLiveTrendbarReq`，由 `ProtoOASpotEvent.trendbar` 解码并缓存；live tick 和 forward VaR/CVaR 改读 bridge 内存 frame；启动历史改为 cTrader 在线优先、本地月库兜底；本地 `data_sync` 调整为每 30 分钟低频回补，并将 system health/market session 的实时判断优先切到 online feed。
+- Fail-closed：实时 trendbar 缺失、断流、乱序或未闭合时保持 `stale_waiting_for_live_trendbar`，不调用 history RPC、不读月库、不生成 alpha；cTrader 重连时重新订阅。
+- Targeted verification：bridge、startup fallback、live tick、freshness、scheduler、health/risk 相关测试 `137 passed`；Python compile 与 `git diff --check` 通过；全量测试 `2707 passed, 9 skipped`。
+- Runtime acceptance：受控重启后已观察到 `source=broker`、`seeded online trendbar feed`、`subscribe_live_trendbars OK` 和新 M5 bar；跨过 18:35 闭合边界后 live tick 继续正常输出，未再出现 `waits for data_sync`。启动 catch-up 的 `data_sync` 仅在 bridge warming 时跳过，正式调度仍为 `2,32 * * * *`；若 cTrader 账户/市场实际不推送 trendbar，必须继续保持 fail-closed，不得回退为在线 spot 伪造 OHLC。
+
 ### P2 canonical risk
 
 ```text
