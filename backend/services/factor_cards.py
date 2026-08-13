@@ -504,8 +504,18 @@ class FactorCardService:
             catalog_by_factor: dict[str, dict[str, Any]] = {}
             runtime_projection: dict[str, Any] = {}
             try:
-                from backend.services.factor_catalog import build_factor_catalog
-                catalog_items = build_factor_catalog(self.db_path)
+                from backend.services.factor_catalog import (
+                    build_factor_catalog,
+                    latest_factor_catalog_snapshot,
+                )
+
+                latest_snapshot = latest_factor_catalog_snapshot(self.db_path)
+                catalog_items = (
+                    latest_snapshot.get("items")
+                    if latest_snapshot.get("ok")
+                    and isinstance(latest_snapshot.get("items"), list)
+                    else build_factor_catalog(self.db_path)
+                )
                 catalog_by_factor = {
                     str(item.get("factor_id") or ""): item
                     for item in catalog_items

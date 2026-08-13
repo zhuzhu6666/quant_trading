@@ -102,3 +102,4 @@ package-lock.json
 *.egg-info/
 dist/
 build/
+web_frontend/src-tauri/target/

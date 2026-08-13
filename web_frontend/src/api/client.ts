@@ -1,41 +1,55 @@
+import { clearAccessToken, getAccessToken, setAccessToken } from "@/auth/tokenStore";
+import { deleteRefreshMaterial, readRefreshMaterial, storeRefreshMaterial } from "@/desktop/bridge";
+import { syncServerClockFromPayload } from "@/api/time";
+import { isTauri } from "@tauri-apps/api/core";
+
 export type AuthError = {
   message: string;
   status: number;
   detail?: unknown;
 };
 
-function errorRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
+type UnknownObject = { [key: string]: unknown };
+
+function object(value: unknown): UnknownObject {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as UnknownObject : {};
 }
 
 export function getApiErrorCode(error: unknown): string {
-  const body = errorRecord(errorRecord(error).detail);
-  const direct = body.error;
+  const detail = object(object(error).detail);
+  const direct = detail.error;
   if (typeof direct === "string") return direct;
-  const detail = errorRecord(body.detail);
-  return typeof detail.error === "string" ? detail.error : "";
+  const nested = object(detail.detail).error;
+  return typeof nested === "string" ? nested : "";
 }
 
 export function isStepUpRequiredError(error: unknown): boolean {
   return getApiErrorCode(error) === "step_up_required";
 }
 
-export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
+export type LoginPayload = { username: string; password: string };
+export type LoginResponse = { user: string; access_token?: string; token?: string; refresh_token?: string; expires_in?: number; token_type?: string };
+export type StepUpResponse = LoginResponse & { session_id: string; auth_time: number };
+export type AuthMe = { user: string; authenticated: boolean };
 
-const envBase = typeof import.meta !== "undefined" && import.meta.env
-  ? String(import.meta.env.VITE_API_BASE_URL || "")
-  : "";
-const API_BASE = envBase.replace(/\/$/, "");
-let onUnauthorized: (() => void | Promise<void>) | null = null;
+export function extractLoginToken(response: LoginResponse): string {
+  const value = response.access_token ?? response.token ?? "";
+  return value.startsWith("Bearer ") ? value.slice(7) : value;
+}
+
+const DEFAULT_DESKTOP_API_BASE_URL = "https://www.zhuzhu666.icu";
+const envBase = typeof import.meta !== "undefined" && import.meta.env ? String(import.meta.env.VITE_API_BASE_URL || "") : "";
+// Browser production is same-origin behind Caddy; Tauri must target the remote API explicitly.
+// VITE_API_BASE_URL remains the deployment override for staging or local backends.
+const configuredBase = envBase || (isTauri() ? DEFAULT_DESKTOP_API_BASE_URL : "");
+const API_BASE = configuredBase.replace(/\/$/, "");
+const AUTH_REFRESH_LOCK = "quant.auth.refresh";
+let unauthorizedHandler: (() => void | Promise<void>) | null = null;
 let unauthorizedInFlight: Promise<void> | null = null;
 let refreshInFlight: Promise<string | null> | null = null;
-const AUTH_TOKEN_KEY = "quant.auth.token";
-const AUTH_REFRESH_LOCK = "quant.auth.refresh";
 
 export function setUnauthorizedHandler(handler: () => void | Promise<void>): void {
-  onUnauthorized = handler;
+  unauthorizedHandler = handler;
 }
 
 export function resetUnauthorizedCoordinator(): void {
@@ -45,867 +59,124 @@ export function resetUnauthorizedCoordinator(): void {
 async function runUnauthorizedOnce(): Promise<void> {
   if (!unauthorizedInFlight) {
     unauthorizedInFlight = (async () => {
-      if (onUnauthorized) {
-        await onUnauthorized();
-      } else {
-        clearAccessToken();
-      }
+      if (unauthorizedHandler) await unauthorizedHandler();
+      else clearAccessToken();
     })();
   }
   await unauthorizedInFlight;
 }
 
 export function getApiBaseUrl(): string {
-  return API_BASE || "";
+  return API_BASE;
 }
 
-function buildHttpUrl(path: string): string {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return `${API_BASE}${normalizedPath}`;
+function httpUrl(path: string): string {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  return `${API_BASE}${normalized}`;
 }
 
-function buildWsUrl(path: string): string {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+function wsUrl(path: string): string {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
   if (API_BASE && /^https?:\/\//i.test(API_BASE)) {
     const parsed = new URL(API_BASE);
-    const scheme = parsed.protocol === "https:" ? "wss:" : "ws:";
-    return `${scheme}//${parsed.host}${normalizedPath}`;
+    return `${parsed.protocol === "https:" ? "wss:" : "ws:"}//${parsed.host}${normalized}`;
   }
-
-  const defaultScheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${defaultScheme}//${window.location.host}${normalizedPath}`;
+  const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss:" : "ws:";
+  const host = typeof window !== "undefined" ? window.location.host : "localhost:5173";
+  return `${protocol}//${host}${normalized}`;
 }
 
 export function getWsUrl(): string {
-  return buildWsUrl("/ws/state");
+  return wsUrl("/ws/state");
 }
 
-function parseResponse<T>(response: Response): Promise<T> {
-  if (response.status === 204) {
-    return Promise.resolve(null as T);
-  }
-  const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) {
-    return response.json() as Promise<T>;
-  }
-  return response.text().then((text) => text as T);
+async function parseResponse<T>(response: Response): Promise<T> {
+  if (response.status === 204) return null as T;
+  const contentType = response.headers.get("content-type") ?? "";
+  return contentType.includes("application/json") ? response.json() as Promise<T> : response.text() as Promise<T>;
 }
 
-function publishAccessToken(token: string): void {
-  localStorage.setItem(AUTH_TOKEN_KEY, token);
-  window.dispatchEvent(new CustomEvent("quant-auth-token", { detail: { token } }));
-}
-
-function clearAccessToken(): void {
-  localStorage.removeItem(AUTH_TOKEN_KEY);
-  window.dispatchEvent(new Event("quant-auth-invalidated"));
-}
-
-async function requestRefreshedAccessToken(failedToken: string | null): Promise<string | null> {
-  const refresh = async (): Promise<string | null> => {
-    const currentToken = localStorage.getItem(AUTH_TOKEN_KEY);
-    if (currentToken && currentToken !== failedToken) {
-      return currentToken;
-    }
-    const response = await fetch(buildHttpUrl("/api/auth/refresh"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-      credentials: "include",
-    });
+async function refreshFromServer(failedToken: string | null): Promise<string | null> {
+  const refresh = async () => {
+    const current = getAccessToken();
+    if (current && current !== failedToken) return current;
+    const refreshMaterial = await readRefreshMaterial();
+    const response = await fetch(httpUrl("/api/auth/refresh"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(refreshMaterial ? { refresh_token: refreshMaterial } : {}), credentials: "include" });
     if (!response.ok) return null;
-    const body = await parseResponse<LoginResponse>(response);
-    const token = extractLoginToken(body);
+    const result = await parseResponse<LoginResponse>(response);
+    const token = extractLoginToken(result);
     if (!token) return null;
-    publishAccessToken(token);
+    if (result.refresh_token) void storeRefreshMaterial(result.refresh_token);
+    setAccessToken(token);
+    window.dispatchEvent(new CustomEvent("quant-auth-token", { detail: { token } }));
     resetUnauthorizedCoordinator();
     return token;
   };
-
-  // Module-local single-flight is insufficient when several tabs share the
-  // same rotating refresh cookie.  Web Locks serializes the refresh authority
-  // across same-origin browsing contexts; the token recheck inside the lock
-  // lets waiters reuse the winner instead of rotating the session again.
-  if (typeof navigator !== "undefined" && navigator.locks) {
-    return navigator.locks.request(AUTH_REFRESH_LOCK, refresh);
-  }
+  if (typeof navigator !== "undefined" && navigator.locks) return navigator.locks.request(AUTH_REFRESH_LOCK, refresh);
   return refresh();
 }
 
-async function refreshAccessToken(failedToken: string | null): Promise<string | null> {
-  if (!refreshInFlight) {
-    refreshInFlight = requestRefreshedAccessToken(failedToken).catch(() => null).finally(() => {
-      refreshInFlight = null;
-    });
-  }
+export async function refreshSession(): Promise<string | null> {
+  if (!refreshInFlight) refreshInFlight = refreshFromServer(getAccessToken()).catch(() => null).finally(() => { refreshInFlight = null; });
   return refreshInFlight;
 }
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}, retried = false): Promise<T> {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  const headers = new Headers(init.headers || {});
-  const hasBody = init.body !== undefined && init.body !== null;
-
-  if (!headers.has("Content-Type") && hasBody) {
-    headers.set("Content-Type", "application/json");
-  }
-  if (token && !headers.has("Authorization")) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
-  const authorization = headers.get("Authorization") || "";
-  const requestToken = authorization.startsWith("Bearer ")
-    ? authorization.slice(7)
-    : token;
-
-  const response = await fetch(buildHttpUrl(path), {
-    ...init,
-    headers,
-    credentials: "include",
-  });
-
+  const token = getAccessToken();
+  const headers = new Headers(init.headers ?? {});
+  if (init.body !== undefined && init.body !== null && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (token && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
+  const requestToken = headers.get("Authorization")?.startsWith("Bearer ") ? headers.get("Authorization")!.slice(7) : token;
+  const response = await fetch(httpUrl(path), { ...init, headers, credentials: "include" });
   if (response.status === 401) {
-    const body = await parseResponse<unknown>(response);
+    const detail = await parseResponse<unknown>(response);
     const authEndpoint = path.startsWith("/api/auth/login") || path.startsWith("/api/auth/refresh");
     if (!retried && !authEndpoint) {
-      // A late 401 from a request sent with the previous token must not rotate
-      // the session again.  Reuse the token already published by another
-      // request/tab and reserve refresh for the still-current failed token.
-      const currentToken = localStorage.getItem(AUTH_TOKEN_KEY);
-      const refreshedToken = currentToken && currentToken !== requestToken
-        ? currentToken
-        : await refreshAccessToken(requestToken);
-      if (refreshedToken) {
-        const retryHeaders = new Headers(init.headers || {});
+      const current = getAccessToken();
+      const refreshed = current && current !== requestToken ? current : await refreshSession();
+      if (refreshed) {
+        const retryHeaders = new Headers(init.headers ?? {});
         retryHeaders.delete("Authorization");
         return apiRequest<T>(path, { ...init, headers: retryHeaders }, true);
       }
     }
     await runUnauthorizedOnce();
-    throw Object.assign(new Error("unauthorized"), {
-      status: 401,
-      detail: body,
-      message: "Unauthorized",
-    } satisfies AuthError);
+    throw Object.assign(new Error("unauthorized"), { status: 401, detail, message: "Unauthorized" } satisfies AuthError);
   }
-
   if (!response.ok) {
-    const body = await parseResponse<unknown>(response);
-    throw Object.assign(new Error("request failed"), {
-      status: response.status,
-      detail: body,
-      message: response.statusText,
-    } satisfies AuthError);
+    const detail = await parseResponse<unknown>(response);
+    throw Object.assign(new Error("request failed"), { status: response.status, detail, message: response.statusText } satisfies AuthError);
   }
-
-  return parseResponse<T>(response);
+  const result = await parseResponse<T>(response);
+  syncServerClockFromPayload(result);
+  return result;
 }
 
-export const getJson = <T>(path: string, init: RequestInit = {}): Promise<T> =>
-  apiRequest<T>(path, { ...init, method: "GET" });
-
-export const postJson = <T>(path: string, body?: unknown, headers?: HeadersInit): Promise<T> =>
-  apiRequest<T>(path, {
-    method: "POST",
-    headers: { ...headers },
-    body: body ? JSON.stringify(body) : null,
-  });
-
-export type LoginPayload = {
-  username: string;
-  password: string;
-};
-
-export type LoginResponse = {
-  user: string;
-  token?: string;
-  access_token?: string;
-  token_type?: string;
-  expires_in?: number;
-  refresh_token?: string;
-  refresh_expires_in?: number;
-  password_rehash_required?: boolean;
-};
-
-export type StepUpResponse = {
-  user: string;
-  token?: string;
-  access_token?: string;
-  token_type?: string;
-  expires_in?: number;
-  session_id: string;
-  auth_time: number;
-  password_rehash_required?: boolean;
-};
-
-export function extractLoginToken(response: LoginResponse): string {
-  const raw = response.access_token || response.token || "";
-  return raw.startsWith("Bearer ") ? raw.slice(7) : raw;
-}
-
-export type AuthMe = {
-  user: string;
-  authenticated: boolean;
-};
-
-export type HealthResponse = {
-  status: string;
-  db?: string;
-  ctrader?: string;
-  server_time?: string;
-  uptime_seconds?: number;
-  [key: string]: unknown;
-};
-
-export type LoopStatus = {
-  running: boolean;
-  broker: string;
-  strategy: string;
-  strategy_name?: string;
-  strategyName?: string;
-  started_at?: number | null;
-  startedAt?: number | null;
-  pid?: number | null;
-  mode?: string;
-  reason?: string;
-  state?: string;
-  [key: string]: unknown;
-};
-
-export type AccountPayload = {
-  ok: boolean;
-  broker?: string;
-  balance?: number;
-  equity?: number;
-  margin?: number;
-  margin_free?: number;
-  free_margin?: number;
-  leverage?: number;
-  currency?: string;
-  error?: string;
-  warming_up?: boolean;
-  readiness?: Record<string, unknown>;
-  [key: string]: unknown;
-};
-
-export type PositionPayload = {
-  ok: boolean;
-  broker?: string;
-  warming_up?: boolean;
-  positions?: unknown[];
-  error?: string;
-  readiness?: Record<string, unknown>;
-  [key: string]: unknown;
-};
-
-export type SessionStats = {
-  pnl_today?: number;
-  pnlToday?: number;
-  trades?: number;
-  win?: number;
-  losses?: number;
-  wins?: number;
-  drawdown_pct?: number;
-  drawdownPct?: number;
-  drawdown?: number;
-  consecutive_loss?: number;
-  consecutiveLoss?: number;
-  session_trades?: number;
-  trade_count?: number;
-};
-
-export type RealizedPoint = {
-  ts: number;
-  cumulative: number;
-  pnl: number;
-  position_id?: number;
-  deal_id?: number;
-  source?: string;
-  symbol?: string;
-  direction?: number | string;
-  gross?: number;
-  swap?: number;
-  commission?: number;
-  [key: string]: unknown;
-};
-
-export type RealizedPnlSeries = {
-  ok: boolean;
-  scope: string;
-  currency: string;
-  source?: string;
-  from_ts: number;
-  to_ts: number;
-  summary: {
-    realized_pnl: number;
-    trades: number;
-    wins: number;
-    losses: number;
-    win_rate: number;
-  };
-  points: RealizedPoint[];
-};
-
-export type RiskSummary = {
-  snapshot?: Record<string, unknown>;
-  policy?: Record<string, unknown>;
-  concentration?: Record<string, unknown>;
-  var?: Record<string, unknown>;
-  stress?: Record<string, unknown>;
-  kelly?: Record<string, unknown>;
-  system_health?: Record<string, unknown>;
-  [key: string]: unknown;
-};
-
-export type DbHealthPayload = {
-  updated_at?: number;
-  databases: unknown[];
-  errors?: string[];
-  status?: string;
-  ok?: boolean;
-  overall?: string;
-  checked_at?: number;
-  summary?: {
-    total?: number;
-    fresh?: number;
-    stale?: number;
-    missing?: number;
-  };
-  [key: string]: unknown;
-};
-
-export type BackendReadinessPayload = {
-  ok?: boolean;
-  status?: string;
-  summary?: Record<string, unknown>;
-  ready_for_frontend?: boolean;
-  readiness?: Record<string, unknown>;
-  generated_at?: number;
-  schema_version?: string;
-  blockers?: unknown[];
-  system_health?: Record<string, unknown>;
-  service_health?: Record<string, unknown>;
-  live?: Record<string, unknown>;
-  backend_service?: Record<string, unknown>;
-  high_load?: Record<string, unknown>;
-  models?: Record<string, unknown>;
-  factor_data?: Record<string, unknown>;
-  [key: string]: unknown;
-};
-
-export type SystemLoadPayload = {
-  ok?: boolean;
-  ts?: number;
-  cpu?: {
-    percent?: number;
-    load1?: number;
-    load5?: number;
-    load15?: number;
-    cores?: number;
-  };
-  memory?: {
-    total_bytes?: number;
-    available_bytes?: number;
-    used_bytes?: number;
-    percent?: number;
-  };
-  disk?: {
-    path?: string;
-    total_bytes?: number;
-    free_bytes?: number;
-    used_bytes?: number;
-    percent?: number;
-  };
-  process?: {
-    pid?: number;
-    rss_bytes?: number;
-  };
-  [key: string]: unknown;
-};
-
-export type LearningPayload = Record<string, unknown>;
-
-export type StateSnapshot = Record<string, unknown> & {
-  account?: Record<string, unknown>;
-  positions_list?: unknown[];
-  positions?: unknown[] | { positions?: unknown[]; ok?: boolean };
-  loop_status?: Record<string, unknown>;
-  session_stats?: SessionStats;
-  daily?: Record<string, unknown>;
-  closed_loop?: Record<string, unknown>;
-  broker?: string;
-  balance?: number;
-  equity?: number;
-  margin?: number;
-  margin_free?: number;
-  leverage?: number;
-  currency?: string;
-  active_strategy?: {
-    id?: string;
-    mode?: string;
-    source?: string;
-  };
-  risk?: Record<string, unknown>;
-  source?: string;
-  session_pnl?: number;
-  server_time?: string;
-  consecutive_loss?: number;
-};
+export const getJson = <T>(path: string): Promise<T> => apiRequest<T>(path, { method: "GET" });
+export const postJson = <T>(path: string, body?: unknown, extraHeaders?: HeadersInit): Promise<T> => apiRequest<T>(path, { method: "POST", headers: extraHeaders, body: body === undefined ? undefined : JSON.stringify(body) });
 
 export async function login(payload: LoginPayload): Promise<LoginResponse> {
-  return postJson<LoginResponse>("/api/auth/login", payload);
+  const result = await postJson<LoginResponse>("/api/auth/login", payload);
+  const token = extractLoginToken(result);
+  if (!token) throw new Error("登录响应缺少 token");
+  if (result.refresh_token) void storeRefreshMaterial(result.refresh_token);
+  setAccessToken(token);
+  window.dispatchEvent(new CustomEvent("quant-auth-token", { detail: { token } }));
+  return result;
 }
 
 export async function stepUpAuth(password: string): Promise<StepUpResponse> {
   const result = await postJson<StepUpResponse>("/api/auth/step-up", { password });
   const token = extractLoginToken(result);
-  if (!token) throw new Error("再认证响应缺少 access token");
-  publishAccessToken(token);
+  if (!token) throw new Error("step-up 响应缺少 access token");
+  setAccessToken(token);
+  window.dispatchEvent(new CustomEvent("quant-auth-token", { detail: { token } }));
   resetUnauthorizedCoordinator();
   return result;
 }
 
-export async function getAuthMe(): Promise<AuthMe> {
-  return getJson<AuthMe>("/api/auth/me");
-}
-
+export const getAuthMe = () => getJson<AuthMe>("/api/auth/me");
 export async function logoutAuth(): Promise<void> {
-  await postJson<Record<string, unknown>>("/api/auth/logout", {});
+  try { await postJson<unknown>("/api/auth/logout", {}); } finally { await deleteRefreshMaterial(); }
 }
-
-export async function getWsTicket(): Promise<{ ticket: string; expires_in: number; expires_at: number }> {
-  return postJson<{ ticket: string; expires_in: number; expires_at: number }>("/api/auth/ws-ticket", {});
-}
-
-export async function getLoopStatus(): Promise<LoopStatus> {
-  return getJson<LoopStatus>("/api/live/loop-status");
-}
-
-export async function getLiveStatus(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/live/status");
-}
-
-export async function getStrategyStatus(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/live/strategy-status");
-}
-
-export async function getAccount(): Promise<AccountPayload> {
-  return getJson<AccountPayload>("/api/live/account");
-}
-
-export async function getPositions(): Promise<PositionPayload> {
-  return getJson<PositionPayload>("/api/live/positions");
-}
-
-export async function getSessionStats(): Promise<SessionStats> {
-  return getJson<SessionStats>("/api/live/session-stats");
-}
-
-export async function getRealizedPnlSeries(scope: string): Promise<RealizedPnlSeries> {
-  const url = `/api/live/realized-pnl-series?scope=${encodeURIComponent(scope)}`;
-  return getJson<RealizedPnlSeries>(url);
-}
-
-export async function getRiskSummary(): Promise<RiskSummary> {
-  return getJson<RiskSummary>("/api/risk/summary");
-}
-
-export async function getRiskPolicyVerdicts(limit = 50): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>(`/api/risk/policy/verdicts?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getRecentTradeTraces(limit = 20): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>(`/api/risk/trade-trace/recent?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getFactorV4Stats(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/v4/stats");
-}
-
-export async function getFactorCatalog(snapshot = false): Promise<Record<string, unknown>> {
-  const query = snapshot ? "?snapshot=latest" : "";
-  return getJson<Record<string, unknown>>(`/api/v4/catalog${query}`);
-}
-
-export async function getFactorV4RecentTicks(): Promise<unknown[]> {
-  return getJson<unknown[]>("/api/v4/recent-ticks");
-}
-
-export async function getLearningSummary(): Promise<LearningPayload> {
-  return getJson<LearningPayload>("/api/learning/summary");
-}
-
-export async function getLearningSuggestions(limit = 20): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/suggestions?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getLearningApplications(limit = 20): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/applications?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getLearningLifecycle(limit = 30): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/lifecycle?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getEvolutionRuns(limit = 10): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/evolution/runs?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getParameterTemplatesActive(): Promise<LearningPayload> {
-  return getJson<LearningPayload>("/api/learning/parameter-templates/active");
-}
-
-export async function getParameterTemplateSwitchLogs(limit = 20): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/parameter-templates/switch-logs?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getLearningReviews(limit = 10): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/reviews?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getAutonomousLearningSamples(limit = 10): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/autonomous/samples?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getModelPermissionAudits(limit = 10): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/model/permissions/audits?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getLearningDatasetReadiness(): Promise<LearningPayload> {
-  return getJson<LearningPayload>("/api/learning/dataset/readiness");
-}
-
-export async function getLearningDatasetQualityHealth(limit = 1000): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/dataset/quality-health?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getModelShadowQueue(limit = 30): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/model/shadow-queue?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getModelCanaryReviews(limit = 30): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/model/canary-review?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getModelInferenceAudits(limit = 30): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/model/inference?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getPositionQualityLightgbmAudits(limit = 30): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/model/position-quality-lightgbm/audits?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getOpenQualityLightgbmAudits(limit = 30): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/model/open-quality-lightgbm/audits?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getFactorGovernanceLightgbmAudits(limit = 30): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/model/factor-governance-lightgbm/audits?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getFactorGovernanceLightgbmAdvisories(limit = 30): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/model/factor-governance-lightgbm/advisories?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getOffmarketHighLoadAudits(limit = 30): Promise<LearningPayload> {
-  return getJson<LearningPayload>(`/api/learning/model/offmarket-high-load/audits?limit=${encodeURIComponent(String(limit))}`);
-}
-
-export async function getReplayLatest(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/ops/replay/latest");
-}
-
-export async function getReplayBarDecisions(limit = 30): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({
-    lookback_days: "7",
-    limit: String(limit),
-    offset: "0",
-  });
-  return getJson<Record<string, unknown>>(`/api/ops/replay/bar-decisions?${params.toString()}`);
-}
-
-export async function runReplayBarEvidence(decisionId = ""): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({
-    lookback_days: "1",
-    limit: "1",
-    warmup_bars: "40",
-    post_bars: "24",
-  });
-  if (decisionId) {
-    params.set("decision_id", decisionId);
-    params.set("lookback_days", "7");
-  }
-  return postJson<Record<string, unknown>>(`/api/ops/replay/bar-preview?${params.toString()}`);
-}
-
-export async function getIncidentControl(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/ops/incident-control");
-}
-
-export async function setIncidentControl(mode: string, reason: string): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/incident-control", {
-    mode,
-    reason,
-    confirm_thaw: mode === "normal",
-  });
-}
-
-export async function getIncidentPlaybookLatest(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/ops/incident-playbook/latest");
-}
-
-export async function runIncidentPlaybook(scenario = "governance_failure", severity = "medium"): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/incident-playbook/run", {
-    scenario,
-    severity,
-    created_by: "web:v15_cockpit",
-  });
-}
-
-export async function getAutonomyScopeApprovalLatest(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/ops/autonomy-health/scope-approvals/latest");
-}
-
-export async function getAutonomyScopeEnforcementLatest(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/ops/autonomy-health/scope-enforcements/latest");
-}
-
-export async function enforceAutonomyScope(): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/autonomy-health/scope-enforcements", {
-    actor: "web:v15_cockpit",
-    reason: "web_v15_cockpit_tightening_review",
-  });
-}
-
-export async function getV15Phase0(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/ops/v15/phase0");
-}
-
-export async function getReleaseLatest(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/ops/release/latest");
-}
-
-export async function startReleaseRun(): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/release/start", {
-    release_class: "daily_autonomous_mutation",
-    summary: { source: "web_v15_cockpit" },
-    tests: [],
-    rollback_ref: {},
-    created_by: "web:v15_cockpit",
-  });
-}
-
-export async function getReleaseApprovals(runId: string): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>(`/api/ops/release/${encodeURIComponent(runId)}/approvals`);
-}
-
-export async function getBrainState(refresh = false): Promise<Record<string, unknown>> {
-  const query = refresh ? "?refresh=true" : "";
-  return getJson<Record<string, unknown>>(`/api/ops/brain/state${query}`);
-}
-
-export async function getBrainMemory(refresh = false, limit = 50): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  if (refresh) params.set("refresh", "true");
-  return getJson<Record<string, unknown>>(`/api/ops/brain/memory?${params.toString()}`);
-}
-
-export async function getAgentAuthority(): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>("/api/ops/agent-authority");
-}
-
-export async function getAgentScorecard(limit = 300): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  return getJson<Record<string, unknown>>(`/api/ops/agent-scorecard?${params.toString()}`);
-}
-
-export async function getAgentBriefing(limit = 20): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  return getJson<Record<string, unknown>>(`/api/ops/agent-briefing?${params.toString()}`);
-}
-
-export async function getAgentChainHealth(limit = 300): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  return getJson<Record<string, unknown>>(`/api/ops/agent-chain-health?${params.toString()}`);
-}
-
-export async function getBrainActionPlans(refresh = false, limit = 50): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  if (refresh) params.set("refresh", "true");
-  return getJson<Record<string, unknown>>(`/api/ops/brain/action-plans?${params.toString()}`);
-}
-
-export async function getBrainActionPlanEvals(refresh = false, limit = 50): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  if (refresh) params.set("refresh", "true");
-  return getJson<Record<string, unknown>>(`/api/ops/brain/action-plan-evals?${params.toString()}`);
-}
-
-export async function getBrainLowImpactExecutions(limit = 50): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  return getJson<Record<string, unknown>>(`/api/ops/brain/low-impact-executions?${params.toString()}`);
-}
-
-export async function runBrainLowImpactExecution(): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/brain/low-impact-executions/run", {
-    limit: 1,
-    allow_tighten: false,
-    replay_lookback_days: 1,
-    replay_limit: 100,
-  });
-}
-
-export async function getBrainMediumImpactGovernance(limit = 50): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  return getJson<Record<string, unknown>>(`/api/ops/brain/medium-impact-governance?${params.toString()}`);
-}
-
-export async function getBrainGovernanceCandidateReviews(limit = 50): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  return getJson<Record<string, unknown>>(`/api/ops/brain/governance-candidate-reviews?${params.toString()}`);
-}
-
-export async function materializeBrainMediumImpactGovernance(): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/brain/medium-impact-governance/materialize", {
-    limit: 4,
-    allow_tighten_low_health: false,
-  });
-}
-
-export async function reviewBrainGovernanceCandidates(): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/brain/governance-candidates/review", {
-    limit: 20,
-    run_llm: false,
-    llm_dry_run: true,
-  });
-}
-
-export async function getBrainLiveReadyGuardrails(limit = 50): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  return getJson<Record<string, unknown>>(`/api/ops/brain/live-ready-guardrails?${params.toString()}`);
-}
-
-export async function getAutonomyProposals(
-  refresh = false,
-  limit = 80,
-  status = "",
-): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  if (refresh) params.set("refresh", "true");
-  if (status) params.set("status", status);
-  return getJson<Record<string, unknown>>(`/api/ops/autonomy/proposals?${params.toString()}`);
-}
-
-export async function refreshAutonomyProposals(limit = 500): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  return postJson<Record<string, unknown>>(`/api/ops/autonomy/proposals/refresh?${params.toString()}`, {});
-}
-
-export async function reviewAutonomyProposal(
-  proposalId: string,
-  payload: { decision?: string; route?: string; notes?: string; actor?: string } = {},
-): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>(`/api/ops/autonomy/proposals/${encodeURIComponent(proposalId)}/review`, {
-    actor: payload.actor || "web:meta_governance",
-    decision: payload.decision || "reviewed",
-    route: payload.route || "",
-    notes: payload.notes || "",
-  });
-}
-
-export async function getLiveAutonomyStatus(refreshProposals = false): Promise<Record<string, unknown>> {
-  const params = new URLSearchParams();
-  if (refreshProposals) params.set("refresh_proposals", "true");
-  const suffix = params.toString() ? `?${params.toString()}` : "";
-  return getJson<Record<string, unknown>>(`/api/ops/autonomy/live-status${suffix}`);
-}
-
-export async function evaluateLiveAutonomyUnlock(
-  reason = "web_meta_governance_evaluate",
-): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/autonomy/live-unlock/evaluate", {
-    actor: "web:meta_governance",
-    reason,
-    confirm: false,
-  });
-}
-
-export async function unlockLiveAutonomy(reason = "web_meta_governance_unlock"): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/autonomy/live-unlock", {
-    actor: "web:meta_governance",
-    reason,
-    confirm: true,
-  });
-}
-
-export async function revokeLiveAutonomy(reason = "web_meta_governance_revoke"): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/autonomy/live-unlock/revoke", {
-    actor: "web:meta_governance",
-    reason,
-  });
-}
-
-export async function evaluateBrainLiveReadyGuardrail(): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/brain/live-ready-guardrails/evaluate", {
-    source: "web:v16_brain",
-  });
-}
-
-export async function tightenBrainLiveReadyGuardrail(targetMode: string): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/ops/brain/live-ready-guardrails/tighten", {
-    target_mode: targetMode,
-    reason: `web:v16_brain:${targetMode}`,
-    actor: "web:v16_brain",
-  });
-}
-
-export async function startTrading(
-  broker = "ctrader",
-  strategy_name = "factor_v4",
-  confirmed = false,
-): Promise<Record<string, unknown>> {
-  return postJson(
-    "/api/live/start",
-    { broker, strategy_name },
-    confirmed ? { "X-Confirm": "start-live" } : undefined,
-  );
-}
-
-export async function stopTrading(): Promise<Record<string, unknown>> {
-  return postJson("/api/live/stop", {});
-}
-
-export async function emergencyClose(confirmed = false): Promise<Record<string, unknown>> {
-  return apiRequest<Record<string, unknown>>("/api/live/emergency-close", {
-    method: "POST",
-    headers: {
-      ...(confirmed ? { "X-Confirm": "emergency" } : {}),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ broker: "ctrader", symbol: null }),
-  });
-}
-
-export type BacktestRequest = {
-  symbol: string;
-  timeframe: string;
-  start?: string;
-  end?: string;
-  max_bars: number;
-  warmup_bars: number;
-  initial_equity: number;
-  volume_lots: number;
-  commission_per_lot_round_turn: number;
-  slippage_price_each_fill: number;
-};
-
-export async function startHistoricalBacktest(
-  payload: BacktestRequest,
-): Promise<Record<string, unknown>> {
-  return postJson<Record<string, unknown>>("/api/backtest/run", payload);
-}
-
-export async function getHistoricalBacktestJob(
-  jobId: string,
-): Promise<Record<string, unknown>> {
-  return getJson<Record<string, unknown>>(`/api/backtest/${encodeURIComponent(jobId)}`);
-}
+export const getWsTicket = () => postJson<{ ticket: string; expires_in: number; expires_at: number }>("/api/auth/ws-ticket", {});

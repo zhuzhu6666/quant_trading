@@ -3607,6 +3607,7 @@ class CTraderBridge(BaseBrokerBridge):
         *,
         force: bool = True,
         allow_cache_fallback: bool = False,
+        positions_reconcile: PositionReconcileResult | None = None,
         confirmed_empty_positions: PositionReconcileResult | None = None,
     ) -> AccountReconcileResult:
         """
@@ -3654,13 +3655,16 @@ class CTraderBridge(BaseBrokerBridge):
             resp = self._send(req, timeout=10.0)
             t = resp.trader
             # Equity is not fresh unless both the trader balance and the
-            # broker position/PnL projection succeeded.  A fresh immutable
-            # broker reconcile that confirms zero positions is authoritative
-            # proof that unrealized PnL was zero at its observation time, so
-            # avoid a redundant PnL RPC in that narrow case.  This reduces
-            # cTrader timeout pressure without ever inferring zero from a
-            # cache, failed reconcile, stale timestamp, or non-empty account.
+            # broker position/PnL projection succeeded.  The position
+            # reconcile is the canonical snapshot for this serial tick.  A
+            # fresh immutable result can therefore provide either proof of
+            # zero PnL (empty) or a known per-position PnL sum (non-empty).
+            # Reusing it avoids a second PnL RPC without ever inferring zero
+            # from a cache, failed reconcile, stale timestamp, or unknown
+            # component.
             empty_positions_observed_at = 0.0
+            reused_positions_pnl_observed_at = 0.0
+            reused_positions_pnl: float | None = None
             if (
                 isinstance(confirmed_empty_positions, PositionReconcileResult)
                 and confirmed_empty_positions.fresh
@@ -3672,11 +3676,45 @@ class CTraderBridge(BaseBrokerBridge):
                 candidate_age = generated_at - candidate_observed_at
                 if -1.0 <= candidate_age <= 15.0:
                     empty_positions_observed_at = candidate_observed_at
-            unrealized = (
-                0.0
-                if empty_positions_observed_at > 0.0
-                else self._unrealized_pnl()
-            )
+            if (
+                isinstance(positions_reconcile, PositionReconcileResult)
+                and positions_reconcile.fresh
+                and positions_reconcile.positions
+            ):
+                position_ids = {
+                    int(position.position_id or 0)
+                    for position in positions_reconcile.positions
+                    if int(position.position_id or 0) > 0
+                }
+                pnl_component = positions_reconcile.pnl_component
+                component_ids = {
+                    int(position_id or 0)
+                    for position_id in (pnl_component.known_position_ids or ())
+                    if int(position_id or 0) > 0
+                }
+                pnl_observed_at = float(pnl_component.observed_at or 0.0)
+                if (
+                    pnl_component.known
+                    and position_ids
+                    and component_ids == position_ids
+                    and all(
+                        str(position.pnl_state or "").lower() == "known"
+                        for position in positions_reconcile.positions
+                    )
+                ):
+                    pnl_age = time.time() - pnl_observed_at
+                    if pnl_observed_at > 0.0 and -1.0 <= pnl_age <= 15.0:
+                        reused_positions_pnl = sum(
+                            float(position.pnl or 0.0)
+                            for position in positions_reconcile.positions
+                        )
+                        reused_positions_pnl_observed_at = pnl_observed_at
+            if empty_positions_observed_at > 0.0:
+                unrealized = 0.0
+            elif reused_positions_pnl is not None:
+                unrealized = reused_positions_pnl
+            else:
+                unrealized = self._unrealized_pnl()
             account = self._account_from_trader(t, unrealized=unrealized)
             balance = account.balance
             equity = account.equity
@@ -3692,6 +3730,11 @@ class CTraderBridge(BaseBrokerBridge):
                 if empty_positions_observed_at > 0.0
                 else time.time()
             )
+            if reused_positions_pnl_observed_at > 0.0:
+                # The trader response is current at this point; use the
+                # current account response time as the account fact time, not
+                # the older position-PnL component time.
+                observed_at = time.time()
             with self._account_cache_lock:
                 self._account_cache_observed_at = observed_at
                 self._account_cache_source = "cache"

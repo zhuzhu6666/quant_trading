@@ -15,6 +15,9 @@ def test_get_bars_default():
     assert "bars" in body
     assert "total" in body
     assert "range" in body
+    assert body["_fact"]["envelope"] == "fact.v1"
+    assert body["_fact"]["contract"] == "market.bars.v1"
+    assert body["_fact"]["state"] in {"known", "stale", "unknown", "error"}
 
 
 def test_invalid_timeframe_422():

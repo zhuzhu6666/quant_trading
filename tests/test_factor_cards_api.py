@@ -536,6 +536,39 @@ def test_learning_factor_cards_endpoint_returns_filtered_items(tmp_path, monkeyp
     assert result["items"][0]["governance_state"]["application_effect_status"] == "observing"
 
 
+def test_factor_cards_prefers_latest_catalog_snapshot(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    _seed_factor_card_state(db_path)
+
+    import backend.services.factor_catalog as factor_catalog
+
+    monkeypatch.setattr(
+        factor_catalog,
+        "latest_factor_catalog_snapshot",
+        lambda _db_path: {
+            "ok": True,
+            "items": [
+                {
+                    "factor_id": "rsi_14",
+                    "source": "builtin",
+                    "lifecycle_status": "ACTIVE",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        factor_catalog,
+        "build_factor_catalog",
+        lambda *_args, **_kwargs: pytest.fail("live catalog rebuild should be skipped"),
+    )
+
+    cards = FactorCardService(db_path).list_cards(factor_id="rsi_14", limit=1)
+
+    assert len(cards) == 1
+    assert cards[0]["factor_id"] == "rsi_14"
+
+
 def test_factor_card_surfaces_catalog_governance_shadow_evidence(tmp_path):
     db_path = str(tmp_path / "state.db")
     reset_shared()

@@ -67,7 +67,7 @@
 
 - 状态：`migrating`
 - canonical：旧线程真实退出前保留 ownership；每 tick 由现有 serial owner 按 positions reconcile -> account reconcile/publish -> Safety -> alpha 排序，Safety v2 与独立 legacy preview 比较。broker fresh snapshot 与 active recovery row 不一致时，先复用既有 close-deal retirement/recovery 投影做一次有界确认，证据不足仍保持冲突 latch。已通过门的同一 closed bar 仅在 watchdog 自有 freshness cause 短暂锁存时由现有 serial owner 保留一次内存 admission retry，下一轮 canonical safety/reconcile 后复用原 open pipeline；bar 推进或出现其他 cause 立即丢弃，不新增执行通道。
-- 当前：2026-08-12 已完成代码、针对性/全量测试并完成受控重启；`safety_freshness` 仍按既有 shadow 观察，尚未满足完整持仓生命周期或 24 小时无仓观察；Generation 开关不变。live-loop 的并发 account/positions refresh 已删除，开仓 admission 不再执行同 tick 二次 reconcile，`make_initial_ctrader_data_pull` 并行历史 K 线 writer 已删除；本批进一步将 cTrader live trendbar 内存 feed 设为 live bar authority，月库改为每 30 分钟低频 durable replica。运行态已确认 broker-first warmup、live trendbar 订阅和跨 M5 闭合边界推进。
+- 当前：2026-08-13 已完成代码、针对性测试并完成受控重启前的验证；`safety_freshness` 仍按既有 shadow 观察，尚未满足完整持仓生命周期或 24 小时无仓观察；Generation 开关不变。live-loop 的并发 account/positions refresh 已删除，开仓 admission 不再执行同 tick 二次 reconcile；同一 tick 的账户对账现在复用持仓对账的已知 PnL，不再发重复 PnL RPC；loop 完成时间不再被 tick 开始阶段冒充。`make_initial_ctrader_data_pull` 并行历史 K 线 writer 已删除；cTrader live trendbar 内存 feed 仍是 live bar authority，月库为低频 durable replica。
 - 退出：重启后确认无 legacy startup history pull，完成共享 deadline/阶段耗时验证，观察与故障矩阵通过、受控发布稳定后删除 loop globals 和旧 safety 尾部执行。
 
 ### live_service 领域重力
@@ -109,6 +109,31 @@
 - 当前：复用 closed-bar、RiskPolicy 与保护纯原语，并绑定 config/data/code/factor artifact hash，但缺 broker/tick/safety/account/cost/projection-ack 的完整 PIT 事实。
 - 权限：固定 `diagnostic_only`、治理数量为零；runner 永不自授权。
 - 退出：只有独立 certification 重验完整 live lifecycle 后才能讨论 live-parity evidence。
+
+### Tauri/React 前端替换
+
+- 状态：migrating
+- canonical：web_frontend 内的 Tauri 2 + React 19 renderer；服务器端 API、fact.v1、
+  /ws/state、认证和 mutation contract 继续作为唯一权威。
+- 当前：新五工作区和直接废弃路由已经落在 React 19 + Vite/Tauri renderer；Workbench Shell、Safety
+  rail、唯一 `/ws/state`、强类型 endpoint decoder、IndexedDB 研究缓存、Tauri 2 壳和
+  signed NSIS updater artifact 均已落地。旧页面、旧 AppShell、`src/lib/compat.ts`、旧 route alias、
+  旧页面绑定 accessibility 样式和关键 endpoint 的宽泛 decoder 已删除。`/api/market/bars`
+  已补齐 `market.bars.v1`，缺数据明确返回 unknown。2026-08-13 的 static artifact
+  切换到公网 Caddy 根目录属于历史验证；当前迁移要求撤下浏览器静态入口、服务器只保留
+  API/WSS 与后端工作树。API 合同补丁已部署并重启验证，旧 dist 和 API pre-change
+  文件已留存仓库外 rollback archive；factor cards 已改为优先复用最新持久 catalog
+  snapshot，远程 44 个 factor-card 测试通过。
+- 替代：Workbench Shell、Trade Ops、Risk Desk、Research Lab、Governance、Ops
+  五个工作区、全局 Safety rail、强类型 endpoint decoder、唯一 live store 和
+  IndexedDB 研究只读缓存。
+- 剩余：服务器 backend-only sparse checkout、Caddy API/WSS-only 收口，以及代码层离线读取缓存、动作禁用、Credential Manager bridge 和 updater wiring
+  已实现，但真实浏览器/Tauri 断网恢复、缓存 hash/schema、Windows 安装卸载、WebView2
+  缺失路径、GitHub Actions Secret/manifest（workflow 已准备，Secret 未配置）、签名成功/失败回退、Linux API/WS/auth 全量
+  运行验证和完整验收仍未完成。
+- 退出：五个工作区通过 frontend-refactor-acceptance-matrix.md，生产入口一次性
+  切换，新旧 route 不再并存，旧页面/fallback/import/宽泛类型删除，签名包和
+  updater 回退通过；回滚使用 commit/artifact，不恢复长期旧地址别名。
 
 ### API/frontend 旧事实字段
 

@@ -7,15 +7,16 @@ import {
   LoginPayload,
   extractLoginToken,
   logoutAuth,
+  refreshSession,
   resetUnauthorizedCoordinator,
   setUnauthorizedHandler,
 } from "@/api/client";
 import { queryClient } from "@/api/queryClient";
+import { clearAccessToken as clearMemoryAccessToken, getAccessToken, setAccessToken } from "@/auth/tokenStore";
 import { authStateAfterMeFailure, type AuthSnapshot } from "@/contexts/authState";
+import { deleteRefreshMaterial } from "@/desktop/bridge";
 
-type AuthState = AuthSnapshot;
-
-type AuthContextValue = AuthState & {
+type AuthContextValue = AuthSnapshot & {
   login: (payload: LoginPayload) => Promise<void>;
   logout: () => void;
   refreshMe: () => Promise<void>;
@@ -23,122 +24,102 @@ type AuthContextValue = AuthState & {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-const STORAGE_KEY = "quant.auth.token";
+async function clearSessionState(clearToken: () => void): Promise<void> {
+  await queryClient.cancelQueries();
+  queryClient.clear();
+  await deleteRefreshMaterial();
+  clearToken();
+  window.dispatchEvent(new Event("quant-auth-invalidated"));
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const [state, setState] = useState<AuthState>({
-    token: localStorage.getItem(STORAGE_KEY),
+  const [state, setState] = useState<AuthSnapshot>({
+    token: getAccessToken(),
     user: null,
     loading: true,
     authenticated: false,
   });
 
   const clearLocalSession = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEY);
-    setState((prev) => ({ ...prev, token: null, user: null, authenticated: false }));
-    window.dispatchEvent(new Event("quant-auth-invalidated"));
+    clearMemoryAccessToken();
+    setState((previous) => ({ ...previous, token: null, user: null, authenticated: false }));
   }, []);
 
-  const logout = () => {
+  const logout = useCallback(() => {
     void logoutAuth().catch(() => undefined);
-    void queryClient.cancelQueries();
-    queryClient.clear();
-    clearLocalSession();
+    void clearSessionState(clearLocalSession);
     navigate("/login", { replace: true });
-  };
+  }, [clearLocalSession, navigate]);
 
-  const refreshMe = async () => {
-    if (!state.token) {
-      setState((prev) => ({ ...prev, loading: false, authenticated: false, user: null }));
+  const refreshMe = useCallback(async () => {
+    let token = getAccessToken();
+    if (!token) {
+      token = await refreshSession();
+    }
+    if (!token) {
+      setState((previous) => ({ ...previous, token: null, loading: false, authenticated: false, user: null }));
       return;
     }
+    setState((previous) => ({ ...previous, token }));
     try {
       const me: AuthMe = await getAuthMe();
-      setState((prev) => ({ ...prev, user: me.user, authenticated: me.authenticated, loading: false }));
+      setState((previous) => ({ ...previous, token, user: me.user, authenticated: me.authenticated, loading: false }));
     } catch (error) {
       const status = (error as { status?: number } | null)?.status;
-      setState((prev) => authStateAfterMeFailure(prev, status));
+      setState((previous) => authStateAfterMeFailure(previous, status));
     }
-  };
+  }, []);
 
   useEffect(() => {
-    refreshMe();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.token]);
+    void refreshMe();
+  }, [refreshMe]);
 
-  const login = async (payload: LoginPayload) => {
+  const login = useCallback(async (payload: LoginPayload) => {
     const result = await apiLogin(payload);
     const token = extractLoginToken(result);
-    if (!token) {
-      throw new Error("登录响应缺少 token");
-    }
-    localStorage.setItem(STORAGE_KEY, token);
+    if (!token) throw new Error("登录响应缺少 token");
+    setAccessToken(token);
     resetUnauthorizedCoordinator();
-    setState((prev) => ({
-      ...prev,
+    setState((previous) => ({
+      ...previous,
       token,
       loading: false,
       authenticated: true,
       user: result.user,
     }));
-  };
+  }, []);
 
   useEffect(() => {
     setUnauthorizedHandler(async () => {
-      await queryClient.cancelQueries();
-      queryClient.clear();
-      clearLocalSession();
+      await clearSessionState(clearLocalSession);
       navigate("/login", { replace: true });
     });
   }, [clearLocalSession, navigate]);
 
   useEffect(() => {
-    const onToken = (event: Event) => {
-      const token = (event as CustomEvent<{ token?: string }>).detail?.token || "";
-      if (token) {
-        setState((prev) => ({ ...prev, token }));
-      }
+    const channel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("quant-auth-events");
+    const onInvalidated = () => {
+      clearLocalSession();
+      navigate("/login", { replace: true });
     };
-    const onStorage = (event: StorageEvent) => {
-      if (event.key !== STORAGE_KEY) return;
-      const token = event.newValue || null;
-      setState((prev) => ({
-        ...prev,
-        token,
-        user: token ? prev.user : null,
-        authenticated: token ? prev.authenticated : false,
-      }));
-    };
-    window.addEventListener("quant-auth-token", onToken);
-    window.addEventListener("storage", onStorage);
+    window.addEventListener("quant-auth-invalidated", onInvalidated);
+    channel?.addEventListener("message", (event) => {
+      if (event.data?.type === "logout") onInvalidated();
+    });
     return () => {
-      window.removeEventListener("quant-auth-token", onToken);
-      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("quant-auth-invalidated", onInvalidated);
+      channel?.close();
     };
-  }, []);
+  }, [clearLocalSession, navigate]);
 
-  const value = useMemo<AuthContextValue>(
-    () => ({
-      ...state,
-      login,
-      logout,
-      refreshMe,
-    }),
-    [state],
-  );
+  const value = useMemo<AuthContextValue>(() => ({ ...state, login, logout, refreshMe }), [login, logout, refreshMe, state]);
 
-  return (
-    <AuthContext.Provider value={value}>
-      {children}
-    </AuthContext.Provider>
-  );
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) {
-    throw new Error("useAuth must be used within AuthProvider");
-  }
-  return ctx;
+export function useAuth(): AuthContextValue {
+  const context = useContext(AuthContext);
+  if (!context) throw new Error("useAuth must be used within AuthProvider");
+  return context;
 }

@@ -12,6 +12,7 @@ class _Bridge:
     is_connected = True
 
     def __init__(self) -> None:
+        self.positions_reconcile = None
         self.confirmed_empty_positions = None
 
     def reconcile_account(
@@ -19,8 +20,10 @@ class _Bridge:
         *,
         force=True,
         allow_cache_fallback=False,
+        positions_reconcile=None,
         confirmed_empty_positions=None,
     ):
+        self.positions_reconcile = positions_reconcile
         self.confirmed_empty_positions = confirmed_empty_positions
         now = time.time()
         return SimpleNamespace(
@@ -48,6 +51,7 @@ def test_explicit_account_reconcile_propagates_immutable_position_contract() -> 
     )
 
     assert result is not None
+    assert bridge.positions_reconcile is positions
     assert bridge.confirmed_empty_positions is positions
 
 

@@ -1,7 +1,7 @@
 # Documentation Governance
 
 > Status: active
-> Last verified: 2026-08-10
+> Last verified: 2026-08-13
 > Scope: 文档职责、更新与删除规则。
 
 ## 1. 原则
@@ -9,10 +9,15 @@
 1. `docs/README.md` 是唯一入口和当前状态摘要。
 2. `system-source-of-truth.md` 只定义长期事实源、权力边界和稳定运行合同。
 3. `legacy-debt-register.md` 只保留 active、migrating、quarantined、regressed 项；完成项由 Git 历史追溯。
-4. `planning/production-autonomy-repair-optimization-plan.md` 是唯一活动工程计划。
+4. `planning/production-autonomy-repair-optimization-plan.md` 是唯一全局生产工程计划；有独立生命周期、owner、读者和退出条件的领域计划可以作为
+   scoped companion 存在，但必须明确不替代全局计划，不复制系统事实。
 5. rollout status 记录实际进度，acceptance matrix 记录通过门槛；二者不重复架构说明。
 6. 领域合同只保存该领域无法由事实源概括的 schema、状态机或消费规则。
 7. 命名为 V15/V16、final blueprint、upgrade plan 的历史版本文档不再作为活动事实源。
+
+领域计划必须在 docs/README.md 有入口，在计划正文写明 owner、scope、替代/删除
+清单、完成条件和回滚方式；完成或取消后应从活动入口移除，剩余事实转入对应
+合同、状态或旧债登记。
 
 ## 2. 更新责任
 

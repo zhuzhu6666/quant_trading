@@ -1,7 +1,3 @@
 @import "./styles/tokens.css";
 @import "./styles/base.css";
-@import "./styles/domains.css";
-@import "./styles/accessibility.css";
-@import "./styles/surface.css";
-@import "./styles/autonomy.css";
-@import "./styles/console.css";
+@import "./styles/workbench.css";

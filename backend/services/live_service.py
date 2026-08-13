@@ -3974,15 +3974,36 @@ def _set_factor_snapshot(votes: dict, composite: dict) -> None:
 
 
 def _set_loop_diagnostic(tick: int, bridge_status: str | None = None, *, bridge_ready: bool | None = None) -> None:
+    """Record loop phase without confusing tick start with tick completion.
+
+    ``ts`` is the public loop liveness observation and therefore advances only
+    after the serial tick has completed.  Phase updates are useful diagnostics
+    but must not keep ``live.loop.v2`` green while a broker/RPC call is stuck.
+    """
     previous = _live_state_get("_diag", {}, clone=True) or {}
+    now = time.time()
     snapshot = {
         "tick": tick,
-        "ts": time.time(),
+        "ts": float(previous.get("ts") or 0.0),
         "bridge": bridge_status or previous.get("bridge", ""),
         "last_error": previous.get("last_error", ""),
+        "phase": bridge_status or previous.get("phase", ""),
+        "phase_at": now,
+        "current_tick": tick,
+        "last_completed_at": float(previous.get("last_completed_at") or 0.0),
+        "last_completed_tick": int(previous.get("last_completed_tick") or 0),
     }
+    if bridge_status == "checking":
+        snapshot["started_at"] = now
+    elif bridge_status is None:
+        snapshot["ts"] = now
+        snapshot["last_completed_at"] = now
+        snapshot["last_completed_tick"] = tick
+        snapshot["phase"] = "completed"
     if bridge_ready is not None:
         snapshot["bridge_ready"] = bridge_ready
+    elif "bridge_ready" in previous:
+        snapshot["bridge_ready"] = previous["bridge_ready"]
     _live_state_set("_diag", snapshot)
 
 

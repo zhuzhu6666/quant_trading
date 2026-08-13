@@ -10,16 +10,23 @@ from typing import Any, Mapping, MutableMapping
 FACT_STATES = frozenset({"known", "unknown", "stale", "error"})
 DEFAULT_STALE_AFTER_SEC = {
     "ws": 5.0,
-    "state": 5.0,
-    # Public spot freshness follows the final open admission contract.  The
-    # observation must still come from a real cTrader quote event; transport
-    # heartbeats must not refresh it.
-    "spot": 15.0,
-    "account": 15.0,
-    "positions": 15.0,
-    "loop": 15.0,
+    # These are presentation windows for the desktop fact projection.  The
+    # independent safety reconciler/open-admission watchdog remains fail
+    # closed at 15 seconds; widening these values must never authorize risk.
+    # A complete broker tick is normally below this 30-second display window,
+    # so a short scheduling/UI delay does not make a connected stream look
+    # disconnected.
+    "state": 30.0,
+    "spot": 30.0,
+    "account": 30.0,
+    "positions": 30.0,
+    "loop": 30.0,
     "risk": 30.0,
     "session": 30.0,
+    # M15 is served by the durable monthly replica.  Its quality gate and
+    # live-sync health contract are 1800 seconds; 900 made every quiet market
+    # period render as a false freshness failure.
+    "market": 1800.0,
     "system_health": 75.0,
     "readiness": 180.0,
     "learning": 180.0,

@@ -1,0 +1,1 @@
+{"main-capability":{"identifier":"main-capability","description":"Minimal desktop capability for the quant workbench renderer.","local":true,"windows":["main"],"permissions":["core:default","process:allow-restart","updater:default"]}}

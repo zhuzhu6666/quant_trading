@@ -4,8 +4,9 @@
 > Last verified: 2026-08-10
 > Scope: lightweight mobile status surface.
 
-This mini-program is now the lightweight mobile status surface for the trading system.
-The full console has moved to the Web frontend at:
+This mini-program is the lightweight mobile status surface for the trading system.
+The full console runs in the personal local Tauri desktop client. The server domain below is
+an API/WSS endpoint only; it is not a browser UI.
 
 `https://www.zhuzhu666.icu`
 
@@ -26,7 +27,9 @@ The overview page shows the essential live state only:
 - circuit breaker, drawdown, and consecutive-loss status
 - latest known XAU price when available
 
-Trading operations, learning governance, factor details, charts, and operations health are handled by the Web frontend.
+Trading operations, learning governance, factor details, charts, and operations health are handled
+by the personal local Tauri desktop client. The mini-program source stays local/GitHub and is not
+deployed to the backend server.
 
 ## Open in WeChat DevTools
 
@@ -55,6 +58,6 @@ This mini-program only depends on the lightweight live/auth surface:
 
 ## Status
 
-- Web frontend is the complete console.
+- Tauri desktop renderer is the complete console.
 - Mini-program is a compact mobile status card.
 - No tabBar, charts, trading controls, learning pages, factor pages, or ops pages are registered.

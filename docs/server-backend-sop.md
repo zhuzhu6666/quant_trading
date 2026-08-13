@@ -2,7 +2,7 @@
 
 > Status: active
 > Last verified: 2026-08-10
-> Scope: Linux unified workspace startup, logs, PostgreSQL, cTrader, frontend build, restart, and runtime acceptance.
+> Scope: Linux backend/API/WSS startup, logs, PostgreSQL, cTrader, restart, and runtime acceptance.
 
 这份文档只服务一个目标：
 把服务器上的后端日常操作标准化，减少临场判断和误操作。
@@ -17,7 +17,9 @@
 - `.env` / systemd / 日志 / 数据库问题
 - 服务器热修
 
-Web 和小程序源码也可在 Linux 统一工作区修改；微信开发者工具与 Windows 浏览器只承担平台专属补充验证。
+服务器只部署后端运行代码、配置、迁移和必要脚本；桌面 renderer 与小程序源码保留在本地/GitHub，
+不进入服务器工作树，也不由服务器构建或托管浏览器静态站点。微信开发者工具与 Windows 桌面环境
+承担客户端专属补充验证。
 
 ## 2. 基础信息
 
@@ -134,7 +136,8 @@ sed -n '1,220p' /etc/caddy/Caddyfile
 
 判断原则：
 
-- `https://www.zhuzhu666.icu/api/health` 正常，说明公网 TLS、Caddy、后端反代基本通。
+- `https://www.zhuzhu666.icu/api/health` 正常，说明公网 TLS、Caddy、后端 API 反代基本通；
+  根路径不提供浏览器操作台，前端 `index.html`/`dist` 不应出现在 Caddy root 或服务器项目树。
 - Caddy 日志中 `dial tcp 127.0.0.1:8000: connect: connection refused` 通常表示当时 `quant-backend.service` 没有监听或正在重启。
 - `nginx -t` 不是当前主入口检查项；除非明确切回 Nginx，否则优先看 Caddy。
 
@@ -491,7 +494,7 @@ cTrader 常用入口：
 
 执行价格保持 broker 原值；commission/gross/swap/balance 等 money 字段才按各自 moneyDigits 转换。unknown broker outcome 禁止猜测成功或重发。
 
-Web：
+本地桌面 renderer（只在开发电脑执行，不在服务器执行）：
 
 ```bash
 cd web_frontend
@@ -500,4 +503,5 @@ npm run typecheck
 npm run build
 ```
 
-小程序由 `miniprogram_v2/` 维护，平台行为最终用微信开发者工具验证。任何客户端都只消费 `fact.v1`/canonical snapshot，不重算风控或 readiness。
+小程序由 `miniprogram_v2/` 维护，平台行为最终用微信开发者工具验证；它也只保留在本地/GitHub。
+任何客户端都只消费 `fact.v1`/canonical snapshot，不重算风控或 readiness。

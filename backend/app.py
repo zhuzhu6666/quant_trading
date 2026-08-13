@@ -7,9 +7,11 @@ Usage:
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api import ALL_ROUTERS
 from backend.core.logging import setup_logging
@@ -18,6 +20,28 @@ from backend.services.backend_runtime_lifecycle import BackendRuntimeLifecycle
 from backend.ws.endpoints import router as ws_router
 from monitor.metrics import install_into_runtime_state
 from monitor.structured_log import setup_structured_logging
+
+
+_DEFAULT_FRONTEND_CORS_ORIGINS = (
+    "https://www.zhuzhu666.icu",
+    "http://tauri.localhost",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+)
+
+
+def _frontend_cors_origins() -> list[str]:
+    configured = [
+        item.strip()
+        for item in os.getenv("QUANT_FRONTEND_CORS_ORIGINS", "").split(",")
+        if item.strip()
+    ]
+    origins = configured or list(_DEFAULT_FRONTEND_CORS_ORIGINS)
+    if "*" in origins:
+        raise RuntimeError(
+            "QUANT_FRONTEND_CORS_ORIGINS must enumerate trusted origins; wildcard CORS is not allowed"
+        )
+    return list(dict.fromkeys(origins))
 
 
 def _init_observability() -> None:
@@ -220,6 +244,13 @@ def create_app() -> FastAPI:
         title="Quant Trading API",
         version="0.1.0",
         lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_frontend_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Accept", "Authorization", "Content-Type", "X-Confirm"],
     )
 
     # Register all API routers

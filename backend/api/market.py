@@ -1,11 +1,12 @@
 """GET /api/market/bars?symbol=&timeframe=&from=&to= — K-line data."""
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.core.auth import RequireUser
+from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC, attach_fact
 from data.store import DataStore
 
 router = APIRouter(prefix="/api/market", tags=["market"])
@@ -30,13 +31,46 @@ class Bar(BaseModel):
     spread: float = 0.0
 
 
+class FactResponse(BaseModel):
+    envelope: Literal["fact.v1"]
+    contract: str
+    state: Literal["known", "unknown", "stale", "error"]
+    source: str
+    observed_at: float | str | None
+    generated_at: float
+    stale_after_sec: float
+    reason_code: str | None = None
+    components: dict[str, Any] = Field(default_factory=dict)
+
+
 class BarsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     bars: list[Bar]
     total: int
     range: dict
+    fact: FactResponse = Field(alias="_fact")
 
 
 VALID_TFS = {"M5", "M15", "M30", "H1", "H4", "D1"}  # noqa: F841 — kept for future validation
+
+
+def _bars_response(
+    bars: list[Bar],
+    total: int,
+    time_range: dict[str, int],
+    observed_at: int | None,
+) -> BarsResponse:
+    payload: dict[str, Any] = {"bars": bars, "total": total, "range": time_range}
+    attach_fact(
+        payload,
+        contract="market.bars.v1",
+        source="bars_monthly" if observed_at is not None else "none",
+        observed_at=observed_at,
+        stale_after_sec=DEFAULT_STALE_AFTER_SEC["market"],
+        reason_code=None if observed_at is not None else "market_bars_empty",
+    )
+    return BarsResponse.model_validate(payload)
 
 
 @router.get("/bars", response_model=BarsResponse)
@@ -58,7 +92,7 @@ def get_bars(
     end_iso = pd.Timestamp(to_ts, unit="s").isoformat() if to_ts is not None else None
     df = store.load_bars(symbol, timeframe, start=start_iso, end=end_iso, limit=limit)
     if df.empty:
-        return BarsResponse(bars=[], total=0, range={"from": 0, "to": 0})
+        return _bars_response([], 0, {"from": 0, "to": 0}, None)
 
     # DataStore returns df with datetime64[s] (SECOND precision, not ns).
     # The unix-seconds value is already what we want for the `t` field.
@@ -86,8 +120,9 @@ def get_bars(
             v=float(volumes[i]) if volumes is not None else 0.0,
             spread=float(spreads[i]) if spreads is not None else 0.0,
         )
-    return BarsResponse(
-        bars=out_bars,
-        total=n,
-        range={"from": int(times[0]) if n else 0, "to": int(times[-1]) if n else 0},
+    return _bars_response(
+        out_bars,
+        n,
+        {"from": int(times[0]) if n else 0, "to": int(times[-1]) if n else 0},
+        int(times[-1]) if n else None,
     )

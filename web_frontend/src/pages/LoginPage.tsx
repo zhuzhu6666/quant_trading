@@ -17,8 +17,8 @@ export function LoginPage() {
     if (!loading && authenticated) {
       const from = typeof (location.state as { from?: string })?.from === "string"
         ? (location.state as { from?: string }).from
-        : "/overview";
-      navigate(from || "/overview", { replace: true });
+        : "/trade-ops";
+      navigate(from || "/trade-ops", { replace: true });
     }
   }, [authenticated, loading, location.state, navigate]);
 
@@ -28,7 +28,7 @@ export function LoginPage() {
     setWorking(true);
     try {
       await login({ username: username.trim(), password });
-      navigate("/overview", { replace: true });
+      navigate("/trade-ops", { replace: true });
     } catch (e) {
       setError(e instanceof Error ? e.message : "登录失败");
     } finally {

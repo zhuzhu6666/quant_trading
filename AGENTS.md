@@ -38,7 +38,7 @@ Linux 服务器继续负责生产运行验证：
 - systemd
 - 数据库
 - 日志排查
-- Web 前端构建、静态发布和公网验证
+- 后端 API、WebSocket、systemd、数据库和公网 API/WSS 验证
 
 Windows 仅在需要平台工具时用于补充验证：
 
@@ -129,13 +129,17 @@ Windows 仅在需要平台工具时用于补充验证：
 - 不再按 `web-view` / nginx 静态 H5 / `lightweight-charts` 方案理解。
 - 当前小程序没有 `web-view` 业务域名配置权限，因此不要再要求配置 `www.zhuzhu666.icu` 为 web-view 业务域名。
 
-## 3.4 Web 前端约定
+## 3.4 客户端与服务器边界
 
-- Web 前端承接完整操作台能力，目录为 `web_frontend/`。
-- 小程序只保留简洁状态界面；复杂图表、交易明细、风控、学习治理、因子治理、运维调试放到 Web 端。
-- 当前公网入口由服务器 Caddy 承接：
-  - `https://www.zhuzhu666.icu`
-  - Caddy 反代到本机 `127.0.0.1:8000`
+- `web_frontend/` 是完整 Tauri 桌面端的 renderer 源码；操作台只在本人本地桌面壳中运行，
+  不作为服务器上的公网浏览器静态站点部署。
+- 小程序只保留简洁状态界面；复杂图表、交易明细、风控、学习治理、因子治理和运维调试
+  由本地 Tauri 桌面端承接。
+- 服务器只提供客户端共用的后端 API 与 `/ws/state` WebSocket：
+  - `https://www.zhuzhu666.icu` 仅作为 API/WSS 公网入口；
+  - Caddy 只反代到本机 `127.0.0.1:8000`，不托管前端 `index.html`、`dist` 或静态 asset；
+  - 服务器工作树采用后端-only sparse checkout，不拉取或保留 `web_frontend/`、`miniprogram_v2/`
+    和前端构建产物。
 - 旧 Web Console 打包产物、旧小程序 H5/web-view 静态入口、旧 Nginx H5 路线均不再保留。
 
 ## 4. 遇到问题时的默认顺序

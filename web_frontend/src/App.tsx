@@ -1,58 +1,42 @@
 import { lazy, Suspense } from "react";
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
-import { AppShell } from "@/components/AppShell";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { useAuth } from "@/contexts/AuthContext";
 import { LiveStateProvider } from "@/hooks/useLiveState";
+import { WorkbenchShell } from "@/shell/WorkbenchShell";
+
 const LoginPage = lazy(() => import("@/pages/LoginPage").then((module) => ({ default: module.LoginPage })));
-const OverviewPage = lazy(() => import("@/pages/OverviewPage").then((module) => ({ default: module.OverviewPage })));
-const TradingPage = lazy(() => import("@/pages/TradingPage").then((module) => ({ default: module.TradingPage })));
-const PerformanceWorkspace = lazy(() => import("@/pages/WorkspacePages").then((module) => ({ default: module.PerformanceWorkspace })));
-const AutonomyWorkspace = lazy(() => import("@/pages/WorkspacePages").then((module) => ({ default: module.AutonomyWorkspace })));
-const SystemWorkspace = lazy(() => import("@/pages/WorkspacePages").then((module) => ({ default: module.SystemWorkspace })));
+const TradeOpsPage = lazy(() => import("@/pages/TradeOpsPage").then((module) => ({ default: module.TradeOpsPage })));
+const RiskDeskPage = lazy(() => import("@/pages/RiskDeskPage").then((module) => ({ default: module.RiskDeskPage })));
+const ResearchPage = lazy(() => import("@/pages/ResearchPage").then((module) => ({ default: module.ResearchPage })));
+const GovernancePage = lazy(() => import("@/pages/GovernancePage").then((module) => ({ default: module.GovernancePage })));
+const OpsPage = lazy(() => import("@/pages/OpsPage").then((module) => ({ default: module.OpsPage })));
 
 function RouteFallback() {
-  return <div className="route-loading" role="status" aria-live="polite"><span />正在加载控制台…</div>;
+  return <div className="route-loading" role="status" aria-live="polite"><span />加载工作区…</div>;
+}
+
+function RouteDeprecatedPage() {
+  return <div className="route-deprecated" role="alert"><span className="route-deprecated-code">404 / ROUTE_DEPRECATED</span><h1>此地址已废弃</h1><p>旧版页面和 section alias 不再自动跳转。请从左侧工作区导航进入当前操作台。</p></div>;
 }
 
 function ProtectedAppLayout() {
   const { authenticated } = useAuth();
-  return (
-    <ProtectedRoute>
-      <LiveStateProvider enabled={authenticated}>
-        <ErrorBoundary>
-          <AppShell><Suspense fallback={<RouteFallback />}><Outlet /></Suspense></AppShell>
-        </ErrorBoundary>
-      </LiveStateProvider>
-    </ProtectedRoute>
-  );
+  return <ProtectedRoute><LiveStateProvider enabled={authenticated}><ErrorBoundary><WorkbenchShell /></ErrorBoundary></LiveStateProvider></ProtectedRoute>;
 }
 
 export function App() {
-  return (
-      <Routes>
-        <Route path="/login" element={<Suspense fallback={<RouteFallback />}><LoginPage /></Suspense>} />
-        <Route
-          path="/"
-          element={<Navigate to="/overview" replace />}
-        />
-        <Route element={<ProtectedAppLayout />}>
-          <Route path="/overview" element={<OverviewPage />} />
-          <Route path="/trading" element={<TradingPage />} />
-          <Route path="/performance/:section" element={<PerformanceWorkspace />} />
-          <Route path="/autonomy/:section" element={<AutonomyWorkspace />} />
-          <Route path="/ops/:section" element={<SystemWorkspace />} />
-          <Route path="/pnl" element={<Navigate to="/performance/pnl" replace />} />
-          <Route path="/risk" element={<Navigate to="/trading" replace />} />
-          <Route path="/learning" element={<Navigate to="/autonomy/learning" replace />} />
-          <Route path="/models" element={<Navigate to="/autonomy/models" replace />} />
-          <Route path="/governance/:section" element={<Navigate to="/autonomy/learning" replace />} />
-          <Route path="/v15" element={<Navigate to="/ops/evidence" replace />} />
-          <Route path="/v16" element={<Navigate to="/autonomy/chain" replace />} />
-          <Route path="/ops" element={<Navigate to="/ops/health" replace />} />
-        </Route>
-        <Route path="*" element={<Navigate to="/overview" replace />} />
-      </Routes>
-  );
+  return <Routes>
+    <Route path="/login" element={<Suspense fallback={<RouteFallback />}><LoginPage /></Suspense>} />
+    <Route path="/" element={<Navigate to="/trade-ops" replace />} />
+    <Route element={<ProtectedAppLayout />}>
+      <Route path="/trade-ops" element={<Suspense fallback={<RouteFallback />}><TradeOpsPage /></Suspense>} />
+      <Route path="/risk-desk" element={<Suspense fallback={<RouteFallback />}><RiskDeskPage /></Suspense>} />
+      <Route path="/research" element={<Suspense fallback={<RouteFallback />}><ResearchPage /></Suspense>} />
+      <Route path="/governance" element={<Suspense fallback={<RouteFallback />}><GovernancePage /></Suspense>} />
+      <Route path="/ops" element={<Suspense fallback={<RouteFallback />}><OpsPage /></Suspense>} />
+      <Route path="*" element={<RouteDeprecatedPage />} />
+    </Route>
+  </Routes>;
 }

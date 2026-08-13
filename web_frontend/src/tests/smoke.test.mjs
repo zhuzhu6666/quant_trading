@@ -1,67 +1,25 @@
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import assert from "node:assert/strict";
 
-const requiredFiles = [
-  "src/main.tsx",
-  "src/App.tsx",
-  "src/main.css",
-  "src/api/client.ts",
-  "src/api/domains/readiness.ts",
-  "src/api/domains/system.ts",
-  "src/contexts/AuthContext.tsx",
-  "src/hooks/useLiveState.ts",
-  "src/pages/LoginPage.tsx",
-  "src/pages/OverviewPage.tsx",
-  "src/pages/TradingPage.tsx",
-  "src/pages/PnlPage.tsx",
-  "src/pages/RiskPage.tsx",
-  "src/pages/OpsPage.tsx",
-  "src/pages/LearningPage.tsx",
-  "src/pages/ModelsPage.tsx",
-  "src/pages/EvidencePage.tsx",
-  "src/pages/V16BrainPage.tsx",
-  "src/pages/WorkspacePages.tsx",
-  "src/styles/console.css",
+const root = process.cwd();
+const required = [
+  "src/main.tsx", "src/App.tsx", "src/main.css", "src/api/client.ts", "src/api/fact.ts", "src/api/workbench.ts",
+  "src/auth/tokenStore.ts", "src/cache/researchCache.ts", "src/cache/researchFallback.ts", "src/hooks/useLiveState.ts", "src/hooks/liveStateLogic.ts", "src/hooks/useNetworkStatus.ts", "src/i18n/zh-CN.ts", "src/shell/WorkbenchShell.tsx",
+  "src/shell/SafetyRail.tsx", "src/shell/CommandPalette.tsx", "src/pages/TradeOpsPage.tsx", "src/pages/RiskDeskPage.tsx",
+  "src/pages/ResearchPage.tsx", "src/pages/GovernancePage.tsx", "src/pages/OpsPage.tsx", "src/pages/LoginPage.tsx",
+  "src-tauri/Cargo.toml", "src-tauri/src/lib.rs", "src-tauri/src/commands.rs", "src-tauri/src/secure_store.rs",
+  "src/desktop/bridge.ts", "src/desktop/updater.ts", "src-tauri/tauri.conf.json", "src-tauri/tauri.release.conf.json", "src-tauri/capabilities/default.json",
 ];
+for (const relative of required) assert.ok(fs.existsSync(path.join(root, relative)), `missing ${relative}`);
 
-let fail = false;
+const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+assert.match(packageJson.dependencies.react, /^\^19/);
+assert.ok(packageJson.dependencies["@radix-ui/react-dialog"]);
+assert.ok(packageJson.devDependencies["@tauri-apps/cli"]);
+assert.equal(packageJson.scripts.tauri, "tauri");
 
-for (const relative of requiredFiles) {
-  const full = path.join(process.cwd(), relative);
-  if (!fs.existsSync(full)) {
-    console.error(`缺少文件: ${relative}`);
-    fail = true;
-  }
+for (const old of ["OverviewPage.tsx", "TradingPage.tsx", "PnlPage.tsx", "RiskPage.tsx", "LearningPage.tsx", "ModelsPage.tsx", "EvidencePage.tsx", "V16BrainPage.tsx", "WorkspacePages.tsx"]) {
+  assert.equal(fs.existsSync(path.join(root, "src/pages", old)), false, `legacy page remains: ${old}`);
 }
-
-if (fail) {
-  process.exit(1);
-}
-
-const formatSource = fs.readFileSync(path.join(process.cwd(), "src/lib/format.ts"), "utf8");
-assert.match(formatSource, /normalizeCurrency/);
-assert.match(formatSource, /\^\[A-Z\]\{3\}\$/);
-assert.match(formatSource, /catch \{/);
-
-const apiSource = fs.readFileSync(path.join(process.cwd(), "src/api/client.ts"), "utf8");
-assert.match(apiSource, /confirmed\s*\?\s*\{\s*"X-Confirm":\s*"start-live"\s*\}/);
-assert.match(apiSource, /confirmed\s*\?\s*\{\s*"X-Confirm":\s*"emergency"\s*\}/);
-assert.match(apiSource, /getReplayLatest/);
-assert.match(apiSource, /getV15Phase0/);
-
-const tradingSource = fs.readFileSync(path.join(process.cwd(), "src/pages/TradingPage.tsx"), "utf8");
-assert.match(tradingSource, /startTrading\("ctrader",\s*strategy\s*\|\|\s*"live",\s*true\)/);
-assert.match(tradingSource, /emergencyClose\(true\)/);
-
-const appSource = fs.readFileSync(path.join(process.cwd(), "src/App.tsx"), "utf8");
-assert.match(appSource, /path="\/v15"/);
-assert.match(appSource, /path="\/v16"/);
-assert.match(appSource, /lazy\(\(\) => import/);
-
-const evidenceSource = fs.readFileSync(path.join(process.cwd(), "src/pages/EvidencePage.tsx"), "utf8");
-assert.match(evidenceSource, /enabled: activeTab === "replay"/);
-assert.match(evidenceSource, /enabled: activeTab === "incident"/);
-assert.match(evidenceSource, /enabled: activeTab === "release"/);
-
-console.log("web_frontend smoke test: ok");
+console.log("workbench smoke test: ok");

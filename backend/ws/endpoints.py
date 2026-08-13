@@ -186,6 +186,11 @@ def _read_state_snapshot() -> dict:
         send_orders = bool(_should_send_orders(live_broker, log_blocking=False)) if live_running else False
     except Exception:
         send_orders = False
+    accepting_new_risk = bool(loop.get("accepting_new_risk", live_state.get("accepting_new_risk", False)))
+    safety_blockers = list(dict.fromkeys(
+        [str(item).strip() for item in (loop.get("blockers") or []) if str(item).strip()]
+        + [str(item).strip() for item in (live_state.get("new_risk_reconcile_blockers") or []) if str(item).strip()]
+    ))
     strategy_status = {
         "running": live_running,
         "broker": live_broker,
@@ -194,6 +199,10 @@ def _read_state_snapshot() -> dict:
         "execution_mode": "LIVE" if live_running else "STOPPED",
         "send_orders": send_orders,
         "dry_run": not send_orders,
+        "accepting_new_risk": accepting_new_risk,
+        "safety_blockers": safety_blockers,
+        "new_risk_reconcile_blockers": list(live_state.get("new_risk_reconcile_blockers") or []),
+        "safety_heartbeat_at": loop.get("safety_heartbeat_at"),
         "reason": str((live_state.get("last_composite") or {}).get("gate_reason") or ""),
         "v4_status": {
             "pipeline_active": bool(pipeline),
@@ -235,6 +244,7 @@ def _read_state_snapshot() -> dict:
             account_updated_at=account_updated_at,
             positions_updated_at=positions_updated_at,
             diagnostic_ts=diagnostic_ts,
+            loop_status=loop,
             spot_quote=spot_quote,
             positions_component_facts=positions_component_facts,
         )
@@ -333,6 +343,9 @@ def _read_state_snapshot() -> dict:
         "positions_list": positions_list,
         "current_price": current_price,
         "spot_quote": spot_quote,
+        "accepting_new_risk": accepting_new_risk,
+        "safety_blockers": safety_blockers,
+        "new_risk_reconcile_blockers": list(live_state.get("new_risk_reconcile_blockers") or []),
         "active_strategy": {
             "id": live_state.get("loop_strategy") or loop.get("strategy_name"),
             "mode": "single",
@@ -349,6 +362,7 @@ def _read_state_snapshot() -> dict:
         account_updated_at=account_updated_at,
         positions_updated_at=positions_updated_at,
         diagnostic_ts=diagnostic_ts,
+        loop_status=loop,
         spot_quote=spot_quote,
         positions_component_facts=positions_component_facts,
     )

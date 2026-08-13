@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "Minimal desktop capability for the quant workbench renderer.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "process:allow-restart",
+    "updater:default"
+  ]
+}

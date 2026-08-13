@@ -613,6 +613,11 @@ def get_autonomy_proposals(
        entity_path=("proposals",),
        observed_paths=(),
        item_paths=(("items",),),
+       query_observed_at=(
+           time.time()
+           if proposals.get("ok") is not False
+           else None
+       ),
        reason_code="proposal_registry_observation_missing")
 
 
@@ -1126,6 +1131,11 @@ def get_brain_governance_candidates(_user: RequireUser, limit: int = 50, status:
        entity_path=("governance_candidates",),
        observed_paths=(),
        item_paths=(("items",),),
+       query_observed_at=(
+           time.time()
+           if str(candidates.get("status") or "") in {"available", "missing_candidates"}
+           else None
+       ),
        reason_code="governance_candidate_observation_missing")
 
 
@@ -1187,6 +1197,11 @@ def get_brain_governance_candidate_reviews(_user: RequireUser, limit: int = 50) 
        observed_paths=(),
        item_paths=(("items",),),
        item_timestamp_fields=("created_at",),
+       query_observed_at=(
+           time.time()
+           if str(reviews.get("status") or "") in {"available", "missing_reviews"}
+           else None
+       ),
        reason_code="governance_candidate_review_observation_missing")
 
 
@@ -1599,6 +1614,7 @@ def get_latest_release_run(_user: RequireUser) -> dict[str, Any]:
     }, contract="ops.release-latest.v2",
        source="state_v1.release_run",
        entity_path=("release",),
+       query_observed_at=(time.time() if release.get("run_id") else None),
        reason_code="release_run_observation_missing")
 
 

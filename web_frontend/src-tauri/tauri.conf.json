@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Quant Trading Workbench",
+  "version": "0.1.0",
+  "identifier": "icu.zhuzhu666.quanttrading.workbench",
+  "build": {
+    "beforeDevCommand": "npm run dev -- --host 127.0.0.1",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Quant Trading Workbench",
+        "width": 1600,
+        "height": 1000,
+        "minWidth": 1120,
+        "minHeight": 720,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' https://www.zhuzhu666.icu wss://www.zhuzhu666.icu http://localhost:5173 ws://localhost:5173; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCREFBMTZDRkE1RTYzODAKUldTQVkxNzZiS0hhTzRkbW04aFBvZTZiK05BeHk5K3BHVkVYRXpBNkJ0ZUsvMFZXRnVPTnRObVkK",
+      "endpoints": [
+        "https://github.com/zhuzhu666/quant_trading/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
