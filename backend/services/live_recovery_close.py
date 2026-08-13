@@ -130,6 +130,10 @@ def replay_recovered_close(
                 real_pnl=review_payload["real_pnl"],
                 close_reason=review_payload["close_reason"],
                 context_integrity=review_payload["context_integrity"],
+                attribution_integrity=str(
+                    review_payload.get("attribution_integrity")
+                    or ("full" if review_payload["contributions"] else "missing")
+                ),
             )
             if review.get("accepted", True):
                 experience = runtime.experience_builder.build_from_review(review)

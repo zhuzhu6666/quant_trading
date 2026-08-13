@@ -257,7 +257,7 @@ class TradeReviewer:
         real_pnl: dict | None = None,
         close_reason: str = "",
         context_integrity: str = "full",
-        attribution_integrity: str = "full",
+        attribution_integrity: str = "",
         close_reason_source: str = "",
         inferred_close_supervisor: dict | None = None,
     ) -> dict:

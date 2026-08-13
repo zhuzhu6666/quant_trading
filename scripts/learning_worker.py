@@ -193,7 +193,6 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
     from backend.runtime.evolution_orchestrator import (
         scheduled_evolution_with_governance_handoff,
     )
-    from backend.runtime.factor_governance_orchestrator import run_autonomous_factor_governance_cycle
     from backend.runtime.scheduler import InProcessScheduler
     from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
     from backend.services.evolution_work_coordinator import coordinated_job
@@ -216,24 +215,21 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
     _add_job(
         scheduler,
         "evolution_hourly",
-        "23,53 * * * *",
+        effective_factor_governance_cron(),
         _coordinated_mutation_job(
             "evolution_hourly",
             scheduled_evolution_with_governance_handoff,
         ),
     )
-    governance_cron = effective_factor_governance_cron()
-    _add_job(
-        scheduler,
-        "factor_governance_autonomous",
-        governance_cron,
-        _coordinated_mutation_job(
-            "factor_governance_autonomous",
-            run_autonomous_factor_governance_cycle,
-        ),
-    )
     if _env_enabled("QUANT_AUTONOMOUS_EVOLUTION_NURSERY_RUNNER", "1"):
-        nursery_cron = str(getattr(_runtime_shared(), "autonomous_evolution_nursery_cron", "7,22,37,52 * * * *") or "7,22,37,52 * * * *")
+        nursery_cron = str(
+            getattr(
+                _runtime_shared(),
+                "autonomous_evolution_nursery_cron",
+                "7,17,37,47 * * * *",
+            )
+            or "7,17,37,47 * * * *"
+        )
 
         def _run_nursery_cycle() -> None:
             result = AutonomousEvolutionNurseryRunner().run_once(

@@ -1643,6 +1643,7 @@ def test_build_replayed_close_payloads_prefers_real_pnl_and_preserves_contracts(
         "close_price": 1.2345,
         "close_ts": 456.7,
         "contributions": {},
+        "attribution_integrity": "missing",
         "real_pnl": {
             "net": 12.5,
             "exec_price": 1.2345,
