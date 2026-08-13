@@ -7,14 +7,14 @@
 ## 1. 当前阶段
 
 阶段：D1 renderer 与桌面壳首批实施完成；本人已确认个人本机认证通过且可以正常使用，
-当前收口集中在完整生命周期验收、少量桌面兼容性，以及服务器从浏览器静态站点切换到
-后端 API/WSS-only。
+服务器 backend-only 收口也已完成；剩余工作集中在完整生命周期验收和少量桌面兼容性。
 
 `web_frontend/` 工作树中的 renderer 已切换到 React 19 + TypeScript + Vite 的五工作区
 路由和 Tauri 2 壳；服务器仍是唯一事实源、风险裁决者和执行权威。2026-08-13 曾将
-本地通过检查的 static artifact 部署到 Caddy 根目录并完成公网 smoke；当前部署收口要求
-撤下该浏览器静态入口，Caddy 只保留 API/WSS 反代。同日完成的认证 HTTP、`/ws/state`
-本机/公网和 `market.bars.v1` 合同 smoke 仍是历史验证证据。
+本地通过检查的 static artifact 曾部署到 Caddy 根目录并完成公网 smoke；2026-08-14 已
+撤下浏览器静态入口，Caddy 只保留 API/WSS 反代。认证 HTTP、`/ws/state` 本机/公网和
+`market.bars.v1` 合同 smoke 仍是历史验证证据，当前根路径已验证为 404、`/api/health`
+为 200。
 Windows 本机已启动发行 executable，确认 WebView2 登录壳和可访问性树可用；本人已确认正常
 登录和基本使用路径通过。本轮已完成工作区主要排版、后端字段解析和 freshness 语义收口；
 缓存、断网恢复、mutation/step-up 全路径仍未作为完整验收通过。Windows 对外发行、签名、GitHub Releases
@@ -49,13 +49,13 @@ manifest 和公开 updater 已明确移出本批完成条件。
 - 远程合同/认证/WS/风险读模型定向批次为 `206 passed`；隔离的 Safety/Risk/Governance
   gate 批次为 `162 passed`。其中新增 `market` freshness 分类同步了
   `tests/test_fact_envelope.py`，没有改变 Safety、Risk sizing 或治理 authority。
-- 2026-08-13 将 `frontend-20260813-043606-0fb3fba38f26` 部署到远程 Caddy 静态根；
+- 2026-08-13 曾将 `frontend-20260813-043606-0fb3fba38f26` 部署到远程 Caddy 静态根；
   新 `index.html`、主 JS/CSS 和五个新工作区入口均返回 `200`，无 HTTP redirect；
   旧 dist 已归档到仓库外 rollback 目录。随后 `backend-api-20260813-044620-market-fact`
   以远程 pre-change backup、targeted pytest `2 passed`、OpenAPI 生成检查和重启后
-  `health=known` 验证完成；因子卡性能收敛后当前后端 PID 为 `1714609`，远程工作树保留
-  7 个未提交合同/性能改动；`system.health.v2=known`、DB/cTrader connected，Caddy 与
-  backend service 均 active，OpenAPI snapshot check 通过。
+  `health=known` 验证完成；因子卡性能收敛后当前后端 PID 为 `1714609`，当时远程工作树
+  曾保留 7 个未提交合同/性能改动；`system.health.v2=known`、DB/cTrader connected，
+  Caddy 与 backend service 均 active，OpenAPI snapshot check 通过。
 
 ### 2026-08-13 Windows 个人自用桌面 QA 与数据流修正
 
@@ -114,6 +114,19 @@ manifest 和公开 updater 已明确移出本批完成条件。
 - `known/stale` 保留服务端历史点，`unknown/error` 不显示猜测曲线；已确认但暂无平仓记录时只显示 500.00 的基线和明确的空记录说明。
 - 本批不新增后端接口、不合并 API、不改变 Fact freshness 或安全心跳；只替换 Trade Ops renderer 的数据源和图表组件。
 
+### 2026-08-14 服务器 backend-only 收口
+
+- 本地与服务器版本先做了无损对比：服务器原有 37 个未提交文件与服务器快照仅有行尾差异；
+  3 个合同/执行文件冲突保留已验证的本地合同版本，其余服务器独有后端改动通过普通 merge
+  合入 `fd0aad52594493879fbdd33453c0fee0d19809e9`，未使用 force、reset --hard 或覆盖式拉取。
+- 服务器 `main` 已与 `origin/main` 同为 `fd0aad5`；Git 使用 backend-only sparse checkout
+  和 `blob:none` partial fetch，实际工作树不再物化 `web_frontend/` 或 `miniprogram_v2/`。
+- Caddy 已改为只反代 `/api/*`、`/ws/*` 到 `127.0.0.1:8000`；公网根路径和旧静态 asset 均返回
+  404，公网 `/api/health` 返回 200。服务器已删除前端 dist、node_modules、空小程序目录和旧
+  frontend release archive，保留 `data`、`logs`、`.venv` 和后端运行目录。
+- 服务器定向后端测试 `136 passed`，重启后新 PID `4158196` active，本机/公网 health 和
+  `openapi.json` 均可访问；未执行交易、治理提交或发布动作。
+
 ## 3. 已通过的本地检查
 
 在 `E:\quant_trading\web_frontend`：
@@ -160,9 +173,9 @@ mutation gate、缓存和断网恢复验收。
 - 正常登录路径已通过，但 WS 认证关闭路径当前只标记 `auth-failed` 并清空 live snapshot，
   尚需验证是否应同步清理会话并回到登录页；Tauri `clear_research_cache` 当前只是窄确认
   命令，实际 renderer IndexedDB 清理仍未接通；
-- 旧浏览器静态入口和 hash asset 的历史发布目录待服务器 backend-only 收口时清理；
-  清理后以 API/WSS smoke 和根路径不再提供 SPA 为准，不再把浏览器旧地址废弃页作为生产
-  客户端验收项。
+- 旧浏览器静态入口和 hash asset 的历史发布目录已随服务器 backend-only 收口清理；
+  以 API/WSS smoke 和根路径不再提供 SPA 为准，不再把浏览器旧地址废弃页作为生产客户端
+  验收项。
 
 ## 5. 本批删除和替代
 

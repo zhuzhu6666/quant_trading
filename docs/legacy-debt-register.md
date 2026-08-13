@@ -121,14 +121,15 @@
   旧页面绑定 accessibility 样式和关键 endpoint 的宽泛 decoder 已删除。`/api/market/bars`
   已补齐 `market.bars.v1`，缺数据明确返回 unknown。2026-08-13 的 static artifact
   切换到公网 Caddy 根目录属于历史验证；当前迁移要求撤下浏览器静态入口、服务器只保留
-  API/WSS 与后端工作树。API 合同补丁已部署并重启验证，旧 dist 和 API pre-change
+  API/WSS 与后端工作树；2026-08-14 已完成 sparse checkout、blob 过滤、Caddy API/WSS-only
+  和前端产物清理。API 合同补丁已部署并重启验证，旧 dist 和 API pre-change
   文件已留存仓库外 rollback archive；factor cards 已改为优先复用最新持久 catalog
   snapshot，远程 44 个 factor-card 测试通过。
 - 替代：Workbench Shell、Trade Ops、Risk Desk、Research Lab、Governance、Ops
   五个工作区、全局 Safety rail、强类型 endpoint decoder、唯一 live store 和
   IndexedDB 研究只读缓存。
-- 剩余：服务器 backend-only sparse checkout、Caddy API/WSS-only 收口，以及代码层离线读取缓存、动作禁用、Credential Manager bridge 和 updater wiring
-  已实现，但真实浏览器/Tauri 断网恢复、缓存 hash/schema、Windows 安装卸载、WebView2
+- 剩余：代码层离线读取缓存、动作禁用、Credential Manager bridge 和 updater wiring
+  已实现，但真实 Tauri 断网恢复、缓存 hash/schema、Windows 安装卸载、WebView2
   缺失路径、GitHub Actions Secret/manifest（workflow 已准备，Secret 未配置）、签名成功/失败回退、Linux API/WS/auth 全量
   运行验证和完整验收仍未完成。
 - 退出：五个工作区通过 frontend-refactor-acceptance-matrix.md，生产入口一次性

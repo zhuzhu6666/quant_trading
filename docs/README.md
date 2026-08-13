@@ -68,7 +68,7 @@ learning worker
 2. 继续观察 Safety shadow，满足既有 24 小时空仓或完整 lifecycle 门槛后，才可单独讨论 Safety 发布门。
 3. 对 `legacy-debt-register.md` 中仍处于 `migrating`、`quarantined` 或 `regressed` 的路径逐条收集退出证据，同批删除旧 authority、旧重算、旧字段回退或无意义 wrapper。
 4. 不扩展新的 V16 调度层，不新增 Brain、PosteriorService、FactorCardV2、表、线程、调度器或平行生产 writer。
-5. 按前端重构文档继续完成真实接口和个人本机桌面验收；公网浏览器静态入口已退出，
+5. 按前端重构文档继续完成真实接口和个人本机桌面验收；公网浏览器静态入口已退出并验证根路径 404，
    服务器只提供 API/WSS，本机认证和基本使用已确认通过，仍需完成 WS/缓存隔离、离线恢复、工作区排版、
    跨工作区数据流和危险动作安全验收。公开
    Windows 分发、安装器签名、GitHub Releases 和自动更新不属于本批范围。

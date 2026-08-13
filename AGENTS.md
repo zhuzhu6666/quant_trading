@@ -1,7 +1,7 @@
 # Workspace Rules
 
 > Status: active
-> Last updated: 2026-07-26
+> Last updated: 2026-08-14
 > Scope: unified workspace collaboration rules and platform-specific verification boundaries.
 
 这个仓库从现在开始按下面的规则协作：

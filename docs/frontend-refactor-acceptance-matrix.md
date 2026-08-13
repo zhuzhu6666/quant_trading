@@ -172,8 +172,8 @@ system-source-of-truth.md、legacy-debt-register.md、OpenAPI snapshot 和
 | FE-702 | old page gone | import graph、文件扫描 | OverviewPage、TradingPage、PnlPage、RiskPage、OpsPage 等旧 page 仍被构建引用 | 通过（源码/测试） |
 | FE-703 | old fallback gone | compat/fallback scan | src/lib/compat.ts、recursive pick 或旧字段 fallback 仍服务新工作区 | 部分通过（源码） |
 | FE-704 | old WS fallback gone | source scan + behavior test | HTTP live fallback、页面级 WS 或旧快照 merge 存在 | 部分通过（源码/fixture） |
-| FE-705 | old docs synced | README、legacy debt、status、acceptance diff | 文档声称完成但代码/包/运行证据缺失 | 部分通过（本批切换为桌面/小程序 + API/WSS-only） |
-| FE-706 | no browser production | Caddy、服务器工作树、artifact、release config review | 服务器仍托管浏览器静态入口或保留前端工作树 | 待服务器只读对比、清理和 API/WSS smoke |
+| FE-705 | old docs synced | README、legacy debt、status、acceptance diff | 文档声称完成但代码/包/运行证据缺失 | 通过（桌面/小程序 + API/WSS-only 口径和服务器证据已同步） |
+| FE-706 | no browser production | Caddy、服务器工作树、artifact、release config review | 服务器仍托管浏览器静态入口或保留前端工作树 | 通过（根路径/旧 asset 404；sparse 工作树无前端；Caddy 仅 API/WSS） |
 
 ## 11. 个人自用收口汇总
 

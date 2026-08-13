@@ -1,7 +1,7 @@
 # Server Backend SOP
 
 > Status: active
-> Last verified: 2026-08-10
+> Last verified: 2026-08-14
 > Scope: Linux backend/API/WSS startup, logs, PostgreSQL, cTrader, restart, and runtime acceptance.
 
 这份文档只服务一个目标：
@@ -33,6 +33,16 @@
 - Public reverse proxy: `caddy.service`
 - Backend bind: `127.0.0.1:8000`
 
+### 2.1 服务器部署边界（2026-08-14）
+
+- 服务器工作树只物化后端运行代码、迁移、脚本和后端测试；`web_frontend/`、
+  `miniprogram_v2/` 不在工作树中。
+- Git 使用 `core.sparseCheckout=true` 和 `remote.origin.partialclonefilter=blob:none`；
+  后续同步必须保留这两个设置，避免拉取或物化新的前端 blob。
+- Caddy 只处理 `/api/*` 和 `/ws/*` 反代；根路径不提供 SPA，前端静态产物不放服务器。
+- `data/` 下的 Python backend modules 必须保留；DuckDB/PostgreSQL、`.env`、日志和 `.venv`
+  是运行依赖，不属于前端清理目标。
+
 ## 3. 登录后第一步
 
 SSH 进入服务器后，先执行：
@@ -52,7 +62,20 @@ systemctl is-active caddy.service
 - 确认工作区是否脏
 - 确认当前代码版本
 - 确认后端服务是否还活着
-- 确认公网反代是否还活着
+ - 确认公网反代是否还活着
+
+### 3.1 同步前版本对比门
+
+服务器同步前必须同时记录 `HEAD`、`origin/main` 和 `git status --short`。若工作树有脏文件，
+先逐文件判断服务器代码是否已包含在待同步 commit；有服务器独有内容时只做普通三方 merge，
+出现语义冲突就停止处理，禁止 `git reset --hard`、强制覆盖或无证据 stash。拉取使用：
+
+```bash
+git fetch --no-tags --filter=blob:none origin main
+git merge --ff-only origin/main
+```
+
+若不能快进，不得把“能拉取”当作“已同步”；应先保存/合入服务器独有后端改动并重新做测试。
 
 ## 4. 日志排查顺序
 
