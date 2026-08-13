@@ -51,6 +51,7 @@ def test_trade_reviewer_uses_broker_close_ts_for_created_at(tmp_path):
     assert payload["close_ts"] == close_ts
     assert payload["real_pnl"]["deal_id"] == 323453066
     assert payload["signal_score"] is None
+    assert payload["attribution_integrity"] == "missing"
     assert "signal_score_missing" in payload["failure_taxonomy"]["evidence_gaps"]
 
 

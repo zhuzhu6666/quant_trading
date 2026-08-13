@@ -77,7 +77,7 @@ def test_tick_requested_break_preserves_recovery_and_projection_ack():
         "recovery_bootstrapped": True,
         "exit_reason": "tick_requested_break",
     }
-    assert diagnostics == [(1, "checking")]
+    assert diagnostics == [(1, "checking"), (1, None)]
     assert acknowledgements[0]["generation_id"] == "generation-1"
     assert pipeline["factor_projection_ack"] == {"acknowledged": True}
 
@@ -85,6 +85,7 @@ def test_tick_requested_break_preserves_recovery_and_projection_ack():
 def test_tick_exception_blocks_risk_and_retries_safety_in_five_seconds():
     state_updates = []
     logs = []
+    diagnostics = []
     stop_flag = _StopFlag(wait_results=[True])
 
     def unavailable(**_kwargs):
@@ -97,14 +98,17 @@ def test_tick_exception_blocks_risk_and_retries_safety_in_five_seconds():
         timeframe="M5",
         generation_id="generation-2",
         log=logs.append,
-        runtime=_runtime(
-            run_tick=unavailable,
-            state_updates=state_updates,
-        ),
+            runtime=_runtime(
+                run_tick=unavailable,
+                state_updates=state_updates,
+                diagnostics=diagnostics,
+            ),
     )
 
     assert state_updates == [{"accepting_new_risk": False}]
-    assert stop_flag.wait_calls == [5.0]
+    assert diagnostics == [(1, "checking"), (1, "error")]
+    assert len(stop_flag.wait_calls) == 1
+    assert 0.0 < stop_flag.wait_calls[0] <= 5.0
     assert result["exit_reason"] == "stop_during_safety_retry"
     assert any("alpha failed" in message for message in logs)
 
@@ -165,4 +169,34 @@ def test_tick_specific_wait_updates_risk_before_wait():
     assert diagnostics == [(1, "checking"), (1, None)]
     assert len(risk_updates) == 1
     assert risk_updates[0]["tick"] == 1
+    assert result["exit_reason"] == "stop_during_tick_wait"
+
+
+def test_safety_wait_is_scheduled_from_tick_start_not_added_after_work():
+    clock = iter([100.0, 107.5])
+    stop_flag = _StopFlag(wait_results=[True])
+
+    result = run_serial_live_ticks(
+        broker="ctrader",
+        stop_flag=stop_flag,
+        bridge_cfg=SimpleNamespace(),
+        timeframe="M5",
+        generation_id="generation-5",
+        log=lambda _message: None,
+        runtime=SerialLiveTickRuntime(
+            set_loop_diagnostic=lambda *_args: None,
+            run_tick_body=lambda **_kwargs: {
+                "recovery_bootstrapped": False,
+                "break_loop": False,
+                "wait_seconds": 5.0,
+            },
+            factor_pipeline=lambda: None,
+            acknowledge_factor_projections=lambda **_kwargs: None,
+            live_state_update=lambda **_kwargs: None,
+            update_risk_metrics=lambda **_kwargs: None,
+            monotonic=lambda: next(clock),
+        ),
+    )
+
+    assert stop_flag.wait_calls == [0.0]
     assert result["exit_reason"] == "stop_during_tick_wait"

@@ -57,6 +57,44 @@ def _component(
     ).to_dict()
 
 
+def _project_required_components(
+    result: Mapping[str, Any],
+    *,
+    components: Mapping[str, Mapping[str, Any]],
+    required_names: tuple[str, ...],
+) -> dict[str, Any]:
+    """Project child fact states onto a composite fact without recalculation."""
+
+    projected = _copy(result)
+    parent_fact = dict(projected.get("_fact") or {})
+    if parent_fact.get("state") == "error":
+        return projected
+    states = {
+        str((components.get(name) or {}).get("state") or "unknown")
+        for name in required_names
+    }
+    projected_state = next(
+        (state for state in ("error", "unknown", "stale") if state in states),
+        "known",
+    )
+    if projected_state == "known":
+        return projected
+    parent_fact["state"] = projected_state
+    if projected_state == "error":
+        parent_fact["reason_code"] = next(
+            (
+                str((components.get(name) or {}).get("reason_code") or "component_error")
+                for name in required_names
+                if (components.get(name) or {}).get("state") == "error"
+            ),
+            "component_error",
+        )
+    else:
+        parent_fact["reason_code"] = f"component_{projected_state}"
+    projected["_fact"] = parent_fact
+    return projected
+
+
 def _position_reconcile_component_views(
     raw_components: Mapping[str, Any] | None,
     *,
@@ -278,16 +316,23 @@ def _loop_fact(
         # Public loop/strategy freshness is liveness, not open authorization.
         # Prefer the latest completed-loop observation when available; the
         # Safety heartbeat remains a separate fail-closed authority.
-        heartbeat_candidates = [
-            value
-            for value in (
-                diagnostic_ts,
-                payload.get("heartbeat_at"),
-                payload.get("safety_heartbeat_at"),
-            )
-            if observed_epoch(value) > 0
-        ]
-        observed_at = max(heartbeat_candidates, key=observed_epoch, default=None)
+        # ``diagnostic_ts`` is advanced only after the whole serial tick
+        # completes.  Prefer it when present; a safety heartbeat can be
+        # newer while a later alpha/risk stage is still blocked, which must
+        # not make the public loop fact pretend that the loop completed.
+        diagnostic_epoch = observed_epoch(diagnostic_ts)
+        if diagnostic_epoch > 0:
+            observed_at = diagnostic_ts
+        else:
+            heartbeat_candidates = [
+                value
+                for value in (
+                    payload.get("heartbeat_at"),
+                    payload.get("safety_heartbeat_at"),
+                )
+                if observed_epoch(value) > 0
+            ]
+            observed_at = max(heartbeat_candidates, key=observed_epoch, default=None)
         reason_code = None if observed_epoch(observed_at) > 0 else "loop_heartbeat_missing"
     else:
         # A stopped/draining status is read synchronously from process/thread
@@ -336,8 +381,8 @@ def live_status_fact_payload(
     components = {
         "broker": _component(
             contract="live.broker-connection.v1",
-            source="ctrader",
-            observed_at=generated_at,
+            source="ctrader" if broker_status == "connected" else "none",
+            observed_at=generated_at if broker_status == "connected" else None,
             stale_after_sec=DEFAULT_STALE_AFTER_SEC["loop"],
             error=broker.get("error") if broker_status in {"error", "disconnected", "no_token"} else None,
             reason_code=f"broker_{broker_status}" if broker_status != "connected" else None,
@@ -375,7 +420,7 @@ def live_status_fact_payload(
     composite_error = broker_error
     if loop_fact.get("state") == "error":
         composite_error = composite_error or loop_fact.get("reason_code") or "loop_source_error"
-    return dict(attach_fact(
+    result = dict(attach_fact(
         result,
         contract="live.status.v2",
         source="ctrader",
@@ -386,6 +431,11 @@ def live_status_fact_payload(
         components=components,
         now=generated_at,
     ))
+    return _project_required_components(
+        result,
+        components=components,
+        required_names=("broker", "account", "positions", "loop"),
+    )
 
 
 def strategy_fact_payload(
@@ -827,6 +877,7 @@ def state_snapshot_fact_payload(
     positions_updated_at: Any,
     diagnostic_ts: Any,
     spot_quote: Mapping[str, Any] | None,
+    loop_status: Mapping[str, Any] | None = None,
     positions_component_facts: Mapping[str, Any] | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
@@ -854,6 +905,23 @@ def state_snapshot_fact_payload(
         positions_component_facts,
         now=generated_at,
     )
+    loop_payload = dict(loop_status or {"running": running})
+    loop_component = _loop_fact(
+        loop_payload,
+        diagnostic_ts=diagnostic_ts,
+        now=generated_at,
+    )
+    safety_payload = loop_payload.get("safety")
+    safety_mapping = safety_payload if isinstance(safety_payload, Mapping) else {}
+    safety_observed_at = (
+        loop_payload.get("safety_heartbeat_at")
+        or safety_mapping.get("heartbeat_at")
+    )
+    safety_blockers = [
+        str(item).strip()
+        for item in (loop_payload.get("blockers") or [])
+        if str(item).strip()
+    ]
     components = {
         "account": _component(
             contract="live.account.v2",
@@ -864,12 +932,17 @@ def state_snapshot_fact_payload(
             now=generated_at,
         ),
         "positions": positions_component,
-        "loop": _component(
-            contract="live.loop.v2",
-            source="live_process" if running else "live_process_stopped",
-            observed_at=diagnostic_ts if running else generated_at,
-            stale_after_sec=DEFAULT_STALE_AFTER_SEC["loop"],
-            reason_code="loop_heartbeat_missing" if running and observed_epoch(diagnostic_ts) <= 0 else None,
+        "loop": loop_component,
+        # This is deliberately separate from the 30-second public snapshot.
+        # It describes the 15-second fail-closed safety heartbeat used by
+        # open-order admission and the watchdog; a known public snapshot can
+        # never be treated as permission to add risk.
+        "safety": _component(
+            contract="live.safety-freshness.v1",
+            source="live_safety_watchdog" if observed_epoch(safety_observed_at) > 0 else "none",
+            observed_at=safety_observed_at,
+            stale_after_sec=15.0,
+            reason_code=safety_blockers[0] if safety_blockers else None,
             now=generated_at,
         ),
         "spot": _component(
@@ -931,7 +1004,7 @@ def state_snapshot_fact_payload(
         stale_after_sec=DEFAULT_STALE_AFTER_SEC["system_health"],
         now=generated_at,
     )
-    return dict(attach_fact(
+    result = dict(attach_fact(
         result,
         contract="live.state.v2",
         source=source,
@@ -942,6 +1015,14 @@ def state_snapshot_fact_payload(
         components=components,
         now=generated_at,
     ))
+    # ``live.state.v2`` is a projection of the required runtime facts.  Spot,
+    # strategy, session, and risk inputs retain their own contracts and are
+    # intentionally not part of this safety aggregate.
+    return _project_required_components(
+        result,
+        components=components,
+        required_names=("account", "positions", "loop"),
+    )
 
 
 def health_fact_payload(payload: Mapping[str, Any], *, now: float | None = None) -> dict[str, Any]:
@@ -961,7 +1042,7 @@ def health_fact_payload(payload: Mapping[str, Any], *, now: float | None = None)
         contract="system.health.v2",
         source="backend_health_probe",
         observed_at=observed_at,
-        stale_after_sec=DEFAULT_STALE_AFTER_SEC["ws"],
+        stale_after_sec=DEFAULT_STALE_AFTER_SEC["system_health"],
         error=error,
         reason_code=reason_code,
         components={

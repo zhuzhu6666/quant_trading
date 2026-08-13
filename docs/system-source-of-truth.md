@@ -54,6 +54,16 @@ release preflight 和前端只能复用该结果，不得通过再次读取原�
 | live autonomy unlock | PostgreSQL `live_autonomy_unlock_event` + `LiveAutonomyService` + `AutonomyControlPlan` | `live_autonomous` 一次性人工解锁/撤销账本；`autonomy_mode`、`live_autonomy_unlocked`、`live_autonomy_unlock_id` 与 `autonomy_expansion_frozen` 属于治理控制面。unlock/unfreeze 是扩张，必须 Coordinator + V16；revoke 是收紧且先落本地 latch，PG 失败不能重新开放风险 |
 | operator governance pause | `governance_expansion_paused` + `GovernanceExpansionControlService` + `OperatorGovernancePausePlan` | `/api/ops/autonomy/governance-expansion-control` 是全 mode operator kill switch；pause 收紧免 V16，resume 需要显式确认和 Coordinator，非有界 Demo 还需要最近 step-up + V16；有界 Demo 的显式 operator resume 免 V16。system/autonomous actor 禁止修改 |
 
+### 2.1 Live broker snapshot 与循环心跳
+
+| 事实 | 唯一生产者/写入者 | 约束 |
+|---|---|---|
+| account/positions fresh reconcile | `live_loop_tick_runtime` 串行 owner + `CTraderBridge.reconcile_positions/reconcile_account` | 每个 tick 先取得一份 `PositionReconcileResult`，账户对账复用其中已确认的 PnL；不得为同一 tick 再次查询相同 PnL |
+| live loop completed observation | `live_loop_runner` + `live_service._set_loop_diagnostic` | `_diag.ts` 只代表完整 tick 完成时间；phase/start 时间不能冒充完成心跳 |
+| Safety heartbeat | `LiveLoopController` / Safety plane | 只表示 Safety 阶段完成并继续独立 fail-closed；不替代 account/positions freshness，也不使公共 loop fact 忽略较旧的完整 tick |
+
+串行 broker RPC、风险保护和风险指标计算都计入 tick 周期。5 秒是目标周期，不是额外 sleep；若工作已经超过目标周期，下一轮立即开始，不再追加等待。15 秒 freshness 到期时必须显示 `stale` 并阻断新增风险，不能把阈值调大来掩盖后端停滞。
+
 判断原则：
 
 - 生产自治动作不应直接修改 `settings.yaml`。
@@ -329,6 +339,7 @@ release preflight 和前端只能复用该结果，不得通过再次读取原�
 | 数据 | 权威来源 | 说明 |
 |---|---|---|
 | K 线 | `data/bars_monthly/bars_YYYY_MM.duckdb` | `data/bars.duckdb` 是当前月兼容链接 |
+| 市场图表 API fact | `backend.api.market.get_bars` + `market.bars.v1` | 只读月库最近一根 K 线作为观测时间；空集为 `unknown`，前端可展示 stale 研究缓存但不得作为运行/风险授权事实 |
 | 外部研究数据 | `data/external_data.duckdb` | COT/ETF/FRED/央行黄金/宏观，必须按 `release_at` 做 PIT；CB 由 WGC 季度序列、ETF 日线由 Yahoo chart、持仓由 SEC EDGAR 刷新 |
 | 经济事件 | `data/events.duckdb` | 风控事件缩放读取 |
 | 运行态状态 | PostgreSQL `state_v1` | 不再使用 `data/state.db` |
@@ -430,3 +441,32 @@ release preflight 和前端只能复用该结果，不得通过再次读取原�
 - Demo nursery 的 `would_block` 探索使用 PostgreSQL 原子 reservation：每原因 5/日、全局 15/日、同 setup 1/日，broker 未成交时释放。
 - Supervisor template 的 50 笔 60 分钟成熟样本、两个 session 和两个 regime 仍作为 evidence readiness 展示，并继续按候选 `template_id`、创建时间和 shadow trace 严格归因；跨休市窗口或缺 M1 的记录只作为 ineligible 诊断样本。该 evidence readiness 对非 Demo template auto-apply 仍是硬门；Demo nursery/autonomous 可在证据未满时应用已批准候选，但必须保留 `demo_aggressive_governance=true`、`canary_evidence_ready=false` 审计，并继续经过 RiskPolicy、V16、snapshot、effect monitor 和自动回滚。
 - 新责任归因以 alpha/gate/context/sizing role 为边界；gate/context 不得生成 alpha downweight。
+
+## 11. 前端与 Tauri 客户端边界
+
+前端重构不改变以下生产 authority：
+
+| 客户端职责 | 唯一事实或执行权 | 客户端允许做什么 |
+|---|---|---|
+| live state | backend canonical live state + broker fresh reconcile | 只读 /ws/state 完整快照；不得 HTTP fallback、轮询或合并旧快照 |
+| account/positions/risk | cTrader、PostgreSQL state_v1、RiskPolicyService | 展示 endpoint-level fact；不得补零、重算或把缓存作为授权输入 |
+| readiness | BackendReadinessSnapshotService + runtime_kv 投影 | 展示 blocker 和 freshness；不得重新计算 readiness 或解锁 |
+| governance/release/incident | typed mutation、Coordinator、V16CommandGate、RiskPolicyService | 收集意图、确认、提交并展示 durable/audit/commit 结果；不得本地 apply |
+| market/research | bars、external PIT、replay、learning 和治理只读投影 | 查询、筛选、引用和本地只读缓存 |
+| credentials/session | auth_session、revocation ledger、一次性 WS ticket | access 仅内存；refresh/session 材料由 Windows Credential Manager 保护 |
+| desktop shell | Tauri 2 / Windows WebView2 | 窗口、更新、诊断和最小 OS 能力；不运行交易或生产 writer |
+
+Tauri 2 只是桌面交付壳，React 19 renderer 只是事实消费和动作编排界面。
+它们不形成第二个服务端、第二个 live state writer、第二个 risk calculator 或
+第二个 governance store。
+
+本地 IndexedDB 只允许保存行情、回放、因子证据和研究/学习/治理只读材料；
+账户、持仓、风险、Safety、Readiness、control、认证结果、mutation 结果和
+任何 access/refresh token 均不得进入缓存。离线只允许查看带 cache/stale 标记
+的研究内容，重新在线后必须以服务端事实重新认证、重连和复核。
+
+前端目标路由、旧路径删除、工作区交互、视觉 token、桌面安装/更新和验收门见
+planning/frontend-refactor-plan.md、frontend-operator-contract.md、
+frontend-desktop-contract.md 和 frontend-refactor-acceptance-matrix.md。
+这些文档是消费规则，不改变本节列出的 authority；接口 contract 只有在真实
+API schema 或状态机发生变化时才更新 api-fact-contract.md。

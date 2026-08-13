@@ -243,6 +243,22 @@ def test_ledger_reads_distinguish_missing_stale_and_source_error():
     assert failed["_fact"]["state"] == "error"
 
 
+def test_successful_empty_ledger_query_is_known_at_query_time():
+    payload = ledger_read_fact_payload(
+        {"ok": False, "ledger": {"status": "missing_candidates", "items": []}},
+        contract="ops.example-ledger.v2",
+        source="state_v1.example",
+        entity_path=("ledger",),
+        observed_paths=(),
+        item_paths=(("items",),),
+        query_observed_at=100.0,
+        now=101.0,
+    )
+
+    assert payload["_fact"]["state"] == "known"
+    assert payload["_fact"]["observed_at"] == 100.0
+
+
 def test_scope_enforcement_only_reports_known_for_committed_or_noop_result():
     pending = autonomy_scope_enforcement_fact_payload(
         {

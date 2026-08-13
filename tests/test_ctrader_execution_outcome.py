@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from execution import ctrader_bridge as ctrader_module
-from execution.base import AccountInfo, PositionInfo, PositionReconcileResult
+from execution.base import (
+    AccountInfo,
+    PositionInfo,
+    PositionReconcileResult,
+    ReconcileComponentFact,
+)
 from execution.ctrader_bridge import CTraderBridge, CTraderOrderResult
 from backend.services.live_safety_state import (
     activate_no_new_risk_latch,
@@ -664,6 +669,62 @@ def test_account_reconcile_does_not_trust_stale_or_nonempty_position_evidence(mo
     assert nonempty_result.account is not None
     assert nonempty_result.account.equity == pytest.approx(1241.5)
     assert len(pnl_calls) == 2
+
+
+def test_account_reconcile_reuses_fresh_known_position_pnl(monkeypatch):
+    bridge = _bridge(enabled=False)
+    trader = SimpleNamespace(
+        balance=123450,
+        traderLogin=7001,
+        depositAssetId=1,
+        leverageInCents=10000,
+        maxLeverage=100,
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_send",
+        lambda *_args, **_kwargs: SimpleNamespace(trader=trader),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_unrealized_pnl",
+        lambda: (_ for _ in ()).throw(AssertionError("duplicate PnL RPC")),
+    )
+    observed_at = ctrader_module.time.time()
+    position = PositionInfo(
+        position_id=11,
+        symbol_id=41,
+        direction=1,
+        volume=100,
+        pnl=7.25,
+        pnl_state="known",
+        pnl_source="ctrader_unrealized_pnl",
+        pnl_observed_at=observed_at,
+    )
+    positions = PositionReconcileResult(
+        reconcile_id="positions-open-known-pnl",
+        status="fresh",
+        positions=(position,),
+        observed_at=observed_at,
+        generated_at=observed_at,
+        pnl_component=ReconcileComponentFact(
+            state="known",
+            source="ctrader_unrealized_pnl",
+            observed_at=observed_at,
+            known_position_ids=(11,),
+        ),
+    )
+
+    result = bridge.reconcile_account(
+        force=True,
+        allow_cache_fallback=False,
+        positions_reconcile=positions,
+    )
+
+    assert result.status == "fresh"
+    assert result.account is not None
+    assert result.account.balance == pytest.approx(1234.5)
+    assert result.account.equity == pytest.approx(1241.75)
 
 
 def test_unresolved_close_intent_blocks_duplicate_broker_rpc(monkeypatch):

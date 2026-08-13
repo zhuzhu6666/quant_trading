@@ -378,6 +378,9 @@
       },
       "BarsResponse": {
         "properties": {
+          "_fact": {
+            "$ref": "#/components/schemas/FactResponse"
+          },
           "bars": {
             "items": {
               "$ref": "#/components/schemas/Bar"
@@ -397,7 +400,8 @@
         "required": [
           "bars",
           "total",
-          "range"
+          "range",
+          "_fact"
         ],
         "title": "BarsResponse",
         "type": "object"
@@ -867,6 +871,81 @@
           "broker"
         ],
         "title": "EmergencyCloseRequest",
+        "type": "object"
+      },
+      "FactResponse": {
+        "properties": {
+          "components": {
+            "title": "Components",
+            "type": "object"
+          },
+          "contract": {
+            "title": "Contract",
+            "type": "string"
+          },
+          "envelope": {
+            "const": "fact.v1",
+            "title": "Envelope",
+            "type": "string"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "number"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "stale_after_sec": {
+            "title": "Stale After Sec",
+            "type": "number"
+          },
+          "state": {
+            "enum": [
+              "known",
+              "unknown",
+              "stale",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "envelope",
+          "contract",
+          "state",
+          "source",
+          "observed_at",
+          "generated_at",
+          "stale_after_sec"
+        ],
+        "title": "FactResponse",
         "type": "object"
       },
       "FactorGovernanceEffectReconcileRequest": {

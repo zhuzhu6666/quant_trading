@@ -682,49 +682,55 @@ def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
     """Run health -> V16 decision -> specialist governance in one evidence cycle."""
 
     report = scheduled_evolution_cycle()
-    if not report.factor_health_persisted:
-        report.factor_governance_handoff = {
-            "status": "skipped",
-            "reason": "factor_health_not_persisted",
-        }
-        return report
-    try:
-        from backend.services.autonomous_evolution_runner import (
-            AutonomousEvolutionNurseryRunner,
-        )
-        from backend.services.v16_brain_orchestrator import (
-            V16BrainOrchestratorService,
-        )
+    v16_result: dict[str, Any] = {}
+    if report.factor_health_persisted:
+        try:
+            from backend.services.autonomous_evolution_runner import (
+                AutonomousEvolutionNurseryRunner,
+            )
+            from backend.services.v16_brain_orchestrator import (
+                V16BrainOrchestratorService,
+            )
 
-        runner = AutonomousEvolutionNurseryRunner()
-        v16_result = V16BrainOrchestratorService().run_once(
-            readiness=runner.build_light_readiness(),
-            limit=20,
-            source=(
-                "system:factor_health_handoff.v16:"
-                f"{report.factor_health_cycle_id}"
-            ),
-            persist=True,
-        )
+            runner = AutonomousEvolutionNurseryRunner()
+            v16_result = V16BrainOrchestratorService().run_once(
+                readiness=runner.build_light_readiness(),
+                limit=20,
+                source=(
+                    "system:factor_health_handoff.v16:"
+                    f"{report.factor_health_cycle_id}"
+                ),
+                persist=True,
+            )
+            report.factor_v16_handoff = {
+                "status": str(v16_result.get("status") or "unknown"),
+                "health_cycle_id": report.factor_health_cycle_id,
+                "snapshot_id": str(v16_result.get("snapshot_id") or ""),
+                "delegated_count": int(v16_result.get("delegated_count") or 0),
+                "command_count": int(v16_result.get("command_count") or 0),
+            }
+        except Exception as exc:
+            # Governance still runs so risk-reducing actions remain available.
+            # Missing V16 authority is fail-closed for expansion inside the
+            # specialist orchestrator.
+            logger.exception(
+                "[Evolve] factor governance V16 handoff failed: %s",
+                exc,
+            )
+            report.factor_v16_handoff = {
+                "status": "failed",
+                "health_cycle_id": report.factor_health_cycle_id,
+                "reason": f"{type(exc).__name__}:{exc}"[:300],
+            }
+    else:
+        # Keep one heavy owner: even when health cannot be refreshed, run the
+        # specialist so tightening actions (downweight/quarantine/retire)
+        # remain available.  Expansion still receives no handoff and remains
+        # fail-closed behind V16CommandGate.
         report.factor_v16_handoff = {
-            "status": str(v16_result.get("status") or "unknown"),
-            "health_cycle_id": report.factor_health_cycle_id,
-            "snapshot_id": str(v16_result.get("snapshot_id") or ""),
-            "delegated_count": int(v16_result.get("delegated_count") or 0),
-            "command_count": int(v16_result.get("command_count") or 0),
-        }
-    except Exception as exc:
-        # Governance still runs so risk-reducing actions remain available.
-        # Missing V16 authority is fail-closed for expansion inside the
-        # specialist orchestrator.
-        logger.exception(
-            "[Evolve] factor governance V16 handoff failed: %s",
-            exc,
-        )
-        report.factor_v16_handoff = {
-            "status": "failed",
-            "health_cycle_id": report.factor_health_cycle_id,
-            "reason": f"{type(exc).__name__}:{exc}"[:300],
+            "status": "skipped",
+            "health_cycle_id": "",
+            "reason": "factor_health_not_persisted",
         }
     try:
         from backend.runtime.factor_governance_orchestrator import (
@@ -732,11 +738,14 @@ def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
         )
 
         started_at = _time.time()
+        has_v16_handoff = bool(report.factor_v16_handoff.get("snapshot_id"))
         result = FactorGovernanceOrchestrator.shared().run_cycle(
             trigger_source=(
                 "factor_health_handoff:"
                 f"{report.factor_health_cycle_id}"
-            ),
+            )
+            if report.factor_health_persisted
+            else "evolution_health_unavailable",
             v16_handoff={
                 **report.factor_v16_handoff,
                 "health_cycle_id": report.factor_health_cycle_id,
@@ -747,7 +756,7 @@ def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
                     or ""
                 ),
             }
-            if report.factor_v16_handoff.get("snapshot_id")
+            if has_v16_handoff
             else None,
         )
         report.factor_governance_handoff = {

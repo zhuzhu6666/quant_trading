@@ -464,26 +464,28 @@ def test_learning_worker_registers_factor_governance_job(monkeypatch):
             registered.append(("__start__", "", ""))
 
     monkeypatch.setattr("backend.runtime.scheduler.InProcessScheduler", lambda: _FakeScheduler())
-    monkeypatch.setattr("backend.runtime.evolution_orchestrator.scheduled_evolution_cycle", lambda: None)
-    monkeypatch.setattr("backend.runtime.factor_governance_orchestrator.run_autonomous_factor_governance_cycle", lambda: None)
+    monkeypatch.setattr(
+        "backend.runtime.evolution_orchestrator.scheduled_evolution_with_governance_handoff",
+        lambda: None,
+    )
     monkeypatch.setattr("backend.services.learning_research_jobs.run_feature_engineering_job", lambda: None)
     monkeypatch.setattr("backend.services.learning_research_jobs.run_offmarket_position_quality_job", lambda: None)
 
     worker._register_heavy_jobs(include_system_health=False)
 
     names = [item[0] for item in registered]
-    assert "factor_governance_autonomous" in names
-    assert (
-        "factor_governance_autonomous",
-        "15,30,45 * * * *",
-        "coordinated_factor_governance_autonomous",
-    ) in registered
+    assert "factor_governance_autonomous" not in names
     assert "awe_adapt" not in names
     assert (
         "evolution_hourly",
         "23,53 * * * *",
         "coordinated_evolution_hourly",
     ) in registered
+    assert any(
+        name == "autonomous_evolution_nursery"
+        and cron == "7,17,37,47 * * * *"
+        for name, cron, _fn in registered
+    )
     assert any(
         name == "feature_eng" and cron == "5 3 * * *"
         for name, cron, _fn in registered

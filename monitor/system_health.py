@@ -179,7 +179,15 @@ class SystemHealth:
         try:
             from backend.services.live_service import loop_status
             ls = loop_status()
-            if ls.get("running"):
+            loop_blockers = sorted(
+                {str(item) for item in (ls.get("blockers") or ()) if str(item)}
+            )
+            loop_phase = str(ls.get("phase") or "")
+            if (
+                ls.get("running")
+                and not loop_blockers
+                and loop_phase not in {"degraded", "draining"}
+            ):
                 components["live_loop"] = ComponentStatus(
                     name="实盘循环",
                     status="ok",
@@ -187,6 +195,16 @@ class SystemHealth:
                     detail=f"pid={ls.get('pid')} broker={ls.get('broker')}",
                     ts=time.time(),
                 )
+            elif ls.get("running"):
+                detail = ", ".join(loop_blockers) or loop_phase or "runtime_degraded"
+                components["live_loop"] = ComponentStatus(
+                    name="实盘循环",
+                    status="degraded",
+                    score=0.4,
+                    detail=f"{detail}; new risk fail-closed",
+                    ts=time.time(),
+                )
+                errors.append(f"Live loop degraded: {detail}")
             else:
                 components["live_loop"] = ComponentStatus(
                     name="实盘循环",

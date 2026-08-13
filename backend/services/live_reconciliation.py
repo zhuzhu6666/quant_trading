@@ -205,18 +205,25 @@ def explicit_account_reconcile(
     try:
         kwargs = {"force": True, "allow_cache_fallback": False}
         if isinstance(positions_reconcile, PositionReconcileResult):
+            # This immutable result is the canonical broker snapshot for the
+            # serial tick.  Let the account reconcile reuse its known PnL
+            # instead of issuing a second PnL RPC.
+            kwargs["positions_reconcile"] = positions_reconcile
             kwargs["confirmed_empty_positions"] = positions_reconcile
         result = bridge.reconcile_account(**kwargs)
     except TypeError:
-        # Compatibility for non-cTrader test/adapter bridges that have not
-        # adopted the additive empty-position evidence argument.
+        # Compatibility for bridges that have not adopted the full same-tick
+        # position evidence argument.  Keep the older empty-position-only
+        # argument before falling back to the original contract.
         try:
-            result = bridge.reconcile_account(
-                force=True,
-                allow_cache_fallback=False,
-            )
+            kwargs.pop("positions_reconcile", None)
+            result = bridge.reconcile_account(**kwargs)
         except TypeError:
-            result = bridge.reconcile_account(force=True)
+            kwargs.pop("confirmed_empty_positions", None)
+            try:
+                result = bridge.reconcile_account(**kwargs)
+            except TypeError:
+                result = bridge.reconcile_account(force=True)
     except Exception:
         return None
     if str(reconcile_value(result, "status", "failed") or "failed") != "fresh":

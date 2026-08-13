@@ -67,6 +67,24 @@ def test_argon2_login_issues_short_access_and_rotating_refresh():
     assert family_revoked.json()["detail"]["error"] == "refresh_session_inactive"
 
 
+def test_tauri_origin_preflight_is_allowed_without_wildcard_cors():
+    client = TestClient(app)
+    response = client.options(
+        "/api/auth/login",
+        headers={
+            "Origin": "http://tauri.localhost",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type,x-confirm",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://tauri.localhost"
+    assert response.headers["access-control-allow-credentials"] == "true"
+    assert "POST" in response.headers["access-control-allow-methods"]
+    assert "Authorization" in response.headers["access-control-allow-headers"]
+    assert "X-Confirm" in response.headers["access-control-allow-headers"]
+
+
 def test_logout_revokes_access_durably_and_refresh_session():
     client = TestClient(app)
     login = client.post(

@@ -96,12 +96,13 @@ def bounded_demo_mode_active(cfg: Any | None = None) -> bool:
 
 
 def effective_factor_governance_cron(cfg: Any | None = None) -> str:
-    """Resolve the worker schedule without changing persisted config hashes.
+    """Resolve the canonical heavy governance owner schedule.
 
-    The historical default included minute 0, where it races the hourly
-    health -> V16 -> governance owner at minute 2. Preserve explicit custom
-    schedules, but migrate that exact old default to the non-overlapping
-    effective cadence.
+    Health, V16 delegation and factor governance now run in one learning
+    worker job.  The historical 15-minute factor-only defaults are retained
+    as compatibility inputs but must resolve to the 30-minute combined owner
+    cadence; otherwise the factor-only job can starve its own health/V16
+    prerequisite behind the shared advisory lock.
     """
 
     current = cfg if cfg is not None else shared()
@@ -109,8 +110,11 @@ def effective_factor_governance_cron(cfg: Any | None = None) -> str:
         getattr(current, "factor_governance_cron", "*/15 * * * *")
         or "*/15 * * * *"
     ).strip()
-    if configured == "*/15 * * * *":
-        return "15,30,45 * * * *"
+    if configured in {
+        "*/15 * * * *",
+        "15,30,45 * * * *",
+    }:
+        return "23,53 * * * *"
     return configured
 
 

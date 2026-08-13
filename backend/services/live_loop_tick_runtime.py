@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import time
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -303,6 +304,7 @@ def _run_safety_boundary(
     log: Any,
     runtime: LiveLoopTickRuntime,
 ) -> dict[str, Any]:
+    started_at = time.monotonic()
     try:
         bridge, broker_error, warming = runtime.get_ctrader()
         bridge_ready = bool(
@@ -310,20 +312,25 @@ def _run_safety_boundary(
             and not warming
             and getattr(bridge, "is_connected", False)
         )
+        positions_started_at = time.monotonic()
         reconcile = runtime.reconcile_positions(
             bridge if bridge_ready else None
         )
+        positions_elapsed = time.monotonic() - positions_started_at
         # Publish both broker facts before Safety evaluates freshness.  The
         # previous order refreshed account after the safety cycle, so a normal
         # positions/protection RPC span could make the watchdog observe an
         # account older than the 15-second contract even though this tick had
         # not yet attempted its account reconcile.
+        account_started_at = time.monotonic()
         account_reconcile, account_blockers = _reconcile_alpha_account(
             bridge=bridge if bridge_ready else None,
             broker=broker,
             positions_reconcile=reconcile,
             runtime=runtime,
         )
+        account_elapsed = time.monotonic() - account_started_at
+        safety_started_at = time.monotonic()
         safety = runtime.run_safety_cycle(
             bridge=bridge if bridge_ready else None,
             broker=broker,
@@ -332,6 +339,17 @@ def _run_safety_boundary(
             generation_id=generation_id,
             reconcile_result=reconcile,
         )
+        safety_elapsed = time.monotonic() - safety_started_at
+        total_elapsed = time.monotonic() - started_at
+        if total_elapsed >= 5.0 or account_blockers:
+            log(
+                f"tick {tick}: safety timing "
+                f"positions={positions_elapsed:.2f}s "
+                f"account={account_elapsed:.2f}s "
+                f"safety={safety_elapsed:.2f}s "
+                f"total={total_elapsed:.2f}s "
+                f"account_blockers={','.join(account_blockers) or 'none'}"
+            )
         return {
             "ok": True,
             "bridge": bridge,
@@ -343,6 +361,7 @@ def _run_safety_boundary(
             "safety": safety,
         }
     except Exception as exc:
+        total_elapsed = time.monotonic() - started_at
         error = f"{type(exc).__name__}: {exc}"
         failure = runtime.persist_safety_fail_closed(
             blockers=("safety_cycle_exception",),
@@ -351,7 +370,7 @@ def _run_safety_boundary(
         )
         log(
             f"tick {tick}: safety cycle failed closed; retry in 5s: "
-            f"{error}"
+            f"{error}; elapsed={total_elapsed:.2f}s"
         )
         return {
             "ok": False,

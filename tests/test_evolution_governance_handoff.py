@@ -93,9 +93,27 @@ def test_health_handoff_skips_when_persistence_failed(monkeypatch):
         lambda: report,
     )
 
+    calls = []
+
+    class _Governance:
+        def run_cycle(self, *, trigger_source, v16_handoff):
+            calls.append((trigger_source, v16_handoff))
+            return {"status": "waiting_v16_command"}
+
+    import backend.runtime.factor_governance_orchestrator as governance
+
+    monkeypatch.setattr(
+        governance.FactorGovernanceOrchestrator,
+        "shared",
+        classmethod(lambda _cls: _Governance()),
+    )
+
     result = evolution.scheduled_evolution_with_governance_handoff()
 
-    assert result.factor_governance_handoff == {
+    assert result.factor_v16_handoff == {
         "status": "skipped",
+        "health_cycle_id": "",
         "reason": "factor_health_not_persisted",
     }
+    assert calls == [("evolution_health_unavailable", None)]
+    assert result.factor_governance_handoff["status"] == "waiting_v16_command"

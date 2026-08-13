@@ -44,13 +44,15 @@
 
 | 事实类型 | `stale_after_sec` |
 |---|---:|
-| WS / 组合 state | 5 秒 |
+| WS transport heartbeat | 5 秒 |
+| `live.state.v2` 组合 state | 15 秒；由 account/positions/loop 必需子事实聚合 |
 | spot / account / positions / loop | 15 秒 |
 | account / positions / loop | 15 秒 |
 | risk / session / 风险性治理投影 | 30 秒 |
 | system runtime health | 75 秒 |
 | auto-recovery | 75 秒 |
 | readiness / learning / ops 账本 | 180 秒 |
+| market bars | 900 秒 |
 
 个别端点可以更严，但必须在 `_fact.stale_after_sec` 中自描述，客户端不得另维护一套隐式时限。
 
@@ -75,6 +77,7 @@
 | `GET /api/ctrader/token-status` | `ops.ctrader-token-status.v2` |
 | `GET /api/data/external-status` | `ops.external-data-status.v2` |
 | `GET /api/v4/catalog` | `factor.catalog.v4` |
+| `GET /api/market/bars` | `market.bars.v1`；`bars_monthly` 最近一根 K 线时间作为 `observed_at`，空结果为 `unknown/market_bars_empty` |
 | `GET /api/ops/alerts` | `ops.alerts.v2`，components 含 `ops.alert-delivery.v1` |
 | `GET /api/ops/recovery` | `ops.auto-recovery.v2` |
 | `GET /api/ops/recovery/history` | `ops.auto-recovery-history.v2` |
@@ -84,7 +87,7 @@
 
 account/positions 的 `observed_at` 与 reconcile ID 必须来自显式 fresh broker RPC；HTTP 读取和 cTrader push event 都不得刷新。push event 只进入 `event_projection` 子事实，供兼容展示和诊断，不能满足 startup、safety 或新增风险 admission。
 
-live loop 的串行 broker owner 在空仓时也必须每 5 秒醒来完成 freshness 所需的显式对账，给两次 RPC 和调度抖动预留空间，避免健康账户跨过 15 秒 account/positions 门槛。Web 端全应用只保留一个 `/ws/state` 连接；页面切换不得重建连接，每条消息都是完整快照。该连接由 canonical live state 写入事件驱动，不发送定时空快照，不做 HTTP fallback、旧快照合并或 live endpoint 轮询。WS 只有在真实断线或认证失败时才清空实时业务值，并按有界 backoff 重连；恢复后以第一条完整 WS 快照重新显示。非实时学习、治理和历史页面只在进入页面或用户明确刷新时读取各自 HTTP 事实。
+live loop 的串行 broker owner 在空仓时也必须以 5 秒为目标周期完成 freshness 所需的显式对账，处理和 broker RPC 耗时计入该周期；如果本轮处理已超过 5 秒，不得再额外等待 5 秒，避免健康账户跨过 15 秒 account/positions 门槛。Web 端全应用只保留一个 `/ws/state` 连接；页面切换不得重建连接，每条消息都是完整快照。该连接由 canonical live state 写入事件驱动，不发送定时空快照，不做 HTTP fallback、旧快照合并或 live endpoint 轮询。WS 只有在真实断线或认证失败时才清空实时业务值，并按有界 backoff 重连；恢复后以第一条完整 WS 快照重新显示。非实时学习、治理和历史页面只在进入页面或用户明确刷新时读取各自 HTTP 事实。
 
 cTrader bridge 的报价快照固定携带 `source=ctrader_spot`。有来源但超过 15 秒的最后报价必须表现为 stale 并保留数值与时间；只有从未收到报价或来源不可用时才是 unknown。该 15 秒窗口与最终开仓事实准入共用，但不改变内部非授权的市场上下文缓存窗口。
 
@@ -93,6 +96,10 @@ Web 概览的 `system.health.v2` 只在页面进入或用户明确刷新时读�
 `risk.summary.v2` 是组件级 fail-closed 组合事实：`system.runtime-health.v1` 由每分钟健康检查产出，允许 75 秒新鲜度以覆盖调度抖动；`risk.inputs.v1` 仍保持 30 秒。父级使用 75 秒自描述窗口，但任一组件为 `error/unknown/stale` 时必须投影为同类非 known 状态，不能用较宽的健康检查窗口掩盖风险输入过期。
 
 `live.positions.v2` 进一步公开 `broker_reconcile.identity/protection/price/pnl` 四个 `fact.v1` 子事实：identity/volume/SL/TP 来自全量 position reconcile；current price 只来自 15 秒内 cTrader spot；PnL 来自独立 broker PnL RPC。fresh 明确空仓不要求四个子组件并可保持 known；非空仓缺必需组件为 unknown，显式组件失败为 error；旧快照已经超过 15 秒时优先保持 stale 和原 `observed_at`。未知 price/PnL 不得用 entry price、账户差额或零值补齐，但 timeout、entry repair、close/reduce/tighten 仍可继续。
+
+live loop 的同一串行 tick 只允许有一份 broker 持仓快照：`reconcile_positions()` 产生的完整 `PositionReconcileResult` 原样传给 `reconcile_account()`；当 PnL component 和每个 position 的 `pnl_state` 都明确为 `known` 时，账户复用该 PnL 总和，不再发第二次 `ProtoOAGetPositionUnrealizedPnLReq`。组件未知或失败仍走原 RPC/失效闭锁，不能用复用优化把未知提升为 known。
+
+`live.loop.v2` 的 `observed_at` 只在串行 tick（包括风险指标更新）完整结束后推进；tick 开始、阶段切换和 transport heartbeat 都不是完成心跳。Safety heartbeat 仍是独立的 fail-closed 授权事实。因此“WS/经纪商已连接”与“账户/持仓事实新鲜”可以同时出现，但任何串行 tick 超过 15 秒都必须如实显示 stale，不能通过放大阈值掩盖。
 
 session 只有 `source` 为权威 `ctrader_deals*` 时才可 known；`degraded_cache` 必须 unknown。session 投影中的 `session_circuit_observation.triggered/reason/enforced` 区分“达到熔断阈值”和“实际阻断”：仅在 autonomy mode 与 broker 环境都确认是 Demo 时允许 `triggered=true, enforced=false`，且此时 `circuit_breaker=false`；非 Demo 必须保持 `triggered=true, enforced=true`。AutoRecovery status/history 读取都不得为取数而隐式构造或启动实例；未注册时固定为 `unknown/not_registered`，不得伪报健康。
 

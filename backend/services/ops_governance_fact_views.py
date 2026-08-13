@@ -236,11 +236,17 @@ def ledger_read_fact_payload(
     observed_paths: Sequence[Sequence[str]] = (("updated_at",), ("created_at",)),
     item_paths: Sequence[Sequence[str]] = (),
     item_timestamp_fields: Sequence[str] = ("updated_at", "created_at"),
+    query_observed_at: Any = None,
     reason_code: str = "ledger_observation_missing",
     stale_after_sec: float = OPS_LEDGER_STALE_AFTER_SEC,
     now: float | None = None,
 ) -> dict[str, Any]:
-    """Attach a fact for one explicitly named ledger/read-model entity."""
+    """Attach a fact for one explicitly named ledger/read-model entity.
+
+    ``query_observed_at`` is reserved for an authoritative successful read
+    model query. It makes the fact describe the freshness of the read itself;
+    item timestamps remain domain record times and are not rewritten.
+    """
 
     entity = _lookup(payload, entity_path)
     observed_at = _first_observation(entity, observed_paths)
@@ -253,6 +259,11 @@ def ledger_read_fact_payload(
         ),
     )
     error = _source_error(payload, entity)
+    if (
+        observed_epoch(query_observed_at) > 0
+        and not error
+    ):
+        observed_at = query_observed_at
     return _attach(
         payload,
         contract=contract,

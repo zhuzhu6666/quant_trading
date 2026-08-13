@@ -1755,6 +1755,7 @@ def build_replayed_close_payloads(
             "close_price": close_price,
             "close_ts": close_ts,
             "contributions": {},
+            "attribution_integrity": "missing",
             "real_pnl": real_pnl,
             "close_reason": "restart_replay",
             "context_integrity": context_integrity,

@@ -109,7 +109,7 @@ def test_fresh_nonempty_positions_require_complete_component_facts():
         assert component["source"] == "ctrader_reconcile"
         assert component["observed_at"] == 99.0
         assert component["generated_at"] == 100.0
-        assert component["stale_after_sec"] == 15.0
+        assert component["stale_after_sec"] == 30.0
         assert "reason_code" in component
         assert "components" in component
 
@@ -151,7 +151,7 @@ def test_stale_position_snapshot_retains_timestamp_when_components_are_missing()
             "ok": True,
             "positions": [{"position_id": 42}],
             "readiness": {
-                "positions_updated_at": 80.0,
+                "positions_updated_at": 60.0,
                 "positions_reconcile_failed_at": 99.0,
                 "positions_reconcile_error": "timeout",
             },
@@ -160,13 +160,13 @@ def test_stale_position_snapshot_retains_timestamp_when_components_are_missing()
     )
 
     assert payload["_fact"]["state"] == "stale"
-    assert payload["_fact"]["observed_at"] == 80.0
+    assert payload["_fact"]["observed_at"] == 60.0
     assert payload["_fact"]["reason_code"] == "freshness_expired"
 
 
 def test_running_loop_requires_a_heartbeat_but_stopped_is_directly_observed():
     missing = loop_fact_payload({"running": True}, now=100.0)
-    stale = loop_fact_payload({"running": True}, diagnostic_ts=80.0, now=100.0)
+    stale = loop_fact_payload({"running": True}, diagnostic_ts=60.0, now=100.0)
     stopped = loop_fact_payload({"running": False}, now=100.0)
 
     assert missing["_fact"]["state"] == "unknown"
@@ -186,6 +186,17 @@ def test_public_loop_fact_prefers_latest_completed_observation_over_safety_age()
     assert payload["_fact"]["observed_at"] == 99.0
 
 
+def test_public_loop_fact_does_not_use_newer_safety_heartbeat_as_tick_completion():
+    payload = loop_fact_payload(
+        {"running": True, "safety_heartbeat_at": 99.0},
+        diagnostic_ts=60.0,
+        now=100.0,
+    )
+
+    assert payload["_fact"]["state"] == "stale"
+    assert payload["_fact"]["observed_at"] == 60.0
+
+
 def test_composite_live_status_cannot_be_known_with_missing_loop_heartbeat():
     payload = live_status_fact_payload(
         {
@@ -201,6 +212,24 @@ def test_composite_live_status_cannot_be_known_with_missing_loop_heartbeat():
 
     assert payload["_fact"]["state"] == "unknown"
     assert payload["_fact"]["components"]["loop"]["state"] == "unknown"
+
+
+def test_composite_live_status_projects_stale_required_components():
+    payload = live_status_fact_payload(
+        {
+            "ctrader": {"status": "connected", "error": None},
+            "loop": {"running": True},
+            "readiness": {
+                "account_updated_at": 60.0,
+                "positions_updated_at": 99.0,
+            },
+        },
+        diagnostic_ts=99.0,
+        now=100.0,
+    )
+
+    assert payload["_fact"]["state"] == "stale"
+    assert payload["_fact"]["components"]["account"]["state"] == "stale"
 
 
 def test_strategy_session_and_realized_contracts_use_domain_observations():
@@ -381,9 +410,9 @@ def test_state_reports_stale_when_underlying_broker_snapshots_are_old():
     payload = state_snapshot_fact_payload(
         {"source": "live", "balance": 1000.0, "equity": 1001.0},
         account={"ok": True},
-        account_updated_at=90.0,
-        positions_updated_at=90.0,
-        diagnostic_ts=99.0,
+        account_updated_at=60.0,
+        positions_updated_at=60.0,
+        diagnostic_ts=60.0,
         spot_quote={"ts": 99.0, "source": "ctrader_spot"},
         now=100.0,
     )
@@ -392,28 +421,68 @@ def test_state_reports_stale_when_underlying_broker_snapshots_are_old():
     assert payload["_fact"]["components"]["spot"]["state"] == "known"
 
 
+def test_state_parent_matches_fresh_required_children_without_five_second_flip():
+    payload = state_snapshot_fact_payload(
+        {"source": "live", "balance": 1000.0, "equity": 1001.0},
+        account={"ok": True},
+        account_updated_at=90.0,
+        positions_updated_at=90.0,
+        diagnostic_ts=99.0,
+        spot_quote={"ts": 99.0, "source": "ctrader_spot"},
+        now=100.0,
+    )
+
+    assert payload["_fact"]["state"] == "known"
+    for name in ("account", "positions", "loop"):
+        assert payload["_fact"]["components"][name]["state"] == "known"
+
+
+def test_state_exposes_separate_fifteen_second_safety_fact_without_poisoning_display():
+    payload = state_snapshot_fact_payload(
+        {"source": "live", "balance": 1000.0, "equity": 1001.0},
+        account={"ok": True},
+        account_updated_at=99.0,
+        positions_updated_at=99.0,
+        diagnostic_ts=99.0,
+        loop_status={
+            "running": True,
+            "accepting_new_risk": False,
+            "safety_heartbeat_at": 80.0,
+            "blockers": ["safety_heartbeat_stale"],
+        },
+        spot_quote={"ts": 99.0, "source": "ctrader_spot"},
+        now=100.0,
+    )
+
+    assert payload["_fact"]["state"] == "known"
+    safety = payload["_fact"]["components"]["safety"]
+    assert safety["state"] == "stale"
+    assert safety["stale_after_sec"] == 15.0
+    assert safety["reason_code"] == "safety_heartbeat_stale"
+
+
 def test_state_spot_fact_uses_the_final_open_freshness_window():
     fresh = state_snapshot_fact_payload(
         {"source": "live", "balance": 1000.0, "equity": 1001.0},
         account={"ok": True},
-        account_updated_at=114.9,
-        positions_updated_at=114.9,
-        diagnostic_ts=114.9,
+        account_updated_at=129.9,
+        positions_updated_at=129.9,
+        diagnostic_ts=129.9,
         spot_quote={"ts": 100.0, "source": "ctrader_spot"},
-        now=114.9,
+        now=129.9,
     )
     stale = state_snapshot_fact_payload(
         {"source": "live", "balance": 1000.0, "equity": 1001.0},
         account={"ok": True},
-        account_updated_at=115.1,
-        positions_updated_at=115.1,
-        diagnostic_ts=115.1,
+        account_updated_at=130.1,
+        positions_updated_at=130.1,
+        diagnostic_ts=130.1,
         spot_quote={"ts": 100.0, "source": "ctrader_spot"},
-        now=115.1,
+        now=130.1,
     )
 
     assert fresh["_fact"]["components"]["spot"]["state"] == "known"
-    assert fresh["_fact"]["components"]["spot"]["stale_after_sec"] == 15.0
+    assert fresh["_fact"]["components"]["spot"]["stale_after_sec"] == 30.0
     assert stale["_fact"]["components"]["spot"]["state"] == "stale"
 
 
@@ -577,6 +646,7 @@ def test_health_probe_adds_fact_without_removing_legacy_shape():
 
     assert payload["status"] == "ok"
     assert payload["_fact"]["state"] == "known"
+    assert payload["_fact"]["stale_after_sec"] == 75.0
 
     unknown = health_fact_payload(
         {"status": "ok", "db": "connected", "ctrader": "unknown"},
