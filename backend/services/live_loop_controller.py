@@ -7,6 +7,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from backend.services.live_reconciliation import LIVE_SAFETY_FRESHNESS_SEC
+
 
 LOOP_STATES = frozenset({"starting", "running", "degraded", "draining", "stopped", "failed"})
 START_BLOCKING_STATES = frozenset({"starting", "running", "degraded", "draining"})
@@ -228,7 +230,10 @@ class LiveLoopController:
                 name for name, ok in generation.startup_barrier.items() if not ok
             ]
             blockers = pending_startup + list(generation.blockers) + list(generation.runtime_blockers)
-            heartbeat_healthy = safety_age is not None and safety_age <= 15.0
+            heartbeat_healthy = (
+                safety_age is not None
+                and safety_age <= LIVE_SAFETY_FRESHNESS_SEC
+            )
             if generation.state in {"running", "degraded"} and not heartbeat_healthy:
                 blockers.append(
                     "safety_heartbeat_unknown" if safety_age is None else "safety_heartbeat_stale"
@@ -275,7 +280,10 @@ class LiveLoopController:
                 return False
             if generation.safety_heartbeat_at <= 0:
                 return False
-            return self._clock() - generation.safety_heartbeat_at <= 15.0
+            return (
+                self._clock() - generation.safety_heartbeat_at
+                <= LIVE_SAFETY_FRESHNESS_SEC
+            )
 
     def current(self) -> LoopGeneration | None:
         with self._lock:

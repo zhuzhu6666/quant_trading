@@ -17,7 +17,7 @@ const tauriCapability = read("src-tauri/capabilities/default.json");
 const tauriCommands = read("src-tauri/src/lib.rs") + read("src-tauri/src/commands.rs") + read("src-tauri/src/secure_store.rs");
 const tauriReleaseConfig = read("src-tauri/tauri.release.conf.json");
 
-for (const route of ["/login", "/trade-ops", "/risk-desk", "/research", "/governance", "/ops"]) assert.match(app, new RegExp(`path=\"${route.replaceAll("/", "\\/")}\"`));
+for (const route of ["/login", "/trade-ops", "/risk-desk", "/research", "/governance", "/ops", "/workflow"]) assert.match(app, new RegExp(`path=\"${route.replaceAll("/", "\\/")}\"`));
 for (const legacy of ["/overview", "/trading", "/pnl", "/risk", "/learning", "/models", "/v15", "/v16", "/performance", "/autonomy", "/ops/:section", "/governance/:section"]) {
   const escaped = legacy.replaceAll("/", "\\/").replaceAll(":", "\\:");
   assert.doesNotMatch(app, new RegExp(`path\\s*=\\s*[\\\"']${escaped}[\\\"']`), `legacy route remains: ${legacy}`);

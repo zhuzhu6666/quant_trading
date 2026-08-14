@@ -437,7 +437,7 @@ def test_state_parent_matches_fresh_required_children_without_five_second_flip()
         assert payload["_fact"]["components"][name]["state"] == "known"
 
 
-def test_state_exposes_separate_fifteen_second_safety_fact_without_poisoning_display():
+def test_state_exposes_twenty_second_safety_fact_without_poisoning_display():
     payload = state_snapshot_fact_payload(
         {"source": "live", "balance": 1000.0, "equity": 1001.0},
         account={"ok": True},
@@ -447,7 +447,7 @@ def test_state_exposes_separate_fifteen_second_safety_fact_without_poisoning_dis
         loop_status={
             "running": True,
             "accepting_new_risk": False,
-            "safety_heartbeat_at": 80.0,
+            "safety_heartbeat_at": 79.0,
             "blockers": ["safety_heartbeat_stale"],
         },
         spot_quote={"ts": 99.0, "source": "ctrader_spot"},
@@ -457,7 +457,7 @@ def test_state_exposes_separate_fifteen_second_safety_fact_without_poisoning_dis
     assert payload["_fact"]["state"] == "known"
     safety = payload["_fact"]["components"]["safety"]
     assert safety["state"] == "stale"
-    assert safety["stale_after_sec"] == 15.0
+    assert safety["stale_after_sec"] == 20.0
     assert safety["reason_code"] == "safety_heartbeat_stale"
 
 
@@ -631,11 +631,94 @@ def test_risk_summary_uses_component_specific_freshness_windows():
 
     assert stale_risk_inputs["_fact"]["state"] == "stale"
     assert stale_risk_inputs["_fact"]["reason_code"] == "component_stale"
-    assert stale_risk_inputs["_fact"]["components"]["risk_inputs"]["stale_after_sec"] == 30.0
+    assert stale_risk_inputs["_fact"]["components"]["risk_inputs"]["stale_after_sec"] == 20.0
 
     assert stale_system_health["_fact"]["state"] == "stale"
     assert stale_system_health["_fact"]["reason_code"] == "freshness_expired"
     assert stale_system_health["_fact"]["components"]["system_health"]["stale_after_sec"] == 75.0
+
+
+def test_risk_summary_uses_snapshot_publication_time_without_hiding_input_age():
+    payload = risk_summary_fact_payload(
+        {
+            "snapshot": {
+                "status": "known",
+                "as_of": 68.0,
+                "published_at": 99.0,
+                "components": {},
+            },
+            "system_health": {"ts": 99.0, "errors": []},
+        },
+        risk_observed_at=68.0,
+        now=100.0,
+    )
+
+    assert payload["_fact"]["state"] == "known"
+    assert payload["_fact"]["components"]["risk_inputs"]["state"] == "known"
+    assert payload["_fact"]["components"]["risk_inputs"]["observed_at"] == 99.0
+
+
+def test_risk_summary_preserves_explicit_stale_snapshot_status():
+    payload = risk_summary_fact_payload(
+        {
+            "snapshot": {
+                "status": "stale",
+                "as_of": 68.0,
+                "published_at": 99.0,
+                "blockers": ["broker_risk_facts_stale"],
+            },
+            "system_health": {"ts": 99.0, "errors": []},
+        },
+        risk_observed_at=68.0,
+        now=100.0,
+    )
+
+    assert payload["_fact"]["state"] == "stale"
+    assert payload["_fact"]["reason_code"] == "component_stale"
+    assert payload["_fact"]["components"]["risk_inputs"]["state"] == "stale"
+    assert payload["_fact"]["components"]["risk_inputs"]["reason_code"] == "broker_risk_facts_stale"
+
+
+def test_risk_summary_non_blocking_health_error_does_not_become_source_error():
+    payload = risk_summary_fact_payload(
+        {
+            "system_health": {
+                "ts": 99.0,
+                "errors": ["Live loop degraded: no_new_risk_latched"],
+                "trading_blocked": False,
+                "blocking_components": [],
+            }
+        },
+        risk_observed_at=68.0,
+        now=100.0,
+    )
+
+    assert payload["_fact"]["state"] == "stale"
+    assert payload["_fact"]["reason_code"] == "component_stale"
+    assert payload["_fact"]["components"]["system_health"]["state"] == "known"
+    assert (
+        payload["_fact"]["components"]["system_health"]["reason_code"]
+        == "non_blocking_health_error"
+    )
+
+
+def test_risk_summary_blocking_health_error_remains_error():
+    payload = risk_summary_fact_payload(
+        {
+            "system_health": {
+                "ts": 99.0,
+                "errors": ["broker unavailable"],
+                "trading_blocked": True,
+                "blocking_components": ["broker"],
+            }
+        },
+        risk_observed_at=99.0,
+        now=100.0,
+    )
+
+    assert payload["_fact"]["state"] == "error"
+    assert payload["_fact"]["reason_code"] == "system_health_blocking"
+    assert payload["_fact"]["components"]["system_health"]["state"] == "error"
 
 
 def test_health_probe_adds_fact_without_removing_legacy_shape():

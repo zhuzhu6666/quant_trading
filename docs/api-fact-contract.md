@@ -47,8 +47,9 @@
 | WS transport heartbeat | 5 秒 |
 | `live.state.v2` 组合 state | 30 秒展示窗口；由 account/positions/loop 必需子事实聚合 |
 | spot / account / positions / loop | 30 秒展示窗口 |
-| `live.safety-freshness.v1` | 15 秒；安全心跳和新增风险准入硬门 |
-| risk / session / 风险性治理投影 | 30 秒 |
+| `live.safety-freshness.v1` | 20 秒；安全心跳和新增风险准入硬门 |
+| risk.inputs / live safety | 20 秒；风险输入与安全心跳共用同一后端事实门 |
+| session / 风险性治理投影 | 30 秒 |
 | system runtime health | 75 秒 |
 | auto-recovery | 75 秒 |
 | readiness / learning / ops 账本 | 180 秒 |
@@ -57,8 +58,8 @@
 个别端点可以更严，但必须在 `_fact.stale_after_sec` 中自描述，客户端不得另维护一套隐式时限。
 
 展示 freshness 与安全 freshness 必须分开理解：`live.state.v2` 及其 account/positions/loop
-子事实允许在 30 秒内继续展示最后一次真实 broker 对账；`live.safety-freshness.v1`
-仍以 15 秒安全心跳判断新增风险是否可接受。前端不得用展示事实的 `known` 推导
+子事实允许在 30 秒内继续展示最后一次真实 broker 对账；`live.safety-freshness.v1` 与
+`risk.inputs.v1` 共用 20 秒后端事实门判断安全和风险输入是否可接受。前端不得用展示事实的 `known` 推导
 `accepting_new_risk=true`，也不得用 WS 已连接替代安全心跳。
 
 ## 3. 核心运行端点
@@ -92,19 +93,19 @@
 
 account/positions 的 `observed_at` 与 reconcile ID 必须来自显式 fresh broker RPC；HTTP 读取和 cTrader push event 都不得刷新。push event 只进入 `event_projection` 子事实，供兼容展示和诊断，不能满足 startup、safety 或新增风险 admission。
 
-live loop 的串行 broker owner 在空仓时也必须以 5 秒为目标周期完成 freshness 所需的显式对账，处理和 broker RPC 耗时计入该周期；本轮处理不得用 transport heartbeat 冒充完成事实。15 秒是安全对账、watchdog 和新增风险 admission 的硬门；桌面展示使用 30 秒窗口，避免短暂调度延迟制造“已连接但整屏过期”的假象。Web 端全应用只保留一个 `/ws/state` 连接；页面切换不得重建连接，每条消息都是完整快照。该连接由 canonical live state 写入事件驱动，不发送定时空快照，不做 HTTP fallback、旧快照合并或 live endpoint 轮询。WS 只有在真实断线或认证失败时才清空实时业务值，并按有界 backoff 重连；恢复后以第一条完整 WS 快照重新显示。非实时学习、治理和历史页面只在进入页面或用户明确刷新时读取各自 HTTP 事实。
+live loop 的串行 broker owner 在空仓时也必须以 5 秒为目标周期完成 freshness 所需的显式对账，处理和 broker RPC 耗时计入该周期；本轮处理不得用 transport heartbeat 冒充完成事实。20 秒是安全对账、watchdog 和新增风险 admission 的硬门；桌面展示使用 30 秒窗口，避免短暂调度延迟制造“已连接但整屏过期”的假象。Web 端全应用只保留一个 `/ws/state` 连接；页面切换不得重建连接，每条消息都是完整快照。该连接由 canonical live state 写入事件驱动，不发送定时空快照，不做 HTTP fallback、旧快照合并或 live endpoint 轮询。WS 只有在真实断线或认证失败时才清空实时业务值，并按有界 backoff 重连；恢复后以第一条完整 WS 快照重新显示。非实时学习、治理和历史页面只在进入页面或用户明确刷新时读取各自 HTTP 事实。
 
-cTrader bridge 的报价快照固定携带 `source=ctrader_spot`。有来源但超过 30 秒的桌面展示报价表现为 stale 并保留数值与时间；安全心跳或最终开仓事实准入在 15 秒内独立判断；只有从未收到报价或来源不可用时才是 unknown。不得用展示报价窗口放宽最终开仓事实准入。
+cTrader bridge 的报价快照固定携带 `source=ctrader_spot`。有来源但超过 30 秒的桌面展示报价表现为 stale 并保留数值与时间；安全心跳或最终开仓事实准入在 20 秒内独立判断；只有从未收到报价或来源不可用时才是 unknown。不得用展示报价窗口放宽最终开仓事实准入。
 
 Web 概览的 `system.health.v2` 只在页面进入或用户明确刷新时读取；不得通过轮询制造“接口正常/接口未知”周期抖动。交易运行态、账户、持仓、会话、策略和风险输入统一使用同一条 `/ws/state` 快照。
 
-`risk.summary.v2` 是组件级 fail-closed 组合事实：`system.runtime-health.v1` 由每分钟健康检查产出，允许 75 秒新鲜度以覆盖调度抖动；`risk.inputs.v1` 仍保持 30 秒。父级使用 75 秒自描述窗口，但任一组件为 `error/unknown/stale` 时必须投影为同类非 known 状态，不能用较宽的健康检查窗口掩盖风险输入过期。
+`risk.summary.v2` 是组件级 fail-closed 组合事实：`system.runtime-health.v1` 由每分钟健康检查产出，允许 75 秒新鲜度以覆盖调度抖动；`risk.inputs.v1` 与安全心跳共用 20 秒后端事实门。父级使用 75 秒自描述窗口，但任一组件为 `error/unknown/stale` 时必须投影为同类非 known 状态，不能用较宽的健康检查窗口掩盖风险输入过期。
 
-`live.positions.v2` 进一步公开 `broker_reconcile.identity/protection/price/pnl` 四个 `fact.v1` 子事实：identity/volume/SL/TP 来自全量 position reconcile；current price 只来自真实 cTrader spot；PnL 来自独立 broker PnL RPC。桌面展示 freshness 为 30 秒，安全对账和最终新增风险 admission 仍独立使用 15 秒门。fresh 明确空仓不要求四个子组件并可保持 known；非空仓缺必需组件为 unknown，显式组件失败为 error；旧快照已经超过 30 秒时优先保持 stale 和原 `observed_at`。未知 price/PnL 不得用 entry price、账户差额或零值补齐，但 timeout、entry repair、close/reduce/tighten 仍可继续。
+`live.positions.v2` 进一步公开 `broker_reconcile.identity/protection/price/pnl` 四个 `fact.v1` 子事实：identity/volume/SL/TP 来自全量 position reconcile；current price 只来自真实 cTrader spot；PnL 来自独立 broker PnL RPC。桌面展示 freshness 为 30 秒，安全对账和最终新增风险 admission 仍独立使用 20 秒门。fresh 明确空仓不要求四个子组件并可保持 known；非空仓缺必需组件为 unknown，显式组件失败为 error；旧快照已经超过 30 秒时优先保持 stale 和原 `observed_at`。未知 price/PnL 不得用 entry price、账户差额或零值补齐，但 timeout、entry repair、close/reduce/tighten 仍可继续。
 
 live loop 的同一串行 tick 只允许有一份 broker 持仓快照：`reconcile_positions()` 产生的完整 `PositionReconcileResult` 原样传给 `reconcile_account()`；当 PnL component 和每个 position 的 `pnl_state` 都明确为 `known` 时，账户复用该 PnL 总和，不再发第二次 `ProtoOAGetPositionUnrealizedPnLReq`。组件未知或失败仍走原 RPC/失效闭锁，不能用复用优化把未知提升为 known。
 
-`live.loop.v2` 的 `observed_at` 只在串行 tick（包括风险指标更新）完整结束后推进；tick 开始、阶段切换和 transport heartbeat 都不是完成心跳。Safety heartbeat 仍通过独立的 `live.safety-freshness.v1` 作为 fail-closed 授权事实。因此“WS/经纪商已连接”与“账户/持仓事实待刷新”可以同时出现；展示可在 30 秒内保留最后一次真实事实，但安全心跳超过 15 秒必须阻止新增风险并显示安全门原因。
+`live.loop.v2` 的 `observed_at` 只在串行 tick（包括风险指标更新）完整结束后推进；tick 开始、阶段切换和 transport heartbeat 都不是完成心跳。Safety heartbeat 仍通过独立的 `live.safety-freshness.v1` 作为 fail-closed 授权事实。因此“WS/经纪商已连接”与“账户/持仓事实待刷新”可以同时出现；展示可在 30 秒内保留最后一次真实事实，但安全心跳超过 20 秒必须阻止新增风险并显示安全门原因。
 
 session 只有 `source` 为权威 `ctrader_deals*` 时才可 known；`degraded_cache` 必须 unknown。session 投影中的 `session_circuit_observation.triggered/reason/enforced` 区分“达到熔断阈值”和“实际阻断”：仅在 autonomy mode 与 broker 环境都确认是 Demo 时允许 `triggered=true, enforced=false`，且此时 `circuit_breaker=false`；非 Demo 必须保持 `triggered=true, enforced=true`。AutoRecovery status/history 读取都不得为取数而隐式构造或启动实例；未注册时固定为 `unknown/not_registered`，不得伪报健康。
 
@@ -210,7 +211,7 @@ session 只有 `source` 为权威 `ctrader_deals*` 时才可 known；`degraded_c
 | `POST /api/ops/replay/bar-run` | `ops.replay-bar-run.v2` | durable replay report ID + 时间 |
 | `POST /api/backtest/run` | 无 `fact.v1`；返回持久任务 ID | 唯一 Parity 历史回测入口；任务结果只返回指标、样本计数与工件位置，完整交易/事件/训练样本保存在已校验回放工件 |
 | `POST /api/ops/replay/bar-preview` | `ops.replay-bar-preview.v2` | 明确不持久化，兼容 unknown |
-| `GET /api/ops/replay/bar-decisions` | `ops.replay-bar-decisions.v2` | `decision_ledger.decision_ts` |
+| `GET /api/ops/replay/bar-decisions` | `ops.replay-bar-decisions.v2` | `decision_ledger.decision_ts`；每条开仓选择同时只读投影 `entry_ts`、已确认平仓才有的 `exit_ts`/`holding_seconds`，以及 `exit_decision_id`/`close_reason`；平仓事实按 `trade_outcome_review`、`position_lifecycle_event`、`recovery_position_state` 的既有只读投影顺序回退；`system_view` 只汇总服务端已有方向、评分、动作理由和后验事实 |
 | `POST /api/ops/incident-playbook/run` | `ops.incident-playbook-run.v2` | durable playbook ID + 时间 |
 | `GET /api/ops/incident-playbook/{playbook_id}/events` | `ops.incident-playbook-events.v2` | event ledger item 时间 |
 | `POST /api/ops/incident-playbook/{playbook_id}/events` | `ops.incident-playbook-event.v2` | durable event ID + 时间 |

@@ -7,6 +7,7 @@ export const workspaceLabels: Record<WorkspaceId, { label: string; english: stri
   research: { label: "研究实验室", english: "Research Lab", hint: "证据画布", kicker: "03 / 证据画布" },
   governance: { label: "治理中心", english: "Governance", hint: "审查与提交", kicker: "04 / 控制平面" },
   ops: { label: "运维中心", english: "Ops", hint: "健康与恢复", kicker: "05 / 运维" },
+  workflow: { label: "工作流", english: "Workflow", hint: "运行路径", kicker: "06 / 运行路径" },
 };
 
 export const factStateLabels: Record<FactState, string> = {

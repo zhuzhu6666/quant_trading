@@ -1,7 +1,7 @@
 :root {
   color-scheme: dark;
-  --font-ui: "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI Variable Text", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
-  --font-display: "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI Variable Display", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-ui: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI Variable Text", "Segoe UI", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI Variable Display", "Segoe UI", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
   font-family: var(--font-ui);
   --surface-0: #07090d;
   --surface-1: #0c1017;
@@ -16,7 +16,7 @@
   --signal-warning: #e5b95e;
   --signal-danger: #ff6c73;
   --signal-info: #65b9ff;
-  --mono: "Cascadia Mono", "Consolas", "Noto Sans Mono CJK SC", "Microsoft YaHei UI", ui-monospace, monospace;
+  --mono: "Consolas", "Cascadia Mono", "Noto Sans Mono CJK SC", "Microsoft YaHei UI", ui-monospace, monospace;
   --radius-sm: 4px;
   --radius-md: 8px;
   --shadow-panel: 0 12px 40px rgb(0 0 0 / 20%);

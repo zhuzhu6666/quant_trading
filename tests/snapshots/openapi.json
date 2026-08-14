@@ -12178,7 +12178,7 @@
     },
     "/api/logs/tail": {
       "get": {
-        "description": "返回 backend.log 最后 N 行。",
+        "description": "返回允许的日志源最后 N 行；source 只接受固定的服务日志白名单。",
         "operationId": "tail_logs_api_logs_tail_get",
         "parameters": [
           {
@@ -12186,11 +12186,27 @@
             "name": "lines",
             "required": false,
             "schema": {
-              "default": 50,
+              "default": 100,
               "maximum": 500,
               "minimum": 1,
               "title": "Lines",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "default": "backend",
+              "enum": [
+                "backend",
+                "live_loop",
+                "alerts",
+                "debug"
+              ],
+              "title": "Source",
+              "type": "string"
             }
           },
           {

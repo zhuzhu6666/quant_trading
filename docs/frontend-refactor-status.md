@@ -9,7 +9,7 @@
 阶段：D1 renderer 与桌面壳首批实施完成；本人已确认个人本机认证通过且可以正常使用，
 服务器 backend-only 收口也已完成；剩余工作集中在完整生命周期验收和少量桌面兼容性。
 
-`web_frontend/` 工作树中的 renderer 已切换到 React 19 + TypeScript + Vite 的五工作区
+`web_frontend/` 工作树中的 renderer 已切换到 React 19 + TypeScript + Vite 的六工作区
 路由和 Tauri 2 壳；服务器仍是唯一事实源、风险裁决者和执行权威。2026-08-13 曾将
 本地通过检查的 static artifact 曾部署到 Caddy 根目录并完成公网 smoke；2026-08-14 已
 撤下浏览器静态入口，Caddy 只保留 API/WSS 反代。认证 HTTP、`/ws/state` 本机/公网和
@@ -26,13 +26,13 @@ manifest 和公开 updater 已明确移出本批完成条件。
   WebView2/桌面诊断、UI preference、研究缓存边界、Windows Credential Manager
   refresh material bridge；公开发行/updater 配置不作为个人自用交付内容；
 - 升级 React 19，保留 TypeScript/Vite，引入 Radix Dialog/Popover/Tabs/Tooltip 原语；
-- 建立 Workbench Shell、全局 Safety/Readiness/Risk rail、Command Palette、五个工作区
+- 建立 Workbench Shell、全局 Safety/Readiness/Risk rail、Command Palette、六个工作区
   导航和可保存的 sidebar/context dock/pin/tab/split/collapse 布局；
 - 建立 `WorkspaceId`、`FactViewState`、`ResearchSnapshot`、`DecisionTrace`、
   `ActionIntent`、`MutationResult`、`CacheEntry` 及 endpoint-specific decoder；
 - 将 `/ws/state` 收敛为单例完整 `live.state.v2` 快照来源，使用 ticket、认证失败清空、
   有界 30 秒 backoff，删除 HTTP live fallback、轮询和旧快照合并；
-- 实现 Trade Ops、Risk Desk、Research Lab、Governance、Ops 五个工作区；Research
+- 实现 Trade Ops、Risk Desk、Research Lab、Governance、Ops 五个工作区及只读 Workflow 一体化架构拓扑页；拓扑把实时执行主干、市场与外部数据、智能学习反馈、治理后验、服务运维和 API/客户端消费放进同一张图，展示既有 authority 与传输方向，点击节点显示输入、输出、事实来源和观测状态；Research
   接入 bars、replay、bar-decisions/PIT trace、factor、learning 和 IndexedDB 只读缓存；
 - 实现 known/stale/unknown/error 展示语义、unknown 零值防护、服务端 action ticket、
   step-up、mutation/audit/commit 结果投影和离线风险增加动作禁用；风险缩减入口仍交给
@@ -42,7 +42,7 @@ manifest 和公开 updater 已明确移出本批完成条件。
 - 对 `/api/market/bars` 做最小合同补充：`market.bars.v1` `_fact`、response model、
   OpenAPI snapshot、后端断言和前端 decoder 已同步，并已部署远程；重启后本机/公网
   认证 GET 均返回 `_fact`；行情 freshness 按 `1800s` 展示窗口计算，只有超过真实行情
-  窗口才显示 `stale`，不再把 15 秒安全心跳阈值误用于 K 线。
+  窗口才显示 `stale`，不再把 20 秒安全心跳阈值误用于 K 线。
 - 对 `/api/learning/factor-cards` 做最小只读性能收敛：优先复用最新持久 factor catalog
   snapshot，snapshot 缺失时保留原 live build 回退；远程完整 `tests/test_factor_cards_api.py`
   为 `44 passed`，认证 `limit=25` 请求从约 54 秒降至约 9.9 秒。
@@ -50,7 +50,7 @@ manifest 和公开 updater 已明确移出本批完成条件。
   gate 批次为 `162 passed`。其中新增 `market` freshness 分类同步了
   `tests/test_fact_envelope.py`，没有改变 Safety、Risk sizing 或治理 authority。
 - 2026-08-13 曾将 `frontend-20260813-043606-0fb3fba38f26` 部署到远程 Caddy 静态根；
-  新 `index.html`、主 JS/CSS 和五个新工作区入口均返回 `200`，无 HTTP redirect；
+  新 `index.html`、主 JS/CSS 和当时五个新工作区入口均返回 `200`，无 HTTP redirect；Workflow 为后续本地只读工作区，不属于该历史公网静态发布；
   旧 dist 已归档到仓库外 rollback 目录。随后 `backend-api-20260813-044620-market-fact`
   以远程 pre-change backup、targeted pytest `2 passed`、OpenAPI 生成检查和重启后
   `health=known` 验证完成；因子卡性能收敛后当前后端 PID 为 `1714609`，当时远程工作树
@@ -110,7 +110,7 @@ manifest 和公开 updater 已明确移出本批完成条件。
 
 - 交易运营页原先的 `/api/market/bars` K 线面板已替换为 `/api/live/realized-pnl-series` 盈亏折线图；研究页仍保留 K 线，不混淆两个使用场景。
 - 前端新增 `live.realized-pnl.v2` 专用 decoder，消费后端返回的平仓成交、单笔盈亏和累计盈亏；不使用行情价格推算收益，也不在前端生成交易结果。
-- 图表基线固定为用户指定的 `500.00 USD`：曲线显示权益，权益 = `500.00 + 服务端累计已实现盈亏`。该基线只属于图表展示，不修改 broker 账户余额、风险基准或运行时资金配置；未平仓浮动盈亏不纳入本图。
+- `全部`范围显示账户权益，权益 = `500.00 + 服务端全历史累计已实现盈亏`；`最近一天/最近一周`只显示所选范围内的累计已实现盈亏，原始 `500.00 USD` 不重复注入周期曲线。该基线只属于图表展示，不修改 broker 账户余额、风险基准或运行时资金配置；未平仓浮动盈亏不纳入本图。
 - `known/stale` 保留服务端历史点，`unknown/error` 不显示猜测曲线；已确认但暂无平仓记录时只显示 500.00 的基线和明确的空记录说明。
 - 本批不新增后端接口、不合并 API、不改变 Fact freshness 或安全心跳；只替换 Trade Ops renderer 的数据源和图表组件。
 
@@ -132,7 +132,7 @@ manifest 和公开 updater 已明确移出本批完成条件。
 在 `E:\quant_trading\web_frontend`：
 
 - `npm install`：通过；
-- `npm test`：通过，包含 smoke、架构删除扫描、Fact/auth、Fact 行为、WS 行为和五工作区
+- `npm test`：通过，包含 smoke、架构删除扫描、Fact/auth、Fact 行为、WS 行为和六工作区
   产品合同测试；
 - `npm run typecheck`：通过；
 - `npm run build`：通过；

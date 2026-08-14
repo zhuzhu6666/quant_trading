@@ -73,6 +73,7 @@ from backend.services.live_safety_watchdog import (
     evaluate_safety_freshness,
 )
 from backend.services.live_reconciliation import (
+    LIVE_SAFETY_FRESHNESS_SEC as _LIVE_SAFETY_FRESHNESS_SEC,
     evaluate_reconciliation_snapshot as _evaluate_reconciliation_snapshot,
     explicit_account_reconcile as _explicit_account_reconcile,
     explicit_position_reconcile as _explicit_position_reconcile,
@@ -2411,7 +2412,7 @@ def _get_final_open_probe_conn():
     """Open a bounded read-only PG connection for the open-only liveness gate.
 
     This connection runs on the single live-loop thread, so both connection
-    setup and ``SELECT 1`` must fail before the 15-second safety SLO.  Other
+    setup and ``SELECT 1`` must fail before the 20-second safety SLO.  Other
     state reads retain their existing transaction semantics.
     """
 
@@ -3345,7 +3346,7 @@ def _sync_partial_close_session_fact(
 def _fresh_cached_broker_open_position_ids(
     *,
     now_ts: float | None = None,
-    stale_after_sec: float = 15.0,
+    stale_after_sec: float = _LIVE_SAFETY_FRESHNESS_SEC,
 ) -> set[int] | None:
     """Return broker-open position IDs only from a fresh position fact.
 
@@ -4392,7 +4393,7 @@ def warmup_ctrader(timeout_sec: float = 0.0) -> None:
 
 _last_spot_subscription_attempt_ts: float = 0.0
 # Internal market-context cache tolerance only. Public spot facts and final
-# open admission use the 15-second contract; this longer window must never be
+# open admission use the 20-second contract; this longer window must never be
 # used to label the UI quote as realtime or authorize a new open.
 _SPOT_QUOTE_STALE_SECONDS = 300.0
 
@@ -5032,6 +5033,15 @@ def _live_safety_watchdog_probe() -> dict[str, Any]:
         "running": thread_alive,
         "started_at": float(_loop_started_at or 0.0),
         "safety_heartbeat_at": heartbeat_at,
+        # This is only a liveness hint for an active serial cycle.  It is not
+        # a completed Safety fact and is never used by the open admission
+        # boundary as proof of fresh account/positions.
+        "safety_cycle_active": bool(
+            _live_state_get("safety_cycle_active", False)
+        ),
+        "safety_cycle_progress_at": float(
+            _live_state_get("safety_cycle_progress_at", 0.0) or 0.0
+        ),
         "account_updated_at": float(_live_state_get("account_updated_at", 0.0) or 0.0),
         "positions_updated_at": float(_live_state_get("positions_updated_at", 0.0) or 0.0),
         "unknown_execution_count": unknown_raw,
@@ -5177,6 +5187,7 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
     account_snapshot: dict[str, Any] = {}
     positions_snapshot: Any = None
     live_loop_recovered = False
+    reconciliation_blockers: list[str] = []
     independent_safety_causes = {
         key
         for key in active_causes
@@ -5202,6 +5213,7 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
             positions_snapshot = _live_state_get(
                 "positions_reconciled", None, clone=True
             )
+            reconciliation_blockers = _new_risk_reconciliation_blockers()
             account_id = str(
                 _live_state_get("account_reconcile_id", "") or ""
             )
@@ -5221,6 +5233,8 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
                 and isinstance(positions_snapshot, list)
                 and bool(positions_id)
                 and bool(safety_payload.get("accepting_new_risk"))
+                and not bool(live_loop_probe.get("safety_cycle_active"))
+                and not reconciliation_blockers
                 and str(safety_payload.get("status") or "")
                 not in {"", "exception", "failed", "unavailable"}
             )
@@ -5252,6 +5266,7 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
                     or "unknown"
                 ),
                 "safety_status": str(safety_payload.get("status") or ""),
+                "reconciliation_blockers": reconciliation_blockers,
             },
         )
 
@@ -5410,7 +5425,7 @@ def _start_live_safety_watchdog() -> bool:
             on_recovery=_on_live_safety_watchdog_recovery,
             recovery_checks=3,
             interval_sec=5.0,
-            stale_after_sec=15.0,
+            stale_after_sec=_LIVE_SAFETY_FRESHNESS_SEC,
         )
     return _live_safety_watchdog.start()
 
@@ -5810,7 +5825,8 @@ def loop_status() -> dict:
             heartbeat_at = float(safety.get("heartbeat_at", 0.0) or 0.0)
             heartbeat_age = max(0.0, time.time() - heartbeat_at) if heartbeat_at > 0 else None
             heartbeat_healthy = bool(
-                heartbeat_age is not None and heartbeat_age <= 15.0
+                heartbeat_age is not None
+                and heartbeat_age <= _LIVE_SAFETY_FRESHNESS_SEC
             )
             generation = {
                 "phase": (
@@ -5859,7 +5875,7 @@ def loop_status() -> dict:
         freshness = evaluate_safety_freshness(
             _live_safety_watchdog_probe(),
             now=time.time(),
-            stale_after_sec=15.0,
+            stale_after_sec=_LIVE_SAFETY_FRESHNESS_SEC,
         )
         local_blockers: list[str] = []
         if freshness.enabled and freshness.running and not freshness.ok:
@@ -7106,6 +7122,7 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
         get_safety_plane=_get_live_safety_plane,
         retry_pending_open=_retry_pending_open_trade,
         process_tick=_process_tick,
+        update_risk_metrics=_update_live_loop_risk_metrics,
     )
 
 
@@ -7298,6 +7315,7 @@ def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
                 **previous,
                 "schema_version": SNAPSHOT_KEY,
                 "status": "stale",
+                "published_at": time.time(),
                 "as_of": min(
                     value for value in (account_at, positions_at) if value > 0
                 ) if account_at > 0 or positions_at > 0 else 0.0,
@@ -7346,6 +7364,11 @@ def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
                 int(getattr(cfg, "var_window", 500) or 500),
             ),
         ).to_dict()
+        # ``as_of`` is the oldest broker input used by the calculation.  Keep
+        # a separate publication clock so the API does not expire a valid
+        # snapshot merely because serial reconciliation and risk math took
+        # part of the 20-second input window.
+        snapshot["published_at"] = time.time()
         _live_state_update(
             risk=attach_internal_forward_var_input(
                 {**snapshot["components"], "snapshot": snapshot},
@@ -7362,6 +7385,7 @@ def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
                 **previous,
                 "schema_version": SNAPSHOT_KEY,
                 "status": "error",
+                "published_at": time.time(),
                 "blockers": ["risk_metrics_calculation_error"],
             }
             _live_state_update(
@@ -7550,7 +7574,6 @@ def _serial_live_tick_runtime() -> SerialLiveTickRuntime:
             _loop_ack_prepared_factor_projections
         ),
         live_state_update=_live_state_update,
-        update_risk_metrics=_update_live_loop_risk_metrics,
     )
 
 

@@ -14,6 +14,9 @@ from typing import Any, Mapping
 from execution.base import PositionReconcileResult
 
 
+LIVE_SAFETY_FRESHNESS_SEC = 20.0
+
+
 def _epoch(value: Any) -> float:
     try:
         return float(value or 0.0)
@@ -32,7 +35,7 @@ def evaluate_reconciliation_snapshot(
     positions_reconcile_id: Any,
     positions_reconcile_failed_at: Any,
     checked_at: float,
-    freshness_seconds: float = 15.0,
+    freshness_seconds: float = LIVE_SAFETY_FRESHNESS_SEC,
 ) -> dict[str, Any]:
     """Evaluate the canonical account/positions snapshot contract.
 
@@ -98,7 +101,9 @@ def reconcile_value(value: Any, field: str, default: Any = None) -> Any:
     return getattr(value, field, default)
 
 
-def fresh_observation_timestamp(value: Any, *, max_age_sec: float = 15.0) -> bool:
+def fresh_observation_timestamp(
+    value: Any, *, max_age_sec: float = LIVE_SAFETY_FRESHNESS_SEC
+) -> bool:
     """Return true only for a known, recent broker observation timestamp."""
 
     try:

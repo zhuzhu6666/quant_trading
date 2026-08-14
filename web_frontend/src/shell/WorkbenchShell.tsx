@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Activity, BrainCircuit, ChevronLeft, ChevronRight, Command, Gauge, LogOut, Menu, Settings2, Shield, X } from "lucide-react";
+import { Activity, BrainCircuit, ChevronLeft, ChevronRight, Command, Gauge, GitBranch, LogOut, Menu, Settings2, Shield, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLiveState } from "@/hooks/useLiveState";
 import { useLayoutPreference } from "@/shell/layout";
 import { buildCommands } from "@/shell/commands";
 import { CommandPalette } from "@/shell/CommandPalette";
 import { SafetyRail } from "@/shell/SafetyRail";
+import { ServerStatusCard } from "@/shell/ServerStatusCard";
 import { getReadinessView } from "@/api/workbench";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { WorkspaceId } from "@/types/contracts";
@@ -18,6 +19,7 @@ const navigation: { id: WorkspaceId; path: string; label: string; english: strin
   { id: "research", path: "/research", ...workspaceLabels.research, icon: BrainCircuit },
   { id: "governance", path: "/governance", ...workspaceLabels.governance, icon: Gauge },
   { id: "ops", path: "/ops", ...workspaceLabels.ops, icon: Settings2 },
+  { id: "workflow", path: "/workflow", ...workspaceLabels.workflow, icon: GitBranch },
 ];
 
 function workspaceFromPath(pathname: string): WorkspaceId {
@@ -57,7 +59,7 @@ export function WorkbenchShell() {
       if (modifier && event.shiftKey && event.key.toLowerCase() === "l") { event.preventDefault(); document.querySelector<HTMLElement>(".safety-rail")?.focus(); }
       if (modifier && event.shiftKey && event.key.toLowerCase() === "r") { event.preventDefault(); refreshFacts(); }
       const number = Number(event.key);
-      if (modifier && number >= 1 && number <= 5) { event.preventDefault(); navigate(navigation[number - 1].path); }
+      if (modifier && number >= 1 && number <= navigation.length) { event.preventDefault(); navigate(navigation[number - 1].path); }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -85,7 +87,7 @@ export function WorkbenchShell() {
       <div className="sidebar-head"><Link to="/trade-ops" className="sidebar-title"><span className="sidebar-logo">Q</span><span><strong>WORKBENCH</strong><small>服务端权威</small></span></Link><button type="button" className="mobile-close" onClick={() => setMobileNavOpen(false)} aria-label="关闭工作区导航"><X size={16} /></button></div>
       <div className="workspace-nav"><span className="nav-kicker">工作区</span>{navigation.map((item, index) => { const Icon = item.icon; return <NavLink key={item.id} to={item.path} onClick={() => setMobileNavOpen(false)} className={({ isActive }) => `workspace-link ${isActive ? "workspace-link-active" : ""}`}><span className="workspace-index">0{index + 1}</span><Icon size={17} aria-hidden="true" /><span className="workspace-copy"><strong>{item.label}</strong><small>{item.hint}</small></span></NavLink>; })}</div>
       <div className="sidebar-utility"><button type="button" onClick={() => setPaletteOpen(true)}><Command size={15} />命令面板 <kbd>⌘K</kbd></button><button type="button" onClick={() => updateLayout({ sidebar_collapsed: false })}><Settings2 size={15} />重置侧栏</button></div>
-      <div className="sidebar-user"><div><strong>{user ?? "操作员"}</strong><small>会话仅驻留内存</small></div><button type="button" onClick={logout} aria-label="退出登录" title="退出登录"><LogOut size={15} /></button></div>
+      <div className="sidebar-bottom"><ServerStatusCard /><div className="sidebar-user"><div><strong>{user ?? "操作员"}</strong><small>会话仅驻留内存</small></div><button type="button" onClick={logout} aria-label="退出登录" title="退出登录"><LogOut size={15} /></button></div></div>
       <button type="button" className="sidebar-collapse" onClick={() => updateLayout({ sidebar_collapsed: !layout.sidebar_collapsed })} aria-label={layout.sidebar_collapsed ? "展开导航" : "折叠导航"}>{layout.sidebar_collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button>
     </aside>
     <button className={`mobile-nav-scrim ${mobileNavOpen ? "mobile-nav-scrim-open" : ""}`} type="button" onClick={() => setMobileNavOpen(false)} aria-label="关闭导航" />

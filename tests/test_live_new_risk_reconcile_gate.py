@@ -225,7 +225,7 @@ def test_final_open_admission_blocks_missing_reconcile_identity():
 
 def test_final_open_admission_blocks_stale_or_newer_failed_reconcile():
     now = time.time()
-    _publish_fresh_reconciles(now - 16.0)
+    _publish_fresh_reconciles(now - 21.0)
     stale = live_service._new_risk_reconciliation_blockers(now_ts=now)
     assert stale == ["account_reconcile_stale", "positions_reconcile_stale"]
 
@@ -242,7 +242,7 @@ def test_final_open_admission_blocks_stale_or_newer_failed_reconcile():
 
 def test_final_open_admission_preserves_specific_reconcile_reason():
     now = time.time()
-    _publish_fresh_reconciles(now - 16.0)
+    _publish_fresh_reconciles(now - 21.0)
 
     blockers = live_service._open_trade_admission_blockers()
 
@@ -258,7 +258,7 @@ def test_final_open_admission_preserves_specific_reconcile_reason():
 
 def test_open_pipeline_blocks_stale_reconcile_without_same_tick_broker_refresh(monkeypatch):
     now = time.time()
-    _publish_fresh_reconciles(now - 16.0)
+    _publish_fresh_reconciles(now - 21.0)
     logs: list[str] = []
     candidate = SimpleNamespace(order_block={"order_blocked": True})
     monkeypatch.setattr(

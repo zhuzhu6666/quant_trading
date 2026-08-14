@@ -12,7 +12,7 @@ DEFAULT_STALE_AFTER_SEC = {
     "ws": 5.0,
     # These are presentation windows for the desktop fact projection.  The
     # independent safety reconciler/open-admission watchdog remains fail
-    # closed at 15 seconds; widening these values must never authorize risk.
+    # closed at 20 seconds; widening these values must never authorize risk.
     # A complete broker tick is normally below this 30-second display window,
     # so a short scheduling/UI delay does not make a connected stream look
     # disconnected.

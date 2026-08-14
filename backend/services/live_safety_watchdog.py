@@ -12,6 +12,8 @@ import time
 import logging
 from typing import Any, Callable, Mapping
 
+from backend.services.live_reconciliation import LIVE_SAFETY_FRESHNESS_SEC
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ def evaluate_safety_freshness(
     snapshot: Mapping[str, Any],
     *,
     now: float | None = None,
-    stale_after_sec: float = 15.0,
+    stale_after_sec: float = LIVE_SAFETY_FRESHNESS_SEC,
 ) -> SafetyFreshnessResult:
     checked_at = float(time.time() if now is None else now)
     enabled = bool(snapshot.get("enabled"))
@@ -81,13 +83,28 @@ def evaluate_safety_freshness(
     threshold = max(1.0, float(stale_after_sec))
     started_age = _age(snapshot.get("started_at"), checked_at)
     startup_grace = started_age is not None and started_age <= threshold
+    progress_age = _age(snapshot.get("safety_cycle_progress_at"), checked_at)
+    cycle_refreshing = bool(
+        snapshot.get("safety_cycle_active")
+        and progress_age is not None
+        and progress_age <= threshold
+    )
+    safety_age = ages["safety"]
+    safety_completed_current = (
+        safety_age is not None and safety_age <= threshold
+    )
     blockers: list[str] = []
-    for key, age in ages.items():
-        if age is None:
+    if not cycle_refreshing:
+        # Account/positions freshness has one canonical owner at the final
+        # open-admission boundary (live_reconciliation).  The watchdog only
+        # owns Safety completion liveness and unresolved execution intent;
+        # retaining account/positions ages above is diagnostic, not a second
+        # blocker calculator.
+        if safety_age is None:
             if not startup_grace:
-                blockers.append(f"{key}_freshness_unknown")
-        elif age > threshold:
-            blockers.append(f"{key}_freshness_stale")
+                blockers.append("safety_freshness_unknown")
+        elif safety_age > threshold:
+            blockers.append("safety_freshness_stale")
 
     raw_unknown = snapshot.get("unknown_execution_count")
     try:
@@ -104,7 +121,7 @@ def evaluate_safety_freshness(
     startup_unknown = bool(
         startup_grace
         and (
-            any(age is None for age in ages.values())
+            ages["safety"] is None
             or unknown_count is None
         )
     )
@@ -116,6 +133,9 @@ def evaluate_safety_freshness(
         # missing facts do not need a durable latch.  They are nevertheless
         # unknown, never a current/fresh observation.
         state=(
+            "refreshing"
+            if cycle_refreshing and not safety_completed_current and not unique
+            else
             "startup_unknown"
             if startup_unknown and not unique
             else "current"
@@ -138,7 +158,7 @@ class LiveSafetyWatchdog:
         on_recovery: Callable[[SafetyFreshnessResult], Any] | None = None,
         recovery_checks: int = 3,
         interval_sec: float = 5.0,
-        stale_after_sec: float = 15.0,
+        stale_after_sec: float = LIVE_SAFETY_FRESHNESS_SEC,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._probe = probe

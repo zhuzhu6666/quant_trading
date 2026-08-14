@@ -8,6 +8,7 @@ const required = [
   "src/auth/tokenStore.ts", "src/cache/researchCache.ts", "src/cache/researchFallback.ts", "src/hooks/useLiveState.ts", "src/hooks/liveStateLogic.ts", "src/hooks/useNetworkStatus.ts", "src/i18n/zh-CN.ts", "src/shell/WorkbenchShell.tsx",
   "src/shell/SafetyRail.tsx", "src/shell/CommandPalette.tsx", "src/pages/TradeOpsPage.tsx", "src/pages/RiskDeskPage.tsx",
   "src/pages/ResearchPage.tsx", "src/pages/GovernancePage.tsx", "src/pages/OpsPage.tsx", "src/pages/LoginPage.tsx",
+  "src/pages/WorkflowPage.tsx",
   "src-tauri/Cargo.toml", "src-tauri/src/lib.rs", "src-tauri/src/commands.rs", "src-tauri/src/secure_store.rs",
   "src/desktop/bridge.ts", "src/desktop/updater.ts", "src-tauri/tauri.conf.json", "src-tauri/tauri.release.conf.json", "src-tauri/capabilities/default.json",
 ];

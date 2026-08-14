@@ -30,7 +30,7 @@ function Metric({ label, metric, parentState }: { label: string; metric: { statu
 }
 
 export function RiskDeskPage() {
-  const query = useQuery({ queryKey: ["workbench", "risk-desk"], queryFn: getRiskDeskData, staleTime: 15_000, retry: false });
+  const query = useQuery({ queryKey: ["workbench", "risk-desk"], queryFn: getRiskDeskData, staleTime: 15_000, refetchInterval: 20_000, refetchIntervalInBackground: true, retry: false });
   const live = useLiveState();
   const data = query.data;
   const riskFact = data?.fact ?? unknownFact("risk.summary.v2", "risk_not_loaded");

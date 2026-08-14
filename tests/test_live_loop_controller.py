@@ -79,12 +79,12 @@ def test_stale_safety_heartbeat_degrades_generation_and_blocks_new_risk():
     controller.heartbeat(generation.generation_id, "safety")
     for step in STARTUP_BARRIER_STEPS:
         controller.complete_barrier_step(generation.generation_id, step)
-    now[0] = 116.0
+    now[0] = 121.0
 
     status = controller.status()
 
     assert status["phase"] == "degraded"
-    assert status["safety_heartbeat_age_sec"] == 16.0
+    assert status["safety_heartbeat_age_sec"] == 21.0
     assert status["accepting_new_risk"] is False
     assert "safety_heartbeat_stale" in status["blockers"]
     assert controller.accepting_new_risk(generation.generation_id) is False

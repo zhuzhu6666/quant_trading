@@ -38,6 +38,7 @@ class LiveLoopTickRuntime:
     get_safety_plane: Any
     retry_pending_open: Any
     process_tick: Any
+    update_risk_metrics: Any | None = None
 
 
 def run_live_loop_tick_body(
@@ -59,6 +60,12 @@ def run_live_loop_tick_body(
         log=log,
         runtime=runtime,
     )
+    if runtime.update_risk_metrics is not None:
+        # Publish from the same serial owner immediately after the fresh
+        # account/positions reconcile and Safety cycle. The remaining alpha
+        # path can consume the 20-second broker-fact window, so waiting until
+        # the end of the tick would self-expire the risk snapshot.
+        runtime.update_risk_metrics(tick=tick, log=log)
     if not safety_result["ok"]:
         return _tick_result(
             recovery_bootstrapped=recovery_bootstrapped,
@@ -305,6 +312,15 @@ def _run_safety_boundary(
     runtime: LiveLoopTickRuntime,
 ) -> dict[str, Any]:
     started_at = time.monotonic()
+    # A completed Safety heartbeat is intentionally separate from this
+    # progress marker.  A slow but active serial broker cycle must not be
+    # mistaken for a dead owner, while the completed heartbeat and the final
+    # reconcile gate continue to block new risk until fresh facts exist.
+    runtime.live_state_update(
+        accepting_new_risk=False,
+        safety_cycle_active=True,
+        safety_cycle_progress_at=time.time(),
+    )
     try:
         bridge, broker_error, warming = runtime.get_ctrader()
         bridge_ready = bool(
@@ -316,11 +332,12 @@ def _run_safety_boundary(
         reconcile = runtime.reconcile_positions(
             bridge if bridge_ready else None
         )
+        runtime.live_state_update(safety_cycle_progress_at=time.time())
         positions_elapsed = time.monotonic() - positions_started_at
         # Publish both broker facts before Safety evaluates freshness.  The
         # previous order refreshed account after the safety cycle, so a normal
         # positions/protection RPC span could make the watchdog observe an
-        # account older than the 15-second contract even though this tick had
+        # account older than the 20-second contract even though this tick had
         # not yet attempted its account reconcile.
         account_started_at = time.monotonic()
         account_reconcile, account_blockers = _reconcile_alpha_account(
@@ -329,6 +346,7 @@ def _run_safety_boundary(
             positions_reconcile=reconcile,
             runtime=runtime,
         )
+        runtime.live_state_update(safety_cycle_progress_at=time.time())
         account_elapsed = time.monotonic() - account_started_at
         safety_started_at = time.monotonic()
         safety = runtime.run_safety_cycle(
@@ -382,6 +400,13 @@ def _run_safety_boundary(
                 "failure": failure,
             },
         }
+    finally:
+        # Do not leave an in-progress marker behind after an exception.  The
+        # next watchdog check must evaluate the last completed Safety facts.
+        runtime.live_state_update(
+            safety_cycle_active=False,
+            safety_cycle_progress_at=time.time(),
+        )
 
 
 def _reconcile_alpha_account(
@@ -528,7 +553,7 @@ def _update_generation_blockers(
 
 
 def _safety_wait_seconds(safety: dict[str, Any]) -> float:
-    # The public account/position fact contract expires after 15 seconds.
+    # The public account/position fact contract expires after 20 seconds.
     # A ten-second idle wait plus two broker RPCs and scheduler jitter made a
     # healthy empty account cross that boundary on alternating cycles. Keep
     # the serial broker owner, but wake it every five seconds in every state.

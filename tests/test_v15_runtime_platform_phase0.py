@@ -375,6 +375,16 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
     assert choices["items"][0]["direction_label"] == "direction_long"
     assert choices["items"][0]["outcome_result"] == "loss"
     assert choices["items"][0]["learning_status"] == "learning_sample_ready"
+    assert choices["items"][0]["entry_ts"] == round(now - 30.0, 3)
+    assert choices["items"][0]["exit_ts"] == round(now - 9.0, 3)
+    assert choices["items"][0]["exit_decision_id"] == "dec_exit_1"
+    assert choices["items"][0]["holding_seconds"] == 21.0
+    assert choices["items"][0]["close_reason"] == "thesis_broken"
+    assert choices["items"][0]["system_view"]["direction"] == 1
+    assert choices["items"][0]["system_view"]["direction_label"] == "direction_long"
+    assert choices["items"][0]["system_view"]["score"] == 0.8
+    assert choices["items"][0]["system_view"]["pnl"] == -1.25
+    assert choices["items"][0]["system_view"]["close_reason"] == "thesis_broken"
 
     selected_preview = service.run_bar_window_preview(
         lookback_days=1,
@@ -1025,3 +1035,45 @@ def test_v15_phase0_completion_gate_separates_code_and_operational_evidence():
     assert "replay_harness_v1" in phase0["evidence_gaps"]
     assert "release_run_ledger_v1" in phase0["evidence_gaps"]
     assert phase0["read_only"] is True
+
+
+def test_bar_decision_choices_fall_back_to_closed_recovery_state(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            """
+            INSERT INTO decision_ledger
+            (decision_id, trade_id, position_id, event_type, symbol, timeframe,
+             decision_ts, action_score, action_reason, portfolio_state_json,
+             risk_state_json, action_json, created_at)
+            VALUES ('dec_recovery_1', 'trade_recovery_1', '2002', 'open',
+                    'XAUUSD+', 'M15', ?, 0.8, 'executed', '{}', '{}', '{}', ?)
+            """,
+            (now - 900.0, now - 100.0),
+        )
+        conn.execute(
+            """
+            INSERT INTO recovery_position_state
+            (position_id, symbol, status, entry_decision_id, closed_at,
+             close_reason, close_pnl)
+            VALUES (2002, 'XAUUSD+', 'closed', 'dec_recovery_1', ?,
+                    'broker_close', 3.5)
+            """,
+            (now - 300.0,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    choices = ReplayHarnessService(db_path).list_bar_preview_decisions(lookback_days=1, limit=10)
+    item = choices["items"][0]
+    assert item["decision_id"] == "dec_recovery_1"
+    assert item["outcome_status"] == "closed"
+    assert item["entry_ts"] == round(now - 900.0, 3)
+    assert item["exit_ts"] == round(now - 300.0, 3)
+    assert item["holding_seconds"] == 600.0
+    assert item["close_reason"] == "broker_close"
+    assert item["pnl"] == 3.5

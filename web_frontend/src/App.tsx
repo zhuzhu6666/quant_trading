@@ -12,6 +12,7 @@ const RiskDeskPage = lazy(() => import("@/pages/RiskDeskPage").then((module) => 
 const ResearchPage = lazy(() => import("@/pages/ResearchPage").then((module) => ({ default: module.ResearchPage })));
 const GovernancePage = lazy(() => import("@/pages/GovernancePage").then((module) => ({ default: module.GovernancePage })));
 const OpsPage = lazy(() => import("@/pages/OpsPage").then((module) => ({ default: module.OpsPage })));
+const WorkflowPage = lazy(() => import("@/pages/WorkflowPage").then((module) => ({ default: module.WorkflowPage })));
 
 function RouteFallback() {
   return <div className="route-loading" role="status" aria-live="polite"><span />加载工作区…</div>;
@@ -36,6 +37,7 @@ export function App() {
       <Route path="/research" element={<Suspense fallback={<RouteFallback />}><ResearchPage /></Suspense>} />
       <Route path="/governance" element={<Suspense fallback={<RouteFallback />}><GovernancePage /></Suspense>} />
       <Route path="/ops" element={<Suspense fallback={<RouteFallback />}><OpsPage /></Suspense>} />
+      <Route path="/workflow" element={<Suspense fallback={<RouteFallback />}><WorkflowPage /></Suspense>} />
       <Route path="*" element={<RouteDeprecatedPage />} />
     </Route>
   </Routes>;

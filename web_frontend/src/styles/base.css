@@ -1,6 +1,6 @@
 * { box-sizing: border-box; }
 html, body, #root { min-height: 100%; margin: 0; }
-body { min-width: 320px; background: var(--surface-0); color: var(--text-primary); font-size: 14px; line-height: 1.5; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }
+body { min-width: 320px; background: var(--surface-0); color: var(--text-primary); font-size: 14px; line-height: 1.5; text-rendering: auto; -webkit-font-smoothing: auto; }
 button, input { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }

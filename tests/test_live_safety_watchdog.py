@@ -74,13 +74,13 @@ def test_phase2_startup_grace_keeps_missing_timestamps_unknown_without_latching(
     assert result.ages == {"safety": None, "account": None, "positions": None}
 
 
-def test_phase2_stale_heartbeat_reconcile_and_unknown_intent_are_blockers():
+def test_phase2_stale_heartbeat_and_unknown_intent_are_watchdog_blockers():
     result = evaluate_safety_freshness(
         {
             "enabled": True,
             "running": True,
             "started_at": 1.0,
-            "safety_heartbeat_at": 80.0,
+            "safety_heartbeat_at": 79.0,
             "account_updated_at": 79.0,
             "positions_updated_at": 78.0,
             "unknown_execution_count": 1,
@@ -91,10 +91,71 @@ def test_phase2_stale_heartbeat_reconcile_and_unknown_intent_are_blockers():
     assert result.ok is False
     assert set(result.blockers) == {
         "safety_freshness_stale",
-        "account_freshness_stale",
-        "positions_freshness_stale",
         "unresolved_execution_intent",
     }
+
+
+def test_account_and_positions_staleness_stays_with_reconcile_admission_owner():
+    result = evaluate_safety_freshness(
+        {
+            "enabled": True,
+            "running": True,
+            "started_at": 1.0,
+            "safety_heartbeat_at": 100.0,
+            "account_updated_at": 80.0,
+            "positions_updated_at": 79.0,
+            "unknown_execution_count": 0,
+        },
+        now=100.0,
+    )
+
+    assert result.ok is True
+    assert result.state == "current"
+    assert result.blockers == ()
+    assert result.ages["account"] == 20.0
+    assert result.ages["positions"] == 21.0
+
+
+def test_active_safety_progress_does_not_latch_before_completed_facts():
+    result = evaluate_safety_freshness(
+        {
+            "enabled": True,
+            "running": True,
+            "started_at": 1.0,
+            "safety_heartbeat_at": 79.0,
+            "account_updated_at": 80.0,
+            "positions_updated_at": 79.0,
+            "safety_cycle_active": True,
+            "safety_cycle_progress_at": 99.0,
+            "unknown_execution_count": 0,
+        },
+        now=100.0,
+    )
+
+    assert result.ok is True
+    assert result.state == "refreshing"
+    assert result.blockers == ()
+
+
+def test_active_safety_progress_keeps_current_completed_heartbeat_current():
+    result = evaluate_safety_freshness(
+        {
+            "enabled": True,
+            "running": True,
+            "started_at": 1.0,
+            "safety_heartbeat_at": 99.0,
+            "account_updated_at": 80.0,
+            "positions_updated_at": 79.0,
+            "safety_cycle_active": True,
+            "safety_cycle_progress_at": 99.0,
+            "unknown_execution_count": 0,
+        },
+        now=100.0,
+    )
+
+    assert result.ok is True
+    assert result.state == "current"
+    assert result.blockers == ()
 
 
 def test_watchdog_violation_durably_latches_no_new_risk():
@@ -103,7 +164,7 @@ def test_watchdog_violation_durably_latches_no_new_risk():
             "enabled": True,
             "running": True,
             "started_at": 1.0,
-            "safety_heartbeat_at": 80.0,
+            "safety_heartbeat_at": 79.0,
             "account_updated_at": 99.0,
             "positions_updated_at": 99.0,
             "unknown_execution_count": 0,
@@ -202,8 +263,10 @@ def test_live_loop_cause_requires_normal_cycle_and_reconciled_facts(monkeypatch)
         session_state_status="available",
         account_reconciled={"ok": True, "account_id": "acct-1"},
         account_reconcile_id="account-r1",
+        account_updated_at=now,
         positions_reconciled=[],
         positions_reconcile_id="positions-r1",
+        positions_updated_at=now,
         safety_plane={
             "status": "completed",
             "accepting_new_risk": True,
@@ -315,6 +378,60 @@ def test_live_loop_cause_stays_latched_when_safety_cycle_is_not_ready():
             "account_updated_at": now,
             "positions_updated_at": now,
             "unknown_execution_count": 0,
+        },
+        now=now,
+    )
+
+    live_service._on_live_safety_watchdog_recovery(result)
+
+    assert {
+        (item["cause"], item["cause_id"])
+        for item in no_new_risk_latch_status()["causes"]
+    } == {("safety_freshness", "live_loop")}
+
+
+def test_live_loop_cause_stays_latched_while_safety_cycle_is_active(monkeypatch):
+    now = time.time()
+    activate_no_new_risk_latch(
+        reason="live loop safety cycle failed",
+        actor="system:live_loop",
+        cause="safety_freshness",
+        cause_id="live_loop",
+    )
+    live_service._live_state_update(
+        loop_running=True,
+        session_state_status="available",
+        account_reconciled={"ok": True},
+        account_reconcile_id="account-r1",
+        positions_reconciled=[],
+        positions_reconcile_id="positions-r1",
+        safety_plane={"status": "completed", "accepting_new_risk": True},
+        safety_cycle_active=True,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_live_safety_watchdog_probe",
+        lambda: {
+            "enabled": True,
+            "running": True,
+            "started_at": now - 60.0,
+            "safety_heartbeat_at": now,
+            "account_updated_at": now,
+            "positions_updated_at": now,
+            "unknown_execution_count": 0,
+            "safety_cycle_active": True,
+        },
+    )
+    result = evaluate_safety_freshness(
+        {
+            "enabled": True,
+            "running": True,
+            "started_at": now - 60.0,
+            "safety_heartbeat_at": now,
+            "account_updated_at": now,
+            "positions_updated_at": now,
+            "unknown_execution_count": 0,
+            "safety_cycle_active": True,
         },
         now=now,
     )
@@ -476,7 +593,7 @@ def test_stale_watchdog_and_unknown_execution_block_open_but_protection_continue
             "enabled": True,
             "running": True,
             "started_at": 1.0,
-            "safety_heartbeat_at": 80.0,
+            "safety_heartbeat_at": 79.0,
             "account_updated_at": 99.0,
             "positions_updated_at": 99.0,
             "unknown_execution_count": 1,
@@ -594,7 +711,7 @@ def test_v2_readiness_requires_fresh_account_positions_and_safety(monkeypatch):
             "ready": True,
             "accepting_new_risk": True,
             "blockers": [],
-            "safety_heartbeat_age_sec": 16.0,
+            "safety_heartbeat_age_sec": 21.0,
             "safety": {
                 "unknown_execution_count": 0,
                 "reconciliation_state": "fresh",
@@ -607,11 +724,11 @@ def test_v2_readiness_requires_fresh_account_positions_and_safety(monkeypatch):
         _diag={"bridge_ready": True},
         account={"ok": True},
         account_reconciled={"ok": True},
-        account_updated_at=now - 16.0,
+        account_updated_at=now - 21.0,
         account_reconcile_id="account-stale-r1",
         positions=[],
         positions_reconciled=[],
-        positions_updated_at=now - 16.0,
+        positions_updated_at=now - 21.0,
         positions_reconcile_id="positions-stale-r1",
     )
 

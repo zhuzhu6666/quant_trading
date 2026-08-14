@@ -21,7 +21,7 @@ const declaredKnown = readFact({
     source: "ctrader",
     observed_at: 1,
     generated_at: 2,
-    stale_after_sec: 15,
+    stale_after_sec: 20,
     reason_code: null,
     components: {},
   },

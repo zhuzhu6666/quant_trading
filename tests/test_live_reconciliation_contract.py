@@ -74,11 +74,11 @@ def test_explicit_account_reconcile_does_not_upgrade_compat_projection() -> None
 def test_reconciliation_snapshot_has_one_blocker_contract_for_all_consumers() -> None:
     result = evaluate_reconciliation_snapshot(
         account={"ok": True},
-        account_updated_at=84.0,
+        account_updated_at=79.0,
         account_reconcile_id="account-1",
         account_reconcile_failed_at=0.0,
         positions=[],
-        positions_updated_at=84.0,
+        positions_updated_at=79.0,
         positions_reconcile_id="positions-1",
         positions_reconcile_failed_at=0.0,
         checked_at=100.0,

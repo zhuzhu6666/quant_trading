@@ -15,6 +15,7 @@ from backend.services.fact_envelope import (
     fact_envelope,
     observed_epoch,
 )
+from backend.services.live_reconciliation import LIVE_SAFETY_FRESHNESS_SEC
 from backend.services.live_runtime_state import safe_container_snapshot
 
 
@@ -813,11 +814,35 @@ def risk_summary_fact_payload(
 ) -> dict[str, Any]:
     generated_at = float(time.time() if now is None else now)
     result = _copy(payload)
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), Mapping) else {}
+    snapshot_status = str(snapshot.get("status") or "").strip().lower()
+    # ``as_of`` is the timestamp of the oldest broker input used by the
+    # calculation.  It can legitimately be older than the moment the
+    # calculation was published (positions/account reconciliation and risk
+    # math are serial).  Freshness of this API fact must follow the publish
+    # timestamp, while the explicit snapshot status still projects stale or
+    # error states fail-closed.
+    published_at = snapshot.get("published_at")
+    effective_risk_observed_at = (
+        published_at
+        if observed_epoch(published_at) > 0
+        else risk_observed_at
+    )
     health = payload.get("system_health") if isinstance(payload.get("system_health"), Mapping) else {}
     health_observed_at = health.get("ts")
-    observed_at = _positive_min([health_observed_at, risk_observed_at])
+    observed_at = _positive_min([health_observed_at, effective_risk_observed_at])
     errors = health.get("errors") if isinstance(health.get("errors"), list) else []
     health_error = "; ".join(str(item) for item in errors if item) or None
+    health_is_blocking = bool(
+        health.get("trading_blocked")
+        or health.get("blocking_components")
+    )
+    health_source_error = health_error if health_is_blocking else None
+    health_reason_code = (
+        "non_blocking_health_error"
+        if health_error and not health_is_blocking
+        else None
+    )
     summary_stale_after_sec = DEFAULT_STALE_AFTER_SEC["system_health"]
     components = {
         "system_health": _component(
@@ -825,15 +850,24 @@ def risk_summary_fact_payload(
             source="system_health" if observed_epoch(health_observed_at) > 0 else "none",
             observed_at=health_observed_at,
             stale_after_sec=DEFAULT_STALE_AFTER_SEC["system_health"],
-            error=health_error,
+            error=health_source_error,
+            reason_code=health_reason_code,
             now=generated_at,
         ),
         "risk_inputs": _component(
             contract="risk.inputs.v1",
-            source="state_pg" if observed_epoch(risk_observed_at) > 0 else "none",
-            observed_at=risk_observed_at,
-            stale_after_sec=DEFAULT_STALE_AFTER_SEC["risk"],
-            error=risk_error,
+            source="state_pg" if observed_epoch(effective_risk_observed_at) > 0 else "none",
+            observed_at=effective_risk_observed_at,
+            stale_after_sec=LIVE_SAFETY_FRESHNESS_SEC,
+            error=(
+                risk_error
+                or ("risk_metrics_snapshot_error" if snapshot_status == "error" else None)
+            ),
+            reason_code=(
+                str((snapshot.get("blockers") or [""])[0]) or None
+                if snapshot_status in {"stale", "error"}
+                else None
+            ),
             now=generated_at,
         ),
     }
@@ -843,16 +877,43 @@ def risk_summary_fact_payload(
         source="system_health+state_pg" if observed_epoch(observed_at) > 0 else "none",
         observed_at=observed_at,
         stale_after_sec=summary_stale_after_sec,
-        error=risk_error or health_error,
-        reason_code="risk_sources_incomplete" if observed_epoch(observed_at) <= 0 else None,
+        error=risk_error or health_source_error,
+        reason_code=(
+            "system_health_blocking"
+            if health_source_error and not risk_error
+            else "risk_sources_incomplete"
+            if observed_epoch(observed_at) <= 0
+            else None
+        ),
         components=components,
         now=generated_at,
     ))
     # The two sources have different production cadences.  The parent window
     # covers the once-per-minute system-health report, while the independently
-    # evaluated risk-input component retains its stricter 30-second contract.
+    # evaluated risk-input component shares the 20-second safety contract.
     # Conservatively project any non-known component onto the parent so the
     # wider health window can never make stale risk inputs look current.
+    risk_component = dict(components["risk_inputs"])
+    if snapshot_status in {"unknown", "warming_up"}:
+        risk_component["state"] = "unknown"
+        risk_component["reason_code"] = (
+            str((snapshot.get("blockers") or [""])[0])
+            or "risk_snapshot_not_ready"
+        )
+    elif snapshot_status == "stale":
+        risk_component["state"] = "stale"
+        risk_component["reason_code"] = (
+            str((snapshot.get("blockers") or [""])[0])
+            or "risk_snapshot_stale"
+        )
+    elif snapshot_status == "error":
+        risk_component["state"] = "error"
+        risk_component["reason_code"] = (
+            str((snapshot.get("blockers") or [""])[0])
+            or "risk_metrics_snapshot_error"
+        )
+    components["risk_inputs"] = risk_component
+    result["_fact"]["components"]["risk_inputs"] = risk_component
     component_states = {
         str(component.get("state") or "unknown")
         for component in components.values()
@@ -934,14 +995,14 @@ def state_snapshot_fact_payload(
         "positions": positions_component,
         "loop": loop_component,
         # This is deliberately separate from the 30-second public snapshot.
-        # It describes the 15-second fail-closed safety heartbeat used by
+        # It describes the 20-second fail-closed safety heartbeat used by
         # open-order admission and the watchdog; a known public snapshot can
         # never be treated as permission to add risk.
         "safety": _component(
             contract="live.safety-freshness.v1",
             source="live_safety_watchdog" if observed_epoch(safety_observed_at) > 0 else "none",
             observed_at=safety_observed_at,
-            stale_after_sec=15.0,
+            stale_after_sec=LIVE_SAFETY_FRESHNESS_SEC,
             reason_code=safety_blockers[0] if safety_blockers else None,
             now=generated_at,
         ),
@@ -979,13 +1040,16 @@ def state_snapshot_fact_payload(
     risk_mapping = risk_payload if isinstance(risk_payload, Mapping) else {}
     risk_snapshot = risk_mapping.get("snapshot")
     risk_snapshot_mapping = risk_snapshot if isinstance(risk_snapshot, Mapping) else {}
-    risk_observed_at = risk_snapshot_mapping.get("as_of")
+    risk_observed_at = (
+        risk_snapshot_mapping.get("published_at")
+        or risk_snapshot_mapping.get("as_of")
+    )
     risk_status = str(risk_snapshot_mapping.get("status") or "")
     risk_fact = _component(
         contract="risk.inputs.v1",
         source="live_risk_metrics" if observed_epoch(risk_observed_at) > 0 else "none",
         observed_at=risk_observed_at,
-        stale_after_sec=DEFAULT_STALE_AFTER_SEC["risk"],
+        stale_after_sec=LIVE_SAFETY_FRESHNESS_SEC,
         error="risk_metrics_snapshot_error" if risk_status == "error" else None,
         reason_code=(str((risk_snapshot_mapping.get("blockers") or [""])[0]) or None)
         if risk_status not in {"", "known"}

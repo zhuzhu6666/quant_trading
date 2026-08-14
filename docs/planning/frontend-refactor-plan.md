@@ -44,7 +44,7 @@ system-source-of-truth.md、api-fact-contract.md、legacy-debt-register.md
 - 在现有 web_frontend 内建立 Tauri 2 桌面端；
 - 用 React 19、TypeScript、Vite、TanStack Query 和 Radix 原语构成强类型、
   可停靠、可保存的终端界面；
-- 首版同时提供 Trade Ops、Risk Desk、Research Lab、Governance、Ops 五个工作区；
+- 首版同时提供 Trade Ops、Risk Desk、Research Lab、Governance、Ops 五个工作区；另提供只读 Workflow 运行路径页，不新增生产 authority；
 - 后端继续是唯一事实源、唯一风险裁决者和唯一执行权威；
 - 仅在本地缓存行情和研究材料，离线只读，不能把缓存变成授权输入；
 - 支持本人 Windows 本地运行的 Tauri 壳；不把 Windows 对外发行、安装包签名、
@@ -109,6 +109,7 @@ Research Lab
 | /research | Research Lab | K 线、回放、因子目录、证据、decision trace |
 | /governance | Governance | 候选、审查、mutation、release 和审计链 |
 | /ops | Ops | 健康、恢复、incident、服务和桌面连接诊断 |
+| /workflow | Workflow | 当前项目运行路径、组件职责和最近观测 |
 
 路由只表达用户当前工作区，不表达事实来源。事实仍由各自 API contract 和
 /ws/state 提供。
@@ -341,9 +342,9 @@ FactBoundary。关键接口先补 OpenAPI/response_model，再迁移工作区消
 实现全局 Safety / Readiness / Risk rail、权限边界、step-up、危险动作确认、
 mutation durable/audit ID 展示和审计反馈。
 
-### 阶段 4：五个工作区
+### 阶段 4：五个工作区与 Workflow 运行路径
 
-按 Trade Ops、Risk Desk、Research Lab、Governance、Ops 完成所有首版工作区，
+按 Trade Ops、Risk Desk、Research Lab、Governance、Ops 完成所有首版工作区，并补充只读 Workflow 运行路径页，
 并接通 Research → Decision Trace → Governance → Risk Desk → Trade Ops 引用链。
 
 ### 阶段 5：缓存与离线
@@ -371,7 +372,7 @@ README、旧债、状态和必要的接口合同。
 | 新实现 | 替代对象 | 完成时必须删除 |
 |---|---|---|
 | Workbench Shell | src/components/AppShell.tsx 和旧导航 | 旧 AppShell、旧导航数组、旧默认 redirect |
-| 五个 workspace route | src/pages/* + WorkspacePages.tsx 旧 section 组合 | 旧 page route、旧 section redirect、旧 route alias |
+| workspace routes | src/pages/* + WorkspacePages.tsx 旧 section 组合 | 旧 page route、旧 section redirect、旧 route alias |
 | typed endpoint decoder | api/client.ts 中关键端点的 Record 返回值 | 关键端点宽泛返回类型和重复字段读取 |
 | FactBoundary v2 消费 | src/lib/compat.ts 和 recursive pick fallback | 无调用方的 compat helper、旧字段 fallback、耦合测试 |
 | live snapshot store | useLiveState.ts 中旧快照兼容投影 | 重复 live projection、HTTP fallback、页面级 WS |
@@ -396,7 +397,7 @@ README、旧债、状态和必要的接口合同。
 
 只有同时满足以下条件，前端重构才可标记 complete：
 
-1. 五个工作区都能在本人本地 Tauri dev 或本地构建中打开并通过权限/Fact 验收；
+1. 六个工作区都能在本人本地 Tauri dev 或本地构建中打开并通过权限/Fact 验收；Workflow 仅验证只读事实和动画语义；
 2. 本机可以启动、重启并完成 WebView2、认证、WS、缓存和窗口恢复验收；不要求
    Windows 安装器、签名、公开升级或升级回退证据；
 3. /ws/state 仍是唯一实时状态来源，后端仍是唯一事实源和执行权威；

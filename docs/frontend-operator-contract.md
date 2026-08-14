@@ -70,7 +70,7 @@ server_endpoint
 状态不会被隐藏；它应显示为“不可用，因为 reason_code”，而不是从命令列表
 静默消失。
 
-## 3. 五个工作区合同
+## 3. 六个工作区合同
 
 ### 3.1 Trade Ops
 
@@ -226,6 +226,38 @@ Service Health | Readiness | Incident Control | Recovery | Logs | Release Eviden
 - API 请求失败显示 error，不把最后一次成功读数标记为当前 known；
 - incident mode 的 effective 值必须包含 local latch 的收紧效果。
 
+### 3.6 Workflow
+
+读模型：
+
+- `/ws/state` 的完整 `live.state.v2` 快照；
+- `/api/ops/backend-readiness` 的只读维度投影；
+- `/api/learning/*`、治理候选/审查/提案、应用和后验效果的 endpoint-specific 只读事实；
+- 架构图中涉及的 K 线月库、外部 PIT 数据、事件库、systemd/日志/recovery 只作为已确认的代码/数据边界展示。
+
+主要面板：
+
+~~~text
+Integrated Architecture Topology | Selected Architecture Node
+~~~
+
+允许动作：
+
+- 在同一张拓扑图中查看实时执行主干、市场/外部数据、智能学习反馈、治理后验、服务运维和客户端消费之间的职责与传输关系；
+- 点击架构节点查看输入、输出、事实来源、最近观测时间和 reason_code；
+- 查看 cTrader、serial live loop、因子/信号、Safety/RiskPolicy、执行对账、state_v1 和桌面消费之间的职责关系；
+- 点击节点查看来源、最近观测时间、reason_code 和当前只读状态；
+- 查看学习证据、治理 Coordinator 和 committed projection 如何回流到下一轮 live loop。
+
+限制：
+
+- 工作流页只显示服务端事实和 readiness 投影，不新增 dashboard 聚合接口；
+- 架构拓扑是服务端 authority、现有 endpoint 和已退役/保留边界的客户端只读组合投影，不新增架构事实或 dashboard 聚合接口；
+- 动效只表示当前 `/ws/state` 或页面标注的传输方向，不表示发生了订单或治理提交；
+- 没有独立运行 Fact 的代码/数据边界必须标记为“架构节点”，不能冒充当前健康或已确认；
+- `observed_at` 只表示最近观测，不被解释为组件实际执行时间；
+- 前端不重算因子、风险、Safety、readiness 或治理授权。
+
 ## 4. 跨工作区证据链
 
 ~~~text
@@ -316,7 +348,7 @@ known empty。
 | 快捷键 | 动作 |
 |---|---|
 | Ctrl/Cmd + K | 打开 Command Palette |
-| Ctrl/Cmd + 1..5 | 切换五个工作区 |
+| Ctrl/Cmd + 1..6 | 切换六个工作区 |
 | Ctrl/Cmd + Shift + L | 聚焦 Safety rail |
 | Ctrl/Cmd + Shift + R | 重新读取当前工作区非实时事实 |
 | Esc | 关闭 palette、dialog、context dock |

@@ -26,14 +26,12 @@ def _runtime(
     diagnostics=None,
     state_updates=None,
     acknowledgements=None,
-    risk_updates=None,
 ):
     diagnostics = diagnostics if diagnostics is not None else []
     state_updates = state_updates if state_updates is not None else []
     acknowledgements = (
         acknowledgements if acknowledgements is not None else []
     )
-    risk_updates = risk_updates if risk_updates is not None else []
     return SerialLiveTickRuntime(
         set_loop_diagnostic=lambda *args: diagnostics.append(args),
         run_tick_body=run_tick,
@@ -43,7 +41,6 @@ def _runtime(
         )
         or {"acknowledged": True},
         live_state_update=lambda **kwargs: state_updates.append(kwargs),
-        update_risk_metrics=lambda **kwargs: risk_updates.append(kwargs),
     )
 
 
@@ -113,8 +110,7 @@ def test_tick_exception_blocks_risk_and_retries_safety_in_five_seconds():
     assert any("alpha failed" in message for message in logs)
 
 
-def test_normal_tick_updates_risk_metrics_before_sixty_second_wait():
-    risk_updates = []
+def test_normal_tick_waits_sixty_seconds_after_tick():
     diagnostics = []
     stop_flag = _StopFlag(wait_results=[True])
 
@@ -131,19 +127,16 @@ def test_normal_tick_updates_risk_metrics_before_sixty_second_wait():
                 "break_loop": False,
                 "wait_seconds": None,
             },
-            risk_updates=risk_updates,
             diagnostics=diagnostics,
         ),
     )
 
-    assert risk_updates[0]["tick"] == 1
     assert diagnostics == [(1, "checking"), (1, None)]
     assert stop_flag.wait_calls == [60.0]
     assert result["exit_reason"] == "stop_during_alpha_wait"
 
 
-def test_tick_specific_wait_updates_risk_before_wait():
-    risk_updates = []
+def test_tick_specific_wait_remains_owned_by_serial_runner():
     diagnostics = []
     stop_flag = _StopFlag(wait_results=[True])
 
@@ -160,15 +153,12 @@ def test_tick_specific_wait_updates_risk_before_wait():
                 "break_loop": False,
                 "wait_seconds": 10.0,
             },
-            risk_updates=risk_updates,
             diagnostics=diagnostics,
         ),
     )
 
     assert stop_flag.wait_calls == [10.0]
     assert diagnostics == [(1, "checking"), (1, None)]
-    assert len(risk_updates) == 1
-    assert risk_updates[0]["tick"] == 1
     assert result["exit_reason"] == "stop_during_tick_wait"
 
 
@@ -193,7 +183,6 @@ def test_safety_wait_is_scheduled_from_tick_start_not_added_after_work():
             factor_pipeline=lambda: None,
             acknowledge_factor_projections=lambda **_kwargs: None,
             live_state_update=lambda **_kwargs: None,
-            update_risk_metrics=lambda **_kwargs: None,
             monotonic=lambda: next(clock),
         ),
     )

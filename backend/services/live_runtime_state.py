@@ -129,6 +129,11 @@ def default_live_state() -> dict[str, Any]:
         "loop_started_at": None,
         "loop_shutdown": None,
         "accepting_new_risk": False,
+        # The completed Safety heartbeat remains the admission authority.
+        # These two fields only let the watchdog tell an active serial safety
+        # cycle from a stalled one; progress must never authorize new risk.
+        "safety_cycle_active": False,
+        "safety_cycle_progress_at": None,
         # ``account``/``positions`` remain the compatibility projections used
         # by existing API/WS consumers.  Only an explicit fresh broker
         # reconcile may populate the corresponding ``*_reconciled`` snapshot

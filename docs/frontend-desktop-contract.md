@@ -80,7 +80,7 @@ timeout、401、error envelope 和 request correlation。
 - `observed_at` 表示业务事实时间，`generated_at` 只表示本次响应生成时间，不能互相替代；
 - WebSocket 连接状态、完整快照时间和业务事实年龄必须分开显示，不得把“已连接”解释为“数据已确认”。
 - 实时桌面展示允许保留 30 秒内的最后一次真实 broker 快照；新增风险仍只读取服务端投影的
-  `live.safety-freshness.v1` 15 秒安全门，renderer 不得把展示 `known` 转换成风险授权。
+  `live.safety-freshness.v1` 20 秒安全门，renderer 不得把展示 `known` 转换成风险授权。
 
 ### 3.3 CORS 与 origin
 

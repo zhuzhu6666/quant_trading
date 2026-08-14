@@ -677,7 +677,7 @@ def test_fresh_open_position_ids_require_independent_position_fact():
         101,
         102,
     }
-    assert live_service._fresh_cached_broker_open_position_ids(now_ts=116.0) is None
+    assert live_service._fresh_cached_broker_open_position_ids(now_ts=121.0) is None
 
 
 def test_degraded_cache_retains_original_session_observation(monkeypatch):

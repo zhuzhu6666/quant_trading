@@ -9,7 +9,7 @@ export type LayoutState = {
 };
 
 const STORAGE_KEY = "quant.ui.layout.v2";
-const WORKSPACE_IDS: readonly WorkspaceId[] = ["trade-ops", "risk-desk", "research", "governance", "ops"];
+const WORKSPACE_IDS: readonly WorkspaceId[] = ["trade-ops", "risk-desk", "research", "governance", "ops", "workflow"];
 
 export function defaultLayout(workspace: WorkspaceId): LayoutState {
   return {

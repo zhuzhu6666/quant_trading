@@ -2,6 +2,8 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { resolve } from 'node:path';
 
+const devApiTarget = process.env.VITE_DEV_API_TARGET || 'https://www.zhuzhu666.icu';
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -12,5 +14,18 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    proxy: {
+      '/api': {
+        target: devApiTarget,
+        changeOrigin: true,
+        secure: true,
+      },
+      '/ws': {
+        target: devApiTarget,
+        changeOrigin: true,
+        secure: true,
+        ws: true,
+      },
+    },
   },
 });

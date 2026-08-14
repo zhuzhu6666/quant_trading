@@ -13,6 +13,8 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable, Mapping
 
+from backend.services.live_reconciliation import LIVE_SAFETY_FRESHNESS_SEC
+
 
 SAFETY_MODES = frozenset({"off", "shadow", "enforce"})
 SAFETY_ACTIONS = frozenset(
@@ -95,7 +97,7 @@ def _reconcile_success(value: Any, *, now: float) -> bool:
     if observed_at <= 0.0:
         return False
     age = float(now) - observed_at
-    return -1.0 <= age <= 15.0
+    return -1.0 <= age <= LIVE_SAFETY_FRESHNESS_SEC
 
 
 def _position_id(position: Any) -> int:

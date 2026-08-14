@@ -13,6 +13,7 @@ from backend.services.live_safety_state import (
     append_safety_outbox,
     safety_outbox_path,
 )
+from backend.services.live_reconciliation import LIVE_SAFETY_FRESHNESS_SEC
 
 
 SCHEMA_VERSION = "live_safety_shadow_observation.v1"
@@ -235,7 +236,7 @@ def evaluate_safety_shadow_gate(
         for field in ("account_updated_at", "positions_updated_at"):
             updated_at = float(item.get(field) or 0.0)
             age = item_at - updated_at if updated_at > 0 else float("inf")
-            if age < -5.0 or age > 15.0:
+            if age < -5.0 or age > LIVE_SAFETY_FRESHNESS_SEC:
                 item_unsafe.append(f"{field.removesuffix('_updated_at')}_freshness_invalid")
         if not comparison:
             item_unsafe.append("comparison_missing")

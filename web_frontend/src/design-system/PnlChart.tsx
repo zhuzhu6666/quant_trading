@@ -7,6 +7,8 @@ export const DEFAULT_INITIAL_CAPITAL = 500;
 type PnlChartProps = {
   points: RealizedPnlPoint[];
   initialCapital?: number;
+  baselineValue?: number;
+  baselineLabel?: string;
   showBaseline?: boolean;
   emptyLabel?: string;
 };
@@ -18,6 +20,8 @@ function money(value: number): string {
 export function PnlChart({
   points,
   initialCapital = DEFAULT_INITIAL_CAPITAL,
+  baselineValue,
+  baselineLabel = "起始",
   showBaseline = false,
   emptyLabel = "暂无已确认盈亏记录",
 }: PnlChartProps) {
@@ -32,22 +36,23 @@ export function PnlChart({
   const plotLeft = 8;
   const plotRight = width - 8;
   const plotHeight = height - plotTop - plotBottom;
-  const equityValues = points.map((point) => initialCapital + point.cumulative);
-  const values = [initialCapital, ...equityValues];
+  const startingValue = baselineValue ?? initialCapital;
+  const equityValues = points.map((point) => startingValue + point.cumulative);
+  const values = [startingValue, ...equityValues];
   const rawMax = Math.max(...values);
   const rawMin = Math.min(...values);
-  const padding = Math.max((rawMax - rawMin) * 0.14, Math.abs(initialCapital) * 0.004, 1);
+  const padding = Math.max((rawMax - rawMin) * 0.14, Math.abs(startingValue) * 0.004, 1);
   const max = rawMax + padding;
   const min = rawMin - padding;
   const range = Math.max(max - min, 0.00001);
   const scale = (value: number) => plotTop + ((max - value) / range) * plotHeight;
   const step = points.length ? (plotRight - plotLeft) / points.length : 0;
   const coordinates = [
-    { x: plotLeft, y: scale(initialCapital), value: initialCapital, ts: null as number | null, pnl: 0 },
+    { x: plotLeft, y: scale(startingValue), value: startingValue, ts: null as number | null, pnl: 0 },
     ...points.map((point, index) => ({
       x: plotLeft + (index + 1) * step,
-      y: scale(initialCapital + point.cumulative),
-      value: initialCapital + point.cumulative,
+      y: scale(startingValue + point.cumulative),
+      value: startingValue + point.cumulative,
       ts: point.ts,
       pnl: point.pnl,
     })),
@@ -59,10 +64,10 @@ export function PnlChart({
   const gridValues = [0, 0.25, 0.5, 0.75, 1];
   const timeIndexes = [0, Math.floor((points.length - 1) / 2), points.length - 1]
     .filter((value, index, valuesForLabels) => points.length > 0 && valuesForLabels.indexOf(value) === index);
-  const positive = last.value >= initialCapital;
-  const baselineY = scale(initialCapital);
+  const positive = last.value >= startingValue;
+  const baselineY = scale(startingValue);
 
-  return <svg className="pnl-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="以 500 为初始资金的已实现盈亏权益折线图">
+  return <svg className="pnl-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`${baselineLabel} ${money(startingValue)} 的已实现盈亏曲线`}>
     <g className="chart-grid" aria-hidden="true">
       {gridValues.map((ratio) => {
         const y = plotTop + ratio * plotHeight;
@@ -71,7 +76,7 @@ export function PnlChart({
       })}
     </g>
     <line x1={plotLeft} y1={baselineY} x2={plotRight} y2={baselineY} className="pnl-baseline" />
-    <text x={plotLeft + 4} y={baselineY - 6} className="pnl-baseline-label">起始 {money(initialCapital)}</text>
+    <text x={plotLeft + 4} y={baselineY - 6} className="pnl-baseline-label">{baselineLabel} {money(startingValue)}</text>
     <path d={areaPath} className={`pnl-area ${positive ? "pnl-area-positive" : "pnl-area-negative"}`} />
     <path d={linePath} className={`pnl-line ${positive ? "pnl-line-positive" : "pnl-line-negative"}`} />
     <circle cx={first.x} cy={first.y} r="3" className="pnl-point pnl-point-start" />

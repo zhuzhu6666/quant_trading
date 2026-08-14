@@ -15,7 +15,6 @@ class SerialLiveTickRuntime:
     factor_pipeline: Any
     acknowledge_factor_projections: Any
     live_state_update: Any
-    update_risk_metrics: Any
     monotonic: Any = time.monotonic
 
 
@@ -60,7 +59,6 @@ def run_serial_live_ticks(
                 runtime.set_loop_diagnostic(tick, None)
                 exit_reason = "tick_requested_break"
                 break
-            runtime.update_risk_metrics(tick=tick, log=log)
             # Refresh the public loop-observation clock only after the serial
             # tick has completed. This is a liveness/display observation;
             # Safety keeps its own heartbeat and remains the authority for
@@ -116,7 +114,7 @@ def _scheduled_wait_seconds(wait_seconds: Any, *, elapsed_seconds: float) -> flo
         return 0.0
     # The live safety cycle requests five seconds.  Subtracting the work
     # already performed keeps account/positions/loop observations inside the
-    # 15-second fact window even when broker RPCs or diagnostics are slow.
+    # 20-second fact window even when broker RPCs or diagnostics are slow.
     if requested <= 5.0:
         return max(0.0, requested - elapsed)
     return requested

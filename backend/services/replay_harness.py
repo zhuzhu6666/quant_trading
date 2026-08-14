@@ -573,6 +573,16 @@ class ReplayHarnessService:
             outcome = dict(linked.get("outcome") or {})
             learning = dict(linked.get("learning") or {})
             direction = self._decision_direction(row)
+            entry_ts = round(_safe_float(row.get("decision_ts")), 3)
+            raw_exit_ts = _safe_float(outcome.get("close_ts"))
+            outcome_status = str(outcome.get("status") or "")
+            exit_ts = round(raw_exit_ts, 3) if outcome_status == "closed" and raw_exit_ts > entry_ts else None
+            action_score = round(_safe_float(row.get("action_score")), 6)
+            action_reason = str(row.get("action_reason") or "")
+            outcome_result = str(outcome.get("result") or "")
+            outcome_label = str(outcome.get("outcome_label") or "")
+            pnl = _safe_float(outcome.get("pnl"))
+            close_reason = str(outcome.get("close_reason") or "")
             items.append(
                 {
                     "decision_id": decision_id,
@@ -583,13 +593,30 @@ class ReplayHarnessService:
                     "timeframe": str(row.get("timeframe") or ""),
                     "direction": direction,
                     "direction_label": self._direction_label(direction),
-                    "decision_ts": round(_safe_float(row.get("decision_ts")), 3),
-                    "action_score": round(_safe_float(row.get("action_score")), 6),
-                    "action_reason": str(row.get("action_reason") or ""),
-                    "outcome_status": str(outcome.get("status") or ""),
-                    "outcome_result": str(outcome.get("result") or ""),
-                    "pnl": _safe_float(outcome.get("pnl")),
-                    "outcome_label": str(outcome.get("outcome_label") or ""),
+                    "decision_ts": entry_ts,
+                    "entry_ts": entry_ts,
+                    "exit_ts": exit_ts,
+                    "exit_decision_id": str(outcome.get("exit_decision_id") or "") or None,
+                    "close_reason": close_reason or None,
+                    "holding_seconds": round(exit_ts - entry_ts, 3) if exit_ts is not None else None,
+                    "action_score": action_score,
+                    "action_reason": action_reason,
+                    "outcome_status": outcome_status,
+                    "outcome_result": outcome_result,
+                    "pnl": pnl,
+                    "outcome_label": outcome_label,
+                    "system_view": {
+                        "direction": direction,
+                        "direction_label": self._direction_label(direction),
+                        "score": action_score,
+                        "action_reason": action_reason or None,
+                        "outcome_status": outcome_status or None,
+                        "outcome_result": outcome_result or None,
+                        "outcome_label": outcome_label or None,
+                        "pnl": pnl if outcome_status == "closed" else None,
+                        "close_reason": close_reason or None,
+                        "summary": str(outcome.get("summary") or "") or None,
+                    },
                     "learning_status": str(learning.get("status") or ""),
                     "sample_count": _safe_int(learning.get("sample_count")),
                     "matured_sample_count": _safe_int(learning.get("matured_sample_count")),
@@ -926,6 +953,7 @@ class ReplayHarnessService:
         try:
             has_reviews = state_table_exists(conn, "trade_outcome_review")
             has_lifecycle = state_table_exists(conn, "position_lifecycle_event")
+            has_recovery = state_table_exists(conn, "recovery_position_state")
             has_samples = state_table_exists(conn, "autonomous_learning_sample")
             items = [
                 self._trade_outcome_learning_item(
@@ -933,6 +961,7 @@ class ReplayHarnessService:
                     row,
                     has_reviews=has_reviews,
                     has_lifecycle=has_lifecycle,
+                    has_recovery=has_recovery,
                     has_samples=has_samples,
                 )
                 for row in rows[: max(1, int(max_items))]
@@ -958,6 +987,7 @@ class ReplayHarnessService:
         *,
         has_reviews: bool,
         has_lifecycle: bool,
+        has_recovery: bool,
         has_samples: bool,
     ) -> dict[str, Any]:
         decision_id = str(row.get("decision_id") or "")
@@ -967,15 +997,28 @@ class ReplayHarnessService:
         direction = self._decision_direction(row)
         review = self._find_trade_review(conn, decision_id=decision_id, trade_id=trade_id, position_id=position_id) if has_reviews else {}
         lifecycle = self._find_latest_position_event(conn, trade_id=trade_id, position_id=position_id) if has_lifecycle else {}
+        recovery = self._find_recovery_position_state(conn, position_id=position_id) if has_recovery else {}
         samples = self._find_learning_samples(conn, decision_id=decision_id, trade_id=trade_id, position_id=position_id) if has_samples else []
         review_json = _loads(review.get("review_json"), {}) if review else {}
         lifecycle_json = _loads(lifecycle.get("details_json"), {}) if lifecycle else {}
-        pnl = _safe_float(review.get("pnl"), _safe_float(lifecycle.get("realized_pnl"))) if review else _safe_float(lifecycle.get("realized_pnl"))
+        lifecycle_event_type = str(lifecycle.get("event_type") or "").lower()
+        lifecycle_is_closed = lifecycle_event_type in {"closed", "broker_closed", "supervisor_closed"}
+        recovery_status = str(recovery.get("status") or "").lower()
+        recovery_close_ts = _safe_float(recovery.get("closed_at"))
+        recovery_is_closed = recovery_status in {"closed", "broker_closed", "supervisor_closed"} or recovery_close_ts > 0
+        if review:
+            pnl = _safe_float(review.get("pnl"), _safe_float(lifecycle.get("realized_pnl")))
+        elif lifecycle_is_closed:
+            pnl = _safe_float(lifecycle.get("realized_pnl"))
+        elif recovery_is_closed:
+            pnl = _safe_float(recovery.get("close_pnl"))
+        else:
+            pnl = _safe_float(lifecycle.get("realized_pnl"))
         has_trade_ref = bool(trade_id or position_id)
         if not has_trade_ref and event_type != "open":
             outcome_status = "no_trade"
             outcome_result = "not_applicable"
-        elif review or str(lifecycle.get("event_type") or "") == "closed":
+        elif review or lifecycle_is_closed or recovery_is_closed:
             outcome_status = "closed"
             outcome_result = "profit" if pnl > 0 else "loss" if pnl < 0 else "flat"
         elif has_trade_ref:
@@ -1016,9 +1059,15 @@ class ReplayHarnessService:
             review_json.get("close_reason")
             or lifecycle_json.get("close_reason")
             or lifecycle_json.get("real_pnl", {}).get("source")
+            or recovery.get("close_reason")
             or ""
         )
         summary_text = str(review.get("summary_text") or "")
+        close_ts = _safe_float(review_json.get("close_ts"))
+        if close_ts <= 0 and lifecycle_is_closed:
+            close_ts = _safe_float(lifecycle.get("event_ts"))
+        if close_ts <= 0 and recovery_is_closed:
+            close_ts = recovery_close_ts
         return {
             "decision_id": decision_id,
             "trade_id": trade_id,
@@ -1036,7 +1085,7 @@ class ReplayHarnessService:
                 "outcome_label": str(review.get("outcome_label") or ""),
                 "review_id": str(review.get("review_id") or ""),
                 "exit_decision_id": str(review.get("exit_decision_id") or ""),
-                "close_ts": round(_safe_float(review_json.get("close_ts"), _safe_float(lifecycle.get("event_ts"))), 3),
+                "close_ts": round(close_ts, 3),
                 "close_reason": close_reason,
                 "summary": summary_text,
                 "primary_factor": str(review_json.get("primary_factor") or self._summary_token(summary_text, "primary_factor")),
@@ -1103,6 +1152,22 @@ class ReplayHarnessService:
             LIMIT 1
             """,
             tuple(params),
+        ).fetchone()
+        return dict(row) if row else {}
+
+    def _find_recovery_position_state(self, conn, *, position_id: str) -> dict[str, Any]:
+        if not position_id:
+            return {}
+        key: Any = int(position_id) if str(position_id).strip().isdigit() else position_id
+        row = _execute(
+            conn,
+            """
+            SELECT *
+            FROM recovery_position_state
+            WHERE position_id = ?
+            LIMIT 1
+            """,
+            (key,),
         ).fetchone()
         return dict(row) if row else {}
 

@@ -63,6 +63,7 @@ def _runtime(
     circuit_enforced=True,
     diagnostic_calls=None,
     retry_calls=None,
+    risk_update=None,
 ):
     order = order if order is not None else []
     process_calls = process_calls if process_calls is not None else []
@@ -137,6 +138,7 @@ def _runtime(
         process_tick=lambda *args, **kwargs: process_calls.append(
             (args, kwargs)
         ),
+        update_risk_metrics=risk_update,
     )
     return runtime, controller, plane
 
@@ -213,6 +215,7 @@ def test_account_failure_still_runs_safety_and_blocks_alpha():
 def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
     order = []
     process_calls = []
+    state_updates = []
     diagnostics = []
     account = {
         "account": {"balance": 10_000.0},
@@ -223,6 +226,7 @@ def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
         order=order,
         reconcile_account=account,
         process_calls=process_calls,
+        state_updates=state_updates,
         diagnostic_calls=diagnostics,
     )
 
@@ -248,9 +252,44 @@ def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
     assert process_calls[0][1]["protection_already_run"] is True
     assert plane.marked
     assert result["wait_seconds"] == 5.0
+    assert any(
+        update.get("safety_cycle_active") is True for update in state_updates
+    )
+    assert state_updates[-1]["safety_cycle_active"] is False
     assert diagnostics == [
         ((4, "bridge_ready"), {"bridge_ready": True}),
     ]
+
+
+def test_risk_metrics_publish_immediately_after_safety_boundary():
+    events = []
+    account = {
+        "account": {"balance": 10_000.0},
+        "observed_at": 100.0,
+        "reconcile_id": "account-risk",
+    }
+
+    def update_risk_metrics(**kwargs):
+        events.append(("risk", kwargs["tick"]))
+
+    runtime, _controller, _plane = _runtime(
+        order=events,
+        reconcile_account=account,
+        risk_update=update_risk_metrics,
+    )
+
+    run_live_loop_tick_body(
+        broker="ctrader",
+        bridge_cfg=SimpleNamespace(),
+        timeframe="M5",
+        tick=7,
+        recovery_bootstrapped=False,
+        stop_requested=lambda: False,
+        log=lambda _message: None,
+        runtime=runtime,
+    )
+
+    assert events[:4] == ["positions", "account", "safety", ("risk", 7)]
 
 
 def test_pending_open_retry_runs_after_safety_before_alpha_due_check():

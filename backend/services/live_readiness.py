@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from backend.services.live_reconciliation import evaluate_reconciliation_snapshot
+from backend.services.live_reconciliation import (
+    LIVE_SAFETY_FRESHNESS_SEC,
+    evaluate_reconciliation_snapshot,
+)
 
 
 def _canonical_loop_blockers(
@@ -58,7 +61,7 @@ def build_live_readiness(
     v2_active: bool,
     broker_status: str,
     broker_error: Any,
-    freshness_seconds: float = 15.0,
+    freshness_seconds: float = LIVE_SAFETY_FRESHNESS_SEC,
 ) -> dict[str, Any]:
     account = dict(state.get("account_reconciled") or {})
     diag = dict(state.get("diag") or {})
