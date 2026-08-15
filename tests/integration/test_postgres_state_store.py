@@ -117,7 +117,8 @@ def test_versioned_state_migration_executes_in_disposable_pg_temp_schema() -> No
                     """CREATE TEMP TABLE autonomous_learning_sample (
                         sample_id TEXT PRIMARY KEY,
                         sample_type TEXT NOT NULL DEFAULT '',
-                        event_ts DOUBLE PRECISION NOT NULL DEFAULT 0.0
+                        event_ts DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
                     )"""
                 )
             elif table == "policy_suggestion":
@@ -228,6 +229,34 @@ def test_versioned_state_migration_executes_in_disposable_pg_temp_schema() -> No
                         created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
                     )"""
                 )
+            elif table == "brain_action_plan_eval":
+                conn.execute(
+                    """CREATE TEMP TABLE brain_action_plan_eval (
+                        eval_id TEXT PRIMARY KEY,
+                        plan_id TEXT NOT NULL DEFAULT '',
+                        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+                    )"""
+                )
+            elif table == "evolution_decision":
+                conn.execute(
+                    """CREATE TEMP TABLE evolution_decision (
+                        decision_id TEXT PRIMARY KEY,
+                        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+                    )"""
+                )
+            elif table == "trade_outcome_review":
+                conn.execute(
+                    """CREATE TEMP TABLE trade_outcome_review (
+                        review_id TEXT PRIMARY KEY
+                    )"""
+                )
+            elif table == "runtime_config_snapshot":
+                conn.execute(
+                    """CREATE TEMP TABLE runtime_config_snapshot (
+                        config_version TEXT NOT NULL DEFAULT '',
+                        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+                    )"""
+                )
             else:
                 conn.execute(f'CREATE TEMP TABLE "{table}" (seed INTEGER)')
 
@@ -298,7 +327,14 @@ def test_versioned_state_migration_executes_in_disposable_pg_temp_schema() -> No
             "meta_shadow_report_snapshot": {"report_id", "model_type", "payload_json", "created_at"},
             "model_influence_decision": {"influence_id", "control_surface", "fused_decision_json", "created_at"},
             "model_influence_effect": {"effect_id", "influence_id", "outcome_json", "matured_at"},
-            "offmarket_high_load_job_audit": {"audit_id", "job_name", "payload_json", "finished_at"},
+            "offmarket_high_load_job_audit": {
+                "audit_id", "job_name", "payload_json", "finished_at",
+                "training_window_key", "phase", "worker_instance_id",
+                "heartbeat_at", "input_bytes_estimate",
+            },
+            "state_payload_archive": {
+                "archive_hash", "source_table", "source_id", "raw_sha256", "payload_bytes",
+            },
             "open_quality_shadow_audit": {"inference_id", "decision_id", "quality_score", "created_at"},
             "position_quality_shadow_audit": {"inference_id", "position_id", "hold_score", "created_at"},
         }

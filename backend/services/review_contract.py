@@ -4,6 +4,11 @@ import json
 import math
 from typing import Any
 
+from backend.services.supervisor_payload_contract import (
+    bounded_review_projection,
+    supervisor_payload_sha256,
+)
+
 
 SYSTEM_CONTAMINATION_LABELS = {
     "bar_data_degraded",
@@ -560,7 +565,24 @@ def normalize_trade_review_contract(
     execution_quality: Any = 0.0,
 ) -> dict[str, Any]:
     review = dict(review_payload or {})
-    normalized = dict(review)
+    # The hot row is a bounded projection.  The complete recursive branches
+    # are retained by the writer in the archive payload and are addressed by
+    # supervisor_payload_sha256; keeping them inline would recreate the
+    # historical write-amplification path even after schema 15 is applied.
+    normalized = bounded_review_projection(review)
+
+    recursive_supervisor_payload = {
+        key: review[key]
+        for key in ("inferred_close_supervisor", "responsibility_domains")
+        if isinstance(review.get(key), dict)
+    }
+    if recursive_supervisor_payload:
+        # The digest is a stable reference for the complete pre-projection
+        # object. The archive writer attaches the compressed original when a
+        # database connection is available; the hot review stays bounded.
+        normalized["supervisor_payload_sha256"] = supervisor_payload_sha256(
+            recursive_supervisor_payload
+        )
 
     normalized["contract_version"] = str(
         review.get("contract_version")
@@ -631,4 +653,4 @@ def normalize_trade_review_contract(
         else build_system_issue_context(normalized)
     )
     normalized["system_issue_context"] = system_issue
-    return normalized
+    return bounded_review_projection(normalized)

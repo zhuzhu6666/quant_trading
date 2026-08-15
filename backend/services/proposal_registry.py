@@ -11,6 +11,7 @@ from backend.services.agent_authority import (
     policy_suggestion_requested_writes,
 )
 from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
+from backend.services.state_payloads import ensure_state_payload_schema
 
 
 ACTIVE_STATUSES = {
@@ -130,6 +131,7 @@ def ensure_proposal_registry_table(db_path: str | Path = STATE_DB) -> None:
         conn.commit()
     finally:
         conn.close()
+    ensure_state_payload_schema(db_path)
 
 
 def _table_columns(conn: Any, db_path: str | Path, table: str) -> set[str]:
@@ -1366,10 +1368,16 @@ class ProposalRegistryService:
         rows = _execute(
             conn,
             """
-            SELECT decision_id, run_id, decision_type, scope_type, scope_key, action,
-                   status, evidence_json, risk_verdict_json, result_json, rollback_json, created_at
-            FROM evolution_decision
-            ORDER BY created_at DESC
+            SELECT d.decision_id, d.run_id, d.decision_type, d.scope_type, d.scope_key, d.action,
+                   status,
+                   COALESCE(p.evidence_json, d.evidence_json) AS evidence_json,
+                   COALESCE(p.risk_verdict_json, d.risk_verdict_json) AS risk_verdict_json,
+                   COALESCE(p.result_json, d.result_json) AS result_json,
+                   COALESCE(p.rollback_json, d.rollback_json) AS rollback_json,
+                   d.created_at
+            FROM evolution_decision d
+            LEFT JOIN mutation_payload p ON p.payload_hash=d.payload_hash
+            ORDER BY d.created_at DESC
             LIMIT ?
             """,
             (limit,),

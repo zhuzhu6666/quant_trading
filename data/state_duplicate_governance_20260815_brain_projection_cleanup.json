@@ -1,0 +1,56 @@
+{
+  "audit_version": "state_duplicate_governance.v1",
+  "operation": "brain_memory.posterior_arbitration.single_projection_cleanup",
+  "executed_at": "2026-08-15T21:47:00+08:00",
+  "scope": {
+    "database": "PostgreSQL state_v1",
+    "table": "state_v1.brain_memory",
+    "predicate": "source_table = 'posterior_arbitration' AND memory_id = 'mem_c14d774131e721c104d40e47'",
+    "source_facts_touched": false,
+    "services_started": false,
+    "vacuum_executed": false,
+    "historical_events_deleted": false
+  },
+  "reason": "posterior_arbitration is a rebuildable derived memory projection. The existing BrainMemoryService refresh path removes this projection before rebuilding the current bounded window; source review and counterfactual facts remain authoritative.",
+  "preimage": {
+    "memory_id": "mem_c14d774131e721c104d40e47",
+    "source_table": "posterior_arbitration",
+    "source_id": "b8f13846ea3927941e97225c",
+    "created_at": 1786800300.0,
+    "last_used_at": 1786800300.0,
+    "summary_bytes": 30,
+    "structured_bytes": 144
+  },
+  "transaction": {
+    "expected_target_rows": 1,
+    "deleted_rows": 1,
+    "remaining_target_rows": 0,
+    "committed": true,
+    "fail_closed_on_unexpected_target_count": true,
+    "lock_timeout": "500ms",
+    "statement_timeout": "3000ms"
+  },
+  "source_fact_counts": {
+    "before": {
+      "experience_memory": 721,
+      "supervisor_counterfactual_review": 576,
+      "trade_outcome_review": 721
+    },
+    "after": {
+      "experience_memory": 721,
+      "supervisor_counterfactual_review": 576,
+      "trade_outcome_review": 721
+    },
+    "unchanged": true
+  },
+  "verified_facts": [
+    "The exact derived projection row was deleted in one committed transaction.",
+    "The three authoritative source fact counts were unchanged.",
+    "No source review, counterfactual, event, snapshot, archive, outbox, or payload row was deleted.",
+    "No service was started and no scheduler was run."
+  ],
+  "not_verified": [
+    "The physical PostgreSQL relation size is unchanged; no VACUUM or table rewrite was run.",
+    "The projection will be rebuilt only when the existing memory refresh path next runs."
+  ]
+}

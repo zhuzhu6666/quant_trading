@@ -8,8 +8,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.db import (
+    STATE_DB,
+    STATE_DB_DDL,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+)
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload
 from research.features.evidence_contract import build_evidence_contract
 
 
@@ -57,6 +65,32 @@ def _timeframe_seconds(timeframe: str) -> int:
 
 def _chunks(items: list[str], size: int = 500) -> list[list[str]]:
     return [items[idx: idx + size] for idx in range(0, len(items), max(1, int(size)))]
+
+
+def _review_archive_select(conn: Any, *, alias: str = "r", output: str = "review_archive_hash") -> str:
+    try:
+        has_archive = "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
+    except Exception:
+        has_archive = False
+    return f", {alias}.review_archive_hash AS {output}" if has_archive else ""
+
+
+def _restore_review_payload(
+    conn: Any,
+    row: dict[str, Any],
+    *,
+    source_id_key: str = "review_id",
+    inline_key: str = "review_json",
+    archive_key: str = "review_archive_hash",
+) -> None:
+    row[inline_key] = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(row.get(source_id_key) or ""),
+        inline_json=row.get(inline_key),
+        archive_hash=row.get(archive_key, ""),
+        default={},
+    )
 
 
 def _base_temporal_context(decision_ts: float, timeframe: str) -> dict:
@@ -317,7 +351,7 @@ class LearningFeatureProvider:
                 placeholders = ",".join(p for _ in chunk)
                 rows = conn.execute(
                     f"""
-                    SELECT e.*, r.review_json AS source_review_json
+                    SELECT e.*, r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
                     FROM experience_memory e
                     JOIN trade_outcome_review r
                       ON e.source_table='trade_outcome_review'
@@ -329,11 +363,19 @@ class LearningFeatureProvider:
                     tuple(chunk),
                 ).fetchall()
                 for row in rows:
-                    if review_has_system_contamination(_loads(row["source_review_json"], {})):
+                    item = dict(row)
+                    _restore_review_payload(
+                        conn,
+                        item,
+                        source_id_key="source_id",
+                        inline_key="source_review_json",
+                        archive_key="source_review_archive_hash",
+                    )
+                    if review_has_system_contamination(item.get("source_review_json")):
                         continue
-                    trade_id = str(row["trade_id"] or "")
+                    trade_id = str(item["trade_id"] or "")
                     if trade_id and trade_id not in found:
-                        found[trade_id] = self._parse_experience(row)
+                        found[trade_id] = self._parse_experience(item)
         return found
 
     @staticmethod
@@ -1015,9 +1057,9 @@ class LearningFeatureProvider:
             return None
         with self._conn() as conn:
             p = self._p()
-            rows = conn.execute(
+            raw_rows = conn.execute(
                 f"""
-                SELECT e.*, r.review_json AS source_review_json
+                SELECT e.*, r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
                 FROM experience_memory e
                 JOIN trade_outcome_review r
                   ON e.source_table='trade_outcome_review'
@@ -1027,9 +1069,20 @@ class LearningFeatureProvider:
                 """,
                 (trade_id,),
             ).fetchall()
-        for row in rows:
-            if not review_has_system_contamination(_loads(row["source_review_json"], {})):
-                return self._parse_experience(row)
+            rows = []
+            for raw_row in raw_rows:
+                item = dict(raw_row)
+                _restore_review_payload(
+                    conn,
+                    item,
+                    source_id_key="source_id",
+                    inline_key="source_review_json",
+                    archive_key="source_review_archive_hash",
+                )
+                rows.append(item)
+        for item in rows:
+            if not review_has_system_contamination(item.get("source_review_json")):
+                return self._parse_experience(item)
         return None
 
     def _application_context(self, factors: list[dict], review_created_at: float) -> list[dict]:
@@ -1198,6 +1251,9 @@ class LearningFeatureProvider:
                 """,
                 (trade_id, trade_id, trade_id),
             ).fetchone()
+            if row:
+                row = dict(row)
+                _restore_review_payload(conn, row)
         if not row:
             raise KeyError(f"trade review not found: {trade_id}")
         return self._sample_from_review_row(row)
@@ -1419,6 +1475,9 @@ class LearningFeatureProvider:
                 """,
                 (int(limit),),
             ).fetchall()
+            rows = [dict(row) for row in rows]
+            for row in rows:
+                _restore_review_payload(conn, row)
         entry_decision_ids = [str(row["entry_decision_id"] or "") for row in rows if str(row["entry_decision_id"] or "")]
         exit_decision_ids = [str(row["exit_decision_id"] or "") for row in rows if str(row["exit_decision_id"] or "")]
         all_decision_ids = list(dict.fromkeys(entry_decision_ids + exit_decision_ids))

@@ -29,7 +29,10 @@ from backend.services._brain_helpers import (
     text,
 )
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.live_position_lifecycle import _compact_supervisor_mapping
+from backend.services.state_payload_archive import load_json_payload
+from backend.services.supervisor_payload_contract import (
+    compact_supervisor_mapping as _compact_supervisor_mapping,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +46,196 @@ def _memory_id(source_table: str, source_id: str) -> str:
 
 def _status_from_component(component: dict[str, Any], default: str = "unknown") -> str:
     return str(component.get("status") or component.get("overall") or component.get("mode") or default)
+
+
+def _review_archive_select(conn: Any, *, alias: str = "r", output: str = "source_review_archive_hash") -> str:
+    """Select the authoritative review archive reference when the schema has it."""
+
+    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
+        return ""
+    return f", {alias}.review_archive_hash AS {output}"
+
+
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        if hasattr(row, "keys") and key not in row.keys():
+            return default
+        value = row[key]
+    except Exception:
+        return default
+    return default if value is None else value
+
+
+def _review_payload_from_row(
+    conn: Any,
+    row: Any,
+    *,
+    source_id_key: str,
+    inline_key: str,
+    archive_key: str = "source_review_archive_hash",
+) -> dict[str, Any]:
+    payload = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(_row_value(row, source_id_key, "") or ""),
+        inline_json=_row_value(row, inline_key, "{}"),
+        archive_hash=_row_value(row, archive_key, ""),
+        default={},
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
+_MEMORY_PERSISTED_MAX_KEYS = 64
+_MEMORY_PERSISTED_MAX_LIST_ITEMS = 32
+_MEMORY_PERSISTED_MAX_STRING = 512
+_MEMORY_PERSISTED_NESTED_KEYS = frozenset(
+    {"context", "decision_context", "evidence", "lesson", "posterior_reconciliation", "review"}
+)
+_UNSUPPORTED_PERSISTED_VALUE = object()
+
+
+def _persisted_scalar(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:_MEMORY_PERSISTED_MAX_STRING]
+    return _UNSUPPORTED_PERSISTED_VALUE
+
+
+def _bounded_persisted_mapping(
+    value: Any,
+    *,
+    nested_keys: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Keep only bounded scalar metadata for rebuildable brain projections."""
+
+    if not isinstance(value, dict):
+        return {}
+    projected: dict[str, Any] = {}
+    for raw_key, raw_value in sorted(value.items(), key=lambda item: str(item[0])):
+        key = str(raw_key)[:128]
+        scalar = _persisted_scalar(raw_value)
+        if scalar is not _UNSUPPORTED_PERSISTED_VALUE:
+            projected[key] = scalar
+        elif isinstance(raw_value, list):
+            values = []
+            for item in raw_value[:_MEMORY_PERSISTED_MAX_LIST_ITEMS]:
+                item_scalar = _persisted_scalar(item)
+                if item_scalar is not _UNSUPPORTED_PERSISTED_VALUE:
+                    values.append(item_scalar)
+            if values or not raw_value:
+                projected[key] = values
+        elif key in nested_keys and isinstance(raw_value, dict):
+            nested = _bounded_persisted_mapping(raw_value)
+            if nested:
+                projected[key] = nested
+        if len(projected) >= _MEMORY_PERSISTED_MAX_KEYS:
+            break
+    return projected
+
+
+def _persisted_memory_item(item: Any) -> dict[str, Any]:
+    """Persist identity and bounded metadata, never the source evidence tree."""
+
+    if not isinstance(item, dict):
+        return {}
+    fields = (
+        "memory_id",
+        "schema_version",
+        "memory_type",
+        "source_table",
+        "source_id",
+        "symbol",
+        "timeframe",
+        "regime",
+        "text_summary",
+        "evidence_score",
+        "similarity_score",
+        "polarity",
+        "created_at",
+        "evidence_eligible",
+    )
+    projected: dict[str, Any] = {}
+    for key in fields:
+        scalar = _persisted_scalar(item.get(key))
+        if scalar is not _UNSUPPORTED_PERSISTED_VALUE:
+            projected[key] = scalar
+    projected["structured"] = _bounded_persisted_mapping(
+        item.get("structured"),
+        nested_keys=_MEMORY_PERSISTED_NESTED_KEYS,
+    )
+    sources = item.get("evidence_sources")
+    if isinstance(sources, list):
+        projected["evidence_sources"] = [
+            {
+                "source_table": str(source.get("source_table") or "")[:128],
+                "source_id": str(source.get("source_id") or "")[:_MEMORY_PERSISTED_MAX_STRING],
+            }
+            for source in sources[:_MEMORY_PERSISTED_MAX_LIST_ITEMS]
+            if isinstance(source, dict)
+        ]
+    return projected
+
+
+def _persisted_memory_reference(item: Any) -> dict[str, Any]:
+    """Persist only the reference fields used by evidence consumers."""
+
+    if not isinstance(item, dict):
+        return {}
+    fields = (
+        "memory_id",
+        "schema_version",
+        "memory_type",
+        "source_table",
+        "source_id",
+        "evidence_score",
+        "similarity_score",
+        "polarity",
+        "created_at",
+        "evidence_eligible",
+    )
+    projected: dict[str, Any] = {}
+    for key in fields:
+        scalar = _persisted_scalar(item.get(key))
+        if scalar is not _UNSUPPORTED_PERSISTED_VALUE:
+            projected[key] = scalar
+    return projected
+
+
+def _bounded_persisted_memory(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    projected: dict[str, Any] = {}
+    for key, raw_value in value.items():
+        if key in {"items", "counter_evidence"}:
+            projected[key] = [
+                _persisted_memory_item(item)
+                for item in (raw_value or [])[:_MEMORY_PERSISTED_MAX_LIST_ITEMS]
+                if isinstance(item, dict)
+            ]
+            continue
+        if key == "negative_matches":
+            projected[key] = [
+                _persisted_memory_reference(item)
+                for item in (raw_value or [])[:_MEMORY_PERSISTED_MAX_LIST_ITEMS]
+                if isinstance(item, dict)
+            ]
+            continue
+        if key == "posterior_memory":
+            projected[key] = _persisted_memory_item(raw_value)
+            continue
+        scalar = _persisted_scalar(raw_value)
+        if scalar is not _UNSUPPORTED_PERSISTED_VALUE:
+            projected[key] = scalar
+        elif isinstance(raw_value, list):
+            projected[key] = [
+                item_scalar
+                for item in raw_value[:_MEMORY_PERSISTED_MAX_LIST_ITEMS]
+                if (item_scalar := _persisted_scalar(item)) is not _UNSUPPORTED_PERSISTED_VALUE
+            ]
+        elif isinstance(raw_value, dict):
+            projected[key] = _bounded_persisted_mapping(raw_value)
+    return projected
 
 
 _SUPERVISOR_COUNTERFACTUAL_ACTIONS = {
@@ -533,6 +726,7 @@ class BrainStateService:
         ensure_brain_state_snapshot_table(self.db_path)
         conn = connect(self.db_path)
         try:
+            persisted_memory = _bounded_persisted_memory(snapshot["memory"])
             execute(
                 conn,
                 """INSERT INTO brain_state_snapshot
@@ -544,7 +738,7 @@ class BrainStateService:
                     snapshot["snapshot_id"], snapshot["schema_version"],
                     snapshot["source"], snapshot["status"],
                     dumps(snapshot["world_model"]), dumps(snapshot["perceptions"]),
-                    dumps(snapshot["memory"]), dumps(snapshot["hypotheses"]),
+                    dumps(persisted_memory), dumps(snapshot["hypotheses"]),
                     dumps(snapshot["critic"]), dumps(snapshot["evidence_refs"]),
                     dumps(snapshot["boundary"]), safe_float(snapshot["created_at"]),
                 ),
@@ -1269,9 +1463,10 @@ class BrainMemoryService:
                        WHERE source_table='trade_outcome_review'
                          AND source_id NOT IN (
                              SELECT review_id FROM trade_outcome_review
-                         )""",
+                       )""",
                 )
             for item in items:
+                persisted_item = _persisted_memory_item(item)
                 execute(
                     conn,
                     """INSERT INTO brain_memory
@@ -1287,12 +1482,15 @@ class BrainMemoryService:
                         evidence_score=excluded.evidence_score,
                         similarity_score=excluded.similarity_score,
                         polarity=excluded.polarity, last_used_at=excluded.last_used_at""",
-                    (item["memory_id"], item.get("memory_type", ""), item.get("source_table", ""),
-                     item.get("source_id", ""), item.get("symbol", ""), item.get("timeframe", ""),
-                     item.get("regime", ""), item.get("text_summary", ""),
-                     dumps(item.get("structured", {})), safe_float(item.get("evidence_score")),
-                     safe_float(item.get("similarity_score")), item.get("polarity", "neutral"),
-                     safe_float(item.get("created_at")), now),
+                    (persisted_item["memory_id"], persisted_item.get("memory_type", ""),
+                     persisted_item.get("source_table", ""), persisted_item.get("source_id", ""),
+                     persisted_item.get("symbol", ""), persisted_item.get("timeframe", ""),
+                     persisted_item.get("regime", ""), persisted_item.get("text_summary", ""),
+                     dumps(persisted_item.get("structured", {})),
+                     safe_float(persisted_item.get("evidence_score")),
+                     safe_float(persisted_item.get("similarity_score")),
+                     persisted_item.get("polarity", "neutral"),
+                     safe_float(persisted_item.get("created_at")), now),
                 )
             conn.commit()
         finally:
@@ -1302,18 +1500,24 @@ class BrainMemoryService:
         if not state_table_exists(conn, "experience_memory"):
             gaps.append("experience_memory")
             return []
-        rows = execute(conn, """SELECT e.experience_id, e.trade_id, e.source_table, e.source_id,
+        archive_select = _review_archive_select(conn)
+        rows = execute(conn, f"""SELECT e.experience_id, e.trade_id, e.source_table, e.source_id,
             e.regime_id, e.decision_context_json, e.outcome_label, e.reward_score,
             e.failure_tags_json, e.recommended_action, e.evidence_strength,
             e.append_source, e.artifact_version, e.created_at,
-            r.review_id AS source_review_id, r.review_json AS source_review_json
+            r.review_id AS source_review_id, r.review_json AS source_review_json{archive_select}
             FROM experience_memory e
             LEFT JOIN trade_outcome_review r ON r.review_id=e.source_id
             WHERE e.append_source='trade_lesson_memory.v1'
             ORDER BY e.created_at DESC""").fetchall()
         items = []
         for row in rows:
-            source_review = loads(row["source_review_json"], {})
+            source_review = _review_payload_from_row(
+                conn,
+                row,
+                source_id_key="source_review_id",
+                inline_key="source_review_json",
+            )
             if not str(row["source_review_id"] or "") or review_has_system_contamination(source_review):
                 continue
             tags = loads(row["failure_tags_json"], [])
@@ -1368,13 +1572,20 @@ class BrainMemoryService:
         if not state_table_exists(conn, "trade_outcome_review"):
             gaps.append("trade_outcome_review")
             return []
-        rows = execute(conn, """SELECT review_id, trade_id, position_id, entry_decision_id, pnl,
-            outcome_label, failure_tags_json, summary_text, review_json, created_at
-            FROM trade_outcome_review ORDER BY created_at DESC""").fetchall()
+        archive_select = _review_archive_select(conn, output="review_archive_hash")
+        rows = execute(conn, f"""SELECT review_id, trade_id, position_id, entry_decision_id, pnl,
+            outcome_label, failure_tags_json, summary_text, review_json, created_at{archive_select}
+            FROM trade_outcome_review AS r ORDER BY created_at DESC""").fetchall()
         items = []
         for row in rows:
             tags = loads(row["failure_tags_json"], [])
-            review = loads(row["review_json"], {})
+            review = _review_payload_from_row(
+                conn,
+                row,
+                source_id_key="review_id",
+                inline_key="review_json",
+                archive_key="review_archive_hash",
+            )
             if review_has_system_contamination(review):
                 continue
             pnl = safe_float(row["pnl"])
@@ -1415,10 +1626,11 @@ class BrainMemoryService:
         if not state_table_exists(conn, "supervisor_counterfactual_review"):
             gaps.append("supervisor_counterfactual_review")
             return []
-        rows = execute(conn, """SELECT c.counterfactual_id, c.review_id, c.trade_id, c.position_id,
+        archive_select = _review_archive_select(conn)
+        rows = execute(conn, f"""SELECT c.counterfactual_id, c.review_id, c.trade_id, c.position_id,
             c.close_ts, c.close_reason, c.supervisor_event_type, c.supervisor_reason, c.label,
             c.confidence, c.horizons_json, c.evidence_json, c.created_at, c.updated_at,
-            r.review_id AS source_review_id, r.review_json AS source_review_json
+            r.review_id AS source_review_id, r.review_json AS source_review_json{archive_select}
             -- close_ts is the event-time ordering.  updated_at is only the
             -- batch/recompute timestamp and must not decide which posterior
             -- enters the brain's bounded evidence window.
@@ -1429,7 +1641,14 @@ class BrainMemoryService:
         for row in rows:
             if (
                 not str(row["source_review_id"] or "")
-                or review_has_system_contamination(loads(row["source_review_json"], {}))
+                or review_has_system_contamination(
+                    _review_payload_from_row(
+                        conn,
+                        row,
+                        source_id_key="source_review_id",
+                        inline_key="source_review_json",
+                    )
+                )
             ):
                 continue
             horizons = loads(row["horizons_json"], [])

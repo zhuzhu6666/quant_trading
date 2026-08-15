@@ -18,6 +18,7 @@ from backend.core.db import (
 )
 from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload
 from backend.services.stability import measure, record_timing, timing_snapshot
 
 
@@ -465,12 +466,17 @@ class BackendReadinessService:
                 _table_exists(conn, "supervisor_counterfactual_review")
                 and _table_exists(conn, "trade_outcome_review")
             ):
+                review_archive_select = (
+                    ", r.review_archive_hash AS source_review_archive_hash"
+                    if "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
+                    else ""
+                )
                 maturity_rows = _execute(
                     conn,
-                    """
+                    f"""
                     SELECT c.position_id, c.close_ts, c.evidence_json,
                            r.review_id AS source_review_id,
-                           r.review_json AS source_review_json
+                           r.review_json AS source_review_json{review_archive_select}
                     FROM supervisor_counterfactual_review c
                     LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
                     ORDER BY c.updated_at DESC
@@ -534,7 +540,14 @@ class BackendReadinessService:
                 source_review_invalid = (
                     not str(item.get("source_review_id") or "")
                     or review_has_system_contamination(
-                        _loads(item.get("source_review_json"), {})
+                        load_json_payload(
+                            conn,
+                            source_table="trade_outcome_review",
+                            source_id=str(item.get("source_review_id") or ""),
+                            inline_json=item.get("source_review_json"),
+                            archive_hash=item.get("source_review_archive_hash", ""),
+                            default={},
+                        )
                     )
                 )
                 if counterfactual_invalidated:

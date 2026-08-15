@@ -27,7 +27,10 @@ from backend.core.db import (
     state_table_columns,
     state_table_exists,
 )
-from backend.services.evolution_ledger import ensure_evolution_ledger_tables
+from backend.services.evolution_ledger import (
+    ensure_evolution_ledger_tables,
+    persist_runtime_config_snapshot,
+)
 from backend.services.runtime_config_overlay import (
     OVERLAY_ID,
     RuntimeConfigOverlayService,
@@ -1552,29 +1555,15 @@ class GovernanceMutationCoordinator:
         mutation_id: str,
         created_at: float,
     ) -> dict[str, Any]:
-        payload = canonical_runtime_config_payload(config)
-        config_hash = _runtime_config_hash(payload)
-        row = conn.execute(
-            _p(
-                self.db_path,
-                """INSERT INTO runtime_config_snapshot
-                   (config_hash, source, config_json, run_id, mutation_id, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)
-                   RETURNING config_version""",
-            ),
-            (config_hash, str(source), _json(payload), str(run_id), str(mutation_id), created_at),
-        ).fetchone()
-        item = _row_dict(row)
-        version = item.get("config_version") if item else row[0]
-        return {
-            "config_version": int(version or 0),
-            "config_hash": config_hash,
-            "source": str(source),
-            "run_id": str(run_id),
-            "mutation_id": str(mutation_id),
-            "created_at": created_at,
-            "reused": False,
-        }
+        return persist_runtime_config_snapshot(
+            config,
+            source=str(source),
+            db_path=self.db_path,
+            run_id=str(run_id),
+            mutation_id=str(mutation_id),
+            conn=conn,
+            created_at=created_at,
+        )
 
     def _intent_payload(self, item: Mapping[str, Any]) -> dict[str, Any]:
         payload = dict(item)

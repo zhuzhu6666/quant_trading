@@ -9,7 +9,14 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.db import (
+    STATE_DB,
+    STATE_DB_DDL,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+)
 from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
 from backend.services.review_contract import (
@@ -19,6 +26,7 @@ from backend.services.review_contract import (
     normalize_trade_review_contract,
     trusted_broker_close_price,
 )
+from backend.services.state_payload_archive import archive_json_payload, load_json_payload
 
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -735,6 +743,7 @@ class TradeReviewer:
             "regime_fit": round(regime_fit_score, 4),
             "execution_quality": round(execution_quality, 4),
         }
+        review_archive_payload = dict(review_json)
         review_json = normalize_trade_review_contract(
             review_json,
             entry_quality=entry_quality,
@@ -747,6 +756,11 @@ class TradeReviewer:
         review_json["failure_taxonomy"] = taxonomy
         review_json["primary_responsibility"] = taxonomy["primary_responsibility"]
         review_json["responsibility_labels"] = taxonomy["responsibility_labels"]
+        review_archive_payload = dict(review_json) | {
+            key: review_archive_payload[key]
+            for key in ("inferred_close_supervisor", "responsibility_domains")
+            if key in review_archive_payload
+        }
         for label in taxonomy["responsibility_labels"]:
             if label not in failure_tags:
                 failure_tags.append(label)
@@ -786,36 +800,70 @@ class TradeReviewer:
                     "review_json": existing_review,
                     "deduplicated": True,
                 }
-            self._execute(conn,
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                 entry_quality, hold_quality, exit_quality, regime_fit_score,
-                 execution_quality, pnl, mae, mfe, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    review_id,
-                    trade_id,
-                    position_id,
-                    entry_decision_id,
-                    exit_decision_id,
-                    round(entry_quality, 4),
-                    round(hold_quality, 4),
-                    round(exit_quality, 4),
-                    round(regime_fit_score, 4),
-                    round(execution_quality, 4),
-                    round(float(pnl), 6),
-                    round(mae, 6),
-                    round(mfe, 6),
-                    outcome_label,
-                    json.dumps(failure_tags, ensure_ascii=False),
-                    summary,
-                    json.dumps(review_json, ensure_ascii=False, default=str),
-                    close_ts,
-                ),
+            archive = archive_json_payload(
+                conn,
+                source_table="trade_outcome_review",
+                source_id=review_id,
+                payload_kind="review_json",
+                raw_json=json.dumps(review_archive_payload, ensure_ascii=False, default=str),
             )
+            if archive:
+                self._execute(
+                    conn,
+                    """
+                    INSERT INTO trade_outcome_review
+                    (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+                     entry_quality, hold_quality, exit_quality, regime_fit_score,
+                     execution_quality, pnl, mae, mfe, outcome_label,
+                     failure_tags_json, summary_text, review_json, created_at,
+                     review_archive_hash, review_raw_sha256, review_raw_bytes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+                        round(entry_quality, 4), round(hold_quality, 4), round(exit_quality, 4),
+                        round(regime_fit_score, 4), round(execution_quality, 4), round(float(pnl), 6),
+                        round(mae, 6), round(mfe, 6), outcome_label,
+                        json.dumps(failure_tags, ensure_ascii=False), summary,
+                        json.dumps(review_json, ensure_ascii=False, default=str), close_ts,
+                        archive["archive_hash"], archive["raw_sha256"], archive["raw_bytes"],
+                    ),
+                )
+            else:
+                self._execute(
+                    conn,
+                    """
+                    INSERT INTO trade_outcome_review
+                    (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+                     entry_quality, hold_quality, exit_quality, regime_fit_score,
+                     execution_quality, pnl, mae, mfe, outcome_label,
+                     failure_tags_json, summary_text, review_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        review_id,
+                        trade_id,
+                        position_id,
+                        entry_decision_id,
+                        exit_decision_id,
+                        round(entry_quality, 4),
+                        round(hold_quality, 4),
+                        round(exit_quality, 4),
+                        round(regime_fit_score, 4),
+                        round(execution_quality, 4),
+                        round(float(pnl), 6),
+                        round(mae, 6),
+                        round(mfe, 6),
+                        outcome_label,
+                        json.dumps(failure_tags, ensure_ascii=False),
+                        summary,
+                        # Without the archive table this is still an old
+                        # fixture/pre-15 store; retain the complete review
+                        # rather than persisting only its bounded projection.
+                        json.dumps(review_archive_payload, ensure_ascii=False, default=str),
+                        close_ts,
+                    ),
+                )
             for factor, mc in contributions.items():
                 entry_contribution = 0.0
                 for row in entry_factors:
@@ -886,10 +934,18 @@ class TradeReviewer:
         close_ts: float,
     ) -> dict | None:
         real_deal_id = _safe_int((real_pnl or {}).get("deal_id"))
+        try:
+            review_archive_select = (
+                ", review_archive_hash"
+                if "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
+                else ""
+            )
+        except Exception:
+            review_archive_select = ""
         rows = self._execute(conn,
-            """
+            f"""
             SELECT review_id, trade_id, position_id, outcome_label, pnl,
-                   failure_tags_json, summary_text, review_json, created_at
+                   failure_tags_json, summary_text, review_json, created_at{review_archive_select}
             FROM trade_outcome_review
             WHERE position_id=?
             ORDER BY created_at DESC
@@ -899,7 +955,16 @@ class TradeReviewer:
         ).fetchall()
         for row in rows:
             try:
-                review_json = json.loads(row["review_json"] or "{}")
+                review_json = load_json_payload(
+                    conn,
+                    source_table="trade_outcome_review",
+                    source_id=str(row["review_id"] or ""),
+                    inline_json=row["review_json"],
+                    archive_hash=row["review_archive_hash"] if "review_archive_hash" in row.keys() else "",
+                    default={},
+                )
+                if not isinstance(review_json, dict):
+                    review_json = {}
             except Exception:
                 review_json = {}
             existing_real = review_json.get("real_pnl") or {}

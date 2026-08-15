@@ -11,8 +11,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, ensure_sqlite_columns, get_state_pg_conn, is_state_db_path
+from backend.core.db import (
+    STATE_DB,
+    STATE_DB_DDL,
+    connect_sqlite,
+    ensure_sqlite_columns,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+)
 from backend.services.market_regime import resolve_market_regime
+from backend.services.state_payload_archive import (
+    archive_json_payload,
+    supervisor_trace_archive_text,
+)
+from backend.services.supervisor_payload_contract import (
+    compact_supervisor_mapping,
+    strip_recursive_supervisor_snapshots,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -647,6 +663,26 @@ class DecisionLedger:
             except Exception:
                 config_version = int(config_version or 0)
                 config_hash = str(config_hash or "")
+        raw_context = strip_recursive_supervisor_snapshots(dict(context or {}))
+        raw_verdict = strip_recursive_supervisor_snapshots(dict(verdict or {}))
+        raw_risk_verdict = strip_recursive_supervisor_snapshots(dict(risk_verdict or {}))
+        raw_execution = strip_recursive_supervisor_snapshots(dict(execution or {}))
+        compact_context = compact_supervisor_mapping(
+            raw_context,
+            nested_keys=frozenset({"position", "account"}),
+        )
+        compact_verdict = compact_supervisor_mapping(
+            raw_verdict,
+            nested_keys=frozenset({"evidence", "recommended_controls", "supervisor_template"}),
+        )
+        compact_risk_verdict = compact_supervisor_mapping(
+            raw_risk_verdict,
+            nested_keys=frozenset({"evidence", "controls"}),
+        )
+        compact_execution = compact_supervisor_mapping(
+            raw_execution,
+            nested_keys=frozenset({"evidence", "controls"}),
+        )
         trace_payload = {
             "trace_id": trace_id,
             "decision_id": decision_id,
@@ -668,10 +704,14 @@ class DecisionLedger:
             "risk_reason": risk_reason,
             "execution_status": execution_status,
             "execution_reason": execution_reason,
-            "context_json": _json_dumps(context),
-            "verdict_json": _json_dumps(verdict),
-            "risk_verdict_json": _json_dumps(risk_verdict),
-            "execution_json": _json_dumps(execution),
+            # The inline trace is always a bounded projection.  If archive is
+            # available, the sanitized full semantic payload is stored there.
+            # Old stores without archive columns must not reintroduce the
+            # recursive payload growth that caused the training OOM gate.
+            "context_json": _json_dumps(compact_context),
+            "verdict_json": _json_dumps(compact_verdict),
+            "risk_verdict_json": _json_dumps(compact_risk_verdict),
+            "execution_json": _json_dumps(compact_execution),
             "trace_integrity": str(trace_integrity or "full"),
             "config_version": int(config_version or 0),
             "config_hash": str(config_hash or ""),
@@ -679,49 +719,79 @@ class DecisionLedger:
             "created_at": now,
         }
         with self._conn() as conn:
-            self._execute(conn,
-                """
-                INSERT INTO position_supervisor_trace
-                (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
-                 tick, event_ts, action, summary_reason, confidence, template_id,
-                 template_version, stage, outcome, risk_action, risk_allowed,
-                 risk_reason, execution_status, execution_reason, context_json,
-                 verdict_json, risk_verdict_json, execution_json, trace_integrity,
-                 config_version, config_hash, evolution_run_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                tuple(trace_payload[k] for k in (
-                    "trace_id",
-                    "decision_id",
-                    "position_id",
-                    "trade_id",
-                    "symbol",
-                    "timeframe",
-                    "tick",
-                    "event_ts",
-                    "action",
-                    "summary_reason",
-                    "confidence",
-                    "template_id",
-                    "template_version",
-                    "stage",
-                    "outcome",
-                    "risk_action",
-                    "risk_allowed",
-                    "risk_reason",
-                    "execution_status",
-                    "execution_reason",
-                    "context_json",
-                    "verdict_json",
-                    "risk_verdict_json",
-                    "execution_json",
-                    "trace_integrity",
-                    "config_version",
-                    "config_hash",
-                    "evolution_run_id",
-                    "created_at",
-                )),
-            )
+            trace_columns = set(state_table_columns(conn, "position_supervisor_trace"))
+            archive_ready = {
+                "verdict_archive_hash",
+                "verdict_raw_sha256",
+                "verdict_raw_bytes",
+            } <= trace_columns
+            archive = None
+            if archive_ready:
+                archive = archive_json_payload(
+                    conn,
+                    source_table="position_supervisor_trace",
+                    source_id=trace_id,
+                    payload_kind="supervisor_trace",
+                    raw_json=supervisor_trace_archive_text(
+                        context_json=_json_dumps(raw_context),
+                        verdict_json=_json_dumps(raw_verdict),
+                        risk_verdict_json=_json_dumps(raw_risk_verdict),
+                        execution_json=_json_dumps(raw_execution),
+                    ),
+                )
+            if archive:
+                trace_payload.update(
+                    {
+                        "context_json": _json_dumps(compact_context),
+                        "verdict_json": _json_dumps(compact_verdict),
+                        "risk_verdict_json": _json_dumps(compact_risk_verdict),
+                        "execution_json": _json_dumps(compact_execution),
+                    }
+                )
+                self._execute(
+                    conn,
+                    """
+                    INSERT INTO position_supervisor_trace
+                    (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
+                     tick, event_ts, action, summary_reason, confidence, template_id,
+                     template_version, stage, outcome, risk_action, risk_allowed,
+                     risk_reason, execution_status, execution_reason, context_json,
+                     verdict_json, risk_verdict_json, execution_json, trace_integrity,
+                     config_version, config_hash, evolution_run_id, created_at,
+                     verdict_archive_hash, verdict_raw_sha256, verdict_raw_bytes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    tuple(trace_payload[k] for k in (
+                        "trace_id", "decision_id", "position_id", "trade_id", "symbol", "timeframe",
+                        "tick", "event_ts", "action", "summary_reason", "confidence", "template_id",
+                        "template_version", "stage", "outcome", "risk_action", "risk_allowed", "risk_reason",
+                        "execution_status", "execution_reason", "context_json", "verdict_json",
+                        "risk_verdict_json", "execution_json", "trace_integrity", "config_version",
+                        "config_hash", "evolution_run_id", "created_at",
+                    )) + (archive["archive_hash"], archive["raw_sha256"], archive["raw_bytes"]),
+                )
+            else:
+                self._execute(
+                    conn,
+                    """
+                    INSERT INTO position_supervisor_trace
+                    (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
+                     tick, event_ts, action, summary_reason, confidence, template_id,
+                     template_version, stage, outcome, risk_action, risk_allowed,
+                     risk_reason, execution_status, execution_reason, context_json,
+                     verdict_json, risk_verdict_json, execution_json, trace_integrity,
+                     config_version, config_hash, evolution_run_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    tuple(trace_payload[k] for k in (
+                        "trace_id", "decision_id", "position_id", "trade_id", "symbol", "timeframe",
+                        "tick", "event_ts", "action", "summary_reason", "confidence", "template_id",
+                        "template_version", "stage", "outcome", "risk_action", "risk_allowed", "risk_reason",
+                        "execution_status", "execution_reason", "context_json", "verdict_json",
+                        "risk_verdict_json", "execution_json", "trace_integrity", "config_version",
+                        "config_hash", "evolution_run_id", "created_at",
+                    )),
+                )
         return trace_id
 
     def get_latest_entry_decision(self, position_id: str) -> sqlite3.Row | None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from typing import Any
@@ -24,6 +26,19 @@ _LAST_AUDIT_STATUS: dict[str, Any] = {
 }
 
 
+def _payload_fingerprint(value: Any) -> str:
+    """Fingerprint a projection input without persisting a second copy."""
+
+    raw = json.dumps(
+        value if value is not None else {},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def record_api_mutation(
     *,
     user: str,
@@ -38,6 +53,8 @@ def record_api_mutation(
     confirm_ok: bool = False,
     source_agent: str = "",
     decision_type: str = "",
+    canonical_event_id: str = "",
+    run_id: str = "",
 ) -> str:
     """Best-effort audit record for high-impact authenticated API mutations."""
     try:
@@ -60,24 +77,50 @@ def record_api_mutation(
         inferred_decision_type = str(decision_type or "").strip()
         if not inferred_decision_type:
             inferred_decision_type = "manual_api_mutation" if inferred_agent == "operator" else "autonomous_mutation"
+        canonical_id = str(canonical_event_id or "")
+        projection_evidence = {
+            "user": user,
+            "endpoint": endpoint,
+            "source_agent": inferred_agent,
+            "decision_type": inferred_decision_type,
+            "required_confirm": required_confirm,
+            "confirm_ok": bool(confirm_ok),
+            "reason": reason,
+        }
+        projection_before = before or {}
+        projection_after = after or {}
+        projection_result = result or {}
+        if canonical_id:
+            # A linked API row is an auditable projection, not a second
+            # canonical mutation fact. Keep request provenance and compact
+            # fingerprints here; the canonical row owns exact JSON values.
+            projection_evidence.update(
+                {
+                    "canonical_event_id": canonical_id,
+                    "projection_mode": "canonical_reference",
+                    "source_payload_fingerprints": {
+                        "before": _payload_fingerprint(projection_before),
+                        "after": _payload_fingerprint(projection_after),
+                        "result": _payload_fingerprint(projection_result),
+                    },
+                }
+            )
+            projection_before = {}
+            projection_after = {}
+            projection_result = {"decision_id": canonical_id}
         decision_id = record_evolution_decision(
+            run_id=str(run_id or ""),
             decision_type=inferred_decision_type,
+            canonical_event_id=canonical_id,
+            projection_type=("api" if canonical_id else "api_canonical"),
             scope_type="api",
             scope_key=endpoint,
             action=action,
             status=status,
-            evidence={
-                "user": user,
-                "endpoint": endpoint,
-                "source_agent": inferred_agent,
-                "decision_type": inferred_decision_type,
-                "required_confirm": required_confirm,
-                "confirm_ok": bool(confirm_ok),
-                "reason": reason,
-            },
-            before=before or {},
-            after=after or {},
-            result=result or {},
+            evidence=projection_evidence,
+            before=projection_before,
+            after=projection_after,
+            result=projection_result,
             db_path=STATE_DB,
         )
         _LAST_AUDIT_STATUS.update(

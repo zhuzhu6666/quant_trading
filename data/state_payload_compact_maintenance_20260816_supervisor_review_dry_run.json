@@ -1,0 +1,621 @@
+{
+  "created_at": 1786811959.6031547,
+  "manifest_version": "state_payload_compaction_manifest.v1",
+  "mode": "dry_run",
+  "result": {
+    "audit_double_write": {
+      "reason": "target_not_selected",
+      "status": "skipped"
+    },
+    "brain_action_plan_eval": {
+      "reason": "target_not_selected",
+      "status": "skipped"
+    },
+    "current_logical_payload_bytes": 0,
+    "digest_algorithm": "sha256",
+    "estimated_compact_payload_bytes": 0,
+    "estimated_current_relation_bytes": 0,
+    "estimated_new_logical_bytes": 0,
+    "estimated_reclaimable_payload_bytes": 0,
+    "estimated_temporary_space_bytes": 510492032,
+    "evolution_decision": {
+      "reason": "target_not_selected",
+      "status": "skipped"
+    },
+    "maintenance_preflight": {
+      "active_writer_sessions": [],
+      "mode": "postgresql",
+      "ok": true,
+      "pending_mutations": 0
+    },
+    "note": "estimates only; physical reclaim requires the full-stop apply/table rewrite, then pg_total_relation_size and df verification; event rows are not removed",
+    "ok": true,
+    "read_only": true,
+    "relation_sizes_bytes": {},
+    "runtime_config_snapshot": {
+      "reason": "target_not_selected",
+      "status": "skipped"
+    },
+    "schema_version": "state_payload_compaction_dry_run.v1",
+    "supervisor_review": {
+      "consumer_coverage": {
+        "all_migrated": true,
+        "loader": "backend.services.state_payload_archive.restore_json_payload",
+        "migrated": [
+          {
+            "detail": "review deduplication reads use verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "bounded review lookup and trace stream; no repeated review join",
+            "status": "migrated"
+          },
+          {
+            "detail": "memory reads use verified review archive references with legacy inline fallback",
+            "status": "migrated"
+          },
+          {
+            "detail": "scorecard and attribution reads use verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "briefing experience reads use verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "candidate evidence filters use verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "factor counter-evidence reads use verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "integrity quarantine checks use verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "counterfactual maturity checks use verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "re-entry review guard uses verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "counterfactual evaluation reads use verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "brain status counterfactual reads use verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "supervisor replay and candidate reads use verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "learning rebuild and regime backfill use verified review archive references",
+            "status": "migrated"
+          },
+          {
+            "detail": "lesson rebuild passes the live connection to the verified review archive loader",
+            "status": "migrated"
+          },
+          {
+            "detail": "review and supervisor trace replay rows restore verified archives before evaluation",
+            "status": "migrated"
+          },
+          {
+            "detail": "factor training sample reads restore verified review archives before filtering",
+            "status": "migrated"
+          },
+          {
+            "detail": "training feature reads restore verified review archives before sample construction",
+            "status": "migrated"
+          },
+          {
+            "detail": "V16 evidence reads use bounded rows and restore verified review archives",
+            "status": "migrated"
+          },
+          {
+            "detail": "learning review API reads restore verified archives before normalization",
+            "status": "migrated"
+          },
+          {
+            "detail": "risk trace API reads restore verified archives before normalization",
+            "status": "migrated"
+          },
+          {
+            "detail": "sample materialization and backfills restore verified review archives",
+            "status": "migrated"
+          },
+          {
+            "detail": "risk metric review inputs restore verified review archives",
+            "status": "migrated"
+          },
+          {
+            "detail": "pure review transformer; database callers supply archive-restored payloads",
+            "status": "migrated"
+          },
+          {
+            "detail": "governance effect review scans restore verified archives before filtering",
+            "status": "migrated"
+          },
+          {
+            "detail": "controlled backfill has no direct review JSON read and delegates archive-aware writer",
+            "status": "migrated"
+          },
+          {
+            "detail": "entry-context backfill restores archives and writes archive metadata on review updates",
+            "status": "migrated"
+          },
+          {
+            "detail": "health check uses the bounded stable review projection only; no recursive branch read",
+            "status": "migrated"
+          },
+          {
+            "detail": "phase-C cases restore verified review archives before diagnostics",
+            "status": "migrated"
+          },
+          {
+            "detail": "state review context is restored before DuckDB reconciliation classification",
+            "status": "migrated"
+          },
+          {
+            "detail": "vertical shadow restores review archives before lineage and payload comparison",
+            "status": "migrated"
+          }
+        ],
+        "pending": []
+      },
+      "estimated_archive_bytes": 76322219,
+      "estimated_temporary_space_bytes": 510492032,
+      "note": "estimates only; no event row is removed or merged. Apply is refused until every direct consumer uses the archive loader.",
+      "schema_version": "state_supervisor_review_compaction_dry_run.v1",
+      "tables": {
+        "position_supervisor_trace": {
+          "bounded_projection_bytes": 139031255,
+          "duplicate_payload_bytes": 0,
+          "duplicate_payload_count": 0,
+          "max_recursive_depth": 491,
+          "original_json_bytes": 395168853,
+          "original_sha256_digest": "9d3bddcca769fb707a9c8873013d5f7e396112ac5289e6ba761b9b9a3160e9d1",
+          "oversized_json_count": 93,
+          "payload_reference_counts": {
+            "0e60d7479dd97f0efbdd8f644d4e3824d85dfe32f3a94927281e5ca2f2faf5b6": 1,
+            "10116289b28c17403208a6b34bc22ed07548fa8ffbd6d8f70cc64a38f246bd3e": 1,
+            "2a94e762a92c332ac77585af4336392605acad1cbed43480060d034c520b6783": 1,
+            "338ccb5bf0bf83f7b50225118f7d837e87cc1bd1a39183d0253e8d1408645ac7": 1,
+            "3674e034851464179c2f832d82e0f2fd31b4d142e03d4644f2d0e09b39dd0914": 1,
+            "380054afa9bb2da68199c02853669cf875c0253494cc9edd65d67c3637967d31": 1,
+            "4d233e996a112db473ee3f18ad5593c40cda8125ceb6374cf4f801a697491f56": 1,
+            "7d9b0283fd865b69b5a3211545bf9b8426e49bace58d26d5290d8fbb25dc6c35": 1,
+            "88ad13b3124a1b08f029e4a776b88262a831975e5345b32ecb2608081fab6a92": 1,
+            "9921a73978e17de7c94286baa02fbfb44b910c0ca49103bd6862a41ee0c2293f": 1,
+            "ae119bb2b7a62bed33eb81c890d5cf968c6352234290ec759851719c1b206b86": 1,
+            "ae1fb14cc08653361271226b37c6e9d4911004005dc8efc8eb2ab17b45a0000d": 1,
+            "b26cd9f50c4b8e2bc6249fb84f969ea29f0b140bbcd015f0292a33f0af30d4fa": 1,
+            "c0b7b837f7b247bbe11b5ac86b5919bebee1de66cad250e6f10e5e08a44c22f4": 1,
+            "c6bb72f45594073aa8ea3c3d19d800e43283c47c97628958e372ee4fec81125d": 1,
+            "ca437371cf623a94b5ada45870df3b6b6e5ea4e5e8c63965f1e06dc6a5097839": 1,
+            "d38a347d4a58f945e0f1a4f98f15ded1050e1630ddabc5ca37c34c576b31ae6d": 1,
+            "d461581d80642aa8f7a4335945ffb03cf041b3897bdcbcc0e1376c64d0209d6c": 1,
+            "f3f853f437e343a9ba803ee540e70388862505c4ea1d980a535f29ca52697c05": 1,
+            "f9682f285569bda1cb7968cfb9ae8330e704ba50b80ccb67297bd247175443eb": 1
+          },
+          "recursive_paths": {
+            "$.execution.candidate": 86,
+            "$.execution.candidate.position.supervisor.evidence.supervisor_state": 17,
+            "$.execution.candidate.position.supervisor.evidence.supervisor_state.<recursive>.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor": 2414,
+            "$.execution.candidate.position.supervisor.evidence.supervisor_state.<recursive>.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 2431,
+            "$.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor": 17,
+            "$.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 17,
+            "$.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor": 17,
+            "$.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 17,
+            "$.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor": 17,
+            "$.verdict.evidence.supervisor_state": 93,
+            "$.verdict.evidence.supervisor_state.latest_supervisor": 81,
+            "$.verdict.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 81,
+            "$.verdict.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.<recursive>.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor": 6320,
+            "$.verdict.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.<recursive>.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 6400,
+            "$.verdict.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor": 81,
+            "$.verdict.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 81,
+            "$.verdict.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor": 80,
+            "$.verdict.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 80,
+            "$.verdict.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor": 80
+          },
+          "rows": 47768,
+          "status": "ready",
+          "top_payloads": [
+            {
+              "event_id": "psvtrace_1cff7da8adaf46b5",
+              "gzip_bytes": 57970,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 3476,
+              "raw_bytes": 3632441,
+              "raw_sha256": "4a2eb9776d452122f137e96cf25bfced90961b775b7449330a429860d5d40d32"
+            },
+            {
+              "event_id": "psvtrace_f02ee2f791aa4424",
+              "gzip_bytes": 58769,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 1537,
+              "raw_bytes": 3614264,
+              "raw_sha256": "4e6f60cc4b5d3832b0c31c95eb4854f1ad23d914560138af190fa767cfb62712"
+            },
+            {
+              "event_id": "psvtrace_78077146787a4b33",
+              "gzip_bytes": 57307,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 3611,
+              "raw_bytes": 3587734,
+              "raw_sha256": "bd37c91d6ff5cad7d9f769e48b321ac577a9272a2281d25e80f20181dec33919"
+            },
+            {
+              "event_id": "psvtrace_76e2719872cc44b3",
+              "gzip_bytes": 58096,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 1512,
+              "raw_bytes": 3569356,
+              "raw_sha256": "6f8152d16b8a8a6e82e6c80f913ebd0d412bf6354a07d978843e89fc9bb2ea9d"
+            },
+            {
+              "event_id": "psvtrace_b992416d007b4ab5",
+              "gzip_bytes": 56499,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 3584,
+              "raw_bytes": 3542753,
+              "raw_sha256": "e14758d977e6732790dff6538a545ac9a0e4536ca6015cfd86f9be40fcbcbfe6"
+            },
+            {
+              "event_id": "psvtrace_3f5d2b454e924aad",
+              "gzip_bytes": 57407,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 1500,
+              "raw_bytes": 3524350,
+              "raw_sha256": "466a03474b5afddd60af1a0da8fd4abeef3a0f749b0b1113906983fc492fc6ec"
+            },
+            {
+              "event_id": "psvtrace_c3a9f6087de44575",
+              "gzip_bytes": 55872,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 3592,
+              "raw_bytes": 3497814,
+              "raw_sha256": "adb17b4c143b09a0abb440dc339cd30563cbae69253e8ece7c2a79f1f20b5475"
+            },
+            {
+              "event_id": "psvtrace_f45dff3c33744fcf",
+              "gzip_bytes": 56769,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 1511,
+              "raw_bytes": 3479429,
+              "raw_sha256": "28f9514222ab743f479d15e453805197cbb7f979d0c223c58125957e862be8d6"
+            },
+            {
+              "event_id": "psvtrace_460a98c8571c472c",
+              "gzip_bytes": 55222,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 3583,
+              "raw_bytes": 3452861,
+              "raw_sha256": "dfffc3679397280fb325201d28173293467901d89a57df251c665cece4a781f7"
+            },
+            {
+              "event_id": "psvtrace_ae009cf226864afc",
+              "gzip_bytes": 56085,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 1505,
+              "raw_bytes": 3434468,
+              "raw_sha256": "8dc2ba4fd84641de6a137386571024d824291fcf16906ff067a89dbd2474dfd9"
+            },
+            {
+              "event_id": "psvtrace_ef647de425b24886",
+              "gzip_bytes": 54449,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 3516,
+              "raw_bytes": 3407946,
+              "raw_sha256": "7c3e285285df31b12ccd9cc63d27bbdfd99eb417aad7d8b2e84647bbc82d420e"
+            },
+            {
+              "event_id": "psvtrace_fb61192777024a82",
+              "gzip_bytes": 55380,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 1505,
+              "raw_bytes": 3389667,
+              "raw_sha256": "78167acbe3550ee3c5baf346b160601bbafd847617b261922be63309eeb902ba"
+            },
+            {
+              "event_id": "psvtrace_9f747499b9174fcc",
+              "gzip_bytes": 53867,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 3519,
+              "raw_bytes": 3363254,
+              "raw_sha256": "946cfa15bece346d39ca9f25b36284a93bcdfc389560740339704fca46e3ff54"
+            },
+            {
+              "event_id": "psvtrace_cb2fb6c76ec84103",
+              "gzip_bytes": 54817,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 1504,
+              "raw_bytes": 3344966,
+              "raw_sha256": "b5de1c979edc2594b3c57703d53e592e40b8e57b21ea9910e4ddd3ebf106d6a7"
+            },
+            {
+              "event_id": "psvtrace_3ac0d02b830a43b0",
+              "gzip_bytes": 53285,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 3519,
+              "raw_bytes": 3318545,
+              "raw_sha256": "3dea90f9869c1df79d6ce72a12eecc32d2e28a5990f9daf36ee1daa960148042"
+            },
+            {
+              "event_id": "psvtrace_fef6b1a3753b468d",
+              "gzip_bytes": 54213,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 1505,
+              "raw_bytes": 3300259,
+              "raw_sha256": "4c08c39696b0030d569357631ece528094e6466736d2ae9ffafd7b2ebe241ccb"
+            },
+            {
+              "event_id": "psvtrace_5a7022b0f5bd42f2",
+              "gzip_bytes": 52672,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 3520,
+              "raw_bytes": 3273836,
+              "raw_sha256": "f7a04d4dfd036fbeb506d4c661f8ecfe1474caaae550d7bf13364f1e3f00ec28"
+            },
+            {
+              "event_id": "psvtrace_84131155525a49af",
+              "gzip_bytes": 53604,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 1505,
+              "raw_bytes": 3255543,
+              "raw_sha256": "0f5b1e65c4219206c68ecf5518bfecc6d82f6b9565b2f405554b0ae4b18c78b7"
+            },
+            {
+              "event_id": "psvtrace_30112a3bed42484b",
+              "gzip_bytes": 52081,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 3606,
+              "raw_bytes": 3229084,
+              "raw_sha256": "210b30722b5e019c8b5ca1d0dbd51cddfa4b3e6b6a609488c9215075905a7c0f"
+            },
+            {
+              "event_id": "psvtrace_ceb77b1778b049f7",
+              "gzip_bytes": 53056,
+              "payload_kind": "supervisor_trace",
+              "projection_bytes": 1515,
+              "raw_bytes": 3210736,
+              "raw_sha256": "2ffc9da9ebf8a9847daaeeb546ea12f0a67f920701b3e9f0d99062c355bf896a"
+            }
+          ],
+          "unique_event_ids": 47768,
+          "unique_gzip_bytes": 70673796,
+          "unique_payload_count": 47768,
+          "unique_raw_bytes": 395168853
+        },
+        "trade_outcome_review": {
+          "bounded_projection_bytes": 28153311,
+          "duplicate_payload_bytes": 0,
+          "duplicate_payload_count": 0,
+          "max_recursive_depth": 494,
+          "original_json_bytes": 39000960,
+          "original_sha256_digest": "d2ca76a9075c733f085cb911a4b38bd6516cf5807a18410d008e7697bb65d4f8",
+          "oversized_json_count": 1,
+          "payload_reference_counts": {
+            "054a55e25a6f7046032fec996ce93a6c983094f8a802dd50f33e2ed69a424f6a": 1,
+            "0fc556eebb1155838cd2cad7421fb4c255c060631c39706718e6aeb481ee498c": 1,
+            "1500df52aac49f6ce4d65ad758c2c0c4502421e9e3e32ed6de1fb4eb449c2436": 1,
+            "1709b83d783d281d0ead6921df2b9dd1bc1ed31b0c3da52c7499f39d14708bea": 1,
+            "1f2e4640b0e0ecbf5ed734ddf30717b9b816f5b59abb344954984ccdb6c19a82": 1,
+            "225a6b2c9c086dd081c1f949ee2cd19397b989146fe2c89555478465dfb42438": 1,
+            "2e04e6ee274d10b383c2e074b91bc8d8fb8fa6f5710ac936ccba1610f0061f4a": 1,
+            "34c2782a03631749e7d72b38f20b935aeeb08ee62bdef5b86833084b580c4ff1": 1,
+            "3994192dea940f1cb2052f0757333c070dcce3454f4b4d985b23ca5dd51b082f": 1,
+            "5ec29334414ad8df3f12ad71825ff471e0f5e4478f790f939e665d8948909258": 1,
+            "70c7c9ddba5c4e8e5f58eb3cbd85c60aced5bce427cd5ef9ee2726b659da7e6e": 1,
+            "7ad927d85d29136470745f16cb03a0a833f1391c68bb457dd21cee2e4ff6867f": 1,
+            "900d1df1c3ceb3afddf291065de6e1b74b340209c6dfb7317bb6b587389e66ae": 1,
+            "93e917051bb0ce1ec29d354014d39a3e14c42559328054ceabbd92d12bd5ae41": 1,
+            "a374f08f9a69b1e0b157a24ad818ee0923991229b836009448111a168a637b1f": 1,
+            "ab91db691f293d520c7345a43b905b34a52b0d6f29d8a5d6b7d6ce48cafc8e32": 1,
+            "b22c02f65b93c3ca2f333cb59d5c96c1f1b946fef3b72758b71046f510d3a6d3": 1,
+            "d69bf5937abcc2ffb906d1b0fea898fe953176405b99e5a43f0b002ce2984516": 1,
+            "e944c480a8e17a4fe45f3ddba84c3fdac7bad907f6ecbc92526c5a00ca6da5f7": 1,
+            "ee6469202099167f6b8cf24096734b5f13a0f2e9ed672657f814d4ba2f8601dc": 1
+          },
+          "recursive_paths": {
+            "$.inferred_close_supervisor.execution.candidate": 1,
+            "$.inferred_close_supervisor.execution.candidate.position.supervisor.evidence.<recursive>.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor": 159,
+            "$.inferred_close_supervisor.execution.candidate.position.supervisor.evidence.<recursive>.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 159,
+            "$.inferred_close_supervisor.execution.candidate.position.supervisor.evidence.supervisor_state": 1,
+            "$.inferred_close_supervisor.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor": 1,
+            "$.inferred_close_supervisor.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 1,
+            "$.inferred_close_supervisor.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor": 1,
+            "$.inferred_close_supervisor.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 1,
+            "$.responsibility_domains.position_management.supervisor.execution.candidate": 1,
+            "$.responsibility_domains.position_management.supervisor.execution.candidate.position.<recursive>.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor": 159,
+            "$.responsibility_domains.position_management.supervisor.execution.candidate.position.<recursive>.latest_supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 160,
+            "$.responsibility_domains.position_management.supervisor.execution.candidate.position.supervisor.evidence.supervisor_state": 1,
+            "$.responsibility_domains.position_management.supervisor.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor": 1,
+            "$.responsibility_domains.position_management.supervisor.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state": 1,
+            "$.responsibility_domains.position_management.supervisor.execution.candidate.position.supervisor.evidence.supervisor_state.latest_supervisor.evidence.supervisor_state.latest_supervisor": 1
+          },
+          "rows": 721,
+          "status": "ready",
+          "top_payloads": [
+            {
+              "event_id": "review_dcb099dca6a64e1a",
+              "gzip_bytes": 118201,
+              "payload_kind": "review_json",
+              "projection_bytes": 58310,
+              "raw_bytes": 6718731,
+              "raw_sha256": "49c8dc2285065862c4505457aa81cb198761a5e53243d5d4c9a97613772636f7"
+            },
+            {
+              "event_id": "review_1acd9e73e6734b80",
+              "gzip_bytes": 15457,
+              "payload_kind": "review_json",
+              "projection_bytes": 61264,
+              "raw_bytes": 109177,
+              "raw_sha256": "490f72d3852013c890a8f4812bea83f1182026aa57e778a57b9756b1c6b03b95"
+            },
+            {
+              "event_id": "review_7ae1d9be2071488c",
+              "gzip_bytes": 15499,
+              "payload_kind": "review_json",
+              "projection_bytes": 60689,
+              "raw_bytes": 109152,
+              "raw_sha256": "16eefdecb29947b0a0536373812fe877526d847636aced398c2971aa4c0ea1b2"
+            },
+            {
+              "event_id": "review_e38e81f3da5445ee",
+              "gzip_bytes": 15458,
+              "payload_kind": "review_json",
+              "projection_bytes": 60689,
+              "raw_bytes": 109072,
+              "raw_sha256": "7f767dfdca03283478e16313ed100ef74ca8cf1134c84110b9bd5849c5696f3e"
+            },
+            {
+              "event_id": "review_3ff42d55c4c04fd5",
+              "gzip_bytes": 15512,
+              "payload_kind": "review_json",
+              "projection_bytes": 60602,
+              "raw_bytes": 108986,
+              "raw_sha256": "b1298fd7c1fe246fe4c0fdc52996fe78943ef7c7db2d0f7acee703954ae160da"
+            },
+            {
+              "event_id": "review_6ae25bfd76a2452e",
+              "gzip_bytes": 15431,
+              "payload_kind": "review_json",
+              "projection_bytes": 60844,
+              "raw_bytes": 108868,
+              "raw_sha256": "f3064e0d974bfdfd919fbeb4dad43518cf73798ec9dafdaea59cc95d7085ffb4"
+            },
+            {
+              "event_id": "review_496038303eeb4360",
+              "gzip_bytes": 15425,
+              "payload_kind": "review_json",
+              "projection_bytes": 60377,
+              "raw_bytes": 108253,
+              "raw_sha256": "e372cd2b9eab93e27c21190473c0f17f1ed9ccd728a419847174b6824360c3bc"
+            },
+            {
+              "event_id": "review_7ee649cdf8f547a6",
+              "gzip_bytes": 15409,
+              "payload_kind": "review_json",
+              "projection_bytes": 60295,
+              "raw_bytes": 108177,
+              "raw_sha256": "8489e175373564a960fec33e1089c23ce26c6b5955382456d79b3e73038dde14"
+            },
+            {
+              "event_id": "review_c5656e453f274a8d",
+              "gzip_bytes": 15316,
+              "payload_kind": "review_json",
+              "projection_bytes": 59871,
+              "raw_bytes": 107887,
+              "raw_sha256": "d48350a719501bd49952f1ac36cbeb72b1fc9fedf2807d57cebe63093631a5cd"
+            },
+            {
+              "event_id": "review_c4c36e69848a4af2",
+              "gzip_bytes": 15293,
+              "payload_kind": "review_json",
+              "projection_bytes": 59723,
+              "raw_bytes": 107626,
+              "raw_sha256": "52c209690f1c33a807383c740788af762ad6e50b2bf515e37a86085eb0b3b7be"
+            },
+            {
+              "event_id": "review_f41cba53acd64885",
+              "gzip_bytes": 15229,
+              "payload_kind": "review_json",
+              "projection_bytes": 59312,
+              "raw_bytes": 107273,
+              "raw_sha256": "a0ecde8d726feeabe13f04d1c3821cc2789a09b2b90e1e4f8f34022a269cf121"
+            },
+            {
+              "event_id": "review_2d1f4839ee554eda",
+              "gzip_bytes": 15300,
+              "payload_kind": "review_json",
+              "projection_bytes": 59241,
+              "raw_bytes": 107150,
+              "raw_sha256": "3c0463795806c2f74181907b1107dfeb77239d57766c6294f5420007c85b2e8b"
+            },
+            {
+              "event_id": "review_14de30c3794740d8",
+              "gzip_bytes": 15126,
+              "payload_kind": "review_json",
+              "projection_bytes": 59271,
+              "raw_bytes": 107145,
+              "raw_sha256": "26d0f8487fcdf376c9c8c78de8643c7d7feac436063a1387a019960a30ccb074"
+            },
+            {
+              "event_id": "review_1d919c7fa6fc446a",
+              "gzip_bytes": 15167,
+              "payload_kind": "review_json",
+              "projection_bytes": 59065,
+              "raw_bytes": 106846,
+              "raw_sha256": "7305b5fe945e342cde5bc4f49ac92fc11a09c4371ff4162be5a61c2cf8f581cf"
+            },
+            {
+              "event_id": "review_aaaafd794455432b",
+              "gzip_bytes": 15074,
+              "payload_kind": "review_json",
+              "projection_bytes": 58364,
+              "raw_bytes": 106204,
+              "raw_sha256": "b555af7f75e4db3ceced6ed3805a29e68749182bcdfd157ac612a236d48f20a8"
+            },
+            {
+              "event_id": "review_0f9506b2e5d54b64",
+              "gzip_bytes": 14992,
+              "payload_kind": "review_json",
+              "projection_bytes": 58515,
+              "raw_bytes": 106036,
+              "raw_sha256": "cf2db3e043bb779ebfabad7e68222b2a3b5dca8bd715d89279f7d6516399d235"
+            },
+            {
+              "event_id": "review_915d44f1da7a4988",
+              "gzip_bytes": 15533,
+              "payload_kind": "review_json",
+              "projection_bytes": 60844,
+              "raw_bytes": 104585,
+              "raw_sha256": "6a9e492f8fbf85ee1315f1d716f537cae31f59f8a029d79cf7d3291a48c58a58"
+            },
+            {
+              "event_id": "review_360de49c9b054dfc",
+              "gzip_bytes": 15591,
+              "payload_kind": "review_json",
+              "projection_bytes": 60689,
+              "raw_bytes": 104362,
+              "raw_sha256": "89da22989aa9c0ed45bda17922e83bf84b6c80892d822e5ba36ddfdda16ad69f"
+            },
+            {
+              "event_id": "review_eef36909ed194056",
+              "gzip_bytes": 15458,
+              "payload_kind": "review_json",
+              "projection_bytes": 60399,
+              "raw_bytes": 104135,
+              "raw_sha256": "21de42c8eb03fc0393e022f0efe47da116928a3232f8c97313ff0266cea171f7"
+            },
+            {
+              "event_id": "review_4c438f9ff5994664",
+              "gzip_bytes": 15436,
+              "payload_kind": "review_json",
+              "projection_bytes": 60280,
+              "raw_bytes": 104088,
+              "raw_sha256": "90546080cd343be5b91439cf57ff4e2ce881c33ce8325c61e7a075248a417045"
+            }
+          ],
+          "unique_event_ids": 721,
+          "unique_gzip_bytes": 5648423,
+          "unique_payload_count": 721,
+          "unique_raw_bytes": 39000960
+        }
+      },
+      "total_original_json_bytes": 434169813,
+      "total_unique_gzip_bytes": 76322219,
+      "total_unique_raw_bytes": 434169813
+    },
+    "targets": "supervisor_review"
+  },
+  "targets": "supervisor_review"
+}

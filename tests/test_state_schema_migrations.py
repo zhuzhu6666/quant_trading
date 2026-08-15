@@ -322,6 +322,88 @@ def test_execution_price_repair_migration_is_additive() -> None:
     assert "DROP " not in sql.upper()
 
 
+def test_state_payload_dedupe_migration_adds_refs_without_data_cleanup() -> None:
+    migration = next(item for item in STATE_SCHEMA_MIGRATIONS if item.version == 14)
+    sql = migration.sql()
+
+    assert migration.version == 14
+    for table in (
+        "runtime_config_payload",
+        "brain_action_plan_eval_payload",
+        "mutation_payload",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
+    for column in (
+        "payload_hash",
+        "evaluation_run_id",
+        "canonical_event_id",
+        "projection_type",
+        "content_fingerprint",
+    ):
+        assert column in sql
+    assert "VACUUM" not in sql.upper()
+    assert "DELETE" not in sql.upper()
+    assert "DROP " not in sql.upper()
+    assert "idx_brain_action_plan_eval_run_plan_unique" in sql
+
+
+def test_training_window_archive_migration_is_schema_only() -> None:
+    migration = next(item for item in STATE_SCHEMA_MIGRATIONS if item.version == 15)
+    sql = migration.sql()
+
+    assert migration.version == 15
+    for column in (
+        "training_window_key",
+        "phase",
+        "worker_instance_id",
+        "heartbeat_at",
+        "input_bytes_estimate",
+        "verdict_archive_hash",
+        "review_archive_hash",
+    ):
+        assert column in sql
+    assert "state_payload_archive" in sql
+    assert "idx_offmarket_training_window_unique" in sql
+    assert "VACUUM" not in sql.upper()
+    assert "DELETE" not in sql.upper()
+
+
+def test_canonical_v2_foundation_migration_is_schema_only_and_reference_based() -> None:
+    migration = STATE_SCHEMA_MIGRATIONS[-1]
+    sql = migration.sql()
+
+    assert migration.version == 16
+    assert "CREATE SCHEMA IF NOT EXISTS canonical_v2" in sql
+    for table in (
+        "canonical_v2.payload_blob",
+        "canonical_v2.event",
+        "canonical_v2.event_relation",
+        "canonical_v2.state_version",
+        "canonical_v2.training_sample",
+        "canonical_v2.dataset_manifest",
+        "canonical_v2.dataset_manifest_member",
+        "canonical_v2.projection_run",
+        "canonical_v2.legacy_mapping",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
+    for column in (
+        "payload_hash",
+        "idempotency_key",
+        "causation_id",
+        "source_event_ids",
+        "sample_digest",
+        "source_watermark",
+        "mapping_confidence",
+    ):
+        assert column in sql
+    assert "TIMESTAMPTZ" in sql
+    assert "REFERENCES canonical_v2.payload_blob" in sql
+    assert "REFERENCES canonical_v2.event" in sql
+    ddl = sql.upper()
+    for forbidden in ("\nDELETE ", "\nUPDATE ", "\nVACUUM ", "\nDROP "):
+        assert forbidden not in ddl
+
+
 def test_schema_status_fails_closed_without_ledger() -> None:
     conn = _FakePgConn()
 

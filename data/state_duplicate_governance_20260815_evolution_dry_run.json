@@ -1,0 +1,42 @@
+{
+  "manifest_version": "state_duplicate_governance_evolution_dry_run.v1",
+  "observed_on": "2026-08-15",
+  "read_only": true,
+  "user_confirmation_for_apply": false,
+  "services": {
+    "quant-backend.service_main_pid": 0,
+    "quant-learning-worker.service_main_pid": 0,
+    "active_postgresql_transactions": 0
+  },
+  "candidate_events": [
+    {
+      "event_id": 46297,
+      "raw_bytes": 4571714,
+      "gzip_bytes": 442385,
+      "counterfactual_items": 483,
+      "raw_sha256": "9d4601ce9afd59703dd19fa78429e2cf20d494186cb60cff545d955af0fa5c8f",
+      "compact_preview_bytes": 174,
+      "compact_preview_contains_items": false
+    },
+    {
+      "event_id": 47511,
+      "raw_bytes": 4581390,
+      "gzip_bytes": 443248,
+      "counterfactual_items": 483,
+      "raw_sha256": "b30f4b85db801912fcde8531d654f1ff0a1a42341353d19a9502e5d7661007e1",
+      "compact_preview_bytes": 174,
+      "compact_preview_contains_items": false
+    }
+  ],
+  "lineage": {
+    "shared_counterfactual_ids": 482,
+    "shared_review_ids": 482,
+    "shared_source_rows": 482,
+    "event_rows_unchanged": 84908,
+    "archive_rows_unchanged": 1
+  },
+  "proposed_action": "archive_payload_pending_approval",
+  "delete_event_rows": false,
+  "apply_executed": false,
+  "vacuum_executed": false
+}

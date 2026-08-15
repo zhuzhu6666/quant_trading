@@ -3,10 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.core.db import (
+    STATE_DB,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+    state_table_exists,
+)
 from backend.services._brain_helpers import loads
 from backend.services.failure_taxonomy import FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload
 
 
 KEEP_BLOCK_THRESHOLD = 0.65
@@ -45,6 +53,31 @@ def _execute(conn: Any, sql: str, params: Any = None):
     if params is None:
         return conn.execute(_sql(conn, sql))
     return conn.execute(_sql(conn, sql), params)
+
+
+def _review_archive_select(conn: Any, *, alias: str = "r", output: str = "review_archive_hash") -> str:
+    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
+        return ""
+    return f", {alias}.review_archive_hash AS {output}"
+
+
+def _review_payload(conn: Any, row: Any, *, source_id_key: str = "review_id", inline_key: str = "review_json", archive_key: str = "review_archive_hash") -> dict[str, Any]:
+    try:
+        keys = row.keys() if hasattr(row, "keys") else ()
+        source_id = row[source_id_key] if source_id_key in keys else ""
+        inline_json = row[inline_key] if inline_key in keys else "{}"
+        archive_hash = row[archive_key] if archive_key in keys else ""
+    except Exception:
+        source_id, inline_json, archive_hash = "", "{}", ""
+    payload = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(source_id or ""),
+        inline_json=inline_json,
+        archive_hash=archive_hash,
+        default={},
+    )
+    return payload if isinstance(payload, dict) else {}
 
 
 class FactorCounterEvidenceService:
@@ -144,9 +177,9 @@ class FactorCounterEvidenceService:
             return {"available": False, "keep_score": 0.0, "prune_score": 0.0, "sample_count": 0, "regimes": []}
         rows = _execute(
             conn,
-            """
+            f"""
             SELECT f.net_contribution, f.confidence, r.pnl, r.outcome_label,
-                   r.regime_fit_score, r.review_json, r.created_at
+                   r.regime_fit_score, r.review_json, r.created_at{_review_archive_select(conn)}
             FROM factor_contribution_review f
             JOIN trade_outcome_review r ON r.review_id = f.review_id
             WHERE f.factor=?
@@ -158,7 +191,7 @@ class FactorCounterEvidenceService:
         rows = [
             row
             for row in rows
-            if self._primary_responsibility(row["review_json"])
+            if self._primary_responsibility(_review_payload(conn, row))
             not in FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES
         ]
         if not rows:
@@ -177,7 +210,7 @@ class FactorCounterEvidenceService:
                 positive += 1
             elif net < 0:
                 negative += 1
-            regime = self._extract_regime(row["review_json"])
+            regime = self._extract_regime(_review_payload(conn, row))
             bucket = by_regime.setdefault(regime, {"count": 0.0, "net": 0.0, "confidence": 0.0})
             bucket["count"] += 1.0
             bucket["net"] += net * confidence
@@ -216,10 +249,11 @@ class FactorCounterEvidenceService:
         like = f"%{factor}%"
         rows = _execute(
             conn,
-            """
+            f"""
             SELECT e.reward_score, e.recommended_action, e.failure_tags_json,
                    e.decision_context_json, e.created_at,
-                   r.review_json AS source_review_json
+                   r.review_id AS source_review_id,
+                   r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
             FROM experience_memory e
             JOIN trade_outcome_review r
               ON e.source_table='trade_outcome_review'
@@ -238,9 +272,16 @@ class FactorCounterEvidenceService:
         negative = 0
         sample_count = 0
         for row in rows:
-            if review_has_system_contamination(loads(row["source_review_json"], {})):
+            review = _review_payload(
+                conn,
+                row,
+                source_id_key="source_review_id",
+                inline_key="source_review_json",
+                archive_key="source_review_archive_hash",
+            )
+            if review_has_system_contamination(review):
                 continue
-            if self._primary_responsibility(row["source_review_json"]) in FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES:
+            if self._primary_responsibility(review) in FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES:
                 continue
             if sample_count >= 50:
                 break

@@ -108,6 +108,9 @@ learning worker
 ### 当前工程收口
 
 - [planning/production-autonomy-repair-optimization-plan.md](planning/production-autonomy-repair-optimization-plan.md)：唯一活动实施计划；
+- [planning/state-data-rebuild-plan.md](planning/state-data-rebuild-plan.md)：canonical_v2 数据逻辑重建 scoped 计划（含 2026-08-16 新对话接手点），不替代全局生产计划；
+- [planning/state-data-writer-registry.md](planning/state-data-writer-registry.md)：canonical_v2 迁移期间的旧写入口、分类和退出条件；
+- [planning/state-data-rebuild-acceptance-matrix.md](planning/state-data-rebuild-acceptance-matrix.md)：canonical_v2 各阶段可重复验收证据与未满足门；
 - [phased-repair-rollout-status.md](phased-repair-rollout-status.md)：当前阶段、运行姿态和未完成证据；
 - [phased-repair-acceptance-matrix.md](phased-repair-acceptance-matrix.md)：可重复验收门和发布证据。
 

@@ -21,7 +21,8 @@ from urllib import error, request
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path  # noqa: E402
+from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_columns  # noqa: E402
+from backend.services.state_payload_archive import load_json_payload  # noqa: E402
 
 
 def _loads(raw: str | None, default):
@@ -95,8 +96,9 @@ def _remote_login(api_base: str, username: str, password: str, timeout: float) -
 def _fetch_cases(conn: sqlite3.Connection, limit: int) -> list[dict]:
     rows = _execute(
         conn,
-        """
-        SELECT review_id, trade_id, position_id, outcome_label, pnl, mae, mfe, summary_text, review_json, created_at
+        f"""
+        SELECT review_id, trade_id, position_id, outcome_label, pnl, mae, mfe, summary_text,
+               review_json{', review_archive_hash' if 'review_archive_hash' in state_table_columns(conn, 'trade_outcome_review') else ''}, created_at
         FROM trade_outcome_review
         ORDER BY created_at DESC
         LIMIT ?
@@ -105,7 +107,20 @@ def _fetch_cases(conn: sqlite3.Connection, limit: int) -> list[dict]:
     ).fetchall()
     cases: list[dict] = []
     for row in rows:
-        review = _loads(row["review_json"], {})
+        try:
+            archive_hash = row["review_archive_hash"]
+        except (KeyError, IndexError):
+            archive_hash = ""
+        review = load_json_payload(
+            conn,
+            source_table="trade_outcome_review",
+            source_id=str(row["review_id"] or ""),
+            inline_json=row["review_json"],
+            archive_hash=archive_hash,
+            default={},
+        )
+        if not isinstance(review, dict):
+            review = {}
         cases.append(
             {
                 "review_id": str(row["review_id"] or ""),

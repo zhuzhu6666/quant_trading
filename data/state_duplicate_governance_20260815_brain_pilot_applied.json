@@ -1,0 +1,38 @@
+{
+  "manifest_version": "state_duplicate_governance_pilot_apply.v1",
+  "observed_on": "2026-08-15",
+  "user_confirmation": true,
+  "read_only_precheck_passed": true,
+  "scope": {
+    "source_table": "brain_state_snapshot",
+    "snapshot_id": "brain_9818b192e159468f",
+    "action": "archive_original_and_replace_negative_matches_with_references"
+  },
+  "archive": {
+    "archive_hash": "e1218891c51a23f17c4208cd08c81187dd345a941dc88aa8d28fe38a33fc6bdf",
+    "raw_sha256": "e1218891c51a23f17c4208cd08c81187dd345a941dc88aa8d28fe38a33fc6bdf",
+    "raw_bytes": 21747769,
+    "compressed_bytes": 556378,
+    "payload_kind": "brain_state_snapshot.memory_json"
+  },
+  "projection": {
+    "before_memory_bytes": 21747769,
+    "after_memory_bytes": 11339712,
+    "negative_match_count": 4,
+    "item_count_unchanged": true,
+    "negative_count_unchanged": true,
+    "reference_only_verified": true
+  },
+  "verification": {
+    "restore_json_equal": true,
+    "source_row_counts_unchanged": true,
+    "brain_state_snapshot_rows": 15007,
+    "experience_memory_rows": 721,
+    "trade_outcome_review_rows": 721,
+    "evolution_events_rows": 84908,
+    "services_started": false,
+    "delete_executed": false,
+    "vacuum_executed": false,
+    "evolution_scope_touched": false
+  }
+}

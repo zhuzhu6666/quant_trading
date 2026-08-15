@@ -16,6 +16,7 @@ from backend.services.brain_governance_candidate_review import (
 from backend.services.brain_memory import BrainMemoryService
 from backend.services.brain_state import BrainStateService
 from backend.services.incident_controls import RuntimeIncidentControlService
+from backend.services.state_payload_archive import archive_json_payload
 
 
 def _readiness_fixture() -> dict:
@@ -98,6 +99,73 @@ def test_brain_state_persists_read_only_world_model_snapshot(tmp_path):
     assert status["schema_version"] == "brain_state_readiness.v1"
     assert status["ok"] is True
     assert status["affects_trading"] is False
+
+
+def test_brain_memory_prefers_verified_review_archive_over_bounded_projection(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            "ALTER TABLE trade_outcome_review ADD COLUMN review_archive_hash TEXT DEFAULT ''"
+        )
+        conn.execute(
+            """
+            CREATE TABLE state_payload_archive (
+                archive_hash TEXT PRIMARY KEY,
+                source_table TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                payload_kind TEXT NOT NULL,
+                codec TEXT NOT NULL DEFAULT 'gzip',
+                raw_sha256 TEXT NOT NULL,
+                raw_bytes INTEGER NOT NULL DEFAULT 0,
+                compressed_bytes INTEGER NOT NULL DEFAULT 0,
+                payload_bytes BLOB NOT NULL,
+                created_at REAL NOT NULL DEFAULT 0.0
+            )
+            """
+        )
+        archive = archive_json_payload(
+            conn,
+            source_table="trade_outcome_review",
+            source_id="review_archived",
+            payload_kind="review_json",
+            raw_json=json.dumps({"regime": "trend", "close_reason": "broker_close"}),
+        )
+        assert archive is not None
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, pnl, outcome_label,
+             failure_tags_json, summary_text, review_json, review_archive_hash, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "review_archived",
+                "trade_archived",
+                "position_archived",
+                -1.0,
+                "bad_loss",
+                "[]",
+                "archived review",
+                json.dumps({"system_contaminated": True}),
+                archive["archive_hash"],
+                100.0,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = connect_sqlite(db_path)
+    conn.row_factory = __import__("sqlite3").Row
+    try:
+        items = BrainMemoryService(db_path)._trade_outcome_memories(conn, set(), [])
+    finally:
+        conn.close()
+
+    assert len(items) == 1
+    assert items[0]["structured"]["review"]["close_reason"] == "broker_close"
 
 
 def test_backend_readiness_exposes_compact_v16_contract(monkeypatch, tmp_path):
@@ -524,6 +592,146 @@ def test_brain_memory_projects_recursive_review_lineage(tmp_path):
         "event_type": "supervisor_tighten",
         "evidence": {"protection_source": "position_supervisor"},
     }
+
+
+def test_brain_persistence_bounds_rebuildable_memory_payloads(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    item = {
+        "memory_id": "mem_large_projection",
+        "schema_version": "brain_memory_item.v1",
+        "memory_type": "episodic",
+        "source_table": "experience_memory",
+        "source_id": "trade_lesson:review_large",
+        "symbol": "XAUUSD",
+        "timeframe": "M5",
+        "regime": "trend",
+        "text_summary": "bounded lesson",
+        "structured": {
+            "source_table": "trade_outcome_review",
+            "source_id": "review_large",
+            "lesson": {
+                "recommended_action": "hold",
+                "raw_review_blob": "x" * 2_000_000,
+            },
+            "raw_review_blob": "y" * 2_000_000,
+        },
+        "evidence_score": 0.8,
+        "similarity_score": 0.9,
+        "polarity": "positive",
+        "created_at": 10.0,
+    }
+
+    memory_service = BrainMemoryService(db_path)
+    memory_service._persist_items([item])
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        index_bytes = conn.execute(
+            "SELECT length(structured_json) FROM brain_memory WHERE memory_id=?",
+            (item["memory_id"],),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    snapshot = {
+        "snapshot_id": "brain_large_projection",
+        "schema_version": "brain_state_snapshot.v1",
+        "source": "test",
+        "status": "computed",
+        "world_model": {},
+        "perceptions": {},
+        "memory": {"items": [item], "negative_matches": [], "counter_evidence": []},
+        "hypotheses": [],
+        "critic": {},
+        "evidence_refs": {},
+        "boundary": BrainStateService.boundary(),
+        "created_at": 10.0,
+    }
+    BrainStateService(db_path)._persist(snapshot)
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        snapshot_bytes = conn.execute(
+            "SELECT length(memory_json) FROM brain_state_snapshot WHERE snapshot_id=?",
+            (snapshot["snapshot_id"],),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert index_bytes < 100_000
+    assert snapshot_bytes < 100_000
+    indexed = memory_service.latest_indexed(limit=10)
+    stored = next(row for row in indexed["items"] if row["memory_id"] == item["memory_id"])
+    assert stored["structured"]["source_id"] == "review_large"
+    assert len(stored["structured"]["raw_review_blob"]) <= 512
+    assert len(stored["structured"]["lesson"]["raw_review_blob"]) <= 512
+
+
+def test_brain_snapshot_persists_memory_evidence_as_references(tmp_path):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    item = {
+        "memory_id": "mem_reference_only",
+        "schema_version": "brain_memory_item.v1",
+        "memory_type": "episodic",
+        "source_table": "experience_memory",
+        "source_id": "trade_lesson:review_reference",
+        "text_summary": "reference metadata",
+        "structured": {"raw_review_blob": "x" * 2_000_000},
+        "evidence_sources": [{"source_table": "trade_outcome_review", "source_id": "review_reference"}],
+        "evidence_score": 0.8,
+        "similarity_score": 0.9,
+        "polarity": "negative",
+        "created_at": 10.0,
+    }
+    snapshot = {
+        "snapshot_id": "brain_reference_projection",
+        "schema_version": "brain_state_snapshot.v1",
+        "source": "test",
+        "status": "computed",
+        "world_model": {},
+        "perceptions": {},
+        "memory": {
+            "items": [item],
+            "negative_matches": [item],
+            "counter_evidence": [item],
+        },
+        "hypotheses": [],
+        "critic": {},
+        "evidence_refs": {},
+        "boundary": BrainStateService.boundary(),
+        "created_at": 10.0,
+    }
+
+    BrainStateService(db_path)._persist(snapshot)
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        stored = json.loads(
+            conn.execute(
+                "SELECT memory_json FROM brain_state_snapshot WHERE snapshot_id=?",
+                (snapshot["snapshot_id"],),
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+
+    assert stored["items"][0]["structured"]
+    assert "structured" not in stored["negative_matches"][0]
+    assert "evidence_sources" not in stored["negative_matches"][0]
+    assert stored["negative_matches"][0]["memory_id"] == item["memory_id"]
+    assert stored["counter_evidence"][0]["structured"]
+    assert len(json.dumps(stored).encode("utf-8")) < 100_000
 
 
 def test_brain_action_planner_records_shadow_only_action_plans(tmp_path):

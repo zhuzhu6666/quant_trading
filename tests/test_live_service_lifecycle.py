@@ -3365,12 +3365,89 @@ def test_supervisor_tighten_noop_is_deduplicated_before_risk_policy(monkeypatch)
             log=lambda msg: None,
         ) == {706}
 
-    assert len(traces) == 2
+    assert len(traces) == 1
     assert all(trace["stage"] == "no_op_suppressed" for trace in traces)
     assert all(trace["outcome"] == "skipped" for trace in traces)
     assert all(trace["execution_status"] == "no_op" for trace in traces)
     assert all(trace["execution"]["execution_class"] == "skipped" for trace in traces)
     assert all(trace["execution"]["is_real_execution"] is False for trace in traces)
+
+
+def test_supervisor_hold_trace_is_deduplicated_by_decision_evidence(monkeypatch):
+    traces = []
+    remembered = set()
+
+    class _Ledger:
+        def log_position_supervisor_trace(self, **kwargs):
+            traces.append(kwargs)
+            return "trace_hold"
+
+        def log_decision(self, **_kwargs):
+            raise AssertionError("hold must not enter the decision ledger")
+
+    class _Bridge:
+        is_connected = True
+
+    verdict = {
+        "position_id": "708",
+        "decision_ts": time.time(),
+        "action": "hold",
+        "summary_reason": "position_healthy",
+        "evidence": {
+            "supervisor_posture": "trend_hold",
+            "closed_bar_key": "bar:42",
+            "trigger_tags": ["trend_hold_preserve_profit"],
+            "thesis_status": "healthy",
+            "regime_shift": "none",
+            "thesis_break_confirmed": False,
+            "management_evidence_ready": False,
+            # Quote/PnL observations change between ticks and must not create
+            # a new trace while the conclusion/evidence level is unchanged.
+            "current_pnl": 1.0,
+        },
+    }
+    monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
+    monkeypatch.setattr(
+        live_service,
+        "_evaluate_position_supervisor_for_position",
+        lambda *args, **kwargs: verdict,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_supervisor_noop_fingerprint_seen",
+        lambda _pid, fingerprint: fingerprint in remembered,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_remember_supervisor_noop",
+        lambda _position, _verdict, *, fingerprint, reason: remembered.add(fingerprint),
+    )
+    position = {
+        "position_id": 708,
+        "symbol": "XAUUSD+",
+        "direction": 1,
+        "entry_price": 4000.0,
+        "current_price": 4010.0,
+        "sl": 3990.0,
+        "tp": 4030.0,
+        "volume": 100.0,
+    }
+
+    for tick, pnl in ((12, 1.0), (13, 1.2)):
+        verdict["evidence"]["current_pnl"] = pnl
+        assert live_service._run_position_supervision(
+            _Bridge(),
+            [position],
+            cfg=SimpleNamespace(timeframe="M5"),
+            acct={"balance": 10000.0, "equity": 10000.0},
+            tick=tick,
+            log=lambda _msg: None,
+        ) == set()
+
+    assert len(traces) == 1
+    assert traces[0]["stage"] == "evaluated"
+    assert traces[0]["outcome"] == "hold"
+    assert traces[0]["execution_status"] == "not_required"
 
 
 def test_demo_adaptive_supervisor_action_is_observed_without_risk_or_broker_mutation(monkeypatch):
@@ -3596,7 +3673,7 @@ def test_supervisor_minimum_position_reduce_is_deduplicated_before_policy(monkey
             log=lambda _msg: None,
         ) == {707}
 
-    assert len(traces) == 2
+    assert len(traces) == 1
     assert all(trace["stage"] == "no_op_suppressed" for trace in traces)
     assert all(
         trace["execution_reason"] == "risk_evidence_not_strong_enough"

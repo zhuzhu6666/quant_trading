@@ -1,0 +1,68 @@
+{
+  "manifest_version": "state_duplicate_governance_dry_run.v1",
+  "observed_on": "2026-08-15",
+  "read_only": true,
+  "database_schema": "state_v1",
+  "schema_version": 15,
+  "services": {
+    "quant-backend.service_main_pid": 0,
+    "quant-learning-worker.service_main_pid": 0,
+    "active_postgresql_transactions": 0
+  },
+  "execution": {
+    "delete": false,
+    "update": false,
+    "insert": false,
+    "payload_archive_apply": false,
+    "vacuum": false,
+    "service_start": false
+  },
+  "candidates": [
+    {
+      "domain": "brain_state_snapshot",
+      "snapshot_id": "brain_9818b192e159468f",
+      "source": "backend_readiness",
+      "memory_bytes": 21747769,
+      "item_count": 12,
+      "negative_count": 4,
+      "exact_duplicate_items": 1,
+      "duplicate_full_bytes": 10057771,
+      "negative_reference_bytes": 1347,
+      "duplicate_memory_ids": ["mem_4d18b333d50a322c60eb58cb"],
+      "source_refs": [
+        {
+          "source_table": "experience_memory",
+          "source_id": "trade_lesson:review_dcb099dca6a64e1a"
+        }
+      ],
+      "source_lineage_verified": true,
+      "proposed_action": "archive_projection_pending_approval",
+      "delete_source_fact": false
+    },
+    {
+      "domain": "evolution_events",
+      "event_ids": [46297, 47511],
+      "smaller_payload_bytes": 4571714,
+      "larger_payload_bytes": 4581390,
+      "older_items": 483,
+      "newer_items": 483,
+      "shared_counterfactual_ids": 482,
+      "shared_source_rows": 482,
+      "shared_review_ids": 482,
+      "source_lineage_verified": true,
+      "current_writer_compacts_items": true,
+      "proposed_action": "archive_payload_pending_approval",
+      "delete_event_rows": false
+    }
+  ],
+  "sample_evidence": {
+    "brain_fixed_seed_sampled_snapshots": 146,
+    "brain_fixed_seed_exact_overlap_rows": 99,
+    "brain_fixed_seed_exact_overlap_bytes": 8206936
+  },
+  "unverified": [
+    "full-table brain duplicate byte total",
+    "physical disk bytes reclaimable after archive and rewrite",
+    "production archive restore execution"
+  ]
+}

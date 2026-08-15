@@ -7,7 +7,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import DATA_DIR, STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.db import (
+    DATA_DIR,
+    STATE_DB,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+)
 from backend.core.state_store import (
     is_state_schema_write_sql,
     validate_runtime_state_schema,
@@ -19,6 +26,7 @@ from backend.services.review_contract import (
     review_execution_evidence_is_trainable,
     review_has_system_contamination,
 )
+from backend.services.state_payload_archive import load_json_payload
 
 
 MODEL_TYPE = "factor_governance_lightgbm"
@@ -58,10 +66,31 @@ FEATURE_NAMES = [
 def _loads(raw: str | None, default: Any) -> Any:
     if not raw:
         return default
+    if isinstance(raw, (dict, list)):
+        return raw
     try:
         return json.loads(raw)
     except Exception:
         return default
+
+
+def _review_archive_select(conn: Any) -> str:
+    try:
+        has_archive = "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
+    except Exception:
+        has_archive = False
+    return ", r.review_archive_hash AS review_archive_hash" if has_archive else ""
+
+
+def _restore_review_payload(conn: Any, item: dict[str, Any]) -> None:
+    item["review_json"] = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(item.get("review_id") or ""),
+        inline_json=item.get("review_json"),
+        archive_hash=item.get("review_archive_hash", ""),
+        default={},
+    )
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -306,7 +335,7 @@ class FactorGovernanceLightGBMService:
         conn = self._conn()
         try:
             rows = self._execute(conn,
-                """
+                f"""
                 SELECT *
                 FROM (
                     SELECT f.id, f.review_id, f.trade_id, f.factor, f.entry_contribution,
@@ -314,7 +343,7 @@ class FactorGovernanceLightGBMService:
                            f.confidence, f.notes, r.position_id, r.entry_quality, r.hold_quality,
                            r.exit_quality, r.regime_fit_score, r.execution_quality,
                            r.pnl, r.mae, r.mfe, r.outcome_label, r.failure_tags_json,
-                           r.review_json, r.created_at,
+                           r.review_json, r.created_at{_review_archive_select(conn)},
                            dl.regime_id AS regime_id,
                            dl.regime_confidence AS regime_confidence,
                            dl.decision_ts AS decision_ts
@@ -331,6 +360,8 @@ class FactorGovernanceLightGBMService:
                 (int(limit),),
             ).fetchall()
             row_items = [dict(row) for row in rows]
+            for item in row_items:
+                _restore_review_payload(conn, item)
             system_clean_count = sum(1 for item in row_items if not _row_system_contaminated(item))
             row_items = [
                 item
@@ -911,7 +942,7 @@ class FactorGovernanceLightGBMService:
         try:
             rows = self._execute(
                 conn,
-                """
+                f"""
                 SELECT inference_id
                 FROM factor_governance_shadow_audit
                 WHERE model_type=? AND artifact_path=?
@@ -1196,13 +1227,13 @@ class FactorGovernanceLightGBMService:
         try:
             rows = self._execute(
                 conn,
-                """
+                f"""
                 SELECT f.id, f.review_id, f.trade_id, f.factor, f.entry_contribution,
                        f.hold_contribution, f.exit_contribution, f.net_contribution,
                        f.confidence, f.notes, r.position_id, r.entry_quality, r.hold_quality,
                        r.exit_quality, r.regime_fit_score, r.execution_quality,
                        r.pnl, r.mae, r.mfe, r.outcome_label, r.failure_tags_json,
-                       r.review_json, r.created_at,
+                       r.review_json, r.created_at{_review_archive_select(conn)},
                        dl.regime_id AS regime_id,
                        dl.regime_confidence AS regime_confidence,
                        dl.decision_ts AS decision_ts
@@ -1218,6 +1249,8 @@ class FactorGovernanceLightGBMService:
                 (factor, int(limit)),
             ).fetchall()
             row_items = [dict(row) for row in rows]
+            for item in row_items:
+                _restore_review_payload(conn, item)
             row_items = [
                 item
                 for item in row_items

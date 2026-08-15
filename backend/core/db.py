@@ -645,6 +645,7 @@ CREATE TABLE IF NOT EXISTS runtime_config_snapshot (
     config_json TEXT NOT NULL DEFAULT '{}',
     run_id TEXT DEFAULT '',
     mutation_id TEXT NOT NULL DEFAULT '',
+    payload_hash TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
@@ -696,6 +697,9 @@ CREATE TABLE IF NOT EXISTS evolution_decision (
     rollback_json TEXT DEFAULT '{}',
     config_version INTEGER DEFAULT 0,
     config_hash TEXT DEFAULT '',
+    payload_hash TEXT NOT NULL DEFAULT '',
+    canonical_event_id TEXT NOT NULL DEFAULT '',
+    projection_type TEXT NOT NULL DEFAULT 'legacy',
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
@@ -875,6 +879,8 @@ CREATE TABLE IF NOT EXISTS brain_action_plan_eval (
     comparison_json TEXT NOT NULL DEFAULT '{}',
     evidence_refs_json TEXT NOT NULL DEFAULT '{}',
     boundary_json TEXT NOT NULL DEFAULT '{}',
+    payload_hash TEXT NOT NULL DEFAULT '',
+    evaluation_run_id TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
@@ -1131,6 +1137,7 @@ CREATE TABLE IF NOT EXISTS autonomous_learning_sample (
     label_json TEXT DEFAULT '{}',
     trace_json TEXT DEFAULT '{}',
     evidence_contract_json TEXT DEFAULT '{}',
+    content_fingerprint TEXT NOT NULL DEFAULT '',
     config_version INTEGER DEFAULT 0,
     config_hash TEXT DEFAULT '',
     evolution_run_id TEXT DEFAULT '',

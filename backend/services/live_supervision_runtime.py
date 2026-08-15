@@ -515,16 +515,50 @@ def run_position_supervision(
         verdict["recommended_action"] = requested_action
         verdict.setdefault("effective_action", action)
         if action == "hold":
-            runtime.log_trace(
-                position=position,
-                verdict=verdict,
-                cfg=cfg,
-                tick=tick,
-                stage="evaluated",
-                outcome="hold",
-                execution_status="not_required",
-                acct=account,
+            evidence = dict(verdict.get("evidence") or {})
+            trigger_key = "|".join(
+                sorted({str(item) for item in evidence.get("trigger_tags") or [] if str(item)})
             )
+            # A healthy hold is still a decision event, but the live loop may
+            # evaluate it on every tick.  Use only conclusion/evidence-level
+            # fields for the persisted fingerprint; volatile quote/PnL fields
+            # must not turn one unchanged conclusion into one row per tick.
+            hold_signature = ":".join(
+                (
+                    str(verdict.get("summary_reason") or "position_healthy"),
+                    str(evidence.get("supervisor_posture") or ""),
+                    str(evidence.get("closed_bar_key") or ""),
+                    trigger_key,
+                    str(evidence.get("thesis_status") or ""),
+                    str(evidence.get("regime_shift") or ""),
+                    str(bool(evidence.get("thesis_break_confirmed"))),
+                    str(bool(evidence.get("management_evidence_ready"))),
+                )
+            )
+            hold_fingerprint = runtime.build_action_fingerprint(
+                position_id=position_id,
+                action=f"hold:{hold_signature}",
+                direction=int(position.get("direction", 0) or 0),
+                controls=dict(verdict.get("recommended_controls") or {}),
+            )
+            verdict["action_fingerprint"] = hold_fingerprint
+            if not runtime.noop_fingerprint_seen(position_id, hold_fingerprint):
+                runtime.log_trace(
+                    position=position,
+                    verdict=verdict,
+                    cfg=cfg,
+                    tick=tick,
+                    stage="evaluated",
+                    outcome="hold",
+                    execution_status="not_required",
+                    acct=account,
+                )
+                runtime.remember_noop(
+                    position,
+                    verdict,
+                    fingerprint=hold_fingerprint,
+                    reason="hold_evaluated",
+                )
             continue
 
         controls = dict(verdict.get("recommended_controls") or {})
@@ -581,28 +615,28 @@ def run_position_supervision(
                     controls=controls,
                 )
                 noop_seen = runtime.noop_fingerprint_seen(position_id, fingerprint)
-                runtime.log_trace(
-                    position=position,
-                    verdict=verdict,
-                    cfg=cfg,
-                    tick=tick,
-                    stage="no_op_suppressed",
-                    outcome="skipped",
-                    execution_status="no_op",
-                    execution_reason=str(
-                        reduce_execution_plan.get("reason")
-                        or "reduce_not_tradeable"
-                    ),
-                    execution={
-                        **reduce_execution_plan,
-                        "action_fingerprint": fingerprint,
-                        "requested_action": "reduce",
-                        "applied_controls": controls,
-                        "duplicate_audit": bool(noop_seen),
-                    },
-                    acct=account,
-                )
                 if not noop_seen:
+                    runtime.log_trace(
+                        position=position,
+                        verdict=verdict,
+                        cfg=cfg,
+                        tick=tick,
+                        stage="no_op_suppressed",
+                        outcome="skipped",
+                        execution_status="no_op",
+                        execution_reason=str(
+                            reduce_execution_plan.get("reason")
+                            or "reduce_not_tradeable"
+                        ),
+                        execution={
+                            **reduce_execution_plan,
+                            "action_fingerprint": fingerprint,
+                            "requested_action": "reduce",
+                            "applied_controls": controls,
+                            "duplicate_audit": False,
+                        },
+                        acct=account,
+                    )
                     runtime.remember_noop(
                         position,
                         verdict,
@@ -631,23 +665,6 @@ def run_position_supervision(
                 position_id,
                 observed_verdict,
             ):
-                runtime.log_trace(
-                    position=position,
-                    verdict=observed_verdict,
-                    cfg=cfg,
-                    tick=tick,
-                    stage="no_op_suppressed",
-                    outcome="skipped",
-                    execution_status="observation_only",
-                    execution_reason="same_adaptive_trigger_episode_and_closed_bar",
-                    execution={
-                        "action_fingerprint": fingerprint,
-                        "requested_action": observed_action,
-                        "effective_action": "hold",
-                        "recommended_action": observed_action,
-                    },
-                    acct=account,
-                )
                 continue
             if candidate_recorder is not None:
                 try:
@@ -725,23 +742,6 @@ def run_position_supervision(
             and runtime.adaptive_duplicate_seen is not None
             and runtime.adaptive_duplicate_seen(position_id, verdict)
         ):
-            runtime.log_trace(
-                position=position,
-                verdict=verdict,
-                cfg=cfg,
-                tick=tick,
-                stage="no_op_suppressed",
-                outcome="skipped",
-                execution_status="duplicate_episode",
-                execution_reason="same_adaptive_trigger_episode_and_closed_bar",
-                execution={
-                    "action_fingerprint": action_fingerprint,
-                    "requested_action": requested_action or action,
-                    "effective_action": "hold",
-                    "recommended_action": requested_action or action,
-                },
-                acct=account,
-            )
             continue
         if hard_action and runtime.recently_applied(position_id, action):
             runtime.log_trace(
@@ -823,24 +823,24 @@ def run_position_supervision(
                     controls=controls,
                 )
                 noop_seen = runtime.noop_fingerprint_seen(position_id, fingerprint)
-                runtime.log_trace(
-                    position=position,
-                    verdict=verdict,
-                    cfg=cfg,
-                    tick=tick,
-                    stage="no_op_suppressed",
-                    outcome="skipped",
-                    execution_status="no_op",
-                    execution_reason="target_already_applied",
-                    execution={
-                        "action_fingerprint": fingerprint,
-                        "sl_plan": sl_plan,
-                        "applied_controls": controls,
-                        "duplicate_audit": bool(noop_seen),
-                    },
-                    acct=account,
-                )
                 if not noop_seen:
+                    runtime.log_trace(
+                        position=position,
+                        verdict=verdict,
+                        cfg=cfg,
+                        tick=tick,
+                        stage="no_op_suppressed",
+                        outcome="skipped",
+                        execution_status="no_op",
+                        execution_reason="target_already_applied",
+                        execution={
+                            "action_fingerprint": fingerprint,
+                            "sl_plan": sl_plan,
+                            "applied_controls": controls,
+                            "duplicate_audit": False,
+                        },
+                        acct=account,
+                    )
                     runtime.remember_noop(
                         position,
                         verdict,

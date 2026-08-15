@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typing import Any
 
 from backend.core.auth import RequireUser
-from backend.core.db import get_state_pg_conn
+from backend.core.db import get_state_pg_conn, state_table_columns
 from backend.risk import VaRCalculator, KellyCriterion, StressTest, ConcentrationChecker
 from backend.services.api_fact_views import (
     policy_verdicts_fact_payload,
@@ -18,6 +18,7 @@ from backend.services.api_fact_views import (
 )
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.review_contract import normalize_trade_review_contract
+from backend.services.state_payload_archive import load_json_payload
 
 router = APIRouter(prefix="/api/risk", tags=["risk"])
 
@@ -508,10 +509,30 @@ def _risk_component(name: str, fallback: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _parse_review_row(row: sqlite3.Row) -> dict[str, Any]:
+def _review_archive_select(conn, *, alias: str = "r") -> str:
+    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
+        return ""
+    return f", {alias}.review_archive_hash AS review_archive_hash"
+
+
+def _parse_review_row(row: sqlite3.Row, conn=None) -> dict[str, Any]:
     item = dict(row)
     item["failure_tags"] = _loads_json(item.pop("failure_tags_json", None), [])
-    review = _loads_json(item.pop("review_json", None), {})
+    inline_json = item.pop("review_json", None)
+    archive_hash = item.pop("review_archive_hash", "")
+    if conn is not None:
+        review = load_json_payload(
+            conn,
+            source_table="trade_outcome_review",
+            source_id=str(item.get("review_id") or ""),
+            inline_json=inline_json,
+            archive_hash=archive_hash,
+            default={},
+        )
+    else:
+        review = _loads_json(inline_json, {})
+    if not isinstance(review, dict):
+        review = {}
     normalized = normalize_trade_review_contract(
         review,
         entry_quality=item.get("entry_quality"),
@@ -1697,11 +1718,11 @@ def _recent_trade_trace_index(limit: int = 20) -> dict[str, Any]:
     try:
         try:
             rows = conn.execute(
-                _state_sql("""
+                _state_sql(f"""
                 SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                        entry_quality, hold_quality, exit_quality, regime_fit_score,
                        execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                       summary_text, review_json, created_at
+                       summary_text, review_json{_review_archive_select(conn)}, created_at
                 FROM trade_outcome_review
                 ORDER BY created_at DESC
                 LIMIT ?
@@ -1712,7 +1733,7 @@ def _recent_trade_trace_index(limit: int = 20) -> dict[str, Any]:
             rows = []
         items: list[dict[str, Any]] = []
         for row in rows:
-            parsed = _parse_review_row(row)
+            parsed = _parse_review_row(row, conn)
             position_id = str(parsed.get("position_id") or "")
             trade_id = str(parsed.get("trade_id") or "")
             context = _latest_symbol_context(conn, position_id=position_id, trade_id=trade_id)
@@ -1914,11 +1935,11 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
         review_row = None
         if resolved_position_id:
             review_row = conn.execute(
-                _state_sql("""
+                _state_sql(f"""
                 SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                        entry_quality, hold_quality, exit_quality, regime_fit_score,
                        execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                       summary_text, review_json, created_at
+                       summary_text, review_json{_review_archive_select(conn)}, created_at
                 FROM trade_outcome_review
                 WHERE position_id = ? OR trade_id = ?
                 ORDER BY created_at DESC
@@ -1928,11 +1949,11 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
             ).fetchone()
         if review_row is None and resolved_decision_id:
             review_row = conn.execute(
-                _state_sql("""
+                _state_sql(f"""
                 SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                        entry_quality, hold_quality, exit_quality, regime_fit_score,
                        execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                       summary_text, review_json, created_at
+                       summary_text, review_json{_review_archive_select(conn)}, created_at
                 FROM trade_outcome_review
                 WHERE entry_decision_id = ? OR exit_decision_id = ?
                 ORDER BY created_at DESC
@@ -1966,7 +1987,7 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
             item["details"] = _loads_json(item.pop("details_json", None), {})
             return item
 
-        review = _parse_review_row(review_row) if review_row is not None else None
+        review = _parse_review_row(review_row, conn) if review_row is not None else None
         factor_contributions = [dict(row) for row in factor_rows]
         for item in factor_contributions:
             raw_notes = str(item.get("notes") or "")

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.core.db import connect_sqlite
 from backend.services.context_policy import ContextPolicyService
 from backend.services.factor_catalog import latest_factor_catalog_snapshot, persist_factor_catalog_snapshot
 from backend.services.factor_redundancy import RedundancyDetector
@@ -397,8 +398,9 @@ def test_incident_control_service_persists_via_overlay_and_requires_confirm_to_t
     try:
         row = conn.execute(
             """
-            SELECT source, config_json
-            FROM runtime_config_snapshot
+            SELECT s.source, p.config_json
+            FROM runtime_config_snapshot s
+            JOIN runtime_config_payload p ON p.payload_hash = s.payload_hash
             ORDER BY config_version DESC
             LIMIT 1
             """
@@ -606,6 +608,52 @@ def test_factor_catalog_snapshot_round_trips_full_catalog_json(tmp_path):
     assert latest["run_id"] == "run_snapshot"
     assert latest["items"] == catalog
     assert latest["catalog_hash"] == snapshot["catalog_hash"]
+
+
+def test_factor_catalog_snapshot_interns_semantic_payload_but_keeps_occurrences(tmp_path):
+    db_path = tmp_path / "state.db"
+    first_catalog = [
+        {
+            "factor_id": "rsi_14",
+            "weight": 0.25,
+            "details": "x" * 1000,
+            "catalog_ts": 100.0,
+            "latest_catalog_snapshot_id": "old-snapshot",
+            "latest_catalog_snapshot_run_id": "old-run",
+        }
+    ]
+    second_catalog = [
+        {
+            "factor_id": "rsi_14",
+            "weight": 0.25,
+            "details": "x" * 1000,
+            "catalog_ts": 200.0,
+            "latest_catalog_snapshot_id": "new-snapshot",
+            "latest_catalog_snapshot_run_id": "new-run",
+        }
+    ]
+
+    first = persist_factor_catalog_snapshot(
+        first_catalog, run_id="old-run", source="test", db_path=db_path
+    )
+    second = persist_factor_catalog_snapshot(
+        second_catalog, run_id="new-run", source="test", db_path=db_path
+    )
+
+    conn = connect_sqlite(db_path, read_only=True)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM factor_catalog_snapshot").fetchone()[0] == 2
+        stored = conn.execute(
+            "SELECT catalog_json FROM factor_catalog_snapshot ORDER BY created_at"
+        ).fetchall()
+        assert stored[0][0].startswith("[")
+        assert len(stored[1][0]) < len(stored[0][0])
+    finally:
+        conn.close()
+    assert second["payload_interned"] is True
+    assert second["catalog_hash"] == first["catalog_hash"]
+    latest = latest_factor_catalog_snapshot(db_path)
+    assert latest["items"] == second_catalog
 
 
 def test_context_policy_only_outputs_threshold_and_sizing_effects():

@@ -1,0 +1,50 @@
+{
+  "manifest_version": "reboot_autostart_evolution_events_review.v1",
+  "observed_on": "2026-08-15",
+  "read_only": true,
+  "scope": {
+    "source_table": "evolution_events",
+    "id_min": 84911,
+    "id_max": 85006,
+    "row_count": 96,
+    "payload_bytes": 22485,
+    "event_type_counts": {
+      "register": 86,
+      "promote": 4,
+      "cycle_start": 1,
+      "cycle_complete": 1,
+      "factor_retirement_candidates": 1,
+      "learning_governance": 1,
+      "learning_suggestions_seen": 1,
+      "weights_candidate": 1
+    }
+  },
+  "duplicate_analysis": {
+    "exact_payload_duplicate_groups": 0,
+    "duplicate_factor_register_groups": 0,
+    "registered_factors": 86,
+    "lifecycle_matches": 86,
+    "shadow_perf_matches": 86,
+    "runtime_projection_matches": 86,
+    "lifecycle_event_matches": 86,
+    "health_matches": 5,
+    "factors_without_any_durable_relation": 0,
+    "promote_events_with_lifecycle": 4,
+    "promote_events_with_lifecycle_event": 4
+  },
+  "decision": {
+    "cleanup_candidate_count": 0,
+    "delete_event_rows": false,
+    "archive_compact_applied": false,
+    "reason": "All inspected events retain durable factor lineage; payload volume is negligible."
+  },
+  "safety": {
+    "backend_enabled": false,
+    "learning_worker_enabled": false,
+    "active_writer_sessions_before_read": 0,
+    "broad_size_scan": "cancelled_by_3s_statement_timeout",
+    "broad_scan_mutation": false,
+    "disk_available": "29G",
+    "memory_available_at_review": "1.2GiB"
+  }
+}

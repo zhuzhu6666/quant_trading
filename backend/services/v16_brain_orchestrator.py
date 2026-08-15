@@ -23,6 +23,7 @@ from backend.services.brain_governance_candidates import (
     BrainGovernanceCandidateService,
 )
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload
 from backend.services.v16_brain_planning import (
     BrainActionPlanEvaluatorService,
     BrainActionPlannerService,
@@ -30,6 +31,24 @@ from backend.services.v16_brain_planning import (
 )
 from backend.services.v16_brain_snapshot import BrainStateService
 from backend.services.v16_command_gate import V16CommandGate
+
+
+def _review_archive_select(conn: Any) -> str:
+    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
+        return ""
+    return ", r.review_archive_hash AS source_review_archive_hash"
+
+
+def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
+    payload = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(row["source_review_id"] or ""),
+        inline_json=row["source_review_json"],
+        archive_hash=row["source_review_archive_hash"] if "source_review_archive_hash" in row.keys() else "",
+        default={},
+    )
+    return payload if isinstance(payload, dict) else {}
 
 
 def ensure_v16_brain_command_table(db_path: str | Path = STATE_DB) -> None:
@@ -193,6 +212,7 @@ class V16BrainOrchestratorService:
         evals_run = BrainActionPlanEvaluatorService(self.db_path).evaluate_latest_plans(
             limit=limit,
             persist=persist,
+            evaluation_run_id=(f"v16_eval_{uuid.uuid4().hex}" if persist else ""),
         )
         governance_run = BrainMediumImpactGovernanceService(self.db_path).materialize_latest(
             limit=limit,
@@ -486,10 +506,10 @@ class V16BrainOrchestratorService:
             ):
                 rows = execute(
                     conn,
-                    """
+                    f"""
                     SELECT c.close_ts, c.updated_at, c.evidence_json,
                            r.review_id AS source_review_id,
-                           r.review_json AS source_review_json
+                           r.review_json AS source_review_json{_review_archive_select(conn)}
                     FROM supervisor_counterfactual_review c
                     LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
                     """,
@@ -499,7 +519,7 @@ class V16BrainOrchestratorService:
                     for row in rows
                     if str(row["source_review_id"] or "")
                     and not review_has_system_contamination(
-                        loads(row["source_review_json"], {})
+                        _review_payload(conn, row)
                     )
                     and not bool(
                         loads(row["evidence_json"], {}).get("evidence_invalidated")

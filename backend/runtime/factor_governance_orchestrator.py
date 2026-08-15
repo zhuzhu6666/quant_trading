@@ -1593,7 +1593,12 @@ class FactorGovernanceOrchestrator:
         conn = get_state_pg_conn(read_only=True)
         try:
             row = conn.execute(
-                _p("SELECT rollback_json FROM evolution_decision WHERE decision_id=? LIMIT 1"),
+                _p(
+                    """SELECT COALESCE(p.rollback_json, d.rollback_json) AS rollback_json
+                       FROM evolution_decision d
+                       LEFT JOIN mutation_payload p ON p.payload_hash=d.payload_hash
+                       WHERE d.decision_id=? LIMIT 1"""
+                ),
                 (decision_id,),
             ).fetchone()
             return self._loads_dict(row["rollback_json"] if row else "{}")
@@ -3833,16 +3838,21 @@ class FactorGovernanceOrchestrator:
         record_api_mutation(
             user="system:factor_governance",
             endpoint="backend.runtime.factor_governance_orchestrator",
+            run_id=str(run.get("run_id") or ""),
             action=action,
             status=status,
             before=before or {},
             after=after or {},
-            result={"decision_id": decision_id, **(result or {})},
+            # The API row is a projection of the canonical decision. The
+            # audit helper retains request fingerprints and the canonical row
+            # retains the exact result JSON.
+            result={"decision_id": decision_id},
             reason=_dumps(evidence),
             required_confirm="autonomous-risk-policy",
             confirm_ok=verdict.allowed,
             source_agent="factor_governance",
             decision_type="autonomous_mutation",
+            canonical_event_id=decision_id,
         )
         return {
             "factor_id": factor_id,

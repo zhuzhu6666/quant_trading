@@ -15,6 +15,7 @@ from backend.core.db import (
     state_table_exists,
 )
 from backend.core.state_store import validate_runtime_state_schema
+from backend.services.state_payload_archive import load_json_payload
 
 
 APPEND_SOURCE = "trade_lesson_memory.v1"
@@ -55,7 +56,25 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
     return default if value is None else value
 
 
-def trade_review_payload_from_row(row: Any) -> dict[str, Any]:
+def _review_archive_select(conn: Any) -> str:
+    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
+        return ""
+    return ", review_archive_hash"
+
+
+def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
+    payload = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(_row_get(row, "review_id", "") or ""),
+        inline_json=_row_get(row, "review_json", "{}"),
+        archive_hash=_row_get(row, "review_archive_hash", ""),
+        default={},
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
+def trade_review_payload_from_row(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
     """Normalize a review table row for the canonical rich lesson builder.
 
     The low-level upsert still accepts a row for compatibility with focused
@@ -63,7 +82,7 @@ def trade_review_payload_from_row(row: Any) -> dict[str, Any]:
     payload to ``ExperienceBuilder`` so a refresh cannot replace a rich lesson
     with the old compact fallback shape.
     """
-    review_json = _loads(_row_get(row, "review_json", "{}"), {})
+    review_json = _review_payload(conn, row) if conn is not None else _loads(_row_get(row, "review_json", "{}"), {})
     if not isinstance(review_json, dict):
         review_json = {}
     failure_tags = _loads(_row_get(row, "failure_tags_json", "[]"), [])
@@ -186,9 +205,9 @@ def _recommended_action(outcome_label: str, failure_tags: list[Any], pnl: float)
     return "watch"
 
 
-def build_trade_lesson(row: Any) -> dict[str, Any]:
+def build_trade_lesson(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
     review_id = str(_row_get(row, "review_id", "") or "")
-    review = _loads(_row_get(row, "review_json", "{}"), {})
+    review = _review_payload(conn, row) if conn is not None else _loads(_row_get(row, "review_json", "{}"), {})
     failure_tags = _loads(_row_get(row, "failure_tags_json", "[]"), [])
     if not isinstance(failure_tags, list):
         failure_tags = []
@@ -286,7 +305,7 @@ def upsert_trade_lesson_memory(
     lesson: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ensure_trade_lesson_memory_schema(conn)
-    lesson = dict(lesson or build_trade_lesson(row))
+    lesson = dict(lesson or build_trade_lesson(row, conn=conn))
     if not lesson["source_id"]:
         raise ValueError("trade lesson requires review_id")
     context = _loads(lesson["decision_context_json"], {})
@@ -463,10 +482,10 @@ def rebuild_trade_lesson_memory(db_path: str | Path = STATE_DB, *, limit: int = 
             return {"ok": False, "status": "missing_trade_outcome_review", "upserted": 0}
         rows = _execute(
             conn,
-            """
+            f"""
             SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                    pnl, mae, mfe, outcome_label, failure_tags_json, summary_text,
-                   review_json, created_at
+                   review_json, created_at{_review_archive_select(conn)}
             FROM trade_outcome_review
             ORDER BY created_at DESC
             LIMIT ?
@@ -476,7 +495,7 @@ def rebuild_trade_lesson_memory(db_path: str | Path = STATE_DB, *, limit: int = 
         builder = ExperienceBuilder(db_path=db_path, ensure_schema=False)
         count = 0
         for row in rows:
-            builder.build_from_review(trade_review_payload_from_row(row), conn=conn)
+            builder.build_from_review(trade_review_payload_from_row(row, conn=conn), conn=conn)
             count += 1
         conn.commit()
         return {"ok": True, "status": "available", "upserted": count, "append_source": APPEND_SOURCE}

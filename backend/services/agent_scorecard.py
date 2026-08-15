@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, state_table_exists
+from backend.core.db import STATE_DB, state_table_columns, state_table_exists
 from backend.services.agent_authority import (
     AgentAuthorityRegistryService,
     infer_policy_suggestion_source_agent,
@@ -15,6 +15,7 @@ from backend.services._brain_helpers import connect as _connect, execute as _exe
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload
 
 
 def _loads(raw: Any, default: Any) -> Any:
@@ -52,6 +53,38 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
     except Exception:
         value = default
     return default if value is None else value
+
+
+def _review_archive_select(conn: Any, *, alias: str = "r", output: str = "review_archive_hash") -> str:
+    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
+        return ""
+    return f", {alias}.review_archive_hash AS {output}"
+
+
+def _review_payload(
+    conn: Any,
+    row: Any,
+    *,
+    source_id_key: str = "review_id",
+    inline_key: str = "review_json",
+    archive_key: str = "review_archive_hash",
+) -> dict[str, Any]:
+    try:
+        keys = row.keys() if hasattr(row, "keys") else ()
+        source_id = row[source_id_key] if source_id_key in keys else ""
+        inline_json = row[inline_key] if inline_key in keys else "{}"
+        archive_hash = row[archive_key] if archive_key in keys else ""
+    except Exception:
+        source_id, inline_json, archive_hash = "", "{}", ""
+    payload = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(source_id or ""),
+        inline_json=inline_json,
+        archive_hash=archive_hash,
+        default={},
+    )
+    return payload if isinstance(payload, dict) else {}
 
 
 def _status_inc(bucket: dict[str, int], status: str) -> None:
@@ -129,21 +162,28 @@ class AgentScorecardService:
                     "items": [],
                     "boundary": self.boundary(),
                 }
+            archive_select = _review_archive_select(conn)
             rows = _execute(
                 conn,
-                """
+                f"""
                 SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                        pnl, outcome_label, failure_tags_json, summary_text,
-                       review_json, created_at
-                FROM trade_outcome_review
+                       review_json, created_at{archive_select}
+                FROM trade_outcome_review AS r
                 ORDER BY created_at DESC
                 """,
             ).fetchall()
-            items = [
-                self._trade_attribution(conn, row, include_external_links=include_external_links)
-                for row in rows
-                if not review_has_system_contamination(_loads(row["review_json"], {}))
-            ][:limit]
+            items = []
+            for row in rows:
+                if review_has_system_contamination(_review_payload(conn, row)):
+                    continue
+                items.append(
+                    self._trade_attribution(
+                        conn, row, include_external_links=include_external_links
+                    )
+                )
+                if len(items) >= limit:
+                    break
         finally:
             conn.close()
         linked = [item for item in items if item["participants"]]
@@ -504,12 +544,13 @@ class AgentScorecardService:
         if not state_table_exists(conn, "experience_memory"):
             gaps.append("experience_memory")
             return
+        archive_select = _review_archive_select(conn, output="source_review_archive_hash")
         rows = _execute(
             conn,
-            """
+            f"""
             SELECT e.experience_id, e.source_table, e.source_id, e.append_source,
                    e.decision_context_json, e.recommended_action, e.created_at,
-                   r.review_id AS source_review_id, r.review_json AS source_review_json
+                   r.review_id AS source_review_id, r.review_json AS source_review_json{archive_select}
             FROM experience_memory e
             LEFT JOIN trade_outcome_review r ON r.review_id=e.source_id
             ORDER BY e.created_at DESC
@@ -518,7 +559,13 @@ class AgentScorecardService:
         accepted = 0
         for row in rows:
             if _text(row["append_source"]) == "trade_lesson_memory.v1":
-                source_review = _loads(row["source_review_json"], {})
+                source_review = _review_payload(
+                    conn,
+                    row,
+                    source_id_key="source_review_id",
+                    inline_key="source_review_json",
+                    archive_key="source_review_archive_hash",
+                )
                 if not _text(row["source_review_id"]) or review_has_system_contamination(source_review):
                     continue
             context = _loads(row["decision_context_json"], {})
@@ -566,7 +613,7 @@ class AgentScorecardService:
         review_id = _text(row["review_id"])
         trade_id = _text(row["trade_id"])
         position_id = _text(row["position_id"])
-        review = _loads(row["review_json"], {})
+        review = _review_payload(conn, row)
         failure_tags = _loads(row["failure_tags_json"], [])
         participants: list[dict[str, Any]] = []
         participants.extend(self._review_declared_agents(review))
@@ -730,9 +777,9 @@ class AgentScorecardService:
             return []
         rows = _execute(
             conn,
-            """SELECT c.counterfactual_id, c.updated_at, c.evidence_json,
+            f"""SELECT c.counterfactual_id, c.updated_at, c.evidence_json,
                       r.review_id AS source_review_id,
-                      r.review_json AS source_review_json
+                      r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
                FROM supervisor_counterfactual_review c
                LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
                WHERE (c.review_id=? AND c.review_id <> '') OR c.position_id=?
@@ -744,7 +791,15 @@ class AgentScorecardService:
             evidence = _loads(row["evidence_json"], {})
             if (
                 not _text(row["source_review_id"])
-                or review_has_system_contamination(_loads(row["source_review_json"], {}))
+                or review_has_system_contamination(
+                    _review_payload(
+                        conn,
+                        row,
+                        source_id_key="source_review_id",
+                        inline_key="source_review_json",
+                        archive_key="source_review_archive_hash",
+                    )
+                )
                 or bool(evidence.get("evidence_invalidated"))
             ):
                 continue
@@ -763,7 +818,7 @@ class AgentScorecardService:
         try:
             from backend.services.v16_brain_snapshot import build_posterior_arbitration
 
-            if review_has_system_contamination(_loads(review["review_json"], {})):
+            if review_has_system_contamination(_review_payload(conn, review)):
                 return {
                     "schema_version": "posterior_arbitration.v1",
                     "status": "excluded_system_contamination",
@@ -773,11 +828,11 @@ class AgentScorecardService:
             if state_table_exists(conn, "supervisor_counterfactual_review"):
                 rows = _execute(
                     conn,
-                    """SELECT c.counterfactual_id, c.review_id, c.trade_id,
+                    f"""SELECT c.counterfactual_id, c.review_id, c.trade_id,
                        c.position_id, c.label, c.confidence, c.horizons_json,
                        c.evidence_json, c.updated_at,
                        r.review_id AS source_review_id,
-                       r.review_json AS source_review_json
+                       r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
                        FROM supervisor_counterfactual_review c
                        LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
                        WHERE (c.review_id=? AND c.review_id <> '') OR c.position_id=?
@@ -789,7 +844,13 @@ class AgentScorecardService:
                     if (
                         not _text(row["source_review_id"])
                         or review_has_system_contamination(
-                            _loads(row["source_review_json"], {})
+                            _review_payload(
+                                conn,
+                                row,
+                                source_id_key="source_review_id",
+                                inline_key="source_review_json",
+                                archive_key="source_review_archive_hash",
+                            )
                         )
                         or bool(evidence.get("evidence_invalidated"))
                     ):
@@ -809,7 +870,7 @@ class AgentScorecardService:
                     if len(counterfactuals) >= 10:
                         break
             review_dict = dict(review)
-            review_dict["review_json"] = review_dict.get("review_json")
+            review_dict["review_json"] = _review_payload(conn, review)
             return build_posterior_arbitration(trade_reviews=[review_dict], counterfactuals=counterfactuals) | {
                 "counterfactuals": counterfactuals,
             }
