@@ -96,6 +96,14 @@ async function parseResponse<T>(response: Response): Promise<T> {
   return contentType.includes("application/json") ? response.json() as Promise<T> : response.text() as Promise<T>;
 }
 
+async function persistRefreshMaterial(material: string | undefined): Promise<void> {
+  if (!material) return;
+  const stored = await storeRefreshMaterial(material);
+  if (isTauri() && !stored) {
+    throw new Error("桌面端无法保存登录会话，请检查 Windows 凭据管理器后重试");
+  }
+}
+
 async function refreshFromServer(failedToken: string | null): Promise<string | null> {
   const refresh = async () => {
     const current = getAccessToken();
@@ -106,7 +114,7 @@ async function refreshFromServer(failedToken: string | null): Promise<string | n
     const result = await parseResponse<LoginResponse>(response);
     const token = extractLoginToken(result);
     if (!token) return null;
-    if (result.refresh_token) void storeRefreshMaterial(result.refresh_token);
+    await persistRefreshMaterial(result.refresh_token);
     setAccessToken(token);
     window.dispatchEvent(new CustomEvent("quant-auth-token", { detail: { token } }));
     resetUnauthorizedCoordinator();
@@ -159,7 +167,7 @@ export async function login(payload: LoginPayload): Promise<LoginResponse> {
   const result = await postJson<LoginResponse>("/api/auth/login", payload);
   const token = extractLoginToken(result);
   if (!token) throw new Error("登录响应缺少 token");
-  if (result.refresh_token) void storeRefreshMaterial(result.refresh_token);
+  await persistRefreshMaterial(result.refresh_token);
   setAccessToken(token);
   window.dispatchEvent(new CustomEvent("quant-auth-token", { detail: { token } }));
   return result;

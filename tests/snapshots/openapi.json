@@ -1551,7 +1551,7 @@
             "type": "string"
           },
           "expires_in": {
-            "default": 900,
+            "default": 86400,
             "title": "Expires In",
             "type": "integer"
           },
@@ -3343,7 +3343,7 @@
             "type": "integer"
           },
           "expires_in": {
-            "default": 900,
+            "default": 86400,
             "title": "Expires In",
             "type": "integer"
           },

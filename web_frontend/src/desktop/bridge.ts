@@ -30,7 +30,8 @@ export async function storeRefreshMaterial(material: string): Promise<boolean> {
   if (!isTauri() || !material) return false;
   try {
     await invoke("set_refresh_material", { request: { account: REFRESH_MATERIAL_ACCOUNT, material } });
-    return true;
+    const stored = await invoke<{ material: string | null }>("get_refresh_material", { account: REFRESH_MATERIAL_ACCOUNT });
+    return stored.material === material;
   } catch {
     return false;
   }
