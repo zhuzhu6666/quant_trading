@@ -94,11 +94,11 @@ OpenAPI/集成测试必须验证带凭证请求、refresh、logout 和预检行�
 
 ### 3.4 Token 生命周期
 
-- access token 只保存在 renderer 内存，不进入 localStorage、IndexedDB、日志、
+- access token 24 小时有效，只保存在 renderer 内存，不进入 localStorage、IndexedDB、日志、
   URL、研究 snapshot 或 Tauri command 参数持久化路径；
 - refresh session 由现有 auth contract 管理；
 - 桌面重新启动时从 Windows Credential Manager 读取 refresh 所需的安全材料，
-  重新换取短 access token；
+  重新换取 access token；
 - step-up 只在需要时通过现有服务端 endpoint 完成，不在桌面本地验证密码；
 - logout/401 family revoke 后清理内存 token、关闭 WS、取消 query，并按现有
   auth contract 进入登录页；

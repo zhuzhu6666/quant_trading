@@ -22,7 +22,7 @@ from fastapi import Depends, Header, HTTPException, status
 
 
 JWT_ALGORITHM: Final[str] = "HS256"
-JWT_EXPIRY_SECONDS: Final[int] = 15 * 60
+JWT_EXPIRY_SECONDS: Final[int] = 24 * 60 * 60
 REFRESH_EXPIRY_SECONDS: Final[int] = 7 * 24 * 3600
 WS_TICKET_EXPIRY_SECONDS: Final[int] = 30
 STEP_UP_MAX_AGE_SECONDS: Final[int] = 5 * 60
@@ -87,7 +87,7 @@ def create_access_token(
     auth_time: int | None = None,
     now: int | None = None,
 ) -> str:
-    """Issue a 15-minute Auth v2 access JWT."""
+    """Issue a 24-hour Auth v2 access JWT."""
     issued_at = int(time.time() if now is None else now)
     payload = {
         "sub": str(user),
@@ -311,7 +311,7 @@ def decode_risk_reduction_token(
 ) -> dict[str, Any]:
     """Validate a token for risk-reducing endpoints without PostgreSQL.
 
-    A normal unexpired access token is accepted.  Once its 15-minute access
+    A normal unexpired access token is accepted.  Once its 24-hour access
     lifetime ends, only an Auth v2 token carrying the signed ``risk_reduce``
     scope remains valid, and only until the fixed seven-day safety deadline.
     Legacy/stateless tokens never receive this grace.

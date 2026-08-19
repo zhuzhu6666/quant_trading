@@ -146,7 +146,7 @@
 ### legacy auth 路径
 
 - 状态：`migrating`
-- canonical：Argon2id、短 access、旋转 refresh session、单次 WS ticket、扩张 step-up、durable revocation。
+- canonical：Argon2id、24 小时 access、旋转 refresh session、单次 WS ticket、扩张 step-up、durable revocation。
 - 剩余：SHA-256、legacy access、URL JWT 三个显式兼容开关。
 - 退出：全部客户端迁移后关闭并删除；stop/emergency 的本地可验证风险缩减能力不得受 PG 故障阻断。
 

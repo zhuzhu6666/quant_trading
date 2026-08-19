@@ -18,6 +18,7 @@ assert.match(client, /refreshInFlight/);
 assert.match(client, /navigator\.locks\.request\(AUTH_REFRESH_LOCK, refresh\)/);
 assert.match(client, /current && current !== requestToken/);
 assert.match(client, /runUnauthorizedOnce/);
+assert.match(client, /await persistRefreshMaterial\(result\.refresh_token\)/);
 assert.match(client, /credentials: "include"/);
 assert.match(client, /\/api\/auth\/ws-ticket/);
 assert.match(client, /isTauri\(\) \? DEFAULT_DESKTOP_API_BASE_URL/);
