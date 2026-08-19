@@ -8,20 +8,21 @@
 
 ## 1. 统一开发工作区
 
-`/home/ubuntu/quant_trading` 是前后端统一开发与运行事实工作区，可直接修改：
+`/home/ubuntu/quant_trading` 是服务器端统一开发与运行事实工作区，可直接修改：
 
-- `miniprogram_v2`
-- `web_frontend`
 - `backend`
 - `execution`
 - `alpha`
 - `risk`
 - `monitor`
 - `config`
+- `scripts`
 - 文档与测试
 
-不再按“Windows 只做前端、Linux 只做后端”分工。改动仍需遵守各领域事实源、
-安全边界和针对性验证要求。
+前端代码（`miniprogram_v2` / `web_frontend`）已迁移到 Windows 本地，
+服务器不再包含前端代码、不拉取前端目录、不做前端构建。
+
+服务器改动仍需遵守各领域事实源、安全边界和针对性验证要求。
 
 `.env`、运行数据、日志、数据库和 systemd 仍只在任务明确涉及且完成只读确认后
 按服务器 SOP 操作；统一开发不扩大运行态变更授权。
@@ -76,17 +77,11 @@ Windows 仅在需要平台工具时用于补充验证：
 
 ## 3.1 当前分支/工作区约定
 
-- 所有工作区统一使用 `main` 分支。
-- Windows 可继续使用 sparse checkout，默认保留：
-  - `miniprogram_v2/`
-  - `web_frontend/`
-  - `docs/`
-  - `AGENTS.md`
-  - `README.md`
-  - `.gitignore`
-- 前端、后端、文档和规则均可在 Linux 统一工作区直接修改。
+- 服务器统一使用 `main` 分支，sparse checkout 只包含后端、脚本和文档，
+  不包含 `miniprogram_v2/`、`web_frontend/` 及前端构建产物。
+- 前端代码（`miniprogram_v2` / `web_frontend`）在 Windows 本地独立仓库维护。
 - 运行态、数据库、systemd 和日志验证仍以 Linux 服务器为准。
-- Windows 平台验证产生的必要修正也提交到同一 `main`，不得形成长期分叉。
+- Windows 本地产生的必要修正提交到同一 `main`，不得形成长期分叉。
 
 ## 3.2 当前数据约定
 
@@ -120,26 +115,13 @@ Windows 仅在需要平台工具时用于补充验证：
   - `quant-l2-collector.service` 和 `scripts/run_l2_collector.py` 已移除，不得恢复
 - 这些运行数据不进入 GitHub。
 
-## 3.3 当前小程序图表约定
+## 3.3 客户端与服务器边界
 
-- 小程序收益图当前使用原生页面：
-  - `miniprogram_v2/pages/pnl-chart/index`
-- 图表库使用小程序本地 vendored `uCharts`：
-  - `miniprogram_v2/vendor/ucharts/u-charts.min.js`
-- 不再按 `web-view` / nginx 静态 H5 / `lightweight-charts` 方案理解。
-- 当前小程序没有 `web-view` 业务域名配置权限，因此不要再要求配置 `www.zhuzhu666.icu` 为 web-view 业务域名。
-
-## 3.4 客户端与服务器边界
-
-- `web_frontend/` 是完整 Tauri 桌面端的 renderer 源码；操作台只在本人本地桌面壳中运行，
-  不作为服务器上的公网浏览器静态站点部署。
-- 小程序只保留简洁状态界面；复杂图表、交易明细、风控、学习治理、因子治理和运维调试
-  由本地 Tauri 桌面端承接。
-- 服务器只提供客户端共用的后端 API 与 `/ws/state` WebSocket：
+- 前端代码（`miniprogram_v2` / `web_frontend`）已全部迁移到 Windows 本地，
+  服务器工作树不包含任何前端代码、构建产物或静态资源。
+- 服务器只提供后端 API 与 `/ws/state` WebSocket：
   - `https://www.zhuzhu666.icu` 仅作为 API/WSS 公网入口；
-  - Caddy 只反代到本机 `127.0.0.1:8000`，不托管前端 `index.html`、`dist` 或静态 asset；
-  - 服务器工作树采用后端-only sparse checkout，不拉取或保留 `web_frontend/`、`miniprogram_v2/`
-    和前端构建产物。
+  - Caddy 反代到本机 `127.0.0.1:8000`，不托管前端静态资源。
 - 旧 Web Console 打包产物、旧小程序 H5/web-view 静态入口、旧 Nginx H5 路线均不再保留。
 
 ## 4. 遇到问题时的默认顺序

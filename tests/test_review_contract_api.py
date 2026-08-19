@@ -5,8 +5,53 @@ from backend.api import risk as risk_api
 from backend.services.review_contract import (
     build_execution_quality_evidence,
     build_system_issue_context,
+    classify_4label_outcome,
 )
 
+
+
+
+def test_non_factor_responsibilities_unify_factor_penalty_exclusions():
+    """B1/B2: execution_timing / operator_intervention are excluded from factor
+    penalty, and the exclusion vocabulary is the single shared authority."""
+    from backend.services.failure_taxonomy import FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES
+    from backend.services.review_contract import NON_FACTOR_RESPONSIBILITIES
+
+    assert "execution_timing" in NON_FACTOR_RESPONSIBILITIES
+    assert "operator_intervention" in NON_FACTOR_RESPONSIBILITIES
+    assert "execution" in NON_FACTOR_RESPONSIBILITIES
+    assert "exit" in NON_FACTOR_RESPONSIBILITIES
+    assert "holding" in NON_FACTOR_RESPONSIBILITIES
+    assert FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES == NON_FACTOR_RESPONSIBILITIES
+
+
+
+def test_classify_4label_outcome_is_single_authority():
+    """A2: the 4-label rule is the single producer for canonical review labels."""
+    # Profit requires attribution proof: positive_share >= 0.55 -> good_win.
+    assert classify_4label_outcome(pnl=5.0, positive_share=0.7)[0] == "good_win"
+    assert classify_4label_outcome(pnl=5.0, positive_share=0.3)[0] == "lucky_win"
+    # No attribution evidence -> conservative lucky_win (never invents good_win).
+    assert classify_4label_outcome(pnl=5.0, positive_share=None)[0] == "lucky_win"
+    # High-conviction loss -> bad_loss; low-conviction, not avoidable -> good_loss.
+    assert classify_4label_outcome(pnl=-2.0, entry_score=0.8)[0] == "bad_loss"
+    assert classify_4label_outcome(pnl=-2.0, entry_score=0.3)[0] == "good_loss"
+    # Avoidable low-conviction loss with conflict -> bad_loss.
+    label, conflict, weak_entry, avoidable = classify_4label_outcome(
+        pnl=-2.0,
+        entry_score=0.3,
+        positive_share=0.3,
+        has_entry_context=True,
+        has_attribution=True,
+        pos_mc=1.0,
+        neg_mc=-0.5,
+        factor_conflict_ratio=0.45,
+        effective_alpha_factor_count=3,
+    )
+    assert label == "bad_loss"
+    assert conflict is True
+    assert weak_entry is True
+    assert avoidable is True
 
 def test_unknown_broker_close_price_contaminates_learning_without_hiding_money_pnl():
     issue = build_system_issue_context(

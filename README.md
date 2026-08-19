@@ -6,16 +6,17 @@
 
 ## 当前状态
 
-截至 2026-08-12 的发布状态快照：
+截至 2026-08-19 的发布状态快照：
 
-- P0 保护现场已完成；P2 canonical risk、P3 证据/记忆/effect、P4 V16 因果调度已完成。
-- P1 的代码与历史污染修复已完成，但仍处于 `runtime acceptance`：还需要真实 post-repair broker deal、重启 replay 和完整持仓生命周期证据。
-- P5 架构收敛持续进行；每个批次都要删除被替代的 writer、重算、fallback 和无意义 wrapper。
-- P6 Demo 观察/毕业仍被前置正确性和真实运行证据阻塞。
-- 最新服务器快照记录 live loop 由 operator 手动停止、当前无持仓，readiness 保持 `no_new_risk`；这不是 live 自治已毕业的状态。
-- Safety v2 仍为 `shadow/observing`；generation、execution outcome、governance enforce 和 PG job queue 等后续发布开关没有因单测或 readiness 自动推进。
+- S0–S5 全库清空重建（`state_v1` → runtime 75 表 + `canonical_v2` 9 事件表）已完成；冷启动与业务表重建（S7.1–S7.3）与代码修复（S7.4）已完成。
+- S7.3 重建遗留的 schema 欠账已全部收敛（迁移 0019–0024）：128 个缺失二级索引补齐、6 张极简表补 63 列、7 张漏建活跃表物归原主、`proposal_registry` 缺列与两处索引契约修复。全量回归 **2782 passed / 12 skipped / 0 failed**，迁移台账 v24 / ok / mismatches 0。
+- 双服务（quant-backend / quant-learning-worker）已受控重启加载最新工作区代码并运行验收通过（cTrader 认证 OK、cron 多轮执行成功、无 missing-index 报错）。
+- **S7.6 进化闭环首验仍待真实交易证据**：需等第一笔真实平仓 → canonical `trade_review` 事件 → sample → posterior/effect 链自然闭合，方能更新 README 首页与验收矩阵。
+- P1 代码与历史污染修复完成，仍处于 `runtime acceptance`：还差真实 post-repair broker deal、重启 replay 和完整持仓生命周期证据。
+- P5 架构收敛持续进行；每个批次删除被替代的 writer、重算、fallback 和无意义 wrapper（最近一批已净删 20 个 backfill/reconcile 脚本、`oms.py`/`algos.py`/`factor_engine.py`/`paper_service.py` 等旧路径）。
+- live loop 当前由 operator 手动停止、无持仓，readiness 保持 `no_new_risk`；Safety v2 仍为 `shadow/observing`；generation / execution outcome / governance enforce / PG job queue 等发布开关未自动推进。
 
-详细阶段、运行姿态和未满足证据见 [分期修复发布状态](docs/phased-repair-rollout-status.md)。
+详细阶段、运行姿态、批次记录和未满足证据见 [分期修复发布状态](docs/phased-repair-rollout-status.md)；剩余待办清单见 [接续总览](docs/planning/handoff-next-batches-2026-08-18.md)。
 
 ## 系统主链
 

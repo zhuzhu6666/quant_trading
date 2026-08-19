@@ -80,19 +80,22 @@ class RedundancyDetector:
         conn = _connect(self.db_path, read_only=True)
         try:
             for name in names:
+                rows = []
                 try:
-                    rows = conn.execute(
-                        _p(self.db_path, """
-                        SELECT normalized_value
-                        FROM decision_factor_snapshot
-                        WHERE factor=?
-                        ORDER BY id DESC
-                        LIMIT ?
-                        """),
-                        (name, int(limit_per_factor)),
-                    ).fetchall()
+                    from backend.services.canonical_v2_reader import iter_decision_factor_snapshots_by_factor
+                    snapshots = iter_decision_factor_snapshots_by_factor(conn, name, limit=int(limit_per_factor))
+                    if snapshots:
+                        rows = [{"normalized_value": s.get("normalized_value")} for s in snapshots]
                 except Exception:
-                    rows = []
+                    pass
+                if not rows:
+                    try:
+                        rows = conn.execute(
+                            _p(self.db_path, "SELECT normalized_value FROM decision_factor_snapshot WHERE factor=? ORDER BY id DESC LIMIT ?"),
+                            (name, int(limit_per_factor)),
+                        ).fetchall()
+                    except Exception:
+                        rows = []
                 series = []
                 for row in rows:
                     try:

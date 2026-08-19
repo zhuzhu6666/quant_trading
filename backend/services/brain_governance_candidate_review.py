@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, state_table_columns, state_table_exists
-from backend.services.agent_governance import AgentBriefingContextService, AgentScorecardService
+from backend.services.agent_briefing import AgentBriefingContextService
+from backend.services.agent_scorecard import AgentScorecardService
 from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
 from backend.services.brain_governance_candidates import (
     BRIDGE_READY_STAGES,

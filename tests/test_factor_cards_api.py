@@ -14,6 +14,7 @@ from backend.services.factor_cards import (
     FactorCardService,
     build_factor_admission_evidence,
 )
+from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.parameter_template_validation import (
     ParameterTemplateValidationService,
@@ -195,54 +196,36 @@ def _seed_factor_card_state(db_path: str) -> None:
                 1_860_000.0,
             ),
         )
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, bias_multiplier,
-             old_weight, new_weight, suggestion_ids_json, status, details_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "app_1",
-                1_861_000.0,
-                "factor",
-                "rsi_14",
-                "downweight",
-                0.8,
-                0.25,
-                0.2,
-                json.dumps(["s1"]),
-                "applied",
-                json.dumps({"reason": "approved"}),
-                1_861_000.0,
-            ),
+        conn.commit()
+        store = LearningApplicationStore(db_path)
+        application_id = store.prepare_application(
+            scope_type="factor",
+            scope_key="rsi_14",
+            action="downweight",
+            status="applied",
+            bias_multiplier=0.8,
+            old_weight=0.25,
+            new_weight=0.2,
+            suggestion_ids=["s1"],
+            cycle_ts=1_861_000.0,
+            details={"reason": "approved"},
         )
-        conn.execute(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status, observed_trade_count,
-             baseline_trade_count, post_avg_reward, baseline_avg_reward, delta_avg_reward,
-             post_win_rate, baseline_win_rate, decision_json, last_review_at, updated_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "app_1",
-                "factor",
-                "rsi_14",
-                "downweight",
-                "observing",
-                3,
-                8,
-                -0.02,
-                -0.11,
-                0.09,
-                0.5,
-                0.25,
-                json.dumps({"note": "watch"}),
-                1_862_000.0,
-                1_862_000.0,
-                1_861_000.0,
-            ),
+        store.write_effect(
+            application_id=application_id,
+            scope_key="rsi_14",
+            scope_type="factor",
+            action="downweight",
+            status="observing",
+            observed_trade_count=3,
+            baseline_trade_count=8,
+            post_avg_reward=-0.02,
+            baseline_avg_reward=-0.11,
+            delta_avg_reward=0.09,
+            post_win_rate=0.5,
+            baseline_win_rate=0.25,
+            decision={"note": "watch"},
+            last_review_at=1_862_000.0,
+            updated_at=1_862_000.0,
         )
         conn.commit()
     finally:
@@ -2436,7 +2419,8 @@ def test_apply_position_supervisor_template_switch_requires_approved_suggestion(
         finally:
             conn.close()
         assert suggestion["status"] == "applied"
-        assert application["scope_type"] == "position_supervisor_template"
+        application_details = json.loads(application["details_json"] or "{}")
+        assert application_details.get("scope_type") == "position_supervisor_template"
         overlay_json = json.loads(overlay["overlay_json"])
         assert overlay_json["position_supervisor_template_id"] == "position_supervisor:conservative.v1"
     finally:

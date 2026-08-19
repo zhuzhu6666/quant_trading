@@ -1,7 +1,7 @@
 """backend/core/db.py — 统一数据库路径常量 + 连接管理。
 
 所有数据库路径集中定义，不再硬编码。
-DuckDB 保留时序数据，PostgreSQL state_v1 承载运行时状态。
+DuckDB 保留时序数据，PostgreSQL runtime schema 承载运行时状态。
 """
 
 from __future__ import annotations
@@ -362,18 +362,7 @@ def state_table_columns(conn, table: str) -> set[str]:
 
 STATE_DB_DDL = """
 -- 策略表现 (原 analytics.db)
-CREATE TABLE IF NOT EXISTS strategy_perf (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    strategy_name TEXT NOT NULL,
-    symbol TEXT, timeframe TEXT,
-    total_pnl REAL DEFAULT 0.0,
-    total_trades INTEGER DEFAULT 0,
-    win_rate REAL DEFAULT 0.0,
-    sharpe REAL DEFAULT 0.0,
-    max_drawdown REAL DEFAULT 0.0,
-    meta_json TEXT DEFAULT '{}',
-    updated_at REAL
-);
+-- 注: strategy_perf 表声明已移除(2026-08-19)——全库 0 处真实 SQL 引用,P3 容量审计确认死表;存活代码不读不写该表。
 
 -- 决策日志 (原 decision_log.db)
 CREATE TABLE IF NOT EXISTS decision_log (
@@ -506,13 +495,6 @@ CREATE TABLE IF NOT EXISTS param_tune (
 CREATE TABLE IF NOT EXISTS calibrator (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     data_json TEXT NOT NULL,
-    updated_at REAL
-);
-
--- 同步健康 (原 sync_health.json)
-CREATE TABLE IF NOT EXISTS sync_health (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    status_json TEXT NOT NULL DEFAULT '{}',
     updated_at REAL
 );
 
@@ -685,18 +667,7 @@ CREATE TABLE IF NOT EXISTS evolution_decision (
     decision_id TEXT PRIMARY KEY,
     run_id TEXT DEFAULT '',
     decision_type TEXT NOT NULL,
-    scope_type TEXT DEFAULT '',
-    scope_key TEXT DEFAULT '',
-    action TEXT DEFAULT '',
-    status TEXT DEFAULT '',
-    evidence_json TEXT DEFAULT '{}',
-    risk_verdict_json TEXT DEFAULT '{}',
-    before_json TEXT DEFAULT '{}',
-    after_json TEXT DEFAULT '{}',
-    result_json TEXT DEFAULT '{}',
-    rollback_json TEXT DEFAULT '{}',
-    config_version INTEGER DEFAULT 0,
-    config_hash TEXT DEFAULT '',
+    decision_json TEXT NOT NULL DEFAULT '{}',
     payload_hash TEXT NOT NULL DEFAULT '',
     canonical_event_id TEXT NOT NULL DEFAULT '',
     projection_type TEXT NOT NULL DEFAULT 'legacy',
@@ -1235,39 +1206,19 @@ CREATE TABLE IF NOT EXISTS policy_suggestion (
 
 CREATE TABLE IF NOT EXISTS learning_application_log (
     application_id TEXT PRIMARY KEY,
-    cycle_ts REAL NOT NULL DEFAULT 0.0,
-    scope_type TEXT NOT NULL,
-    scope_key TEXT NOT NULL,
-    action TEXT NOT NULL,
-    bias_multiplier REAL DEFAULT 1.0,
-    old_weight REAL DEFAULT 0.0,
-    new_weight REAL DEFAULT 0.0,
-    suggestion_ids_json TEXT DEFAULT '[]',
-    status TEXT DEFAULT 'applied',
-    details_json TEXT DEFAULT '{}',
-    mutation_id TEXT NOT NULL DEFAULT '',
-    governance_eligibility_version TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL DEFAULT 0.0
+    run_id TEXT DEFAULT '',
+    source TEXT DEFAULT '',
+    status TEXT DEFAULT 'prepared',
+    details_json TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL DEFAULT 0.0,
+    updated_at REAL DEFAULT 0.0
 );
 
 CREATE TABLE IF NOT EXISTS learning_application_effect (
-    application_id TEXT PRIMARY KEY,
-    scope_type TEXT NOT NULL,
-    scope_key TEXT NOT NULL,
-    action TEXT NOT NULL,
-    status TEXT DEFAULT 'observing',
-    observed_trade_count INTEGER DEFAULT 0,
-    baseline_trade_count INTEGER DEFAULT 0,
-    post_avg_reward REAL DEFAULT 0.0,
-    baseline_avg_reward REAL DEFAULT 0.0,
-    delta_avg_reward REAL DEFAULT 0.0,
-    post_win_rate REAL DEFAULT 0.0,
-    baseline_win_rate REAL DEFAULT 0.0,
-    decision_json TEXT DEFAULT '{}',
-    mutation_id TEXT NOT NULL DEFAULT '',
-    governance_eligibility_version TEXT NOT NULL DEFAULT '',
-    last_review_at REAL DEFAULT 0.0,
-    updated_at REAL NOT NULL DEFAULT 0.0,
+    effect_id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL DEFAULT '',
+    scope TEXT DEFAULT '',
+    effect_json TEXT NOT NULL DEFAULT '{}',
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
@@ -1441,8 +1392,8 @@ CREATE INDEX IF NOT EXISTS idx_factor_contribution_review_factor ON factor_contr
 CREATE INDEX IF NOT EXISTS idx_experience_memory_trade ON experience_memory(trade_id);
 CREATE INDEX IF NOT EXISTS idx_experience_memory_regime ON experience_memory(regime_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_policy_suggestion_scope ON policy_suggestion(scope_type, scope_key, status);
-CREATE INDEX IF NOT EXISTS idx_learning_application_scope ON learning_application_log(scope_type, scope_key, cycle_ts);
-CREATE INDEX IF NOT EXISTS idx_learning_application_effect_scope ON learning_application_effect(scope_type, scope_key, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_learning_application_scope ON learning_application_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_learning_application_effect_scope ON learning_application_effect(scope, created_at);
 CREATE INDEX IF NOT EXISTS idx_parameter_template_registry_factor ON parameter_template_registry(factor_id, regime_key, template_version, active);
 CREATE INDEX IF NOT EXISTS idx_parameter_template_active_factor ON parameter_template_active(factor_id, regime_key, updated_at);
 CREATE INDEX IF NOT EXISTS idx_parameter_template_switch_log_factor ON parameter_template_switch_log(factor_id, regime_key, created_at);
@@ -1816,6 +1767,310 @@ _init_lock = threading.Lock()
 _initialized = False
 
 
+def _ensure_pg_business_tables() -> None:
+    """Create missing PostgreSQL business tables after S5 wipe.
+
+    Uses a plain psycopg connection (not RuntimeStateConnection) to bypass
+    the DDL interception layer. All DDL uses CREATE TABLE IF NOT EXISTS.
+    Tables are created in the runtime schema.
+    """
+    if not state_pg_enabled():
+        return
+    import psycopg as _psycopg
+    dsn = state_pg_dsn()
+    conn = _psycopg.connect(dsn)
+    try:
+        conn.execute(f'SET search_path TO "{STATE_SCHEMA}", public')
+        for ddl in _PG_BUSINESS_TABLES_DDL:
+            try:
+                conn.execute(ddl)
+            except Exception:
+                pass  # Table may already exist
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
+# DDL for all business tables that must exist at runtime.
+# Columns match the original state_v1 schema; types use PostgreSQL natives.
+_PG_BUSINESS_TABLES_DDL: list[str] = [
+    # --- evolution ledger ---
+    """
+    CREATE TABLE IF NOT EXISTS evolution_run (
+        run_id TEXT PRIMARY KEY,
+        run_type TEXT NOT NULL,
+        trigger_source TEXT DEFAULT '',
+        status TEXT DEFAULT 'running',
+        config_version INTEGER DEFAULT 0,
+        config_hash TEXT DEFAULT '',
+        summary_json TEXT DEFAULT '{}',
+        started_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        ended_at DOUBLE PRECISION DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS evolution_decision (
+        decision_id TEXT PRIMARY KEY,
+        run_id TEXT DEFAULT '',
+        decision_type TEXT NOT NULL DEFAULT '',
+        decision_json TEXT NOT NULL DEFAULT '{}',
+        payload_hash TEXT NOT NULL DEFAULT '',
+        canonical_event_id TEXT NOT NULL DEFAULT '',
+        projection_type TEXT NOT NULL DEFAULT 'legacy',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS runtime_config_snapshot (
+        config_version INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        config_hash TEXT DEFAULT '', source TEXT DEFAULT '',
+        config_json TEXT NOT NULL DEFAULT '{}', run_id TEXT DEFAULT '',
+        mutation_id TEXT NOT NULL DEFAULT '',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS runtime_config_overlay (
+        overlay_id TEXT PRIMARY KEY, overlay_json TEXT NOT NULL DEFAULT '{}',
+        overlay_hash TEXT DEFAULT '', source TEXT DEFAULT '',
+        run_id TEXT DEFAULT '', mutation_id TEXT NOT NULL DEFAULT '',
+        legacy_authority_json TEXT NOT NULL DEFAULT '{}',
+        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_catalog_snapshot (
+        snapshot_id TEXT PRIMARY KEY, run_id TEXT DEFAULT '',
+        catalog_hash TEXT DEFAULT '', catalog_json TEXT NOT NULL DEFAULT '[]',
+        source TEXT DEFAULT '',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0)
+    """,
+    # --- autonomous learning ---
+    """
+    CREATE TABLE IF NOT EXISTS evolution_events (
+        id SERIAL PRIMARY KEY,
+        timestamp DOUBLE PRECISION NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS autonomous_learning_sample (
+        sample_id TEXT PRIMARY KEY,
+        sample_type TEXT NOT NULL,
+        source_table TEXT DEFAULT '',
+        source_id TEXT DEFAULT '',
+        features_json TEXT NOT NULL DEFAULT '{}',
+        label TEXT DEFAULT '',
+        label_status TEXT DEFAULT 'pending',
+        train_weight DOUBLE PRECISION DEFAULT 0.0,
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        updated_at DOUBLE PRECISION DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS position_supervisor_trace (
+        trace_id TEXT PRIMARY KEY,
+        position_id TEXT DEFAULT '',
+        suggestion_id TEXT DEFAULT '',
+        stage TEXT DEFAULT '',
+        execution_status TEXT DEFAULT '',
+        trace_json TEXT NOT NULL DEFAULT '{}',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS experience_pattern_stats (
+        id SERIAL PRIMARY KEY,
+        scope TEXT NOT NULL,
+        pattern_key TEXT NOT NULL,
+        raw_count INTEGER DEFAULT 0,
+        raw_avg_reward DOUBLE PRECISION DEFAULT 0.0,
+        effective_count INTEGER DEFAULT 0,
+        effective_avg_reward DOUBLE PRECISION DEFAULT 0.0,
+        weighted_avg_reward DOUBLE PRECISION DEFAULT 0.0,
+        fingerprint TEXT DEFAULT '',
+        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS policy_suggestion (
+        suggestion_id TEXT PRIMARY KEY,
+        source TEXT DEFAULT '',
+        source_agent TEXT DEFAULT '',
+        action TEXT NOT NULL DEFAULT '',
+        scope TEXT DEFAULT '',
+        status TEXT DEFAULT 'proposed',
+        details_json TEXT NOT NULL DEFAULT '{}',
+        applied_mutation_id TEXT DEFAULT '',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        updated_at DOUBLE PRECISION DEFAULT 0.0
+    )
+    """,
+    # --- learning application ---
+    """
+    CREATE TABLE IF NOT EXISTS learning_application_log (
+        application_id TEXT PRIMARY KEY,
+        run_id TEXT DEFAULT '',
+        source TEXT DEFAULT '',
+        status TEXT DEFAULT 'prepared',
+        details_json TEXT NOT NULL DEFAULT '{}',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        updated_at DOUBLE PRECISION DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS learning_application_effect (
+        effect_id TEXT PRIMARY KEY,
+        application_id TEXT NOT NULL DEFAULT '',
+        scope TEXT DEFAULT '',
+        effect_json TEXT NOT NULL DEFAULT '{}',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    # --- factor lifecycle ---
+    """
+    CREATE TABLE IF NOT EXISTS factor_lifecycle_state (
+        factor_id TEXT PRIMARY KEY,
+        stage TEXT NOT NULL DEFAULT 'SHADOW',
+        origin TEXT DEFAULT '',
+        artifact_hash TEXT DEFAULT '',
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        updated_at DOUBLE PRECISION DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_runtime_projection (
+        factor_id TEXT PRIMARY KEY,
+        projection_json TEXT NOT NULL DEFAULT '{}',
+        loaded_at DOUBLE PRECISION DEFAULT 0.0,
+        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_health (
+        factor_id TEXT PRIMARY KEY,
+        health_score DOUBLE PRECISION DEFAULT 0.0,
+        status TEXT DEFAULT 'UNKNOWN',
+        rolling_ic DOUBLE PRECISION DEFAULT 0.0,
+        components_json TEXT NOT NULL DEFAULT '{}',
+        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    # --- brain / V16 ---
+    """
+    CREATE TABLE IF NOT EXISTS brain_governance_candidate (
+        candidate_id TEXT PRIMARY KEY,
+        control_surface TEXT DEFAULT '',
+        target_scope TEXT DEFAULT '',
+        status TEXT DEFAULT 'active',
+        candidate_json TEXT NOT NULL DEFAULT '{}',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        updated_at DOUBLE PRECISION DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS v16_brain_command (
+        command_id TEXT PRIMARY KEY,
+        target_agent TEXT NOT NULL DEFAULT '',
+        authority_issued_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        status TEXT DEFAULT 'available',
+        command_json TEXT NOT NULL DEFAULT '{}',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        updated_at DOUBLE PRECISION DEFAULT 0.0
+    )
+    """,
+    # --- governance ---
+    """
+    CREATE TABLE IF NOT EXISTS governance_mutation_intent (
+        mutation_id TEXT PRIMARY KEY,
+        stage TEXT NOT NULL DEFAULT 'reserved',
+        intent_json TEXT NOT NULL DEFAULT '{}',
+        error_stage TEXT DEFAULT '',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        updated_at DOUBLE PRECISION DEFAULT 0.0
+    )
+    """,
+    # --- model influence ---
+    """
+    CREATE TABLE IF NOT EXISTS model_influence_decision (
+        decision_id TEXT PRIMARY KEY,
+        model_type TEXT DEFAULT '',
+        model_version TEXT DEFAULT '',
+        influence_json TEXT NOT NULL DEFAULT '{}',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    # --- release / incident ---
+    """
+    CREATE TABLE IF NOT EXISTS release_run (
+        run_id TEXT PRIMARY KEY,
+        status TEXT DEFAULT 'started',
+        details_json TEXT NOT NULL DEFAULT '{}',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        updated_at DOUBLE PRECISION DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS release_approval_event (
+        event_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL DEFAULT '',
+        actor TEXT DEFAULT '',
+        decision TEXT DEFAULT '',
+        reason TEXT DEFAULT '',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    # --- recovery position ---
+    """
+    CREATE TABLE IF NOT EXISTS recovery_position_state (
+        position_id TEXT PRIMARY KEY,
+        recovery_json TEXT NOT NULL DEFAULT '{}',
+        last_seen_at DOUBLE PRECISION DEFAULT 0.0,
+        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    # --- trade review / decision ledger (canonical_v2 event types) ---
+    """
+    CREATE TABLE IF NOT EXISTS trade_outcome_review (
+        review_id TEXT PRIMARY KEY,
+        review_json TEXT NOT NULL DEFAULT '{}',
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS decision_ledger (
+        decision_id TEXT PRIMARY KEY,
+        decision_json TEXT NOT NULL DEFAULT '{}',
+        decision_ts DOUBLE PRECISION DEFAULT 0.0,
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS order_lifecycle_event (
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT DEFAULT '',
+        event_json TEXT NOT NULL DEFAULT '{}',
+        event_ts DOUBLE PRECISION DEFAULT 0.0,
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS position_lifecycle_event (
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT DEFAULT '',
+        event_json TEXT NOT NULL DEFAULT '{}',
+        event_ts DOUBLE PRECISION DEFAULT 0.0,
+        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
+    )
+    """,
+]
+
+
 def init_all() -> None:
     """Validate runtime database prerequisites without applying schema DDL."""
     global _initialized
@@ -1824,6 +2079,7 @@ def init_all() -> None:
             return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         init_state_db()
+        _ensure_pg_business_tables()
         if EXPERIMENTS_DB.exists():
             validate_experiments_db_schema(EXPERIMENTS_DB)
         _initialized = True

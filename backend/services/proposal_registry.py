@@ -1307,24 +1307,15 @@ class ProposalRegistryService:
     def _from_learning_applications(self, conn: Any, *, limit: int, now: float) -> list[dict[str, Any]]:
         if not state_table_exists(conn, "learning_application_log"):
             return []
-        rows = _execute(
-            conn,
-            """
-            SELECT application_id, cycle_ts, scope_type, scope_key, action,
-                   suggestion_ids_json, status, details_json, created_at
-            FROM learning_application_log
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        from backend.services.learning_application_store import LearningApplicationStore
+
         items = []
-        for row in rows:
-            scope_type = _text(row["scope_type"])
-            scope_key = _text(row["scope_key"])
-            action = _text(row["action"])
+        for row in LearningApplicationStore(self.db_path).iter_applications(limit=limit):
+            scope_type = _text(row.get("scope_type"))
+            scope_key = _text(row.get("scope_key"))
+            action = _text(row.get("action"))
             surface = _control_surface(scope_type, action)
-            status = _text(row["status"], "applied")
+            status = _text(row.get("status"), "applied")
             impact = _impact_level(surface, status)
             authority = AgentAuthorityRegistryService().evaluate(
                 "autonomous_learning",
@@ -1335,19 +1326,20 @@ class ProposalRegistryService:
                 impact_level=impact,
             )
             gates = authority["required_gate"]
-            details = _loads(row["details_json"], {})
+            details = dict(row) if isinstance(row, dict) else {}
+            created_at = _safe_float(row.get("created_at"), now)
             items.append(self._proposal(
-                proposal_id=f"learning_application_log:{row['application_id']}",
+                proposal_id=f"learning_application_log:{row.get('application_id')}",
                 source_agent="autonomous_learning",
                 source_ref_type="learning_application_log",
-                source_ref_id=_text(row["application_id"]),
+                source_ref_id=_text(row.get("application_id")),
                 proposal_type=_proposal_type(scope_type, action),
                 proposal_action=action,
                 control_surface=surface,
                 target_scope=_scope(scope_type, scope_key),
                 impact_level=impact,
                 confidence=_safe_float(details.get("confidence")),
-                evidence_refs={"suggestion_ids": _loads(row["suggestion_ids_json"], []), "details": details},
+                evidence_refs={"suggestion_ids": list(row.get("suggestion_ids") or []), "details": details},
                 counter_evidence_refs={},
                 required_gate=gates,
                 risk_verdict=details.get("risk_verdict") or {},
@@ -1357,8 +1349,8 @@ class ProposalRegistryService:
                 status=status,
                 authority_state=authority["authority_state"],
                 route_recommendation=_route(status, impact, False, gates),
-                created_at=_safe_float(row["created_at"], _safe_float(row["cycle_ts"], now)),
-                updated_at=_safe_float(row["created_at"], _safe_float(row["cycle_ts"], now)),
+                created_at=created_at,
+                updated_at=created_at,
             ))
         return items
 
@@ -1368,12 +1360,8 @@ class ProposalRegistryService:
         rows = _execute(
             conn,
             """
-            SELECT d.decision_id, d.run_id, d.decision_type, d.scope_type, d.scope_key, d.action,
-                   status,
-                   COALESCE(p.evidence_json, d.evidence_json) AS evidence_json,
-                   COALESCE(p.risk_verdict_json, d.risk_verdict_json) AS risk_verdict_json,
-                   COALESCE(p.result_json, d.result_json) AS result_json,
-                   COALESCE(p.rollback_json, d.rollback_json) AS rollback_json,
+            SELECT d.decision_id, d.run_id, d.decision_type, d.decision_json,
+                   p.evidence_json, p.result_json, p.rollback_json, p.risk_verdict_json,
                    d.created_at
             FROM evolution_decision d
             LEFT JOIN mutation_payload p ON p.payload_hash=d.payload_hash
@@ -1386,16 +1374,17 @@ class ProposalRegistryService:
         for row in rows:
             if _text(row["decision_type"]) in {"manual_api_mutation", "autonomous_mutation"}:
                 continue
-            scope_type = _text(row["scope_type"])
-            scope_key = _text(row["scope_key"])
-            action = _text(row["action"] or row["decision_type"])
+            meta = _loads(row["decision_json"], {})
+            scope_type = _text(meta.get("scope_type", ""))
+            scope_key = _text(meta.get("scope_key", ""))
+            action = _text(meta.get("action") or row["decision_type"])
             if action in IGNORED_MAINTENANCE_ACTIONS:
                 continue
             decision_evidence = _loads(row["evidence_json"], {})
             if not isinstance(decision_evidence, dict):
                 decision_evidence = {}
             surface = _control_surface(scope_type, action)
-            status = _text(row["status"], "recorded")
+            status = _text(meta.get("status"), "recorded")
             impact = _impact_level(surface, status)
             authority = AgentAuthorityRegistryService().evaluate(
                 "factor_governance",

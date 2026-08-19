@@ -234,6 +234,44 @@ def test_rebuild_learning_state_preserves_non_factor_policy_suggestions(tmp_path
     assert duplicate_backfill is None
 
 
+def test_rebuild_learning_state_does_not_write_factor_pattern_stats(tmp_path):
+    """S2.3 writer convergence: factor-scope ``experience_pattern_stats`` and
+    ``policy_suggestion`` are owned solely by the live policy_suggester path.
+    The legacy batch rebuild must only re-populate experience_memory and must
+    never create or mutate factor-scope pattern stats / suggestions."""
+    db_path = str(tmp_path / "state.db")
+    _init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, pnl, outcome_label,
+             failure_tags_json, review_json, created_at)
+            VALUES ('review_factor', 'trade_factor', 'pos_factor', -1.5, 'bad_loss',
+                    '[]', '{"worst_factor":"rsi_14"}', 10.0)
+            """
+        )
+        learning_backfill.rebuild_learning_state(conn)
+        factor_stats = conn.execute(
+            "SELECT 1 FROM experience_pattern_stats WHERE scope_type='factor'"
+        ).fetchall()
+        factor_suggestions = conn.execute(
+            "SELECT 1 FROM policy_suggestion WHERE scope_type='factor'"
+        ).fetchall()
+        memory = conn.execute(
+            "SELECT append_source FROM experience_memory WHERE source_id='review_factor'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert factor_stats == []
+    assert factor_suggestions == []
+    assert memory  # experience_memory rebuild path stays authoritative
+
+
+
 def test_rebuild_learning_state_excludes_contaminated_review_lineage(tmp_path):
     db_path = str(tmp_path / "state.db")
     _init_db(db_path)

@@ -14,7 +14,13 @@ import re
 
 from backend.core.auth import RequireUser
 import backend.core.db as core_db
+from backend.core.db_helpers import execute as _execute
 from backend.jobs import get_job_manager
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    iter_review_rows,
+    review_row,
+)
 from backend.services.mutation_audit import confirm_header_valid, record_api_mutation
 from backend.services.factor_cards import FactorCardService
 from backend.services.stability import measure
@@ -129,19 +135,6 @@ def _state_conn_for_path(db_path, *, read_only: bool = True):
     conn = core_db.connect_sqlite(db_path, read_only=read_only)
     conn.row_factory = sqlite3.Row
     return conn
-
-
-def _state_sql(conn, sql: str) -> str:
-    if conn.__class__.__module__.split(".", 1)[0] != "psycopg":
-        return sql
-    return sql.replace("%", "%%").replace("?", "%s")
-
-
-def _execute(conn, sql: str, params: Any = None):
-    sql = _state_sql(conn, sql)
-    if params is None:
-        return conn.execute(sql)
-    return conn.execute(sql, params)
 
 
 def _require_governance_confirm(
@@ -1469,19 +1462,30 @@ def _latest_factor_trace_locator(conn, factor_id: str) -> dict:
     factor_key = str(factor_id or "").strip()
     if not factor_key:
         return {}
-    row = _execute(
+    rows = _execute(
         conn,
         """
-        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.exit_decision_id, r.created_at
-        FROM factor_contribution_review f
-        JOIN trade_outcome_review r ON r.review_id = f.review_id
-        WHERE f.factor = ?
-        ORDER BY r.created_at DESC, f.id DESC
-        LIMIT 1
+        SELECT review_id, MAX(id) AS max_id
+        FROM factor_contribution_review
+        WHERE factor = ?
+        GROUP BY review_id
         """,
         (factor_key,),
-    ).fetchone()
-    return _trace_locator_from_review_row(row)
+    ).fetchall()
+    best = None
+    best_key = (0.0, 0)
+    for row in rows:
+        rid = str(row["review_id"] or "")
+        if not rid:
+            continue
+        review = review_row(conn, rid)
+        if review is None:
+            continue
+        key = (float(review.get("created_at") or 0.0), int(row["max_id"] or 0))
+        if best is None or key > best_key:
+            best = review
+            best_key = key
+    return _trace_locator_from_review_row(best)
 
 
 class ReviewRequest(BaseModel):
@@ -2034,32 +2038,12 @@ def get_learning_summary(_user: RequireUser) -> dict:
                 ).fetchone()["c"] or 0)
             except sqlite3.OperationalError:
                 lifecycle_count = 0
-            review_rows = _execute(
-                conn,
-                """
-                SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                       entry_quality, hold_quality, exit_quality, regime_fit_score,
-                       execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                       summary_text, review_json, created_at
-                FROM trade_outcome_review
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ).fetchone()
+            all_review_rows = iter_review_rows(conn, limit=0)
+            all_review_rows.sort(key=lambda r: float(r.get("created_at") or 0.0), reverse=True)
+            review_rows = all_review_rows[0] if all_review_rows else None
             visible_reviews = []
             if review_rows:
-                rows = _execute(
-                    conn,
-                    f"""
-                    SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                           entry_quality, hold_quality, exit_quality, regime_fit_score,
-                           execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                           summary_text, review_json{_review_archive_select(conn)}, created_at
-                    FROM trade_outcome_review
-                    ORDER BY created_at DESC
-                    LIMIT 200
-                    """
-                ).fetchall()
+                rows = all_review_rows[:200]
                 visible_reviews = [
                     item for item in (_parse_review_row(row, conn) for row in rows)
                     if _is_visible_review(item)
@@ -2273,19 +2257,9 @@ def get_reviews(
         return learning_reviews_fact_payload(cached)
     conn = _state_conn(read_only=True)
     try:
-        rows = _execute(
-            conn,
-            f"""
-            SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                   entry_quality, hold_quality, exit_quality, regime_fit_score,
-                   execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                   summary_text, review_json{_review_archive_select(conn)}, created_at
-            FROM trade_outcome_review
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        rows = iter_review_rows(conn, limit=0)
+        rows.sort(key=lambda r: float(r.get("created_at") or 0.0), reverse=True)
+        rows = rows[: max(1, int(limit))]
         items = [
             item for item in (_parse_review_row(row, conn) for row in rows)
             if _is_visible_review(item)
@@ -3323,38 +3297,38 @@ def get_applications(
 ) -> dict:
     cache_key = f"applications:{int(limit)}"
     def _compute() -> dict:
-        conn = _state_conn(read_only=True)
+        from backend.services.learning_application_store import (
+            LearningApplicationStore,
+        )
+
+        store = LearningApplicationStore()
         try:
-            rows = _execute(
-                conn,
-                """
-                SELECT l.application_id, l.cycle_ts, l.scope_type, l.scope_key, l.action, l.bias_multiplier,
-                       l.old_weight, l.new_weight, l.suggestion_ids_json, l.status, l.details_json, l.created_at,
-                       e.observed_trade_count, e.baseline_trade_count, e.post_avg_reward, e.baseline_avg_reward,
-                       e.delta_avg_reward, e.post_win_rate, e.baseline_win_rate, e.last_review_at
-                FROM learning_application_log l
-                LEFT JOIN learning_application_effect e
-                  ON e.application_id = l.application_id
-                ORDER BY l.created_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            effects_by_app: dict[str, dict] = {}
+            for eff in store.iter_effects():
+                effects_by_app.setdefault(str(eff.get("application_id") or ""), eff)
             items = []
-            for row in rows:
-                item = dict(row)
-                try:
-                    item["suggestion_ids"] = json.loads(item.pop("suggestion_ids_json") or "[]")
-                except Exception:
-                    item["suggestion_ids"] = []
-                try:
-                    item["details"] = json.loads(item.pop("details_json") or "{}")
-                except Exception:
-                    item["details"] = {}
+            for app in store.iter_applications(limit=limit):
+                item = dict(app)
+                effect = effects_by_app.get(str(app.get("application_id") or "")) or {}
+                for key in (
+                    "observed_trade_count",
+                    "baseline_trade_count",
+                    "post_avg_reward",
+                    "baseline_avg_reward",
+                    "delta_avg_reward",
+                    "post_win_rate",
+                    "baseline_win_rate",
+                    "last_review_at",
+                ):
+                    item[key] = effect.get(key)
+                item["suggestion_ids"] = list(item.get("suggestion_ids") or [])
+                item["details"] = dict(
+                    item.get("application_state") or {}
+                ) if item.get("application_state") else {}
                 items.append(item)
             return applications_fact_payload({"items": items})
         finally:
-            conn.close()
+            pass
 
     payload = _learning_cached_read(cache_key, _compute, timing_name="api.learning.applications")
     return applications_fact_payload(payload)

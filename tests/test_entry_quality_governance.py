@@ -97,9 +97,12 @@ def test_demo_applies_one_entry_quality_control_as_committed_mutation(tmp_path, 
 
     conn = sqlite3.connect(db_path)
     try:
-        cycle_ts = conn.execute(
-            "SELECT cycle_ts FROM learning_application_log"
-        ).fetchone()[0]
+        from backend.services.learning_application_store import LearningApplicationStore
+
+        app = LearningApplicationStore(str(db_path)).latest_application(
+            scope_type="entry_quality", scope_key="weak_signal"
+        )
+        cycle_ts = float((app or {}).get("created_at") or 0.0)
         for idx in range(5):
             conn.execute(
                 """
@@ -157,13 +160,16 @@ def test_demo_applies_one_entry_quality_control_as_committed_mutation(tmp_path, 
     assert reconciled["observed"] == 1
     conn = sqlite3.connect(db_path)
     try:
-        effect = conn.execute(
-            "SELECT observed_trade_count, decision_json FROM learning_application_effect"
-        ).fetchone()
+        from backend.services.learning_application_store import LearningApplicationStore
+
+        effect = LearningApplicationStore(str(db_path)).latest_effect(
+            scope_key="weak_signal", scope_type="entry_quality"
+        )
     finally:
         conn.close()
-    decision = json.loads(effect[1])
-    assert effect[0] == 5
+    observed = int((effect or {}).get("observed_trade_count") or 0)
+    decision = dict((effect or {}).get("decision") or {})
+    assert observed == 5
     assert decision["evidence_quality"]["raw_post_count"] == 6
     assert decision["entry_quality_effect"]["post"]["distinct_positions"] == 5
     assert (

@@ -47,12 +47,6 @@ def run_paper(args):
 
     if args.include_shadow_factors:
         logger.info(f"  [T15.5] shadow factors ENABLED (top_k={args.shadow_top_k})")
-    if args.factor_health_report:
-        logger.info(f"  [T14.1] 跑因子健康评估 (落盘 factor_health_report.txt)")
-
-    # T14.1 因子健康评估
-    if args.factor_health_report:
-        _run_factor_health_report(args)
 
     if args.use_router:
         logger.info(f"  [T1] MABRouter 启用: {args.router_arms} (seed={args.router_seed})")
@@ -155,53 +149,6 @@ def run_paper(args):
     logger.info(f"Trade log saved: {csv_path}")
 
     return report
-
-
-def _run_factor_health_report(args):
-    """T14.1: 跑 paper 前的因子健康评估."""
-    import json as _json
-    from alpha.ic_tracker import ICTracker
-    from alpha.factor_engine import FactorEngine  # batch-only, offline analysis
-    from alpha.factor_health import FactorHealth
-    from data.store import DataStore
-
-    store = DataStore("data/ctrader_data.duckdb")
-    df = store.load_bars(args.symbol, args.timeframe)
-    if df.empty:
-        logger.warning(f"[T14.1] 无 {args.timeframe} 数据, 跳过健康评估")
-        return
-
-    from data.external_loader import ExternalDataLoader
-    ext = ExternalDataLoader("data/ctrader_data.duckdb")
-    ext_df = ext.align_to_bars(df)
-    df = df.join(ext_df, how="left")
-    logger.info(f"[T14.1] 加载 {len(df)} {args.timeframe} bar (含跨资产列, {len(ext_df.columns)} ext cols)")
-
-    engine = FactorEngine(df)
-    factor_data = engine.compute_all()
-    logger.info(f"[T14.1] 算 {len(factor_data)} 因子值")
-
-    forward_returns = df["close"].pct_change().shift(-1).fillna(0).values
-    ic_tracker = ICTracker(window=min(5000, len(df)))
-    for name, vals in factor_data.items():
-        ic_tracker.update(name, vals, forward_returns)
-
-    health = FactorHealth(ic_tracker, active_factor_names=[])
-    report2 = health.report()
-
-    active_now = health.get_active_factors(min_score=70)
-    health2 = FactorHealth(ic_tracker, active_factor_names=active_now)
-    report2 = health2.report()
-
-    out_dir = Path("data/charts")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    txt_path = out_dir / "factor_health_report.txt"
-    txt_path.write_text(report2, encoding="utf-8")
-    json_path = out_dir / "factor_health_report.json"
-    json_path.write_text(_json.dumps(health2.report_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info(f"[T14.1] 报告落盘: {txt_path}, {json_path}")
-    logger.info(f"[T14.1] ACTIVE 因子: {active_now}")
-    logger.info("\n" + report2)
 
 
 def _run_paper_with_router(args, store, event_sizing):

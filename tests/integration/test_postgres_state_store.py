@@ -81,7 +81,6 @@ def test_versioned_state_migration_executes_in_disposable_pg_temp_schema() -> No
         pytest.skip("QUANT_STATE_PG_DSN is not configured")
 
     from backend.core.state_schema_migrations import (
-        STATE_SCHEMA_BASELINE_TABLES,
         STATE_SCHEMA_MIGRATIONS,
         require_state_schema_version,
         run_state_schema_migrations,
@@ -111,7 +110,21 @@ def test_versioned_state_migration_executes_in_disposable_pg_temp_schema() -> No
     try:
         conn.execute("SET search_path TO pg_temp")
         conn.execute("CREATE TEMP TABLE migration_connection_ddl_smoke (value INTEGER)")
-        for table in STATE_SCHEMA_BASELINE_TABLES:
+        # STATE_SCHEMA_BASELINE_TABLES 已于 2026-08-18 清空（生产表由 ensure_*
+        # 预建）；migration 0001-0018 仍假设这些运行表在干净 schema 中预存，
+        # 因此集成测试使用迁移期冻结的预存表清单（order_lifecycle_event 由下方独立补建）。
+        _MIGRATION_PREDEPOSIT_TABLES = (
+            "autonomous_learning_sample", "brain_governance_candidate_review",
+            "brain_medium_impact_governance", "brain_state_snapshot", "ctrader_deals",
+            "decision_ledger", "decision_factor_snapshot", "brain_action_plan_eval",
+            "evolution_decision", "experience_memory", "experience_pattern_stats",
+            "factor_catalog_snapshot", "jobs", "learning_application_effect",
+            "learning_application_log", "learning_experiment_reservation",
+            "policy_suggestion", "position_supervisor_trace", "proposal_registry",
+            "runtime_config_overlay", "runtime_config_snapshot", "trade_outcome_review",
+            "v16_brain_command",
+        )
+        for table in _MIGRATION_PREDEPOSIT_TABLES:
             if table == "autonomous_learning_sample":
                 conn.execute(
                     """CREATE TEMP TABLE autonomous_learning_sample (
@@ -259,6 +272,503 @@ def test_versioned_state_migration_executes_in_disposable_pg_temp_schema() -> No
                 )
             else:
                 conn.execute(f'CREATE TEMP TABLE "{table}" (seed INTEGER)')
+
+        # baseline 已于 2026-08-18 清空（表由生产 ensure_* 预建）；migration
+        # 0001 仍会对 order_lifecycle_event 做 ADD COLUMN + INDEX，干净 schema
+        # 下需先补建该依赖表（含 index 所需 event_ts 列）。
+        conn.execute(
+            """CREATE TEMP TABLE order_lifecycle_event (
+                event_id TEXT PRIMARY KEY,
+                event_ts DOUBLE PRECISION NOT NULL DEFAULT 0.0
+            )"""
+        )
+
+        # 0019 二级索引回填引用了一大批"生产代码 DDL 预建、迁移链从不建表"的
+        # 表（Test 环境既无夹具 create 也无迁移 CREATE，否则会 UndefinedTable）。
+        # 按生产 ensure_* 预建的真实列建 TEMP 表（列名/类型/DEFAULT 与 runtime
+        # schema 对齐，跳过序列/函数默认值），使 0019 在 pg_temp 模拟的生产
+        # 形态上可重放。此清单来自 S7.3 重建的 runtime 表减去迁移 CREATE 的表。
+        conn.execute("""CREATE TEMP TABLE autonomy_health_snapshot (
+    "snapshot_id" text NOT NULL,
+    "score" double precision NOT NULL DEFAULT 0.0,
+    "posture" text DEFAULT ''::text,
+    "blockers_json" text NOT NULL DEFAULT '[]'::text,
+    "metrics_json" text NOT NULL DEFAULT '{}'::text,
+    "trend_json" text NOT NULL DEFAULT '{}'::text,
+    "source" text DEFAULT ''::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE autonomy_scope_approval_event (
+    "event_id" text NOT NULL,
+    "snapshot_id" text DEFAULT ''::text,
+    "posture" text DEFAULT ''::text,
+    "recommendation_json" text NOT NULL DEFAULT '{}'::text,
+    "actor" text DEFAULT ''::text,
+    "decision" text DEFAULT ''::text,
+    "reason" text DEFAULT ''::text,
+    "boundary_json" text NOT NULL DEFAULT '{}'::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE autonomy_scope_enforcement_event (
+    "event_id" text NOT NULL,
+    "snapshot_id" text DEFAULT ''::text,
+    "posture" text DEFAULT ''::text,
+    "recommendation_json" text NOT NULL DEFAULT '{}'::text,
+    "current_mode" text DEFAULT ''::text,
+    "target_mode" text DEFAULT ''::text,
+    "status" text DEFAULT ''::text,
+    "risk_verdict_json" text NOT NULL DEFAULT '{}'::text,
+    "mutation_json" text NOT NULL DEFAULT '{}'::text,
+    "actor" text DEFAULT ''::text,
+    "reason" text DEFAULT ''::text,
+    "boundary_json" text NOT NULL DEFAULT '{}'::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE brain_action_plan (
+    "plan_id" text NOT NULL,
+    "snapshot_id" text DEFAULT ''::text,
+    "hypothesis_id" text DEFAULT ''::text,
+    "action_type" text DEFAULT ''::text,
+    "status" text DEFAULT 'shadow_recorded',
+    "scope_json" text NOT NULL DEFAULT '{}'::text,
+    "max_impact" text DEFAULT 'none_shadow_only',
+    "risk_class" text DEFAULT ''::text,
+    "critic_verdict" text DEFAULT ''::text,
+    "validation_refs_json" text NOT NULL DEFAULT '{}'::text,
+    "rollback_plan_json" text NOT NULL DEFAULT '{}'::text,
+    "required_services_json" text NOT NULL DEFAULT '[]'::text,
+    "shadow_eval_json" text NOT NULL DEFAULT '{}'::text,
+    "boundary_json" text NOT NULL DEFAULT '{}'::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE brain_governance_candidate (
+    "candidate_id" text NOT NULL,
+    "source_agent" text DEFAULT ''::text,
+    "source_kind" text DEFAULT ''::text,
+    "source_ref_type" text DEFAULT ''::text,
+    "source_ref_id" text DEFAULT ''::text,
+    "proposal_stage" text DEFAULT 'brain_candidate',
+    "capability_scope" text DEFAULT ''::text,
+    "scope_type" text DEFAULT ''::text,
+    "scope_key" text DEFAULT ''::text,
+    "action" text DEFAULT ''::text,
+    "confidence" real DEFAULT 0.0,
+    "evidence_score" real DEFAULT 0.0,
+    "risk_class" text DEFAULT ''::text,
+    "max_impact" text DEFAULT ''::text,
+    "expected_effect_json" text NOT NULL DEFAULT '{}'::text,
+    "evidence_refs_json" text NOT NULL DEFAULT '{}'::text,
+    "counter_evidence_refs_json" text NOT NULL DEFAULT '{}'::text,
+    "risk_verdict_json" text NOT NULL DEFAULT '{}'::text,
+    "decision_policy_json" text NOT NULL DEFAULT '{}'::text,
+    "rollback_plan_json" text NOT NULL DEFAULT '{}'::text,
+    "lineage_json" text NOT NULL DEFAULT '{}'::text,
+    "status" text DEFAULT 'active',
+    "submitted_suggestion_id" text DEFAULT ''::text,
+    "submitted_at" real DEFAULT 0.0,
+    "expires_at" real DEFAULT 0.0,
+    "created_at" real NOT NULL DEFAULT 0.0,
+    "updated_at" real NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE brain_live_ready_guardrail (
+    "guardrail_id" text NOT NULL,
+    "status" text DEFAULT ''::text,
+    "live_capability_lock_json" text NOT NULL DEFAULT '{}'::text,
+    "broker_local_divergence_json" text NOT NULL DEFAULT '{}'::text,
+    "incident_control_json" text NOT NULL DEFAULT '{}'::text,
+    "incident_memory_json" text NOT NULL DEFAULT '{}'::text,
+    "release_rollback_json" text NOT NULL DEFAULT '{}'::text,
+    "p3_p4_evidence_json" text NOT NULL DEFAULT '{}'::text,
+    "action_recommendation_json" text NOT NULL DEFAULT '{}'::text,
+    "risk_precheck_json" text NOT NULL DEFAULT '{}'::text,
+    "boundary_json" text NOT NULL DEFAULT '{}'::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0,
+    "updated_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE brain_low_impact_execution (
+    "execution_id" text NOT NULL,
+    "plan_id" text DEFAULT ''::text,
+    "eval_id" text DEFAULT ''::text,
+    "action_type" text DEFAULT ''::text,
+    "execution_action" text DEFAULT ''::text,
+    "status" text DEFAULT ''::text,
+    "evidence_score" double precision NOT NULL DEFAULT 0.0,
+    "critic_verdict" text DEFAULT ''::text,
+    "comparison_verdict" text DEFAULT ''::text,
+    "risk_verdict_json" text NOT NULL DEFAULT '{}'::text,
+    "rollback_plan_json" text NOT NULL DEFAULT '{}'::text,
+    "result_json" text NOT NULL DEFAULT '{}'::text,
+    "posterior_monitor_json" text NOT NULL DEFAULT '{}'::text,
+    "boundary_json" text NOT NULL DEFAULT '{}'::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0,
+    "updated_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE brain_memory (
+    "memory_id" text NOT NULL,
+    "memory_type" text DEFAULT ''::text,
+    "source_table" text DEFAULT ''::text,
+    "source_id" text DEFAULT ''::text,
+    "symbol" text DEFAULT ''::text,
+    "timeframe" text DEFAULT ''::text,
+    "regime" text DEFAULT ''::text,
+    "text_summary" text DEFAULT ''::text,
+    "structured_json" text NOT NULL DEFAULT '{}'::text,
+    "evidence_score" double precision NOT NULL DEFAULT 0.0,
+    "similarity_score" double precision NOT NULL DEFAULT 0.0,
+    "polarity" text DEFAULT 'neutral',
+    "created_at" double precision NOT NULL DEFAULT 0.0,
+    "last_used_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE evolution_events (
+    "id" integer NOT NULL,
+    "timestamp" double precision NOT NULL,
+    "event_type" text NOT NULL,
+    "payload_json" text NOT NULL DEFAULT '{}'::text
+)""")
+        conn.execute("""CREATE TEMP TABLE evolution_run (
+    "run_id" text NOT NULL,
+    "run_type" text NOT NULL,
+    "trigger_source" text DEFAULT ''::text,
+    "status" text DEFAULT 'running',
+    "config_version" integer DEFAULT 0,
+    "config_hash" text DEFAULT ''::text,
+    "summary_json" text DEFAULT '{}'::text,
+    "started_at" double precision NOT NULL DEFAULT 0.0,
+    "ended_at" double precision DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE experiments (
+    "run_id" text NOT NULL,
+    "experiment_type" text,
+    "params_json" text DEFAULT '{}'::text,
+    "metrics_json" text DEFAULT '{}'::text,
+    "tags_json" text DEFAULT '[]'::text,
+    "artifacts_json" text DEFAULT '[]'::text,
+    "status" text DEFAULT 'running',
+    "timestamp" real,
+    "created_at" real
+)""")
+        conn.execute("""CREATE TEMP TABLE incident_playbook_event (
+    "event_id" text NOT NULL,
+    "playbook_id" text NOT NULL,
+    "event_type" text DEFAULT ''::text,
+    "actor" text DEFAULT ''::text,
+    "status" text DEFAULT ''::text,
+    "evidence_refs_json" text NOT NULL DEFAULT '{}'::text,
+    "notes" text DEFAULT ''::text,
+    "boundary_json" text NOT NULL DEFAULT '{}'::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE incident_playbook_run (
+    "playbook_id" text NOT NULL,
+    "scenario" text DEFAULT ''::text,
+    "severity" text DEFAULT ''::text,
+    "current_mode" text DEFAULT ''::text,
+    "target_mode" text DEFAULT ''::text,
+    "status" text DEFAULT ''::text,
+    "steps_json" text NOT NULL DEFAULT '[]'::text,
+    "risk_precheck_json" text NOT NULL DEFAULT '{}'::text,
+    "release_ref_json" text NOT NULL DEFAULT '{}'::text,
+    "boundary_json" text NOT NULL DEFAULT '{}'::text,
+    "created_by" text DEFAULT ''::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE live_autonomy_unlock_event (
+    "event_id" text NOT NULL,
+    "action" text DEFAULT ''::text,
+    "status" text DEFAULT ''::text,
+    "actor" text DEFAULT ''::text,
+    "reason" text DEFAULT ''::text,
+    "autonomy_mode_before" text DEFAULT ''::text,
+    "autonomy_mode_after" text DEFAULT ''::text,
+    "readiness_json" text NOT NULL DEFAULT '{}'::text,
+    "proposal_registry_json" text NOT NULL DEFAULT '{}'::text,
+    "risk_verdict_json" text NOT NULL DEFAULT '{}'::text,
+    "blockers_json" text NOT NULL DEFAULT '[]'::text,
+    "mutation_json" text NOT NULL DEFAULT '{}'::text,
+    "boundary_json" text NOT NULL DEFAULT '{}'::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE model_canary_review (
+    "review_id" text NOT NULL,
+    "candidate_id" text NOT NULL,
+    "model_type" text NOT NULL,
+    "decision" text NOT NULL,
+    "report_path" text DEFAULT ''::text,
+    "metrics_json" text DEFAULT '{}'::text,
+    "thresholds_json" text DEFAULT '{}'::text,
+    "issues_json" text DEFAULT '[]'::text,
+    "note" text DEFAULT ''::text,
+    "created_at" double precision DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE model_canary_trial (
+    "trial_id" text NOT NULL,
+    "candidate_id" text NOT NULL,
+    "status" text NOT NULL,
+    "metrics_json" text DEFAULT '{}'::text,
+    "thresholds_json" text DEFAULT '{}'::text,
+    "details_json" text DEFAULT '{}'::text,
+    "created_at" double precision DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE model_inference_audit (
+    "inference_id" text NOT NULL,
+    "candidate_id" text NOT NULL,
+    "model_type" text NOT NULL,
+    "mode" text DEFAULT 'advisory',
+    "score" double precision DEFAULT 0.0,
+    "prediction" integer DEFAULT 0,
+    "payload_json" text DEFAULT '{}'::text,
+    "result_json" text DEFAULT '{}'::text,
+    "created_at" double precision DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE model_permission_audit (
+    "audit_id" text NOT NULL,
+    "model_type" text DEFAULT ''::text,
+    "artifact_path" text DEFAULT ''::text,
+    "status" text DEFAULT ''::text,
+    "reason" text DEFAULT ''::text,
+    "capabilities_json" text DEFAULT '{}'::text,
+    "violations_json" text DEFAULT '[]'::text,
+    "context_json" text DEFAULT '{}'::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE model_shadow_candidate (
+    "candidate_id" text NOT NULL,
+    "model_type" text NOT NULL,
+    "artifact_path" text NOT NULL,
+    "artifact_sha256" text NOT NULL,
+    "symbol" text DEFAULT 'XAUUSD+',
+    "timeframe" text DEFAULT 'M5',
+    "status" text DEFAULT 'queued',
+    "gate_decision" text DEFAULT ''::text,
+    "gate_json" text DEFAULT '{}'::text,
+    "registry_version_json" text DEFAULT 'null',
+    "note" text DEFAULT ''::text,
+    "created_at" double precision DEFAULT 0.0,
+    "updated_at" double precision DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE parameter_template_active (
+    "factor_id" text NOT NULL,
+    "regime_key" text NOT NULL DEFAULT ''::text,
+    "template_id" text NOT NULL,
+    "template_version" text NOT NULL,
+    "status" text DEFAULT 'active',
+    "suggestion_id" text DEFAULT ''::text,
+    "context_json" text DEFAULT '{}'::text,
+    "activated_at" double precision NOT NULL DEFAULT 0.0,
+    "updated_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE parameter_template_registry (
+    "template_id" text NOT NULL,
+    "factor_id" text NOT NULL,
+    "regime_key" text DEFAULT ''::text,
+    "template_version" text NOT NULL,
+    "template_role" text DEFAULT 'default',
+    "factor_family" text DEFAULT ''::text,
+    "formula_version" text DEFAULT ''::text,
+    "base_parameter_version" text DEFAULT ''::text,
+    "parameters_json" text DEFAULT '{}'::text,
+    "applicable_regimes_json" text DEFAULT '[]'::text,
+    "avoid_regimes_json" text DEFAULT '[]'::text,
+    "holding_profile_hint_json" text DEFAULT '{}'::text,
+    "evidence_json" text DEFAULT '{}'::text,
+    "source" text DEFAULT 'derived',
+    "active" integer DEFAULT 0,
+    "created_at" double precision NOT NULL DEFAULT 0.0,
+    "updated_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE parameter_template_release_candidate (
+    "candidate_id" text NOT NULL,
+    "factor_id" text NOT NULL,
+    "template_id" text NOT NULL,
+    "regime_key" text DEFAULT ''::text,
+    "status" text DEFAULT 'pending_review',
+    "boundary_json" text DEFAULT '{}'::text,
+    "validation_summary_json" text DEFAULT '{}'::text,
+    "validation_report_path" text DEFAULT ''::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0,
+    "updated_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE parameter_template_switch_log (
+    "switch_id" text NOT NULL,
+    "factor_id" text NOT NULL,
+    "regime_key" text DEFAULT ''::text,
+    "old_template_id" text DEFAULT ''::text,
+    "new_template_id" text NOT NULL,
+    "suggestion_id" text DEFAULT ''::text,
+    "risk_verdict_json" text DEFAULT '{}'::text,
+    "context_json" text DEFAULT '{}'::text,
+    "status" text DEFAULT 'applied',
+    "created_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE release_approval_event (
+    "event_id" text NOT NULL,
+    "run_id" text NOT NULL,
+    "action" text DEFAULT ''::text,
+    "actor" text DEFAULT ''::text,
+    "decision" text DEFAULT ''::text,
+    "reason" text DEFAULT ''::text,
+    "evidence_refs_json" text NOT NULL DEFAULT '{}'::text,
+    "boundary_json" text NOT NULL DEFAULT '{}'::text,
+    "created_at" real NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE release_run (
+    "run_id" text NOT NULL,
+    "release_class" text DEFAULT ''::text,
+    "status" text DEFAULT 'started',
+    "summary_json" text NOT NULL DEFAULT '{}'::text,
+    "checklist_json" text NOT NULL DEFAULT '{}'::text,
+    "runtime_config_hash" text DEFAULT ''::text,
+    "replay_run_id" text DEFAULT ''::text,
+    "replay_artifact_hash" text DEFAULT ''::text,
+    "incident_mode" text DEFAULT ''::text,
+    "readiness_posture" text DEFAULT ''::text,
+    "tests_json" text NOT NULL DEFAULT '[]'::text,
+    "rollback_ref_json" text NOT NULL DEFAULT '{}'::text,
+    "created_by" text DEFAULT ''::text,
+    "created_at" real NOT NULL DEFAULT 0.0,
+    "updated_at" real NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE replay_report (
+    "replay_run_id" text NOT NULL,
+    "scope_json" text NOT NULL DEFAULT '{}'::text,
+    "input_dataset_hash" text DEFAULT ''::text,
+    "runtime_config_hash" text DEFAULT ''::text,
+    "code_version" text DEFAULT ''::text,
+    "decision_count" integer DEFAULT 0,
+    "matched_live_count" integer DEFAULT 0,
+    "mismatch_count" integer DEFAULT 0,
+    "metric_summary_json" text NOT NULL DEFAULT '{}'::text,
+    "replay_error" text DEFAULT ''::text,
+    "evidence_grade" text DEFAULT ''::text,
+    "artifact_path" text DEFAULT ''::text,
+    "artifact_hash" text DEFAULT ''::text,
+    "status" text DEFAULT 'completed',
+    "created_at" double precision NOT NULL DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE shadow_factor_perf (
+    "factor" text NOT NULL,
+    "source" text DEFAULT 'shadow',
+    "symbol" text DEFAULT ''::text,
+    "timeframe" text DEFAULT ''::text,
+    "oos_bars" integer DEFAULT 0,
+    "cumulative_pnl" double precision DEFAULT 0.0,
+    "hit_rate" double precision DEFAULT 0.0,
+    "max_drawdown" double precision DEFAULT 0.0,
+    "last_signal" double precision DEFAULT 0.0,
+    "metrics_json" text DEFAULT '{}'::text,
+    "updated_at" double precision DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE supervisor_counterfactual_review (
+    "counterfactual_id" text NOT NULL,
+    "review_id" text DEFAULT ''::text,
+    "trade_id" text DEFAULT ''::text,
+    "position_id" text NOT NULL,
+    "close_ts" double precision NOT NULL DEFAULT 0.0,
+    "close_reason" text DEFAULT ''::text,
+    "supervisor_event_type" text DEFAULT ''::text,
+    "supervisor_reason" text DEFAULT ''::text,
+    "label" text DEFAULT ''::text,
+    "confidence" double precision DEFAULT 0.0,
+    "horizons_json" text DEFAULT '[]'::text,
+    "evidence_json" text DEFAULT '{}'::text,
+    "created_at" double precision NOT NULL DEFAULT 0.0,
+    "updated_at" double precision NOT NULL DEFAULT 0.0
+)""")
+
+        # 0020 补列迁移同样作用于这三张"生产 ensure_* 预建、迁移链从不建表"
+        # 的表（factor_health / position_lifecycle_event / recovery_position_state），
+        # 干净 schema 下测试需按其生产预建形态建出（含 0020 新增列，幂等）。
+        conn.execute("""CREATE TEMP TABLE factor_health (
+    "factor_id" text NOT NULL,
+    "health_score" double precision DEFAULT 0.0,
+    "status" text DEFAULT 'UNKNOWN'::text,
+    "rolling_ic" double precision DEFAULT 0.0,
+    "components_json" text NOT NULL DEFAULT '{}'::text,
+    "updated_at" double precision NOT NULL DEFAULT 0.0,
+    "factor" text,
+    "n_obs" integer DEFAULT 0,
+    "score" double precision DEFAULT 50.0,
+    "section" text DEFAULT 'unknown'::text
+)""")
+        conn.execute("""CREATE TEMP TABLE position_lifecycle_event (
+    "event_id" text NOT NULL,
+    "event_type" text DEFAULT ''::text,
+    "event_json" text NOT NULL DEFAULT '{}'::text,
+    "event_ts" double precision DEFAULT 0.0,
+    "created_at" double precision NOT NULL DEFAULT 0.0,
+    "avg_price" double precision DEFAULT 0.0,
+    "details_json" text DEFAULT '{}'::text,
+    "net_volume" double precision DEFAULT 0.0,
+    "position_id" text,
+    "realized_pnl" double precision DEFAULT 0.0,
+    "symbol" text DEFAULT ''::text,
+    "trade_id" text DEFAULT ''::text,
+    "unrealized_pnl" double precision DEFAULT 0.0
+)""")
+        conn.execute("""CREATE TEMP TABLE recovery_position_state (
+    "position_id" text NOT NULL,
+    "recovery_json" text NOT NULL DEFAULT '{}'::text,
+    "last_seen_at" double precision DEFAULT 0.0,
+    "updated_at" double precision NOT NULL DEFAULT 0.0,
+    "broker" text DEFAULT 'ctrader'::text,
+    "close_pnl" double precision DEFAULT 0.0,
+    "close_reason" text DEFAULT ''::text,
+    "closed_at" double precision DEFAULT 0.0,
+    "context_integrity" text DEFAULT 'full'::text,
+    "direction" integer DEFAULT 0,
+    "entry_decision_id" text DEFAULT ''::text,
+    "first_seen_at" double precision DEFAULT 0.0,
+    "open_price" double precision DEFAULT 0.0,
+    "recovery_meta_json" text DEFAULT '{}'::text,
+    "status" text DEFAULT 'open'::text,
+    "strategy_name" text DEFAULT ''::text,
+    "symbol" text DEFAULT ''::text,
+    "volume" double precision DEFAULT 0.0
+)""")
+
+        # 0019 二级索引回填同时引用了一批"生产代码 DDL 预建、迁移链从未 ADD"的列
+        # （autonomous_learning_sample.source_table/source_id 等）。夹具预建的
+        # 极简/seed 版不含这些列，迁移在干净 schema 上重放时会因缺列失败。
+        # 按生产 ensure_* 预建的真实列对齐夹具（ADD COLUMN IF NOT EXISTS 幂等，
+        # 与生产 DDL 类型一致，且与迁移链已 ADD 的列不重复），
+        # 使 0019 在 pg_temp 模拟的生产形态上可重放。
+        conn.execute("ALTER TABLE autonomous_learning_sample ADD COLUMN IF NOT EXISTS event_ts real")
+        conn.execute("ALTER TABLE autonomous_learning_sample ADD COLUMN IF NOT EXISTS label_status text")
+        conn.execute("ALTER TABLE autonomous_learning_sample ADD COLUMN IF NOT EXISTS sample_type text")
+        conn.execute("ALTER TABLE autonomous_learning_sample ADD COLUMN IF NOT EXISTS source_id text")
+        conn.execute("ALTER TABLE autonomous_learning_sample ADD COLUMN IF NOT EXISTS source_table text")
+        conn.execute("ALTER TABLE autonomous_learning_sample ADD COLUMN IF NOT EXISTS updated_at real")
+        conn.execute("ALTER TABLE brain_action_plan_eval ADD COLUMN IF NOT EXISTS scope_type text")
+        conn.execute("ALTER TABLE brain_action_plan_eval ADD COLUMN IF NOT EXISTS status text")
+        conn.execute("ALTER TABLE brain_governance_candidate_review ADD COLUMN IF NOT EXISTS review_status text")
+        conn.execute("ALTER TABLE brain_medium_impact_governance ADD COLUMN IF NOT EXISTS created_at double precision")
+        conn.execute("ALTER TABLE brain_medium_impact_governance ADD COLUMN IF NOT EXISTS eval_id text")
+        conn.execute("ALTER TABLE brain_medium_impact_governance ADD COLUMN IF NOT EXISTS plan_id text")
+        conn.execute("ALTER TABLE brain_medium_impact_governance ADD COLUMN IF NOT EXISTS scope_type text")
+        conn.execute("ALTER TABLE brain_medium_impact_governance ADD COLUMN IF NOT EXISTS status text")
+        conn.execute("ALTER TABLE brain_state_snapshot ADD COLUMN IF NOT EXISTS created_at double precision")
+        conn.execute("ALTER TABLE brain_state_snapshot ADD COLUMN IF NOT EXISTS status text")
+        conn.execute("ALTER TABLE ctrader_deals ADD COLUMN IF NOT EXISTS exec_timestamp double precision")
+        conn.execute("ALTER TABLE ctrader_deals ADD COLUMN IF NOT EXISTS position_id integer")
+        conn.execute("ALTER TABLE decision_ledger ADD COLUMN IF NOT EXISTS decision_ts double precision")
+        conn.execute("ALTER TABLE evolution_decision ADD COLUMN IF NOT EXISTS decision_type text")
+        conn.execute("ALTER TABLE evolution_decision ADD COLUMN IF NOT EXISTS run_id text")
+        conn.execute("ALTER TABLE experience_memory ADD COLUMN IF NOT EXISTS regime_id text")
+        conn.execute("ALTER TABLE experience_memory ADD COLUMN IF NOT EXISTS trade_id text")
+        conn.execute("ALTER TABLE learning_application_effect ADD COLUMN IF NOT EXISTS created_at double precision")
+        conn.execute("ALTER TABLE learning_application_effect ADD COLUMN IF NOT EXISTS scope text")
+        conn.execute("ALTER TABLE learning_application_log ADD COLUMN IF NOT EXISTS created_at double precision")
+        conn.execute("ALTER TABLE policy_suggestion ADD COLUMN IF NOT EXISTS scope_key text")
+        conn.execute("ALTER TABLE policy_suggestion ADD COLUMN IF NOT EXISTS scope_type text")
+        conn.execute("ALTER TABLE position_supervisor_trace ADD COLUMN IF NOT EXISTS action text")
+        conn.execute("ALTER TABLE position_supervisor_trace ADD COLUMN IF NOT EXISTS event_ts real")
+        conn.execute("ALTER TABLE position_supervisor_trace ADD COLUMN IF NOT EXISTS outcome text")
+        conn.execute("ALTER TABLE position_supervisor_trace ADD COLUMN IF NOT EXISTS position_id text")
+        conn.execute("ALTER TABLE proposal_registry ADD COLUMN IF NOT EXISTS source_ref_type text")
+        conn.execute("ALTER TABLE proposal_registry ADD COLUMN IF NOT EXISTS status text")
+        conn.execute("ALTER TABLE runtime_config_snapshot ADD COLUMN IF NOT EXISTS config_hash text")
+        conn.execute("ALTER TABLE v16_brain_command ADD COLUMN IF NOT EXISTS scope_key text")
+        conn.execute("ALTER TABLE v16_brain_command ADD COLUMN IF NOT EXISTS status text")
 
         first = run_state_schema_migrations(wrapped, runner_id="pytest_pg_temp")
         second = run_state_schema_migrations(wrapped, runner_id="pytest_pg_temp")

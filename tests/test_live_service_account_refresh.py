@@ -30,6 +30,12 @@ def test_recent_review_reentry_block_uses_consecutive_conflicting_losses(monkeyp
     conn = MagicMock()
     conn.execute.return_value.fetchall.return_value = rows
     monkeypatch.setattr("backend.core.db.get_state_pg_conn", lambda **_kwargs: conn)
+    # The canonical review stream is the only path now; the reader returns
+    # legacy-shaped rows directly.
+    monkeypatch.setattr(
+        "backend.services.live_reentry_guard.iter_review_rows",
+        lambda _conn, limit=0: rows,
+    )
 
     block = live_service._recent_review_reentry_block(
         symbol="XAUUSD+", direction=-1, now_ts=now,
@@ -57,6 +63,10 @@ def test_recent_review_reentry_block_requires_consecutive_failures(monkeypatch):
     conn = MagicMock()
     conn.execute.return_value.fetchall.return_value = rows
     monkeypatch.setattr("backend.core.db.get_state_pg_conn", lambda **_kwargs: conn)
+    monkeypatch.setattr(
+        "backend.services.live_reentry_guard.iter_review_rows",
+        lambda _conn, limit=0: rows,
+    )
 
     assert live_service._recent_review_reentry_block(
         symbol="XAUUSD+", direction=-1, now_ts=10_000.0,
@@ -255,6 +265,20 @@ def test_ctrader_events_never_rejuvenate_reconciled_account_or_positions(monkeyp
         positions_reconciled=list(authoritative_positions),
         positions_updated_at=broker_observed_at,
         positions_reconcile_id="positions-r1",
+        # A fresh non-empty positions snapshot carries per-component reconcile
+        # metadata in production; without it the positions fact contract treats
+        # the snapshot as missing required components (fail-closed unknown).
+        positions_component_facts={
+            name: {
+                "state": "known",
+                "source": "ctrader_reconcile",
+                "observed_at": broker_observed_at,
+                "reason_code": None,
+                "known_position_ids": [42],
+                "unknown_position_ids": [],
+            }
+            for name in ("identity", "protection", "price", "pnl")
+        },
     )
 
     live_service._install_ctrader_live_listener(bridge)
@@ -290,8 +314,12 @@ def test_ctrader_events_never_rejuvenate_reconciled_account_or_positions(monkeyp
         "positions": authoritative_positions,
         "readiness": readiness,
     }
-    assert account_fact_payload(account_payload, now=now)["_fact"]["state"] == "stale"
-    assert positions_fact_payload(positions_payload, now=now)["_fact"]["state"] == "stale"
+    # Fact state reflects the reconciled account/positions data itself (fresh
+    # and known here); readiness flags a NEW reconcile required after broker
+    # events.  The event must NOT rejuvenate the stored observation timestamps
+    # (asserted above) -- the fact stays "known", readiness goes stale.
+    assert account_fact_payload(account_payload, now=now)["_fact"]["state"] == "known"
+    assert positions_fact_payload(positions_payload, now=now)["_fact"]["state"] == "known"
 
 
 def test_readiness_cannot_be_green_when_loop_or_safety_blocks_new_risk(monkeypatch):

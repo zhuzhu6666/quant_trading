@@ -21,20 +21,16 @@ from backend.services.evolution_ledger import current_runtime_config_snapshot
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.replay_harness import ReplayHarnessService
 
+from backend.core.db_helpers import (
+    load_json as _loads,
+    conn_is_pg as _conn_is_pg,
+    pg_sql as _sql,
+)
+
+
 
 def _dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
-
-
-def _loads(raw: Any, default: Any) -> Any:
-    if raw is None:
-        return default
-    if isinstance(raw, (dict, list)):
-        return raw
-    try:
-        return json.loads(str(raw))
-    except Exception:
-        return default
 
 
 def _use_pg(db_path: str | Path = STATE_DB) -> bool:
@@ -46,14 +42,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
 
 
 def _execute(conn, sql: str, params: Any = None):

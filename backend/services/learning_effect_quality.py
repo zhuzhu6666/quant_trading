@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.services.canonical_v2_reader import iter_reviews
+from backend.services.fact_envelope import observed_epoch
+from backend.services.learning_application_store import LearningApplicationStore
 
 
 def _loads(raw: Any) -> dict[str, Any]:
@@ -85,37 +88,70 @@ class LearningEffectQualityService:
         factor_cutoffs: dict[str, float],
     ) -> tuple[dict[str, float], list[tuple[str, str, float]]]:
         latest_review_by_factor: dict[str, float] = {}
-        if factor_cutoffs and state_table_exists(conn, "trade_outcome_review") and state_table_exists(conn, "decision_factor_snapshot"):
+        if factor_cutoffs:
             factors = sorted(factor_cutoffs)
-            placeholders = ",".join("?" for _ in factors)
-            latest_reviews = conn.execute(
-                self._sql(f"""
-                SELECT dfs.factor, MAX(r.created_at) AS latest_review_at
-                FROM trade_outcome_review r
-                JOIN decision_factor_snapshot dfs ON dfs.decision_id=r.entry_decision_id
-                WHERE r.created_at>? AND dfs.factor IN ({placeholders})
-                GROUP BY dfs.factor
-                """),
-                (min(factor_cutoffs.values()), *factors),
-            ).fetchall()
-            latest_review_by_factor = {
-                str(row["factor"]): float(row["latest_review_at"] or 0.0) for row in latest_reviews
-            }
-        if not factor_cutoffs or not state_table_exists(conn, "learning_application_log"):
+            # --- read factor-decision pairs (canonical first, legacy fallback) ---
+            rows: list = []
+            try:
+                from backend.services.canonical_v2_reader import (
+                    _canonical_ready, _parse_factor_snapshots, read_payload,
+                )
+                if _canonical_ready(conn):
+                    event_rows = conn.execute(
+                        self._sql(
+                            "SELECT payload_hash FROM canonical_v2.event"
+                            " WHERE event_type='risk_decision'"
+                            " ORDER BY created_at DESC LIMIT 500"
+                        ),
+                    ).fetchall()
+                    factor_set = set(factors)
+                    for er in event_rows:
+                        ph = er["payload_hash"] if hasattr(er, "keys") else er[0]
+                        try:
+                            payload = read_payload(conn, str(ph))
+                        except Exception:
+                            continue
+                        for s in _parse_factor_snapshots(payload):
+                            if str(s.get("factor")) in factor_set:
+                                rows.append(s)
+            except Exception:
+                pass
+            if not rows and state_table_exists(conn, "decision_factor_snapshot"):
+                placeholders = ",".join("?" for _ in factors)
+                rows = conn.execute(
+                    self._sql(f"SELECT factor, decision_id FROM decision_factor_snapshot WHERE factor IN ({placeholders})"),
+                    (*factors,),
+                ).fetchall()
+            cutoff = float(min(factor_cutoffs.values()) or 0.0)
+            # Reviews flow through the canonical reader (reader-owned legacy
+            # fallback for fixtures); the module holds no private review SQL.
+            review_ts_by_decision: dict[str, float] = {}
+            for record in iter_reviews(conn, limit=0):
+                payload = record.get("payload") or {}
+                entry_id = str(payload.get("entry_decision_id") or "")
+                reviewed_at = observed_epoch(payload.get("created_at"))
+                if entry_id and reviewed_at > cutoff:
+                    review_ts_by_decision[entry_id] = max(review_ts_by_decision.get(entry_id, 0.0), reviewed_at)
+            for row in rows:
+                factor = str(row["factor"] or "")
+                reviewed_at = review_ts_by_decision.get(str(row["decision_id"] or ""))
+                if reviewed_at:
+                    latest_review_by_factor[factor] = max(latest_review_by_factor.get(factor, 0.0), reviewed_at)
+        if not factor_cutoffs:
             return latest_review_by_factor, []
-        active_applications = conn.execute(
-            """
-            SELECT scope_type, scope_key, cycle_ts
-            FROM learning_application_log
-            WHERE status NOT IN ('superseded','rolled_back','rejected')
-            """
-        ).fetchall()
+        store = LearningApplicationStore(self.db_path)
+        active_applications = [
+            (
+                str(app.get("scope_type") or ""),
+                str(app.get("scope_key") or ""),
+                float(app.get("created_at") or app.get("cycle_ts") or 0.0),
+            )
+            for app in store.iter_applications()
+            if str(app.get("status") or "") not in ("superseded", "rolled_back", "rejected")
+        ]
         return (
             latest_review_by_factor,
-            [
-                (str(row["scope_type"] or ""), str(row["scope_key"] or ""), float(row["cycle_ts"] or 0.0))
-                for row in active_applications
-            ],
+            active_applications,
         )
 
     @staticmethod
@@ -132,7 +168,7 @@ class LearningEffectQualityService:
         latest_review_at = latest_review_by_factor.get(factor, 0.0)
         if latest_review_at <= float(row["updated_at"] or 0.0):
             return False, "no_new_evidence_after_terminalization"
-        cycle_ts = float(row["cycle_ts"] or 0.0)
+        cycle_ts = float(row.get("cycle_ts") or row.get("created_at") or 0.0)
         if any(
             active_scope_type == scope_type and active_scope_key == scope_key and active_cycle_ts > cycle_ts
             for active_scope_type, active_scope_key, active_cycle_ts in active_applications
@@ -158,25 +194,12 @@ class LearningEffectQualityService:
         try:
             if not state_table_exists(conn, "learning_application_effect"):
                 return self._empty("missing_effect_ledger")
-            rows = conn.execute(
-                """
-                SELECT e.application_id, e.scope_type, e.scope_key, e.action, e.status,
-                       e.observed_trade_count, e.baseline_trade_count, e.decision_json,
-                       e.updated_at, e.created_at, l.cycle_ts
-                FROM learning_application_effect e
-                LEFT JOIN learning_application_log l ON l.application_id=e.application_id
-                ORDER BY e.updated_at DESC LIMIT ?
-                """ if not is_state_db_path(self.db_path) else
-                """
-                SELECT e.application_id, e.scope_type, e.scope_key, e.action, e.status,
-                       e.observed_trade_count, e.baseline_trade_count, e.decision_json,
-                       e.updated_at, e.created_at, l.cycle_ts
-                FROM learning_application_effect e
-                LEFT JOIN learning_application_log l ON l.application_id=e.application_id
-                ORDER BY e.updated_at DESC LIMIT %s
-                """,
-                (max(1, min(int(limit), 5000)),),
-            ).fetchall()
+            store = LearningApplicationStore(self.db_path)
+            rows = sorted(
+                (eff for eff in store.iter_effects()),
+                key=lambda eff: float(eff.get("updated_at") or eff.get("created_at") or 0.0),
+                reverse=True,
+            )[:max(1, min(int(limit), 5000))]
             status_counts: Counter[str] = Counter()
             reason_counts: Counter[str] = Counter()
             oldest_active_age = 0.0
@@ -188,38 +211,38 @@ class LearningEffectQualityService:
             retry_reviews: list[dict[str, Any]] = []
             retry_factor_cutoffs: dict[str, float] = {}
             for row in rows:
-                decision = _loads(row["decision_json"])
+                decision = row.get("decision") or {}
                 quality = decision.get("evidence_quality") if isinstance(decision.get("evidence_quality"), dict) else {}
-                if str(row["status"] or "") != "inconclusive" or not bool(quality.get("retry_via_new_application")):
+                if str(row.get("status") or "") != "inconclusive" or not bool(quality.get("retry_via_new_application")):
                     continue
-                scope_type = str(row["scope_type"] or "")
-                scope_key = str(row["scope_key"] or "")
+                scope_type = str(row.get("scope_type") or "")
+                scope_key = str(row.get("scope_key") or "")
                 if scope_type not in {"factor", "parameter_template"}:
                     continue
                 factor = scope_key if scope_type == "factor" else scope_key.split(":", 1)[0]
-                updated_at = float(row["updated_at"] or 0.0)
+                updated_at = float(row.get("updated_at") or 0.0)
                 retry_factor_cutoffs[factor] = min(retry_factor_cutoffs.get(factor, updated_at), updated_at)
             latest_review_by_factor, active_applications = self._retry_context(conn, retry_factor_cutoffs)
             for row in rows:
-                status = str(row["status"] or "unknown")
+                status = str(row.get("status") or "unknown")
                 status_counts[status] += 1
-                decision = _loads(row["decision_json"])
+                decision = row.get("decision") or {}
                 quality = decision.get("evidence_quality") if isinstance(decision.get("evidence_quality"), dict) else {}
                 reason = str(quality.get("causal_status") or "missing")
                 reason_counts[reason] += 1
                 if reason == "bounded_window_insufficient_samples" and status != "inconclusive":
                     bounded_nonterminal_count += 1
                 if status in {"prepared", "observing", "mixed"}:
-                    oldest_active_age = max(oldest_active_age, now - float(row["cycle_ts"] or row["created_at"] or now))
-                    oldest_active_review_age = max(oldest_active_review_age, now - float(row["updated_at"] or row["created_at"] or now))
+                    oldest_active_age = max(oldest_active_age, now - float(row.get("cycle_ts") or row.get("created_at") or now))
+                    oldest_active_review_age = max(oldest_active_review_age, now - float(row.get("updated_at") or row.get("created_at") or now))
                 if status == "inconclusive" and bool(quality.get("retry_via_new_application")):
                     retry_review_count += 1
                     eligible, eligibility_reason = self._retry_eligibility(row, latest_review_by_factor, active_applications)
                     item = {
-                        "application_id": str(row["application_id"]),
-                        "scope_type": str(row["scope_type"]),
-                        "scope_key": str(row["scope_key"]),
-                        "action": str(row["action"]),
+                        "application_id": str(row.get("application_id")),
+                        "scope_type": str(row.get("scope_type")),
+                        "scope_key": str(row.get("scope_key")),
+                        "action": str(row.get("action")),
                         "reason": reason,
                         "retry_eligible": eligible,
                         "eligibility_reason": eligibility_reason,

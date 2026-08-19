@@ -10,10 +10,9 @@ from .loop_host import LoopHost, RunnerFactory
 from .runtime_state import LoopStatus, RuntimeState
 from .scheduler import InProcessScheduler, JobInfo
 from .evolution_orchestrator import scheduled_evolution_cycle, EvolutionReport
-from .evolution_kernel import EvolutionKernel
 
 __all__ = [
     "LoopHost", "RunnerFactory", "LoopStatus", "RuntimeState",
     "InProcessScheduler", "JobInfo",
-    "scheduled_evolution_cycle", "EvolutionReport", "EvolutionKernel",
+    "scheduled_evolution_cycle", "EvolutionReport",
 ]

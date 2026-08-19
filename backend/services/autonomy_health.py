@@ -17,18 +17,12 @@ from backend.core.state_store import (
     is_state_schema_write_sql,
     validate_runtime_state_schema,
 )
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    load_json as _loads,
+    pg_sql as _sql,
+)
 from backend.services.policy_suggestion_status import count_policy_suggestion_statuses
-
-
-def _loads(raw: Any, default: Any) -> Any:
-    if raw is None:
-        return default
-    if isinstance(raw, (dict, list)):
-        return raw
-    try:
-        return json.loads(str(raw))
-    except Exception:
-        return default
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -58,14 +52,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
 
 
 def _execute(conn, sql: str, params: Any = None):
@@ -826,20 +812,22 @@ class AutonomyHealthService:
             rolled_back = 0
             blocked = 0
             total = 0
-            if state_table_exists(conn, "learning_application_log"):
-                rows = _execute(
-                    conn,
-                    """
-                    SELECT status, COUNT(*) AS n
-                    FROM learning_application_log
-                    GROUP BY status
-                    """,
-                ).fetchall()
-                counts = {str(row["status"] or ""): _safe_int(row["n"]) for row in rows}
-                applied += sum(counts.get(item, 0) for item in ("applied", "completed", "kept", "reinforced"))
-                rolled_back += sum(counts.get(item, 0) for item in ("rolled_back", "rollback"))
-                blocked += sum(counts.get(item, 0) for item in ("blocked_by_risk", "blocked", "rejected"))
-                total += sum(counts.values())
+            try:
+                from backend.services.learning_application_store import (
+                    LearningApplicationStore,
+                )
+
+                counts: dict[str, int] = {}
+                for app in LearningApplicationStore(self.db_path).iter_applications():
+                    status = str(app.get("status") or "")
+                    counts[status] = counts.get(status, 0) + 1
+                if counts:
+                    applied += sum(counts.get(item, 0) for item in ("applied", "completed", "kept", "reinforced"))
+                    rolled_back += sum(counts.get(item, 0) for item in ("rolled_back", "rollback"))
+                    blocked += sum(counts.get(item, 0) for item in ("blocked_by_risk", "blocked", "rejected"))
+                    total += sum(counts.values())
+            except Exception:
+                pass
             if state_table_exists(conn, "policy_suggestion"):
                 rows = _execute(
                     conn,
@@ -857,15 +845,16 @@ class AutonomyHealthService:
                 rows = _execute(
                     conn,
                     """
-                    SELECT d.status,
-                           COALESCE(p.risk_verdict_json, d.risk_verdict_json) AS risk_verdict_json
+                    SELECT d.decision_json,
+                           p.risk_verdict_json AS risk_verdict_json
                     FROM evolution_decision d
                     LEFT JOIN mutation_payload p ON p.payload_hash=d.payload_hash
                     """
                 ).fetchall()
                 for row in rows:
                     total += 1
-                    status = str(row["status"] or "")
+                    meta = _loads(row["decision_json"], {})
+                    status = str(meta.get("status") or "")
                     verdict = _loads(row["risk_verdict_json"], {})
                     allowed = verdict.get("allowed")
                     if status in {"applied", "completed", "accepted"}:
@@ -888,42 +877,32 @@ class AutonomyHealthService:
             conn.close()
 
     def _effect_stats(self) -> dict[str, Any]:
-        conn = _connect(self.db_path, read_only=True)
         try:
-            if not state_table_exists(conn, "learning_application_effect"):
-                return {"effect_count": 0, "post_action_reward_delta": 0.0}
-            row = _execute(
-                conn,
-                """
-                SELECT COUNT(*) AS n, AVG(delta_avg_reward) AS avg_delta
-                FROM learning_application_effect
-                WHERE observed_trade_count > 0
-                """
-            ).fetchone()
+            from backend.services.learning_application_store import (
+                LearningApplicationStore,
+            )
+
+            count = 0
+            delta_sum = 0.0
+            for eff in LearningApplicationStore(self.db_path).iter_effects():
+                if int(eff.get("observed_trade_count") or 0) > 0:
+                    count += 1
+                    delta_sum += _safe_float(eff.get("delta_avg_reward"))
             return {
-                "effect_count": _safe_int(row["n"] if row else 0),
-                "post_action_reward_delta": _safe_float(row["avg_delta"] if row else 0.0),
+                "effect_count": count,
+                "post_action_reward_delta": (delta_sum / count) if count else 0.0,
             }
-        finally:
-            conn.close()
+        except Exception:
+            return {"effect_count": 0, "post_action_reward_delta": 0.0}
 
     def _evidence_integrity_stats(self) -> dict[str, Any]:
         conn = _connect(self.db_path, read_only=True)
         try:
-            if not state_table_exists(conn, "autonomous_learning_sample"):
-                return {"sample_count": 0, "evidence_integrity": 0.5}
-            rows = _execute(
-                conn,
-                """
-                SELECT integrity, label_status, governance_effective_weight
-                FROM autonomous_learning_sample
-                WHERE COALESCE(system_contaminated, 0)=0
-                  AND COALESCE(governance_eligible, 0)=1
-                  AND COALESCE(governance_effective_weight, 0)>0
-                ORDER BY event_ts DESC
-                LIMIT 500
-                """
-            ).fetchall()
+            from backend.services.canonical_v2_reader import iter_training_sample_rows
+            rows = iter_training_sample_rows(
+                conn, system_contaminated=0, governance_eligible=1,
+                min_governance_weight=0.0, order_by_event_ts=True, limit=500,
+            )
             if not rows:
                 return {"sample_count": 0, "evidence_integrity": 0.5}
             integrity_weight = {"full": 1.0, "recovered": 0.7, "partial": 0.35, "missing": 0.0}

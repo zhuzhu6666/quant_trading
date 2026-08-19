@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+logger = logging.getLogger(__name__)
 
 from backend.core.db import (
     STATE_DB,
@@ -27,6 +30,7 @@ from backend.core.db import (
     state_table_columns,
     state_table_exists,
 )
+from backend.core.db_helpers import dump_json as _json, load_json as _loads
 from backend.services.evolution_ledger import (
     ensure_evolution_ledger_tables,
     persist_runtime_config_snapshot,
@@ -53,16 +57,6 @@ class GovernanceMutationError(RuntimeError):
     pass
 
 
-def _json(value: Any) -> str:
-    return json.dumps(
-        value if value is not None else {},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-
-
 def _hash(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
@@ -85,13 +79,35 @@ def _row_dict(row: Any) -> dict[str, Any]:
     return dict(row)
 
 
-def _loads(value: Any, default: Any) -> Any:
-    if isinstance(value, (dict, list)):
-        return value
+def _mirror_mutation_stage(
+    conn: Any,
+    intent: Mapping[str, Any],
+    *,
+    stage: str,
+    stage_timestamp: Any,
+) -> None:
+    """Mirror one governance mutation lifecycle stage into canonical.
+
+    Fail-open: mirroring problems never abort the legacy transaction; the
+    incremental backfill pipeline reconciles any gaps.
+    """
     try:
-        return json.loads(str(value or ""))
-    except Exception:
-        return default
+        from backend.services.canonical_v2 import record_governance_mutation_event
+
+        record_governance_mutation_event(
+            conn,
+            mutation_id=str(intent.get("mutation_id") or ""),
+            stage=stage,
+            stage_timestamp=stage_timestamp,
+            row_fields=dict(intent),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[governance] canonical mutation mirror failed mutation_id=%s stage=%s: %s",
+            intent.get("mutation_id"),
+            stage,
+            exc,
+        )
 
 
 def _slice(payload: Mapping[str, Any], keys: list[str]) -> dict[str, Any]:
@@ -654,6 +670,49 @@ class GovernanceMutationCoordinator:
                     now,
                 ),
             )
+            # ── canonical 增量镜像（reserved 阶段；同事务、幂等、fail-open）──
+            try:
+                from backend.services.canonical_v2 import record_governance_mutation_event
+                record_governance_mutation_event(
+                    conn,
+                    mutation_id=mutation_id,
+                    stage="reserved",
+                    stage_timestamp=now,
+                    row_fields={
+                        "mutation_id": mutation_id,
+                        "idempotency_key": idempotency_key,
+                        "control_surface": str(plan.control_surface),
+                        "scope_type": str(plan.scope_type),
+                        "scope_key": str(plan.scope_key),
+                        "action": str(plan.action or plan.source),
+                        "actor": str(plan.actor),
+                        "source": str(plan.source),
+                        "producer": str(plan.v16_target_agent or ""),
+                        "run_id": str(plan.run_id),
+                        "risk_class": classification.risk_class,
+                        "status": "reserved",
+                        "evidence_fingerprint": evidence_fingerprint,
+                        "evidence_refs": evidence_refs,
+                        "v16_command_id": str(plan.v16_command_id or ""),
+                        "target_config_version": 0,
+                        "target_config_hash": target_hash,
+                        "committed_config_version": 0,
+                        "committed_config_hash": "",
+                        "domain_hash": domain_hash,
+                        "before_json": before,
+                        "target_json": target,
+                        "patch_json": sanitized,
+                        "rollback_json": rollback,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[governance] canonical mutation mirror failed mutation_id=%s stage=reserved: %s",
+                    mutation_id,
+                    exc,
+                )
             conn.commit()
             return {
                 "ok": True,
@@ -1074,6 +1133,17 @@ class GovernanceMutationCoordinator:
                 ),
             )
             self._fault(fault_injector, "before_commit")
+            committed_row = conn.execute(
+                _p(self.db_path, "SELECT * FROM governance_mutation_intent WHERE mutation_id=?"),
+                (mutation_id,),
+            ).fetchone()
+            if committed_row is not None:
+                committed_intent = _row_dict(committed_row)
+                if str(committed_intent.get("status") or "") == "committed":
+                    _mirror_mutation_stage(
+                        conn, committed_intent, stage="committed",
+                        stage_timestamp=committed_intent.get("committed_at") or now,
+                    )
             conn.commit()
             return {
                 "mutation_id": mutation_id,
@@ -1309,6 +1379,16 @@ class GovernanceMutationCoordinator:
                 ),
                 (now, str(stage), str(message)[:2000], now, str(mutation_id)),
             )
+            row = conn.execute(
+                _p(self.db_path, "SELECT * FROM governance_mutation_intent WHERE mutation_id=?"),
+                (str(mutation_id),),
+            ).fetchone()
+            if row is not None:
+                intent = _row_dict(row)
+                if str(intent.get("status") or "") == "aborted":
+                    _mirror_mutation_stage(
+                        conn, intent, stage="aborted", stage_timestamp=intent.get("aborted_at")
+                    )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1341,6 +1421,17 @@ class GovernanceMutationCoordinator:
                 ),
                 (status, now, str(link_value), now, str(mutation_id)),
             )
+            row = conn.execute(
+                _p(self.db_path, "SELECT * FROM governance_mutation_intent WHERE mutation_id=?"),
+                (str(mutation_id),),
+            ).fetchone()
+            if row is not None:
+                intent = _row_dict(row)
+                if str(intent.get("status") or "") == status:
+                    _mirror_mutation_stage(
+                        conn, intent, stage=status,
+                        stage_timestamp=intent.get(timestamp_column) or now,
+                    )
             conn.commit()
             return {
                 "ok": int(result.rowcount or 0) == 1,

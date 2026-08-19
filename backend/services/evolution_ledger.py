@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 import uuid
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from backend.core.db import (
     STATE_DB,
@@ -24,19 +27,11 @@ from backend.services.state_payloads import (
 )
 
 
+from backend.core.db_helpers import load_json as _loads
+
+
 def _dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
-
-
-def _loads(raw: Any, default: Any) -> Any:
-    if raw is None:
-        return default
-    if isinstance(raw, (dict, list)):
-        return raw
-    try:
-        return json.loads(str(raw))
-    except Exception:
-        return default
 
 
 def _stable_hash(value: Any) -> str:
@@ -86,6 +81,11 @@ def _as_dict(config: Any) -> dict[str, Any]:
 
 def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
     if _use_pg(db_path):
+        # PostgreSQL bootstrap/DDL lives in the central db helper (which owns
+        # the plain-psycopg DDL bypass); route through it, not raw psycopg here.
+        from backend.core.db import _ensure_pg_business_tables
+
+        _ensure_pg_business_tables()
         return
     conn = connect_sqlite(db_path)
     try:
@@ -149,18 +149,10 @@ def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
                 decision_id TEXT PRIMARY KEY,
                 run_id TEXT DEFAULT '',
                 decision_type TEXT NOT NULL,
-                scope_type TEXT DEFAULT '',
-                scope_key TEXT DEFAULT '',
-                action TEXT DEFAULT '',
-                status TEXT DEFAULT '',
-                evidence_json TEXT DEFAULT '{}',
-                risk_verdict_json TEXT DEFAULT '{}',
-                before_json TEXT DEFAULT '{}',
-                after_json TEXT DEFAULT '{}',
-                result_json TEXT DEFAULT '{}',
-                rollback_json TEXT DEFAULT '{}',
-                config_version INTEGER DEFAULT 0,
-                config_hash TEXT DEFAULT '',
+                decision_json TEXT NOT NULL DEFAULT '{}',
+                payload_hash TEXT NOT NULL DEFAULT '',
+                canonical_event_id TEXT NOT NULL DEFAULT '',
+                projection_type TEXT NOT NULL DEFAULT 'legacy',
                 created_at REAL NOT NULL DEFAULT 0.0
             )
             """
@@ -229,15 +221,6 @@ def ensure_evolution_columns(db_path: str | Path = STATE_DB) -> None:
         "position_supervisor_trace",
         {
             "trace_integrity": "trace_integrity TEXT DEFAULT 'full'",
-            "config_version": "config_version INTEGER DEFAULT 0",
-            "config_hash": "config_hash TEXT DEFAULT ''",
-            "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
-        },
-    )
-    ensure_sqlite_columns(
-        db_path,
-        "autonomous_learning_sample",
-        {
             "config_version": "config_version INTEGER DEFAULT 0",
             "config_hash": "config_hash TEXT DEFAULT ''",
             "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
@@ -326,6 +309,37 @@ def persist_runtime_config_snapshot(
         )
         row = cur.fetchone()
         config_version = row["config_version"] if hasattr(row, "keys") and "config_version" in row.keys() else (row[0] if row else 0)
+        # ── canonical 增量镜像（配置载荷池；内容寻址、幂等、fail-open）──
+        try:
+            from backend.services.canonical_v2 import put_payload
+            import json as _json_mod
+
+            try:
+                config_obj = _json_mod.loads(payload_json)
+            except Exception:
+                config_obj = {"config_json": str(payload_json)[:100000]}
+            put_payload(
+                active_conn,
+                {
+                    "config_version": int(config_version or 0),
+                    "config_hash": str(config_hash or ""),
+                    "source": str(source or ""),
+                    "run_id": str(run_id or ""),
+                    "mutation_id": str(mutation_id or ""),
+                    "created_at": now,
+                    "legacy_payload_hash": str(payload_hash_value or ""),
+                    "config": config_obj,
+                },
+                payload_kind="runtime_config_version",
+                schema_version="canonical_payload.v1",
+                created_at=now,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[evolution] canonical config mirror failed config_hash=%s: %s",
+                config_hash,
+                exc,
+            )
         if owned_conn:
             active_conn.commit()
         return {
@@ -566,29 +580,29 @@ def record_evolution_decision(
         put_mutation_payload(conn, mutation_hash, mutation_parts)
         canonical_id = str(canonical_event_id or did)
         projection = str(projection_type or ("canonical" if canonical_id == did else "projection"))
+        # Converged 8-column shape (PG == SQLite): rich semantic fields live in
+        # decision_json, evidence/risk_verdict/before/after/result/rollback stay
+        # interned via payload_hash -> mutation_payload, canonical linkage in columns.
+        decision_json = _dumps(
+            {
+                "scope_type": str(scope_type or ""),
+                "scope_key": str(scope_key or ""),
+                "action": str(action or ""),
+                "status": str(status or ""),
+                "config_version": int(config_version or 0),
+                "config_hash": str(config_hash or ""),
+            }
+        )
         conn.execute(
             _p(db_path, """
             INSERT INTO evolution_decision
-            (decision_id, run_id, decision_type, scope_type, scope_key, action, status,
-             evidence_json, risk_verdict_json, before_json, after_json, result_json,
-             rollback_json, config_version, config_hash, payload_hash,
+            (decision_id, run_id, decision_type, decision_json, payload_hash,
              canonical_event_id, projection_type, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(decision_id) DO UPDATE SET
                 run_id=excluded.run_id,
                 decision_type=excluded.decision_type,
-                scope_type=excluded.scope_type,
-                scope_key=excluded.scope_key,
-                action=excluded.action,
-                status=excluded.status,
-                evidence_json=excluded.evidence_json,
-                risk_verdict_json=excluded.risk_verdict_json,
-                before_json=excluded.before_json,
-                after_json=excluded.after_json,
-                result_json=excluded.result_json,
-                rollback_json=excluded.rollback_json,
-                config_version=excluded.config_version,
-                config_hash=excluded.config_hash,
+                decision_json=excluded.decision_json,
                 payload_hash=excluded.payload_hash,
                 canonical_event_id=excluded.canonical_event_id,
                 projection_type=excluded.projection_type,
@@ -598,24 +612,42 @@ def record_evolution_decision(
                 did,
                 str(run_id or ""),
                 str(decision_type or ""),
-                str(scope_type or ""),
-                str(scope_key or ""),
-                str(action or ""),
-                str(status or ""),
-                "{}",
-                "{}",
-                "{}",
-                "{}",
-                "{}",
-                "{}",
-                int(config_version or 0),
-                str(config_hash or ""),
+                decision_json,
                 mutation_hash,
                 canonical_id,
                 projection,
                 time.time(),
             ),
         )
+        # ── canonical 增量镜像（governance_command；同事务、幂等、fail-open）──
+        try:
+            from backend.services.canonical_v2 import record_governance_command_event
+            record_governance_command_event(
+                conn,
+                decision_id=did,
+                run_id=str(run_id or ""),
+                decision_type=str(decision_type or ""),
+                scope_type=str(scope_type or ""),
+                scope_key=str(scope_key or ""),
+                action=str(action or ""),
+                status=str(status or ""),
+                config_version=int(config_version or 0),
+                config_hash=str(config_hash or ""),
+                created_at=time.time(),
+                legacy_payload_hash=str(mutation_hash or ""),
+                evidence=evidence,
+                risk_verdict=risk_verdict,
+                before=before,
+                after=after,
+                result=result,
+                rollback=rollback,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[evolution] canonical command mirror failed decision_id=%s: %s",
+                did,
+                exc,
+            )
         conn.commit()
     finally:
         conn.close()
@@ -663,33 +695,17 @@ def get_evolution_run(run_id: str, *, db_path: str | Path = STATE_DB) -> dict[st
         decisions = []
         for drow in conn.execute(
             _p(db_path, """
-            SELECT d.decision_id, d.run_id, d.decision_type, d.scope_type,
-                   d.scope_key, d.action, d.status,
-                   COALESCE(p.evidence_json, d.evidence_json) AS evidence_json,
-                   COALESCE(p.risk_verdict_json, d.risk_verdict_json) AS risk_verdict_json,
-                   CASE WHEN d.projection_type='api'
-                        THEN COALESCE(cp.before_json, p.before_json, d.before_json)
-                        ELSE COALESCE(p.before_json, d.before_json)
-                   END AS before_json,
-                   CASE WHEN d.projection_type='api'
-                        THEN COALESCE(cp.after_json, p.after_json, d.after_json)
-                        ELSE COALESCE(p.after_json, d.after_json)
-                   END AS after_json,
-                   CASE WHEN d.projection_type='api'
-                        THEN COALESCE(cp.result_json, p.result_json, d.result_json)
-                        ELSE COALESCE(p.result_json, d.result_json)
-                   END AS result_json,
-                   CASE WHEN d.projection_type='api'
-                        THEN COALESCE(cp.rollback_json, p.rollback_json, d.rollback_json)
-                        ELSE COALESCE(p.rollback_json, d.rollback_json)
-                   END AS rollback_json,
-                   d.config_version, d.config_hash, d.payload_hash,
-                   d.canonical_event_id, d.projection_type, d.created_at
+            SELECT d.decision_id, d.run_id, d.decision_type, d.decision_json,
+                   d.payload_hash, d.canonical_event_id, d.projection_type, d.created_at,
+                   p.evidence_json, p.risk_verdict_json, p.before_json, p.after_json,
+                   p.result_json, p.rollback_json,
+                   cd.projection_type AS cd_projection_type,
+                   cp.before_json AS cp_before_json, cp.after_json AS cp_after_json,
+                   cp.result_json AS cp_result_json, cp.rollback_json AS cp_rollback_json
             FROM evolution_decision d
             LEFT JOIN mutation_payload p ON p.payload_hash=d.payload_hash
             LEFT JOIN evolution_decision cd
                    ON cd.decision_id=d.canonical_event_id
-                  AND d.projection_type='api'
             LEFT JOIN mutation_payload cp ON cp.payload_hash=cd.payload_hash
             WHERE d.run_id=?
             ORDER BY d.created_at ASC
@@ -697,9 +713,31 @@ def get_evolution_run(run_id: str, *, db_path: str | Path = STATE_DB) -> dict[st
             (str(run_id or ""),),
         ).fetchall():
             d = dict(drow)
-            for key in ("evidence_json", "risk_verdict_json", "before_json", "after_json", "result_json", "rollback_json"):
-                d[key[:-5] if key.endswith("_json") else key] = _loads(d.pop(key, "{}"), {})
-            decisions.append(d)
+            meta = _loads(d.pop("decision_json", ""), {})
+            is_api = d.get("projection_type") == "api" and d.get("cd_projection_type") == "canonical"
+            decisions.append(
+                {
+                    "decision_id": d.get("decision_id"),
+                    "run_id": d.get("run_id"),
+                    "decision_type": d.get("decision_type"),
+                    "scope_type": meta.get("scope_type", ""),
+                    "scope_key": meta.get("scope_key", ""),
+                    "action": meta.get("action", ""),
+                    "status": meta.get("status", ""),
+                    "evidence": _loads(d.get("evidence_json"), {}),
+                    "risk_verdict": _loads(d.get("risk_verdict_json"), {}),
+                    "before": _loads((d.get("cp_before_json") if is_api else d.get("before_json")), {}),
+                    "after": _loads((d.get("cp_after_json") if is_api else d.get("after_json")), {}),
+                    "result": _loads((d.get("cp_result_json") if is_api else d.get("result_json")), {}),
+                    "rollback": _loads((d.get("cp_rollback_json") if is_api else d.get("rollback_json")), {}),
+                    "config_version": meta.get("config_version", 0),
+                    "config_hash": meta.get("config_hash", ""),
+                    "payload_hash": d.get("payload_hash", ""),
+                    "canonical_event_id": d.get("canonical_event_id", ""),
+                    "projection_type": d.get("projection_type", ""),
+                    "created_at": d.get("created_at"),
+                }
+            )
         item["decisions"] = decisions
         return item
     finally:

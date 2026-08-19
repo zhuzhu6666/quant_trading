@@ -20,6 +20,7 @@ from backend.services.trade_lesson_memory import (
     upsert_trade_lesson_memory,
 )
 from backend.services.live_position_lifecycle import _compact_supervisor_mapping
+from backend.services.review_contract import NON_FACTOR_RESPONSIBILITIES
 
 
 class ExperienceBuilder:
@@ -191,9 +192,15 @@ class ExperienceBuilder:
             and attribution_integrity != "missing"
         )
         primary_responsibility = str(review_json.get("primary_responsibility") or "")
+        # B1: never downweight a factor for a responsibility that is not the
+        # factor's own doing.  execution_timing / operator_intervention come
+        # from the system-issue path (signal_execution_delay, manual/restart
+        # close) and must be excluded the same way as the other system domains;
+        # otherwise execution noise is misattributed as a factor defect.  The
+        # exclusion vocabulary is the single review_contract authority.
         if (
             (review.get("outcome_label") == "bad_loss" or supervisor_entry_failure)
-            and primary_responsibility not in {"exit", "holding", "execution", "data_quality", "system"}
+            and primary_responsibility not in NON_FACTOR_RESPONSIBILITIES
         ):
             recommended_action = "downweight"
         elif review.get("outcome_label") == "good_win":

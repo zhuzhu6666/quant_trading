@@ -8,6 +8,7 @@ from backend.services.brain_governance_candidate_review import (
 )
 from backend.services.brain_governance_candidates import ensure_policy_suggestion_table
 from backend.services.v16_brain_snapshot import build_posterior_arbitration
+from backend.services.learning_application_store import LearningApplicationStore
 
 
 def _readiness() -> dict:
@@ -64,19 +65,27 @@ def _seed_posterior_facts(db_path, now: float) -> None:
                 now - 20.0,
             ),
         )
-        conn.execute(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status,
-             observed_trade_count, baseline_trade_count, post_avg_reward,
-             baseline_avg_reward, delta_avg_reward, post_win_rate,
-             baseline_win_rate, updated_at, created_at)
-            VALUES ('effect-v16', 'supervisor_template', 'position_supervisor',
-                    'switch_position_supervisor_template', 'observed', 5, 5,
-                    0.30, 0.10, 0.20, 0.70, 0.50, ?, ?)
-            """,
-            (now - 10.0, now - 10.0),
-        )
+        conn.commit()
+    finally:
+        conn.close()
+    store = LearningApplicationStore(db_path)
+    store.write_effect(
+        application_id="effect-v16",
+        scope_key="position_supervisor",
+        scope_type="supervisor_template",
+        action="switch_position_supervisor_template",
+        status="observed",
+        observed_trade_count=5,
+        baseline_trade_count=5,
+        post_avg_reward=0.30,
+        baseline_avg_reward=0.10,
+        delta_avg_reward=0.20,
+        post_win_rate=0.70,
+        baseline_win_rate=0.50,
+        updated_at=now - 10.0,
+    )
+    conn = connect_sqlite(db_path)
+    try:
         conn.execute(
             """
             INSERT INTO position_supervisor_trace

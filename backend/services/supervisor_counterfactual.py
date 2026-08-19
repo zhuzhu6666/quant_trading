@@ -12,12 +12,17 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
-    state_table_columns,
     state_table_exists,
 )
 from backend.core.state_store import (
     is_state_schema_write_sql,
     validate_runtime_state_schema,
+)
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    iter_decision_rows,
+    iter_position_rows,
+    iter_review_rows,
 )
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.state_payload_archive import load_json_payload
@@ -37,12 +42,10 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     return conn
 
 
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    pg_sql as _sql,
+)
 
 
 def _execute(conn, sql: str, params: Any = None):
@@ -52,12 +55,6 @@ def _execute(conn, sql: str, params: Any = None):
     if params is None:
         return conn.execute(rendered)
     return conn.execute(rendered, params)
-
-
-def _review_archive_select(conn: Any) -> str:
-    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
-        return ""
-    return ", review_archive_hash"
 
 
 def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
@@ -105,57 +102,6 @@ def _direction_from_review(review: dict[str, Any]) -> int:
     if entry <= 0 or close <= 0 or abs(pnl) < 1e-9:
         return 1
     return 1 if (close - entry) * pnl >= 0 else -1
-
-
-def _position_open_event(conn, position_id: str) -> dict[str, Any]:
-    row = _execute(
-        conn,
-        """
-        SELECT details_json, event_ts
-        FROM position_lifecycle_event
-        WHERE position_id=? AND event_type='opened'
-        ORDER BY event_ts ASC
-        LIMIT 1
-        """,
-        (str(position_id),),
-    ).fetchone()
-    if not row:
-        return {}
-    details = _loads(row["details_json"], {})
-    details["event_ts"] = _safe_float(row["event_ts"])
-    return details
-
-
-def _latest_supervisor_before_close(conn, position_id: str, close_ts: float) -> dict[str, Any]:
-    row = _execute(
-        conn,
-        """
-        SELECT decision_id, event_type, action_reason, action_score, action_json,
-               risk_state_json, created_at, decision_ts
-        FROM decision_ledger
-        WHERE position_id=?
-          AND event_type LIKE 'supervisor_%'
-          AND decision_ts <= ?
-          AND decision_ts >= ?
-        ORDER BY decision_ts DESC, created_at DESC
-        LIMIT 1
-        """,
-        (str(position_id), float(close_ts) + 5.0, float(close_ts) - 3600.0),
-    ).fetchone()
-    if not row:
-        return {}
-    action = _loads(row["action_json"], {})
-    verdict = action.get("supervisor_verdict") or {}
-    return {
-        "decision_id": str(row["decision_id"] or ""),
-        "event_type": str(row["event_type"] or ""),
-        "action_reason": str(row["action_reason"] or ""),
-        "action_score": _safe_float(row["action_score"]),
-        "created_at": _safe_float(row["created_at"]),
-        "decision_ts": _safe_float(row["decision_ts"]),
-        "verdict": verdict,
-        "risk_state": _loads(row["risk_state_json"], {}),
-    }
 
 
 def _load_future_bars(symbol: str, timeframe: str, close_ts: float, max_minutes: int):
@@ -487,37 +433,46 @@ def evaluate_counterfactuals(
     try:
         target_review_ids = sorted({str(item) for item in (review_ids or []) if str(item)})
         bounded_limit = max(1, int(limit))
+        position_open: dict[str, dict[str, Any]] = {}
+        supervisor_by_position: dict[str, list[dict[str, Any]]] = {}
+        # Batch-preload canonical streams once per evaluation run; the
+        # per-review lookups below are then in-memory (legacy indexed SQL
+        # is not available on canonical events, which are keyed by event id).
+        for item in iter_position_rows(conn, limit=0):
+            if str(item.get("event_type") or "") != "opened":
+                continue
+            pid = str(item.get("position_id") or "")
+            existing = position_open.get(pid)
+            if existing is None or _safe_float(item.get("event_ts")) < _safe_float(existing.get("event_ts")):
+                position_open[pid] = item
+        for decision in iter_decision_rows(conn, limit=0):
+            if not str(decision.get("event_type") or "").startswith("supervisor_"):
+                continue
+            pid = str(decision.get("position_id") or "")
+            if pid:
+                supervisor_by_position.setdefault(pid, []).append(decision)
+        for items in supervisor_by_position.values():
+            items.sort(
+                key=lambda d: (
+                    _safe_float(d.get("decision_ts")),
+                    _safe_float(d.get("created_at")),
+                ),
+                reverse=True,
+            )
 
         def _review_rows():
             if review_ids is not None and not target_review_ids:
                 return
-            page_offset = 0
-            placeholders = ",".join("?" for _ in target_review_ids)
-            review_filter = (
-                f"AND review_id IN ({placeholders})"
-                if review_ids is not None
-                else ""
+            rows = iter_review_rows(conn, limit=0)
+            rows.sort(
+                key=lambda r: (float(r.get("created_at") or 0.0), str(r.get("review_id") or "")),
+                reverse=True,
             )
-            review_params: tuple[Any, ...] = tuple(target_review_ids)
-            while True:
-                page = _execute(
-                    conn,
-                    f"""
-                    SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                           pnl, review_json, created_at{_review_archive_select(conn)}
-                    FROM trade_outcome_review
-                    WHERE created_at > 0 {review_filter}
-                    ORDER BY created_at DESC, review_id DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (*review_params, bounded_limit, page_offset),
-                ).fetchall()
-                if not page:
-                    return
-                page_offset += len(page)
-                for page_row in page:
-                    yield page_row
-                del page
+            if review_ids is not None:
+                target = set(target_review_ids)
+                rows = [r for r in rows if str(r.get("review_id") or "") in target]
+            for row in rows:
+                yield row
 
         candidates = []
         for row in _review_rows():
@@ -539,7 +494,15 @@ def evaluate_counterfactuals(
                 continue
             position_id = str(row["position_id"] or "")
             close_ts = _safe_float(review.get("close_ts") or row["created_at"])
-            supervisor = _latest_supervisor_before_close(conn, position_id, close_ts)
+            supervisor = next(
+                (
+                    item
+                    for item in supervisor_by_position.get(position_id, [])
+                    if _safe_float(item.get("decision_ts")) <= close_ts + 5.0
+                    and _safe_float(item.get("decision_ts")) >= close_ts - 3600.0
+                ),
+                None,
+            )
             if _conn_is_pg(conn):
                 conn.commit()
             if not supervisor:
@@ -547,7 +510,11 @@ def evaluate_counterfactuals(
             supervisor_event = str(supervisor.get("event_type") or "")
             if supervisor_event not in {"supervisor_tighten", "supervisor_reduce", "supervisor_close"}:
                 continue
-            opened = _position_open_event(conn, position_id)
+            opened_row = position_open.get(position_id)
+            opened = {}
+            if opened_row is not None:
+                opened = _loads(opened_row.get("details_json"), {})
+                opened["event_ts"] = _safe_float(opened_row.get("event_ts"))
             if _conn_is_pg(conn):
                 conn.commit()
             direction = int(opened.get("direction") or _direction_from_review(review) or 1)

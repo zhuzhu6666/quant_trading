@@ -124,71 +124,89 @@ class LearningExperimentAdmissionService:
             return True
         return application_status in ACTIVE_APPLICATION_STATUSES
 
+    def _store_active_rows(self) -> list[dict[str, Any]]:
+        """Active-eligible application rows joined with effect status via the lean store."""
+        try:
+            from backend.services.learning_application_store import (
+                LearningApplicationStore,
+            )
+
+            store = LearningApplicationStore(self.db_path)
+            effects_by_app: dict[str, dict[str, Any]] = {}
+            for eff in store.iter_effects():
+                effects_by_app.setdefault(str(eff.get("application_id") or ""), eff)
+            rows: list[dict[str, Any]] = []
+            for app in store.iter_applications():
+                app_id = str(app.get("application_id") or "")
+                eff = effects_by_app.get(app_id) or {}
+                rows.append(
+                    {
+                        "application_id": app_id,
+                        "scope_type": str(app.get("scope_type") or ""),
+                        "scope_key": str(app.get("scope_key") or ""),
+                        "action": str(app.get("action") or ""),
+                        "application_status": str(app.get("status") or ""),
+                        "effect_status": str(eff.get("status") or ""),
+                        "updated_at": float(
+                            app.get("updated_at") or eff.get("updated_at") or 0.0
+                        ),
+                        "observed_trade_count": int(eff.get("observed_trade_count") or 0),
+                        "baseline_trade_count": int(eff.get("baseline_trade_count") or 0),
+                    }
+                )
+            return rows
+        except Exception:
+            return []
+
     def active(self, *, scope_type: str, scope_key: str) -> dict[str, Any] | None:
         if not scope_type or not scope_key:
             return None
-        try:
-            conn = self._conn()
-        except Exception:
-            # A fresh isolated store has no active experiment by definition.
-            # Production connectivity still fails closed at prepared/mutation.
-            return None
-        try:
-            if not state_table_exists(conn, "learning_application_log"):
-                return None
-            sql = """
-                SELECT l.application_id, l.action, l.status AS application_status,
-                       l.cycle_ts, l.created_at, e.status AS effect_status,
-                       e.observed_trade_count, e.baseline_trade_count, e.updated_at
-                FROM learning_application_log l
-                LEFT JOIN learning_application_effect e ON e.application_id=l.application_id
-                WHERE l.scope_type=? AND l.scope_key=?
-                ORDER BY l.cycle_ts DESC, l.created_at DESC
-            """
-            if is_state_db_path(self.db_path):
-                sql = sql.replace("?", "%s")
-            for row in conn.execute(sql, (scope_type, scope_key)).fetchall():
-                application_status = str(row["application_status"] or "")
-                effect_status = str(row["effect_status"] or "")
-                if self.row_is_active(row):
-                    return {
-                        "application_id": str(row["application_id"] or ""),
-                        "action": str(row["action"] or ""),
-                        "application_status": application_status,
-                        "effect_status": effect_status,
-                        "cycle_ts": float(row["cycle_ts"] or 0.0),
-                        "updated_at": float(row["updated_at"] or 0.0),
-                        "observed_trade_count": int(row["observed_trade_count"] or 0),
-                        "baseline_trade_count": int(row["baseline_trade_count"] or 0),
-                    }
-            return None
-        finally:
-            conn.close()
+        for row in self._store_active_rows():
+            if str(row["scope_type"] or "") != scope_type:
+                continue
+            if str(row["scope_key"] or "") != scope_key:
+                continue
+            if self.row_is_active(row):
+                return {
+                    "application_id": str(row["application_id"] or ""),
+                    "action": str(row["action"] or ""),
+                    "application_status": str(row["application_status"] or ""),
+                    "effect_status": str(row["effect_status"] or ""),
+                    "cycle_ts": float(row["updated_at"] or 0.0),
+                    "updated_at": float(row["updated_at"] or 0.0),
+                    "observed_trade_count": int(row["observed_trade_count"] or 0),
+                    "baseline_trade_count": int(row["baseline_trade_count"] or 0),
+                }
+        return None
+
+    def _store_active_ids_and_scopes(self) -> tuple[set[str], set[tuple[str, str]]]:
+        active_ids: set[str] = set()
+        active_scopes: set[tuple[str, str]] = set()
+        for row in self._store_active_rows():
+            if self.row_is_active(row):
+                active_scopes.add((str(row["scope_type"] or ""), str(row["scope_key"] or "")))
+                active_ids.add(str(row["application_id"] or ""))
+        active_ids.discard("")
+        return active_ids, active_scopes
 
     def global_active_count(self) -> int:
         """Count unique non-terminal experiments across application/effect ledgers."""
+        active_ids, _ = self._store_active_ids_and_scopes()
         try:
             conn = self._conn()
         except Exception:
-            return 0
+            return len(active_ids)
         try:
-            active_ids: set[str] = set()
-            if state_table_exists(conn, "learning_application_log"):
-                statuses = ",".join(f"'{status}'" for status in sorted(ACTIVE_APPLICATION_STATUSES))
-                rows = conn.execute(f"SELECT application_id FROM learning_application_log WHERE status IN ({statuses})").fetchall()
-                active_ids.update(str(row["application_id"] or "") for row in rows)
-            if state_table_exists(conn, "learning_application_effect"):
-                statuses = ",".join(f"'{status}'" for status in sorted(ACTIVE_EFFECT_STATUSES))
-                rows = conn.execute(f"SELECT application_id FROM learning_application_effect WHERE status IN ({statuses})").fetchall()
-                active_ids.update(str(row["application_id"] or "") for row in rows)
+            now = time.time()
             if state_table_exists(conn, "learning_experiment_reservation"):
-                now = time.time()
                 sql = self._sql(
                     "SELECT reservation_id FROM learning_experiment_reservation "
                     "WHERE status='reserved' AND expires_at>?"
                 )
                 rows = conn.execute(sql, (now,)).fetchall()
-                active_ids.update(str(row["reservation_id"] or "") for row in rows)
+                active_ids.update(
+                    str(row["reservation_id"] or "") for row in rows
+                )
             active_ids.discard("")
             return len(active_ids)
         finally:
@@ -254,21 +272,7 @@ class LearningExperimentAdmissionService:
                 (now, now),
             )
 
-            active_scopes: set[tuple[str, str]] = set()
-            active_ids: set[str] = set()
-            if state_table_exists(conn, "learning_application_log"):
-                rows = conn.execute(
-                    """
-                    SELECT l.scope_type, l.scope_key, l.application_id,
-                           l.status AS application_status, e.status AS effect_status
-                    FROM learning_application_log l
-                    LEFT JOIN learning_application_effect e ON e.application_id=l.application_id
-                    """
-                ).fetchall()
-                for row in rows:
-                    if self.row_is_active(row):
-                        active_scopes.add((str(row["scope_type"] or ""), str(row["scope_key"] or "")))
-                        active_ids.add(str(row["application_id"] or ""))
+            active_ids, active_scopes = self._store_active_ids_and_scopes()
             if state_table_exists(conn, "learning_experiment_reservation"):
                 rows = conn.execute(
                     self._sql(
@@ -280,6 +284,7 @@ class LearningExperimentAdmissionService:
                 for row in rows:
                     active_scopes.add((str(row["scope_type"] or ""), str(row["scope_key"] or "")))
                     active_ids.add(str(row["reservation_id"] or ""))
+
 
             active_count = len({item for item in active_ids if item})
             for name in sorted(candidates):
@@ -406,23 +411,7 @@ class LearningExperimentAdmissionService:
             (now, now),
         )
 
-        active_scopes: set[tuple[str, str]] = set()
-        active_ids: set[str] = set()
-        if state_table_exists(conn, "learning_application_log"):
-            rows = conn.execute(
-                """
-                SELECT l.scope_type, l.scope_key, l.application_id,
-                       l.status AS application_status, e.status AS effect_status
-                FROM learning_application_log l
-                LEFT JOIN learning_application_effect e ON e.application_id=l.application_id
-                """
-            ).fetchall()
-            for row in rows:
-                if self.row_is_active(row):
-                    active_scopes.add(
-                        (str(row["scope_type"] or ""), str(row["scope_key"] or ""))
-                    )
-                    active_ids.add(str(row["application_id"] or ""))
+        active_ids, active_scopes = self._store_active_ids_and_scopes()
         rows = conn.execute(
             self._sql(
                 "SELECT reservation_id, scope_type, scope_key "
@@ -581,19 +570,7 @@ class LearningExperimentAdmissionService:
                 ),
                 (now, now),
             )
-            active_scopes: set[tuple[str, str]] = set()
-            active_ids: set[str] = set()
-            if state_table_exists(conn, "learning_application_log"):
-                rows = conn.execute(
-                    """SELECT l.scope_type, l.scope_key, l.application_id,
-                              l.status AS application_status, e.status AS effect_status
-                       FROM learning_application_log l
-                       LEFT JOIN learning_application_effect e ON e.application_id=l.application_id"""
-                ).fetchall()
-                for row in rows:
-                    if self.row_is_active(row):
-                        active_scopes.add((str(row["scope_type"] or ""), str(row["scope_key"] or "")))
-                        active_ids.add(str(row["application_id"] or ""))
+            active_ids, active_scopes = self._store_active_ids_and_scopes()
             rows = conn.execute(
                 self._sql(
                     "SELECT reservation_id, scope_type, scope_key FROM learning_experiment_reservation "

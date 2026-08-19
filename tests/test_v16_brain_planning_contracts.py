@@ -3,6 +3,7 @@ from backend.services.brain_governance_candidates import (
     BrainGovernanceCandidateService,
     ensure_brain_governance_candidate_table,
 )
+from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.v16_brain_planning import BrainActionPlanEvaluatorService
 
 
@@ -56,24 +57,24 @@ def test_learning_effect_evidence_is_not_globally_truncated_before_scope_filter(
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
-        conn.executemany(
-            """INSERT INTO learning_application_effect
-               (application_id, scope_type, scope_key, action, updated_at, created_at)
-               VALUES (?, 'factor_weight', ?, 'factor_governance_cycle', ?, ?)""",
-            [
-                (f"factor-effect-{idx}", f"factor-{idx}", 100.0 - idx, 100.0 - idx)
-                for idx in range(20)
-            ],
-        )
-        conn.execute(
-            """INSERT INTO learning_application_effect
-               (application_id, scope_type, scope_key, action, updated_at, created_at)
-               VALUES ('supervisor-effect-old', 'supervisor_template',
-                       'position_supervisor', 'switch_position_supervisor_template', 1.0, 1.0)"""
-        )
-        conn.commit()
     finally:
         conn.close()
+    store = LearningApplicationStore(db_path)
+    for idx in range(20):
+        store.write_effect(
+            application_id=f"factor-effect-{idx}",
+            scope_key=f"factor-{idx}",
+            scope_type="factor_weight",
+            action="factor_governance_cycle",
+            updated_at=100.0 - idx,
+        )
+    store.write_effect(
+        application_id="supervisor-effect-old",
+        scope_key="position_supervisor",
+        scope_type="supervisor_template",
+        action="switch_position_supervisor_template",
+        updated_at=1.0,
+    )
 
     evidence = BrainActionPlanEvaluatorService(db_path)._load_evidence(limit=20)
 

@@ -119,11 +119,6 @@ def test_run_once_with_open_circuit_keeps_observation_but_skips_mutation(
         "scheduled_evolution_cycle",
         lambda: mutations.append("evolution"),
     )
-    monkeypatch.setattr(
-        factor_module,
-        "run_autonomous_factor_governance_cycle",
-        lambda: mutations.append("factor_governance"),
-    )
 
     class _Nursery:
         def run_once(self, **_kwargs):
@@ -168,11 +163,6 @@ def test_run_once_operator_pause_reaches_autonomous_learning_as_observation_only
         evolution_module,
         "scheduled_evolution_cycle",
         lambda: mutations.append("evolution"),
-    )
-    monkeypatch.setattr(
-        factor_module,
-        "run_autonomous_factor_governance_cycle",
-        lambda: mutations.append("factor_governance"),
     )
 
     class _Nursery:

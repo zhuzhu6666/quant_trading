@@ -117,13 +117,13 @@ class LearningApplicationStateService:
                 ),
                 (status, json.dumps(details, ensure_ascii=False, default=str), str(application_id)),
             )
-            conn.execute(
-                self._sql(
-                    "UPDATE learning_application_effect SET status=?, updated_at=? WHERE application_id=?"
-                ),
-                (effect_status, now, str(application_id)),
-            )
             conn.commit()
+            from backend.services.learning_application_store import LearningApplicationStore
+
+            LearningApplicationStore(str(self.db_path)).update_effect(
+                str(application_id),
+                patch={"status": effect_status},
+            )
             return {
                 "ok": True,
                 "status": status,
@@ -141,18 +141,22 @@ class LearningApplicationStateService:
         now = time.time()
         conn = self._conn(read_only=True)
         try:
-            rows = conn.execute(
-                self._sql(
-                    """
-                    SELECT application_id, details_json, created_at
-                    FROM learning_application_log
-                    WHERE status='prepared'
-                    ORDER BY created_at ASC
-                    LIMIT ?
-                    """
-                ),
-                (max(1, min(int(limit), 2000)),),
-            ).fetchall()
+            try:
+                rows = conn.execute(
+                    self._sql(
+                        """
+                        SELECT application_id, details_json, created_at
+                        FROM learning_application_log
+                        WHERE status='prepared'
+                        ORDER BY created_at ASC
+                        LIMIT ?
+                        """
+                    ),
+                    (max(1, min(int(limit), 2000)),),
+                ).fetchall()
+            except Exception:
+                # learning_application_log was dropped in S5; nothing to recover
+                rows = []
             snapshots = []
             for row in rows:
                 details = _loads(row["details_json"])

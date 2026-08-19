@@ -14,7 +14,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 
-STATE_SCHEMA: Final[str] = "state_v1"
+STATE_SCHEMA: Final[str] = "runtime"
 
 
 class RuntimeStateSchemaError(RuntimeError):
@@ -270,7 +270,13 @@ def _require_index_contract(conn: psycopg.Connection, declaration: str) -> None:
 
 
 def _validate_runtime_schema_statement(conn: psycopg.Connection, sql: str) -> None:
-    """Interpret legacy idempotent DDL as a non-mutating catalog assertion."""
+    """Interpret legacy idempotent DDL as a non-mutating catalog assertion.
+
+    This is catalog validation ONLY and always fails closed: the migration CLI
+    (``scripts/state_schema_migrate.py --apply``) is the sole schema writer, so
+    a missing table/column/index or a non-matching index definition raises
+    ``RuntimeStateSchemaMissingError`` instead of silently creating/mutating.
+    """
 
     normalized = _without_sql_comments(sql).strip()
     table_match = _CREATE_TABLE_RE.match(normalized)
@@ -308,13 +314,14 @@ def validate_runtime_state_schema(
     conn: psycopg.Connection,
     statements: str | tuple[str, ...] | list[str],
 ) -> dict[str, int | str | bool]:
-    """Validate legacy schema declarations without executing their DDL.
+    """Validate legacy schema declarations against the live catalog only.
 
     Service-local ``ensure`` functions may retain a declaration for isolated
     SQLite fixtures, but PostgreSQL runtime paths must call this function (or
     rely on the connection-level backstop below).  Every statement is reduced
-    to catalog reads for the declared table/columns/index.  Missing migrated
-    objects fail closed and unsupported DDL is rejected.
+    to catalog reads for the declared table/columns/index and never mutates the
+    database; the migration CLI is the only schema writer.  Missing objects or
+    a non-matching index definition raise ``RuntimeStateSchemaMissingError``.
     """
 
     items = (statements,) if isinstance(statements, str) else tuple(statements)

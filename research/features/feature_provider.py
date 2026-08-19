@@ -18,6 +18,7 @@ from backend.core.db import (
 )
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.state_payload_archive import load_json_payload
+from backend.services.learning_application_store import LearningApplicationStore
 from research.features.evidence_contract import build_evidence_contract
 
 
@@ -379,55 +380,55 @@ class LearningFeatureProvider:
         return found
 
     @staticmethod
-    def _parse_application_context_row(row: Any) -> dict:
+    def _application_context_item(app: dict, eff: dict | None) -> dict:
         return {
-            "application_id": str(row["application_id"] or ""),
-            "scope_type": str(row["scope_type"] or ""),
-            "scope_key": str(row["scope_key"] or ""),
-            "action": str(row["action"] or ""),
-            "bias_multiplier": _safe_float(row["bias_multiplier"], 1.0),
-            "old_weight": _safe_float(row["old_weight"]),
-            "new_weight": _safe_float(row["new_weight"]),
-            "status": str(row["status"] or ""),
-            "effect_status": str(row["effect_status"] or ""),
-            "observed_trade_count": int(row["observed_trade_count"] or 0),
-            "baseline_trade_count": int(row["baseline_trade_count"] or 0),
-            "delta_avg_reward": _safe_float(row["delta_avg_reward"]),
-            "post_win_rate": _safe_float(row["post_win_rate"]),
-            "baseline_win_rate": _safe_float(row["baseline_win_rate"]),
-            "decision": _loads(row["decision_json"], {}),
-            "_cycle_ts": _safe_float(row["cycle_ts"]),
+            "application_id": str(app.get("application_id") or ""),
+            "scope_type": str(app.get("scope_type") or ""),
+            "scope_key": str(app.get("scope_key") or ""),
+            "action": str(app.get("action") or ""),
+            "bias_multiplier": _safe_float(app.get("bias_multiplier"), 1.0),
+            "old_weight": _safe_float(app.get("old_weight")),
+            "new_weight": _safe_float(app.get("new_weight")),
+            "status": str(app.get("status") or ""),
+            "effect_status": str((eff or {}).get("status") or ""),
+            "observed_trade_count": int((eff or {}).get("observed_trade_count") or 0),
+            "baseline_trade_count": int((eff or {}).get("baseline_trade_count") or 0),
+            "delta_avg_reward": _safe_float((eff or {}).get("delta_avg_reward")),
+            "post_win_rate": _safe_float((eff or {}).get("post_win_rate")),
+            "baseline_win_rate": _safe_float((eff or {}).get("baseline_win_rate")),
+            "decision": dict((eff or {}).get("decision") or {}),
+            "_cycle_ts": _safe_float(
+                app.get("cycle_ts"), _safe_float(app.get("created_at"))
+            ),
         }
 
-    def _application_context_rows_for_factors(self, factor_names: list[str], max_created_at: float) -> list[dict]:
-        names = [str(item) for item in factor_names if str(item)]
+    def _application_context_rows_for_factors(
+        self, factor_names: list[str], max_created_at: float
+    ) -> list[dict]:
+        names = {str(item) for item in factor_names if str(item)}
         if not names:
             return []
-        p = self._p()
-        rows_out: list[dict] = []
-        with self._conn() as conn:
-            for chunk in _chunks(names):
-                placeholders = ",".join(p for _ in chunk)
-                rows = conn.execute(
-                    f"""
-                    SELECT l.application_id, l.scope_type, l.scope_key, l.action,
-                           l.bias_multiplier, l.old_weight, l.new_weight, l.status,
-                           l.cycle_ts, e.status AS effect_status,
-                           e.observed_trade_count, e.baseline_trade_count,
-                           e.delta_avg_reward, e.post_win_rate, e.baseline_win_rate,
-                           e.decision_json
-                    FROM learning_application_log l
-                    LEFT JOIN learning_application_effect e
-                      ON e.application_id = l.application_id
-                    WHERE l.scope_type='factor'
-                      AND l.scope_key IN ({placeholders})
-                      AND l.cycle_ts <= {p}
-                    ORDER BY l.cycle_ts DESC
-                    """,
-                    (*chunk, max_created_at),
-                ).fetchall()
-                rows_out.extend(self._parse_application_context_row(row) for row in rows)
-        return rows_out
+        store = LearningApplicationStore(str(self.db_path))
+        effects_by_app: dict[str, dict[str, Any]] = {}
+        for eff in store.iter_effects(scope_type="factor"):
+            aid = str(eff.get("application_id") or "")
+            if aid:
+                effects_by_app[aid] = eff
+        items: list[dict] = []
+        for app in store.iter_applications(scope_type="factor"):
+            if str(app.get("scope_key") or "") not in names:
+                continue
+            cycle_ts = _safe_float(
+                app.get("cycle_ts"), _safe_float(app.get("created_at"))
+            )
+            if cycle_ts > float(max_created_at):
+                continue
+            eff = effects_by_app.get(str(app.get("application_id") or ""))
+            items.append(self._application_context_item(app, eff))
+        items.sort(
+            key=lambda item: _safe_float(item.get("_cycle_ts")), reverse=True
+        )
+        return items
 
     @staticmethod
     def _application_context_from_prefetch(factors: list[dict], review_created_at: float, rows: list[dict]) -> list[dict]:
@@ -1086,51 +1087,30 @@ class LearningFeatureProvider:
         return None
 
     def _application_context(self, factors: list[dict], review_created_at: float) -> list[dict]:
-        names = [f["factor"] for f in factors if f.get("factor")]
+        names = {str(f["factor"]) for f in factors if f.get("factor")}
         if not names:
             return []
-        p = self._p()
-        placeholders = ",".join(p for _ in names)
-        with self._conn() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT l.application_id, l.scope_type, l.scope_key, l.action,
-                       l.bias_multiplier, l.old_weight, l.new_weight, l.status,
-                       l.cycle_ts, e.status AS effect_status,
-                       e.observed_trade_count, e.baseline_trade_count,
-                       e.delta_avg_reward, e.post_win_rate, e.baseline_win_rate,
-                       e.decision_json
-                FROM learning_application_log l
-                LEFT JOIN learning_application_effect e
-                  ON e.application_id = l.application_id
-                WHERE l.scope_type='factor'
-                  AND l.scope_key IN ({placeholders})
-                  AND l.cycle_ts <= {p}
-                ORDER BY l.cycle_ts DESC
-                LIMIT 20
-                """,
-                (*names, review_created_at),
-            ).fetchall()
-        return [
-            {
-                "application_id": str(row["application_id"] or ""),
-                "scope_type": str(row["scope_type"] or ""),
-                "scope_key": str(row["scope_key"] or ""),
-                "action": str(row["action"] or ""),
-                "bias_multiplier": _safe_float(row["bias_multiplier"], 1.0),
-                "old_weight": _safe_float(row["old_weight"]),
-                "new_weight": _safe_float(row["new_weight"]),
-                "status": str(row["status"] or ""),
-                "effect_status": str(row["effect_status"] or ""),
-                "observed_trade_count": int(row["observed_trade_count"] or 0),
-                "baseline_trade_count": int(row["baseline_trade_count"] or 0),
-                "delta_avg_reward": _safe_float(row["delta_avg_reward"]),
-                "post_win_rate": _safe_float(row["post_win_rate"]),
-                "baseline_win_rate": _safe_float(row["baseline_win_rate"]),
-                "decision": _loads(row["decision_json"], {}),
-            }
-            for row in rows
-        ]
+        store = LearningApplicationStore(str(self.db_path))
+        effects_by_app: dict[str, dict[str, Any]] = {}
+        for eff in store.iter_effects(scope_type="factor"):
+            aid = str(eff.get("application_id") or "")
+            if aid:
+                effects_by_app[aid] = eff
+        items: list[dict] = []
+        for app in store.iter_applications(scope_type="factor"):
+            if str(app.get("scope_key") or "") not in names:
+                continue
+            cycle_ts = _safe_float(
+                app.get("cycle_ts"), _safe_float(app.get("created_at"))
+            )
+            if cycle_ts > float(review_created_at):
+                continue
+            eff = effects_by_app.get(str(app.get("application_id") or ""))
+            items.append(self._application_context_item(app, eff))
+        items.sort(
+            key=lambda item: _safe_float(item.get("_cycle_ts")), reverse=True
+        )
+        return items[:20]
 
     @staticmethod
     def _parse_experience(row: sqlite3.Row) -> dict:
@@ -1528,10 +1508,11 @@ class LearningFeatureProvider:
         """Summarize persisted factor evidence using the learning contract.
 
         This is intentionally a warm, read-only projection.  Matured,
-        uncontaminated, governance-eligible counts come from the same
-        ``autonomous_learning_sample`` eligibility fields populated by this
-        provider's evidence-contract pipeline; decision snapshots remain
-        observations and are never promoted to mature-trade evidence.
+        uncontaminated, governance-eligible counts come from the canonical
+        ``training_sample_row`` eligibility fields populated by this provider's
+        evidence-contract pipeline (read via the canonical reader); decision
+        snapshots remain observations and are never promoted to mature-trade
+        evidence.
         """
         ids = list(dict.fromkeys(str(item) for item in factor_ids if str(item)))
         if not ids:
@@ -1580,61 +1561,64 @@ class LearningFeatureProvider:
                     if factor_id in result:
                         result[factor_id]["factor_linked_trade_reviews"] = int(row["n"] or 0)
 
-                rows = conn.execute(
-                    f"""
-                    SELECT factor,
-                           COUNT(DISTINCT CASE
-                               WHEN label_status='matured'
-                                AND COALESCE(governance_eligible, 0)=1
-                                AND COALESCE(system_contaminated, 0)=0
-                               THEN sample_id END) AS mature_n,
-                           COUNT(DISTINCT CASE
-                               WHEN COALESCE(governance_eligible, 0)=0
-                                 OR COALESCE(system_contaminated, 0)=1
-                               THEN sample_id END) AS ineligible_n
-                    FROM (
-                        SELECT s.sample_id, s.label_status,
-                               s.governance_eligible, s.system_contaminated,
-                               d.factor AS factor
-                        FROM autonomous_learning_sample s
-                        JOIN decision_factor_snapshot d
-                          ON d.decision_id=s.decision_id
-                        WHERE d.factor IN ({placeholders})
-                        UNION
-                        SELECT s.sample_id, s.label_status,
-                               s.governance_eligible, s.system_contaminated,
-                               f.factor AS factor
-                        FROM autonomous_learning_sample s
-                        JOIN trade_outcome_review r
-                          ON r.review_id=s.source_id
-                         AND s.source_table='trade_outcome_review'
-                        JOIN factor_contribution_review f
-                          ON f.review_id=r.review_id
+                from backend.services.canonical_v2_reader import iter_training_sample_rows
+                sampled_rows = iter_training_sample_rows(conn, limit=0)
+                linked: dict[str, list[dict[str, Any]]] = {factor_id: [] for factor_id in ids}
+                d_factors: dict[str, list[str]] = defaultdict(list)
+                r_factors: dict[str, list[str]] = defaultdict(list)
+                if ids:
+                    rows = conn.execute(
+                        f"SELECT decision_id, factor FROM decision_factor_snapshot "
+                        f"WHERE factor IN ({placeholders})",
+                        tuple(ids),
+                    ).fetchall()
+                    for row in rows:
+                        d_factors[str(row["decision_id"] or "")].append(str(row["factor"] or ""))
+                    rows = conn.execute(
+                        f"""
+                        SELECT r.review_id, f.factor
+                        FROM factor_contribution_review f
+                        JOIN trade_outcome_review r ON r.review_id=f.review_id
                         WHERE f.factor IN ({placeholders})
-                    ) linked
-                    GROUP BY factor
-                    """,
-                    tuple(ids) + tuple(ids),
-                ).fetchall()
-                for row in rows:
-                    factor_id = str(row["factor"] or "")
-                    if factor_id in result:
-                        result[factor_id]["governance_eligible_mature"] = int(row["mature_n"] or 0)
-                        result[factor_id]["contaminated_or_ineligible"] = int(row["ineligible_n"] or 0)
+                        """,
+                        tuple(ids),
+                    ).fetchall()
+                    for row in rows:
+                        r_factors[str(row["review_id"] or "")].append(str(row["factor"] or ""))
+                for s in sampled_rows:
+                    factors: set[str] = set()
+                    decision_id = str(s.get("decision_id") or "")
+                    for fid in d_factors.get(decision_id, ()):
+                        factors.add(fid)
+                    if str(s.get("source_table") or "") == "trade_outcome_review":
+                        source_id = str(s.get("source_id") or "")
+                        for fid in r_factors.get(source_id, ()):
+                            factors.add(fid)
+                    for factor_id in factors:
+                        linked[factor_id].append(s)
+                for factor_id, items in linked.items():
+                    if not items:
+                        continue
+                    mature_n = sum(
+                        1 for item in items
+                        if item.get("label_status") == "matured"
+                        and bool(item.get("governance_eligible"))
+                        and not bool(item.get("system_contaminated"))
+                    )
+                    result[factor_id]["governance_eligible_mature"] = mature_n
+                    result[factor_id]["contaminated_or_ineligible"] = len(items) - mature_n
 
-                rows = conn.execute(
-                    f"""
-                    SELECT scope_key AS factor, COUNT(*) AS n
-                    FROM learning_application_effect
-                    WHERE scope_type='factor' AND scope_key IN ({placeholders})
-                    GROUP BY scope_key
-                    """,
-                    tuple(ids),
-                ).fetchall()
-                for row in rows:
-                    factor_id = str(row["factor"] or "")
+                id_set = {str(i) for i in ids}
+                counts: dict[str, int] = defaultdict(int)
+                for eff in LearningApplicationStore(
+                    str(self.db_path)
+                ).iter_effects(scope_type="factor"):
+                    key = str(eff.get("scope_key") or "")
+                    if key in id_set:
+                        counts[key] += 1
+                for factor_id, n in counts.items():
                     if factor_id in result:
-                        result[factor_id]["effects_observed"] = int(row["n"] or 0)
+                        result[factor_id]["effects_observed"] = n
         except Exception:
             for item in result.values():
                 item["decision_observations"] = None

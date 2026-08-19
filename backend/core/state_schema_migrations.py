@@ -1,4 +1,4 @@
-"""Versioned PostgreSQL migrations for the ``state_v1`` runtime schema.
+"""Versioned PostgreSQL migrations for the ``runtime`` PostgreSQL schema.
 
 The application processes only validate a minimum schema version.  Applying
 migrations is an explicit operator action through ``scripts/state_schema_migrate.py``.
@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Sequence
 
+from backend.core.db_helpers import row_value as _row_value
+
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_SCHEMA_MIGRATION_DIR: Final[Path] = _PROJECT_ROOT / "migrations" / "state_pg"
@@ -26,30 +28,7 @@ STATE_SCHEMA_MIGRATION_LOCK_ID: Final[int] = 0x5155414E54534D31  # ASCII: QUANTS
 # runner must never make an empty or partial schema look deployable merely by
 # creating the new migration ledger and foundation tables.
 STATE_SCHEMA_BASELINE_TABLES: Final[tuple[str, ...]] = (
-    "autonomous_learning_sample",
-    "brain_governance_candidate_review",
-    "brain_medium_impact_governance",
-    "brain_state_snapshot",
-    "ctrader_deals",
-    "decision_ledger",
-    "decision_factor_snapshot",
-    "brain_action_plan_eval",
-    "evolution_decision",
-    "experience_memory",
-    "experience_pattern_stats",
-    "factor_catalog_snapshot",
-    "jobs",
-    "learning_application_effect",
-    "learning_application_log",
-    "learning_experiment_reservation",
-    "order_lifecycle_event",
-    "policy_suggestion",
-    "position_supervisor_trace",
-    "proposal_registry",
-    "runtime_config_overlay",
-    "runtime_config_snapshot",
-    "trade_outcome_review",
-    "v16_brain_command",
+    # 2026-08-18: 空列表（表已全部删除，由代码 ensure_* 函数重建）
 )
 
 
@@ -131,6 +110,18 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(14, "state_payload_dedupe", "0014_state_payload_dedupe.sql"),
     StateSchemaMigration(15, "training_window_and_payload_archive", "0015_training_window_and_payload_archive.sql"),
     StateSchemaMigration(16, "canonical_v2_foundation", "0016_canonical_v2_foundation.sql"),
+    StateSchemaMigration(17, "canonical_v2_sample_domain", "0017_canonical_v2_sample_domain.sql"),
+    StateSchemaMigration(18, "boundary_event_types", "0018_boundary_event_types.sql"),
+    StateSchemaMigration(19, "secondary_index_backfill", "0019_secondary_index_backfill.sql"),
+    StateSchemaMigration(20, "backfill_minimal_table_columns", "0020_backfill_minimal_table_columns.sql"),
+    StateSchemaMigration(21, "create_missed_runtime_tables", "0021_create_missed_runtime_tables.sql"),
+    StateSchemaMigration(22, "backfill_single_column_gaps", "0022_backfill_single_column_gaps.sql"),
+    StateSchemaMigration(23, "rebuild_proposal_registry_index", "0023_rebuild_proposal_registry_index.sql"),
+    StateSchemaMigration(24, "rebuild_jobs_claim_ready_index", "0024_rebuild_jobs_claim_ready_index.sql"),
+    StateSchemaMigration(25, "restore_offmarket_training_window_unique", "0025_restore_offmarket_training_window_unique.sql"),
+    StateSchemaMigration(26, "align_factor_runtime_projection", "0026_align_factor_runtime_projection.sql"),
+    StateSchemaMigration(27, "build_backfilled_live_indexes", "0027_build_backfilled_live_indexes.sql"),
+    StateSchemaMigration(28, "align_factor_lifecycle_state", "0028_align_factor_lifecycle_state.sql"),
 )
 STATE_SCHEMA_MIN_VERSION: Final[int] = 16
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
@@ -147,17 +138,6 @@ CREATE TABLE IF NOT EXISTS state_schema_migration (
     applied_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
 )
 """
-
-
-def _row_value(row: Any, key: str, index: int = 0, default: Any = None) -> Any:
-    if row is None:
-        return default
-    if isinstance(row, dict):
-        return row.get(key, default)
-    try:
-        return row[index]
-    except (IndexError, KeyError, TypeError):
-        return default
 
 
 def _validate_catalog(migrations: Sequence[StateSchemaMigration]) -> None:

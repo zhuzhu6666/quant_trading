@@ -365,68 +365,70 @@ class DecisionLedger:
                     and bool(row["config_hash"])
                     else "lineage_missing"
                 )
-            self._execute(conn,
-                """
-                INSERT INTO decision_ledger
-                (decision_id, trade_id, position_id, event_type, symbol, timeframe,
-                 decision_ts, regime_id, regime_confidence, portfolio_state_json,
-                 risk_state_json, policy_version, factor_set_version, action_score,
-                 action_reason, action_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                tuple(decision_payload[k] for k in (
-                    "decision_id",
-                    "trade_id",
-                    "position_id",
-                    "event_type",
-                    "symbol",
-                    "timeframe",
-                    "decision_ts",
-                    "regime_id",
-                    "regime_confidence",
-                    "portfolio_state_json",
-                    "risk_state_json",
-                    "policy_version",
-                    "factor_set_version",
-                    "action_score",
-                    "action_reason",
-                    "action_json",
-                    "created_at",
-                )),
-            )
-            for row in factor_payloads:
-                self._execute(conn,
-                    """
-                    INSERT INTO decision_factor_snapshot
-                    (decision_id, factor, source, raw_value, normalized_value, direction,
-                     base_weight, policy_weight, shadow_score, health_score, gated,
-                     gated_reason, contribution_score, generation, artifact_hash,
-                     definition_fingerprint, runtime_selection_fingerprint,
-                     config_hash, lineage_status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        decision_id,
-                        row["factor"],
-                        row["source"],
-                        row["raw_value"],
-                        row["normalized_value"],
-                        row["direction"],
-                        row["base_weight"],
-                        row["policy_weight"],
-                        row["shadow_score"],
-                        row["health_score"],
-                        row["gated"],
-                        row["gated_reason"],
-                        row["contribution_score"],
-                        row["generation"],
-                        row["artifact_hash"],
-                        row["definition_fingerprint"],
-                        row["runtime_selection_fingerprint"],
-                        row["config_hash"],
-                        row["lineage_status"],
-                    ),
+            # ── P4 单轨写入：canonical 是唯一事实源 ──
+            # PG 环境 fail-closed；SQLite fixture 回退 legacy（测试兼容）
+            _use_canonical = self._use_pg()
+            if _use_canonical:
+                from backend.services.canonical_v2 import record_decision_event
+                record_decision_event(
+                    conn,
+                    decision_id=str(decision_id or ""),
+                    trade_id=str(decision_payload.get("trade_id") or ""),
+                    position_id=str(decision_payload.get("position_id") or ""),
+                    event_type=str(decision_payload.get("event_type") or ""),
+                    symbol=str(decision_payload.get("symbol") or ""),
+                    timeframe=str(decision_payload.get("timeframe") or ""),
+                    decision_ts=decision_payload.get("decision_ts"),
+                    regime_id=str(decision_payload.get("regime_id") or ""),
+                    regime_confidence=decision_payload.get("regime_confidence"),
+                    policy_version=str(decision_payload.get("policy_version") or ""),
+                    factor_set_version=str(decision_payload.get("factor_set_version") or ""),
+                    action_score=decision_payload.get("action_score"),
+                    action_reason=str(decision_payload.get("action_reason") or ""),
+                    action=decision_payload.get("action_json"),
+                    risk_state=decision_payload.get("risk_state_json"),
+                    portfolio_state=decision_payload.get("portfolio_state_json"),
+                    created_at=decision_payload.get("created_at"),
+                    factor_snapshots=factor_payloads if factor_payloads else None,
                 )
+            else:
+                # SQLite fixture fallback: legacy writes for test compatibility
+                self._execute(conn,
+                    "INSERT INTO decision_ledger"
+                    " (decision_id, trade_id, position_id, event_type, symbol, timeframe,"
+                    " decision_ts, regime_id, regime_confidence, portfolio_state_json,"
+                    " risk_state_json, policy_version, factor_set_version, action_score,"
+                    " action_reason, action_json, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    tuple(decision_payload[k] for k in (
+                        "decision_id", "trade_id", "position_id", "event_type", "symbol",
+                        "timeframe", "decision_ts", "regime_id", "regime_confidence",
+                        "portfolio_state_json", "risk_state_json", "policy_version",
+                        "factor_set_version", "action_score", "action_reason",
+                        "action_json", "created_at",
+                    )),
+                )
+                for row in factor_payloads:
+                    self._execute(conn,
+                        "INSERT INTO decision_factor_snapshot"
+                        " (decision_id, factor, source, raw_value, normalized_value, direction,"
+                        " base_weight, policy_weight, shadow_score, health_score, gated,"
+                        " gated_reason, contribution_score, generation, artifact_hash,"
+                        " definition_fingerprint, runtime_selection_fingerprint,"
+                        " config_hash, lineage_status)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            decision_id, row["factor"], row["source"],
+                            row["raw_value"], row["normalized_value"], row["direction"],
+                            row["base_weight"], row["policy_weight"],
+                            row["shadow_score"], row["health_score"],
+                            row["gated"], row["gated_reason"],
+                            row["contribution_score"], row["generation"],
+                            row["artifact_hash"], row["definition_fingerprint"],
+                            row["runtime_selection_fingerprint"],
+                            row["config_hash"], row["lineage_status"],
+                        ),
+                    )
         return decision_id
 
     def log_composite_decision(
@@ -557,6 +559,7 @@ class DecisionLedger:
         event_ts: float | None = None,
     ) -> str:
         event_id = self.new_id("ordevt")
+        event_ts = float(event_ts or time.time())
         with self._conn() as conn:
             self._execute(conn,
                 """
@@ -572,13 +575,36 @@ class DecisionLedger:
                     order_id,
                     broker_order_id,
                     event_type,
-                    float(event_ts or time.time()),
+                    event_ts,
                     float(price or 0.0),
                     float(volume or 0.0),
                     status,
                     _json_dumps(details),
                 ),
             )
+            # ── canonical 增量镜像（同事务、幂等；过渡期 fail-open）──
+            try:
+                from backend.services.canonical_v2 import record_order_event
+                record_order_event(
+                    conn,
+                    event_id=event_id,
+                    event_type=event_type,
+                    event_ts=event_ts,
+                    decision_id=decision_id,
+                    trade_id=trade_id,
+                    order_id=order_id,
+                    broker_order_id=broker_order_id,
+                    price=price,
+                    volume=volume,
+                    status=status,
+                    details=details,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[ledger] canonical order mirror failed event_id=%s: %s",
+                    event_id,
+                    exc,
+                )
         return event_id
 
     def log_position_event(
@@ -596,6 +622,7 @@ class DecisionLedger:
         event_ts: float | None = None,
     ) -> str:
         event_id = self.new_id("posevt")
+        event_ts = float(event_ts or time.time())
         with self._conn() as conn:
             self._execute(conn,
                 """
@@ -610,7 +637,7 @@ class DecisionLedger:
                     trade_id,
                     symbol,
                     event_type,
-                    float(event_ts or time.time()),
+                    event_ts,
                     float(net_volume or 0.0),
                     float(avg_price or 0.0),
                     float(unrealized_pnl or 0.0),
@@ -618,6 +645,29 @@ class DecisionLedger:
                     _json_dumps(details),
                 ),
             )
+            # ── canonical 增量镜像（同事务、幂等；过渡期 fail-open）──
+            try:
+                from backend.services.canonical_v2 import record_position_event
+                record_position_event(
+                    conn,
+                    event_id=event_id,
+                    position_id=position_id,
+                    event_type=event_type,
+                    event_ts=event_ts,
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    net_volume=net_volume,
+                    avg_price=avg_price,
+                    unrealized_pnl=unrealized_pnl,
+                    realized_pnl=realized_pnl,
+                    details=details,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[ledger] canonical position mirror failed event_id=%s: %s",
+                    event_id,
+                    exc,
+                )
         return event_id
 
     def log_position_supervisor_trace(
@@ -794,7 +844,39 @@ class DecisionLedger:
                 )
         return trace_id
 
-    def get_latest_entry_decision(self, position_id: str) -> sqlite3.Row | None:
+    def get_latest_entry_decision(self, position_id: str) -> Any | None:
+        """Latest open decision for a position (canonical position index first).
+
+        The materialized index (scripts/canonical_v2_position_decision_index.py)
+        resolves the position to its entry decision; the decision is then read
+        through the canonical reader (legacy-shaped row).  Positions missing
+        from the index and non-canonical connections keep the legacy lookup.
+        """
+        try:
+            from backend.services.canonical_v2_reader import (
+                decision_row,
+                load_position_decision_index,
+            )
+        except Exception:  # noqa: BLE001
+            decision_row = None
+            load_position_decision_index = None
+        if decision_row is not None and load_position_decision_index is not None:
+            try:
+                index_path = (
+                    Path(__file__).resolve().parents[2]
+                    / "run_artifacts"
+                    / "canonical_v2_position_decision_index.json"
+                )
+                index = load_position_decision_index(index_path)
+                if index is not None:
+                    entry = index.get(str(position_id))
+                    if entry is not None and entry.get("decision_id"):
+                        with self._conn() as conn:
+                            row = decision_row(conn, str(entry["decision_id"]))
+                        if row is not None:
+                            return row
+            except Exception:  # noqa: BLE001
+                pass  # transitional fallback to the legacy lookup below
         with self._conn() as conn:
             return self._execute(conn,
                 """
@@ -805,16 +887,25 @@ class DecisionLedger:
                 (position_id,),
             ).fetchone()
 
-    def get_factor_snapshots(self, decision_id: str) -> list[sqlite3.Row]:
-        with self._conn() as conn:
-            return list(
-                self._execute(conn,
-                    """
-                    SELECT * FROM decision_factor_snapshot
-                    WHERE decision_id=?
-                    ORDER BY ABS(contribution_score) DESC, factor ASC
-                    """,
-                    (decision_id,),
-                )
+    def get_factor_snapshots(self, decision_id: str) -> list[dict]:
+        """Return per-factor snapshot rows for a decision.
+
+        Reads from canonical payload (new decisions) with legacy fallback.
+        """
+        try:
+            from backend.services.canonical_v2_reader import (
+                iter_decision_factor_snapshots,
             )
+            with self._conn() as conn:
+                return iter_decision_factor_snapshots(conn, decision_id)
+        except Exception:
+            with self._conn() as conn:
+                return list(
+                    self._execute(conn,
+                        "SELECT * FROM decision_factor_snapshot"
+                        " WHERE decision_id=?"
+                        " ORDER BY ABS(contribution_score) DESC, factor ASC",
+                        (decision_id,),
+                    )
+                )
 

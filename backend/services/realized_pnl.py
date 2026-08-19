@@ -8,6 +8,7 @@ from typing import Callable, Iterable
 from zoneinfo import ZoneInfo
 
 from backend.core.db import get_state_pg_conn
+from backend.core.db_helpers import conn_is_pg as _conn_is_pg, execute as _execute
 
 _DEFAULT_TZ = "Asia/Shanghai"
 _VALID_SCOPES = {"today", "24h", "7d", "30d", "all"}
@@ -40,20 +41,6 @@ def _net_from_close_row(row) -> float:
 
 def _connect_state():
     return get_state_pg_conn(read_only=True)
-
-
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _state_sql(sql: str) -> str:
-    return sql.replace("?", "%s")
-
-
-def _execute(conn, sql: str, params: list | tuple | None = None):
-    if params is None:
-        return conn.execute(_state_sql(sql) if _conn_is_pg(conn) else sql)
-    return conn.execute(_state_sql(sql) if _conn_is_pg(conn) else sql, tuple(params))
 
 
 def _fetch_ctrader_close_points(conn, *, from_ts: float | None, to_ts: float) -> list[dict]:

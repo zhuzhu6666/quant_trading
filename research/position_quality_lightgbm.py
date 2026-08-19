@@ -22,7 +22,7 @@ from backend.core.state_store import (
     is_state_schema_write_sql,
     validate_runtime_state_schema,
 )
-from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
 from backend.services.review_contract import (
     SYSTEM_CONTAMINATION_LABELS,

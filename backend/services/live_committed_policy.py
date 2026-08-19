@@ -90,29 +90,25 @@ def load_live_policy_controls(
     candidates = [dict(row) for row in rows if str(dict(row).get("action") or "") in actions]
     application_statuses: dict[str, set[str]] = {}
     if candidates and state_table_exists(conn, "learning_application_log"):
-        application_columns = state_table_columns(conn, "learning_application_log")
-        if {"scope_type", "suggestion_ids_json", "status"} <= application_columns:
-            application_rows = conn.execute(
-                _sql(
-                    conn,
-                    """
-                    SELECT suggestion_ids_json, status
-                    FROM learning_application_log
-                    WHERE scope_type=?
-                    """,
-                ),
-                (str(scope_type),),
-            ).fetchall()
-            for application in application_rows:
-                payload = dict(application).get("suggestion_ids_json") or []
-                if isinstance(payload, str):
-                    try:
-                        payload = json.loads(payload or "[]")
-                    except (TypeError, ValueError):
-                        payload = []
+        from backend.services.learning_application_store import store_for_conn
+
+        store = store_for_conn(conn)
+        if store is not None:
+            # Lean store: suggestion_ids + status live inside the parsed
+            # details blob produced by iter_applications, never as wide columns.
+            for application in store.iter_applications(scope_type=str(scope_type)):
+                payload = application.get("suggestion_ids")
+                if not isinstance(payload, list):
+                    if isinstance(payload, str):
+                        try:
+                            payload = json.loads(payload or "[]")
+                        except (TypeError, ValueError):
+                            payload = []
+                    else:
+                        continue
                 if not isinstance(payload, list):
                     continue
-                status = str(dict(application).get("status") or "")
+                status = str(application.get("status") or "")
                 for suggestion_id in payload:
                     application_statuses.setdefault(str(suggestion_id), set()).add(status)
     mutation_ids = sorted(

@@ -16,6 +16,12 @@ from backend.core.db import (
     state_table_columns,
     state_table_exists,
 )
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    execute as _execute,
+    pg_sql as _sql,
+)
+from backend.services.canonical_v2_reader import canonical_ready, iter_review_rows, review_row
 from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.state_payload_archive import load_json_payload
@@ -64,20 +70,6 @@ def _connect_state(db_path: str | Path = STATE_DB):
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
 
 
 class BackendReadinessService:
@@ -462,26 +454,51 @@ class BackendReadinessService:
             }
         try:
             maturity_rows = []
-            if (
-                _table_exists(conn, "supervisor_counterfactual_review")
-                and _table_exists(conn, "trade_outcome_review")
+            if _table_exists(conn, "supervisor_counterfactual_review") and (
+                canonical_ready(conn) or _table_exists(conn, "trade_outcome_review")
             ):
-                review_archive_select = (
-                    ", r.review_archive_hash AS source_review_archive_hash"
-                    if "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
-                    else ""
-                )
-                maturity_rows = _execute(
+                cf_rows = _execute(
                     conn,
-                    f"""
-                    SELECT c.position_id, c.close_ts, c.evidence_json,
-                           r.review_id AS source_review_id,
-                           r.review_json AS source_review_json{review_archive_select}
+                    """
+                    SELECT c.position_id, c.close_ts, c.evidence_json, c.review_id
                     FROM supervisor_counterfactual_review c
-                    LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
                     ORDER BY c.updated_at DESC
                     """,
                 ).fetchall()
+                if canonical_ready(conn):
+                    # Review facts come from canonical (reader-owned legacy
+                    # fallback); the counterfactual table stays legacy.  One
+                    # canonical stream serves all counterfactual rows.
+                    review_map = {
+                        str(row.get("review_id") or ""): row
+                        for row in iter_review_rows(conn, limit=0)
+                    }
+                    for item in cf_rows:
+                        value = dict(item)
+                        review_id = str(value.get("review_id") or "")
+                        review = review_map.get(review_id)
+                        value["source_review_id"] = review_id if review is not None else ""
+                        value["source_review_json"] = (review or {}).get("review_json") or {}
+                        value["source_review_archive_hash"] = ""
+                        maturity_rows.append(value)
+                else:
+                    review_archive_select = (
+                        ", r.review_archive_hash AS source_review_archive_hash"
+                        if "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
+                        else ""
+                    )
+                    legacy_rows = _execute(
+                        conn,
+                        f"""
+                        SELECT c.position_id, c.close_ts, c.evidence_json,
+                               r.review_id AS source_review_id,
+                               r.review_json AS source_review_json{review_archive_select}
+                        FROM supervisor_counterfactual_review c
+                        LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
+                        ORDER BY c.updated_at DESC
+                        """,
+                    ).fetchall()
+                    maturity_rows = [dict(row) for row in legacy_rows]
             canary_started_at = 0.0
             canary_suggestion_id = ""
             canary_template_id = ""
@@ -580,13 +597,24 @@ class BackendReadinessService:
 
             active_effects = 0
             effect_ages: list[float] = []
-            if _table_exists(conn, "learning_application_effect"):
-                rows = _execute(
-                    conn,
-                    "SELECT status, updated_at FROM learning_application_effect WHERE status IN ('prepared','observing','mixed')",
-                ).fetchall()
-                active_effects = len(rows)
-                effect_ages = [max(0.0, now - _safe_float(dict(row).get("updated_at"))) for row in rows]
+            try:
+                from backend.services.learning_application_store import (
+                    LearningApplicationStore,
+                )
+
+                for eff in LearningApplicationStore(self.db_path).iter_effects():
+                    if str(eff.get("status") or "") in (
+                        "prepared",
+                        "observing",
+                        "mixed",
+                    ):
+                        active_effects += 1
+                        effect_ages.append(
+                            max(0.0, now - _safe_float(eff.get("updated_at")))
+                        )
+            except Exception:
+                active_effects = 0
+                effect_ages = []
 
             budget = {"reserved": 0, "consumed": 0}
             if _table_exists(conn, "nursery_exploration_reservation"):

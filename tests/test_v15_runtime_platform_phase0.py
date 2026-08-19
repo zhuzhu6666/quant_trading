@@ -7,6 +7,7 @@ import pandas as pd
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.autonomy_health import AutonomyHealthService
 from backend.services.incident_controls import RuntimeIncidentControlService
+from tests.canonical_fixture import ensure_training_sample_row_sqlite
 from backend.services.release_control import ReleaseControlService
 from backend.services.replay_harness import ReplayHarnessService
 from backend.services.v15_phase0 import V15Phase0CompletionService
@@ -20,6 +21,7 @@ def test_replay_harness_persists_factor_gate_risk_report(tmp_path):
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_training_sample_row_sqlite(db_path)
         conn.execute(
             """
             INSERT INTO runtime_config_snapshot
@@ -96,6 +98,7 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_training_sample_row_sqlite(db_path)
         conn.execute(
             """
             INSERT INTO runtime_config_snapshot
@@ -195,7 +198,7 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
         )
         conn.execute(
             """
-            INSERT INTO autonomous_learning_sample
+            INSERT INTO training_sample_row
             (sample_id, sample_type, source_table, source_id, decision_id,
              trade_id, position_id, symbol, timeframe, event_ts,
              label_status, integrity, train_weight, system_contaminated,
@@ -404,7 +407,7 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
     try:
         conn.execute(
             """
-            UPDATE autonomous_learning_sample
+            UPDATE training_sample_row
             SET system_contaminated=1, governance_eligible=0,
                 governance_effective_weight=0.0
             WHERE sample_id='als_trade_1'
@@ -434,9 +437,28 @@ def test_autonomy_health_v1_is_machine_readable_and_read_only(tmp_path):
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_training_sample_row_sqlite(db_path)
+        # PG-only payload pool consulted by AutonomyHealthService._action_stats
+        # (evolution_decision LEFT JOIN mutation_payload); not part of the
+        # SQLite STATE_DB_DDL fixture.
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS mutation_payload (
+                payload_hash TEXT PRIMARY KEY,
+                evidence_json TEXT,
+                risk_verdict_json TEXT,
+                before_json TEXT,
+                after_json TEXT,
+                result_json TEXT,
+                rollback_json TEXT,
+                byte_length INTEGER,
+                created_at REAL
+            );
+            """
+        )
         conn.execute(
             """
-            INSERT INTO autonomous_learning_sample
+            INSERT INTO training_sample_row
             (sample_id, sample_type, source_table, source_id, event_ts, label_status,
              integrity, train_weight, created_at, updated_at)
             VALUES ('s1', 'shadow_open_decision', 'decision_ledger', 'dec_1',
@@ -559,9 +581,10 @@ def test_autonomy_health_filters_before_limit_and_uses_governance_weight(tmp_pat
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_training_sample_row_sqlite(db_path)
         conn.execute(
             """
-            INSERT INTO autonomous_learning_sample
+            INSERT INTO training_sample_row
             (sample_id, sample_type, source_table, source_id, event_ts,
              label_status, integrity, train_weight, system_contaminated,
              governance_eligible, governance_effective_weight,
@@ -573,7 +596,7 @@ def test_autonomy_health_filters_before_limit_and_uses_governance_weight(tmp_pat
         )
         conn.executemany(
             """
-            INSERT INTO autonomous_learning_sample
+            INSERT INTO training_sample_row
             (sample_id, sample_type, source_table, source_id, event_ts,
              label_status, integrity, train_weight, system_contaminated,
              governance_eligible, governance_effective_weight,

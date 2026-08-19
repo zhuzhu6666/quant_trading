@@ -327,11 +327,13 @@ class RuntimeConfigMutationService:
             if production_state and v16_authority.get("claim_token"):
                 from backend.services.v16_command_gate import V16CommandGate
 
-                consumed = V16CommandGate.consume(
+                consumed = V16CommandGate.finalize(
                     self.db_path,
                     command_id=str(v16_authority.get("command_id") or v16_command_id),
                     claim_token=str(v16_authority.get("claim_token") or ""),
                     mutation_id=str(run_id or f"{source}:{int(time.time() * 1000)}"),
+                    config_hash="",
+                    domain_hash="",
                 )
                 v16_authority["consumed"] = consumed
                 if not consumed.get("allowed"):

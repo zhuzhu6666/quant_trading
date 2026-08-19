@@ -376,7 +376,7 @@ def incident_control_status_fact_payload(
     )
     projection = _component(
         contract="ops.incident-control-projection.v2",
-        source="state_v1.runtime_config_overlay",
+        source="runtime.runtime_config_overlay",
         observed_at=projection_observed_at,
         stale_after_sec=OPS_RISK_STALE_AFTER_SEC,
         error=projection_error,
@@ -400,7 +400,7 @@ def incident_control_status_fact_payload(
         ),
         now=generated_at,
     )
-    source = "state_v1.runtime_config_overlay"
+    source = "runtime.runtime_config_overlay"
     if latch_is_active and observed_epoch(latch_observed_at) > 0:
         source += "+local_safety_latch"
     return _attach(
@@ -461,7 +461,7 @@ def governance_mutation_fact_payload(
     components = {
         "governance_commit": _component(
             contract=f"{contract}.commit",
-            source="state_v1.governance_mutation_intent",
+            source="runtime.governance_mutation_intent",
             observed_at=observed_at,
             stale_after_sec=OPS_RISK_STALE_AFTER_SEC,
             error=_source_error(mutation),
@@ -489,7 +489,7 @@ def governance_mutation_fact_payload(
     return _attach(
         payload,
         contract=contract,
-        source="state_v1.governance_mutation_intent",
+        source="runtime.governance_mutation_intent",
         observed_at=observed_at,
         stale_after_sec=OPS_RISK_STALE_AFTER_SEC,
         error=_source_error(payload, result, mutation),
@@ -516,9 +516,9 @@ def autonomy_scope_enforcement_fact_payload(
         payload,
         contract="ops.autonomy-scope-enforcement.v2",
         source=(
-            "state_v1.autonomy_scope_enforcement_event"
+            "runtime.autonomy_scope_enforcement_event"
             if no_mutation_needed
-            else "state_v1.governance_mutation_intent"
+            else "runtime.governance_mutation_intent"
         ),
         observed_at=observed_at,
         stale_after_sec=OPS_RISK_STALE_AFTER_SEC,
@@ -538,14 +538,14 @@ def factor_catalog_fact_payload(
     mode = str(payload.get("snapshot_mode") or "live").strip().lower()
     if mode == "latest":
         observed_at = payload.get("created_at")
-        source = str(payload.get("source") or "state_v1.factor_catalog_snapshot")
+        source = str(payload.get("source") or "runtime.factor_catalog_snapshot")
     else:
         observed_at = _latest_item_observation(
             payload,
             item_paths=(("items",),),
             timestamp_fields=("health_updated_at", "last_action_ts", "created_at", "updated_at"),
         )
-        source = "factor_registry+state_v1"
+        source = "factor_registry+runtime"
     return _attach(
         payload,
         contract="factor.catalog.v4",
@@ -577,7 +577,7 @@ def proposal_refresh_fact_payload(
     return _attach(
         payload,
         contract="ops.autonomy-proposals-refresh.v2",
-        source="state_v1.proposal_registry",
+        source="runtime.proposal_registry",
         observed_at=observed_at if confirmed else None,
         error=_source_error(payload, projection),
         reason_code=None if confirmed else "proposal_projection_reconcile_missing",
@@ -592,7 +592,7 @@ def scope_approval_fact_payload(
         return persisted_record_fact_payload(
             payload,
             contract="ops.autonomy-scope-approval-event.v2",
-            source="state_v1.autonomy_scope_approval_event",
+            source="runtime.autonomy_scope_approval_event",
             record_path=("approval_event",),
             id_fields=("event_id",),
             observed_paths=(("created_at",),),
@@ -601,7 +601,7 @@ def scope_approval_fact_payload(
     return ledger_read_fact_payload(
         payload,
         contract="ops.autonomy-scope-approval-latest.v2",
-        source="state_v1.autonomy_scope_approval_event",
+        source="runtime.autonomy_scope_approval_event",
         entity_path=("approval_event",),
         observed_paths=(("created_at",),),
         reason_code="scope_approval_event_missing",
@@ -615,7 +615,7 @@ def scope_enforcement_read_fact_payload(
     return ledger_read_fact_payload(
         payload,
         contract="ops.autonomy-scope-enforcement-latest.v2",
-        source="state_v1.autonomy_scope_enforcement_event",
+        source="runtime.autonomy_scope_enforcement_event",
         entity_path=("enforcement_event",),
         observed_paths=(("created_at",),),
         reason_code="scope_enforcement_event_missing",
@@ -644,7 +644,7 @@ def release_approval_trail_fact_payload(
     return _attach(
         payload,
         contract="ops.release-approval-trail.v2",
-        source="state_v1.release_approval_event",
+        source="runtime.release_approval_event",
         observed_at=observed_at if confirmed else None,
         error=_source_error(payload, trail, release_row),
         reason_code=(

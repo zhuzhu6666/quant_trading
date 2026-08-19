@@ -2,7 +2,7 @@ import json
 import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
-from backend.services.brain_memory import BrainMemoryService
+from backend.services.v16_brain_snapshot import BrainMemoryService
 from backend.services.trade_lesson_memory import upsert_trade_lesson_memory
 
 

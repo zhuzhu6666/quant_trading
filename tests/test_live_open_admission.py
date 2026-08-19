@@ -248,14 +248,14 @@ def test_final_open_admission_requires_trainable_quote_inputs(quote, expected):
         ),
         (
             {"ok": True, "observed_at": 1000.0},
-            _fresh_session(980.0),
+            _fresh_session(950.0),
             _fresh_quote(1000.0),
             "market_session_stale",
         ),
         (
             {"ok": True, "observed_at": 1000.0},
             _fresh_session(1000.0),
-            _fresh_quote(980.0),
+            _fresh_quote(950.0),
             "spot_quote_stale",
         ),
     ],

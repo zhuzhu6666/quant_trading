@@ -93,10 +93,19 @@ def test_remember_and_active_block_expiry():
     assert expired_runtime.blocks == {}
 
 
-def test_recent_review_requires_two_consecutive_conflict_losses():
+def test_recent_review_requires_two_consecutive_conflict_losses(monkeypatch):
     runtime = _runtime(
         now=1_000.0,
         rows=[_review("2", created_at=950.0), _review("1", created_at=900.0)],
+    )
+    # The canonical review stream is the only path now; the reader returns
+    # legacy-shaped rows directly.
+    monkeypatch.setattr(
+        "backend.services.live_reentry_guard.iter_review_rows",
+        lambda _conn, limit=0: [
+            _review("2", created_at=950.0),
+            _review("1", created_at=900.0),
+        ],
     )
 
     block = recent_review_reentry_block(
@@ -107,10 +116,18 @@ def test_recent_review_requires_two_consecutive_conflict_losses():
     assert block["remaining_seconds"] == 3_550.0
 
 
-def test_recent_review_clean_matching_row_breaks_streak():
+def test_recent_review_clean_matching_row_breaks_streak(monkeypatch):
     runtime = _runtime(
         now=1_000.0,
         rows=[
+            _review("3", created_at=950.0),
+            _review("2", created_at=925.0, outcome="good_win"),
+            _review("1", created_at=900.0),
+        ],
+    )
+    monkeypatch.setattr(
+        "backend.services.live_reentry_guard.iter_review_rows",
+        lambda _conn, limit=0: [
             _review("3", created_at=950.0),
             _review("2", created_at=925.0, outcome="good_win"),
             _review("1", created_at=900.0),

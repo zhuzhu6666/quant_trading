@@ -854,16 +854,19 @@ class AutonomousDemoApplyStepper:
         )
         if active > 0:
             return 0
-        return min(
-            1,
-            self._count_table(
+        from backend.services.canonical_v2_reader import iter_training_sample_rows
+        eligible_count = len(
+            iter_training_sample_rows(
                 conn,
-                "autonomous_learning_sample",
-                "sample_type='trade_review_outcome' AND label_status='matured' "
-                "AND governance_eligible=1 AND governance_effective_weight>0 "
-                f"AND governance_eligibility_version='{GOVERNANCE_ELIGIBILITY_VERSION}'",
-            ),
+                sample_type="trade_review_outcome",
+                label_status="matured",
+                governance_eligible=1,
+                min_governance_weight=0.0,
+                governance_eligibility_version=GOVERNANCE_ELIGIBILITY_VERSION,
+                governance_eligibility_fingerprint_not_empty=True,
+            )
         )
+        return min(1, eligible_count)
 
     def _count_table(self, conn: Any, table: str, where: str) -> int:
         if not self._table_exists(conn, table):
@@ -876,30 +879,35 @@ class AutonomousDemoApplyStepper:
             return 0
         try:
             from config.runtime_config import shared as runtime_config
+            from backend.services.learning_application_store import LearningApplicationStore
 
+            store = LearningApplicationStore(str(self.db_path))
             current_template_id = str(getattr(runtime_config(), "position_supervisor_template_id", "") or "")
-            rows = _execute(
-                conn,
-                """
-                SELECT l.application_id, l.scope_key, l.details_json,
-                       e.observed_trade_count, e.delta_avg_reward
-                FROM learning_application_log l
-                JOIN learning_application_effect e ON e.application_id = l.application_id
-                WHERE l.scope_type='position_supervisor_template'
-                  AND l.action='switch_position_supervisor_template'
-                  AND l.status IN ('applied', 'observing', 'ineffective')
-                  AND e.status IN ('observing', 'ineffective')
-                  AND COALESCE(e.observed_trade_count, 0) >= 3
-                  AND COALESCE(e.delta_avg_reward, 0.0) <= -0.005
-                ORDER BY l.created_at DESC
-                LIMIT 50
-                """,
-            ).fetchall()
             actionable = 0
-            for row in rows:
-                details = self._loads(row["details_json"] if hasattr(row, "keys") else row[2], {})
-                previous_template_id = str(details.get("previous_template_id") or "")
-                target_template_id = str(details.get("target_template_id") or (row["scope_key"] if hasattr(row, "keys") else row[1]) or "")
+            for effect in store.iter_effects():
+                if str(effect.get("scope_type") or "") != "position_supervisor_template":
+                    continue
+                if str(effect.get("status") or "") not in ("observing", "ineffective"):
+                    continue
+                if int(effect.get("observed_trade_count") or 0) < 3:
+                    continue
+                if float(effect.get("delta_avg_reward") or 0.0) > -0.005:
+                    continue
+                application_id = str(effect.get("application_id") or "")
+                if not application_id:
+                    continue
+                application = store.get_application(application_id)
+                if not application:
+                    continue
+                if str(application.get("scope_type") or "") != "position_supervisor_template":
+                    continue
+                if str(application.get("action") or "") != "switch_position_supervisor_template":
+                    continue
+                if str(application.get("status") or "") not in ("applied", "observing", "ineffective"):
+                    continue
+                scope_key = str(application.get("scope_key") or "")
+                previous_template_id = str(application.get("previous_template_id") or "")
+                target_template_id = str(application.get("target_template_id") or scope_key or "")
                 if previous_template_id and current_template_id and current_template_id == target_template_id:
                     actionable += 1
             return actionable
@@ -933,16 +941,17 @@ class AutonomousDemoApplyStepper:
 
     @staticmethod
     def _table_exists(conn: Any, table: str) -> bool:
+        from backend.core.state_store import STATE_SCHEMA
         try:
             row = _execute(
                 conn,
                 """
                 SELECT 1
                 FROM information_schema.tables
-                WHERE table_schema = 'state_v1' AND table_name = ?
+                WHERE table_schema = ? AND table_name = ?
                 LIMIT 1
                 """,
-                (table,),
+                (STATE_SCHEMA, table),
             ).fetchone()
             if row:
                 return True

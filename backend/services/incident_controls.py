@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    execute as _execute,
+    load_json as _loads,
+    pg_sql as _sql,
+)
 from backend.services.governance_control_plans import IncidentControlPlan
 from backend.services.live_safety_state import (
     SafetyStatePersistenceError,
@@ -23,17 +29,6 @@ def _dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
 
 
-def _loads(raw: Any, default: Any) -> Any:
-    if raw is None:
-        return default
-    if isinstance(raw, (dict, list)):
-        return raw
-    try:
-        return json.loads(str(raw))
-    except Exception:
-        return default
-
-
 def _use_pg(db_path: str | Path = STATE_DB) -> bool:
     return is_state_db_path(db_path)
 
@@ -43,20 +38,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

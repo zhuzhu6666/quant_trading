@@ -31,9 +31,13 @@ from backend.services._brain_helpers import (
     safe_float,
     text,
 )
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    iter_position_rows,
+    iter_review_rows_desc,
+)
 from backend.services.agent_authority import control_surface, execution_owner
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import load_json_payload
 from backend.services.v16_brain_snapshot import (
     BrainMemoryService,
     BrainStateService,
@@ -486,20 +490,7 @@ class BrainActionPlanEvaluatorService:
                 replay = dict(row) if row else {}
             else:
                 source_gaps.append("missing_replay_report")
-            trade_reviews = self._fetch_table(conn, "trade_outcome_review", limit,
-                                              cols=["review_id", "trade_id", "position_id", "pnl",
-                                                    "outcome_label", "failure_tags_json",
-                                                    "summary_text", "review_json", "review_archive_hash",
-                                                    "created_at"])
-            for row in trade_reviews:
-                row["review_json"] = load_json_payload(
-                    conn,
-                    source_table="trade_outcome_review",
-                    source_id=str(row.get("review_id") or ""),
-                    inline_json=row.get("review_json", "{}"),
-                    archive_hash=row.get("review_archive_hash", ""),
-                    default={},
-                )
+            trade_reviews = iter_review_rows_desc(conn, limit=limit)
             trade_reviews = [
                 row
                 for row in trade_reviews
@@ -511,14 +502,17 @@ class BrainActionPlanEvaluatorService:
             # Effects are partitioned by scope in _evaluate_plan.  A global
             # LIMIT here can fill the page with factor rows and hide the
             # older supervisor effect that the selected plan needs.
-            learning_effects = self._fetch_table(conn, "learning_application_effect", None,
-                                                  cols=["application_id", "scope_type", "scope_key",
-                                                        "action", "status", "observed_trade_count",
-                                                        "baseline_trade_count", "post_avg_reward",
-                                                        "baseline_avg_reward", "delta_avg_reward",
-                                                        "post_win_rate", "baseline_win_rate",
-                                                        "decision_json", "last_review_at", "updated_at", "created_at"],
-                                                  order_col="updated_at")
+            learning_effects = []
+            try:
+                from backend.services.learning_application_store import (
+                    LearningApplicationStore,
+                )
+
+                learning_effects = list(
+                    LearningApplicationStore(self.db_path).iter_effects()
+                )
+            except Exception:
+                learning_effects = []
             supervisor_traces = self._fetch_table(conn, "position_supervisor_trace", limit,
                                                    cols=["trace_id", "decision_id", "position_id",
                                                          "trade_id", "action", "outcome", "risk_allowed",
@@ -1713,6 +1707,19 @@ class BrainLiveReadyGuardrailService:
     def _local_open_position_count(self) -> int:
         conn = connect(self.db_path, read_only=True)
         try:
+            if canonical_ready(conn):
+                opened: set[str] = set()
+                closed: set[str] = set()
+                for row in iter_position_rows(conn, limit=0):
+                    position_id = str(row.get("position_id") or "")
+                    if not position_id:
+                        continue
+                    event_type = str(row.get("event_type") or "")
+                    if event_type in ("opened", "open", "recovered"):
+                        opened.add(position_id)
+                    elif event_type in ("closed", "close", "retired", "failed"):
+                        closed.add(position_id)
+                return len(opened - closed)
             if not state_table_exists(conn, "position_lifecycle_event"):
                 return 0
             row = execute(conn, """SELECT COUNT(DISTINCT position_id) AS cnt FROM position_lifecycle_event

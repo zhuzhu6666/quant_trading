@@ -93,8 +93,8 @@ def _create_db(path):
     conn.execute(
         """
         INSERT INTO trade_outcome_review
-        (review_id, trade_id, position_id, pnl, review_json, created_at)
-        VALUES ('r1', 'p1', 'p1', -1.0, ?, 1000.0)
+        (review_id, trade_id, position_id, entry_decision_id, pnl, review_json, created_at)
+        VALUES ('r1', 'p1', 'p1', 'dec_r1', -1.0, ?, 1000.0)
         """,
         (json.dumps(review),),
     )

@@ -15,15 +15,22 @@ from backend.core.state_store import (
     validate_runtime_state_schema,
 )
 from backend.services.failure_taxonomy import build_failure_taxonomy
-from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.position_metrics import update_position_path_metrics
 from backend.services.review_contract import (
     build_execution_quality_evidence,
+    classify_4label_outcome,
     normalize_trade_review_contract,
     review_has_system_contamination,
 )
 from backend.services.state_payload_archive import archive_json_payload, load_json_payload
 from backend.services.trade_lesson_memory import trade_review_payload_from_row
+
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    pg_sql as _sql,
+    execute as _execute,
+)
+
 
 
 logger = logging.getLogger(__name__)
@@ -42,20 +49,6 @@ def get_state_conn():
 
 def _connect_state():
     return get_state_conn()
-
-
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
 
 
 def _review_archive_select(conn: Any, *, alias: str = "", output: str = "review_archive_hash") -> str:
@@ -296,10 +289,21 @@ def _infer_path_metrics_from_bars(
 
 
 def classify_outcome(entry_score: float, pnl: float) -> str:
-    if pnl > 0:
-        return "lucky_win"
-    conviction = abs(float(entry_score or 0.0))
-    return "bad_loss" if conviction >= 0.55 else "good_loss"
+    """Deprecated legacy two-track label helper (S3/A2).
+
+    The canonical ``trade_review`` label authority is the single
+    ``review_contract.classify_4label_outcome`` rule (reviewer 口径).  This
+    helper only produces the label provable from ``(entry_score, pnl)``:
+    without the attribution ``positive_share`` evidence a profit is always
+    ``lucky_win``, matching the authoritative rule's ``positive_share<0.55``
+    branch.  It is retained only for the retiring two-track backfill path.
+    """
+    return classify_4label_outcome(
+        pnl=float(pnl),
+        entry_score=float(entry_score or 0.0),
+        has_entry_context=False,
+        has_attribution=False,
+    )[0]
 
 
 def _infer_close_reason(row: sqlite3.Row, path_metrics: dict[str, Any]) -> str:
@@ -617,6 +621,10 @@ def build_review_record(
 
 
 def insert_review(conn: sqlite3.Connection, record: dict) -> None:
+    # P4 单轨：PG 环境 review 已通过 canonical trade_review 事件写入；
+    # SQLite fixture 保留 legacy 写入以兼容测试。
+    if _conn_is_pg(conn):
+        return
     archive = archive_json_payload(
         conn,
         source_table="trade_outcome_review",
@@ -626,15 +634,13 @@ def insert_review(conn: sqlite3.Connection, record: dict) -> None:
     )
     if archive:
         _execute(conn,
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-             entry_quality, hold_quality, exit_quality, regime_fit_score,
-             execution_quality, pnl, mae, mfe, outcome_label,
-             failure_tags_json, summary_text, review_json, created_at,
-             review_archive_hash, review_raw_sha256, review_raw_bytes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            "INSERT INTO trade_outcome_review"
+            " (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,"
+            " entry_quality, hold_quality, exit_quality, regime_fit_score,"
+            " execution_quality, pnl, mae, mfe, outcome_label,"
+            " failure_tags_json, summary_text, review_json, created_at,"
+            " review_archive_hash, review_raw_sha256, review_raw_bytes)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 record["review_id"], record["trade_id"], record["position_id"],
                 record["entry_decision_id"], record["exit_decision_id"],
@@ -654,34 +660,19 @@ def insert_review(conn: sqlite3.Connection, record: dict) -> None:
             if key in archive_review:
                 legacy_review[key] = archive_review[key]
     _execute(conn,
-        """
-        INSERT INTO trade_outcome_review
-        (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-         entry_quality, hold_quality, exit_quality, regime_fit_score,
-         execution_quality, pnl, mae, mfe, outcome_label,
-         failure_tags_json, summary_text, review_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
+        "INSERT INTO trade_outcome_review"
+        " (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,"
+        " entry_quality, hold_quality, exit_quality, regime_fit_score,"
+        " execution_quality, pnl, mae, mfe, outcome_label,"
+        " failure_tags_json, summary_text, review_json, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            record["review_id"],
-            record["trade_id"],
-            record["position_id"],
-            record["entry_decision_id"],
-            record["exit_decision_id"],
-            record["entry_quality"],
-            record["hold_quality"],
-            record["exit_quality"],
-            record["regime_fit_score"],
-            record["execution_quality"],
-            record["pnl"],
-            record["mae"],
-            record["mfe"],
-            record["outcome_label"],
-            record["failure_tags_json"],
-            record["summary_text"],
-            # Legacy/pre-15 stores have no archive columns. Preserve the
-            # normalized numeric contract and the recursive branches until a
-            # lossless archive destination is available.
+            record["review_id"], record["trade_id"], record["position_id"],
+            record["entry_decision_id"], record["exit_decision_id"],
+            record["entry_quality"], record["hold_quality"], record["exit_quality"],
+            record["regime_fit_score"], record["execution_quality"], record["pnl"],
+            record["mae"], record["mfe"], record["outcome_label"],
+            record["failure_tags_json"], record["summary_text"],
             json.dumps(legacy_review, ensure_ascii=False, default=str),
             record["created_at"],
         ),
@@ -725,8 +716,16 @@ def _ensure_experience_memory_source_columns(conn: sqlite3.Connection) -> None:
 
 
 def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Rebuild ``experience_memory`` from trade reviews (idempotent).
+
+    Writer convergence (S2.3): ``experience_pattern_stats`` for the ``factor``
+    scope is owned solely by ``policy_suggester.suggest_from_experience`` (the
+    live path carrying governance weighting + eligibility fingerprint).  This
+    legacy batch path no longer deletes or writes factor-scope pattern stats /
+    policy suggestions; it only re-populates ``experience_memory`` through the
+    shared ExperienceBuilder so the memory index stays authoritative.
+    """
     _ensure_experience_memory_source_columns(conn)
-    _execute(conn, "DELETE FROM experience_pattern_stats WHERE scope_type='factor'")
     reviews = _execute(conn,
         f"""
         SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
@@ -737,195 +736,19 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
         """
     ).fetchall()
     experience_builder = _experience_builder_for_conn(conn)
-    stats: dict[str, dict] = {}
-    suggestions_created = 0
     rebuilt = 0
-    now = time.time()
 
     for row in reviews:
         review_json = _review_payload(conn, row)
         if review_has_system_contamination(review_json):
             continue
-        failure_tags = list(json.loads(row["failure_tags_json"] or "[]"))
-        outcome_label = str(row["outcome_label"] or "")
-        pnl = float(row["pnl"] or 0.0)
-        close_reason = str(review_json.get("close_reason") or "")
-        context_integrity = str(review_json.get("context_integrity", "full") or "full")
-        top_weight_factor = str(review_json.get("top_weight_factor") or "")
-        top_factor = str(review_json.get("top_factor") or "")
-        worst_factor = str(review_json.get("worst_factor") or "")
-
-        def actionable(name: str) -> bool:
-            return bool(name) and not name.startswith("dsl_auto_")
-
-        if outcome_label in {"bad_loss", "good_loss"}:
-            primary_factor = worst_factor if actionable(worst_factor) else (top_weight_factor or top_factor or worst_factor)
-        else:
-            primary_factor = top_weight_factor or top_factor or worst_factor
-            if not actionable(primary_factor):
-                primary_factor = top_weight_factor or top_factor or worst_factor
-
-        reward_score = 0.0
-        if pnl > 0:
-            reward_score = min(1.0, pnl / max(abs(pnl), 50.0))
-        elif pnl < 0:
-            reward_score = -min(1.0, abs(pnl) / max(abs(pnl), 50.0))
-        reward_scale = 1.0
-        evidence_scale = 1.0
-        if context_integrity != "full":
-            reward_scale *= 0.5
-            evidence_scale *= 0.35
-        if close_reason in {"emergency_close", "restart_replay"}:
-            reward_scale *= 0.6
-            evidence_scale *= 0.5
-        reward_score *= reward_scale
-
-        if context_integrity != "full" and "partial_context" not in failure_tags:
-            failure_tags.append("partial_context")
-        if close_reason == "emergency_close" and "manual_intervention" not in failure_tags:
-            failure_tags.append("manual_intervention")
-        if close_reason == "restart_replay" and "restart_replay" not in failure_tags:
-            failure_tags.append("restart_replay")
-
-        recommended_action = "downweight" if outcome_label == "bad_loss" else "watch"
-        if context_integrity != "full" or close_reason in {"emergency_close", "restart_replay"}:
-            recommended_action = "watch"
-        evidence_strength = min(1.0, max(0.15, abs(reward_score) + 0.20 * len(failure_tags)))
-        evidence_strength = max(0.05, evidence_strength * evidence_scale)
-
-        lesson = experience_builder.build_from_review(
+        experience_builder.build_from_review(
             trade_review_payload_from_row(row, conn=conn),
             conn=conn,
         )
-        source_table = str(lesson["source_table"])
-        source_id = str(lesson["source_id"])
-        append_source = str(lesson["append_source"])
-        experience_id = str(lesson["experience_id"])
         rebuilt += 1
 
-        if not primary_factor:
-            continue
-
-        stat = stats.get(primary_factor, {"sample_count": 0, "win_count": 0, "bad_loss_count": 0, "avg_reward": 0.0})
-        stat["sample_count"] += 1
-        stat["win_count"] += 1 if reward_score > 0 else 0
-        stat["bad_loss_count"] += 1 if outcome_label == "bad_loss" else 0
-        prev_avg = stat["avg_reward"]
-        stat["avg_reward"] = prev_avg + (reward_score - prev_avg) / stat["sample_count"]
-        stats[primary_factor] = stat
-
-        sample_count = stat["sample_count"]
-        avg_reward = stat["avg_reward"]
-        bad_loss_count = stat["bad_loss_count"]
-        win_count = stat["win_count"]
-        if sample_count >= 3 and avg_reward <= -0.20:
-            action = "downweight"
-            confidence = min(0.95, 0.45 + 0.08 * sample_count + 0.10 * bad_loss_count)
-            reason = f"factor {primary_factor} shows repeated negative outcomes ({sample_count} samples)"
-        elif sample_count >= 4 and win_count >= 3 and avg_reward >= 0.22:
-            action = "boost_small"
-            confidence = min(0.85, 0.40 + 0.05 * sample_count)
-            reason = f"factor {primary_factor} shows stable positive outcomes ({sample_count} samples)"
-        else:
-            action = "watch"
-            confidence = 0.0
-            reason = f"factor {primary_factor} still accumulating evidence"
-
-        _execute(conn,
-            """
-            INSERT INTO experience_pattern_stats
-            (scope_type, scope_key, sample_count, win_count, bad_loss_count,
-             avg_reward, last_outcome_label, recommended_action, updated_at)
-            VALUES ('factor', ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(scope_type, scope_key) DO UPDATE SET
-                sample_count=excluded.sample_count,
-                win_count=excluded.win_count,
-                bad_loss_count=excluded.bad_loss_count,
-                avg_reward=excluded.avg_reward,
-                last_outcome_label=excluded.last_outcome_label,
-                recommended_action=excluded.recommended_action,
-                updated_at=excluded.updated_at
-            """,
-            (
-                primary_factor,
-                sample_count,
-                win_count,
-                bad_loss_count,
-                round(avg_reward, 6),
-                outcome_label,
-                action,
-                now,
-            ),
-        )
-
-        if action != "watch":
-            existing = _execute(conn,
-                """
-                SELECT suggestion_id
-                FROM policy_suggestion
-                WHERE scope_type='factor' AND scope_key=? AND action=? AND status='proposed'
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (primary_factor, action),
-            ).fetchone()
-            evidence = {
-                "source": "learning_backfill.v1",
-                "source_table": source_table,
-                "source_id": source_id,
-                "append_source": append_source,
-                "sample_count": sample_count,
-                "win_count": win_count,
-                "bad_loss_count": bad_loss_count,
-                "avg_reward": round(avg_reward, 6),
-                "experience_id": experience_id,
-                "failure_tags": failure_tags,
-            }
-            evidence = attach_policy_suggestion_agent_context(
-                evidence,
-                source_agent="autonomous_learning",
-                scope_type="factor",
-                action=action,
-                requested_writes=["policy_suggestion"],
-                status="proposed",
-                impact_level="medium",
-            )
-            if existing:
-                _execute(conn,
-                    """
-                    UPDATE policy_suggestion
-                    SET confidence=?, reason=?, evidence_json=?, created_at=?
-                    WHERE suggestion_id=?
-                    """,
-                    (
-                        round(confidence, 6),
-                        reason,
-                        json.dumps(evidence, ensure_ascii=False),
-                        now,
-                        str(existing["suggestion_id"]),
-                    ),
-                )
-            else:
-                _execute(conn,
-                    """
-                    INSERT INTO policy_suggestion
-                    (suggestion_id, scope_type, scope_key, action, confidence, reason,
-                     evidence_json, status, created_at)
-                    VALUES (?, 'factor', ?, ?, ?, ?, ?, 'proposed', ?)
-                    """,
-                    (
-                        new_id("psg"),
-                        primary_factor,
-                        action,
-                        round(confidence, 6),
-                        reason,
-                        json.dumps(evidence, ensure_ascii=False),
-                        now,
-                    ),
-                )
-                suggestions_created += 1
-
-    return rebuilt, suggestions_created
+    return rebuilt, 0
 
 
 def _refresh_trade_lesson_memory(conn: sqlite3.Connection, *, limit: int = 200) -> dict[str, Any]:

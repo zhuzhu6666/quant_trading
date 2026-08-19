@@ -13,6 +13,7 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
         """
         CREATE TABLE decision_ledger (
             decision_id TEXT PRIMARY KEY,
+            position_id TEXT DEFAULT '',
             event_type TEXT NOT NULL,
             symbol TEXT DEFAULT '',
             timeframe TEXT DEFAULT '',
@@ -499,6 +500,19 @@ def test_recent_trade_trace_index_surfaces_recent_samples(monkeypatch, tmp_path)
             confidence REAL DEFAULT 0.0,
             notes TEXT DEFAULT ''
         );
+        CREATE TABLE position_lifecycle_event (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT DEFAULT '',
+            trade_id TEXT DEFAULT '',
+            symbol TEXT DEFAULT '',
+            event_type TEXT NOT NULL,
+            event_ts REAL NOT NULL DEFAULT 0.0,
+            net_volume REAL DEFAULT 0.0,
+            avg_price REAL DEFAULT 0.0,
+            unrealized_pnl REAL DEFAULT 0.0,
+            realized_pnl REAL DEFAULT 0.0,
+            details_json TEXT DEFAULT '{}'
+        );
         CREATE TABLE parameter_template_release_candidate (
             candidate_id TEXT PRIMARY KEY,
             factor_id TEXT NOT NULL,
@@ -521,6 +535,17 @@ def test_recent_trade_trace_index_surfaces_recent_samples(monkeypatch, tmp_path)
         [
             ("dec_old", "8001", "8001", 100.0, 100.0),
             ("dec_new", "8002", "8002", 200.0, 200.0),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO position_lifecycle_event
+        (event_id, position_id, trade_id, symbol, event_type, event_ts, details_json)
+        VALUES (?, ?, ?, 'XAUUSD+', 'opened', ?, '{}')
+        """,
+        [
+            ("posevt_old", "8001", "8001", 50.0),
+            ("posevt_new", "8002", "8002", 150.0),
         ],
     )
     conn.executemany(

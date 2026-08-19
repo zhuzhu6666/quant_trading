@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import time
+import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,8 +18,15 @@ from backend.core.db import (
     is_state_db_path,
     state_table_columns,
 )
+from backend.core.db_helpers import conn_is_pg as _conn_is_pg, execute as _execute, pg_sql as _sql
 from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
+from backend.services.canonical_v2_reader import canonical_ready, iter_fact_events, iter_review_rows, review_row
+from backend.services.fact_envelope import observed_epoch
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
+from backend.services.learning_application_store import (
+    LearningApplicationStore,
+    store_for_conn,
+)
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.position_supervisor import evaluate_position_supervisor
 from backend.services.position_supervisor_templates import (
@@ -53,20 +61,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     return conn
 
 
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
-
-
 def _review_archive_select(conn: Any, *, alias: str = "", output: str = "review_archive_hash") -> str:
     try:
         has_archive = "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
@@ -76,6 +70,34 @@ def _review_archive_select(conn: Any, *, alias: str = "", output: str = "review_
         return ""
     prefix = f"{alias}." if alias else ""
     return f", {prefix}review_archive_hash AS {output}"
+
+
+def _legacy_review_table_exists(conn) -> bool:
+    try:
+        return "review_id" in state_table_columns(conn, "trade_outcome_review")
+    except Exception:
+        return False
+
+
+def _attach_reviews(conn, rows: list[Any]) -> list[dict[str, Any]]:
+    """Attach canonical/legacy review facts to counterfactual rows (inner-join semantics)."""
+    combined: list[dict[str, Any]] = []
+    for row in rows:
+        mapping = dict(row) if hasattr(row, "keys") else {}
+        review_id = str(mapping.get("review_id") or "")
+        review = review_row(conn, review_id) if review_id else None
+        if review is None:
+            continue
+        combined.append(
+            {
+                **mapping,
+                **review,
+                "source_review_id": review_id,
+                "source_review_json": review.get("review_json") or {},
+                "source_review_archive_hash": "",
+            }
+        )
+    return combined
 
 
 def _review_payload(
@@ -142,59 +164,72 @@ def list_position_supervisor_canary_candidates(
     if not required_suggestion_columns.issubset(suggestion_columns):
         return []
 
-    effect_columns = state_table_columns(conn, "learning_application_effect")
-    can_bind_active_applied = {
-        "application_id",
-        "scope_type",
-        "scope_key",
-        "status",
-        "mutation_id",
-        "created_at",
-    }.issubset(effect_columns) and "applied_mutation_id" in suggestion_columns
-
-    if can_bind_active_applied:
-        rows = _execute(
+    approved_rows = _execute(
+        conn,
+        """
+        SELECT suggestion_id, scope_key, status, created_at
+        FROM policy_suggestion
+        WHERE scope_type='position_supervisor_template'
+          AND status='approved'
+        ORDER BY created_at DESC
+        """,
+    ).fetchall()
+    candidates: list[dict[str, Any]] = [
+        {
+            "suggestion_id": str(r["suggestion_id"] or ""),
+            "scope_key": str(r["scope_key"] or ""),
+            "status": str(r["status"] or ""),
+            "created_at": float(r["created_at"] or 0.0),
+            "_lifecycle_ts": float(r["created_at"] or 0.0),
+        }
+        for r in approved_rows
+    ]
+    # Applied suggestions bound to a still-active effect (prepared/observing/
+    # mixed) stay observable through their effect's lifecycle timestamp so a
+    # historical/ineffective effect cannot reopen a canary.  The lean store
+    # keeps effect status/scope_key/mutation_id inside effect_json.
+    store = store_for_conn(conn)
+    if store is not None and "applied_mutation_id" in suggestion_columns:
+        applied_rows = _execute(
             conn,
             """
-            SELECT suggestion_id, scope_key, status, created_at
-            FROM (
-                SELECT p.suggestion_id, p.scope_key, p.status, p.created_at,
-                       p.created_at AS lifecycle_ts
-                FROM policy_suggestion p
-                WHERE p.scope_type='position_supervisor_template'
-                  AND p.status='approved'
-                UNION ALL
-                SELECT p.suggestion_id, p.scope_key, p.status, p.created_at,
-                       e.created_at AS lifecycle_ts
-                FROM policy_suggestion p
-                JOIN learning_application_effect e
-                  ON e.scope_type='position_supervisor_template'
-                 AND e.scope_key=p.scope_key
-                 AND e.mutation_id=p.applied_mutation_id
-                WHERE p.scope_type='position_supervisor_template'
-                  AND p.status='applied'
-                  AND p.applied_mutation_id<>''
-                  AND e.status IN ('prepared', 'observing', 'mixed')
-            ) candidates
-            ORDER BY lifecycle_ts DESC, created_at DESC
-            LIMIT ?
-            """,
-            (bounded_limit,),
-        ).fetchall()
-    else:
-        rows = _execute(
-            conn,
-            """
-            SELECT suggestion_id, scope_key, status, created_at
+            SELECT suggestion_id, scope_key, status, created_at, applied_mutation_id
             FROM policy_suggestion
             WHERE scope_type='position_supervisor_template'
-              AND status='approved'
-            ORDER BY created_at DESC
-            LIMIT ?
+              AND status='applied'
+              AND applied_mutation_id<>''
             """,
-            (bounded_limit,),
         ).fetchall()
-    return [dict(row) for row in rows]
+        applied_by_mutation = {
+            str(r["applied_mutation_id"] or ""): dict(r) for r in applied_rows
+        }
+        for eff in store.iter_effects(scope_type="position_supervisor_template"):
+            if str(eff.get("status") or "") not in ("prepared", "observing", "mixed"):
+                continue
+            applied = applied_by_mutation.get(str(eff.get("mutation_id") or ""))
+            if applied is None:
+                continue
+            if str(applied.get("scope_key") or "") != str(eff.get("scope_key") or ""):
+                continue
+            candidates.append(
+                {
+                    "suggestion_id": str(applied.get("suggestion_id") or ""),
+                    "scope_key": str(applied.get("scope_key") or ""),
+                    "status": str(applied.get("status") or ""),
+                    "created_at": float(applied.get("created_at") or 0.0),
+                    "_lifecycle_ts": float(eff.get("created_at") or 0.0),
+                }
+            )
+    candidates.sort(key=lambda item: (item["_lifecycle_ts"], item["created_at"]), reverse=True)
+    return [
+        {
+            "suggestion_id": item["suggestion_id"],
+            "scope_key": item["scope_key"],
+            "status": item["status"],
+            "created_at": item["created_at"],
+        }
+        for item in candidates[:bounded_limit]
+    ]
 
 
 _SUPERVISOR_TEMPLATE_CONTROL_SECTIONS = (
@@ -407,53 +442,74 @@ def _write_supervisor_switch_domain(
         "mutation_id": mutation_id,
         "commit_boundary": "governance_mutation_coordinator",
     }
-    app_columns = state_table_columns(conn, "learning_application_log")
-    app_values: dict[str, Any] = {
-        "application_id": application_id,
-        "cycle_ts": now,
+    # Lean convergence: fold every former wide column into details_json and
+    # write only the 7 lean log columns on the coordinator-owned conn (the
+    # store cannot write inside the open SQLite transaction).
+    app_details = {
+        **dict(details),
+        "mutation_id": mutation_id,
+        "commit_boundary": "governance_mutation_coordinator",
         "scope_type": "position_supervisor_template",
         "scope_key": target_template_id,
         "action": "switch_position_supervisor_template",
         "bias_multiplier": 1.0,
         "old_weight": 0.0,
         "new_weight": 0.0,
-        "suggestion_ids_json": _json([suggestion_id] if suggestion_id else []),
-        "status": "applied",
-        "details_json": _json(details_payload),
-        "created_at": now,
+        "suggestion_ids": [suggestion_id] if suggestion_id else [],
+        "governance_eligibility_version": str(GOVERNANCE_ELIGIBILITY_VERSION or ""),
+        "application_state": {
+            "status": "applied",
+            "prepared_at": now,
+            "applied_at": now,
+            "updated_at": now,
+            "atomic_commit": True,
+        },
     }
-    if "mutation_id" in app_columns:
-        app_values["mutation_id"] = mutation_id
-    if "governance_eligibility_version" in app_columns:
-        app_values["governance_eligibility_version"] = GOVERNANCE_ELIGIBILITY_VERSION
     _upsert_row(
         conn,
         table="learning_application_log",
         primary_key="application_id",
-        values=app_values,
+        values={
+            "application_id": application_id,
+            "run_id": str(details.get("run_id") or ""),
+            "source": str(details.get("source") or ""),
+            "status": "applied",
+            "details_json": _json(app_details),
+            "created_at": now,
+            "updated_at": now,
+        },
         immutable_columns={"created_at"},
     )
 
-    effect_columns = state_table_columns(conn, "learning_application_effect")
-    effect_values: dict[str, Any] = {
-        "application_id": application_id,
+    effect_payload = {
         "scope_type": "position_supervisor_template",
         "scope_key": target_template_id,
         "action": "switch_position_supervisor_template",
         "status": "observing",
-        "decision_json": _json(details_payload),
+        "observed_trade_count": 0,
+        "baseline_trade_count": 0,
+        "post_avg_reward": 0.0,
+        "baseline_avg_reward": 0.0,
+        "delta_avg_reward": None,
+        "post_win_rate": 0.0,
+        "baseline_win_rate": 0.0,
+        "decision": details_payload,
+        "mutation_id": mutation_id,
+        "governance_eligibility_version": str(GOVERNANCE_ELIGIBILITY_VERSION or ""),
+        "last_review_at": 0.0,
         "updated_at": now,
-        "created_at": now,
     }
-    if "mutation_id" in effect_columns:
-        effect_values["mutation_id"] = mutation_id
-    if "governance_eligibility_version" in effect_columns:
-        effect_values["governance_eligibility_version"] = GOVERNANCE_ELIGIBILITY_VERSION
     _upsert_row(
         conn,
         table="learning_application_effect",
-        primary_key="application_id",
-        values=effect_values,
+        primary_key="effect_id",
+        values={
+            "effect_id": f"effect_{uuid.uuid4().hex[:16]}",
+            "application_id": application_id,
+            "scope": target_template_id,
+            "effect_json": _json(effect_payload),
+            "created_at": now,
+        },
         immutable_columns={"created_at"},
     )
 
@@ -529,57 +585,52 @@ def _write_supervisor_switch_domain(
 
 
 def _write_supervisor_rollback_domain(
-    conn,
+    store,
     *,
     mutation_id: str,
     application_id: str,
     rollback: Mapping[str, Any],
     now: float,
 ) -> dict[str, Any]:
-    details_row = _execute(
-        conn,
-        "SELECT details_json FROM learning_application_log WHERE application_id=?",
-        (application_id,),
-    ).fetchone()
-    previous_details = _loads(details_row["details_json"], {}) if details_row else {}
+    """Mark a supervisor application/effect rolled back via the lean store.
+
+    Runs after the coordinator commits: the store owns its own connection and
+    cannot write inside the coordinator's open SQLite transaction (BEGIN
+    IMMEDIATE holds a write lock).  ``get_application`` replaces the old
+    details_json read, ``transition_application`` the log UPDATE, and
+    ``update_effect`` the effect UPDATE.
+    """
+    previous_details = dict(store.get_application(application_id) or {})
     rollback_payload = {
         **dict(rollback),
         "mutation_id": mutation_id,
         "commit_boundary": "governance_mutation_coordinator",
     }
-    app_columns = state_table_columns(conn, "learning_application_log")
-    assignments = ["status='rolled_back'", "details_json=?"]
-    params: list[Any] = [_json({**previous_details, "rollback": rollback_payload})]
-    if "mutation_id" in app_columns:
-        assignments.append("mutation_id=?")
-        params.append(mutation_id)
-    params.append(application_id)
-    application_update = _execute(
-        conn,
-        "UPDATE learning_application_log SET "
-        + ", ".join(assignments)
-        + " WHERE application_id=?",
-        tuple(params),
+    app_res = store.transition_application(
+        application_id,
+        status="rolled_back",
+        details_patch={
+            "rollback": rollback_payload,
+            "mutation_id": mutation_id,
+        },
     )
-    if int(application_update.rowcount or 0) != 1:
+    if not bool(app_res.get("ok")):
         raise RuntimeError("supervisor_rollback_application_missing")
-    effect_columns = state_table_columns(conn, "learning_application_effect")
-    assignments = ["status='rolled_back'", "decision_json=?", "updated_at=?"]
-    params = [_json(rollback_payload), now]
-    if "mutation_id" in effect_columns:
-        assignments.append("mutation_id=?")
-        params.append(mutation_id)
-    params.append(application_id)
-    effect_update = _execute(
-        conn,
-        "UPDATE learning_application_effect SET "
-        + ", ".join(assignments)
-        + " WHERE application_id=?",
-        tuple(params),
+    updated = store.update_effect(
+        application_id,
+        patch={
+            "status": "rolled_back",
+            "decision": rollback_payload,
+            "mutation_id": mutation_id,
+        },
     )
-    if int(effect_update.rowcount or 0) != 1:
+    if not updated:
         raise RuntimeError("supervisor_rollback_effect_missing")
-    return {"application_id": application_id, "mutation_id": mutation_id}
+    return {
+        "application_id": application_id,
+        "mutation_id": mutation_id,
+        "previous_details": previous_details,
+    }
 
 
 def _day_bounds(day: str) -> tuple[float, float]:
@@ -600,18 +651,15 @@ def _direction_from_review(payload: dict[str, Any]) -> int:
 
 
 def _position_prices(conn: sqlite3.Connection, position_id: str) -> dict[str, float]:
-    row = _execute(
-        conn,
-        """
-        SELECT details_json
-        FROM position_lifecycle_event
-        WHERE position_id=? AND event_type='opened'
-        ORDER BY event_ts ASC
-        LIMIT 1
-        """,
-        (str(position_id),),
-    ).fetchone()
-    details = _loads(row["details_json"], {}) if row else {}
+    opened = None
+    for event in iter_fact_events(conn, "position", entity_id=str(position_id)):
+        payload = event.get("payload") or {}
+        if str(payload.get("event_type") or "") == "opened":
+            opened = payload
+            break
+    details = (opened or {}).get("details")
+    if not isinstance(details, dict):
+        details = _loads(details, {}) if details else {}
     return {
         "sl": _safe_float(details.get("sl")),
         "tp": _safe_float(details.get("tp")),
@@ -691,41 +739,32 @@ def _load_review_rows(
     limit: int,
 ) -> list[sqlite3.Row]:
     start_ts, end_ts = _day_bounds(day)
-    rows = _execute(
-        conn,
-        f"""
-        SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-               pnl, mae, mfe, outcome_label, failure_tags_json, summary_text,
-               review_json, created_at{_review_archive_select(conn)}
-        FROM trade_outcome_review
-        WHERE created_at >= ? AND created_at < ?
-          AND ABS(COALESCE(pnl, 0.0)) <= ?
-        ORDER BY created_at ASC
-        """,
-        (start_ts, end_ts, float(small_abs_pnl)),
-    ).fetchall()
-    clean_rows = [
-        row
-        for row in rows
-        if not review_has_system_contamination(_review_payload(conn, row))
-    ]
-    return clean_rows[: max(0, int(limit))]
+    if not canonical_ready(conn) and not _legacy_review_table_exists(conn):
+        return []
+    rows = []
+    for row in iter_review_rows(conn, limit=0):
+        created_at = _safe_float(row.get("created_at"))
+        if not (start_ts <= created_at < end_ts):
+            continue
+        if abs(_safe_float(row.get("pnl"))) > float(small_abs_pnl):
+            continue
+        if review_has_system_contamination(_review_payload(conn, row)):
+            continue
+        rows.append(row)
+    rows.sort(key=lambda row: (_safe_float(row.get("created_at")), str(row.get("review_id") or "")))
+    return rows[: max(0, int(limit))]
 
 
 def _amend_issue_count(conn: sqlite3.Connection, *, day: str) -> dict[str, int]:
     start_ts, end_ts = _day_bounds(day)
-    rows = _execute(
-        conn,
-        """
-        SELECT event_type, COUNT(*) AS n
-        FROM position_lifecycle_event
-        WHERE event_ts >= ? AND event_ts < ?
-          AND event_type IN ('amend_failed', 'amend_skipped')
-        GROUP BY event_type
-        """,
-        (start_ts, end_ts),
-    ).fetchall()
-    return {str(row["event_type"]): int(row["n"] or 0) for row in rows}
+    counts: dict[str, int] = {}
+    for event in iter_fact_events(conn, "position"):
+        payload = event.get("payload") or {}
+        event_ts = observed_epoch(payload.get("event_ts"))
+        event_type = str(payload.get("event_type") or "")
+        if start_ts <= event_ts < end_ts and event_type in ("amend_failed", "amend_skipped"):
+            counts[event_type] = counts.get(event_type, 0) + 1
+    return counts
 
 
 def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, Any]:
@@ -733,16 +772,14 @@ def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, 
     try:
         rows = _execute(
             conn,
-            f"""
-            SELECT cf.label, cf.supervisor_event_type, cf.evidence_json,
-                   tr.review_id AS source_review_id,
-                   tr.review_json AS source_review_json{_review_archive_select(conn, alias="tr", output="source_review_archive_hash")}
+            """
+            SELECT cf.label, cf.supervisor_event_type, cf.evidence_json, cf.review_id
             FROM supervisor_counterfactual_review cf
-            JOIN trade_outcome_review tr ON tr.review_id=cf.review_id
             WHERE cf.close_ts >= ? AND cf.close_ts < ?
             """,
             (start_ts, end_ts),
         ).fetchall()
+        rows = _attach_reviews(conn, rows)
     except Exception:
         rows = []
     labels: dict[str, int] = {}
@@ -791,19 +828,12 @@ def _iter_candidate_observation_reviews(
     while True:
         rows = _execute(
             conn,
-            f"""
-            SELECT cf.counterfactual_id, cf.close_ts,
-                   cf.evidence_json AS counterfactual_evidence_json,
-                   tr.review_id, tr.trade_id, tr.position_id,
-                   tr.entry_decision_id, tr.exit_decision_id,
-                   tr.pnl, tr.mae, tr.mfe, tr.outcome_label,
-                   tr.failure_tags_json, tr.summary_text,
-                   tr.review_json, tr.created_at{_review_archive_select(conn, alias="tr")}
+            """
+            SELECT cf.counterfactual_id, cf.close_ts, cf.review_id,
+                   cf.evidence_json AS counterfactual_evidence_json
             FROM supervisor_counterfactual_review cf
-            JOIN trade_outcome_review tr ON tr.review_id=cf.review_id
             WHERE cf.close_ts>=?
-            ORDER BY cf.close_ts ASC, tr.created_at DESC,
-                     cf.counterfactual_id ASC
+            ORDER BY cf.close_ts ASC, cf.counterfactual_id ASC
             LIMIT ? OFFSET ?
             """,
             (candidate_created_at, page_limit, page_offset),
@@ -811,7 +841,7 @@ def _iter_candidate_observation_reviews(
         if not rows:
             return
         page_offset += len(rows)
-        for row in rows:
+        for row in _attach_reviews(conn, rows):
             yield row
         del rows
 
@@ -1899,15 +1929,6 @@ class PositionSupervisorGovernanceMutationService:
             v16_command_id=v16_command_id,
         )
 
-        def writer(conn, mutation_id: str, _effective_config) -> Mapping[str, Any]:
-            return _write_supervisor_rollback_domain(
-                conn,
-                mutation_id=mutation_id,
-                application_id=application_id,
-                rollback=rollback_details,
-                now=now,
-            )
-
         mode = governance_coordinator_mode()
         if mode == "off":
             # Legacy compatibility only.  dual/enforce always use the typed
@@ -1931,18 +1952,20 @@ class PositionSupervisorGovernanceMutationService:
                 risk_reduction=True,
             )
         else:
-            mutation = plan.execute(self.db_path, transaction_writer=writer)
+            # The learning_application rollback is written through the store
+            # after commit (below); the coordinator transaction no longer paths
+            # store writes through its own connection.
+            mutation = plan.execute(self.db_path, transaction_writer=None)
         committed = self._committed(mutation)
-        if committed and mode == "off":
-            conn = _connect(self.db_path)
-            try:
-                writer(conn, str(mutation.get("mutation_id") or ""), None)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
+        if committed:
+            store = LearningApplicationStore(str(self.db_path))
+            _write_supervisor_rollback_domain(
+                store,
+                mutation_id=str(mutation.get("mutation_id") or ""),
+                application_id=application_id,
+                rollback=rollback_details,
+                now=now,
+            )
         return {
             "ok": committed,
             "committed": committed,

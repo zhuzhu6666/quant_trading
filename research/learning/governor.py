@@ -16,9 +16,10 @@ from backend.core.db import (
     is_state_db_path,
     state_table_columns,
 )
-from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
+from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.state_payload_archive import load_json_payload
@@ -136,16 +137,94 @@ class RuleEvolutionGovernor:
 
     @staticmethod
     def _parse_application_row(row: sqlite3.Row) -> dict:
+        # Legacy wide-row parser retained for callers that may pass a raw row;
+        # the canonical read path is LearningApplicationStore.iter_applications.
         item = dict(row)
         try:
-            item["suggestion_ids"] = json.loads(item.pop("suggestion_ids_json") or "[]")
+            item["suggestion_ids"] = json.loads(
+                item.pop("suggestion_ids_json", "[]") or "[]"
+            )
         except Exception:
             item["suggestion_ids"] = []
         try:
-            item["details"] = json.loads(item.pop("details_json") or "{}")
+            item["details"] = json.loads(item.pop("details_json", "{}") or "{}")
         except Exception:
             item["details"] = {}
         return item
+
+    def _write_application(
+        self,
+        application_id: str,
+        *,
+        status: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> bool:
+        """Narrow lean log write: update the status column + details_json only.
+
+        The canonical store owns creation via prepare_application, but its
+        transition_application only accepts a fixed status set, so the leading
+        (reuse) path and reconcile still need a minimal status/details_json
+        update here that never references the removed wide columns.
+        """
+        now = time.time()
+        with self._conn() as conn:
+            row = conn.execute(
+                self._sql(
+                    "SELECT details_json, status FROM learning_application_log "
+                    "WHERE application_id=?"
+                ),
+                (str(application_id),),
+            ).fetchone()
+            if not row:
+                return False
+            raw = row["details_json"]
+            try:
+                data = json.loads(raw or "{}") if isinstance(raw, str) else dict(raw or {})
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            if details is not None:
+                data.update(details)
+            lifecycle = dict(data.get("application_state") or {})
+            if status is not None:
+                lifecycle["status"] = status
+            lifecycle["updated_at"] = now
+            if status == "applied":
+                lifecycle.setdefault("applied_at", now)
+            elif status == "mutation_failed":
+                lifecycle.setdefault("failed_at", now)
+            data["application_state"] = lifecycle
+            new_status = (
+                status
+                if status is not None
+                else str(row["status"] or lifecycle.get("status") or "")
+            )
+            conn.execute(
+                self._sql(
+                    "UPDATE learning_application_log SET status=?, details_json=?, "
+                    "updated_at=? WHERE application_id=?"
+                ),
+                (
+                    new_status,
+                    json.dumps(data, ensure_ascii=False, default=str),
+                    now,
+                    str(application_id),
+                ),
+            )
+        return True
+
+    def _effect_ts(self, eff: dict | None) -> float:
+        try:
+            return float(eff.get("updated_at") or eff.get("created_at") or 0.0)
+        except Exception:
+            return 0.0
+
+    def _app_ts(self, app: dict) -> float:
+        try:
+            return float(app.get("cycle_ts") or app.get("created_at") or 0.0)
+        except Exception:
+            return 0.0
 
     @staticmethod
     def _review_archive_select(conn, *, alias: str = "r") -> str:
@@ -883,7 +962,7 @@ class RuleEvolutionGovernor:
         details: dict | None = None,
         ) -> str:
         suggestion_ids = [str(item) for item in (suggestion_ids or []) if str(item)]
-        suggestion_ids_json = json.dumps(sorted(set(suggestion_ids)), ensure_ascii=False)
+        normalized_sids = json.dumps(sorted(set(suggestion_ids)), ensure_ascii=False)
         details_payload = dict(details or {})
         source_agent = str(details_payload.get("source_agent") or "autonomous_learning")
         details_payload.setdefault("source_agent", source_agent)
@@ -898,171 +977,128 @@ class RuleEvolutionGovernor:
                 impact_level="medium",
             ),
         )
-        details_json = json.dumps(details_payload, ensure_ascii=False, default=str)
-        with self._conn() as conn:
-            existing = self._execute(conn,
-                """
-                SELECT application_id, suggestion_ids_json, status
-                FROM learning_application_log
-                WHERE scope_type=? AND scope_key=? AND action=?
-                  AND status IN ('prepared', 'applied', 'observing', 'effective')
-                ORDER BY cycle_ts DESC, created_at DESC
-                LIMIT 1
-                """,
-                (scope_type, scope_key, action),
-            ).fetchone()
-            if existing:
-                try:
-                    existing_ids = json.dumps(
-                        sorted(set(str(item) for item in json.loads(existing["suggestion_ids_json"] or "[]"))),
-                        ensure_ascii=False,
-                    )
-                except Exception:
-                    existing_ids = "[]"
-                existing_status = str(existing["status"] or "")
-                if existing_ids == suggestion_ids_json and existing_status in {"prepared", "applied", "observing", "effective"}:
-                    self._execute(conn,
-                        """
-                        UPDATE learning_application_log
-                        SET status='superseded'
-                        WHERE scope_type=? AND scope_key=? AND action=?
-                          AND application_id<>?
-                          AND status IN ('prepared', 'applied', 'observing', 'effective')
-                          AND suggestion_ids_json=?
-                        """,
-                        (
-                            scope_type,
-                            scope_key,
-                            action,
-                            str(existing["application_id"]),
-                            suggestion_ids_json,
-                        ),
-                    )
-                    self._execute(conn,
-                        """
-                        UPDATE learning_application_effect
-                        SET status='superseded', updated_at=?
-                        WHERE application_id IN (
-                            SELECT application_id
-                            FROM learning_application_log
-                            WHERE scope_type=? AND scope_key=? AND action=?
-                              AND application_id<>?
-                              AND status='superseded'
-                              AND suggestion_ids_json=?
-                        )
-                        """,
-                        (
-                            time.time(),
-                            scope_type,
-                            scope_key,
-                            action,
-                            str(existing["application_id"]),
-                            suggestion_ids_json,
-                        ),
-                    )
-                    self._execute(conn,
-                        """
-                        UPDATE learning_application_log
-                        SET cycle_ts=?, bias_multiplier=?, old_weight=?, new_weight=?, details_json=?
-                        WHERE application_id=?
-                        """,
-                        (
-                            float(cycle_ts),
-                            float(bias_multiplier),
-                            float(old_weight),
-                            float(new_weight),
-                            details_json,
-                            str(existing["application_id"]),
-                        ),
-                    )
-                    self._execute(conn,
-                        """
-                        UPDATE learning_application_effect
-                        SET decision_json=?, updated_at=?
-                        WHERE application_id=?
-                        """,
-                        (
-                            json.dumps(
-                                {
-                                    "suggestion_ids": suggestion_ids,
-                                    "bias_multiplier": bias_multiplier,
-                                    "old_weight": old_weight,
-                                    "new_weight": new_weight,
-                                    "details": details_payload,
-                                },
-                                ensure_ascii=False,
-                                default=str,
-                            ),
-                            time.time(),
-                            str(existing["application_id"]),
-                        ),
-                    )
-                    return str(existing["application_id"])
+        # cycle_ts lives inside details_json so store-parsed application dicts can
+        # recover the observation-window boundary.
+        details_payload["cycle_ts"] = float(cycle_ts)
+        store = LearningApplicationStore(str(self.db_path))
+        active_statuses = {"prepared", "applied", "observing", "effective"}
 
-            application_id = self._new_id("lapp")
-            effect_status = "prepared" if status == "prepared" else "observing"
-            self._execute(conn,
-                """
-                INSERT INTO learning_application_log
-                (application_id, cycle_ts, scope_type, scope_key, action, bias_multiplier,
-                 old_weight, new_weight, suggestion_ids_json, status, details_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    application_id,
-                    float(cycle_ts),
-                    scope_type,
-                    scope_key,
-                    action,
-                    float(bias_multiplier),
-                    float(old_weight),
-                    float(new_weight),
-                    suggestion_ids_json,
-                    status,
-                    details_json,
-                    time.time(),
-                ),
+        def _app_ts(item: dict) -> float:
+            try:
+                return float(item.get("cycle_ts") or 0.0)
+            except Exception:
+                return 0.0
+
+        def _app_sids(item: dict) -> str:
+            try:
+                return json.dumps(
+                    sorted(set(str(i) for i in (item.get("suggestion_ids") or []))),
+                    ensure_ascii=False,
+                )
+            except Exception:
+                return "[]"
+
+        def _matches_scope(item: dict) -> bool:
+            return (
+                str(item.get("scope_type") or "") == scope_type
+                and str(item.get("scope_key") or "") == scope_key
+                and str(item.get("action") or "") == action
             )
-            self._execute(conn,
-                """
-                INSERT INTO learning_application_effect
-                (application_id, scope_type, scope_key, action, status, decision_json,
-                 updated_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(application_id) DO UPDATE SET
-                    scope_type=excluded.scope_type,
-                    scope_key=excluded.scope_key,
-                    action=excluded.action,
-                    status=excluded.status,
-                    decision_json=excluded.decision_json,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    application_id,
-                    scope_type,
-                    scope_key,
-                    action,
-                    effect_status,
-                    json.dumps(
-                        {
-                            "suggestion_ids": suggestion_ids,
-                            "bias_multiplier": bias_multiplier,
-                            "old_weight": old_weight,
-                            "new_weight": new_weight,
-                            "details": details_payload,
-                        },
-                        ensure_ascii=False,
-                        default=str,
-                    ),
-                    time.time(),
-                    time.time(),
-                ),
+
+        # Reuse the newest active application for this scope+action when the
+        # suggestion batch is identical; otherwise create a fresh one.
+        existing = None
+        existing_ts = float("-inf")
+        for item in store.iter_applications(scope_type=scope_type, scope_key=scope_key):
+            if not _matches_scope(item):
+                continue
+            if str(item.get("status") or "") not in active_statuses:
+                continue
+            ts = _app_ts(item)
+            if ts > existing_ts:
+                existing_ts = ts
+                existing = item
+        if existing is not None and _app_sids(existing) == normalized_sids:
+            existing_id = str(existing["application_id"])
+            for item in store.iter_applications(scope_type=scope_type, scope_key=scope_key):
+                if not _matches_scope(item):
+                    continue
+                if str(item.get("application_id")) == existing_id:
+                    continue
+                if str(item.get("status") or "") not in active_statuses:
+                    continue
+                if _app_sids(item) == normalized_sids:
+                    store.transition_application(
+                        str(item["application_id"]), status="superseded"
+                    )
+                    store.update_effect(
+                        str(item["application_id"]), patch={"status": "superseded"}
+                    )
+            refreshed = dict(existing)
+            refreshed.update(details_payload)
+            refreshed["bias_multiplier"] = float(bias_multiplier)
+            refreshed["old_weight"] = float(old_weight)
+            refreshed["new_weight"] = float(new_weight)
+            refreshed["cycle_ts"] = float(cycle_ts)
+            refreshed["suggestion_ids"] = suggestion_ids
+            self._write_application(
+                existing_id, details=refreshed, status=str(existing.get("status") or "")
             )
+            store.update_effect(
+                existing_id,
+                patch={
+                    "decision": {
+                        "suggestion_ids": suggestion_ids,
+                        "bias_multiplier": float(bias_multiplier),
+                        "old_weight": float(old_weight),
+                        "new_weight": float(new_weight),
+                        "details": details_payload,
+                    },
+                    "status": ("prepared" if status == "prepared" else "observing"),
+                    "updated_at": float(cycle_ts),
+                },
+            )
+            return existing_id
+
+        application_id = store.prepare_application(
+            scope_type=scope_type,
+            scope_key=scope_key,
+            action=action,
+            status=status,
+            run_id=str(details_payload.get("run_id") or ""),
+            source=str(
+                details_payload.get("source")
+                or details_payload.get("mutation_source")
+                or ""
+            ),
+            bias_multiplier=float(bias_multiplier),
+            old_weight=float(old_weight),
+            new_weight=float(new_weight),
+            suggestion_ids=suggestion_ids,
+            cycle_ts=float(cycle_ts),
+            details=details_payload,
+        )
+        effect_status = "prepared" if status == "prepared" else "observing"
+        store.write_effect(
+            application_id=application_id,
+            scope_type=scope_type,
+            scope_key=scope_key,
+            action=action,
+            status=effect_status,
+            decision={
+                "suggestion_ids": suggestion_ids,
+                "bias_multiplier": float(bias_multiplier),
+                "old_weight": float(old_weight),
+                "new_weight": float(new_weight),
+                "details": details_payload,
+            },
+            last_review_at=0.0,
+            updated_at=float(cycle_ts),
+        )
         return application_id
 
     def _persist_effect_evaluation(
         self,
-        conn: Any,
         *,
         app: dict[str, Any],
         scope_type: str,
@@ -1070,61 +1106,48 @@ class RuleEvolutionGovernor:
         evaluation: EffectEvaluation,
         now: float,
     ) -> None:
-        self._execute(conn,
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status,
-             observed_trade_count, baseline_trade_count,
-             post_avg_reward, baseline_avg_reward, delta_avg_reward,
-             post_win_rate, baseline_win_rate, decision_json,
-             last_review_at, updated_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(application_id) DO UPDATE SET
-                scope_type=excluded.scope_type,
-                scope_key=excluded.scope_key,
-                action=excluded.action,
-                status=excluded.status,
-                observed_trade_count=excluded.observed_trade_count,
-                baseline_trade_count=excluded.baseline_trade_count,
-                post_avg_reward=excluded.post_avg_reward,
-                baseline_avg_reward=excluded.baseline_avg_reward,
-                delta_avg_reward=excluded.delta_avg_reward,
-                post_win_rate=excluded.post_win_rate,
-                baseline_win_rate=excluded.baseline_win_rate,
-                decision_json=excluded.decision_json,
-                last_review_at=excluded.last_review_at,
-                updated_at=excluded.updated_at
-            """,
-            (
-                app["application_id"],
-                scope_type,
-                scope_key,
-                app["action"],
-                evaluation.status,
-                evaluation.post_count,
-                evaluation.baseline_count,
-                round(evaluation.post_avg, 6),
-                round(evaluation.baseline_avg, 6),
-                round(evaluation.delta, 6),
-                round(evaluation.post_win_rate, 4),
-                round(evaluation.baseline_win_rate, 4),
-                json.dumps(evaluation.decision, ensure_ascii=False, default=str),
-                evaluation.last_review_at,
-                now,
-                now,
-            ),
-        )
-        self._execute(conn,
-            """
-            UPDATE learning_application_log
-            SET status=?, details_json=?
-            WHERE application_id=?
-            """,
-            (
-                evaluation.status,
-                json.dumps({**(app.get("details") or {}), "effect": evaluation.decision}, ensure_ascii=False, default=str),
-                app["application_id"],
-            ),
+        store = LearningApplicationStore(str(self.db_path))
+        effect_patch = {
+            "status": evaluation.status,
+            "observed_trade_count": evaluation.post_count,
+            "baseline_trade_count": evaluation.baseline_count,
+            "post_avg_reward": round(evaluation.post_avg, 6),
+            "baseline_avg_reward": round(evaluation.baseline_avg, 6),
+            "post_win_rate": round(evaluation.post_win_rate, 4),
+            "baseline_win_rate": round(evaluation.baseline_win_rate, 4),
+            "decision": evaluation.decision,
+            "last_review_at": evaluation.last_review_at,
+            "updated_at": now,
+        }
+        if evaluation.delta is not None:
+            effect_patch["delta_avg_reward"] = round(evaluation.delta, 6)
+        application_id = str(app["application_id"])
+        # Upsert the single effect row for this application (mirrors the old
+        # INSERT ... ON CONFLICT(application_id) DO UPDATE shape).
+        if not store.update_effect(application_id, patch=effect_patch):
+            store.write_effect(
+                application_id=application_id,
+                scope_type=scope_type,
+                scope_key=scope_key,
+                action=str(app.get("action") or ""),
+                status=evaluation.status,
+                observed_trade_count=evaluation.post_count,
+                baseline_trade_count=evaluation.baseline_count,
+                post_avg_reward=round(evaluation.post_avg, 6),
+                baseline_avg_reward=round(evaluation.baseline_avg, 6),
+                delta_avg_reward=(
+                    round(evaluation.delta, 6) if evaluation.delta is not None else None
+                ),
+                post_win_rate=round(evaluation.post_win_rate, 4),
+                baseline_win_rate=round(evaluation.baseline_win_rate, 4),
+                decision=evaluation.decision,
+                last_review_at=evaluation.last_review_at,
+                updated_at=now,
+            )
+        self._write_application(
+            application_id,
+            status=evaluation.status,
+            details={"effect": evaluation.decision},
         )
 
     def reconcile_application_effects(
@@ -1148,6 +1171,10 @@ class RuleEvolutionGovernor:
         inconclusive = 0
         rollback_pending = 0
         pending_parameter_rollbacks: list[dict[str, Any]] = []
+        # The lean store owns its own connection and cannot write inside the
+        # open SQLite write transaction below (single-writer lock), so
+        # reinforcements are applied after the transaction commits.
+        reinforced_application_ids: list[str] = []
 
         with self._conn() as conn:
             now = time.time()
@@ -1162,36 +1189,47 @@ class RuleEvolutionGovernor:
                 except Exception:
                     effect_days = 7
                 max_observation_age_seconds = float(effect_days * 86400)
-            rows = self._execute(conn,
-                """
-                SELECT l.*
-                FROM learning_application_log l
-                LEFT JOIN learning_application_effect e
-                  ON e.application_id=l.application_id
-                WHERE l.status IN ('applied', 'observing', 'effective', 'mixed')
-                  AND (
-                      l.status<>'mixed'
-                      OR COALESCE(e.updated_at, 0)<=?
-                  )
-                ORDER BY
-                    COALESCE(e.updated_at, 0) ASC,
-                    CASE l.status
-                        WHEN 'applied' THEN 0
-                        WHEN 'observing' THEN 1
-                        WHEN 'mixed' THEN 2
-                        ELSE 3
-                    END,
-                    l.cycle_ts ASC
-                LIMIT ?
-                """,
-                (
-                    now - max(300.0, float(mixed_recheck_after_seconds or 0.0)),
-                    max(1, min(int(application_limit or 200), 2000)),
-                ),
-            ).fetchall()
+            store = LearningApplicationStore(str(self.db_path))
+            all_apps = list(store.iter_applications())
+            effects_by_app: dict[str, dict[str, Any]] = {}
+            for eff in store.iter_effects():
+                eff_aid = str(eff.get("application_id") or "")
+                if not eff_aid:
+                    continue
+                cur = effects_by_app.get(eff_aid)
+                if cur is None or self._effect_ts(eff) > self._effect_ts(cur):
+                    effects_by_app[eff_aid] = eff
 
-            for row in rows:
-                app = self._parse_application_row(row)
+            active_log_statuses = {"applied", "observing", "effective", "mixed"}
+            _status_rank = {"applied": 0, "observing": 1, "mixed": 2}
+            mixed_cutoff = now - max(300.0, float(mixed_recheck_after_seconds or 0.0))
+            candidates = []
+            for app in all_apps:
+                if str(app.get("status") or "") not in active_log_statuses:
+                    continue
+                eff_updated_at = self._effect_ts(
+                    effects_by_app.get(str(app.get("application_id") or ""))
+                )
+                if str(app.get("status") or "") == "mixed":
+                    if eff_updated_at > mixed_cutoff:
+                        continue
+                candidates.append(
+                    (
+                        eff_updated_at,
+                        _status_rank.get(str(app.get("status") or ""), 3),
+                        self._app_ts(app),
+                        app,
+                    )
+                )
+            candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+            rows = [
+                item[3]
+                for item in candidates[
+                    : max(1, min(int(application_limit or 200), 2000))
+                ]
+            ]
+
+            for app in rows:
                 prior_status = str(app.get("status") or "")
                 if prior_status == "mixed":
                     rechecked_mixed += 1
@@ -1207,34 +1245,28 @@ class RuleEvolutionGovernor:
                 review_limit = max(int(observe_trades) * 5, int(observe_trades))
                 raw_post_count_override: int | None = None
                 raw_pre_count_override: int | None = None
-                next_application_row = self._execute(
-                    conn,
-                    """
-                    SELECT application_id, action, cycle_ts
-                    FROM learning_application_log
-                    WHERE application_id<>?
-                      AND scope_type=? AND scope_key=?
-                      AND cycle_ts>?
-                      AND status NOT IN ('superseded', 'rolled_back', 'rejected')
-                    ORDER BY cycle_ts ASC
-                    LIMIT 1
-                    """,
-                    (
-                        app["application_id"],
-                        scope_type,
-                        str(app.get("scope_key") or ""),
-                        float(app.get("cycle_ts") or 0.0),
-                    ),
-                ).fetchone()
-                next_application = (
-                    {
-                        "application_id": str(next_application_row["application_id"] or ""),
-                        "action": str(next_application_row["action"] or ""),
-                        "cycle_ts": float(next_application_row["cycle_ts"] or 0.0),
-                    }
-                    if next_application_row
-                    else None
-                )
+                current_cycle_ts = self._app_ts(app)
+                next_application = None
+                next_cycle = float("inf")
+                for other in all_apps:
+                    if str(other.get("application_id")) == str(app.get("application_id") or ""):
+                        continue
+                    if str(other.get("scope_type") or "") != scope_type:
+                        continue
+                    if str(other.get("scope_key") or "") != str(app.get("scope_key") or ""):
+                        continue
+                    other_ts = self._app_ts(other)
+                    if other_ts <= current_cycle_ts:
+                        continue
+                    if str(other.get("status") or "") in {"superseded", "rolled_back", "rejected"}:
+                        continue
+                    if other_ts < next_cycle:
+                        next_cycle = other_ts
+                        next_application = {
+                            "application_id": str(other.get("application_id") or ""),
+                            "action": str(other.get("action") or ""),
+                            "cycle_ts": other_ts,
+                        }
                 observation_upper_bound = (
                     float(next_application["cycle_ts"])
                     if next_application
@@ -1258,7 +1290,7 @@ class RuleEvolutionGovernor:
                         ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, review_scan_limit),
+                        (self._app_ts(app), observation_upper_bound, review_scan_limit),
                     ).fetchall()
                     post_reviews = [
                         r for r in (self._parse_review_row(row, conn) for row in post_rows)
@@ -1274,7 +1306,7 @@ class RuleEvolutionGovernor:
                         ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), review_scan_limit),
+                        (self._app_ts(app), review_scan_limit),
                     ).fetchall()
                     pre_reviews = [
                         r for r in (self._parse_review_row(row, conn) for row in pre_rows)
@@ -1292,7 +1324,7 @@ class RuleEvolutionGovernor:
                         WHERE r.created_at > ? AND r.created_at < ?
                         ORDER BY r.created_at DESC LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, review_scan_limit),
+                        (self._app_ts(app), observation_upper_bound, review_scan_limit),
                     ).fetchall()
                     pre_rows = self._execute(
                         conn,
@@ -1304,7 +1336,7 @@ class RuleEvolutionGovernor:
                         WHERE r.created_at <= ?
                         ORDER BY r.created_at DESC LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), review_scan_limit),
+                        (self._app_ts(app), review_scan_limit),
                     ).fetchall()
                     parsed_post = [self._parse_review_row(row, conn) for row in post_rows]
                     parsed_pre = [self._parse_review_row(row, conn) for row in pre_rows]
@@ -1334,7 +1366,7 @@ class RuleEvolutionGovernor:
                     factor = (
                         str(app.get("scope_key") or "")
                         if scope_type == "factor"
-                        else str((app.get("details") or {}).get("factor_id") or scope_key_for_effect.split(":", 1)[0])
+                        else str(app.get("factor_id") or scope_key_for_effect.split(":", 1)[0])
                     )
                     if not factor:
                         continue
@@ -1356,7 +1388,7 @@ class RuleEvolutionGovernor:
                         ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, factor, review_scan_limit),
+                        (self._app_ts(app), observation_upper_bound, factor, review_scan_limit),
                     ).fetchall()
                     post_reviews = [self._parse_review_row(r, conn) for r in post_rows]
 
@@ -1375,18 +1407,17 @@ class RuleEvolutionGovernor:
                         ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), factor, review_scan_limit),
+                        (self._app_ts(app), factor, review_scan_limit),
                     ).fetchall()
                     pre_reviews = [self._parse_review_row(r, conn) for r in pre_rows]
                     reward_from_review = self._reward_from_review
 
                 raw_post_reviews = list(post_reviews)
                 raw_pre_reviews = list(pre_reviews)
-                details = app.get("details") or {}
                 target_regime = str(
-                    details.get("regime_id")
-                    or details.get("regime_key")
-                    or details.get("entry_regime")
+                    app.get("regime_id")
+                    or app.get("regime_key")
+                    or app.get("entry_regime")
                     or ""
                 ).strip()
                 if not target_regime:
@@ -1477,7 +1508,7 @@ class RuleEvolutionGovernor:
                     )
                 decision = evaluation.decision
                 if scope_type == "entry_quality":
-                    controls = dict((app.get("details") or {}).get("controls") or {})
+                    controls = dict(app.get("controls") or {})
                     threshold = float(controls.get("min_abs_signal_score") or 0.0)
 
                     def entry_metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1539,8 +1570,11 @@ class RuleEvolutionGovernor:
                 post_win_rate = evaluation.post_win_rate
                 pre_win_rate = evaluation.baseline_win_rate
 
+                # The store writes on its own connection and cannot write while
+                # this reconcile connection still holds an uncommitted write from
+                # a previous iteration (e.g. policy_suggestion), so flush first.
+                conn.commit()
                 self._persist_effect_evaluation(
-                    conn,
                     app=app,
                     scope_type=scope_type,
                     scope_key=scope_key_for_effect,
@@ -1559,11 +1593,10 @@ class RuleEvolutionGovernor:
                 suggestion_ids = list(app.get("suggestion_ids") or [])
                 if next_status == "ineffective" and suggestion_ids:
                     if scope_type == "parameter_template":
-                        details = app.get("details") or {}
-                        factor_id = str(details.get("factor_id") or factor)
-                        regime_key = str(details.get("regime_key") or "")
-                        old_template_id = str(details.get("old_template_id") or "")
-                        new_template_id = str(details.get("new_template_id") or "")
+                        factor_id = str(app.get("factor_id") or "")
+                        regime_key = str(app.get("regime_key") or "")
+                        old_template_id = str(app.get("old_template_id") or "")
+                        new_template_id = str(app.get("new_template_id") or "")
                         if old_template_id:
                             pending_parameter_rollbacks.append(
                                 {
@@ -1646,23 +1679,16 @@ class RuleEvolutionGovernor:
                             now,
                         ),
                     )
-                    self._execute(conn,
-                        """
-                        UPDATE learning_application_effect
-                        SET status='reinforced', updated_at=?
-                        WHERE application_id=?
-                        """,
-                        (now, app["application_id"]),
-                    )
-                    self._execute(conn,
-                        """
-                        UPDATE learning_application_log
-                        SET status='reinforced'
-                        WHERE application_id=?
-                        """,
-                        (app["application_id"],),
-                    )
+                    reinforced_application_ids.append(str(app["application_id"]))
                     reinforced += 1
+
+        # Apply reinforcements now that the write transaction above has
+        # committed and released its lock (the store needs its own writer).
+        for _reinforced_application_id in reinforced_application_ids:
+            store.update_effect(
+                _reinforced_application_id, patch={"status": "reinforced"}
+            )
+            self._write_application(_reinforced_application_id, status="reinforced")
 
         for item in pending_parameter_rollbacks:
             from backend.services.parameter_templates import ParameterTemplateService

@@ -6,9 +6,10 @@ import time
 from backend.services.proposal_registry import ProposalRegistryService, ensure_proposal_registry_table
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.brain_governance_candidates import ensure_brain_governance_candidate_table
-from backend.services.brain_action_planner import ensure_brain_action_plan_table
+from backend.services.v16_brain_planning import ensure_brain_action_plan_table
 from backend.services.autonomous_learning import ensure_autonomous_learning_tables
-from backend.core.db import connect_sqlite
+from backend.core.db import STATE_DB_DDL, connect_sqlite
+from backend.services.learning_application_store import LearningApplicationStore
 
 
 def test_proposal_registry_normalizes_policy_candidate_and_action_plan(tmp_path):
@@ -518,77 +519,11 @@ def test_proposal_registry_reliability_gate_requires_evidence_for_negative_agent
     ensure_proposal_registry_table(db_path)
     ensure_autonomous_learning_tables(db_path)
     now = time.time()
+    # Converged: lean learning tables come from STATE_DB_DDL; seed the
+    # application/effect through the store so reads via the store work.
     conn = connect_sqlite(db_path)
     try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS policy_suggestion (
-                suggestion_id TEXT PRIMARY KEY,
-                scope_type TEXT NOT NULL,
-                scope_key TEXT NOT NULL,
-                action TEXT NOT NULL,
-                confidence REAL DEFAULT 0.0,
-                reason TEXT DEFAULT '',
-                evidence_json TEXT DEFAULT '{}',
-                status TEXT DEFAULT 'proposed',
-                reviewed_at REAL DEFAULT 0.0,
-                review_note TEXT DEFAULT '',
-                created_at REAL NOT NULL DEFAULT 0.0
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS learning_application_log (
-                application_id TEXT PRIMARY KEY,
-                cycle_ts REAL NOT NULL DEFAULT 0.0,
-                scope_type TEXT NOT NULL,
-                scope_key TEXT NOT NULL,
-                action TEXT NOT NULL,
-                bias_multiplier REAL DEFAULT 1.0,
-                old_weight REAL DEFAULT 0.0,
-                new_weight REAL DEFAULT 0.0,
-                suggestion_ids_json TEXT DEFAULT '[]',
-                status TEXT DEFAULT 'applied',
-                details_json TEXT DEFAULT '{}',
-                created_at REAL NOT NULL DEFAULT 0.0
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS learning_application_effect (
-                application_id TEXT PRIMARY KEY,
-                scope_type TEXT NOT NULL,
-                scope_key TEXT NOT NULL,
-                action TEXT NOT NULL,
-                status TEXT DEFAULT 'observing',
-                delta_avg_reward REAL DEFAULT 0.0,
-                updated_at REAL NOT NULL DEFAULT 0.0,
-                created_at REAL NOT NULL DEFAULT 0.0
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action,
-             suggestion_ids_json, status, details_json, created_at)
-            VALUES ('app_bad', ?, 'factor', 'rsi_14', 'downweight',
-                    '[]', 'applied', '{"source_agent":"autonomous_learning"}', ?)
-            """,
-            (now - 10, now - 10),
-        )
-        conn.execute(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status,
-             delta_avg_reward, updated_at, created_at)
-            VALUES ('app_bad', 'factor', 'rsi_14', 'downweight',
-                    'ineffective', -0.2, ?, ?)
-            """,
-            (now - 5, now - 5),
-        )
+        conn.executescript(STATE_DB_DDL)
         conn.execute(
             """
             INSERT INTO policy_suggestion
@@ -602,6 +537,26 @@ def test_proposal_registry_reliability_gate_requires_evidence_for_negative_agent
         conn.commit()
     finally:
         conn.close()
+    store = LearningApplicationStore(db_path)
+    app_id = store.prepare_application(
+        scope_type="factor",
+        scope_key="rsi_14",
+        action="downweight",
+        status="applied",
+        suggestion_ids=["ps_low_agent"],
+        details={"source_agent": "autonomous_learning"},
+        cycle_ts=now - 10,
+    )
+    store.write_effect(
+        application_id=app_id,
+        scope_key="rsi_14",
+        scope_type="factor",
+        action="downweight",
+        status="ineffective",
+        delta_avg_reward=-0.2,
+        decision={"source_agent": "autonomous_learning"},
+        updated_at=now - 5,
+    )
 
     ProposalRegistryService(db_path).refresh()
     item = ProposalRegistryService(db_path).get("policy_suggestion:ps_low_agent")["proposal"]

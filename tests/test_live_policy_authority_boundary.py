@@ -97,6 +97,20 @@ def test_frozen_live_supervision_only_evaluates_projected_template(monkeypatch) 
         "_log_supervisor_trace",
         lambda **kwargs: traces.append(kwargs),
     )
+    # Isolate the shared recovery-store boundaries: the noop dedup is
+    # persisted per position in state_v1, so a real/previous row for the
+    # same deterministic hold fingerprint would suppress the evaluation
+    # trace and the test would also upsert production state.
+    monkeypatch.setattr(
+        live_service,
+        "_supervisor_noop_fingerprint_seen",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_remember_supervisor_noop",
+        lambda *_args, **_kwargs: None,
+    )
     cfg = SimpleNamespace(
         autonomy_mode="live_candidate",
         autonomy_expansion_frozen=True,

@@ -12,13 +12,8 @@ alpha 包 — 因子分析 + IC 追踪
     classify_expr          快捷分类函数
     factor_registry        因子注册表
 
-已弃用 (仍可导入但仅用于批量离线分析脚本):
-    FactorEngine → alpha/factor_engine.py (batch-only, 离线分析用;
-                    生产路径请用 StreamingFactorEngine)
 """
-
 from .ic_tracker import ICTracker
-from .factor_engine import FactorEngine  # deprecated — batch-only offline analysis
 from .streaming_factor_engine import StreamingFactorEngine
 from .signal_normalizer import SignalNormalizer
 from .portfolio_compositor import PortfolioCompositor, CompositeSignal
@@ -50,5 +45,4 @@ __all__ = [
     "evaluate_shadow_factors",
     "load_shadow_perf",
     "AdaptiveWeightEngine",
-    # FactorEngine intentionally excluded — batch-only
 ]

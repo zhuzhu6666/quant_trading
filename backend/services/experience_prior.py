@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.services.learning_application_store import LearningApplicationStore
 
 
 _CACHE_LOCK = threading.Lock()
@@ -62,36 +63,30 @@ class ExperiencePriorService:
                 result = self._empty("missing_effect_ledger")
             else:
                 cutoff = now - max(1, int(max_age_days)) * 86400.0
-                sql = """
-                    SELECT application_id, scope_key, status, observed_trade_count,
-                           delta_avg_reward, decision_json, updated_at
-                    FROM learning_application_effect
-                    WHERE scope_type='factor'
-                      AND status IN ('reinforced','effective','ineffective','rolled_back')
-                      AND updated_at>=?
-                    ORDER BY updated_at DESC
-                """
-                if is_state_db_path(self.db_path):
-                    sql = sql.replace("?", "%s")
-                rows = conn.execute(sql, (cutoff,)).fetchall()
+                terminal_statuses = {"reinforced", "effective", "ineffective", "rolled_back"}
+                store = LearningApplicationStore(self.db_path)
                 grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
                 rejected = 0
-                for row in rows:
-                    decision = _loads(row["decision_json"])
+                for eff in store.iter_effects(scope_type="factor"):
+                    if str(eff.get("status") or "") not in terminal_statuses:
+                        continue
+                    if float(eff.get("updated_at") or 0.0) < cutoff:
+                        continue
+                    decision = eff.get("decision") or {}
                     quality = decision.get("evidence_quality") if isinstance(decision.get("evidence_quality"), dict) else {}
                     if not bool(quality.get("bounded_attribution_allowed")):
                         rejected += 1
                         continue
-                    factor = str(row["scope_key"] or "")
+                    factor = str(eff.get("scope_key") or "")
                     if not factor:
                         rejected += 1
                         continue
                     grouped[factor].append({
-                        "application_id": str(row["application_id"] or ""),
-                        "status": str(row["status"] or ""),
-                        "sample_count": max(0, int(row["observed_trade_count"] or 0)),
-                        "delta": float(row["delta_avg_reward"] or 0.0),
-                        "updated_at": float(row["updated_at"] or 0.0),
+                        "application_id": str(eff.get("application_id") or ""),
+                        "status": str(eff.get("status") or ""),
+                        "sample_count": max(0, int(eff.get("observed_trade_count") or 0)),
+                        "delta": float(eff.get("delta_avg_reward") or 0.0),
+                        "updated_at": float(eff.get("updated_at") or 0.0),
                         "regime": str(quality.get("target_regime") or ""),
                     })
                 priors: dict[str, dict[str, Any]] = {}

@@ -103,3 +103,6 @@ package-lock.json
 dist/
 build/
 web_frontend/src-tauri/target/
+
+# Canonical_v2 migration run manifests / checkpoints (not source, not committed)
+run_artifacts/

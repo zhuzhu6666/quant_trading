@@ -22,6 +22,8 @@ from alpha.decision_policy import DecisionPolicy
 from alpha.portfolio_compositor import resolve_factor_role
 from alpha.registry_adapter import RegistryAdapter
 from backend.core.db import connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.core.db_helpers import load_json as _loads
+from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
 from backend.services.factor_cards import build_factor_admission_evidence
 from backend.services.factor_blend_health import FactorBlendHealthService
@@ -140,17 +142,6 @@ def _json_default(value: Any) -> Any:
 
 def _dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=_json_default)
-
-
-def _loads(raw: Any, default: Any) -> Any:
-    if raw is None:
-        return default
-    if isinstance(raw, (dict, list)):
-        return raw
-    try:
-        return json.loads(str(raw))
-    except Exception:
-        return default
 
 
 def factor_batch_manifest_verdict(
@@ -1030,37 +1021,17 @@ class FactorGovernanceOrchestrator:
         if not production_state and not Path(db_path).exists():
             return False
         try:
-            conn = (
-                get_state_pg_conn(read_only=True)
-                if production_state
-                else connect_sqlite(db_path, read_only=True)
+            store = LearningApplicationStore(str(db_path))
+            app = store.latest_application(scope_type="factor", scope_key=str(factor_id))
+            eff = store.latest_effect(scope_key=str(factor_id), scope_type="factor")
+            if app is None and eff is None:
+                return False
+            return LearningExperimentAdmissionService.row_is_active(
+                {
+                    "application_status": str((app or {}).get("status") or ""),
+                    "effect_status": str((eff or {}).get("status") or ""),
+                }
             )
-            if not production_state:
-                conn.row_factory = sqlite3.Row
-            try:
-                if not state_table_exists(conn, "learning_application_log"):
-                    return False
-                row = conn.execute(
-                    _p("""
-                    SELECT l.status AS application_status, e.status AS effect_status
-                    FROM learning_application_log l
-                    LEFT JOIN learning_application_effect e ON e.application_id=l.application_id
-                    WHERE l.scope_type='factor' AND l.scope_key=?
-                    ORDER BY l.cycle_ts DESC, l.created_at DESC
-                    LIMIT 1
-                    """) if production_state else """
-                    SELECT l.status AS application_status, e.status AS effect_status
-                    FROM learning_application_log l
-                    LEFT JOIN learning_application_effect e ON e.application_id=l.application_id
-                    WHERE l.scope_type='factor' AND l.scope_key=?
-                    ORDER BY l.cycle_ts DESC, l.created_at DESC
-                    LIMIT 1
-                    """,
-                    (factor_id,),
-                ).fetchone()
-                return LearningExperimentAdmissionService.row_is_active(row)
-            finally:
-                conn.close()
         except Exception:
             # Production state uncertainty must block another mutation.  An
             # isolated test/research store has no live authority and may treat
@@ -1073,10 +1044,10 @@ class FactorGovernanceOrchestrator:
     ) -> dict[str, Any] | None:
         """Latest measured posterior effect of the last autonomous factor action.
 
-        Reuses the same production table and filter rules as the rollback path
-        (learning_application_effect joined on learning_application_log), so the
-        expansion guard shares one fact source instead of adding a new writer.
-        Returns None when there is no applicable record.
+        Reuses the converged lean learning_application_effect store
+        (scope=scope_key, posterior in effect_json) shared with the rollback
+        path, so the expansion guard reads one fact source.  Returns None when
+        there is no applicable record.
         """
         if not factor_id:
             return None
@@ -1085,53 +1056,20 @@ class FactorGovernanceOrchestrator:
         if not production_state and not Path(db_path).exists():
             return None
         try:
-            conn = (
-                get_state_pg_conn(read_only=True)
-                if production_state
-                else connect_sqlite(db_path, read_only=True)
+            eff = LearningApplicationStore(str(db_path)).latest_effect(
+                scope_key=str(factor_id), scope_type="factor"
             )
-            if not production_state:
-                conn.row_factory = sqlite3.Row
-            try:
-                if not state_table_exists(conn, "learning_application_effect"):
-                    return None
-                sql = """
-                    SELECT e.observed_trade_count, e.delta_avg_reward
-                    FROM learning_application_log l
-                    JOIN learning_application_effect e
-                      ON e.application_id = l.application_id
-                    WHERE l.scope_type='factor' AND l.scope_key=?
-                      AND l.status IN ('applied','observing','ineffective')
-                      AND e.status IN ('observing','applied','ineffective')
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM learning_application_log newer
-                          WHERE newer.scope_type='factor'
-                            AND newer.scope_key=l.scope_key
-                            AND newer.created_at > l.created_at
-                            AND newer.status NOT IN ('rolled_back','superseded')
-                      )
-                    ORDER BY e.updated_at DESC, l.created_at DESC
-                    LIMIT 1
-                """
-                row = conn.execute(
-                    _p(sql) if production_state else sql,
-                    (factor_id,),
-                ).fetchone()
-                if not row:
-                    return None
-                return {
-                    "observed_trade_count": int(
-                        row["observed_trade_count"] or 0
-                    ),
-                    "delta_avg_reward": (
-                        float(row["delta_avg_reward"])
-                        if row["delta_avg_reward"] is not None
-                        else None
-                    ),
-                }
-            finally:
-                conn.close()
+            if eff is None:
+                return None
+            return {
+                "observed_trade_count": int(eff.get("observed_trade_count") or 0),
+                "delta_avg_reward": (
+                    float(eff["delta_avg_reward"])
+                    if eff.get("delta_avg_reward") is not None
+                    else None
+                ),
+                "status": str(eff.get("status") or ""),
+            }
         except Exception:
             # Production state uncertainty must block expansion; an isolated
             # test/research store has no live authority and may treat a
@@ -1380,32 +1318,54 @@ class FactorGovernanceOrchestrator:
         cfg = runtime_config.shared()
         min_trades = int(getattr(cfg, "factor_governance_rollback_min_trades", 3) or 3)
         delta_threshold = float(getattr(cfg, "factor_governance_rollback_delta_threshold", -0.15) or -0.15)
-        conn = get_state_pg_conn()
         try:
-            rows = conn.execute(
-                _p("""
-                SELECT l.application_id, l.scope_key, l.action, l.suggestion_ids_json,
-                       l.details_json, e.observed_trade_count, e.delta_avg_reward
-                FROM learning_application_log l
-                JOIN learning_application_effect e ON e.application_id = l.application_id
-                WHERE l.scope_type='factor'
-                  AND l.status IN ('applied','observing','ineffective')
-                  AND e.status IN ('observing','applied','ineffective')
-                  AND e.observed_trade_count >= ?
-                  AND e.delta_avg_reward <= ?
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM learning_application_log newer
-                      WHERE newer.scope_type='factor'
-                        AND newer.scope_key=l.scope_key
-                        AND newer.created_at > l.created_at
-                        AND newer.status NOT IN ('rolled_back','superseded')
-                  )
-                ORDER BY e.updated_at DESC, l.created_at DESC
-                LIMIT 5
-                """),
-                (min_trades, delta_threshold),
-            ).fetchall()
+            store = LearningApplicationStore(str(self.overlay.db_path))
+            _rows: list[dict[str, Any]] = []
+            for eff in store.iter_effects(scope_type="factor"):
+                if eff.get("status") not in ("observing", "applied", "ineffective"):
+                    continue
+                otc = int(eff.get("observed_trade_count") or 0)
+                dar = eff.get("delta_avg_reward")
+                if otc < min_trades:
+                    continue
+                if dar is None or float(dar) > delta_threshold:
+                    continue
+                app = store.get_application(str(eff.get("application_id") or ""))
+                if not app:
+                    continue
+                if app.get("status") not in ("applied", "observing", "ineffective"):
+                    continue
+                factor_id = str(eff.get("scope_key") or app.get("scope_key") or "")
+                app_ts = float(app.get("created_at") or 0)
+                superseded = False
+                for newer in store.iter_applications(scope_key=factor_id):
+                    if (
+                        float(newer.get("created_at") or 0) > app_ts
+                        and str(newer.get("status")) not in ("rolled_back", "superseded")
+                    ):
+                        superseded = True
+                        break
+                if superseded:
+                    continue
+                _rows.append({
+                    "application_id": str(app.get("application_id") or ""),
+                    "scope_key": factor_id,
+                    "action": str(eff.get("action") or app.get("action") or ""),
+                    "observed_trade_count": otc,
+                    "delta_avg_reward": float(dar),
+                    "details_json": json.dumps({
+                        "decision_id": app.get("decision_id") or "",
+                        "scope_type": app.get("scope_type") or "factor",
+                        "scope_key": factor_id,
+                        "action": eff.get("action") or "",
+                    }, ensure_ascii=False),
+                    "suggestion_ids_json": json.dumps(
+                        app.get("suggestion_ids") or [], ensure_ascii=False
+                    ),
+                    "_effect_updated_at": float(eff.get("updated_at") or 0),
+                })
+            _rows.sort(key=lambda r: r["_effect_updated_at"], reverse=True)
+            rows = _rows[:5]
             for row in rows:
                 factor_id = str(row["scope_key"] or "")
                 decision_id = self._decision_id_from_application(row)
@@ -1461,7 +1421,7 @@ class FactorGovernanceOrchestrator:
                     )
                     weight_result = FactorWeightChangeService(self.overlay.db_path).execute(
                         source="factor_governance_auto_rollback",
-                        producer="factor_governance_posterior_rollback",
+                        producer="factor_governance",
                         run_id=rollback_run_id,
                         actor="system:factor_governance",
                         reason=f"posterior rollback for {factor_id}",
@@ -1564,8 +1524,6 @@ class FactorGovernanceOrchestrator:
                 ))
         except Exception as exc:
             logger.debug("[factor_governance] rollback scan skipped: %s", exc)
-        finally:
-            conn.close()
         return actions
 
     def _decision_id_from_application(self, row: Any) -> str:
@@ -1594,10 +1552,10 @@ class FactorGovernanceOrchestrator:
         try:
             row = conn.execute(
                 _p(
-                    """SELECT COALESCE(p.rollback_json, d.rollback_json) AS rollback_json
-                       FROM evolution_decision d
-                       LEFT JOIN mutation_payload p ON p.payload_hash=d.payload_hash
-                       WHERE d.decision_id=? LIMIT 1"""
+                    """SELECT p.rollback_json AS rollback_json
+                      FROM evolution_decision d
+                      LEFT JOIN mutation_payload p ON p.payload_hash=d.payload_hash
+                      WHERE d.decision_id=? LIMIT 1"""
                 ),
                 (decision_id,),
             ).fetchone()
@@ -1607,20 +1565,17 @@ class FactorGovernanceOrchestrator:
 
     def _mark_application_rolled_back(self, *, application_id: str, suggestion_ids: list[str], decision: dict[str, Any]) -> None:
         now = time.time()
-        conn = get_state_pg_conn()
+        store = LearningApplicationStore(str(self.overlay.db_path))
+        store.transition_application(application_id, status="rolled_back")
+        store.update_effect(
+            application_id,
+            patch={"status": "rolled_back", "decision": decision},
+        )
+        use_pg = is_state_db_path(self.overlay.db_path)
+        conn = get_state_pg_conn() if use_pg else connect_sqlite(self.overlay.db_path)
+        if not use_pg:
+            conn.row_factory = sqlite3.Row
         try:
-            conn.execute(
-                _p("UPDATE learning_application_log SET status='rolled_back' WHERE application_id=?"),
-                (application_id,),
-            )
-            conn.execute(
-                _p("""
-                UPDATE learning_application_effect
-                SET status='rolled_back', decision_json=?, updated_at=?
-                WHERE application_id=?
-                """),
-                (_dumps(decision), now, application_id),
-            )
             for suggestion_id in suggestion_ids:
                 conn.execute(
                     _p("""
@@ -2955,7 +2910,7 @@ class FactorGovernanceOrchestrator:
         authority = dict(v16_authority or {})
         result = FactorWeightChangeService(self.overlay.db_path).execute(
             source="factor_governance_active_canary_restore",
-            producer="factor_governance_restore",
+            producer="factor_governance",
             run_id=str(run.get("run_id") or ""),
             actor="system:factor_governance",
             reason=f"restore evidence-qualified ACTIVE builtin canary: {factor_id}",
@@ -3992,32 +3947,18 @@ class FactorGovernanceOrchestrator:
                 impact_level="medium",
             ),
         }
-        conn = get_state_pg_conn()
-        try:
-            conn.execute(
-                _p("""
-                INSERT INTO learning_application_log
-                (application_id, cycle_ts, scope_type, scope_key, action,
-                 bias_multiplier, old_weight, new_weight, suggestion_ids_json,
-                 status, details_json, created_at)
-                VALUES (?, ?, 'factor', ?, ?, 1.0, ?, ?, ?, ?, ?, ?)
-                """),
-                (
-                    f"fgv3_app_{uuid.uuid4().hex[:16]}",
-                    now,
-                    factor_id,
-                    action,
-                    old_weight,
-                    new_weight,
-                    _dumps([suggestion_id] if suggestion_id else []),
-                    status,
-                    _dumps(details),
-                    now,
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        LearningApplicationStore(str(self.overlay.db_path)).prepare_application(
+            scope_type="factor",
+            scope_key=str(factor_id),
+            action=str(action),
+            status=str(status or "applied"),
+            bias_multiplier=1.0,
+            old_weight=old_weight,
+            new_weight=new_weight,
+            suggestion_ids=[suggestion_id] if suggestion_id else [],
+            cycle_ts=now,
+            details=details,
+        )
 
     def _redundancy_report(self, catalog: list[dict[str, Any]]) -> dict[str, Any]:
         groups: dict[str, dict[str, Any]] = {}
@@ -4052,7 +3993,3 @@ class FactorGovernanceOrchestrator:
         if not isinstance(value, list):
             return []
         return [str(item) for item in value if str(item or "")]
-
-
-def run_autonomous_factor_governance_cycle() -> dict[str, Any]:
-    return FactorGovernanceOrchestrator.shared().run_cycle(trigger_source="scheduler")

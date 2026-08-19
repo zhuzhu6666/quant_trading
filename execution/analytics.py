@@ -2,7 +2,7 @@
 execution/analytics.py — 执行质量分析器 (Phase 4)
 
 记录每笔成交的滑点、延迟、市场冲击，输出统计报告。
-接入 live_service / paper_service 的成交回调。
+接入 live_service 的成交回调。
 """
 from __future__ import annotations
 

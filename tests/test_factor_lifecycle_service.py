@@ -23,6 +23,7 @@ from backend.services.factor_lifecycle_service import (
     FactorLifecycleService,
     FactorLifecycleStage,
 )
+from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.governance_mutation_coordinator import (
     GovernanceMutationCoordinator,
     GovernanceMutationPlan,
@@ -565,19 +566,17 @@ def test_candidate_activation_creates_exactly_one_observing_application(lifecycl
     assert first["application_id"]
     assert second["ok"] is True
     assert second["status"] == "already_active"
-    conn = sqlite3.connect(service.db_path)
-    try:
-        applications = conn.execute(
-            """SELECT l.application_id, l.status, e.status
-               FROM learning_application_log l
-               JOIN learning_application_effect e
-                 ON e.application_id=l.application_id
-               WHERE l.scope_type='factor' AND l.scope_key=?""",
-            (name,),
-        ).fetchall()
-    finally:
-        conn.close()
-    assert applications == [(first["application_id"], "applied", "observing")]
+    store = LearningApplicationStore(str(service.db_path))
+    latest = store.latest_application(scope_type="factor", scope_key=name)
+    effects = [
+        e for e in store.iter_effects(scope_key=name, scope_type="factor")
+        if e.get("application_id") == first["application_id"]
+    ]
+    assert latest is not None
+    assert latest["application_id"] == first["application_id"]
+    assert latest["status"] == "applied"
+    assert len(effects) == 1
+    assert effects[0]["status"] == "observing"
 
 
 def test_demote_to_shadow_preserves_generation_and_terminalizes_effect(lifecycle):
@@ -604,19 +603,16 @@ def test_demote_to_shadow_preserves_generation_and_terminalizes_effect(lifecycle
     assert cfg.factor_signal_config[name]["enabled"] is False
     assert cfg.factor_signal_config[name]["activation_canary"] is False
     assert cfg.factor_portfolio_weights[name] == 0.0
-    conn = sqlite3.connect(service.db_path)
-    try:
-        application = conn.execute(
-            """SELECT l.status, e.status
-               FROM learning_application_log l
-               JOIN learning_application_effect e
-                 ON e.application_id=l.application_id
-               WHERE l.application_id=?""",
-            (activated["application_id"],),
-        ).fetchone()
-    finally:
-        conn.close()
-    assert application == ("rolled_back", "rolled_back")
+    store = LearningApplicationStore(str(service.db_path))
+    application = store.get_application(activated["application_id"])
+    effects = [
+        e for e in store.iter_effects(scope_key=name, scope_type="factor")
+        if e.get("application_id") == activated["application_id"]
+    ]
+    assert application is not None
+    assert application["status"] == "rolled_back"
+    assert len(effects) == 1
+    assert effects[0]["status"] == "rolled_back"
 
 
 def test_activation_accepts_fresh_watch_health_above_watch_threshold(lifecycle):

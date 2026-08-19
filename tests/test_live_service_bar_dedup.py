@@ -121,34 +121,72 @@ def test_open_pipeline_allows_distinct_bar_without_open_record(monkeypatch):
 
 
 def test_bar_open_already_recorded_queries_ledger(monkeypatch):
-    """The guard queries the durable ledger for an open on the same bar ts."""
-    seen = {}
+    """The guard queries canonical decisions for an open on the same bar ts."""
+    def _fake_scan(conn, **kwargs):
+        class _Row(dict):
+            pass
 
-    class _FakeRow:
-        pass
+        yield _Row(event_type="skip")
+        yield _Row(event_type="open")
 
-    def _fake_execute(conn, sql, params=None):
-        seen["sql"] = sql
-        seen["params"] = params
-        if "event_type='open' AND decision_ts=?" in sql and params == (1786383900.0,):
-            return MagicMock(fetchone=lambda: _FakeRow())
-        return MagicMock(fetchone=lambda: None)
-
-    monkeypatch.setattr(live_service, "_state_execute", _fake_execute)
+    monkeypatch.setattr(live_service, "iter_decision_rows", _fake_scan)
+    monkeypatch.setattr(live_service, "logger", MagicMock())
 
     assert live_service._bar_open_already_recorded(1786383900.0) is True
-    assert "decision_ledger" in seen["sql"]
-    assert "event_type='open'" in seen["sql"]
+
+
+def test_bar_open_already_recorded_canonical_window(monkeypatch):
+    """Canonical branch: an open decision within the +-5s window dedupes the bar."""
+    def _fake_scan(conn, **kwargs):
+        class _Row(dict):
+            pass
+
+        yield _Row(event_type="skip")
+        yield _Row(event_type="open")
+
+    monkeypatch.setattr(live_service, "canonical_ready", lambda conn: True)
+    monkeypatch.setattr(live_service, "iter_decision_rows", _fake_scan)
+    monkeypatch.setattr(live_service, "logger", MagicMock())
+
+    assert live_service._bar_open_already_recorded(1786383900.0) is True
+
+
+def test_bar_open_already_recorded_canonical_no_open(monkeypatch):
+    """Canonical branch: no open decision in the window -> allow the bar."""
+    def _fake_scan(conn, **kwargs):
+        return iter([])
+
+    monkeypatch.setattr(live_service, "canonical_ready", lambda conn: True)
+    monkeypatch.setattr(live_service, "iter_decision_rows", _fake_scan)
+    monkeypatch.setattr(live_service, "logger", MagicMock())
+
+    assert live_service._bar_open_already_recorded(1786383900.0) is False
 
 
 def test_bar_open_already_recorded_fail_open_on_error(monkeypatch):
-    """Ledger unreadable -> allow the open (dedup guard is not a risk gate)."""
-    def _boom(conn, sql, params=None):
+    """Canonical scan unreadable -> fail-open (dedup guard is not a risk gate)."""
+    def _boom(conn, **kwargs):
         raise RuntimeError("ledger down")
 
-    monkeypatch.setattr(live_service, "_state_execute", _boom)
+    monkeypatch.setattr(live_service, "iter_decision_rows", _boom)
     monkeypatch.setattr(live_service, "logger", MagicMock())
 
     assert live_service._bar_open_already_recorded(1786383900.0) is False
     assert live_service._bar_open_already_recorded(0.0) is False
     assert live_service._bar_open_already_recorded(None) is False
+
+
+def test_bar_open_already_recorded_fail_open_on_canonical_error(monkeypatch):
+    """Canonical window unreadable -> legacy fallback -> fail-open on error."""
+    def _boom(conn, sql, params=None):
+        raise RuntimeError("ledger down")
+
+    def _boom_scan(conn, **kwargs):
+        raise RuntimeError("canonical down")
+
+    monkeypatch.setattr(live_service, "canonical_ready", lambda conn: True)
+    monkeypatch.setattr(live_service, "iter_decision_rows", _boom_scan)
+    monkeypatch.setattr(live_service, "_state_execute", _boom)
+    monkeypatch.setattr(live_service, "logger", MagicMock())
+
+    assert live_service._bar_open_already_recorded(1786383900.0) is False

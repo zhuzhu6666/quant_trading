@@ -10,36 +10,10 @@ from research.open_quality_lightgbm import (
 
 
 def _init_db(path):
+    from tests.canonical_fixture import create_training_sample_row_tables
+
     conn = sqlite3.connect(str(path))
-    conn.executescript(
-        """
-        CREATE TABLE autonomous_learning_sample (
-            sample_id TEXT PRIMARY KEY,
-            sample_type TEXT NOT NULL,
-            source_table TEXT DEFAULT '',
-            source_id TEXT DEFAULT '',
-            decision_id TEXT DEFAULT '',
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            label_status TEXT DEFAULT 'pending',
-            integrity TEXT DEFAULT 'full',
-            train_weight REAL DEFAULT 1.0,
-            features_json TEXT DEFAULT '{}',
-            verdict_json TEXT DEFAULT '{}',
-            label_json TEXT DEFAULT '{}',
-            trace_json TEXT DEFAULT '{}',
-            evidence_contract_json TEXT DEFAULT '{}',
-            config_version INTEGER DEFAULT 0,
-            config_hash TEXT DEFAULT '',
-            evolution_run_id TEXT DEFAULT '',
-            created_at REAL NOT NULL DEFAULT 0.0,
-            updated_at REAL NOT NULL DEFAULT 0.0
-        );
-        """
-    )
+    create_training_sample_row_tables(conn)
     contract = {
         "schema_version": "learning_evidence_contract.v1",
         "allowed_uses": ["audit", "explainability", "supervised_training"],
@@ -99,7 +73,7 @@ def _init_db(path):
         }
         conn.execute(
             """
-            INSERT INTO autonomous_learning_sample
+            INSERT INTO training_sample_row
             (sample_id, sample_type, source_table, source_id, decision_id, trade_id,
              position_id, symbol, timeframe, event_ts, label_status, integrity,
              train_weight, features_json, label_json, trace_json,

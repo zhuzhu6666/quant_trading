@@ -167,18 +167,46 @@ def test_dual_mode_legacy_compatibility_accepts_only_declared_tightening(tmp_pat
 
 def test_terminal_application_cannot_leave_applied_control_live(tmp_path) -> None:
     conn = _connection(tmp_path)
-    conn.executescript(
-        """
-        CREATE TABLE learning_application_log (
-            application_id TEXT PRIMARY KEY,
-            scope_type TEXT,
-            suggestion_ids_json TEXT,
-            status TEXT
-        );
-        INSERT INTO learning_application_log VALUES
-        ('app_old', 'entry_quality', '["committed_applied"]', 'superseded');
-        """
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE learning_application_log (
+                application_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                source TEXT,
+                status TEXT,
+                details_json TEXT,
+                created_at REAL,
+                updated_at REAL
+            );
+            CREATE TABLE learning_application_effect (
+                effect_id TEXT PRIMARY KEY,
+                application_id TEXT,
+                scope TEXT,
+                effect_json TEXT,
+                created_at REAL
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    from backend.services.learning_application_store import LearningApplicationStore
+
+    store = LearningApplicationStore(str(tmp_path / "state.db"))
+    application_id = store.prepare_application(
+        scope_type="entry_quality",
+        scope_key="weak_signal",
+        action="raise_weak_signal_threshold",
+        status="prepared",
+        suggestion_ids=["committed_applied"],
+        source="autonomous_learning",
     )
+    store.transition_application(application_id, status="superseded")
+
+    conn = sqlite3.connect(str(tmp_path / "state.db"))
+    conn.row_factory = sqlite3.Row
     try:
         controls = load_live_policy_controls(
             conn,

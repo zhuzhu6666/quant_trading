@@ -25,15 +25,12 @@ from backend.core.db import (
     state_table_columns,
     state_table_exists,
 )
+from backend.core.db_helpers import conn_is_pg as _is_pg
 
 
 RUNTIME_CONFIG_PAYLOAD_TABLE = "runtime_config_payload"
 BRAIN_ACTION_PLAN_EVAL_PAYLOAD_TABLE = "brain_action_plan_eval_payload"
 MUTATION_PAYLOAD_TABLE = "mutation_payload"
-
-
-def _is_pg(conn: Any) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
 
 
 def _sql(conn: Any, statement: str) -> str:
@@ -212,11 +209,6 @@ def ensure_state_payload_schema(db_path: str | Path = STATE_DB, conn: Any | None
             active.execute(
                 "CREATE INDEX IF NOT EXISTS idx_evolution_decision_canonical "
                 "ON evolution_decision(canonical_event_id, projection_type, created_at)"
-            )
-        if state_table_exists(active, "autonomous_learning_sample"):
-            active.execute(
-                "CREATE INDEX IF NOT EXISTS idx_autonomous_learning_sample_fingerprint "
-                "ON autonomous_learning_sample(content_fingerprint, updated_at)"
             )
         if owned:
             active.commit()

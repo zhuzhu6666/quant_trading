@@ -34,7 +34,7 @@ _DB_LIST = [
     ("ctrader_data.duckdb", "旧K线/外部数据兼容库", "duckdb"),
     ("trades.duckdb", "交易记录", "duckdb"),
     ("events.duckdb", "事件日历", "duckdb"),
-    ("state_v1", "统一状态库(PostgreSQL)", "postgres_state"),
+    ("runtime", "运行态schema(PostgreSQL)", "postgres_state"),
     ("experiments.db", "实验记录", "sqlite"),
 ]
 

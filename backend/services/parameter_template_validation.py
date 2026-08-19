@@ -33,6 +33,11 @@ from backend.services.parameter_templates import (
     ParameterTemplateService,
     clear_parameter_template_recommendation_cache,
 )
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    execute as _execute,
+    pg_sql as _sql,
+)
 from backend.services.research_evidence import (
     RESEARCH_EVIDENCE_POLICY_VERSION,
     ResearchEvidenceRejected,
@@ -46,20 +51,6 @@ from research.learning.governor import RuleEvolutionGovernor
 
 def _use_pg(db_path: str | Path) -> bool:
     return Path(db_path).resolve() == Path(STATE_DB).resolve()
-
-
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
 
 
 class ParameterTemplateValidationService:

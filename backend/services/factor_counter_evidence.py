@@ -11,7 +11,13 @@ from backend.core.db import (
     state_table_columns,
     state_table_exists,
 )
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    execute as _execute,
+    pg_sql as _sql,
+)
 from backend.services._brain_helpers import loads
+from backend.services.canonical_v2_reader import review_row
 from backend.services.failure_taxonomy import FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.state_payload_archive import load_json_payload
@@ -39,20 +45,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _conn_is_pg(conn: Any) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn: Any, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn: Any, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
 
 
 def _review_archive_select(conn: Any, *, alias: str = "r", output: str = "review_archive_hash") -> str:
@@ -173,21 +165,26 @@ class FactorCounterEvidenceService:
         }
 
     def _contribution_counter_evidence(self, conn: Any, factor: str) -> dict[str, Any]:
-        if not state_table_exists(conn, "factor_contribution_review") or not state_table_exists(conn, "trade_outcome_review"):
+        if not state_table_exists(conn, "factor_contribution_review"):
             return {"available": False, "keep_score": 0.0, "prune_score": 0.0, "sample_count": 0, "regimes": []}
-        rows = _execute(
+        contribution_rows = _execute(
             conn,
-            f"""
-            SELECT f.net_contribution, f.confidence, r.pnl, r.outcome_label,
-                   r.regime_fit_score, r.review_json, r.created_at{_review_archive_select(conn)}
+            """
+            SELECT f.id, f.review_id, f.net_contribution, f.confidence
             FROM factor_contribution_review f
-            JOIN trade_outcome_review r ON r.review_id = f.review_id
             WHERE f.factor=?
-            ORDER BY r.created_at DESC, f.id DESC
-            LIMIT 80
+            ORDER BY f.id DESC
             """,
             (factor,),
         ).fetchall()
+        rows = []
+        for row in contribution_rows:
+            review = review_row(conn, str(row["review_id"] or ""))
+            if review is None:
+                continue
+            rows.append({**dict(row), **review})
+        rows.sort(key=lambda row: (_safe_float(row.get("created_at")), _safe_float(row.get("id"))), reverse=True)
+        rows = rows[:80]
         rows = [
             row
             for row in rows
@@ -247,23 +244,32 @@ class FactorCounterEvidenceService:
         if not state_table_exists(conn, "experience_memory"):
             return {"available": False, "keep_score": 0.0, "prune_score": 0.0, "sample_count": 0}
         like = f"%{factor}%"
-        rows = _execute(
+        memory_rows = _execute(
             conn,
-            f"""
+            """
             SELECT e.reward_score, e.recommended_action, e.failure_tags_json,
-                   e.decision_context_json, e.created_at,
-                   r.review_id AS source_review_id,
-                   r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
+                   e.decision_context_json, e.created_at, e.source_id
             FROM experience_memory e
-            JOIN trade_outcome_review r
-              ON e.source_table='trade_outcome_review'
-             AND r.review_id=e.source_id
             WHERE e.append_source='trade_lesson_memory.v1'
               AND (e.decision_context_json LIKE ? OR e.recommended_action LIKE ?)
             ORDER BY e.created_at DESC
             """,
             (like, like),
         ).fetchall()
+        rows = []
+        for row in memory_rows:
+            review = review_row(conn, str(row["source_id"] or ""))
+            if review is None:
+                continue
+            rows.append(
+                {
+                    **dict(row),
+                    **review,
+                    "source_review_id": str(row["source_id"] or ""),
+                    "source_review_json": review.get("review_json") or {},
+                    "source_review_archive_hash": "",
+                }
+            )
         if not rows:
             return {"available": True, "keep_score": 0.0, "prune_score": 0.0, "sample_count": 0}
         keep = 0.0

@@ -12,7 +12,20 @@ from backend.services.factor_identity import (
     factor_definition_fingerprint,
 )
 from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
+from backend.services.learning_application_store import LearningApplicationStore
 from config import runtime_config as rc
+
+
+def _init_state_db(tmp_path) -> None:
+    """Seed a bare overlay sqlite with the full runtime schema (lean DDL)."""
+    from backend.core.db import STATE_DB_DDL, connect_sqlite
+
+    conn = connect_sqlite(tmp_path / "state.db")
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 class _AllowRisk:
@@ -634,6 +647,7 @@ def test_orchestrator_downweights_from_model_weakness_evidence(monkeypatch, tmp_
         "factor_governance_model_weakness_threshold": 0.65,
         "awe_max_single_change": 0.15,
     })
+    _init_state_db(tmp_path)
     orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
     orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
     audited = []
@@ -798,33 +812,36 @@ def test_orchestrator_does_not_audit_decision_policy_noop(monkeypatch):
     assert audited == []
 
 
-def test_pending_effect_gate_releases_factor_after_final_effect(monkeypatch):
-    row = {"application_status": "reinforced", "effect_status": "reinforced"}
+def test_pending_effect_gate_releases_factor_after_final_effect(tmp_path):
+    _init_state_db(tmp_path)
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+    store = LearningApplicationStore(tmp_path / "state.db")
+    fid = "rsi_14"
 
-    class _Result:
-        def fetchone(self):
-            return row
+    # No ledger rows -> no pending experiment.
+    assert orch._factor_has_pending_effect(fid) is False
 
-    class _Conn:
-        def execute(self, *args, **kwargs):
-            return _Result()
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(
-        "backend.runtime.factor_governance_orchestrator.get_state_pg_conn",
-        lambda read_only: _Conn(),
+    # Terminal effect (effective) releases the scope even while the
+    # application log keeps an active "applied" status.
+    app = store.prepare_application(
+        scope_type="factor", scope_key=fid, action="update_weight", status="applied"
     )
-    orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    store.write_effect(
+        application_id=app, scope_key=fid, scope_type="factor", status="effective",
+        observed_trade_count=5, delta_avg_reward=0.2,
+    )
+    assert orch._factor_has_pending_effect(fid) is False
 
-    assert orchestrator._factor_has_pending_effect("rsi_14") is False
-
-    row.update(application_status="applied", effect_status="mixed")
-    assert orchestrator._factor_has_pending_effect("rsi_14") is False
-
-    row.update(application_status="observing", effect_status="reinforced")
-    assert orchestrator._factor_has_pending_effect("rsi_14") is True
+    # An active/supervising effect keeps the factor pending until it matures.
+    app2 = store.prepare_application(
+        scope_type="factor", scope_key=fid, action="update_weight", status="applied"
+    )
+    store.write_effect(
+        application_id=app2, scope_key=fid, scope_type="factor", status="observing",
+        observed_trade_count=1, delta_avg_reward=0.0,
+    )
+    assert orch._factor_has_pending_effect(fid) is True
 
 
 def test_scoped_factor_rollback_preserves_unrelated_runtime_config():
@@ -1231,21 +1248,16 @@ def test_downweight_applied_when_current_regime_weak_too(monkeypatch, tmp_path):
         "factor_governance_model_weakness_threshold": 0.65,
         "awe_max_single_change": 0.15,
     })
+    _init_state_db(tmp_path)
     orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
     orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
     import sqlite3 as _sqlite3
     conn = _sqlite3.connect(tmp_path / "state.db")
-    conn.executescript(
-        """
-        CREATE TABLE experience_memory (
-            regime_id TEXT, created_at REAL, trade_id TEXT
-        );
-        INSERT INTO experience_memory (regime_id, created_at, trade_id)
-        VALUES ('trend=weak|volatility=low', 1600000.0, 't1'),
-               ('trend=weak|volatility=low', 1600010.0, 't2'),
-               ('trend=weak|volatility=low', 1600020.0, 't3');
-        """
-    )
+    for _ts in (1600000.0, 1600010.0, 1600020.0):
+        conn.execute(
+            "INSERT INTO experience_memory (regime_id, created_at, trade_id) VALUES (?, ?, ?)",
+            ("trend=weak|volatility=low", _ts, "t1"),
+        )
     conn.commit()
     conn.close()
 

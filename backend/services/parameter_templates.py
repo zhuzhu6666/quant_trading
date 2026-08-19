@@ -25,6 +25,14 @@ from backend.services.policy_suggestion_context import attach_policy_suggestion_
 from research.learning.governor import RuleEvolutionGovernor
 from risk.policy_service import RiskPolicyService
 
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    pg_sql as _sql,
+    execute as _execute,
+    load_json as _loads,
+)
+
+
 
 _RECOMMENDATION_CACHE_TTL_SEC = 60.0
 _RECOMMENDATION_CACHE_LOCK = threading.Lock()
@@ -33,20 +41,6 @@ _RECOMMENDATION_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 def _use_pg(db_path: str | Path) -> bool:
     return Path(db_path).resolve() == Path(STATE_DB).resolve()
-
-
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
 
 
 def clear_parameter_template_recommendation_cache(db_path: str | Path | None = None) -> None:
@@ -58,17 +52,6 @@ def clear_parameter_template_recommendation_cache(db_path: str | Path | None = N
         for key in list(_RECOMMENDATION_CACHE):
             if key.startswith(prefix):
                 _RECOMMENDATION_CACHE.pop(key, None)
-
-
-def _loads(value: Any, default: Any) -> Any:
-    if value is None:
-        return default
-    if isinstance(value, (dict, list)):
-        return value
-    try:
-        return json.loads(str(value))
-    except Exception:
-        return default
 
 
 _MANUAL_TEMPLATE_LIBRARY: dict[str, list[dict[str, Any]]] = {
@@ -1037,50 +1020,47 @@ class ParameterTemplateService:
                     now,
                 ),
             )
-            app_row = _execute(
+            prior_row = _execute(
                 conn,
                 "SELECT details_json FROM learning_application_log WHERE application_id=?",
                 (application_id,),
             ).fetchone()
-            prior_details = _loads(app_row["details_json"], {}) if app_row else {}
-            app_columns = state_table_columns(conn, "learning_application_log")
-            assignments = ["status='rolled_back'", "details_json=?"]
-            params: list[Any] = [
-                json.dumps(
-                    {**prior_details, "rollback": context},
-                    ensure_ascii=False,
-                    default=str,
-                )
-            ]
-            if "mutation_id" in app_columns:
-                assignments.append("mutation_id=?")
-                params.append(mutation_id)
-            params.append(application_id)
-            application_update = _execute(
-                conn,
-                "UPDATE learning_application_log SET "
-                + ", ".join(assignments)
-                + " WHERE application_id=?",
-                tuple(params),
-            )
-            if int(application_update.rowcount or 0) != 1:
+            if prior_row is None:
                 raise RuntimeError("parameter_template_rollback_application_missing")
-            effect_columns = state_table_columns(conn, "learning_application_effect")
-            assignments = ["status='rolled_back'", "decision_json=?", "updated_at=?"]
-            params = [json.dumps(context, ensure_ascii=False, default=str), now]
-            if "mutation_id" in effect_columns:
-                assignments.append("mutation_id=?")
-                params.append(mutation_id)
-            params.append(application_id)
-            effect_update = _execute(
+            prior_details = _loads(prior_row["details_json"], {})
+            _execute(
                 conn,
-                "UPDATE learning_application_effect SET "
-                + ", ".join(assignments)
-                + " WHERE application_id=?",
-                tuple(params),
+                "UPDATE learning_application_log SET status='rolled_back', "
+                "details_json=?, updated_at=? WHERE application_id=?",
+                (
+                    json.dumps(
+                        {**prior_details, "rollback": context, "mutation_id": mutation_id},
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    now,
+                    application_id,
+                ),
             )
-            if int(effect_update.rowcount or 0) != 1:
+            effect_row = _execute(
+                conn,
+                "SELECT effect_json FROM learning_application_effect WHERE application_id=?",
+                (application_id,),
+            ).fetchone()
+            if effect_row is None:
                 raise RuntimeError("parameter_template_rollback_effect_missing")
+            effect_data = _loads(effect_row["effect_json"], {})
+            effect_data["status"] = "rolled_back"
+            effect_data["decision"] = context
+            effect_data["updated_at"] = now
+            _execute(
+                conn,
+                "UPDATE learning_application_effect SET effect_json=? WHERE application_id=?",
+                (
+                    json.dumps(effect_data, ensure_ascii=False, default=str),
+                    application_id,
+                ),
+            )
             for suggestion_id in suggestion_ids or []:
                 suggestion_columns = state_table_columns(conn, "policy_suggestion")
                 assignments = ["status='rolled_back'", "reviewed_at=?", "review_note=?"]
@@ -1409,58 +1389,77 @@ class ParameterTemplateService:
                     now,
                 ),
             )
-            app_columns = state_table_columns(conn, "learning_application_log")
-            app_values: dict[str, Any] = {
-                "application_id": application_id,
-                "cycle_ts": now,
+            app_details = {
+                **dict(committed_context if isinstance(committed_context, dict) else {}),
                 "scope_type": "parameter_template",
                 "scope_key": f"{factor_id}:{regime_key or 'default'}",
                 "action": "switch_parameter_template",
                 "bias_multiplier": 1.0,
                 "old_weight": 0.0,
                 "new_weight": 0.0,
-                "suggestion_ids_json": json.dumps(
-                    [suggestion_id] if suggestion_id else [], ensure_ascii=False
+                "suggestion_ids": [suggestion_id] if suggestion_id else [],
+                "mutation_id": str(mutation_id or ""),
+                "governance_eligibility_version": str(
+                    GOVERNANCE_ELIGIBILITY_VERSION or ""
                 ),
-                "status": "applied",
-                "details_json": json.dumps(
-                    committed_context, ensure_ascii=False, default=str
-                ),
-                "created_at": now,
+                "application_state": {
+                    "status": "applied",
+                    "prepared_at": now,
+                    "applied_at": now,
+                    "updated_at": now,
+                    "atomic_commit": True,
+                },
             }
-            if "mutation_id" in app_columns:
-                app_values["mutation_id"] = mutation_id
-            if "governance_eligibility_version" in app_columns:
-                app_values["governance_eligibility_version"] = GOVERNANCE_ELIGIBILITY_VERSION
             upsert(
                 conn,
                 "learning_application_log",
                 "application_id",
-                app_values,
+                {
+                    "application_id": application_id,
+                    "run_id": str(app_details.get("run_id") or ""),
+                    "source": str(app_details.get("source") or ""),
+                    "status": "applied",
+                    "details_json": json.dumps(
+                        app_details, ensure_ascii=False, default=str
+                    ),
+                    "created_at": now,
+                    "updated_at": now,
+                },
                 immutable={"created_at"},
             )
-            effect_columns = state_table_columns(conn, "learning_application_effect")
-            effect_values: dict[str, Any] = {
-                "application_id": application_id,
+            effect_payload = {
                 "scope_type": "parameter_template",
                 "scope_key": f"{factor_id}:{regime_key or 'default'}",
                 "action": "switch_parameter_template",
                 "status": "observing",
-                "decision_json": json.dumps(
-                    committed_context, ensure_ascii=False, default=str
+                "observed_trade_count": 0,
+                "baseline_trade_count": 0,
+                "post_avg_reward": 0.0,
+                "baseline_avg_reward": 0.0,
+                "delta_avg_reward": None,
+                "post_win_rate": 0.0,
+                "baseline_win_rate": 0.0,
+                "decision": committed_context,
+                "mutation_id": str(mutation_id or ""),
+                "governance_eligibility_version": str(
+                    GOVERNANCE_ELIGIBILITY_VERSION or ""
                 ),
+                "last_review_at": 0.0,
                 "updated_at": now,
-                "created_at": now,
             }
-            if "mutation_id" in effect_columns:
-                effect_values["mutation_id"] = mutation_id
-            if "governance_eligibility_version" in effect_columns:
-                effect_values["governance_eligibility_version"] = GOVERNANCE_ELIGIBILITY_VERSION
             upsert(
                 conn,
                 "learning_application_effect",
-                "application_id",
-                effect_values,
+                "effect_id",
+                {
+                    "effect_id": self._new_id("effect"),
+                    "application_id": application_id,
+                    "scope": f"{factor_id}:{regime_key or 'default'}",
+                    "effect_json": json.dumps(
+                        effect_payload, ensure_ascii=False, default=str
+                    ),
+                    "created_at": now,
+                },
                 immutable={"created_at"},
             )
             reservation_columns = state_table_columns(

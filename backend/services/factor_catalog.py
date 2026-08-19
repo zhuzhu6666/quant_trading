@@ -22,6 +22,7 @@ from backend.core.db import (
     is_state_db_path,
     state_table_columns,
 )
+from backend.core.db_helpers import load_json as _loads
 from backend.core.state_store import validate_runtime_state_schema
 from config.runtime_config import shared as runtime_config
 
@@ -32,17 +33,6 @@ def _connect_state(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     conn = connect_sqlite(db_path)
     conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _loads(raw: Any, default: Any) -> Any:
-    if raw is None:
-        return default
-    if isinstance(raw, (dict, list)):
-        return raw
-    try:
-        return json.loads(str(raw))
-    except Exception:
-        return default
 
 
 def _safe_float(value: Any) -> float:

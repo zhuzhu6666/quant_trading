@@ -37,6 +37,10 @@ EVENT_TYPES = frozenset(
         "trade_review",
         "label_observation",
         "training_run",
+        # P2 边界 4 域事件化
+        "counterfactual_review",
+        "supervisor_trace",
+        "broker_deal",
     }
 )
 
@@ -54,9 +58,6 @@ RELATION_TYPES = frozenset(
         "governed_by",
     }
 )
-
-LEGACY_MAPPING_CONFIDENCE = frozenset({"exact", "strong", "weak", "unresolved"})
-
 
 class CanonicalV2Error(RuntimeError):
     """Base class for canonical v2 contract failures."""
@@ -82,7 +83,11 @@ def _is_pg(conn: Any) -> bool:
 
 
 def _sql(conn: Any, statement: str) -> str:
-    return statement.replace("?", "%s") if _is_pg(conn) else statement
+    if _is_pg(conn):
+        return statement.replace("?", "%s")
+    # SQLite fixtures keep canonical tables as bare names in the main database,
+    # so the canonical_v2. schema prefix is dropped (PG keeps it).
+    return statement.replace("canonical_v2.", "")
 
 
 def _row_value(row: Any, key: str, index: int = 0, default: Any = None) -> Any:
@@ -138,8 +143,19 @@ def _comparable(field: str, value: Any) -> Any:
     return value
 
 
+def _utc_value(value: Any) -> Any:
+    """Normalize datetimes to UTC so the same instant compares equal."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    return value
+
+
 def _same_value(field: str, left: Any, right: Any) -> bool:
-    return stable_json(_comparable(field, left)) == stable_json(_comparable(field, right))
+    return stable_json(_comparable(field, _utc_value(left))) == stable_json(
+        _comparable(field, _utc_value(right))
+    )
 
 
 def _hash_payload(payload_kind: str, schema_version: str, raw_bytes: bytes) -> str:
@@ -475,6 +491,521 @@ def append_relation(
         (str(from_event_id), str(to_event_id), relation_type, _db_time(conn, created_at)),
     )
     return bool(getattr(cursor, "rowcount", 1))
+
+
+def _payload_iso(value: Any) -> str | None:
+    """Normalize a timestamp to the ISO form used by canonical payloads."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        v = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc).isoformat()
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+LIVE_INCREMENT_RUN = "live.increment.v2"
+
+
+def record_decision_event(
+    conn: Any,
+    *,
+    decision_id: str,
+    event_type: str,
+    symbol: str,
+    timeframe: str,
+    decision_ts: Any,
+    trade_id: str = "",
+    position_id: str = "",
+    regime_id: str = "",
+    regime_confidence: Any = None,
+    policy_version: str = "",
+    factor_set_version: str = "",
+    action_score: Any = None,
+    action_reason: str = "",
+    action: Any = None,
+    risk_state: Any = None,
+    portfolio_state: Any = None,
+    created_at: Any = None,
+    producer: str = "live_ledger",
+    factor_snapshots: list | None = None,
+) -> dict[str, Any]:
+    """Mirror one live decision into canonical within the caller's transaction.
+
+    Idempotent per ``decision_id`` (event_id and idempotency_key derive from the
+    decision id), so replaying the same ledger write returns the existing event
+    instead of duplicating payload/event/mapping rows.  The payload shape
+    mirrors the historical canonical decision backfill so
+    ``canonical_v2_reader`` returns live decisions on the
+    same ``risk_decision`` stream.
+
+    When *factor_snapshots* is provided the per-factor detail is embedded in the
+    payload, enabling consumers to derive factor data from the canonical event
+    instead of reading the legacy ``decision_factor_snapshot`` table.
+    """
+    payload: dict[str, Any] = {
+        "decision_id": str(decision_id or ""),
+        "trade_id": str(trade_id or ""),
+        "position_id": str(position_id or ""),
+        "event_type": str(event_type or ""),
+        "symbol": str(symbol or ""),
+        "timeframe": str(timeframe or ""),
+        "decision_ts": _payload_iso(decision_ts),
+        "regime_id": str(regime_id or ""),
+        "regime_confidence": regime_confidence,
+        "policy_version": str(policy_version or ""),
+        "factor_set_version": str(factor_set_version or ""),
+        "action_score": action_score,
+        "action_reason": str(action_reason or ""),
+        "action": action,
+        "risk_state": risk_state,
+        "portfolio_state": portfolio_state,
+        "created_at": _payload_iso(created_at),
+    }
+    if factor_snapshots:
+        payload["factor_snapshots"] = factor_snapshots
+    ref = put_payload(
+        conn,
+        payload,
+        payload_kind="risk_decision",
+        schema_version=CANONICAL_PAYLOAD_SCHEMA,
+        created_at=decision_ts,
+    )
+    event = append_event(
+        conn,
+        event_id=f"live_decision_{str(decision_id or '')}",
+        event_type="risk_decision",
+        entity_type="decision",
+        entity_id=str(decision_id or ""),
+        payload_hash=ref.payload_hash,
+        producer=producer,
+        observed_at=decision_ts,
+        idempotency_key=str(decision_id or ""),
+        status="completed",
+    )
+    start_projection_run(
+        conn,
+        projection_run_id=LIVE_INCREMENT_RUN,
+        run_kind="backfill",
+        projection_name="live_increment",
+        source_watermark="live",
+        code_version=LIVE_INCREMENT_RUN,
+        input_digest="live",
+    )
+    return event
+
+
+def record_order_event(
+    conn: Any,
+    *,
+    event_id: str,
+    event_type: str,
+    event_ts: Any,
+    decision_id: str = "",
+    trade_id: str = "",
+    order_id: str = "",
+    broker_order_id: str = "",
+    price: Any = None,
+    volume: Any = None,
+    status: str = "",
+    details: Any = None,
+    producer: str = "live_ledger",
+) -> dict[str, Any]:
+    """Mirror one live order lifecycle event into canonical (idempotent)."""
+    payload: dict[str, Any] = {
+        "event_id": str(event_id or ""),
+        "decision_id": str(decision_id or ""),
+        "trade_id": str(trade_id or ""),
+        "order_id": str(order_id or ""),
+        "broker_order_id": str(broker_order_id or ""),
+        "event_type": str(event_type or ""),
+        "event_ts": _payload_iso(event_ts),
+        "price": price,
+        "volume": volume,
+        "status": str(status or ""),
+        "details": details,
+    }
+    ref = put_payload(
+        conn, payload, payload_kind="broker_execution",
+        schema_version=CANONICAL_PAYLOAD_SCHEMA, created_at=event_ts,
+    )
+    evt = append_event(
+        conn,
+        event_id=f"live_ordevt_{str(event_id or '')}",
+        event_type="broker_execution",
+        entity_type="order",
+        entity_id=str(event_id or ""),
+        payload_hash=ref.payload_hash,
+        producer=producer,
+        observed_at=event_ts,
+        idempotency_key=str(event_id or ""),
+        status="completed",
+    )
+    start_projection_run(
+        conn, projection_run_id=LIVE_INCREMENT_RUN, run_kind="backfill",
+        projection_name="live_increment", source_watermark="live",
+        code_version=LIVE_INCREMENT_RUN, input_digest="live",
+    )
+    return evt
+
+
+def record_position_event(
+    conn: Any,
+    *,
+    event_id: str,
+    event_type: str,
+    event_ts: Any,
+    position_id: str = "",
+    trade_id: str = "",
+    symbol: str = "",
+    net_volume: Any = None,
+    avg_price: Any = None,
+    unrealized_pnl: Any = None,
+    realized_pnl: Any = None,
+    details: Any = None,
+    producer: str = "live_ledger",
+) -> dict[str, Any]:
+    """Mirror one live position lifecycle event into canonical (idempotent)."""
+    payload: dict[str, Any] = {
+        "event_id": str(event_id or ""),
+        "position_id": str(position_id or ""),
+        "trade_id": str(trade_id or ""),
+        "symbol": str(symbol or ""),
+        "event_type": str(event_type or ""),
+        "event_ts": _payload_iso(event_ts),
+        "net_volume": net_volume,
+        "avg_price": avg_price,
+        "unrealized_pnl": unrealized_pnl,
+        "realized_pnl": realized_pnl,
+        "details": details,
+    }
+    ref = put_payload(
+        conn, payload, payload_kind="position_transition",
+        schema_version=CANONICAL_PAYLOAD_SCHEMA, created_at=event_ts,
+    )
+    evt = append_event(
+        conn,
+        event_id=f"live_posevt_{str(event_id or '')}",
+        event_type="position_transition",
+        entity_type="position",
+        entity_id=str(event_id or ""),
+        payload_hash=ref.payload_hash,
+        producer=producer,
+        observed_at=event_ts,
+        idempotency_key=str(event_id or ""),
+        status="completed",
+    )
+    start_projection_run(
+        conn, projection_run_id=LIVE_INCREMENT_RUN, run_kind="backfill",
+        projection_name="live_increment", source_watermark="live",
+        code_version=LIVE_INCREMENT_RUN, input_digest="live",
+    )
+    return evt
+
+
+MUTATION_STAGE_FIELDS = (
+    "mutation_id", "idempotency_key", "control_surface", "scope_type", "scope_key",
+    "action", "actor", "source", "producer", "run_id", "risk_class", "status",
+    "evidence_fingerprint", "v16_command_id",
+    "target_config_version", "target_config_hash",
+    "committed_config_version", "committed_config_hash", "domain_hash",
+)
+
+
+def record_governance_mutation_event(
+    conn: Any,
+    *,
+    mutation_id: str,
+    stage: str,
+    stage_timestamp: Any,
+    row_fields: Mapping[str, Any],
+    producer: str = "governance_coordinator",
+) -> dict[str, Any]:
+    """Mirror one live governance mutation lifecycle stage into canonical.
+
+    Payload shape mirrors the historical backfill stage facts so governance
+    consumers see live mutations on the same ``governance_effect`` stream.
+    Idempotent per (mutation_id, stage).
+    """
+    base: dict[str, Any] = {}
+    for field in MUTATION_STAGE_FIELDS:
+        value = row_fields.get(field)
+        base[field] = _json_value(value)
+    base["evidence_refs"] = _json_value(
+        row_fields.get("evidence_refs_json") or row_fields.get("evidence_refs")
+    )
+    base["mutation_id"] = str(mutation_id or "")
+    base["created_at"] = _payload_iso(row_fields.get("created_at"))
+    base["updated_at"] = _payload_iso(row_fields.get("updated_at"))
+    payload: dict[str, Any] = dict(base)
+    payload["stage"] = str(stage or "")
+    payload["stage_timestamp"] = _payload_iso(stage_timestamp)
+    if stage == "committed":
+        for key in ("before", "target", "patch", "rollback"):
+            payload[key] = _json_value(row_fields.get(f"{key}_json"))
+    elif stage == "aborted":
+        for key in ("error_stage", "error_type", "error_message"):
+            payload[key] = str(row_fields.get(key) or "")
+    elif stage == "rolled_back":
+        payload["rollback_mutation_id"] = str(row_fields.get("rollback_mutation_id") or "")
+    elif stage == "superseded":
+        payload["superseded_by_mutation_id"] = str(row_fields.get("superseded_by_mutation_id") or "")
+    ref = put_payload(
+        conn, payload, payload_kind="governance_mutation_intent",
+        schema_version=CANONICAL_PAYLOAD_SCHEMA, created_at=stage_timestamp,
+    )
+    evt = append_event(
+        conn,
+        event_id=f"live_gov_{str(mutation_id or '')}_{str(stage or '')}",
+        event_type="governance_effect",
+        entity_type="governance",
+        entity_id=str(mutation_id or ""),
+        payload_hash=ref.payload_hash,
+        producer=producer,
+        observed_at=stage_timestamp,
+        idempotency_key=f"{str(mutation_id or '')}:{str(stage or '')}",
+        status="completed",
+    )
+    start_projection_run(
+        conn, projection_run_id=LIVE_INCREMENT_RUN, run_kind="backfill",
+        projection_name="live_increment", source_watermark="live",
+        code_version=LIVE_INCREMENT_RUN, input_digest="live",
+    )
+    return evt
+
+
+def _json_value(value: Any) -> Any:
+    """Pass through JSON-ready values; stringify structured payloads."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (dict, list)):
+        return value
+    return str(value)
+
+
+def record_governance_command_event(
+    conn: Any,
+    *,
+    decision_id: str,
+    run_id: str = "",
+    decision_type: str = "",
+    scope_type: str = "",
+    scope_key: str = "",
+    action: str = "",
+    status: str = "",
+    config_version: Any = None,
+    config_hash: str = "",
+    created_at: Any = None,
+    legacy_payload_hash: str = "",
+    evidence: Any = None,
+    risk_verdict: Any = None,
+    before: Any = None,
+    after: Any = None,
+    result: Any = None,
+    rollback: Any = None,
+    producer: str = "evolution_ledger",
+) -> dict[str, Any]:
+    """Mirror one live evolution command into canonical (idempotent)."""
+    payload: dict[str, Any] = {
+        "decision_id": str(decision_id or ""),
+        "run_id": str(run_id or ""),
+        "decision_type": str(decision_type or ""),
+        "scope_type": str(scope_type or ""),
+        "scope_key": str(scope_key or ""),
+        "action": str(action or ""),
+        "status": str(status or ""),
+        "config_version": config_version,
+        "config_hash": str(config_hash or ""),
+        "created_at": _payload_iso(created_at),
+        "legacy_payload_hash": str(legacy_payload_hash or ""),
+        "evidence": _json_value(evidence),
+        "risk_verdict": _json_value(risk_verdict),
+        "before": _json_value(before),
+        "after": _json_value(after),
+        "result": _json_value(result),
+        "rollback": _json_value(rollback),
+    }
+    ref = put_payload(
+        conn, payload, payload_kind="evolution_decision",
+        schema_version=CANONICAL_PAYLOAD_SCHEMA, created_at=created_at,
+    )
+    evt = append_event(
+        conn,
+        event_id=f"live_evol_{str(decision_id or '')}",
+        event_type="governance_command",
+        entity_type="governance",
+        entity_id=str(decision_id or ""),
+        payload_hash=ref.payload_hash,
+        producer=producer,
+        observed_at=created_at,
+        idempotency_key=str(decision_id or ""),
+        status="completed",
+    )
+    start_projection_run(
+        conn, projection_run_id=LIVE_INCREMENT_RUN, run_kind="backfill",
+        projection_name="live_increment", source_watermark="live",
+        code_version=LIVE_INCREMENT_RUN, input_digest="live",
+    )
+    return evt
+
+
+SAMPLE_ROW_COLUMNS = (
+    "sample_id", "sample_type", "source_table", "source_id", "decision_id",
+    "trade_id", "position_id", "symbol", "timeframe", "event_ts",
+    "label_status", "integrity", "train_weight", "features_json",
+    "verdict_json", "label_json", "trace_json", "evidence_contract_json",
+    "config_version", "config_hash", "evolution_run_id",
+    "system_contaminated", "governance_eligible", "governance_effective_weight",
+    "governance_eligibility_version", "governance_ineligible_reason",
+    "governance_eligibility_fingerprint", "content_fingerprint",
+    "created_at", "updated_at",
+)
+
+
+def record_sample_row(
+    conn: Any,
+    row: Mapping[str, Any],
+    producer: str = "learning_worker",
+) -> dict[str, Any]:
+    """Mirror one live training sample row into canonical (idempotent upsert)."""
+    sample_id = str(row.get("sample_id") or "")
+    if not sample_id:
+        raise CanonicalV2Error("canonical sample row requires sample_id")
+    values = tuple(row.get(column) for column in SAMPLE_ROW_COLUMNS)
+    placeholders = ", ".join("%s" if _is_pg(conn) else "?" for _ in SAMPLE_ROW_COLUMNS)
+    update_cols = [c for c in SAMPLE_ROW_COLUMNS if c != "sample_id"]
+    conn.execute(
+        _sql(
+            conn,
+            f"""
+            INSERT INTO canonical_v2.training_sample_row ({', '.join(SAMPLE_ROW_COLUMNS)})
+            VALUES ({placeholders})
+            ON CONFLICT(sample_id) DO UPDATE SET
+                {', '.join(f"{c}=excluded.{c}" for c in update_cols)}
+            """,
+        ),
+        values,
+    )
+    return {"sample_id": sample_id, "created": True}
+
+
+def purge_sample_rows_without_source(
+    conn: Any,
+    *,
+    sample_type: str,
+    source_table: str,
+    source_table_ref: str,
+    source_key_col: str,
+) -> int:
+    """Delete canonical training sample rows whose source row no longer exists.
+
+    Single-writer maintenance op for the training-sample domain (owned by this
+    module).  ``source_table_ref`` / ``source_key_col`` are trusted internal
+    identifiers (caller-supplied constants only, never raw SQL input).
+    """
+    sub_select = (
+        f"SELECT 1 FROM {source_table_ref} s "
+        f"WHERE s.{source_key_col} = canonical_v2.training_sample_row.source_id"
+    )
+    cur = conn.execute(
+        _sql(
+            conn,
+            "DELETE FROM canonical_v2.training_sample_row "
+            "WHERE sample_type=? AND source_table=? AND NOT EXISTS (" + sub_select + ")",
+        ),
+        (sample_type, source_table),
+    )
+    return int(getattr(cur, "rowcount", 0))
+
+
+def record_review(
+    conn: Any,
+    *,
+    review_id: str,
+    trade_id: str = "",
+    position_id: str = "",
+    entry_decision_id: str = "",
+    exit_decision_id: str = "",
+    entry_quality: Any = None,
+    hold_quality: Any = None,
+    exit_quality: Any = None,
+    regime_fit_score: Any = None,
+    execution_quality: Any = None,
+    pnl: Any = None,
+    mae: Any = None,
+    mfe: Any = None,
+    outcome_label: str = "",
+    failure_tags: Any = None,
+    summary_text: str = "",
+    review: Any = None,
+    created_at: Any = None,
+    producer: str = "live_closed_position",
+) -> dict[str, Any]:
+    """Mirror one live trade review into canonical within the caller's transaction.
+
+    Idempotent per ``review_id`` (event_id and idempotency_key derive from the
+    review id), so replaying the same live review returns the existing event
+    instead of duplicating payload/event/mapping rows.  The payload shape mirrors
+    the historical canonical review backfill so
+    ``canonical_v2_reader.iter_reviews`` returns live reviews on the same
+    ``trade_review`` stream.  This is the mandatory live writer that keeps the
+    posterior/effect arbitration fed after the full data flush (A1).
+    """
+    if not review_id:
+        raise CanonicalV2Error("canonical trade review requires review_id")
+    payload: dict[str, Any] = {
+        "review_id": str(review_id or ""),
+        "trade_id": str(trade_id or ""),
+        "position_id": str(position_id or ""),
+        "entry_decision_id": str(entry_decision_id or ""),
+        "exit_decision_id": str(exit_decision_id or ""),
+        "entry_quality": entry_quality,
+        "hold_quality": hold_quality,
+        "exit_quality": exit_quality,
+        "regime_fit_score": regime_fit_score,
+        "execution_quality": execution_quality,
+        "pnl": pnl,
+        "mae": mae,
+        "mfe": mfe,
+        "outcome_label": str(outcome_label or ""),
+        "failure_tags": _json_value(failure_tags),
+        "summary_text": str(summary_text or ""),
+        "created_at": _payload_iso(created_at),
+        "review": _json_value(review),
+    }
+    ref = put_payload(
+        conn,
+        payload,
+        payload_kind="trade_review",
+        schema_version=CANONICAL_PAYLOAD_SCHEMA,
+        created_at=created_at,
+    )
+    evt = append_event(
+        conn,
+        event_id=f"live_review_{str(review_id or '')}",
+        event_type="trade_review",
+        entity_type="review",
+        entity_id=str(review_id or ""),
+        payload_hash=ref.payload_hash,
+        producer=producer,
+        observed_at=created_at,
+        idempotency_key=str(review_id or ""),
+        status="completed",
+    )
+    start_projection_run(
+        conn,
+        projection_run_id=LIVE_INCREMENT_RUN,
+        run_kind="backfill",
+        projection_name="live_increment",
+        source_watermark="live",
+        code_version=LIVE_INCREMENT_RUN,
+        input_digest="live",
+    )
+    return evt
+
 
 
 def put_state_version(
@@ -831,96 +1362,6 @@ def put_dataset_members(
         if bool(getattr(cursor, "rowcount", 1)):
             inserted += 1
     return inserted
-
-
-def put_legacy_mapping(
-    conn: Any,
-    *,
-    legacy_table: str,
-    legacy_primary_key: str,
-    canonical_event_id: str | None = None,
-    canonical_payload_hash: str | None = None,
-    classification: str,
-    mapping_confidence: str,
-    unresolved_reason: str = "",
-    migration_run_id: str,
-) -> dict[str, Any]:
-    """Record one auditable legacy mapping or an explicit quarantine row."""
-
-    values = {
-        "legacy_table": str(legacy_table or ""),
-        "legacy_primary_key": str(legacy_primary_key or ""),
-        "canonical_event_id": str(canonical_event_id or "") or None,
-        "canonical_payload_hash": str(canonical_payload_hash or "") or None,
-        "classification": str(classification or ""),
-        "mapping_confidence": str(mapping_confidence or ""),
-        "unresolved_reason": str(unresolved_reason or ""),
-        "migration_run_id": str(migration_run_id or ""),
-    }
-    for field in (
-        "legacy_table",
-        "legacy_primary_key",
-        "classification",
-        "migration_run_id",
-    ):
-        if not values[field]:
-            raise CanonicalV2Error(f"legacy mapping field must not be empty: {field}")
-    if values["mapping_confidence"] not in LEGACY_MAPPING_CONFIDENCE:
-        raise CanonicalV2Error(
-            f"unsupported legacy mapping confidence: {values['mapping_confidence']}"
-        )
-    if values["mapping_confidence"] == "unresolved":
-        if not values["unresolved_reason"]:
-            raise CanonicalV2Error("unresolved legacy mapping requires unresolved_reason")
-    elif values["canonical_event_id"] is None and values["canonical_payload_hash"] is None:
-        raise CanonicalV2Error("resolved legacy mapping requires a canonical reference")
-
-    columns = (
-        "legacy_table",
-        "legacy_primary_key",
-        "canonical_event_id",
-        "canonical_payload_hash",
-        "classification",
-        "mapping_confidence",
-        "unresolved_reason",
-        "migration_run_id",
-    )
-    existing = conn.execute(
-        _sql(
-            conn,
-            "SELECT " + ", ".join(columns) + " FROM canonical_v2.legacy_mapping "
-            "WHERE legacy_table=? AND legacy_primary_key=? AND migration_run_id=?",
-        ),
-        (
-            values["legacy_table"],
-            values["legacy_primary_key"],
-            values["migration_run_id"],
-        ),
-    ).fetchone()
-    if existing is not None:
-        result = _row_dict(existing, columns)
-        for field in columns:
-            if not _same_value(field, result.get(field), values.get(field)):
-                raise CanonicalV2ConflictError(
-                    "immutable canonical legacy mapping conflict "
-                    f"field={field} legacy_table={values['legacy_table']} "
-                    f"legacy_primary_key={values['legacy_primary_key']}"
-                )
-        result["created"] = False
-        return result
-    conn.execute(
-        _sql(
-            conn,
-            "INSERT INTO canonical_v2.legacy_mapping (" + ", ".join(columns) + ") "
-            "VALUES (" + ", ".join("?" for _ in columns) + ")",
-        ),
-        tuple(values[field] for field in columns),
-    )
-    result = dict(values)
-    result["created"] = True
-    return result
-
-
 def start_projection_run(
     conn: Any,
     *,
@@ -1111,7 +1552,6 @@ __all__ = [
     "finish_projection_run",
     "put_dataset_manifest",
     "put_dataset_members",
-    "put_legacy_mapping",
     "put_payload",
     "put_state_version",
     "put_training_sample",

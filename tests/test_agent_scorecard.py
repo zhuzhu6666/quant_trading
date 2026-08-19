@@ -4,10 +4,11 @@ import json
 import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
-from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.agent_briefing import AgentBriefingContextService
 from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.brain_governance_candidates import ensure_brain_governance_candidate_table
+from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.trade_lesson_memory import upsert_trade_lesson_memory
 
 
@@ -125,32 +126,22 @@ def test_agent_scorecard_counts_proposals_applications_and_effects(tmp_path):
             """,
             (json.dumps({"source_agent": "factor_governance", "authority_verdict": verdict}), now, now),
         )
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, bias_multiplier,
-             old_weight, new_weight, suggestion_ids_json, status, details_json, created_at)
-            VALUES ('app1', ?, 'factor', 'rsi_14', 'downweight', 0.8, 0.3, 0.2,
-                    '["s1"]', 'applied', ?, ?)
-            """,
-            (
-                now,
-                json.dumps({"source_agent": "factor_governance", "authority_verdict": verdict}),
-                now,
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status, delta_avg_reward,
-             updated_at, created_at)
-            VALUES ('app1', 'factor', 'rsi_14', 'downweight', 'effective', 0.12, ?, ?)
-            """,
-            (now, now),
-        )
         conn.commit()
     finally:
         conn.close()
+
+    store = LearningApplicationStore(db_path)
+    app_id = store.prepare_application(
+        scope_type="factor", scope_key="rsi_14", action="downweight",
+        bias_multiplier=0.8, old_weight=0.3, new_weight=0.2,
+        suggestion_ids=["s1"], status="applied", cycle_ts=now,
+        details={"source_agent": "factor_governance", "authority_verdict": verdict},
+    )
+    store.write_effect(
+        application_id=app_id, scope_key="rsi_14", scope_type="factor",
+        action="downweight", status="effective", delta_avg_reward=0.12,
+        updated_at=now,
+    )
 
     scorecard = AgentScorecardService(db_path).scorecard(limit=50)
     factor_agent = next(item for item in scorecard["items"] if item["source_agent"] == "factor_governance")

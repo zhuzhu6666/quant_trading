@@ -16,6 +16,15 @@ from backend.services.api_fact_views import (
     risk_summary_fact_payload,
     trade_traces_fact_payload,
 )
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    decision_row,
+    iter_decision_rows,
+    iter_order_rows,
+    iter_position_rows,
+    iter_review_rows,
+    review_row,
+)
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.review_contract import normalize_trade_review_contract
 from backend.services.state_payload_archive import load_json_payload
@@ -192,77 +201,134 @@ def _advisory_only_components() -> set[str]:
     return advisory
 
 
-def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
-    limit = max(1, min(int(limit or 50), 200))
-    conn = _state_conn(read_only=True)
+def _legacy_policy_verdict_rows(
+    conn: sqlite3.Connection, *, limit: int, pre_policy_limit: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Legacy decision_ledger reads (pre-cutover environments only)."""
+    query = """
+        SELECT decision_id, position_id, event_type, symbol, timeframe, decision_ts,
+               action_reason, action_json, risk_state_json
+        FROM decision_ledger
+        WHERE risk_state_json LIKE '%policy_verdict%'
+           OR action_json LIKE '%risk_verdict%'
+        ORDER BY decision_ts DESC, created_at DESC
+        LIMIT ?
+        """
     try:
-        query = """
-            SELECT decision_id, position_id, event_type, symbol, timeframe, decision_ts,
+        rows = conn.execute(_state_sql(query), (limit,)).fetchall()
+    except Exception as exc:
+        if "position_id" not in str(exc).lower():
+            raise
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        rows = conn.execute(
+            _state_sql("""
+            SELECT decision_id, '' AS position_id, event_type, symbol, timeframe, decision_ts,
                    action_reason, action_json, risk_state_json
             FROM decision_ledger
             WHERE risk_state_json LIKE '%policy_verdict%'
                OR action_json LIKE '%risk_verdict%'
             ORDER BY decision_ts DESC, created_at DESC
             LIMIT ?
-            """
+            """),
+            (limit,),
+        ).fetchall()
+    # A signal can pass the factor gate and still be stopped by the live
+    # open-admission gate before RiskPolicy is called. Those observations
+    # deliberately have no policy_verdict, so keep them as a separate
+    # read-only projection instead of counting them as policy decisions.
+    pre_policy_query = """
+        SELECT decision_id, position_id, event_type, symbol, timeframe, decision_ts,
+               action_reason, action_json, risk_state_json
+        FROM decision_ledger
+        WHERE event_type = 'skip'
+          AND action_json LIKE '%before_candidate%'
+        ORDER BY decision_ts DESC, created_at DESC
+        LIMIT ?
+        """
+    try:
+        pre_policy_rows = conn.execute(
+            _state_sql(pre_policy_query), (pre_policy_limit,)
+        ).fetchall()
+    except Exception as exc:
+        if "position_id" not in str(exc).lower():
+            raise
         try:
-            rows = conn.execute(_state_sql(query), (limit,)).fetchall()
-        except Exception as exc:
-            if "position_id" not in str(exc).lower():
-                raise
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            rows = conn.execute(
-                _state_sql("""
-                SELECT decision_id, '' AS position_id, event_type, symbol, timeframe, decision_ts,
-                       action_reason, action_json, risk_state_json
-                FROM decision_ledger
-                WHERE risk_state_json LIKE '%policy_verdict%'
-                   OR action_json LIKE '%risk_verdict%'
-                ORDER BY decision_ts DESC, created_at DESC
-                LIMIT ?
-                """),
-                (limit,),
-            ).fetchall()
-        # A signal can pass the factor gate and still be stopped by the live
-        # open-admission gate before RiskPolicy is called. Those observations
-        # deliberately have no policy_verdict, so keep them as a separate
-        # read-only projection instead of counting them as policy decisions.
-        pre_policy_limit = min(max(limit * 4, limit), 1000)
-        pre_policy_query = """
-            SELECT decision_id, position_id, event_type, symbol, timeframe, decision_ts,
+            conn.rollback()
+        except Exception:
+            pass
+        pre_policy_rows = conn.execute(
+            _state_sql("""
+            SELECT decision_id, '' AS position_id, event_type, symbol, timeframe, decision_ts,
                    action_reason, action_json, risk_state_json
             FROM decision_ledger
             WHERE event_type = 'skip'
               AND action_json LIKE '%before_candidate%'
             ORDER BY decision_ts DESC, created_at DESC
             LIMIT ?
-            """
-        try:
-            pre_policy_rows = conn.execute(
-                _state_sql(pre_policy_query), (pre_policy_limit,)
-            ).fetchall()
-        except Exception as exc:
-            if "position_id" not in str(exc).lower():
-                raise
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            pre_policy_rows = conn.execute(
-                _state_sql("""
-                SELECT decision_id, '' AS position_id, event_type, symbol, timeframe, decision_ts,
-                       action_reason, action_json, risk_state_json
-                FROM decision_ledger
-                WHERE event_type = 'skip'
-                  AND action_json LIKE '%before_candidate%'
-                ORDER BY decision_ts DESC, created_at DESC
-                LIMIT ?
-                """),
-                (pre_policy_limit,),
-            ).fetchall()
+            """),
+            (pre_policy_limit,),
+        ).fetchall()
+    return [dict(row) for row in rows], [dict(row) for row in pre_policy_rows]
+
+
+def _canonical_policy_verdict_rows(
+    conn: Any, *, limit: int, pre_policy_limit: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Canonical equivalent of the legacy verdict reads.
+
+    Streams decisions newest-first and drains same-timestamp ties before the
+    cut, then applies the legacy (decision_ts DESC, created_at DESC) order and
+    LIMIT in Python, so the result is identical to the legacy SQL projection.
+    """
+    verdict_matches: list[dict[str, Any]] = []
+    pre_policy_matches: list[dict[str, Any]] = []
+    verdict_boundary: float | None = None
+    pre_boundary: float | None = None
+    for row in iter_decision_rows(conn, limit=0, reverse=True):
+        decision_ts = float(row.get("decision_ts") or 0.0)
+        if (
+            verdict_boundary is not None
+            and pre_boundary is not None
+            and decision_ts < verdict_boundary
+            and decision_ts < pre_boundary
+        ):
+            break
+        risk_state_json = str(row.get("risk_state_json") or "")
+        action_json = str(row.get("action_json") or "")
+        if "policy_verdict" in risk_state_json or "risk_verdict" in action_json:
+            if len(verdict_matches) < limit:
+                verdict_matches.append(row)
+                if len(verdict_matches) == limit:
+                    verdict_boundary = decision_ts
+            elif decision_ts >= verdict_boundary:
+                verdict_matches.append(row)
+        if str(row.get("event_type") or "") == "skip" and "before_candidate" in action_json:
+            if len(pre_policy_matches) < pre_policy_limit:
+                pre_policy_matches.append(row)
+                if len(pre_policy_matches) == pre_policy_limit:
+                    pre_boundary = decision_ts
+            elif decision_ts >= pre_boundary:
+                pre_policy_matches.append(row)
+
+    def _sort_key(item: dict[str, Any]) -> tuple[float, float]:
+        return (float(item.get("decision_ts") or 0.0), float(item.get("created_at") or 0.0))
+
+    verdict_matches.sort(key=_sort_key, reverse=True)
+    pre_policy_matches.sort(key=_sort_key, reverse=True)
+    return verdict_matches[:limit], pre_policy_matches[:pre_policy_limit]
+
+
+def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
+    limit = max(1, min(int(limit or 50), 200))
+    pre_policy_limit = min(max(limit * 4, limit), 1000)
+    conn = _state_conn(read_only=True)
+    try:
+        rows, pre_policy_rows = _canonical_policy_verdict_rows(
+            conn, limit=limit, pre_policy_limit=pre_policy_limit
+        )
 
         pre_policy_skips: list[dict[str, Any]] = []
         for row in pre_policy_rows:
@@ -580,24 +646,27 @@ def _db_path_from_conn(conn: sqlite3.Connection) -> str | None:
 def _latest_symbol_context(conn: sqlite3.Connection, *, position_id: str, trade_id: str) -> dict[str, str]:
     if not position_id and not trade_id:
         return {"symbol": "", "timeframe": ""}
-    try:
-        row = conn.execute(
-            _state_sql("""
-            SELECT symbol, timeframe
-            FROM decision_ledger
-            WHERE position_id = ? OR trade_id = ?
-            ORDER BY decision_ts DESC, created_at DESC
-            LIMIT 1
-            """),
-            (position_id, trade_id),
-        ).fetchone()
-    except sqlite3.OperationalError:
-        row = None
-    if not row:
+    best = None
+    best_key = (0.0, 0.0)
+    first_ts: float | None = None
+    for row in iter_decision_rows(conn, limit=0, reverse=True):
+        decision_ts = float(row.get("decision_ts") or 0.0)
+        if first_ts is not None and decision_ts < first_ts:
+            break
+        if (position_id and str(row.get("position_id") or "") == position_id) or (
+            trade_id and str(row.get("trade_id") or "") == trade_id
+        ):
+            if first_ts is None:
+                first_ts = decision_ts
+            key = (decision_ts, float(row.get("created_at") or 0.0))
+            if key > best_key:
+                best = row
+                best_key = key
+    if best is None:
         return {"symbol": "", "timeframe": ""}
     return {
-        "symbol": str(row["symbol"] or ""),
-        "timeframe": str(row["timeframe"] or ""),
+        "symbol": str(best.get("symbol") or ""),
+        "timeframe": str(best.get("timeframe") or ""),
     }
 
 
@@ -1716,27 +1785,45 @@ def _recent_trade_trace_index(limit: int = 20) -> dict[str, Any]:
     limit = max(1, min(int(limit or 20), 100))
     conn = _state_conn(read_only=True)
     try:
-        try:
-            rows = conn.execute(
-                _state_sql(f"""
-                SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                       entry_quality, hold_quality, exit_quality, regime_fit_score,
-                       execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                       summary_text, review_json{_review_archive_select(conn)}, created_at
-                FROM trade_outcome_review
-                ORDER BY created_at DESC
-                LIMIT ?
-                """),
-                (limit,),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = []
+        rows = iter_review_rows(conn, limit=0)
+        rows.sort(key=lambda r: float(r.get("created_at") or 0.0), reverse=True)
+        rows = rows[:limit]
+        # Canonical symbol/timeframe context: resolve the review's entry
+        # decision directly (indexed mapping); fall back to a position-event
+        # map built from one bounded stream for reviews without a decision
+        # reference. Symbol/timeframe is constant per trade, so any decision
+        # or position event of the trade carries the same value.
+        position_context: dict[str, tuple[str, str]] = {}
+        for item in iter_position_rows(conn, limit=0):
+            position_id = str(item.get("position_id") or "")
+            trade_id = str(item.get("trade_id") or "")
+            entry = (str(item.get("symbol") or ""), str(item.get("timeframe") or ""))
+            if position_id:
+                position_context[position_id] = entry
+            if trade_id:
+                position_context[trade_id] = entry
+
+        def _symbol_context(
+            position_id: str, trade_id: str, entry_decision_id: str = ""
+        ) -> dict[str, str]:
+            if entry_decision_id:
+                resolved = decision_row(conn, entry_decision_id)
+                if resolved:
+                    return {
+                        "symbol": str(resolved.get("symbol") or ""),
+                        "timeframe": str(resolved.get("timeframe") or ""),
+                    }
+            entry = position_context.get(position_id) or position_context.get(trade_id)
+            return {
+                "symbol": entry[0] if entry else "",
+                "timeframe": entry[1] if entry else "",
+            }
         items: list[dict[str, Any]] = []
         for row in rows:
             parsed = _parse_review_row(row, conn)
             position_id = str(parsed.get("position_id") or "")
             trade_id = str(parsed.get("trade_id") or "")
-            context = _latest_symbol_context(conn, position_id=position_id, trade_id=trade_id)
+            context = _symbol_context(position_id, trade_id, str(parsed.get("entry_decision_id") or ""))
             factor_hint = _top_factor_hint_for_review(conn, str(parsed.get("review_id") or ""))
             parameter_factor = ""
             parameter_candidate_status = ""
@@ -1840,6 +1927,82 @@ def _recent_trade_trace_index(limit: int = 20) -> dict[str, Any]:
         conn.close()
 
 
+def _canonical_trace_review(
+    conn: Any, *, position_id: str = "", decision_id: str = ""
+) -> dict[str, Any] | None:
+    """Latest review matching a position/trade or an entry/exit decision."""
+    best = None
+    best_ts = 0.0
+    for row in iter_review_rows(conn, limit=0):
+        matched = (
+            bool(position_id)
+            and (
+                str(row.get("position_id") or "") == position_id
+                or str(row.get("trade_id") or "") == position_id
+            )
+        ) or (
+            bool(decision_id)
+            and (
+                str(row.get("entry_decision_id") or "") == decision_id
+                or str(row.get("exit_decision_id") or "") == decision_id
+            )
+        )
+        if not matched:
+            continue
+        row_ts = float(row.get("created_at") or 0.0)
+        if best is None or row_ts > best_ts:
+            best = row
+            best_ts = row_ts
+    return best
+
+
+def _canonical_trace_ledger_rows(
+    conn: Any, position_id: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Decisions for a position/trade plus that position's lifecycle events.
+
+    The decision scan is bounded by the position's own event window (±24h):
+    any decision that references the position must occur inside the position's
+    lifecycle (entry before open, supervisor/close while live).  When the
+    position has no lifecycle events the scan falls back to the full stream
+    (correctness over speed).
+    """
+    position_key = str(position_id or "")
+    position_events: list[dict[str, Any]] = []
+    lo = hi = None
+    for item in iter_position_rows(conn, limit=0):
+        if str(item.get("position_id") or "") != position_key:
+            continue
+        position_events.append(item)
+        ts = float(item.get("event_ts") or 0.0)
+        lo = ts if lo is None else min(lo, ts)
+        hi = ts if hi is None else max(hi, ts)
+    margin = 24 * 3600.0
+    if lo is not None:
+        rows = [
+            row
+            for row in iter_decision_rows(
+                conn,
+                limit=0,
+                min_observed_epoch=lo - margin,
+                max_observed_epoch=(hi or lo) + margin,
+            )
+            if str(row.get("position_id") or "") == position_key
+            or str(row.get("trade_id") or "") == position_key
+        ]
+    else:
+        rows = [
+            row
+            for row in iter_decision_rows(conn, limit=0)
+            if str(row.get("position_id") or "") == position_key
+            or str(row.get("trade_id") or "") == position_key
+        ]
+    rows.sort(
+        key=lambda r: (float(r.get("decision_ts") or 0.0), float(r.get("created_at") or 0.0))
+    )
+    return rows, position_events
+
+
 def _trade_trace(position_id: str | None = None, decision_id: str | None = None) -> dict[str, Any]:
     resolved_position_id = str(position_id or "").strip()
     resolved_decision_id = str(decision_id or "").strip()
@@ -1850,33 +2013,16 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
     try:
         anchor = None
         if resolved_decision_id:
-            anchor = conn.execute(
-                _state_sql("""
-                SELECT decision_id, trade_id, position_id, event_type, symbol, timeframe, decision_ts,
-                       regime_id, regime_confidence, portfolio_state_json, risk_state_json,
-                       policy_version, factor_set_version, action_score, action_reason, action_json, created_at
-                FROM decision_ledger
-                WHERE decision_id = ?
-                LIMIT 1
-                """),
-                (resolved_decision_id,),
-            ).fetchone()
+            anchor = decision_row(conn, resolved_decision_id)
             if anchor and not resolved_position_id:
                 resolved_position_id = str(anchor["position_id"] or anchor["trade_id"] or "").strip()
 
         ledger_rows = []
+        position_events_for_window: list[dict[str, Any]] = []
         if resolved_position_id:
-            ledger_rows = conn.execute(
-                _state_sql("""
-                SELECT decision_id, trade_id, position_id, event_type, symbol, timeframe, decision_ts,
-                       regime_id, regime_confidence, portfolio_state_json, risk_state_json,
-                       policy_version, factor_set_version, action_score, action_reason, action_json, created_at
-                FROM decision_ledger
-                WHERE position_id = ? OR trade_id = ?
-                ORDER BY decision_ts ASC, created_at ASC
-                """),
-                (resolved_position_id, resolved_position_id),
-            ).fetchall()
+            ledger_rows, position_events_for_window = _canonical_trace_ledger_rows(
+                conn, resolved_position_id
+            )
         elif anchor:
             ledger_rows = [anchor]
 
@@ -1897,16 +2043,10 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
         recovery_state = None
         pos_int = _safe_int(resolved_position_id)
         if pos_int is not None:
-            position_events = conn.execute(
-                _state_sql("""
-                SELECT event_id, position_id, trade_id, symbol, event_type, event_ts,
-                       net_volume, avg_price, unrealized_pnl, realized_pnl, details_json
-                FROM position_lifecycle_event
-                WHERE position_id = ?
-                ORDER BY event_ts ASC, event_id ASC
-                """),
-                (str(pos_int),),
-            ).fetchall()
+            position_events = [
+                item for item in position_events_for_window
+                if str(item.get("position_id") or "") == str(pos_int)
+            ]
             recovery_state = conn.execute(
                 _state_sql("""
                 SELECT position_id, broker, symbol, direction, open_price, volume, first_seen_at,
@@ -1921,46 +2061,16 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
 
         order_events = []
         if trade_id:
-            order_events = conn.execute(
-                _state_sql("""
-                SELECT event_id, decision_id, trade_id, order_id, broker_order_id, event_type,
-                       event_ts, price, volume, status, details_json
-                FROM order_lifecycle_event
-                WHERE trade_id = ?
-                ORDER BY event_ts ASC, event_id ASC
-                """),
-                (trade_id,),
-            ).fetchall()
+            order_events = [
+                item for item in iter_order_rows(conn, limit=0)
+                if str(item.get("trade_id") or "") == trade_id
+            ]
 
         review_row = None
         if resolved_position_id:
-            review_row = conn.execute(
-                _state_sql(f"""
-                SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                       entry_quality, hold_quality, exit_quality, regime_fit_score,
-                       execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                       summary_text, review_json{_review_archive_select(conn)}, created_at
-                FROM trade_outcome_review
-                WHERE position_id = ? OR trade_id = ?
-                ORDER BY created_at DESC
-                LIMIT 1
-                """),
-                (resolved_position_id, resolved_position_id),
-            ).fetchone()
+            review_row = _canonical_trace_review(conn, position_id=resolved_position_id)
         if review_row is None and resolved_decision_id:
-            review_row = conn.execute(
-                _state_sql(f"""
-                SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                       entry_quality, hold_quality, exit_quality, regime_fit_score,
-                       execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                       summary_text, review_json{_review_archive_select(conn)}, created_at
-                FROM trade_outcome_review
-                WHERE entry_decision_id = ? OR exit_decision_id = ?
-                ORDER BY created_at DESC
-                LIMIT 1
-                """),
-                (resolved_decision_id, resolved_decision_id),
-            ).fetchone()
+            review_row = _canonical_trace_review(conn, decision_id=resolved_decision_id)
 
         factor_rows = []
         if review_row is not None:
@@ -2164,6 +2274,29 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
         conn.close()
 
 
+def _capacity_trend_snapshot() -> dict[str, Any] | None:
+    """Read-only capacity growth digest for the system_health dashboard.
+
+    Invokes scripts/capacity_observe.py --trend (pure SELECT + JSON), reusing the existing
+    observation instrument. Failure or PG unavailability yields None so it never blocks health.
+    """
+    try:
+        import json as _json
+        import subprocess
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[2]
+        out = subprocess.run(
+            [str(root / ".venv/bin/python"), "scripts/capacity_observe.py", "--trend"],
+            capture_output=True, text=True, cwd=root, timeout=20,
+        )
+        if out.returncode != 0:
+            return None
+        payload = _json.loads(out.stdout)
+        return payload
+    except Exception:
+        return None
+
+
 def _system_health_summary() -> dict[str, Any]:
     report = _get_system_health_report()
     if report is None:
@@ -2179,6 +2312,7 @@ def _system_health_summary() -> dict[str, Any]:
             "impact_summary": "还没有拿到运行环境快照，暂时无法判断是否会影响交易。",
             "policy_flags": _runtime_risk_policy(),
             "components": {},
+            "capacity": None,
             "errors": [],
         }
 
@@ -2241,6 +2375,7 @@ def _system_health_summary() -> dict[str, Any]:
         "impact_summary": impact_summary,
         "policy_flags": policy_flags,
         "components": component_status,
+        "capacity": _capacity_trend_snapshot(),
         "errors": list(getattr(report, "errors", []) or []),
         "ts": float(getattr(report, "ts", 0.0) or 0.0),
     }

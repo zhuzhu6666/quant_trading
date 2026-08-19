@@ -22,6 +22,11 @@ from backend.services.brain_governance_candidates import (
     CANDIDATE_REVIEWABLE_STATUSES,
     BrainGovernanceCandidateService,
 )
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    iter_review_rows,
+    review_row,
+)
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.state_payload_archive import load_json_payload
 from backend.services.v16_brain_planning import (
@@ -500,20 +505,42 @@ class V16BrainOrchestratorService:
             )
             latest_cf = 0.0
             latest_cf_updated = 0.0
-            if (
-                state_table_exists(conn, "supervisor_counterfactual_review")
-                and state_table_exists(conn, "trade_outcome_review")
+            if state_table_exists(conn, "supervisor_counterfactual_review") and (
+                canonical_ready(conn) or state_table_exists(conn, "trade_outcome_review")
             ):
-                rows = execute(
+                cf_rows = execute(
                     conn,
-                    f"""
-                    SELECT c.close_ts, c.updated_at, c.evidence_json,
-                           r.review_id AS source_review_id,
-                           r.review_json AS source_review_json{_review_archive_select(conn)}
+                    """
+                    SELECT c.close_ts, c.updated_at, c.evidence_json, c.review_id
                     FROM supervisor_counterfactual_review c
-                    LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
                     """,
                 ).fetchall()
+                if canonical_ready(conn):
+                    review_map = {
+                        str(row.get("review_id") or ""): row
+                        for row in iter_review_rows(conn, limit=0)
+                    }
+                    built: list[dict[str, Any]] = []
+                    for item in cf_rows:
+                        value = dict(item)
+                        review_id = str(value.get("review_id") or "")
+                        review = review_map.get(review_id)
+                        value["source_review_id"] = review_id if review is not None else ""
+                        value["source_review_json"] = (review or {}).get("review_json") or {}
+                        value["source_review_archive_hash"] = ""
+                        built.append(value)
+                    rows = built
+                else:
+                    rows = execute(
+                        conn,
+                        f"""
+                        SELECT c.close_ts, c.updated_at, c.evidence_json,
+                               r.review_id AS source_review_id,
+                               r.review_json AS source_review_json{_review_archive_select(conn)}
+                        FROM supervisor_counterfactual_review c
+                        LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
+                        """,
+                    ).fetchall()
                 valid_rows = [
                     row
                     for row in rows

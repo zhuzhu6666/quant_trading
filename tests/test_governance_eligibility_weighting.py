@@ -8,6 +8,7 @@ import pytest
 
 from backend.services import autonomous_learning as learning
 from research.learning.governor import RuleEvolutionGovernor
+from tests.canonical_fixture import seed_canonical_sqlite_file
 
 
 def _sample(index: int, *, integrity: str = "full", contaminated: bool = False) -> dict:
@@ -64,6 +65,7 @@ def _sample(index: int, *, integrity: str = "full", contaminated: bool = False) 
 
 def _insert_sample(db_path, item: dict) -> None:
     learning.ensure_autonomous_learning_tables(db_path)
+    seed_canonical_sqlite_file(db_path)
     conn = learning._connect(db_path)
     try:
         assert learning._upsert_sample(conn, item) is True
@@ -89,7 +91,7 @@ def test_sample_upsert_persists_full_recovered_and_contaminated_eligibility(tmp_
             SELECT sample_id, system_contaminated, governance_eligible,
                    governance_effective_weight, governance_eligibility_version,
                    governance_eligibility_fingerprint, governance_ineligible_reason
-            FROM autonomous_learning_sample
+            FROM training_sample_row
             ORDER BY sample_id
             """
         ).fetchall()
@@ -229,12 +231,13 @@ def test_governor_rejects_missing_contract_and_uses_weighted_metrics(tmp_path) -
 def test_repair_backfills_eligibility_and_is_idempotent(tmp_path) -> None:
     db_path = tmp_path / "state.db"
     learning.ensure_autonomous_learning_tables(db_path)
+    seed_canonical_sqlite_file(db_path)
     item = _sample(10)
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
             """
-            INSERT INTO autonomous_learning_sample
+            INSERT INTO training_sample_row
             (sample_id, sample_type, source_table, source_id, decision_id,
              position_id, event_ts, label_status, integrity, train_weight,
              features_json, verdict_json, label_json, trace_json,
@@ -279,12 +282,13 @@ def test_repair_backfills_eligibility_and_is_idempotent(tmp_path) -> None:
 def test_repair_does_not_infer_executable_governance_from_sample_type(tmp_path) -> None:
     db_path = tmp_path / "state.db"
     learning.ensure_autonomous_learning_tables(db_path)
+    seed_canonical_sqlite_file(db_path)
     item = _sample(11)
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
             """
-            INSERT INTO autonomous_learning_sample
+            INSERT INTO training_sample_row
             (sample_id, sample_type, source_table, source_id, decision_id,
              position_id, event_ts, label_status, integrity, train_weight,
              features_json, verdict_json, label_json, trace_json,

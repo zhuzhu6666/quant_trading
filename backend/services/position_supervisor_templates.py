@@ -6,6 +6,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from backend.core.db_helpers import conn_is_pg as _conn_is_pg, pg_sql as _sql
+
 
 SCHEMA_VERSION = "position_supervisor_template.v1"
 DEFAULT_TEMPLATE_ID = "position_supervisor:default.v1"
@@ -191,14 +193,6 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
 }
 
 
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
 def _merge_template(base: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:
     merged = deepcopy(base)
     for policy_key in ("thresholds", "sl_policy", "tp_policy", "capture_policy", "learning_bounds"):
@@ -236,21 +230,26 @@ def _generated_templates_from_state(db_path: str | Path | None = None) -> list[d
     # prevents a newer proposed/approved suggestion with the same template ID
     # from replacing the content that was actually committed and applied.
     try:
-        application_rows = conn.execute(
-            _sql(
-                conn,
-                """
-                SELECT details_json
-                FROM learning_application_log
-                WHERE scope_type='position_supervisor_template'
-                  AND action='switch_position_supervisor_template'
-                  AND status IN ('applied', 'observing', 'reinforced', 'mixed')
-                ORDER BY created_at DESC
-                LIMIT 100
-                """,
-            )
-        ).fetchall()
-        payloads.extend(row["details_json"] for row in application_rows)
+        from backend.services.learning_application_store import LearningApplicationStore
+
+        store = LearningApplicationStore(path)
+        count = 0
+        # Lean store already merged details_json into each dict (scope_type,
+        # scope_key, action, status all live in the parsed details blob).
+        for app in store.iter_applications(scope_type="position_supervisor_template"):
+            if str(app.get("action") or "") != "switch_position_supervisor_template":
+                continue
+            if str(app.get("status") or "") not in (
+                "applied",
+                "observing",
+                "reinforced",
+                "mixed",
+            ):
+                continue
+            payloads.append(app)
+            count += 1
+            if count >= 100:
+                break
     except Exception:
         pass
     try:
@@ -275,10 +274,13 @@ def _generated_templates_from_state(db_path: str | Path | None = None) -> list[d
 
     result: dict[str, dict[str, Any]] = {}
     for raw_payload in payloads:
-        try:
-            payload = json.loads(raw_payload or "{}")
-        except Exception:
-            continue
+        if isinstance(raw_payload, dict):
+            payload = raw_payload
+        else:
+            try:
+                payload = json.loads(raw_payload or "{}")
+            except Exception:
+                continue
         if not isinstance(payload, dict):
             continue
         evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
@@ -356,45 +358,40 @@ def latest_applied_position_supervisor_template_id(
             ) from exc
         return DEFAULT_TEMPLATE_ID
     try:
-        application_columns = state_table_columns(conn, "learning_application_log")
-        mutation_select = "mutation_id" if "mutation_id" in application_columns else "'' AS mutation_id"
-        row = conn.execute(
-            _sql(
-                conn,
-                f"""
-                SELECT application_id, scope_key, status, details_json,
-                       {mutation_select}
-                FROM learning_application_log
-                WHERE scope_type='position_supervisor_template'
-                  AND action='switch_position_supervisor_template'
-                  AND status IN ('applied', 'observing', 'reinforced', 'mixed')
-                ORDER BY cycle_ts DESC, created_at DESC
-                LIMIT 1
-                """,
-            )
-        ).fetchone()
+        from backend.services.learning_application_store import LearningApplicationStore
+
+        store = LearningApplicationStore(path)
+        row: dict[str, Any] | None = None
+        # Lean store merges details_json into each dict, so action/status/
+        # scope_key/mutation_id all come from the parsed details blob.
+        for app in store.iter_applications(scope_type="position_supervisor_template"):
+            if str(app.get("action") or "") != "switch_position_supervisor_template":
+                continue
+            if str(app.get("status") or "") not in (
+                "applied",
+                "observing",
+                "reinforced",
+                "mixed",
+            ):
+                continue
+            row = app
+            break
         if not row:
             # Strict startup preserves the release/YAML/committed-overlay
             # projection when no application fact exists.  It must not
             # implicitly reset a configured template to the built-in default.
             return "" if require_authority else DEFAULT_TEMPLATE_ID
 
-        template_id = str(row["scope_key"] or "") if row else ""
+        template_id = str(row.get("scope_key") or "")
         if require_authority:
-            try:
-                details = json.loads(row["details_json"] or "{}")
-            except Exception as exc:
-                raise RuntimeError(
-                    "legacy_position_supervisor_restore_details_invalid:"
-                    f"{row['application_id']}"
-                ) from exc
+            details = dict(row)
             if not isinstance(details, dict):
                 raise RuntimeError(
                     "legacy_position_supervisor_restore_details_invalid:"
-                    f"{row['application_id']}"
+                    f"{row.get('application_id', '')}"
                 )
 
-            mutation_id = str(row["mutation_id"] or "")
+            mutation_id = str(row.get("mutation_id") or "")
             details_mutation_id = str(details.get("mutation_id") or "")
             committed = False
             if (

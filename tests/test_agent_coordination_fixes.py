@@ -109,11 +109,13 @@ def test_v16_command_claim_is_single_use_and_evidence_bound(tmp_path):
     )
     assert second["allowed"] is False
 
-    consumed = V16CommandGate.consume(
+    consumed = V16CommandGate.finalize(
         db_path,
         command_id=claim["command_id"],
         claim_token=claim["claim_token"],
         mutation_id="mutation-claim",
+        config_hash="",
+        domain_hash="",
     )
     assert consumed["allowed"] is True
     third = V16CommandGate.claim(

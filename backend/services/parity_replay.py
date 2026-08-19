@@ -239,7 +239,14 @@ def _factor_contribution(value: Any) -> tuple[float, float]:
 
 
 def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
-    """Build deterministic, filesystem-only training rows from replay outcomes."""
+    """Build deterministic, filesystem-only training rows from replay outcomes.
+
+    Deprecated (S3/A2): the ``outcome_label`` produced here is a replay-only
+    binary reconstruction mark, not the review label authority.  Canonical
+    ``trade_review`` labels are owned solely by
+    ``review_contract.classify_4label_outcome`` (reviewer 口径); this bundle is
+    kept only so replay parity observations remain inspectable offline.
+    """
 
     bindings = dict(report.get("bindings") or {})
     binding_hash = str(bindings.get("binding_hash") or "")

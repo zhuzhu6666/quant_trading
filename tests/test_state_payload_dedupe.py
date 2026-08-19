@@ -6,6 +6,7 @@ from backend.api import ops as ops_api
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services import mutation_audit
 from backend.services.autonomous_learning import _upsert_sample, ensure_autonomous_learning_tables
+from tests.canonical_fixture import seed_canonical_sqlite_file
 from backend.services.evolution_ledger import (
     get_evolution_run,
     persist_runtime_config_snapshot,
@@ -198,14 +199,28 @@ def test_mutation_projection_reads_payload_without_event_json_copy(tmp_path) -> 
     )
     conn = connect_sqlite(db_path, read_only=True)
     try:
-        assert conn.execute(
-            "SELECT evidence_json, result_json FROM evolution_decision WHERE decision_id='canonical-1'"
-        ).fetchone() == ("{}", "{}")
+        dj = json.loads(
+            conn.execute(
+                "SELECT decision_json FROM evolution_decision WHERE decision_id='canonical-1'"
+            ).fetchone()[0]
+        )
+        # rich payload is interned in mutation_payload, not copied inline into decision_json
+        assert "evidence" not in dj and "result" not in dj
+        assert dj["action"] == "update_weight" and dj["status"] == "applied"
+        pl = conn.execute(
+            "SELECT p.evidence_json, p.result_json FROM evolution_decision d "
+            "JOIN mutation_payload p ON p.payload_hash=d.payload_hash "
+            "WHERE d.decision_id='canonical-1'"
+        ).fetchone()
+        assert json.loads(pl[0]) == {"evidence_id": "e-1"}
+        assert json.loads(pl[1]) == {"decision_id": "canonical-1"}
     finally:
         conn.close()
     run = get_evolution_run("run-1", db_path=db_path)
     assert run["decisions"][0]["evidence"] == {"evidence_id": "e-1"}
     assert run["decisions"][0]["result"] == {"decision_id": "canonical-1"}
+    assert run["decisions"][0]["action"] == "update_weight"
+    assert run["decisions"][0]["status"] == "applied"
 
 
 def test_api_projection_rehydrates_canonical_payload_on_read(tmp_path, monkeypatch) -> None:
@@ -254,6 +269,7 @@ def test_api_projection_rehydrates_canonical_payload_on_read(tmp_path, monkeypat
 def test_learning_sample_noop_does_not_update_timestamp(tmp_path) -> None:
     db_path = tmp_path / "state.db"
     ensure_autonomous_learning_tables(db_path)
+    seed_canonical_sqlite_file(db_path)
     item = {
         "sample_id": "sample-1",
         "sample_type": "shadow_open_decision",
@@ -274,12 +290,12 @@ def test_learning_sample_noop_does_not_update_timestamp(tmp_path) -> None:
         assert _upsert_sample(conn, item) is True
         conn.commit()
         before = conn.execute(
-            "SELECT updated_at, content_fingerprint FROM autonomous_learning_sample WHERE sample_id='sample-1'"
+            "SELECT updated_at, content_fingerprint FROM training_sample_row WHERE sample_id='sample-1'"
         ).fetchone()
         assert _upsert_sample(conn, item) is False
         conn.commit()
         after = conn.execute(
-            "SELECT updated_at, content_fingerprint FROM autonomous_learning_sample WHERE sample_id='sample-1'"
+            "SELECT updated_at, content_fingerprint FROM training_sample_row WHERE sample_id='sample-1'"
         ).fetchone()
         assert tuple(after) == tuple(before)
     finally:
@@ -516,9 +532,9 @@ def test_compactor_reports_and_preserves_audit_lineage(tmp_path, capsys) -> None
     conn = connect_sqlite(db_path, read_only=True)
     try:
         rows = conn.execute(
-            "SELECT decision_id, canonical_event_id, projection_type, evidence_json FROM evolution_decision ORDER BY decision_id"
+            "SELECT decision_id, canonical_event_id, projection_type FROM evolution_decision ORDER BY decision_id"
         ).fetchall()
-        assert tuple(rows[0]) == ("api-audit", "canonical-audit", "api", "{}")
-        assert tuple(rows[1]) == ("canonical-audit", "canonical-audit", "canonical", "{}")
+        assert tuple(rows[0]) == ("api-audit", "canonical-audit", "api")
+        assert tuple(rows[1]) == ("canonical-audit", "canonical-audit", "canonical")
     finally:
         conn.close()

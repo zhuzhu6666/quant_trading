@@ -19,6 +19,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import backend.core.db as core_db
+from backend.core.db_helpers import row_value as _row_value
+from backend.services.canonical_v2 import _sql
+from backend.services.canonical_v2_reader import canonical_fact_observation
 from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC, attach_fact, observed_epoch
 
 
@@ -434,15 +437,6 @@ def _connect_state_source(db_path: str | Path):
     return core_db.connect_sqlite(db_path, read_only=True)
 
 
-def _row_value(row: Any, key: str, index: int) -> Any:
-    if isinstance(row, Mapping):
-        return row.get(key)
-    try:
-        return row[index]
-    except (IndexError, KeyError, TypeError):
-        return None
-
-
 def observe_learning_dataset_source(
     db_path: str | Path,
     *,
@@ -452,12 +446,14 @@ def observe_learning_dataset_source(
     """Read record counts and real source timestamps without writing schema."""
 
     queried_at = float(time.time() if now is None else now)
-    specs: list[tuple[str, tuple[str, ...]]] = [
-        ("autonomous_learning_sample", ("updated_at", "event_ts", "created_at")),
-        ("decision_ledger", ("decision_ts", "created_at")),
+    # decision/review facts are canonical_schema-owned; the training-sample row is
+    # canonical_v2-owned (read via the canonical reader).
+    specs: list[tuple[str, tuple[str, ...], str | None]] = [
+        ("canonical_v2.training_sample_row", ("updated_at", "event_ts", "created_at"), None),
+        ("decision_ledger", ("decision_ts", "created_at"), "risk_decision"),
     ]
     if include_trade_reviews:
-        specs.append(("trade_outcome_review", ("created_at",)))
+        specs.append(("trade_outcome_review", ("created_at",), "trade_review"))
 
     conn = None
     try:
@@ -465,14 +461,43 @@ def observe_learning_dataset_source(
         record_count = 0
         latest = 0.0
         missing_tables: list[str] = []
-        for table, timestamp_columns in specs:
+        for table, timestamp_columns, canonical_event_type in specs:
+            if canonical_event_type is not None:
+                # decision/review counts and freshness come from the canonical
+                # reader (with reader-owned legacy fallback); the module holds
+                # no private SQL for canonical-owned facts.
+                observation = canonical_fact_observation(
+                    conn,
+                    {
+                        "risk_decision": "decision",
+                        "trade_review": "review",
+                    }.get(canonical_event_type, ""),
+                    timestamp_columns=timestamp_columns,
+                )
+                if observation is not None:
+                    record_count += int(observation["count"] or 0)
+                    latest = max(latest, observed_epoch(observation.get("latest")))
+                    continue
+                missing_tables.append(table)
+                continue
             if not core_db.state_table_exists(conn, table):
+                if table == "canonical_v2.training_sample_row":
+                    from backend.services.canonical_v2_reader import iter_training_sample_rows
+                    sample_rows = iter_training_sample_rows(conn)
+                    if sample_rows:
+                        record_count += len(sample_rows)
+                        for col in timestamp_columns:
+                            latest = max(
+                                latest,
+                                max((float(r.get(col) or 0.0) for r in sample_rows), default=0.0),
+                            )
+                        continue
                 missing_tables.append(table)
                 continue
             projections = ["COUNT(*) AS record_count"]
             projections.extend(f"MAX({column}) AS max_{column}" for column in timestamp_columns)
             row = conn.execute(
-                f"SELECT {', '.join(projections)} FROM {table}"  # noqa: S608 - fixed internal identifiers
+                _sql(conn, f"SELECT {', '.join(projections)} FROM {table}")  # noqa: S608 - fixed internal identifiers
             ).fetchone()
             record_count += int(_row_value(row, "record_count", 0) or 0)
             for index, column in enumerate(timestamp_columns, start=1):
@@ -483,14 +508,14 @@ def observe_learning_dataset_source(
                 observed_at=latest or None,
                 authoritative_empty=False,
                 record_count=record_count,
-                tables=tuple(table for table, _ in specs),
+                tables=tuple(table for table, _cols, _event_type in specs),
                 error="missing_source_tables:" + ",".join(missing_tables),
             )
         return DurableSourceObservation(
             observed_at=queryed_at if record_count == 0 else (latest or None),
             authoritative_empty=record_count == 0,
             record_count=record_count,
-            tables=tuple(table for table, _ in specs),
+            tables=tuple(table for table, _cols, _event_type in specs),
             error=None if record_count == 0 or latest > 0 else "persisted_timestamp_missing",
         )
     except Exception as exc:
@@ -498,7 +523,7 @@ def observe_learning_dataset_source(
             observed_at=None,
             authoritative_empty=False,
             record_count=0,
-            tables=tuple(table for table, _ in specs),
+            tables=tuple(table for table, _cols, _event_type in specs),
             error=f"source_observation_failed:{type(exc).__name__}",
         )
     finally:

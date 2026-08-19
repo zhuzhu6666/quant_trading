@@ -3,6 +3,7 @@ import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.factor_governance_effect_tracker import FactorGovernanceEffectTrackerService
+from backend.services.learning_application_store import LearningApplicationStore
 
 
 def _insert_pruning_suggestion(conn, *, suggestion_id="brain_bridge_effect", factor="dsl_auto_effect", status="approved"):
@@ -28,36 +29,32 @@ def _insert_pruning_suggestion(conn, *, suggestion_id="brain_bridge_effect", fac
     return now
 
 
+def _seed_observing_application(db_path, suggestion_id, factor, status, cycle_ts):
+    store = LearningApplicationStore(db_path)
+    app_id = store.prepare_application(
+        scope_type="factor", scope_key=factor, action="downweight",
+        bias_multiplier=0.82, old_weight=0.01, new_weight=0.0082,
+        suggestion_ids=[suggestion_id], status=status, cycle_ts=cycle_ts,
+    )
+    store.write_effect(
+        application_id=app_id, scope_key=factor, scope_type="factor",
+        action="downweight", status="observing",
+        observed_trade_count=0, baseline_trade_count=0, decision={},
+        updated_at=cycle_ts,
+    )
+    return app_id
+
+
 def test_factor_governance_effect_tracker_reports_observing_application(tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
         now = _insert_pruning_suggestion(conn)
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, bias_multiplier,
-             old_weight, new_weight, suggestion_ids_json, status, details_json, created_at)
-            VALUES ('app_effect_1', ?, 'factor', 'dsl_auto_effect', 'downweight',
-                    0.82, 0.01, 0.0082, ?, 'observing', '{}', ?)
-            """,
-            (now + 1, json.dumps(["brain_bridge_effect"]), now + 1),
-        )
-        conn.execute(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status,
-             observed_trade_count, baseline_trade_count, decision_json,
-             updated_at, created_at)
-            VALUES ('app_effect_1', 'factor', 'dsl_auto_effect', 'downweight',
-                    'observing', 0, 0, '{}', ?, ?)
-            """,
-            (now + 1, now + 1),
-        )
         conn.commit()
     finally:
         conn.close()
+    _seed_observing_application(db_path, "brain_bridge_effect", "dsl_auto_effect", "observing", now + 1)
 
     result = FactorGovernanceEffectTrackerService(db_path).status()
 
@@ -66,27 +63,18 @@ def test_factor_governance_effect_tracker_reports_observing_application(tmp_path
     item = result["items"][0]
     assert item["stage"] == "observing"
     assert item["recommended_action"] == "collect_more_trades"
-    assert item["application"]["application_id"] == "app_effect_1"
+    assert item["application"]["application_id"]
     assert item["effect"]["status"] == "observing"
     assert item["evidence_contract"]["has_risk_verdict"] is True
 
 
 def test_factor_governance_effect_tracker_reconcile_marks_ineffective(tmp_path):
     db_path = tmp_path / "state.db"
+    now = time.time()
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
-        now = _insert_pruning_suggestion(conn)
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, bias_multiplier,
-             old_weight, new_weight, suggestion_ids_json, status, details_json, created_at)
-            VALUES ('app_effect_bad', ?, 'factor', 'dsl_auto_effect', 'downweight',
-                    0.82, 0.01, 0.0082, ?, 'observing', '{}', ?)
-            """,
-            (now, json.dumps(["brain_bridge_effect"]), now),
-        )
+        _insert_pruning_suggestion(conn)
         for idx in range(2):
             conn.execute(
                 """
@@ -124,6 +112,7 @@ def test_factor_governance_effect_tracker_reconcile_marks_ineffective(tmp_path):
         conn.commit()
     finally:
         conn.close()
+    _seed_observing_application(db_path, "brain_bridge_effect", "dsl_auto_effect", "observing", now)
 
     result = FactorGovernanceEffectTrackerService(db_path).reconcile(limit=10)
 

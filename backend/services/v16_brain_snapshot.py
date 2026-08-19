@@ -28,6 +28,11 @@ from backend.services._brain_helpers import (
     safe_float,
     text,
 )
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    iter_review_rows,
+    review_row,
+)
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.state_payload_archive import load_json_payload
 from backend.services.supervisor_payload_contract import (
@@ -317,14 +322,12 @@ def _build_correction_contract(
     *,
     fingerprint: str,
     selected: dict[str, Any],
-    dimension_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project posterior evidence into the existing V16 policy JSON boundary.
 
-    The default is deliberately non-executable.  A caller may provide an
-    already governed dimension fact, but it must explicitly prove that the
-    downstream effect is executable; source coverage alone never becomes a
-    production patch here.
+    The contract is deliberately non-executable: every dimension defaults to
+    ``no_change`` because none of the v16 callers supply governed dimension
+    facts (the former ``dimension_evidence`` projection was never reached).
     """
     refs: list[str] = []
     for key in ("source_ref_id", "review_id", "trade_id", "position_id"):
@@ -362,31 +365,6 @@ def _build_correction_contract(
             }
         )
 
-    for name, raw in dict(dimension_evidence or {}).items():
-        if name not in dimensions or not isinstance(raw, dict):
-            continue
-        item = dict(raw)
-        evidence_status = str(item.get("evidence_status") or "missing")
-        causal_state = str(item.get("causal_state") or "unobservable")
-        requested_action = str(item.get("action") or "no_change")
-        executable_allowed = bool(item.get("executable_allowed"))
-        action = requested_action if executable_allowed else "no_change"
-        reason = str(item.get("reason") or "")
-        if requested_action != "no_change" and not executable_allowed:
-            reason = reason or "dimension_evidence_not_governed_for_execution"
-        dimensions[name] = {
-            "evidence_status": evidence_status,
-            "causal_state": causal_state,
-            "action": action,
-            "confidence": item.get("confidence"),
-            "applicable_generation": item.get("applicable_generation"),
-            "applicable_regime": item.get("applicable_regime"),
-            "evidence_refs": list(item.get("evidence_refs") or []),
-            "expected_effect": item.get("expected_effect"),
-            "rollback_plan": item.get("rollback_plan"),
-            "reason": reason or "dimension_fact_projected_without_direct_mutation",
-        }
-
     policy_decision_id = "pd_" + hashlib.sha256(
         f"{fingerprint}:v16_brain_policy_decision.v1".encode("utf-8")
     ).hexdigest()[:24]
@@ -399,11 +377,13 @@ def _build_correction_contract(
     }
 
 
+_SUPERVISOR_WEAK_CONFIDENCE_THRESHOLD = 0.3
+
+
 def build_posterior_arbitration(
     *,
     trade_reviews: list[dict[str, Any]] | None = None,
     counterfactuals: list[dict[str, Any]] | None = None,
-    dimension_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Select the strongest post-close conclusion by causal scope.
 
@@ -411,10 +391,17 @@ def build_posterior_arbitration(
     future path independently proves that a supervisor intervention was too
     early.  Those are not competing labels.  V16 must keep both facts and
     dispatch each conclusion to the agent that owns that surface.
+
+    A3 fix: Lower the supervisor confidence threshold from 0.5 to 0.3 so
+    that weak-but-real counterfactuals can still generate posterior memory
+    items (with proportionally lower evidence_score).  This allows the
+    brain to accumulate posterior evidence even when individual
+    counterfactuals are not yet high-confidence.
     """
     reviews = [dict(item) for item in (trade_reviews or []) if isinstance(item, dict)]
     cfs = [dict(item) for item in (counterfactuals or []) if isinstance(item, dict)]
     supervisor_items: list[dict[str, Any]] = []
+    weak_supervisor_items: list[dict[str, Any]] = []
     for item in cfs:
         label = str(item.get("label") or "")
         mapped = _SUPERVISOR_COUNTERFACTUAL_ACTIONS.get(label)
@@ -422,23 +409,38 @@ def build_posterior_arbitration(
         confidence = max(0.0, min(1.0, safe_float(item.get("confidence"))))
         evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
         tags = list(evidence.get("tags") or [])
-        if not mapped or confidence < 0.5 or not horizons:
+        if not mapped:
             continue
-        supervisor_items.append({
+        # A3: accept confidence >= 0.3 for weak posterior channel (down from 0.5)
+        if confidence < _SUPERVISOR_WEAK_CONFIDENCE_THRESHOLD or not horizons:
+            continue
+        is_weak = confidence < 0.5
+        item_data = {
             "causal_scope": "supervisor",
             "conclusion": mapped[0],
             "recommended_action": mapped[1],
             "counterfactual_label": label,
             "confidence": confidence,
-            "evidence_score": round(confidence * (1.0 if "no_future_bars" not in tags else 0.5), 6),
+            "evidence_score": round(confidence * (0.6 if is_weak else 1.0) * (1.0 if "no_future_bars" not in tags else 0.5), 6),
             "source_ref_type": "supervisor_counterfactual_review",
             "source_ref_id": str(item.get("counterfactual_id") or ""),
             "position_id": str(item.get("position_id") or ""),
             "review_id": str(item.get("review_id") or ""),
             "trade_id": str(item.get("trade_id") or ""),
             "evidence_tags": tags,
-        })
-    supervisor = max(supervisor_items, key=lambda item: item["evidence_score"]) if supervisor_items else {}
+            "weak_posterior": is_weak,
+        }
+        if is_weak:
+            weak_supervisor_items.append(item_data)
+        else:
+            supervisor_items.append(item_data)
+    # Prefer strong evidence; fall back to weak if nothing stronger exists
+    if supervisor_items:
+        supervisor = max(supervisor_items, key=lambda item: item["evidence_score"])
+    elif weak_supervisor_items:
+        supervisor = max(weak_supervisor_items, key=lambda item: item["evidence_score"])
+    else:
+        supervisor = {}
 
     entry = {}
     related_reviews = reviews
@@ -491,10 +493,11 @@ def build_posterior_arbitration(
         )
         outcome = str(review.get("outcome_label") or review_json.get("outcome_label") or "")
         tags = list(failure_tags)
+        pnl = safe_float(review.get("pnl", review_json.get("pnl")))
         if primary or outcome or tags:
             entry = {
                 "causal_scope": "entry",
-                "conclusion": "entry_or_thesis_failure" if safe_float(review.get("pnl", review_json.get("pnl"))) < 0 else "entry_supported",
+                "conclusion": "entry_or_thesis_failure" if pnl < 0 else "entry_supported",
                 "primary_responsibility": primary,
                 "outcome_label": outcome,
                 "failure_tags": tags,
@@ -504,6 +507,7 @@ def build_posterior_arbitration(
                 "source_ref_id": str(review.get("review_id") or ""),
                 "position_id": str(review.get("position_id") or ""),
                 "trade_id": str(review.get("trade_id") or ""),
+                "pnl": pnl,
             }
 
     # A successful/neutral trade review is useful context but is not an entry
@@ -511,6 +515,39 @@ def build_posterior_arbitration(
     # agent; a mature counterfactual can still independently select the
     # supervisor agent for the same position.
     entry_actionable = entry if entry.get("conclusion") == "entry_or_thesis_failure" else {}
+    # A4: positive entry memory — wins with good attribution produce
+    # positive reinforcement so the system can learn "how to win", not
+    # only "how to lose".  A positive entry is not an actionable
+    # correction but becomes a positive_entry memory item downstream.
+    positive_entry = {}
+    if (
+        entry
+        and entry.get("conclusion") == "entry_supported"
+        and safe_float(entry.get("pnl")) > 0
+    ):
+        # Positive trades are useful when they have a clear primary factor
+        # responsibility (not execution_timing / operator_intervention /
+        # data_quality which are system noise, not strategy signal).
+        positive_primary = str(entry.get("primary_responsibility") or "")
+        _POSITIVE_ENTRY_BLOCKED_RESPONSIBILITIES = frozenset({
+            "execution_timing", "operator_intervention", "data_quality",
+            "system", "exit", "holding",
+        })
+        if positive_primary and positive_primary not in _POSITIVE_ENTRY_BLOCKED_RESPONSIBILITIES:
+            positive_entry = {
+                "causal_scope": "entry",
+                "conclusion": "positive_entry_reinforcement",
+                "primary_responsibility": positive_primary,
+                "outcome_label": str(entry.get("outcome_label") or ""),
+                "failure_tags": [],
+                "confidence": 0.65,
+                "evidence_score": 0.60,
+                "source_ref_type": "trade_outcome_review",
+                "source_ref_id": str(entry.get("source_ref_id") or ""),
+                "position_id": str(entry.get("position_id") or ""),
+                "trade_id": str(entry.get("trade_id") or ""),
+                "pnl": safe_float(entry.get("pnl")),
+            }
     selected = supervisor or entry_actionable
     selected_scope = str(selected.get("causal_scope") or "")
     conflicts = []
@@ -525,27 +562,34 @@ def build_posterior_arbitration(
         "selected": selected,
         "entry": entry,
         "supervisor": supervisor,
+        "positive_entry": positive_entry,
     }
     fingerprint = hashlib.sha256(
         json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()[:24]
+    # Determine selection reason including positive entry channel
+    if supervisor:
+        selection_reason = "mature_counterfactual_has_highest_causal_evidence"
+    elif entry_actionable:
+        selection_reason = "trade_outcome_review_is_current_best_source"
+    elif positive_entry:
+        selection_reason = "positive_trade_reinforcement"
+    else:
+        selection_reason = "no_actionable_posterior"
     return {
         "schema_version": "posterior_arbitration.v1",
-        "status": "actionable" if selected else "needs_evidence",
+        "status": "actionable" if selected else "positive" if positive_entry else "needs_evidence",
         "selected_scope": selected_scope,
         "selected_conclusion": selected,
         "entry_conclusion": entry,
         "supervisor_conclusion": supervisor,
+        "positive_entry_conclusion": positive_entry,
         "conflicts": conflicts,
-        "selection_reason": (
-            "mature_counterfactual_has_highest_causal_evidence"
-            if supervisor else "trade_outcome_review_is_current_best_source" if entry_actionable else "no_actionable_posterior"
-        ),
+        "selection_reason": selection_reason,
         "fingerprint": fingerprint,
         "correction_contract": _build_correction_contract(
             fingerprint=fingerprint,
             selected=selected,
-            dimension_evidence=dimension_evidence,
         ),
         "authority": {
             "v16_role": "judge_and_dispatch_only",
@@ -1296,8 +1340,35 @@ class BrainMemoryService:
     def _posterior_memory_item(self, arbitration: dict[str, Any]) -> dict[str, Any] | None:
         selected = dict(arbitration.get("selected_conclusion") or {})
         fingerprint = str(arbitration.get("fingerprint") or "")
-        if not selected or not fingerprint:
+        if not fingerprint:
             return None
+
+        # A4: positive entry memory — when there is no actionable correction
+        # (loss or counterfactual), but there IS a positive entry reinforcement,
+        # generate a memory item so the system can learn "how to win".
+        positive_entry = dict(arbitration.get("positive_entry_conclusion") or {})
+        if not selected and positive_entry:
+            return self._item(
+                source_table="posterior_arbitration",
+                source_id=fingerprint,
+                memory_type="positive_entry",
+                text_summary=f"entry positive_entry_reinforcement {str(positive_entry.get('primary_responsibility') or '')}",
+                structured={
+                    "final_memory": True,
+                    "posterior_arbitration": arbitration,
+                    "positive_entry": positive_entry,
+                    "action_owner": "autonomous_learning",
+                    "allowed_uses": ["memory_retrieval", "critic_context", "positive_reinforcement"],
+                },
+                evidence_score=max(0.0, min(1.0, safe_float(positive_entry.get("evidence_score", 0.6)))),
+                polarity="positive",
+                created_at=time.time(),
+                terms=set(),
+            )
+
+        if not selected:
+            return None
+
         scope = str(selected.get("causal_scope") or arbitration.get("selected_scope") or "")
         conclusion = str(selected.get("conclusion") or "")
         action = str(selected.get("recommended_action") or "hold")
@@ -1456,15 +1527,30 @@ class BrainMemoryService:
                              SELECT experience_id FROM experience_memory
                          )""",
                 )
-            if state_table_exists(conn, "trade_outcome_review"):
-                execute(
-                    conn,
-                    """DELETE FROM brain_memory
-                       WHERE source_table='trade_outcome_review'
-                         AND source_id NOT IN (
-                             SELECT review_id FROM trade_outcome_review
-                       )""",
-                )
+            if canonical_ready(conn) or state_table_exists(conn, "trade_outcome_review"):
+                if canonical_ready(conn):
+                    review_ids = {
+                        str(r.get("review_id") or "") for r in iter_review_rows(conn, limit=0)
+                    }
+                    review_ids.discard("")
+                    if review_ids:
+                        placeholders = ",".join("?" for _ in review_ids)
+                        execute(
+                            conn,
+                            f"""DELETE FROM brain_memory
+                               WHERE source_table='trade_outcome_review'
+                                 AND source_id NOT IN ({placeholders})""",
+                            tuple(review_ids),
+                        )
+                else:
+                    execute(
+                        conn,
+                        """DELETE FROM brain_memory
+                           WHERE source_table='trade_outcome_review'
+                             AND source_id NOT IN (
+                                 SELECT review_id FROM trade_outcome_review
+                           )""",
+                    )
             for item in items:
                 persisted_item = _persisted_memory_item(item)
                 execute(
@@ -1500,16 +1586,35 @@ class BrainMemoryService:
         if not state_table_exists(conn, "experience_memory"):
             gaps.append("experience_memory")
             return []
-        archive_select = _review_archive_select(conn)
-        rows = execute(conn, f"""SELECT e.experience_id, e.trade_id, e.source_table, e.source_id,
+        memory_rows = execute(conn, """SELECT e.experience_id, e.trade_id, e.source_table, e.source_id,
             e.regime_id, e.decision_context_json, e.outcome_label, e.reward_score,
             e.failure_tags_json, e.recommended_action, e.evidence_strength,
-            e.append_source, e.artifact_version, e.created_at,
-            r.review_id AS source_review_id, r.review_json AS source_review_json{archive_select}
+            e.append_source, e.artifact_version, e.created_at
             FROM experience_memory e
-            LEFT JOIN trade_outcome_review r ON r.review_id=e.source_id
             WHERE e.append_source='trade_lesson_memory.v1'
             ORDER BY e.created_at DESC""").fetchall()
+        if canonical_ready(conn):
+            built: list[dict[str, Any]] = []
+            for item in memory_rows:
+                value = dict(item)
+                source_id = str(value.get("source_id") or "")
+                review = review_row(conn, source_id) if source_id else None
+                value["source_review_id"] = source_id if review is not None else ""
+                value["source_review_json"] = (review or {}).get("review_json") or {}
+                value["source_review_archive_hash"] = ""
+                built.append(value)
+            rows = built
+        else:
+            archive_select = _review_archive_select(conn)
+            rows = execute(conn, f"""SELECT e.experience_id, e.trade_id, e.source_table, e.source_id,
+                e.regime_id, e.decision_context_json, e.outcome_label, e.reward_score,
+                e.failure_tags_json, e.recommended_action, e.evidence_strength,
+                e.append_source, e.artifact_version, e.created_at,
+                r.review_id AS source_review_id, r.review_json AS source_review_json{archive_select}
+                FROM experience_memory e
+                LEFT JOIN trade_outcome_review r ON r.review_id=e.source_id
+                WHERE e.append_source='trade_lesson_memory.v1'
+                ORDER BY e.created_at DESC""").fetchall()
         items = []
         for row in rows:
             source_review = _review_payload_from_row(
@@ -1569,13 +1674,17 @@ class BrainMemoryService:
         return items
 
     def _trade_outcome_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
-        if not state_table_exists(conn, "trade_outcome_review"):
+        if not canonical_ready(conn) and not state_table_exists(conn, "trade_outcome_review"):
             gaps.append("trade_outcome_review")
             return []
-        archive_select = _review_archive_select(conn, output="review_archive_hash")
-        rows = execute(conn, f"""SELECT review_id, trade_id, position_id, entry_decision_id, pnl,
-            outcome_label, failure_tags_json, summary_text, review_json, created_at{archive_select}
-            FROM trade_outcome_review AS r ORDER BY created_at DESC""").fetchall()
+        if canonical_ready(conn):
+            rows = iter_review_rows(conn, limit=0)
+            rows.sort(key=lambda r: float(r.get("created_at") or 0.0), reverse=True)
+        else:
+            archive_select = _review_archive_select(conn, output="review_archive_hash")
+            rows = execute(conn, f"""SELECT review_id, trade_id, position_id, entry_decision_id, pnl,
+                outcome_label, failure_tags_json, summary_text, review_json, created_at{archive_select}
+                FROM trade_outcome_review AS r ORDER BY created_at DESC""").fetchall()
         items = []
         for row in rows:
             tags = loads(row["failure_tags_json"], [])
@@ -1626,17 +1735,34 @@ class BrainMemoryService:
         if not state_table_exists(conn, "supervisor_counterfactual_review"):
             gaps.append("supervisor_counterfactual_review")
             return []
-        archive_select = _review_archive_select(conn)
-        rows = execute(conn, f"""SELECT c.counterfactual_id, c.review_id, c.trade_id, c.position_id,
+        cf_rows = execute(conn, """SELECT c.counterfactual_id, c.review_id, c.trade_id, c.position_id,
             c.close_ts, c.close_reason, c.supervisor_event_type, c.supervisor_reason, c.label,
-            c.confidence, c.horizons_json, c.evidence_json, c.created_at, c.updated_at,
-            r.review_id AS source_review_id, r.review_json AS source_review_json{archive_select}
-            -- close_ts is the event-time ordering.  updated_at is only the
-            -- batch/recompute timestamp and must not decide which posterior
-            -- enters the brain's bounded evidence window.
+            c.confidence, c.horizons_json, c.evidence_json, c.created_at, c.updated_at
             FROM supervisor_counterfactual_review c
-            LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
             ORDER BY c.close_ts DESC, c.updated_at DESC""").fetchall()
+        if canonical_ready(conn):
+            built: list[dict[str, Any]] = []
+            for item in cf_rows:
+                value = dict(item)
+                review_id = str(value.get("review_id") or "")
+                review = review_row(conn, review_id) if review_id else None
+                value["source_review_id"] = review_id if review is not None else ""
+                value["source_review_json"] = (review or {}).get("review_json") or {}
+                value["source_review_archive_hash"] = ""
+                built.append(value)
+            rows = built
+        else:
+            archive_select = _review_archive_select(conn)
+            rows = execute(conn, f"""SELECT c.counterfactual_id, c.review_id, c.trade_id, c.position_id,
+                c.close_ts, c.close_reason, c.supervisor_event_type, c.supervisor_reason, c.label,
+                c.confidence, c.horizons_json, c.evidence_json, c.created_at, c.updated_at,
+                r.review_id AS source_review_id, r.review_json AS source_review_json{archive_select}
+                -- close_ts is the event-time ordering.  updated_at is only the
+                -- batch/recompute timestamp and must not decide which posterior
+                -- enters the brain's bounded evidence window.
+                FROM supervisor_counterfactual_review c
+                LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
+                ORDER BY c.close_ts DESC, c.updated_at DESC""").fetchall()
         items = []
         for row in rows:
             if (

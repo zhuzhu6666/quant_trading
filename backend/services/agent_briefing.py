@@ -4,11 +4,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, state_table_columns
+from backend.core.db import STATE_DB
 from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services._brain_helpers import connect as _connect, execute as _execute, loads as _loads
+from backend.services.canonical_v2_reader import review_row
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.state_payload_archive import load_json_payload
 from backend.services.v16_brain_snapshot import BrainMemoryService
@@ -20,11 +21,29 @@ class AgentBriefingContextService:
     def __init__(self, db_path: str | Path = STATE_DB):
         self.db_path = db_path
 
-    @staticmethod
-    def _review_archive_select(conn: Any) -> str:
-        if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
-            return ""
-        return ", r.review_archive_hash AS source_review_archive_hash"
+    def _reviews_attached(self, conn: Any, rows: list[Any]) -> list[dict[str, Any]]:
+        """Inner-join semantics against canonical review facts per row."""
+        combined: list[dict[str, Any]] = []
+        for row in rows:
+            source_id = str(row["source_id"] or "") if "source_id" in (row.keys() if hasattr(row, "keys") else ()) else ""
+            review = review_row(conn, source_id)
+            if review is None:
+                continue
+            combined.append(
+                {
+                    **dict(row),
+                    "source_review_id": source_id,
+                    "source_trade_id": str(review.get("trade_id") or ""),
+                    "source_position_id": str(review.get("position_id") or ""),
+                    "source_pnl": review.get("pnl"),
+                    "source_outcome_label": str(review.get("outcome_label") or ""),
+                    "source_failure_tags_json": review.get("failure_tags_json") or "[]",
+                    "source_created_at": review.get("created_at"),
+                    "source_review_json": review.get("review_json") or {},
+                    "source_review_archive_hash": "",
+                }
+            )
+        return combined
 
     @staticmethod
     def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
@@ -226,16 +245,8 @@ class AgentBriefingContextService:
                 SELECT e.experience_id, e.trade_id, e.regime_id, e.outcome_label,
                        e.reward_score, e.failure_tags_json, e.recommended_action,
                        e.evidence_strength, e.decision_context_json, e.created_at,
-                       r.review_id AS source_review_id, r.trade_id AS source_trade_id,
-                       r.position_id AS source_position_id, r.pnl AS source_pnl,
-                       r.outcome_label AS source_outcome_label,
-                       r.failure_tags_json AS source_failure_tags_json,
-                       r.created_at AS source_created_at,
-                       r.review_json AS source_review_json{self._review_archive_select(conn)}
+                       e.source_id
                 FROM experience_memory e
-                JOIN trade_outcome_review r
-                  ON e.source_table='trade_outcome_review'
-                 AND r.review_id=e.source_id
                 WHERE e.append_source='trade_lesson_memory.v1'
                 {"AND " + where[6:] if where else ""}
                 ORDER BY e.evidence_strength DESC, e.created_at DESC
@@ -243,6 +254,7 @@ class AgentBriefingContextService:
                 """,
                 (*params, min(200, max(limit, limit * 5))),
             ).fetchall()
+            rows = self._reviews_attached(conn, rows)
             result = []
             for row in rows:
                 review_json = self._review_payload(conn, row)

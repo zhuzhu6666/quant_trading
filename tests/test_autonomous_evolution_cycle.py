@@ -39,7 +39,6 @@ def _create_core_tables(db_path, *, include_replay: bool, include_effect: bool) 
         for table in [
             "decision_ledger",
             "trade_outcome_review",
-            "autonomous_learning_sample",
             "experience_memory",
             "learning_application_log",
             "learning_application_effect",
@@ -49,11 +48,21 @@ def _create_core_tables(db_path, *, include_replay: bool, include_effect: bool) 
         for table in [
             "decision_ledger",
             "trade_outcome_review",
-            "autonomous_learning_sample",
             "experience_memory",
             "learning_application_log",
         ]:
             conn.execute(f"INSERT INTO {table} (id, created_at) VALUES (?, ?)", (f"{table}_1", now))
+        from tests.canonical_fixture import create_training_sample_row_tables
+        create_training_sample_row_tables(conn)
+        conn.execute(
+            """
+            INSERT INTO training_sample_row
+            (sample_id, sample_type, source_table, source_id, event_ts, label_status,
+             integrity, train_weight, created_at, updated_at)
+            VALUES (?, 'shadow_open_decision', 'decision_ledger', ?, ?, 'matured', 'full', 1.0, ?, ?)
+            """,
+            (f"sample_{now}", f"dec_{now}", now, now, now),
+        )
         if include_replay:
             conn.execute("INSERT INTO replay_report (id, created_at) VALUES (?, ?)", ("replay_1", now))
         if include_effect:

@@ -324,33 +324,6 @@ def test_learning_repair_tracks_active_applied_supervisor_cohort(tmp_path):
                 ),
             ],
         )
-        conn.executemany(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status,
-             mutation_id, created_at, updated_at)
-            VALUES (?, 'position_supervisor_template', ?,
-                    'switch_position_supervisor_template', ?, ?, ?, ?)
-            """,
-            [
-                (
-                    "effect_old",
-                    "position_supervisor:old.v1",
-                    "rolled_back",
-                    "mutation_old",
-                    candidate_started_at - 86399,
-                    candidate_started_at - 86399,
-                ),
-                (
-                    "effect_current",
-                    "position_supervisor:current.v1",
-                    "observing",
-                    "mutation_current",
-                    candidate_started_at + 1,
-                    candidate_started_at + 1,
-                ),
-            ],
-        )
         conn.execute(
             """
             INSERT INTO policy_suggestion
@@ -403,6 +376,35 @@ def test_learning_repair_tracks_active_applied_supervisor_cohort(tmp_path):
         conn.commit()
     finally:
         conn.close()
+
+    from backend.services.learning_application_store import LearningApplicationStore
+
+    store = LearningApplicationStore(db_path)
+    for application_id, scope_key, status, mutation_id, ts in [
+        (
+            "effect_old",
+            "position_supervisor:old.v1",
+            "rolled_back",
+            "mutation_old",
+            candidate_started_at - 86399,
+        ),
+        (
+            "effect_current",
+            "position_supervisor:current.v1",
+            "observing",
+            "mutation_current",
+            candidate_started_at + 1,
+        ),
+    ]:
+        store.write_effect(
+            application_id=application_id,
+            scope_type="position_supervisor_template",
+            scope_key=scope_key,
+            action="switch_position_supervisor_template",
+            status=status,
+            mutation_id=mutation_id,
+            updated_at=ts,
+        )
 
     rc.replace(
         rc.RuntimeConfig(

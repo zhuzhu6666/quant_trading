@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from backend.core.db import connect_sqlite
-from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.agent_authority import AgentAuthorityRegistryService
 
 
 def test_agent_authority_registry_lists_current_source_agents():

@@ -6,6 +6,15 @@ from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 from backend.services.factor_counter_evidence import FactorCounterEvidenceService
+from backend.services.learning_application_store import LearningApplicationStore
+
+from backend.core.db_helpers import (
+    load_json as _loads,
+    conn_is_pg as _conn_is_pg,
+    pg_sql as _sql,
+    execute as _execute,
+)
+
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -13,17 +22,6 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         if value is None:
             return default
         return float(value)
-    except Exception:
-        return default
-
-
-def _loads(raw: Any, default: Any) -> Any:
-    if raw is None:
-        return default
-    if isinstance(raw, (dict, list)):
-        return raw
-    try:
-        return json.loads(str(raw))
     except Exception:
         return default
 
@@ -37,20 +35,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _conn_is_pg(conn: Any) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn: Any, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn: Any, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
 
 
 class FactorGovernanceEffectTrackerService:
@@ -176,71 +160,60 @@ class FactorGovernanceEffectTrackerService:
     def _application_for_suggestion(self, conn: Any, suggestion_id: str) -> dict[str, Any]:
         if not suggestion_id or not state_table_exists(conn, "learning_application_log"):
             return {}
-        row = _execute(
-            conn,
-            """
-            SELECT application_id, cycle_ts, scope_type, scope_key, action, bias_multiplier,
-                   old_weight, new_weight, suggestion_ids_json, status, details_json, created_at
-            FROM learning_application_log
-            WHERE suggestion_ids_json LIKE ?
-            ORDER BY cycle_ts DESC, created_at DESC
-            LIMIT 1
-            """,
-            (f"%{suggestion_id}%",),
-        ).fetchone()
-        if not row:
+        store = LearningApplicationStore(str(self.db_path))
+        best: dict[str, Any] | None = None
+        best_key: tuple[float, float] | None = None
+        for app in store.iter_applications():
+            ids = [str(item) for item in (app.get("suggestion_ids") or [])]
+            if suggestion_id not in ids:
+                continue
+            created = _safe_float(app.get("created_at"))
+            key = (created, created)
+            if best_key is None or key > best_key:
+                best_key = key
+                best = app
+        if best is None:
             return {}
         return {
-            "application_id": str(row["application_id"] or ""),
-            "cycle_ts": _safe_float(row["cycle_ts"]),
-            "scope_type": str(row["scope_type"] or ""),
-            "scope_key": str(row["scope_key"] or ""),
-            "action": str(row["action"] or ""),
-            "bias_multiplier": _safe_float(row["bias_multiplier"], 1.0),
-            "old_weight": _safe_float(row["old_weight"]),
-            "new_weight": _safe_float(row["new_weight"]),
-            "status": str(row["status"] or ""),
-            "details": _loads(row["details_json"], {}),
-            "created_at": _safe_float(row["created_at"]),
+            "application_id": str(best.get("application_id") or ""),
+            "cycle_ts": _safe_float(best.get("created_at")),
+            "scope_type": str(best.get("scope_type") or ""),
+            "scope_key": str(best.get("scope_key") or ""),
+            "action": str(best.get("action") or ""),
+            "bias_multiplier": _safe_float(best.get("bias_multiplier"), 1.0),
+            "old_weight": _safe_float(best.get("old_weight")),
+            "new_weight": _safe_float(best.get("new_weight")),
+            "status": str(best.get("status") or ""),
+            "details": dict(best.get("details") or {}),
+            "created_at": _safe_float(best.get("created_at")),
         }
 
     def _effect_for_application(self, conn: Any, application_id: str) -> dict[str, Any]:
         if not application_id or not state_table_exists(conn, "learning_application_effect"):
             return {}
-        row = _execute(
-            conn,
-            """
-            SELECT application_id, scope_type, scope_key, action, status,
-                   observed_trade_count, baseline_trade_count,
-                   post_avg_reward, baseline_avg_reward, delta_avg_reward,
-                   post_win_rate, baseline_win_rate, decision_json,
-                   last_review_at, updated_at, created_at
-            FROM learning_application_effect
-            WHERE application_id=?
-            LIMIT 1
-            """,
-            (application_id,),
-        ).fetchone()
-        if not row:
-            return {}
-        return {
-            "application_id": str(row["application_id"] or ""),
-            "scope_type": str(row["scope_type"] or ""),
-            "scope_key": str(row["scope_key"] or ""),
-            "action": str(row["action"] or ""),
-            "status": str(row["status"] or ""),
-            "observed_trade_count": int(_safe_float(row["observed_trade_count"])),
-            "baseline_trade_count": int(_safe_float(row["baseline_trade_count"])),
-            "post_avg_reward": _safe_float(row["post_avg_reward"]),
-            "baseline_avg_reward": _safe_float(row["baseline_avg_reward"]),
-            "delta_avg_reward": _safe_float(row["delta_avg_reward"]),
-            "post_win_rate": _safe_float(row["post_win_rate"]),
-            "baseline_win_rate": _safe_float(row["baseline_win_rate"]),
-            "decision": _loads(row["decision_json"], {}),
-            "last_review_at": _safe_float(row["last_review_at"]),
-            "updated_at": _safe_float(row["updated_at"]),
-            "created_at": _safe_float(row["created_at"]),
-        }
+        store = LearningApplicationStore(str(self.db_path))
+        for eff in store.iter_effects():
+            if str(eff.get("application_id") or "") != str(application_id or ""):
+                continue
+            return {
+                "application_id": str(eff.get("application_id") or ""),
+                "scope_type": str(eff.get("scope_type") or ""),
+                "scope_key": str(eff.get("scope_key") or ""),
+                "action": str(eff.get("action") or ""),
+                "status": str(eff.get("status") or ""),
+                "observed_trade_count": int(_safe_float(eff.get("observed_trade_count"))),
+                "baseline_trade_count": int(_safe_float(eff.get("baseline_trade_count"))),
+                "post_avg_reward": _safe_float(eff.get("post_avg_reward")),
+                "baseline_avg_reward": _safe_float(eff.get("baseline_avg_reward")),
+                "delta_avg_reward": _safe_float(eff.get("delta_avg_reward")),
+                "post_win_rate": _safe_float(eff.get("post_win_rate")),
+                "baseline_win_rate": _safe_float(eff.get("baseline_win_rate")),
+                "decision": dict(eff.get("decision") or {}),
+                "last_review_at": _safe_float(eff.get("last_review_at")),
+                "updated_at": _safe_float(eff.get("updated_at")),
+                "created_at": _safe_float(eff.get("created_at")),
+            }
+        return {}
 
     @staticmethod
     def _classify(

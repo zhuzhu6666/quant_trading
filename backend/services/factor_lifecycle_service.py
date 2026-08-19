@@ -1664,27 +1664,18 @@ class FactorLifecycleService:
         now: float,
     ) -> str:
         """Create the one observing real-effect window in the lifecycle commit."""
-        rows = conn.execute(
-            _p(
-                self.db_path,
-                """SELECT l.application_id,
-                          l.status AS application_status,
-                          e.status AS effect_status
-                   FROM learning_application_log l
-                   LEFT JOIN learning_application_effect e
-                     ON e.application_id=l.application_id
-                   WHERE l.scope_type='factor' AND l.scope_key=?""",
-            ),
-            (mutation.definition.name,),
-        ).fetchall()
-        for row in rows:
-            item = _row_dict(row)
-            if (
-                str(item.get("application_status") or "")
-                in ACTIVE_APPLICATION_STATUSES
-                or str(item.get("effect_status") or "")
-                in ACTIVE_EFFECT_STATUSES
-            ):
+        from backend.services.learning_application_store import LearningApplicationStore
+
+        # Reads go through the lean store; writes stay on the caller's live
+        # transaction connection so commit/rollback of the lifecycle stays atomic
+        # (a second write connection would contend for the SQLite lock).
+        store = LearningApplicationStore(str(self.db_path))
+        scope_key = str(mutation.definition.name or "")
+        latest = store.latest_application(scope_type="factor", scope_key=scope_key) if scope_key else None
+        if latest and str(latest.get("status") or "") in ACTIVE_APPLICATION_STATUSES:
+            raise FactorLifecycleError("factor_active_application_exists")
+        for effect in store.iter_effects(scope_key=scope_key, scope_type="factor"):
+            if str(effect.get("status") or "") in ACTIVE_EFFECT_STATUSES:
                 raise FactorLifecycleError("factor_active_application_exists")
 
         admission = dict(mutation.evidence_refs.get("admission_evidence") or {})
@@ -1707,27 +1698,36 @@ class FactorLifecycleService:
             "admission_evidence": admission,
             "effect_boundary": "real_application_required_for_weight_expansion",
         }
+        payload = dict(details)
+        payload.update(
+            {
+                "scope_type": "factor",
+                "scope_key": scope_key,
+                "action": "activate_factor_canary",
+                "bias_multiplier": 1.0,
+                "old_weight": 0.0,
+                "new_weight": float(mutation.weight or 0.0),
+                "suggestion_ids": [],
+                "mutation_id": mutation_id,
+                "governance_eligibility_version": "factor_admission_evidence.v1",
+                "run_id": "",
+                "source": str(mutation.source or ""),
+                "application_state": {
+                    "status": "applied",
+                    "prepared_at": now,
+                    "updated_at": now,
+                },
+            }
+        )
         conn.execute(
             _p(
                 self.db_path,
                 """INSERT INTO learning_application_log
-                   (application_id, cycle_ts, scope_type, scope_key, action,
-                    bias_multiplier, old_weight, new_weight,
-                    suggestion_ids_json, status, details_json, mutation_id,
-                    governance_eligibility_version, created_at)
-                   VALUES (?, ?, 'factor', ?, 'activate_factor_canary', 1.0,
-                           0.0, ?, '[]', 'applied', ?, ?,
-                           'factor_admission_evidence.v1', ?)""",
+                   (application_id, run_id, source, status, details_json,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, 'applied', ?, ?, ?)""",
             ),
-            (
-                application_id,
-                now,
-                mutation.definition.name,
-                float(mutation.weight or 0.0),
-                _json(details),
-                mutation_id,
-                now,
-            ),
+            (application_id, "", str(mutation.source or ""), _json(payload), now, now),
         )
         decision = {
             "schema_version": "factor_activation_canary_effect.v1",
@@ -1740,25 +1740,36 @@ class FactorLifecycleService:
                 "reason": "real_application_effect_not_mature",
             },
         }
+        effect_payload = {
+            "scope_type": "factor",
+            "scope_key": scope_key,
+            "action": "activate_factor_canary",
+            "status": "observing",
+            "observed_trade_count": 0,
+            "baseline_trade_count": int(validation.get("independent_mature_evidence_count") or 0),
+            "post_avg_reward": 0.0,
+            "baseline_avg_reward": 0.0,
+            "delta_avg_reward": None,
+            "post_win_rate": 0.0,
+            "baseline_win_rate": 0.0,
+            "decision": decision,
+            "mutation_id": mutation_id,
+            "governance_eligibility_version": "factor_admission_evidence.v1",
+            "last_review_at": 0.0,
+            "updated_at": now,
+        }
         conn.execute(
             _p(
                 self.db_path,
                 """INSERT INTO learning_application_effect
-                   (application_id, scope_type, scope_key, action, status,
-                    observed_trade_count, baseline_trade_count, decision_json,
-                    mutation_id, governance_eligibility_version,
-                    last_review_at, updated_at, created_at)
-                   VALUES (?, 'factor', ?, 'activate_factor_canary',
-                           'observing', 0, ?, ?, ?,
-                           'factor_admission_evidence.v1', 0.0, ?, ?)""",
+                   (effect_id, application_id, scope, effect_json, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
             ),
             (
+                f"effect_{uuid.uuid4().hex[:16]}",
                 application_id,
-                mutation.definition.name,
-                int(validation.get("independent_mature_evidence_count") or 0),
-                _json(decision),
-                mutation_id,
-                now,
+                scope_key,
+                _json(effect_payload),
                 now,
             ),
         )
@@ -1773,30 +1784,26 @@ class FactorLifecycleService:
         reason: str,
         now: float,
     ) -> None:
-        rows = conn.execute(
-            _p(
-                self.db_path,
-                """SELECT l.application_id, l.status AS application_status,
-                          e.status AS effect_status, e.decision_json
-                   FROM learning_application_log l
-                   LEFT JOIN learning_application_effect e
-                     ON e.application_id=l.application_id
-                   WHERE l.scope_type='factor' AND l.scope_key=?""",
-            ),
-            (factor_name,),
-        ).fetchall()
-        for row in rows:
-            item = _row_dict(row)
+        from backend.services.learning_application_store import LearningApplicationStore
+
+        # Read the surviving real effects through the lean store (parses
+        # effect_json); terminalize both rows on the caller's transaction conn.
+        store = LearningApplicationStore(str(self.db_path))
+        _EFFECT_META = ("effect_id", "application_id", "scope", "created_at")
+        for effect in store.iter_effects(scope_key=factor_name, scope_type="factor"):
+            application_id = str(effect.get("application_id") or "")
+            if not application_id:
+                continue
+            application = store.get_application(application_id)
+            if not application:
+                continue
             active = (
-                str(item.get("application_status") or "")
-                in ACTIVE_APPLICATION_STATUSES
-                or str(item.get("effect_status") or "")
-                in ACTIVE_EFFECT_STATUSES
+                str(application.get("status") or "") in ACTIVE_APPLICATION_STATUSES
+                or str(effect.get("status") or "") in ACTIVE_EFFECT_STATUSES
             )
             if not active:
                 continue
-            application_id = str(item.get("application_id") or "")
-            decision = _loads(item.get("decision_json"))
+            decision = dict(effect.get("decision") or {})
             decision.update(
                 {
                     "status": "rolled_back",
@@ -1805,25 +1812,47 @@ class FactorLifecycleService:
                     "terminalized_at": now,
                 }
             )
-            conn.execute(
-                _p(
-                    self.db_path,
-                    """UPDATE learning_application_effect
-                       SET status='rolled_back', decision_json=?, mutation_id=?,
-                           last_review_at=?, updated_at=?
-                       WHERE application_id=?""",
-                ),
-                (_json(decision), mutation_id, now, now, application_id),
+            effect_data = {
+                key: value
+                for key, value in effect.items()
+                if key not in _EFFECT_META
+            }
+            effect_data.update(
+                {
+                    "decision": decision,
+                    "status": "rolled_back",
+                    "mutation_id": mutation_id,
+                    "last_review_at": now,
+                    "updated_at": now,
+                }
             )
             conn.execute(
                 _p(
                     self.db_path,
-                    """UPDATE learning_application_log
-                       SET status='rolled_back', mutation_id=?
-                       WHERE application_id=?""",
+                    "UPDATE learning_application_effect SET effect_json=? WHERE application_id=?",
                 ),
-                (mutation_id, application_id),
+                (_json(effect_data), application_id),
             )
+            row = conn.execute(
+                _p(
+                    self.db_path,
+                    "SELECT details_json FROM learning_application_log WHERE application_id=?",
+                ),
+                (application_id,),
+            ).fetchone()
+            if row is not None:
+                details = _loads(_row_dict(row).get("details_json"))
+                details["mutation_id"] = mutation_id
+                lifecycle = dict(details.get("application_state") or {})
+                lifecycle.update({"status": "rolled_back", "updated_at": now})
+                details["application_state"] = lifecycle
+                conn.execute(
+                    _p(
+                        self.db_path,
+                        "UPDATE learning_application_log SET status='rolled_back', details_json=? WHERE application_id=?",
+                    ),
+                    (_json(details), application_id),
+                )
 
     def _publish_committed(self, config: RuntimeConfig, transaction: dict[str, Any]) -> None:
         mutation_id = str(transaction.get("mutation_id") or "")
@@ -2411,38 +2440,18 @@ class FactorLifecycleService:
                 );
                 CREATE TABLE IF NOT EXISTS learning_application_log (
                     application_id TEXT PRIMARY KEY,
-                    cycle_ts REAL NOT NULL DEFAULT 0.0,
-                    scope_type TEXT NOT NULL,
-                    scope_key TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    bias_multiplier REAL DEFAULT 1.0,
-                    old_weight REAL DEFAULT 0.0,
-                    new_weight REAL DEFAULT 0.0,
-                    suggestion_ids_json TEXT DEFAULT '[]',
-                    status TEXT DEFAULT 'applied',
-                    details_json TEXT DEFAULT '{}',
-                    mutation_id TEXT NOT NULL DEFAULT '',
-                    governance_eligibility_version TEXT NOT NULL DEFAULT '',
-                    created_at REAL NOT NULL DEFAULT 0.0
+                    run_id TEXT DEFAULT '',
+                    source TEXT DEFAULT '',
+                    status TEXT DEFAULT 'prepared',
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL DEFAULT 0.0,
+                    updated_at REAL DEFAULT 0.0
                 );
                 CREATE TABLE IF NOT EXISTS learning_application_effect (
-                    application_id TEXT PRIMARY KEY,
-                    scope_type TEXT NOT NULL,
-                    scope_key TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    status TEXT DEFAULT 'observing',
-                    observed_trade_count INTEGER DEFAULT 0,
-                    baseline_trade_count INTEGER DEFAULT 0,
-                    post_avg_reward REAL DEFAULT 0.0,
-                    baseline_avg_reward REAL DEFAULT 0.0,
-                    delta_avg_reward REAL DEFAULT 0.0,
-                    post_win_rate REAL DEFAULT 0.0,
-                    baseline_win_rate REAL DEFAULT 0.0,
-                    decision_json TEXT DEFAULT '{}',
-                    mutation_id TEXT NOT NULL DEFAULT '',
-                    governance_eligibility_version TEXT NOT NULL DEFAULT '',
-                    last_review_at REAL DEFAULT 0.0,
-                    updated_at REAL NOT NULL DEFAULT 0.0,
+                    effect_id TEXT PRIMARY KEY,
+                    application_id TEXT NOT NULL DEFAULT '',
+                    scope TEXT DEFAULT '',
+                    effect_json TEXT NOT NULL DEFAULT '{}',
                     created_at REAL NOT NULL DEFAULT 0.0
                 );
                 """

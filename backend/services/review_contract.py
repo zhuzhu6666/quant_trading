@@ -24,6 +24,51 @@ SYSTEM_CONTAMINATION_LABELS = {
 
 ADVISORY_ONLY_HEALTH_COMPONENTS: set[str] = set()
 
+# B2: canonical responsibility-domain vocabulary.  system-issue override
+# domains (operator_intervention / execution_timing / data_quality) and the
+# failure-taxonomy domains share one enumeration so no consumer can hold a
+# different responsibility vocabulary.
+RESPONSIBILITY_DOMAINS = frozenset(
+    {
+        # system-issue override domains
+        "operator_intervention",
+        "execution_timing",
+        "data_quality",
+        # failure-taxonomy domains
+        "timing",
+        "event_risk",
+        "execution",
+        "exit",
+        "signal_quality",
+        "factor_conflict",
+        "reward_risk",
+        "regime",
+        "parameter",
+        "thesis",
+        "holding",
+        "unclear",
+        # catch-all used by the governance mutation / audit surfaces
+        "system",
+    }
+)
+
+# B1: responsibilities that must never downweight or penalize a factor.  A bad
+# loss caused by these domains is a system/process defect, not evidence against
+# the alpha factor itself.  Shared by the failure taxonomy, counter-evidence,
+# and experience_builder so the exclusion list cannot drift.
+NON_FACTOR_RESPONSIBILITIES = frozenset(
+    {
+        "exit",
+        "holding",
+        "execution",
+        "execution_timing",
+        "operator_intervention",
+        "data_quality",
+        "system",
+        "parameter",
+    }
+)
+
 
 def trusted_broker_close_price(payload: dict[str, Any] | None) -> float | None:
     value = payload or {}
@@ -37,6 +82,47 @@ def trusted_broker_close_price(payload: dict[str, Any] | None) -> float | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return price if math.isfinite(price) and price > 0.0 else None
+
+
+def classify_4label_outcome(
+    *,
+    pnl: float,
+    entry_score: float = 0.0,
+    positive_share: float | None = None,
+    has_entry_context: bool = False,
+    has_attribution: bool = False,
+    pos_mc: float = 0.0,
+    neg_mc: float = 0.0,
+    factor_conflict_ratio: float | None = None,
+    effective_alpha_factor_count: int = 0,
+) -> tuple[str, bool, bool, bool]:
+    """Single authoritative 4-label outcome classifier (A2, reviewer 口径).
+
+    Returns ``(outcome_label, conflict, weak_entry, avoidable_entry)``.
+
+    Profit requires attribution proof: ``positive_share >= 0.55`` is a
+    ``good_win``; any profit without that evidence is a ``lucky_win``.  Losses
+    are ``bad_loss`` when entry conviction ``>= 0.55`` or the entry was
+    avoidable, otherwise ``good_loss``.  Every producer of outcome labels for
+    canonical ``trade_review`` must go through this rule so labels do not
+    drift across the live, backfill, and replay paths.
+    """
+    conviction = abs(float(entry_score or 0.0))
+    conflict = bool(
+        has_attribution
+        and pos_mc > 0
+        and neg_mc < 0
+        and float(factor_conflict_ratio or 0.0) >= 0.4
+        and int(effective_alpha_factor_count or 0) >= 3
+    )
+    weak_entry = bool(has_entry_context and conviction < 0.55)
+    share = 0.0 if positive_share is None else float(positive_share or 0.0)
+    if pnl > 0:
+        return ("good_win" if share >= 0.55 else "lucky_win"), conflict, weak_entry, False
+
+    avoidable_entry = bool(weak_entry and (conflict or (has_attribution and share < 0.45)))
+    label = "bad_loss" if conviction >= 0.55 or avoidable_entry else "good_loss"
+    return label, conflict, weak_entry, avoidable_entry
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

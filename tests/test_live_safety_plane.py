@@ -60,7 +60,7 @@ def test_non_fresh_reconcile_never_authorizes_safety_or_new_risk(state):
     ("reconcile_state", "observed_at"),
     [
         ("fresh", 0.0),
-        ("fresh", 84.9),
+        ("fresh", 79.9),
         ("fresh", "invalid"),
         (None, 100.0),
     ],

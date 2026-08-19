@@ -12,7 +12,7 @@ from backend.core.state_store import (
     is_state_schema_write_sql,
     validate_runtime_state_schema,
 )
-from backend.services.agent_authority_registry import AgentAuthorityRegistryService
+from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.model_permissions import validate_model_artifact
 
 
@@ -340,28 +340,25 @@ class OpenQualityLightGBMService:
     def load_samples(self, *, limit: int = 2000) -> list[dict[str, Any]]:
         conn = self._conn()
         try:
-            rows = self._execute(
+            from backend.services.canonical_v2_reader import iter_training_sample_rows
+            rows = iter_training_sample_rows(
                 conn,
-                """
-                SELECT *
-                FROM (
-                    SELECT *
-                    FROM autonomous_learning_sample
-                    WHERE sample_type='shadow_open_decision'
-                      AND label_status='matured'
-                    ORDER BY event_ts DESC, created_at DESC
-                    LIMIT ?
-                ) recent
-                ORDER BY event_ts ASC, created_at ASC
-                """,
-                (int(limit),),
-            ).fetchall()
+                sample_type="shadow_open_decision",
+                label_status="matured",
+                order_by_event_ts=True,
+                limit=int(limit),
+            )
             candidates = []
             for row in rows:
                 item = _sample_from_row(row)
                 if item is not None:
                     candidates.append(item)
             valid = [item for item in candidates if not item.get("quality_errors")]
+            # reader returns newest-first; restore ascending to match the previous
+            # "newest DESC limit, then ASC" loader (latest lineage = valid[-1])
+            valid.sort(
+                key=lambda it: (float(it.get("event_ts") or 0.0), float(it.get("created_at") or 0.0))
+            )
             latest_lineage = str(valid[-1].get("lineage_id") or "") if valid else ""
             samples = [item for item in valid if str(item.get("lineage_id") or "") == latest_lineage]
             rejection_counts: dict[str, int] = {}

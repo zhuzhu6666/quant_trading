@@ -27,7 +27,6 @@ from backend.services.brain_governance_candidates import (
     CANDIDATE_REVIEWABLE_STATUSES,
 )
 
-
 class V16CommandGate:
     """Resolve a current V16 delegation before a system-owned mutation."""
 
@@ -416,43 +415,6 @@ class V16CommandGate:
             )
         finally:
             conn.close()
-
-    @classmethod
-    def consume(
-        cls,
-        db_path: str | Path = STATE_DB,
-        *,
-        command_id: str,
-        claim_token: str,
-        mutation_id: str,
-    ) -> dict[str, Any]:
-        """Compatibility wrapper for one release cycle.
-
-        Legacy callers still invoke ``consume`` before applying their overlay.
-        The durable state is now ``finalized``; coordinator callers use
-        :meth:`finalize_in_transaction` so the apply count and mutation facts
-        commit atomically.
-        """
-        result = cls.finalize(
-            db_path,
-            command_id=command_id,
-            claim_token=claim_token,
-            mutation_id=mutation_id,
-            config_hash="",
-            domain_hash="",
-        )
-        if not result.get("allowed"):
-            return {
-                **result,
-                "status": "v16_command_consume_failed",
-                "reason": str(result.get("reason") or result.get("status") or "v16_command_consume_failed"),
-            }
-        return {
-            **result,
-            "status": "v16_command_consumed",
-            "consumed_at": result.get("finalized_at", 0.0),
-            "compatibility_state": "finalized",
-        }
 
     @classmethod
     def ensure_finalize_schema(cls, db_path: str | Path = STATE_DB) -> None:

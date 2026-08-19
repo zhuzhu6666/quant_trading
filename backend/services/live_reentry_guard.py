@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from backend.core.db import state_table_columns
+from backend.services.canonical_v2_reader import iter_review_rows
 from backend.services.state_payload_archive import load_json_payload
 
 
@@ -106,24 +106,14 @@ def recent_review_reentry_block(
     try:
         conn = runtime.state_connection_factory(read_only=True)
         try:
-            try:
-                has_review_archive = "review_archive_hash" in state_table_columns(
-                    conn, "trade_outcome_review"
-                )
-            except Exception:
-                has_review_archive = False
-            review_archive_select = ", review_archive_hash" if has_review_archive else ""
-            rows = conn.execute(
-                f"""
-                SELECT review_id, position_id, outcome_label, failure_tags_json,
-                       review_json, created_at{review_archive_select}
-                FROM trade_outcome_review
-                WHERE created_at >= %s
-                ORDER BY created_at DESC
-                LIMIT 12
-                """,
-                (now - 3 * 3600.0,),
-            ).fetchall()
+            rows = iter_review_rows(conn, limit=0)
+            cutoff = float(now - 3 * 3600.0)
+            rows = [
+                row for row in rows
+                if float(row.get("created_at") or 0.0) >= cutoff
+            ]
+            rows.sort(key=lambda row: float(row.get("created_at") or 0.0), reverse=True)
+            rows = rows[:12]
             rows = [
                 {
                     **dict(row),

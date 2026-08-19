@@ -22,6 +22,7 @@ from backend.services.position_metrics import normalize_path_state, update_posit
 from backend.services.review_contract import (
     build_entry_timing_context,
     build_execution_quality_evidence,
+    classify_4label_outcome,
     extract_decision_freshness_context,
     normalize_trade_review_contract,
     trusted_broker_close_price,
@@ -405,43 +406,41 @@ class TradeReviewer:
         positive_share = pos_mc / total_abs_mc
 
         failure_tags: list[str] = []
-        # Profit branches never enter the loss-only avoidability analysis,
-        # but the orthogonal outcome contract still requires a deterministic
-        # value for this field.
-        avoidable_entry = False
-        if pnl > 0:
-            outcome_label = "good_win" if positive_share >= 0.55 else "lucky_win"
-            if outcome_label == "lucky_win":
-                failure_tags.append("lucky_win")
+        # A2: the 4-label rule (good_win/lucky_win/good_loss/bad_loss) is owned
+        # by the single review_contract.classify_4label_outcome authority so
+        # the live, backfill, and replay producers cannot drift apart.
+        conviction = abs(float(entry_score or 0.0))
+        has_entry_context = entry is not None
+        has_attribution = bool(contributions)
+        decision_quality_context = (
+            (entry_action or {}).get("decision_quality_context")
+            if isinstance(entry_action, dict)
+            else {}
+        ) or {}
+        factor_conflict_ratio = _safe_float(decision_quality_context.get("factor_conflict_ratio"))
+        effective_alpha_factor_count = _safe_int(
+            decision_quality_context.get("effective_alpha_factor_count")
+            or decision_quality_context.get("n_active_alpha_factors")
+        )
+        outcome_label, conflict, weak_entry, avoidable_entry = classify_4label_outcome(
+            pnl=pnl,
+            entry_score=entry_score,
+            positive_share=positive_share,
+            has_entry_context=has_entry_context,
+            has_attribution=has_attribution,
+            pos_mc=pos_mc,
+            neg_mc=neg_mc,
+            factor_conflict_ratio=factor_conflict_ratio,
+            effective_alpha_factor_count=effective_alpha_factor_count,
+        )
+        if outcome_label == "lucky_win":
+            failure_tags.append("lucky_win")
+        elif outcome_label == "bad_loss":
+            failure_tags.append("bad_loss")
         else:
-            conviction = abs(float(entry_score or 0.0))
-            has_entry_context = entry is not None
-            has_attribution = bool(contributions)
-            decision_quality_context = (
-                (entry_action or {}).get("decision_quality_context")
-                if isinstance(entry_action, dict)
-                else {}
-            ) or {}
-            factor_conflict_ratio = _safe_float(decision_quality_context.get("factor_conflict_ratio"))
-            effective_alpha_factor_count = _safe_int(
-                decision_quality_context.get("effective_alpha_factor_count")
-                or decision_quality_context.get("n_active_alpha_factors")
-            )
-            conflict = (
-                has_attribution
-                and pos_mc > 0
-                and neg_mc < 0
-                and factor_conflict_ratio >= 0.4
-                and effective_alpha_factor_count >= 3
-            )
-            weak_entry = has_entry_context and conviction < 0.55
-            avoidable_entry = weak_entry and (conflict or (has_attribution and positive_share < 0.45))
-            outcome_label = "bad_loss" if conviction >= 0.55 or avoidable_entry else "good_loss"
-            if outcome_label == "bad_loss":
-                failure_tags.append("bad_loss")
-            else:
-                failure_tags.append("good_loss")
-                failure_tags.append("clean_good_loss" if not conflict else "conflict_entry_loss")
+            failure_tags.append("good_loss")
+            failure_tags.append("clean_good_loss" if not conflict else "conflict_entry_loss")
+        if pnl <= 0:
             if weak_entry:
                 failure_tags.append("weak_entry_loss")
             if avoidable_entry:
@@ -864,6 +863,32 @@ class TradeReviewer:
                         close_ts,
                     ),
                 )
+            if self._use_pg():
+                # A1: mirror the live review into canonical within the same
+                # transaction as the legacy write so the canonical trade_review
+                # stream stays authoritative after the full data flush.
+                self._record_canonical_review(
+                    conn,
+                    review_id=review_id,
+                    trade_id=trade_id,
+                    position_id=position_id,
+                    entry_decision_id=entry_decision_id,
+                    exit_decision_id=exit_decision_id,
+                    entry_quality=entry_quality,
+                    hold_quality=hold_quality,
+                    exit_quality=exit_quality,
+                    regime_fit_score=regime_fit_score,
+                    execution_quality=execution_quality,
+                    pnl=pnl,
+                    mae=mae,
+                    mfe=mfe,
+                    outcome_label=outcome_label,
+                    failure_tags=failure_tags,
+                    summary_text=summary,
+                    review=review_json,
+                    created_at=close_ts,
+                )
+
             for factor, mc in contributions.items():
                 entry_contribution = 0.0
                 for row in entry_factors:
@@ -924,6 +949,19 @@ class TradeReviewer:
             "summary_text": summary,
             "review_json": review_json,
         }
+
+
+    def _record_canonical_review(self, conn, **fields: Any) -> dict[str, Any] | None:
+        """Mirror one accepted live review into the canonical trade_review stream.
+
+        Called within the reviewer's open PG transaction so the legacy review
+        row and its canonical mirror commit atomically.  Runs only when the
+        store is PostgreSQL (canonical schema available); SQLite fixtures keep
+        the legacy-only path for test compatibility.
+        """
+        from backend.services.canonical_v2 import record_review
+
+        return record_review(conn, producer="live_closed_position", **fields)
 
     def _find_existing_review(
         self,

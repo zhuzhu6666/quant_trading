@@ -5,6 +5,7 @@ from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
 from backend.services.factor_pruning_governance import FactorPruningGovernanceService
 from research.learning.governor import RuleEvolutionGovernor
+from backend.services.learning_application_store import LearningApplicationStore
 
 
 class _Verdict:
@@ -463,29 +464,28 @@ def test_factor_pruning_governance_auto_bridge_requires_candidate_review(monkeyp
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action,
-             suggestion_ids_json, status, details_json, created_at)
-            VALUES ('app_bad_pruning_agent', ?, 'factor', 'dsl_auto_test', 'downweight',
-                    '[]', 'applied', '{"source_agent":"factor_pruning_governance"}', ?)
-            """,
-            (now - 10, now - 10),
-        )
-        conn.execute(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status,
-             delta_avg_reward, updated_at, created_at)
-            VALUES ('app_bad_pruning_agent', 'factor', 'dsl_auto_test', 'downweight',
-                    'ineffective', -0.2, ?, ?)
-            """,
-            (now - 5, now - 5),
-        )
         conn.commit()
     finally:
         conn.close()
+    store = LearningApplicationStore(db_path)
+    app_id = store.prepare_application(
+        scope_type="factor",
+        scope_key="dsl_auto_test",
+        action="downweight",
+        status="applied",
+        suggestion_ids=[],
+        details={"source_agent": "factor_pruning_governance"},
+        cycle_ts=now - 10,
+    )
+    store.write_effect(
+        application_id=app_id,
+        scope_key="dsl_auto_test",
+        scope_type="factor",
+        action="downweight",
+        status="ineffective",
+        delta_avg_reward=-0.2,
+        updated_at=now - 5,
+    )
     monkeypatch.setattr("backend.services.factor_pruning_governance.RiskPolicyService.shared", lambda: _Risk(_Verdict(True)))
     monkeypatch.setattr(
         "backend.services.factor_pruning_governance.FactorPruningCandidateService.build",

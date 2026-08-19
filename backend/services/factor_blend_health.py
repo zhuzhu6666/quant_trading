@@ -6,6 +6,13 @@ from typing import Any, Mapping, Sequence
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    pg_sql as _sql,
+    execute as _execute,
+)
+
+
 
 DEFAULT_TARGET_MAX_ACTIVE_ALPHA = 80
 DEFAULT_WARN_MAX_ACTIVE_ALPHA = 120
@@ -41,20 +48,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _conn_is_pg(conn: Any) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn: Any, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn: Any, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
 
 
 def _family(name: str) -> str:

@@ -1,28 +1,20 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-08-13
+> Last verified: 2026-08-18 (S7 冷启动完成：双服务 active、API 可用、75 张 runtime 表已重建)
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读对应合同。
 
 ## 1. 当前结论
 
-- 当前分支为 `main`；本次前端实施批次修改 `web_frontend/`、市场 bars 最小事实合同、
-  对应 OpenAPI snapshot 和 scoped 文档，保留工作区已有用户改动。
-- P0 已完成。
-- P1 的代码与历史污染修复已完成，但仍保持 `runtime acceptance`：必须继续用真实 broker deal、重启回放和完整持仓生命周期证明修复后的链路。
-- P2 canonical risk、P3 writer/identity 收敛和 P4 V16 因果调度已完成；P5 是持续删除旧路径的工程纪律，P6 Demo 观察/毕业仍受真实证据阻塞。
-- 2026-08-10 只读运行核对：backend、learning worker active；`/api/health` 为 `db=connected`、`ctrader=connected`；readiness 当前报告 live execution、live alpha、autonomous mutation 和 release 均 ready。
-- live loop 当前 running、accepting new risk，account/positions reconcile fresh，当前空仓；`risk_metrics_snapshot.v2` 为 known，使用 500 个闭合 M5 样本，空仓零敞口是计算结果，不是缺失兜底。
-- Safety v2 仍为 `shadow/observing`，尚未满足 24 小时连续空仓或完整 broker lifecycle 的切换条件；Generation、Execution Outcome、Governance 和 PG Job Queue 的静态发布开关保持原值。
-- learning worker capability 为 `ready/complete/available`；readiness 和 capability 只表示当前事实可用，不授权绕过 V16、Candidate Review、RiskPolicy 或 Coordinator，也不等同于切换静态发布开关。
-- 2026-08-13 前端重构首批 renderer/Tauri 代码已落在工作树；React 19、五个工作区、
-  Fact/唯一 WS、Safety rail 和研究缓存均已有本地证据。桌面端目标是本人本地使用，
-  服务器只保留后端 API/WSS，不部署公网浏览器静态站点；
-  Windows 安装包签名、GitHub Releases manifest、公开 updater 和 Windows runner 不再
-  是本批完成条件。远程 `market.bars.v1` Fact 合同及 factor-card 只读性能收敛已完成
-  本机/公网认证 smoke。
+- 当前分支为 `main`。
+- **当前姿态（2026-08-18）**：**S7 冷启动完成**——quant-backend `active`、quant-learning-worker `active`；全库已清空并重建，runtime schema 75 张表、canonical_v2 9 张表（空）；API `status=ok, db=connected`。
+- **全库清空（已完成）**：`state_v1`（86 表）已 DROP、`public`（4 表）已 DROP、`canonical_v2` 数据已 TRUNCATE（9 表 0 行）+ `legacy_mapping` 已 DROP；运行骨架迁入 `runtime` schema（6 表）；数据库 10.8GB → 9.7MB。
+- **A 类结构修复（已完成）**：A1 trade_review 实时写入器 ✅ / A2 label 单一口径 ✅ / A3 posterior 触发放宽 ✅ / A4 win 单正反馈 ✅ / A5 effect 归因链代码就绪 ✅ / A6 supervisor_trace 成熟链 ✅。
+- **代码收敛（S2/S3 完成）**：db_helpers 公共层（33 文件）+ 四域清扫（9 空壳 + EvolutionKernel + 零调用转发 + consume 包装器）+ A1–A6 / B1–B5 结构修复；全量回归 2815 passed / 12 skipped。
+- legacy 事实迁移的旧表述（P1/P2/P4/P5、1,702 处、schema version 20）已被"全库清空重建"取代，仅历史参考。
+- 前端（miniprogram_v2 / web_frontend）在 Windows 本地维护；服务器后端-only sparse checkout，只提供 API 与 `/ws/state`。
 
 每次回答“现在能否交易/发布”前，都必须重新查询服务、PostgreSQL、`runtime_kv`、日志和 broker；本页不保存逐时运行流水。
 
@@ -108,9 +100,8 @@ learning worker
 ### 当前工程收口
 
 - [planning/production-autonomy-repair-optimization-plan.md](planning/production-autonomy-repair-optimization-plan.md)：唯一活动实施计划；
-- [planning/state-data-rebuild-plan.md](planning/state-data-rebuild-plan.md)：canonical_v2 数据逻辑重建 scoped 计划（含 2026-08-16 新对话接手点），不替代全局生产计划；
-- [planning/state-data-writer-registry.md](planning/state-data-writer-registry.md)：canonical_v2 迁移期间的旧写入口、分类和退出条件；
-- [planning/state-data-rebuild-acceptance-matrix.md](planning/state-data-rebuild-acceptance-matrix.md)：canonical_v2 各阶段可重复验收证据与未满足门；
+- [planning/final-execution-checklist.md](planning/final-execution-checklist.md)：停机重建终极执行清单（canonical 单库 + 架构清扫 + 学习进化结构修复 + 冷启动），当前停机专项蓝本；
+- [planning/architecture-audit-2026-08-18.md](planning/architecture-audit-2026-08-18.md)：全项目架构审计 + 清库重建问题点全清单；
 - [phased-repair-rollout-status.md](phased-repair-rollout-status.md)：当前阶段、运行姿态和未完成证据；
 - [phased-repair-acceptance-matrix.md](phased-repair-acceptance-matrix.md)：可重复验收门和发布证据。
 

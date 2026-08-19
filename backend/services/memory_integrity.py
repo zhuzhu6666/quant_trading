@@ -12,8 +12,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, state_table_columns, state_table_exists
+from backend.core.db import STATE_DB, state_table_exists
 from backend.services._brain_helpers import connect, execute, safe_float
+from backend.services.canonical_v2_reader import iter_review_rows
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.state_payload_archive import load_json_payload
 
@@ -82,22 +83,7 @@ class MemoryIntegrityReportService:
                     "required_tables_missing:" + ",".join(sorted(missing_tables)),
                 )
 
-            review_archive_select = (
-                ", review_archive_hash"
-                if "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
-                else ""
-            )
-            review_rows = [
-                _row_dict(row)
-                for row in execute(
-                    conn,
-                    f"""
-                    SELECT review_id, review_json, created_at{review_archive_select}
-                    FROM trade_outcome_review
-                    ORDER BY created_at DESC
-                    """,
-                ).fetchall()
-            ]
+            review_rows = [_row_dict(row) for row in iter_review_rows(conn, limit=0)]
             projection_rows = [
                 _row_dict(row)
                 for row in execute(

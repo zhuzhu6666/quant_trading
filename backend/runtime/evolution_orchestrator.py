@@ -1579,7 +1579,7 @@ def _apply_model_governed_downweights(
             target_weight = max(0.0, min(requested_target, old_weight - materiality_floor))
             result = model_weight_service.execute(
                 source="demo_model_governance_downweight",
-                producer="factor_governance",
+                producer="evolution_orchestrator",
                 run_id=f"demo_model_weight_{int(_time.time())}",
                 actor="system:evolution_orchestrator.demo_model_governance",
                 reason="applied LightGBM model downweight through demo nursery",
@@ -1773,7 +1773,7 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
         run_id = f"evolution_weight_{int(_time.time())}"
         weight_result = weight_service.execute(
             source="evolution_decision_policy_update_weight",
-            producer="weight_policy_governance",
+            producer="evolution_orchestrator",
             run_id=run_id,
             actor="system:evolution_orchestrator",
             reason="explicit governed weight sync",

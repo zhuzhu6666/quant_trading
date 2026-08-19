@@ -317,28 +317,46 @@ def _insert_activation_effect(
     try:
         conn.execute(
             """INSERT INTO learning_application_log
-               (application_id, cycle_ts, scope_type, scope_key, action,
-                old_weight, new_weight, status, created_at)
-               VALUES ('activation-app', ?, 'factor', 'alpha_x',
-                       'activate_factor_canary', 0.0, 0.7, 'applied', ?)""",
-            (now, now),
+               (application_id, run_id, source, status, details_json, created_at, updated_at)
+               VALUES ('activation-app', '', '', 'applied', ?, ?, ?)""",
+            (
+                json.dumps(
+                    {
+                        "scope_type": "factor",
+                        "scope_key": "alpha_x",
+                        "action": "activate_factor_canary",
+                        "bias_multiplier": 1.0,
+                        "old_weight": 0.0,
+                        "new_weight": 0.7,
+                        "suggestion_ids": [],
+                        "application_state": {"status": "applied"},
+                    },
+                    ensure_ascii=False,
+                ),
+                now,
+                now,
+            ),
         )
         conn.execute(
             """INSERT INTO learning_application_effect
-               (application_id, scope_type, scope_key, action, status,
-                observed_trade_count, decision_json, updated_at, created_at)
-               VALUES ('activation-app', 'factor', 'alpha_x',
-                       'activate_factor_canary', ?, 20, ?, ?, ?)""",
+               (effect_id, application_id, scope, effect_json, created_at)
+               VALUES ('activation-effect', 'activation-app', 'alpha_x', ?, ?)""",
             (
-                status,
                 json.dumps(
                     {
-                        "evidence_quality": {
-                            "bounded_attribution_allowed": bounded_attribution_allowed
-                        }
-                    }
+                        "scope_type": "factor",
+                        "scope_key": "alpha_x",
+                        "action": "activate_factor_canary",
+                        "status": status,
+                        "observed_trade_count": 20,
+                        "decision": {
+                            "evidence_quality": {
+                                "bounded_attribution_allowed": bounded_attribution_allowed
+                            }
+                        },
+                    },
+                    ensure_ascii=False,
                 ),
-                now,
                 now,
             ),
         )
@@ -446,14 +464,14 @@ def test_weight_change_prepares_before_mutation_and_enters_observation(monkeypat
             (application_id,),
         ).fetchone()
         effect = conn.execute(
-            "SELECT status FROM learning_application_effect WHERE application_id=?",
+            "SELECT effect_json FROM learning_application_effect WHERE application_id=?",
             (application_id,),
         ).fetchone()
     finally:
         conn.close()
     assert app[0] == "applied"
     assert json.loads(app[1])["application_state"]["status"] == "applied"
-    assert effect[0] == "observing"
+    assert json.loads(effect[0])["status"] == "observing"
 
 
 def test_weight_change_marks_prepared_application_failed_when_mutation_interrupts(monkeypatch, tmp_path):
@@ -469,11 +487,11 @@ def test_weight_change_marks_prepared_application_failed_when_mutation_interrupt
     conn = connect_sqlite(path, read_only=True)
     try:
         app = conn.execute("SELECT status FROM learning_application_log").fetchone()
-        effect = conn.execute("SELECT status FROM learning_application_effect").fetchone()
+        effect = conn.execute("SELECT effect_json FROM learning_application_effect").fetchone()
     finally:
         conn.close()
     assert app[0] == "mutation_failed"
-    assert effect[0] == "superseded"
+    assert effect is not None and json.loads(effect[0])["status"] == "superseded"
 
 
 def test_weight_change_releases_reservation_when_risk_check_crashes(monkeypatch, tmp_path):
@@ -620,12 +638,12 @@ def test_coordinated_weight_change_atomically_binds_all_domain_facts(
     conn = connect_sqlite(path, read_only=True)
     try:
         app = conn.execute(
-            "SELECT status, mutation_id, details_json FROM learning_application_log "
+            "SELECT status, details_json FROM learning_application_log "
             "WHERE application_id=?",
             (application_id,),
         ).fetchone()
         effect = conn.execute(
-            "SELECT status, mutation_id FROM learning_application_effect "
+            "SELECT effect_json FROM learning_application_effect "
             "WHERE application_id=?",
             (application_id,),
         ).fetchone()
@@ -636,9 +654,13 @@ def test_coordinated_weight_change_atomically_binds_all_domain_facts(
     finally:
         conn.close()
         runtime_config.reset_for_tests()
-    assert tuple(app[:2]) == ("applied", mutation_id)
-    assert json.loads(app[2])["application_state"]["atomic_commit"] is True
-    assert tuple(effect) == ("observing", mutation_id)
+    app_details = json.loads(app[1])
+    assert app[0] == "applied"
+    assert app_details["mutation_id"] == mutation_id
+    assert app_details["application_state"]["atomic_commit"] is True
+    effect_data = json.loads(effect[0])
+    assert effect_data["status"] == "observing"
+    assert effect_data["mutation_id"] == mutation_id
     assert tuple(reservation) == ("consumed", application_id, mutation_id)
 
 
@@ -690,20 +712,37 @@ def test_coordinated_batch_admission_block_rolls_back_runtime_target(
     conn = connect_sqlite(path)
     try:
         conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, status, created_at)
-            VALUES ('existing-app', 1.0, 'factor', 'existing-factor',
-                    'update_weight', 'applied', 1.0)
-            """
+            """INSERT INTO learning_application_log
+               (application_id, run_id, source, status, details_json, created_at, updated_at)
+               VALUES ('existing-app', '', '', 'applied', ?, ?, ?)""",
+            (
+                json.dumps(
+                    {
+                        "scope_type": "factor",
+                        "scope_key": "existing-factor",
+                        "action": "update_weight",
+                        "application_state": {"status": "applied"},
+                    }
+                ),
+                1.0,
+                1.0,
+            ),
         )
         conn.execute(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status, created_at, updated_at)
-            VALUES ('existing-app', 'factor', 'existing-factor',
-                    'update_weight', 'observing', 1.0, 1.0)
-            """
+            """INSERT INTO learning_application_effect
+               (effect_id, application_id, scope, effect_json, created_at)
+               VALUES ('existing-effect', 'existing-app', 'existing-factor', ?, ?)""",
+            (
+                json.dumps(
+                    {
+                        "scope_type": "factor",
+                        "scope_key": "existing-factor",
+                        "action": "update_weight",
+                        "status": "observing",
+                    }
+                ),
+                1.0,
+            ),
         )
         conn.commit()
     finally:

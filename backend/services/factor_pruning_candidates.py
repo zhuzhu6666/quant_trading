@@ -8,12 +8,18 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
-    state_table_columns,
     state_table_exists,
 )
+from backend.services.canonical_v2_reader import iter_review_rows
 from backend.services.factor_blend_health import DEFAULT_LOW_WEIGHT_THRESHOLD, FactorBlendHealthService
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import load_json_payload
+
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    pg_sql as _sql,
+    execute as _execute,
+)
+
 
 
 DEFAULT_MAX_CANDIDATES = 50
@@ -22,6 +28,21 @@ DEFAULT_RECENT_REVIEW_LIMIT = 50
 MIN_LIVE_DECISION_REVIEWS = 1
 MIN_LIVE_LOSS_REVIEWS = 2
 HARMFUL_LOSS_CONTRIBUTION = 0.02
+
+
+def _canonical_clean_review_rows(
+    conn: Any, *, limit: int = DEFAULT_RECENT_REVIEW_LIMIT
+) -> list[dict[str, Any]]:
+    """Legacy-shaped clean reviews with an entry decision, newest first."""
+    rows = [
+        row for row in iter_review_rows(conn, limit=0)
+        if str(row.get("entry_decision_id") or "")
+    ]
+    rows.sort(key=lambda r: float(r.get("created_at") or 0.0), reverse=True)
+    return [
+        row for row in rows
+        if not review_has_system_contamination(row.get("review_json") or {})
+    ][: max(1, int(limit))]
 MIN_LIVE_AVG_ABS_CONTRIBUTION = 0.005
 
 
@@ -45,20 +66,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     return conn
 
 
-def _conn_is_pg(conn: Any) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn: Any, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn: Any, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
-
-
 def _family(name: str) -> str:
     lower = str(name or "").lower()
     if lower.startswith("dsl_auto_") or lower.startswith("dsl_"):
@@ -66,24 +73,6 @@ def _family(name: str) -> str:
     if lower.startswith("pca_"):
         return "pca"
     return "core"
-
-
-def _review_archive_select(conn: Any) -> str:
-    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
-        return ""
-    return ", review_archive_hash"
-
-
-def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
-    payload = load_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(row["review_id"] or ""),
-        inline_json=row["review_json"],
-        archive_hash=row["review_archive_hash"] if "review_archive_hash" in row.keys() else "",
-        default={},
-    )
-    return payload if isinstance(payload, dict) else {}
 
 
 class FactorPruningCandidateService:
@@ -223,40 +212,57 @@ class FactorPruningCandidateService:
         except Exception:
             return []
         try:
-            if not state_table_exists(conn, "trade_outcome_review") or not state_table_exists(conn, "decision_factor_snapshot"):
-                return []
-            review_rows = _execute(
-                conn,
-                f"""
-                SELECT review_id, review_json{_review_archive_select(conn)}
-                FROM trade_outcome_review
-                WHERE COALESCE(entry_decision_id, '') <> ''
-                ORDER BY created_at DESC
-                """,
-            ).fetchall()
-            clean_review_ids = [
-                str(row["review_id"])
-                for row in review_rows
-                if not review_has_system_contamination(_review_payload(conn, row))
-            ][:DEFAULT_RECENT_REVIEW_LIMIT]
+            clean = _canonical_clean_review_rows(conn)
+            clean_review_ids = [str(r["review_id"] or "") for r in clean]
             if not clean_review_ids:
                 return []
-            placeholders = ",".join("?" for _ in clean_review_ids)
-            rows = _execute(
-                conn,
-                f"""
-                SELECT dfs.factor,
-                       AVG(dfs.policy_weight) AS avg_policy_weight,
-                       AVG(ABS(dfs.contribution_score)) AS avg_abs_contribution,
-                       COUNT(DISTINCT r.review_id) AS decision_review_count,
-                       MAX(COALESCE(dfs.source, '')) AS source
-                FROM trade_outcome_review r
-                JOIN decision_factor_snapshot dfs ON dfs.decision_id = r.entry_decision_id
-                WHERE r.review_id IN ({placeholders})
-                GROUP BY dfs.factor
-                """,
-                tuple(clean_review_ids),
-            ).fetchall()
+            entry_ids = sorted({str(r.get("entry_decision_id") or "") for r in clean} - {""})
+            # --- read factor snapshots (canonical first, legacy fallback) ---
+            all_snapshots: list[dict] = []
+            try:
+                from backend.services.canonical_v2_reader import iter_all_decision_factor_snapshots
+                all_snapshots = iter_all_decision_factor_snapshots(conn, entry_ids)
+            except Exception:
+                placeholders = ",".join("?" for _ in entry_ids)
+                all_snapshots = [
+                    dict(r) for r in _execute(
+                        conn,
+                        f"SELECT * FROM decision_factor_snapshot WHERE decision_id IN ({placeholders})",
+                        tuple(entry_ids),
+                    ).fetchall()
+                ]
+            if not all_snapshots:
+                return []
+            # aggregate by factor
+            from collections import defaultdict
+            factor_agg: dict[str, dict] = defaultdict(lambda: {"weight_sum": 0.0, "abs_cs_sum": 0.0, "count": 0, "source": ""})
+            for snap in all_snapshots:
+                f = str(snap.get("factor") or "")
+                if not f:
+                    continue
+                agg = factor_agg[f]
+                agg["weight_sum"] += float(snap.get("policy_weight") or 0)
+                agg["abs_cs_sum"] += abs(float(snap.get("contribution_score") or 0))
+                agg["count"] += 1
+                agg["source"] = str(snap.get("source") or agg["source"] or "")
+            agg_rows = [
+                {"factor": f, "avg_policy_weight": a["weight_sum"] / max(a["count"], 1), "avg_abs_contribution": a["abs_cs_sum"] / max(a["count"], 1), "source": a["source"]}
+                for f, a in factor_agg.items()
+            ]
+            decision_factors: dict[str, set[str]] = {}
+            for snap in all_snapshots:
+                did = str(snap.get("decision_id") or "")
+                f = str(snap.get("factor") or "")
+                if did and f:
+                    decision_factors.setdefault(did, set()).add(f)
+            review_counts: dict[str, int] = {}
+            for review in clean:
+                for factor in decision_factors.get(str(review.get("entry_decision_id") or ""), set()):
+                    review_counts[factor] = review_counts.get(factor, 0) + 1
+            rows = [
+                dict(row) | {"decision_review_count": review_counts.get(str(row["factor"] or ""), 0)}
+                for row in agg_rows
+            ]
         except Exception:
             return []
         finally:
@@ -329,48 +335,107 @@ class FactorPruningCandidateService:
         except Exception:
             return {}
         try:
-            if not state_table_exists(conn, "trade_outcome_review") or not state_table_exists(conn, "decision_factor_snapshot"):
-                return {}
-            review_rows = _execute(
-                conn,
-                f"""
-                SELECT review_id, review_json{_review_archive_select(conn)}
-                FROM trade_outcome_review
-                WHERE COALESCE(entry_decision_id, '') <> ''
-                ORDER BY created_at DESC
-                """,
-            ).fetchall()
-            clean_review_ids = [
-                str(row["review_id"])
-                for row in review_rows
-                if not review_has_system_contamination(_review_payload(conn, row))
-            ][: max(1, int(review_limit or DEFAULT_RECENT_REVIEW_LIMIT))]
+            clean = _canonical_clean_review_rows(conn, limit=review_limit or DEFAULT_RECENT_REVIEW_LIMIT)
+            clean_review_ids = [str(r["review_id"] or "") for r in clean]
             if not clean_review_ids:
                 return {}
-            placeholders = ",".join("?" for _ in clean_review_ids)
-            rows = _execute(
-                conn,
-                f"""
-                SELECT dfs.factor,
-                       COUNT(DISTINCT r.review_id) AS decision_review_count,
-                       SUM(CASE WHEN r.pnl <= 0 THEN 1 ELSE 0 END) AS loss_review_count,
-                       SUM(CASE WHEN r.pnl > 0 THEN 1 ELSE 0 END) AS win_review_count,
-                       AVG(ABS(dfs.contribution_score)) AS avg_abs_contribution,
-                       AVG(CASE WHEN r.pnl <= 0 THEN ABS(dfs.contribution_score) END) AS loss_abs_contribution,
-                       AVG(CASE WHEN r.pnl > 0 THEN ABS(dfs.contribution_score) END) AS win_abs_contribution,
-                       AVG(CASE WHEN r.pnl <= 0 THEN dfs.contribution_score END) AS loss_avg_contribution,
-                       AVG(CASE WHEN r.pnl > 0 THEN dfs.contribution_score END) AS win_avg_contribution,
-                       AVG(dfs.policy_weight) AS avg_policy_weight,
-                       SUM(CASE WHEN r.failure_tags_json LIKE '%market_data_stale%' THEN 1 ELSE 0 END) AS market_data_stale_count,
-                       SUM(CASE WHEN r.failure_tags_json LIKE '%signal_execution_delay%' THEN 1 ELSE 0 END) AS signal_execution_delay_count,
-                       MAX(r.created_at) AS latest_review_at
-                FROM trade_outcome_review r
-                JOIN decision_factor_snapshot dfs ON dfs.decision_id = r.entry_decision_id
-                WHERE r.review_id IN ({placeholders})
-                GROUP BY dfs.factor
-                """,
-                tuple(clean_review_ids),
-            ).fetchall()
+            entry_ids = sorted({str(r.get("entry_decision_id") or "") for r in clean} - {""})
+            # --- read factor snapshots (canonical first, legacy fallback) ---
+            try:
+                from backend.services.canonical_v2_reader import iter_all_decision_factor_snapshots
+                dfs_rows = iter_all_decision_factor_snapshots(conn, entry_ids)
+            except Exception:
+                placeholders = ",".join("?" for _ in entry_ids)
+                dfs_rows = [
+                    dict(r) for r in _execute(
+                        conn,
+                        f"SELECT decision_id, factor, contribution_score, policy_weight FROM decision_factor_snapshot WHERE decision_id IN ({placeholders})",
+                        tuple(entry_ids),
+                    ).fetchall()
+                ]
+            review_by_decision = {str(r.get("entry_decision_id") or ""): r for r in clean}
+            groups: dict[str, dict[str, Any]] = {}
+
+            def _group(factor: str) -> dict[str, Any]:
+                if factor not in groups:
+                    groups[factor] = {
+                        "review_ids": set(),
+                        "loss": 0,
+                        "win": 0,
+                        "abs_sum": 0.0,
+                        "abs_n": 0,
+                        "loss_abs_sum": 0.0,
+                        "loss_abs_n": 0,
+                        "win_abs_sum": 0.0,
+                        "win_abs_n": 0,
+                        "loss_cs_sum": 0.0,
+                        "loss_cs_n": 0,
+                        "win_cs_sum": 0.0,
+                        "win_cs_n": 0,
+                        "weight_sum": 0.0,
+                        "weight_n": 0,
+                        "stale": 0,
+                        "delay": 0,
+                        "latest_review_at": 0.0,
+                    }
+                return groups[factor]
+
+            for raw_df in dfs_rows:
+                df = dict(raw_df) if not isinstance(raw_df, dict) else raw_df
+                review = review_by_decision.get(str(df["decision_id"] or ""))
+                if review is None:
+                    continue
+                g = _group(str(df["factor"] or ""))
+                g["review_ids"].add(str(review.get("review_id") or ""))
+                contribution = _safe_float(df.get("contribution_score"))
+                abs_contribution = abs(contribution)
+                pnl_raw = review.get("pnl")
+                pnl = _safe_float(pnl_raw)
+                if pnl_raw is not None:
+                    if pnl <= 0:
+                        g["loss"] += 1
+                        g["loss_abs_sum"] += abs_contribution
+                        g["loss_abs_n"] += 1
+                        g["loss_cs_sum"] += contribution
+                        g["loss_cs_n"] += 1
+                    else:
+                        g["win"] += 1
+                        g["win_abs_sum"] += abs_contribution
+                        g["win_abs_n"] += 1
+                        g["win_cs_sum"] += contribution
+                        g["win_cs_n"] += 1
+                g["abs_sum"] += abs_contribution
+                g["abs_n"] += 1
+                g["weight_sum"] += _safe_float(df.get("policy_weight"))
+                g["weight_n"] += 1
+                tags = str(review.get("failure_tags_json") or "")
+                if "market_data_stale" in tags:
+                    g["stale"] += 1
+                if "signal_execution_delay" in tags:
+                    g["delay"] += 1
+                g["latest_review_at"] = max(g["latest_review_at"], _safe_float(review.get("created_at")))
+
+            def _avg(total: float, n: int) -> float | None:
+                return (total / n) if n else None
+
+            rows = [
+                {
+                    "factor": factor,
+                    "decision_review_count": len(g["review_ids"]),
+                    "loss_review_count": g["loss"],
+                    "win_review_count": g["win"],
+                    "avg_abs_contribution": _avg(g["abs_sum"], g["abs_n"]),
+                    "loss_abs_contribution": _avg(g["loss_abs_sum"], g["loss_abs_n"]),
+                    "win_abs_contribution": _avg(g["win_abs_sum"], g["win_abs_n"]),
+                    "loss_avg_contribution": _avg(g["loss_cs_sum"], g["loss_cs_n"]),
+                    "win_avg_contribution": _avg(g["win_cs_sum"], g["win_cs_n"]),
+                    "avg_policy_weight": _avg(g["weight_sum"], g["weight_n"]),
+                    "market_data_stale_count": g["stale"],
+                    "signal_execution_delay_count": g["delay"],
+                    "latest_review_at": g["latest_review_at"],
+                }
+                for factor, g in groups.items()
+            ]
         except Exception:
             return {}
         finally:

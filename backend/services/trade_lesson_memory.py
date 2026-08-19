@@ -15,6 +15,7 @@ from backend.core.db import (
     state_table_exists,
 )
 from backend.core.state_store import validate_runtime_state_schema
+from backend.services.canonical_v2_reader import canonical_ready, iter_review_rows
 from backend.services.state_payload_archive import load_json_payload
 
 
@@ -24,17 +25,6 @@ ARTIFACT_VERSION = "trade_lesson.v1"
 
 def _dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
-
-
-def _loads(raw: Any, default: Any) -> Any:
-    if raw is None:
-        return default
-    if isinstance(raw, (dict, list)):
-        return raw
-    try:
-        return json.loads(str(raw))
-    except Exception:
-        return default
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -54,6 +44,14 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
     except Exception:
         value = default
     return default if value is None else value
+
+
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    execute as _execute,
+    load_json as _loads,
+    pg_sql as _sql,
+)
 
 
 def _review_archive_select(conn: Any) -> str:
@@ -118,20 +116,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _conn_is_pg(conn: Any) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn: Any, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn: Any, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
 
 
 def ensure_trade_lesson_memory_schema(conn: Any) -> None:
@@ -203,6 +187,7 @@ def _recommended_action(outcome_label: str, failure_tags: list[Any], pnl: float)
     if pnl > 0:
         return "reuse_when_context_matches"
     return "watch"
+
 
 
 def build_trade_lesson(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
@@ -478,24 +463,13 @@ def rebuild_trade_lesson_memory(db_path: str | Path = STATE_DB, *, limit: int = 
 
     conn = _connect(db_path)
     try:
-        if not state_table_exists(conn, "trade_outcome_review"):
-            return {"ok": False, "status": "missing_trade_outcome_review", "upserted": 0}
-        rows = _execute(
-            conn,
-            f"""
-            SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                   pnl, mae, mfe, outcome_label, failure_tags_json, summary_text,
-                   review_json, created_at{_review_archive_select(conn)}
-            FROM trade_outcome_review
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (max(1, int(limit)),),
-        ).fetchall()
+        if not canonical_ready(conn):
+            return {"ok": False, "status": "missing_canonical_review_source", "upserted": 0}
+        rows = iter_review_rows(conn, limit=max(1, int(limit)))
         builder = ExperienceBuilder(db_path=db_path, ensure_schema=False)
         count = 0
         for row in rows:
-            builder.build_from_review(trade_review_payload_from_row(row, conn=conn), conn=conn)
+            builder.build_from_review(trade_review_payload_from_row(row, conn=None), conn=conn)
             count += 1
         conn.commit()
         return {"ok": True, "status": "available", "upserted": count, "append_source": APPEND_SOURCE}

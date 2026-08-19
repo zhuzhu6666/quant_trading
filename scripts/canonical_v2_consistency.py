@@ -27,7 +27,6 @@ REQUIRED_TABLES = (
     "dataset_manifest",
     "dataset_manifest_member",
     "projection_run",
-    "legacy_mapping",
 )
 
 
@@ -92,21 +91,6 @@ def _reference_checks(conn: Any) -> dict[str, int]:
             SELECT COUNT(*) FROM canonical_v2.dataset_manifest_member m
             LEFT JOIN canonical_v2.training_sample s ON s.sample_id=m.sample_id
             WHERE s.sample_id IS NULL
-        """,
-        "legacy_event_orphans": """
-            SELECT COUNT(*) FROM canonical_v2.legacy_mapping m
-            LEFT JOIN canonical_v2.event e ON e.event_id=m.canonical_event_id
-            WHERE m.canonical_event_id IS NOT NULL AND e.event_id IS NULL
-        """,
-        "legacy_payload_orphans": """
-            SELECT COUNT(*) FROM canonical_v2.legacy_mapping m
-            LEFT JOIN canonical_v2.payload_blob p ON p.payload_hash=m.canonical_payload_hash
-            WHERE m.canonical_payload_hash IS NOT NULL AND p.payload_hash IS NULL
-        """,
-        "legacy_run_orphans": """
-            SELECT COUNT(*) FROM canonical_v2.legacy_mapping m
-            LEFT JOIN canonical_v2.projection_run r ON r.projection_run_id=m.migration_run_id
-            WHERE r.projection_run_id IS NULL
         """,
     }
     result: dict[str, int] = {}

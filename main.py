@@ -81,8 +81,6 @@ def main():
     parser.add_argument("--no-event-filter", action="store_true")
     parser.add_argument("--use-event-sizing", action="store_true", default=True)
     parser.add_argument("--no-event-sizing", action="store_true")
-    parser.add_argument("--factor-health-report", action="store_true")
-    parser.add_argument("--factor-health-data", type=str, default=None)
     parser.add_argument("--router-seed", type=int, default=42)
     parser.add_argument("--router-arms", nargs="+",
                         default=["multi_factor_m15", "trend_following", "mean_reversion", "breakout"])

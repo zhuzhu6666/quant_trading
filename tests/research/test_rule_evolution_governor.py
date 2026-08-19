@@ -5,6 +5,7 @@ import sqlite3
 
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
+from backend.services.learning_application_store import LearningApplicationStore
 from research.learning.governor import RuleEvolutionGovernor
 
 
@@ -12,6 +13,78 @@ def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _store(path: str) -> LearningApplicationStore:
+    return LearningApplicationStore(str(path))
+
+
+def _load_json(value, default=None):
+    if value is None:
+        return default
+    try:
+        return json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        return default
+
+
+def _app(path: str, application_id: str) -> dict:
+    app = _store(path).get_application(str(application_id))
+    return app if app is not None else {}
+
+
+def _apps(path: str, **kwargs) -> list[dict]:
+    return list(_store(path).iter_applications(**kwargs))
+
+
+def _effect(path: str, application_id: str) -> dict:
+    aid = str(application_id)
+    for eff in _store(path).iter_effects():
+        if str(eff.get("application_id")) == aid:
+            return eff
+    return {}
+
+
+def _effects(path: str, **kwargs) -> list[dict]:
+    return list(_store(path).iter_effects(**kwargs))
+
+
+def _set_app_field(path: str, application_id: str, key: str, value):
+    """Update a single caller field inside details_json (lean column only)."""
+    conn = _connect(path)
+    try:
+        row = conn.execute(
+            "SELECT details_json FROM learning_application_log WHERE application_id=?",
+            (str(application_id),),
+        ).fetchone()
+        data = _load_json(row["details_json"], {})
+        data[key] = value
+        conn.execute(
+            "UPDATE learning_application_log SET details_json=? WHERE application_id=?",
+            (json.dumps(data, ensure_ascii=False), str(application_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _set_effect_field(path: str, application_id: str, key: str, value):
+    """Update a single field inside effect_json (lean column only)."""
+    conn = _connect(path)
+    try:
+        row = conn.execute(
+            "SELECT effect_json FROM learning_application_effect WHERE application_id=?",
+            (str(application_id),),
+        ).fetchone()
+        data = _load_json(row["effect_json"], {})
+        data[key] = value
+        conn.execute(
+            "UPDATE learning_application_effect SET effect_json=? WHERE application_id=?",
+            (json.dumps(data, ensure_ascii=False), str(application_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def test_governor_reviews_pending_and_rolls_back(tmp_path):
@@ -223,18 +296,10 @@ def test_governor_logs_learning_application(tmp_path):
     )
     assert app_id
 
-    conn = _connect(db_path)
-    try:
-        row = conn.execute(
-            "SELECT * FROM learning_application_log WHERE application_id=?",
-            (app_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    assert row is not None
-    assert row["scope_key"] == "foo"
-    assert float(row["new_weight"]) == 0.42
+    app = _app(db_path, app_id)
+    assert app.get("application_id") == app_id
+    assert app.get("scope_key") == "foo"
+    assert float(app.get("new_weight")) == 0.42
 
 
 def test_governor_reuses_active_application_for_same_suggestion(tmp_path):
@@ -266,23 +331,14 @@ def test_governor_reuses_active_application_for_same_suggestion(tmp_path):
 
     assert second_id == first_id
 
-    conn = _connect(db_path)
-    try:
-        rows = conn.execute(
-            "SELECT application_id, cycle_ts, bias_multiplier, old_weight, new_weight, details_json FROM learning_application_log"
-        ).fetchall()
-        effect = conn.execute(
-            "SELECT decision_json FROM learning_application_effect WHERE application_id=?",
-            (first_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    assert len(rows) == 1
-    assert float(rows[0]["cycle_ts"]) == 200.0
-    assert float(rows[0]["new_weight"]) == 0.2205
-    assert json.loads(rows[0]["details_json"])["note"] == "refresh"
-    assert json.loads(effect["decision_json"])["new_weight"] == 0.2205
+    apps = _apps(db_path)
+    assert len(apps) == 1
+    app = apps[0]
+    assert float(app.get("cycle_ts")) == 200.0
+    assert float(app.get("new_weight")) == 0.2205
+    assert app.get("note") == "refresh"
+    eff = _effect(db_path, first_id)
+    assert eff.get("decision", {}).get("new_weight") == 0.2205
 
 
 def test_governor_supersedes_older_duplicate_active_applications(tmp_path):
@@ -301,26 +357,31 @@ def test_governor_supersedes_older_duplicate_active_applications(tmp_path):
         details={"note": "first"},
     )
 
-    conn = _connect(db_path)
-    try:
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, bias_multiplier,
-             old_weight, new_weight, suggestion_ids_json, status, details_json, created_at)
-            VALUES ('dup_old', 90.0, 'factor', 'foo', 'boost_small', 1.03, 0.19, 0.1957, '["s1"]', 'observing', '{}', 90.0)
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status, decision_json, updated_at, created_at)
-            VALUES ('dup_old', 'factor', 'foo', 'boost_small', 'observing', '{}', 90.0, 90.0)
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    # Seed an older duplicate active application for the same suggestion batch,
+    # written through the store (newest duplicate gets reused, this one superseded).
+    store = _store(db_path)
+    dup_old = store.prepare_application(
+        scope_type="factor",
+        scope_key="foo",
+        action="boost_small",
+        status="observing",
+        bias_multiplier=1.03,
+        old_weight=0.19,
+        new_weight=0.1957,
+        suggestion_ids=["s1"],
+        cycle_ts=90.0,
+        details={},
+    )
+    store.write_effect(
+        application_id=dup_old,
+        scope_type="factor",
+        scope_key="foo",
+        action="boost_small",
+        status="observing",
+        decision={},
+        last_review_at=0.0,
+        updated_at=90.0,
+    )
 
     second_id = gov.log_application(
         scope_type="factor",
@@ -336,25 +397,19 @@ def test_governor_supersedes_older_duplicate_active_applications(tmp_path):
 
     assert second_id == first_id
 
-    conn = _connect(db_path)
-    try:
-        rows = conn.execute(
-            "SELECT application_id, status FROM learning_application_log ORDER BY application_id"
-        ).fetchall()
-        effects = conn.execute(
-            "SELECT application_id, status FROM learning_application_effect ORDER BY application_id"
-        ).fetchall()
-    finally:
-        conn.close()
-
-    assert [dict(r) for r in rows] == [
-        {"application_id": "dup_old", "status": "superseded"},
-        {"application_id": first_id, "status": "applied"},
-    ]
-    assert [dict(r) for r in effects] == [
-        {"application_id": "dup_old", "status": "superseded"},
-        {"application_id": first_id, "status": "observing"},
-    ]
+    apps = _apps(db_path)
+    status_by_id = {str(a["application_id"]): str(a.get("status") or "") for a in apps}
+    eff_status_by_id = {
+        str(e["application_id"]): str(e.get("status") or "") for e in _effects(db_path)
+    }
+    assert status_by_id == {
+        str(dup_old): "superseded",
+        first_id: "applied",
+    }
+    assert eff_status_by_id == {
+        str(dup_old): "superseded",
+        first_id: "observing",
+    }
 
 
 def test_reconcile_application_effects_marks_ineffective_and_rolls_back(tmp_path):
@@ -429,19 +484,16 @@ def test_reconcile_application_effects_marks_ineffective_and_rolls_back(tmp_path
         suggestion_row = conn.execute(
             "SELECT status, review_note FROM policy_suggestion WHERE suggestion_id='s1'"
         ).fetchone()
-        effect_row = conn.execute(
-            "SELECT status, observed_trade_count, baseline_trade_count, delta_avg_reward FROM learning_application_effect WHERE application_id=?",
-            (app_id,),
-        ).fetchone()
     finally:
         conn.close()
+    eff = _effect(db_path, app_id)
 
     assert app_row["status"] == "ineffective"
     assert suggestion_row["status"] == "rolled_back"
-    assert effect_row["status"] == "ineffective"
-    assert int(effect_row["observed_trade_count"]) == 3
-    assert int(effect_row["baseline_trade_count"]) == 3
-    assert float(effect_row["delta_avg_reward"]) < 0
+    assert eff.get("status") == "ineffective"
+    assert int(eff.get("observed_trade_count")) == 3
+    assert int(eff.get("baseline_trade_count")) == 3
+    assert float(eff.get("delta_avg_reward") or 0.0) < 0
 
 
 def test_reconcile_application_effects_reinforces_positive_application(tmp_path):
@@ -520,10 +572,6 @@ def test_reconcile_application_effects_reinforces_positive_application(tmp_path)
             "SELECT status FROM learning_application_log WHERE application_id=?",
             (app_id,),
         ).fetchone()
-        effect_row = conn.execute(
-            "SELECT status, observed_trade_count, baseline_trade_count, delta_avg_reward FROM learning_application_effect WHERE application_id=?",
-            (app_id,),
-        ).fetchone()
         reinforced_rows = conn.execute(
             """
             SELECT suggestion_id, status, action, review_note
@@ -534,12 +582,13 @@ def test_reconcile_application_effects_reinforces_positive_application(tmp_path)
         ).fetchall()
     finally:
         conn.close()
+    eff = _effect(db_path, app_id)
 
     assert app_row["status"] == "reinforced"
-    assert effect_row["status"] == "reinforced"
-    assert int(effect_row["observed_trade_count"]) == 3
-    assert int(effect_row["baseline_trade_count"]) == 3
-    assert float(effect_row["delta_avg_reward"]) > 0
+    assert eff.get("status") == "reinforced"
+    assert int(eff.get("observed_trade_count")) == 3
+    assert int(eff.get("baseline_trade_count")) == 3
+    assert float(eff.get("delta_avg_reward") or 0.0) > 0
     assert len(reinforced_rows) == 2
     assert reinforced_rows[0]["status"] == "proposed"
     assert reinforced_rows[0]["action"] == "boost_small"
@@ -625,24 +674,17 @@ def test_reconcile_application_effects_observes_position_supervisor_template(tmp
 
     conn = _connect(db_path)
     try:
-        effect_row = conn.execute(
-            """
-            SELECT status, observed_trade_count, baseline_trade_count, delta_avg_reward
-            FROM learning_application_effect
-            WHERE application_id=?
-            """,
-            (app_id,),
-        ).fetchone()
         suggestion_row = conn.execute(
             "SELECT status FROM policy_suggestion WHERE suggestion_id='psv1'"
         ).fetchone()
     finally:
         conn.close()
+    eff = _effect(db_path, app_id)
 
-    assert effect_row["status"] == "ineffective"
-    assert int(effect_row["observed_trade_count"]) == 3
-    assert int(effect_row["baseline_trade_count"]) == 3
-    assert float(effect_row["delta_avg_reward"]) < 0
+    assert eff.get("status") == "ineffective"
+    assert int(eff.get("observed_trade_count")) == 3
+    assert int(eff.get("baseline_trade_count")) == 3
+    assert float(eff.get("delta_avg_reward") or 0.0) < 0
     assert suggestion_row["status"] == "rolled_back"
 
 
@@ -714,17 +756,14 @@ def test_reconcile_application_effects_waits_when_baseline_too_thin(tmp_path):
             "SELECT status, details_json FROM learning_application_log WHERE application_id=?",
             (app_id,),
         ).fetchone()
-        effect_row = conn.execute(
-            "SELECT status, observed_trade_count, baseline_trade_count FROM learning_application_effect WHERE application_id=?",
-            (app_id,),
-        ).fetchone()
     finally:
         conn.close()
+    eff = _effect(db_path, app_id)
 
     assert app_row["status"] == "observing"
-    assert effect_row["status"] == "observing"
-    assert int(effect_row["observed_trade_count"]) == 3
-    assert int(effect_row["baseline_trade_count"]) == 1
+    assert eff.get("status") == "observing"
+    assert int(eff.get("observed_trade_count")) == 3
+    assert int(eff.get("baseline_trade_count")) == 1
 
 
 def test_demo_reconcile_terminalizes_comparatively_mixed_effects(tmp_path):
@@ -783,11 +822,7 @@ def test_demo_reconcile_terminalizes_comparatively_mixed_effects(tmp_path):
     )
 
     assert result["inconclusive"] == 1
-    row = _connect(db_path).execute(
-        "SELECT status FROM learning_application_effect WHERE application_id=?",
-        (app_id,),
-    ).fetchone()
-    assert row["status"] == "inconclusive"
+    assert _effect(db_path, app_id).get("status") == "inconclusive"
 
 
 def test_reconcile_application_effects_waits_when_no_post_reviews(tmp_path):
@@ -851,18 +886,15 @@ def test_reconcile_application_effects_waits_when_no_post_reviews(tmp_path):
             "SELECT status FROM learning_application_log WHERE application_id=?",
             (app_id,),
         ).fetchone()
-        effect_row = conn.execute(
-            "SELECT status, observed_trade_count, baseline_trade_count, last_review_at FROM learning_application_effect WHERE application_id=?",
-            (app_id,),
-        ).fetchone()
     finally:
         conn.close()
+    eff = _effect(db_path, app_id)
 
     assert app_row["status"] == "observing"
-    assert effect_row["status"] == "observing"
-    assert int(effect_row["observed_trade_count"]) == 0
-    assert int(effect_row["baseline_trade_count"]) == 3
-    assert float(effect_row["last_review_at"]) == 0.0
+    assert eff.get("status") == "observing"
+    assert int(eff.get("observed_trade_count")) == 0
+    assert int(eff.get("baseline_trade_count")) == 3
+    assert float(eff.get("last_review_at") or 0.0) == 0.0
 
 
 def test_reconcile_parameter_template_effects_rolls_back_active_template(tmp_path):
@@ -926,24 +958,15 @@ def test_reconcile_parameter_template_effects_rolls_back_active_template(tmp_pat
     )
     assert applied["ok"] is True
 
+    apps = [a["application_id"] for a in _apps(db_path, scope_type="parameter_template")]
+    assert len(apps) >= 2
+    _set_app_field(db_path, apps[-1], "cycle_ts", 80.0)
+    _set_app_field(db_path, apps[0], "cycle_ts", 200.0)
     conn = _connect(db_path)
     try:
-        apps = conn.execute(
-            """
-            SELECT application_id
-            FROM learning_application_log
-            WHERE scope_type='parameter_template'
-            ORDER BY created_at DESC
-            """
-        ).fetchall()
-        assert len(apps) >= 2
         conn.execute(
-            "UPDATE learning_application_log SET status='superseded', cycle_ts=80.0 WHERE application_id=?",
-            (str(apps[-1]["application_id"]),),
-        )
-        conn.execute(
-            "UPDATE learning_application_log SET cycle_ts=200.0 WHERE application_id=?",
-            (str(apps[0]["application_id"]),),
+            "UPDATE learning_application_log SET status='superseded' WHERE application_id=?",
+            (str(apps[-1]),),
         )
         conn.commit()
     finally:
@@ -1386,16 +1409,9 @@ def test_effect_reconciliation_closes_window_before_concurrent_same_scope_change
 
     gov.reconcile_application_effects(min_trades=3, observe_trades=3, baseline_min_trades=2)
 
-    conn = _connect(db_path)
-    try:
-        row = conn.execute(
-            "SELECT status, decision_json FROM learning_application_effect WHERE application_id=?",
-            (first_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    decision = json.loads(row["decision_json"])
-    assert row["status"] == "inconclusive"
+    eff = _effect(db_path, first_id)
+    decision = eff.get("decision") or {}
+    assert eff.get("status") == "inconclusive"
     assert decision["evidence_quality"]["causal_status"] == "bounded_window_insufficient_samples"
     assert decision["evidence_quality"]["observation_window"]["end_ts"] == 230.0
     assert decision["evidence_quality"]["bounded_attribution_allowed"] is False
@@ -1452,17 +1468,10 @@ def test_effect_reconciliation_uses_only_evidence_before_next_same_scope_change(
 
     gov.reconcile_application_effects(min_trades=3, observe_trades=3, baseline_min_trades=2)
 
-    conn = _connect(db_path)
-    try:
-        row = conn.execute(
-            "SELECT status, observed_trade_count, decision_json FROM learning_application_effect WHERE application_id=?",
-            (first_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    decision = json.loads(row["decision_json"])
-    assert row["status"] == "reinforced"
-    assert row["observed_trade_count"] == 3
+    eff = _effect(db_path, first_id)
+    decision = eff.get("decision") or {}
+    assert eff.get("status") == "reinforced"
+    assert eff.get("observed_trade_count") == 3
     assert decision["evidence_quality"]["causal_status"] == "bounded_comparative_effective"
     assert "bounded_review_5" not in decision["post_review_ids"]
 
@@ -1484,13 +1493,11 @@ def test_mixed_effect_is_rechecked_after_cooldown(tmp_path):
     conn = _connect(db_path)
     try:
         conn.execute("UPDATE learning_application_log SET status='mixed' WHERE application_id=?", (app_id,))
-        conn.execute(
-            "UPDATE learning_application_effect SET status='mixed', updated_at=0 WHERE application_id=?",
-            (app_id,),
-        )
         conn.commit()
     finally:
         conn.close()
+    _set_effect_field(db_path, app_id, "status", "mixed")
+    _set_effect_field(db_path, app_id, "updated_at", 0)
 
     result = gov.reconcile_application_effects(mixed_recheck_after_seconds=300.0)
 
@@ -1516,13 +1523,8 @@ def test_observation_window_expires_as_inconclusive(tmp_path):
     result = gov.reconcile_application_effects(max_observation_age_seconds=86400.0)
 
     assert result["inconclusive"] == 1
-    conn = _connect(db_path)
-    try:
-        effect = conn.execute(
-            "SELECT status, decision_json FROM learning_application_effect WHERE application_id=?",
-            (app_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    assert effect["status"] == "inconclusive"
-    assert json.loads(effect["decision_json"])["evidence_quality"]["retry_via_new_application"] is True
+    eff = _effect(db_path, app_id)
+    assert eff.get("status") == "inconclusive"
+    assert (eff.get("decision") or {}).get("evidence_quality", {}).get(
+        "retry_via_new_application"
+    ) is True

@@ -20,6 +20,17 @@ from backend.core.db import (
     is_state_db_path,
     state_pg_enabled,
 )
+from backend.services.canonical_v2_reader import review_row
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    execute as _execute,
+    load_json as _loads,
+    pg_sql as _sql,
+)
+
+
+def _use_pg(db_path: str | Path) -> bool:
+    return is_state_db_path(db_path)
 
 
 _CARD_CACHE_TTL_SEC = 60.0
@@ -33,24 +44,6 @@ _TERMINAL_EFFECT_STATUSES = frozenset(
 )
 
 
-def _use_pg(db_path: str | Path) -> bool:
-    return is_state_db_path(db_path)
-
-
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
-
-
 def clear_factor_card_cache(db_path: str | Path | None = None) -> None:
     prefix = f"{Path(db_path).resolve()}|" if db_path else None
     with _CARD_CACHE_LOCK:
@@ -60,17 +53,6 @@ def clear_factor_card_cache(db_path: str | Path | None = None) -> None:
         for key in list(_CARD_CACHE):
             if key.startswith(prefix):
                 _CARD_CACHE.pop(key, None)
-
-
-def _loads(value: Any, default: Any) -> Any:
-    if value is None:
-        return default
-    if isinstance(value, (dict, list)):
-        return value
-    try:
-        return json.loads(str(value))
-    except Exception:
-        return default
 
 
 def _round(value: Any, digits: int = 6) -> float:
@@ -614,24 +596,62 @@ class FactorCardService:
                 return self._factor_ids(conn=owned)
         for table, column in (
             ("factor_health", "factor"),
-            ("decision_factor_snapshot", "factor"),
             ("factor_contribution_review", "factor"),
         ):
             rows = _execute(conn, f"SELECT DISTINCT {column} AS value FROM {table}").fetchall()
             names.update(str(row["value"] or "") for row in rows if str(row["value"] or ""))
+        # factor names from canonical factor_snapshots (derived, not legacy table)
+        try:
+            from backend.services.canonical_v2_reader import (
+                _canonical_ready, _parse_factor_snapshots, read_payload,
+            )
+            if _canonical_ready(conn):
+                event_rows = _execute(
+                    conn,
+                    "SELECT payload_hash FROM canonical_v2.event"
+                    " WHERE event_type = 'risk_decision'"
+                    " ORDER BY created_at DESC LIMIT 500",
+                ).fetchall()
+                for er in event_rows:
+                    try:
+                        payload = read_payload(conn, str(er["payload_hash"]))
+                    except Exception:
+                        continue
+                    for s in _parse_factor_snapshots(payload):
+                        fn = str(s.get("factor") or "")
+                        if fn:
+                            names.add(fn)
+        except Exception:
+            pass
+        # legacy fallback
+        if not names:
+            try:
+                rows = _execute(conn, "SELECT DISTINCT factor AS value FROM decision_factor_snapshot").fetchall()
+                names.update(str(row["value"] or "") for row in rows if str(row["value"] or ""))
+            except Exception:
+                pass
         rows = _execute(
             conn,
             """
             SELECT DISTINCT scope_key AS value
             FROM policy_suggestion
             WHERE scope_type='factor'
-            UNION
-            SELECT DISTINCT scope_key AS value
-            FROM learning_application_log
-            WHERE scope_type='factor'
             """
         ).fetchall()
         names.update(str(row["value"] or "") for row in rows if str(row["value"] or ""))
+        try:
+            from backend.services.learning_application_store import (
+                LearningApplicationStore,
+            )
+
+            for app in LearningApplicationStore(self.db_path).iter_applications(
+                scope_type="factor"
+            ):
+                key = str(app.get("scope_key") or "")
+                if key:
+                    names.add(key)
+        except Exception:
+            pass
         return sorted(name for name in names if name)
 
     def _build_card(
@@ -904,22 +924,32 @@ class FactorCardService:
             """,
             (factor_id,),
         ).fetchone()
-        snapshot_row = _execute(
-            conn,
-            """
-            SELECT AVG(shadow_score) AS avg_shadow_score,
-                   AVG(contribution_score) AS avg_contribution_score,
-                   COUNT(*) AS sample_count
-            FROM (
-                SELECT shadow_score, contribution_score
-                FROM decision_factor_snapshot
-                WHERE factor=?
-                ORDER BY id DESC
-                LIMIT ?
-            ) recent
-            """,
-            (factor_id, _EVIDENCE_SNAPSHOT_LIMIT),
-        ).fetchone()
+        # --- read factor snapshots (canonical first, legacy fallback) ---
+        snapshot_rows: list = []
+        try:
+            from backend.services.canonical_v2_reader import iter_decision_factor_snapshots_by_factor
+            snapshot_rows = iter_decision_factor_snapshots_by_factor(conn, factor_id, limit=_EVIDENCE_SNAPSHOT_LIMIT)
+        except Exception:
+            pass
+        if not snapshot_rows:
+            snapshot_rows = [
+                dict(r) for r in _execute(
+                    conn,
+                    "SELECT shadow_score, contribution_score FROM decision_factor_snapshot"
+                    " WHERE factor=? ORDER BY id DESC LIMIT ?",
+                    (factor_id, _EVIDENCE_SNAPSHOT_LIMIT),
+                ).fetchall()
+            ]
+        if snapshot_rows:
+            shadow_scores = [float(r.get("shadow_score") or 0) for r in snapshot_rows]
+            contrib_scores = [float(r.get("contribution_score") or 0) for r in snapshot_rows]
+            snapshot_row = {
+                "avg_shadow_score": sum(shadow_scores) / len(shadow_scores) if shadow_scores else 0,
+                "avg_contribution_score": sum(contrib_scores) / len(contrib_scores) if contrib_scores else 0,
+                "sample_count": len(snapshot_rows),
+            }
+        else:
+            snapshot_row = None
         review_rows = _execute(
             conn,
             """
@@ -931,16 +961,21 @@ class FactorCardService:
             """,
             (factor_id,),
         ).fetchall()
-        review_updated_row = _execute(
-            conn,
-            """
-            SELECT MAX(r.created_at) AS updated_at
-            FROM factor_contribution_review f
-            JOIN trade_outcome_review r ON r.review_id = f.review_id
-            WHERE f.factor=?
-            """,
-            (factor_id,),
-        ).fetchone()
+        review_ids = [
+            str(row["review_id"] or "")
+            for row in _execute(
+                conn,
+                "SELECT review_id FROM factor_contribution_review WHERE factor=?",
+                (factor_id,),
+            ).fetchall()
+            if str(row["review_id"] or "")
+        ]
+        updated_at = 0.0
+        for review_id in review_ids:
+            review = review_row(conn, review_id)
+            if review is not None:
+                updated_at = max(updated_at, float(review.get("created_at") or 0.0))
+        review_updated_row = {"updated_at": updated_at} if review_ids else None
         labels: list[str] = []
         last_primary = ""
         for row in review_rows:
@@ -982,43 +1017,23 @@ class FactorCardService:
             """,
             (factor_id,),
         ).fetchone()
-        app = _execute(
-            conn,
-            """
-            SELECT application_id, action, status, old_weight, new_weight,
-                   details_json, mutation_id, created_at
-            FROM learning_application_log
-            WHERE scope_type='factor' AND scope_key=?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (factor_id,),
-        ).fetchone()
-        if app:
-            effect = _execute(
-                conn,
-                """
-                SELECT application_id, status, observed_trade_count,
-                       delta_avg_reward, decision_json, mutation_id, updated_at
-                FROM learning_application_effect
-                WHERE application_id=?
-                LIMIT 1
-                """,
-                (str(app["application_id"] or ""),),
-            ).fetchone()
+        from backend.services.learning_application_store import (
+            LearningApplicationStore,
+        )
+
+        store = LearningApplicationStore(self.db_path)
+        app = store.latest_application(scope_type="factor", scope_key=factor_id)
+        if app is not None:
+            effect = next(
+                (
+                    e
+                    for e in store.iter_effects(scope_key=factor_id)
+                    if str(e.get("application_id") or "") == str(app["application_id"] or "")
+                ),
+                None,
+            )
         else:
-            effect = _execute(
-                conn,
-                """
-                SELECT application_id, status, observed_trade_count,
-                       delta_avg_reward, decision_json, mutation_id, updated_at
-                FROM learning_application_effect
-                WHERE scope_type='factor' AND scope_key=?
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """,
-                (factor_id,),
-            ).fetchone()
+            effect = store.latest_effect(scope_key=factor_id, scope_type="factor")
         active_template = _execute(
             conn,
             """
@@ -1126,7 +1141,7 @@ class FactorCardService:
                 float(effect["delta_avg_reward"] or 0.0) if effect else None
             ),
             "application_effect_decision": (
-                _loads(effect["decision_json"], {}) if effect else {}
+                dict(effect.get("decision") or {}) if effect else {}
             ),
             "latest_template_candidate_trace": latest_candidate_trace,
             "latest_template_recommendation": latest_recommendation,

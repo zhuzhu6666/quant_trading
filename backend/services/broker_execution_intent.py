@@ -14,26 +14,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 
 from backend.core.db import get_state_pg_conn
+from backend.core.db_helpers import dump_json as _json, row_value as _row_value
 
 
 UNRESOLVED_EXECUTION_STATUSES = frozenset({"prepared", "submitting", "unknown"})
 FINAL_EXECUTION_STATUSES = frozenset({"confirmed", "rejected", "simulated"})
 EXECUTION_INTENT_STATUSES = UNRESOLVED_EXECUTION_STATUSES | FINAL_EXECUTION_STATUSES
-
-
-def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def _row_value(row: Any, key: str, index: int, default: Any = None) -> Any:
-    if row is None:
-        return default
-    if isinstance(row, Mapping):
-        return row.get(key, default)
-    try:
-        return row[index]
-    except (IndexError, KeyError, TypeError):
-        return default
 
 
 @dataclass(frozen=True)

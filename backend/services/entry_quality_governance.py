@@ -16,6 +16,7 @@ from backend.services.governance_mutation_coordinator import (
     GovernanceMutationCoordinator,
     GovernanceMutationPlan,
 )
+from backend.services.learning_application_store import LearningApplicationStore
 from config import runtime_config as runtime_config_module
 from risk.policy_service import RiskPolicyService
 
@@ -36,6 +37,33 @@ def _verdict_payload(verdict: Any) -> dict[str, Any]:
     if hasattr(verdict, "to_dict"):
         return dict(verdict.to_dict())
     return dict(verdict or {})
+
+
+_ENTRY_QUALITY_ACTIVE_STATES = frozenset(
+    {"prepared", "applied", "observing", "effective"}
+)
+
+
+def _supersede_entry_quality_scope(store: LearningApplicationStore) -> None:
+    """Mark every active entry-quality application/effect superseded.
+
+    The lean store only exposes per-application transitions (there is no bulk
+    scope UPDATE), so we enumerate the governed effects and transition each
+    still-active application plus its effect.  Runs after the coordinator
+    commits (the store owns its own connection and must not write inside the
+    coordinator's open SQLite transaction).
+    """
+    seen: set[str] = set()
+    for eff in store.iter_effects(scope_key="weak_signal", scope_type="entry_quality"):
+        app_id = str(eff.get("application_id") or "")
+        if not app_id or app_id in seen:
+            continue
+        seen.add(app_id)
+        app = store.get_application(app_id)
+        if str((app or {}).get("status") or "") in _ENTRY_QUALITY_ACTIVE_STATES:
+            store.transition_application(app_id, status="superseded")
+        if str(eff.get("status") or "") in _ENTRY_QUALITY_ACTIVE_STATES:
+            store.update_effect(app_id, patch={"status": "superseded"})
 
 
 class EntryQualityGovernanceService:
@@ -211,17 +239,19 @@ class EntryQualityGovernanceService:
                 or str(current.get("applied_mutation_id") or "")
             ):
                 raise RuntimeError("entry_quality_suggestion_changed")
-            competing = execute(
-                conn,
-                """
-                SELECT application_id
-                FROM learning_application_log
-                WHERE scope_type='entry_quality' AND scope_key='weak_signal'
-                  AND status IN ('prepared','applied','observing','effective')
-                LIMIT 1
-                """,
-            ).fetchone()
-            if competing and str(competing["application_id"] or "") != application_id:
+            # Competing-active guard. Read-only store call is safe inside the
+            # coordinator's open SQLite write transaction; a concurrent active
+            # experiment blocks a new one unless we are superseding legacy v1.
+            store = LearningApplicationStore(str(self.db_path))
+            active_app = store.latest_application(
+                scope_type="entry_quality", scope_key="weak_signal"
+            )
+            if active_app and str(active_app.get("status") or "") in (
+                "prepared",
+                "applied",
+                "observing",
+                "effective",
+            ):
                 if not legacy_ids:
                     raise RuntimeError("entry_quality_experiment_already_active")
 
@@ -237,25 +267,6 @@ class EntryQualityGovernanceService:
                       AND status='applied'
                     """,
                     (now, *legacy_ids),
-                )
-                execute(
-                    conn,
-                    """
-                    UPDATE learning_application_log
-                    SET status='superseded'
-                    WHERE scope_type='entry_quality' AND scope_key='weak_signal'
-                      AND status IN ('prepared','applied','observing','effective')
-                    """,
-                )
-                execute(
-                    conn,
-                    """
-                    UPDATE learning_application_effect
-                    SET status='superseded', updated_at=?
-                    WHERE scope_type='entry_quality' AND scope_key='weak_signal'
-                      AND status IN ('observing','applied','effective')
-                    """,
-                    (now,),
                 )
 
             execute(
@@ -276,61 +287,8 @@ class EntryQualityGovernanceService:
                 applied_mutation_id=mutation_id,
                 now=now,
             )
-            execute(
-                conn,
-                """
-                INSERT INTO learning_application_log
-                (application_id, cycle_ts, scope_type, scope_key, action,
-                 bias_multiplier, old_weight, new_weight, suggestion_ids_json,
-                 status, details_json, mutation_id,
-                 governance_eligibility_version, created_at)
-                VALUES (?, ?, 'entry_quality', 'weak_signal',
-                        'activate_entry_quality_control', 1.0, 0.0, ?, ?,
-                        'observing', ?, ?, ?, ?)
-                ON CONFLICT(application_id) DO UPDATE SET
-                    status='observing', details_json=excluded.details_json,
-                    mutation_id=excluded.mutation_id
-                """,
-                (
-                    application_id,
-                    now,
-                    threshold,
-                    json.dumps([suggestion_id], ensure_ascii=False),
-                    dumps(details),
-                    mutation_id,
-                    GOVERNANCE_ELIGIBILITY_VERSION,
-                    now,
-                ),
-            )
-            execute(
-                conn,
-                """
-                INSERT INTO learning_application_effect
-                (application_id, scope_type, scope_key, action, status,
-                 observed_trade_count, baseline_trade_count, decision_json,
-                 mutation_id, governance_eligibility_version,
-                 last_review_at, updated_at, created_at)
-                VALUES (?, 'entry_quality', 'weak_signal',
-                        'activate_entry_quality_control', 'observing',
-                        0, 0, ?, ?, ?, 0.0, ?, ?)
-                ON CONFLICT(application_id) DO UPDATE SET
-                    status='observing', decision_json=excluded.decision_json,
-                    mutation_id=excluded.mutation_id,
-                    governance_eligibility_version=excluded.governance_eligibility_version,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    application_id,
-                    dumps({"details": details, "effect_status": "awaiting_post_trades"}),
-                    mutation_id,
-                    GOVERNANCE_ELIGIBILITY_VERSION,
-                    now,
-                    now,
-                ),
-            )
             return {
                 "suggestion_id": suggestion_id,
-                "application_id": application_id,
                 "scope_key": "weak_signal",
                 "threshold": threshold,
                 "strong_signal_override": strong_override,
@@ -377,8 +335,47 @@ class EntryQualityGovernanceService:
             ),
             transaction_writer=transaction_writer,
         )
+        committed = bool(mutation.get("ok"))
+        application_id = ""
+        if committed:
+            # The store owns its own connection and cannot write inside the
+            # coordinator's open SQLite transaction (BEGIN IMMEDIATE holds a
+            # write lock), so supersede legacy actives and record the new
+            # application/effect after the coordinator commits.
+            store = LearningApplicationStore(str(self.db_path))
+            _supersede_entry_quality_scope(store)
+            application_id = store.prepare_application(
+                scope_type="entry_quality",
+                scope_key="weak_signal",
+                action="activate_entry_quality_control",
+                status="observing",
+                run_id=run_id,
+                source="autonomous_learning",
+                bias_multiplier=1.0,
+                old_weight=0.0,
+                new_weight=threshold,
+                suggestion_ids=[suggestion_id],
+                mutation_id=str(mutation.get("mutation_id") or ""),
+                governance_eligibility_version=GOVERNANCE_ELIGIBILITY_VERSION,
+                cycle_ts=now,
+                details=details,
+            )
+            store.write_effect(
+                application_id=application_id,
+                scope_key="weak_signal",
+                scope_type="entry_quality",
+                action="activate_entry_quality_control",
+                status="observing",
+                observed_trade_count=0,
+                baseline_trade_count=0,
+                decision={"details": details, "effect_status": "awaiting_post_trades"},
+                mutation_id=str(mutation.get("mutation_id") or ""),
+                governance_eligibility_version=GOVERNANCE_ELIGIBILITY_VERSION,
+                last_review_at=0.0,
+                updated_at=now,
+            )
         return {
-            "ok": bool(mutation.get("ok")),
+            "ok": committed,
             "status": str(mutation.get("status") or "mutation_failed"),
             "suggestion_id": suggestion_id,
             "application_id": application_id,
@@ -470,25 +467,6 @@ class EntryQualityGovernanceService:
                 """,
                 (now, *legacy_ids),
             )
-            execute(
-                conn,
-                """
-                UPDATE learning_application_log
-                SET status='superseded'
-                WHERE scope_type='entry_quality' AND scope_key='weak_signal'
-                  AND status IN ('prepared','applied','observing','effective')
-                """,
-            )
-            execute(
-                conn,
-                """
-                UPDATE learning_application_effect
-                SET status='superseded', updated_at=?
-                WHERE scope_type='entry_quality' AND scope_key='weak_signal'
-                  AND status IN ('observing','applied','effective')
-                """,
-                (now,),
-            )
             return {
                 "invalidated_suggestion_ids": legacy_ids,
                 "base_threshold": base_threshold,
@@ -529,8 +507,15 @@ class EntryQualityGovernanceService:
             ),
             transaction_writer=transaction_writer,
         )
+        committed = bool(mutation.get("ok"))
+        if committed:
+            # Supersede surviving active entry-quality applications/effects via
+            # the store after the coordinator commits (store cannot write inside
+            # the coordinator's open SQLite transaction).
+            store = LearningApplicationStore(str(self.db_path))
+            _supersede_entry_quality_scope(store)
         return {
-            "ok": bool(mutation.get("ok")),
+            "ok": committed,
             "status": str(mutation.get("status") or "mutation_failed"),
             "mutation": mutation,
             "invalidated_suggestion_ids": legacy_ids,
@@ -542,31 +527,33 @@ class EntryQualityGovernanceService:
         ensure_autonomous_learning_tables(self.db_path)
         conn = connect(self.db_path, read_only=True)
         try:
-            raw = execute(
-                conn,
-                """
-                SELECT COUNT(*) AS raw_rows,
-                       COUNT(DISTINCT NULLIF(position_id, '')) AS raw_positions
-                FROM autonomous_learning_sample
-                WHERE sample_type='trade_review_outcome'
-                """,
-            ).fetchone()
-            eligible = execute(
-                conn,
-                """
-                SELECT COUNT(*) AS eligible_rows,
-                       COUNT(DISTINCT NULLIF(position_id, '')) AS eligible_positions,
-                       COALESCE(SUM(governance_effective_weight), 0.0) AS effective_sample_size
-                FROM autonomous_learning_sample
-                WHERE sample_type='trade_review_outcome'
-                  AND label_status='matured'
-                  AND governance_eligible=1
-                  AND governance_effective_weight>0
-                  AND governance_eligibility_version=?
-                  AND governance_eligibility_fingerprint<>''
-                """,
-                (GOVERNANCE_ELIGIBILITY_VERSION,),
-            ).fetchone()
+            from backend.services.canonical_v2_reader import iter_training_sample_rows
+            sampled_rows = iter_training_sample_rows(
+                conn, sample_type="trade_review_outcome"
+            )
+            eligible_rows = [
+                r for r in sampled_rows
+                if str(r.get("label_status") or "") == "matured"
+                and bool(r.get("governance_eligible"))
+                and float(r.get("governance_effective_weight") or 0.0) > 0
+                and str(r.get("governance_eligibility_version") or "") == GOVERNANCE_ELIGIBILITY_VERSION
+                and str(r.get("governance_eligibility_fingerprint") or "") != ""
+            ]
+            raw = {
+                "raw_rows": len(sampled_rows),
+                "raw_positions": len(
+                    {str(r.get("position_id") or "") for r in sampled_rows if r.get("position_id")}
+                ),
+            }
+            eligible = {
+                "eligible_rows": len(eligible_rows),
+                "eligible_positions": len(
+                    {str(r.get("position_id") or "") for r in eligible_rows if r.get("position_id")}
+                ),
+                "effective_sample_size": sum(
+                    float(r.get("governance_effective_weight") or 0.0) for r in eligible_rows
+                ),
+            }
             suggestion = execute(
                 conn,
                 """
@@ -582,35 +569,17 @@ class EntryQualityGovernanceService:
                 (SUPPORTED_ACTION, GOVERNANCE_ELIGIBILITY_VERSION),
             ).fetchone()
             application = None
-            if state_table_exists(conn, "learning_application_log"):
-                has_effect = state_table_exists(conn, "learning_application_effect")
-                effect_columns = (
-                    "e.observed_trade_count, e.baseline_trade_count, "
-                    "e.delta_avg_reward, e.decision_json, e.updated_at"
-                    if has_effect
-                    else (
-                        "0 AS observed_trade_count, 0 AS baseline_trade_count, "
-                        "0.0 AS delta_avg_reward, '{}' AS decision_json, "
-                        "0.0 AS updated_at"
-                    )
+            effect = None
+            store = LearningApplicationStore(str(self.db_path))
+            try:
+                application = store.latest_application(
+                    scope_type="entry_quality", scope_key="weak_signal"
                 )
-                effect_join = (
-                    "LEFT JOIN learning_application_effect e "
-                    "ON e.application_id=l.application_id"
-                    if has_effect
-                    else ""
+                effect = store.latest_effect(
+                    scope_key="weak_signal", scope_type="entry_quality"
                 )
-                application = execute(
-                    conn,
-                    f"""
-                    SELECT l.application_id, l.status, l.mutation_id, l.cycle_ts,
-                           l.details_json, {effect_columns}
-                    FROM learning_application_log l
-                    {effect_join}
-                    WHERE l.scope_type='entry_quality' AND l.scope_key='weak_signal'
-                    ORDER BY l.cycle_ts DESC LIMIT 1
-                    """,
-                ).fetchone()
+            except Exception:
+                application, effect = None, None
             suggestion_item = dict(suggestion) if suggestion else {}
             if suggestion_item:
                 suggestion_item["evidence"] = loads(
@@ -618,12 +587,15 @@ class EntryQualityGovernanceService:
                 )
             application_item = dict(application) if application else {}
             if application_item:
-                application_item["details"] = loads(
-                    application_item.pop("details_json", "{}"), {}
+                application_item["details"] = application_item.get("details") or {}
+                application_item["effect"] = dict(effect) if effect else {}
+                application_item["observed_trade_count"] = int(
+                    (effect or {}).get("observed_trade_count") or 0
                 )
-                application_item["effect"] = loads(
-                    application_item.pop("decision_json", "{}"), {}
+                application_item["delta_avg_reward"] = (effect or {}).get(
+                    "delta_avg_reward"
                 )
+                application_item["updated_at"] = (effect or {}).get("updated_at") or 0.0
             return {
                 "ok": True,
                 "schema_version": "entry_quality_governance_status.v1",
@@ -682,19 +654,25 @@ class EntryQualityGovernanceService:
             conn.close()
 
     def _active_application(self) -> dict[str, Any]:
-        conn = connect(self.db_path, read_only=True)
+        store = LearningApplicationStore(str(self.db_path))
         try:
-            row = execute(
-                conn,
-                """
-                SELECT application_id, status, mutation_id, cycle_ts
-                FROM learning_application_log
-                WHERE scope_type='entry_quality' AND scope_key='weak_signal'
-                  AND status IN ('prepared','applied','observing','effective')
-                ORDER BY cycle_ts DESC
-                LIMIT 1
-                """,
-            ).fetchone()
-            return dict(row) if row else {}
-        finally:
-            conn.close()
+            row = store.latest_application(
+                scope_type="entry_quality", scope_key="weak_signal"
+            )
+        except Exception:
+            return {}
+        if not row:
+            return {}
+        if str(row.get("status") or "") not in (
+            "prepared",
+            "applied",
+            "observing",
+            "effective",
+        ):
+            return {}
+        return {
+            "application_id": str(row.get("application_id") or ""),
+            "status": str(row.get("status") or ""),
+            "mutation_id": str(row.get("mutation_id") or ""),
+            "cycle_ts": float(row.get("created_at") or 0.0),
+        }

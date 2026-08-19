@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import fields
 from pathlib import Path
@@ -306,14 +307,16 @@ def test_supervisor_switch_commits_domain_and_runtime_with_one_mutation(
     )["status"] == "committed"
     application = _row(
         db_path,
-        "SELECT status, mutation_id FROM learning_application_log WHERE application_id=?",
+        "SELECT status, details_json FROM learning_application_log WHERE application_id=?",
         (result["application_id"],),
     )
     effect = _row(
         db_path,
-        "SELECT status, mutation_id FROM learning_application_effect WHERE application_id=?",
+        "SELECT effect_json FROM learning_application_effect WHERE application_id=?",
         (result["application_id"],),
     )
+    app_details = json.loads(application["details_json"] or "{}")
+    effect_details = json.loads(effect["effect_json"] or "{}")
     suggestion = _row(
         db_path,
         "SELECT status, applied_mutation_id FROM policy_suggestion WHERE suggestion_id=?",
@@ -324,8 +327,10 @@ def test_supervisor_switch_commits_domain_and_runtime_with_one_mutation(
         "SELECT status, mutation_id FROM learning_experiment_reservation WHERE reservation_id=?",
         (reservation_id,),
     )
-    assert application == {"status": "applied", "mutation_id": mutation_id}
-    assert effect == {"status": "observing", "mutation_id": mutation_id}
+    assert application["status"] == "applied"
+    assert app_details.get("mutation_id") == mutation_id
+    assert effect_details.get("status") == "observing"
+    assert effect_details.get("mutation_id") == mutation_id
     assert suggestion == {"status": "applied", "applied_mutation_id": mutation_id}
     assert reservation == {"status": "consumed", "mutation_id": mutation_id}
 
@@ -527,11 +532,12 @@ def test_parameter_template_activation_uses_atomic_coordinator_writer(
     active = service.get_active_template(factor_id="rsi_14", regime_key="range")
     application = _row(
         db_path,
-        "SELECT status, mutation_id FROM learning_application_log WHERE application_id=?",
+        "SELECT status, details_json FROM learning_application_log WHERE application_id=?",
         (result["application_id"],),
     )
     assert active["template_id"] == target["template_id"]
-    assert application == {"status": "applied", "mutation_id": mutation_id}
+    assert application["status"] == "applied"
+    assert json.loads(application["details_json"])["mutation_id"] == mutation_id
     assert result["mutation"]["risk_classification"]["classification_source"] == (
         "coordinator_before_after"
     )
@@ -548,13 +554,14 @@ def test_parameter_template_activation_uses_atomic_coordinator_writer(
     assert rollback["ok"] is True
     rolled_back = _row(
         db_path,
-        "SELECT status, mutation_id FROM learning_application_log WHERE application_id=?",
+        "SELECT status, details_json FROM learning_application_log WHERE application_id=?",
         (result["application_id"],),
     )
-    assert rolled_back == {
-        "status": "rolled_back",
-        "mutation_id": rollback["mutation_id"],
-    }
+    assert rolled_back["status"] == "rolled_back"
+    assert (
+        json.loads(rolled_back["details_json"])["mutation_id"]
+        == rollback["mutation_id"]
+    )
     assert service.get_active_template(
         factor_id="rsi_14", regime_key="range"
     )["template_id"] == previous["template_id"]

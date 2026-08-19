@@ -18,6 +18,7 @@ from backend.core.db import (
     is_state_db_path,
     state_table_columns,
 )
+from backend.core.db_helpers import conn_is_pg as _conn_is_pg, dump_json as _json, execute as _execute
 from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
 from backend.services.experience_prior import ExperiencePriorService
 from backend.services.factor_blend_health import FactorBlendHealthService
@@ -44,33 +45,12 @@ class AtomicExperimentAdmissionError(RuntimeError):
         )
 
 
-def _json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-
-
 def _fingerprint(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
 def _stable_id(prefix: str, value: Any, *, length: int = 20) -> str:
     return f"{prefix}_{_fingerprint(value)[:length]}"
-
-
-def _conn_is_pg(conn: Any) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _execute(conn: Any, sql: str, params: tuple[Any, ...] | list[Any] | None = None):
-    statement = sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-    if params is None:
-        return conn.execute(statement)
-    return conn.execute(statement, tuple(params))
 
 
 def _upsert_row(
@@ -108,7 +88,22 @@ def _verdict_payload(verdict: Any) -> dict[str, Any]:
 
 
 class FactorWeightChangeService:
-    """Plan, admit, authorize, persist, and observe factor weight changes."""
+    """Plan, admit, authorize, persist, and observe factor weight changes.
+
+    Producer-naming convention (S2.3 writer convergence): every ``execute``
+    caller sets ``producer`` to the *orchestrator subsystem identity* and keeps
+    the specific trigger in ``source`` while leaving ``source_agent`` as the
+    governing authority.  The stable producer set is:
+
+    - ``factor_governance``            -> FactorGovernanceOrchestrator
+    - ``evolution_orchestrator``       -> EvolutionOrchestrator
+    - ``awe_adapt``                    -> live AWE adapter
+    - ``autonomous_demo_apply_stepper``-> autonomous learning demo stepper
+
+    A new caller must reuse one of these identities (or add a new subsystem
+    identity to the set) rather than inventing ad-hoc per-action producer
+    suffixes; keep the action name in ``source``.
+    """
 
     def __init__(self, db_path: str | Path = STATE_DB):
         self.db_path = Path(db_path)
@@ -200,29 +195,22 @@ class FactorWeightChangeService:
                 "status": "controlled_active_canary_contract_missing",
                 "reason": "legacy_evidence_incomplete",
             }
-        conn = None
+        from backend.services.learning_application_store import (
+            LearningApplicationStore,
+        )
+        store = LearningApplicationStore(str(self.db_path))
         try:
-            conn = (
-                get_state_pg_conn(read_only=True)
-                if is_state_db_path(self.db_path)
-                else connect_sqlite(self.db_path, read_only=True)
+            app = store.latest_application(
+                scope_type="factor", scope_key=str(factor_id)
             )
-            row = _execute(
-                conn,
-                """SELECT l.application_id,
-                          l.status AS application_status,
-                          e.status AS effect_status,
-                          e.observed_trade_count,
-                          e.decision_json,
-                          e.updated_at
-                   FROM learning_application_log l
-                   LEFT JOIN learning_application_effect e
-                     ON e.application_id=l.application_id
-                   WHERE l.scope_type='factor' AND l.scope_key=?
-                   ORDER BY l.cycle_ts DESC, l.created_at DESC
-                   LIMIT 1""",
-                (factor_id,),
-            ).fetchone()
+            eff = store.latest_effect(
+                scope_key=str(factor_id), scope_type="factor"
+            )
+            item_application_id = str((app or {}).get("application_id") or "")
+            application_status = str((app or {}).get("status") or "")
+            effect_status = str((eff or {}).get("status") or "")
+            observed_trade_count = int((eff or {}).get("observed_trade_count") or 0)
+            decision = dict((eff or {}).get("decision") or {}) if eff else {}
         except Exception as exc:
             return {
                 "ok": True,
@@ -230,37 +218,17 @@ class FactorWeightChangeService:
                 "status": "application_effect_unavailable",
                 "reason": f"{type(exc).__name__}: {exc}",
             }
-        finally:
-            if conn is not None:
-                conn.close()
-        if not row:
+        if not item_application_id:
             return {
                 "ok": True,
                 "allowed": False,
                 "status": "application_effect_missing",
                 "reason": "real_application_effect_required",
             }
-        columns = (
-            "application_id",
-            "application_status",
-            "effect_status",
-            "observed_trade_count",
-            "decision_json",
-            "updated_at",
-        )
-        item = (
-            {key: row[key] for key in columns}
-            if hasattr(row, "keys")
-            else {key: row[index] for index, key in enumerate(columns)}
-        )
-        try:
-            decision = json.loads(str(item.get("decision_json") or "{}"))
-        except Exception:
-            decision = {}
         quality = dict((decision or {}).get("evidence_quality") or {})
-        effect_status = str(item.get("effect_status") or "").lower()
+        effect_status_l = str(effect_status or "").lower()
         allowed = bool(
-            effect_status == "effective"
+            effect_status_l == "effective"
             and quality.get("bounded_attribution_allowed") is True
         )
         return {
@@ -276,13 +244,11 @@ class FactorWeightChangeService:
                 if allowed
                 else "weight_expansion_requires_effective_bounded_attribution"
             ),
-            "application_id": str(item.get("application_id") or ""),
-            "application_status": str(item.get("application_status") or ""),
-            "effect_status": effect_status,
-            "observed_trade_count": int(item.get("observed_trade_count") or 0),
-            "bounded_attribution_allowed": quality.get(
-                "bounded_attribution_allowed"
-            ),
+            "application_id": item_application_id,
+            "application_status": application_status,
+            "effect_status": effect_status_l,
+            "observed_trade_count": observed_trade_count,
+            "bounded_attribution_allowed": quality.get("bounded_attribution_allowed"),
         }
 
     @staticmethod
@@ -324,7 +290,7 @@ class FactorWeightChangeService:
         bypass_for_risk_reduction: bool,
     ) -> dict[str, Any]:
         """Commit experiment facts on the coordinator-owned transaction."""
-        from backend.services.agent_authority_registry import (
+        from backend.services.agent_authority import (
             AgentAuthorityRegistryService,
         )
         from backend.services.governance_eligibility import (
@@ -349,25 +315,14 @@ class FactorWeightChangeService:
             raise AtomicExperimentAdmissionError(batch_admission)
 
         now = time.time()
-        app_columns = state_table_columns(conn, "learning_application_log")
-        effect_columns = state_table_columns(conn, "learning_application_effect")
         suggestion_columns = state_table_columns(conn, "policy_suggestion")
         reservation_columns = state_table_columns(
             conn, "learning_experiment_reservation"
         )
-        missing_mutation_columns = [
-            table
-            for table, columns in (
-                ("learning_application_log", app_columns),
-                ("learning_application_effect", effect_columns),
-                ("learning_experiment_reservation", reservation_columns),
-            )
-            if "mutation_id" not in columns
-        ]
-        if missing_mutation_columns:
+        if "mutation_id" not in reservation_columns:
             raise RuntimeError(
                 "factor_weight_atomic_schema_missing_mutation_id:"
-                + ",".join(missing_mutation_columns)
+                "learning_experiment_reservation"
             )
         for name in sorted(expected):
             decision = decisions[name]
@@ -391,6 +346,9 @@ class FactorWeightChangeService:
                 status="applied",
                 impact_level="medium",
             )
+            old_weight = float(decision.old_weight)
+            new_weight = float(decision.new_weight)
+            bias_multiplier = (new_weight / old_weight) if old_weight else 1.0
             details = {
                 **dict(details_by_factor.get(name) or {}),
                 "experiment_admission": (batch_admission.get("admissions") or {}).get(name)
@@ -399,6 +357,16 @@ class FactorWeightChangeService:
                 "mutation_id": mutation_id,
                 "commit_boundary": "governance_mutation_coordinator",
                 "authority_verdict": authority_verdict,
+                "scope_type": "factor",
+                "scope_key": name,
+                "action": "update_weight",
+                "bias_multiplier": bias_multiplier,
+                "old_weight": old_weight,
+                "new_weight": new_weight,
+                "suggestion_ids": suggestion_ids,
+                "governance_eligibility_version": str(
+                    GOVERNANCE_ELIGIBILITY_VERSION or ""
+                ),
                 "application_state": {
                     "status": "applied",
                     "prepared_at": float(cycle_ts),
@@ -407,33 +375,23 @@ class FactorWeightChangeService:
                     "atomic_commit": True,
                 },
             }
-            old_weight = float(decision.old_weight)
-            new_weight = float(decision.new_weight)
-            app_values: dict[str, Any] = {
-                "application_id": application_id,
-                "cycle_ts": float(cycle_ts),
-                "scope_type": "factor",
-                "scope_key": name,
-                "action": "update_weight",
-                "bias_multiplier": (new_weight / old_weight) if old_weight else 1.0,
-                "old_weight": old_weight,
-                "new_weight": new_weight,
-                "suggestion_ids_json": _json(suggestion_ids),
-                "status": "applied",
-                "details_json": _json(details),
-                "created_at": now,
-            }
-            if "mutation_id" in app_columns:
-                app_values["mutation_id"] = mutation_id
-            if "governance_eligibility_version" in app_columns:
-                app_values["governance_eligibility_version"] = (
-                    GOVERNANCE_ELIGIBILITY_VERSION
-                )
             _upsert_row(
                 conn,
                 table="learning_application_log",
                 primary_key="application_id",
-                values=app_values,
+                values={
+                    "application_id": application_id,
+                    "run_id": str(details.get("run_id") or ""),
+                    "source": str(
+                        details.get("mutation_source")
+                        or details.get("producer")
+                        or ""
+                    ),
+                    "status": "applied",
+                    "details_json": _json(details),
+                    "created_at": now,
+                    "updated_at": now,
+                },
                 immutable_columns={"created_at"},
             )
 
@@ -494,35 +452,43 @@ class FactorWeightChangeService:
                     now=now,
                 )
 
-            effect_values: dict[str, Any] = {
-                "application_id": application_id,
+            effect_payload = {
                 "scope_type": "factor",
                 "scope_key": name,
                 "action": "update_weight",
                 "status": "observing",
-                "decision_json": _json(
-                    {
-                        "suggestion_ids": suggestion_ids,
-                        "bias_multiplier": app_values["bias_multiplier"],
-                        "old_weight": old_weight,
-                        "new_weight": new_weight,
-                        "details": details,
-                    }
+                "observed_trade_count": 0,
+                "baseline_trade_count": 0,
+                "post_avg_reward": 0.0,
+                "baseline_avg_reward": 0.0,
+                "delta_avg_reward": None,
+                "post_win_rate": 0.0,
+                "baseline_win_rate": 0.0,
+                "decision": {
+                    "suggestion_ids": suggestion_ids,
+                    "bias_multiplier": bias_multiplier,
+                    "old_weight": old_weight,
+                    "new_weight": new_weight,
+                    "details": details,
+                },
+                "mutation_id": mutation_id,
+                "governance_eligibility_version": str(
+                    GOVERNANCE_ELIGIBILITY_VERSION or ""
                 ),
+                "last_review_at": 0.0,
                 "updated_at": now,
-                "created_at": now,
             }
-            if "mutation_id" in effect_columns:
-                effect_values["mutation_id"] = mutation_id
-            if "governance_eligibility_version" in effect_columns:
-                effect_values["governance_eligibility_version"] = (
-                    GOVERNANCE_ELIGIBILITY_VERSION
-                )
             _upsert_row(
                 conn,
                 table="learning_application_effect",
-                primary_key="application_id",
-                values=effect_values,
+                primary_key="effect_id",
+                values={
+                    "effect_id": _stable_id("effect", application_id),
+                    "application_id": application_id,
+                    "scope": name,
+                    "effect_json": _json(effect_payload),
+                    "created_at": now,
+                },
                 immutable_columns={"created_at"},
             )
 

@@ -9,14 +9,15 @@ def test_risk_inputs_use_clean_reviews_and_position_notional(monkeypatch, tmp_pa
     conn.executescript(
         """
         CREATE TABLE trade_outcome_review (
+            review_id TEXT PRIMARY KEY,
             position_id TEXT,
             pnl REAL,
             review_json TEXT,
             created_at REAL
         );
         INSERT INTO trade_outcome_review
-            (position_id, pnl, review_json, created_at)
-        VALUES ('position-1', 12.5, '{}', 100.0);
+            (review_id, position_id, pnl, review_json, created_at)
+        VALUES ('rev-1', 'position-1', 12.5, '{}', 100.0);
         """
     )
     conn.close()

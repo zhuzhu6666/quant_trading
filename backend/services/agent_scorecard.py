@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, state_table_columns, state_table_exists
+from backend.core.db import STATE_DB, state_table_exists
+from backend.core.db_helpers import load_json as _loads
 from backend.services.agent_authority import (
     AgentAuthorityRegistryService,
     infer_policy_suggestion_source_agent,
@@ -13,20 +13,11 @@ from backend.services.agent_authority import (
 )
 from backend.services._brain_helpers import connect as _connect, execute as _execute
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
+from backend.services.canonical_v2_reader import canonical_ready, iter_review_rows, read_review
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.state_payload_archive import load_json_payload
-
-
-def _loads(raw: Any, default: Any) -> Any:
-    if raw is None:
-        return default
-    if isinstance(raw, (dict, list)):
-        return raw
-    try:
-        return json.loads(str(raw))
-    except Exception:
-        return default
+from backend.services.learning_application_store import LearningApplicationStore
 
 
 def _text(value: Any, default: str = "") -> str:
@@ -53,12 +44,6 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
     except Exception:
         value = default
     return default if value is None else value
-
-
-def _review_archive_select(conn: Any, *, alias: str = "r", output: str = "review_archive_hash") -> str:
-    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
-        return ""
-    return f", {alias}.review_archive_hash AS {output}"
 
 
 def _review_payload(
@@ -154,7 +139,7 @@ class AgentScorecardService:
         limit = max(1, min(int(limit), 200))
         conn = _connect(self.db_path, read_only=True)
         try:
-            if not state_table_exists(conn, "trade_outcome_review"):
+            if not canonical_ready(conn) and not state_table_exists(conn, "trade_outcome_review"):
                 return {
                     "ok": False,
                     "schema_version": "agent_trade_attribution.v1",
@@ -162,17 +147,11 @@ class AgentScorecardService:
                     "items": [],
                     "boundary": self.boundary(),
                 }
-            archive_select = _review_archive_select(conn)
-            rows = _execute(
-                conn,
-                f"""
-                SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                       pnl, outcome_label, failure_tags_json, summary_text,
-                       review_json, created_at{archive_select}
-                FROM trade_outcome_review AS r
-                ORDER BY created_at DESC
-                """,
-            ).fetchall()
+            rows = sorted(
+                iter_review_rows(conn, limit=0),
+                key=lambda row: _safe_float(row.get("created_at")),
+                reverse=True,
+            )
             items = []
             for row in rows:
                 if review_has_system_contamination(_review_payload(conn, row)):
@@ -492,43 +471,37 @@ class AgentScorecardService:
             gaps.append("learning_application_log")
             return
         has_effect = state_table_exists(conn, "learning_application_effect")
-        rows = _execute(
-            conn,
-            """
-            SELECT application_id, scope_type, scope_key, action, suggestion_ids_json,
-                   status, details_json, created_at
-            FROM learning_application_log
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        for row in rows:
-            details = _loads(row["details_json"], {})
-            ids = [str(item) for item in _loads(row["suggestion_ids_json"], [])]
+        store = LearningApplicationStore(self.db_path)
+        apps = list(store.iter_applications(limit=limit))
+        effect_by_app: dict[str, dict[str, Any]] = {}
+        if has_effect:
+            effect_by_app = {
+                str(eff.get("application_id") or ""): eff
+                for eff in store.iter_effects()
+                if str(eff.get("application_id") or "")
+            }
+        for app in apps:
+            details = app
+            ids = [str(item) for item in (app.get("suggestion_ids") or [])]
             source_agent = _text(details.get("source_agent"), "")
             if not source_agent:
                 source_agent = next((suggestion_sources.get(item, "") for item in ids if suggestion_sources.get(item)), "autonomous_learning")
             metric = self._metric(metrics, source_agent)
             metric["application_count"] += 1
-            if _text(row["status"]) in {"applied", "observing", "effective"}:
+            if _text(app.get("status")) in {"applied", "observing", "effective"}:
                 metric["applied_application_count"] += 1
-            if _text(row["status"]) == "rolled_back":
+            if _text(app.get("status")) == "rolled_back":
                 metric["rolled_back_application_count"] += 1
-            _status_inc(metric["status_counts"], row["status"])
-            self._touch(metric, row["created_at"])
+            _status_inc(metric["status_counts"], app.get("status"))
+            self._touch(metric, app.get("created_at"))
             verdict = details.get("authority_verdict") if isinstance(details, dict) else {}
             if isinstance(verdict, dict) and verdict.get("violations"):
                 metric["contract_violation_count"] += len(verdict.get("violations") or [])
             if has_effect:
-                effect = _execute(
-                    conn,
-                    "SELECT delta_avg_reward, status FROM learning_application_effect WHERE application_id=? LIMIT 1",
-                    (row["application_id"],),
-                ).fetchone()
+                effect = effect_by_app.get(str(app.get("application_id") or ""))
                 if effect:
-                    delta = _safe_float(effect["delta_avg_reward"])
-                    effect_status = _text(effect["status"])
+                    delta = _safe_float(effect.get("delta_avg_reward"))
+                    effect_status = _text(effect.get("status"))
                     if effect_status in {"effective", "reinforced", "ineffective", "rolled_back"}:
                         metric["terminal_effect_count"] += 1
                     elif effect_status == "inconclusive":
@@ -544,29 +517,21 @@ class AgentScorecardService:
         if not state_table_exists(conn, "experience_memory"):
             gaps.append("experience_memory")
             return
-        archive_select = _review_archive_select(conn, output="source_review_archive_hash")
         rows = _execute(
             conn,
             f"""
             SELECT e.experience_id, e.source_table, e.source_id, e.append_source,
                    e.decision_context_json, e.recommended_action, e.created_at,
-                   r.review_id AS source_review_id, r.review_json AS source_review_json{archive_select}
+                   e.source_id AS source_review_id, '' AS source_review_json, '' AS source_review_archive_hash
             FROM experience_memory e
-            LEFT JOIN trade_outcome_review r ON r.review_id=e.source_id
             ORDER BY e.created_at DESC
             """,
         ).fetchall()
         accepted = 0
         for row in rows:
             if _text(row["append_source"]) == "trade_lesson_memory.v1":
-                source_review = _review_payload(
-                    conn,
-                    row,
-                    source_id_key="source_review_id",
-                    inline_key="source_review_json",
-                    archive_key="source_review_archive_hash",
-                )
-                if not _text(row["source_review_id"]) or review_has_system_contamination(source_review):
+                source_review = self._canonical_review(conn, str(row["source_id"] or ""))
+                if source_review is None or review_has_system_contamination(source_review):
                     continue
             context = _loads(row["decision_context_json"], {})
             agents = []
@@ -777,11 +742,8 @@ class AgentScorecardService:
             return []
         rows = _execute(
             conn,
-            f"""SELECT c.counterfactual_id, c.updated_at, c.evidence_json,
-                      r.review_id AS source_review_id,
-                      r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
+            """SELECT c.counterfactual_id, c.updated_at, c.evidence_json, c.review_id
                FROM supervisor_counterfactual_review c
-               LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
                WHERE (c.review_id=? AND c.review_id <> '') OR c.position_id=?
                ORDER BY c.updated_at DESC""",
             (review_id, position_id),
@@ -789,17 +751,10 @@ class AgentScorecardService:
         links: list[dict[str, Any]] = []
         for row in rows:
             evidence = _loads(row["evidence_json"], {})
+            source_review = self._canonical_review(conn, str(row["review_id"] or ""))
             if (
-                not _text(row["source_review_id"])
-                or review_has_system_contamination(
-                    _review_payload(
-                        conn,
-                        row,
-                        source_id_key="source_review_id",
-                        inline_key="source_review_json",
-                        archive_key="source_review_archive_hash",
-                    )
-                )
+                source_review is None
+                or review_has_system_contamination(source_review)
                 or bool(evidence.get("evidence_invalidated"))
             ):
                 continue
@@ -828,30 +783,20 @@ class AgentScorecardService:
             if state_table_exists(conn, "supervisor_counterfactual_review"):
                 rows = _execute(
                     conn,
-                    f"""SELECT c.counterfactual_id, c.review_id, c.trade_id,
+                    """SELECT c.counterfactual_id, c.review_id, c.trade_id,
                        c.position_id, c.label, c.confidence, c.horizons_json,
-                       c.evidence_json, c.updated_at,
-                       r.review_id AS source_review_id,
-                       r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
+                       c.evidence_json, c.updated_at
                        FROM supervisor_counterfactual_review c
-                       LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
                        WHERE (c.review_id=? AND c.review_id <> '') OR c.position_id=?
                        ORDER BY c.updated_at DESC""",
                     (review_id, position_id),
                 ).fetchall()
                 for row in rows:
                     evidence = _loads(row["evidence_json"], {})
+                    source_review = self._canonical_review(conn, str(row["review_id"] or ""))
                     if (
-                        not _text(row["source_review_id"])
-                        or review_has_system_contamination(
-                            _review_payload(
-                                conn,
-                                row,
-                                source_id_key="source_review_id",
-                                inline_key="source_review_json",
-                                archive_key="source_review_archive_hash",
-                            )
-                        )
+                        source_review is None
+                        or review_has_system_contamination(source_review)
                         or bool(evidence.get("evidence_invalidated"))
                     ):
                         continue
@@ -876,6 +821,19 @@ class AgentScorecardService:
             }
         except Exception as exc:
             return {"schema_version": "posterior_arbitration.v1", "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+    def _canonical_review(self, conn: Any, review_id: str) -> dict[str, Any] | None:
+        """Resolve the full review payload through canonical mapping first."""
+        if not review_id:
+            return None
+        record = read_review(conn, review_id)
+        if record is None:
+            return None
+        if record.get("source") == "canonical":
+            payload = record.get("payload") or {}
+            nested = payload.get("review") if isinstance(payload, dict) else None
+            return nested if isinstance(nested, dict) else {}
+        return _review_payload(conn, record.get("payload") or {})
 
     def _trade_lesson(self, conn: Any, review_id: str) -> dict[str, Any]:
         if not review_id or not state_table_exists(conn, "experience_memory"):

@@ -3,6 +3,7 @@ import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.experience_prior import ExperiencePriorService
+from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.learning_experiment_admission import LearningExperimentAdmissionService
 
 
@@ -18,27 +19,23 @@ def _db(tmp_path):
 def test_admission_blocks_active_scope_and_immaterial_weight_delta(tmp_path):
     db_path = _db(tmp_path)
     now = time.time()
-    conn = connect_sqlite(db_path)
-    try:
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, status, created_at)
-            VALUES ('app_active', ?, 'factor', 'rsi_14', 'update_weight', 'applied', ?)
-            """,
-            (now, now),
-        )
-        conn.execute(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status, updated_at, created_at)
-            VALUES ('app_active', 'factor', 'rsi_14', 'update_weight', 'observing', ?, ?)
-            """,
-            (now, now),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    store = LearningApplicationStore(db_path)
+    app_id = store.prepare_application(
+        scope_type="factor",
+        scope_key="rsi_14",
+        action="update_weight",
+        status="applied",
+        cycle_ts=now,
+        details={"created_at": now},
+    )
+    store.write_effect(
+        application_id=app_id,
+        scope_key="rsi_14",
+        scope_type="factor",
+        action="update_weight",
+        status="observing",
+        updated_at=now,
+    )
 
     service = LearningExperimentAdmissionService(db_path)
     blocked = service.evaluate(
@@ -47,10 +44,10 @@ def test_admission_blocks_active_scope_and_immaterial_weight_delta(tmp_path):
     assert blocked["allowed"] is False
     assert blocked["status"] == "blocked_active_experiment"
 
+    store.update_effect(app_id, patch={"status": "reinforced"})
     conn = connect_sqlite(db_path)
     try:
-        conn.execute("UPDATE learning_application_log SET status='reinforced' WHERE application_id='app_active'")
-        conn.execute("UPDATE learning_application_effect SET status='reinforced' WHERE application_id='app_active'")
+        conn.execute("UPDATE learning_application_log SET status='reinforced' WHERE application_id=?", (app_id,))
         conn.commit()
     finally:
         conn.close()
@@ -77,23 +74,17 @@ def test_experience_prior_uses_only_terminal_bounded_effects(tmp_path):
         }
     }
     unbounded = {"evidence_quality": {"bounded_attribution_allowed": False}}
-    conn = connect_sqlite(db_path)
-    try:
-        conn.executemany(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status, observed_trade_count,
-             delta_avg_reward, decision_json, updated_at, created_at)
-            VALUES (?, 'factor', ?, 'update_weight', ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                ("bounded", "rsi_14", "reinforced", 5, 0.2, json.dumps(bounded), now, now),
-                ("unbounded", "macd_hist", "ineffective", 10, -0.2, json.dumps(unbounded), now, now),
-            ],
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    store = LearningApplicationStore(db_path)
+    store.write_effect(
+        application_id="bounded", scope_key="rsi_14", scope_type="factor",
+        action="update_weight", status="reinforced", observed_trade_count=5,
+        delta_avg_reward=0.2, decision=bounded, updated_at=now,
+    )
+    store.write_effect(
+        application_id="unbounded", scope_key="macd_hist", scope_type="factor",
+        action="update_weight", status="ineffective", observed_trade_count=10,
+        delta_avg_reward=-0.2, decision=unbounded, updated_at=now,
+    )
 
     result = ExperiencePriorService(db_path).build(cache_seconds=0.0)
     assert result["eligible_count"] == 1
@@ -106,19 +97,24 @@ def test_experience_prior_uses_only_terminal_bounded_effects(tmp_path):
 def test_admission_enforces_global_active_experiment_budget(tmp_path):
     db_path = _db(tmp_path)
     now = time.time()
-    conn = connect_sqlite(db_path)
-    try:
-        conn.executemany(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, status, created_at)
-            VALUES (?, ?, 'factor', ?, 'update_weight', 'applied', ?)
-            """,
-            [("active_1", now, "factor_a", now), ("active_2", now, "factor_b", now)],
+    store = LearningApplicationStore(db_path)
+    for name in ("active_1", "active_2"):
+        app_id = store.prepare_application(
+            scope_type="factor",
+            scope_key=("factor_a" if name == "active_1" else "factor_b"),
+            action="update_weight",
+            status="applied",
+            cycle_ts=now,
+            details={"created_at": now},
         )
-        conn.commit()
-    finally:
-        conn.close()
+        store.write_effect(
+            application_id=app_id,
+            scope_key=("factor_a" if name == "active_1" else "factor_b"),
+            scope_type="factor",
+            action="update_weight",
+            status="observing",
+            updated_at=now,
+        )
 
     service = LearningExperimentAdmissionService(db_path)
     result = service.evaluate(

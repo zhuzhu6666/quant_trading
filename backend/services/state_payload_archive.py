@@ -8,9 +8,7 @@ import json
 import time
 from typing import Any
 
-
-def _is_pg(conn: Any) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
+from backend.core.db_helpers import conn_is_pg as _is_pg
 
 
 def _sql(conn: Any, sql: str) -> str:

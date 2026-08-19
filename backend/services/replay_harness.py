@@ -20,7 +20,17 @@ from backend.core.state_store import (
     is_state_schema_write_sql,
     validate_runtime_state_schema,
 )
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    decision_row,
+    iter_decision_rows,
+    iter_order_rows,
+    iter_position_rows,
+    iter_review_rows,
+    review_row,
+)
 from backend.services.evolution_ledger import current_runtime_config_snapshot
+from backend.services.fact_envelope import observed_epoch
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.state_payload_archive import load_json_payload, load_supervisor_trace_archive
 
@@ -33,15 +43,11 @@ def _dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
 
 
-def _loads(raw: Any, default: Any) -> Any:
-    if raw is None:
-        return default
-    if isinstance(raw, (dict, list)):
-        return raw
-    try:
-        return json.loads(str(raw))
-    except Exception:
-        return default
+from backend.core.db_helpers import (
+    conn_is_pg as _conn_is_pg,
+    load_json as _loads,
+    pg_sql as _sql,
+)
 
 
 def _hash(value: Any) -> str:
@@ -61,14 +67,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
 
 
 def _execute(conn, sql: str, params: Any = None):
@@ -677,55 +675,70 @@ class ReplayHarnessService:
             "stale_after_seconds": stale_after_sec,
         }
 
+    _DECISION_EVENT_TYPES = ("open", "skip", "order_failed")
+
     def _load_decisions(self, *, since_ts: float, limit: int) -> list[dict[str, Any]]:
         conn = _connect(self.db_path, read_only=True)
         try:
-            if not state_table_exists(conn, "decision_ledger"):
-                return []
-            has_factor_snapshot = state_table_exists(conn, "decision_factor_snapshot")
-            factor_expr = (
-                "(SELECT COUNT(*) FROM decision_factor_snapshot dfs WHERE dfs.decision_id = dl.decision_id)"
-                if has_factor_snapshot
-                else "0"
-            )
-            rows = _execute(
-                conn,
-                f"""
-                SELECT dl.decision_id, dl.trade_id, dl.position_id,
-                       dl.event_type, dl.symbol, dl.timeframe,
-                       dl.decision_ts, dl.action_score, dl.action_reason,
-                       dl.portfolio_state_json, dl.risk_state_json, dl.action_json,
-                       {factor_expr} AS factor_snapshot_count
-                FROM decision_ledger dl
-                WHERE dl.decision_ts >= ?
-                  AND dl.event_type IN ('open', 'skip', 'order_failed')
-                ORDER BY dl.decision_ts ASC
-                LIMIT ?
-                """,
-                (float(since_ts), max(1, int(limit))),
-            ).fetchall()
-            decisions = [dict(row) for row in rows]
-            if has_factor_snapshot and decisions:
-                for item in decisions:
-                    snapshot_rows = _execute(
-                        conn,
-                        """
-                        SELECT factor, source, raw_value, normalized_value, direction,
-                               base_weight, policy_weight, shadow_score, health_score,
-                               gated, gated_reason, contribution_score,
-                               generation, artifact_hash, definition_fingerprint,
-                               runtime_selection_fingerprint, config_hash,
-                               lineage_status
-                        FROM decision_factor_snapshot
-                        WHERE decision_id = ?
-                        ORDER BY ABS(contribution_score) DESC, factor ASC
-                        """,
-                        (str(item.get("decision_id") or ""),),
-                    ).fetchall()
-                    item["factor_snapshots"] = [dict(row) for row in snapshot_rows]
-            return decisions
+            return self._load_decisions_canonical(conn, since_ts=float(since_ts), limit=max(1, int(limit)))
         finally:
             conn.close()
+
+    def _load_decisions_canonical(self, conn: Any, *, since_ts: float, limit: int) -> list[dict[str, Any]]:
+        """Decision reads through canonical_v2 (legacy-shaped rows)."""
+        has_factor_snapshot = state_table_exists(conn, "decision_factor_snapshot")
+        decisions: list[dict[str, Any]] = []
+        for row in iter_decision_rows(conn, limit=0):
+            if _safe_float(row.get("decision_ts")) < since_ts:
+                continue
+            if str(row.get("event_type") or "") not in self._DECISION_EVENT_TYPES:
+                continue
+            decisions.append(row)
+        decisions.sort(key=lambda item: _safe_float(item.get("decision_ts")))
+        decisions = decisions[:limit]
+        if decisions:
+            for item in decisions:
+                item["factor_snapshot_count"] = self._factor_snapshot_count(conn, str(item.get("decision_id") or ""))
+                item["factor_snapshots"] = self._load_factor_snapshots(conn, str(item.get("decision_id") or ""))
+        return decisions
+
+    @staticmethod
+    def _factor_snapshot_count(conn: Any, decision_id: str) -> int:
+        try:
+            from backend.services.canonical_v2_reader import (
+                count_decision_factor_snapshots,
+            )
+            return count_decision_factor_snapshots(conn, decision_id)
+        except Exception:
+            row = _execute(
+                conn,
+                "SELECT COUNT(*) AS n FROM decision_factor_snapshot WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchone()
+            return _safe_int(row["n"] if row is not None else 0)
+
+    @staticmethod
+    def _load_factor_snapshots(conn: Any, decision_id: str) -> list[dict[str, Any]]:
+        try:
+            from backend.services.canonical_v2_reader import (
+                iter_decision_factor_snapshots,
+            )
+            return iter_decision_factor_snapshots(conn, decision_id)
+        except Exception:
+            rows = _execute(
+                conn,
+                "SELECT factor, source, raw_value, normalized_value, direction,"
+                " base_weight, policy_weight, shadow_score, health_score,"
+                " gated, gated_reason, contribution_score,"
+                " generation, artifact_hash, definition_fingerprint,"
+                " runtime_selection_fingerprint, config_hash,"
+                " lineage_status"
+                " FROM decision_factor_snapshot"
+                " WHERE decision_id = ?"
+                " ORDER BY ABS(contribution_score) DESC, factor ASC",
+                (decision_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def _load_preview_decisions(self, *, since_ts: float, limit: int, decision_id: str = "") -> list[dict[str, Any]]:
         selected_decision_id = str(decision_id or "").strip()
@@ -737,49 +750,30 @@ class ReplayHarnessService:
     def _load_decision_by_id(self, decision_id: str) -> dict[str, Any]:
         conn = _connect(self.db_path, read_only=True)
         try:
-            if not state_table_exists(conn, "decision_ledger"):
+            row = decision_row(conn, str(decision_id))
+            if row is None or str(row.get("event_type") or "") not in self._DECISION_EVENT_TYPES:
                 return {}
-            rows = _execute(
-                conn,
-                """
-                SELECT dl.decision_id, dl.trade_id, dl.position_id,
-                       dl.event_type, dl.symbol, dl.timeframe,
-                       dl.decision_ts, dl.action_score, dl.action_reason,
-                       dl.portfolio_state_json, dl.risk_state_json, dl.action_json,
-                       0 AS factor_snapshot_count
-                FROM decision_ledger dl
-                WHERE dl.decision_id = ?
-                  AND dl.event_type IN ('open', 'skip', 'order_failed')
-                """,
-                (decision_id,),
-            ).fetchall()
-            return dict(rows[0]) if rows else {}
+            row = dict(row)
+            row["factor_snapshot_count"] = 0
+            return row
         finally:
             conn.close()
 
     def _load_preview_decision_candidates(self, *, since_ts: float, limit: int, offset: int = 0) -> list[dict[str, Any]]:
         conn = _connect(self.db_path, read_only=True)
         try:
-            if not state_table_exists(conn, "decision_ledger"):
-                return []
             fetch_limit = max(50, (max(0, int(offset)) + max(1, int(limit))) * 5)
-            rows = _execute(
-                conn,
-                """
-                SELECT dl.decision_id, dl.trade_id, dl.position_id,
-                       dl.event_type, dl.symbol, dl.timeframe,
-                       dl.decision_ts, dl.action_score, dl.action_reason,
-                       dl.portfolio_state_json, dl.risk_state_json, dl.action_json,
-                       0 AS factor_snapshot_count
-                FROM decision_ledger dl
-                WHERE dl.decision_ts >= ?
-                  AND dl.event_type IN ('open', 'skip', 'order_failed')
-                ORDER BY dl.decision_ts DESC
-                LIMIT ?
-                """,
-                (float(since_ts), fetch_limit),
-            ).fetchall()
-            decisions = [dict(row) for row in rows]
+            candidates: list[dict[str, Any]] = []
+            for row in iter_decision_rows(conn, limit=0):
+                if _safe_float(row.get("decision_ts")) < float(since_ts):
+                    continue
+                if str(row.get("event_type") or "") not in self._DECISION_EVENT_TYPES:
+                    continue
+                row = dict(row)
+                row["factor_snapshot_count"] = 0
+                candidates.append(row)
+            candidates.sort(key=lambda item: _safe_float(item.get("decision_ts")), reverse=True)
+            decisions = candidates[:fetch_limit]
             ranked = sorted(decisions, key=self._preview_decision_rank)
             start = max(0, int(offset))
             return ranked[start : start + max(1, int(limit))]
@@ -956,7 +950,7 @@ class ReplayHarnessService:
             has_reviews = state_table_exists(conn, "trade_outcome_review")
             has_lifecycle = state_table_exists(conn, "position_lifecycle_event")
             has_recovery = state_table_exists(conn, "recovery_position_state")
-            has_samples = state_table_exists(conn, "autonomous_learning_sample")
+            has_samples = True  # canonical training_sample_row is the only sample store
             items = [
                 self._trade_outcome_learning_item(
                     conn,
@@ -1107,66 +1101,38 @@ class ReplayHarnessService:
         }
 
     def _find_trade_review(self, conn, *, decision_id: str, trade_id: str, position_id: str) -> dict[str, Any]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if decision_id:
-            clauses.extend(["entry_decision_id = ?", "exit_decision_id = ?"])
-            params.extend([decision_id, decision_id])
-        if trade_id:
-            clauses.append("trade_id = ?")
-            params.append(trade_id)
-        if position_id:
-            clauses.append("position_id = ?")
-            params.append(position_id)
-        if not clauses:
-            return {}
-        row = _execute(
-            conn,
-            f"""
-            SELECT *
-            FROM trade_outcome_review
-            WHERE {" OR ".join(clauses)}
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            tuple(params),
-        ).fetchone()
-        if not row:
-            return {}
-        result = dict(row)
-        result["review_json"] = load_json_payload(
-            conn,
-            source_table="trade_outcome_review",
-            source_id=str(result.get("review_id") or ""),
-            inline_json=result.get("review_json"),
-            archive_hash=result.get("review_archive_hash", ""),
-            default={},
-        )
-        return result
+        best: dict[str, Any] | None = None
+        best_ts = 0.0
+        for row in iter_review_rows(conn, limit=0):
+            matched = (
+                bool(decision_id)
+                and (
+                    str(row.get("entry_decision_id") or "") == decision_id
+                    or str(row.get("exit_decision_id") or "") == decision_id
+                )
+            ) or (bool(trade_id) and str(row.get("trade_id") or "") == trade_id) or (
+                bool(position_id) and str(row.get("position_id") or "") == position_id
+            )
+            if not matched:
+                continue
+            row_ts = _safe_float(row.get("created_at"))
+            if best is None or row_ts > best_ts:
+                best = row
+                best_ts = row_ts
+        return best or {}
 
     def _find_latest_position_event(self, conn, *, trade_id: str, position_id: str) -> dict[str, Any]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if position_id:
-            clauses.append("position_id = ?")
-            params.append(position_id)
-        if trade_id:
-            clauses.append("trade_id = ?")
-            params.append(trade_id)
-        if not clauses:
-            return {}
-        row = _execute(
-            conn,
-            f"""
-            SELECT *
-            FROM position_lifecycle_event
-            WHERE {" OR ".join(clauses)}
-            ORDER BY event_ts DESC
-            LIMIT 1
-            """,
-            tuple(params),
-        ).fetchone()
-        return dict(row) if row else {}
+        best: dict[str, Any] | None = None
+        best_ts = 0.0
+        for row in iter_position_rows(conn, limit=0):
+            if (bool(position_id) and str(row.get("position_id") or "") == position_id) or (
+                bool(trade_id) and str(row.get("trade_id") or "") == trade_id
+            ):
+                row_ts = _safe_float(row.get("event_ts"))
+                if best is None or row_ts > best_ts:
+                    best = row
+                    best_ts = row_ts
+        return best or {}
 
     def _find_recovery_position_state(self, conn, *, position_id: str) -> dict[str, Any]:
         if not position_id:
@@ -1185,31 +1151,24 @@ class ReplayHarnessService:
         return dict(row) if row else {}
 
     def _find_learning_samples(self, conn, *, decision_id: str, trade_id: str, position_id: str) -> list[dict[str, Any]]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if decision_id:
-            clauses.append("decision_id = ?")
-            params.append(decision_id)
-        if trade_id:
-            clauses.append("trade_id = ?")
-            params.append(trade_id)
-        if position_id:
-            clauses.append("position_id = ?")
-            params.append(position_id)
-        if not clauses:
-            return []
-        rows = _execute(
-            conn,
-            f"""
-            SELECT *
-            FROM autonomous_learning_sample
-            WHERE {" OR ".join(clauses)}
-            ORDER BY created_at DESC
-            LIMIT 10
-            """,
-            tuple(params),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        from backend.services.canonical_v2_reader import iter_training_sample_rows
+
+        merged: dict[str, dict[str, Any]] = {}
+        for key, value in (
+            ("decision_id", decision_id),
+            ("trade_id", trade_id),
+            ("position_id", position_id),
+        ):
+            if not value:
+                continue
+            for row in iter_training_sample_rows(conn, **{key: value}, limit=10):
+                merged.setdefault(str(row.get("sample_id") or f"#{id(row)}"), row)
+        ordered = sorted(
+            merged.values(),
+            key=lambda r: _safe_float(r.get("created_at")),
+            reverse=True,
+        )[:10]
+        return ordered
 
     @staticmethod
     def _summary_token(summary: str, key: str) -> str:
@@ -1346,53 +1305,39 @@ class ReplayHarnessService:
             return empty
         conn = _connect(self.db_path, read_only=True)
         try:
-            has_orders = state_table_exists(conn, "order_lifecycle_event")
-            has_positions = state_table_exists(conn, "position_lifecycle_event")
+            has_orders = state_table_exists(conn, "order_lifecycle_event") or True
+            has_positions = state_table_exists(conn, "position_lifecycle_event") or True
             has_supervisor = state_table_exists(conn, "position_supervisor_trace")
             has_deals = state_table_exists(conn, "ctrader_deals")
-            has_counterfactuals = (
-                state_table_exists(conn, "supervisor_counterfactual_review")
-                and state_table_exists(conn, "trade_outcome_review")
-            )
+            has_counterfactuals = state_table_exists(conn, "supervisor_counterfactual_review")
             orders: dict[str, list[dict[str, Any]]] = {}
             positions: dict[str, list[dict[str, Any]]] = {}
             supervisor: dict[str, list[dict[str, Any]]] = {}
             deals: dict[str, list[dict[str, Any]]] = {}
             counterfactuals: dict[str, list[dict[str, Any]]] = {}
+            # Order/position facts are canonical-owned; batch-restore once per replay
+            # run, then filter per decision in memory.
+            canonical_orders = iter_order_rows(conn, limit=0)
+            canonical_positions = iter_position_rows(conn, limit=0)
             for row in rows:
                 decision_id = str(row.get("decision_id") or "")
                 trade_id = str(row.get("trade_id") or "")
                 position_id = str(row.get("position_id") or "")
                 numeric_position_id = _safe_int(position_id)
                 if has_orders:
-                    order_rows = _execute(
-                        conn,
-                        """
-                        SELECT event_id, decision_id, trade_id, order_id, broker_order_id,
-                               event_type, event_ts, price, volume, status, details_json
-                        FROM order_lifecycle_event
-                        WHERE decision_id = ?
-                           OR (? <> '' AND trade_id = ?)
-                        ORDER BY event_ts ASC, event_id ASC
-                        """,
-                        (decision_id, trade_id, trade_id),
-                    ).fetchall()
-                    orders[decision_id] = [dict(item) for item in order_rows]
+                    orders[decision_id] = [
+                        item
+                        for item in canonical_orders
+                        if str(item.get("decision_id") or "") == decision_id
+                        or (trade_id and str(item.get("trade_id") or "") == trade_id)
+                    ]
                 if has_positions:
-                    position_rows = _execute(
-                        conn,
-                        """
-                        SELECT event_id, position_id, trade_id, symbol, event_type,
-                               event_ts, net_volume, avg_price, unrealized_pnl,
-                               realized_pnl, details_json
-                        FROM position_lifecycle_event
-                        WHERE (? <> '' AND position_id = ?)
-                           OR (? <> '' AND trade_id = ?)
-                        ORDER BY event_ts ASC, event_id ASC
-                        """,
-                        (position_id, position_id, trade_id, trade_id),
-                    ).fetchall()
-                    positions[decision_id] = [dict(item) for item in position_rows]
+                    positions[decision_id] = [
+                        item
+                        for item in canonical_positions
+                        if (position_id and str(item.get("position_id") or "") == position_id)
+                        or (trade_id and str(item.get("trade_id") or "") == trade_id)
+                    ]
                 if has_supervisor:
                     try:
                         has_trace_archive = "verdict_archive_hash" in state_table_columns(
@@ -1445,52 +1390,30 @@ class ReplayHarnessService:
                     ).fetchall()
                     deals[decision_id] = [dict(item) for item in deal_rows]
                 if has_counterfactuals:
-                    try:
-                        has_review_archive = "review_archive_hash" in state_table_columns(
-                            conn, "trade_outcome_review"
-                        )
-                    except Exception:
-                        has_review_archive = False
-                    review_archive_select = (
-                        ", r.review_archive_hash AS source_review_archive_hash"
-                        if has_review_archive
-                        else ""
-                    )
+                    valid_counterfactuals = []
                     cf_rows = _execute(
                         conn,
-                        f"""
+                        """
                         SELECT c.counterfactual_id, c.review_id, c.trade_id,
                                c.position_id, c.close_ts, c.close_reason,
                                c.supervisor_event_type, c.supervisor_reason,
                                c.label, c.confidence, c.horizons_json,
-                               c.evidence_json, c.created_at, c.updated_at,
-                               r.review_id AS source_review_id,
-                               r.review_json AS source_review_json{review_archive_select}
+                               c.evidence_json, c.created_at, c.updated_at
                         FROM supervisor_counterfactual_review c
-                        LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
                         WHERE (? <> '' AND c.position_id = ?)
                            OR (? <> '' AND c.trade_id = ?)
                         ORDER BY c.close_ts ASC, c.counterfactual_id ASC
                         """,
                         (position_id, position_id, trade_id, trade_id),
                     ).fetchall()
-                    valid_counterfactuals = []
                     for item in cf_rows:
                         value = dict(item)
                         evidence = _loads(value.get("evidence_json"), {})
-                        source_review = load_json_payload(
-                            conn,
-                            source_table="trade_outcome_review",
-                            source_id=str(value.get("source_review_id") or ""),
-                            inline_json=value.get("source_review_json"),
-                            archive_hash=value.get("source_review_archive_hash", ""),
-                            default={},
-                        )
+                        source_review = review_row(conn, str(value.get("review_id") or ""))
                         if (
-                            not str(value.pop("source_review_id", "") or "")
-                            or review_has_system_contamination(
-                                source_review
-                            )
+                            not str(value.get("review_id") or "")
+                            or source_review is None
+                            or review_has_system_contamination(source_review.get("review_json") or {})
                             or bool(evidence.get("evidence_invalidated"))
                         ):
                             continue

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.services.review_contract import build_system_issue_context
-
-
-FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES = frozenset(
-    {"exit", "holding", "data_quality", "parameter"}
+from backend.services.review_contract import (
+    NON_FACTOR_RESPONSIBILITIES,
+    RESPONSIBILITY_DOMAINS,
+    build_system_issue_context,
 )
+
+
+# B1/B2: unified factor-penalty exclusion list owned by review_contract so the
+# failure taxonomy, counter-evidence, and experience_builder cannot drift.
+FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES = NON_FACTOR_RESPONSIBILITIES
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -169,6 +173,12 @@ def build_failure_taxonomy(review: dict[str, Any] | None) -> dict[str, Any]:
         primary = "thesis"
     elif "holding_inefficient" in labels:
         primary = "holding"
+
+    # B2: every produced responsibility must belong to the single canonical
+    # vocabulary; unknown values degrade to unclear instead of leaking a new
+    # ad-hoc enumeration into consumers (e.g. experience_builder/penalty gates).
+    if primary not in RESPONSIBILITY_DOMAINS:
+        primary = "unclear"
 
     confidence = 0.35 + 0.12 * len(labels)
     if context_integrity != "full":

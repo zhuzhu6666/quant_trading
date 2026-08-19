@@ -179,7 +179,7 @@ def test_runtime_connector_never_creates_schema(monkeypatch) -> None:
     conn = connect_state_store("postgresql://runtime", read_only=False)
 
     assert conn is fake
-    assert fake.executed == ['SET search_path TO "state_v1", public']
+    assert fake.executed == ['SET search_path TO "runtime", public']
     assert not any("CREATE" in sql.upper() for sql in fake.executed)
 
 
@@ -196,7 +196,7 @@ def test_runtime_read_only_connector_protects_current_and_future_transactions(
     connect_state_store("postgresql://runtime", read_only=True)
 
     assert fake.read_only is True
-    assert fake.executed == ['SET search_path TO "state_v1", public']
+    assert fake.executed == ['SET search_path TO "runtime", public']
 
 
 def test_migration_connector_is_the_explicit_schema_writer(monkeypatch) -> None:
@@ -211,8 +211,8 @@ def test_migration_connector_is_the_explicit_schema_writer(monkeypatch) -> None:
 
     assert conn is fake
     assert fake.executed == [
-        'CREATE SCHEMA IF NOT EXISTS "state_v1"',
-        'SET search_path TO "state_v1", public',
+        'CREATE SCHEMA IF NOT EXISTS "runtime"',
+        'SET search_path TO "runtime", public',
     ]
 
 
@@ -267,7 +267,9 @@ def test_runtime_state_ddl_objects_have_a_schema_contract() -> None:
     root = Path(__file__).resolve().parents[1]
     object_pattern = re.compile(
         r"CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)\s+"
-        r"(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)",
+        r"(?:IF\s+NOT\s+EXISTS\s+)?"
+        r"(?:[A-Za-z_][A-Za-z0-9_]*\.)?"
+        r"([A-Za-z_][A-Za-z0-9_]*)",
         re.IGNORECASE,
     )
     runtime_objects: set[str] = set()

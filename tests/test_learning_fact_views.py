@@ -166,15 +166,13 @@ def test_learning_and_model_console_contracts_use_explicit_endpoint_timestamps()
 
 
 def _create_dataset_source(path: str) -> None:
+    from tests.canonical_fixture import ensure_training_sample_row_sqlite
+
+    ensure_training_sample_row_sqlite(path)
     conn = sqlite3.connect(path)
     try:
         conn.executescript(
             """
-            CREATE TABLE autonomous_learning_sample (
-                updated_at REAL,
-                event_ts REAL,
-                created_at REAL
-            );
             CREATE TABLE decision_ledger (
                 decision_ts REAL,
                 created_at REAL
@@ -185,8 +183,13 @@ def _create_dataset_source(path: str) -> None:
             """
         )
         conn.execute(
-            "INSERT INTO autonomous_learning_sample VALUES (?, ?, ?)",
-            (930.0, 920.0, 910.0),
+            """
+            INSERT INTO training_sample_row
+            (sample_id, sample_type, source_table, source_id, event_ts, label_status,
+             integrity, train_weight, created_at, updated_at)
+            VALUES ('sample_1', 'shadow_open_decision', 'decision_ledger', 'd1',
+                    920.0, 'matured', 'full', 1.0, 910.0, 930.0)
+            """
         )
         conn.execute("INSERT INTO decision_ledger VALUES (?, ?)", (970.0, 960.0))
         conn.execute("INSERT INTO trade_outcome_review VALUES (?)", (950.0,))

@@ -11,6 +11,7 @@ from backend.core.db import (
     is_state_db_path,
     state_table_exists,
 )
+from backend.core.db_helpers import conn_is_pg as _conn_is_pg, execute as _execute, pg_sql as _sql
 from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
@@ -26,20 +27,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = True):
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _conn_is_pg(conn: Any) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _sql(conn: Any, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _conn_is_pg(conn) else sql
-
-
-def _execute(conn: Any, sql: str, params: Any = None):
-    if params is None:
-        return conn.execute(_sql(conn, sql))
-    return conn.execute(_sql(conn, sql), params)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -250,15 +237,17 @@ class AutonomousEvolutionCycleService:
         tables = [
             "decision_ledger",
             "trade_outcome_review",
-            "autonomous_learning_sample",
             "experience_memory",
             "replay_report",
         ]
         items = [self._table_freshness(table, now=now) for table in tables]
+        sample_item = self._sample_freshness(now=now)
+        if sample_item is not None:
+            items.append(sample_item)
         hard_missing = [
             item["table"]
             for item in items
-            if item["table"] in {"decision_ledger", "autonomous_learning_sample"} and item["count"] <= 0
+            if item["table"] in {"decision_ledger", "canonical_v2.training_sample_row"} and item["count"] <= 0
         ]
         replay_item = next((item for item in items if item["table"] == "replay_report"), {})
         replay_stale = bool(replay_item.get("latest_age_seconds", 0) > 24 * 3600) or _safe_int(replay_item.get("count")) <= 0
@@ -327,16 +316,47 @@ class AutonomousEvolutionCycleService:
         finally:
             conn.close()
 
+    def _sample_freshness(self, *, now: float) -> dict[str, Any] | None:
+        """Canonical training-sample freshness via the canonical reader."""
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            from backend.services.canonical_v2_reader import iter_training_sample_rows
+            rows = iter_training_sample_rows(conn, order_by_event_ts=True)
+            if not rows:
+                return {
+                    "table": "canonical_v2.training_sample_row",
+                    "exists": True,
+                    "count": 0,
+                    "latest_created_at": 0.0,
+                    "latest_age_seconds": 0.0,
+                    "status": "empty",
+                }
+            latest = max(float(r.get("updated_at") or 0.0) for r in (rows[:1] or [{}]))
+            age = max(0.0, now - latest) if latest > 0 else 0.0
+            return {
+                "table": "canonical_v2.training_sample_row",
+                "exists": True,
+                "count": len(rows),
+                "latest_created_at": latest,
+                "latest_age_seconds": age,
+                "status": "available",
+            }
+        except Exception:
+            return None
+        finally:
+            conn.close()
+
     def _columns(self, conn: Any, table: str) -> set[str]:
         if _conn_is_pg(conn):
+            from backend.core.state_store import STATE_SCHEMA
             rows = _execute(
                 conn,
                 """
                 SELECT column_name
                 FROM information_schema.columns
-                WHERE table_schema = 'state_v1' AND table_name = ?
+                WHERE table_schema = ? AND table_name = ?
                 """,
-                (table,),
+                (STATE_SCHEMA, table),
             ).fetchall()
             return {str(row["column_name"]) for row in rows}
         rows = _execute(conn, f"PRAGMA table_info({table})").fetchall()

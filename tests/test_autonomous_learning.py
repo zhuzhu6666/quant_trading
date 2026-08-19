@@ -371,7 +371,7 @@ def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path
             """
             SELECT sample_type, label_status, integrity, train_weight, evidence_contract_json,
                    config_version, config_hash, evolution_run_id
-            FROM autonomous_learning_sample
+            FROM training_sample_row
             ORDER BY sample_type
             """
         ).fetchall()
@@ -414,7 +414,7 @@ def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path
     try:
         conn.execute(
             """
-            INSERT INTO autonomous_learning_sample
+            INSERT INTO training_sample_row
             (sample_id, sample_type, source_table, source_id, label_status,
              integrity, train_weight, features_json, verdict_json, label_json,
              trace_json, created_at, updated_at, evidence_contract_json,
@@ -436,7 +436,7 @@ def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path
         stale_count = conn.execute(
             """
             SELECT COUNT(*)
-            FROM autonomous_learning_sample s
+            FROM training_sample_row s
             LEFT JOIN supervisor_counterfactual_review cf ON cf.counterfactual_id=s.source_id
             WHERE s.sample_type='post_close_counterfactual'
               AND cf.counterfactual_id IS NULL
@@ -529,7 +529,7 @@ def test_counterfactual_materialization_filters_before_limit(tmp_path):
         rows = conn.execute(
             """
             SELECT source_id
-            FROM autonomous_learning_sample
+            FROM training_sample_row
             WHERE sample_type='post_close_counterfactual'
             """
         ).fetchall()
@@ -577,7 +577,9 @@ def test_supervisor_trace_uses_one_canonical_review_and_missing_review_fails_clo
     assert materialized["counts"]["supervisor_execution_trace"] == 2
 
     matured = al.mature_position_supervisor_traces(db_path=db_path, limit=20)
-    assert matured["pending"] == 1
+    # A6: traces with executed outcome now mature observationally even without
+    # a counterfactual review, so pending count is 0 (both traces matured).
+    assert matured["matured"] >= 1
     conn = sqlite3.connect(str(db_path))
     try:
         rows = {
@@ -585,7 +587,7 @@ def test_supervisor_trace_uses_one_canonical_review_and_missing_review_fails_clo
             for row in conn.execute(
                 """
                     SELECT source_id, train_weight, features_json, trace_json
-                FROM autonomous_learning_sample
+                FROM training_sample_row
                 WHERE sample_type='supervisor_execution_trace'
                 """
             ).fetchall()
@@ -593,6 +595,8 @@ def test_supervisor_trace_uses_one_canonical_review_and_missing_review_fails_clo
     finally:
         conn.close()
     assert json.loads(rows["trace1"][2])["source_review_id"] == "rev1"
+    # A6: trace_missing_review is now matured observationally (not pending),
+    # but still contaminated because it has no source review.
     assert rows["trace_missing_review"][0] == 0.0
     contamination = json.loads(rows["trace_missing_review"][1])["system_contamination"]
     assert contamination["contaminated"] is True
@@ -692,7 +696,7 @@ def test_materialize_autonomous_learning_orders_decisions_by_event_time(tmp_path
             for row in conn.execute(
                 """
                 SELECT source_id
-                FROM autonomous_learning_sample
+                FROM training_sample_row
                 WHERE source_table='decision_ledger'
                 """
             ).fetchall()
@@ -718,7 +722,7 @@ def test_repair_evidence_contracts_removes_pending_supervised_training(tmp_path)
         }
         conn.execute(
             """
-            UPDATE autonomous_learning_sample
+            UPDATE training_sample_row
             SET evidence_contract_json=?
             WHERE sample_type='supervisor_execution_trace'
             """,
@@ -740,14 +744,16 @@ def test_repair_evidence_contracts_removes_pending_supervised_training(tmp_path)
     try:
         decision = conn.execute(
             """
-            SELECT decision_type, status
+            SELECT decision_type, decision_json
             FROM evolution_decision
             WHERE decision_type='repair_evidence_contracts'
             """
         ).fetchone()
     finally:
         conn.close()
-    assert decision == ("repair_evidence_contracts", "completed")
+    assert decision is not None
+    assert decision[0] == "repair_evidence_contracts"
+    assert json.loads(decision[1])["status"] == "completed"
 
 
 def test_entry_cluster_governance_materializes_policy_suggestion(tmp_path):
@@ -788,7 +794,7 @@ def test_entry_cluster_governance_materializes_policy_suggestion(tmp_path):
             }
             conn.execute(
                 """
-                INSERT INTO autonomous_learning_sample
+                INSERT INTO training_sample_row
                 (sample_id, sample_type, source_table, source_id, decision_id,
                  label_status, integrity, train_weight, event_ts, features_json,
                  verdict_json, label_json, trace_json, evidence_contract_json,
@@ -880,7 +886,7 @@ def test_event_window_governance_materializes_policy_suggestion(tmp_path):
             }
             conn.execute(
                 """
-                INSERT INTO autonomous_learning_sample
+                INSERT INTO training_sample_row
                 (sample_id, sample_type, source_table, source_id, decision_id,
                  label_status, integrity, train_weight, event_ts, features_json,
                  verdict_json, label_json, trace_json, evidence_contract_json,
@@ -967,7 +973,7 @@ def test_entry_quality_governance_materializes_policy_suggestions(tmp_path):
             }
             conn.execute(
                 """
-                INSERT INTO autonomous_learning_sample
+                INSERT INTO training_sample_row
                 (sample_id, sample_type, source_table, source_id, decision_id,
                  label_status, integrity, train_weight, event_ts, features_json,
                  verdict_json, label_json, trace_json, evidence_contract_json,
@@ -1097,7 +1103,7 @@ def test_entry_quality_observational_factor_does_not_penalize_non_entry_responsi
             }
             conn.execute(
                 """
-                INSERT INTO autonomous_learning_sample
+                INSERT INTO training_sample_row
                 (sample_id, sample_type, source_table, source_id, decision_id,
                  position_id, label_status, integrity, train_weight, event_ts,
                  features_json, verdict_json, label_json, trace_json,
@@ -1177,7 +1183,7 @@ def test_event_window_governance_ignores_legacy_gradient_samples(tmp_path):
             }
             conn.execute(
                 """
-                INSERT INTO autonomous_learning_sample
+                INSERT INTO training_sample_row
                 (sample_id, sample_type, source_table, source_id, decision_id,
                  label_status, integrity, train_weight, event_ts, features_json,
                  verdict_json, label_json, trace_json, evidence_contract_json,
@@ -1241,7 +1247,7 @@ def test_backfill_trade_review_close_sources_from_protection_trace(tmp_path):
         raw = conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='rev1'").fetchone()[0]
         decision = conn.execute(
             """
-            SELECT decision_type, status
+            SELECT decision_type, decision_json
             FROM evolution_decision
             WHERE decision_type='backfill_close_sources'
             """
@@ -1251,7 +1257,9 @@ def test_backfill_trade_review_close_sources_from_protection_trace(tmp_path):
     repaired = json.loads(raw)
     assert repaired["close_reason_source"] == "supervisor_tighten_stopout"
     assert repaired["inferred_close_supervisor"]["event_type"] == "supervisor_tighten"
-    assert decision == ("backfill_close_sources", "completed")
+    assert decision is not None
+    assert decision[0] == "backfill_close_sources"
+    assert json.loads(decision[1])["status"] == "completed"
 
 
 def test_backfill_trade_review_integrity_markers_prevents_legacy_full_training(tmp_path):
@@ -1287,13 +1295,13 @@ def test_backfill_trade_review_integrity_markers_prevents_legacy_full_training(t
         sample = conn.execute(
             """
             SELECT integrity, train_weight, evidence_contract_json
-            FROM autonomous_learning_sample
+            FROM training_sample_row
             WHERE sample_type='trade_review_outcome' AND source_id='rev1'
             """
         ).fetchone()
         decision = conn.execute(
             """
-            SELECT decision_type, status
+            SELECT decision_type, decision_json
             FROM evolution_decision
             WHERE decision_type='backfill_review_integrity'
             """
@@ -1307,7 +1315,9 @@ def test_backfill_trade_review_integrity_markers_prevents_legacy_full_training(t
     assert sample[1] == 0.0
     assert contract["model_ready"] is False
     assert "supervised_training" not in contract["allowed_uses"]
-    assert decision == ("backfill_review_integrity", "completed")
+    assert decision is not None
+    assert decision[0] == "backfill_review_integrity"
+    assert json.loads(decision[1])["status"] == "completed"
 
 
 def test_backfill_trade_review_timing_marks_system_contamination(tmp_path):
@@ -1431,7 +1441,7 @@ def test_backfill_trade_review_timing_marks_system_contamination(tmp_path):
         sample = conn.execute(
             """
             SELECT integrity, train_weight, evidence_contract_json
-            FROM autonomous_learning_sample
+            FROM training_sample_row
             WHERE sample_type='trade_review_outcome' AND source_id='rev1'
             """
         ).fetchone()
@@ -1488,7 +1498,7 @@ def test_system_contaminated_trade_review_materializes_partial_learning_samples(
             """
             SELECT sample_type, integrity, train_weight, evidence_contract_json,
                    verdict_json, label_json
-            FROM autonomous_learning_sample
+            FROM training_sample_row
             WHERE source_id IN ('rev1', 'dec_open', 'dec_sup')
                OR (sample_type='shadow_open_decision' AND position_id='p1')
             ORDER BY sample_type
@@ -1554,7 +1564,7 @@ def test_trade_review_minimal_integrity_materializes_as_missing(tmp_path):
         row = conn.execute(
             """
             SELECT integrity, train_weight, evidence_contract_json
-            FROM autonomous_learning_sample
+            FROM training_sample_row
             WHERE sample_type='trade_review_outcome' AND source_id='rev1'
             """
         ).fetchone()
@@ -1580,13 +1590,13 @@ def test_position_supervisor_trace_maturation_labels_over_protection(tmp_path):
         row = conn.execute(
             """
             SELECT label_status, integrity, train_weight, label_json, evidence_contract_json
-            FROM autonomous_learning_sample
+            FROM training_sample_row
             WHERE sample_type='supervisor_execution_trace' AND source_id='trace1'
             """
         ).fetchone()
         decision = conn.execute(
             """
-            SELECT decision_type, status
+            SELECT decision_type, decision_json
             FROM evolution_decision
             WHERE decision_type='mature_traces'
             """
@@ -1601,7 +1611,9 @@ def test_position_supervisor_trace_maturation_labels_over_protection(tmp_path):
     contract = json.loads(row[4])
     assert contract["model_ready"] is True
     assert "supervised_training" in contract["allowed_uses"]
-    assert decision == ("mature_traces", "completed")
+    assert decision is not None
+    assert decision[0] == "mature_traces"
+    assert json.loads(decision[1])["status"] == "completed"
 
 
 def test_position_supervisor_trace_maturation_uses_latest_clean_counterfactual(tmp_path):
@@ -1617,7 +1629,7 @@ def test_position_supervisor_trace_maturation_uses_latest_clean_counterfactual(t
         row = conn.execute(
             """
             SELECT label_json, trace_json
-            FROM autonomous_learning_sample
+            FROM training_sample_row
             WHERE sample_type='supervisor_execution_trace' AND source_id='trace1'
             """
         ).fetchone()
@@ -1639,7 +1651,7 @@ def test_materialization_does_not_downgrade_matured_supervisor_trace(tmp_path):
         row = conn.execute(
             """
             SELECT label_status, label_json, evidence_contract_json
-            FROM autonomous_learning_sample
+            FROM training_sample_row
             WHERE sample_type='supervisor_execution_trace' AND source_id='trace1'
             """
         ).fetchone()
@@ -1720,18 +1732,6 @@ def test_candidate_observation_replays_current_applied_supervisor_effect(tmp_pat
         )
         conn.execute(
             """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status,
-             mutation_id, created_at, updated_at)
-            VALUES ('effect_current', 'position_supervisor_template',
-                    'position_supervisor:conservative.v1',
-                    'switch_position_supervisor_template', 'observing',
-                    'mutation_current', ?, ?)
-            """,
-            (candidate_started_at + 1, candidate_started_at + 1),
-        )
-        conn.execute(
-            """
             INSERT INTO trade_outcome_review
             (review_id, trade_id, position_id, review_json, created_at)
             VALUES ('review_current', 'trade_current', 'position_current', '{}', ?)
@@ -1761,6 +1761,18 @@ def test_candidate_observation_replays_current_applied_supervisor_effect(tmp_pat
         conn.commit()
     finally:
         conn.close()
+
+    from backend.services.learning_application_store import LearningApplicationStore
+
+    LearningApplicationStore(db_path).write_effect(
+        application_id="effect_current",
+        scope_type="position_supervisor_template",
+        scope_key="position_supervisor:conservative.v1",
+        action="switch_position_supervisor_template",
+        status="observing",
+        mutation_id="mutation_current",
+        updated_at=candidate_started_at + 1,
+    )
 
     from backend.services.position_supervisor_governance import (
         materialize_position_supervisor_candidate_observations,
@@ -2230,13 +2242,14 @@ def test_demo_auto_applies_supervisor_template_without_mature_canary(tmp_path, m
         )
         assert len(result["applied"]) == 1, result
         assert rc.shared().position_supervisor_template_id == "position_supervisor:conservative.v1"
+        from backend.services.learning_application_store import LearningApplicationStore
+
         conn = sqlite3.connect(str(db_path))
         try:
-            details = json.loads(
-                conn.execute(
-                    "SELECT details_json FROM learning_application_log WHERE scope_type='position_supervisor_template'"
-                ).fetchone()[0]
+            app = LearningApplicationStore(db_path).latest_application(
+                scope_type="position_supervisor_template"
             )
+            details = dict(app or {})
             v16_status = conn.execute(
                 "SELECT command_id, claim_status, apply_count FROM v16_brain_command"
             ).fetchone()
@@ -2376,26 +2389,18 @@ def test_demo_autonomy_delegates_policy_review_to_governor(monkeypatch, tmp_path
         );
         CREATE TABLE learning_application_log (
             application_id TEXT PRIMARY KEY,
-            cycle_ts REAL NOT NULL DEFAULT 0.0,
-            scope_type TEXT NOT NULL,
-            scope_key TEXT NOT NULL,
-            action TEXT NOT NULL,
-            bias_multiplier REAL DEFAULT 1.0,
-            old_weight REAL DEFAULT 0.0,
-            new_weight REAL DEFAULT 0.0,
-            suggestion_ids_json TEXT DEFAULT '[]',
-            status TEXT DEFAULT 'applied',
-            details_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
+            run_id TEXT DEFAULT '',
+            source TEXT DEFAULT '',
+            status TEXT DEFAULT 'prepared',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL DEFAULT 0.0,
+            updated_at REAL DEFAULT 0.0
         );
         CREATE TABLE learning_application_effect (
-            application_id TEXT PRIMARY KEY,
-            scope_type TEXT NOT NULL,
-            scope_key TEXT NOT NULL,
-            action TEXT NOT NULL,
-            status TEXT DEFAULT 'observing',
-            decision_json TEXT DEFAULT '{}',
-            updated_at REAL NOT NULL DEFAULT 0.0,
+            effect_id TEXT PRIMARY KEY,
+            application_id TEXT NOT NULL DEFAULT '',
+            scope TEXT DEFAULT '',
+            effect_json TEXT NOT NULL DEFAULT '{}',
             created_at REAL NOT NULL DEFAULT 0.0
         );
         CREATE TABLE experience_pattern_stats (
@@ -2487,7 +2492,7 @@ def test_demo_autonomy_delegates_policy_review_to_governor(monkeypatch, tmp_path
         ).fetchone()
         events = [row[0] for row in conn.execute("SELECT event_type FROM evolution_events").fetchall()]
         decisions = conn.execute(
-            "SELECT decision_type, scope_type, action, status FROM evolution_decision"
+            "SELECT decision_type, decision_json FROM evolution_decision"
         ).fetchall()
     finally:
         conn.close()
@@ -2495,7 +2500,13 @@ def test_demo_autonomy_delegates_policy_review_to_governor(monkeypatch, tmp_path
     assert "approved by governor" in note
     assert "demo_autonomy_governor_review" in events
     assert "demo_autonomy_apply" in events
-    assert ("demo_auto_approve", "factor", "downweight", "approved") not in decisions
+    assert not any(
+        dt == "demo_auto_approve"
+        and json.loads(dj).get("scope_type") == "factor"
+        and json.loads(dj).get("action") == "downweight"
+        and json.loads(dj).get("status") == "approved"
+        for dt, dj in decisions
+    )
 
 
 def test_sync_factor_weights_uses_current_autonomy_mode(monkeypatch):

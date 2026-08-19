@@ -151,7 +151,7 @@ def _required_schema(conn: Any) -> list[str]:
         },
         "evolution_decision": {
             "decision_id",
-            "result_json",
+            "decision_json",
             "payload_hash",
             "canonical_event_id",
             "projection_type",
@@ -425,28 +425,58 @@ def _eval_rows(
     )
 
 
+_MUTATION_ROW_KEYS = (
+    "decision_id", "run_id", "decision_type", "decision_json",
+    "created_at", "payload_hash", "canonical_event_id", "projection_type",
+    "evidence_json", "risk_verdict_json", "before_json", "after_json",
+    "result_json", "rollback_json",
+)
+
+
 def _mutation_rows(
     conn: Any,
     *,
     batch_size: int = DEFAULT_ROW_BATCH_SIZE,
 ) -> Iterator[Any]:
-    return _iter_rows(
+    # Converged 8-column shape: rich semantic fields live in decision_json and
+    # evidence/risk_verdict/before/after/result/rollback stay interned via
+    # payload_hash -> mutation_payload. Rebuild the same key order the original
+    # wide SELECT exposed so downstream name/index access keeps working.
+    for row in _iter_rows(
         conn,
-        """SELECT d.decision_id, d.run_id, d.decision_type, d.scope_type,
-                  d.scope_key, d.action, d.status, d.config_version,
-                  d.config_hash, d.created_at, d.result_json,
-                  d.payload_hash, d.canonical_event_id, d.projection_type,
-                  COALESCE(p.evidence_json, d.evidence_json) AS evidence_payload,
-                  COALESCE(p.risk_verdict_json, d.risk_verdict_json) AS risk_payload,
-                  COALESCE(p.before_json, d.before_json) AS before_payload,
-                  COALESCE(p.after_json, d.after_json) AS after_payload,
-                  COALESCE(p.result_json, d.result_json) AS result_payload,
-                  COALESCE(p.rollback_json, d.rollback_json) AS rollback_payload
+        """SELECT d.decision_id, d.run_id, d.decision_type, d.decision_json,
+                  d.created_at, d.payload_hash, d.canonical_event_id, d.projection_type,
+                  p.evidence_json, p.risk_verdict_json, p.before_json, p.after_json,
+                  p.result_json, p.rollback_json
            FROM evolution_decision d
            LEFT JOIN mutation_payload p ON p.payload_hash=d.payload_hash
            ORDER BY d.created_at, d.decision_id""",
         batch_size=batch_size,
-    )
+    ):
+        r = {k: row[i] for i, k in enumerate(_MUTATION_ROW_KEYS)}
+        meta = _loads_object(r["decision_json"])
+        yield {
+            "decision_id": r["decision_id"],
+            "run_id": r["run_id"],
+            "decision_type": r["decision_type"],
+            "scope_type": meta.get("scope_type", ""),
+            "scope_key": meta.get("scope_key", ""),
+            "action": meta.get("action", ""),
+            "status": meta.get("status", ""),
+            "config_version": meta.get("config_version", 0),
+            "config_hash": meta.get("config_hash", ""),
+            "created_at": r["created_at"],
+            "result_json": r.get("result_json") or "",
+            "payload_hash": r["payload_hash"],
+            "canonical_event_id": r["canonical_event_id"],
+            "projection_type": r["projection_type"],
+            "evidence_payload": r.get("evidence_json") or "",
+            "risk_payload": r.get("risk_verdict_json") or "",
+            "before_payload": r.get("before_json") or "",
+            "after_payload": r.get("after_json") or "",
+            "result_payload": r.get("result_json") or "",
+            "rollback_payload": r.get("rollback_json") or "",
+        }
 
 
 def _pg_payload_definition(domain: str) -> dict[str, str]:
@@ -483,12 +513,12 @@ def _pg_payload_definition(domain: str) -> dict[str, str]:
         }
     if domain == "evolution_decision":
         parts = {
-            "after_json": "COALESCE(p.after_json, NULLIF(d.after_json, ''), '{}')",
-            "before_json": "COALESCE(p.before_json, NULLIF(d.before_json, ''), '{}')",
-            "evidence_json": "COALESCE(p.evidence_json, NULLIF(d.evidence_json, ''), '{}')",
-            "result_json": "COALESCE(p.result_json, NULLIF(d.result_json, ''), '{}')",
-            "risk_verdict_json": "COALESCE(p.risk_verdict_json, NULLIF(d.risk_verdict_json, ''), '{}')",
-            "rollback_json": "COALESCE(p.rollback_json, NULLIF(d.rollback_json, ''), '{}')",
+            "after_json": "COALESCE(p.after_json, '{}')",
+            "before_json": "COALESCE(p.before_json, '{}')",
+            "evidence_json": "COALESCE(p.evidence_json, '{}')",
+            "result_json": "COALESCE(p.result_json, '{}')",
+            "risk_verdict_json": "COALESCE(p.risk_verdict_json, '{}')",
+            "rollback_json": "COALESCE(p.rollback_json, '{}')",
         }
         raw = " || chr(0) || ".join(
             f"'{key}=' || {value}" for key, value in parts.items()
@@ -532,12 +562,12 @@ def _pg_payload_hash_input_and_size(domain: str) -> tuple[str, str]:
         return hash_input, f"({payload_size}) + 2"
     if domain == "evolution_decision":
         parts = (
-            ("after_json", "COALESCE(p.after_json, NULLIF(d.after_json, ''), '{}')"),
-            ("before_json", "COALESCE(p.before_json, NULLIF(d.before_json, ''), '{}')"),
-            ("evidence_json", "COALESCE(p.evidence_json, NULLIF(d.evidence_json, ''), '{}')"),
-            ("result_json", "COALESCE(p.result_json, NULLIF(d.result_json, ''), '{}')"),
-            ("risk_verdict_json", "COALESCE(p.risk_verdict_json, NULLIF(d.risk_verdict_json, ''), '{}')"),
-            ("rollback_json", "COALESCE(p.rollback_json, NULLIF(d.rollback_json, ''), '{}')"),
+            ("after_json", "COALESCE(p.after_json, '{}')"),
+            ("before_json", "COALESCE(p.before_json, '{}')"),
+            ("evidence_json", "COALESCE(p.evidence_json, '{}')"),
+            ("result_json", "COALESCE(p.result_json, '{}')"),
+            ("risk_verdict_json", "COALESCE(p.risk_verdict_json, '{}')"),
+            ("rollback_json", "COALESCE(p.rollback_json, '{}')"),
         )
         segments = [
             f"convert_to('{key}=', 'UTF8') || convert_to(({value}), 'UTF8')"
@@ -721,15 +751,19 @@ def _audit_rows(
 
     if not _is_pg(conn):
         return _mutation_rows(conn, batch_size=batch_size)
-    result_json = "COALESCE(p.result_json, NULLIF(d.result_json, ''), '{}')"
-    evidence_json = "COALESCE(p.evidence_json, NULLIF(d.evidence_json, ''), '{}')"
+    result_json = "COALESCE(p.result_json, '{}')"
+    evidence_json = "COALESCE(p.evidence_json, '{}')"
     return _iter_rows(
         conn,
-        f"""SELECT d.decision_id, d.run_id, d.decision_type, d.scope_type,
-                         d.action, d.status, d.config_hash, d.created_at,
+        f"""SELECT d.decision_id, d.run_id, d.decision_type,
+                         (d.decision_json->>'scope_type') AS scope_type,
+                         (d.decision_json->>'action') AS action,
+                         (d.decision_json->>'status') AS status,
+                         (d.decision_json->>'config_hash') AS config_hash,
+                         d.created_at,
                          d.canonical_event_id, d.projection_type,
                          substring({result_json} FROM
-                             '"decision_id"[[:space:]]*:[[:space:]]*"([^\"]+)"'
+                             '"decision_id"[[:space:]]*:[[:space:]]*"([^\\"]+)"'
                          ) AS direct_decision_id,
                          (
                            strpos({evidence_json}, '"endpoint"') > 0
@@ -795,20 +829,38 @@ def _eval_metadata_rows(
     )
 
 
+_MUTATION_META_KEYS = (
+    "decision_id", "run_id", "decision_type", "decision_json",
+    "created_at",
+)
+
+
 def _mutation_metadata_rows(
     conn: Any,
     *,
     batch_size: int = DEFAULT_ROW_BATCH_SIZE,
 ) -> Iterator[Any]:
-    return _iter_rows(
+    for row in _iter_rows(
         conn,
-        """SELECT decision_id, run_id, decision_type, scope_type,
-                         scope_key, action, status, config_version,
-                         config_hash, created_at
-                  FROM evolution_decision
-                 ORDER BY created_at, decision_id""",
+        """SELECT decision_id, run_id, decision_type, decision_json, created_at
+                 FROM evolution_decision
+                ORDER BY created_at, decision_id""",
         batch_size=batch_size,
-    )
+    ):
+        r = {k: row[i] for i, k in enumerate(_MUTATION_META_KEYS)}
+        meta = _loads_object(r["decision_json"])
+        yield {
+            "decision_id": r["decision_id"],
+            "run_id": r["run_id"],
+            "decision_type": r["decision_type"],
+            "scope_type": meta.get("scope_type", ""),
+            "scope_key": meta.get("scope_key", ""),
+            "action": meta.get("action", ""),
+            "status": meta.get("status", ""),
+            "config_version": meta.get("config_version", 0),
+            "config_hash": meta.get("config_hash", ""),
+            "created_at": r["created_at"],
+        }
 
 
 def _metadata_manifest(
@@ -2213,12 +2265,12 @@ def _pg_apply_payload_domain(conn: Any, domain: str) -> int:
         )
     elif domain == "evolution_decision":
         parts = {
-            "after_json": "COALESCE(p.after_json, NULLIF(d.after_json, ''), '{}')",
-            "before_json": "COALESCE(p.before_json, NULLIF(d.before_json, ''), '{}')",
-            "evidence_json": "COALESCE(p.evidence_json, NULLIF(d.evidence_json, ''), '{}')",
-            "result_json": "COALESCE(p.result_json, NULLIF(d.result_json, ''), '{}')",
-            "risk_verdict_json": "COALESCE(p.risk_verdict_json, NULLIF(d.risk_verdict_json, ''), '{}')",
-            "rollback_json": "COALESCE(p.rollback_json, NULLIF(d.rollback_json, ''), '{}')",
+            "after_json": "COALESCE(p.after_json, '{}')",
+            "before_json": "COALESCE(p.before_json, '{}')",
+            "evidence_json": "COALESCE(p.evidence_json, '{}')",
+            "result_json": "COALESCE(p.result_json, '{}')",
+            "risk_verdict_json": "COALESCE(p.risk_verdict_json, '{}')",
+            "rollback_json": "COALESCE(p.rollback_json, '{}')",
         }
         mutation_source = (
             "SELECT d.decision_id AS event_id, "
@@ -2263,13 +2315,7 @@ def _pg_apply_payload_domain(conn: Any, domain: str) -> int:
         conn.execute(
             f"""WITH payload_rows AS ({mutation_hashed})
                 UPDATE evolution_decision AS target
-                   SET payload_hash=payload_rows.payload_hash,
-                       evidence_json='{{}}',
-                       risk_verdict_json='{{}}',
-                       before_json='{{}}',
-                       after_json='{{}}',
-                       result_json='{{}}',
-                       rollback_json='{{}}'
+                  SET payload_hash=payload_rows.payload_hash
                   FROM payload_rows
                  WHERE target.decision_id=payload_rows.event_id"""
         )
@@ -2289,30 +2335,21 @@ def _apply_payload_refs_pg(conn: Any) -> dict[str, Any]:
     eval_count = _pg_apply_payload_domain(conn, "brain_action_plan_eval")
     mutation_count = _pg_apply_payload_domain(conn, "evolution_decision")
 
-    conn.execute(
-        """CREATE TEMP TABLE state_payload_lineage_tmp (
-                   decision_id TEXT PRIMARY KEY,
-                   canonical_event_id TEXT NOT NULL,
-                   projection_type TEXT NOT NULL
-               ) ON COMMIT DROP"""
-    )
+    # Runtime PostgreSQL connections must not create schema objects (a
+    # persisted, temp or staging table alike).  Apply lineage directly with
+    # parameterized DML instead of a temporary lineage table.  This matches the
+    # SQLite branch below and keeps the runtime connection schema-guard intact.
     with conn.cursor() as cursor:
         cursor.executemany(
-            """INSERT INTO state_payload_lineage_tmp
-                       (decision_id, canonical_event_id, projection_type)
-                   VALUES (%s, %s, %s)""",
+            """UPDATE evolution_decision AS target
+                  SET canonical_event_id=%s,
+                      projection_type=%s
+                WHERE target.decision_id=%s""",
             [
-                (decision_id, canonical_id, projection_type)
+                (canonical_id, projection_type, decision_id)
                 for decision_id, (canonical_id, projection_type) in lineage.items()
             ],
         )
-    conn.execute(
-        """UPDATE evolution_decision AS target
-              SET canonical_event_id=lineage.canonical_event_id,
-                  projection_type=lineage.projection_type
-             FROM state_payload_lineage_tmp AS lineage
-            WHERE target.decision_id=lineage.decision_id"""
-    )
     conn.commit()
     return {
         "runtime_config_snapshot": runtime_count,
@@ -2402,9 +2439,7 @@ def _apply_payload_refs(
             _sql(
                 conn,
                 """UPDATE evolution_decision
-                   SET evidence_json='{}', risk_verdict_json='{}', before_json='{}',
-                       after_json='{}', result_json='{}', rollback_json='{}',
-                       payload_hash=?, canonical_event_id=?, projection_type=?
+                   SET payload_hash=?, canonical_event_id=?, projection_type=?
                    WHERE decision_id=?""",
             ),
             (digest, canonical_id, projection_type, decision_id),
@@ -2591,29 +2626,9 @@ def _rollback(conn: Any) -> dict[str, Any]:
                boundary_json=(SELECT p.boundary_json FROM brain_action_plan_eval_payload p WHERE p.payload_hash=brain_action_plan_eval.payload_hash)
            WHERE payload_hash IN (SELECT payload_hash FROM brain_action_plan_eval_payload)""",
     )
-    conn.execute(
-        _sql(
-            conn,
-            """UPDATE evolution_decision d
-               SET evidence_json=p.evidence_json,
-                   risk_verdict_json=p.risk_verdict_json,
-                   before_json=p.before_json,
-                   after_json=p.after_json,
-                   result_json=p.result_json,
-                   rollback_json=p.rollback_json
-               FROM mutation_payload p
-               WHERE p.payload_hash=d.payload_hash""",
-        )
-        if _is_pg(conn)
-        else """UPDATE evolution_decision
-           SET evidence_json=(SELECT p.evidence_json FROM mutation_payload p WHERE p.payload_hash=evolution_decision.payload_hash),
-               risk_verdict_json=(SELECT p.risk_verdict_json FROM mutation_payload p WHERE p.payload_hash=evolution_decision.payload_hash),
-               before_json=(SELECT p.before_json FROM mutation_payload p WHERE p.payload_hash=evolution_decision.payload_hash),
-               after_json=(SELECT p.after_json FROM mutation_payload p WHERE p.payload_hash=evolution_decision.payload_hash),
-               result_json=(SELECT p.result_json FROM mutation_payload p WHERE p.payload_hash=evolution_decision.payload_hash),
-               rollback_json=(SELECT p.rollback_json FROM mutation_payload p WHERE p.payload_hash=evolution_decision.payload_hash)
-           WHERE payload_hash IN (SELECT payload_hash FROM mutation_payload)""",
-    )
+    # evolution_decision: post-convergence the six JSON projections live only in
+    # mutation_payload (interned via payload_hash) and are rehydrated by readers
+    # through the JOIN, so there is no inline wide-column copy to restore.
     conn.commit()
     return {"schema_version": "state_payload_compaction_rollback.v1", "ok": True}
 

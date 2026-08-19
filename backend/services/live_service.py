@@ -19,6 +19,7 @@ import copy
 from dataclasses import asdict, is_dataclass
 from functools import partial
 import json
+from pathlib import Path
 import threading
 import time
 import traceback
@@ -73,6 +74,12 @@ from backend.services.live_safety_watchdog import (
     evaluate_safety_freshness,
 )
 from backend.core.db import state_table_columns
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    iter_decision_rows,
+    iter_review_rows,
+    load_position_decision_index,
+)
 from backend.services.state_payload_archive import load_json_payload
 from backend.services.live_reconciliation import (
     LIVE_SAFETY_FRESHNESS_SEC as _LIVE_SAFETY_FRESHNESS_SEC,
@@ -2552,48 +2559,56 @@ def _runtime_kv_set(key: str, value) -> None:
         conn.close()
 
 
+_POSITION_DECISION_INDEX_CACHE: dict[str, dict[str, Any]] | None | bool = False
+_POSITION_DECISION_INDEX_PATH = (
+    Path(__file__).resolve().parents[2] / "run_artifacts" / "canonical_v2_position_decision_index.json"
+)
+
+
+def _position_decision_index() -> dict[str, dict[str, Any]] | None:
+    """Lazily load the materialized position->entry decision index (once).
+
+    Returns None when the file is missing/invalid (callers fall back to the
+    legacy lookup); never writes.  The projection is rebuilt independently
+    (scripts/canonical_v2_position_decision_index.py) and is stale-tolerant:
+    a position missing from the index falls back to the legacy ledger until
+    the next rebuild.
+    """
+    global _POSITION_DECISION_INDEX_CACHE
+    if _POSITION_DECISION_INDEX_CACHE is False:
+        _POSITION_DECISION_INDEX_CACHE = load_position_decision_index(_POSITION_DECISION_INDEX_PATH)
+    return _POSITION_DECISION_INDEX_CACHE  # type: ignore[return-value]
+
+
 def _lookup_entry_decision_id(position_id: int) -> str:
-    conn = _get_state_read_conn()
-    try:
-        row = _state_execute(
-            conn,
-            """
-            SELECT decision_id, action_json FROM decision_ledger
-            WHERE position_id=? AND event_type='open'
-            ORDER BY decision_ts DESC LIMIT 1
-            """,
-            (str(position_id),),
-        ).fetchone()
-        if not row:
-            return ""
-        child_decision_id = str(row["decision_id"] or "")
-        try:
-            action = json.loads(row["action_json"] or "{}")
-        except Exception:
-            action = {}
-        return str(action.get("parent_decision_id") or child_decision_id)
-    finally:
-        conn.close()
+    """Entry decision for a position via the canonical position-decision index.
+
+    The materialized index is a rebuildable file projection
+    (scripts/canonical_v2_position_decision_index.py); positions missing from
+    it (e.g. newer than the last rebuild) resolve to "".
+    """
+    index = _position_decision_index()
+    if index is None:
+        return ""
+    entry = index.get(str(position_id))
+    if entry is None:
+        return ""
+    return str(entry.get("parent_decision_id") or entry.get("decision_id") or "")
 
 
 def _lookup_open_decision_context(position_id: int) -> dict:
+    """Latest open decision context (canonical position-decision index first)."""
+    index = _position_decision_index()
+    if index is not None:
+        entry = index.get(str(position_id))
+        if entry is not None:
+            return {
+                "entry_ts": float(entry.get("decision_ts") or 0.0),
+                "timeframe": str(entry.get("timeframe") or ""),
+                "source": "canonical_position_decision_index",
+            }
     conn = _get_state_read_conn()
     try:
-        row = _state_execute(
-            conn,
-            """
-            SELECT decision_ts, timeframe FROM decision_ledger
-            WHERE position_id=? AND event_type='open'
-            ORDER BY decision_ts DESC LIMIT 1
-            """,
-            (str(position_id),),
-        ).fetchone()
-        if row:
-            return {
-                "entry_ts": float(row["decision_ts"] or 0.0),
-                "timeframe": str(row["timeframe"] or ""),
-                "source": "decision_ledger",
-            }
         recovery = _state_execute(
             conn,
             """
@@ -3458,24 +3473,25 @@ def _consume_close_verdict(position_id: int, close_reason: str) -> dict:
 def _latest_supervisor_event_before_close(position_id: int, close_ts: float, lookback_sec: float = 3600.0) -> dict[str, Any]:
     conn = _get_state_read_conn()
     try:
-        row = _state_execute(
+        # Bounded window scan (reverse keyset); canonical events carry the
+        # position inside the payload, so the filter is applied here.
+        lower = float(close_ts or time.time()) - max(1.0, lookback_sec)
+        upper = float(close_ts or time.time())
+        for candidate in iter_decision_rows(
             conn,
-            """
-            SELECT decision_id, event_type, action_reason, action_json, risk_state_json, decision_ts
-            FROM decision_ledger
-            WHERE position_id=?
-              AND (
-                  event_type LIKE 'supervisor_%'
-                  OR event_type IN ('legacy_awe_trailing', 'holding_timeout')
-              )
-              AND decision_ts <= ?
-              AND decision_ts >= ?
-            ORDER BY decision_ts DESC
-            LIMIT 1
-            """,
-            (str(position_id), float(close_ts or time.time()), float(close_ts or time.time()) - max(1.0, lookback_sec)),
-        ).fetchone()
-        return _lifecycle_normalize_supervisor_event_row(row, close_ts=close_ts)
+            min_observed_epoch=lower,
+            max_observed_epoch=upper,
+            reverse=True,
+        ):
+            if (
+                str(candidate.get("position_id") or "") == str(position_id)
+                and (
+                    str(candidate.get("event_type") or "").startswith("supervisor_")
+                    or str(candidate.get("event_type") or "") in ("legacy_awe_trailing", "holding_timeout")
+                )
+            ):
+                return _lifecycle_normalize_supervisor_event_row(candidate, close_ts=close_ts)
+        return {}
     finally:
         conn.close()
 
@@ -5724,28 +5740,25 @@ def _start_live_scheduler():
     # minutes to avoid decisions from the same evidence window racing.
     sched.add_job("awe_adapt", "8,38 * * * *", _scheduled_awe_adapt)
 
+    # S2.2: EvolutionKernel 已移除（它只注册 system_health，且 run_heavy_jobs=0 时
+    # 从不实例化）。system_health 统一在此注册；heavy jobs 由 quant-learning-worker 独占。
+    try:
+        from monitor.system_health import shared as _sh_shared
+        from monitor.alerter import Alerter
+
+        _sys_health = _sh_shared()
+        _sys_health.set_alerter(Alerter({
+            "log_file": "logs/alerts.log",
+            "min_level": "WARNING",
+        }).send)
+        sched.add_job("system_health", "* * * * *", _sys_health.run)
+    except Exception as e:
+        logger.warning("[live] system_health registration failed: {}", e)
+
     if run_heavy_jobs:
-        # EvolutionKernel now owns backend-local health only. Evolution and
-        # factor governance remain exclusive to the learning worker.
-        from backend.runtime.evolution_kernel import EvolutionKernel
-
-        kernel = EvolutionKernel.shared()
-        kernel.set_pipeline(_factor_pipeline)
-        kernel.start()
+        logger.info("[live] heavy scheduler jobs enabled in backend (QUANT_BACKEND_HEAVY_JOBS=1)")
     else:
-        try:
-            from monitor.system_health import shared as _sh_shared
-            from monitor.alerter import Alerter
-
-            _sys_health = _sh_shared()
-            _sys_health.set_alerter(Alerter({
-                "log_file": "logs/alerts.log",
-                "min_level": "WARNING",
-            }).send)
-            sched.add_job("system_health", "* * * * *", _sys_health.run)
-            logger.info("[live] heavy scheduler jobs disabled; system_health remains in backend")
-        except Exception as e:
-            logger.warning("[live] system_health registration failed while heavy jobs disabled: {}", e)
+        logger.info("[live] heavy jobs delegated to learning worker; set QUANT_BACKEND_HEAVY_JOBS=1 to run them in backend")
 
     sched.add_job(
         "data_sync",
@@ -5784,7 +5797,6 @@ def _start_live_scheduler():
         )
     else:
         logger.info("[live] heavy jobs delegated; set QUANT_BACKEND_HEAVY_JOBS=1 to run them in backend")
-    # ★ system_health 已由 EvolutionKernel 注册
     sched.start()
     logger.info("[live] InProcessScheduler started; heavy_jobs={}", run_heavy_jobs)
 
@@ -7168,35 +7180,22 @@ def _risk_metric_inputs(
         raise ValueError("risk_metrics_snapshot.v2 requires historical VaR")
     conn = _get_state_pg_conn()
     try:
-        review_columns = state_table_columns(conn, "trade_outcome_review")
-        review_id_select = "review_id, " if "review_id" in review_columns else ""
-        review_archive_select = (
-            ", review_archive_hash"
-            if "review_archive_hash" in review_columns
-            else ""
-        )
-        review_rows = _state_execute(
-            conn,
-            f"""
-            SELECT {review_id_select}position_id, pnl, review_json{review_archive_select}
-            FROM trade_outcome_review
-            ORDER BY created_at DESC
-            LIMIT 200
-            """,
-        ).fetchall()
+        rows = iter_review_rows(conn, limit=0)
+        rows.sort(key=lambda row: float(row.get("created_at") or 0.0), reverse=True)
+        rows = rows[:200]
         review_rows = [
             (
                 row,
                 load_json_payload(
                     conn,
                     source_table="trade_outcome_review",
-                    source_id=str(row["review_id"] if "review_id" in review_columns else row["position_id"] or ""),
-                    inline_json=row["review_json"],
-                    archive_hash=row.get("review_archive_hash", "") if hasattr(row, "get") else "",
+                    source_id=str(row.get("review_id") or row.get("position_id") or ""),
+                    inline_json=row.get("review_json"),
+                    archive_hash=row.get("review_archive_hash", ""),
                     default={},
                 ),
             )
-            for row in review_rows
+            for row in rows
         ]
         conn.commit()
     finally:
@@ -10140,16 +10139,18 @@ def _bar_open_already_recorded(bar_ts: float) -> bool:
         return False
     conn = _get_state_read_conn()
     try:
-        row = _state_execute(
+        # Bounded window around the bar time (reverse keyset); canonical
+        # open decisions carry decision_ts == bar_ts for the same bar.
+        window = 5.0
+        for candidate in iter_decision_rows(
             conn,
-            """
-            SELECT 1 FROM decision_ledger
-            WHERE event_type='open' AND decision_ts=?
-            LIMIT 1
-            """,
-            (float(bar_ts),),
-        ).fetchone()
-        return row is not None
+            min_observed_epoch=float(bar_ts) - window,
+            max_observed_epoch=float(bar_ts) + window,
+            reverse=True,
+        ):
+            if str(candidate.get("event_type") or "") == "open":
+                return True
+        return False
     except Exception as exc:
         logger.warning("[live] bar open dedup check failed: %s", exc)
         return False

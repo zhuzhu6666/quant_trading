@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from backend.core.db import STATE_DB_DDL
+from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.position_supervisor_templates import (
     CONSERVATIVE_TEMPLATE_ID,
     DEFAULT_TEMPLATE_ID,
@@ -23,6 +24,26 @@ def _init_db(path):
         conn.close()
 
 
+def _prepare_app(
+    path,
+    *,
+    scope_key,
+    status,
+    cycle_ts,
+    details=None,
+    mutation_id="",
+):
+    return LearningApplicationStore(str(path)).prepare_application(
+        scope_type="position_supervisor_template",
+        scope_key=scope_key,
+        action="switch_position_supervisor_template",
+        status=status,
+        cycle_ts=cycle_ts,
+        mutation_id=mutation_id,
+        details=details,
+    )
+
+
 def test_latest_applied_position_supervisor_template_defaults_without_application(tmp_path):
     db_path = tmp_path / "state.db"
     _init_db(db_path)
@@ -33,27 +54,12 @@ def test_latest_applied_position_supervisor_template_defaults_without_applicatio
 def test_latest_applied_position_supervisor_template_restores_recent_valid_application(tmp_path):
     db_path = tmp_path / "state.db"
     _init_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, status, created_at)
-            VALUES ('old_default', 10.0, 'position_supervisor_template', ?, 'switch_position_supervisor_template', 'applied', 10.0)
-            """,
-            (DEFAULT_TEMPLATE_ID,),
-        )
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, status, created_at)
-            VALUES ('new_conservative', 20.0, 'position_supervisor_template', ?, 'switch_position_supervisor_template', 'applied', 20.0)
-            """,
-            (CONSERVATIVE_TEMPLATE_ID,),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _prepare_app(
+        db_path, scope_key=DEFAULT_TEMPLATE_ID, status="applied", cycle_ts=10.0
+    )
+    _prepare_app(
+        db_path, scope_key=CONSERVATIVE_TEMPLATE_ID, status="applied", cycle_ts=20.0
+    )
 
     assert latest_applied_position_supervisor_template_id(db_path=db_path) == CONSERVATIVE_TEMPLATE_ID
 
@@ -61,19 +67,9 @@ def test_latest_applied_position_supervisor_template_restores_recent_valid_appli
 def test_latest_applied_position_supervisor_template_ignores_rolled_back_application(tmp_path):
     db_path = tmp_path / "state.db"
     _init_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, status, created_at)
-            VALUES ('rolled_back', 30.0, 'position_supervisor_template', ?, 'switch_position_supervisor_template', 'rolled_back', 30.0)
-            """,
-            (CONSERVATIVE_TEMPLATE_ID,),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _prepare_app(
+        db_path, scope_key=CONSERVATIVE_TEMPLATE_ID, status="rolled_back", cycle_ts=30.0
+    )
 
     assert latest_applied_position_supervisor_template_id(db_path=db_path) == DEFAULT_TEMPLATE_ID
 
@@ -104,20 +100,13 @@ def test_generated_template_remains_available_from_learning_application(tmp_path
         "target_template_id": template_id,
         "evidence": {"candidate_template": candidate_template},
     }
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, status, details_json, created_at)
-            VALUES ('generated_active', 40.0, 'position_supervisor_template', ?,
-                    'switch_position_supervisor_template', 'mixed', ?, 40.0)
-            """,
-            (template_id, json.dumps(details, ensure_ascii=False)),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _prepare_app(
+        db_path,
+        scope_key=template_id,
+        status="mixed",
+        cycle_ts=40.0,
+        details=details,
+    )
 
     templates = {item["template_id"] for item in list_position_supervisor_templates(db_path=db_path)}
     restored = get_position_supervisor_template(template_id, db_path=db_path)
@@ -131,21 +120,13 @@ def test_generated_template_remains_available_from_learning_application(tmp_path
 def test_strict_startup_refuses_uncommitted_legacy_supervisor_application(tmp_path):
     db_path = tmp_path / "state.db"
     _init_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, status,
-             details_json, created_at)
-            VALUES ('legacy_unverified', 50.0, 'position_supervisor_template', ?,
-                    'switch_position_supervisor_template', 'applied', '{}', 50.0)
-            """,
-            (CONSERVATIVE_TEMPLATE_ID,),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _prepare_app(
+        db_path,
+        scope_key=CONSERVATIVE_TEMPLATE_ID,
+        status="applied",
+        cycle_ts=50.0,
+        details={},
+    )
 
     with pytest.raises(RuntimeError, match="legacy_position_supervisor_restore_unverified"):
         latest_applied_position_supervisor_template_id(
@@ -161,21 +142,13 @@ def test_strict_startup_allows_explicit_tightening_legacy_quarantine(tmp_path):
         "governance_authority": "legacy_quarantined",
         "risk_class": "risk_tightening",
     }
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, status,
-             details_json, created_at)
-            VALUES ('legacy_reviewed', 60.0, 'position_supervisor_template', ?,
-                    'switch_position_supervisor_template', 'applied', ?, 60.0)
-            """,
-            (CONSERVATIVE_TEMPLATE_ID, json.dumps(details)),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _prepare_app(
+        db_path,
+        scope_key=CONSERVATIVE_TEMPLATE_ID,
+        status="applied",
+        cycle_ts=60.0,
+        details=details,
+    )
 
     assert latest_applied_position_supervisor_template_id(
         db_path=db_path,
@@ -215,19 +188,17 @@ def test_strict_startup_accepts_hash_bound_committed_supervisor_application(tmp_
             """,
             (mutation_id,),
         )
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, status,
-             details_json, mutation_id, created_at)
-            VALUES ('committed_supervisor', 70.0, 'position_supervisor_template', ?,
-                    'switch_position_supervisor_template', 'applied', ?, ?, 70.0)
-            """,
-            (CONSERVATIVE_TEMPLATE_ID, json.dumps(details), mutation_id),
-        )
         conn.commit()
     finally:
         conn.close()
+    _prepare_app(
+        db_path,
+        scope_key=CONSERVATIVE_TEMPLATE_ID,
+        status="applied",
+        cycle_ts=70.0,
+        details=details,
+        mutation_id=mutation_id,
+    )
 
     assert latest_applied_position_supervisor_template_id(
         db_path=db_path,
@@ -251,18 +222,12 @@ def test_applied_generated_snapshot_wins_over_same_id_uncommitted_suggestion(tmp
     }
     conn = sqlite3.connect(str(db_path))
     try:
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action, status,
-             details_json, created_at)
-            VALUES ('snapshot_applied', 80.0, 'position_supervisor_template', ?,
-                    'switch_position_supervisor_template', 'applied', ?, 80.0)
-            """,
-            (
-                template_id,
-                json.dumps({"template_snapshot": applied_snapshot}),
-            ),
+        _prepare_app(
+            db_path,
+            scope_key=template_id,
+            status="applied",
+            cycle_ts=80.0,
+            details={"template_snapshot": applied_snapshot},
         )
         conn.execute(
             """

@@ -3,19 +3,20 @@ import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.backend_readiness import BackendReadinessService
-from backend.services.brain_action_evaluator import BrainActionPlanEvaluatorService
-from backend.services.brain_action_planner import BrainActionPlannerService
-from backend.services.brain_low_impact_executor import BrainLowImpactExecutorService
-from backend.services.brain_live_ready_guardrail import BrainLiveReadyGuardrailService
-from backend.services.brain_medium_impact_governance import BrainMediumImpactGovernanceService
+from backend.services.v16_brain_planning import BrainActionPlanEvaluatorService
+from backend.services.v16_brain_planning import BrainActionPlannerService
+from backend.services.v16_brain_planning import BrainLowImpactExecutorService
+from backend.services.v16_brain_planning import BrainLiveReadyGuardrailService
+from backend.services.v16_brain_planning import BrainMediumImpactGovernanceService
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
 from backend.services.brain_governance_candidate_review import (
     BrainGovernanceCandidateReviewService,
     ensure_brain_governance_candidate_review_table,
 )
-from backend.services.brain_memory import BrainMemoryService
-from backend.services.brain_state import BrainStateService
+from backend.services.v16_brain_snapshot import BrainMemoryService
+from backend.services.v16_brain_snapshot import BrainStateService
 from backend.services.incident_controls import RuntimeIncidentControlService
+from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.state_payload_archive import archive_json_payload
 
 
@@ -469,7 +470,7 @@ def test_brain_memory_uses_token_matching_not_generic_substrings():
     assert BrainMemoryService._similarity("factor instability", {"factor"}) > 0.0
 
 
-def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path):
+def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)
     contaminated = {
@@ -531,6 +532,34 @@ def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path):
 
     result = BrainMemoryService(db_path).retrieve(persist=False, limit=50)
     source_ids = {item["source_id"] for item in result["items"]}
+
+    # Trade reviews are read through the canonical review stream only; the
+    # fixture serves legacy-shaped rows via the reader function.
+    monkeypatch.setattr(
+        "backend.services.v16_brain_planning.iter_review_rows_desc",
+        lambda _conn, limit=100: [
+            {
+                "review_id": "review_bad",
+                "trade_id": "trade_bad",
+                "position_id": "position_bad",
+                "pnl": -1,
+                "outcome_label": "loss",
+                "review_json": contaminated,
+                "review_archive_hash": "",
+                "created_at": 20.0,
+            },
+            {
+                "review_id": "review_clean",
+                "trade_id": "trade_clean",
+                "position_id": "position_clean",
+                "pnl": 1,
+                "outcome_label": "win",
+                "review_json": clean,
+                "review_archive_hash": "",
+                "created_at": 10.0,
+            },
+        ][:limit],
+    )
 
     # Trade review and experience memory share the same trade lineage and may
     # be deduplicated into one current memory item.
@@ -789,7 +818,7 @@ def test_brain_action_planner_records_shadow_only_action_plans(tmp_path):
     assert status["affects_trading"] is False
 
 
-def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence(tmp_path):
+def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     now = time.time()
     conn = connect_sqlite(db_path)
@@ -815,18 +844,6 @@ def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence
         )
         conn.execute(
             """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status,
-             observed_trade_count, baseline_trade_count, post_avg_reward,
-             baseline_avg_reward, delta_avg_reward, post_win_rate,
-             baseline_win_rate, updated_at, created_at)
-            VALUES ('effect_1', 'factor', 'alpha_weight_policy', 'downweight',
-                    'observed', 5, 5, 0.3, 0.2, 0.1, 0.6, 0.5, ?, ?)
-            """,
-            (now - 20.0, now - 20.0),
-        )
-        conn.execute(
-            """
             INSERT INTO position_supervisor_trace
             (trace_id, decision_id, position_id, trade_id, event_ts, action,
              outcome, risk_allowed, execution_status, trace_integrity, created_at)
@@ -839,8 +856,42 @@ def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence
     finally:
         conn.close()
 
+    LearningApplicationStore(db_path).write_effect(
+        application_id="effect_1",
+        scope_type="factor",
+        scope_key="alpha_weight_policy",
+        action="downweight",
+        status="observed",
+        observed_trade_count=5,
+        baseline_trade_count=5,
+        post_avg_reward=0.3,
+        baseline_avg_reward=0.2,
+        delta_avg_reward=0.1,
+        post_win_rate=0.6,
+        baseline_win_rate=0.5,
+        updated_at=now - 20.0,
+    )
+
     snapshot = BrainStateService(db_path).build(readiness=_readiness_fixture(), source="test")
     BrainActionPlannerService(db_path).build_plans(brain_state=snapshot, persist=True, source="test")
+    # Trade reviews are read through the canonical review stream only; the
+    # fixture serves legacy-shaped rows via the reader function.
+    monkeypatch.setattr(
+        "backend.services.v16_brain_planning.iter_review_rows_desc",
+        lambda _conn, limit=100: [
+            {
+                "review_id": "review_1",
+                "trade_id": "trade_1",
+                "position_id": "pos_1",
+                "pnl": 12.5,
+                "outcome_label": "win",
+                "summary_text": "posterior outcome supports shadow comparison",
+                "review_json": {},
+                "review_archive_hash": "",
+                "created_at": now - 30.0,
+            }
+        ][:limit],
+    )
     run = BrainActionPlanEvaluatorService(db_path).evaluate_latest_plans(limit=10, persist=True)
 
     assert run["schema_version"] == "brain_action_plan_eval_run.v1"
@@ -939,7 +990,7 @@ def test_brain_low_impact_executor_runs_replay_job_through_risk_policy(tmp_path)
     assert status["low_impact_only"] is True
 
 
-def test_brain_medium_impact_governance_materializes_governance_candidates_only(tmp_path):
+def test_brain_medium_impact_governance_materializes_governance_candidates_only(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     now = time.time()
     conn = connect_sqlite(db_path)
@@ -964,18 +1015,6 @@ def test_brain_medium_impact_governance_materializes_governance_candidates_only(
         )
         conn.execute(
             """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status,
-             observed_trade_count, baseline_trade_count, post_avg_reward,
-             baseline_avg_reward, delta_avg_reward, post_win_rate,
-             baseline_win_rate, updated_at, created_at)
-            VALUES ('effect_p4', 'factor', 'alpha_weight_policy', 'downweight',
-                    'observed', 5, 5, 0.35, 0.2, 0.15, 0.7, 0.5, ?, ?)
-            """,
-            (now - 20.0, now - 20.0),
-        )
-        conn.execute(
-            """
             INSERT INTO position_supervisor_trace
             (trace_id, decision_id, position_id, trade_id, event_ts, action,
              outcome, risk_allowed, execution_status, trace_integrity, created_at)
@@ -988,8 +1027,42 @@ def test_brain_medium_impact_governance_materializes_governance_candidates_only(
     finally:
         conn.close()
 
+    LearningApplicationStore(db_path).write_effect(
+        application_id="effect_p4",
+        scope_type="factor",
+        scope_key="alpha_weight_policy",
+        action="downweight",
+        status="observed",
+        observed_trade_count=5,
+        baseline_trade_count=5,
+        post_avg_reward=0.35,
+        baseline_avg_reward=0.2,
+        delta_avg_reward=0.15,
+        post_win_rate=0.7,
+        baseline_win_rate=0.5,
+        updated_at=now - 20.0,
+    )
+
     snapshot = BrainStateService(db_path).build(readiness=_readiness_fixture(), source="test")
     BrainActionPlannerService(db_path).build_plans(brain_state=snapshot, persist=True, source="test")
+    # Trade reviews are read through the canonical review stream only; the
+    # fixture serves legacy-shaped rows via the reader function.
+    monkeypatch.setattr(
+        "backend.services.v16_brain_planning.iter_review_rows_desc",
+        lambda _conn, limit=100: [
+            {
+                "review_id": "review_p4",
+                "trade_id": "trade_1",
+                "position_id": "pos_1",
+                "pnl": 8.0,
+                "outcome_label": "win",
+                "summary_text": "ok",
+                "review_json": {},
+                "review_archive_hash": "",
+                "created_at": now - 30.0,
+            }
+        ][:limit],
+    )
     BrainActionPlanEvaluatorService(db_path).evaluate_latest_plans(limit=4, persist=True)
 
     run = BrainMediumImpactGovernanceService(db_path).materialize_latest(limit=4)
@@ -1344,29 +1417,28 @@ def test_brain_governance_candidate_review_uses_agent_reliability_gate(tmp_path)
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
-        conn.execute(
-            """
-            INSERT INTO learning_application_log
-            (application_id, cycle_ts, scope_type, scope_key, action,
-             suggestion_ids_json, status, details_json, created_at)
-            VALUES ('app_bad_v16', ?, 'factor', 'rsi_14', 'downweight',
-                    '[]', 'applied', '{"source_agent":"v16_brain"}', ?)
-            """,
-            (now - 10, now - 10),
-        )
-        conn.execute(
-            """
-            INSERT INTO learning_application_effect
-            (application_id, scope_type, scope_key, action, status,
-             delta_avg_reward, updated_at, created_at)
-            VALUES ('app_bad_v16', 'factor', 'rsi_14', 'downweight',
-                    'ineffective', -0.2, ?, ?)
-            """,
-            (now - 5, now - 5),
-        )
         conn.commit()
     finally:
         conn.close()
+
+    store = LearningApplicationStore(db_path)
+    app_id = store.prepare_application(
+        scope_type="factor",
+        scope_key="rsi_14",
+        action="downweight",
+        status="applied",
+        details={"source_agent": "v16_brain"},
+        cycle_ts=now - 10,
+    )
+    store.write_effect(
+        application_id=app_id,
+        scope_type="factor",
+        scope_key="rsi_14",
+        action="downweight",
+        status="ineffective",
+        delta_avg_reward=-0.2,
+        updated_at=now - 5,
+    )
 
     BrainGovernanceCandidateService(db_path).create_candidate(
         candidate_id="candidate_supervisor_low_source",
