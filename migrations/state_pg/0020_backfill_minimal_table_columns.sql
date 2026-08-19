@@ -82,3 +82,4 @@ CREATE INDEX IF NOT EXISTS idx_order_lifecycle_trade ON order_lifecycle_event(tr
 CREATE INDEX IF NOT EXISTS idx_position_lifecycle_pos ON position_lifecycle_event(position_id, event_ts);
 CREATE INDEX IF NOT EXISTS idx_trade_outcome_review_trade ON trade_outcome_review(trade_id);
 CREATE INDEX IF NOT EXISTS idx_recovery_position_status ON recovery_position_state(status, broker, last_seen_at);
+

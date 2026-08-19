@@ -123,8 +123,11 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(27, "build_backfilled_live_indexes", "0027_build_backfilled_live_indexes.sql"),
     StateSchemaMigration(28, "align_factor_lifecycle_state", "0028_align_factor_lifecycle_state.sql"),
 )
-STATE_SCHEMA_MIN_VERSION: Final[int] = 16
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
+# Runtime code consumes the complete checked-in state contract.  A process
+# must not start against an intermediate schema while an operator is applying
+# the catalogued migrations.
+STATE_SCHEMA_MIN_VERSION: Final[int] = STATE_SCHEMA_LATEST_VERSION
 
 
 _LEDGER_DDL: Final[str] = """

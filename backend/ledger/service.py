@@ -633,7 +633,7 @@ class DecisionLedger:
                 """,
                 (
                     event_id,
-                    position_id,
+                    str(position_id),
                     trade_id,
                     symbol,
                     event_type,
@@ -651,7 +651,7 @@ class DecisionLedger:
                 record_position_event(
                     conn,
                     event_id=event_id,
-                    position_id=position_id,
+                    position_id=str(position_id),
                     event_type=event_type,
                     event_ts=event_ts,
                     trade_id=trade_id,
@@ -884,7 +884,7 @@ class DecisionLedger:
                 WHERE position_id=? AND event_type='open'
                 ORDER BY decision_ts DESC LIMIT 1
                 """,
-                (position_id,),
+                (str(position_id),),
             ).fetchone()
 
     def get_factor_snapshots(self, decision_id: str) -> list[dict]:
@@ -908,4 +908,3 @@ class DecisionLedger:
                         (decision_id,),
                     )
                 )
-

@@ -10,6 +10,7 @@ import pytest
 from backend.core import db
 from backend.core.state_schema_migrations import (
     STATE_SCHEMA_BASELINE_TABLES,
+    STATE_SCHEMA_LATEST_VERSION,
     STATE_SCHEMA_MIN_VERSION,
     STATE_SCHEMA_MIGRATION_LOCK_ID,
     STATE_SCHEMA_MIGRATIONS,
@@ -425,6 +426,20 @@ def test_schema_status_with_empty_baseline_has_no_missing_tables() -> None:
 
     assert status["missing_baseline_tables"] == []
     assert status["ok"] is True
+
+
+def test_schema_status_fails_closed_on_migration_checksum_mismatch() -> None:
+    applied = _applied_all()
+    applied[20]["checksum"] = "tampered-checksum"
+
+    status = state_schema_status(_FakePgConn(applied=applied))
+
+    assert status["current_version"] == STATE_SCHEMA_LATEST_VERSION
+    assert status["missing_required_versions"] == []
+    assert status["migration_mismatches"][0]["version"] == 20
+    assert status["ok"] is False
+    with pytest.raises(StateSchemaVersionError, match="checksum_or_name_mismatch"):
+        require_state_schema_version(_FakePgConn(applied=applied))
 
 
 def test_runner_applies_once_under_lock_and_records_checksum() -> None:

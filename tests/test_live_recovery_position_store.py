@@ -105,3 +105,61 @@ def test_recovery_position_store_owns_complete_persistence_lifecycle(tmp_path):
     assert closed["close_pnl"] == pytest.approx(12.5)
     assert closed["recovery_meta"]["deal_id"] == 99
     assert store.list_active("ctrader") == []
+
+
+def test_recovery_position_store_binds_text_position_ids_for_postgres(tmp_path):
+    path = tmp_path / "state.db"
+    connect = _connection_factory(path)
+    conn = connect()
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    def execute(conn, sql, params=()):
+        compact = " ".join(sql.lower().split())
+        if "recovery_position_state" in compact:
+            position_param = (
+                params[0] if compact.startswith("insert into") else params[-1]
+            )
+            assert isinstance(position_param, str)
+        return conn.execute(sql, params)
+
+    store = RecoveryPositionStore(
+        RecoveryPositionStoreRuntime(
+            get_read_connection=connect,
+            get_write_connection=connect,
+            execute=execute,
+            normalize_position=normalize_position_snapshot,
+            normalize_row=normalize_recovery_position_row,
+            lookup_entry_decision_id=lambda _position_id: "decision-text-id",
+            build_meta_update_payload=build_recovery_meta_update_payload,
+            build_closed_update_payload=build_recovery_closed_update_payload,
+            now=lambda: 100.0,
+            local_open_volumes={},
+        )
+    )
+
+    store.upsert(
+        {
+            "position_id": 41,
+            "symbol": "XAUUSD+",
+            "direction": 1,
+            "open_price": 2400.0,
+            "volume": 100.0,
+        },
+        broker="ctrader",
+        strategy_name="factor_v4",
+    )
+    assert store.load(41)["position_id"] == 41
+    store.merge_meta(41, {"close_deal_pending": {"status": "pending"}})
+    assert store.last_seen_by_position({41}) == {41: 95.0}
+    assert store.remaining_volume_by_position({41}) == {41: 100.0}
+    assert store.context_integrity(41, default="partial") == "full"
+    store.mark_closed(
+        41,
+        close_reason="broker_close",
+        close_pnl=1.0,
+        closed_at=110.0,
+    )

@@ -2616,7 +2616,7 @@ def _lookup_open_decision_context(position_id: int) -> dict:
             WHERE position_id=?
             ORDER BY first_seen_at DESC LIMIT 1
             """,
-            (int(position_id),),
+            (str(int(position_id)),),
         ).fetchone()
         if recovery:
             return {
@@ -2652,7 +2652,7 @@ def _ensure_open_ledger_for_recovered_close(
         row = _state_execute(
             conn,
             "SELECT * FROM recovery_position_state WHERE position_id=?",
-            (position_id,),
+            (str(int(position_id)),),
         ).fetchone()
     finally:
         conn.close()
@@ -3159,7 +3159,23 @@ def _pending_close_cursor_overrides(
             latch_evidence=pending_close_causes.get(pid),
         )
         pending_kind = str(requirements.get("pending_kind") or "")
-        if pid in active_rows_by_id and pending_kind != "partial_close":
+        pending_reason = str(requirements.get("reason") or "")
+        expected_volume = float(
+            requirements.get("expected_position_volume") or 0.0
+        )
+        is_fallback_final_close = bool(
+            not pending_kind
+            and pending_reason == "close_deal_missing_or_delayed"
+            and expected_volume > 0.0
+        )
+        if (
+            pending_kind != "partial_close"
+            and (
+                pid in active_rows_by_id
+                or pending_kind == "final_close"
+                or is_fallback_final_close
+            )
+        ):
             # A durable position that has disappeared at the broker is a
             # final-close recovery, not a new reduction RPC.  A close deal
             # already fetched by an earlier retry remains valid evidence; do

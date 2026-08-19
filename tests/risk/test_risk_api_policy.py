@@ -33,17 +33,23 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
             event_ts REAL NOT NULL DEFAULT 0.0,
             created_at REAL NOT NULL DEFAULT 0.0
         );
+        CREATE TABLE recovery_position_state (
+            position_id TEXT PRIMARY KEY,
+            direction INTEGER DEFAULT 0
+        );
         """
     )
     conn.executemany(
         """
         INSERT INTO decision_ledger
-        (decision_id, event_type, symbol, timeframe, decision_ts, action_reason, action_json, risk_state_json, created_at)
-        VALUES (?, ?, 'XAUUSD+', 'M5', ?, ?, ?, ?, ?)
+        (decision_id, position_id, event_type, symbol, timeframe, decision_ts,
+         action_reason, action_json, risk_state_json, created_at)
+        VALUES (?, ?, ?, 'XAUUSD+', 'M5', ?, ?, ?, ?, ?)
         """,
         [
             (
                 "dec_allowed",
+                "284214987",
                 "open",
                 200.0,
                 "executed",
@@ -53,6 +59,7 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
             ),
             (
                 "dec_skipped",
+                "",
                 "supervisor_reduce",
                 150.0,
                 "risk_reducing_action",
@@ -62,6 +69,7 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
             ),
             (
                 "dec_blocked",
+                "",
                 "skip",
                 100.0,
                 "仓位上限: 3/3",
@@ -71,6 +79,7 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
             ),
             (
                 "dec_pre_policy",
+                "",
                 "skip",
                 175.0,
                 "no_new_risk_latched",
@@ -91,6 +100,10 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
                 175.0,
             ),
         ],
+    )
+    conn.execute(
+        "INSERT INTO recovery_position_state(position_id, direction) VALUES (?, ?)",
+        ("284214987", 1),
     )
     conn.executemany(
         """
@@ -125,8 +138,16 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
     conn.commit()
     conn.close()
 
+    recovery_params = []
+
+    class _SpyConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if "from recovery_position_state" in str(sql).lower():
+                recovery_params.append(tuple(parameters))
+            return super().execute(sql, parameters)
+
     def _conn():
-        c = sqlite3.connect(str(db_path))
+        c = sqlite3.connect(str(db_path), factory=_SpyConnection)
         c.row_factory = sqlite3.Row
         return c
 
@@ -159,6 +180,7 @@ def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path
     assert result["items"][1]["decision_id"] == "dec_skipped"
     assert result["items"][1]["execution_category"] == "skipped"
     assert result["items"][1]["execution_reason"] == "invalid_reduce_volume"
+    assert recovery_params == [("284214987",)]
 
 
 def test_system_health_summary_serializes_latest_report(monkeypatch):
@@ -283,7 +305,7 @@ def test_trade_trace_collects_ledger_review_and_lifecycle(monkeypatch, tmp_path)
             notes TEXT DEFAULT ''
         );
         CREATE TABLE recovery_position_state (
-            position_id INTEGER PRIMARY KEY,
+            position_id TEXT PRIMARY KEY,
             broker TEXT DEFAULT 'ctrader',
             symbol TEXT DEFAULT '',
             direction INTEGER DEFAULT 0,
@@ -411,8 +433,16 @@ def test_trade_trace_collects_ledger_review_and_lifecycle(monkeypatch, tmp_path)
     conn.commit()
     conn.close()
 
+    recovery_params = []
+
+    class _SpyConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if "from recovery_position_state" in str(sql).lower():
+                recovery_params.append(tuple(parameters))
+            return super().execute(sql, parameters)
+
     def _conn():
-        c = sqlite3.connect(str(db_path))
+        c = sqlite3.connect(str(db_path), factory=_SpyConnection)
         c.row_factory = sqlite3.Row
         return c
 
@@ -440,6 +470,7 @@ def test_trade_trace_collects_ledger_review_and_lifecycle(monkeypatch, tmp_path)
     assert result["factor_contributions"][0]["responsibility_labels"] == ["entry_good_exit_bad"]
     assert result["factor_contributions"][0]["factor_role"] == "helpful"
     assert result["recovery_state"]["recovery_meta"]["source"] == "replay"
+    assert recovery_params == [("9001",)]
     assert result["parameter_governance"]["overview"]["show_stage_card"] is False
     assert result["parameter_governance"]["timeline_filter_context"]["focus_filters"]["all"]["summary_template"] == "当前证据链共 {count} 个事件。"
 

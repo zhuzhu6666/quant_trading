@@ -7,11 +7,35 @@ import pandas as pd
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.autonomy_health import AutonomyHealthService
 from backend.services.incident_controls import RuntimeIncidentControlService
+from backend.services import replay_harness as replay_harness_module
 from tests.canonical_fixture import ensure_training_sample_row_sqlite
 from backend.services.release_control import ReleaseControlService
 from backend.services.replay_harness import ReplayHarnessService
 from backend.services.v15_phase0 import V15Phase0CompletionService
 from config import runtime_config as rc
+
+
+def test_replay_recovery_lookup_keeps_numeric_position_id_as_text(monkeypatch):
+    captured = {}
+
+    class _Result:
+        def fetchone(self):
+            return {"position_id": "284214987"}
+
+    def fake_execute(_conn, _sql, params=None):
+        captured["params"] = params
+        return _Result()
+
+    monkeypatch.setattr(replay_harness_module, "_execute", fake_execute)
+    service = object.__new__(ReplayHarnessService)
+
+    row = service._find_recovery_position_state(
+        object(),
+        position_id="284214987",
+    )
+
+    assert row["position_id"] == "284214987"
+    assert captured["params"] == ("284214987",)
 
 
 def test_replay_harness_persists_factor_gate_risk_report(tmp_path):

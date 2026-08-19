@@ -1137,7 +1137,6 @@ class ReplayHarnessService:
     def _find_recovery_position_state(self, conn, *, position_id: str) -> dict[str, Any]:
         if not position_id:
             return {}
-        key: Any = int(position_id) if str(position_id).strip().isdigit() else position_id
         row = _execute(
             conn,
             """
@@ -1146,7 +1145,7 @@ class ReplayHarnessService:
             WHERE position_id = ?
             LIMIT 1
             """,
-            (key,),
+            (str(position_id),),
         ).fetchone()
         return dict(row) if row else {}
 
@@ -1363,7 +1362,13 @@ class ReplayHarnessService:
                            OR (? <> '' AND trade_id = ?)
                         ORDER BY event_ts ASC, trace_id ASC
                         """,
-                        (decision_id, position_id, position_id, trade_id, trade_id),
+                        (
+                            decision_id,
+                            str(position_id),
+                            str(position_id),
+                            trade_id,
+                            trade_id,
+                        ),
                     ).fetchall()
                     supervisor_items = []
                     for item in supervisor_rows:
@@ -1404,7 +1409,12 @@ class ReplayHarnessService:
                            OR (? <> '' AND c.trade_id = ?)
                         ORDER BY c.close_ts ASC, c.counterfactual_id ASC
                         """,
-                        (position_id, position_id, trade_id, trade_id),
+                        (
+                            str(position_id),
+                            str(position_id),
+                            trade_id,
+                            trade_id,
+                        ),
                     ).fetchall()
                     for item in cf_rows:
                         value = dict(item)

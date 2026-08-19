@@ -4203,7 +4203,7 @@ def _entry_decision_for_review(
         ORDER BY decision_ts DESC
         LIMIT 1
         """,
-        (position_id,),
+        (str(position_id),),
     ).fetchone()
 
 

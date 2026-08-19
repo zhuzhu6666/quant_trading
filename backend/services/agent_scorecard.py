@@ -746,7 +746,7 @@ class AgentScorecardService:
                FROM supervisor_counterfactual_review c
                WHERE (c.review_id=? AND c.review_id <> '') OR c.position_id=?
                ORDER BY c.updated_at DESC""",
-            (review_id, position_id),
+            (review_id, str(position_id)),
         ).fetchall()
         links: list[dict[str, Any]] = []
         for row in rows:
@@ -789,7 +789,7 @@ class AgentScorecardService:
                        FROM supervisor_counterfactual_review c
                        WHERE (c.review_id=? AND c.review_id <> '') OR c.position_id=?
                        ORDER BY c.updated_at DESC""",
-                    (review_id, position_id),
+                    (review_id, str(position_id)),
                 ).fetchall()
                 for row in rows:
                     evidence = _loads(row["evidence_json"], {})

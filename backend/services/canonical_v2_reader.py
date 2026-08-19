@@ -654,7 +654,7 @@ def iter_fact_events(
         params: list[Any] = []
         if entity_id:
             clauses.append("position_id=?" if kind == "position" else "trade_id=?")
-            params.append(entity_id)
+            params.append(str(entity_id))
         if legacy_event_type:
             clauses.append("event_type=?")
             params.append(str(legacy_event_type))
@@ -830,7 +830,7 @@ def iter_training_sample_rows(
         params.append(trade_id)
     if position_id:
         where_clauses.append("position_id = ?")
-        params.append(position_id)
+        params.append(str(position_id))
     where = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
     order = " ORDER BY event_ts DESC, created_at DESC" if order_by_event_ts else " ORDER BY created_at DESC"
     select_cols = ", ".join(TRAINING_SAMPLE_COLUMNS)

@@ -32,6 +32,7 @@ class RecoveryPositionStore:
     def load(self, position_id: int) -> dict[str, Any]:
         if int(position_id or 0) <= 0:
             return {}
+        position_key = str(int(position_id))
         conn = self.runtime.get_read_connection()
         try:
             row = self.runtime.execute(
@@ -42,7 +43,7 @@ class RecoveryPositionStore:
                 WHERE position_id=?
                 LIMIT 1
                 """,
-                (int(position_id),),
+                (position_key,),
             ).fetchone()
             return self.runtime.normalize_row(row)
         finally:
@@ -51,12 +52,13 @@ class RecoveryPositionStore:
     def merge_meta(self, position_id: int, meta: Mapping[str, Any] | None) -> None:
         if int(position_id or 0) <= 0 or not meta:
             return
+        position_key = str(int(position_id))
         conn = self.runtime.get_write_connection()
         try:
             row = self.runtime.execute(
                 conn,
                 "SELECT recovery_meta_json FROM recovery_position_state WHERE position_id=?",
-                (int(position_id),),
+                (position_key,),
             ).fetchone()
             if row is None:
                 return
@@ -79,7 +81,7 @@ class RecoveryPositionStore:
                         ensure_ascii=False,
                         default=str,
                     ),
-                    payload["position_id"],
+                    str(payload["position_id"]),
                 ),
             )
             conn.commit()
@@ -100,6 +102,7 @@ class RecoveryPositionStore:
         position_id = int(snapshot["position_id"] or 0)
         if position_id <= 0:
             return
+        position_key = str(position_id)
         now = float(self.runtime.now())
         entry_decision_id = str(
             self.runtime.lookup_entry_decision_id(position_id) or ""
@@ -114,7 +117,7 @@ class RecoveryPositionStore:
             prev = self.runtime.execute(
                 conn,
                 "SELECT * FROM recovery_position_state WHERE position_id=?",
-                (position_id,),
+                (position_key,),
             ).fetchone()
             first_seen_at = float(prev["first_seen_at"]) if prev else now
             stored_meta: dict[str, Any] = {}
@@ -180,7 +183,7 @@ class RecoveryPositionStore:
                     END
                 """,
                 (
-                    position_id,
+                    position_key,
                     broker,
                     snapshot["symbol"],
                     snapshot["direction"],
@@ -225,10 +228,11 @@ class RecoveryPositionStore:
         try:
             result: dict[int, float] = {}
             for position_id in normalized:
+                position_key = str(position_id)
                 row = self.runtime.execute(
                     conn,
                     "SELECT last_seen_at FROM recovery_position_state WHERE position_id=?",
-                    (position_id,),
+                    (position_key,),
                 ).fetchone()
                 if row and float(row["last_seen_at"] or 0.0) > 0.0:
                     result[position_id] = max(
@@ -252,10 +256,11 @@ class RecoveryPositionStore:
         try:
             result: dict[int, float] = {}
             for position_id in normalized:
+                position_key = str(position_id)
                 row = self.runtime.execute(
                     conn,
                     "SELECT volume FROM recovery_position_state WHERE position_id=?",
-                    (position_id,),
+                    (position_key,),
                 ).fetchone()
                 if row and float(row["volume"] or 0.0) > 0.0:
                     result[position_id] = float(row["volume"])
@@ -278,12 +283,13 @@ class RecoveryPositionStore:
         closed_at: float,
         meta: Mapping[str, Any] | None = None,
     ) -> None:
+        position_key = str(int(position_id))
         conn = self.runtime.get_write_connection()
         try:
             row = self.runtime.execute(
                 conn,
                 "SELECT recovery_meta_json FROM recovery_position_state WHERE position_id=?",
-                (position_id,),
+                (position_key,),
             ).fetchone()
             payload = self.runtime.build_closed_update_payload(
                 position_id=position_id,
@@ -313,7 +319,7 @@ class RecoveryPositionStore:
                         ensure_ascii=False,
                         default=str,
                     ),
-                    payload["position_id"],
+                    str(payload["position_id"]),
                 ),
             )
             conn.commit()
@@ -321,12 +327,13 @@ class RecoveryPositionStore:
             conn.close()
 
     def context_integrity(self, position_id: int, *, default: str) -> str:
+        position_key = str(int(position_id))
         conn = self.runtime.get_read_connection()
         try:
             row = self.runtime.execute(
                 conn,
                 "SELECT context_integrity FROM recovery_position_state WHERE position_id=?",
-                (position_id,),
+                (position_key,),
             ).fetchone()
             return str(row["context_integrity"] or default) if row else default
         finally:

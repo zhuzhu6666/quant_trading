@@ -433,7 +433,7 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
                 FROM recovery_position_state
                 WHERE position_id IN ({placeholders})
                 """),
-                tuple(int(pid) if pid.isdigit() else pid for pid in position_ids),
+                tuple(str(pid) for pid in position_ids),
             ).fetchall()
             position_directions = {
                 str(item["position_id"]): _coerce_direction(item["direction"])
@@ -2056,7 +2056,7 @@ def _trade_trace(position_id: str | None = None, decision_id: str | None = None)
                 WHERE position_id = ?
                 LIMIT 1
                 """),
-                (pos_int,),
+                (str(pos_int),),
             ).fetchone()
 
         order_events = []

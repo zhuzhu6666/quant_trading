@@ -107,7 +107,7 @@ def _deal_context(conn: sqlite3.Connection, position_id: int) -> dict:
     recovery = _execute(
         conn,
         "SELECT * FROM recovery_position_state WHERE position_id=?",
-        (position_id,),
+        (str(position_id),),
     ).fetchone()
     return {
         "open_deal": dict(open_deal) if open_deal else {},
@@ -281,7 +281,7 @@ def repair(
                     END
                 WHERE position_id=?
                 """,
-                (decision_id, position_id),
+                (decision_id, str(position_id)),
             )
         if apply:
             conn.commit()

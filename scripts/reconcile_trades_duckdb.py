@@ -153,7 +153,7 @@ def _state_context(conn, position_id: int) -> dict[str, Any]:
         FROM recovery_position_state
         WHERE position_id=?
         """,
-        (position_id,),
+        (str(position_id),),
     ).fetchone()
     review_data = _rowdict(review)
     if review_data:

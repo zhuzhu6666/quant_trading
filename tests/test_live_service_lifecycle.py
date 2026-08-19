@@ -65,6 +65,7 @@ def _reset_loop_state(monkeypatch, tmp_path):
         accepting_new_risk=False,
         loop_shutdown=None,
     )
+
     live_service._reset_session_state_for_new_day()
     yield
     live_service._loop_thread = None
@@ -101,6 +102,54 @@ def _reset_loop_state(monkeypatch, tmp_path):
         loop_shutdown=None,
     )
     live_service._reset_session_state_for_new_day()
+
+
+def test_missing_recovery_row_final_close_resets_stale_baseline():
+    position_id = 284214987
+
+    result = live_service._pending_close_cursor_overrides(
+        {position_id},
+        active_rows_by_id={},
+        pending_close_causes={
+            position_id: {
+                "reason": "close_deal_missing_or_delayed",
+                "expected_position_volume": 100.0,
+            }
+        },
+        broker="ctrader",
+    )
+
+    assert result[position_id] == {
+        "baseline_cursor_available": True,
+        "baseline_deal_ids": [],
+        "baseline_closed_volume": 0.0,
+    }
+
+
+def test_missing_recovery_row_partial_close_keeps_incremental_baseline():
+    position_id = 284214987
+
+    result = live_service._pending_close_cursor_overrides(
+        {position_id},
+        active_rows_by_id={},
+        pending_close_causes={
+            position_id: {
+                "pending_kind": "partial_close",
+                "reason": "close_deal_missing_or_delayed",
+                "expected_position_volume": 100.0,
+                "baseline_cursor_available": True,
+                "baseline_deal_ids": [7001],
+                "baseline_closed_volume": 50.0,
+            }
+        },
+        broker="ctrader",
+    )
+
+    assert result[position_id] == {
+        "baseline_cursor_available": True,
+        "baseline_deal_ids": [7001],
+        "baseline_closed_volume": 50.0,
+    }
 
 
 def _patch_live_state_conn(monkeypatch, conn_factory):
