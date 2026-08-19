@@ -39,7 +39,7 @@ def _auth_v2_isolation(monkeypatch, tmp_path):
     reset_memory_sessions_for_tests()
 
 
-def test_argon2_login_issues_short_access_and_rotating_refresh():
+def test_argon2_login_issues_24_hour_access_and_rotating_refresh():
     client = TestClient(app)
     login = client.post(
         "/api/auth/login",
@@ -47,7 +47,7 @@ def test_argon2_login_issues_short_access_and_rotating_refresh():
     )
     assert login.status_code == 200
     body = login.json()
-    assert body["expires_in"] == 15 * 60
+    assert body["expires_in"] == 24 * 60 * 60
     assert body["refresh_expires_in"] == 7 * 24 * 3600
     assert body["token"] == body["access_token"]
     assert body["password_rehash_required"] is False
