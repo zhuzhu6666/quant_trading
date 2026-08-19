@@ -6,6 +6,9 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from backend.core.db import state_table_columns
+from backend.services.state_payload_archive import load_json_payload
+
 
 @dataclass(frozen=True)
 class ReentryGuardRuntime:
@@ -103,10 +106,17 @@ def recent_review_reentry_block(
     try:
         conn = runtime.state_connection_factory(read_only=True)
         try:
+            try:
+                has_review_archive = "review_archive_hash" in state_table_columns(
+                    conn, "trade_outcome_review"
+                )
+            except Exception:
+                has_review_archive = False
+            review_archive_select = ", review_archive_hash" if has_review_archive else ""
             rows = conn.execute(
-                """
+                f"""
                 SELECT review_id, position_id, outcome_label, failure_tags_json,
-                       review_json, created_at
+                       review_json, created_at{review_archive_select}
                 FROM trade_outcome_review
                 WHERE created_at >= %s
                 ORDER BY created_at DESC
@@ -114,6 +124,20 @@ def recent_review_reentry_block(
                 """,
                 (now - 3 * 3600.0,),
             ).fetchall()
+            rows = [
+                {
+                    **dict(row),
+                    "_review_payload": load_json_payload(
+                        conn,
+                        source_table="trade_outcome_review",
+                        source_id=str(dict(row).get("review_id") or ""),
+                        inline_json=dict(row).get("review_json"),
+                        archive_hash=dict(row).get("review_archive_hash", ""),
+                        default={},
+                    ),
+                }
+                for row in rows
+            ]
         finally:
             conn.close()
     except Exception as exc:
@@ -126,7 +150,9 @@ def recent_review_reentry_block(
     matched: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        review = _json_object(item.get("review_json"))
+        review = item.pop("_review_payload", {})
+        if not isinstance(review, dict):
+            review = {}
         if int(review.get("direction") or 0) != int(direction):
             continue
         tags = _json_list(item.get("failure_tags_json"))

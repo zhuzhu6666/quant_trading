@@ -15,6 +15,7 @@ from loguru import logger
 from backend.core.db import (
     STATE_DB,
     connect_sqlite,
+    ensure_sqlite_columns,
     get_state_pg_conn,
     is_state_db_path,
     state_pg_enabled,
@@ -44,8 +45,15 @@ from backend.services.review_contract import (
     review_has_system_contamination,
 )
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.state_payload_archive import (
+    archive_json_payload,
+    load_json_payload,
+    supervisor_trace_archive_text,
+)
 from research.features.evidence_contract import build_evidence_contract
-from backend.services.live_position_lifecycle import _compact_supervisor_mapping
+from backend.services.supervisor_payload_contract import (
+    compact_supervisor_mapping as _compact_supervisor_mapping,
+)
 
 _scheduler_thread: threading.Thread | None = None
 _stop_event = threading.Event()
@@ -254,6 +262,7 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
                 label_json TEXT DEFAULT '{}',
                 trace_json TEXT DEFAULT '{}',
                 evidence_contract_json TEXT DEFAULT '{}',
+                content_fingerprint TEXT NOT NULL DEFAULT '',
                 config_version INTEGER DEFAULT 0,
                 config_hash TEXT DEFAULT '',
                 evolution_run_id TEXT DEFAULT '',
@@ -267,6 +276,11 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
                 updated_at REAL NOT NULL DEFAULT 0.0
             )
             """
+        )
+        ensure_sqlite_columns(
+            db_path,
+            "autonomous_learning_sample",
+            {"content_fingerprint": "content_fingerprint TEXT NOT NULL DEFAULT ''"},
         )
         conn.execute(
             """
@@ -841,7 +855,7 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
     existing = _execute(
         conn,
         """
-        SELECT label_status
+        SELECT label_status, content_fingerprint
         FROM autonomous_learning_sample
         WHERE sample_id=?
         LIMIT 1
@@ -851,8 +865,10 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
     if existing is not None:
         try:
             existing_label_status = str(existing["label_status"] or "")
+            existing_fingerprint = str(existing["content_fingerprint"] or "")
         except Exception:
             existing_label_status = str(existing[0] or "")
+            existing_fingerprint = str(existing[1] or "") if len(existing) > 1 else ""
         if existing_label_status == "matured" and label_status != "matured":
             return False
     row_payload = {
@@ -886,6 +902,17 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
         "created_at": now,
         "updated_at": now,
     }
+    fingerprint_payload = {
+        key: value
+        for key, value in row_payload.items()
+        if key not in {"created_at", "updated_at"}
+    }
+    content_fingerprint = hashlib.sha256(
+        _dumps(fingerprint_payload).encode("utf-8")
+    ).hexdigest()
+    if existing is not None and existing_fingerprint and existing_fingerprint == content_fingerprint:
+        return False
+    row_payload["content_fingerprint"] = content_fingerprint
     cur = _execute(
         conn,
         """
@@ -893,11 +920,15 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
         (sample_id, sample_type, source_table, source_id, decision_id, trade_id,
          position_id, symbol, timeframe, event_ts, label_status, integrity,
          train_weight, features_json, verdict_json, label_json, trace_json,
-         evidence_contract_json, config_version, config_hash, evolution_run_id,
+         evidence_contract_json, content_fingerprint, config_version, config_hash, evolution_run_id,
          system_contaminated, governance_eligible, governance_effective_weight,
          governance_eligibility_version, governance_eligibility_fingerprint,
          governance_ineligible_reason, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
         ON CONFLICT(sample_id) DO UPDATE SET
             decision_id=excluded.decision_id,
             trade_id=excluded.trade_id,
@@ -913,6 +944,7 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
             label_json=excluded.label_json,
             trace_json=excluded.trace_json,
             evidence_contract_json=excluded.evidence_contract_json,
+            content_fingerprint=excluded.content_fingerprint,
             config_version=excluded.config_version,
             config_hash=excluded.config_hash,
             evolution_run_id=excluded.evolution_run_id,
@@ -943,6 +975,7 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
             "label_json",
             "trace_json",
             "evidence_contract_json",
+            "content_fingerprint",
             "config_version",
             "config_hash",
             "evolution_run_id",
@@ -1111,18 +1144,64 @@ def _open_target_v2(
     }
 
 
-def _counterfactual_source_is_clean(row: Any) -> bool:
+def _review_archive_select(
+    conn: Any,
+    *,
+    alias: str = "r",
+    output: str = "review_archive_hash",
+) -> str:
+    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
+        return ""
+    return f", {alias}.review_archive_hash AS {output}"
+
+
+def _review_payload_value(
+    conn: Any,
+    row: Any,
+    *,
+    inline_key: str = "review_json",
+    archive_key: str = "review_archive_hash",
+    source_id_key: str = "review_id",
+) -> dict[str, Any]:
+    payload = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(_row_value(row, source_id_key, "") or ""),
+        inline_json=_row_value(row, inline_key, "{}"),
+        archive_hash=_row_value(row, archive_key, ""),
+        default={},
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
+def _counterfactual_source_is_clean(row: Any, conn: Any | None = None) -> bool:
     source_review_id = str(_row_value(row, "source_review_id", "") or "")
     if not source_review_id:
         return False
-    source_review = _loads(_row_value(row, "source_review_json", ""), {})
+    source_review = (
+        _review_payload_value(
+            conn,
+            row,
+            inline_key="source_review_json",
+            archive_key="source_review_archive_hash",
+            source_id_key="source_review_id",
+        )
+        if conn is not None
+        else _loads(_row_value(row, "source_review_json", ""), {})
+    )
     if review_has_system_contamination(source_review):
         return False
     evidence = _loads(_row_value(row, "evidence_json", ""), {})
     return not bool(evidence.get("evidence_invalidated"))
 
 
-def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | None = None) -> dict[str, Any]:
+def _sample_from_decision(
+    row: Any,
+    sample_type: str,
+    *,
+    outcome_review: Any | None = None,
+    conn: Any | None = None,
+) -> dict[str, Any]:
     action_json = _loads(row["action_json"], {})
     risk_state = _loads(row["risk_state_json"], {})
     portfolio = _loads(row["portfolio_state_json"], {})
@@ -1138,7 +1217,9 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
         and sample_type in {"shadow_open_decision", "supervisor_trajectory"}
     )
     outcome_review_json = (
-        _loads(outcome_review["review_json"], {}) if review_backed_sample else {}
+        _review_payload_value(conn, outcome_review)
+        if review_backed_sample and conn is not None
+        else (_loads(outcome_review["review_json"], {}) if review_backed_sample else {})
     )
     outcome_contamination = _review_system_contamination(outcome_review_json)
     label = {
@@ -1195,7 +1276,7 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
         label["summary_reason"] = str(verdict.get("summary_reason") or row["action_reason"] or "")
         train_weight = 0.6
         if outcome_review is not None:
-            review_json = _loads(outcome_review["review_json"], {})
+            review_json = outcome_review_json
             integrity, review_weight = _review_integrity_for_training(review_json)
             label_status = "matured" if integrity != "missing" else "pending"
             train_weight = min(train_weight, review_weight)
@@ -1224,7 +1305,7 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
         "label_status": label_status,
         "executable_governance_allowed": sample_type in EXECUTABLE_GOVERNANCE_SAMPLE_TYPES,
         "integrity": (
-            _review_integrity_for_training(_loads(outcome_review["review_json"], {}))[0]
+            _review_integrity_for_training(outcome_review_json)[0]
             if review_backed_sample
             else ("full" if risk_verdict or action_json else "partial")
         ),
@@ -1279,8 +1360,8 @@ def _sample_from_decision(row: Any, sample_type: str, *, outcome_review: Any | N
     }
 
 
-def _sample_from_review(row: Any) -> dict[str, Any]:
-    review = _loads(row["review_json"], {})
+def _sample_from_review(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
+    review = _review_payload_value(conn, row) if conn is not None else _loads(row["review_json"], {})
     integrity, train_weight = _review_integrity_for_training(review)
     contamination = _review_system_contamination(review)
     return {
@@ -1336,14 +1417,22 @@ def _sample_from_review(row: Any) -> dict[str, Any]:
     }
 
 
-def _sample_from_counterfactual(row: Any) -> dict[str, Any]:
+def _sample_from_counterfactual(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
     label = str(row["label"] or "")
     confidence = float(row["confidence"] or 0.0)
     evidence = _loads(row["evidence_json"], {})
     source_review_id = str(_row_value(row, "source_review_id", "") or "")
     if source_review_id:
         source_contamination = _review_system_contamination(
-            _loads(_row_value(row, "source_review_json", ""), {})
+            _review_payload_value(
+                conn,
+                row,
+                inline_key="source_review_json",
+                archive_key="source_review_archive_hash",
+                source_id_key="source_review_id",
+            )
+            if conn is not None
+            else _loads(_row_value(row, "source_review_json", ""), {})
         )
     else:
         source_contamination = {
@@ -1403,8 +1492,12 @@ def _sample_from_counterfactual(row: Any) -> dict[str, Any]:
     }
 
 
-def _sample_from_entry_supervisor_feedback(row: Any) -> dict[str, Any] | None:
-    review = _loads(row["review_json"], {})
+def _sample_from_entry_supervisor_feedback(
+    row: Any,
+    *,
+    conn: Any | None = None,
+) -> dict[str, Any] | None:
+    review = _review_payload_value(conn, row) if conn is not None else _loads(row["review_json"], {})
     inferred = review.get("inferred_close_supervisor") or {}
     close_reason_source = str(review.get("close_reason_source") or "")
     event_type = str(inferred.get("event_type") or "")
@@ -1525,6 +1618,7 @@ def _sample_from_supervisor_trace(
     row: Any,
     *,
     source_review_row: Any | None = None,
+    conn: Any | None = None,
 ) -> dict[str, Any]:
     verdict = _loads(row["verdict_json"], {})
     context = _loads(row["context_json"], {})
@@ -1534,7 +1628,15 @@ def _sample_from_supervisor_trace(
     source_review_id = str(_row_value(review_row, "source_review_id", "") or "")
     if source_review_id:
         source_contamination = _review_system_contamination(
-            _loads(_row_value(review_row, "source_review_json", ""), {})
+            _review_payload_value(
+                conn,
+                review_row,
+                inline_key="source_review_json",
+                archive_key="source_review_archive_hash",
+                source_id_key="source_review_id",
+            )
+            if conn is not None
+            else _loads(_row_value(review_row, "source_review_json", ""), {})
         )
     else:
         source_contamination = {
@@ -1655,8 +1757,14 @@ def _dynamic_tpsl_labels(base: dict[str, Any], cf_label: str) -> list[str]:
     return sorted(labels)
 
 
-def _matured_sample_from_supervisor_trace(row: Any, cf_row: Any | None, *, run_context: dict[str, Any]) -> dict[str, Any]:
-    base = _sample_from_supervisor_trace(row, source_review_row=cf_row)
+def _matured_sample_from_supervisor_trace(
+    row: Any,
+    cf_row: Any | None,
+    *,
+    run_context: dict[str, Any],
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    base = _sample_from_supervisor_trace(row, source_review_row=cf_row, conn=conn)
     cf_label = str(cf_row["label"] or "") if cf_row is not None else ""
     label_status, unified_label, recommended_action, weight = _supervisor_label_from_counterfactual(cf_label)
     protection_labels = _dynamic_tpsl_labels(base, cf_label)
@@ -1715,6 +1823,12 @@ def backfill_position_supervisor_traces(
     inserted = 0
     skipped = 0
     try:
+        trace_columns = state_table_columns(conn, "position_supervisor_trace")
+        archive_capable = {
+            "verdict_archive_hash",
+            "verdict_raw_sha256",
+            "verdict_raw_bytes",
+        } <= trace_columns
         rows = _execute(
             conn,
             """
@@ -1737,6 +1851,34 @@ def backfill_position_supervisor_traces(
             action = str(verdict.get("action") or event_type.replace("supervisor_", "") or "")
             trace_id = "psvtrace_legacy_" + hashlib.sha1(str(row["decision_id"] or "").encode("utf-8")).hexdigest()[:16]
             integrity = "recovered" if verdict else "partial"
+            raw_context = {"legacy_action": action_json, "event_type": event_type}
+            raw_verdict = dict(verdict)
+            context_json = _dumps(raw_context)
+            verdict_json = _dumps(raw_verdict)
+            archive = None
+            if archive_capable:
+                archive = archive_json_payload(
+                    conn,
+                    source_table="position_supervisor_trace",
+                    source_id=trace_id,
+                    payload_kind="supervisor_trace",
+                    raw_json=supervisor_trace_archive_text(
+                        context_json=_dumps(raw_context),
+                        verdict_json=_dumps(raw_verdict),
+                        risk_verdict_json="{}",
+                        execution_json="{}",
+                    ),
+                )
+                if archive:
+                    context_json = _dumps(_compact_supervisor_mapping(raw_context))
+                    verdict_json = _dumps(
+                        _compact_supervisor_mapping(
+                            raw_verdict,
+                            nested_keys=frozenset(
+                                {"evidence", "recommended_controls", "supervisor_template"}
+                            ),
+                        )
+                    )
             cur = _execute(
                 conn,
                 """
@@ -1765,8 +1907,8 @@ def backfill_position_supervisor_traces(
                     float(verdict.get("confidence", row["action_score"] or 0.0) or 0.0),
                     str((verdict.get("supervisor_template") or {}).get("template_id") or ""),
                     str((verdict.get("supervisor_template") or {}).get("template_version") or ""),
-                    _dumps({"legacy_action": action_json, "event_type": event_type}),
-                    _dumps(verdict),
+                    context_json,
+                    verdict_json,
                     integrity,
                     int(run.get("config_version") or 0),
                     str(run.get("config_hash") or ""),
@@ -1774,6 +1916,21 @@ def backfill_position_supervisor_traces(
                     time.time(),
                 ),
             )
+            if archive:
+                _execute(
+                    conn,
+                    """
+                    UPDATE position_supervisor_trace
+                    SET verdict_archive_hash=?, verdict_raw_sha256=?, verdict_raw_bytes=?
+                    WHERE trace_id=?
+                    """,
+                    (
+                        archive["archive_hash"],
+                        archive["raw_sha256"],
+                        archive["raw_bytes"],
+                        trace_id,
+                    ),
+                )
             if getattr(cur, "rowcount", 0) > 0:
                 inserted += 1
             else:
@@ -1839,9 +1996,9 @@ def mature_position_supervisor_traces(
             while cf is None:
                 cf_rows = _execute(
                     conn,
-                    """
+                    f"""
                     SELECT cf.*, r.review_id AS source_review_id,
-                           r.review_json AS source_review_json
+                           r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
                     FROM supervisor_counterfactual_review cf
                     JOIN trade_outcome_review r ON r.review_id=cf.review_id
                     WHERE cf.position_id=?
@@ -1864,12 +2021,12 @@ def mature_position_supervisor_traces(
                     (
                         candidate
                         for candidate in cf_rows
-                        if _counterfactual_source_is_clean(candidate)
+                        if _counterfactual_source_is_clean(candidate, conn)
                     ),
                     None,
                 )
                 del cf_rows
-            item = _matured_sample_from_supervisor_trace(trace, cf, run_context=run_context)
+            item = _matured_sample_from_supervisor_trace(trace, cf, run_context=run_context, conn=conn)
             if _upsert_sample(conn, item):
                 if item["label_status"] == "matured":
                     matured += 1
@@ -1944,6 +2101,7 @@ def materialize_autonomous_learning_samples(
                             row,
                             "shadow_open_decision",
                             outcome_review=outcome_review,
+                            conn=conn,
                         ),
                         **sample_context,
                     },
@@ -1952,11 +2110,11 @@ def materialize_autonomous_learning_samples(
             if event_type == "skip":
                 action_json = _loads(row["action_json"], {})
                 if str(action_json.get("skip_stage") or "") in {"risk_policy", "market_session", "sizing"}:
-                    if _upsert_sample(conn, {**_sample_from_decision(row, "risk_rejection"), **sample_context}):
+                    if _upsert_sample(conn, {**_sample_from_decision(row, "risk_rejection", conn=conn), **sample_context}):
                         counts["risk_rejection"] += 1
             if event_type.startswith("supervisor_"):
                 outcome_review = _review_for_open_decision(conn, row)
-                if _upsert_sample(conn, {**_sample_from_decision(row, "supervisor_trajectory", outcome_review=outcome_review), **sample_context}):
+                if _upsert_sample(conn, {**_sample_from_decision(row, "supervisor_trajectory", outcome_review=outcome_review, conn=conn), **sample_context}):
                     counts["supervisor_trajectory"] += 1
         del decisions
         gc.collect()
@@ -1964,9 +2122,9 @@ def materialize_autonomous_learning_samples(
         if state_table_exists(conn, "position_supervisor_trace"):
             traces = _execute(
                 conn,
-                """
+                f"""
                 SELECT t.*, r.review_id AS source_review_id,
-                       r.review_json AS source_review_json
+                       r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
                 FROM position_supervisor_trace t
                 LEFT JOIN trade_outcome_review r
                   ON r.review_id = (
@@ -1982,7 +2140,7 @@ def materialize_autonomous_learning_samples(
                 (int(limit),),
             ).fetchall()
             for row in traces:
-                if _upsert_sample(conn, {**_sample_from_supervisor_trace(row), **sample_context}):
+                if _upsert_sample(conn, {**_sample_from_supervisor_trace(row, conn=conn), **sample_context}):
                     counts["supervisor_execution_trace"] += 1
             del traces
             gc.collect()
@@ -1998,9 +2156,9 @@ def materialize_autonomous_learning_samples(
             (int(limit),),
         ).fetchall()
         for row in reviews:
-            if _upsert_sample(conn, {**_sample_from_review(row), **sample_context}):
+            if _upsert_sample(conn, {**_sample_from_review(row, conn=conn), **sample_context}):
                 counts["trade_review_outcome"] += 1
-            entry_feedback = _sample_from_entry_supervisor_feedback(row)
+            entry_feedback = _sample_from_entry_supervisor_feedback(row, conn=conn)
             if entry_feedback and _upsert_sample(conn, {**entry_feedback, **sample_context}):
                 counts["entry_supervisor_feedback"] += 1
         del reviews
@@ -2026,9 +2184,9 @@ def materialize_autonomous_learning_samples(
             while accepted_counterfactuals < page_limit:
                 cfs = _execute(
                     conn,
-                    """
+                    f"""
                     SELECT cf.*, r.review_id AS source_review_id,
-                           r.review_json AS source_review_json
+                           r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
                     FROM supervisor_counterfactual_review cf
                     JOIN trade_outcome_review r ON r.review_id=cf.review_id
                     ORDER BY cf.updated_at DESC, cf.counterfactual_id DESC
@@ -2040,10 +2198,10 @@ def materialize_autonomous_learning_samples(
                     break
                 page_offset += len(cfs)
                 for row in cfs:
-                    if not _counterfactual_source_is_clean(row):
+                    if not _counterfactual_source_is_clean(row, conn):
                         continue
                     accepted_counterfactuals += 1
-                    if _upsert_sample(conn, {**_sample_from_counterfactual(row), **sample_context}):
+                    if _upsert_sample(conn, {**_sample_from_counterfactual(row, conn=conn), **sample_context}):
                         counts["post_close_counterfactual"] += 1
                     if accepted_counterfactuals >= page_limit:
                         break
@@ -3731,7 +3889,7 @@ def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit
         rows = _execute(
             conn,
             """
-            SELECT review_id, position_id, review_json, created_at
+            SELECT *
             FROM trade_outcome_review
             ORDER BY created_at DESC
             LIMIT ?
@@ -3741,7 +3899,7 @@ def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit
         now = time.time()
         for row in rows:
             checked += 1
-            review = _loads(row["review_json"], {})
+            review = _review_payload_from_row(conn, row)
             if str(review.get("close_reason_source") or "").strip():
                 continue
             position_id = str(row["position_id"] or review.get("position_id") or "")
@@ -3758,15 +3916,38 @@ def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit
                 "backfilled_at": now,
                 "method": "decision_ledger_or_position_supervisor_trace" if latest else "conservative_no_system_evidence",
             }
-            _execute(
+            review_id = str(row["review_id"] or "")
+            hot_json, archive = _review_storage_parts(
                 conn,
-                """
-                UPDATE trade_outcome_review
-                SET review_json=?
-                WHERE review_id=?
-                """,
-                (_dumps(review), str(row["review_id"] or "")),
+                review_id=review_id,
+                review=review,
             )
+            if archive:
+                _execute(
+                    conn,
+                    """
+                    UPDATE trade_outcome_review
+                    SET review_json=?, review_archive_hash=?, review_raw_sha256=?, review_raw_bytes=?
+                    WHERE review_id=?
+                    """,
+                    (
+                        hot_json,
+                        archive["archive_hash"],
+                        archive["raw_sha256"],
+                        archive["raw_bytes"],
+                        review_id,
+                    ),
+                )
+            else:
+                _execute(
+                    conn,
+                    """
+                    UPDATE trade_outcome_review
+                    SET review_json=?
+                    WHERE review_id=?
+                    """,
+                    (hot_json, review_id),
+                )
             updated += 1
             by_source[source] = by_source.get(source, 0) + 1
         payload = {
@@ -3801,33 +3982,31 @@ def backfill_trade_review_integrity_markers(*, db_path: str | Path = STATE_DB, l
     checked = 0
     updated = 0
     try:
-        integrity_filter_sql = (
-            """
-            SELECT review_id, review_json
-            FROM trade_outcome_review
-            WHERE COALESCE(json_extract(review_json, '$.attribution_integrity'), json_extract(review_json, '$.context_integrity'), '') = ''
-            ORDER BY created_at DESC
-            LIMIT ?
-            """
-            if not _use_pg(db_path)
-            else """
-            SELECT review_id, review_json
-            FROM trade_outcome_review
-            WHERE COALESCE(review_json, '') NOT LIKE '%attribution_integrity%'
-              AND COALESCE(review_json, '') NOT LIKE '%context_integrity%'
-            ORDER BY created_at DESC
-            LIMIT ?
-            """
-        )
         rows = _execute(
             conn,
-            integrity_filter_sql,
-            (max(1, int(limit)),),
+            """
+            SELECT *
+            FROM trade_outcome_review
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (max(1, min(max(int(limit) * 10, int(limit)), 50000)),),
         ).fetchall()
+        candidate_rows: list[Any] = []
+        for row in rows:
+            review = _review_payload_from_row(conn, row)
+            if (
+                not str(review.get("attribution_integrity") or "").strip()
+                and not str(review.get("context_integrity") or "").strip()
+            ):
+                candidate_rows.append(row)
+                if len(candidate_rows) >= max(1, int(limit)):
+                    break
+        rows = candidate_rows
         now = time.time()
         for row in rows:
             checked += 1
-            review = _loads(row["review_json"], {})
+            review = _review_payload_from_row(conn, row)
             review["attribution_integrity"] = "missing"
             review["context_integrity"] = "missing"
             review["integrity_backfill"] = {
@@ -3835,15 +4014,38 @@ def backfill_trade_review_integrity_markers(*, db_path: str | Path = STATE_DB, l
                 "backfilled_at": now,
                 "reason": "legacy_review_missing_integrity_marker",
             }
-            _execute(
+            review_id = str(row["review_id"] or "")
+            hot_json, archive = _review_storage_parts(
                 conn,
-                """
-                UPDATE trade_outcome_review
-                SET review_json=?
-                WHERE review_id=?
-                """,
-                (_dumps(review), str(row["review_id"] or "")),
+                review_id=review_id,
+                review=review,
             )
+            if archive:
+                _execute(
+                    conn,
+                    """
+                    UPDATE trade_outcome_review
+                    SET review_json=?, review_archive_hash=?, review_raw_sha256=?, review_raw_bytes=?
+                    WHERE review_id=?
+                    """,
+                    (
+                        hot_json,
+                        archive["archive_hash"],
+                        archive["raw_sha256"],
+                        archive["raw_bytes"],
+                        review_id,
+                    ),
+                )
+            else:
+                _execute(
+                    conn,
+                    """
+                    UPDATE trade_outcome_review
+                    SET review_json=?
+                    WHERE review_id=?
+                    """,
+                    (hot_json, review_id),
+                )
             updated += 1
         payload = {
             "schema_version": "trade_review_integrity_backfill.v1",
@@ -3966,6 +4168,48 @@ def _merge_review_labels(existing: Any, *groups: Any) -> list[str]:
     return labels
 
 
+def _review_payload_from_row(conn: Any, row: Any) -> dict[str, Any]:
+    """Load a review from its verified archive when the hot row is projected."""
+    return _review_payload_value(conn, row)
+
+
+def _review_storage_parts(
+    conn: Any,
+    *,
+    review_id: str,
+    review: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    """Prepare one bounded hot review and its optional lossless archive."""
+
+    full_review = dict(review)
+    normalized = normalize_trade_review_contract(full_review)
+    archive = None
+    archive_capable = {
+        "review_archive_hash",
+        "review_raw_sha256",
+        "review_raw_bytes",
+    } <= state_table_columns(conn, "trade_outcome_review")
+    if archive_capable:
+        archive = archive_json_payload(
+            conn,
+            source_table="trade_outcome_review",
+            source_id=str(review_id),
+            payload_kind="review_json",
+            raw_json=_dumps(full_review),
+        )
+    if archive:
+        return _dumps(normalized), archive
+
+    # Pre-15 fixtures/legacy SQLite stores have no archive destination. Keep
+    # their previous complete behavior rather than silently dropping recursive
+    # branches; production PostgreSQL must use the archive branch above.
+    legacy = dict(normalized)
+    for key in ("inferred_close_supervisor", "responsibility_domains"):
+        if key in full_review:
+            legacy[key] = full_review[key]
+    return _dumps(legacy), None
+
+
 def _update_factor_contribution_system_notes(
     conn: Any,
     *,
@@ -4038,7 +4282,7 @@ def backfill_trade_review_timing_and_system_markers(
         now = time.time()
         for row in rows:
             checked += 1
-            review = _loads(_row_value(row, "review_json", "{}"), {})
+            review = _review_payload_from_row(conn, row)
             if not isinstance(review, dict):
                 continue
             before = _dumps(review)
@@ -4100,6 +4344,7 @@ def backfill_trade_review_timing_and_system_markers(
                 "backfilled_at": now,
                 "method": "decision_ledger_order_events_runtime_health",
             }
+            full_review = dict(review)
             review = normalize_trade_review_contract(
                 review,
                 entry_quality=review.get("entry_quality", _row_value(row, "entry_quality", 0.0)),
@@ -4118,6 +4363,10 @@ def backfill_trade_review_timing_and_system_markers(
                 taxonomy.get("responsibility_labels") or [],
             )
             review["failure_tags"] = failure_tags
+            archive_review = dict(review)
+            for key in ("inferred_close_supervisor", "responsibility_domains"):
+                if key in full_review:
+                    archive_review[key] = full_review[key]
             system_issue = review.get("system_issue_context") if isinstance(review.get("system_issue_context"), dict) else {}
             if bool((system_issue or {}).get("contaminates_learning")):
                 contaminated += 1
@@ -4126,19 +4375,38 @@ def backfill_trade_review_timing_and_system_markers(
                 pnl=float(_row_value(row, "pnl", 0.0) or 0.0),
                 outcome_label=str(_row_value(row, "outcome_label", "") or review.get("outcome_label") or ""),
             )
-            after = _dumps(review)
-            if after == before:
+            if _dumps(review) == before:
                 continue
             review_id = str(_row_value(row, "review_id", "") or "")
-            _execute(
+            after, archive = _review_storage_parts(
                 conn,
-                """
-                UPDATE trade_outcome_review
-                SET failure_tags_json=?, summary_text=?, review_json=?
-                WHERE review_id=?
-                """,
-                (_dumps(failure_tags), summary, after, review_id),
+                review_id=review_id,
+                review=archive_review,
             )
+            if archive:
+                _execute(
+                    conn,
+                    """
+                    UPDATE trade_outcome_review
+                    SET failure_tags_json=?, summary_text=?, review_json=?,
+                        review_archive_hash=?, review_raw_sha256=?, review_raw_bytes=?
+                    WHERE review_id=?
+                    """,
+                    (
+                        _dumps(failure_tags), summary, after, archive["archive_hash"],
+                        archive["raw_sha256"], archive["raw_bytes"], review_id,
+                    ),
+                )
+            else:
+                _execute(
+                    conn,
+                    """
+                    UPDATE trade_outcome_review
+                    SET failure_tags_json=?, summary_text=?, review_json=?
+                    WHERE review_id=?
+                    """,
+                    (_dumps(failure_tags), summary, after, review_id),
+                )
             factor_rows_updated += _update_factor_contribution_system_notes(
                 conn,
                 review_id=review_id,
@@ -4981,10 +5249,10 @@ def _auto_apply_position_supervisor_template_suggestions(
             while accepted_counterfactuals < page_limit:
                 cf_rows = _execute(
                     conn,
-                    """
+                    f"""
                     SELECT cf.position_id, cf.close_ts, cf.evidence_json,
                            r.review_id AS source_review_id,
-                           r.review_json AS source_review_json
+                           r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
                     FROM supervisor_counterfactual_review cf
                     JOIN trade_outcome_review r ON r.review_id=cf.review_id
                     WHERE cf.close_ts>=?
@@ -5015,7 +5283,7 @@ def _auto_apply_position_supervisor_template_suggestions(
                     break
                 page_offset += len(cf_rows)
                 for cf_row in cf_rows:
-                    if not _counterfactual_source_is_clean(cf_row):
+                    if not _counterfactual_source_is_clean(cf_row, conn):
                         continue
                     cf_evidence = _loads(cf_row["evidence_json"], {})
                     if not bool((cf_evidence.get("maturity") or {}).get("governance_eligible")):

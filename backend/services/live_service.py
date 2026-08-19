@@ -72,6 +72,8 @@ from backend.services.live_safety_watchdog import (
     SafetyFreshnessResult,
     evaluate_safety_freshness,
 )
+from backend.core.db import state_table_columns
+from backend.services.state_payload_archive import load_json_payload
 from backend.services.live_reconciliation import (
     LIVE_SAFETY_FRESHNESS_SEC as _LIVE_SAFETY_FRESHNESS_SEC,
     evaluate_reconciliation_snapshot as _evaluate_reconciliation_snapshot,
@@ -374,7 +376,6 @@ from backend.services.live_position_lifecycle import (
     build_supervisor_position_event_payload as _lifecycle_build_supervisor_position_event_payload,
     build_supervisor_state_upsert_payload as _lifecycle_build_supervisor_state_upsert_payload,
     build_supervisor_trace_ledger_payload as _lifecycle_build_supervisor_trace_ledger_payload,
-    _compact_supervisor_mapping as _lifecycle_compact_supervisor_mapping,
     build_supervisor_close_context_inputs as _lifecycle_build_supervisor_close_context_inputs,
     build_supervisor_action_fingerprint as _lifecycle_build_supervisor_action_fingerprint,
     build_supervisor_risk_context_payload as _lifecycle_build_supervisor_risk_context_payload,
@@ -440,6 +441,9 @@ from backend.services.live_scheduler_jobs import (
     register_external_sync_jobs as _register_external_sync_jobs,
     register_factor_selection_heartbeat_job as _register_factor_selection_heartbeat_job,
     start_scheduler_catch_up as _start_scheduler_catch_up,
+)
+from backend.services.supervisor_payload_contract import (
+    compact_supervisor_mapping as _lifecycle_compact_supervisor_mapping,
 )
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
 from backend.services.position_supervisor import (
@@ -7164,26 +7168,45 @@ def _risk_metric_inputs(
         raise ValueError("risk_metrics_snapshot.v2 requires historical VaR")
     conn = _get_state_pg_conn()
     try:
+        review_columns = state_table_columns(conn, "trade_outcome_review")
+        review_id_select = "review_id, " if "review_id" in review_columns else ""
+        review_archive_select = (
+            ", review_archive_hash"
+            if "review_archive_hash" in review_columns
+            else ""
+        )
         review_rows = _state_execute(
             conn,
-            """
-            SELECT position_id, pnl, review_json
+            f"""
+            SELECT {review_id_select}position_id, pnl, review_json{review_archive_select}
             FROM trade_outcome_review
             ORDER BY created_at DESC
             LIMIT 200
             """,
         ).fetchall()
+        review_rows = [
+            (
+                row,
+                load_json_payload(
+                    conn,
+                    source_table="trade_outcome_review",
+                    source_id=str(row["review_id"] if "review_id" in review_columns else row["position_id"] or ""),
+                    inline_json=row["review_json"],
+                    archive_hash=row.get("review_archive_hash", "") if hasattr(row, "get") else "",
+                    default={},
+                ),
+            )
+            for row in review_rows
+        ]
         conn.commit()
     finally:
         conn.close()
 
     clean_pnls: list[float] = []
     seen_positions: set[str] = set()
-    for row in review_rows:
+    for row, review in review_rows:
         position_id = str(row["position_id"] or "")
-        try:
-            review = json.loads(row["review_json"] or "{}")
-        except (TypeError, ValueError):
+        if not isinstance(review, dict):
             continue
         if position_id in seen_positions or review_has_system_contamination(review):
             continue

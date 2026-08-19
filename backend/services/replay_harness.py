@@ -13,6 +13,7 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
+    state_table_columns,
     state_table_exists,
 )
 from backend.core.state_store import (
@@ -21,6 +22,7 @@ from backend.core.state_store import (
 )
 from backend.services.evolution_ledger import current_runtime_config_snapshot
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload, load_supervisor_trace_archive
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -1129,7 +1131,18 @@ class ReplayHarnessService:
             """,
             tuple(params),
         ).fetchone()
-        return dict(row) if row else {}
+        if not row:
+            return {}
+        result = dict(row)
+        result["review_json"] = load_json_payload(
+            conn,
+            source_table="trade_outcome_review",
+            source_id=str(result.get("review_id") or ""),
+            inline_json=result.get("review_json"),
+            archive_hash=result.get("review_archive_hash", ""),
+            default={},
+        )
+        return result
 
     def _find_latest_position_event(self, conn, *, trade_id: str, position_id: str) -> dict[str, Any]:
         clauses: list[str] = []
@@ -1381,9 +1394,16 @@ class ReplayHarnessService:
                     ).fetchall()
                     positions[decision_id] = [dict(item) for item in position_rows]
                 if has_supervisor:
+                    try:
+                        has_trace_archive = "verdict_archive_hash" in state_table_columns(
+                            conn, "position_supervisor_trace"
+                        )
+                    except Exception:
+                        has_trace_archive = False
+                    trace_archive_select = ", verdict_archive_hash" if has_trace_archive else ""
                     supervisor_rows = _execute(
                         conn,
-                        """
+                        f"""
                         SELECT trace_id, decision_id, position_id, trade_id, symbol,
                                timeframe, tick, event_ts, action, summary_reason,
                                confidence, template_id, template_version, stage,
@@ -1391,7 +1411,7 @@ class ReplayHarnessService:
                                execution_status, execution_reason, context_json,
                                verdict_json, risk_verdict_json, execution_json,
                                trace_integrity, config_hash, evolution_run_id,
-                               created_at
+                               created_at{trace_archive_select}
                         FROM position_supervisor_trace
                         WHERE decision_id = ?
                            OR (? <> '' AND position_id = ?)
@@ -1400,7 +1420,14 @@ class ReplayHarnessService:
                         """,
                         (decision_id, position_id, position_id, trade_id, trade_id),
                     ).fetchall()
-                    supervisor[decision_id] = [dict(item) for item in supervisor_rows]
+                    supervisor_items = []
+                    for item in supervisor_rows:
+                        value = dict(item)
+                        archive_hash = str(value.get("verdict_archive_hash") or "")
+                        if archive_hash:
+                            value.update(load_supervisor_trace_archive(conn, archive_hash))
+                        supervisor_items.append(value)
+                    supervisor[decision_id] = supervisor_items
                 if has_deals and numeric_position_id > 0:
                     deal_rows = _execute(
                         conn,
@@ -1418,16 +1445,27 @@ class ReplayHarnessService:
                     ).fetchall()
                     deals[decision_id] = [dict(item) for item in deal_rows]
                 if has_counterfactuals:
+                    try:
+                        has_review_archive = "review_archive_hash" in state_table_columns(
+                            conn, "trade_outcome_review"
+                        )
+                    except Exception:
+                        has_review_archive = False
+                    review_archive_select = (
+                        ", r.review_archive_hash AS source_review_archive_hash"
+                        if has_review_archive
+                        else ""
+                    )
                     cf_rows = _execute(
                         conn,
-                        """
+                        f"""
                         SELECT c.counterfactual_id, c.review_id, c.trade_id,
                                c.position_id, c.close_ts, c.close_reason,
                                c.supervisor_event_type, c.supervisor_reason,
                                c.label, c.confidence, c.horizons_json,
                                c.evidence_json, c.created_at, c.updated_at,
                                r.review_id AS source_review_id,
-                               r.review_json AS source_review_json
+                               r.review_json AS source_review_json{review_archive_select}
                         FROM supervisor_counterfactual_review c
                         LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
                         WHERE (? <> '' AND c.position_id = ?)
@@ -1440,10 +1478,18 @@ class ReplayHarnessService:
                     for item in cf_rows:
                         value = dict(item)
                         evidence = _loads(value.get("evidence_json"), {})
+                        source_review = load_json_payload(
+                            conn,
+                            source_table="trade_outcome_review",
+                            source_id=str(value.get("source_review_id") or ""),
+                            inline_json=value.get("source_review_json"),
+                            archive_hash=value.get("source_review_archive_hash", ""),
+                            default={},
+                        )
                         if (
                             not str(value.pop("source_review_id", "") or "")
                             or review_has_system_contamination(
-                                _loads(value.pop("source_review_json", None), {})
+                                source_review
                             )
                             or bool(evidence.get("evidence_invalidated"))
                         ):

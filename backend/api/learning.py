@@ -30,6 +30,7 @@ from backend.services.position_supervisor_governance import (
 )
 from backend.services.position_supervisor_templates import list_position_supervisor_templates
 from backend.services.review_contract import normalize_trade_review_contract
+from backend.services.state_payload_archive import load_json_payload
 from backend.services.supervisor_counterfactual import (
     evaluate_counterfactuals,
     list_counterfactuals,
@@ -1225,15 +1226,35 @@ def _suggestion_review_result_display(status: str) -> dict[str, str]:
     }
 
 
-def _parse_review_row(row) -> dict:
+def _review_archive_select(conn, *, alias: str = "r") -> str:
+    if "review_archive_hash" not in core_db.state_table_columns(conn, "trade_outcome_review"):
+        return ""
+    return f", {alias}.review_archive_hash AS review_archive_hash"
+
+
+def _parse_review_row(row, conn=None) -> dict:
     item = dict(row)
     try:
         item["failure_tags"] = json.loads(item.pop("failure_tags_json") or "[]")
     except Exception:
         item["failure_tags"] = []
-    try:
-        review = json.loads(item.pop("review_json") or "{}")
-    except Exception:
+    inline_json = item.pop("review_json", "{}")
+    archive_hash = item.pop("review_archive_hash", "")
+    if conn is not None:
+        review = load_json_payload(
+            conn,
+            source_table="trade_outcome_review",
+            source_id=str(item.get("review_id") or ""),
+            inline_json=inline_json,
+            archive_hash=archive_hash,
+            default={},
+        )
+    else:
+        try:
+            review = json.loads(inline_json or "{}")
+        except Exception:
+            review = {}
+    if not isinstance(review, dict):
         review = {}
     normalized = normalize_trade_review_contract(
         review,
@@ -2029,18 +2050,18 @@ def get_learning_summary(_user: RequireUser) -> dict:
             if review_rows:
                 rows = _execute(
                     conn,
-                    """
+                    f"""
                     SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                            entry_quality, hold_quality, exit_quality, regime_fit_score,
                            execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                           summary_text, review_json, created_at
+                           summary_text, review_json{_review_archive_select(conn)}, created_at
                     FROM trade_outcome_review
                     ORDER BY created_at DESC
                     LIMIT 200
                     """
                 ).fetchall()
                 visible_reviews = [
-                    item for item in (_parse_review_row(row) for row in rows)
+                    item for item in (_parse_review_row(row, conn) for row in rows)
                     if _is_visible_review(item)
                 ]
             review_counts: dict[str, int] = {}
@@ -2254,11 +2275,11 @@ def get_reviews(
     try:
         rows = _execute(
             conn,
-            """
+            f"""
             SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                    entry_quality, hold_quality, exit_quality, regime_fit_score,
                    execution_quality, pnl, mae, mfe, outcome_label, failure_tags_json,
-                   summary_text, review_json, created_at
+                   summary_text, review_json{_review_archive_select(conn)}, created_at
             FROM trade_outcome_review
             ORDER BY created_at DESC
             LIMIT ?
@@ -2266,7 +2287,7 @@ def get_reviews(
             (limit,),
         ).fetchall()
         items = [
-            item for item in (_parse_review_row(row) for row in rows)
+            item for item in (_parse_review_row(row, conn) for row in rows)
             if _is_visible_review(item)
         ]
         for item in items:

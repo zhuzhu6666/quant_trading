@@ -29,6 +29,14 @@ from backend.services.position_supervisor_templates import (
     list_position_supervisor_templates,
 )
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import (
+    archive_json_payload,
+    load_json_payload,
+    supervisor_trace_archive_text,
+)
+from backend.services.supervisor_payload_contract import (
+    compact_supervisor_mapping,
+)
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
@@ -57,6 +65,36 @@ def _execute(conn, sql: str, params: Any = None):
     if params is None:
         return conn.execute(_sql(conn, sql))
     return conn.execute(_sql(conn, sql), params)
+
+
+def _review_archive_select(conn: Any, *, alias: str = "", output: str = "review_archive_hash") -> str:
+    try:
+        has_archive = "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
+    except Exception:
+        has_archive = False
+    if not has_archive:
+        return ""
+    prefix = f"{alias}." if alias else ""
+    return f", {prefix}review_archive_hash AS {output}"
+
+
+def _review_payload(
+    conn: Any,
+    row: Any,
+    *,
+    source_id_key: str = "review_id",
+    inline_key: str = "review_json",
+    archive_key: str = "review_archive_hash",
+) -> dict[str, Any]:
+    payload = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(row[source_id_key] or ""),
+        inline_json=row[inline_key],
+        archive_hash=row[archive_key] if archive_key in row.keys() else "",
+        default={},
+    )
+    return payload if isinstance(payload, dict) else {}
 
 
 def _loads(raw: str | None, default: Any) -> Any:
@@ -581,7 +619,7 @@ def _position_prices(conn: sqlite3.Connection, position_id: str) -> dict[str, fl
 
 
 def _review_to_supervisor_context(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
-    payload = _loads(row["review_json"], {})
+    payload = _review_payload(conn, row)
     real_pnl = payload.get("real_pnl") or {}
     quality_context = payload.get("decision_quality_context")
     if not isinstance(quality_context, dict):
@@ -655,10 +693,10 @@ def _load_review_rows(
     start_ts, end_ts = _day_bounds(day)
     rows = _execute(
         conn,
-        """
+        f"""
         SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                pnl, mae, mfe, outcome_label, failure_tags_json, summary_text,
-               review_json, created_at
+               review_json, created_at{_review_archive_select(conn)}
         FROM trade_outcome_review
         WHERE created_at >= ? AND created_at < ?
           AND ABS(COALESCE(pnl, 0.0)) <= ?
@@ -669,7 +707,7 @@ def _load_review_rows(
     clean_rows = [
         row
         for row in rows
-        if not review_has_system_contamination(_loads(row["review_json"], {}))
+        if not review_has_system_contamination(_review_payload(conn, row))
     ]
     return clean_rows[: max(0, int(limit))]
 
@@ -695,9 +733,10 @@ def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, 
     try:
         rows = _execute(
             conn,
-            """
+            f"""
             SELECT cf.label, cf.supervisor_event_type, cf.evidence_json,
-                   tr.review_json AS source_review_json
+                   tr.review_id AS source_review_id,
+                   tr.review_json AS source_review_json{_review_archive_select(conn, alias="tr", output="source_review_archive_hash")}
             FROM supervisor_counterfactual_review cf
             JOIN trade_outcome_review tr ON tr.review_id=cf.review_id
             WHERE cf.close_ts >= ? AND cf.close_ts < ?
@@ -710,7 +749,13 @@ def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, 
     events: dict[str, int] = {}
     for row in rows:
         if review_has_system_contamination(
-            _loads(row["source_review_json"], {})
+            _review_payload(
+                conn,
+                row,
+                source_id_key="source_review_id",
+                inline_key="source_review_json",
+                archive_key="source_review_archive_hash",
+            )
         ):
             continue
         label = str(row["label"] or "")
@@ -746,14 +791,14 @@ def _iter_candidate_observation_reviews(
     while True:
         rows = _execute(
             conn,
-            """
+            f"""
             SELECT cf.counterfactual_id, cf.close_ts,
                    cf.evidence_json AS counterfactual_evidence_json,
                    tr.review_id, tr.trade_id, tr.position_id,
                    tr.entry_decision_id, tr.exit_decision_id,
                    tr.pnl, tr.mae, tr.mfe, tr.outcome_label,
                    tr.failure_tags_json, tr.summary_text,
-                   tr.review_json, tr.created_at
+                   tr.review_json, tr.created_at{_review_archive_select(conn, alias="tr")}
             FROM supervisor_counterfactual_review cf
             JOIN trade_outcome_review tr ON tr.review_id=cf.review_id
             WHERE cf.close_ts>=?
@@ -795,6 +840,12 @@ def materialize_position_supervisor_candidate_observations(
     skipped: list[dict[str, Any]] = []
     candidate_summaries: list[dict[str, Any]] = []
     try:
+        trace_columns = state_table_columns(conn, "position_supervisor_trace")
+        archive_capable = {
+            "verdict_archive_hash",
+            "verdict_raw_sha256",
+            "verdict_raw_bytes",
+        } <= trace_columns
         if not state_table_columns(conn, "policy_suggestion"):
             return {
                 "schema_version": "position_supervisor_candidate_observation.v1",
@@ -838,9 +889,7 @@ def materialize_position_supervisor_candidate_observations(
                 page_limit=bounded_limit,
             ):
                 item = dict(row)
-                if review_has_system_contamination(
-                    _loads(item.get("review_json"), {})
-                ):
+                if review_has_system_contamination(_review_payload(conn, item)):
                     continue
                 position_id = str(item.get("position_id") or "")
                 if not position_id or position_id in seen_positions:
@@ -895,6 +944,52 @@ def materialize_position_supervisor_candidate_observations(
                     "lineage_state": "verified_recovered",
                     "governance_eligible_counterfactual": True,
                 }
+                raw_context = {**context, "observation_contract": observation_contract}
+                raw_verdict = dict(verdict)
+                raw_execution = {
+                    "execution_class": "shadow",
+                    "is_real_execution": False,
+                    "broker_mutation_attempted": False,
+                    "observation_contract": observation_contract,
+                }
+                context_json = _json(raw_context)
+                verdict_json = _json(raw_verdict)
+                execution_json = _json(raw_execution)
+                archive = None
+                if archive_capable:
+                    archive = archive_json_payload(
+                        conn,
+                        source_table="position_supervisor_trace",
+                        source_id=trace_id,
+                        payload_kind="supervisor_trace",
+                        raw_json=supervisor_trace_archive_text(
+                            context_json=_json(raw_context),
+                            verdict_json=_json(raw_verdict),
+                            risk_verdict_json="{}",
+                            execution_json=_json(raw_execution),
+                        ),
+                    )
+                    if archive:
+                        context_json = _json(
+                            compact_supervisor_mapping(
+                                raw_context,
+                                nested_keys=frozenset({"position", "account"}),
+                            )
+                        )
+                        verdict_json = _json(
+                            compact_supervisor_mapping(
+                                raw_verdict,
+                                nested_keys=frozenset(
+                                    {"evidence", "recommended_controls", "supervisor_template"}
+                                ),
+                            )
+                        )
+                        execution_json = _json(
+                            compact_supervisor_mapping(
+                                raw_execution,
+                                nested_keys=frozenset({"evidence", "controls"}),
+                            )
+                        )
                 cursor = _execute(
                     conn,
                     """
@@ -923,20 +1018,28 @@ def materialize_position_supervisor_candidate_observations(
                         template_id,
                         str(template.get("template_version") or ""),
                         f"learning_worker_candidate_replay:{suggestion_id}",
-                        _json({**context, "observation_contract": observation_contract}),
-                        _json(verdict),
-                        _json(
-                            {
-                                "execution_class": "shadow",
-                                "is_real_execution": False,
-                                "broker_mutation_attempted": False,
-                                "observation_contract": observation_contract,
-                            }
-                        ),
+                        context_json,
+                        verdict_json,
+                        execution_json,
                         str(run_id or ""),
                         now,
                     ),
                 )
+                if archive:
+                    _execute(
+                        conn,
+                        """
+                        UPDATE position_supervisor_trace
+                        SET verdict_archive_hash=?, verdict_raw_sha256=?, verdict_raw_bytes=?
+                        WHERE trace_id=?
+                        """,
+                        (
+                            archive["archive_hash"],
+                            archive["raw_sha256"],
+                            archive["raw_bytes"],
+                            trace_id,
+                        ),
+                    )
                 was_inserted = int(cursor.rowcount or 0) == 1
                 inserted += int(was_inserted)
                 existing += int(not was_inserted)
@@ -1004,7 +1107,7 @@ def replay_position_supervisor_templates(
             }
         for row in rows:
             context = _review_to_supervisor_context(conn, row)
-            review_payload = _loads(row["review_json"], {})
+            review_payload = _review_payload(conn, row)
             pnl = _safe_float(row["pnl"])
             mfe = _safe_float(row["mfe"] if row["mfe"] is not None else review_payload.get("mfe"))
             mae = _safe_float(row["mae"] if row["mae"] is not None else review_payload.get("mae"))

@@ -548,6 +548,25 @@
         "title": "BrainMediumImpactGovernanceRequest",
         "type": "object"
       },
+      "BrainRefreshRequest": {
+        "properties": {
+          "idempotency_key": {
+            "default": "",
+            "maxLength": 160,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "BrainRefreshRequest",
+        "type": "object"
+      },
       "DaemonStartRequest": {
         "properties": {
           "interval_seconds": {
@@ -14022,7 +14041,7 @@
     },
     "/api/ops/brain/action-plan-evals": {
       "get": {
-        "description": "Return V16 Phase 2 shadow action-plan posterior comparisons.",
+        "description": "Return V16 Phase 2 comparisons without writing state.",
         "operationId": "get_brain_action_plan_evals_api_ops_brain_action_plan_evals_get",
         "parameters": [
           {
@@ -14091,9 +14110,70 @@
         ]
       }
     },
+    "/api/ops/brain/action-plan-evals/refresh": {
+      "post": {
+        "description": "Explicitly evaluate and persist V16 action-plan comparisons.",
+        "operationId": "refresh_brain_action_plan_evals_api_ops_brain_action_plan_evals_refresh_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrainRefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Refresh Brain Action Plan Evals Api Ops Brain Action Plan Evals Refresh Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh Brain Action Plan Evals",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
     "/api/ops/brain/action-plans": {
       "get": {
-        "description": "Return V16 Phase 2 shadow action plans without executing them.",
+        "description": "Return V16 Phase 2 shadow action plans without writing state.\n\n``refresh`` remains accepted for client compatibility but is deliberately\nignored.  Use the explicit POST refresh route for a stateful operation.",
         "operationId": "get_brain_action_plans_api_ops_brain_action_plans_get",
         "parameters": [
           {
@@ -14157,6 +14237,67 @@
           }
         },
         "summary": "Get Brain Action Plans",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/api/ops/brain/action-plans/refresh": {
+      "post": {
+        "description": "Explicitly rebuild and persist V16 shadow action plans.",
+        "operationId": "refresh_brain_action_plans_api_ops_brain_action_plans_refresh_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrainRefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Refresh Brain Action Plans Api Ops Brain Action Plans Refresh Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh Brain Action Plans",
         "tags": [
           "ops"
         ]

@@ -3,10 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
-from backend.services._brain_helpers import loads
+from backend.core.db import (
+    STATE_DB,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+    state_table_exists,
+)
 from backend.services.factor_blend_health import DEFAULT_LOW_WEIGHT_THRESHOLD, FactorBlendHealthService
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload
 
 
 DEFAULT_MAX_CANDIDATES = 50
@@ -59,6 +66,24 @@ def _family(name: str) -> str:
     if lower.startswith("pca_"):
         return "pca"
     return "core"
+
+
+def _review_archive_select(conn: Any) -> str:
+    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
+        return ""
+    return ", review_archive_hash"
+
+
+def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
+    payload = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(row["review_id"] or ""),
+        inline_json=row["review_json"],
+        archive_hash=row["review_archive_hash"] if "review_archive_hash" in row.keys() else "",
+        default={},
+    )
+    return payload if isinstance(payload, dict) else {}
 
 
 class FactorPruningCandidateService:
@@ -202,8 +227,8 @@ class FactorPruningCandidateService:
                 return []
             review_rows = _execute(
                 conn,
-                """
-                SELECT review_id, review_json
+                f"""
+                SELECT review_id, review_json{_review_archive_select(conn)}
                 FROM trade_outcome_review
                 WHERE COALESCE(entry_decision_id, '') <> ''
                 ORDER BY created_at DESC
@@ -212,7 +237,7 @@ class FactorPruningCandidateService:
             clean_review_ids = [
                 str(row["review_id"])
                 for row in review_rows
-                if not review_has_system_contamination(loads(row["review_json"], {}))
+                if not review_has_system_contamination(_review_payload(conn, row))
             ][:DEFAULT_RECENT_REVIEW_LIMIT]
             if not clean_review_ids:
                 return []
@@ -308,8 +333,8 @@ class FactorPruningCandidateService:
                 return {}
             review_rows = _execute(
                 conn,
-                """
-                SELECT review_id, review_json
+                f"""
+                SELECT review_id, review_json{_review_archive_select(conn)}
                 FROM trade_outcome_review
                 WHERE COALESCE(entry_decision_id, '') <> ''
                 ORDER BY created_at DESC
@@ -318,7 +343,7 @@ class FactorPruningCandidateService:
             clean_review_ids = [
                 str(row["review_id"])
                 for row in review_rows
-                if not review_has_system_contamination(loads(row["review_json"], {}))
+                if not review_has_system_contamination(_review_payload(conn, row))
             ][: max(1, int(review_limit or DEFAULT_RECENT_REVIEW_LIMIT))]
             if not clean_review_ids:
                 return {}

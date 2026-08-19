@@ -1,0 +1,86 @@
+{
+  "manifest_version": "evolution_events_archive_compact_pilot.v1",
+  "observed_on": "2026-08-15",
+  "user_authorized": true,
+  "scope": {
+    "source_table": "evolution_events",
+    "event_ids": [46297, 47511],
+    "event_type": "autonomous_learning_cycle",
+    "operation": "archive_original_payload_and_compact_counterfactuals_items",
+    "delete_event_rows": false,
+    "vacuum_executed": false,
+    "table_rewrite_executed": false
+  },
+  "precheck": {
+    "schema_version": 15,
+    "migration_check_ok": true,
+    "backend_main_pid": 0,
+    "learning_worker_main_pid": 0,
+    "active_writer_sessions": 0,
+    "blocking_locks": 0,
+    "disk_available": "29G",
+    "memory_available_before_apply": "2.6GiB",
+    "target_archive_rows_before": 0
+  },
+  "rows": [
+    {
+      "event_id": 46297,
+      "archive_hash": "9d4601ce9afd59703dd19fa78429e2cf20d494186cb60cff545d955af0fa5c8f",
+      "raw_sha256": "9d4601ce9afd59703dd19fa78429e2cf20d494186cb60cff545d955af0fa5c8f",
+      "raw_bytes": 4571714,
+      "compressed_bytes": 442385,
+      "compact_bytes": 3371,
+      "counterfactual_items_before": 483,
+      "counterfactual_items_in_hot_projection": 0
+    },
+    {
+      "event_id": 47511,
+      "archive_hash": "b30f4b85db801912fcde8531d654f1ff0a1a42341353d19a9502e5d7661007e1",
+      "raw_sha256": "b30f4b85db801912fcde8531d654f1ff0a1a42341353d19a9502e5d7661007e1",
+      "raw_bytes": 4581390,
+      "compressed_bytes": 443248,
+      "compact_bytes": 6557,
+      "counterfactual_items_before": 483,
+      "counterfactual_items_in_hot_projection": 0
+    }
+  ],
+  "verification": {
+    "restore_json_valid": true,
+    "restore_sha256_matches_raw_sha256": true,
+    "hot_projection_matches_expected_compact": true,
+    "non_counterfactual_fields_equal": true,
+    "restored_counterfactual_items_per_row": 483,
+    "counterfactual_count_per_hot_row": 483,
+    "candidate_count_per_hot_row": 483,
+    "target_archive_rows_after": 2,
+    "archive_rows_total_after": 3,
+    "counterfactual_rows_observed_after": 576,
+    "review_rows_observed_after": 721,
+    "services_started": false
+  },
+  "reboot_autostart_observation": {
+    "historical_event_rows_reference_before_reboot": 84908,
+    "event_rows_observed_after_reboot_and_before_compact_effect": 85004,
+    "delta_rows": 96,
+    "window": "2026-08-15T21:22:52+08:00/2026-08-15T21:23:17+08:00",
+    "event_type_counts": {
+      "register": 86,
+      "promote": 4,
+      "cycle_complete": 1,
+      "cycle_start": 1,
+      "factor_retirement_candidates": 1,
+      "learning_governance": 1,
+      "learning_suggestions_seen": 1,
+      "weights_candidate": 1
+    },
+    "compact_operation_inserted_event_rows": false,
+    "cause": "observed during service auto-start window; exact writer attribution remains unverified"
+  },
+  "safety": {
+    "backend_enabled_after": false,
+    "learning_worker_enabled_after": false,
+    "services_masked": false,
+    "history_deleted": false,
+    "source_counterfactual_or_review_rows_deleted": false
+  }
+}

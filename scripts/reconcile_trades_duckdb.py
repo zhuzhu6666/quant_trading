@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.core.db import DUCKDB_TRADES, connect_duckdb, get_state_pg_conn
+from backend.services.state_payload_archive import load_json_payload
 
 
 @dataclass
@@ -154,10 +155,20 @@ def _state_context(conn, position_id: int) -> dict[str, Any]:
         """,
         (position_id,),
     ).fetchone()
+    review_data = _rowdict(review)
+    if review_data:
+        review_data["review_json"] = load_json_payload(
+            conn,
+            source_table="trade_outcome_review",
+            source_id=str(review_data.get("review_id") or ""),
+            inline_json=review_data.get("review_json", "{}"),
+            archive_hash=review_data.get("review_archive_hash", ""),
+            default={},
+        )
     return {
         "close_deal": _rowdict(close_deal),
         "open_deal": _rowdict(open_deal),
-        "review": _rowdict(review),
+        "review": review_data,
         "recovery": _rowdict(recovery),
     }
 

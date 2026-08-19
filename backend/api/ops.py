@@ -1,6 +1,7 @@
 """Ops API endpoints: alerts, auto-recovery, weekly reports, experiments."""
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 import time
+import uuid
 from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
@@ -133,6 +134,11 @@ class BrainLowImpactExecutionRequest(BaseModel):
     allow_tighten: bool = False
     replay_lookback_days: float = 1.0
     replay_limit: int = 100
+
+
+class BrainRefreshRequest(BaseModel):
+    limit: int = Field(default=50, ge=1, le=200)
+    idempotency_key: str = Field(default="", max_length=160)
 
 
 class BrainMediumImpactGovernanceRequest(BaseModel):
@@ -879,26 +885,15 @@ def get_brain_commands(_user: RequireUser, limit: int = 50) -> dict[str, Any]:
 
 @router.get("/brain/action-plans")
 def get_brain_action_plans(_user: RequireUser, refresh: bool = False, limit: int = 50) -> dict[str, Any]:
-    """Return V16 Phase 2 shadow action plans without executing them."""
+    """Return V16 Phase 2 shadow action plans without writing state.
+
+    ``refresh`` remains accepted for client compatibility but is deliberately
+    ignored.  Use the explicit POST refresh route for a stateful operation.
+    """
     planner = BrainActionPlannerService()
     limit = max(1, min(int(limit), 200))
-    if refresh:
-        readiness = BackendReadinessService().build()
-        snapshot = (readiness.get("brain_state") or {}).get("latest_snapshot") or {}
-        if not snapshot.get("snapshot_id"):
-            snapshot = BrainStateService().build(
-                readiness=readiness,
-                persist=True,
-                source="api:ops.brain_action_plans",
-            )
-        action_plans = planner.build_plans(
-            brain_state=snapshot,
-            persist=True,
-            source="api:ops.brain_action_plans",
-        )
-        _READINESS_CACHE.invalidate("backend-readiness")
-    else:
-        action_plans = planner.latest_plans(limit=limit)
+    del refresh
+    action_plans = planner.latest_plans(limit=limit)
     return ledger_read_fact_payload({
         "ok": bool(action_plans.get("ok")),
         "schema_version": "ops_brain_action_plans.v1",
@@ -913,30 +908,11 @@ def get_brain_action_plans(_user: RequireUser, refresh: bool = False, limit: int
 
 @router.get("/brain/action-plan-evals")
 def get_brain_action_plan_evals(_user: RequireUser, refresh: bool = False, limit: int = 50) -> dict[str, Any]:
-    """Return V16 Phase 2 shadow action-plan posterior comparisons."""
+    """Return V16 Phase 2 comparisons without writing state."""
     evaluator = BrainActionPlanEvaluatorService()
     limit = max(1, min(int(limit), 200))
-    if refresh:
-        planner = BrainActionPlannerService()
-        latest_plans = planner.latest_plans(limit=limit)
-        if not latest_plans.get("plans"):
-            readiness = BackendReadinessService().build()
-            snapshot = (readiness.get("brain_state") or {}).get("latest_snapshot") or {}
-            if not snapshot.get("snapshot_id"):
-                snapshot = BrainStateService().build(
-                    readiness=readiness,
-                    persist=True,
-                    source="api:ops.brain_action_plan_evals",
-                )
-            planner.build_plans(
-                brain_state=snapshot,
-                persist=True,
-                source="api:ops.brain_action_plan_evals",
-            )
-        evals = evaluator.evaluate_latest_plans(limit=limit, persist=True)
-        _READINESS_CACHE.invalidate("backend-readiness")
-    else:
-        evals = evaluator.latest_evals(limit=limit)
+    del refresh
+    evals = evaluator.latest_evals(limit=limit)
     return ledger_read_fact_payload({
         "ok": bool(evals.get("ok")),
         "schema_version": "ops_brain_action_plan_evals.v1",
@@ -947,6 +923,82 @@ def get_brain_action_plan_evals(_user: RequireUser, refresh: bool = False, limit
        observed_paths=(("created_at",),),
        item_paths=(("evals",),),
        reason_code="brain_action_plan_eval_observation_missing")
+
+
+@router.post("/brain/action-plans/refresh")
+def refresh_brain_action_plans(req: BrainRefreshRequest, _user: RequireUser) -> dict[str, Any]:
+    """Explicitly rebuild and persist V16 shadow action plans."""
+    planner = BrainActionPlannerService()
+    readiness = BackendReadinessService().build()
+    snapshot = (readiness.get("brain_state") or {}).get("latest_snapshot") or {}
+    if not snapshot.get("snapshot_id"):
+        snapshot = BrainStateService().build(
+            readiness=readiness,
+            persist=True,
+            source="api:ops.brain_action_plans.refresh",
+        )
+    action_plans = planner.build_plans(
+        brain_state=snapshot,
+        persist=True,
+        source="api:ops.brain_action_plans.refresh",
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return persisted_record_fact_payload(
+        {
+            "ok": bool(action_plans.get("ok")),
+            "schema_version": "ops_brain_action_plans.v1",
+            "action_plans": action_plans,
+        },
+        contract="ops.v16-action-plans-refresh.v1",
+        source="state_v1.brain_action_plan",
+        record_path=("action_plans",),
+        id_fields=(),
+        observed_paths=(("created_at",),),
+        item_paths=(("plans",),),
+        item_id_fields=("plan_id",),
+    )
+
+
+@router.post("/brain/action-plan-evals/refresh")
+def refresh_brain_action_plan_evals(req: BrainRefreshRequest, _user: RequireUser) -> dict[str, Any]:
+    """Explicitly evaluate and persist V16 action-plan comparisons."""
+    planner = BrainActionPlannerService()
+    latest_plans = planner.latest_plans(limit=max(1, min(int(req.limit), 200)))
+    if not latest_plans.get("plans"):
+        readiness = BackendReadinessService().build()
+        snapshot = (readiness.get("brain_state") or {}).get("latest_snapshot") or {}
+        if not snapshot.get("snapshot_id"):
+            snapshot = BrainStateService().build(
+                readiness=readiness,
+                persist=True,
+                source="api:ops.brain_action_plan_evals.refresh",
+            )
+        planner.build_plans(
+            brain_state=snapshot,
+            persist=True,
+            source="api:ops.brain_action_plan_evals.refresh",
+        )
+    evaluation_run_id = str(req.idempotency_key or f"api_eval_{uuid.uuid4().hex}")
+    evals = BrainActionPlanEvaluatorService().evaluate_latest_plans(
+        limit=max(1, min(int(req.limit), 200)),
+        persist=True,
+        evaluation_run_id=evaluation_run_id,
+    )
+    _READINESS_CACHE.invalidate("backend-readiness")
+    return persisted_record_fact_payload(
+        {
+            "ok": bool(evals.get("ok")),
+            "schema_version": "ops_brain_action_plan_evals.v1",
+            "action_plan_evals": evals,
+        },
+        contract="ops.v16-action-plan-evals-refresh.v1",
+        source="state_v1.brain_action_plan_eval",
+        record_path=("action_plan_evals",),
+        id_fields=(),
+        observed_paths=(("created_at",),),
+        item_paths=(("evals",),),
+        item_id_fields=("eval_id",),
+    )
 
 
 @router.get("/brain/low-impact-executions")

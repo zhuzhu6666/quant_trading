@@ -18,7 +18,12 @@ from backend.services.review_contract import (
     build_execution_quality_event_details,
     trusted_broker_close_price,
 )
+from backend.services.supervisor_payload_contract import compact_supervisor_mapping
 from risk.runtime_policy import RiskLimitSnapshot
+
+# Compatibility export for older read/projection callers; the implementation
+# is now owned by the shared supervisor payload contract above.
+_compact_supervisor_mapping = compact_supervisor_mapping
 
 
 MergeRecoveryMeta = Callable[[int, dict[str, Any]], Any]
@@ -1580,38 +1585,6 @@ def latest_close_evidence(ledger_latest: dict[str, Any] | None, trace_latest: di
     ):
         return trace
     return ledger
-
-
-def _compact_supervisor_mapping(
-    value: Any,
-    *,
-    nested_keys: frozenset[str] = frozenset(),
-) -> dict[str, Any]:
-    """Keep supervisor evidence scalar and bounded at the lifecycle boundary.
-
-    Supervisor verdicts can contain the live position context and the previous
-    supervisor result.  Persisting those nested mappings in every trace row
-    creates an ever-growing object graph.  The trace/readback contract only
-    needs scalar facts and a few scalar control/evidence maps, so nested
-    payloads are intentionally not carried across this boundary.
-    """
-    if not isinstance(value, Mapping):
-        return {}
-    compact: dict[str, Any] = {}
-    for key, item in value.items():
-        key = str(key)
-        if item is None or isinstance(item, (str, int, float, bool)):
-            compact[key] = item
-        elif isinstance(item, list) and all(
-            part is None or isinstance(part, (str, int, float, bool))
-            for part in item
-        ):
-            compact[key] = list(item)
-        elif key in nested_keys and isinstance(item, Mapping):
-            nested = _compact_supervisor_mapping(item)
-            if nested:
-                compact[key] = nested
-    return compact
 
 
 def _json_dict(value: Any) -> dict[str, Any]:

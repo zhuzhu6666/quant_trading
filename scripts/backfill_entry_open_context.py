@@ -12,10 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend.core.db import get_state_pg_conn
+from backend.core.db import get_state_pg_conn, state_table_columns
 from backend.services.autonomous_learning import materialize_autonomous_learning_samples
 from backend.services.failure_taxonomy import build_failure_taxonomy
-from backend.services.review_contract import build_execution_quality_evidence
+from backend.services.review_contract import build_execution_quality_evidence, normalize_trade_review_contract
+from backend.services.state_payload_archive import archive_json_payload, load_json_payload
 from research.learning.experience_builder import ExperienceBuilder
 
 
@@ -25,6 +26,8 @@ SCHEMA_VERSION = "entry_open_context_backfill.v1"
 def _loads(raw: Any, default: Any) -> Any:
     if raw is None:
         return default
+    if isinstance(raw, (dict, list)):
+        return raw
     if isinstance(raw, (dict, list)):
         return raw
     try:
@@ -51,6 +54,71 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
+    try:
+        archive_hash = row["review_archive_hash"]
+    except (KeyError, IndexError):
+        archive_hash = ""
+    payload = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(row["review_id"] or ""),
+        inline_json=row["review_json"],
+        archive_hash=archive_hash,
+        default={},
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_review(
+    conn: Any,
+    *,
+    review_id: str,
+    review: dict[str, Any],
+    failure_tags: list[str] | None = None,
+    execution_quality: float | None = None,
+) -> None:
+    columns = state_table_columns(conn, "trade_outcome_review")
+    archive_capable = {
+        "review_archive_hash",
+        "review_raw_sha256",
+        "review_raw_bytes",
+    } <= columns
+    values: list[Any] = []
+    assignments = ["review_json=%s"]
+    if archive_capable:
+        archive = archive_json_payload(
+            conn,
+            source_table="trade_outcome_review",
+            source_id=str(review_id),
+            payload_kind="review_json",
+            raw_json=_dumps(review),
+        )
+        hot_json = _dumps(normalize_trade_review_contract(review))
+        assignments = [
+            "review_json=%s",
+            "review_archive_hash=%s",
+            "review_raw_sha256=%s",
+            "review_raw_bytes=%s",
+        ]
+        values.extend([hot_json, archive["archive_hash"], archive["raw_sha256"], archive["raw_bytes"]])
+    else:
+        values.append(_dumps(review))
+    if failure_tags is not None:
+        assignments.append("failure_tags_json=%s")
+        values.append(_dumps(failure_tags))
+    if execution_quality is not None and "execution_quality" in columns:
+        assignments.append("execution_quality=%s")
+        values.append(float(execution_quality))
+    values.append(str(review_id))
+    conn.execute(
+        "UPDATE state_v1.trade_outcome_review SET "
+        + ", ".join(assignments)
+        + " WHERE review_id=%s",
+        tuple(values),
+    )
+
+
 def _symbol_key(value: Any) -> str:
     return str(value or "XAUUSD").replace("+", "").upper()
 
@@ -66,8 +134,8 @@ def _direction_from_action(action: dict[str, Any], action_score: float) -> int:
     return 0
 
 
-def _review_close_ts(review_row: Any) -> float:
-    review = _loads(review_row["review_json"], {})
+def _review_close_ts(conn: Any, review_row: Any) -> float:
+    review = _review_payload(conn, review_row)
     return _safe_float(review.get("close_ts"), _safe_float(review_row["created_at"]))
 
 
@@ -159,9 +227,7 @@ def _merge_open_action(action: dict[str, Any], cluster: dict[str, Any], *, force
 
 
 def _update_review_from_entry(conn: Any, review_row: Any, entry_action: dict[str, Any], *, force: bool) -> bool:
-    review = _loads(review_row["review_json"], {})
-    if not isinstance(review, dict):
-        review = {}
+    review = _review_payload(conn, review_row)
     failure_tags = _loads(review_row["failure_tags_json"], [])
     if not isinstance(failure_tags, list):
         failure_tags = []
@@ -211,13 +277,11 @@ def _update_review_from_entry(conn: Any, review_row: Any, entry_action: dict[str
 
     if not changed:
         return False
-    conn.execute(
-        """
-        UPDATE state_v1.trade_outcome_review
-        SET review_json=%s, failure_tags_json=%s
-        WHERE review_id=%s
-        """,
-        (_dumps(review), _dumps(failure_tags), str(review_row["review_id"] or "")),
+    _write_review(
+        conn,
+        review_id=str(review_row["review_id"] or ""),
+        review=review,
+        failure_tags=failure_tags,
     )
     return True
 
@@ -247,12 +311,12 @@ def _rebuild_factor_attribution(
     if existing is not None:
         return {"recovered": 0, "marked_missing": 0, "skipped": 1}
     current_review = conn.execute(
-        "SELECT review_json, failure_tags_json FROM state_v1.trade_outcome_review WHERE review_id=%s LIMIT 1",
+        "SELECT review_id, review_json, review_archive_hash, failure_tags_json "
+        "FROM state_v1.trade_outcome_review WHERE review_id=%s LIMIT 1",
         (review_id,),
     ).fetchone()
     review_source = current_review or review_row
-    review = _loads(review_source["review_json"], {})
-    review = review if isinstance(review, dict) else {}
+    review = _review_payload(conn, review_source)
     contributions = review.get("factor_contributions")
     contributions = contributions if isinstance(contributions, dict) else {}
     snapshots = conn.execute(
@@ -295,13 +359,11 @@ def _rebuild_factor_attribution(
             tags.append("attribution_missing")
             changed = True
         if changed and not dry_run:
-            conn.execute(
-                """
-                UPDATE state_v1.trade_outcome_review
-                SET review_json=%s, failure_tags_json=%s
-                WHERE review_id=%s
-                """,
-                (_dumps(review), _dumps(tags), review_id),
+            _write_review(
+                conn,
+                review_id=review_id,
+                review=review,
+                failure_tags=tags,
             )
         return {"recovered": 0, "marked_missing": 1, "skipped": 0}
 
@@ -340,9 +402,10 @@ def _rebuild_factor_attribution(
                 "recovered_factor_count": len(valid),
             }
         )
-        conn.execute(
-            "UPDATE state_v1.trade_outcome_review SET review_json=%s WHERE review_id=%s",
-            (_dumps(review), review_id),
+        _write_review(
+            conn,
+            review_id=review_id,
+            review=review,
         )
     return {"recovered": len(valid), "marked_missing": 0, "skipped": 0}
 
@@ -359,12 +422,12 @@ def _refresh_execution_quality(
     if not review_id:
         return {"refreshed": 0, "unknown": 0}
     current_review = conn.execute(
-        "SELECT execution_quality, review_json FROM state_v1.trade_outcome_review WHERE review_id=%s LIMIT 1",
+        "SELECT review_id, execution_quality, review_json, review_archive_hash "
+        "FROM state_v1.trade_outcome_review WHERE review_id=%s LIMIT 1",
         (review_id,),
     ).fetchone()
     review_source = current_review or review_row
-    review = _loads(review_source["review_json"], {})
-    review = review if isinstance(review, dict) else {}
+    review = _review_payload(conn, review_source)
     decision = conn.execute(
         "SELECT action_json FROM state_v1.decision_ledger WHERE decision_id=%s LIMIT 1",
         (decision_id,),
@@ -409,13 +472,11 @@ def _refresh_execution_quality(
         review["execution_quality"] = score
         review["execution_quality_state"] = state
         review["execution_quality_evidence"] = evidence
-        conn.execute(
-            """
-            UPDATE state_v1.trade_outcome_review
-            SET execution_quality=%s, review_json=%s
-            WHERE review_id=%s
-            """,
-            (score, _dumps(review), review_id),
+        _write_review(
+            conn,
+            review_id=review_id,
+            review=review,
+            execution_quality=score,
         )
     return {"refreshed": 1 if changed else 0, "unknown": 1 if state != "full" else 0}
 
@@ -481,7 +542,7 @@ def run_backfill(*, limit: int, force: bool, dry_run: bool, materialize: bool) -
                         (_dumps(action), open_item["decision_id"]),
                     )
             review = review_by_entry.get(open_item["decision_id"]) or review_by_position.get(open_item["position_id"])
-            close_ts = _review_close_ts(review) if review is not None else 0.0
+            close_ts = _review_close_ts(conn, review) if review is not None else 0.0
             active.append({**open_item, "opened_at": created_at, "close_ts": close_ts})
 
         for review in reviews:
@@ -517,7 +578,7 @@ def run_backfill(*, limit: int, force: bool, dry_run: bool, materialize: bool) -
                 (max(1, int(limit)),),
             ).fetchall()
             for row in rows:
-                review_json = _loads(row["review_json"], {})
+                review_json = _review_payload(conn, row)
                 review = {
                     "accepted": True,
                     "review_id": str(row["review_id"] or ""),

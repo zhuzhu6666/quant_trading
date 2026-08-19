@@ -1,0 +1,65 @@
+{
+  "apply_result": {
+    "after_relation_sizes_bytes": {
+      "brain_action_plan_eval": 74842112,
+      "brain_action_plan_eval_payload": 106954752,
+      "evolution_decision": 24346624,
+      "mutation_payload": 1957191680,
+      "runtime_config_payload": 585859072,
+      "runtime_config_snapshot": 7315456
+    },
+    "audit_double_write": {
+      "api_audit_rows": 14295,
+      "canonical_events": 30165,
+      "conflicts": 5908,
+      "linked": 0,
+      "unmatched": 8387
+    },
+    "brain_action_plan_eval": 140864,
+    "evolution_decision": 44460,
+    "maintenance_preflight": {
+      "active_writer_sessions": [],
+      "mode": "postgresql",
+      "ok": true,
+      "pending_mutations": 0
+    },
+    "rewrite": "vacuum_full_analyze",
+    "runtime_config_snapshot": 14491,
+    "tables": [
+      "runtime_config_snapshot",
+      "brain_action_plan_eval",
+      "evolution_decision"
+    ]
+  },
+  "before": {
+    "brain_action_plan_eval": {
+      "count": 140864,
+      "metadata_digest": "df3caffba2b55012780df90b6ea49172070da03a7659584b18988b6fe7cbeec1",
+      "total_rows": 140864,
+      "unique_event_ids": 140864
+    },
+    "evolution_decision": {
+      "count": 44460,
+      "metadata_digest": "a42c4e5a7c732056504b82372d83adab99f1e999006dece16fb45066a86116aa",
+      "total_rows": 44460,
+      "unique_event_ids": 44460
+    },
+    "runtime_config_snapshot": {
+      "count": 14491,
+      "metadata_digest": "947a26cead965acee975b2d0465b849df7b0316709921f5f92dbe9db18f5608c",
+      "total_rows": 14491,
+      "unique_event_ids": 14491
+    }
+  },
+  "before_relation_sizes_bytes": {
+    "brain_action_plan_eval": 4768833536,
+    "brain_action_plan_eval_payload": 106954752,
+    "evolution_decision": 3045441536,
+    "mutation_payload": 1957150720,
+    "runtime_config_payload": 585859072,
+    "runtime_config_snapshot": 34308096
+  },
+  "created_at": 1786733011.115288,
+  "maintenance_id": "maintenance_20260815_state_payload_confirmed",
+  "manifest_version": "state_payload_compaction_manifest.v1"
+}

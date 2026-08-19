@@ -33,6 +33,8 @@ STATE_SCHEMA_BASELINE_TABLES: Final[tuple[str, ...]] = (
     "ctrader_deals",
     "decision_ledger",
     "decision_factor_snapshot",
+    "brain_action_plan_eval",
+    "evolution_decision",
     "experience_memory",
     "experience_pattern_stats",
     "factor_catalog_snapshot",
@@ -46,6 +48,7 @@ STATE_SCHEMA_BASELINE_TABLES: Final[tuple[str, ...]] = (
     "proposal_registry",
     "runtime_config_overlay",
     "runtime_config_snapshot",
+    "trade_outcome_review",
     "v16_brain_command",
 )
 
@@ -125,8 +128,11 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(11, "execution_price_repair_ledger", "0011_execution_price_repair_ledger.sql"),
     StateSchemaMigration(12, "risk_daily_equity", "0012_risk_daily_equity.sql"),
     StateSchemaMigration(13, "decision_factor_snapshot_lineage", "0013_decision_factor_snapshot_lineage.sql"),
+    StateSchemaMigration(14, "state_payload_dedupe", "0014_state_payload_dedupe.sql"),
+    StateSchemaMigration(15, "training_window_and_payload_archive", "0015_training_window_and_payload_archive.sql"),
+    StateSchemaMigration(16, "canonical_v2_foundation", "0016_canonical_v2_foundation.sql"),
 )
-STATE_SCHEMA_MIN_VERSION: Final[int] = 13
+STATE_SCHEMA_MIN_VERSION: Final[int] = 16
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
 
 

@@ -4,8 +4,11 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sqlite3
+import socket
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +16,19 @@ from backend.core import db as state_db
 from backend.core.db import connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.core.state_store import validate_runtime_state_schema
 from backend.services.runtime_health_projection import RuntimeHealthProjectionService
+from research.position_quality_lightgbm import TrainingMemoryBudgetExceeded
 
 
 logger = logging.getLogger(__name__)
+
+_WORKER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
+_TRAINING_WINDOW_STALE_SECONDS = 300.0
+_TRAINING_TERMINAL_STATUSES = {
+    "done",
+    "blocked_memory_budget",
+    "aborted_process_loss",
+    "failed",
+}
 
 
 def run_feature_engineering_job() -> dict[str, Any]:
@@ -97,6 +110,292 @@ def _sql(db_path: str | Path, sql: str) -> str:
     return sql.replace("?", "%s") if is_state_db_path(db_path) else sql
 
 
+def _ensure_offmarket_audit_table(conn, db_path: str | Path) -> None:
+    table_declaration = """
+        CREATE TABLE IF NOT EXISTS offmarket_high_load_job_audit (
+            audit_id TEXT PRIMARY KEY, job_name TEXT NOT NULL, status TEXT NOT NULL,
+            session_status TEXT DEFAULT '', high_load_profile TEXT DEFAULT '',
+            payload_json TEXT DEFAULT '{}', result_json TEXT DEFAULT '{}', error TEXT DEFAULT '',
+            started_at REAL NOT NULL, finished_at REAL NOT NULL,
+            training_window_key TEXT NOT NULL DEFAULT '',
+            phase TEXT NOT NULL DEFAULT '',
+            worker_instance_id TEXT NOT NULL DEFAULT '',
+            heartbeat_at REAL NOT NULL DEFAULT 0.0,
+            input_bytes_estimate INTEGER NOT NULL DEFAULT 0
+        )
+    """
+    if is_state_db_path(db_path):
+        validate_runtime_state_schema(conn, table_declaration)
+        return
+    conn.execute(table_declaration)
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(offmarket_high_load_job_audit)").fetchall()
+    }
+    for name, declaration in (
+        ("training_window_key", "TEXT NOT NULL DEFAULT ''"),
+        ("phase", "TEXT NOT NULL DEFAULT ''"),
+        ("worker_instance_id", "TEXT NOT NULL DEFAULT ''"),
+        ("heartbeat_at", "REAL NOT NULL DEFAULT 0.0"),
+        ("input_bytes_estimate", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE offmarket_high_load_job_audit ADD COLUMN {name} {declaration}")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_offmarket_training_window_unique
+        ON offmarket_high_load_job_audit(job_name, training_window_key)
+        WHERE training_window_key <> ''
+        """
+    )
+
+
+def _training_audit_row(row: Any) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return dict(row)
+    try:
+        return {key: row[key] for key in row.keys()}
+    except (AttributeError, KeyError, TypeError):
+        return {
+            "audit_id": row[0],
+            "status": row[1],
+            "phase": row[2],
+            "heartbeat_at": row[3],
+            "finished_at": row[4],
+        }
+
+
+def _claim_training_window(
+    *,
+    db_path: str | Path,
+    job_name: str,
+    window_key: str,
+    session: dict[str, Any],
+    payload: dict[str, Any],
+    started_at: float,
+    allow_retry_terminal: bool = False,
+) -> dict[str, Any] | None:
+    """Claim one durable window, or return the reason it must not run again."""
+    if not window_key:
+        return None
+    conn = _connect(db_path)
+    now = time.time()
+    try:
+        _ensure_offmarket_audit_table(conn, db_path)
+        row = conn.execute(
+            _sql(
+                db_path,
+                """
+                SELECT audit_id, status, phase, heartbeat_at, finished_at,
+                       payload_json, result_json, error
+                FROM offmarket_high_load_job_audit
+                WHERE job_name=? AND training_window_key=?
+                FOR UPDATE
+                """,
+            )
+            if is_state_db_path(db_path)
+            else _sql(
+                db_path,
+                """
+                SELECT audit_id, status, phase, heartbeat_at, finished_at,
+                       payload_json, result_json, error
+                FROM offmarket_high_load_job_audit
+                WHERE job_name=? AND training_window_key=?
+                """,
+            ),
+            (job_name, window_key),
+        ).fetchone()
+        if row is not None:
+            existing = _training_audit_row(row)
+            status = str(existing.get("status") or "")
+            audit_id = str(existing.get("audit_id") or "")
+            if status in _TRAINING_TERMINAL_STATUSES:
+                try:
+                    previous_payload = json.loads(existing.get("payload_json") or "{}")
+                except (TypeError, ValueError):
+                    previous_payload = {}
+                retry_count = int(previous_payload.get("retry_count") or 0)
+                retryable_status = status in {"aborted_process_loss", "blocked_memory_budget"}
+                if allow_retry_terminal and retryable_status and retry_count < 1:
+                    retry_payload = {
+                        **dict(payload or {}),
+                        "retry_count": retry_count + 1,
+                        "retry_of_audit_id": audit_id,
+                        "previous_terminal_status": status,
+                    }
+                    conn.execute(
+                        _sql(
+                            db_path,
+                            """
+                            UPDATE offmarket_high_load_job_audit
+                            SET status='running', phase='retry_claim',
+                                payload_json=?, result_json=?, error='',
+                                started_at=?, finished_at=?, heartbeat_at=?,
+                                worker_instance_id=?
+                            WHERE audit_id=? AND status=?
+                            """,
+                        ),
+                        (
+                            json.dumps(retry_payload, ensure_ascii=False, default=str),
+                            json.dumps(
+                                {
+                                    "previous_attempt": {
+                                        "status": status,
+                                        "result_json": existing.get("result_json") or "{}",
+                                        "error": existing.get("error") or "",
+                                    }
+                                },
+                                ensure_ascii=False,
+                                default=str,
+                            ),
+                            started_at,
+                            now,
+                            now,
+                            _WORKER_INSTANCE_ID,
+                            audit_id,
+                            status,
+                        ),
+                    )
+                    conn.commit()
+                    return {
+                        "claimed": True,
+                        "audit_id": audit_id,
+                        "status": "running",
+                        "training_window_key": window_key,
+                        "retry_count": retry_count + 1,
+                    }
+                conn.commit()
+                return {
+                    "claimed": False,
+                    "reason": "training_window_already_terminal",
+                    "audit": existing,
+                }
+            heartbeat_at = float(existing.get("heartbeat_at") or 0.0)
+            if status == "running" and now - heartbeat_at <= _TRAINING_WINDOW_STALE_SECONDS:
+                conn.commit()
+                return {
+                    "claimed": False,
+                    "reason": "training_window_running",
+                    "audit": existing,
+                }
+            if status == "running":
+                conn.execute(
+                    _sql(
+                        db_path,
+                        """
+                        UPDATE offmarket_high_load_job_audit
+                        SET status='aborted_process_loss', phase='recovered_process_loss',
+                            error=?, heartbeat_at=?, finished_at=?
+                        WHERE audit_id=?
+                        """,
+                    ),
+                    (
+                        "stale running audit recovered after worker process loss",
+                        now,
+                        now,
+                        audit_id,
+                    ),
+                )
+            conn.commit()
+            return {
+                "claimed": False,
+                "reason": "training_window_aborted_process_loss",
+                "audit": {
+                    **existing,
+                    "status": "aborted_process_loss",
+                    "phase": "recovered_process_loss",
+                },
+            }
+
+        audit_id = f"{job_name}:window:{uuid.uuid5(uuid.NAMESPACE_URL, window_key).hex[:24]}"
+        insert_result = conn.execute(
+            _sql(
+                db_path,
+                """
+                INSERT INTO offmarket_high_load_job_audit
+                (audit_id, job_name, status, session_status, high_load_profile,
+                 payload_json, result_json, error, started_at, finished_at,
+                 training_window_key, phase, worker_instance_id, heartbeat_at,
+                 input_bytes_estimate)
+                VALUES (?, ?, 'running', ?, ?, ?, '{}', '', ?, ?, ?, 'claim', ?, ?, 0)
+                ON CONFLICT DO NOTHING
+                """,
+            ),
+            (
+                audit_id,
+                job_name,
+                str((session or {}).get("status") or ""),
+                str((session or {}).get("high_load_profile") or "disabled"),
+                json.dumps(payload, ensure_ascii=False, default=str),
+                started_at,
+                now,
+                window_key,
+                _WORKER_INSTANCE_ID,
+                now,
+            ),
+        )
+        if int(getattr(insert_result, "rowcount", 1) or 0) == 0:
+            existing_row = conn.execute(
+                _sql(
+                    db_path,
+                    """
+                    SELECT audit_id, status, phase, heartbeat_at, finished_at
+                    FROM offmarket_high_load_job_audit
+                    WHERE job_name=? AND training_window_key=?
+                    """,
+                ),
+                (job_name, window_key),
+            ).fetchone()
+            conn.commit()
+            existing = _training_audit_row(existing_row)
+            return {
+                "claimed": False,
+                "reason": "training_window_running",
+                "audit": existing,
+            }
+        conn.commit()
+        return {
+            "claimed": True,
+            "audit_id": audit_id,
+            "status": "running",
+            "training_window_key": window_key,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _heartbeat_training_window(
+    *,
+    db_path: str | Path,
+    audit_id: str,
+    phase: str,
+    input_bytes_estimate: int = 0,
+) -> None:
+    if not audit_id:
+        return
+    conn = _connect(db_path)
+    try:
+        _ensure_offmarket_audit_table(conn, db_path)
+        now = time.time()
+        conn.execute(
+            _sql(
+                db_path,
+                """
+                UPDATE offmarket_high_load_job_audit
+                SET phase=?, heartbeat_at=?, input_bytes_estimate=?
+                WHERE audit_id=? AND status='running'
+                """,
+            ),
+            (str(phase or ""), now, max(0, int(input_bytes_estimate or 0)), audit_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _record_offmarket_audit(
     *,
     job_name: str,
@@ -107,12 +406,22 @@ def _record_offmarket_audit(
     error: str = "",
     started_at: float | None = None,
     db_path: str | Path | None = None,
+    training_window_key: str = "",
+    phase: str = "",
+    worker_instance_id: str = "",
+    heartbeat_at: float | None = None,
+    input_bytes_estimate: int = 0,
+    audit_id: str = "",
 ) -> dict[str, Any]:
     db_path = Path(db_path or state_db.STATE_DB)
     now = time.time()
     started = float(started_at or now)
     row = {
-        "audit_id": f"{job_name}:{int(started * 1000)}",
+        "audit_id": audit_id or (
+            f"{job_name}:window:{uuid.uuid5(uuid.NAMESPACE_URL, training_window_key).hex[:24]}"
+            if training_window_key
+            else f"{job_name}:{int(started * 1000)}"
+        ),
         "job_name": job_name,
         "status": status,
         "session_status": str((session or {}).get("status") or ""),
@@ -122,40 +431,41 @@ def _record_offmarket_audit(
         "error": str(error or ""),
         "started_at": started,
         "finished_at": now,
+        "training_window_key": str(training_window_key or ""),
+        "phase": str(phase or ""),
+        "worker_instance_id": str(worker_instance_id or _WORKER_INSTANCE_ID),
+        "heartbeat_at": float(heartbeat_at or now),
+        "input_bytes_estimate": max(0, int(input_bytes_estimate or 0)),
     }
     conn = _connect(db_path)
     try:
-        table_declaration = """
-            CREATE TABLE IF NOT EXISTS offmarket_high_load_job_audit (
-                audit_id TEXT PRIMARY KEY, job_name TEXT NOT NULL, status TEXT NOT NULL,
-                session_status TEXT DEFAULT '', high_load_profile TEXT DEFAULT '',
-                payload_json TEXT DEFAULT '{}', result_json TEXT DEFAULT '{}', error TEXT DEFAULT '',
-                started_at REAL NOT NULL, finished_at REAL NOT NULL
-            )
-        """
-        if is_state_db_path(db_path):
-            validate_runtime_state_schema(conn, table_declaration)
-        else:
-            conn.execute(table_declaration)
+        _ensure_offmarket_audit_table(conn, db_path)
         conn.execute(
             _sql(
                 db_path,
                 """
                 INSERT INTO offmarket_high_load_job_audit
                 (audit_id, job_name, status, session_status, high_load_profile,
-                 payload_json, result_json, error, started_at, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 payload_json, result_json, error, started_at, finished_at,
+                 training_window_key, phase, worker_instance_id,
+                  heartbeat_at, input_bytes_estimate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(audit_id) DO UPDATE SET
                     status=excluded.status, payload_json=excluded.payload_json,
                     result_json=excluded.result_json, error=excluded.error,
-                    finished_at=excluded.finished_at
+                    finished_at=excluded.finished_at,
+                    phase=excluded.phase, worker_instance_id=excluded.worker_instance_id,
+                    heartbeat_at=excluded.heartbeat_at,
+                    input_bytes_estimate=excluded.input_bytes_estimate
                 """,
             ),
             (
                 row["audit_id"], row["job_name"], row["status"], row["session_status"],
-                row["high_load_profile"], json.dumps(row["payload"], ensure_ascii=False),
-                json.dumps(row["result"], ensure_ascii=False), row["error"],
-                row["started_at"], row["finished_at"],
+                row["high_load_profile"], json.dumps(row["payload"], ensure_ascii=False, default=str),
+                json.dumps(row["result"], ensure_ascii=False, default=str), row["error"],
+                row["started_at"], row["finished_at"], row["training_window_key"],
+                row["phase"], row["worker_instance_id"], row["heartbeat_at"],
+                row["input_bytes_estimate"],
             ),
         )
         conn.commit()
@@ -245,6 +555,7 @@ def _train_and_score_model(
     train_kwargs: dict[str, Any],
     shadow_limit: int,
     mode: str,
+    score_shadow: bool = True,
 ) -> dict[str, Any]:
     """Keep one model's training failure isolated from the other models.
 
@@ -254,6 +565,20 @@ def _train_and_score_model(
     """
     try:
         trained = dict(model_service.train(**dict(train_kwargs)) or {})
+    except TrainingMemoryBudgetExceeded as exc:
+        trained = {
+            "ok": False,
+            "status": "blocked_memory_budget",
+            "reason_codes": ["blocked_memory_budget"],
+            "error": "blocked_memory_budget",
+            "detail": str(exc),
+            "data_quality": dict(getattr(exc, "data_quality", {}) or {}),
+        }
+        logger.warning(
+            "[offmarket_high_load] %s blocked by memory budget: %s",
+            model_type,
+            trained["detail"],
+        )
     except Exception as exc:  # noqa: BLE001 - report per-model failure
         trained = {
             "ok": False,
@@ -282,6 +607,14 @@ def _train_and_score_model(
                 trained.get("reason")
                 or (trained.get("reason_codes") or ["training_not_ready"])[0]
             ),
+        }
+        return item
+    if not score_shadow:
+        item["shadow"] = {
+            "ok": False,
+            "skipped": True,
+            "model_type": model_type,
+            "reason": "training_only",
         }
         return item
     item["shadow"] = _score_shadow_model(
@@ -367,8 +700,12 @@ def run_offmarket_position_quality_job(
     *,
     session: dict[str, Any] | None = None,
     db_path: str | Path | None = None,
+    execution_mode: str = "scheduled_suite",
 ) -> dict[str, Any]:
-    """Train the PIT-v2 suite and keep every model's shadow output current."""
+    """Run the scheduled suite or one explicitly isolated training-only job."""
+    if execution_mode not in {"scheduled_suite", "training_only"}:
+        raise ValueError(f"unsupported execution_mode: {execution_mode}")
+    training_only = execution_mode == "training_only"
     job_name = "offmarket_position_quality_lightgbm"
     started_at = time.time()
     db_path = Path(db_path or state_db.STATE_DB)
@@ -377,16 +714,21 @@ def run_offmarket_position_quality_job(
         session = dict(projection.get("market_session") or {}) if projection.get("ok") else {}
     allowed, reason = offmarket_high_load_allowed(session or {})
     profile = str((session or {}).get("high_load_profile") or "disabled")
+    if training_only and allowed and profile != "full":
+        allowed = False
+        reason = "training_only_requires_full_profile"
     payload = {
         "job_name": job_name,
+        "execution_mode": execution_mode,
         "market_session": session or {},
-        "limit": 4000 if profile == "full" else 250,
-        "shadow_limit": 100 if profile == "full" else 30,
+        "limit": 4000 if training_only or profile == "full" else 250,
+        "shadow_limit": 0 if training_only else (100 if profile == "full" else 30),
         "min_samples": 20,
         "profile": profile,
     }
     training_window_key = _offmarket_training_window_key(session or {}, profile)
     payload["training_window_key"] = training_window_key
+    payload["worker_instance_id"] = _WORKER_INSTANCE_ID
     if not allowed:
         shadow_refresh: dict[str, Any] = {
             "ok": False,
@@ -425,15 +767,6 @@ def run_offmarket_position_quality_job(
             "training_window_key": training_window_key,
             "completed_audit": completed_window,
         }
-        audit = _record_offmarket_audit(
-            job_name=job_name,
-            status="skipped",
-            session=session or {},
-            payload=payload,
-            result=result,
-            started_at=started_at,
-            db_path=db_path,
-        )
         logger.info(
             "[offmarket_high_load] %s skipped: training window already completed (%s)",
             job_name,
@@ -445,12 +778,74 @@ def run_offmarket_position_quality_job(
             "reason": result["reason"],
             "training_window_key": training_window_key,
             "completed_audit": completed_window,
-            "audit": audit,
+            "audit": {**completed_window, "status": "done"},
         }
+
+    window_claim = _claim_training_window(
+        db_path=db_path,
+        job_name=job_name,
+        window_key=training_window_key,
+        session=session or {},
+        payload=payload,
+        started_at=started_at,
+        allow_retry_terminal=training_only,
+    )
+    window_audit_id = ""
+    if window_claim is not None and not bool(window_claim.get("claimed")):
+        guard_reason = str(window_claim.get("reason") or "training_window_not_claimed")
+        existing = dict(window_claim.get("audit") or {})
+        status = str(existing.get("status") or "")
+        if status == "done":
+            guard_reason = "training_window_already_completed"
+        elif status == "blocked_memory_budget":
+            guard_reason = "training_window_already_blocked_memory_budget"
+        result = {
+            "ok": False,
+            "skipped": True,
+            "reason": guard_reason,
+            "training_window_key": training_window_key,
+            "audit_status": status,
+        }
+        logger.info(
+            "[offmarket_high_load] %s skipped: %s (%s)",
+            job_name,
+            guard_reason,
+            training_window_key,
+        )
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": guard_reason,
+            "training_window_key": training_window_key,
+            "audit": existing,
+        }
+    if window_claim is not None:
+        window_audit_id = str(window_claim.get("audit_id") or "")
     try:
-        from backend.services.model_influence_governance import ModelInfluenceGovernanceService
-        from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
-        suite = _build_shadow_model_suite(db_path)
+        if training_only:
+            from research.position_quality_lightgbm import PositionQualityLightGBMService
+
+            suite = [
+                (
+                    "position_quality_lightgbm",
+                    PositionQualityLightGBMService(db_path=db_path),
+                    {
+                        "limit": 4000,
+                        "holdout_ratio": 0.2,
+                        "min_samples": 20,
+                        "register": False,
+                        "horizon_minutes": 30,
+                        "pnl_tolerance": 0.25,
+                        "symbol": "XAUUSD+",
+                        "timeframe": "M5",
+                    },
+                )
+            ]
+        else:
+            from backend.services.model_influence_governance import ModelInfluenceGovernanceService
+            from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+            suite = _build_shadow_model_suite(db_path)
         result: dict[str, Any] = {"models": {}}
         for model_type, model_service, train_kwargs in suite:
             if model_type != "position_quality_lightgbm" and (
@@ -472,6 +867,11 @@ def run_offmarket_position_quality_job(
                     },
                 }
                 continue
+            _heartbeat_training_window(
+                db_path=db_path,
+                audit_id=window_audit_id,
+                phase=f"train:{model_type}",
+            )
             item = _train_and_score_model(
                 model_type=model_type,
                 model_service=model_service,
@@ -486,40 +886,71 @@ def run_offmarket_position_quality_job(
                 ),
                 shadow_limit=int(payload["shadow_limit"]),
                 mode="offmarket_shadow_after_train",
+                score_shadow=not training_only,
             )
             result["models"][model_type] = item
+            quality = dict(getattr(model_service, "last_data_quality", {}) or {})
+            estimated_bytes = int(
+                quality.get("input_bytes_estimate")
+                or (
+                    int(quality.get("unique_review_bytes") or 0)
+                    + int(quality.get("selected_verdict_bytes") or 0)
+                )
+            )
+            _heartbeat_training_window(
+                db_path=db_path,
+                audit_id=window_audit_id,
+                phase=f"completed:{model_type}",
+                input_bytes_estimate=estimated_bytes,
+            )
 
         position_item = result["models"].get("position_quality_lightgbm") or {}
         result["train"] = dict(position_item.get("train") or {})
         # Preserve the existing top-level position shadow field for API callers.
         result["shadow"] = dict(position_item.get("shadow") or {})
 
-        governance = ModelInfluenceGovernanceService(db_path)
-        result["reconcile_before_training"] = governance.reconcile_active_models()
-        v16 = V16BrainOrchestratorService(db_path)
-        promoted = []
-        for model_type, item in result["models"].items():
-            trained = dict(item.get("train") or {})
-            if not trained.get("ok"):
-                continue
-            gate = governance.evaluate_artifact(str(trained.get("artifact_path") or ""))
-            item["promotion_gate"] = gate
-            if not gate.get("passed"):
-                continue
-            delegation = v16.delegate_model_promotion(gate, persist=True)
-            item["v16_delegation"] = delegation
-            command_id = str((delegation.get("command") or {}).get("command_id") or "")
-            promotion = governance.promote(
-                str(trained.get("artifact_path") or ""),
-                stage="demo_canary",
-                v16_command_id=command_id,
-            )
-            item["promotion"] = promotion
-            if promotion.get("ok"):
-                promoted.append(model_type)
-        result["promoted_models"] = promoted
+        if training_only:
+            result["governance"] = {
+                "ok": True,
+                "skipped": True,
+                "reason": "training_only",
+                "promotion": "skipped",
+                "model_registration": "disabled",
+                "v16_delegate": "skipped",
+            }
+            result["promoted_models"] = []
+        else:
+            governance = ModelInfluenceGovernanceService(db_path)
+            result["reconcile_before_training"] = governance.reconcile_active_models()
+            v16 = V16BrainOrchestratorService(db_path)
+            promoted = []
+            for model_type, item in result["models"].items():
+                trained = dict(item.get("train") or {})
+                if not trained.get("ok"):
+                    continue
+                gate = governance.evaluate_artifact(str(trained.get("artifact_path") or ""))
+                item["promotion_gate"] = gate
+                if not gate.get("passed"):
+                    continue
+                delegation = v16.delegate_model_promotion(gate, persist=True)
+                item["v16_delegation"] = delegation
+                command_id = str((delegation.get("command") or {}).get("command_id") or "")
+                promotion = governance.promote(
+                    str(trained.get("artifact_path") or ""),
+                    stage="demo_canary",
+                    v16_command_id=command_id,
+                )
+                item["promotion"] = promotion
+                if promotion.get("ok"):
+                    promoted.append(model_type)
+            result["promoted_models"] = promoted
         trained_ok = [bool((item.get("train") or {}).get("ok")) for item in result["models"].values()]
-        status = "done" if any(trained_ok) else "failed"
+        position_train_status = str((position_item.get("train") or {}).get("status") or "")
+        status = (
+            "blocked_memory_budget"
+            if position_train_status == "blocked_memory_budget"
+            else "done" if any(trained_ok) else "failed"
+        )
         model_errors = [
             f"{model_type}:{str((item.get('train') or {}).get('error') or (item.get('train') or {}).get('reason') or '')}"
             for model_type, item in result["models"].items()
@@ -530,12 +961,25 @@ def run_offmarket_position_quality_job(
             job_name=job_name, status=status, session=session or {}, payload=payload,
             result=result, error=";".join(model_errors),
             started_at=started_at, db_path=db_path,
+            training_window_key=training_window_key,
+            phase="finished",
+            worker_instance_id=_WORKER_INSTANCE_ID,
+            audit_id=window_audit_id,
+            input_bytes_estimate=int(
+                ((position_item.get("train") or {}).get("data_quality") or {}).get("unique_review_bytes") or 0
+            ) + int(
+                ((position_item.get("train") or {}).get("data_quality") or {}).get("selected_verdict_bytes") or 0
+            ),
         )
         return {"ok": status == "done", "status": status, "audit": audit, "result": result}
     except Exception as exc:
         audit = _record_offmarket_audit(
             job_name=job_name, status="error", session=session or {}, payload=payload,
             error=f"{type(exc).__name__}: {exc}"[:500], started_at=started_at, db_path=db_path,
+            training_window_key=training_window_key,
+            phase="error",
+            worker_instance_id=_WORKER_INSTANCE_ID,
+            audit_id=window_audit_id,
         )
         logger.warning("[offmarket_high_load] %s error: %s", job_name, exc)
         return {"ok": False, "status": "error", "audit": audit, "error": str(exc)}

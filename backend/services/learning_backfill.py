@@ -22,6 +22,7 @@ from backend.services.review_contract import (
     normalize_trade_review_contract,
     review_has_system_contamination,
 )
+from backend.services.state_payload_archive import archive_json_payload, load_json_payload
 from backend.services.trade_lesson_memory import trade_review_payload_from_row
 
 
@@ -55,6 +56,29 @@ def _execute(conn, sql: str, params: Any = None):
     if params is None:
         return conn.execute(_sql(conn, sql))
     return conn.execute(_sql(conn, sql), params)
+
+
+def _review_archive_select(conn: Any, *, alias: str = "", output: str = "review_archive_hash") -> str:
+    try:
+        has_archive = "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
+    except Exception:
+        has_archive = False
+    if not has_archive:
+        return ""
+    prefix = f"{alias}." if alias else ""
+    return f", {prefix}review_archive_hash AS {output}"
+
+
+def _review_payload(conn: Any, row: Any, *, source_id_key: str = "review_id", inline_key: str = "review_json", archive_key: str = "review_archive_hash") -> dict[str, Any]:
+    payload = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(row[source_id_key] or ""),
+        inline_json=row[inline_key],
+        archive_hash=row[archive_key] if archive_key in row.keys() else "",
+        default={},
+    )
+    return payload if isinstance(payload, dict) else {}
 
 
 def _experience_builder_for_conn(conn):
@@ -546,6 +570,7 @@ def build_review_record(
     }
     context_integrity = "full" if row["entry_decision_id"] else ("partial" if broker_entry_ts > 0 else "minimal")
     review_json["context_integrity"] = context_integrity
+    review_archive_payload = dict(review_json)
     review_json = normalize_trade_review_contract(
         review_json,
         entry_quality=review_json["entry_quality"],
@@ -559,6 +584,11 @@ def build_review_record(
     review_json["failure_taxonomy"] = taxonomy
     review_json["primary_responsibility"] = taxonomy["primary_responsibility"]
     review_json["responsibility_labels"] = taxonomy["responsibility_labels"]
+    review_archive_payload = dict(review_json) | {
+        key: review_archive_payload[key]
+        for key in ("inferred_close_supervisor", "responsibility_domains")
+        if key in review_archive_payload
+    }
     failure_tags = [outcome_label]
     for label in taxonomy["responsibility_labels"]:
         if label not in failure_tags:
@@ -581,11 +611,48 @@ def build_review_record(
         "failure_tags_json": json.dumps(failure_tags, ensure_ascii=False),
         "summary_text": summary,
         "review_json": json.dumps(review_json, ensure_ascii=False, default=str),
+        "review_archive_raw": json.dumps(review_archive_payload, ensure_ascii=False, default=str),
         "created_at": float(row["close_ts"] or time.time()),
     }
 
 
 def insert_review(conn: sqlite3.Connection, record: dict) -> None:
+    archive = archive_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(record["review_id"]),
+        payload_kind="review_json",
+        raw_json=str(record.get("review_archive_raw") or record["review_json"] or "{}"),
+    )
+    if archive:
+        _execute(conn,
+            """
+            INSERT INTO trade_outcome_review
+            (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
+             entry_quality, hold_quality, exit_quality, regime_fit_score,
+             execution_quality, pnl, mae, mfe, outcome_label,
+             failure_tags_json, summary_text, review_json, created_at,
+             review_archive_hash, review_raw_sha256, review_raw_bytes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record["review_id"], record["trade_id"], record["position_id"],
+                record["entry_decision_id"], record["exit_decision_id"],
+                record["entry_quality"], record["hold_quality"], record["exit_quality"],
+                record["regime_fit_score"], record["execution_quality"], record["pnl"],
+                record["mae"], record["mfe"], record["outcome_label"],
+                record["failure_tags_json"], record["summary_text"], record["review_json"],
+                record["created_at"], archive["archive_hash"], archive["raw_sha256"],
+                archive["raw_bytes"],
+            ),
+        )
+        return
+    legacy_review = json.loads(str(record["review_json"] or "{}"))
+    archive_review = json.loads(str(record.get("review_archive_raw") or "{}"))
+    if isinstance(legacy_review, dict) and isinstance(archive_review, dict):
+        for key in ("inferred_close_supervisor", "responsibility_domains"):
+            if key in archive_review:
+                legacy_review[key] = archive_review[key]
     _execute(conn,
         """
         INSERT INTO trade_outcome_review
@@ -612,7 +679,10 @@ def insert_review(conn: sqlite3.Connection, record: dict) -> None:
             record["outcome_label"],
             record["failure_tags_json"],
             record["summary_text"],
-            record["review_json"],
+            # Legacy/pre-15 stores have no archive columns. Preserve the
+            # normalized numeric contract and the recursive branches until a
+            # lossless archive destination is available.
+            json.dumps(legacy_review, ensure_ascii=False, default=str),
             record["created_at"],
         ),
     )
@@ -658,10 +728,10 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
     _ensure_experience_memory_source_columns(conn)
     _execute(conn, "DELETE FROM experience_pattern_stats WHERE scope_type='factor'")
     reviews = _execute(conn,
-        """
+        f"""
         SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                pnl, mae, mfe, outcome_label, failure_tags_json,
-               summary_text, review_json, created_at
+               summary_text, review_json, created_at{_review_archive_select(conn)}
         FROM trade_outcome_review
         ORDER BY created_at ASC
         """
@@ -673,7 +743,7 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
     now = time.time()
 
     for row in reviews:
-        review_json = json.loads(row["review_json"] or "{}")
+        review_json = _review_payload(conn, row)
         if review_has_system_contamination(review_json):
             continue
         failure_tags = list(json.loads(row["failure_tags_json"] or "[]"))
@@ -724,7 +794,7 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
         evidence_strength = max(0.05, evidence_strength * evidence_scale)
 
         lesson = experience_builder.build_from_review(
-            trade_review_payload_from_row(row),
+            trade_review_payload_from_row(row, conn=conn),
             conn=conn,
         )
         source_table = str(lesson["source_table"])
@@ -865,10 +935,10 @@ def _refresh_trade_lesson_memory(conn: sqlite3.Connection, *, limit: int = 200) 
     try:
         rows = _execute(
             conn,
-            """
+            f"""
             SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
                    pnl, mae, mfe, outcome_label, failure_tags_json, summary_text,
-                   review_json, created_at
+                   review_json, created_at{_review_archive_select(conn)}
             FROM trade_outcome_review
             ORDER BY created_at DESC, review_id DESC
             LIMIT ?
@@ -888,7 +958,7 @@ def _refresh_trade_lesson_memory(conn: sqlite3.Connection, *, limit: int = 200) 
     upserted = 0
     for row in rows:
         experience_builder.build_from_review(
-            trade_review_payload_from_row(row),
+            trade_review_payload_from_row(row, conn=conn),
             conn=conn,
         )
         upserted += 1
@@ -905,8 +975,9 @@ def _backfill_trade_review_regimes(conn: sqlite3.Connection, *, limit: int = 100
 
     rows = _execute(
         conn,
-        """
+        f"""
         SELECT r.review_id, r.review_json, d.regime_id
+               {_review_archive_select(conn, alias="r")}
         FROM trade_outcome_review r
         JOIN decision_ledger d ON d.decision_id=r.entry_decision_id
         WHERE COALESCE(d.regime_id, '')<>''
@@ -918,7 +989,7 @@ def _backfill_trade_review_regimes(conn: sqlite3.Connection, *, limit: int = 100
     updated = 0
     for row in rows:
         try:
-            review = row["review_json"] if isinstance(row["review_json"], dict) else json.loads(str(row["review_json"] or "{}"))
+            review = _review_payload(conn, row)
         except Exception:
             review = {}
         if not isinstance(review, dict):
@@ -931,11 +1002,34 @@ def _backfill_trade_review_regimes(conn: sqlite3.Connection, *, limit: int = 100
         review["regime_id"] = regime_id
         review["entry_regime"] = regime_id
         review["regime_source"] = "decision_ledger.entry_decision"
-        _execute(
+        raw_review = json.dumps(review, ensure_ascii=False, default=str)
+        archive = archive_json_payload(
             conn,
-            "UPDATE trade_outcome_review SET review_json=? WHERE review_id=?",
-            (json.dumps(review, ensure_ascii=False, default=str), str(row["review_id"] or "")),
+            source_table="trade_outcome_review",
+            source_id=str(row["review_id"] or ""),
+            payload_kind="review_json",
+            raw_json=raw_review,
         )
+        if archive and "review_archive_hash" in state_table_columns(conn, "trade_outcome_review"):
+            _execute(
+                conn,
+                """UPDATE trade_outcome_review
+                   SET review_json=?, review_archive_hash=?, review_raw_sha256=?, review_raw_bytes=?
+                   WHERE review_id=?""",
+                (
+                    raw_review,
+                    archive["archive_hash"],
+                    archive["raw_sha256"],
+                    archive["raw_bytes"],
+                    str(row["review_id"] or ""),
+                ),
+            )
+        else:
+            _execute(
+                conn,
+                "UPDATE trade_outcome_review SET review_json=? WHERE review_id=?",
+                (raw_review, str(row["review_id"] or "")),
+            )
         updated += 1
     return {
         "ok": True,

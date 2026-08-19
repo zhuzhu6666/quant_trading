@@ -7,12 +7,20 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.core.db import (
+    STATE_DB,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+    state_table_exists,
+)
 from backend.core.state_store import (
     is_state_schema_write_sql,
     validate_runtime_state_schema,
 )
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload
 
 
 DEFAULT_HORIZONS_MINUTES = [5, 15, 30, 60, 120]
@@ -44,6 +52,24 @@ def _execute(conn, sql: str, params: Any = None):
     if params is None:
         return conn.execute(rendered)
     return conn.execute(rendered, params)
+
+
+def _review_archive_select(conn: Any) -> str:
+    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
+        return ""
+    return ", review_archive_hash"
+
+
+def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
+    payload = load_json_payload(
+        conn,
+        source_table="trade_outcome_review",
+        source_id=str(row["review_id"] or ""),
+        inline_json=row["review_json"],
+        archive_hash=row["review_archive_hash"] if "review_archive_hash" in row.keys() else "",
+        default={},
+    )
+    return payload if isinstance(payload, dict) else {}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -478,7 +504,7 @@ def evaluate_counterfactuals(
                     conn,
                     f"""
                     SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                           pnl, review_json, created_at
+                           pnl, review_json, created_at{_review_archive_select(conn)}
                     FROM trade_outcome_review
                     WHERE created_at > 0 {review_filter}
                     ORDER BY created_at DESC, review_id DESC
@@ -495,7 +521,7 @@ def evaluate_counterfactuals(
 
         candidates = []
         for row in _review_rows():
-            review = _loads(row["review_json"], {})
+            review = _review_payload(conn, row)
             if review_has_system_contamination(review):
                 continue
             close_reason = str(review.get("close_reason") or "")

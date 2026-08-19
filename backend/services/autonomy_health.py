@@ -857,8 +857,10 @@ class AutonomyHealthService:
                 rows = _execute(
                     conn,
                     """
-                    SELECT status, risk_verdict_json
-                    FROM evolution_decision
+                    SELECT d.status,
+                           COALESCE(p.risk_verdict_json, d.risk_verdict_json) AS risk_verdict_json
+                    FROM evolution_decision d
+                    LEFT JOIN mutation_payload p ON p.payload_hash=d.payload_hash
                     """
                 ).fetchall()
                 for row in rows:

@@ -33,6 +33,7 @@ from backend.services._brain_helpers import (
 )
 from backend.services.agent_authority import control_surface, execution_owner
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload
 from backend.services.v16_brain_snapshot import (
     BrainMemoryService,
     BrainStateService,
@@ -41,6 +42,11 @@ from backend.services.v16_brain_snapshot import (
 from backend.services.brain_governance_candidates import (
     BrainGovernanceCandidateService,
     ensure_brain_governance_candidate_table,
+)
+from backend.services.state_payloads import (
+    ensure_state_payload_schema,
+    payload_hash,
+    put_brain_action_plan_eval_payload,
 )
 from risk.policy_service import INCIDENT_MODE_RANK, INCIDENT_MODES, RiskPolicyService
 
@@ -90,6 +96,7 @@ def ensure_brain_action_plan_eval_table(db_path: str | Path = STATE_DB) -> None:
         conn.commit()
     finally:
         conn.close()
+    ensure_state_payload_schema(db_path)
 
 
 def ensure_brain_low_impact_execution_table(db_path: str | Path = STATE_DB) -> None:
@@ -410,7 +417,13 @@ class BrainActionPlanEvaluatorService:
                 "does_not_switch_templates": True, "does_not_write_learning_samples": True,
                 "comparison_sources_only": True}
 
-    def evaluate_latest_plans(self, *, limit: int = 20, persist: bool = True) -> dict[str, Any]:
+    def evaluate_latest_plans(
+        self,
+        *,
+        limit: int = 20,
+        persist: bool = True,
+        evaluation_run_id: str = "",
+    ) -> dict[str, Any]:
         ensure_brain_action_plan_eval_table(self.db_path)
         limit = max(1, min(int(limit), 200))
         plans = list(BrainActionPlannerService(self.db_path).latest_plans(limit=limit).get("plans") or [])
@@ -422,7 +435,7 @@ class BrainActionPlanEvaluatorService:
         evidence = self._load_evidence(limit=100)
         evals = [self._evaluate_plan(plan=p, evidence=evidence, now=now) for p in plans]
         if persist:
-            self._persist(evals)
+            self._persist(evals, evaluation_run_id=str(evaluation_run_id or ""))
         return {"ok": True, "schema_version": "brain_action_plan_eval_run.v1", "status": "evaluated",
                 "eval_count": len(evals), "evals": evals, "source_gaps": evidence.get("source_gaps", []),
                 "read_only": True, "affects_trading": False, "boundary": self.boundary(), "created_at": now}
@@ -432,10 +445,15 @@ class BrainActionPlanEvaluatorService:
         limit = max(1, min(int(limit), 200))
         conn = connect(self.db_path, read_only=True)
         try:
-            rows = execute(conn, """SELECT eval_id, plan_id, snapshot_id, action_type, scope_type,
-                status, comparison_verdict, coverage_score, comparison_json,
-                evidence_refs_json, boundary_json, created_at
-                FROM brain_action_plan_eval ORDER BY created_at DESC LIMIT ?""", (limit,)).fetchall()
+            rows = execute(conn, """SELECT e.eval_id, e.plan_id, e.snapshot_id, e.action_type, e.scope_type,
+                e.status, e.comparison_verdict, e.coverage_score,
+                COALESCE(p.comparison_json, e.comparison_json) AS comparison_json,
+                COALESCE(p.evidence_refs_json, e.evidence_refs_json) AS evidence_refs_json,
+                COALESCE(p.boundary_json, e.boundary_json) AS boundary_json,
+                e.payload_hash, e.evaluation_run_id, e.created_at
+                FROM brain_action_plan_eval e
+                LEFT JOIN brain_action_plan_eval_payload p ON p.payload_hash=e.payload_hash
+                ORDER BY e.created_at DESC LIMIT ?""", (limit,)).fetchall()
             return {"ok": bool(rows), "schema_version": "brain_action_plan_eval_list.v1",
                     "status": "available" if rows else "missing_evals",
                     "evals": [self._row_to_eval(r) for r in rows],
@@ -468,10 +486,20 @@ class BrainActionPlanEvaluatorService:
                 replay = dict(row) if row else {}
             else:
                 source_gaps.append("missing_replay_report")
-            trade_reviews = self._fetch_table(conn, "trade_outcome_review", None,
+            trade_reviews = self._fetch_table(conn, "trade_outcome_review", limit,
                                               cols=["review_id", "trade_id", "position_id", "pnl",
                                                     "outcome_label", "failure_tags_json",
-                                                    "summary_text", "review_json", "created_at"])
+                                                    "summary_text", "review_json", "review_archive_hash",
+                                                    "created_at"])
+            for row in trade_reviews:
+                row["review_json"] = load_json_payload(
+                    conn,
+                    source_table="trade_outcome_review",
+                    source_id=str(row.get("review_id") or ""),
+                    inline_json=row.get("review_json", "{}"),
+                    archive_hash=row.get("review_archive_hash", ""),
+                    default={},
+                )
             trade_reviews = [
                 row
                 for row in trade_reviews
@@ -661,20 +689,59 @@ class BrainActionPlanEvaluatorService:
             "evidence": loads(item.get("evidence_json"), {}),
         }
 
-    def _persist(self, evals: list[dict[str, Any]]) -> None:
+    def _persist(self, evals: list[dict[str, Any]], *, evaluation_run_id: str = "") -> None:
         ensure_brain_action_plan_eval_table(self.db_path)
         conn = connect(self.db_path)
         try:
             for e in evals:
-                execute(conn, """INSERT INTO brain_action_plan_eval (eval_id, plan_id, snapshot_id,
+                comparison_json = dumps(e.get("comparison", {}))
+                evidence_refs_json = dumps(e.get("evidence_refs", {}))
+                boundary_json = dumps(e.get("boundary", {}))
+                eval_payload_hash = payload_hash(
+                    "\x00".join((comparison_json, evidence_refs_json, boundary_json)),
+                    namespace="brain_action_plan_eval_payload.v1",
+                )
+                if evaluation_run_id:
+                    existing = execute(
+                        conn,
+                        """SELECT eval_id FROM brain_action_plan_eval
+                           WHERE evaluation_run_id=? AND plan_id=? LIMIT 1""",
+                        (str(evaluation_run_id), str(e.get("plan_id", ""))),
+                    ).fetchone()
+                    if existing:
+                        e["eval_id"] = str(
+                            existing["eval_id"] if hasattr(existing, "keys") else existing[0]
+                        )
+                        continue
+                put_brain_action_plan_eval_payload(
+                    conn,
+                    eval_payload_hash,
+                    comparison_json,
+                    evidence_refs_json,
+                    boundary_json,
+                    created_at=safe_float(e.get("created_at")),
+                )
+                inserted = execute(conn, """INSERT INTO brain_action_plan_eval (eval_id, plan_id, snapshot_id,
                     action_type, scope_type, status, comparison_verdict, coverage_score,
-                    comparison_json, evidence_refs_json, boundary_json, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    comparison_json, evidence_refs_json, boundary_json, payload_hash,
+                    evaluation_run_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', '{}', '{}', ?, ?, ?)
+                    ON CONFLICT DO NOTHING""",
                     (e["eval_id"], e.get("plan_id", ""), e.get("snapshot_id", ""),
                      e.get("action_type", ""), e.get("scope_type", ""), e.get("status", ""),
                      e.get("comparison_verdict", ""), safe_float(e.get("coverage_score")),
-                     dumps(e.get("comparison", {})), dumps(e.get("evidence_refs", {})),
-                     dumps(e.get("boundary", {})), safe_float(e.get("created_at"))))
+                     eval_payload_hash, str(evaluation_run_id or ""), safe_float(e.get("created_at"))))
+                if evaluation_run_id and int(getattr(inserted, "rowcount", 1) or 0) == 0:
+                    existing = execute(
+                        conn,
+                        """SELECT eval_id FROM brain_action_plan_eval
+                           WHERE evaluation_run_id=? AND plan_id=? LIMIT 1""",
+                        (str(evaluation_run_id), str(e.get("plan_id", ""))),
+                    ).fetchone()
+                    if existing:
+                        e["eval_id"] = str(
+                            existing["eval_id"] if hasattr(existing, "keys") else existing[0]
+                        )
             conn.commit()
         finally:
             conn.close()

@@ -8,12 +8,20 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, STATE_DB_DDL, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.core.db import (
+    STATE_DB,
+    STATE_DB_DDL,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_columns,
+)
 from backend.services.agent_authority_registry import AgentAuthorityRegistryService
 from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload
 from research.learning.effect_reconciliation import EffectEvaluation, evaluate_application_effect
 from research.learning.governance_conflicts import GovernanceConflictResolver
 
@@ -140,15 +148,35 @@ class RuleEvolutionGovernor:
         return item
 
     @staticmethod
-    def _parse_review_row(row: sqlite3.Row) -> dict:
+    def _review_archive_select(conn, *, alias: str = "r") -> str:
+        if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
+            return ""
+        return f", {alias}.review_archive_hash AS review_archive_hash"
+
+    @staticmethod
+    def _parse_review_row(row: sqlite3.Row, conn=None) -> dict:
         item = dict(row)
         try:
             item["failure_tags"] = json.loads(item.pop("failure_tags_json") or "[]")
         except Exception:
             item["failure_tags"] = []
-        try:
-            item["review"] = json.loads(item.pop("review_json") or "{}")
-        except Exception:
+        inline_json = item.pop("review_json", "{}")
+        archive_hash = item.pop("review_archive_hash", "")
+        if conn is not None:
+            item["review"] = load_json_payload(
+                conn,
+                source_table="trade_outcome_review",
+                source_id=str(item.get("review_id") or ""),
+                inline_json=inline_json,
+                archive_hash=archive_hash,
+                default={},
+            )
+        else:
+            try:
+                item["review"] = json.loads(inline_json or "{}")
+            except Exception:
+                item["review"] = {}
+        if not isinstance(item["review"], dict):
             item["review"] = {}
         return item
 
@@ -1212,77 +1240,74 @@ class RuleEvolutionGovernor:
                     if next_application
                     else 1.0e18
                 )
+                review_archive_select = self._review_archive_select(conn)
+                review_scan_limit = min(
+                    max(review_limit * 10, int(observe_trades) * 20, 500),
+                    5000,
+                )
                 if scope_type == "position_supervisor_template":
                     if not scope_key_for_effect:
                         continue
                     post_rows = self._execute(conn,
-                        """
+                        f"""
                         SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
-                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
                         FROM trade_outcome_review r
                         WHERE r.created_at > ?
                           AND r.created_at < ?
-                          AND (
-                              r.review_json LIKE '%inferred_close_supervisor%'
-                              OR r.review_json LIKE '%supervisor_%'
-                          )
                         ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, review_limit),
+                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, review_scan_limit),
                     ).fetchall()
                     post_reviews = [
-                        r for r in (self._parse_review_row(row) for row in post_rows)
+                        r for r in (self._parse_review_row(row, conn) for row in post_rows)
                         if self._has_supervisor_feedback(r)
                     ][: int(observe_trades)]
 
                     pre_rows = self._execute(conn,
-                        """
+                        f"""
                         SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
-                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
                         FROM trade_outcome_review r
                         WHERE r.created_at <= ?
-                          AND (
-                              r.review_json LIKE '%inferred_close_supervisor%'
-                              OR r.review_json LIKE '%supervisor_%'
-                          )
                         ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), review_limit),
+                        (float(app.get("cycle_ts") or 0.0), review_scan_limit),
                     ).fetchall()
                     pre_reviews = [
-                        r for r in (self._parse_review_row(row) for row in pre_rows)
+                        r for r in (self._parse_review_row(row, conn) for row in pre_rows)
                         if self._has_supervisor_feedback(r)
                     ][: int(observe_trades)]
                     reward_from_review = self._supervisor_reward_from_review
                 elif scope_type == "entry_quality":
                     post_rows = self._execute(
                         conn,
-                        """
+                        f"""
                         SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id,
                                r.entry_quality, r.pnl, r.mfe, r.outcome_label,
-                               r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                               r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
                         FROM trade_outcome_review r
                         WHERE r.created_at > ? AND r.created_at < ?
                         ORDER BY r.created_at DESC LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, review_limit),
+                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, review_scan_limit),
                     ).fetchall()
                     pre_rows = self._execute(
                         conn,
-                        """
+                        f"""
                         SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id,
                                r.entry_quality, r.pnl, r.mfe, r.outcome_label,
-                               r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                               r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
                         FROM trade_outcome_review r
                         WHERE r.created_at <= ?
                         ORDER BY r.created_at DESC LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), review_limit),
+                        (float(app.get("cycle_ts") or 0.0), review_scan_limit),
                     ).fetchall()
-                    parsed_post = [self._parse_review_row(row) for row in post_rows]
-                    parsed_pre = [self._parse_review_row(row) for row in pre_rows]
+                    parsed_post = [self._parse_review_row(row, conn) for row in post_rows]
+                    parsed_pre = [self._parse_review_row(row, conn) for row in pre_rows]
                     raw_post_count_override = len(parsed_post)
                     raw_pre_count_override = len(parsed_pre)
 
@@ -1316,9 +1341,9 @@ class RuleEvolutionGovernor:
                     scope_key_for_effect = scope_key_for_effect or factor
 
                     post_rows = self._execute(conn,
-                        """
+                        f"""
                         SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
-                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
                         FROM trade_outcome_review r
                         WHERE r.created_at > ?
                           AND r.created_at < ?
@@ -1331,14 +1356,14 @@ class RuleEvolutionGovernor:
                         ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, factor, review_limit),
+                        (float(app.get("cycle_ts") or 0.0), observation_upper_bound, factor, review_scan_limit),
                     ).fetchall()
-                    post_reviews = [self._parse_review_row(r) for r in post_rows]
+                    post_reviews = [self._parse_review_row(r, conn) for r in post_rows]
 
                     pre_rows = self._execute(conn,
-                        """
+                        f"""
                         SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
-                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json, r.created_at
+                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
                         FROM trade_outcome_review r
                         WHERE r.created_at <= ?
                           AND EXISTS (
@@ -1350,9 +1375,9 @@ class RuleEvolutionGovernor:
                         ORDER BY r.created_at DESC
                         LIMIT ?
                         """,
-                        (float(app.get("cycle_ts") or 0.0), factor, review_limit),
+                        (float(app.get("cycle_ts") or 0.0), factor, review_scan_limit),
                     ).fetchall()
-                    pre_reviews = [self._parse_review_row(r) for r in pre_rows]
+                    pre_reviews = [self._parse_review_row(r, conn) for r in pre_rows]
                     reward_from_review = self._reward_from_review
 
                 raw_post_reviews = list(post_reviews)

@@ -1,12 +1,21 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-08-11
+> Last verified: 2026-08-16
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
 
 ## 1. 全局收敛
+
+### state_v1 多表 payload 重复与 canonical_v2 重建
+
+- 状态：`active`
+- canonical：`canonical_v2` 的单份 payload、不可变 event、event relation、state version、training manifest 和可重建 projection；旧 `state_v1` 在切换前只读。
+- 当前：migration 16 和隔离 writer 初版已建立；尚未进行历史 backfill、生产切换或旧 projection 退役。现有 `mutation_payload`、`evolution_events`、`evolution_run`、`governance_mutation_intent`、`brain_memory` 和 factor catalog 仍由旧路径解释。只读审计确认旧 `position_supervisor_trace` 存在递归 `latest_supervisor` payload；新写入边界已修复并由 `tests/test_supervisor_trace_writer_bounds.py` 覆盖，历史行尚未修改。2026-08-15 supervisor/review repair manifest 已生成；2026-08-16 已将当前 31 个 supervisor/review 直接读取路径切换到 verified archive loader，静态 coverage 为 `31 migrated / 0 pending`。同日 vertical backfill planner 扫描 16,791 decision、1,357 order、2,956 position、721 review、58,632 sample，并以数据库 `EXISTS` 校验 sample source 引用，quarantine 为 0，mapping digest 为 `ffe1194e39e2a1b80355c700df42d884ce5fd1c0dd15a8ffb62bcc8d94161257`；fresh full compact dry-run 又确认 `brain_action_plan_eval` 为 141,514 行、138,312 条重复 payload 引用行，三域逻辑重复下界约 17.68GB；但 `audit_double_write` 仍有 5,927 conflicts / 8,489 unmatched。仍未执行 compact apply、历史 backfill、canonical 写入或物理重写。
+- 剩余：先分类 audit lineage，再完成 decision 到 training artifact 垂直链路；按 writer/lineage 分批回填；完成 shadow read、完整资源监控和切换验收。下一次接手顺序以 [`planning/state-data-rebuild-plan.md`](planning/state-data-rebuild-plan.md) 的“新对话接手点”为准。
+- 退出：一个事实域一个生产 writer；新旧差异全部分类；完整生命周期、治理回放、training-only 和 projection rebuild 通过；用户单独确认后归档旧 projection。
+- 验证：`docs/planning/state-data-rebuild-plan.md`、canonical_v2 migration ledger、backfill manifest、projection run、training manifest 和 acceptance matrix。
 
 ### 平行 authority、重复门控和无退出兼容层
 

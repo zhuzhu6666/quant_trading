@@ -61,6 +61,82 @@ def _hash(value: Any) -> str:
     return hashlib.sha256(_dumps(value).encode("utf-8")).hexdigest()
 
 
+_CATALOG_VOLATILE_FIELDS = {
+    "catalog_ts",
+    "latest_catalog_snapshot_id",
+    "latest_catalog_snapshot_run_id",
+}
+_CATALOG_PAYLOAD_REF = "__catalog_payload_ref__"
+
+
+def _catalog_semantic_payload(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove occurrence metadata before deciding whether content is reused."""
+
+    return [
+        {
+            key: value
+            for key, value in item.items()
+            if key not in _CATALOG_VOLATILE_FIELDS
+        }
+        if isinstance(item, dict)
+        else item
+        for item in catalog
+    ]
+
+
+def _uniform_catalog_field(catalog: list[dict[str, Any]], field: str) -> tuple[bool, Any]:
+    """Return whether a volatile field can be represented once per occurrence."""
+
+    present = [item[field] for item in catalog if isinstance(item, dict) and field in item]
+    if not present:
+        return True, None
+    if len(present) != len(catalog) or any(value != present[0] for value in present[1:]):
+        return False, None
+    return True, present[0]
+
+
+def _catalog_payload_reference(catalog: list[dict[str, Any]], catalog_hash: str) -> dict[str, Any] | None:
+    """Build a small occurrence record when all volatile fields are uniform."""
+
+    metadata: dict[str, Any] = {}
+    for field in _CATALOG_VOLATILE_FIELDS:
+        uniform, value = _uniform_catalog_field(catalog, field)
+        if not uniform:
+            return None
+        metadata[field] = {
+            "present": any(isinstance(item, dict) and field in item for item in catalog),
+            "value": value,
+        }
+    return {
+        _CATALOG_PAYLOAD_REF: catalog_hash,
+        "metadata": metadata,
+    }
+
+
+def _apply_catalog_occurrence_metadata(
+    catalog: list[dict[str, Any]], metadata: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(metadata, dict):
+        return catalog
+    result: list[dict[str, Any]] = []
+    for item in catalog:
+        if not isinstance(item, dict):
+            result.append(item)
+            continue
+        updated = dict(item)
+        for field in _CATALOG_VOLATILE_FIELDS:
+            state = metadata.get(field)
+            if isinstance(state, dict) and bool(state.get("present")):
+                updated[field] = state.get("value")
+            elif isinstance(state, dict) and not bool(state.get("present")):
+                updated.pop(field, None)
+            elif field in updated and field in metadata:
+                # Read compatibility for an early reference encoding.
+                updated[field] = metadata[field]
+        result.append(updated)
+    return result
+
+
 def _p(db_path: str | Path, sql: str) -> str:
     return sql.replace("?", "%s") if is_state_db_path(db_path) else sql
 
@@ -797,16 +873,35 @@ def persist_factor_catalog_snapshot(
     payload = list(catalog if catalog is not None else build_factor_catalog(db_path))
     now = time.time()
     snapshot_id = f"fcatsnap_{uuid.uuid4().hex[:16]}"
-    catalog_hash = _hash(payload)
+    catalog_hash = _hash(_catalog_semantic_payload(payload))
+    storage_payload: Any = payload
+    payload_interned = False
     conn = _connect_state(db_path)
     try:
+        existing = conn.execute(
+            _p(
+                db_path,
+                """SELECT 1
+                   FROM factor_catalog_snapshot
+                   WHERE catalog_hash=? AND substr(catalog_json, 1, 1)='['
+                   LIMIT 1""",
+            ),
+            (catalog_hash,),
+        ).fetchone()
+        if existing:
+            reference = _catalog_payload_reference(payload, catalog_hash)
+            if reference is not None and len(_dumps(reference).encode("utf-8")) < len(
+                _dumps(payload).encode("utf-8")
+            ):
+                storage_payload = reference
+                payload_interned = True
         conn.execute(
             _p(db_path, """
             INSERT INTO factor_catalog_snapshot
             (snapshot_id, run_id, catalog_hash, catalog_json, source, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """),
-            (snapshot_id, str(run_id or ""), catalog_hash, _dumps(payload), str(source or ""), now),
+            (snapshot_id, str(run_id or ""), catalog_hash, _dumps(storage_payload), str(source or ""), now),
         )
         conn.commit()
     finally:
@@ -818,6 +913,7 @@ def persist_factor_catalog_snapshot(
         "source": str(source or ""),
         "created_at": now,
         "count": len(payload),
+        "payload_interned": payload_interned,
     }
 
 
@@ -836,6 +932,23 @@ def latest_factor_catalog_snapshot(db_path: str | Path = STATE_DB) -> dict[str, 
         if not row:
             return {"ok": False, "status": "missing", "items": [], "count": 0}
         items = _loads(row["catalog_json"], [])
+        if isinstance(items, dict) and items.get(_CATALOG_PAYLOAD_REF):
+            payload_row = conn.execute(
+                _p(
+                    db_path,
+                    """SELECT catalog_json
+                       FROM factor_catalog_snapshot
+                       WHERE catalog_hash=? AND substr(catalog_json, 1, 1)='['
+                       ORDER BY created_at ASC
+                       LIMIT 1""",
+                ),
+                (str(items.get(_CATALOG_PAYLOAD_REF) or row["catalog_hash"] or ""),),
+            ).fetchone()
+            payload_items = _loads(payload_row["catalog_json"] if payload_row else "[]", [])
+            items = _apply_catalog_occurrence_metadata(
+                payload_items if isinstance(payload_items, list) else [],
+                items.get("metadata"),
+            )
         if not isinstance(items, list):
             items = []
         return {

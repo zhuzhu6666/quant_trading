@@ -12,9 +12,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB, state_table_exists
-from backend.services._brain_helpers import connect, execute, loads, safe_float
+from backend.core.db import STATE_DB, state_table_columns, state_table_exists
+from backend.services._brain_helpers import connect, execute, safe_float
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload
 
 
 CANONICAL_APPEND_SOURCE = "trade_lesson_memory.v1"
@@ -81,12 +82,17 @@ class MemoryIntegrityReportService:
                     "required_tables_missing:" + ",".join(sorted(missing_tables)),
                 )
 
+            review_archive_select = (
+                ", review_archive_hash"
+                if "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
+                else ""
+            )
             review_rows = [
                 _row_dict(row)
                 for row in execute(
                     conn,
-                    """
-                    SELECT review_id, review_json, created_at
+                    f"""
+                    SELECT review_id, review_json, created_at{review_archive_select}
                     FROM trade_outcome_review
                     ORDER BY created_at DESC
                     """,
@@ -113,6 +119,21 @@ class MemoryIntegrityReportService:
                     ORDER BY last_used_at DESC, created_at DESC
                     """,
                 ).fetchall()
+            ]
+            contaminated_review_ids = [
+                str(row.get("review_id") or "")
+                for row in review_rows
+                if str(row.get("review_id") or "")
+                and review_has_system_contamination(
+                    load_json_payload(
+                        conn,
+                        source_table="trade_outcome_review",
+                        source_id=str(row.get("review_id") or ""),
+                        inline_json=row.get("review_json"),
+                        archive_hash=row.get("review_archive_hash", ""),
+                        default={},
+                    )
+                )
             ]
         except Exception as exc:
             return self._unavailable(observed_at, f"memory_integrity_query_failed:{type(exc).__name__}: {exc}")
@@ -158,12 +179,6 @@ class MemoryIntegrityReportService:
                 for row in rows
             )
         ]
-        contaminated_review_ids = [
-            review_id
-            for review_id, row in reviews.items()
-            if review_has_system_contamination(loads(row.get("review_json"), {}))
-        ]
-
         projection_by_id = {
             str(row.get("experience_id") or ""): row
             for row in projection_rows

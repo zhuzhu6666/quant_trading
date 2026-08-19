@@ -4,12 +4,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from backend.core.db import STATE_DB
+from backend.core.db import STATE_DB, state_table_columns
 from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services._brain_helpers import connect as _connect, execute as _execute, loads as _loads
 from backend.services.review_contract import review_has_system_contamination
+from backend.services.state_payload_archive import load_json_payload
 from backend.services.v16_brain_snapshot import BrainMemoryService
 
 
@@ -18,6 +19,31 @@ class AgentBriefingContextService:
 
     def __init__(self, db_path: str | Path = STATE_DB):
         self.db_path = db_path
+
+    @staticmethod
+    def _review_archive_select(conn: Any) -> str:
+        if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
+            return ""
+        return ", r.review_archive_hash AS source_review_archive_hash"
+
+    @staticmethod
+    def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
+        try:
+            keys = row.keys() if hasattr(row, "keys") else ()
+            source_id = row["source_review_id"] if "source_review_id" in keys else ""
+            inline_json = row["source_review_json"] if "source_review_json" in keys else "{}"
+            archive_hash = row["source_review_archive_hash"] if "source_review_archive_hash" in keys else ""
+        except Exception:
+            source_id, inline_json, archive_hash = "", "{}", ""
+        payload = load_json_payload(
+            conn,
+            source_table="trade_outcome_review",
+            source_id=str(source_id or ""),
+            inline_json=inline_json,
+            archive_hash=archive_hash,
+            default={},
+        )
+        return payload if isinstance(payload, dict) else {}
 
     @staticmethod
     def boundary() -> dict[str, Any]:
@@ -205,7 +231,7 @@ class AgentBriefingContextService:
                        r.outcome_label AS source_outcome_label,
                        r.failure_tags_json AS source_failure_tags_json,
                        r.created_at AS source_created_at,
-                       r.review_json AS source_review_json
+                       r.review_json AS source_review_json{self._review_archive_select(conn)}
                 FROM experience_memory e
                 JOIN trade_outcome_review r
                   ON e.source_table='trade_outcome_review'
@@ -219,7 +245,7 @@ class AgentBriefingContextService:
             ).fetchall()
             result = []
             for row in rows:
-                review_json = _loads(row["source_review_json"], {})
+                review_json = self._review_payload(conn, row)
                 if review_has_system_contamination(review_json):
                     continue
                 review_id = str(row["source_review_id"] or "")

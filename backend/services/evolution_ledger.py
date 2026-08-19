@@ -16,6 +16,12 @@ from backend.core.db import (
     is_state_db_path,
     state_pg_enabled,
 )
+from backend.services.state_payloads import (
+    ensure_state_payload_schema,
+    payload_hash,
+    put_mutation_payload,
+    put_runtime_config_payload,
+)
 
 
 def _dumps(value: Any) -> str:
@@ -34,7 +40,17 @@ def _loads(raw: Any, default: Any) -> Any:
 
 
 def _stable_hash(value: Any) -> str:
-    return hashlib.sha256(_dumps(value).encode("utf-8")).hexdigest()
+    # Keep the config hash contract identical to the governance coordinator:
+    # whitespace is serialization detail, while the logical JSON content is
+    # the authority binding.
+    payload = json.dumps(
+        value if value is not None else {},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _new_id(prefix: str) -> str:
@@ -200,6 +216,7 @@ def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_release_run_created ON release_run(created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_release_run_status ON release_run(status, created_at)")
         conn.commit()
+        ensure_state_payload_schema(db_path)
     finally:
         conn.close()
 
@@ -234,7 +251,9 @@ def persist_runtime_config_snapshot(
     source: str,
     db_path: str | Path = STATE_DB,
     run_id: str = "",
+    mutation_id: str = "",
     conn: Any | None = None,
+    created_at: float | None = None,
 ) -> dict[str, Any]:
     """Persist a config snapshot, optionally inside the caller's transaction.
 
@@ -248,44 +267,62 @@ def persist_runtime_config_snapshot(
 
     payload = canonical_runtime_config_payload(_as_dict(config))
     config_hash = _stable_hash(payload)
-    now = time.time()
+    payload_json = _dumps(payload)
+    payload_hash_value = payload_hash(payload_json, namespace="runtime_config_payload.v1")
+    now = float(created_at if created_at is not None else time.time())
     owned_conn = conn is None
     active_conn = conn or _connect(db_path)
     try:
-        existing = active_conn.execute(
-            _p(db_path, """
-            SELECT config_version, config_hash, source, run_id, created_at
-            FROM runtime_config_snapshot
-            ORDER BY config_version DESC
-            LIMIT 1
-            """),
-        ).fetchone()
-        if existing:
-            existing_hash = existing["config_hash"] if hasattr(existing, "keys") else existing[1]
-            existing_source_value = existing["source"] if hasattr(existing, "keys") else existing[2]
-            existing_run_value = existing["run_id"] if hasattr(existing, "keys") else existing[3]
-            if str(existing_hash or "") == config_hash:
-                config_version = existing["config_version"] if hasattr(existing, "keys") else existing[0]
-                existing_source = existing_source_value
-                existing_run_id = existing_run_value
-                existing_created_at = existing["created_at"] if hasattr(existing, "keys") else existing[4]
+        ensure_state_payload_schema(db_path, active_conn)
+        if mutation_id:
+            mutation_row = active_conn.execute(
+                _p(
+                    db_path,
+                    """SELECT config_version, config_hash, source, run_id,
+                              mutation_id, payload_hash, created_at
+                       FROM runtime_config_snapshot
+                       WHERE mutation_id=?
+                       ORDER BY config_version DESC
+                       LIMIT 1""",
+                ),
+                (str(mutation_id),),
+            ).fetchone()
+            if mutation_row:
+                existing_mutation_hash = mutation_row["config_hash"] if hasattr(mutation_row, "keys") else mutation_row[1]
+                if str(existing_mutation_hash or "") != config_hash:
+                    raise ValueError(
+                        f"runtime_config_snapshot_mutation_id_conflict:{mutation_id}"
+                    )
                 return {
-                    "config_version": int(config_version or 0),
+                    "config_version": int(mutation_row["config_version"] if hasattr(mutation_row, "keys") else mutation_row[0] or 0),
                     "config_hash": config_hash,
-                    "source": str(existing_source or ""),
-                    "run_id": str(existing_run_id or ""),
-                    "created_at": float(existing_created_at or 0.0),
+                    "payload_hash": str(mutation_row["payload_hash"] if hasattr(mutation_row, "keys") else mutation_row[5] or payload_hash_value),
+                    "source": str(mutation_row["source"] if hasattr(mutation_row, "keys") else mutation_row[2] or ""),
+                    "run_id": str(mutation_row["run_id"] if hasattr(mutation_row, "keys") else mutation_row[3] or ""),
+                    "mutation_id": str(mutation_row["mutation_id"] if hasattr(mutation_row, "keys") else mutation_row[4] or ""),
+                    "created_at": float(mutation_row["created_at"] if hasattr(mutation_row, "keys") else mutation_row[6] or 0.0),
                     "reused": True,
                     "requested_source": str(source or ""),
                     "requested_run_id": str(run_id or ""),
                 }
+        # Identical payloads are deliberately still separate snapshot
+        # occurrences.  Only an explicit mutation_id is idempotent; event
+        # metadata such as source/run_id/created_at must not disappear merely
+        # because the effective config did not change.
+        put_runtime_config_payload(
+            active_conn,
+            payload_hash_value,
+            payload_json,
+            created_at=now,
+        )
         cur = active_conn.execute(
             _p(db_path, """
-            INSERT INTO runtime_config_snapshot (config_hash, source, config_json, run_id, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO runtime_config_snapshot
+                (config_hash, source, config_json, run_id, mutation_id, payload_hash, created_at)
+            VALUES (?, ?, '{}', ?, ?, ?, ?)
             RETURNING config_version
             """),
-            (config_hash, str(source or ""), _dumps(payload), str(run_id or ""), now),
+            (config_hash, str(source or ""), str(run_id or ""), str(mutation_id or ""), payload_hash_value, now),
         )
         row = cur.fetchone()
         config_version = row["config_version"] if hasattr(row, "keys") and "config_version" in row.keys() else (row[0] if row else 0)
@@ -294,7 +331,10 @@ def persist_runtime_config_snapshot(
         return {
             "config_version": int(config_version or 0),
             "config_hash": config_hash,
+            "payload_hash": payload_hash_value,
             "source": str(source or ""),
+            "run_id": str(run_id or ""),
+            "mutation_id": str(mutation_id or ""),
             "created_at": now,
             "reused": False,
         }
@@ -316,7 +356,8 @@ def current_runtime_config_snapshot(
     try:
         row = conn.execute(
             """
-            SELECT config_version, config_hash, source, created_at
+            SELECT config_version, config_hash, source, run_id, mutation_id,
+                   payload_hash, created_at
             FROM runtime_config_snapshot
             ORDER BY config_version DESC
             LIMIT 1
@@ -485,6 +526,8 @@ def record_evolution_decision(
     config_hash: str = "",
     db_path: str | Path = STATE_DB,
     decision_id: str = "",
+    canonical_event_id: str = "",
+    projection_type: str = "",
 ) -> str:
     ensure_evolution_ledger_tables(db_path)
     did = str(decision_id or _new_id("evodec"))
@@ -501,13 +544,36 @@ def record_evolution_decision(
             conn.close()
     conn = _connect(db_path)
     try:
+        ensure_state_payload_schema(db_path, conn)
+        evidence_json = _dumps(evidence or {})
+        risk_verdict_json = _dumps(risk_verdict or {})
+        before_json = _dumps(before or {})
+        after_json = _dumps(after or {})
+        result_json = _dumps(result or {})
+        rollback_json = _dumps(rollback or {})
+        mutation_parts = {
+            "evidence_json": evidence_json,
+            "risk_verdict_json": risk_verdict_json,
+            "before_json": before_json,
+            "after_json": after_json,
+            "result_json": result_json,
+            "rollback_json": rollback_json,
+        }
+        mutation_hash = payload_hash(
+            "\x00".join(f"{key}={mutation_parts[key]}" for key in sorted(mutation_parts)),
+            namespace="mutation_payload.v1",
+        )
+        put_mutation_payload(conn, mutation_hash, mutation_parts)
+        canonical_id = str(canonical_event_id or did)
+        projection = str(projection_type or ("canonical" if canonical_id == did else "projection"))
         conn.execute(
             _p(db_path, """
             INSERT INTO evolution_decision
             (decision_id, run_id, decision_type, scope_type, scope_key, action, status,
              evidence_json, risk_verdict_json, before_json, after_json, result_json,
-             rollback_json, config_version, config_hash, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             rollback_json, config_version, config_hash, payload_hash,
+             canonical_event_id, projection_type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(decision_id) DO UPDATE SET
                 run_id=excluded.run_id,
                 decision_type=excluded.decision_type,
@@ -523,6 +589,9 @@ def record_evolution_decision(
                 rollback_json=excluded.rollback_json,
                 config_version=excluded.config_version,
                 config_hash=excluded.config_hash,
+                payload_hash=excluded.payload_hash,
+                canonical_event_id=excluded.canonical_event_id,
+                projection_type=excluded.projection_type,
                 created_at=excluded.created_at
             """),
             (
@@ -533,14 +602,17 @@ def record_evolution_decision(
                 str(scope_key or ""),
                 str(action or ""),
                 str(status or ""),
-                _dumps(evidence or {}),
-                _dumps(risk_verdict or {}),
-                _dumps(before or {}),
-                _dumps(after or {}),
-                _dumps(result or {}),
-                _dumps(rollback or {}),
+                "{}",
+                "{}",
+                "{}",
+                "{}",
+                "{}",
+                "{}",
                 int(config_version or 0),
                 str(config_hash or ""),
+                mutation_hash,
+                canonical_id,
+                projection,
                 time.time(),
             ),
         )
@@ -578,6 +650,7 @@ def list_evolution_runs(*, db_path: str | Path = STATE_DB, limit: int = 100) -> 
 
 def get_evolution_run(run_id: str, *, db_path: str | Path = STATE_DB) -> dict[str, Any]:
     ensure_evolution_ledger_tables(db_path)
+    ensure_state_payload_schema(db_path)
     conn = _connect(db_path, read_only=True)
     if not _use_pg(db_path):
         conn.row_factory = __import__("sqlite3").Row
@@ -590,10 +663,36 @@ def get_evolution_run(run_id: str, *, db_path: str | Path = STATE_DB) -> dict[st
         decisions = []
         for drow in conn.execute(
             _p(db_path, """
-            SELECT *
-            FROM evolution_decision
-            WHERE run_id=?
-            ORDER BY created_at ASC
+            SELECT d.decision_id, d.run_id, d.decision_type, d.scope_type,
+                   d.scope_key, d.action, d.status,
+                   COALESCE(p.evidence_json, d.evidence_json) AS evidence_json,
+                   COALESCE(p.risk_verdict_json, d.risk_verdict_json) AS risk_verdict_json,
+                   CASE WHEN d.projection_type='api'
+                        THEN COALESCE(cp.before_json, p.before_json, d.before_json)
+                        ELSE COALESCE(p.before_json, d.before_json)
+                   END AS before_json,
+                   CASE WHEN d.projection_type='api'
+                        THEN COALESCE(cp.after_json, p.after_json, d.after_json)
+                        ELSE COALESCE(p.after_json, d.after_json)
+                   END AS after_json,
+                   CASE WHEN d.projection_type='api'
+                        THEN COALESCE(cp.result_json, p.result_json, d.result_json)
+                        ELSE COALESCE(p.result_json, d.result_json)
+                   END AS result_json,
+                   CASE WHEN d.projection_type='api'
+                        THEN COALESCE(cp.rollback_json, p.rollback_json, d.rollback_json)
+                        ELSE COALESCE(p.rollback_json, d.rollback_json)
+                   END AS rollback_json,
+                   d.config_version, d.config_hash, d.payload_hash,
+                   d.canonical_event_id, d.projection_type, d.created_at
+            FROM evolution_decision d
+            LEFT JOIN mutation_payload p ON p.payload_hash=d.payload_hash
+            LEFT JOIN evolution_decision cd
+                   ON cd.decision_id=d.canonical_event_id
+                  AND d.projection_type='api'
+            LEFT JOIN mutation_payload cp ON cp.payload_hash=cd.payload_hash
+            WHERE d.run_id=?
+            ORDER BY d.created_at ASC
             """),
             (str(run_id or ""),),
         ).fetchall():
