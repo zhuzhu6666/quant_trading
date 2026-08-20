@@ -26,6 +26,7 @@ from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC, attach_fact,
 
 
 LEARNING_STALE_AFTER_SEC = DEFAULT_STALE_AFTER_SEC["learning"]
+CANONICAL_SOURCE = "canonical"
 
 
 @dataclass(frozen=True)
@@ -145,7 +146,7 @@ def active_parameter_templates_fact_payload(
     return _durable_list_fact(
         payload,
         contract="learning.parameter-templates-active.v2",
-        source="state_v1",
+        source=CANONICAL_SOURCE,
         timestamp_fields=("updated_at", "activated_at"),
         now=now,
     )
@@ -157,7 +158,7 @@ def suggestions_fact_payload(
     return _durable_list_fact(
         payload,
         contract="learning.suggestions.v2",
-        source="state_v1",
+        source=CANONICAL_SOURCE,
         timestamp_fields=("reviewed_at", "created_at"),
         now=now,
     )
@@ -169,7 +170,7 @@ def applications_fact_payload(
     return _durable_list_fact(
         payload,
         contract="learning.applications.v2",
-        source="state_v1",
+        source=CANONICAL_SOURCE,
         timestamp_fields=("last_review_at", "created_at", "cycle_ts"),
         now=now,
     )
@@ -181,7 +182,7 @@ def lifecycle_fact_payload(
     return _durable_list_fact(
         payload,
         contract="learning.lifecycle.v2",
-        source="state_v1",
+        source=CANONICAL_SOURCE,
         timestamp_fields=("ts",),
         now=now,
     )
@@ -193,7 +194,7 @@ def model_permission_audits_fact_payload(
     return _durable_list_fact(
         payload,
         contract="learning.model-permission-audits.v2",
-        source="state_v1",
+        source=CANONICAL_SOURCE,
         timestamp_fields=("created_at",),
         now=now,
     )
@@ -229,7 +230,7 @@ def factor_governance_audits_fact_payload(
     return _durable_list_fact(
         payload,
         contract="learning.factor-governance-lightgbm-audits.v2",
-        source="state_v1",
+        source=CANONICAL_SOURCE,
         timestamp_fields=("created_at",),
         now=now,
     )
@@ -254,7 +255,7 @@ def factor_governance_advisories_fact_payload(
         attach_fact(
             result,
             contract="learning.factor-governance-lightgbm-advisories.v2",
-            source="state_v1",
+            source=CANONICAL_SOURCE,
             observed_at=observed_at,
             stale_after_sec=LEARNING_STALE_AFTER_SEC,
             error=payload_error,
@@ -330,7 +331,7 @@ def learning_summary_fact_payload(
         attach_fact(
             result,
             contract="learning.summary.v2",
-            source="state_v1",
+            source=CANONICAL_SOURCE,
             observed_at=observed_at,
             stale_after_sec=LEARNING_STALE_AFTER_SEC,
             error=source_error,
@@ -362,7 +363,7 @@ def learning_reviews_fact_payload(
     return _durable_list_fact(
         payload,
         contract="learning.reviews.v2",
-        source="state_v1",
+        source=CANONICAL_SOURCE,
         timestamp_fields=("created_at",),
         now=now,
     )
@@ -374,7 +375,7 @@ def autonomous_samples_fact_payload(
     return _durable_list_fact(
         payload,
         contract="learning.autonomous-samples.v2",
-        source="state_v1",
+        source=CANONICAL_SOURCE,
         timestamp_fields=("updated_at", "event_ts", "created_at"),
         now=now,
     )
@@ -386,7 +387,7 @@ def model_position_quality_audits_fact_payload(
     return _durable_list_fact(
         payload,
         contract="learning.model-position-quality-audits.v2",
-        source="state_v1",
+        source=CANONICAL_SOURCE,
         timestamp_fields=("created_at",),
         now=now,
     )
@@ -398,7 +399,7 @@ def model_open_quality_audits_fact_payload(
     return _durable_list_fact(
         payload,
         contract="learning.model-open-quality-audits.v2",
-        source="state_v1",
+        source=CANONICAL_SOURCE,
         timestamp_fields=("created_at",),
         now=now,
     )
@@ -422,7 +423,7 @@ def model_offmarket_high_load_audits_fact_payload(
     return _durable_list_fact(
         payload,
         contract="learning.model-offmarket-high-load-audits.v2",
-        source="state_v1",
+        source=CANONICAL_SOURCE,
         timestamp_fields=("finished_at", "started_at"),
         now=now,
     )
@@ -446,14 +447,15 @@ def observe_learning_dataset_source(
     """Read record counts and real source timestamps without writing schema."""
 
     queried_at = float(time.time() if now is None else now)
-    # decision/review facts are canonical_schema-owned; the training-sample row is
-    # canonical_v2-owned (read via the canonical reader).
+    # All durable learning facts are owned by canonical_v2. The event streams
+    # are observed through the canonical reader; the sample row is read from
+    # canonical_v2.training_sample_row.
     specs: list[tuple[str, tuple[str, ...], str | None]] = [
         ("canonical_v2.training_sample_row", ("updated_at", "event_ts", "created_at"), None),
-        ("decision_ledger", ("decision_ts", "created_at"), "risk_decision"),
+        ("canonical_v2.event", ("observed_at",), "risk_decision"),
     ]
     if include_trade_reviews:
-        specs.append(("trade_outcome_review", ("created_at",), "trade_review"))
+        specs.append(("canonical_v2.event", ("observed_at",), "trade_review"))
 
     conn = None
     try:
@@ -463,9 +465,8 @@ def observe_learning_dataset_source(
         missing_tables: list[str] = []
         for table, timestamp_columns, canonical_event_type in specs:
             if canonical_event_type is not None:
-                # decision/review counts and freshness come from the canonical
-                # reader (with reader-owned legacy fallback); the module holds
-                # no private SQL for canonical-owned facts.
+                # Decision/review counts and freshness come from the canonical
+                # reader; this module holds no private fact SQL.
                 observation = canonical_fact_observation(
                     conn,
                     {
@@ -504,26 +505,29 @@ def observe_learning_dataset_source(
                 latest = max(latest, observed_epoch(_row_value(row, f"max_{column}", index)))
 
         if missing_tables:
+            source_tables = tuple(dict.fromkeys(table for table, _cols, _event_type in specs))
             return DurableSourceObservation(
                 observed_at=latest or None,
                 authoritative_empty=False,
                 record_count=record_count,
-                tables=tuple(table for table, _cols, _event_type in specs),
-                error="missing_source_tables:" + ",".join(missing_tables),
+                tables=source_tables,
+                error="missing_source_tables:" + ",".join(dict.fromkeys(missing_tables)),
             )
+        source_tables = tuple(dict.fromkeys(table for table, _cols, _event_type in specs))
         return DurableSourceObservation(
             observed_at=queryed_at if record_count == 0 else (latest or None),
             authoritative_empty=record_count == 0,
             record_count=record_count,
-            tables=tuple(table for table, _cols, _event_type in specs),
+            tables=source_tables,
             error=None if record_count == 0 or latest > 0 else "persisted_timestamp_missing",
         )
     except Exception as exc:
+        source_tables = tuple(dict.fromkeys(table for table, _cols, _event_type in specs))
         return DurableSourceObservation(
             observed_at=None,
             authoritative_empty=False,
             record_count=0,
-            tables=tuple(table for table, _cols, _event_type in specs),
+            tables=source_tables,
             error=f"source_observation_failed:{type(exc).__name__}",
         )
     finally:
@@ -572,7 +576,7 @@ def _dataset_fact_payload(
         attach_fact(
             result,
             contract=contract,
-            source="state_v1",
+            source=CANONICAL_SOURCE,
             observed_at=observation.observed_at,
             stale_after_sec=LEARNING_STALE_AFTER_SEC,
             error=observation.error or _payload_error(payload),

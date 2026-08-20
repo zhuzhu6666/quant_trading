@@ -454,8 +454,8 @@ def test_reader_read_trade_chain_resolves_relations() -> None:
     assert append_relation(conn, from_event_id=order["event_id"], to_event_id=decision["event_id"], relation_type="caused_by")
     assert append_relation(conn, from_event_id=position["event_id"], to_event_id=decision["event_id"], relation_type="caused_by")
 
-    # the legacy primary key resolves to the canonical review event via the
-    # live-event id convention (legacy_mapping is gone since S5/R1)
+    # The review key resolves to the canonical review event via the
+    # deterministic live-event id convention.
     chain = read_trade_chain(conn, "review-r1")
     assert chain is not None
     assert chain["review"]["source"] == "canonical"
@@ -465,9 +465,77 @@ def test_reader_read_trade_chain_resolves_relations() -> None:
     assert {item["entity_id"] for item in chain["positions"]} == {"position-p1"}
 
 
-def test_reader_legacy_fallback_without_canonical_schema() -> None:
-    """Reader falls back to the legacy occurrence table when the canonical
-    schema is absent (SQLite fixtures / pre-cutover environments)."""
+def test_reader_supervisor_trace_is_canonical_and_payload_flattened() -> None:
+    from backend.services.canonical_v2_reader import (
+        iter_supervisor_trace_events,
+        iter_supervisor_trace_rows,
+    )
+
+    conn = _canonical_sqlite()
+    payload = {
+        "trace_id": "trace-1",
+        "decision_id": "decision-1",
+        "position_id": "position-1",
+        "action": "tighten",
+        "stage": "executed",
+        "outcome": "applied",
+        "execution": {"is_real_execution": True, "broker_action_confirmed": True},
+    }
+    ref = put_payload(conn, payload, payload_kind="supervisor_trace", schema_version="v1")
+    append_event(
+        conn,
+        event_type="supervisor_trace",
+        entity_type="position_supervisor_trace",
+        entity_id="trace-1",
+        payload_hash=ref.payload_hash,
+        producer="trace-reader-test",
+        observed_at=datetime(2026, 8, 4, 10, 0, tzinfo=timezone.utc),
+    )
+
+    events = iter_supervisor_trace_events(conn, position_id="position-1")
+    rows = iter_supervisor_trace_rows(conn, decision_id="decision-1")
+    assert len(events) == len(rows) == 1
+    assert events[0]["source"] == rows[0]["source"] == "canonical"
+    assert events[0]["trace_id"] == rows[0]["trace_id"] == "trace-1"
+    assert events[0]["execution_json"]
+    assert events[0]["canonical_event_id"]
+    assert events[0]["canonical_event_id"] != "trace-1"
+    assert events[0]["event_type"] == "supervisor_trace"
+
+
+def test_reader_counterfactual_is_canonical_and_json_aliases_are_available() -> None:
+    from backend.services.canonical_v2_reader import iter_counterfactual_rows
+
+    conn = _canonical_sqlite()
+    payload = {
+        "counterfactual_id": "cf-1",
+        "review_id": "review-1",
+        "position_id": "position-1",
+        "label": "would_have_helped",
+        "horizons": [{"minutes": 60, "label": "better"}],
+        "evidence": {"maturity": {"governance_eligible": True}},
+    }
+    ref = put_payload(conn, payload, payload_kind="counterfactual_review", schema_version="v1")
+    append_event(
+        conn,
+        event_type="counterfactual_review",
+        entity_type="supervisor_counterfactual_review",
+        entity_id="cf-1",
+        payload_hash=ref.payload_hash,
+        producer="counterfactual-reader-test",
+        observed_at=datetime(2026, 8, 4, 11, 0, tzinfo=timezone.utc),
+    )
+
+    rows = iter_counterfactual_rows(conn, review_id="review-1")
+    assert len(rows) == 1
+    assert rows[0]["source"] == "canonical"
+    assert rows[0]["counterfactual_id"] == "cf-1"
+    assert json.loads(rows[0]["horizons_json"]) == payload["horizons"]
+    assert json.loads(rows[0]["evidence_json"]) == payload["evidence"]
+
+
+def test_reader_does_not_read_retired_table_without_canonical_schema() -> None:
+    """A missing canonical stream is empty even if a retired table exists."""
     from backend.services.canonical_v2_reader import canonical_ready, iter_reviews, read_review
 
     conn = sqlite3.connect(":memory:")
@@ -490,15 +558,8 @@ def test_reader_legacy_fallback_without_canonical_schema() -> None:
         ("review-legacy-1", "trade-1", "position-1", "decision-1", -3.5, "loss", 1786800000.0),
     )
     assert canonical_ready(conn) is False
-
-    record = read_review(conn, "review-legacy-1")
-    assert record is not None
-    assert record["source"] == "legacy"
-    assert record["payload"]["pnl"] == -3.5
-
-    rows = iter_reviews(conn, limit=0)
-    assert len(rows) == 1
-    assert rows[0]["review_id"] == "review-legacy-1"
+    assert read_review(conn, "review-legacy-1") is None
+    assert iter_reviews(conn, limit=0) == []
 
 
 def test_reader_order_position_rows_shape_legacy_row_shapes() -> None:
@@ -583,7 +644,7 @@ def test_reader_order_position_rows_shape_legacy_row_shapes() -> None:
     assert shaped_order["event_id"] == "oevt-1"
     assert abs(shaped_order["event_ts"] - stamp.timestamp()) < 1e-6
     assert shaped_order["details_json"] == json.dumps({"sl": 4100.0, "tp": 4160.0}, sort_keys=True)
-    # nested details key is not part of the legacy-shaped row
+    # nested details key is not part of the historical row shape
     assert "details" not in shaped_order
 
     shaped_position = position_row(conn, "pevt-1")
