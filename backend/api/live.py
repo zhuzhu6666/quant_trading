@@ -492,7 +492,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
     else:
         reason = "等待因子信号"
 
-    # ── 因子投票快照 (每 tick 更新, 前端「因子投票」面板) ──
+    # ── 因子投票快照 (每个已提交决策 K 线更新, 前端「因子投票」面板) ──
     factor_votes = _live_state.get("last_factor_votes") or {}
     last_composite = _live_state.get("last_composite") or {}
     # 诊断信息

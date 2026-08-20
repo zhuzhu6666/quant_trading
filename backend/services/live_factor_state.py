@@ -89,7 +89,15 @@ def commit_ready_factor_decision(
                 getattr(composite, "factor_roles", {}),
                 getattr(composite, "active_weights", {}),
             ),
-            build_factor_snapshot_summary(composite, gate_result, now=now()),
+            # Keep the decision-bar identity in the same snapshot that the
+            # renderer consumes.  ``ts`` is publication time and cannot
+            # distinguish two decisions with identical factor values.
+            build_factor_snapshot_summary(
+                composite,
+                gate_result,
+                now=now(),
+                decision_bar_ts=progress.bar_ts,
+            ),
         )
     except Exception as exc:
         log(f"tick {tick}: factor votes save failed (non-fatal): {exc}")

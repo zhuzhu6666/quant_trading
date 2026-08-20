@@ -78,6 +78,7 @@ def test_commit_ready_factor_decision_updates_state_and_snapshot_contract():
     }
     assert votes["volatility"]["direction"] == 0
     assert summary["ts"] == 999.0
+    assert summary["decision_bar_ts"] == 321.0
     assert summary["gate_reason"] == "passed"
     assert committed.factor_values is frame.factor_values
     assert committed.composite is frame.composite
@@ -155,3 +156,4 @@ def test_commit_ready_factor_decision_with_zero_bar_ts_skips_state_update():
     assert state_updates == []
     assert len(snapshots) == 1
     assert snapshots[0][1]["ts"] == 1001.0
+    assert snapshots[0][1]["decision_bar_ts"] == 0.0

@@ -79,7 +79,12 @@ def test_factor_snapshot_helpers_preserve_vote_and_summary_payloads():
         {"trend": "alpha", "noise": "context", "mean": "alpha"},
         {"trend": 0.5, "noise": 0.0, "mean": 0.2},
     )
-    summary = build_factor_snapshot_summary(composite, gate, now=123.0)
+    summary = build_factor_snapshot_summary(
+        composite,
+        gate,
+        now=123.0,
+        decision_bar_ts=120.0,
+    )
 
     assert votes == {
         "trend": {
@@ -135,6 +140,7 @@ def test_factor_snapshot_helpers_preserve_vote_and_summary_payloads():
         "gate_passed": True,
         "gate_reason": "ok",
         "ts": 123.0,
+        "decision_bar_ts": 120.0,
     }
 
 

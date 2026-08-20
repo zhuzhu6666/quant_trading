@@ -69,8 +69,9 @@ def build_factor_snapshot_summary(
     gate_result: Any,
     *,
     now: float,
+    decision_bar_ts: float | None = None,
 ) -> dict[str, Any]:
-    return {
+    summary = {
         "direction": composite.direction,
         "score": round(composite.score, 4),
         "tactical_score": round(composite.tactical_score, 4),
@@ -113,6 +114,9 @@ def build_factor_snapshot_summary(
         "gate_reason": gate_result.reason,
         "ts": now,
     }
+    if decision_bar_ts is not None:
+        summary["decision_bar_ts"] = float(decision_bar_ts or 0.0)
+    return summary
 
 
 def build_signal_log_suffix(composite: Any, gate_result: Any) -> str:

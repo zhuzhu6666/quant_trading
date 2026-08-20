@@ -107,7 +107,17 @@ function stringList(value: unknown): string[] {
 }
 
 function timestampValue(source: UnknownObject): string | number | null {
-  for (const key of ["observed_at", "updated_at", "created_at", "decision_ts", "catalog_ts", "lifecycle_updated_at", "health_updated_at", "last_action_ts"]) {
+  for (const key of ["observed_at", "updated_at", "created_at", "decision_ts", "catalog_ts", "lifecycle_updated_at", "health_updated_at", "last_action_ts", "ts"]) {
+    const value = source[key];
+    if ((typeof value === "string" && value.trim()) || (typeof value === "number" && Number.isFinite(value))) {
+      return value as string | number;
+    }
+  }
+  return null;
+}
+
+function decisionBarTimestampValue(source: UnknownObject): string | number | null {
+  for (const key of ["decision_bar_ts", "bar_ts", "bar_time", "signal_bar_ts", "decision_ts"]) {
     const value = source[key];
     if ((typeof value === "string" && value.trim()) || (typeof value === "number" && Number.isFinite(value))) {
       return value as string | number;
@@ -225,6 +235,24 @@ export function decodeSpot(payload: unknown): SpotFact {
   };
 }
 
+function decodeFactorComposite(value: unknown) {
+  const source = object(value);
+  return {
+    gatePassed: booleanValue(source, "gate_passed"),
+    gateReason: firstString(source, "gate_reason", "reason", "action_reason"),
+    direction: stringOrNumberValue(source, "direction") ?? stringValue(source, "side"),
+    score: numberValue(source, "score"),
+    factorSetVersion: firstString(source, "factor_set_version", "factor_version"),
+    activeFactors: numberValue(source, "n_active_factors"),
+    availableFactors: numberValue(source, "n_available_factors"),
+    scoringFactors: numberValue(source, "n_scoring_factors"),
+    contributingFactors: numberValue(source, "n_contributing_factors"),
+    abstainFactors: numberValue(source, "n_abstain_factors"),
+    decisionBarAt: decisionBarTimestampValue(source),
+    observedAt: timestampValue(source),
+  };
+}
+
 function decodeSnapshotComponent<T>(payload: UnknownObject, name: string, decode: (value: unknown) => T, value: unknown = payload): T {
   const components = object(readFact(payload, "live.state.v2").components);
   const domain = object(value);
@@ -236,6 +264,7 @@ export function decodeLiveSnapshot(payload: unknown) {
   const source = object(payload);
   const fact = readFact(source, "live.state.v2");
   const strategyStatus = object(source.strategy_status);
+  const strategyV4Status = object(strategyStatus.v4_status);
   const daily = object(source.daily);
   const risk = object(source.risk);
   const account = decodeSnapshotComponent(source, "account", decodeAccount, source.account ?? source);
@@ -261,6 +290,7 @@ export function decodeLiveSnapshot(payload: unknown) {
       ?? source.new_risk_reconcile_blockers,
   );
   const gates = object(source.action_gates);
+  const pipelineFact = readFactComponent({ _fact: fact }, "strategy", "live.strategy.v2");
   return {
     fact,
     serverTime: stringValue(source, "server_time"),
@@ -268,6 +298,17 @@ export function decodeLiveSnapshot(payload: unknown) {
     account,
     positions,
     loop,
+    pipeline: {
+      fact: pipelineFact,
+      strategy: firstString(strategyStatus, "strategy", "name"),
+      mode: firstString(strategyStatus, "mode"),
+      executionMode: firstString(strategyStatus, "execution_mode"),
+      active: booleanValue(strategyV4Status, "pipeline_active") ?? booleanValue(strategyStatus, "running"),
+      engineWarm: booleanValue(strategyV4Status, "engine_warm"),
+      bufferSize: numberValue(strategyV4Status, "buffer_size"),
+      factorVotes: object(source.factor_votes),
+      composite: decodeFactorComposite(source.last_composite),
+    },
     session,
     spot,
     safety,
@@ -370,6 +411,22 @@ function decodeVerdict(value: unknown, index: number): RiskPolicyVerdict {
         : "unknown",
     reasonCode: firstString(source, "reason_code", "reason", "execution_reason", "execution_category"),
     decisionAt: source.decision_ts as string | number | null ?? source.created_at as string | number | null ?? null,
+    decisionId: identifierValue(source, "decision_id"),
+    positionId: identifierValue(source, "position_id"),
+    eventType: firstString(source, "event_type"),
+    symbol: stringValue(source, "symbol"),
+    timeframe: stringValue(source, "timeframe"),
+    direction: stringOrNumberValue(source, "direction") ?? stringValue(source, "side"),
+    gatePassed: booleanValue(source, "gate_passed"),
+    gateReason: firstString(source, "gate_reason"),
+    admissionGatePassed: booleanValue(source, "admission_gate_passed"),
+    riskPolicyReached: booleanValue(source, "risk_policy_reached"),
+    actionReason: firstString(source, "action_reason"),
+    executionStatus: firstString(source, "execution_status"),
+    executionOutcome: firstString(source, "execution_outcome"),
+    executionReason: firstString(source, "execution_reason"),
+    executionApplied: booleanValue(source, "execution_applied"),
+    executionCategory: firstString(source, "execution_category"),
   };
 }
 
@@ -389,9 +446,24 @@ function decodeExecutionTrace(value: unknown, index: number): ExecutionTrace {
   };
 }
 
-export function decodePolicyVerdicts(payload: unknown): { fact: ReturnType<typeof readFact>; items: RiskPolicyVerdict[] } {
+export function decodePolicyVerdicts(payload: unknown): { fact: ReturnType<typeof readFact>; items: RiskPolicyVerdict[]; prePolicySkips: RiskPolicyVerdict[] } {
   const source = object(payload);
-  return { fact: readFact(source, "risk.policy-verdicts.v2"), items: arrayField(source, "items").map(decodeVerdict) };
+  const prePolicySkips = arrayField(source, "pre_policy_skips").map((value, index) => {
+    const skip = object(value);
+    return decodeVerdict({
+      ...skip,
+      action: "open_admission_gate",
+      allowed: false,
+      decision: "block",
+      reason: firstString(skip, "action_reason", "gate_reason", "admission_owner") ?? "risk_not_reached",
+      execution_category: "not_reached",
+    }, index);
+  });
+  return {
+    fact: readFact(source, "risk.policy-verdicts.v2"),
+    items: arrayField(source, "items").map(decodeVerdict),
+    prePolicySkips,
+  };
 }
 
 export function decodeTradeTraces(payload: unknown): { fact: ReturnType<typeof readFact>; items: ExecutionTrace[] } {
@@ -887,15 +959,19 @@ export async function getRiskDeskData(): Promise<RiskDeskData> {
   return { fact: risk.fact, policyFact: policy.fact, traceFact: traces.fact, snapshot: risk.snapshot, verdicts: policy.items, traceRows: traces.items };
 }
 
+export type MarketBarsSource = "monthly" | "live";
+
 export function getMarketBars(
   symbol = "XAUUSD+",
   timeframe = "M15",
   limit = 180,
   range?: { fromTs?: number; toTs?: number },
+  source: MarketBarsSource = "monthly",
 ): Promise<MarketBars> {
   const params = new URLSearchParams({ symbol, timeframe, limit: String(limit) });
   if (range?.fromTs !== undefined) params.set("from", String(Math.floor(range.fromTs)));
   if (range?.toTs !== undefined) params.set("to", String(Math.ceil(range.toTs)));
+  if (source !== "monthly") params.set("source", source);
   return apiRequest<unknown>(`/api/market/bars?${params.toString()}`).then((payload) => decodeMarketBars(payload, symbol, timeframe));
 }
 

@@ -495,6 +495,7 @@ def _publish_initial_factor_signal(
                 composite,
                 gate_result,
                 now=runtime.now(),
+                decision_bar_ts=last_bar.get("time"),
             ),
         )
         direction_name = {1: "LONG", -1: "SHORT"}.get(

@@ -83,7 +83,7 @@
 | `GET /api/ctrader/token-status` | `ops.ctrader-token-status.v2` |
 | `GET /api/data/external-status` | `ops.external-data-status.v2` |
 | `GET /api/v4/catalog` | `factor.catalog.v4` |
-| `GET /api/market/bars` | `market.bars.v1`；`bars_monthly` 最近一根 K 线时间作为 `observed_at`，空结果为 `unknown/market_bars_empty` |
+| `GET /api/market/bars` | `market.bars.v1`；默认 `source=monthly` 使用 `bars_monthly`，显式 `source=live` 只读 cTrader bridge 的 `ctrader_live_trendbar` 在线缓存；两者都用最近一根 K 线作为 `observed_at`，实时源不可用时为 `unknown/ctrader_live_trendbar_unavailable`，不回退月库 |
 | `GET /api/ops/alerts` | `ops.alerts.v2`，components 含 `ops.alert-delivery.v1` |
 | `GET /api/ops/recovery` | `ops.auto-recovery.v2` |
 | `GET /api/ops/recovery/history` | `ops.auto-recovery-history.v2` |

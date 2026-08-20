@@ -162,14 +162,25 @@ export function OpsPage() {
     setActiveSource(source);
   };
 
+  const logWindowSummary = logs.error ? "读取失败" : logs.data ? `${visibleEntries.length} / ${allEntries.length}` : "—";
+  const issueSummary = health.isPending || logs.isPending ? "—" : String(issues.length);
+  const loadSummary = systemLoad.data ? `CPU ${formatPercent(systemLoad.data.cpu.percent)} · 内存 ${formatPercent(systemLoad.data.memory.percent)}` : "—";
+
   return <div className="workspace-page ops-page">
-    <WorkspaceTitle kicker="05 / 运维" title="运维中心" description="实时日志、异常摘要、任务诊断与审计追踪。" />
+    <WorkspaceTitle kicker="05 / 运维" title="运维中心" description="实时日志、异常摘要、任务诊断与审计追踪。" fact={healthFact} />
     <div className="workspace-toolbar ops-toolbar">
       <span><Terminal size={14} />日志 / {LOG_SOURCES.find((item) => item.id === activeSource)?.file}</span>
       <span><Wifi size={14} />WS / {uiStatus(live.connection)}</span>
       <FactBadge compact fact={healthFact} label="后端" />
       <span><Clock3 size={14} />观测 / {formatTimestamp(logs.data?.observedAt, "未读取")}</span>
       <button type="button" onClick={refreshAll} disabled={logs.isFetching}><RefreshCw size={14} />重新读取</button>
+    </div>
+    <div className="reference-fact-strip ops-summary-strip">
+      <div className="reference-fact-card"><span>服务健康</span><strong><FactBadge compact fact={healthFact} /></strong><small>{health.data?.source.status ?? (health.error ? "请求失败" : "待确认")}</small></div>
+      <div className="reference-fact-card"><span>日志窗口</span><strong>{logWindowSummary}</strong><small>{LOG_SOURCES.find((item) => item.id === activeSource)?.label} · {paused ? "已暂停" : "每 3 秒"}</small></div>
+      <div className="reference-fact-card"><span>异常摘要</span><strong>{issueSummary}</strong><small>只汇总已读取诊断</small></div>
+      <div className="reference-fact-card"><span>系统负载</span><strong>{loadSummary}</strong><small>{systemLoad.data ? "服务器响应" : "待确认"}</small></div>
+      <div className="reference-fact-card"><span>自动恢复</span><strong>{recovery.data?.source.running === true ? "运行中" : recovery.data?.source.registered === true ? "已注册" : "—"}</strong><small><FactBadge compact fact={recoveryFact} /></small></div>
     </div>
     <div className="workspace-grid ops-grid">
       <Panel title="实时日志" eyebrow="/api/logs/tail" className="ops-log-panel">

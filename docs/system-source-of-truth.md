@@ -339,7 +339,7 @@ release preflight 和前端只能复用该结果，不得通过再次读取原�
 | 数据 | 权威来源 | 说明 |
 |---|---|---|
 | K 线 | `data/bars_monthly/bars_YYYY_MM.duckdb` | `data/bars.duckdb` 是当前月兼容链接 |
-| 市场图表 API fact | `backend.api.market.get_bars` + `market.bars.v1` | 只读月库最近一根 K 线作为观测时间；空集为 `unknown`，前端可展示 stale 研究缓存但不得作为运行/风险授权事实 |
+| 市场图表 API fact | `backend.api.market.get_bars` + `market.bars.v1` | 默认 `source=monthly` 只读月库；显式 `source=live` 只读 `CTraderBridge` 内存 trendbar feed，最近一根 K 线作为观测时间；实时源空集为 `unknown`，不以月库替代，不作为运行/风险授权事实 |
 | 外部研究数据 | `data/external_data.duckdb` | COT/ETF/FRED/央行黄金/宏观，必须按 `release_at` 做 PIT；CB 由 WGC 季度序列、ETF 日线由 Yahoo chart、持仓由 SEC EDGAR 刷新 |
 | 经济事件 | `data/events.duckdb` | 风控事件缩放读取 |
 | 运行态状态 | PostgreSQL `runtime` schema | 不再使用 `data/state.db` |

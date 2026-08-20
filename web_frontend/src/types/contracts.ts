@@ -84,6 +84,33 @@ export type LoopFact = {
   reasonCode: string | null;
 };
 
+export type FactorCompositeView = {
+  gatePassed: boolean | null;
+  gateReason: string | null;
+  direction: string | null;
+  score: number | null;
+  factorSetVersion: string | null;
+  activeFactors: number | null;
+  availableFactors: number | null;
+  scoringFactors: number | null;
+  contributingFactors: number | null;
+  abstainFactors: number | null;
+  decisionBarAt: string | number | null;
+  observedAt: string | number | null;
+};
+
+export type FactorPipelineFact = {
+  fact: FactEnvelope;
+  strategy: string | null;
+  mode: string | null;
+  executionMode: string | null;
+  active: boolean | null;
+  engineWarm: boolean | null;
+  bufferSize: number | null;
+  factorVotes: Readonly<Record<string, unknown>>;
+  composite: FactorCompositeView;
+};
+
 export type SessionRiskFact = {
   fact: FactEnvelope;
   pnlToday: number | null;
@@ -106,6 +133,7 @@ export type LiveStateSnapshot = {
   account: AccountFact;
   positions: PositionsFact;
   loop: LoopFact;
+  pipeline: FactorPipelineFact;
   session: SessionRiskFact;
   spot: SpotFact;
   safety: FactEnvelope;
@@ -157,6 +185,22 @@ export type RiskPolicyVerdict = {
   decision: "allow" | "block" | "unknown";
   reasonCode: string | null;
   decisionAt: string | number | null;
+  decisionId?: string | null;
+  positionId?: string | null;
+  eventType?: string | null;
+  symbol?: string | null;
+  timeframe?: string | null;
+  direction?: string | null;
+  gatePassed?: boolean | null;
+  gateReason?: string | null;
+  admissionGatePassed?: boolean | null;
+  riskPolicyReached?: boolean | null;
+  actionReason?: string | null;
+  executionStatus?: string | null;
+  executionOutcome?: string | null;
+  executionReason?: string | null;
+  executionApplied?: boolean | null;
+  executionCategory?: string | null;
 };
 
 export type RiskDeskData = {

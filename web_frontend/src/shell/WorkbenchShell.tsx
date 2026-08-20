@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Activity, BrainCircuit, ChevronLeft, ChevronRight, Command, Gauge, GitBranch, LogOut, Menu, Settings2, Shield, X } from "lucide-react";
+import { Activity, BookOpen, BrainCircuit, ChevronLeft, ChevronRight, Command, Gauge, GitBranch, Home, LogOut, Menu, Settings2, Shield, X } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLiveState } from "@/hooks/useLiveState";
 import { useLayoutPreference } from "@/shell/layout";
@@ -9,6 +9,7 @@ import { CommandPalette } from "@/shell/CommandPalette";
 import { SafetyRail } from "@/shell/SafetyRail";
 import { ServerStatusCard } from "@/shell/ServerStatusCard";
 import { getReadinessView } from "@/api/workbench";
+import { formatObservedTime } from "@/api/time";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { WorkspaceId } from "@/types/contracts";
 import { uiStatus, workspaceLabels } from "@/i18n/zh-CN";
@@ -21,6 +22,14 @@ const navigation: { id: WorkspaceId; path: string; label: string; english: strin
   { id: "ops", path: "/ops", ...workspaceLabels.ops, icon: Settings2 },
   { id: "workflow", path: "/workflow", ...workspaceLabels.workflow, icon: GitBranch },
 ];
+
+const visualNavigation = [
+  { path: "/trade-ops", label: "概览", hint: "账户与持仓", icon: Home },
+  { path: "/research", label: "研究", hint: "行情与证据", icon: BookOpen },
+  { path: "/risk-desk", label: "风控", hint: "风险与裁决", icon: Shield },
+  { path: "/governance", label: "治理", hint: "审查与发布", icon: Gauge },
+  { path: "/ops", label: "运维", hint: "日志与健康", icon: Settings2 },
+] as const;
 
 function workspaceFromPath(pathname: string): WorkspaceId {
   const item = navigation.find((entry) => pathname === entry.path || pathname.startsWith(`${entry.path}/`));
@@ -80,14 +89,15 @@ export function WorkbenchShell() {
     return () => observer.disconnect();
   }, []);
 
-  return <div ref={shellRef} className={`workbench cockpit-theme ${layout.sidebar_collapsed ? "workbench-sidebar-collapsed" : ""}`}>
+  return <div ref={shellRef} className={`workbench cockpit-theme reference-theme ${layout.sidebar_collapsed ? "workbench-sidebar-collapsed" : ""}`}>
     <SafetyRail onRefresh={refreshFacts} />
     <a className="skip-link" href="#workbench-main">跳到主要内容</a>
     <aside className={`workbench-sidebar ${mobileNavOpen ? "workbench-sidebar-open" : ""}`} aria-label="工作区导航">
-      <div className="sidebar-head"><Link to="/trade-ops" className="sidebar-title"><span className="sidebar-logo">Q</span><span><strong>WORKBENCH</strong><small>服务端权威</small></span></Link><button type="button" className="mobile-close" onClick={() => setMobileNavOpen(false)} aria-label="关闭工作区导航"><X size={16} /></button></div>
-      <div className="workspace-nav"><span className="nav-kicker">工作区</span>{navigation.map((item, index) => { const Icon = item.icon; return <NavLink key={item.id} to={item.path} onClick={() => setMobileNavOpen(false)} className={({ isActive }) => `workspace-link ${isActive ? "workspace-link-active" : ""}`}><span className="workspace-index">0{index + 1}</span><Icon size={17} aria-hidden="true" /><span className="workspace-copy"><strong>{item.label}</strong><small>{item.hint}</small></span></NavLink>; })}</div>
+      <div className="sidebar-head"><Link to="/trade-ops" className="sidebar-title"><span className="sidebar-logo">Q</span><span><strong>WORKBENCH</strong><small>视觉预览</small></span></Link><button type="button" className="mobile-close" onClick={() => setMobileNavOpen(false)} aria-label="关闭工作区导航"><X size={16} /></button></div>
+      <div className="workspace-nav reference-workspace-nav"><span className="nav-kicker">导航</span>{visualNavigation.map((item, index) => { const Icon = item.icon; const itemUrl = new URL(item.path, window.location.origin); const itemView = new URLSearchParams(itemUrl.search).get("view"); const active = location.pathname === itemUrl.pathname && (!itemView || new URLSearchParams(location.search).get("view") === itemView); return <NavLink key={item.path} to={item.path} onClick={() => setMobileNavOpen(false)} className={`workspace-link ${active ? "workspace-link-active" : ""}`}><span className="workspace-index">0{index + 1}</span><Icon size={20} aria-hidden="true" /><span className="workspace-copy"><strong>{item.label}</strong><small>{item.hint}</small></span></NavLink>; })}</div>
+      <div className="reference-sidebar-status"><ServerStatusCard /></div>
       <div className="sidebar-utility"><button type="button" onClick={() => setPaletteOpen(true)}><Command size={15} />命令面板 <kbd>⌘K</kbd></button><button type="button" onClick={() => updateLayout({ sidebar_collapsed: false })}><Settings2 size={15} />重置侧栏</button></div>
-      <div className="sidebar-bottom"><ServerStatusCard /><div className="sidebar-user"><div><strong>{user ?? "操作员"}</strong><small>会话仅驻留内存</small></div><button type="button" onClick={logout} aria-label="退出登录" title="退出登录"><LogOut size={15} /></button></div></div>
+      <div className="sidebar-bottom reference-sidebar-bottom"><div className="sidebar-garden" aria-hidden="true"><span className="plant-leaf plant-leaf-a" /><span className="plant-leaf plant-leaf-b" /><span className="plant-leaf plant-leaf-c" /><span className="plant-leaf plant-leaf-d" /><span className="plant-stem" /><span className="plant-pot" /><span className="plant-plinth" /></div><div className="sidebar-user"><div><strong>{user ?? "操作员"}</strong><small>视觉预览</small></div><button type="button" onClick={logout} aria-label="退出登录" title="退出登录"><LogOut size={15} /></button></div></div>
       <button type="button" className="sidebar-collapse" onClick={() => updateLayout({ sidebar_collapsed: !layout.sidebar_collapsed })} aria-label={layout.sidebar_collapsed ? "展开导航" : "折叠导航"}>{layout.sidebar_collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button>
     </aside>
     <button className={`mobile-nav-scrim ${mobileNavOpen ? "mobile-nav-scrim-open" : ""}`} type="button" onClick={() => setMobileNavOpen(false)} aria-label="关闭导航" />
@@ -97,7 +107,7 @@ export function WorkbenchShell() {
       <div className="workbench-stage">
         <div className="workbench-primary"><Outlet /></div>
       </div>
-      <footer className="workbench-footer"><span className={`footer-connection footer-${live.connection}`}><i />{uiStatus(live.connection)}</span><span>事实新鲜度：服务端观测</span><span>{live.reconnectCount ? `重连 ${live.reconnectCount} 次` : "无重连"}</span><span className="footer-spacer" /><span>审计活动：经后端路由</span><span>桌面端：Tauri 2 已就绪</span></footer>
+      <footer className="workbench-footer reference-footer"><span className={`footer-connection footer-${live.connection}`}><i />数据连接</span><span>{uiStatus(live.connection)}</span><span>事实观测　{live.lastCompleteSnapshotAt ? formatObservedTime(live.lastCompleteSnapshotAt) : "未知"}</span><span>经纪商　{live.snapshot?.broker ?? "未知"}</span><span className="footer-spacer" /><span>审计活动　经后端路由</span><span className="footer-warning">⚠　本界面仅供参考，不构成投资建议</span></footer>
     </main>
     <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={commands} />
   </div>;

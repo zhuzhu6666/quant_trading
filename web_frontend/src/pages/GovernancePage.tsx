@@ -37,8 +37,19 @@ export function GovernancePage() {
   const reviewsFact = queryFact(reviews.data?.fact, reviews.error, "ops.v16-governance-candidate-reviews.v2", "governance_reviews_not_loaded");
   const proposalsFact = queryFact(proposals.data?.fact, proposals.error, "ops.autonomy-proposals.v2", "governance_proposals_not_loaded");
   const releaseFact = queryFact(release.data?.fact, release.error, "ops.release-latest.v2", "governance_release_not_loaded");
+  const confirmedCount = (fact: FactEnvelope, count: number | undefined): string => fact.state === "known" || fact.state === "stale" ? String(count ?? 0) : "—";
+  const candidateCount = confirmedCount(candidatesFact, candidates.data?.items.length);
+  const reviewCount = confirmedCount(reviewsFact, reviews.data?.items.length);
+  const proposalCount = confirmedCount(proposalsFact, proposals.data?.items.length);
+  const releaseCount = confirmedCount(releaseFact, release.data?.items.length);
 
-  return <div className="workspace-page governance-page"><WorkspaceTitle kicker="04 / 控制平面" title="治理中心" description="候选、审查、提案、mutation、release 和审计轨迹。前端不批准、不应用，不绕过 Coordinator、V16 或 RiskPolicy。" fact={candidatesFact} /><div className="workspace-toolbar"><span><ShieldCheck size={14} />治理 / 服务端门控</span><span>必须有持久 ID + 审计 ID</span><span>mutation / 回读提交状态</span></div><div className="workspace-grid governance-grid">
+  return <div className="workspace-page governance-page"><WorkspaceTitle kicker="04 / 控制平面" title="治理中心" description="候选、审查、提案、mutation、release 和审计轨迹。前端不批准、不应用，不绕过 Coordinator、V16 或 RiskPolicy。" fact={candidatesFact} /><div className="workspace-toolbar"><span><ShieldCheck size={14} />治理 / 服务端门控</span><span>必须有持久 ID + 审计 ID</span><span>mutation / 回读提交状态</span></div><div className="reference-fact-strip governance-summary-strip">
+    <div className="reference-fact-card"><span>候选队列</span><strong>{candidateCount}</strong><small><FactBadge compact fact={candidatesFact} /></small></div>
+    <div className="reference-fact-card"><span>候选审查</span><strong>{reviewCount}</strong><small><FactBadge compact fact={reviewsFact} /></small></div>
+    <div className="reference-fact-card"><span>提案登记</span><strong>{proposalCount}</strong><small><FactBadge compact fact={proposalsFact} /></small></div>
+    <div className="reference-fact-card"><span>发布证据</span><strong>{releaseCount}</strong><small><FactBadge compact fact={releaseFact} /></small></div>
+    <div className="reference-fact-card reference-fact-card-note"><span>授权边界</span><strong>服务端门控</strong><small>空列表不等于允许</small></div>
+  </div><div className="workspace-grid governance-grid">
     <Panel title="候选队列" eyebrow="V16 治理候选" className="governance-candidates"><div className="panel-toolbar"><FactBadge fact={candidatesFact} /><span>{candidates.data?.items.length ?? "—"} 条记录</span><span className="control-boundary"><ClipboardCheck size={13} />进入桥接前必须审查</span></div><GovernanceRows items={candidates.data?.items ?? []} emptyMessage={candidates.error ? "候选队列读取失败；未显示猜测值。" : candidatesFact.state === "known" ? "当前没有可审候选；后端查询已完成，历史候选均已进入终态。" : "候选数据尚未确认；未显示猜测值。"} /></Panel>
     <Panel title="候选审查" eyebrow="候选审查" className="governance-reviews"><div className="panel-toolbar"><FactBadge fact={reviewsFact} /><span>仅服务端审查</span></div><GovernanceRows items={reviews.data?.items ?? []} emptyMessage={reviews.error ? "候选审查读取失败；未显示猜测值。" : undefined} /></Panel>
     <Panel title="提案登记" eyebrow="/api/ops/autonomy/proposals" className="governance-proposals"><div className="panel-toolbar"><FactBadge fact={proposalsFact} /><span>只读投影</span></div><GovernanceRows items={proposals.data?.items ?? []} emptyMessage={proposals.error ? "提案登记读取失败；未显示猜测值。" : undefined} /></Panel>
