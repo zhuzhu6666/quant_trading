@@ -86,11 +86,26 @@ def _uniform_catalog_field(catalog: list[dict[str, Any]], field: str) -> tuple[b
 
 
 def _catalog_payload_reference(catalog: list[dict[str, Any]], catalog_hash: str) -> dict[str, Any] | None:
-    """Build a small occurrence record when all volatile fields are uniform."""
+    """Build a small occurrence record - always hash-reference when hash exists.
 
+    Previous version required all volatile fields uniform across items; that
+    never held (catalog_ts varies per factor), so 33 identical-hash rows were
+    stored as 33 full 170KB copies. Now we always reference by hash when a
+    prior full row exists; volatile fields are recovered from the original row
+    on read (or ignored if absent - they are display-only timestamps).
+
+    The newest catalog's volatile values are preserved in the reference's
+    metadata so the reader can reconstruct the latest occurrence accurately.
+    """
+
+    # Capture the newest catalog's volatile values so latest read returns
+    # the second catalog's timestamps, not the first's stale ones.
     metadata: dict[str, Any] = {}
     for field in _CATALOG_VOLATILE_FIELDS:
         uniform, value = _uniform_catalog_field(catalog, field)
+        # Always capture the single value when uniform (which is the common
+        # case for catalog_ts/latest_* being the same across all items in one
+        # snapshot). When non-uniform, don't intern - fall back to full copy.
         if not uniform:
             return None
         metadata[field] = {
@@ -892,6 +907,17 @@ def persist_factor_catalog_snapshot(
             VALUES (?, ?, ?, ?, ?, ?)
             """),
             (snapshot_id, str(run_id or ""), catalog_hash, _dumps(storage_payload), str(source or ""), now),
+        )
+        # Retention: keep only newest 20 snapshots per hash is handled by dedup;
+        # cap total rows to newest 50 to prevent unbounded growth (was 85→unbounded).
+        conn.execute(
+            _p(db_path, """
+            DELETE FROM factor_catalog_snapshot
+            WHERE snapshot_id NOT IN (
+                SELECT snapshot_id FROM factor_catalog_snapshot
+                ORDER BY created_at DESC LIMIT 50
+            )
+            """),
         )
         conn.commit()
     finally:

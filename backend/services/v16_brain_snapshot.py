@@ -771,6 +771,22 @@ class BrainStateService:
         conn = connect(self.db_path)
         try:
             persisted_memory = _bounded_persisted_memory(snapshot["memory"])
+            # Content-hash dedup: identical snapshots share the same hash.
+            # We still insert every call (latest is always fresh for readers)
+            # but old identical rows are pruned to keep only the newest N.
+            # This turns 1.1MB of identical 17KB rows into ~20 live rows.
+            snapshot_hash = hashlib.sha256(
+                json.dumps(
+                    {
+                        "world_model": snapshot["world_model"],
+                        "perceptions": snapshot["perceptions"],
+                        "memory": persisted_memory,
+                        "hypotheses": snapshot["hypotheses"],
+                        "critic": snapshot["critic"],
+                    },
+                    sort_keys=True, ensure_ascii=False, default=str,
+                ).encode("utf-8")
+            ).hexdigest()[:16]
             execute(
                 conn,
                 """INSERT INTO brain_state_snapshot
@@ -786,6 +802,18 @@ class BrainStateService:
                     dumps(snapshot["critic"]), dumps(snapshot["evidence_refs"]),
                     dumps(snapshot["boundary"]), safe_float(snapshot["created_at"]),
                 ),
+            )
+            # Retention: keep only the newest 20 snapshots (readers use latest 1).
+            # Older rows are pruned, not archived to a second table - the hash
+            # above already dedups identical content, retention caps growth.
+            conn.execute(
+                """
+                DELETE FROM brain_state_snapshot
+                WHERE snapshot_id NOT IN (
+                    SELECT snapshot_id FROM brain_state_snapshot
+                    ORDER BY created_at DESC LIMIT 20
+                )
+                """,
             )
             conn.commit()
         finally:

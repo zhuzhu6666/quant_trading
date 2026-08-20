@@ -104,9 +104,14 @@ class RecoveryPositionStore:
             return
         position_key = str(position_id)
         now = float(self.runtime.now())
-        entry_decision_id = str(
+        # Prefer the caller-supplied entry_decision_id (the live ledger return)
+        # over the stale file index. The file index from 2026-08-16 has no
+        # 284* positions and would wash a freshly-created decision id to "".
+        snapshot_entry = str(snapshot.get("entry_decision_id") or "")
+        lookup_entry = str(
             self.runtime.lookup_entry_decision_id(position_id) or ""
         )
+        entry_decision_id = snapshot_entry or lookup_entry
         desired_integrity = context_integrity or (
             self.runtime.full_context
             if entry_decision_id

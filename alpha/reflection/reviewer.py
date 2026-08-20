@@ -307,18 +307,65 @@ class TradeReviewer:
                 """,
                 (position_id,),
             ).fetchone()
-            entry_decision_id = str(entry["decision_id"]) if entry else ""
-            trade_id = str(entry["trade_id"]) if entry and entry["trade_id"] else str(position_id)
+            # Fallback: decision_ledger can be empty for new live positions
+            # (e.g. after a stale index rebuild gap). Recover entry context
+            # from the durable recovery meta / order events so the next close
+            # review is not forced into restart_replay / missing attribution.
+            fallback_meta: dict = {}
+            fallback_order: dict | None = None
+            if entry is None:
+                rec_fallback = self._execute(conn,
+                    """
+                    SELECT recovery_meta_json
+                    FROM recovery_position_state
+                    WHERE position_id=?
+                    LIMIT 1
+                    """,
+                    (position_id,),
+                ).fetchone()
+                if rec_fallback and rec_fallback["recovery_meta_json"]:
+                    try:
+                        fallback_meta = json.loads(rec_fallback["recovery_meta_json"])
+                    except Exception:
+                        fallback_meta = {}
+                # order event is the second fallback (filled order always exists)
+                ord_fallback = self._execute(conn,
+                    """
+                    SELECT decision_id, trade_id, event_ts, details_json
+                    FROM order_lifecycle_event
+                    WHERE trade_id=?
+                    ORDER BY event_ts DESC LIMIT 1
+                    """,
+                    (str(position_id),),
+                ).fetchone()
+                if ord_fallback:
+                    fallback_order = dict(ord_fallback)
+                # synthesize a minimal entry_decision_id from recovery/order
+                if not fallback_meta and not fallback_order:
+                    fallback_meta = {}
+            entry_decision_id = str(entry["decision_id"]) if entry else str(
+                fallback_meta.get("entry_decision_id") or fallback_meta.get("parent_decision_id")
+                or (fallback_order.get("decision_id") if fallback_order else "") or ""
+            )
+            trade_id = str(entry["trade_id"]) if entry and entry["trade_id"] else str(
+                fallback_order.get("trade_id") if fallback_order and fallback_order.get("trade_id") else str(position_id)
+            )
             entry_score = (
                 float(entry["action_score"])
                 if entry and entry["action_score"] is not None
                 else None
             )
-            regime_id = str(entry["regime_id"] or "") if entry else ""
-            entry_decision_ts = float(entry["decision_ts"] or 0.0) if entry else 0.0
-            timeframe = str(entry["timeframe"] or "") if entry else ""
-            entry_action = _loads(entry["action_json"], {}) if entry else {}
-            entry_risk_state = _loads(entry["risk_state_json"], {}) if entry else {}
+            regime_id = str(entry["regime_id"] or "") if entry else str(fallback_meta.get("entry_regime") or "")
+            entry_decision_ts = float(entry["decision_ts"] or 0.0) if entry else float(
+                fallback_meta.get("tick", 0) or (fallback_order.get("event_ts") if fallback_order else 0) or 0.0
+            )
+            timeframe = str(entry["timeframe"] or "") if entry else str(fallback_meta.get("timeframe") or "")
+            entry_action = _loads(entry["action_json"], {}) if entry else dict(
+                fallback_meta.get("entry_action") or fallback_meta.get("trade_attribution") or {}
+            )
+            entry_risk_state = _loads(entry["risk_state_json"], {}) if entry else dict(
+                fallback_meta.get("entry_risk_state") or {}
+            )
             entry_factors = list(
                 self._execute(conn,
                     """
