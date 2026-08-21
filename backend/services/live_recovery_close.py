@@ -5,7 +5,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from backend.services.review_contract import trusted_broker_close_price
+from backend.services.review_contract import (
+    classify_close_reason_from_recovery,
+    trusted_broker_close_price,
+)
 
 @dataclass(frozen=True)
 class RecoveredCloseReplayRuntime:
@@ -63,6 +66,16 @@ def replay_recovered_close(
         )
         return False
 
+    # Why did this position close?  Reconciliation only knows that it is gone.
+    # A fill matching our durable broker-side stop-loss proves a natural
+    # broker stop-out; everything else stays conservatively labelled.
+    reason_resolution = classify_close_reason_from_recovery(
+        replayed=True,
+        real_pnl=real_pnl,
+        position_state=position_state,
+        fallback_reason="restart_replay",
+    )
+
     payloads = runtime.build_payloads(
         position_id=position_id,
         position_state=position_state,
@@ -70,6 +83,7 @@ def replay_recovered_close(
         strategy_name=strategy_name,
         now_ts=runtime.now(),
         context_integrity_default=runtime.partial_context,
+        sl_hit_evidence=reason_resolution.get("sl_hit_evidence"),
     )
     total_pnl = float(payloads["total_pnl"])
     close_ts = float(payloads["close_ts"])

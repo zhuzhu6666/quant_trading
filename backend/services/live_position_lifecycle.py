@@ -1587,6 +1587,7 @@ def build_replayed_close_payloads(
     strategy_name: str,
     now_ts: float,
     context_integrity_default: str,
+    sl_hit_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     state = position_state or {}
     pnl_payload = real_pnl or {}
@@ -1595,16 +1596,25 @@ def build_replayed_close_payloads(
     close_ts = float(pnl_payload.get("exec_timestamp", now_ts) or now_ts)
     context_integrity = str(state.get("context_integrity") or context_integrity_default or "")
     symbol = str(state.get("symbol") or "XAUUSD+")
-    replay_meta = {"replayed_at": float(now_ts or 0.0), "strategy_name": str(strategy_name or "")}
+    # A replayed close whose fill provably matched our broker-side stop-loss
+    # is the strategy's natural lifecycle (broker stop-out).  The evidence
+    # dict cites the durable intent/deal IDs; it never duplicates payloads.
+    evidence = dict(sl_hit_evidence or {})
+    close_reason = "broker_close" if evidence.get("matched") else "restart_replay"
+    replay_meta = {
+        "replayed_at": float(now_ts or 0.0),
+        "strategy_name": str(strategy_name or ""),
+        **({"sl_hit_evidence": evidence} if evidence else {}),
+    }
     action_json = {
         "position_id": int(position_id),
         "replayed": True,
-        "close_reason": "restart_replay",
+        "close_reason": close_reason,
         "real_pnl": pnl_payload,
     }
     event_details = {
         "replayed": True,
-        "close_reason": "restart_replay",
+        "close_reason": close_reason,
         "real_pnl": pnl_payload,
     }
     return {
@@ -1645,7 +1655,7 @@ def build_replayed_close_payloads(
             "contributions": {},
             "attribution_integrity": "missing",
             "real_pnl": real_pnl,
-            "close_reason": "restart_replay",
+            "close_reason": close_reason,
             "context_integrity": context_integrity,
         },
     }

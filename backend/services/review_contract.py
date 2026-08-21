@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from typing import Any, Mapping
 
 from backend.services.supervisor_payload_contract import (
     bounded_review_projection,
@@ -83,6 +83,104 @@ def trusted_broker_close_price(payload: dict[str, Any] | None) -> float | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return price if math.isfinite(price) and price > 0.0 else None
+
+
+# Broker-side stop-loss execution carries normal slippage.  A replayed close
+# whose fill lands within this tolerance of the durable amend intent's SL is a
+# broker stop-out on the strategy's own protective order — the strategy's
+# natural lifecycle observed through recovery reconciliation, not an
+# operator/replay termination.
+BROKER_SL_HIT_TOLERANCE_RATIO = 0.0005  # 5 bps of price (XAUUSD@4600 ≈ 2.3 pts)
+
+
+def broker_stop_hit_evidence(
+    *,
+    real_pnl: dict[str, Any] | None,
+    position_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Prove (or refute) that a replayed close was our broker-side stop-loss.
+
+    References existing durable records only — the amend intent row and the
+    authoritative close deal — never copying their payloads into the review.
+    Returns a small evidence dict suitable for ``close_reason_source_backfill``
+    style consumption:
+
+    - ``matched``            → close_reason may be reclassified to broker_close
+    - ``intent_id``/``deal_id`` are citations (IDs), not duplicated payloads
+    """
+
+    pnl = real_pnl if isinstance(real_pnl, Mapping) else {}
+    state = position_state if isinstance(position_state, Mapping) else {}
+    fill = trusted_broker_close_price(pnl)
+    direction_raw = state.get("direction") or state.get("side") or 0
+    try:
+        direction = int(direction_raw)
+    except (TypeError, ValueError):
+        direction = 0
+    if fill is None or direction == 0:
+        return {"matched": False}
+
+    intent = None
+    try:
+        from backend.services.broker_execution_intent import BrokerExecutionIntentStore
+
+        intent = BrokerExecutionIntentStore().latest_stop_loss_for_position(
+            str(state.get("position_id") or ""),
+        )
+    except Exception:
+        intent = None
+    target_sl = float(getattr(intent, "target_stop_loss", 0.0) or 0.0)
+    if target_sl <= 0.0:
+        return {"matched": False}
+
+    # A stop-out fill lands *at* the stop (± slippage tolerance), regardless
+    # of side: a long's SL is below and fills at/below it, a short's SL is
+    # above and fills at/above it.  An absolute-ratio window around the stop
+    # captures both without letting distant TP/manual fills through.
+    if abs(fill - target_sl) / target_sl > BROKER_SL_HIT_TOLERANCE_RATIO:
+        return {
+            "matched": False,
+            "intent_id": str(getattr(intent, "intent_id", "") or ""),
+        }
+
+    return {
+        "matched": True,
+        "method": "broker_sl_fill_match",
+        "schema_version": "broker_sl_hit_evidence.v1",
+        "intent_id": str(getattr(intent, "intent_id", "") or ""),
+        "decision_id": str(getattr(intent, "decision_id", "") or ""),
+        "target_stop_loss": target_sl,
+        "deal_id": pnl.get("deal_id"),
+        "exec_price": fill,
+        "direction": direction,
+    }
+
+
+def classify_close_reason_from_recovery(
+    *,
+    replayed: bool,
+    real_pnl: dict[str, Any] | None,
+    position_state: dict[str, Any] | None,
+    fallback_reason: str = "restart_replay",
+) -> dict[str, Any]:
+    """Resolve the close reason for a recovery-replayed close.
+
+    The replay path observes closes by reconciliation ("position vanished"),
+    which alone says nothing about *why* it closed.  When the durable amend
+    intent plus the authoritative deal prove the fill matched our broker-side
+    stop-loss, the strategy's natural lifecycle holds and the review must say
+    ``broker_close`` — otherwise keep the conservative replay label.
+    """
+
+    base = "broker_close" if str(fallback_reason or "") == "broker_close" else str(
+        fallback_reason or "restart_replay"
+    )
+    if not replayed:
+        return {"close_reason": base, "sl_hit_evidence": None}
+    evidence = broker_stop_hit_evidence(real_pnl=real_pnl, position_state=position_state)
+    if evidence.get("matched"):
+        return {"close_reason": "broker_close", "sl_hit_evidence": evidence}
+    return {"close_reason": base, "sl_hit_evidence": evidence}
 
 
 def classify_4label_outcome(

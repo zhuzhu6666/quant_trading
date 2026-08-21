@@ -320,6 +320,52 @@ class BrokerExecutionIntentStore:
             (str(intent_id),),
         ).fetchone()
 
+    def latest_stop_loss_for_position(
+        self,
+        position_id: int | str,
+        *,
+        broker: str = "ctrader",
+    ) -> BrokerExecutionIntent | None:
+        """Return the newest confirmed SL/TP amend intent for a position.
+
+        Read-only reference lookup.  Callers receive the durable intent row
+        itself — never a copy of its payload — so the close-reason classifier
+        can cite the broker-side stop-loss authority without duplicating it.
+        """
+
+        pid = str(int(position_id or 0) or 0)
+        if not pid:
+            return None
+        conn = self._connect(read_only=True)
+        try:
+            row = conn.execute(
+                """
+                SELECT intent_id, idempotency_key, broker, account_id, symbol,
+                       action, side, requested_volume, status, attempt_count,
+                       position_id, broker_order_id, request_json,
+                       broker_response_json, error_json, prepared_at,
+                       submitted_at, completed_at, updated_at,
+                       requested_price, target_stop_loss, target_take_profit,
+                       decision_id, trade_id
+                FROM runtime.broker_execution_intent
+                WHERE position_id=%s AND broker=%s
+                  AND action IN ('amend_position_sltp', 'market_open')
+                  AND status='confirmed'
+                ORDER BY prepared_at DESC
+                LIMIT 1
+                """,
+                (pid, str(broker)),
+            ).fetchone()
+            return self._decode(row) if row is not None else None
+        except Exception:
+            # A missing table / unavailable state store must never upgrade a
+            # close-reason classification: absence of evidence is not the
+            # evidence of a stop-loss hit.
+            return None
+        finally:
+            conn.close()
+
+
     @staticmethod
     def _decode(row: Any) -> BrokerExecutionIntent:
         def load_json(key: str, index: int) -> dict[str, Any]:
