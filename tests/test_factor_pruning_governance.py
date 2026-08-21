@@ -2,6 +2,7 @@ import json
 import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
+from backend.services.canonical_v2 import ensure_sqlite_schema, record_review
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
 from backend.services.factor_pruning_governance import FactorPruningGovernanceService
 from research.learning.governor import RuleEvolutionGovernor
@@ -102,6 +103,7 @@ def test_factor_pruning_governance_materializes_candidate_lane_only(monkeypatch,
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         conn.commit()
     finally:
         conn.close()
@@ -290,6 +292,7 @@ def test_factor_pruning_governance_counter_evidence_blocks_promotion(monkeypatch
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         conn.execute(
             """
             INSERT INTO shadow_factor_perf
@@ -300,13 +303,14 @@ def test_factor_pruning_governance_counter_evidence_blocks_promotion(monkeypatch
         )
         for idx in range(3):
             review_id = f"review_keep_{idx}"
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, pnl, outcome_label, review_json, created_at)
-                VALUES (?, ?, 25.0, 'good_win', ?, ?)
-                """,
-                (review_id, f"trade_keep_{idx}", json.dumps({"regime": "trend"}), now + idx),
+            record_review(
+                conn,
+                review_id=review_id,
+                trade_id=f"trade_keep_{idx}",
+                pnl=25.0,
+                outcome_label="good_win",
+                review={"regime": "trend"},
+                created_at=now + idx,
             )
             conn.execute(
                 """

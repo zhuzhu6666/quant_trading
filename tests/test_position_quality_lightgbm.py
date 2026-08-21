@@ -1,53 +1,21 @@
 import json
 import sqlite3
 
+from backend.services.canonical_v2 import (
+    record_review,
+    record_supervisor_trace_event,
+)
+from backend.services.canonical_v2_reader import iter_supervisor_trace_rows
 from research.position_quality_lightgbm import (
     MODEL_TYPE,
     PositionQualityLightGBMService,
 )
-from backend.services.state_payload_archive import archive_json_payload
+from tests.canonical_fixture import make_canonical_sqlite
 
 
-def _create_reviews(path):
-    conn = sqlite3.connect(str(path))
-    conn.executescript(
-        """
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            exit_decision_id TEXT DEFAULT '',
-            entry_quality REAL DEFAULT 0.0,
-            hold_quality REAL DEFAULT 0.0,
-            exit_quality REAL DEFAULT 0.0,
-            regime_fit_score REAL DEFAULT 0.0,
-            execution_quality REAL DEFAULT 0.0,
-            pnl REAL DEFAULT 0.0,
-            mae REAL DEFAULT 0.0,
-            mfe REAL DEFAULT 0.0,
-            outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]',
-            summary_text TEXT DEFAULT '',
-            review_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE position_supervisor_trace (
-            trace_id TEXT PRIMARY KEY,
-            position_id TEXT DEFAULT '',
-            trade_id TEXT DEFAULT '',
-            stage TEXT DEFAULT '',
-            trace_integrity TEXT DEFAULT 'full',
-            verdict_json TEXT DEFAULT '{}',
-            context_json TEXT DEFAULT '{}',
-            template_id TEXT DEFAULT '',
-            template_version TEXT DEFAULT '',
-            config_version INTEGER DEFAULT 0,
-            config_hash TEXT DEFAULT '',
-            event_ts REAL NOT NULL DEFAULT 0.0
-        );
-        """
-    )
+def _create_reviews(path, *, contaminated_indices=None):
+    contaminated_indices = set(contaminated_indices or ())
+    conn = make_canonical_sqlite(path)
     for i in range(8):
         positive = i % 2 == 0
         payload = {
@@ -68,39 +36,38 @@ def _create_reviews(path):
             "regime_shift": "none",
             "close_reason": "broker_close" if positive else "thesis_broken",
         }
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, pnl, mae, mfe, outcome_label,
-             review_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"rev_{i}",
-                f"trade_{i}",
-                f"pos_{i}",
-                1.0 if positive else -1.0,
-                payload["mae"],
-                payload["mfe"],
-                "small_win" if positive else "bad_loss",
-                json.dumps(payload),
-                1000.0 + i,
-            ),
+        if i in contaminated_indices:
+            payload["system_issue_context"] = {
+                "system_contaminated": True,
+                "contaminates_learning": True,
+            }
+        record_review(
+            conn,
+            review_id=f"rev_{i}",
+            trade_id=f"trade_{i}",
+            position_id=f"pos_{i}",
+            pnl=1.0 if positive else -1.0,
+            mae=payload["mae"],
+            mfe=payload["mfe"],
+            outcome_label="small_win" if positive else "bad_loss",
+            failure_tags=[],
+            review=payload,
+            created_at=1000.0 + i,
         )
-        conn.execute(
-            """
-            INSERT INTO position_supervisor_trace
-            (trace_id, position_id, trade_id, stage, trace_integrity,
-             verdict_json, context_json, template_id, template_version,
-             config_version, config_hash, event_ts)
-            VALUES (?, ?, ?, 'evaluated', 'full', ?, '{}', 'default', 'v-current',
-                    1, 'cfg-current', ?)
-            """,
-            (
-                f"trace_{i}", f"pos_{i}", f"trade_{i}",
-                json.dumps({"action": "hold", "evidence": payload}),
-                900.0 + i,
-            ),
+        record_supervisor_trace_event(
+            conn,
+            trace_id=f"trace_{i}",
+            event_ts=900.0 + i,
+            payload={
+                "trace_id": f"trace_{i}",
+                "position_id": f"pos_{i}",
+                "trade_id": f"trade_{i}",
+                "stage": "evaluated",
+                "trace_integrity": "full",
+                "template_version": "v-current",
+                "config_hash": "cfg-current",
+                "verdict": {"action": "hold", "evidence": payload},
+            },
         )
     conn.commit()
     conn.close()
@@ -167,33 +134,32 @@ def test_inspect_training_window_is_read_only_and_emits_manifest(tmp_path):
 def test_oversized_trace_window_is_excluded_before_streaming(tmp_path, monkeypatch):
     db_path = tmp_path / "oversized-trace-window.db"
     _create_reviews(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = make_canonical_sqlite(db_path)
     try:
-        trace_payload = conn.execute(
-            "SELECT verdict_json FROM position_supervisor_trace WHERE trace_id='trace_0'"
-        ).fetchone()[0]
+        trace_payload = iter_supervisor_trace_rows(
+            conn, trace_id="trace_0", reverse=False
+        )[0]["verdict_json"]
         for index in range(2):
-            conn.execute(
-                """
-                INSERT INTO position_supervisor_trace
-                (trace_id, position_id, trade_id, stage, trace_integrity,
-                 verdict_json, context_json, template_id, template_version,
-                 config_version, config_hash, event_ts)
-                VALUES (?, 'pos_0', 'trade_0', 'evaluated', 'full', ?, '{}',
-                        'default', 'v-current', 1, 'cfg-current', ?)
-                """,
-                (f"trace_0_extra_{index}", trace_payload, 901.0 + index),
+            record_supervisor_trace_event(
+                conn,
+                trace_id=f"trace_0_extra_{index}",
+                event_ts=901.0 + index,
+                payload={
+                    "trace_id": f"trace_0_extra_{index}",
+                    "position_id": "pos_0",
+                    "trade_id": "trade_0",
+                    "stage": "evaluated",
+                    "trace_integrity": "full",
+                    "template_version": "v-current",
+                    "config_hash": "cfg-current",
+                    "verdict": json.loads(trace_payload),
+                },
             )
         conn.commit()
         safe_window_bytes = max(
-            len(row[0].encode("utf-8"))
-            for row in conn.execute(
-                """
-                SELECT verdict_json
-                FROM position_supervisor_trace
-                WHERE position_id <> 'pos_0'
-                """
-            )
+            len(str(row["verdict_json"]).encode("utf-8"))
+            for row in iter_supervisor_trace_rows(conn, reverse=False)
+            if row.get("position_id") != "pos_0"
         )
     finally:
         conn.close()
@@ -213,24 +179,7 @@ def test_oversized_trace_window_is_excluded_before_streaming(tmp_path, monkeypat
 
 def test_position_quality_lightgbm_excludes_system_contaminated_reviews(tmp_path):
     db_path = tmp_path / "state.db"
-    _create_reviews(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT review_json FROM trade_outcome_review WHERE review_id='rev_0'"
-        ).fetchone()
-        review = json.loads(row[0])
-        review["system_issue_context"] = {
-            "system_contaminated": True,
-            "contaminates_learning": True,
-        }
-        conn.execute(
-            "UPDATE trade_outcome_review SET review_json=? WHERE review_id='rev_0'",
-            (json.dumps(review),),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _create_reviews(db_path, contaminated_indices={0})
 
     samples = PositionQualityLightGBMService(
         db_path=db_path,
@@ -257,7 +206,7 @@ def test_review_text_contaminated_matches_sql_semantics():
     assert not _review_text_contaminated(
         '{"system_issue_context":{"contaminates_learning":false}}'
     )
-    # Legacy rows without the flag: quoted failure-tag fallback
+    # Rows without the flag: quoted failure-tag fallback
     assert _review_text_contaminated(
         '{"failure_tags": ["decision_bar_stale", "other"]}'
     )
@@ -269,7 +218,7 @@ def test_review_text_contaminated_matches_sql_semantics():
 def test_multiple_reviews_for_one_position_fail_closed(tmp_path):
     db_path = tmp_path / "ambiguous-review.db"
     _create_reviews(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = make_canonical_sqlite(db_path)
     try:
         payload = {
             "execution_quality_state": "full",
@@ -278,13 +227,15 @@ def test_multiple_reviews_for_one_position_fail_closed(tmp_path):
                 "evidence_state": "full",
             },
         }
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, outcome_label, review_json, created_at)
-            VALUES ('rev_0_duplicate', 'trade_0', 'pos_0', 'small_win', ?, 2000.0)
-            """,
-            (json.dumps(payload),),
+        record_review(
+            conn,
+            review_id="rev_0_duplicate",
+            trade_id="trade_0",
+            position_id="pos_0",
+            outcome_label="small_win",
+            failure_tags=[],
+            review=payload,
+            created_at=2000.0,
         )
         conn.commit()
     finally:
@@ -298,22 +249,7 @@ def test_multiple_reviews_for_one_position_fail_closed(tmp_path):
 
 def test_review_payload_is_parsed_once_even_when_trace_density_is_high(tmp_path, monkeypatch):
     db_path = tmp_path / "review-once.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY, trade_id TEXT, position_id TEXT,
-            pnl REAL DEFAULT 0.0, outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]', review_json TEXT DEFAULT '{}',
-            created_at REAL DEFAULT 0.0
-        );
-        CREATE TABLE position_supervisor_trace (
-            trace_id TEXT PRIMARY KEY, position_id TEXT, trade_id TEXT,
-            stage TEXT, trace_integrity TEXT, verdict_json TEXT,
-            template_version TEXT, config_hash TEXT, event_ts REAL
-        );
-        """
-    )
+    conn = make_canonical_sqlite(db_path)
     review = {
         "execution_quality_state": "full",
         "execution_quality_evidence": {
@@ -321,20 +257,32 @@ def test_review_payload_is_parsed_once_even_when_trace_density_is_high(tmp_path,
             "evidence_state": "full",
         },
     }
-    conn.execute(
-        "INSERT INTO trade_outcome_review VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("review-1", "trade-1", "position-1", 1.0, "small_win", "[]", json.dumps(review), 5000.0),
+    record_review(
+        conn,
+        review_id="review-1",
+        trade_id="trade-1",
+        position_id="position-1",
+        pnl=1.0,
+        outcome_label="small_win",
+        failure_tags=[],
+        review=review,
+        created_at=5000.0,
     )
     for index in range(100):
-        conn.execute(
-            "INSERT INTO position_supervisor_trace VALUES (?, ?, ?, 'evaluated', 'full', ?, 'v-current', 'cfg', ?)",
-            (
-                f"trace-{index}",
-                "position-1",
-                "trade-1",
-                json.dumps({"evidence": {"current_pnl": float(index)}}),
-                4000.0 + index * 30.0,
-            ),
+        record_supervisor_trace_event(
+            conn,
+            trace_id=f"trace-{index}",
+            event_ts=4000.0 + index * 30.0,
+            payload={
+                "trace_id": f"trace-{index}",
+                "position_id": "position-1",
+                "trade_id": "trade-1",
+                "stage": "evaluated",
+                "trace_integrity": "full",
+                "template_version": "v-current",
+                "config_hash": "cfg",
+                "verdict": {"evidence": {"current_pnl": float(index)}},
+            },
         )
     conn.commit()
     conn.close()
@@ -353,59 +301,3 @@ def test_review_payload_is_parsed_once_even_when_trace_density_is_high(tmp_path,
     service.load_samples(limit=20)
     assert calls["count"] == 1
     assert service.last_data_quality["unique_review_count"] == 1
-
-
-def test_archived_review_is_restored_before_feature_extraction(tmp_path):
-    db_path = tmp_path / "archived-review.db"
-    _create_reviews(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.executescript(
-            """
-            CREATE TABLE state_payload_archive (
-                archive_hash TEXT PRIMARY KEY,
-                source_table TEXT NOT NULL,
-                source_id TEXT NOT NULL,
-                payload_kind TEXT NOT NULL,
-                codec TEXT NOT NULL,
-                raw_sha256 TEXT NOT NULL,
-                raw_bytes INTEGER NOT NULL,
-                compressed_bytes INTEGER NOT NULL,
-                payload_bytes BLOB NOT NULL,
-                created_at REAL NOT NULL
-            );
-            ALTER TABLE trade_outcome_review ADD COLUMN review_archive_hash TEXT NOT NULL DEFAULT '';
-            ALTER TABLE trade_outcome_review ADD COLUMN review_raw_bytes INTEGER NOT NULL DEFAULT 0;
-            """
-        )
-        full_review = {
-            "execution_quality_state": "full",
-            "execution_quality_evidence": {
-                "schema_version": "execution_quality_evidence.v2",
-                "evidence_state": "full",
-            },
-            "system_issue_context": {
-                "system_contaminated": True,
-                "contaminates_learning": True,
-            },
-        }
-        archive = archive_json_payload(
-            conn,
-            source_table="trade_outcome_review",
-            source_id="rev_0",
-            payload_kind="trade_review",
-            raw_json=json.dumps(full_review, separators=(",", ":")),
-        )
-        conn.execute(
-            "UPDATE trade_outcome_review SET review_json=?, review_archive_hash=?, review_raw_bytes=? WHERE review_id='rev_0'",
-            (json.dumps({"execution_quality_state": "full"}), archive["archive_hash"], archive["raw_bytes"]),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    service = PositionQualityLightGBMService(db_path=db_path, artifact_dir=tmp_path / "artifacts")
-    samples = service.load_samples(limit=20)
-    assert "rev_0" not in {item["review_id"] for item in samples}
-    assert service.last_data_quality["archive_review_count"] == 1
-    assert service.last_data_quality["inline_review_count"] == 7

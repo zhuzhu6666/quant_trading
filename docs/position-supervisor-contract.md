@@ -291,10 +291,11 @@ MFE、MAE、giveback、profit capture 和 time-in-profit 仍只由
 高波动只影响闭合 bar 确认窗口，不直接等价于更快收紧；未确认 thesis break 继续 hold。
 
 输出中的 `recommended_action` 是状态机原始建议，`requested_action` 是进入执行规划的请求，
-`effective_action` 是最终允许送入 RiskPolicy 的动作。`execution_class=observed` 且
-`execution_status=observation_only` 只表示 Demo 观察，不调用 RiskPolicy 或 broker；真实执行
-仍严格限定为 `stage=executed AND outcome=applied`，此时才可有
-`execution_class=applied` 与 `is_real_execution=true`。
+`effective_action` 是最终允许送入 RiskPolicy 的动作。active template 只接受
+`risk_boundary.adaptive_execution_mode=governed_execute`；`observation_only` 只表示历史记录或
+learning-shadow 审计值，不得作为新的 live trace 执行边界。真实执行仍严格限定为
+`stage=executed AND outcome=applied`，此时才可有 `execution_class=applied` 与
+`is_real_execution=true`。
 
 ---
 
@@ -339,10 +340,10 @@ supervisor.action = close
 - `tighten / reduce / close` 必须先形成 supervisor verdict，再交给 `RiskPolicyService`
 - 风控拒绝时只写审计，不执行 broker 修改
 - broker amend / close 失败时必须写入 lifecycle，不得把 action 记成成功
-- supervisor 模板切换必须来自可审计治理建议；Demo 仍可沿既有 V16/Admission/Coordinator
-  申请和应用模板，但模板中的自适应动作默认 `observation_only`，不会因此获得 broker 执行权。
-  只有具备有效 V16、Admission、RiskPolicy、Coordinator committed authority 的模板，才可
-  通过 `risk_boundary.adaptive_execution_mode=governed_execute` 释放自适应执行。
+- supervisor 模板切换必须来自可审计治理建议；Demo 与未来实盘共用同一 V16/Admission/RiskPolicy/Coordinator
+  mutation service，但普通持仓监督执行不依赖 `apply_demo` 或学习周期显式 apply。只要 active template
+  已通过既有 authority，普通 `tighten/reduce/close` 就统一进入 governed supervisor executor；
+  `autonomy_demo_auto_apply` 只控制治理 mutation 的应用，不授予或撤销 broker 执行权。
 
 ### 6.4 风控上下文扩展要求
 
@@ -361,9 +362,9 @@ supervisor.action = close
 
 ## 7. Ledger / Trace 写入要求
 
-### 7.1 decision ledger
+### 7.1 canonical decision event
 
-supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
+supervisor 结论进入 `canonical_v2.event`，`entity_type=risk_decision`，建议 event_type 使用：
 
 - `supervisor_hold`
 - `supervisor_tighten`
@@ -377,9 +378,9 @@ supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
 - `risk_state_json`: 如果已进入 `RiskPolicyService`，写入 `policy_verdict`
 - `position_id` / `trade_id`: 必填
 
-### 7.2 position lifecycle
+### 7.2 canonical position lifecycle
 
-执行层真正落动作后，再写 `position_lifecycle_event`：
+执行层真正落动作后，再写 `canonical_v2.event`，`entity_type=position_transition`：
 
 - `tightened`
 - `reduced`
@@ -392,14 +393,14 @@ supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
 - `risk_verdict_reason`
 - `applied_controls`
 
-### 7.3 position supervisor trace
+### 7.3 canonical position supervisor trace
 
-`position_supervisor_trace` 是 supervisor 自治学习的永久轨迹表。
+监督轨迹写入 `canonical_v2.event`，`entity_type=supervisor_trace`，是 supervisor 自治学习的永久事实。
 
-它和 `decision_ledger` 的职责不同：
+它和 `risk_decision` event 的职责不同：
 
-- `decision_ledger` 记录进入正式决策账本的 supervisor 动作；
-- `position_supervisor_trace` 记录每一次 supervisor 对仓位的处理结果，包括 `hold`、冷却跳过、风控拒绝、执行跳过、执行成功、执行失败和异常。
+- `risk_decision` event 记录进入正式决策账本的 supervisor 动作；
+- `supervisor_trace` event 记录每一次 supervisor 对仓位的处理结果，包括 `hold`、冷却跳过、风控拒绝、执行跳过、执行成功、执行失败和异常。
 
 每条 trace 至少保留：
 
@@ -442,18 +443,19 @@ supervisor 结论进入 `decision_ledger`，建议 event_type 使用：
 - `is_real_execution=true` 仅允许出现在 `stage=executed AND outcome=applied`
 - `recommended_action` 保留 supervisor 建议动作；shadow 建议还在 `shadow_recommendation` 中显式保留
 
-Demo 自适应动作的首版边界：
+Demo/实盘共用同一监督执行边界：
 
-- `trend_hold` 下的普通保护、`range_capture` 下的 tighten/reduce/near-TP 均记录为
-  `observed/superseded`，不进入 `recently_applied`、broker cooldown 或 RiskPolicy application；
-- 硬风险、确认反转、确认 thesis break、原有 timeout 和 entry repair 仍保持正常执行优先级；
-- `recovery_position_state.recovery_meta` 记录 posture、posture 起始时间、trigger episode、
-  闭合 bar、adaptive fingerprint 和 execution class；同一 episode/bar/fingerprint 最多一次。
-  trigger 清除、posture 改变或目标 fingerprint 改变后才允许再次建议。
+- active template 的普通 `tighten/reduce/close` 都必须走 supervisor verdict -> RiskPolicy -> broker ->
+  lifecycle -> fresh reconcile -> trace；风控拒绝、未知回执、broker 失败或对账不完整不得记为 applied；
+- `observation_only/superseded` 只保留为历史审计或 learning-shadow 记录，不再进入新的 live trace、
+  `recently_applied` 或 broker cooldown；历史非真实 trace 通过幂等 repair terminalize 为
+  `label_status=excluded`、`train_weight=0`、`allowed_uses=[audit, explainability]`；
+- `recovery_position_state.recovery_meta` 继续记录 posture、episode、闭合 bar、fingerprint 和执行 class，
+  但去重不能把真实执行降级为 observation，也不能把 observation 重复送回 pending。
 
-`legacy_awe_trailing` 已接入同一保护仲裁。在 Demo 中只写
-`observed/superseded`，不得与 canonical supervisor 同时 applied；非 Demo 兼容路径暂保留，
-待 replay、trace、effect 证明等价后再删除执行分支和耦合测试。
+`legacy_awe_trailing` 已从 active protection cycle 和 candidate writer 退役。旧 trace、close attribution
+和 parity replay 仍可读取；generic executor 对新的 legacy candidate 明确拒绝，不生成新决策/trace，也不调用
+RiskPolicy/broker。它不是 Demo 或未来实盘的备用执行链。
 
 `tighten` 在进入 `RiskPolicyService` 前先比较 broker 当前 SL 与计划 SL。目标已经达到或没有形成更严格保护时，不创建 decision ledger、不调用 RiskPolicy、不触达 broker；首次写 `no_op_suppressed` trace，并把动作目标 fingerprint 保存到 `recovery_position_state.recovery_meta_json`，后续相同目标直接去重。目标变化或当前 SL 重新变得可收紧时会恢复正常风控和执行链路。
 
@@ -464,19 +466,22 @@ Demo 自适应动作的首版边界：
 - 形成 `supervisor_execution_trace` 学习样本 (`autonomous_learning_sample.sample_type`，不是独立表)；
 - 支持自动降权、模板调整、冷却窗口调整和回滚观察。
 
-`supervisor_execution_trace` 样本默认 `label_status=pending`，不能直接作为强收益标签；只有平仓 review 与 counterfactual 成熟后，才允许升级为更高权重训练/治理证据。
+`supervisor_execution_trace` 只有真实 `stage=executed AND outcome=applied` trace 才进入 supervisor maturity；
+非真实/观察/失败 trace 通过幂等 repair 记为 `label_status=excluded`、`train_weight=0`，仅允许 audit/explainability。
+真实结果可进入按消费者隔离的 outcome learning；只有存在同一 decision_id 的真实 trace、完整 broker lifecycle/reconcile
+和无硬污染 review 时，才可升级为 `supervisor_counterfactual`，并且 governance mutation 仍要求完整成熟且无污染证据。
 
 系统支持三类 trace 来源：
 
-- live trace：由 `live_service -> DecisionLedger.log_position_supervisor_trace()` 写入，默认 `trace_integrity=full`
+- live trace：由 `live_service -> DecisionLedger.log_position_supervisor_trace()` 写入 canonical event，默认 `trace_integrity=full`
 - candidate observation：由 learning worker 的 `materialize_position_supervisor_candidate_observations()` 基于已平仓 outcome 与成熟 counterfactual 回放，固定 `stage=learning_shadow / execution_status=observation_only / trace_integrity=recovered`；不调用 broker，也不进入 live action arbitration
-- legacy trace：由 `backfill_position_supervisor_traces()` 从历史 `decision_ledger` 回填，标记为 `recovered / partial`
+- 历史 recovered trace：只从已明确标记的历史审计输入回填到 canonical event，标记为 `recovered / partial`；不再读取或重建旧事实表。
 
 candidate observation 与 legacy trace 只用于审计/弱监督；前者必须与当前 suggestion ID 精确绑定后才可作为 candidate readiness 的一项输入，二者都不构成 live 控制授权。
 
 ### 7.4 supervisor trace 成熟化
 
-`mature_position_supervisor_traces()` 会把 `position_supervisor_trace` 与 `supervisor_counterfactual_review` 对齐，生成或更新 `sample_type=supervisor_execution_trace` 的学习样本。
+`mature_position_supervisor_traces()` 会把 canonical `supervisor_trace` 与 `counterfactual_review` event 对齐，生成或更新 `sample_type=supervisor_execution_trace` 的学习样本。
 
 统一标签口径：
 
@@ -607,6 +612,6 @@ finalize 为准；普通 learning candidate 不能自动打开 `governed_execute
 后续扩展优先顺序建议为：
 
 1. 增加真实 `tighten / reduce / timeout` 样本覆盖
-2. 提升 `supervisor_counterfactual_review` 的标签置信度
+2. 提升 canonical `counterfactual_review` event 的标签置信度
 3. 增加受控 rollback / gray-release 展示
 4. `time_decay_score / thesis_status / regime_shift`

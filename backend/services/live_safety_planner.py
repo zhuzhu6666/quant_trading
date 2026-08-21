@@ -3,8 +3,8 @@
 The planner deliberately receives every stateful dependency through
 ``SafetyPlannerRuntime``.  It may read recovery/config/model projections through
 those callbacks, but this module has no broker API and cannot submit or amend an
-order.  Legacy execution remains authoritative while the safety plane is in
-shadow mode.
+order.  The governed supervisor executor remains the only live mutation
+authority; historical AWE adapters are replay/audit inputs only.
 """
 from __future__ import annotations
 
@@ -64,10 +64,10 @@ def _missing_components(
         normalized = str(component or "").strip().lower()
         if normalized not in {"price", "pnl"}:
             continue
-        # Legacy producers without state remain compatible.  Explicit state
-        # is fail-closed and only ``known`` can satisfy a metric dependency.
+        # The canonical broker reconcile must publish an explicit component
+        # state.  Missing state is unknown, never an implicit clean fact.
         state = _position_component_state(position, normalized)
-        if state not in {"", "known"}:
+        if state != "known":
             missing.append(normalized)
     return tuple(dict.fromkeys(missing))
 
@@ -135,13 +135,13 @@ def safety_candidate(
 
 
 def protection_candidate_to_safety(candidate: Any) -> SafetyCandidate:
-    """Normalize a legacy ``ProtectionCandidate`` without importing live_service."""
+    """Normalize an active protection candidate without importing live_service."""
 
     source = str(getattr(candidate, "source", "") or "")
     if source == "entry_protection_repair":
         action = "repair_entry_protection"
     elif source == "legacy_awe_trailing":
-        action = "trailing"
+        raise ValueError("retired_legacy_trailing_candidate")
     else:
         action = str(getattr(candidate, "action", "") or "")
     return safety_candidate(
@@ -162,12 +162,14 @@ class SafetyPlannerRuntime:
         [Mapping[str, Any], Sequence[Mapping[str, Any]], Any, Mapping[str, Any], float],
         Mapping[str, Any],
     ]
+    # Historical replay/audit adapters only.  The live wiring intentionally
+    # leaves these unset so retired AWE candidates cannot enter a new cycle.
     build_trailing_update: Callable[
         [Mapping[str, Any], Mapping[str, Any] | None, float, float, float],
         Mapping[str, Any],
-    ]
-    trailing_state: Callable[[int], Mapping[str, Any] | None]
-    composite_conviction: Callable[[], float]
+    ] | None = None
+    trailing_state: Callable[[int], Mapping[str, Any] | None] | None = None
+    composite_conviction: Callable[[], float] | None = None
     normalize_supervisor_action: Callable[
         [Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]
     ] | None = None
@@ -246,7 +248,7 @@ def plan_live_safety_candidates(
     entry_repair_cooldown_seconds: float = 20.0,
     planned_at: float | None = None,
 ) -> SafetyPlan:
-    """Plan timeout > entry repair > supervisor > trailing, without mutation."""
+    """Plan timeout > entry repair > governed supervisor, without mutation."""
 
     now_ts = float(planned_at if planned_at is not None else runtime.clock())
     normalized_positions = [dict(position or {}) for position in positions]
@@ -338,59 +340,6 @@ def plan_live_safety_candidates(
         arbitration.append(
             {"fingerprint": candidate.fingerprint, "decision": "selected", "priority": 30}
         )
-
-    # 4. AWE trailing is last and cannot override any prior protection action.
-    if float(atr_price or 0.0) > 0:
-        conviction = float(runtime.composite_conviction() or 0.0)
-        for position in normalized_positions:
-            pid = _position_id(position)
-            if pid <= 0:
-                continue
-            missing_components = _missing_components(position, ("price",))
-            if missing_components:
-                arbitration.append(
-                    {
-                        "position_id": pid,
-                        "decision": "blocked_component_unknown",
-                        "priority": 50,
-                        "action": "trailing",
-                        "missing_components": list(missing_components),
-                    }
-                )
-                continue
-            update = dict(
-                runtime.build_trailing_update(
-                    position,
-                    dict(runtime.trailing_state(pid) or {}),
-                    float(current_price or 0.0),
-                    float(atr_price or 0.0),
-                    conviction,
-                )
-                or {}
-            )
-            payload = update.get("candidate")
-            if not isinstance(payload, Mapping):
-                continue
-            candidate = safety_candidate(
-                action="trailing",
-                position_id=pid,
-                source="legacy_awe_trailing",
-                controls=dict(payload.get("controls") or {}),
-            )
-            if pid in protected:
-                arbitration.append(
-                    {
-                        "fingerprint": candidate.fingerprint,
-                        "decision": "superseded",
-                        "priority": 50,
-                    }
-                )
-                continue
-            selected.append(candidate)
-            protected.add(pid)
-            arbitration.append(
-                {"fingerprint": candidate.fingerprint, "decision": "selected", "priority": 50}
-            )
 
     return SafetyPlan(
         candidates=tuple(selected),

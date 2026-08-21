@@ -1,6 +1,11 @@
 import json
 import sqlite3
 
+from backend.services.canonical_v2 import (
+    ensure_sqlite_schema,
+    record_decision_event,
+    record_review,
+)
 from research.factor_governance_lightgbm import (
     FEATURE_NAMES,
     MODEL_TYPE,
@@ -10,77 +15,13 @@ from research.factor_governance_lightgbm import (
 )
 
 
-def _create_factor_reviews(path):
+def _create_factor_reviews(path, *, contaminated_indices=None):
+    contaminated_indices = set(contaminated_indices or ())
     conn = sqlite3.connect(str(path))
-    conn.executescript(
+    conn.row_factory = sqlite3.Row
+    ensure_sqlite_schema(conn)
+    conn.execute(
         """
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            exit_decision_id TEXT DEFAULT '',
-            entry_quality REAL DEFAULT 0.0,
-            hold_quality REAL DEFAULT 0.0,
-            exit_quality REAL DEFAULT 0.0,
-            regime_fit_score REAL DEFAULT 0.0,
-            execution_quality REAL DEFAULT 0.0,
-            pnl REAL DEFAULT 0.0,
-            mae REAL DEFAULT 0.0,
-            mfe REAL DEFAULT 0.0,
-            outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]',
-            summary_text TEXT DEFAULT '',
-            review_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE factor_contribution_review (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            review_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            factor TEXT NOT NULL,
-            entry_contribution REAL DEFAULT 0.0,
-            hold_contribution REAL DEFAULT 0.0,
-            exit_contribution REAL DEFAULT 0.0,
-            net_contribution REAL DEFAULT 0.0,
-            confidence REAL DEFAULT 0.0,
-            notes TEXT DEFAULT ''
-        );
-        CREATE TABLE decision_ledger (
-            decision_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            event_type TEXT DEFAULT '',
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            decision_ts REAL DEFAULT 0.0,
-            regime_id TEXT DEFAULT '',
-            regime_confidence REAL DEFAULT 0.0,
-            portfolio_state_json TEXT DEFAULT '{}',
-            risk_state_json TEXT DEFAULT '{}',
-            policy_version TEXT DEFAULT '',
-            factor_set_version TEXT DEFAULT '',
-            action_score REAL DEFAULT 0.0,
-            action_reason TEXT DEFAULT '',
-            action_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE decision_factor_snapshot (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            decision_id TEXT NOT NULL,
-            factor TEXT NOT NULL,
-            source TEXT DEFAULT 'registry',
-            raw_value REAL DEFAULT 0.0,
-            normalized_value REAL DEFAULT 0.0,
-            direction REAL DEFAULT 0.0,
-            base_weight REAL DEFAULT 0.0,
-            policy_weight REAL DEFAULT 0.0,
-            shadow_score REAL DEFAULT 0.0,
-            health_score REAL DEFAULT 0.0,
-            gated INTEGER DEFAULT 0,
-            gated_reason TEXT DEFAULT '',
-            contribution_score REAL DEFAULT 0.0
-        );
         CREATE TABLE policy_suggestion (
             suggestion_id TEXT PRIMARY KEY,
             scope_type TEXT NOT NULL,
@@ -93,106 +34,87 @@ def _create_factor_reviews(path):
             reviewed_at REAL DEFAULT 0.0,
             review_note TEXT DEFAULT '',
             created_at REAL NOT NULL DEFAULT 0.0
-        );
+        )
         """
     )
     for i in range(18):
         positive = i % 2 == 0
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, entry_decision_id, entry_quality, hold_quality,
-             exit_quality, regime_fit_score, execution_quality, pnl, mae, mfe,
-             outcome_label, review_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"rev_{i}",
-                f"trade_{i}",
-                f"pos_{i}",
-                f"dec_{i}",
-                0.8 if positive else 0.2,
-                0.7 if positive else 0.2,
-                0.7 if positive else 0.2,
-                0.8 if positive else 0.3,
-                0.8 if positive else 0.4,
-                2.0 if positive else -2.0,
-                0.4 if positive else 2.4,
-                2.8 if positive else 0.3,
-                "small_win" if positive else "bad_loss",
-                json.dumps({
-                    "case": i,
-                    "execution_quality_state": "full",
-                    "execution_quality_evidence": {
-                        "schema_version": "execution_quality_evidence.v2",
-                        "evidence_state": "full",
-                    },
-                }),
-                1000.0 + i,
-            ),
+        factor = "momentum_factor" if positive else "weak_factor"
+        pnl = 2.0 if positive else -2.0
+        entry_contribution = 0.4 if positive else -0.4
+        hold_contribution = 0.2 if positive else -0.3
+        exit_contribution = 0.2 if positive else -0.2
+        net_contribution = 0.8 if positive else -0.9
+        review_payload = {
+            "case": i,
+            "execution_quality_state": "full",
+            "execution_quality_evidence": {
+                "schema_version": "execution_quality_evidence.v2",
+                "evidence_state": "full",
+            },
+            "factor_contributions": {
+                factor: {
+                    "entry_contribution": entry_contribution,
+                    "hold_contribution": hold_contribution,
+                    "exit_contribution": exit_contribution,
+                    "net_contribution": net_contribution,
+                    "confidence": 0.8,
+                }
+            },
+        }
+        if i in contaminated_indices:
+            review_payload["system_issue_context"] = {
+                "system_contaminated": True,
+                "contaminates_learning": True,
+                "labels": ["market_data_stale", "signal_execution_delay"],
+            }
+        decision_id = f"dec_{i}"
+        record_decision_event(
+            conn,
+            decision_id=decision_id,
+            event_type="entry_signal",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=1000.0 + i,
+            trade_id=f"trade_{i}",
+            position_id=f"pos_{i}",
+            regime_id="trend=strong|volatility=high" if positive else "trend=weak|volatility=low",
+            regime_confidence=0.8,
+            factor_snapshots=[
+                {
+                    "decision_id": decision_id,
+                    "factor": factor,
+                    "source": "registry",
+                    "raw_value": 1.5 if positive else -1.5,
+                    "normalized_value": 0.6 if positive else -0.6,
+                    "direction": 1.0 if positive else -1.0,
+                    "base_weight": 0.3,
+                    "policy_weight": 0.3,
+                    "shadow_score": 0.5,
+                    "health_score": 72.0 if positive else 30.0,
+                    "gated": False,
+                    "contribution_score": 0.18 if positive else -0.18,
+                }
+            ],
         )
-        conn.execute(
-            """
-            INSERT INTO factor_contribution_review
-            (review_id, trade_id, factor, entry_contribution, hold_contribution,
-             exit_contribution, net_contribution, confidence, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"rev_{i}",
-                f"trade_{i}",
-                "momentum_factor" if positive else "weak_factor",
-                0.4 if positive else -0.4,
-                0.2 if positive else -0.3,
-                0.2 if positive else -0.2,
-                0.8 if positive else -0.9,
-                0.8,
-                "",
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO decision_ledger
-            (decision_id, trade_id, position_id, event_type, symbol, timeframe,
-             decision_ts, regime_id, regime_confidence, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"dec_{i}",
-                f"trade_{i}",
-                f"pos_{i}",
-                "open",
-                "XAUUSD+",
-                "M5",
-                1000.0 + i,
-                "trend=strong|volatility=high" if positive else "trend=weak|volatility=low",
-                0.8,
-                1000.0 + i,
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO decision_factor_snapshot
-            (decision_id, factor, source, raw_value, normalized_value, direction,
-             base_weight, policy_weight, shadow_score, health_score, gated,
-             gated_reason, contribution_score)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"dec_{i}",
-                "momentum_factor" if positive else "weak_factor",
-                "registry",
-                1.5 if positive else -1.5,
-                0.6 if positive else -0.6,
-                1.0 if positive else -1.0,
-                0.3,
-                0.3,
-                0.5,
-                72.0 if positive else 30.0,
-                0,
-                "",
-                0.18 if positive else -0.18,
-            ),
+        record_review(
+            conn,
+            review_id=f"rev_{i}",
+            trade_id=f"trade_{i}",
+            position_id=f"pos_{i}",
+            entry_decision_id=decision_id,
+            entry_quality=0.8 if positive else 0.2,
+            hold_quality=0.7 if positive else 0.2,
+            exit_quality=0.7 if positive else 0.2,
+            regime_fit_score=0.8 if positive else 0.3,
+            execution_quality=0.8 if positive else 0.4,
+            pnl=pnl,
+            mae=0.4 if positive else 2.4,
+            mfe=2.8 if positive else 0.3,
+            outcome_label="small_win" if positive else "bad_loss",
+            failure_tags=[],
+            review=review_payload,
+            created_at=1000.0 + i,
         )
     conn.commit()
     conn.close()
@@ -274,34 +196,7 @@ def test_factor_governance_lightgbm_trains_or_reports_missing_dependency(tmp_pat
 def test_factor_governance_lightgbm_skips_system_contaminated_reviews(tmp_path):
     db_path = tmp_path / "state.db"
     artifact_dir = tmp_path / "artifacts"
-    _create_factor_reviews(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        system_issue = {
-            "schema_version": "trade_review_system_issue.v1",
-            "system_contaminated": True,
-            "contaminates_learning": True,
-            "labels": ["market_data_stale", "signal_execution_delay"],
-        }
-        conn.execute(
-            """
-            UPDATE trade_outcome_review
-            SET review_json=?
-            WHERE review_id='rev_1'
-            """,
-            (json.dumps({"case": 1, "system_issue_context": system_issue}),),
-        )
-        conn.execute(
-            """
-            UPDATE factor_contribution_review
-            SET notes=?
-            WHERE review_id='rev_1'
-            """,
-            (json.dumps({"system_contaminated": True}),),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _create_factor_reviews(db_path, contaminated_indices={1})
 
     service = FactorGovernanceLightGBMService(db_path=db_path, artifact_dir=artifact_dir)
     samples = service.load_samples(limit=20)
@@ -598,7 +493,7 @@ def test_batch_a_train_reports_version_bump():
     assert FEATURE_SCHEMA_VERSION.startswith("pit.v4")
 
 
-# ── 批次 F: 因子×regime 条件绩效(decision_factor_snapshot JOIN decision_ledger) ──
+# ── 批次 F: 因子×regime 条件绩效(canonical decision payload) ──
 
 REGIME_CONDITIONAL_FEATURES = {
     "same_regime_positive_rate",

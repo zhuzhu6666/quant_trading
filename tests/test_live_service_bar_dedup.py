@@ -21,6 +21,11 @@ def _reset_state(monkeypatch, tmp_path):
     monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path / "safety"))
     reset_safety_state_for_tests()
     rc.reset_for_tests()
+    monkeypatch.setattr(
+        live_service._LIVE_LOOP_CONTROLLER,
+        "accepting_new_risk",
+        lambda _generation_id: True,
+    )
     live_service._local_positions.clear()
     live_service._live_state["account"] = None
     live_service._live_state["positions"] = []
@@ -103,12 +108,19 @@ def test_open_pipeline_blocks_same_bar_second_open(monkeypatch):
 
 
 def test_open_pipeline_allows_distinct_bar_without_open_record(monkeypatch):
-    """A bar with no prior open in the ledger proceeds to candidate prep."""
+    """A bar with no prior canonical open proceeds to candidate prep."""
     bridge = _fake_bridge()
     logs = []
-    prepare = MagicMock()
+    prepare = MagicMock(
+        return_value=SimpleNamespace(order_block={"order_blocked": False})
+    )
     monkeypatch.setattr(live_service, "_bar_open_already_recorded", lambda ts: False)
     monkeypatch.setattr(live_service, "_prepare_open_trade_candidate", prepare)
+    monkeypatch.setattr(
+        live_service,
+        "_submit_open_trade_candidate",
+        lambda **_kwargs: False,
+    )
 
     gate = live_service._run_open_trade_pipeline(
         **_open_pipeline_kwargs(bridge, logs)
@@ -120,7 +132,7 @@ def test_open_pipeline_allows_distinct_bar_without_open_record(monkeypatch):
     bridge.market_buy.assert_not_called()
 
 
-def test_bar_open_already_recorded_queries_ledger(monkeypatch):
+def test_bar_open_already_recorded_queries_canonical_decision_stream(monkeypatch):
     """The guard queries canonical decisions for an open on the same bar ts."""
     def _fake_scan(conn, **kwargs):
         class _Row(dict):
@@ -177,16 +189,12 @@ def test_bar_open_already_recorded_fail_open_on_error(monkeypatch):
 
 
 def test_bar_open_already_recorded_fail_open_on_canonical_error(monkeypatch):
-    """Canonical window unreadable -> legacy fallback -> fail-open on error."""
-    def _boom(conn, sql, params=None):
-        raise RuntimeError("ledger down")
-
+    """Canonical window unreadable -> fail-open because dedup is not a risk gate."""
     def _boom_scan(conn, **kwargs):
         raise RuntimeError("canonical down")
 
     monkeypatch.setattr(live_service, "canonical_ready", lambda conn: True)
     monkeypatch.setattr(live_service, "iter_decision_rows", _boom_scan)
-    monkeypatch.setattr(live_service, "_state_execute", _boom)
     monkeypatch.setattr(live_service, "logger", MagicMock())
 
     assert live_service._bar_open_already_recorded(1786383900.0) is False

@@ -14,7 +14,7 @@ def _call_name(node: ast.Call) -> str:
 
 def test_startup_has_no_legacy_governance_projection_writes():
     tree = ast.parse(Path("backend/app.py").read_text(encoding="utf-8"))
-    guarded_calls = {"sync_runtime_config", "rc_patch", "restore_from_log"}
+    guarded_calls = {"sync_runtime_config", "rc_patch", "restore_from_canonical"}
     seen: set[str] = set()
     for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
         name = _call_name(call)

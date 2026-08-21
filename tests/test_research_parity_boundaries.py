@@ -1152,7 +1152,7 @@ def test_parity_replay_preserves_supervisor_partial_close_lifecycle(monkeypatch)
     assert report["metrics"]["open_position_at_end"] is True
 
 
-def test_parity_replay_routes_trailing_through_live_candidate_and_protection_plan(monkeypatch):
+def test_parity_replay_does_not_model_retired_trailing_candidate(monkeypatch):
     from risk.policy_service import RiskPolicyService
 
     class AllowReductions:
@@ -1192,22 +1192,25 @@ def test_parity_replay_routes_trailing_through_live_candidate_and_protection_pla
         data_source={"source": "monthly_pit_bars", "source_files": ["fixture"]},
     )
 
-    trailing_plan = next(
-        event
+    safety_plans = [
+        event for event in report["events"] if event["event"] == "live_safety_plan"
+    ]
+    bar_two_plan = next(event for event in safety_plans if event["bar_index"] == 2)
+    assert bar_two_plan["candidates"] == []
+    assert not any(
+        event["event"] == "protection_plan_applied_modeled"
+        and event.get("action") == "trailing"
         for event in report["events"]
-        if event["event"] == "live_safety_plan"
-        and any(item["action"] == "trailing" for item in event["candidates"])
     )
-    applied = next(
-        event
-        for event in report["events"]
-        if event["event"] == "protection_plan_applied_modeled"
-        and event["action"] == "trailing"
+    assert all(
+        item["action"] != "trailing"
+        for event in safety_plans
+        for item in event["candidates"]
     )
-    assert trailing_plan["bar_index"] == 2
-    assert applied["new_sl"] > applied["old_sl"]
-    assert applied["broker_projection_ack"] is False
     assert report["components"]["trailing"]["verified"] is False
+    assert report["components"]["trailing"]["reason"] == (
+        "historical_awe_conviction_and_tick_observation_path_are_unavailable"
+    )
 
 
 def test_quote_age_for_shared_protection_plan_is_replay_deterministic():

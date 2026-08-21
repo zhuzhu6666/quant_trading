@@ -4,19 +4,18 @@ L1 因子生命周期第 2 步. 包装 alpha.registry.factor_registry, 加:
 - 运行时 register/unregister (绕过 @decorator)
 - register_with_status (记录 source: builtin / discovered / shadow)
 - get_active(min_score) 配合 FactorHealth 用
-- lifecycle_log 事件流 (jsonl 落盘)
+- canonical_v2 lifecycle facts
 
 跟现有 alpha/registry.factor_registry 100% 兼容 (用了同一个 _factors dict).
 """
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
-import threading
 import time as _time
 from collections.abc import Callable
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 import numpy as np
@@ -74,12 +73,9 @@ class RegistryAdapter:
         adapter.unregister("dsl_factor_001", reason="DECAYING 14 days")
     """
 
-    def __init__(self, log_path: str = "data/charts/factor_lifecycle_log.jsonl"):
+    def __init__(self):
         # 用现有 factor_registry._factors 直接操作 (不另开 dict)
-        self._log_path = Path(log_path)
-        self._log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._pending_log_path = self._log_path.with_suffix(".pending.jsonl")
-        self._pending_log_lock = threading.Lock()
+        # Lifecycle facts have one authority: canonical_v2.
         # 因子的元数据 (source / register_time / description)
         # key: factor_name, value: dict
         self._meta: dict[str, dict] = {}
@@ -114,7 +110,7 @@ class RegistryAdapter:
             func: 因子函数, 签名 (df: pd.DataFrame) -> np.ndarray
             source: builtin / discovered / shadow
             description: 表达式或描述
-            log_event: 是否写入 lifecycle log. restore_from_log 传 False 避免重复.
+            log_event: 是否写入 canonical lifecycle fact. 恢复过程传 False 避免重复.
         """
         if name in factor_registry:
             logger.warning(f"[RegistryAdapter] {name} 已存在, 跳过 register")
@@ -449,118 +445,42 @@ class RegistryAdapter:
     # ── 事件日志 ───────────────────────────────────────────────
 
     def _event_payload(self, event: FactorLifecycleEvent) -> dict:
-        return asdict(event)
-
-    def _append_jsonl(self, path: Path, payload: dict) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-
-    def _insert_lifecycle_event(self, conn, event: FactorLifecycleEvent) -> bool:
-        exists = conn.execute(
-            _p("""
-            SELECT 1
-            FROM lifecycle_events
-            WHERE timestamp=? AND event=? AND factor=? AND source=?
-              AND description=? AND score=? AND status=? AND reason=?
-            LIMIT 1
-            """),
-            (
-                event.timestamp,
-                event.event,
-                event.factor,
-                event.source,
-                event.description,
-                event.score,
-                event.status,
-                event.reason,
-            ),
-        ).fetchone()
-        if exists:
-            return False
-        conn.execute(
-            _p("INSERT INTO lifecycle_events (timestamp, event, factor, source, description, score, status, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
-            (
-                event.timestamp,
-                event.event,
-                event.factor,
-                event.source,
-                event.description,
-                event.score,
-                event.status,
-                event.reason,
-            ),
-        )
-        return True
-
-    def _drain_pending_lifecycle_events(self, conn, limit: int = 200) -> int:
-        if not self._pending_log_path.exists():
-            return 0
-        with self._pending_log_lock:
-            lines = self._pending_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            if not lines:
-                self._pending_log_path.unlink(missing_ok=True)
-                return 0
-            drained = 0
-            remaining: list[str] = []
-            for raw in lines:
-                if drained >= limit:
-                    remaining.append(raw)
-                    continue
-                try:
-                    payload = json.loads(raw)
-                    event = FactorLifecycleEvent(**payload)
-                    self._insert_lifecycle_event(conn, event)
-                    drained += 1
-                except Exception:
-                    remaining.append(raw)
-            if remaining:
-                tmp_path = self._pending_log_path.with_suffix(".pending.tmp")
-                tmp_path.write_text("\n".join(remaining) + "\n", encoding="utf-8")
-                tmp_path.replace(self._pending_log_path)
-            else:
-                self._pending_log_path.unlink(missing_ok=True)
-            return drained
+        payload = asdict(event)
+        # The canonical reader reserves ``source`` for the read-authority
+        # marker. Keep the lifecycle business source explicit in the payload
+        # so restore/projections do not lose it.
+        payload["lifecycle_source"] = event.source
+        return payload
 
     def _log_event(self, event: FactorLifecycleEvent):
-        """写入 state.db lifecycle_events 表 + 联动 EvolutionStory / Metrics."""
+        """Write one immutable factor lifecycle fact to canonical_v2."""
         payload = self._event_payload(event)
         try:
-            self._append_jsonl(self._log_path, payload)
-        except Exception as e:
-            logger.warning("[RegistryAdapter] lifecycle JSONL write failed: {}", e)
-        try:
+            from backend.services.canonical_v2 import record_factor_lifecycle_event
+
+            digest = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+            ).hexdigest()
             conn = _connect_state()
             try:
-                self._drain_pending_lifecycle_events(conn)
-                self._insert_lifecycle_event(conn, event)
+                record_factor_lifecycle_event(
+                    conn,
+                    lifecycle_id=digest,
+                    event_ts=event.timestamp,
+                    factor=event.factor,
+                    event=event.event,
+                    source=event.source,
+                    description=event.description,
+                    score=event.score,
+                    status=event.status,
+                    reason=event.reason,
+                    producer="registry_adapter",
+                )
                 conn.commit()
             finally:
                 conn.close()
         except Exception as e:
-            logger.warning(f"[RegistryAdapter] lifecycle event DB write failed: {e}")
-            try:
-                with self._pending_log_lock:
-                    self._append_jsonl(self._pending_log_path, payload)
-            except Exception as pending_err:
-                logger.warning("[RegistryAdapter] lifecycle pending write failed: {}", pending_err)
-        # Phase 2.0 接入层:同步广播到 EvolutionStory + RuntimeState(可观测,失败不抛)
-        try:
-            from monitor.evolution_story import EvolutionStory
-            EvolutionStory.shared().append(
-                event.event,
-                {
-                    "factor": event.factor,
-                    "source": event.source,
-                    "description": event.description,
-                    "score": event.score,
-                    "status": event.status,
-                    "reason": event.reason,
-                },
-            )
-        except Exception:
-            logger.debug("EvolutionStory.append skipped", exc_info=True)
+            logger.warning("[RegistryAdapter] canonical lifecycle event write failed: %s", e)
         try:
             from backend.runtime.runtime_state import RuntimeState
             RuntimeState.shared().emit_metric(
@@ -571,18 +491,22 @@ class RegistryAdapter:
             logger.debug("RuntimeState.emit_metric skipped", exc_info=True)
 
     def read_events(self, n: int = 100) -> list[dict]:
-        """读最近 n 条事件 (从 PostgreSQL state store)."""
+        """Read the latest factor lifecycle facts from canonical_v2."""
         try:
+            from backend.services.canonical_v2_reader import iter_factor_lifecycle_rows
+
             conn = _connect_state(read_only=True)
             try:
-                rows = conn.execute(
-                    _p("SELECT * FROM lifecycle_events ORDER BY id DESC LIMIT ?"), (n,)
-                ).fetchall()
-                return [dict(r) for r in reversed(rows)]
+                rows = iter_factor_lifecycle_rows(
+                    conn,
+                    limit=max(0, int(n)),
+                    reverse=False,
+                )
+                return list(reversed(rows))
             finally:
                 conn.close()
         except Exception as e:
-            logger.warning(f"[RegistryAdapter] read events failed: {e}")
+            logger.warning("[RegistryAdapter] canonical lifecycle read failed: %s", e)
             return []
 
     def dead_count(self) -> int:
@@ -603,7 +527,6 @@ class RegistryAdapter:
         return {
             "total_active": len(all_factors),
             "by_source": by_source,
-            "log_path": str(self._log_path),
         }
 
 

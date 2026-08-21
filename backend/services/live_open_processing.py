@@ -208,7 +208,6 @@ class AmendedOpenSuccessRuntime:
     build_learning_context: Callable[..., dict[str, Any]]
     log_ledger: Callable[..., str]
     upsert_recovery: Callable[..., Any]
-    write_decision_log: Callable[..., Any]
 
 
 def record_amended_open_success_context(
@@ -216,7 +215,7 @@ def record_amended_open_success_context(
     *,
     runtime: AmendedOpenSuccessRuntime,
 ) -> None:
-    """Publish confirmed protection context in the legacy-compatible order."""
+    """Publish confirmed protection context in the canonical order."""
 
     runtime.mark_local_state(
         pid=request.pid,
@@ -310,20 +309,6 @@ def record_amended_open_success_context(
             event_sizing_context=request.event_sizing_context,
             sizing_trace=request.sizing_trace,
             learning_context=learning_context,
-        )
-        runtime.write_decision_log(
-            bar=request.bar,
-            composite=request.composite,
-            pid=request.pid,
-            actual_api_volume=request.actual_api_volume,
-            requested_volume=request.requested_volume,
-            base_requested_volume=request.base_requested_volume,
-            event_sizing_context=request.event_sizing_context,
-            sizing_trace=request.sizing_trace,
-            current_price=request.current_price,
-            sl_price=request.sl_price,
-            tp_price=request.tp_price,
-            tick=request.tick,
         )
     except Exception as exc:
         request.log(

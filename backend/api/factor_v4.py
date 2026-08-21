@@ -19,6 +19,7 @@ from fastapi import APIRouter, Query
 
 from backend.core.auth import RequireUser
 from backend.core.db import get_state_pg_conn
+from backend.services.canonical_v2_reader import iter_decision_rows
 from backend.services.ops_governance_fact_views import factor_catalog_fact_payload
 
 logger = logging.getLogger(__name__)
@@ -30,10 +31,6 @@ _ATTR_SNAPSHOT = Path(__file__).resolve().parent.parent.parent / "data" / "chart
 
 def _state_conn():
     return get_state_pg_conn(read_only=True)
-
-
-def _state_sql(sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s")
 
 
 @router.get("/weights")
@@ -230,23 +227,35 @@ def get_attribution_stats(_user: RequireUser) -> dict:
 
 @router.get("/recent-ticks")
 def get_recent_ticks(_user: RequireUser, n: int = 30) -> list[dict]:
-    """返回最近 N 个 v4 信号记录 (从主状态库 decision_log 读取)。"""
+    """Return recent factor-v4 signal payloads from canonical risk decisions."""
     entries: list[dict] = []
+    limit = max(0, min(int(n), 200))
+    if limit == 0:
+        return entries
     try:
         conn = _state_conn()
         try:
-            rows = conn.execute(
-                _state_sql("SELECT meta, ts FROM decision_log WHERE strategy='factor_v4' "
-                "AND decision_type='signal' ORDER BY id DESC LIMIT ?"),
-                (n,)
-            ).fetchall()
-            for r in reversed(rows):
-                try:
-                    entry = json.loads(r["meta"])
-                    entry["ts"] = r["ts"]
-                    entries.append(entry)
-                except json.JSONDecodeError:
+            newest: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            for row in iter_decision_rows(conn, limit=0, reverse=True):
+                if str(row.get("event_type") or "") != "signal":
                     continue
+                raw_action = row.get("action")
+                if not isinstance(raw_action, (dict, str)):
+                    raw_action = row.get("action_json")
+                if isinstance(raw_action, str):
+                    try:
+                        raw_action = json.loads(raw_action)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                if not isinstance(raw_action, dict):
+                    continue
+                newest.append((row, raw_action))
+                if len(newest) >= limit:
+                    break
+            for row, raw_action in reversed(newest):
+                entry = dict(raw_action)
+                entry["ts"] = row.get("decision_ts") or row.get("created_at")
+                entries.append(entry)
         finally:
             conn.close()
     except Exception:

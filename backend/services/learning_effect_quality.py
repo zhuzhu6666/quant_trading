@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
-from backend.services.canonical_v2_reader import iter_reviews
+from backend.services.canonical_v2_reader import (
+    iter_decision_factor_snapshots,
+    iter_decision_rows,
+    iter_reviews,
+)
 from backend.services.fact_envelope import observed_epoch
 from backend.services.learning_application_store import LearningApplicationStore
 
@@ -90,41 +94,30 @@ class LearningEffectQualityService:
         latest_review_by_factor: dict[str, float] = {}
         if factor_cutoffs:
             factors = sorted(factor_cutoffs)
-            # --- read factor-decision pairs (canonical first, legacy fallback) ---
-            rows: list = []
+            # Factor/decision pairs are derived only through the canonical
+            # reader.  An unavailable or incomplete canonical stream yields
+            # no evidence; it must never reopen a retired fact table.
+            rows: list[dict[str, Any]] = []
+            factor_set = set(factors)
             try:
-                from backend.services.canonical_v2_reader import (
-                    _canonical_ready, _parse_factor_snapshots, read_payload,
-                )
-                if _canonical_ready(conn):
-                    event_rows = conn.execute(
-                        self._sql(
-                            "SELECT payload_hash FROM canonical_v2.event"
-                            " WHERE event_type='risk_decision'"
-                            " ORDER BY created_at DESC LIMIT 500"
-                        ),
-                    ).fetchall()
-                    factor_set = set(factors)
-                    for er in event_rows:
-                        ph = er["payload_hash"] if hasattr(er, "keys") else er[0]
-                        try:
-                            payload = read_payload(conn, str(ph))
-                        except Exception:
+                for decision in iter_decision_rows(conn, limit=500, reverse=True):
+                    decision_id = str(decision.get("decision_id") or "")
+                    if not decision_id:
+                        continue
+                    for snapshot in iter_decision_factor_snapshots(conn, decision_id):
+                        if str(snapshot.get("factor") or "") not in factor_set:
                             continue
-                        for s in _parse_factor_snapshots(payload):
-                            if str(s.get("factor")) in factor_set:
-                                rows.append(s)
+                        normalized = dict(snapshot)
+                        normalized["decision_id"] = str(
+                            normalized.get("decision_id") or decision_id
+                        )
+                        rows.append(normalized)
             except Exception:
-                pass
-            if not rows and state_table_exists(conn, "decision_factor_snapshot"):
-                placeholders = ",".join("?" for _ in factors)
-                rows = conn.execute(
-                    self._sql(f"SELECT factor, decision_id FROM decision_factor_snapshot WHERE factor IN ({placeholders})"),
-                    (*factors,),
-                ).fetchall()
+                # Canonical read failure is fail-closed for retry evidence; it
+                # must not reopen a retired fact table.
+                rows = []
             cutoff = float(min(factor_cutoffs.values()) or 0.0)
-            # Reviews flow through the canonical reader (reader-owned legacy
-            # fallback for fixtures); the module holds no private review SQL.
+            # Reviews and factor snapshots both flow through canonical readers.
             review_ts_by_decision: dict[str, float] = {}
             for record in iter_reviews(conn, limit=0):
                 payload = record.get("payload") or {}

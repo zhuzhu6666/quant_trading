@@ -1,4 +1,4 @@
-"""Legacy-authoritative position protection orchestration outside the live façade."""
+"""Governed position protection orchestration outside the live façade."""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -8,14 +8,12 @@ from typing import Any
 
 @dataclass(frozen=True)
 class PositionProtectionCycleRuntime:
-    update_trailing_stops: Callable[..., Any]
     enforce_holding_timeout: Callable[..., Any]
     entry_protection_repair_candidates: Callable[..., Any]
     log_candidate_superseded: Callable[..., Any]
     execute_candidate: Callable[..., Any]
     run_position_supervision: Callable[..., Any]
     protection_candidate_to_safety: Callable[[Any], Any]
-    candidate_supersede_reason: Callable[..., str]
     build_cycle_result: Callable[..., dict[str, Any]]
     record_aux_failure: Callable[..., Any]
     warning: Callable[..., Any]
@@ -36,7 +34,11 @@ def run_position_protection_cycle(
     runtime: PositionProtectionCycleRuntime,
     decision_ts: float | None = None,
 ) -> dict[str, Any]:
-    """Run timeout, entry repair, supervisor, and trailing in fixed priority."""
+    """Run timeout, entry repair and supervisor in fixed priority.
+
+    ``legacy_awe_trailing`` is historical evidence only.  It is deliberately
+    not collected, arbitrated, written, or executed by the live cycle.
+    """
 
     if not positions or bridge is None or cfg is None:
         return {
@@ -99,21 +101,6 @@ def run_position_protection_cycle(
             action=stage,
             error=exc,
         )
-
-    trailing_candidates: list[Any] = []
-    if atr_price > 0:
-        try:
-            trailing_candidates = runtime.update_trailing_stops(
-                bridge,
-                positions,
-                current_price,
-                pipeline,
-                atr_price,
-                tick,
-                log,
-            )
-        except Exception as exc:
-            record_stage_error("trailing_candidate_collection", exc)
 
     try:
         timeout_handled = runtime.enforce_holding_timeout(
@@ -202,78 +189,12 @@ def run_position_protection_cycle(
     except Exception as exc:
         record_stage_error("position_supervisor", exc)
         supervisor_handled = set()
-    protected_pids = (
-        set(timeout_handled) | set(entry_repair_applied) | set(supervisor_handled)
-    )
-    trailing_applied: set[int] = set()
-    trailing_superseded: set[int] = set()
-    for candidate in sorted(trailing_candidates, key=lambda item: item.priority):
-        if str(getattr(cfg, "autonomy_mode", "") or "").strip().lower() in {
-            "demo_autonomous",
-            "demo_nursery",
-        }:
-            trailing_superseded.add(candidate.position_id)
-            runtime.log_candidate_superseded(
-                candidate,
-                cfg=cfg,
-                tick=tick,
-                reason="demo_adaptive_observation",
-                acct=account,
-            )
-            record_superseded(
-                runtime.protection_candidate_to_safety(candidate),
-                priority=50,
-                reason="demo_adaptive_observation",
-            )
-            continue
-        supersede_reason = runtime.candidate_supersede_reason(
-            position_id=candidate.position_id,
-            timeout_handled=set(timeout_handled),
-            protected_position_ids=protected_pids,
-        )
-        if supersede_reason:
-            trailing_superseded.add(candidate.position_id)
-            runtime.log_candidate_superseded(
-                candidate,
-                cfg=cfg,
-                tick=tick,
-                reason=supersede_reason,
-                acct=account,
-            )
-            record_superseded(
-                runtime.protection_candidate_to_safety(candidate),
-                priority=50,
-                reason=supersede_reason,
-            )
-            continue
-        try:
-            if runtime.execute_candidate(
-                candidate,
-                bridge=bridge,
-                cfg=cfg,
-                tick=tick,
-                log=log,
-                acct=account,
-            ):
-                trailing_applied.add(candidate.position_id)
-                protected_pids.add(candidate.position_id)
-                record_selected(
-                    runtime.protection_candidate_to_safety(candidate),
-                    priority=50,
-                )
-        except Exception as exc:
-            record_stage_error(
-                "trailing_execution",
-                exc,
-                position_id=int(candidate.position_id or 0),
-            )
-
     result = runtime.build_cycle_result(
         timeout_handled=set(timeout_handled),
         entry_repair_applied=entry_repair_applied,
         supervisor_handled=set(supervisor_handled),
-        trailing_applied=trailing_applied,
-        trailing_superseded=trailing_superseded,
+        trailing_applied=set(),
+        trailing_superseded=set(),
     )
     if stage_errors:
         result["stage_errors"] = stage_errors

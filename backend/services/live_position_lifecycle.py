@@ -109,39 +109,6 @@ def side_name(direction: int) -> str:
     return "unknown"
 
 
-def position_price_pnl_estimate(position: dict[str, Any]) -> float:
-    open_price = float(
-        position.get("open_price")
-        or position.get("entry_price")
-        or position.get("price_open")
-        or 0.0
-    )
-    current_price = float(
-        position.get("current_price")
-        or position.get("price_current")
-        or open_price
-        or 0.0
-    )
-    if open_price <= 0 or current_price <= 0:
-        return 0.0
-    api_volume = position_api_volume(position)
-    display_units = api_volume / 100.0 if api_volume > 10.0 else api_volume
-    if display_units <= 0:
-        display_units = 1.0
-    return (current_price - open_price) * position_direction_sign(position) * display_units
-
-
-def account_unrealized_pnl(account: dict[str, Any] | None) -> float:
-    if not account:
-        return 0.0
-    try:
-        equity = float(account.get("equity", 0.0) or 0.0)
-        balance = float(account.get("balance", 0.0) or 0.0)
-    except Exception:
-        return 0.0
-    return equity - balance
-
-
 def position_unrealized_pnl(position: Any) -> float:
     if isinstance(position, dict):
         candidates = (
@@ -164,11 +131,7 @@ def position_unrealized_pnl(position: Any) -> float:
 
 
 def position_component_state(position: Any, component: str) -> str:
-    """Return an explicitly published position component state.
-
-    Empty is retained for legacy producers and is intentionally distinct from
-    an explicit ``unknown``/``stale``/``error`` state.
-    """
+    """Return the broker-published component state, defaulting to unknown."""
 
     normalized = str(component or "").strip().lower()
     keys = (
@@ -182,95 +145,45 @@ def position_component_state(position: Any, component: str) -> str:
         value = payload_get(position, key, "")
         if value not in (None, ""):
             return str(value).strip().lower()
-    return ""
+    return "unknown"
 
 
 def position_component_is_known(position: Any, component: str) -> bool:
-    """Compatibility-aware component availability.
+    """Return true only for an explicitly broker-confirmed component."""
 
-    Legacy fixtures/producers without a state field keep their historic
-    behavior.  Once a producer publishes component truth, only ``known`` may
-    be consumed as a numeric metric.
-    """
-
-    return position_component_state(position, component) in {"", "known"}
+    return position_component_state(position, component) == "known"
 
 
 def apply_unrealized_pnl_fields(
     positions: list[dict[str, Any]],
-    *,
-    account: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not positions:
         return []
     out = [dict(item) for item in positions]
     component_states = [position_component_state(item, "pnl") for item in out]
-    component_known = [state in {"", "known"} for state in component_states]
-    existing_values: list[float] = []
-    missing_or_zero = True
-    for item in out:
-        value = position_unrealized_pnl(item)
-        existing_values.append(value)
-        if abs(value) > 1e-9:
-            missing_or_zero = False
-    account_pnl = account_unrealized_pnl(account)
-    estimates = [position_price_pnl_estimate(item) for item in out]
-    sum_existing = sum(existing_values)
-    use_account_fallback = (
-        all(state == "" for state in component_states)
-        and abs(account_pnl) > 1e-9
-        and missing_or_zero
-        and abs(sum_existing) < 1e-9
-    )
-    values: list[float]
-    source = "broker"
-    if use_account_fallback and len(out) == 1:
-        values = [account_pnl]
-        source = "account_equity"
-    elif use_account_fallback:
-        weight_total = sum(abs(item) for item in estimates)
-        if weight_total > 1e-9:
-            values = [account_pnl * (abs(item) / weight_total) for item in estimates]
-            source = "account_equity_allocated"
-        else:
-            values = estimates
-            source = "price_estimate"
-    else:
-        values = [
-            existing
-            if state == "known" or abs(existing) > 1e-9
-            else estimate
-            for existing, estimate, state in zip(
-                existing_values,
-                estimates,
-                component_states,
-            )
-        ]
-        if (
-            all(state == "" for state in component_states)
-            and all(abs(existing) <= 1e-9 for existing in existing_values)
-            and any(abs(v) > 1e-9 for v in values)
-        ):
-            source = "price_estimate"
-    for item, value, pnl_known in zip(out, values, component_known):
-        if not pnl_known:
+    for item, state in zip(out, component_states):
+        if state != "known":
             # Never convert an unavailable PnL component into a numeric zero.
             # Risk-reducing actions can continue using position identity, but
             # metric-driven supervisor/path logic must see the unknown state.
+            item["pnl_state"] = state
             item["profit"] = None
             item["pnl"] = None
             item["unrealized"] = None
             item["unrealized_pnl"] = None
             item["netUnrealizedPnL"] = None
-            item["pnl_source"] = str(item.get("pnl_source") or "unknown")
+            item["pnl_source"] = "unknown"
+            item["pnl_reason_code"] = str(
+                item.get("pnl_reason_code") or "position_pnl_component_unknown"
+            )
             continue
-        pnl = round(float(value or 0.0), 6)
+        pnl = round(float(position_unrealized_pnl(item) or 0.0), 6)
         item["profit"] = pnl
         item["pnl"] = pnl
         item["unrealized"] = pnl
         item["unrealized_pnl"] = pnl
         item["netUnrealizedPnL"] = pnl
-        item["pnl_source"] = source
+        item["pnl_source"] = "broker"
     return out
 
 
@@ -1464,7 +1377,6 @@ def current_regime_hint_from_composite(composite: Any) -> str:
 def enrich_positions_with_lifecycle_metrics(
     pos_list: list[Any],
     *,
-    account: dict | None,
     cfg: Any = None,
     now_ts: float,
     persist: bool,
@@ -1477,10 +1389,7 @@ def enrich_positions_with_lifecycle_metrics(
     evaluate_position_supervisor_for_position: Callable[..., dict[str, Any]],
 ) -> list[dict[str, Any]]:
     enriched: list[dict[str, Any]] = []
-    raw_positions = apply_unrealized_pnl_fields_fn(
-        coerce_positions(pos_list),
-        account=account or {},
-    )
+    raw_positions = apply_unrealized_pnl_fields_fn(coerce_positions(pos_list))
     for raw in raw_positions:
         item = dict(raw)
         item.update(holding_summary_for_position(item, cfg=cfg, now_ts=now_ts))
@@ -2622,7 +2531,13 @@ def build_supervisor_trace_ledger_payload(
     template = verdict.get("supervisor_template") or {}
     risk_payload = risk_verdict or {}
     execution_payload = dict(execution or {})
-    is_real_execution = str(stage or "") == "executed" and str(outcome or "") == "applied"
+    is_real_execution = bool(
+        str(stage or "") == "executed"
+        and str(outcome or "") == "applied"
+        and execution_payload.get("is_real_execution") is True
+        and execution_payload.get("broker_action_confirmed") is True
+        and execution_payload.get("reconcile_confirmed") is True
+    )
     explicit_execution_class = str(
         execution_payload.get("execution_class")
         or verdict.get("execution_class")
@@ -3470,6 +3385,9 @@ def build_supervisor_tighten_result_payloads(
                     else "amend_position_sltp_success"
                 ),
                 "execution": {
+                    "broker_action_confirmed": True,
+                    "reconcile_confirmed": True,
+                    "is_real_execution": True,
                     "target_stop_loss_sent": planned_sl,
                     "target_take_profit_sent": planned_tp,
                     "target_take_profit_changed": planned_tp != current_tp,

@@ -15,15 +15,16 @@ from backend.core.db import (
     STATE_DB,
     STATE_DB_DDL,
     connect_sqlite,
-    ensure_sqlite_columns,
     get_state_pg_conn,
     is_state_db_path,
-    state_table_columns,
 )
 from backend.services.market_regime import resolve_market_regime
-from backend.services.state_payload_archive import (
-    archive_json_payload,
-    supervisor_trace_archive_text,
+from backend.services.canonical_v2 import (
+    ensure_sqlite_schema as ensure_canonical_sqlite_schema,
+    record_decision_event,
+    record_order_event,
+    record_position_event,
+    record_supervisor_trace_event,
 )
 from backend.services.supervisor_payload_contract import (
     compact_supervisor_mapping,
@@ -205,17 +206,7 @@ class DecisionLedger:
         with self._conn() as conn:
             if not self._use_pg():
                 conn.executescript(STATE_DB_DDL)
-        if not self._use_pg():
-            ensure_sqlite_columns(
-                self.db_path,
-                "position_supervisor_trace",
-                {
-                    "trace_integrity": "trace_integrity TEXT DEFAULT 'full'",
-                    "config_version": "config_version INTEGER DEFAULT 0",
-                    "config_hash": "config_hash TEXT DEFAULT ''",
-                    "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
-                },
-            )
+                ensure_canonical_sqlite_schema(conn)
 
     @staticmethod
     def new_id(prefix: str) -> str:
@@ -365,70 +356,27 @@ class DecisionLedger:
                     and bool(row["config_hash"])
                     else "lineage_missing"
                 )
-            # ── P4 单轨写入：canonical 是唯一事实源 ──
-            # PG 环境 fail-closed；SQLite fixture 回退 legacy（测试兼容）
-            _use_canonical = self._use_pg()
-            if _use_canonical:
-                from backend.services.canonical_v2 import record_decision_event
-                record_decision_event(
-                    conn,
-                    decision_id=str(decision_id or ""),
-                    trade_id=str(decision_payload.get("trade_id") or ""),
-                    position_id=str(decision_payload.get("position_id") or ""),
-                    event_type=str(decision_payload.get("event_type") or ""),
-                    symbol=str(decision_payload.get("symbol") or ""),
-                    timeframe=str(decision_payload.get("timeframe") or ""),
-                    decision_ts=decision_payload.get("decision_ts"),
-                    regime_id=str(decision_payload.get("regime_id") or ""),
-                    regime_confidence=decision_payload.get("regime_confidence"),
-                    policy_version=str(decision_payload.get("policy_version") or ""),
-                    factor_set_version=str(decision_payload.get("factor_set_version") or ""),
-                    action_score=decision_payload.get("action_score"),
-                    action_reason=str(decision_payload.get("action_reason") or ""),
-                    action=decision_payload.get("action_json"),
-                    risk_state=decision_payload.get("risk_state_json"),
-                    portfolio_state=decision_payload.get("portfolio_state_json"),
-                    created_at=decision_payload.get("created_at"),
-                    factor_snapshots=factor_payloads if factor_payloads else None,
-                )
-            else:
-                # SQLite fixture fallback: legacy writes for test compatibility
-                self._execute(conn,
-                    "INSERT INTO decision_ledger"
-                    " (decision_id, trade_id, position_id, event_type, symbol, timeframe,"
-                    " decision_ts, regime_id, regime_confidence, portfolio_state_json,"
-                    " risk_state_json, policy_version, factor_set_version, action_score,"
-                    " action_reason, action_json, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    tuple(decision_payload[k] for k in (
-                        "decision_id", "trade_id", "position_id", "event_type", "symbol",
-                        "timeframe", "decision_ts", "regime_id", "regime_confidence",
-                        "portfolio_state_json", "risk_state_json", "policy_version",
-                        "factor_set_version", "action_score", "action_reason",
-                        "action_json", "created_at",
-                    )),
-                )
-                for row in factor_payloads:
-                    self._execute(conn,
-                        "INSERT INTO decision_factor_snapshot"
-                        " (decision_id, factor, source, raw_value, normalized_value, direction,"
-                        " base_weight, policy_weight, shadow_score, health_score, gated,"
-                        " gated_reason, contribution_score, generation, artifact_hash,"
-                        " definition_fingerprint, runtime_selection_fingerprint,"
-                        " config_hash, lineage_status)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            decision_id, row["factor"], row["source"],
-                            row["raw_value"], row["normalized_value"], row["direction"],
-                            row["base_weight"], row["policy_weight"],
-                            row["shadow_score"], row["health_score"],
-                            row["gated"], row["gated_reason"],
-                            row["contribution_score"], row["generation"],
-                            row["artifact_hash"], row["definition_fingerprint"],
-                            row["runtime_selection_fingerprint"],
-                            row["config_hash"], row["lineage_status"],
-                        ),
-                    )
+            record_decision_event(
+                conn,
+                decision_id=str(decision_id or ""),
+                trade_id=str(decision_payload.get("trade_id") or ""),
+                position_id=str(decision_payload.get("position_id") or ""),
+                event_type=str(decision_payload.get("event_type") or ""),
+                symbol=str(decision_payload.get("symbol") or ""),
+                timeframe=str(decision_payload.get("timeframe") or ""),
+                decision_ts=decision_payload.get("decision_ts"),
+                regime_id=str(decision_payload.get("regime_id") or ""),
+                regime_confidence=decision_payload.get("regime_confidence"),
+                policy_version=str(decision_payload.get("policy_version") or ""),
+                factor_set_version=str(decision_payload.get("factor_set_version") or ""),
+                action_score=decision_payload.get("action_score"),
+                action_reason=str(decision_payload.get("action_reason") or ""),
+                action=decision_payload.get("action_json"),
+                risk_state=decision_payload.get("risk_state_json"),
+                portfolio_state=decision_payload.get("portfolio_state_json"),
+                created_at=decision_payload.get("created_at"),
+                factor_snapshots=factor_payloads if factor_payloads else None,
+            )
         return decision_id
 
     def log_composite_decision(
@@ -561,50 +509,20 @@ class DecisionLedger:
         event_id = self.new_id("ordevt")
         event_ts = float(event_ts or time.time())
         with self._conn() as conn:
-            self._execute(conn,
-                """
-                INSERT INTO order_lifecycle_event
-                (event_id, decision_id, trade_id, order_id, broker_order_id,
-                 event_type, event_ts, price, volume, status, details_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event_id,
-                    decision_id,
-                    trade_id,
-                    order_id,
-                    broker_order_id,
-                    event_type,
-                    event_ts,
-                    float(price or 0.0),
-                    float(volume or 0.0),
-                    status,
-                    _json_dumps(details),
-                ),
+            record_order_event(
+                conn,
+                event_id=event_id,
+                event_type=event_type,
+                event_ts=event_ts,
+                decision_id=decision_id,
+                trade_id=trade_id,
+                order_id=order_id,
+                broker_order_id=broker_order_id,
+                price=price,
+                volume=volume,
+                status=status,
+                details=details,
             )
-            # ── canonical 增量镜像（同事务、幂等；过渡期 fail-open）──
-            try:
-                from backend.services.canonical_v2 import record_order_event
-                record_order_event(
-                    conn,
-                    event_id=event_id,
-                    event_type=event_type,
-                    event_ts=event_ts,
-                    decision_id=decision_id,
-                    trade_id=trade_id,
-                    order_id=order_id,
-                    broker_order_id=broker_order_id,
-                    price=price,
-                    volume=volume,
-                    status=status,
-                    details=details,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[ledger] canonical order mirror failed event_id=%s: %s",
-                    event_id,
-                    exc,
-                )
         return event_id
 
     def log_position_event(
@@ -624,50 +542,20 @@ class DecisionLedger:
         event_id = self.new_id("posevt")
         event_ts = float(event_ts or time.time())
         with self._conn() as conn:
-            self._execute(conn,
-                """
-                INSERT INTO position_lifecycle_event
-                (event_id, position_id, trade_id, symbol, event_type, event_ts,
-                 net_volume, avg_price, unrealized_pnl, realized_pnl, details_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event_id,
-                    str(position_id),
-                    trade_id,
-                    symbol,
-                    event_type,
-                    event_ts,
-                    float(net_volume or 0.0),
-                    float(avg_price or 0.0),
-                    float(unrealized_pnl or 0.0),
-                    float(realized_pnl or 0.0),
-                    _json_dumps(details),
-                ),
+            record_position_event(
+                conn,
+                event_id=event_id,
+                position_id=str(position_id),
+                event_type=event_type,
+                event_ts=event_ts,
+                trade_id=trade_id,
+                symbol=symbol,
+                net_volume=net_volume,
+                avg_price=avg_price,
+                unrealized_pnl=unrealized_pnl,
+                realized_pnl=realized_pnl,
+                details=details,
             )
-            # ── canonical 增量镜像（同事务、幂等；过渡期 fail-open）──
-            try:
-                from backend.services.canonical_v2 import record_position_event
-                record_position_event(
-                    conn,
-                    event_id=event_id,
-                    position_id=str(position_id),
-                    event_type=event_type,
-                    event_ts=event_ts,
-                    trade_id=trade_id,
-                    symbol=symbol,
-                    net_volume=net_volume,
-                    avg_price=avg_price,
-                    unrealized_pnl=unrealized_pnl,
-                    realized_pnl=realized_pnl,
-                    details=details,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[ledger] canonical position mirror failed event_id=%s: %s",
-                    event_id,
-                    exc,
-                )
         return event_id
 
     def log_position_supervisor_trace(
@@ -754,10 +642,9 @@ class DecisionLedger:
             "risk_reason": risk_reason,
             "execution_status": execution_status,
             "execution_reason": execution_reason,
-            # The inline trace is always a bounded projection.  If archive is
-            # available, the sanitized full semantic payload is stored there.
-            # Old stores without archive columns must not reintroduce the
-            # recursive payload growth that caused the training OOM gate.
+            # The inline trace is a bounded projection.  The canonical event
+            # payload keeps the sanitized semantic fields; there is no second
+            # archive table or legacy payload path.
             "context_json": _json_dumps(compact_context),
             "verdict_json": _json_dumps(compact_verdict),
             "risk_verdict_json": _json_dumps(compact_risk_verdict),
@@ -769,142 +656,66 @@ class DecisionLedger:
             "created_at": now,
         }
         with self._conn() as conn:
-            trace_columns = set(state_table_columns(conn, "position_supervisor_trace"))
-            archive_ready = {
-                "verdict_archive_hash",
-                "verdict_raw_sha256",
-                "verdict_raw_bytes",
-            } <= trace_columns
-            archive = None
-            if archive_ready:
-                archive = archive_json_payload(
-                    conn,
-                    source_table="position_supervisor_trace",
-                    source_id=trace_id,
-                    payload_kind="supervisor_trace",
-                    raw_json=supervisor_trace_archive_text(
-                        context_json=_json_dumps(raw_context),
-                        verdict_json=_json_dumps(raw_verdict),
-                        risk_verdict_json=_json_dumps(raw_risk_verdict),
-                        execution_json=_json_dumps(raw_execution),
-                    ),
-                )
-            if archive:
-                trace_payload.update(
-                    {
-                        "context_json": _json_dumps(compact_context),
-                        "verdict_json": _json_dumps(compact_verdict),
-                        "risk_verdict_json": _json_dumps(compact_risk_verdict),
-                        "execution_json": _json_dumps(compact_execution),
-                    }
-                )
-                self._execute(
-                    conn,
-                    """
-                    INSERT INTO position_supervisor_trace
-                    (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
-                     tick, event_ts, action, summary_reason, confidence, template_id,
-                     template_version, stage, outcome, risk_action, risk_allowed,
-                     risk_reason, execution_status, execution_reason, context_json,
-                     verdict_json, risk_verdict_json, execution_json, trace_integrity,
-                     config_version, config_hash, evolution_run_id, created_at,
-                     verdict_archive_hash, verdict_raw_sha256, verdict_raw_bytes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    tuple(trace_payload[k] for k in (
-                        "trace_id", "decision_id", "position_id", "trade_id", "symbol", "timeframe",
-                        "tick", "event_ts", "action", "summary_reason", "confidence", "template_id",
-                        "template_version", "stage", "outcome", "risk_action", "risk_allowed", "risk_reason",
-                        "execution_status", "execution_reason", "context_json", "verdict_json",
-                        "risk_verdict_json", "execution_json", "trace_integrity", "config_version",
-                        "config_hash", "evolution_run_id", "created_at",
-                    )) + (archive["archive_hash"], archive["raw_sha256"], archive["raw_bytes"]),
-                )
-            else:
-                self._execute(
-                    conn,
-                    """
-                    INSERT INTO position_supervisor_trace
-                    (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
-                     tick, event_ts, action, summary_reason, confidence, template_id,
-                     template_version, stage, outcome, risk_action, risk_allowed,
-                     risk_reason, execution_status, execution_reason, context_json,
-                     verdict_json, risk_verdict_json, execution_json, trace_integrity,
-                     config_version, config_hash, evolution_run_id, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    tuple(trace_payload[k] for k in (
-                        "trace_id", "decision_id", "position_id", "trade_id", "symbol", "timeframe",
-                        "tick", "event_ts", "action", "summary_reason", "confidence", "template_id",
-                        "template_version", "stage", "outcome", "risk_action", "risk_allowed", "risk_reason",
-                        "execution_status", "execution_reason", "context_json", "verdict_json",
-                        "risk_verdict_json", "execution_json", "trace_integrity", "config_version",
-                        "config_hash", "evolution_run_id", "created_at",
-                    )),
-                )
+            canonical_trace_payload = {
+                **trace_payload,
+                "context": compact_context,
+                "verdict": compact_verdict,
+                "risk_verdict": compact_risk_verdict,
+                "execution": compact_execution,
+                "raw_context": raw_context,
+                "raw_verdict": raw_verdict,
+                "raw_risk_verdict": raw_risk_verdict,
+                "raw_execution": raw_execution,
+            }
+            record_supervisor_trace_event(
+                conn,
+                trace_id=trace_id,
+                decision_id=str(decision_id or ""),
+                event_ts=trace_payload["event_ts"],
+                payload=canonical_trace_payload,
+            )
         return trace_id
 
     def get_latest_entry_decision(self, position_id: str) -> Any | None:
-        """Latest open decision for a position (canonical position index first).
+        """Return the latest canonical open decision for a position."""
 
-        The materialized index (scripts/canonical_v2_position_decision_index.py)
-        resolves the position to its entry decision; the decision is then read
-        through the canonical reader (legacy-shaped row).  Positions missing
-        from the index and non-canonical connections keep the legacy lookup.
-        """
-        try:
-            from backend.services.canonical_v2_reader import (
-                decision_row,
-                load_position_decision_index,
-            )
-        except Exception:  # noqa: BLE001
-            decision_row = None
-            load_position_decision_index = None
-        if decision_row is not None and load_position_decision_index is not None:
-            try:
-                index_path = (
-                    Path(__file__).resolve().parents[2]
-                    / "run_artifacts"
-                    / "canonical_v2_position_decision_index.json"
-                )
-                index = load_position_decision_index(index_path)
-                if index is not None:
-                    entry = index.get(str(position_id))
-                    if entry is not None and entry.get("decision_id"):
-                        with self._conn() as conn:
-                            row = decision_row(conn, str(entry["decision_id"]))
-                        if row is not None:
-                            return row
-            except Exception:  # noqa: BLE001
-                pass  # transitional fallback to the legacy lookup below
+        from backend.services.canonical_v2_reader import (
+            decision_row,
+            iter_decision_rows,
+            load_position_decision_index,
+        )
+
         with self._conn() as conn:
-            return self._execute(conn,
-                """
-                SELECT * FROM decision_ledger
-                WHERE position_id=? AND event_type='open'
-                ORDER BY decision_ts DESC LIMIT 1
-                """,
-                (str(position_id),),
-            ).fetchone()
+            index_path = (
+                Path(__file__).resolve().parents[2]
+                / "run_artifacts"
+                / "canonical_v2_position_decision_index.json"
+            )
+            index = load_position_decision_index(index_path)
+            entry = (index or {}).get(str(position_id))
+            if isinstance(entry, dict) and entry.get("decision_id"):
+                row = decision_row(conn, str(entry["decision_id"]))
+                if row is not None:
+                    return row
+            candidates = [
+                row
+                for row in iter_decision_rows(conn, limit=0)
+                if str(row.get("position_id") or "") == str(position_id)
+                and str(row.get("event_type") or "") == "open"
+            ]
+            if not candidates:
+                return None
+            return max(
+                candidates,
+                key=lambda row: (
+                    float(row.get("decision_ts") or 0.0),
+                    str(row.get("decision_id") or ""),
+                ),
+            )
 
     def get_factor_snapshots(self, decision_id: str) -> list[dict]:
-        """Return per-factor snapshot rows for a decision.
+        """Return per-factor snapshots embedded in the canonical decision."""
+        from backend.services.canonical_v2_reader import iter_decision_factor_snapshots
 
-        Reads from canonical payload (new decisions) with legacy fallback.
-        """
-        try:
-            from backend.services.canonical_v2_reader import (
-                iter_decision_factor_snapshots,
-            )
-            with self._conn() as conn:
-                return iter_decision_factor_snapshots(conn, decision_id)
-        except Exception:
-            with self._conn() as conn:
-                return list(
-                    self._execute(conn,
-                        "SELECT * FROM decision_factor_snapshot"
-                        " WHERE decision_id=?"
-                        " ORDER BY ABS(contribution_score) DESC, factor ASC",
-                        (decision_id,),
-                    )
-                )
+        with self._conn() as conn:
+            return iter_decision_factor_snapshots(conn, decision_id)

@@ -77,7 +77,7 @@
 | `GET /api/live/realized-pnl-series` | `live.realized-pnl.v2` |
 | WebSocket state snapshot | `live.state.v2`，components 含 account/positions/loop/safety/spot/session/strategy/risk_inputs/risk_health |
 | `GET /api/risk/summary` | `risk.summary.v2`，components 含 `system.runtime-health.v1` 和 `risk.inputs.v1` |
-| `GET /api/risk/policy/verdicts` | `risk.policy-verdicts.v2`；成功 PostgreSQL 查询的 `observed_at` 是本次读取时间，item `decision_ts` 只表示事件发生时间，历史长期无新事件不得使当前列表变 stale；`items` 只含已到 `RiskPolicyService` 的裁决，`pre_policy_skips` 单独投影 `decision_ledger` 中 `skip_stage=before_candidate` 且 `risk_policy_reached=false` 的开仓前置拦截，包含 `admission_owner`、`blockers`、`execution_intent_created`，不计入政策允许/拦截统计 |
+| `GET /api/risk/policy/verdicts` | `risk.policy-verdicts.v2`；成功 PostgreSQL 查询的 `observed_at` 是本次读取时间，item `decision_ts` 只表示事件发生时间，历史长期无新事件不得使当前列表变 stale；`items` 只含已到 `RiskPolicyService` 的裁决，`pre_policy_skips` 单独投影 canonical `risk_decision` events 中 `skip_stage=before_candidate` 且 `risk_policy_reached=false` 的开仓前置拦截，包含 `admission_owner`、`blockers`、`execution_intent_created`，不计入政策允许/拦截统计 |
 | `GET /api/risk/trade-trace/recent` | `risk.trade-trace-recent.v2` |
 | `GET /api/sync/status` | `ops.sync-status.v2` |
 | `GET /api/ctrader/token-status` | `ops.ctrader-token-status.v2` |
@@ -116,7 +116,7 @@ session 只有 `source` 为权威 `ctrader_deals*` 时才可 known；`degraded_c
 | 端点 | `_fact.contract` | 权威观测 |
 |---|---|---|
 | `GET /api/learning/suggestions` | `learning.suggestions.v2` | 最新 `reviewed_at/created_at` |
-| `GET /api/learning/summary` | `learning.summary.v2` | `state_v1` 聚合源的最新持久化时间 |
+| `GET /api/learning/summary` | `learning.summary.v2` | `runtime`/`canonical_v2` 聚合源的最新持久化时间 |
 | `GET /api/learning/reviews` | `learning.reviews.v2` | 最新 review 持久化时间 |
 | `GET /api/learning/autonomous/samples` | `learning.autonomous-samples.v2` | 最新 sample 持久化时间 |
 | `GET /api/learning/parameter-templates/active` | `learning.parameter-templates-active.v2` | 最新 `updated_at/activated_at` |
@@ -188,7 +188,7 @@ session 只有 `source` 为权威 `ctrader_deals*` 时才可 known；`degraded_c
 | `GET /api/ops/agent-authority` | `ops.agent-authority.v2` | 未暴露持久化观测，兼容 unknown |
 | `GET /api/ops/agent-scorecard` | `ops.agent-scorecard.v2` | agent governance ledgers 最新活动时间 |
 | `GET /api/ops/agent-briefing` | `ops.agent-briefing.v2` | briefing 中持久化 agent/experience item 时间 |
-| `GET /api/ops/agent-trade-attribution` | `ops.agent-trade-attribution.v2` | `trade_outcome_review.created_at` |
+| `GET /api/ops/agent-trade-attribution` | `ops.agent-trade-attribution.v2` | canonical `trade_review` event timestamp |
 | `GET /api/ops/agent-chain-health` | `ops.agent-chain-health.v2` | 聚合层未暴露来源时间，兼容 unknown |
 | `GET /api/ops/autonomy/evolution-cycle` | `ops.autonomous-evolution-cycle.v2` | evidence/effect ledger 最新持久化时间 |
 | `POST /api/ops/autonomy/evolution-cycle/run` | `ops.autonomous-evolution-nursery-run.v2` | run 未完成写后回读，兼容 unknown |
@@ -211,7 +211,7 @@ session 只有 `source` 为权威 `ctrader_deals*` 时才可 known；`degraded_c
 | `POST /api/ops/replay/bar-run` | `ops.replay-bar-run.v2` | durable replay report ID + 时间 |
 | `POST /api/backtest/run` | 无 `fact.v1`；返回持久任务 ID | 唯一 Parity 历史回测入口；任务结果只返回指标、样本计数与工件位置，完整交易/事件/训练样本保存在已校验回放工件 |
 | `POST /api/ops/replay/bar-preview` | `ops.replay-bar-preview.v2` | 明确不持久化，兼容 unknown |
-| `GET /api/ops/replay/bar-decisions` | `ops.replay-bar-decisions.v2` | `decision_ledger.decision_ts`；每条开仓选择同时只读投影 `entry_ts`、已确认平仓才有的 `exit_ts`/`holding_seconds`，以及 `exit_decision_id`/`close_reason`；平仓事实按 `trade_outcome_review`、`position_lifecycle_event`、`recovery_position_state` 的既有只读投影顺序回退；`system_view` 只汇总服务端已有方向、评分、动作理由和后验事实 |
+| `GET /api/ops/replay/bar-decisions` | `ops.replay-bar-decisions.v2` | canonical `risk_decision.decision_ts`；每条开仓选择同时只读投影 `entry_ts`、已确认平仓才有的 `exit_ts`/`holding_seconds`，以及 `exit_decision_id`/`close_reason`；平仓事实按 canonical `trade_review`/`position_transition` events 与 `recovery_position_state` 只读投影；`system_view` 只汇总服务端已有方向、评分、动作理由和后验事实 |
 | `POST /api/ops/incident-playbook/run` | `ops.incident-playbook-run.v2` | durable playbook ID + 时间 |
 | `GET /api/ops/incident-playbook/{playbook_id}/events` | `ops.incident-playbook-events.v2` | event ledger item 时间 |
 | `POST /api/ops/incident-playbook/{playbook_id}/events` | `ops.incident-playbook-event.v2` | durable event ID + 时间 |

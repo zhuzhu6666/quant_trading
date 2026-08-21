@@ -1,9 +1,16 @@
 import json
-import sqlite3
 
 import pandas as pd
 
 from backend.services import supervisor_counterfactual as scf
+from backend.services.canonical_v2 import (
+    ensure_sqlite_schema,
+    record_counterfactual_event,
+    record_decision_event,
+    record_position_event,
+    record_review,
+    record_supervisor_trace_event,
+)
 
 
 def _complete_m1_bars(*, close_ts=1000.0, minutes=120, overrides=None):
@@ -23,108 +30,94 @@ def _complete_m1_bars(*, close_ts=1000.0, minutes=120, overrides=None):
     return pd.DataFrame(rows)
 
 
-def _create_db(path):
+def _create_db(
+    path,
+    *,
+    event_type="supervisor_tighten",
+    action="tighten",
+    close_reason="broker_close",
+    contaminated=False,
+    action_reason="thesis_weakening",
+):
+    import sqlite3
+
     conn = sqlite3.connect(str(path))
-    conn.executescript(
-        """
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            exit_decision_id TEXT DEFAULT '',
-            entry_quality REAL DEFAULT 0.0,
-            hold_quality REAL DEFAULT 0.0,
-            exit_quality REAL DEFAULT 0.0,
-            regime_fit_score REAL DEFAULT 0.0,
-            execution_quality REAL DEFAULT 0.0,
-            pnl REAL DEFAULT 0.0,
-            mae REAL DEFAULT 0.0,
-            mfe REAL DEFAULT 0.0,
-            outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]',
-            summary_text TEXT DEFAULT '',
-            review_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE decision_ledger (
-            decision_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            decision_ts REAL NOT NULL DEFAULT 0.0,
-            regime_id TEXT DEFAULT '',
-            regime_confidence REAL DEFAULT 0.0,
-            portfolio_state_json TEXT DEFAULT '{}',
-            risk_state_json TEXT DEFAULT '{}',
-            policy_version TEXT DEFAULT '',
-            factor_set_version TEXT DEFAULT '',
-            action_score REAL DEFAULT 0.0,
-            action_reason TEXT DEFAULT '',
-            action_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE position_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            position_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            symbol TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            net_volume REAL DEFAULT 0.0,
-            avg_price REAL DEFAULT 0.0,
-            unrealized_pnl REAL DEFAULT 0.0,
-            realized_pnl REAL DEFAULT 0.0,
-            details_json TEXT DEFAULT '{}'
-        );
-        """
+    ensure_sqlite_schema(conn)
+    record_decision_event(
+        conn,
+        decision_id="d1",
+        trade_id="p1",
+        position_id="p1",
+        event_type=event_type,
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=990.0,
+        action_score=0.6,
+        action_reason=action_reason,
+        action={
+            "supervisor_verdict": {
+                "action": action,
+                "summary_reason": action_reason,
+                "evidence": {"trigger_tags": [action_reason]},
+            }
+        },
+        created_at=991.0,
     )
-    review = {
+    record_position_event(
+        conn,
+        event_id="open1",
+        position_id="p1",
+        trade_id="p1",
+        event_type="opened",
+        event_ts=900.0,
+        details={"direction": -1, "sl": 103.0, "tp": 95.0},
+    )
+    record_supervisor_trace_event(
+        conn,
+        trace_id="t1",
+        decision_id="d1",
+        event_ts=995.0,
+        payload={
+            "trace_id": "t1",
+            "decision_id": "d1",
+            "position_id": "p1",
+            "trade_id": "p1",
+            "action": action,
+            "stage": "executed",
+            "outcome": "applied",
+            "execution_json": json.dumps(
+                {
+                    "is_real_execution": True,
+                    "broker_action_confirmed": True,
+                    "reconcile_confirmed": True,
+                }
+            ),
+        },
+    )
+    review_payload = {
         "position_id": "p1",
         "trade_id": "p1",
         "close_ts": 1000.0,
         "close_price": 100.0,
         "timeframe": "M5",
-        "close_reason": "broker_close",
+        "close_reason": close_reason,
+        "entry_action": {"direction": -1},
         "real_pnl": {"entry_price": 101.0, "net": -1.0},
     }
-    conn.execute(
-        """
-        INSERT INTO trade_outcome_review
-        (review_id, trade_id, position_id, entry_decision_id, pnl, review_json, created_at)
-        VALUES ('r1', 'p1', 'p1', 'dec_r1', -1.0, ?, 1000.0)
-        """,
-        (json.dumps(review),),
-    )
-    conn.execute(
-        """
-        INSERT INTO decision_ledger
-        (decision_id, trade_id, position_id, event_type, action_reason,
-         action_score, action_json, created_at, decision_ts)
-        VALUES ('d1', 'p1', 'p1', 'supervisor_tighten', 'thesis_weakening',
-                0.6, ?, 1300.0, 990.0)
-        """,
-        (
-            json.dumps(
-                {
-                    "supervisor_verdict": {
-                        "action": "tighten",
-                        "summary_reason": "thesis_weakening",
-                        "evidence": {"trigger_tags": ["thesis_weakening"]},
-                    }
-                }
-            ),
-        ),
-    )
-    conn.execute(
-        """
-        INSERT INTO position_lifecycle_event
-        (event_id, position_id, trade_id, event_type, event_ts, details_json)
-        VALUES ('open1', 'p1', 'p1', 'opened', 900.0, ?)
-        """,
-        (json.dumps({"direction": -1, "sl": 103.0, "tp": 95.0}),),
+    if contaminated:
+        review_payload["system_issue_context"] = {
+            "contaminates_learning": True,
+            "labels": ["market_data_stale"],
+        }
+    record_review(
+        conn,
+        review_id="r1",
+        trade_id="p1",
+        position_id="p1",
+        entry_decision_id="d1",
+        pnl=-1.0,
+        review=review_payload,
+        created_at=1000.0,
     )
     conn.commit()
     conn.close()
@@ -148,26 +141,7 @@ def test_counterfactual_labels_premature_tighten_when_future_recovers(monkeypatc
 
 def test_counterfactual_skips_system_contaminated_review(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
-    _create_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        review = json.loads(
-            conn.execute(
-                "SELECT review_json FROM trade_outcome_review WHERE review_id='r1'"
-            ).fetchone()[0]
-        )
-        review["system_issue_context"] = {
-            "contaminates_learning": True,
-            "labels": ["market_data_stale"],
-        }
-        conn.execute(
-            "UPDATE trade_outcome_review SET review_json=? WHERE review_id='r1'",
-            (json.dumps(review),),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
+    _create_db(db_path, contaminated=True)
     monkeypatch.setattr(scf, "_load_future_bars", lambda *args, **kwargs: _complete_m1_bars())
 
     result = scf.evaluate_counterfactuals(db_path=db_path, limit=10, materialize=True)
@@ -213,24 +187,30 @@ def test_counterfactual_terminal_invalidation_cannot_be_rematerialized(monkeypat
     )
     counterfactual_id = first["items"][0]["counterfactual_id"]
     invalidated = {
-        **first["items"][0]["evidence"],
-        "evidence_invalidated": True,
-        "invalidation_reason": "broker_execution_price_scale_repair_v1",
-        "maturity": {
-            **dict(first["items"][0]["evidence"].get("maturity") or {}),
-            "governance_eligible": False,
+        **first["items"][0],
+        "evidence": {
+            **first["items"][0]["evidence"],
+            "evidence_invalidated": True,
+            "invalidation_reason": "broker_execution_price_scale_repair_v1",
+            "maturity": {
+                **dict(first["items"][0]["evidence"].get("maturity") or {}),
+                "governance_eligible": False,
+            },
         },
     }
+    import sqlite3
 
     conn = sqlite3.connect(str(db_path))
     try:
-        conn.execute(
-            """
-            UPDATE supervisor_counterfactual_review
-            SET evidence_json=?
-            WHERE counterfactual_id=?
-            """,
-            (json.dumps(invalidated), counterfactual_id),
+        ensure_sqlite_schema(conn)
+        record_counterfactual_event(
+            conn,
+            counterfactual_id=counterfactual_id,
+            review_id="r1",
+            decision_id="d1",
+            trace_id="t1",
+            event_ts=float(first["items"][0]["close_ts"]) + 1.0,
+            payload=invalidated,
         )
         conn.commit()
     finally:
@@ -247,9 +227,7 @@ def test_counterfactual_terminal_invalidation_cannot_be_rematerialized(monkeypat
     assert stored["count"] == 1
     evidence = stored["items"][0]["evidence"]
     assert evidence["evidence_invalidated"] is True
-    assert evidence["invalidation_reason"] == (
-        "broker_execution_price_scale_repair_v1"
-    )
+    assert evidence["invalidation_reason"] == "broker_execution_price_scale_repair_v1"
     assert evidence["maturity"]["governance_eligible"] is False
 
 
@@ -303,43 +281,15 @@ def test_counterfactual_default_horizon_catches_two_hour_recovery(monkeypatch, t
     assert item["horizons"][-1]["first_original_hit"] == "tp"
 
 
-def test_counterfactual_includes_supervisor_reduce_close_with_m1_evidence(monkeypatch, tmp_path):
+def test_counterfactual_includes_supervisor_reduce_with_m1_evidence(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
-    _create_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    review = {
-        "position_id": "p1",
-        "trade_id": "p1",
-        "close_ts": 1000.0,
-        "close_price": 100.0,
-        "timeframe": "M5",
-        "close_reason": "supervisor_reduce",
-        "entry_action": {"direction": -1},
-        "real_pnl": {"entry_price": 101.0, "net": -1.0},
-    }
-    conn.execute("UPDATE trade_outcome_review SET review_json=? WHERE review_id='r1'", (json.dumps(review),))
-    conn.execute(
-        """
-        UPDATE decision_ledger
-        SET event_type='supervisor_reduce',
-            action_reason='profit_giveback_after_mfe',
-            action_json=?
-        WHERE decision_id='d1'
-        """,
-        (
-            json.dumps(
-                {
-                    "supervisor_verdict": {
-                        "action": "reduce",
-                        "summary_reason": "profit_giveback_after_mfe",
-                        "evidence": {"trigger_tags": ["profit_giveback_after_mfe"]},
-                    }
-                }
-            ),
-        ),
+    _create_db(
+        db_path,
+        event_type="supervisor_reduce",
+        action="reduce",
+        close_reason="supervisor_reduce",
+        action_reason="profit_giveback_after_mfe",
     )
-    conn.commit()
-    conn.close()
 
     bars = _complete_m1_bars(overrides={2: {"low": 94.9, "close": 95.2}})
     calls = []
@@ -349,7 +299,6 @@ def test_counterfactual_includes_supervisor_reduce_close_with_m1_evidence(monkey
         return bars
 
     monkeypatch.setattr(scf, "_load_future_bars", _future)
-
     result = scf.evaluate_counterfactuals(db_path=db_path, limit=10, materialize=True)
 
     assert result["count"] == 1

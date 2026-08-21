@@ -18,9 +18,16 @@ from backend.core.db import (
     is_state_db_path,
     state_table_columns,
 )
-from backend.core.db_helpers import conn_is_pg as _conn_is_pg, execute as _execute, pg_sql as _sql
+from backend.core.db_helpers import execute as _execute
 from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
-from backend.services.canonical_v2_reader import canonical_ready, iter_fact_events, iter_review_rows, review_row
+from backend.services.canonical_v2 import record_supervisor_trace_event
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    iter_counterfactual_rows,
+    iter_fact_events,
+    iter_review_rows,
+    iter_supervisor_trace_rows,
+)
 from backend.services.fact_envelope import observed_epoch
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.learning_application_store import (
@@ -37,14 +44,6 @@ from backend.services.position_supervisor_templates import (
     list_position_supervisor_templates,
 )
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import (
-    archive_json_payload,
-    load_json_payload,
-    supervisor_trace_archive_text,
-)
-from backend.services.supervisor_payload_contract import (
-    compact_supervisor_mapping,
-)
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
@@ -61,31 +60,18 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     return conn
 
 
-def _review_archive_select(conn: Any, *, alias: str = "", output: str = "review_archive_hash") -> str:
-    try:
-        has_archive = "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
-    except Exception:
-        has_archive = False
-    if not has_archive:
-        return ""
-    prefix = f"{alias}." if alias else ""
-    return f", {prefix}review_archive_hash AS {output}"
-
-
-def _legacy_review_table_exists(conn) -> bool:
-    try:
-        return "review_id" in state_table_columns(conn, "trade_outcome_review")
-    except Exception:
-        return False
-
-
 def _attach_reviews(conn, rows: list[Any]) -> list[dict[str, Any]]:
-    """Attach canonical/legacy review facts to counterfactual rows (inner-join semantics)."""
+    """Attach canonical review facts to counterfactual rows."""
+    review_index = {
+        str(item.get("review_id") or ""): item
+        for item in iter_review_rows(conn, limit=0)
+        if str(item.get("review_id") or "")
+    }
     combined: list[dict[str, Any]] = []
     for row in rows:
         mapping = dict(row) if hasattr(row, "keys") else {}
         review_id = str(mapping.get("review_id") or "")
-        review = review_row(conn, review_id) if review_id else None
+        review = review_index.get(review_id) if review_id else None
         if review is None:
             continue
         combined.append(
@@ -94,7 +80,6 @@ def _attach_reviews(conn, rows: list[Any]) -> list[dict[str, Any]]:
                 **review,
                 "source_review_id": review_id,
                 "source_review_json": review.get("review_json") or {},
-                "source_review_archive_hash": "",
             }
         )
     return combined
@@ -104,24 +89,21 @@ def _review_payload(
     conn: Any,
     row: Any,
     *,
-    source_id_key: str = "review_id",
     inline_key: str = "review_json",
-    archive_key: str = "review_archive_hash",
 ) -> dict[str, Any]:
-    payload = load_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(row[source_id_key] or ""),
-        inline_json=row[inline_key],
-        archive_hash=row[archive_key] if archive_key in row.keys() else "",
-        default={},
-    )
-    return payload if isinstance(payload, dict) else {}
+    del conn
+    mapping = dict(row) if hasattr(row, "keys") else {}
+    payload = mapping.get(inline_key)
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return _loads(payload, {})
 
 
-def _loads(raw: str | None, default: Any) -> Any:
-    if not raw:
+def _loads(raw: Any, default: Any) -> Any:
+    if raw in (None, ""):
         return default
+    if isinstance(raw, (Mapping, list, tuple)):
+        return raw
     try:
         return json.loads(raw)
     except Exception:
@@ -739,7 +721,7 @@ def _load_review_rows(
     limit: int,
 ) -> list[sqlite3.Row]:
     start_ts, end_ts = _day_bounds(day)
-    if not canonical_ready(conn) and not _legacy_review_table_exists(conn):
+    if not canonical_ready(conn):
         return []
     rows = []
     for row in iter_review_rows(conn, limit=0):
@@ -769,19 +751,18 @@ def _amend_issue_count(conn: sqlite3.Connection, *, day: str) -> dict[str, int]:
 
 def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, Any]:
     start_ts, end_ts = _day_bounds(day)
-    try:
-        rows = _execute(
-            conn,
-            """
-            SELECT cf.label, cf.supervisor_event_type, cf.evidence_json, cf.review_id
-            FROM supervisor_counterfactual_review cf
-            WHERE cf.close_ts >= ? AND cf.close_ts < ?
-            """,
-            (start_ts, end_ts),
-        ).fetchall()
-        rows = _attach_reviews(conn, rows)
-    except Exception:
-        rows = []
+    counterfactuals = [
+        row
+        for row in iter_counterfactual_rows(conn, limit=0, reverse=True)
+        if start_ts <= _safe_float(row.get("close_ts")) < end_ts
+    ]
+    counterfactuals.sort(
+        key=lambda row: (
+            _safe_float(row.get("close_ts")),
+            str(row.get("counterfactual_id") or ""),
+        )
+    )
+    rows = _attach_reviews(conn, counterfactuals)
     labels: dict[str, int] = {}
     events: dict[str, int] = {}
     for row in rows:
@@ -789,20 +770,13 @@ def _counterfactual_summary(conn: sqlite3.Connection, *, day: str) -> dict[str, 
             _review_payload(
                 conn,
                 row,
-                source_id_key="source_review_id",
                 inline_key="source_review_json",
-                archive_key="source_review_archive_hash",
             )
         ):
             continue
-        label = str(row["label"] or "")
-        event_type = str(row["supervisor_event_type"] or "")
-        evidence = row["evidence_json"] or {}
-        if isinstance(evidence, str):
-            try:
-                evidence = json.loads(evidence or "{}")
-            except Exception:
-                evidence = {}
+        label = str(row.get("label") or "")
+        event_type = str(row.get("supervisor_event_type") or "")
+        evidence = _loads(row.get("evidence_json") or row.get("evidence"), {})
         if (
             bool((evidence or {}).get("evidence_invalidated"))
             or not bool(((evidence or {}).get("maturity") or {}).get("governance_eligible"))
@@ -824,26 +798,29 @@ def _iter_candidate_observation_reviews(
     candidate_created_at: float,
     page_limit: int,
 ):
-    page_offset = 0
-    while True:
-        rows = _execute(
-            conn,
-            """
-            SELECT cf.counterfactual_id, cf.close_ts, cf.review_id,
-                   cf.evidence_json AS counterfactual_evidence_json
-            FROM supervisor_counterfactual_review cf
-            WHERE cf.close_ts>=?
-            ORDER BY cf.close_ts ASC, cf.counterfactual_id ASC
-            LIMIT ? OFFSET ?
-            """,
-            (candidate_created_at, page_limit, page_offset),
-        ).fetchall()
-        if not rows:
-            return
-        page_offset += len(rows)
-        for row in _attach_reviews(conn, rows):
+    rows = [
+        row
+        for row in iter_counterfactual_rows(conn, limit=0, reverse=True)
+        if _safe_float(row.get("close_ts")) >= float(candidate_created_at or 0.0)
+    ]
+    rows.sort(
+        key=lambda row: (
+            _safe_float(row.get("close_ts")),
+            str(row.get("counterfactual_id") or ""),
+        )
+    )
+    attached = _attach_reviews(conn, rows)
+    for row in attached:
+        # Keep the consumer-local name used by the learning worker without
+        # reintroducing a legacy table alias or SQL projection.
+        row.setdefault(
+            "counterfactual_evidence_json",
+            row.get("evidence_json") or row.get("evidence") or {},
+        )
+    bounded_page_limit = max(1, int(page_limit or 1))
+    for page_offset in range(0, len(attached), bounded_page_limit):
+        for row in attached[page_offset : page_offset + bounded_page_limit]:
             yield row
-        del rows
 
 
 def materialize_position_supervisor_candidate_observations(
@@ -852,17 +829,13 @@ def materialize_position_supervisor_candidate_observations(
     limit: int = 500,
     run_id: str = "",
 ) -> dict[str, Any]:
-    """Replay supervisor candidates in the non-execution learning plane.
+    """Replay approved supervisor candidates into canonical shadow events.
 
-    Approved suggestions and the currently active applied suggestion are
-    observations, never live controls.  This helper reconstructs a
-    closed-position context from the outcome review, evaluates the candidate
-    without a broker dependency, and persists an immutable ``learning_shadow``
-    trace.  The trace is deliberately marked recovered and non-authoritative
-    so it cannot be mistaken for a broker mutation or a live execution trace.
+    The event is a learning observation, never broker execution. Its
+    ``trace_id`` is the immutable idempotency boundary; run-specific metadata
+    is kept out of the payload so retries return the same canonical event.
     """
     bounded_limit = max(1, min(int(limit), 5000))
-    now = time.time()
     conn = _connect(db_path)
     inserted = 0
     existing = 0
@@ -870,15 +843,20 @@ def materialize_position_supervisor_candidate_observations(
     skipped: list[dict[str, Any]] = []
     candidate_summaries: list[dict[str, Any]] = []
     try:
-        trace_columns = state_table_columns(conn, "position_supervisor_trace")
-        archive_capable = {
-            "verdict_archive_hash",
-            "verdict_raw_sha256",
-            "verdict_raw_bytes",
-        } <= trace_columns
+        if not canonical_ready(conn):
+            return {
+                "schema_version": "position_supervisor_candidate_observation.v2",
+                "status": "unavailable",
+                "reason": "canonical_v2_unavailable",
+                "inserted": 0,
+                "existing": 0,
+                "evaluated": 0,
+                "candidates": [],
+                "skipped": [],
+            }
         if not state_table_columns(conn, "policy_suggestion"):
             return {
-                "schema_version": "position_supervisor_candidate_observation.v1",
+                "schema_version": "position_supervisor_candidate_observation.v2",
                 "status": "unavailable",
                 "reason": "policy_suggestion_missing",
                 "inserted": 0,
@@ -935,15 +913,16 @@ def materialize_position_supervisor_candidate_observations(
                     continue
                 seen_positions.add(position_id)
                 close_ts = _safe_float(item.get("close_ts"))
+                event_ts = close_ts if close_ts > 0.0 else candidate_created_at
                 trace_id = "psvobs_" + hashlib.sha256(
                     f"{suggestion_id}|{position_id}|{close_ts:.6f}".encode("utf-8")
                 ).hexdigest()
-                already_materialized = _execute(
+                if iter_supervisor_trace_rows(
                     conn,
-                    "SELECT 1 FROM position_supervisor_trace WHERE trace_id=?",
-                    (trace_id,),
-                ).fetchone()
-                if already_materialized:
+                    trace_id=trace_id,
+                    limit=1,
+                    reverse=True,
+                ):
                     existing += 1
                     candidate_existing += 1
                     remaining -= 1
@@ -960,7 +939,7 @@ def materialize_position_supervisor_candidate_observations(
                         "counterfactual_id": str(item.get("counterfactual_id") or ""),
                         "non_authoritative": True,
                         "observation_source": "learning_worker_closed_position_replay",
-                        "lineage_state": "verified_recovered",
+                        "lineage_state": "canonical_observation",
                     }
                 )
                 verdict = {**dict(verdict), "evidence": verdict_evidence}
@@ -971,106 +950,55 @@ def materialize_position_supervisor_candidate_observations(
                     "source": "learning_worker",
                     "non_authoritative": True,
                     "broker_mutation_allowed": False,
-                    "lineage_state": "verified_recovered",
+                    "lineage_state": "canonical_observation",
                     "governance_eligible_counterfactual": True,
                 }
                 raw_context = {**context, "observation_contract": observation_contract}
                 raw_verdict = dict(verdict)
                 raw_execution = {
-                    "execution_class": "shadow",
+                    "execution_class": "learning_shadow",
                     "is_real_execution": False,
                     "broker_mutation_attempted": False,
                     "observation_contract": observation_contract,
                 }
-                context_json = _json(raw_context)
-                verdict_json = _json(raw_verdict)
-                execution_json = _json(raw_execution)
-                archive = None
-                if archive_capable:
-                    archive = archive_json_payload(
-                        conn,
-                        source_table="position_supervisor_trace",
-                        source_id=trace_id,
-                        payload_kind="supervisor_trace",
-                        raw_json=supervisor_trace_archive_text(
-                            context_json=_json(raw_context),
-                            verdict_json=_json(raw_verdict),
-                            risk_verdict_json="{}",
-                            execution_json=_json(raw_execution),
-                        ),
-                    )
-                    if archive:
-                        context_json = _json(
-                            compact_supervisor_mapping(
-                                raw_context,
-                                nested_keys=frozenset({"position", "account"}),
-                            )
-                        )
-                        verdict_json = _json(
-                            compact_supervisor_mapping(
-                                raw_verdict,
-                                nested_keys=frozenset(
-                                    {"evidence", "recommended_controls", "supervisor_template"}
-                                ),
-                            )
-                        )
-                        execution_json = _json(
-                            compact_supervisor_mapping(
-                                raw_execution,
-                                nested_keys=frozenset({"evidence", "controls"}),
-                            )
-                        )
-                cursor = _execute(
+                event = record_supervisor_trace_event(
                     conn,
-                    """
-                    INSERT INTO position_supervisor_trace
-                    (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
-                     tick, event_ts, action, summary_reason, confidence, template_id,
-                     template_version, stage, outcome, risk_action, risk_allowed,
-                     risk_reason, execution_status, execution_reason, context_json,
-                     verdict_json, risk_verdict_json, execution_json, trace_integrity,
-                     config_version, config_hash, evolution_run_id, created_at)
-                    VALUES (?, ?, ?, ?, '', '', 0, ?, ?, ?, ?, ?, ?,
-                            'learning_shadow', 'shadow', '', 0, '',
-                            'observation_only', ?,
-                            ?, ?, '{}', ?, 'recovered', 0, '', ?, ?)
-                    ON CONFLICT(trace_id) DO NOTHING
-                    """,
-                    (
-                        trace_id,
-                        str(item.get("exit_decision_id") or ""),
-                        position_id,
-                        str(item.get("trade_id") or position_id),
-                        close_ts,
-                        str(verdict.get("action") or "hold"),
-                        str(verdict.get("summary_reason") or ""),
-                        _safe_float(verdict.get("confidence")),
-                        template_id,
-                        str(template.get("template_version") or ""),
-                        f"learning_worker_candidate_replay:{suggestion_id}",
-                        context_json,
-                        verdict_json,
-                        execution_json,
-                        str(run_id or ""),
-                        now,
-                    ),
+                    trace_id=trace_id,
+                    decision_id=str(item.get("exit_decision_id") or ""),
+                    event_ts=event_ts,
+                    payload={
+                        "trace_id": trace_id,
+                        "decision_id": str(item.get("exit_decision_id") or ""),
+                        "position_id": position_id,
+                        "trade_id": str(item.get("trade_id") or position_id),
+                        "symbol": str(item.get("symbol") or ""),
+                        "timeframe": str(item.get("timeframe") or ""),
+                        "tick": 0,
+                        "event_ts": event_ts,
+                        "action": str(verdict.get("action") or "hold"),
+                        "summary_reason": str(verdict.get("summary_reason") or ""),
+                        "confidence": _safe_float(verdict.get("confidence")),
+                        "template_id": template_id,
+                        "template_version": str(template.get("template_version") or ""),
+                        "stage": "learning_shadow",
+                        "outcome": "shadow",
+                        "risk_action": "",
+                        "risk_allowed": False,
+                        "risk_reason": "learning_shadow_not_executed",
+                        "execution_status": "not_executed",
+                        "execution_reason": f"learning_worker_candidate_replay:{suggestion_id}",
+                        "context": raw_context,
+                        "verdict": raw_verdict,
+                        "risk_verdict": {},
+                        "execution": raw_execution,
+                        "observation_contract": observation_contract,
+                        "trace_integrity": "canonical_observation",
+                        "config_version": 0,
+                        "config_hash": "",
+                    },
+                    producer="position_supervisor_governance",
                 )
-                if archive:
-                    _execute(
-                        conn,
-                        """
-                        UPDATE position_supervisor_trace
-                        SET verdict_archive_hash=?, verdict_raw_sha256=?, verdict_raw_bytes=?
-                        WHERE trace_id=?
-                        """,
-                        (
-                            archive["archive_hash"],
-                            archive["raw_sha256"],
-                            archive["raw_bytes"],
-                            trace_id,
-                        ),
-                    )
-                was_inserted = int(cursor.rowcount or 0) == 1
+                was_inserted = bool(event.get("created", True))
                 inserted += int(was_inserted)
                 existing += int(not was_inserted)
                 evaluated += 1
@@ -1091,9 +1019,9 @@ def materialize_position_supervisor_candidate_observations(
             )
         conn.commit()
         return {
-            "schema_version": "position_supervisor_candidate_observation.v1",
+            "schema_version": "position_supervisor_candidate_observation.v2",
             "status": "completed",
-            "authority": "learning_observation_only",
+            "authority": "canonical_learning_shadow",
             "broker_mutation_allowed": False,
             "inserted": inserted,
             "existing": existing,
@@ -1774,7 +1702,6 @@ class PositionSupervisorGovernanceMutationService:
     ) -> dict[str, Any]:
         from backend.services.governance_control_plans import (
             PositionSupervisorTemplatePlan,
-            governance_coordinator_mode,
         )
 
         now = time.time()
@@ -1830,8 +1757,6 @@ class PositionSupervisorGovernanceMutationService:
             evidence_fingerprint=v16_evidence_fingerprint,
         )
 
-        mode = governance_coordinator_mode()
-
         def writer(conn, mutation_id: str, _effective_config) -> Mapping[str, Any]:
             return _write_supervisor_switch_domain(
                 conn,
@@ -1843,25 +1768,15 @@ class PositionSupervisorGovernanceMutationService:
                 details=details,
                 review_note=reason,
                 now=now,
-                require_governance_eligibility=mode != "off",
+                require_governance_eligibility=True,
             )
 
         mutation = plan.execute(
             self.db_path,
-            transaction_writer=writer if mode != "off" else None,
+            transaction_writer=writer,
         )
         committed = self._committed(mutation)
-        if committed and mode == "off":
-            conn = _connect(self.db_path)
-            try:
-                writer(conn, str(mutation.get("mutation_id") or ""), None)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
-        elif not committed and reservation_id:
+        if not committed and reservation_id:
             from backend.services.learning_experiment_admission import (
                 LearningExperimentAdmissionService,
             )
@@ -1879,7 +1794,6 @@ class PositionSupervisorGovernanceMutationService:
             "target_template_id": target_template_id,
             "mutation": mutation,
             "mutation_id": str(mutation.get("mutation_id") or ""),
-            "coordinator_mode": mode,
         }
 
     def rollback_template(
@@ -1898,7 +1812,6 @@ class PositionSupervisorGovernanceMutationService:
     ) -> dict[str, Any]:
         from backend.services.governance_control_plans import (
             PositionSupervisorTemplatePlan,
-            governance_coordinator_mode,
         )
 
         now = time.time()
@@ -1929,33 +1842,9 @@ class PositionSupervisorGovernanceMutationService:
             v16_command_id=v16_command_id,
         )
 
-        mode = governance_coordinator_mode()
-        if mode == "off":
-            # Legacy compatibility only.  dual/enforce always use the typed
-            # plan and coordinator-derived risk classification.
-            from backend.services.runtime_config_mutation import (
-                RuntimeConfigMutationService,
-            )
-
-            mutation = RuntimeConfigMutationService(self.db_path).apply_patch(
-                dict(plan.patch),
-                source=plan.source,
-                run_id=plan.run_id,
-                actor=plan.actor,
-                action=plan.action,
-                reason=plan.reason,
-                v16_command_id=plan.v16_command_id,
-                v16_target_agent=plan.target_agent,
-                v16_scope_type=plan.scope_type,
-                v16_scope_key=plan.scope_key,
-                v16_action=plan.action,
-                risk_reduction=True,
-            )
-        else:
-            # The learning_application rollback is written through the store
-            # after commit (below); the coordinator transaction no longer paths
-            # store writes through its own connection.
-            mutation = plan.execute(self.db_path, transaction_writer=None)
+        # The learning_application rollback is written through the store after
+        # the coordinator commits; no coordinator-off mutation path exists.
+        mutation = plan.execute(self.db_path, transaction_writer=None)
         committed = self._committed(mutation)
         if committed:
             store = LearningApplicationStore(str(self.db_path))
@@ -1975,5 +1864,4 @@ class PositionSupervisorGovernanceMutationService:
             "rolled_back_from": current_template_id,
             "mutation": mutation,
             "mutation_id": str(mutation.get("mutation_id") or ""),
-            "coordinator_mode": mode,
         }

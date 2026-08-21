@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check or explicitly apply versioned PostgreSQL ``state_v1`` migrations."""
+"""Check or explicitly apply versioned PostgreSQL ``runtime`` migrations."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from backend.core.state_schema_migrations import (
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Check or apply additive migrations for PostgreSQL state_v1."
+        description="Check or apply additive migrations for the PostgreSQL runtime schema."
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(

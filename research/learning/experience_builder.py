@@ -254,7 +254,7 @@ class ExperienceBuilder:
             "attribution_integrity": attribution_integrity,
             "summary_text": review.get("summary_text", ""),
         }
-        source_table = "trade_outcome_review"
+        source_table = "canonical_v2.trade_review"
         source_id = str(review.get("review_id") or review_json.get("review_id") or review.get("trade_id") or "")
         append_source = "trade_lesson_memory.v1"
         experience_id = f"trade_lesson:{source_id}"

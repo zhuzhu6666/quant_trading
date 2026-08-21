@@ -23,7 +23,6 @@ SAFETY_ACTIONS = frozenset(
         "repair_entry_protection",
         "timeout",
         "supervisor",
-        "trailing",
         "close",
         "reduce",
         "tighten",
@@ -191,9 +190,6 @@ class LiveSafetyPlane:
         unknown_execution_count: int,
         candidate_provider: Callable[[list[Any]], Iterable[SafetyCandidate | Mapping[str, Any]]],
         executor: Callable[[SafetyCandidate], Mapping[str, Any]],
-        legacy_candidates: Iterable[SafetyCandidate | Mapping[str, Any]] | None = None,
-        comparison_independent: bool = False,
-        require_candidate_match: bool = False,
         force_full_cycle: bool = False,
     ) -> SafetyCycleResult:
         now = self._clock()
@@ -223,16 +219,13 @@ class LiveSafetyPlane:
         )
         elapsed = now - self._last_full_cycle_at if self._last_full_cycle_at > 0 else interval
         if elapsed < interval and not force_full_cycle:
-            comparison = dict(self._last_comparison) if require_candidate_match else {}
-            if require_candidate_match:
-                if bool(comparison.get("duplicate")):
-                    blockers.append("safety_candidate_duplicate")
-                elif bool(comparison.get("position_conflict")):
-                    blockers.append("safety_candidate_position_conflict")
-                elif not bool(comparison.get("independent")):
-                    blockers.append("safety_candidate_comparison_not_independent")
-                elif not bool(comparison.get("match")):
-                    blockers.append("safety_candidate_mismatch")
+            comparison = dict(self._last_comparison)
+            if bool(comparison.get("duplicate")):
+                blockers.append("safety_candidate_duplicate")
+            elif bool(comparison.get("position_conflict")):
+                blockers.append("safety_candidate_position_conflict")
+            elif not bool(comparison.get("match")):
+                blockers.append("safety_candidate_comparison_error")
             if self.forced_shadow:
                 blockers.append("safety_v2_forced_shadow")
             return SafetyCycleResult(
@@ -260,11 +253,10 @@ class LiveSafetyPlane:
             candidates = tuple(
                 self._coerce_candidate(item) for item in candidate_provider(raw_positions)
             )
-            comparison = self._compare_candidates(
-                candidates,
-                legacy_candidates or (),
-                independent=bool(comparison_independent),
-            )
+            # The candidate provider is the only live safety authority.  This
+            # is an integrity check over that one stream, not a second legacy
+            # planner or execution fallback.
+            comparison = self._compare_candidates(candidates)
         except Exception as exc:
             # Candidate coercion and set comparison are part of the authority
             # decision, not execution.  Any exception therefore removes V2
@@ -276,28 +268,18 @@ class LiveSafetyPlane:
                 "match": False,
                 "enforce_eligible": False,
                 "fingerprint": "",
-                "diff": {"v2_only": [], "legacy_only": []},
-                "v2_only": [],
-                "legacy_only": [],
-                "v2_count": 0,
-                "legacy_count": 0,
+                "candidate_keys": [],
+                "candidate_count": 0,
                 "error": comparison_error,
             }
         self._last_comparison = dict(comparison)
-        if require_candidate_match:
-            if comparison_error:
-                blockers.append("safety_candidate_comparison_error")
-            elif bool(comparison.get("duplicate")):
-                blockers.append("safety_candidate_duplicate")
-            elif bool(comparison.get("position_conflict")):
-                blockers.append("safety_candidate_position_conflict")
-            elif not bool(comparison.get("independent")):
-                blockers.append("safety_candidate_comparison_not_independent")
-            elif not bool(comparison.get("match")):
-                blockers.append("safety_candidate_mismatch")
-        comparison_ready = bool(
-            not require_candidate_match or comparison.get("enforce_eligible")
-        )
+        if comparison_error:
+            blockers.append("safety_candidate_comparison_error")
+        elif bool(comparison.get("duplicate")):
+            blockers.append("safety_candidate_duplicate")
+        elif bool(comparison.get("position_conflict")):
+            blockers.append("safety_candidate_position_conflict")
+        comparison_ready = bool(comparison.get("enforce_eligible"))
         if self.mode == "enforce" and not comparison_ready:
             if comparison_error:
                 force_reason = "safety_candidate_comparison_error"
@@ -305,10 +287,8 @@ class LiveSafetyPlane:
                 force_reason = "safety_candidate_duplicate"
             elif bool(comparison.get("position_conflict")):
                 force_reason = "safety_candidate_position_conflict"
-            elif not bool(comparison.get("independent")):
-                force_reason = "safety_candidate_comparison_not_independent"
             else:
-                force_reason = "safety_candidate_mismatch"
+                force_reason = "safety_candidate_comparison_error"
             self.force_shadow(force_reason)
         if self.forced_shadow:
             blockers.append("safety_v2_forced_shadow")
@@ -364,51 +344,24 @@ class LiveSafetyPlane:
         )
 
     @classmethod
-    def compare_candidate_sets(
-        cls,
-        candidates: Iterable[SafetyCandidate | Mapping[str, Any]],
-        legacy: Iterable[SafetyCandidate | Mapping[str, Any]],
-        *,
-        independent: bool,
-    ) -> dict[str, Any]:
-        return cls._compare_candidates(
-            (cls._coerce_candidate(item) for item in candidates),
-            legacy,
-            independent=independent,
-        )
-
-    @classmethod
     def _compare_candidates(
         cls,
         candidates: Iterable[SafetyCandidate],
-        legacy: Iterable[SafetyCandidate | Mapping[str, Any]],
-        *,
-        independent: bool = False,
     ) -> dict[str, Any]:
         current_items = list(candidates)
         current_keys = [cls._candidate_key(item) for item in current_items]
-        legacy_items = [cls._coerce_candidate(item) for item in legacy]
-        legacy_keys = [cls._candidate_key(item) for item in legacy_items]
         current_counts = Counter(current_keys)
-        legacy_counts = Counter(legacy_keys)
-        match = current_counts == legacy_counts
-        duplicate_v2 = sorted(key for key, count in current_counts.items() if count > 1)
-        duplicate_legacy = sorted(key for key, count in legacy_counts.items() if count > 1)
+        duplicate_candidates = sorted(
+            key for key, count in current_counts.items() if count > 1
+        )
         current_position_counts = Counter(int(item.position_id) for item in current_items)
-        legacy_position_counts = Counter(int(item.position_id) for item in legacy_items)
-        conflicting_v2_position_ids = sorted(
+        conflicting_position_ids = sorted(
             pid for pid, count in current_position_counts.items() if count > 1
         )
-        conflicting_legacy_position_ids = sorted(
-            pid for pid, count in legacy_position_counts.items() if count > 1
-        )
-        duplicate = bool(duplicate_v2 or duplicate_legacy)
-        position_conflict = bool(
-            conflicting_v2_position_ids or conflicting_legacy_position_ids
-        )
+        duplicate = bool(duplicate_candidates)
+        position_conflict = bool(conflicting_position_ids)
         fingerprint_payload = {
-            "v2": sorted(current_keys),
-            "legacy": sorted(legacy_keys),
+            "authority": sorted(current_keys),
         }
         fingerprint = hashlib.sha256(
             json.dumps(
@@ -418,24 +371,20 @@ class LiveSafetyPlane:
                 ensure_ascii=True,
             ).encode("utf-8")
         ).hexdigest()
-        v2_only = sorted((current_counts - legacy_counts).elements())
-        legacy_only = sorted((legacy_counts - current_counts).elements())
         return {
-            "independent": bool(independent),
-            "match": match,
-            "enforce_eligible": bool(independent) and match and not duplicate and not position_conflict,
+            "schema_version": "single_safety_authority.v1",
+            "authority": "supervisor_executor",
+            "comparison_scope": "single_authority_integrity",
+            "independent": True,
+            "match": True,
+            "enforce_eligible": not duplicate and not position_conflict,
             "fingerprint": fingerprint,
-            "diff": {"v2_only": v2_only, "legacy_only": legacy_only},
-            "v2_only": v2_only,
-            "legacy_only": legacy_only,
-            "v2_count": len(current_keys),
-            "legacy_count": len(legacy_keys),
+            "candidate_keys": sorted(current_keys),
+            "candidate_count": len(current_keys),
             "duplicate": duplicate,
-            "duplicate_v2": duplicate_v2,
-            "duplicate_legacy": duplicate_legacy,
+            "duplicate_candidates": duplicate_candidates,
             "position_conflict": position_conflict,
-            "conflicting_v2_position_ids": conflicting_v2_position_ids,
-            "conflicting_legacy_position_ids": conflicting_legacy_position_ids,
+            "conflicting_position_ids": conflicting_position_ids,
         }
 
     @staticmethod

@@ -14,7 +14,6 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
-    state_table_columns,
 )
 from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
@@ -22,7 +21,11 @@ from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSI
 from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import load_json_payload
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    iter_decision_factor_snapshots,
+    iter_review_rows_desc,
+)
 from research.learning.effect_reconciliation import EffectEvaluation, evaluate_application_effect
 from research.learning.governance_conflicts import GovernanceConflictResolver
 
@@ -137,8 +140,8 @@ class RuleEvolutionGovernor:
 
     @staticmethod
     def _parse_application_row(row: sqlite3.Row) -> dict:
-        # Legacy wide-row parser retained for callers that may pass a raw row;
-        # the canonical read path is LearningApplicationStore.iter_applications.
+        # Keep the lean application-row shape for LearningApplicationStore
+        # callers; review facts are parsed by _parse_review_row below.
         item = dict(row)
         try:
             item["suggestion_ids"] = json.loads(
@@ -227,34 +230,26 @@ class RuleEvolutionGovernor:
             return 0.0
 
     @staticmethod
-    def _review_archive_select(conn, *, alias: str = "r") -> str:
-        if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
-            return ""
-        return f", {alias}.review_archive_hash AS review_archive_hash"
-
-    @staticmethod
-    def _parse_review_row(row: sqlite3.Row, conn=None) -> dict:
+    def _parse_review_row(row: sqlite3.Row | dict[str, Any]) -> dict:
         item = dict(row)
         try:
-            item["failure_tags"] = json.loads(item.pop("failure_tags_json") or "[]")
+            raw_failure_tags = item.pop("failure_tags_json", [])
+            item["failure_tags"] = (
+                json.loads(raw_failure_tags or "[]")
+                if isinstance(raw_failure_tags, str)
+                else raw_failure_tags
+            )
         except Exception:
             item["failure_tags"] = []
-        inline_json = item.pop("review_json", "{}")
-        archive_hash = item.pop("review_archive_hash", "")
-        if conn is not None:
-            item["review"] = load_json_payload(
-                conn,
-                source_table="trade_outcome_review",
-                source_id=str(item.get("review_id") or ""),
-                inline_json=inline_json,
-                archive_hash=archive_hash,
-                default={},
+        inline_json = item.pop("review_json", {})
+        try:
+            item["review"] = (
+                json.loads(inline_json or "{}")
+                if isinstance(inline_json, str)
+                else inline_json
             )
-        else:
-            try:
-                item["review"] = json.loads(inline_json or "{}")
-            except Exception:
-                item["review"] = {}
+        except Exception:
+            item["review"] = {}
         if not isinstance(item["review"], dict):
             item["review"] = {}
         return item
@@ -1228,6 +1223,33 @@ class RuleEvolutionGovernor:
                     : max(1, min(int(application_limit or 200), 2000))
                 ]
             ]
+            canonical_reviews = [
+                self._parse_review_row(row)
+                for row in (
+                    iter_review_rows_desc(conn, limit=0)
+                    if canonical_ready(conn)
+                    else []
+                )
+            ]
+            factor_names_by_decision: dict[str, set[str]] = {}
+
+            def review_timestamp(item: dict[str, Any]) -> float:
+                try:
+                    return float(item.get("created_at") or 0.0)
+                except Exception:
+                    return 0.0
+
+            def review_has_factor(item: dict[str, Any], factor: str) -> bool:
+                decision_id = str(item.get("entry_decision_id") or "")
+                if not decision_id:
+                    return False
+                if decision_id not in factor_names_by_decision:
+                    factor_names_by_decision[decision_id] = {
+                        str(snapshot.get("factor") or "")
+                        for snapshot in iter_decision_factor_snapshots(conn, decision_id)
+                        if str(snapshot.get("factor") or "")
+                    }
+                return str(factor) in factor_names_by_decision[decision_id]
 
             for app in rows:
                 prior_status = str(app.get("status") or "")
@@ -1272,7 +1294,6 @@ class RuleEvolutionGovernor:
                     if next_application
                     else 1.0e18
                 )
-                review_archive_select = self._review_archive_select(conn)
                 review_scan_limit = min(
                     max(review_limit * 10, int(observe_trades) * 20, 500),
                     5000,
@@ -1280,66 +1301,37 @@ class RuleEvolutionGovernor:
                 if scope_type == "position_supervisor_template":
                     if not scope_key_for_effect:
                         continue
-                    post_rows = self._execute(conn,
-                        f"""
-                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
-                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
-                        FROM trade_outcome_review r
-                        WHERE r.created_at > ?
-                          AND r.created_at < ?
-                        ORDER BY r.created_at DESC
-                        LIMIT ?
-                        """,
-                        (self._app_ts(app), observation_upper_bound, review_scan_limit),
-                    ).fetchall()
+                    post_rows = [
+                        item
+                        for item in canonical_reviews
+                        if self._app_ts(app) < review_timestamp(item) < observation_upper_bound
+                    ][:review_scan_limit]
                     post_reviews = [
-                        r for r in (self._parse_review_row(row, conn) for row in post_rows)
+                        r for r in post_rows
                         if self._has_supervisor_feedback(r)
                     ][: int(observe_trades)]
 
-                    pre_rows = self._execute(conn,
-                        f"""
-                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
-                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
-                        FROM trade_outcome_review r
-                        WHERE r.created_at <= ?
-                        ORDER BY r.created_at DESC
-                        LIMIT ?
-                        """,
-                        (self._app_ts(app), review_scan_limit),
-                    ).fetchall()
+                    pre_rows = [
+                        item
+                        for item in canonical_reviews
+                        if review_timestamp(item) <= self._app_ts(app)
+                    ][:review_scan_limit]
                     pre_reviews = [
-                        r for r in (self._parse_review_row(row, conn) for row in pre_rows)
+                        r for r in pre_rows
                         if self._has_supervisor_feedback(r)
                     ][: int(observe_trades)]
                     reward_from_review = self._supervisor_reward_from_review
                 elif scope_type == "entry_quality":
-                    post_rows = self._execute(
-                        conn,
-                        f"""
-                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id,
-                               r.entry_quality, r.pnl, r.mfe, r.outcome_label,
-                               r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
-                        FROM trade_outcome_review r
-                        WHERE r.created_at > ? AND r.created_at < ?
-                        ORDER BY r.created_at DESC LIMIT ?
-                        """,
-                        (self._app_ts(app), observation_upper_bound, review_scan_limit),
-                    ).fetchall()
-                    pre_rows = self._execute(
-                        conn,
-                        f"""
-                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id,
-                               r.entry_quality, r.pnl, r.mfe, r.outcome_label,
-                               r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
-                        FROM trade_outcome_review r
-                        WHERE r.created_at <= ?
-                        ORDER BY r.created_at DESC LIMIT ?
-                        """,
-                        (self._app_ts(app), review_scan_limit),
-                    ).fetchall()
-                    parsed_post = [self._parse_review_row(row, conn) for row in post_rows]
-                    parsed_pre = [self._parse_review_row(row, conn) for row in pre_rows]
+                    parsed_post = [
+                        item
+                        for item in canonical_reviews
+                        if self._app_ts(app) < review_timestamp(item) < observation_upper_bound
+                    ][:review_scan_limit]
+                    parsed_pre = [
+                        item
+                        for item in canonical_reviews
+                        if review_timestamp(item) <= self._app_ts(app)
+                    ][:review_scan_limit]
                     raw_post_count_override = len(parsed_post)
                     raw_pre_count_override = len(parsed_pre)
 
@@ -1372,44 +1364,18 @@ class RuleEvolutionGovernor:
                         continue
                     scope_key_for_effect = scope_key_for_effect or factor
 
-                    post_rows = self._execute(conn,
-                        f"""
-                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
-                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
-                        FROM trade_outcome_review r
-                        WHERE r.created_at > ?
-                          AND r.created_at < ?
-                          AND EXISTS (
-                              SELECT 1
-                              FROM decision_factor_snapshot dfs
-                              WHERE dfs.decision_id = r.entry_decision_id
-                                AND dfs.factor = ?
-                          )
-                        ORDER BY r.created_at DESC
-                        LIMIT ?
-                        """,
-                        (self._app_ts(app), observation_upper_bound, factor, review_scan_limit),
-                    ).fetchall()
-                    post_reviews = [self._parse_review_row(r, conn) for r in post_rows]
-
-                    pre_rows = self._execute(conn,
-                        f"""
-                        SELECT r.review_id, r.trade_id, r.position_id, r.entry_decision_id, r.pnl,
-                               r.outcome_label, r.failure_tags_json, r.summary_text, r.review_json{review_archive_select}, r.created_at
-                        FROM trade_outcome_review r
-                        WHERE r.created_at <= ?
-                          AND EXISTS (
-                              SELECT 1
-                              FROM decision_factor_snapshot dfs
-                              WHERE dfs.decision_id = r.entry_decision_id
-                                AND dfs.factor = ?
-                          )
-                        ORDER BY r.created_at DESC
-                        LIMIT ?
-                        """,
-                        (self._app_ts(app), factor, review_scan_limit),
-                    ).fetchall()
-                    pre_reviews = [self._parse_review_row(r, conn) for r in pre_rows]
+                    post_reviews = [
+                        item
+                        for item in canonical_reviews
+                        if self._app_ts(app) < review_timestamp(item) < observation_upper_bound
+                        and review_has_factor(item, factor)
+                    ][:review_scan_limit]
+                    pre_reviews = [
+                        item
+                        for item in canonical_reviews
+                        if review_timestamp(item) <= self._app_ts(app)
+                        and review_has_factor(item, factor)
+                    ][:review_scan_limit]
                     reward_from_review = self._reward_from_review
 
                 raw_post_reviews = list(post_reviews)

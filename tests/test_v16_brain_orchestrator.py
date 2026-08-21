@@ -1,7 +1,13 @@
-import json
 import time
 
+import pytest
+
 from backend.core.db import STATE_DB_DDL, connect_sqlite
+from backend.services.canonical_v2 import (
+    record_counterfactual_event,
+    record_review,
+    record_supervisor_trace_event,
+)
 from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
 from backend.services.brain_governance_candidate_review import (
     ensure_brain_governance_candidate_review_table,
@@ -9,6 +15,31 @@ from backend.services.brain_governance_candidate_review import (
 from backend.services.brain_governance_candidates import ensure_policy_suggestion_table
 from backend.services.v16_brain_snapshot import build_posterior_arbitration
 from backend.services.learning_application_store import LearningApplicationStore
+from risk.policy_service import RiskPolicyService
+from tests.canonical_fixture import make_canonical_sqlite
+
+
+@pytest.fixture(autouse=True)
+def _governed_demo_bridge(monkeypatch):
+    """Bind supervisor-template governance to the explicit demo bridge.
+
+    The production RiskPolicyService requires this release-bound evidence for
+    supervisor template switches.  The tests below exercise the autonomous
+    demo dispatch path, so keep that boundary explicit while preserving the
+    real policy evaluation for every other field and action.
+    """
+
+    original_evaluate = RiskPolicyService.evaluate
+
+    def evaluate_with_demo_bridge(service, action, context=None):
+        if action == "switch_position_supervisor_template":
+            context = dict(context or {})
+            evidence = dict(context.get("evidence") or {})
+            evidence["bridge"] = {"automatic_demo": True}
+            context["evidence"] = evidence
+        return original_evaluate(service, action, context)
+
+    monkeypatch.setattr(RiskPolicyService, "evaluate", evaluate_with_demo_bridge)
 
 
 def _readiness() -> dict:
@@ -39,7 +70,7 @@ def _readiness() -> dict:
 
 
 def _seed_posterior_facts(db_path, now: float) -> None:
-    conn = connect_sqlite(db_path)
+    conn = make_canonical_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
         conn.execute(
@@ -51,19 +82,20 @@ def _seed_posterior_facts(db_path, now: float) -> None:
             """,
             (now - 30.0,),
         )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, pnl, outcome_label,
-             failure_tags_json, summary_text, review_json, created_at)
-            VALUES ('review-v16', 'trade-v16', 'position-v16', -10.0, 'loss', ?,
-                    'entry was weak', ?, ?)
-            """,
-            (
-                json.dumps(["weak_entry"]),
-                json.dumps({"primary_responsibility": "entry", "failure_taxonomy": {"primary_responsibility": "entry"}}),
-                now - 20.0,
-            ),
+        record_review(
+            conn,
+            review_id="review-v16",
+            trade_id="trade-v16",
+            position_id="position-v16",
+            pnl=-10.0,
+            outcome_label="loss",
+            failure_tags=["weak_entry"],
+            summary_text="entry was weak",
+            review={
+                "primary_responsibility": "entry",
+                "failure_taxonomy": {"primary_responsibility": "entry"},
+            },
+            created_at=now - 20.0,
         )
         conn.commit()
     finally:
@@ -86,38 +118,50 @@ def _seed_posterior_facts(db_path, now: float) -> None:
     )
     conn = connect_sqlite(db_path)
     try:
-        conn.execute(
-            """
-            INSERT INTO position_supervisor_trace
-            (trace_id, decision_id, position_id, trade_id, event_ts, action,
-             outcome, risk_allowed, execution_status, trace_integrity, created_at)
-            VALUES ('trace-v16', 'decision-v16', 'position-v16', 'trade-v16', ?,
-                    'tighten', 'observed', 1, 'observed', 'full', ?)
-            """,
-            (now - 15.0, now - 15.0),
+        record_supervisor_trace_event(
+            conn,
+            trace_id="trace-v16",
+            decision_id="decision-v16",
+            event_ts=now - 15.0,
+            payload={
+                "trace_id": "trace-v16",
+                "decision_id": "decision-v16",
+                "position_id": "position-v16",
+                "trade_id": "trade-v16",
+                "event_ts": now - 15.0,
+                "action": "tighten",
+                "outcome": "observed",
+                "risk_allowed": True,
+                "execution_status": "observed",
+                "trace_integrity": "full",
+                "created_at": now - 15.0,
+            },
         )
-        conn.execute(
-            """
-            INSERT INTO supervisor_counterfactual_review
-            (counterfactual_id, review_id, trade_id, position_id, close_ts,
-             close_reason, supervisor_event_type, supervisor_reason, label,
-             confidence, horizons_json, evidence_json, created_at, updated_at)
-            VALUES ('cf-v16', 'review-v16', 'trade-v16', 'position-v16', ?,
-                    'stop', 'tighten', 'tighten happened too early',
-                    'premature_tighten', 0.80, ?, ?, ?, ?)
-            """,
-            (
-                now - 15.0,
-                json.dumps([{"horizon_minutes": 30, "future_pnl": 9.7}]),
-                json.dumps(
-                    {
-                        "tags": ["future_bars_complete"],
-                        "maturity": {"governance_eligible": True},
-                    }
-                ),
-                now - 5.0,
-                now - 5.0,
-            ),
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf-v16",
+            review_id="review-v16",
+            trace_id="trace-v16",
+            event_ts=now - 15.0,
+            payload={
+                "counterfactual_id": "cf-v16",
+                "review_id": "review-v16",
+                "trade_id": "trade-v16",
+                "position_id": "position-v16",
+                "close_ts": now - 15.0,
+                "close_reason": "stop",
+                "supervisor_event_type": "tighten",
+                "supervisor_reason": "tighten happened too early",
+                "label": "premature_tighten",
+                "confidence": 0.80,
+                "horizons": [{"horizon_minutes": 30, "future_pnl": 9.7}],
+                "evidence": {
+                    "tags": ["future_bars_complete"],
+                    "maturity": {"governance_eligible": True},
+                },
+                "created_at": now - 5.0,
+                "updated_at": now - 5.0,
+            },
         )
         conn.commit()
     finally:

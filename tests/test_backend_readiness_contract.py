@@ -6,6 +6,16 @@ from backend.services import config_service
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.backend_readiness import BackendReadinessService
 from backend.services.evolution_ledger import persist_runtime_config_snapshot
+from backend.services.canonical_v2 import (
+    ensure_sqlite_schema,
+    record_counterfactual_event,
+    record_review,
+    record_supervisor_trace_event,
+)
+from backend.services.canonical_v2 import (
+    ensure_sqlite_schema,
+    record_parameter_template_lifecycle_event,
+)
 from backend.services.policy_suggestion_status import normalize_policy_suggestion_status
 from config import runtime_config as rc
 
@@ -140,6 +150,39 @@ def test_readiness_exposes_mutation_policy_and_audit_health():
     assert "ok" in audit
 
 
+def test_governance_status_does_not_authorize_supervisor_without_intent_schema(
+    tmp_path,
+):
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+    finally:
+        conn.close()
+
+    previous = rc.shared()
+    try:
+        rc.replace(
+            rc.RuntimeConfig(
+                autonomy_mode="demo_autonomous",
+                autonomy_demo_auto_apply=True,
+                ctrader_send_orders=True,
+                position_supervisor_template_id="position_supervisor:default.v1",
+            )
+        )
+        service = BackendReadinessService(db_path=db_path)
+        service._factor_governance_runtime_status = lambda: {}
+        status = service._governance_status()
+    finally:
+        rc.replace(previous)
+
+    assert status["active_template_mode"] == "governed_execute"
+    assert status["broker_execution_enabled"] is True
+    assert status["supervisor_execution_authorized"] is False
+    assert status["authority_source"] == "broker_execution_intent_schema_unavailable"
+    assert status["execution_schema"]["reason"] == "broker_execution_intent_table_missing"
+
+
 def test_readiness_projects_canonical_forward_var_snapshot(tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)
@@ -198,6 +241,7 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         conn.execute(
             """
             INSERT INTO policy_suggestion
@@ -215,26 +259,30 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
         ]
         for index, (position_id, close_ts, eligible, regime, has_shadow) in enumerate(rows):
             review_id = f"review_{index}"
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, review_json, created_at)
-                VALUES (?, ?, ?, '{}', ?)
-                """,
-                (review_id, f"trade_{index}", position_id, close_ts),
+            record_review(
+                conn,
+                review_id=review_id,
+                trade_id=f"trade_{index}",
+                position_id=position_id,
+                review={},
+                created_at=close_ts,
             )
             if has_shadow:
-                conn.execute(
-                    """
-                    INSERT INTO position_supervisor_trace
-                    (trace_id, position_id, template_id, stage, outcome,
-                     execution_status, execution_reason, trace_integrity,
-                     event_ts, created_at)
-                    VALUES (?, ?, 'position_supervisor:test.v1', 'learning_shadow', 'shadow',
-                            'observation_only', 'learning_worker_candidate_replay:canary_1',
-                            'recovered', ?, ?)
-                    """,
-                    (f"trace_{index}", position_id, close_ts - 60, close_ts - 60),
+                record_supervisor_trace_event(
+                    conn,
+                    trace_id=f"trace_{index}",
+                    event_ts=close_ts - 60,
+                    payload={
+                        "trace_id": f"trace_{index}",
+                        "position_id": position_id,
+                        "template_id": "position_supervisor:test.v1",
+                        "stage": "learning_shadow",
+                        "outcome": "shadow",
+                        "execution_status": "observation_only",
+                        "execution_reason": "learning_worker_candidate_replay:canary_1",
+                        "trace_integrity": "recovered",
+                        "event_ts": close_ts - 60,
+                    },
                 )
             evidence = {
                 "regime": regime,
@@ -243,22 +291,18 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
                     "governance_eligible": eligible,
                 },
             }
-            conn.execute(
-                """
-                INSERT INTO supervisor_counterfactual_review
-                (counterfactual_id, review_id, position_id, close_ts,
-                 evidence_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    f"cf_{index}",
-                    review_id,
-                    position_id,
-                    close_ts,
-                    json.dumps(evidence),
-                    now,
-                    now,
-                ),
+            record_counterfactual_event(
+                conn,
+                counterfactual_id=f"cf_{index}",
+                review_id=review_id,
+                event_ts=close_ts,
+                payload={
+                    "counterfactual_id": f"cf_{index}",
+                    "review_id": review_id,
+                    "position_id": position_id,
+                    "close_ts": close_ts,
+                    "evidence": evidence,
+                },
             )
         conn.commit()
     finally:
@@ -301,6 +345,7 @@ def test_learning_repair_tracks_active_applied_supervisor_cohort(tmp_path):
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         conn.executemany(
             """
             INSERT INTO policy_suggestion
@@ -334,44 +379,45 @@ def test_learning_repair_tracks_active_applied_supervisor_cohort(tmp_path):
             """,
             (candidate_started_at + 7200,),
         )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, review_json, created_at)
-            VALUES ('review_current', 'trade_current', 'position_current', '{}', ?)
-            """,
-            (candidate_started_at + 3600,),
+        record_review(
+            conn,
+            review_id="review_current",
+            trade_id="trade_current",
+            position_id="position_current",
+            review={},
+            created_at=candidate_started_at + 3600,
         )
-        conn.execute(
-            """
-            INSERT INTO position_supervisor_trace
-            (trace_id, position_id, template_id, stage, outcome,
-             execution_status, execution_reason, trace_integrity, event_ts, created_at)
-            VALUES ('trace_current', 'position_current', 'position_supervisor:current.v1',
-                    'learning_shadow', 'shadow', 'observation_only',
-                    'learning_worker_candidate_replay:applied_current',
-                    'recovered', ?, ?)
-            """,
-            (candidate_started_at + 3590, candidate_started_at + 3590),
+        record_supervisor_trace_event(
+            conn,
+            trace_id="trace_current",
+            event_ts=candidate_started_at + 3590,
+            payload={
+                "trace_id": "trace_current",
+                "position_id": "position_current",
+                "template_id": "position_supervisor:current.v1",
+                "stage": "learning_shadow",
+                "outcome": "shadow",
+                "execution_status": "observation_only",
+                "execution_reason": "learning_worker_candidate_replay:applied_current",
+                "trace_integrity": "recovered",
+                "event_ts": candidate_started_at + 3590,
+            },
         )
-        conn.execute(
-            """
-            INSERT INTO supervisor_counterfactual_review
-            (counterfactual_id, review_id, position_id, close_ts,
-             evidence_json, created_at, updated_at)
-            VALUES ('cf_current', 'review_current', 'position_current', ?, ?, ?, ?)
-            """,
-            (
-                candidate_started_at + 3600,
-                json.dumps(
-                    {
-                        "regime": "current_regime",
-                        "maturity": {"governance_eligible": True},
-                    }
-                ),
-                candidate_started_at + 3600,
-                candidate_started_at + 3600,
-            ),
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_current",
+            review_id="review_current",
+            event_ts=candidate_started_at + 3600,
+            payload={
+                "counterfactual_id": "cf_current",
+                "review_id": "review_current",
+                "position_id": "position_current",
+                "close_ts": candidate_started_at + 3600,
+                "evidence": {
+                    "regime": "current_regime",
+                    "maturity": {"governance_eligible": True},
+                },
+            },
         )
         conn.commit()
     finally:
@@ -454,14 +500,15 @@ def test_governance_freshness_accepts_lifecycle_timestamp_column(tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)
     try:
-        conn.executescript(STATE_DB_DDL)
-        conn.execute(
-            """
-            INSERT INTO lifecycle_events
-            (timestamp, event, factor, source, description, score, status, reason)
-            VALUES (?, 'register', 'alpha_x', 'shadow', '', 0.0, 'ACTIVE', '')
-            """,
-            (9999999999.0,),
+        ensure_sqlite_schema(conn)
+        record_parameter_template_lifecycle_event(
+            conn,
+            lifecycle_id="freshness-1",
+            event_ts=9999999999.0,
+            factor_id="alpha_x",
+            event="registered",
+            status="active",
+            description="",
         )
         conn.commit()
     finally:
@@ -469,8 +516,8 @@ def test_governance_freshness_accepts_lifecycle_timestamp_column(tmp_path):
 
     status = BackendReadinessService(db_path=db_path)._governance_freshness_status()
 
-    assert status["tables"]["lifecycle_events"]["status"] == "fresh"
-    assert status["tables"]["lifecycle_events"]["latest_ts"] == 9999999999.0
+    assert status["tables"]["canonical.parameter_template_lifecycle"]["status"] == "fresh"
+    assert status["tables"]["canonical.parameter_template_lifecycle"]["latest_ts"] == 9999999999.0
 
 
 def test_factor_governance_runtime_reports_missing_run(tmp_path):

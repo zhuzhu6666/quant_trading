@@ -12,7 +12,6 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
-    state_table_exists,
 )
 from backend.core.state_store import (
     is_state_schema_write_sql,
@@ -20,12 +19,20 @@ from backend.core.state_store import (
 )
 from backend.services.canonical_v2_reader import (
     canonical_ready,
+    iter_counterfactual_rows,
     iter_decision_rows,
     iter_position_rows,
     iter_review_rows,
+    iter_supervisor_trace_rows,
 )
-from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import load_json_payload
+from backend.services.review_contract import (
+    review_consumer_eligibility,
+    trusted_broker_close_price,
+)
+from backend.services.canonical_v2 import (
+    ensure_sqlite_schema as ensure_canonical_sqlite_schema,
+    record_counterfactual_event,
+)
 
 
 DEFAULT_HORIZONS_MINUTES = [5, 15, 30, 60, 120]
@@ -58,14 +65,9 @@ def _execute(conn, sql: str, params: Any = None):
 
 
 def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
-    payload = load_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(row["review_id"] or ""),
-        inline_json=row["review_json"],
-        archive_hash=row["review_archive_hash"] if "review_archive_hash" in row.keys() else "",
-        default={},
-    )
+    payload = row.get("review_json") if isinstance(row, dict) else row["review_json"]
+    if isinstance(payload, str):
+        payload = _loads(payload, {})
     return payload if isinstance(payload, dict) else {}
 
 
@@ -358,63 +360,19 @@ def _classify_counterfactual(close_pnl: float, horizons: list[dict[str, Any]], s
     return "inconclusive", 0.35, tags
 
 
-def ensure_counterfactual_table(db_path: str | Path = STATE_DB) -> None:
+def ensure_counterfactual_stream(db_path: str | Path = STATE_DB) -> None:
+    """Validate the canonical counterfactual event stream.
+
+    Counterfactuals are immutable derived events in ``canonical_v2``.  This
+    function intentionally does not create a runtime table or repair a
+    missing PostgreSQL schema at process startup.
+    """
     conn = _connect(db_path)
     try:
-        if _conn_is_pg(conn):
-            if not state_table_exists(conn, "supervisor_counterfactual_review"):
-                raise RuntimeError("missing state table: supervisor_counterfactual_review")
-            if not state_table_exists(conn, "supervisor_counterfactual_history"):
-                raise RuntimeError("missing state table: supervisor_counterfactual_history")
-            return
-        _execute(
-            conn,
-            """
-            CREATE TABLE IF NOT EXISTS supervisor_counterfactual_review (
-                counterfactual_id TEXT PRIMARY KEY,
-                review_id TEXT DEFAULT '',
-                trade_id TEXT DEFAULT '',
-                position_id TEXT NOT NULL,
-                close_ts REAL NOT NULL DEFAULT 0.0,
-                close_reason TEXT DEFAULT '',
-                supervisor_event_type TEXT DEFAULT '',
-                supervisor_reason TEXT DEFAULT '',
-                label TEXT DEFAULT '',
-                confidence REAL DEFAULT 0.0,
-                horizons_json TEXT DEFAULT '[]',
-                evidence_json TEXT DEFAULT '{}',
-                created_at REAL NOT NULL DEFAULT 0.0,
-                updated_at REAL NOT NULL DEFAULT 0.0
-            )
-            """
-        )
-        _execute(
-            conn,
-            """
-            CREATE TABLE IF NOT EXISTS supervisor_counterfactual_history (
-                history_id TEXT PRIMARY KEY,
-                counterfactual_id TEXT NOT NULL,
-                payload_json TEXT NOT NULL DEFAULT '{}',
-                archived_reason TEXT NOT NULL DEFAULT '',
-                created_at REAL NOT NULL DEFAULT 0.0
-            )
-            """
-        )
-        _execute(
-            conn,
-            """
-            CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_position
-            ON supervisor_counterfactual_review(position_id, close_ts)
-            """
-        )
-        _execute(
-            conn,
-            """
-            CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_label
-            ON supervisor_counterfactual_review(label, updated_at)
-            """
-        )
-        conn.commit()
+        if not _conn_is_pg(conn):
+            ensure_canonical_sqlite_schema(conn)
+        if not canonical_ready(conn):
+            raise RuntimeError("missing canonical_v2.event stream")
     finally:
         conn.close()
 
@@ -427,7 +385,7 @@ def evaluate_counterfactuals(
     materialize: bool = True,
     review_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    ensure_counterfactual_table(db_path)
+    ensure_counterfactual_stream(db_path)
     horizons_minutes = list(horizons_minutes or DEFAULT_HORIZONS_MINUTES)
     conn = _connect(db_path)
     try:
@@ -435,6 +393,14 @@ def evaluate_counterfactuals(
         bounded_limit = max(1, int(limit))
         position_open: dict[str, dict[str, Any]] = {}
         supervisor_by_position: dict[str, list[dict[str, Any]]] = {}
+        trace_by_decision: dict[str, list[dict[str, Any]]] = {}
+        diagnostics = {
+            "not_executed": 0,
+            "contaminated": 0,
+            "missing_trace": 0,
+            "eligible": 0,
+            "matured": 0,
+        }
         # Batch-preload canonical streams once per evaluation run; the
         # per-review lookups below are then in-memory (legacy indexed SQL
         # is not available on canonical events, which are keyed by event id).
@@ -460,6 +426,28 @@ def evaluate_counterfactuals(
                 reverse=True,
             )
 
+        for trace in iter_supervisor_trace_rows(conn, limit=0, reverse=False):
+            decision_id = str(trace.get("decision_id") or "")
+            if decision_id:
+                trace_by_decision.setdefault(decision_id, []).append(dict(trace))
+
+        def _trace_is_real_execution(trace: dict[str, Any]) -> bool:
+            if (
+                str(trace.get("stage") or "").strip().lower() != "executed"
+                or str(trace.get("outcome") or "").strip().lower() != "applied"
+            ):
+                return False
+            execution = trace.get("execution_json") or {}
+            if isinstance(execution, str):
+                execution = _loads(execution, {})
+            if not isinstance(execution, dict):
+                return False
+            return bool(
+                execution.get("is_real_execution") is True
+                and execution.get("broker_action_confirmed") is True
+                and execution.get("reconcile_confirmed") is True
+            )
+
         def _review_rows():
             if review_ids is not None and not target_review_ids:
                 return
@@ -477,8 +465,6 @@ def evaluate_counterfactuals(
         candidates = []
         for row in _review_rows():
             review = _review_payload(conn, row)
-            if review_has_system_contamination(review):
-                continue
             close_reason = str(review.get("close_reason") or "")
             if close_reason not in {
                 "broker_close",
@@ -492,24 +478,69 @@ def evaluate_counterfactuals(
                 "holding_timeout_exceeded",
             }:
                 continue
+            consumer_eligibility = review_consumer_eligibility(
+                review,
+                "supervisor_counterfactual",
+            )
+            if not bool(consumer_eligibility.get("eligible")):
+                diagnostics["contaminated"] += 1
+                continue
             position_id = str(row["position_id"] or "")
             close_ts = _safe_float(review.get("close_ts") or row["created_at"])
+            supervisor_rows = supervisor_by_position.get(position_id, [])
+            review_supervisor_decision_id = str(
+                review.get("exit_decision_id")
+                or review.get("close_decision_id")
+                or ""
+            )
             supervisor = next(
                 (
                     item
-                    for item in supervisor_by_position.get(position_id, [])
-                    if _safe_float(item.get("decision_ts")) <= close_ts + 5.0
-                    and _safe_float(item.get("decision_ts")) >= close_ts - 3600.0
+                    for item in supervisor_rows
+                    if review_supervisor_decision_id
+                    and str(item.get("decision_id") or "")
+                    == review_supervisor_decision_id
                 ),
                 None,
             )
+            if supervisor is None:
+                supervisor = next(
+                    (
+                        item
+                        for item in supervisor_rows
+                        if _safe_float(item.get("decision_ts")) <= close_ts + 5.0
+                        and _safe_float(item.get("decision_ts")) >= close_ts - 3600.0
+                    ),
+                    None,
+                )
             if _conn_is_pg(conn):
                 conn.commit()
             if not supervisor:
+                diagnostics["not_executed"] += 1
                 continue
             supervisor_event = str(supervisor.get("event_type") or "")
             if supervisor_event not in {"supervisor_tighten", "supervisor_reduce", "supervisor_close"}:
+                diagnostics["not_executed"] += 1
                 continue
+            decision_id = str(supervisor.get("decision_id") or "")
+            matching_traces = [
+                trace
+                for trace in trace_by_decision.get(decision_id, [])
+                if str(trace.get("position_id") or "") == position_id
+                and str(trace.get("action") or "").strip().lower()
+                == supervisor_event.removeprefix("supervisor_")
+            ]
+            if not matching_traces:
+                diagnostics["missing_trace"] += 1
+                continue
+            real_trace = next(
+                (trace for trace in matching_traces if _trace_is_real_execution(trace)),
+                None,
+            )
+            if real_trace is None:
+                diagnostics["not_executed"] += 1
+                continue
+            diagnostics["eligible"] += 1
             opened_row = position_open.get(position_id)
             opened = {}
             if opened_row is not None:
@@ -520,7 +551,12 @@ def evaluate_counterfactuals(
             direction = int(opened.get("direction") or _direction_from_review(review) or 1)
             real = review.get("real_pnl") or {}
             entry_price = _safe_float(real.get("entry_price") or review.get("entry_price"))
-            close_price = _safe_float(review.get("close_price") or real.get("exec_price"))
+            close_price = _safe_float(
+                trusted_broker_close_price(real)
+                or review.get("close_price")
+                or real.get("exec_price")
+                or real.get("close_price")
+            )
             close_pnl = _safe_float(row["pnl"] if row["pnl"] is not None else real.get("net"))
             if entry_price <= 0 or close_price <= 0:
                 continue
@@ -535,6 +571,7 @@ def evaluate_counterfactuals(
                     "close_ts": close_ts,
                     "close_reason": close_reason,
                     "supervisor": supervisor,
+                    "supervisor_trace": real_trace,
                     "supervisor_event": supervisor_event,
                     "opened": opened,
                     "direction": direction,
@@ -560,6 +597,7 @@ def evaluate_counterfactuals(
             close_ts = candidate["close_ts"]
             close_reason = candidate["close_reason"]
             supervisor = candidate["supervisor"]
+            supervisor_trace = candidate["supervisor_trace"]
             supervisor_event = candidate["supervisor_event"]
             opened = candidate["opened"]
             direction = candidate["direction"]
@@ -618,6 +656,16 @@ def evaluate_counterfactuals(
                 "original_sl": _safe_float(opened.get("sl")),
                 "original_tp": _safe_float(opened.get("tp")),
                 "supervisor": supervisor,
+                "supervisor_trace": {
+                    "trace_id": str((supervisor_trace or {}).get("trace_id") or ""),
+                    "decision_id": str((supervisor_trace or {}).get("decision_id") or ""),
+                    "stage": str((supervisor_trace or {}).get("stage") or ""),
+                    "outcome": str((supervisor_trace or {}).get("outcome") or ""),
+                    "execution": _loads(
+                        (supervisor_trace or {}).get("execution_json"),
+                        {},
+                    ),
+                },
                 "tags": tags,
                 "advisory_only": True,
                 "bar_timeframe": timeframe,
@@ -652,90 +700,32 @@ def evaluate_counterfactuals(
                 "governance_eligible": evidence["maturity"]["governance_eligible"],
             }
             items.append(item)
+            if maturity_status in {"governance_ready", "fully_matured"}:
+                diagnostics["matured"] += 1
             if materialize:
-                now = time.time()
-                previous = _execute(
+                record_counterfactual_event(
                     conn,
-                    "SELECT * FROM supervisor_counterfactual_review WHERE counterfactual_id=?",
-                    (item["counterfactual_id"],),
-                ).fetchone()
-                if previous:
-                    previous_payload = dict(previous)
-                    previous_evidence = previous_payload.get("evidence_json") or {}
-                    if isinstance(previous_evidence, str):
-                        previous_evidence = _loads(previous_evidence, {})
-                    # Terminal evidence invalidation is an audit decision.  A
-                    # later idempotent rematerialization must not resurrect it.
-                    if bool((previous_evidence or {}).get("evidence_invalidated")):
-                        item["evidence"]["evidence_invalidated"] = True
-                        item["evidence"]["invalidation_reason"] = str(
-                            (previous_evidence or {}).get("invalidation_reason") or "invalidated_evidence"
-                        )
-                        item["evidence"]["maturity"]["status"] = "invalidated_missing_m1"
-                        item["evidence"]["maturity"]["governance_eligible"] = False
-                        item["maturity_status"] = "invalidated_missing_m1"
-                        item["governance_eligible"] = False
-                    if str((previous_evidence or {}).get("schema_version") or "") != "supervisor_counterfactual.v2":
-                        history_id = "scfh_" + hashlib.sha1(
-                            f"{item['counterfactual_id']}:{previous_payload.get('updated_at', 0)}".encode("utf-8")
-                        ).hexdigest()[:20]
-                        _execute(
-                            conn,
-                            """
-                            INSERT INTO supervisor_counterfactual_history
-                            (history_id, counterfactual_id, payload_json, archived_reason, created_at)
-                            VALUES (?, ?, ?, 'maturity_contract_v2_rematerialization', ?)
-                            ON CONFLICT(history_id) DO NOTHING
-                            """,
-                            (history_id, item["counterfactual_id"], json.dumps(previous_payload, ensure_ascii=False, default=str), now),
-                        )
-                _execute(
-                    conn,
-                    """
-                    INSERT INTO supervisor_counterfactual_review
-                    (counterfactual_id, review_id, trade_id, position_id, close_ts,
-                     close_reason, supervisor_event_type, supervisor_reason, label,
-                     confidence, horizons_json, evidence_json, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(counterfactual_id) DO UPDATE SET
-                        review_id=excluded.review_id,
-                        trade_id=excluded.trade_id,
-                        position_id=excluded.position_id,
-                        close_ts=excluded.close_ts,
-                        close_reason=excluded.close_reason,
-                        supervisor_event_type=excluded.supervisor_event_type,
-                        supervisor_reason=excluded.supervisor_reason,
-                        label=excluded.label,
-                        confidence=excluded.confidence,
-                        horizons_json=excluded.horizons_json,
-                        evidence_json=excluded.evidence_json,
-                        updated_at=excluded.updated_at
-                    """,
-                    (
-                        item["counterfactual_id"],
-                        item["review_id"],
-                        item["trade_id"],
-                        item["position_id"],
-                        item["close_ts"],
-                        item["close_reason"],
-                        item["supervisor_event_type"],
-                        item["supervisor_reason"],
-                        item["label"],
-                        item["confidence"],
-                        json.dumps(item["horizons"], ensure_ascii=False, sort_keys=True),
-                        json.dumps(item["evidence"], ensure_ascii=False, sort_keys=True),
-                        now,
-                        now,
-                    ),
+                    counterfactual_id=item["counterfactual_id"],
+                    review_id=item["review_id"],
+                    decision_id=str(supervisor.get("decision_id") or ""),
+                    trace_id=str((supervisor_trace or {}).get("trace_id") or ""),
+                    event_ts=item["close_ts"] or time.time(),
+                    payload=item,
                 )
         if materialize:
             conn.commit()
         return {
-            "schema_version": "supervisor_counterfactual_batch.v1",
+            "schema_version": "supervisor_counterfactual_batch.v2",
             "materialized": bool(materialize),
             "items": items,
             "count": len(items),
             "candidate_count": len(candidates),
+            "diagnostics": diagnostics,
+            "not_executed": diagnostics["not_executed"],
+            "contaminated": diagnostics["contaminated"],
+            "missing_trace": diagnostics["missing_trace"],
+            "eligible": diagnostics["eligible"],
+            "matured": diagnostics["matured"],
             "bar_cache_groups": len(bar_cache),
             "requested_review_count": len(target_review_ids) if review_ids is not None else None,
         }
@@ -750,29 +740,16 @@ def list_counterfactuals(
     position_id: str | None = None,
     label: str | None = None,
 ) -> dict[str, Any]:
-    ensure_counterfactual_table(db_path)
-    clauses = []
-    params: list[Any] = []
-    if position_id:
-        clauses.append("position_id=?")
-        params.append(str(position_id))
-    if label:
-        clauses.append("label=?")
-        params.append(str(label))
-    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    ensure_counterfactual_stream(db_path)
     conn = _connect(db_path, read_only=True)
     try:
-        rows = _execute(
+        rows = iter_counterfactual_rows(
             conn,
-            f"""
-            SELECT *
-            FROM supervisor_counterfactual_review
-            {where}
-            ORDER BY close_ts DESC
-            LIMIT ?
-            """,
-            (*params, int(limit)),
-        ).fetchall()
+            limit=max(0, int(limit)),
+            position_id=str(position_id or ""),
+            label=str(label or ""),
+            reverse=True,
+        )
         items = []
         for row in rows:
             items.append(
@@ -787,10 +764,10 @@ def list_counterfactuals(
                     "supervisor_reason": str(row["supervisor_reason"] or ""),
                     "label": str(row["label"] or ""),
                     "confidence": _safe_float(row["confidence"]),
-                    "horizons": _loads(row["horizons_json"], []),
-                    "evidence": _loads(row["evidence_json"], {}),
-                    "created_at": _safe_float(row["created_at"]),
-                    "updated_at": _safe_float(row["updated_at"]),
+                    "horizons": row.get("horizons") or _loads(row.get("horizons_json"), []),
+                    "evidence": row.get("evidence") or _loads(row.get("evidence_json"), {}),
+                    "created_at": _safe_float(row.get("created_at") or row.get("close_ts")),
+                    "updated_at": _safe_float(row.get("updated_at") or row.get("observed_at") or row.get("close_ts")),
                 }
             )
         return {"items": items, "count": len(items)}

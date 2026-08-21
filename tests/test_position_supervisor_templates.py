@@ -19,6 +19,22 @@ def _init_db(path):
     conn = sqlite3.connect(str(path))
     try:
         conn.executescript(STATE_DB_DDL)
+        # SQLite's compact test DDL does not include the PostgreSQL governance
+        # coordinator table, so model the committed projection explicitly.
+        conn.execute(
+            """
+            CREATE TABLE governance_mutation_intent (
+                mutation_id TEXT PRIMARY KEY,
+                stage TEXT NOT NULL DEFAULT 'reserved',
+                intent_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'reserved',
+                projection_status TEXT NOT NULL DEFAULT 'pending',
+                scope_type TEXT NOT NULL DEFAULT '',
+                committed_config_hash TEXT NOT NULL DEFAULT '',
+                domain_hash TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -44,6 +60,24 @@ def _prepare_app(
     )
 
 
+def _commit_intent(path, mutation_id):
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO governance_mutation_intent
+            (mutation_id, stage, intent_json, status, projection_status,
+             scope_type, committed_config_hash, domain_hash)
+            VALUES (?, 'committed', '{}', 'committed', 'current',
+                    'supervisor_template', 'config-sha256', 'domain-sha256')
+            """,
+            (mutation_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_latest_applied_position_supervisor_template_defaults_without_application(tmp_path):
     db_path = tmp_path / "state.db"
     _init_db(db_path)
@@ -54,11 +88,29 @@ def test_latest_applied_position_supervisor_template_defaults_without_applicatio
 def test_latest_applied_position_supervisor_template_restores_recent_valid_application(tmp_path):
     db_path = tmp_path / "state.db"
     _init_db(db_path)
+    _commit_intent(db_path, "gmut_default")
     _prepare_app(
-        db_path, scope_key=DEFAULT_TEMPLATE_ID, status="applied", cycle_ts=10.0
+        db_path,
+        scope_key=DEFAULT_TEMPLATE_ID,
+        status="applied",
+        cycle_ts=10.0,
+        mutation_id="gmut_default",
+        details={
+            "mutation_id": "gmut_default",
+            "commit_boundary": "governance_mutation_coordinator",
+        },
     )
+    _commit_intent(db_path, "gmut_conservative")
     _prepare_app(
-        db_path, scope_key=CONSERVATIVE_TEMPLATE_ID, status="applied", cycle_ts=20.0
+        db_path,
+        scope_key=CONSERVATIVE_TEMPLATE_ID,
+        status="applied",
+        cycle_ts=20.0,
+        mutation_id="gmut_conservative",
+        details={
+            "mutation_id": "gmut_conservative",
+            "commit_boundary": "governance_mutation_coordinator",
+        },
     )
 
     assert latest_applied_position_supervisor_template_id(db_path=db_path) == CONSERVATIVE_TEMPLATE_ID
@@ -99,12 +151,16 @@ def test_generated_template_remains_available_from_learning_application(tmp_path
         "schema_version": "position_supervisor_template_switch.v1",
         "target_template_id": template_id,
         "evidence": {"candidate_template": candidate_template},
+        "mutation_id": "gmut_generated",
+        "commit_boundary": "governance_mutation_coordinator",
     }
+    _commit_intent(db_path, "gmut_generated")
     _prepare_app(
         db_path,
         scope_key=template_id,
         status="mixed",
         cycle_ts=40.0,
+        mutation_id="gmut_generated",
         details=details,
     )
 
@@ -128,14 +184,11 @@ def test_strict_startup_refuses_uncommitted_legacy_supervisor_application(tmp_pa
         details={},
     )
 
-    with pytest.raises(RuntimeError, match="legacy_position_supervisor_restore_unverified"):
-        latest_applied_position_supervisor_template_id(
-            db_path=db_path,
-            require_authority=True,
-        )
+    with pytest.raises(RuntimeError, match="position_supervisor_restore_unverified"):
+        latest_applied_position_supervisor_template_id(db_path=db_path)
 
 
-def test_strict_startup_allows_explicit_tightening_legacy_quarantine(tmp_path):
+def test_strict_startup_rejects_legacy_quarantine_application(tmp_path):
     db_path = tmp_path / "state.db"
     _init_db(db_path)
     details = {
@@ -150,10 +203,8 @@ def test_strict_startup_allows_explicit_tightening_legacy_quarantine(tmp_path):
         details=details,
     )
 
-    assert latest_applied_position_supervisor_template_id(
-        db_path=db_path,
-        require_authority=True,
-    ) == CONSERVATIVE_TEMPLATE_ID
+    with pytest.raises(RuntimeError, match="position_supervisor_restore_unverified"):
+        latest_applied_position_supervisor_template_id(db_path=db_path)
 
 
 def test_strict_startup_accepts_hash_bound_committed_supervisor_application(tmp_path):
@@ -164,33 +215,7 @@ def test_strict_startup_accepts_hash_bound_committed_supervisor_application(tmp_
         "mutation_id": mutation_id,
         "commit_boundary": "governance_mutation_coordinator",
     }
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            """
-            CREATE TABLE governance_mutation_intent (
-                mutation_id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                projection_status TEXT NOT NULL,
-                scope_type TEXT NOT NULL,
-                committed_config_hash TEXT NOT NULL,
-                domain_hash TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO governance_mutation_intent
-            (mutation_id, status, projection_status, scope_type,
-             committed_config_hash, domain_hash)
-            VALUES (?, 'committed', 'current', 'supervisor_template',
-                    'config-sha256', 'domain-sha256')
-            """,
-            (mutation_id,),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    _commit_intent(db_path, mutation_id)
     _prepare_app(
         db_path,
         scope_key=CONSERVATIVE_TEMPLATE_ID,
@@ -200,10 +225,7 @@ def test_strict_startup_accepts_hash_bound_committed_supervisor_application(tmp_
         mutation_id=mutation_id,
     )
 
-    assert latest_applied_position_supervisor_template_id(
-        db_path=db_path,
-        require_authority=True,
-    ) == CONSERVATIVE_TEMPLATE_ID
+    assert latest_applied_position_supervisor_template_id(db_path=db_path) == CONSERVATIVE_TEMPLATE_ID
 
 
 def test_applied_generated_snapshot_wins_over_same_id_uncommitted_suggestion(tmp_path):

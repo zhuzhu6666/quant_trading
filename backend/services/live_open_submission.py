@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import inspect
 from typing import Any, Callable
 
 
@@ -20,7 +19,7 @@ class OpenSubmissionRuntime:
     append_safety_outbox: Callable[..., Any]
     finalize_nursery_reservation: Callable[[str, bool], Any]
     now: Callable[[], float]
-    prepare_open_intent: Callable[..., str] | None = None
+    prepare_open_intent: Callable[..., str]
 
 
 def _submit_order_with_lineage(
@@ -33,30 +32,15 @@ def _submit_order_with_lineage(
     trade_id: str,
     risk_verdict: Any,
 ) -> Any:
-    """Call the context-aware callback without double-submitting legacy stubs."""
-    supports_context = True
-    try:
-        parameters = list(inspect.signature(submit_order).parameters.values())
-        supports_context = any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters
-        ) or {
-            "decision_id",
-            "trade_id",
-            "risk_verdict",
-        }.issubset({parameter.name for parameter in parameters})
-    except (TypeError, ValueError):
-        pass
-    if supports_context:
-        return submit_order(
-            bridge,
-            composite,
-            volume,
-            decision_id=decision_id,
-            trade_id=trade_id,
-            risk_verdict=risk_verdict,
-        )
-    return submit_order(bridge, composite, volume)
+    """Submit through the context-aware canonical broker callback."""
+    return submit_order(
+        bridge,
+        composite,
+        volume,
+        decision_id=decision_id,
+        trade_id=trade_id,
+        risk_verdict=risk_verdict,
+    )
 
 
 def submit_open_trade_candidate(
@@ -119,33 +103,32 @@ def submit_open_trade_candidate(
             )
             finalize_nursery(False)
             return False
-        intent_prepare_attempted = runtime.prepare_open_intent is not None
+        intent_prepare_attempted = True
         decision_id = ""
         try:
-            if runtime.prepare_open_intent is not None:
-                decision_id = str(
-                    runtime.prepare_open_intent(
-                        bridge=bridge,
-                        broker=broker,
-                        cfg=cfg,
-                        bar=bar,
-                        tick=tick,
-                        account=account,
-                        positions=positions,
-                        composite=composite,
-                        gate_result=gate_result,
-                        candidate=candidate,
-                        current_price=current_price,
-                        signal_decision_id=signal_decision_id,
-                    )
-                    or ""
+            decision_id = str(
+                runtime.prepare_open_intent(
+                    bridge=bridge,
+                    broker=broker,
+                    cfg=cfg,
+                    bar=bar,
+                    tick=tick,
+                    account=account,
+                    positions=positions,
+                    composite=composite,
+                    gate_result=gate_result,
+                    candidate=candidate,
+                    current_price=current_price,
+                    signal_decision_id=signal_decision_id,
                 )
-                if not decision_id:
-                    raise RuntimeError("open_intent_not_persisted")
-                try:
-                    candidate.open_decision_id = decision_id
-                except Exception:
-                    pass
+                or ""
+            )
+            if not decision_id:
+                raise RuntimeError("open_intent_not_persisted")
+            try:
+                candidate.open_decision_id = decision_id
+            except Exception:
+                pass
             submit_started_at = runtime.now()
             result = _submit_order_with_lineage(
                 runtime.submit_order,

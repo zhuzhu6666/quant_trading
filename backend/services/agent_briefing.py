@@ -9,9 +9,8 @@ from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.proposal_registry import ProposalRegistryService
 from backend.services._brain_helpers import connect as _connect, execute as _execute, loads as _loads
-from backend.services.canonical_v2_reader import review_row
+from backend.services.canonical_v2_reader import iter_counterfactual_rows, review_row
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import load_json_payload
 from backend.services.v16_brain_snapshot import BrainMemoryService
 
 
@@ -40,7 +39,6 @@ class AgentBriefingContextService:
                     "source_failure_tags_json": review.get("failure_tags_json") or "[]",
                     "source_created_at": review.get("created_at"),
                     "source_review_json": review.get("review_json") or {},
-                    "source_review_archive_hash": "",
                 }
             )
         return combined
@@ -51,17 +49,9 @@ class AgentBriefingContextService:
             keys = row.keys() if hasattr(row, "keys") else ()
             source_id = row["source_review_id"] if "source_review_id" in keys else ""
             inline_json = row["source_review_json"] if "source_review_json" in keys else "{}"
-            archive_hash = row["source_review_archive_hash"] if "source_review_archive_hash" in keys else ""
         except Exception:
             source_id, inline_json, archive_hash = "", "{}", ""
-        payload = load_json_payload(
-            conn,
-            source_table="trade_outcome_review",
-            source_id=str(source_id or ""),
-            inline_json=inline_json,
-            archive_hash=archive_hash,
-            default={},
-        )
+        payload = inline_json if isinstance(inline_json, dict) else _loads(inline_json, {})
         return payload if isinstance(payload, dict) else {}
 
     @staticmethod
@@ -278,32 +268,24 @@ class AgentBriefingContextService:
                 }
                 counterfactuals = []
                 if review_id:
-                    try:
-                        counterfactual_rows = _execute(
-                            conn,
-                            """
-                            SELECT counterfactual_id, review_id, trade_id, position_id,
-                                   label, confidence, horizons_json, evidence_json
-                            FROM supervisor_counterfactual_review
-                            WHERE review_id=?
-                            ORDER BY close_ts DESC, updated_at DESC
-                            """,
-                            (review_id,),
-                        ).fetchall()
-                    except Exception:
-                        counterfactual_rows = []
+                    counterfactual_rows = iter_counterfactual_rows(
+                        conn,
+                        limit=0,
+                        review_id=review_id,
+                        reverse=True,
+                    )
                     for counterfactual in counterfactual_rows:
-                        evidence = _loads(counterfactual["evidence_json"], {})
+                        evidence = counterfactual.get("evidence") or _loads(counterfactual.get("evidence_json"), {})
                         if not isinstance(evidence, dict) or evidence.get("evidence_invalidated"):
                             continue
-                        horizons = _loads(counterfactual["horizons_json"], [])
+                        horizons = counterfactual.get("horizons") or _loads(counterfactual.get("horizons_json"), [])
                         counterfactuals.append({
-                            "counterfactual_id": str(counterfactual["counterfactual_id"] or ""),
-                            "review_id": str(counterfactual["review_id"] or review_id),
-                            "trade_id": str(counterfactual["trade_id"] or ""),
-                            "position_id": str(counterfactual["position_id"] or ""),
-                            "label": str(counterfactual["label"] or ""),
-                            "confidence": counterfactual["confidence"],
+                            "counterfactual_id": str(counterfactual.get("counterfactual_id") or ""),
+                            "review_id": str(counterfactual.get("review_id") or review_id),
+                            "trade_id": str(counterfactual.get("trade_id") or ""),
+                            "position_id": str(counterfactual.get("position_id") or ""),
+                            "label": str(counterfactual.get("label") or ""),
+                            "confidence": counterfactual.get("confidence"),
                             "horizons": horizons if isinstance(horizons, list) else [],
                             "evidence": evidence,
                         })

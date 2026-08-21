@@ -34,8 +34,6 @@ import pandas as pd
 import numpy as _np
 from pathlib import Path
 
-# ── DecisionLog (v4 决策审计) ─────────────────────────────────
-from db.store import DecisionLogStore
 from backend.ledger.service import DecisionLedger
 from alpha.reflection.reviewer import TradeReviewer
 from research.learning.experience_builder import ExperienceBuilder
@@ -52,9 +50,6 @@ from backend.services.live_safety_planner import (
     protection_candidate_to_safety,
     safety_candidate,
 )
-from backend.services.live_legacy_safety_preview import (
-    preview_legacy_safety_candidates,
-)
 from backend.services.live_safety_state import (
     activate_no_new_risk_latch,
     append_safety_outbox,
@@ -62,7 +57,6 @@ from backend.services.live_safety_state import (
     no_new_risk_latch_status,
     release_no_new_risk_latch_cause,
     safety_v2_forced_shadow_status,
-    unresolved_broker_outcome_mutations,
 )
 from backend.services.live_safety_shadow_observation import (
     build_safety_shadow_observer,
@@ -78,9 +72,9 @@ from backend.services.canonical_v2_reader import (
     canonical_ready,
     iter_decision_rows,
     iter_review_rows,
+    iter_supervisor_trace_rows,
     load_position_decision_index,
 )
-from backend.services.state_payload_archive import load_json_payload
 from backend.services.live_reconciliation import (
     LIVE_SAFETY_FRESHNESS_SEC as _LIVE_SAFETY_FRESHNESS_SEC,
     evaluate_reconciliation_snapshot as _evaluate_reconciliation_snapshot,
@@ -108,7 +102,6 @@ from backend.services.live_loop_runner import (
 )
 from backend.services.live_loop_stop import (
     LiveLoopStopRuntime,
-    LoopOwnershipSnapshot,
     stop_live_loop as _runtime_stop_live_loop,
 )
 from backend.services.live_loop_start import (
@@ -187,7 +180,6 @@ from backend.services.live_closed_position_processing import (
     collect_closed_position_attribution as _runtime_collect_close_attribution,
     log_closed_position_ledger as _runtime_log_closed_position_ledger,
     run_closed_position_learning as _runtime_run_closed_position_learning,
-    write_close_decision_log as _runtime_write_close_decision_log,
 )
 from backend.services.live_open_submission import (
     OpenSubmissionRuntime,
@@ -245,7 +237,6 @@ from backend.services.live_data_sync_helpers import (
     classify_decision_bar_freshness as _sync_classify_decision_bar_freshness,
 )
 from backend.services.live_decision_pipeline import (
-    build_signal_decision_log_payload as _decision_build_signal_decision_log_payload,
     run_live_decision_pipeline as _decision_run_live_decision_pipeline,
 )
 from backend.services.live_factor_state import (
@@ -268,7 +259,7 @@ from backend.services.live_loop_shell import (
     build_warmup_feed as _loop_build_warmup_feed,
     enabled_symbols_from_config as _loop_enabled_symbols_from_config,
     execution_gate_config as _loop_execution_gate_config,
-    loop_status_snapshot as _loop_status_snapshot,
+    loop_identity_snapshot as _loop_identity_snapshot,
     market_closed_log_message as _loop_market_closed_log_message,
     mark_loop_stopped_for_display as _loop_mark_stopped_for_display,
     subscribe_spot_once as _loop_subscribe_spot_once,
@@ -319,14 +310,12 @@ from backend.services.live_tick_pipeline import (
     build_factor_votes as _tick_build_factor_votes,
     guard_current_price_with_spot_quote as _tick_guard_current_price_with_spot_quote,
     build_signal_log_suffix as _tick_build_signal_log_suffix,
-    build_close_decision_audit_meta as _tick_build_close_decision_audit_meta,
     build_close_ledger_payloads as _tick_build_close_ledger_payloads,
     build_effective_event_sizing_payload as _tick_build_effective_event_sizing_payload,
     build_amend_failed_ledger_payloads as _tick_build_amend_failed_ledger_payloads,
     build_trade_review_payload as _tick_build_trade_review_payload,
     build_market_order_block as _tick_build_market_order_block,
     build_open_order_preflight as _tick_build_open_order_preflight,
-    build_open_decision_log_payload as _tick_build_open_decision_log_payload,
     build_open_ledger_payloads as _tick_build_open_ledger_payloads,
     build_order_failed_ledger_payloads as _tick_build_order_failed_ledger_payloads,
     build_skip_ledger_payload as _tick_build_skip_ledger_payload,
@@ -339,7 +328,6 @@ from backend.services.live_tick_pipeline import (
     select_close_total_pnl as _tick_select_close_total_pnl,
 )
 from backend.services.live_position_lifecycle import (
-    account_unrealized_pnl as _lifecycle_account_unrealized_pnl,
     active_pending_open_attach_ids as _lifecycle_active_pending_open_attach_ids,
     adjust_sl_plan_for_tp_only_protection as _lifecycle_adjust_sl_plan_for_tp_only_protection,
     apply_unrealized_pnl_fields as _lifecycle_apply_unrealized_pnl_fields,
@@ -367,7 +355,6 @@ from backend.services.live_position_lifecycle import (
     build_position_supervisor_context_inputs as _lifecycle_build_position_supervisor_context_inputs,
     build_position_supervisor_context_payload as _lifecycle_build_position_supervisor_context_payload,
     build_position_protection_cycle_result as _lifecycle_build_position_protection_cycle_result,
-    build_legacy_awe_trailing_update as _lifecycle_build_legacy_awe_trailing_update,
     build_protection_candidate_verdict_payload as _lifecycle_build_protection_candidate_verdict_payload,
     build_protection_candidate_risk_context_from_candidate as _lifecycle_build_protection_candidate_risk_context_from_candidate,
     build_protection_execution_trace_fields as _lifecycle_build_protection_execution_trace_fields,
@@ -410,7 +397,6 @@ from backend.services.live_position_lifecycle import (
     normalize_recovery_position_row as _lifecycle_normalize_recovery_position_row,
     normalize_supervisor_event_row as _lifecycle_normalize_supervisor_event_row,
     payload_get as _lifecycle_payload_get,
-    protection_candidate_supersede_reason as _lifecycle_protection_candidate_supersede_reason,
     normalize_position_snapshot as _lifecycle_normalize_position_snapshot,
     position_api_volume as _lifecycle_position_api_volume,
     position_direction_from_payload as _lifecycle_position_direction_from_payload,
@@ -418,7 +404,6 @@ from backend.services.live_position_lifecycle import (
     position_id_value as _lifecycle_position_id_value,
     position_open_price as _lifecycle_position_open_price,
     position_open_timestamp as _lifecycle_position_open_timestamp,
-    position_price_pnl_estimate as _lifecycle_position_price_pnl_estimate,
     position_symbol_value as _lifecycle_position_symbol_value,
     position_unrealized_pnl as _lifecycle_position_unrealized_pnl,
     remember_pending_open_attach as _lifecycle_remember_pending_open_attach,
@@ -458,8 +443,6 @@ from backend.services.position_supervisor import (
     is_hard_supervisor_action,
 )
 from backend.services.stability import record_timed
-_DECISION_LOG: DecisionLogStore | None = None
-_DECISION_LOG_RUN_ID: int = 0
 _LEDGER: DecisionLedger | None = None
 _TRADE_REVIEWER: TradeReviewer | None = None
 _EXPERIENCE_BUILDER: ExperienceBuilder | None = None
@@ -467,9 +450,6 @@ _POLICY_SUGGESTER: PolicySuggester | None = None
 _POSITION_QUALITY_ADVISOR: Any = None
 _OPEN_QUALITY_ADVISOR: Any = None
 _RISK_POLICY = RiskPolicyService.shared()
-_DECISION_LOG_PENDING_PATH = Path("data/charts/decision_log.pending.jsonl")
-_DECISION_LOG_PENDING_LOCK = threading.Lock()
-_DECISION_LOG_LAST_DRAIN = 0.0
 _RUNTIME_KV_PENDING_PATH = Path("data/charts/runtime_kv.pending.jsonl")
 _RUNTIME_KV_PENDING_LOCK = threading.Lock()
 _ENTRY_CLUSTER_POLICY_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": {}}
@@ -478,89 +458,6 @@ _EVENT_WINDOW_POLICY_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": {}}
 _EVENT_WINDOW_POLICY_CACHE_LOCK = threading.Lock()
 _ENTRY_QUALITY_POLICY_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": {}}
 _ENTRY_QUALITY_POLICY_CACHE_LOCK = threading.Lock()
-
-
-def _append_decision_log_pending(payload: dict[str, Any], error: str = "") -> None:
-    _DECISION_LOG_PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "queued_at": time.time(),
-        "error": str(error or ""),
-        "payload": payload,
-    }
-    line = json.dumps(record, ensure_ascii=False, default=str)
-    with _DECISION_LOG_PENDING_LOCK:
-        with _DECISION_LOG_PENDING_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-
-
-def _rewrite_decision_log_pending_unlocked(lines: list[str]) -> None:
-    if lines:
-        tmp_path = _DECISION_LOG_PENDING_PATH.with_suffix(".pending.tmp")
-        tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        tmp_path.replace(_DECISION_LOG_PENDING_PATH)
-    else:
-        _DECISION_LOG_PENDING_PATH.unlink(missing_ok=True)
-
-
-def _drain_decision_log_pending(log_store: DecisionLogStore, limit: int = 100) -> int:
-    if not _DECISION_LOG_PENDING_PATH.exists():
-        return 0
-    with _DECISION_LOG_PENDING_LOCK:
-        lines = _DECISION_LOG_PENDING_PATH.read_text(
-            encoding="utf-8",
-            errors="replace",
-        ).splitlines()
-        if not lines:
-            _DECISION_LOG_PENDING_PATH.unlink(missing_ok=True)
-            return 0
-
-        drained = 0
-        remaining: list[str] = []
-        for idx, raw in enumerate(lines):
-            if drained >= limit:
-                remaining.extend(lines[idx:])
-                break
-            try:
-                record = json.loads(raw)
-                payload = record.get("payload") if isinstance(record, dict) else None
-                if not isinstance(payload, dict):
-                    remaining.append(raw)
-                    continue
-                log_store.log(**payload)
-                drained += 1
-            except Exception:
-                remaining.append(raw)
-                remaining.extend(lines[idx + 1:])
-                break
-        _rewrite_decision_log_pending_unlocked(remaining)
-        return drained
-
-
-def _safe_decision_log(log_store: DecisionLogStore | None, **kwargs) -> None:
-    global _DECISION_LOG_LAST_DRAIN
-    if log_store is None:
-        return
-    now = time.time()
-    if _DECISION_LOG_PENDING_PATH.exists() and now - _DECISION_LOG_LAST_DRAIN >= 5.0:
-        _DECISION_LOG_LAST_DRAIN = now
-        try:
-            drained = _drain_decision_log_pending(log_store)
-            if drained:
-                logger.info("[live] legacy decision_log pending drained: {}", drained)
-        except Exception as exc:
-            logger.warning("[live] legacy decision_log pending drain deferred: {}", exc)
-    try:
-        log_store.log(**kwargs)
-    except Exception as exc:
-        try:
-            _append_decision_log_pending(dict(kwargs), str(exc))
-            logger.warning("[live] legacy decision_log write queued: {}", exc)
-        except Exception as queue_exc:
-            logger.error(
-                "[live] legacy decision_log write failed and queue failed: write={} queue={}",
-                exc,
-                queue_exc,
-            )
 
 
 def _append_runtime_kv_pending(key: str, value, error: str = "") -> None:
@@ -660,9 +557,6 @@ _pos_open_prices: dict[int, float] = {}
 # 用于仓位上限/展示的策略口径 API volume (开仓后回查到的实际 API 量)
 _pos_open_api_volume: dict[int, float] = {}
 _pending_open_attach_until: dict[int, float] = {}
-# ── 追踪止损状态 ──
-# position_id → {best_price, activated, entry_price, direction}
-_trailing_state: dict[int, dict] = {}
 # ── 金字塔规则: position_id → 开仓时的 composite.score
 # 用于判断新信号是否比已有持仓更强, 避免递减加仓
 _pos_entry_scores: dict[int, float] = {}
@@ -836,8 +730,6 @@ def _estimate_close_pnl_from_cached_state(position_id: int, current_price: float
 
 
 _position_direction_sign = _lifecycle_position_direction_sign
-_position_price_pnl_estimate = _lifecycle_position_price_pnl_estimate
-_account_unrealized_pnl = _lifecycle_account_unrealized_pnl
 _apply_unrealized_pnl_fields = _lifecycle_apply_unrealized_pnl_fields
 
 
@@ -1646,7 +1538,7 @@ def _position_path_metrics_runtime() -> PositionPathMetricsRuntime:
         current_regime_hint=_current_regime_hint,
         position_unrealized_pnl=_position_unrealized_pnl,
         now=time.time,
-        loop_strategy_name=_loop_strategy_name,
+        loop_strategy_name=_current_loop_strategy_name("factor_pipeline_v4"),
         default_context_integrity=_RECOVERY_CONTEXT_FULL,
         build_update=_lifecycle_build_position_path_metrics_update,
         normalize_path_state=normalize_path_state,
@@ -1762,7 +1654,7 @@ def _evaluate_position_supervisor_for_position(
         load_recovery_row=_load_recovery_row_for_risk_reduction,
         upsert_recovery_position=_upsert_recovery_position_state,
         build_state_upsert_payload=_lifecycle_build_supervisor_state_upsert_payload,
-        loop_strategy_name=str(_loop_strategy_name or ""),
+        loop_strategy_name=_current_loop_strategy_name(""),
         default_context_integrity=_RECOVERY_CONTEXT_FULL,
         record_aux_failure=_record_risk_reduction_aux_failure,
     )
@@ -1787,12 +1679,10 @@ def _enrich_positions_with_path_metrics(
     persist: bool = False,
     broker: str = "",
     strategy_name: str = "",
-    account: dict | None = None,
 ) -> list[dict]:
     now_ts = float(now_ts or time.time())
     return _lifecycle_enrich_positions_with_lifecycle_metrics(
         pos_list,
-        account=account or (_live_state_get("account", {}, clone=True) or {}),
         cfg=cfg,
         now_ts=now_ts,
         persist=persist,
@@ -1848,7 +1738,7 @@ def _remember_supervisor_state(
                 verdict=verdict,
                 broker=broker,
                 strategy_name=strategy_name,
-                loop_strategy_name=_loop_strategy_name,
+                loop_strategy_name=_current_loop_strategy_name(),
                 default_context_integrity=_RECOVERY_CONTEXT_FULL,
                 action_applied=action_applied,
                 applied_ts=time.time() if action_applied else 0.0,
@@ -1883,7 +1773,7 @@ def _remember_protection_state(
                 source=source,
                 broker=broker,
                 strategy_name=strategy_name,
-                loop_strategy_name=_loop_strategy_name,
+                loop_strategy_name=_current_loop_strategy_name(),
                 default_context_integrity=_RECOVERY_CONTEXT_FULL,
                 action_applied=action_applied,
                 applied_ts=time.time() if action_applied else 0.0,
@@ -1968,7 +1858,7 @@ def _remember_supervisor_noop(position: dict[str, Any], verdict: dict[str, Any],
         position,
         verdict,
         broker="ctrader",
-        strategy_name=str(_loop_strategy_name or "factor_v4"),
+        strategy_name=_current_loop_strategy_name(),
     )
     _merge_recovery_position_meta(
         pid,
@@ -2220,7 +2110,7 @@ def _run_position_supervision(
 ) -> set[int]:
     runtime = LiveSupervisionRuntime(
         logger=logger,
-        strategy_name=str(_loop_strategy_name or "factor_v4"),
+        strategy_name=_current_loop_strategy_name(),
         ledger=_LEDGER,
         evaluate_position=_evaluate_position_supervisor_for_position,
         record_aux_failure=_record_risk_reduction_aux_failure,
@@ -2456,14 +2346,6 @@ def _state_execute(conn, sql: str, params=None):
     return conn.execute(_state_sql(conn, sql), params)
 
 
-def _ensure_runtime_kv_schema(conn) -> None:
-    from backend.core.db import STATE_DB_DDL
-
-    if _state_conn_is_pg(conn):
-        return
-    conn.executescript(STATE_DB_DDL)
-
-
 def _runtime_kv_get(key: str, default=None):
     conn = _get_state_read_conn()
     try:
@@ -2539,7 +2421,6 @@ def _drain_runtime_kv_pending(conn, limit: int = 100) -> int:
 def _runtime_kv_set(key: str, value) -> None:
     conn = _get_state_pg_conn()
     try:
-        _ensure_runtime_kv_schema(conn)
         drained = _drain_runtime_kv_pending(conn)
         if drained:
             logger.info("[live] runtime_kv pending drained: {}", drained)
@@ -2568,11 +2449,11 @@ _POSITION_DECISION_INDEX_PATH = (
 def _position_decision_index() -> dict[str, dict[str, Any]] | None:
     """Lazily load the materialized position->entry decision index (once).
 
-    Returns None when the file is missing/invalid (callers fall back to the
-    legacy lookup); never writes.  The projection is rebuilt independently
+    Returns None when the file is missing/invalid; never writes.  The
+    projection is rebuilt independently
     (scripts/canonical_v2_position_decision_index.py) and is stale-tolerant:
-    a position missing from the index falls back to the legacy ledger until
-    the next rebuild.
+    a position missing from the index is resolved from the live recovery
+    snapshot, without consulting a retired fact store.
     """
     global _POSITION_DECISION_INDEX_CACHE
     if _POSITION_DECISION_INDEX_CACHE is False:
@@ -2638,7 +2519,7 @@ def _ensure_open_ledger_for_recovered_close(
     real_pnl: dict | None = None,
     close_reason: str = "broker_close",
 ) -> str:
-    """Create minimal open evidence for recovered legacy positions before close review."""
+    """Create minimal open evidence for a recovered broker position before close review."""
     if position_id <= 0:
         return ""
     existing = _lookup_entry_decision_id(position_id)
@@ -2668,7 +2549,7 @@ def _ensure_open_ledger_for_recovered_close(
         risk_state=_live_state_get("risk", {}, clone=True) or {},
         real_pnl=real_pnl or {},
         close_reason=close_reason,
-        fallback_strategy_name=_loop_strategy_name or "factor_v4",
+        fallback_strategy_name=_current_loop_strategy_name(),
         context_integrity_default=_RECOVERY_CONTEXT_PARTIAL,
         fallback_now_ts=time.time(),
     )
@@ -2877,15 +2758,12 @@ def _build_session_state_from_authoritative_trades(
     trade_date: str,
     trades: list[dict],
     realized_close_legs: list[dict] | None = None,
-    persisted_state: dict | None = None,
 ) -> dict:
     """Project fresh broker account/deal facts into the live risk session.
 
-    ``persisted_state`` remains in the compatibility signature for one release
-    but is intentionally ignored: cache-derived peak/equity history must not
-    contaminate an authoritative reconstruction.
+    Cache-derived peak/equity history is intentionally excluded: only fresh
+    broker account and deal facts may reconstruct the risk session.
     """
-    del persisted_state
     account = _live_state_get("account", {}, clone=True) or {}
     limits = RiskLimitSnapshot.from_runtime_config()
     return _session_build_authoritative_state(
@@ -2935,7 +2813,7 @@ def _restore_session_state_for_day(
         )
     if not decision.get("authoritative") and decision.get("restored"):
         logger.warning(
-            "[live] restoring legacy session snapshot for %s because broker close facts are unavailable",
+            "[live] restoring cached session projection for %s because broker close facts are unavailable",
             trade_date,
         )
     _live_state_update(**dict(decision.get("state") or {}))
@@ -3060,6 +2938,86 @@ def _release_session_close_deal_latch(position_id: int, real_pnl: dict[str, Any]
             )
         except Exception:
             pass
+
+
+def _release_orphaned_recovery_session_latches(
+    position_ids: list[int] | set[int] | tuple[int, ...],
+    *,
+    broker: str,
+    broker_position_ids: set[int],
+    reconcile_id: str,
+    observed_at: float,
+) -> None:
+    """Release close-deal latches for recovery rows proven to be orphaned.
+
+    This is deliberately distinct from ``_release_session_close_deal_latch``:
+    no broker close deal is being asserted here.  The only fact used is that
+    ``RecoveryPositionStore.purge_unbrokered`` already verified that the row
+    had no entry lineage and was absent from the same fresh broker snapshot.
+    Keeping this release separate prevents a cleanup of synthetic/test state
+    from becoming a false close outcome or a supervisor learning sample.
+    """
+
+    normalized_ids = sorted({int(position_id) for position_id in position_ids if int(position_id) > 0})
+    if not normalized_ids:
+        return
+    active_causes = {
+        (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
+        for item in list(
+            no_new_risk_latch_status(fail_closed=True).get("causes") or []
+        )
+        if isinstance(item, dict)
+    }
+    for position_id in normalized_ids:
+        cause_key = ("session_risk_unavailable", str(position_id))
+        if cause_key not in active_causes:
+            continue
+        evidence = {
+            "position_id": position_id,
+            "broker": str(broker or "ctrader"),
+            "broker_position_ids": sorted(int(item) for item in broker_position_ids),
+            "reconcile_id": str(reconcile_id or ""),
+            "observed_at": float(observed_at or 0.0),
+            "source": "fresh_ctrader_reconcile",
+            "classification": "orphaned_or_test_recovery_state",
+            "broker_close_deal_asserted": False,
+        }
+        try:
+            release_no_new_risk_latch_cause(
+                cause=cause_key[0],
+                cause_id=cause_key[1],
+                reason="orphaned_recovery_row_purged",
+                actor="system:position_reconcile",
+                correlation_id=str(reconcile_id or position_id),
+                evidence=evidence,
+            )
+            logger.warning(
+                f"[live] released orphaned recovery latch for position {position_id} "
+                f"after fresh broker reconcile (no close-deal claim)"
+            )
+        except Exception as exc:
+            # A failed release must remain fail-closed.  The recovery row has
+            # already been purged, so surface the durable-latch repair issue
+            # loudly for the next operator/reconcile cycle.
+            logger.error(
+                f"[live] failed to release orphaned recovery latch for position "
+                f"{position_id}: {type(exc).__name__}: {exc}"
+            )
+
+    # Remove only the stale display blockers produced by the same synthetic
+    # rows.  Do not mark the session available here: session_restore owns that
+    # authority and may still have an independent session_not_restored cause.
+    stale_blockers = {
+        f"close_deal_pending:{position_id}" for position_id in normalized_ids
+    }
+    current_blockers = list(
+        _live_state_get("session_risk_blockers", [], clone=True) or []
+    )
+    filtered_blockers = [
+        blocker for blocker in current_blockers if str(blocker) not in stale_blockers
+    ]
+    if filtered_blockers != current_blockers:
+        _live_state_update(session_risk_blockers=filtered_blockers)
 
 
 def _pending_session_close_causes() -> dict[int, dict[str, Any]]:
@@ -3503,7 +3461,7 @@ def _latest_supervisor_event_before_close(position_id: int, close_ts: float, loo
                 str(candidate.get("position_id") or "") == str(position_id)
                 and (
                     str(candidate.get("event_type") or "").startswith("supervisor_")
-                    or str(candidate.get("event_type") or "") in ("legacy_awe_trailing", "holding_timeout")
+                    or str(candidate.get("event_type") or "") == "holding_timeout"
                 )
             ):
                 return _lifecycle_normalize_supervisor_event_row(candidate, close_ts=close_ts)
@@ -3515,24 +3473,20 @@ def _latest_supervisor_event_before_close(position_id: int, close_ts: float, loo
 def _latest_protection_trace_before_close(position_id: int, close_ts: float, lookback_sec: float = 3600.0) -> dict[str, Any]:
     conn = _get_state_read_conn()
     try:
-        try:
-            row = _state_execute(
+        upper = float(close_ts or time.time())
+        lower = upper - max(1.0, lookback_sec)
+        rows = [
+            item
+            for item in iter_supervisor_trace_rows(
                 conn,
-                """
-                SELECT trace_id, decision_id, action, summary_reason, event_ts,
-                       verdict_json, risk_verdict_json, execution_json, stage, outcome
-                FROM position_supervisor_trace
-                WHERE position_id=?
-                  AND event_ts <= ?
-                  AND event_ts >= ?
-                  AND action IN ('tighten', 'reduce', 'close')
-                ORDER BY event_ts DESC
-                LIMIT 1
-                """,
-                (str(position_id), float(close_ts or time.time()), float(close_ts or time.time()) - max(1.0, lookback_sec)),
-            ).fetchone()
-        except Exception:
-            row = None
+                limit=0,
+                position_id=str(position_id),
+                reverse=True,
+            )
+            if lower <= float(item.get("event_ts") or item.get("observed_at") or 0.0) <= upper
+            and str(item.get("action") or "").strip().lower() in {"tighten", "reduce", "close"}
+        ]
+        row = rows[0] if rows else None
         return _lifecycle_normalize_protection_trace_row(row, close_ts=close_ts)
     finally:
         conn.close()
@@ -4063,9 +4017,6 @@ def _prime_live_loop_state(
     time until the new generation completes a fresh reconcile.
     """
     account_payload = dict(account or {})
-    execution_v2_enabled = bool(
-        _phase2_feature_flags().ctrader_execution_outcome_v2_enabled
-    )
     if not account_observed:
         account_payload.update(ok=False, warming_up=True)
     _live_state_update(
@@ -4074,8 +4025,9 @@ def _prime_live_loop_state(
         loop_strategy=strategy_name,
         loop_started_at=started_at,
         loop_shutdown=None,
-        # Every generation starts fail-closed.  Legacy and v2 loops may reopen
-        # only after their explicit broker/session gates complete.
+        # Every generation starts fail-closed.  The broker execution-intent
+        # recovery contract is mandatory and reopens risk only after its
+        # explicit broker/session gates complete.
         accepting_new_risk=False,
         account_event=account_payload,
         account_event_updated_at=(time.time() if account_observed else None),
@@ -4083,13 +4035,11 @@ def _prime_live_loop_state(
             "startup_projection" if account_observed else "startup_warming"
         ),
         execution_recovery={
-            "schema": "broker_execution_intent_recovery.v1",
-            "enabled": execution_v2_enabled,
-            "ready": not execution_v2_enabled,
-            "unresolved_count": None if execution_v2_enabled else 0,
-            "status": (
-                "pending" if execution_v2_enabled else "disabled"
-            ),
+            "schema": "broker_execution_intent_recovery.v2",
+            "enabled": True,
+            "ready": False,
+            "unresolved_count": None,
+            "status": "pending",
         },
     )
     if restore_session:
@@ -4303,7 +4253,7 @@ def _install_ctrader_live_listener(bridge) -> None:
                     now_ts=now_ts,
                     persist=False,
                     broker="ctrader",
-                    strategy_name=str(_loop_strategy_name or "factor_v4"),
+                    strategy_name=_current_loop_strategy_name(),
                 )
                 _live_state_update(
                     positions_event=enriched,
@@ -4330,49 +4280,6 @@ def _install_ctrader_live_listener(bridge) -> None:
 _CTRADER_RUNTIME = CTraderRuntime(
     lock_path=Path(__file__).resolve().parent.parent.parent / "runtime" / "ctrader_session.lock",
 )
-_ctrader_bridge = None  # type: "CTraderBridge | None"
-_ctrader_lock = _CTRADER_RUNTIME.lock
-_ctrader_connect_thread: threading.Thread | None = None
-_ctrader_last_error: str | None = None
-_ctrader_next_retry_at: float = 0.0
-_ctrader_guard_handle = None
-
-
-def _sync_ctrader_runtime_from_legacy() -> None:
-    """Keep old module globals as a facade over CTraderRuntime state."""
-    global _ctrader_bridge, _ctrader_connect_thread, _ctrader_last_error, _ctrader_next_retry_at, _ctrader_guard_handle
-    if _ctrader_bridge is not None and _ctrader_bridge is not _CTRADER_RUNTIME.bridge:
-        _CTRADER_RUNTIME.bridge = _ctrader_bridge
-    if _ctrader_connect_thread is not None and _ctrader_connect_thread is not _CTRADER_RUNTIME.connect_thread:
-        _CTRADER_RUNTIME.connect_thread = _ctrader_connect_thread
-    if _ctrader_guard_handle is not None and _ctrader_guard_handle is not _CTRADER_RUNTIME.guard_handle:
-        _CTRADER_RUNTIME.guard_handle = _ctrader_guard_handle
-    _ctrader_bridge = _CTRADER_RUNTIME.bridge
-    _ctrader_connect_thread = _CTRADER_RUNTIME.connect_thread
-    _ctrader_last_error = _CTRADER_RUNTIME.last_error
-    _ctrader_next_retry_at = _CTRADER_RUNTIME.next_retry_at
-    _ctrader_guard_handle = _CTRADER_RUNTIME.guard_handle
-
-
-def _ensure_ctrader_process_guard() -> str | None:
-    _sync_ctrader_runtime_from_legacy()
-    err = _CTRADER_RUNTIME.ensure_process_guard()
-    _sync_ctrader_runtime_from_legacy()
-    return err
-
-
-def _ctrader_retry_remaining() -> float:
-    _sync_ctrader_runtime_from_legacy()
-    return _CTRADER_RUNTIME.retry_remaining()
-
-
-def _kickoff_ctrader_connect():
-    """在后台线程跑 _ctrader_bridge.connect(). 不会阻塞调用方.
-    必须已持有 _ctrader_lock 锁. 假定 _ctrader_bridge 已实例化."""
-    _sync_ctrader_runtime_from_legacy()
-    thread = _CTRADER_RUNTIME.kickoff_connect(logger=logger)
-    _sync_ctrader_runtime_from_legacy()
-    return thread
 
 
 def _get_ctrader():
@@ -4395,14 +4302,12 @@ def _get_ctrader():
     except ImportError as e:
         return None, f"ctrader-open-api not installed: {e}", False
 
-    _sync_ctrader_runtime_from_legacy()
     result = _CTRADER_RUNTIME.get_or_start(
         make_bridge=_make_ctrader_bridge,
         should_send_orders=_should_send_orders,
         apply_runtime_config=_apply_ctrader_runtime_config,
         logger=logger,
     )
-    _sync_ctrader_runtime_from_legacy()
     return result
 
 
@@ -4539,17 +4444,14 @@ def _ensure_spot_subscription(
     bridge,
     *,
     log=None,
-    market_session: dict[str, Any] | None = None,
     timeframe: str = "M5",
 ) -> None:
     """Restore spot and live trendbar streams on a connected bridge.
 
-    ``market_session`` remains accepted for compatibility with the legacy tick
-    runtime, but a maintenance/open-pending classification must never suppress
-    the subscription that can produce the missing quote.
+    A maintenance/open-pending classification must never suppress the
+    subscription that can produce the missing quote.
     """
     global _last_spot_subscription_attempt_ts
-    del market_session
     if bridge is None or not getattr(bridge, "is_connected", False):
         return
     quote = {}
@@ -4729,7 +4631,8 @@ def get_live_readiness(broker: str = "ctrader") -> dict:
         state=state,
         positions=positions,
         checked_at=time.time(),
-        v2_active=_phase2_v2_active(),
+        # The canonical generation/supervisor path is the only live authority.
+        v2_active=True,
         broker_status=broker_status,
         broker_error=broker_error,
     )
@@ -4850,7 +4753,6 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
             now_ts=time.time(),
             persist=False,
             broker=broker,
-            account=_live_state_get("account_reconciled", {}, clone=True) or {},
         )
 
     def _visible_positions(pos_list: list[Any]) -> list[dict]:
@@ -4979,13 +4881,9 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
 
 # ── Trading loop management (background thread) ─────────────────────────
 
-# Module-level state for the loop (singleton, persists across requests)
-# ── 模块级状态 ──────────────────────────────────────────
-_loop_thread: threading.Thread | None = None
-_loop_stop_flag: threading.Event = None  # type: ignore[assignment]
-_loop_broker: str | None = None
-_loop_started_at: float | None = None
-_loop_strategy_name: str | None = "factor_pipeline_v4"
+# The generation controller is the sole live-loop ownership authority.  The
+# shared live state below is a read-only API/UI projection, never a second
+# source for thread, broker, or strategy identity.
 _loop_state_lock = threading.Lock()
 _OPEN_TRADE_ADMISSION_LOCK = threading.Lock()
 _process_shutdown_requested = False
@@ -4993,8 +4891,7 @@ _LIVE_LOOP_CONTROLLER = LiveLoopController()
 _live_safety_plane: LiveSafetyPlane | None = None
 _live_safety_plane_owner: str = ""
 _live_safety_watchdog: LiveSafetyWatchdog | None = None
-# ★ v9-fix: 重启退避 + 价格僵死检测 + 备份 bar 缓存
-_last_loop_end: float = 0.0
+# Restart backoff, price-stuck detection, and bar cache.
 _MIN_RESTART_INTERVAL = 60  # 最小重启间隔 60s
 _BAR_CACHE_PATH = Path(__file__).resolve().parent.parent.parent / "logs" / ".bar_cache.pkl"
 _PRICE_STUCK_WARNED: dict[str, float] = {}  # {(broker,tf): last_price}
@@ -5004,30 +4901,21 @@ def _phase2_feature_flags():
     return shared_static_feature_flags()
 
 
-def _generation_controller_enabled() -> bool:
-    return bool(_phase2_feature_flags().live_generation_controller_v2_enabled)
-
-
-def _phase2_v2_active() -> bool:
-    flags = _phase2_feature_flags()
-    return bool(
-        _generation_controller_enabled()
-        or str(flags.live_safety_plane_v2_mode) != "off"
-        # Execution-outcome recovery is itself a startup/new-risk barrier.  It
-        # must not silently fall back to the legacy alpha-first loop merely
-        # because generation ownership and Safety v2 are still off.
-        or bool(flags.ctrader_execution_outcome_v2_enabled)
-    )
-
-
 def _current_generation_id() -> str:
     current = _LIVE_LOOP_CONTROLLER.current()
     return str(current.generation_id) if current is not None else ""
 
 
+def _current_loop_strategy_name(default: str = "factor_v4") -> str:
+    current = _LIVE_LOOP_CONTROLLER.current()
+    if current is None:
+        return str(default)
+    return str(current.strategy_name or default)
+
+
 def _get_live_safety_plane(generation_id: str = "") -> LiveSafetyPlane:
     global _live_safety_plane, _live_safety_plane_owner
-    owner = str(generation_id or "legacy")
+    owner = str(generation_id or "unowned")
     mode = str(_phase2_feature_flags().live_safety_plane_v2_mode)
     if (
         _live_safety_plane is None
@@ -5037,10 +4925,8 @@ def _get_live_safety_plane(generation_id: str = "") -> LiveSafetyPlane:
         _live_safety_plane = LiveSafetyPlane(mode=mode)
         _live_safety_plane_owner = owner
     if mode == "enforce" and not _live_safety_plane.forced_shadow:
-        # Re-read the additive authority cause even for an existing plane so
-        # another process/generation cannot leave this loop enforcing V2 after
-        # a shared comparison failure has already forced the deployment back
-        # to legacy authority.
+        # Re-read the persisted fail-closed cause for an existing generation;
+        # a restart or another process must not silently clear it.
         persisted_override = safety_v2_forced_shadow_status()
         if bool(persisted_override.get("active")):
             _live_safety_plane.force_shadow(
@@ -5055,19 +4941,21 @@ def _get_live_safety_plane(generation_id: str = "") -> LiveSafetyPlane:
 def _live_safety_watchdog_probe() -> dict[str, Any]:
     """Return process facts only; the watchdog never calls the broker."""
 
-    thread_alive = bool(_loop_thread is not None and _loop_thread.is_alive())
     safety = _live_state_get("safety_plane", {}, clone=True) or {}
     heartbeat_at = float(safety.get("heartbeat_at", 0.0) or 0.0)
-    if _generation_controller_enabled():
-        controller = _LIVE_LOOP_CONTROLLER.status()
-        heartbeat_at = float(controller.get("safety_heartbeat_at", 0.0) or 0.0)
+    controller = _LIVE_LOOP_CONTROLLER.status()
+    thread_alive = bool(controller.get("thread_alive"))
+    heartbeat_at = float(controller.get("safety_heartbeat_at", 0.0) or 0.0)
     unknown_raw = safety.get("unknown_execution_count")
     return {
-        # The feature flag selects the authoritative planner; it must never
-        # disable the heartbeat invariant for a running legacy/off loop.
-        "enabled": bool(thread_alive or _live_state_get("loop_running", False)),
+        # The generation controller is the authoritative lifecycle owner; the
+        # watchdog only observes its heartbeat and never calls the broker.
+        "enabled": bool(
+            thread_alive
+            or controller.get("phase") in {"starting", "running", "degraded", "draining"}
+        ),
         "running": thread_alive,
-        "started_at": float(_loop_started_at or 0.0),
+        "started_at": float(controller.get("created_at") or 0.0),
         "safety_heartbeat_at": heartbeat_at,
         # This is only a liveness hint for an active serial cycle.  It is not
         # a completed Safety fact and is never used by the open admission
@@ -5155,16 +5043,15 @@ def _persist_safety_fail_closed(
         safety_failure=payload,
         no_new_risk_latch=latch,
     )
-    if _generation_controller_enabled():
-        current = _LIVE_LOOP_CONTROLLER.current()
-        if current is not None:
-            try:
-                _LIVE_LOOP_CONTROLLER.update_runtime_health(
-                    current.generation_id,
-                    blockers=tuple(normalized),
-                )
-            except RuntimeError:
-                pass
+    current = _LIVE_LOOP_CONTROLLER.current()
+    if current is not None:
+        try:
+            _LIVE_LOOP_CONTROLLER.update_runtime_health(
+                current.generation_id,
+                blockers=tuple(normalized),
+            )
+        except RuntimeError:
+            pass
     if needs_latch_record or error:
         try:
             append_safety_outbox(
@@ -5429,27 +5316,22 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
             recovery_blockers.append("session_circuit_breaker")
 
     normalized_recovery_blockers = sorted(set(recovery_blockers))
-    if _generation_controller_enabled():
-        current = _LIVE_LOOP_CONTROLLER.current()
-        if current is not None:
-            try:
-                _LIVE_LOOP_CONTROLLER.update_runtime_health(
-                    current.generation_id,
-                    blockers=tuple(normalized_recovery_blockers)
-                    if recovery_ready
-                    else ("safety_recovery_not_ready",),
+    current = _LIVE_LOOP_CONTROLLER.current()
+    if current is not None:
+        try:
+            _LIVE_LOOP_CONTROLLER.update_runtime_health(
+                current.generation_id,
+                blockers=tuple(normalized_recovery_blockers)
+                if recovery_ready
+                else ("safety_recovery_not_ready",),
+            )
+            _live_state_update(
+                accepting_new_risk=_LIVE_LOOP_CONTROLLER.accepting_new_risk(
+                    current.generation_id
                 )
-                _live_state_update(
-                    accepting_new_risk=_LIVE_LOOP_CONTROLLER.accepting_new_risk(
-                        current.generation_id
-                    )
-                )
-            except RuntimeError:
-                pass
-    elif bool(_live_state_get("loop_running", False)):
-        _live_state_update(
-            accepting_new_risk=bool(recovery_ready and not normalized_recovery_blockers)
-        )
+            )
+        except RuntimeError:
+            pass
 
 
 def _start_live_safety_watchdog() -> bool:
@@ -5698,9 +5580,14 @@ def _scheduled_offmarket_position_quality_lightgbm(
     from backend.services.learning_research_jobs import run_offmarket_position_quality_job
 
     session = _live_state_get("market_session", {}, clone=True) or {}
-    if not session:
-        session = _market_session_snapshot(None)
-    return run_offmarket_position_quality_job(session=session, db_path=db_path)
+    # Let the quality job consume runtime_health_projection.v1 when this
+    # process has not published an in-memory session yet.  Recomputing with a
+    # None bridge would silently fall back to the static schedule and create
+    # a second market-session authority in the learning path.
+    return run_offmarket_position_quality_job(
+        session=session or None,
+        db_path=db_path,
+    )
 
 
 def _scheduled_factor_selection_heartbeat() -> dict[str, Any]:
@@ -5835,75 +5722,12 @@ def _stop_live_scheduler():
 
 
 def loop_status() -> dict:
-    """Whether the live trading loop thread is running. 优先 _live_state 缓存."""
+    """Return the canonical generation status and read-only live projections."""
     with _loop_state_lock:
-        legacy = _loop_status_snapshot(
-            state_get=_live_state_get,
-            thread=_loop_thread,
-            broker=_loop_broker,
-            started_at=_loop_started_at,
-            strategy_name=_loop_strategy_name,
+        generation = _LIVE_LOOP_CONTROLLER.status()
+        identity = _loop_identity_snapshot(
+            generation=generation,
         )
-        if _generation_controller_enabled():
-            generation = _LIVE_LOOP_CONTROLLER.status()
-        else:
-            thread_alive = bool(_loop_thread is not None and _loop_thread.is_alive())
-            draining = bool(
-                thread_alive
-                and _loop_stop_flag is not None
-                and _loop_stop_flag.is_set()
-            )
-            safety = _live_state_get("safety_plane", {}, clone=True) or {}
-            heartbeat_at = float(safety.get("heartbeat_at", 0.0) or 0.0)
-            heartbeat_age = max(0.0, time.time() - heartbeat_at) if heartbeat_at > 0 else None
-            heartbeat_healthy = bool(
-                heartbeat_age is not None
-                and heartbeat_age <= _LIVE_SAFETY_FRESHNESS_SEC
-            )
-            generation = {
-                "phase": (
-                    "draining"
-                    if draining
-                    else
-                    "degraded"
-                    if thread_alive and not heartbeat_healthy
-                    else "running"
-                    if thread_alive
-                    else "stopped"
-                ),
-                "generation": "",
-                "thread_alive": thread_alive,
-                "ready": bool(thread_alive and heartbeat_healthy and not draining),
-                "accepting_new_risk": bool(
-                    thread_alive
-                    and heartbeat_healthy
-                    and not draining
-                    and _live_state_get("accepting_new_risk", True)
-                    and not no_new_risk_latched(fail_closed=True)
-                ),
-                "safety_heartbeat_at": heartbeat_at or None,
-                "alpha_heartbeat_at": None,
-                "safety_heartbeat_age_sec": heartbeat_age,
-                "alpha_heartbeat_age_sec": None,
-                "startup_barrier": {},
-                "blockers": sorted(
-                    (
-                        ["live_loop_draining"]
-                        if draining
-                        else []
-                    )
-                    + (
-                        []
-                        if heartbeat_healthy
-                        else [
-                            "safety_heartbeat_unknown"
-                            if heartbeat_age is None
-                            else "safety_heartbeat_stale"
-                        ]
-                    )
-                ),
-                "components": {},
-            }
         freshness = evaluate_safety_freshness(
             _live_safety_watchdog_probe(),
             now=time.time(),
@@ -5914,6 +5738,18 @@ def loop_status() -> dict:
             local_blockers.extend(freshness.blockers)
         if no_new_risk_latched(fail_closed=True):
             local_blockers.append("no_new_risk_latched")
+        safety_payload = _live_state_get("safety_plane", {}, clone=True) or {}
+        if isinstance(safety_payload, dict):
+            local_blockers.extend(
+                str(item)
+                for item in (safety_payload.get("blockers") or [])
+                if str(item)
+            )
+            if (
+                safety_payload.get("accepting_new_risk") is False
+                and not safety_payload.get("blockers")
+            ):
+                local_blockers.append("safety_not_accepting_new_risk")
         if bool(generation.get("thread_alive")):
             reconcile_blockers = _new_risk_reconciliation_blockers()
             local_blockers.extend(reconcile_blockers)
@@ -5932,83 +5768,50 @@ def loop_status() -> dict:
                 local_blockers.append(
                     "market_session_blocks_open"
                 )
-        if local_blockers:
+        current = _LIVE_LOOP_CONTROLLER.current()
+        if current is not None:
+            try:
+                _LIVE_LOOP_CONTROLLER.update_runtime_health(
+                    current.generation_id,
+                    blockers=tuple(local_blockers),
+                )
+                generation = _LIVE_LOOP_CONTROLLER.status()
+                _live_state_update(
+                    accepting_new_risk=_LIVE_LOOP_CONTROLLER.accepting_new_risk(
+                        current.generation_id
+                    )
+                )
+            except RuntimeError:
+                pass
+        elif local_blockers:
             generation = {
                 **generation,
-                "phase": (
-                    "degraded"
-                    if generation.get("phase") == "running"
-                    else generation.get("phase")
-                ),
                 "accepting_new_risk": False,
                 "blockers": sorted(
                     set(generation.get("blockers") or ()) | set(local_blockers)
                 ),
             }
         return {
-            **legacy,
+            **identity,
             **generation,
-            # Compatibility field remains available during the v2 rollout.
             "running": bool(generation["thread_alive"] and generation["phase"] != "stopped"),
             "safety": _live_state_get("safety_plane", {}, clone=True) or {},
-            "safety_authority": (
-                "phase2_serial_safety_plane"
-                if _phase2_v2_active()
-                else "legacy_authoritative"
-            ),
+            "safety_authority": "governed_supervisor_executor",
             "safety_heartbeat_state": freshness.state,
             "safety_freshness": freshness.to_dict(),
             "safety_shadow_gate": safety_shadow_gate_status(),
         }
 
-
-def _prepare_loop_ownership(
-    *,
-    stop_flag,
-    broker: str,
-    started_at: float,
-    strategy_name: str,
-) -> None:
-    global _loop_stop_flag, _loop_broker, _loop_started_at, _loop_strategy_name
-
-    _loop_stop_flag = stop_flag
-    _loop_broker = broker
-    _loop_started_at = started_at
-    _loop_strategy_name = strategy_name
-
-
-def _reset_start_ownership() -> None:
-    global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
-    global _loop_strategy_name
-
-    _loop_thread = None
-    _loop_stop_flag = None
-    _loop_broker = None
-    _loop_started_at = None
-    _loop_strategy_name = None
-
-
-def _install_loop_thread(thread) -> None:
-    global _loop_thread
-
-    _loop_thread = thread
-
-
 def _live_loop_start_runtime() -> LiveLoopStartRuntime:
     return LiveLoopStartRuntime(
-        generation_controller_enabled=_generation_controller_enabled,
         state_lock=_loop_state_lock,
-        snapshot_ownership=_loop_ownership_snapshot,
         process_shutdown_requested=lambda: _process_shutdown_requested,
         controller=_LIVE_LOOP_CONTROLLER,
-        last_loop_end=lambda: _last_loop_end,
+        last_loop_end=_LIVE_LOOP_CONTROLLER.last_exit_at,
         now=time.time,
         sleep=time.sleep,
         logger_warning=logger.warning,
         logger_info=logger.info,
-        event_factory=threading.Event,
-        prepare_ownership=_prepare_loop_ownership,
-        reset_start_ownership=_reset_start_ownership,
         persist_desired_state=_persist_loop_desired_state,
         prime_live_loop_state=_prime_live_loop_state,
         start_safety_watchdog=_start_live_safety_watchdog,
@@ -6017,10 +5820,7 @@ def _live_loop_start_runtime() -> LiveLoopStartRuntime:
         stop_safety_watchdog=_stop_live_safety_watchdog,
         thread_factory=threading.Thread,
         loop_target=_run_loop,
-        install_loop_thread=_install_loop_thread,
         live_state_update=_live_state_update,
-        live_state_get=_live_state_get,
-        no_new_risk_latched=no_new_risk_latched,
     )
 
 
@@ -6047,8 +5847,6 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
     state.  It does not stop schedulers, disconnect cTrader, or alter broker
     positions.  The current tick is allowed to finish before the loop exits.
     """
-    global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
-    global _loop_strategy_name, _last_loop_end
     global _process_shutdown_requested
 
     requested_at = time.time()
@@ -6056,19 +5854,31 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
     trigger_reason = "backend_shutdown"
 
     with _loop_state_lock:
-        thread = _loop_thread
-        broker = _loop_broker
+        controller_status = _LIVE_LOOP_CONTROLLER.status()
+        generation = _LIVE_LOOP_CONTROLLER.current()
+        ownership = _LIVE_LOOP_CONTROLLER.ownership_snapshot()
+        thread = ownership.thread
+        broker = ownership.broker
         thread_id = getattr(thread, "ident", None) if thread is not None else None
-        if thread is None or not thread.is_alive():
+        active = bool(
+            generation is not None
+            and (
+                controller_status.get("thread_alive")
+                or controller_status.get("phase")
+                in {"starting", "running", "degraded", "draining"}
+            )
+        )
+        if not active:
             with _OPEN_TRADE_ADMISSION_LOCK:
                 _process_shutdown_requested = True
-            ownership_released = _loop_thread is thread
+            ownership_released = True
+            if generation is not None and thread is not None:
+                ownership_released = _LIVE_LOOP_CONTROLLER.clear_thread_if(
+                    generation.generation_id,
+                    thread,
+                    time.time(),
+                )
             if ownership_released:
-                _loop_thread = None
-                _loop_stop_flag = None
-                _loop_broker = None
-                _loop_started_at = None
-                _loop_strategy_name = None
                 _mark_loop_stopped_for_display()
             finished_at = time.time()
             result = {
@@ -6090,11 +5900,9 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
                 "trigger_reason": trigger_reason,
             }
         else:
-            stop_flag = _loop_stop_flag
-            if _generation_controller_enabled():
-                generation = _LIVE_LOOP_CONTROLLER.current()
-                if generation is not None:
-                    _LIVE_LOOP_CONTROLLER.request_stop(generation.generation_id)
+            assert generation is not None
+            stop_flag = generation.stop_event
+            _LIVE_LOOP_CONTROLLER.request_stop(generation.generation_id)
             draining = {
                 "schema_version": "live_loop_process_shutdown.v1",
                 "status": "draining",
@@ -6133,6 +5941,38 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
         logger.info("[live] process shutdown: no running live loop")
         return result
 
+    if thread is None:
+        # A generation can be in the start barrier before its worker thread is
+        # bound.  Shutdown owns that generation too; acknowledge it here so a
+        # later request cannot observe a phantom start.
+        assert generation is not None
+        _LIVE_LOOP_CONTROLLER.acknowledge_exit(generation.generation_id)
+        finished_at = time.time()
+        ownership_released = True
+        with _loop_state_lock:
+            _mark_loop_stopped_for_display()
+        result = {
+            "schema_version": "live_loop_process_shutdown.v1",
+            "status": "completed",
+            "ok": True,
+            "graceful": True,
+            "recovery_required": False,
+            "was_running": True,
+            "desired_state_preserved": True,
+            "ownership_released": True,
+            "replacement_detected": False,
+            "accepting_new_risk": False,
+            "broker": broker,
+            "thread_id": thread_id,
+            "timeout_sec": timeout,
+            "requested_at": requested_at,
+            "ts": finished_at,
+            "trigger_reason": trigger_reason,
+        }
+        _live_state_update(loop_shutdown=result, accepting_new_risk=False)
+        _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
+        return result
+
     thread.join(timeout=timeout)
     finished_at = time.time()
     timed_out = thread.is_alive()
@@ -6165,14 +6005,23 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
         return result
 
     with _loop_state_lock:
-        ownership_released = _loop_thread is thread
+        current_after = _LIVE_LOOP_CONTROLLER.current()
+        if (
+            current_after is not None
+            and generation is not None
+            and current_after.generation_id == generation.generation_id
+            and current_after.state not in {"stopped", "failed"}
+        ):
+            _LIVE_LOOP_CONTROLLER.acknowledge_exit(generation.generation_id)
+        ownership_released = bool(
+            generation is not None
+            and _LIVE_LOOP_CONTROLLER.clear_thread_if(
+                generation.generation_id,
+                thread,
+                finished_at,
+            )
+        )
         if ownership_released:
-            _loop_thread = None
-            _loop_stop_flag = None
-            _loop_broker = None
-            _loop_started_at = None
-            _loop_strategy_name = None
-            _last_loop_end = finished_at
             _mark_loop_stopped_for_display()
 
     result = {
@@ -6201,47 +6050,9 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
     return result
 
 
-def _loop_ownership_snapshot() -> LoopOwnershipSnapshot:
-    return LoopOwnershipSnapshot(
-        thread=_loop_thread,
-        stop_flag=_loop_stop_flag,
-        broker=_loop_broker,
-        started_at=_loop_started_at,
-        strategy_name=_loop_strategy_name,
-    )
-
-
-def _clear_loop_ownership_if(thread, finished_at: float) -> bool:
-    global _loop_thread, _loop_stop_flag, _loop_broker, _loop_started_at
-    global _loop_strategy_name, _last_loop_end
-
-    if _loop_thread is not thread:
-        return False
-    _loop_thread = None
-    _loop_stop_flag = None
-    _loop_broker = None
-    _loop_started_at = None
-    _loop_strategy_name = None
-    _last_loop_end = float(finished_at)
-    _mark_loop_stopped_for_display()
-    return True
-
-
-def _ensure_loop_stop_event():
-    global _loop_stop_flag
-
-    if _loop_stop_flag is None:
-        _loop_stop_flag = threading.Event()
-    return _loop_stop_flag
-
-
 def _live_loop_stop_runtime() -> LiveLoopStopRuntime:
     return LiveLoopStopRuntime(
-        generation_controller_enabled=_generation_controller_enabled,
         state_lock=_loop_state_lock,
-        snapshot_ownership=_loop_ownership_snapshot,
-        clear_ownership_if=_clear_loop_ownership_if,
-        ensure_stop_event=_ensure_loop_stop_event,
         controller=_LIVE_LOOP_CONTROLLER,
         admission_lock=_OPEN_TRADE_ADMISSION_LOCK,
         live_state_update=_live_state_update,
@@ -6596,8 +6407,7 @@ def _publish_fresh_position_reconcile(
             now_ts=observed_at,
             persist=bool(persist),
             broker=broker,
-            strategy_name=str(_loop_strategy_name or "factor_v4"),
-            account=_live_state_get("account", {}, clone=True) or {},
+            strategy_name=_current_loop_strategy_name(),
         )
     except Exception as exc:
         # Enrichment/audit is advisory; the broker snapshot remains usable by
@@ -6641,6 +6451,32 @@ def _publish_fresh_position_reconcile(
         }
         missing_recovery_ids = sorted(recovery_ids - broker_ids)
         if missing_recovery_ids and bridge is not None and persist:
+            # Fresh broker identity is authoritative for recovery rows that
+            # have no entry lineage.  Those rows are orphaned/test state (for
+            # example synthetic three-digit IDs), not trades waiting for a
+            # close deal.  Purge only that narrow class; rows with an entry
+            # decision remain on the close-deal proof path below.
+            purged_ids = _recovery_position_store().purge_unbrokered(
+                set(missing_recovery_ids),
+                broker=broker,
+                broker_position_ids=broker_ids,
+            )
+            if purged_ids:
+                logger.warning(
+                    f"[live] purged orphaned recovery rows absent from fresh broker "
+                    f"snapshot: {sorted(purged_ids)}"
+                )
+                _release_orphaned_recovery_session_latches(
+                    purged_ids,
+                    broker=broker,
+                    broker_position_ids=broker_ids,
+                    reconcile_id=reconcile_id,
+                    observed_at=observed_at,
+                )
+                recovery_ids = _lifecycle_recovery_active_position_ids(
+                    _list_active_recovery_positions(broker)
+                )
+                missing_recovery_ids = sorted(recovery_ids - broker_ids)
             # A broker-side close can race this first fresh snapshot.  Resolve
             # each missing durable row once through the existing close-deal
             # retirement contract before turning the observation into a
@@ -6653,7 +6489,7 @@ def _publish_fresh_position_reconcile(
                         bridge,
                         position_id,
                         broker=broker,
-                        strategy_name=str(_loop_strategy_name or "factor_v4"),
+                        strategy_name=_current_loop_strategy_name(),
                         reason="fresh_reconcile_missing_recovery_position",
                         persist_reconcile=False,
                     ):
@@ -6763,7 +6599,7 @@ def _safety_reference_price(bridge: Any, positions: list[dict[str, Any]]) -> flo
     return float(get_latest_price() or 0.0)
 
 
-def _live_safety_planner_runtime() -> SafetyPlannerRuntime:
+def _live_safety_planner_runtime(bridge: Any) -> SafetyPlannerRuntime:
     """Build read-only adapters shared by two independent planning algorithms."""
 
     def build_timeout_context(position, effective_cfg, now_ts):
@@ -6857,25 +6693,13 @@ def _live_safety_planner_runtime() -> SafetyPlannerRuntime:
         )
         return evaluate_position_supervisor(context)
 
-    def build_trailing_update(position, existing_state, price, atr, conviction):
-        anchor = _runtime_config_anchor()
-        return _lifecycle_build_legacy_awe_trailing_update(
-            position=dict(position),
-            existing_state=dict(existing_state or {}),
-            current_price=float(price or 0.0),
-            atr_price=float(atr or 0.0),
-            conviction=float(conviction or 0.0),
-            config_version=int(anchor.get("config_version") or 0),
-            config_hash=str(anchor.get("config_hash") or ""),
-        )
-
     def normalize_supervisor_action(position, verdict):
         payload = dict(verdict or {})
         if str(payload.get("action") or "").strip().lower() != "reduce":
             return payload
         controls = dict(payload.get("recommended_controls") or {})
         execution_plan = _plan_supervisor_reduce_action(
-            bridge=_ctrader_bridge,
+            bridge=bridge,
             position=dict(position or {}),
             verdict=payload,
             controls=controls,
@@ -6886,24 +6710,17 @@ def _live_safety_planner_runtime() -> SafetyPlannerRuntime:
         )
         return _normalize_supervisor_reduce_verdict(payload, execution_plan)
 
-    pipeline = _factor_pipeline or {}
-    awe = pipeline.get("awe")
-
     return SafetyPlannerRuntime(
         build_timeout_context=build_timeout_context,
         load_entry_protection_plan=load_entry_plan,
         evaluate_supervisor=evaluate_supervisor_read_only,
-        build_trailing_update=build_trailing_update,
-        trailing_state=lambda pid: copy.deepcopy(_trailing_state.get(int(pid), {})),
-        composite_conviction=(
-            awe.composite_conviction if awe is not None else lambda: 0.0
-        ),
         normalize_supervisor_action=normalize_supervisor_action,
     )
 
 
 def _plan_live_safety_candidates(
     *,
+    bridge: Any,
     positions: list[dict[str, Any]],
     cfg: Any,
     account: dict[str, Any],
@@ -6921,30 +6738,7 @@ def _plan_live_safety_candidates(
         atr_price=atr_price,
         planned_at=planned_at,
         entry_repair_cooldown_seconds=_ENTRY_PROTECTION_REPAIR_COOLDOWN_SECONDS,
-        runtime=_live_safety_planner_runtime(),
-    )
-
-
-def _preview_legacy_live_safety_candidates(
-    *,
-    positions: list[dict[str, Any]],
-    cfg: Any,
-    account: dict[str, Any],
-    current_price: float,
-    atr_price: float,
-    planned_at: float,
-):
-    """Run the separate, read-only legacy arbitration preview."""
-
-    return preview_legacy_safety_candidates(
-        positions=positions,
-        cfg=cfg,
-        account=account,
-        current_price=current_price,
-        atr_price=atr_price,
-        planned_at=planned_at,
-        entry_repair_cooldown_seconds=_ENTRY_PROTECTION_REPAIR_COOLDOWN_SECONDS,
-        runtime=_live_safety_planner_runtime(),
+        runtime=_live_safety_planner_runtime(bridge),
     )
 
 
@@ -6954,7 +6748,7 @@ def _safety_candidate_execution_runtime() -> SafetyCandidateExecutionRuntime:
         entry_protection_repair_source=_ENTRY_PROTECTION_REPAIR_SOURCE,
         runtime_config_anchor=_runtime_config_anchor,
         protection_candidate_cls=ProtectionCandidate,
-        execute_trailing_candidate=_execute_trailing_candidate,
+        execute_protection_candidate=_execute_protection_candidate,
         evaluate_position_supervisor=(
             _evaluate_position_supervisor_for_position
         ),
@@ -7032,7 +6826,6 @@ def _run_live_safety_cycle(
             safety_reference_price=_safety_reference_price,
             factor_pipeline=_factor_pipeline or {},
             plan_safety_candidates=_plan_live_safety_candidates,
-            plan_legacy_candidates=_preview_legacy_live_safety_candidates,
             execute_safety_candidate=_execute_live_safety_candidate,
             run_position_protection_cycle=_run_position_protection_cycle,
             persist_safety_fail_closed=_persist_safety_fail_closed,
@@ -7057,7 +6850,6 @@ def _recover_execution_outcomes_before_alpha(
     safety_result: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
     return _loop_recover_execution_outcomes(
-        enabled=bool(_phase2_feature_flags().ctrader_execution_outcome_v2_enabled),
         bridge=bridge,
         broker=broker,
         tick=tick,
@@ -7120,7 +6912,7 @@ def _attempt_generation_startup_barrier(
             restore_session_state=_restore_session_state_for_day,
             bootstrap_position_recovery=_bootstrap_position_recovery,
             factor_pipeline=_factor_pipeline or {},
-            strategy_name=str(_loop_strategy_name or "factor_v4"),
+            strategy_name=_current_loop_strategy_name(),
         ),
     )
 
@@ -7143,7 +6935,7 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
         attempt_startup_barrier=_attempt_generation_startup_barrier,
         live_state_get=_live_state_get,
         bootstrap_position_recovery=_bootstrap_position_recovery,
-        loop_strategy_name=str(_loop_strategy_name or "factor_v4"),
+        loop_strategy_name=_current_loop_strategy_name(),
         restore_session_state=_restore_session_state_for_day,
         session_circuit_breaker_enforced=lambda: not bounded_demo_mode_active(),
         evaluate_daily_drawdown=_evaluate_daily_drawdown,
@@ -7199,20 +6991,15 @@ def _risk_metric_inputs(
         rows = iter_review_rows(conn, limit=0)
         rows.sort(key=lambda row: float(row.get("created_at") or 0.0), reverse=True)
         rows = rows[:200]
-        review_rows = [
-            (
-                row,
-                load_json_payload(
-                    conn,
-                    source_table="trade_outcome_review",
-                    source_id=str(row.get("review_id") or row.get("position_id") or ""),
-                    inline_json=row.get("review_json"),
-                    archive_hash=row.get("review_archive_hash", ""),
-                    default={},
-                ),
-            )
-            for row in rows
-        ]
+        review_rows = []
+        for row in rows:
+            review = row.get("review_json")
+            if isinstance(review, str):
+                try:
+                    review = json.loads(review)
+                except (TypeError, ValueError):
+                    review = {}
+            review_rows.append((row, review if isinstance(review, dict) else {}))
         conn.commit()
     finally:
         conn.close()
@@ -7449,7 +7236,7 @@ def _run_loop(
         _run_loop_body(broker, stop_flag, generation_id=generation_id)
     except BaseException as exc:
         failed_reason = f"{type(exc).__name__}: {exc}"
-        logger.exception("[live] generation %s failed", generation_id or "legacy")
+        logger.exception("[live] generation %s failed", generation_id or "unowned")
         raise
     finally:
         _live_state_update(accepting_new_risk=False)
@@ -7689,7 +7476,6 @@ def _run_loop_body_active(
         return
     df = warmup.frame
 
-    global _DECISION_LOG, _DECISION_LOG_RUN_ID
     global _LEDGER, _TRADE_REVIEWER, _EXPERIENCE_BUILDER, _POLICY_SUGGESTER
     global _factor_pipelines, _cross_asset_covar
 
@@ -7705,9 +7491,6 @@ def _run_loop_body_active(
 
     if _factor_pipeline is not None:
         try:
-            if _DECISION_LOG is None:
-                _DECISION_LOG = DecisionLogStore()
-                _DECISION_LOG_RUN_ID = int(time.time())
             if _LEDGER is None:
                 _LEDGER = DecisionLedger()
             if _TRADE_REVIEWER is None:
@@ -7805,9 +7588,8 @@ _cross_asset_covar: "CrossAssetCovariance | None" = None  # 跨品种协方差
 
 
 # ═══════════════════════════════════════════════════════════
-# 审计日志 (统一使用 DecisionLogStore → PostgreSQL state store)
+# Canonical decision and lifecycle facts
 # ═══════════════════════════════════════════════════════════
-import json as _json
 
 
 def _should_send_orders(broker: str, *, log_blocking: bool = True) -> bool:
@@ -7924,13 +7706,7 @@ _EMERGENCY_SLEEP = time.sleep
 
 
 def _recover_emergency_execution_intents(bridge: Any) -> dict[str, Any]:
-    return _runtime_recover_emergency_intents(
-        bridge,
-        enabled=bool(
-            _phase2_feature_flags().ctrader_execution_outcome_v2_enabled
-        ),
-        read_local_unresolved=unresolved_broker_outcome_mutations,
-    )
+    return _runtime_recover_emergency_intents(bridge)
 
 
 def emergency_close(broker: str, symbol: str | None = None) -> dict:
@@ -8127,7 +7903,7 @@ def _upsert_filled_open_recovery(
         recovery_payloads = _lifecycle_build_filled_open_recovery_payloads(
             position_id=pid,
             broker=broker,
-            strategy_name=str(_loop_strategy_name or "factor_v4"),
+            strategy_name=_current_loop_strategy_name(),
             direction=composite.direction,
             fill_price=fill_price,
             current_price=current_price,
@@ -8236,11 +8012,6 @@ def _closed_position_processing_runtime() -> ClosedPositionProcessingRuntime:
         classify_close_source=_classify_close_source,
         select_close_total_pnl=_tick_select_close_total_pnl,
         open_api_volumes=_pos_open_api_volume,
-        decision_log=_DECISION_LOG,
-        decision_log_run_id=_DECISION_LOG_RUN_ID,
-        safe_decision_log=_safe_decision_log,
-        build_close_decision_audit_meta=_tick_build_close_decision_audit_meta,
-        json_dumps=_json.dumps,
         ledger=_LEDGER,
         ensure_open_ledger=_ensure_open_ledger_for_recovered_close,
         lookup_context_integrity=_lookup_recovery_context_integrity,
@@ -8252,7 +8023,6 @@ def _closed_position_processing_runtime() -> ClosedPositionProcessingRuntime:
         policy_suggester=_POLICY_SUGGESTER,
         build_trade_review_payload=_tick_build_trade_review_payload,
         mark_recovery_closed=_mark_recovery_position_closed,
-        trailing_state=_trailing_state,
         entry_scores=_pos_entry_scores,
         entry_decisions=_pos_entry_decisions,
         pending_open_attach_until=_pending_open_attach_until,
@@ -8277,24 +8047,6 @@ def _collect_closed_position_attribution(
         attr_engine=attr_engine,
         tick=tick,
         log=log,
-        runtime=_closed_position_processing_runtime(),
-    )
-
-
-def _write_close_decision_log_after_tick(
-    *,
-    cpid: int,
-    bar: dict,
-    total_pnl: float,
-    current_price: float,
-    tick: int,
-) -> None:
-    _runtime_write_close_decision_log(
-        position_id=cpid,
-        bar=bar,
-        total_pnl=total_pnl,
-        current_price=current_price,
-        tick=tick,
         runtime=_closed_position_processing_runtime(),
     )
 
@@ -8422,7 +8174,6 @@ def _handle_closed_positions_after_tick(
             defer_close=_defer_close_until_authoritative_deal,
             update_live_state=_live_state_update,
             collect_attribution=_collect_closed_position_attribution,
-            write_close_decision_log=_write_close_decision_log_after_tick,
             lookup_context_integrity=_lookup_recovery_context_integrity,
             log_closed_position_ledger=_log_closed_position_ledger_after_tick,
             run_closed_position_learning=_run_closed_position_learning_after_tick,
@@ -8657,7 +8408,7 @@ def _upsert_amended_open_recovery(
         recovery_payloads = _lifecycle_build_filled_open_recovery_payloads(
             position_id=int(pid),
             broker=broker,
-            strategy_name=str(_loop_strategy_name or "factor_v4"),
+            strategy_name=_current_loop_strategy_name(),
             direction=int(composite.direction),
             fill_price=float(fill_price),
             current_price=float(current_price),
@@ -8695,52 +8446,6 @@ def _upsert_amended_open_recovery(
         logger.debug("[live] recovery open persist failed for pos %s: %s", pid, _recovery_open_err)
 
 
-def _write_amended_open_decision_log(
-    *,
-    bar: dict,
-    composite: Any,
-    pid: int,
-    actual_api_volume: float,
-    requested_volume: float,
-    base_requested_volume: float,
-    event_sizing_context: dict[str, Any],
-    sizing_trace: dict[str, Any],
-    current_price: float,
-    sl_price: float,
-    tp_price: float,
-    tick: int,
-) -> None:
-    if not _DECISION_LOG:
-        return
-    payload = _tick_build_open_decision_log_payload(
-        bar=bar,
-        composite=composite,
-        position_id=int(pid),
-        actual_api_volume=float(actual_api_volume),
-        requested_volume=float(requested_volume),
-        base_requested_volume=float(base_requested_volume),
-        event_sizing_context=event_sizing_context,
-        sizing_trace=sizing_trace,
-        current_price=float(current_price),
-        sl_price=float(sl_price),
-        tp_price=float(tp_price),
-        tick=tick,
-        fallback_ts=time.time(),
-    )
-    _safe_decision_log(
-        _DECISION_LOG,
-        run_id=_DECISION_LOG_RUN_ID,
-        ts=payload["ts"],
-        bar_date=payload["bar_date"],
-        decision_type=payload["decision_type"],
-        strategy=payload["strategy"],
-        direction=payload["direction"],
-        confidence=payload["confidence"],
-        decision=payload["decision"],
-        meta=_json.dumps(payload["meta"], ensure_ascii=False),
-    )
-
-
 def _amended_open_success_processing_runtime() -> AmendedOpenSuccessRuntime:
     return AmendedOpenSuccessRuntime(
         mark_local_state=_mark_amended_open_success_local_state,
@@ -8749,7 +8454,6 @@ def _amended_open_success_processing_runtime() -> AmendedOpenSuccessRuntime:
         build_learning_context=_open_learning_context_payload,
         log_ledger=_log_amended_open_ledger,
         upsert_recovery=_upsert_amended_open_recovery,
-        write_decision_log=_write_amended_open_decision_log,
     )
 
 
@@ -9575,7 +9279,7 @@ def _prepare_open_trade_intent(
 ) -> str:
     """Persist the root decision immediately before broker submission."""
     if not _LEDGER:
-        raise RuntimeError("decision_ledger_unavailable")
+        raise RuntimeError("canonical_risk_decision_unavailable")
     decision_ts = float((bar or {}).get("time") or time.time())
     intent_prepared_at = time.time()
     risk_payload = _serialize_open_risk_verdict(candidate.risk_verdict)
@@ -9651,9 +9355,9 @@ def _submit_open_trade_order(
     composite: Any,
     volume: float,
     *,
-    decision_id: str = "",
-    trade_id: str = "",
-    risk_verdict: Any = None,
+    decision_id: str,
+    trade_id: str,
+    risk_verdict: Any,
 ):
     risk_payload = _serialize_open_risk_verdict(risk_verdict)
     if composite.direction == 1:
@@ -9707,7 +9411,7 @@ def _persist_pending_entry_protection_plan(
                 ),
             },
             broker=broker,
-            strategy_name=str(_loop_strategy_name or "factor_v4"),
+            strategy_name=_current_loop_strategy_name(),
             status="open",
             meta={
                 "tick": tick,
@@ -9937,7 +9641,16 @@ def _handle_open_trade_order_success(
         broker=broker,
         tick=tick,
     )
-    refreshed_positions = bridge.get_positions(getattr(bridge, "symbol", "") or "")
+    refreshed_reconcile = bridge.reconcile_positions(
+        getattr(bridge, "symbol", "") or "",
+        force=True,
+        allow_cache_fallback=False,
+    )
+    refreshed_positions = list(
+        refreshed_reconcile.positions
+        if str(getattr(refreshed_reconcile, "status", "")) == "fresh"
+        else []
+    )
     actual_api_volume = _resolve_position_api_volume(
         position_id,
         refreshed_positions,
@@ -10021,14 +9734,7 @@ def _open_submission_runtime(bridge: Any) -> OpenSubmissionRuntime:
         open_trade_draining=_open_trade_draining,
         persist_safety_fail_closed=_persist_safety_fail_closed,
         submit_order=_submit_open_trade_order,
-        # Test/dry-run bridges without a broker mutation method do not cross
-        # the production boundary; real bridges require the intent callback.
-        prepare_open_intent=(
-            _prepare_open_trade_intent
-            if callable(getattr(bridge, "market_buy", None))
-            or callable(getattr(bridge, "market_sell", None))
-            else None
-        ),
+        prepare_open_intent=_prepare_open_trade_intent,
         handle_order_success=_handle_open_trade_order_success,
         record_order_failure=_record_open_trade_order_failure,
         reconcile_positions=_explicit_position_reconcile,
@@ -10183,16 +9889,12 @@ def _open_trade_admission_blockers(stop_requested=None) -> tuple[str, ...]:
     # the broker open RPC and fails closed if the latch ledger is unreadable.
     if no_new_risk_latched(fail_closed=True):
         blockers.append("no_new_risk_latched")
-    if _generation_controller_enabled():
-        if not _LIVE_LOOP_CONTROLLER.accepting_new_risk(_current_generation_id()):
-            blockers.append("generation_not_accepting_new_risk")
+    if not _LIVE_LOOP_CONTROLLER.accepting_new_risk(_current_generation_id()):
+        blockers.append("generation_not_accepting_new_risk")
     if bool(_live_state_get("loop_running", False)):
-        # Generation ownership and the live/session fact projection are
-        # independent authorities and must both allow admission.  A controller
-        # that was ready before a same-tick close cannot override a failed
-        # post-close session rebuild.  Safety reductions do not use this gate.
-        if not bool(_live_state_get("accepting_new_risk", False)):
-            blockers.append("accepting_new_risk_false")
+        # The controller is the only lifecycle/admission authority.  The
+        # shared value is a projection for APIs and WebSocket consumers, never
+        # an independent gate that can diverge from the generation.
         if str(
             _live_state_get("session_state_status", "unknown") or "unknown"
         ) != "available":
@@ -10729,28 +10431,6 @@ def _process_tick_factor_pipeline(
     signals = committed_decision.signals
     composite = committed_decision.composite
     gate_result = committed_decision.gate_result
-    # ── 决策审计: signal ──
-    if _DECISION_LOG:
-        decision_log_payload = _decision_build_signal_decision_log_payload(
-            bar=bar,
-            composite=composite,
-            gate_result=gate_result,
-            tick=tick,
-        )
-        if decision_log_payload:
-            _safe_decision_log(
-                _DECISION_LOG,
-                run_id=_DECISION_LOG_RUN_ID,
-                ts=decision_log_payload["ts"],
-                bar_date=decision_log_payload["bar_date"],
-                decision_type=decision_log_payload["decision_type"],
-                strategy=decision_log_payload["strategy"],
-                direction=decision_log_payload["direction"],
-                confidence=decision_log_payload["confidence"],
-                decision=decision_log_payload["decision"],
-                meta=_json.dumps(decision_log_payload["meta"], ensure_ascii=False),
-            )
-
     # 3. 发单 (仅非 dry_run 且门通过)
     send = _should_send_orders(broker)
 
@@ -10775,7 +10455,7 @@ def _process_tick_factor_pipeline(
     )
     current_price = float(last_bar["close"])
     signal_decision_id = ""
-    if _LEDGER and composite.direction != 0:
+    if _LEDGER:
         try:
             # Signal events are the root of the durable factor lineage. Bind
             # them to the same runtime selection projection later used by the
@@ -10952,7 +10632,7 @@ def _process_tick_factor_pipeline(
     # ── 业务告警检查 ──
     _check_business_alerts(tick, acct, pos, log)
 
-    # ── 统一持仓保护仲裁: timeout > supervisor > legacy AWE trailing ──
+    # ── 统一持仓保护仲裁: timeout > governed supervisor > entry repair ──
     if not protection_already_run and pos and bridge is not None and cfg is not None:
         _run_position_protection_cycle(
             bridge,
@@ -10970,58 +10650,6 @@ def _process_tick_factor_pipeline(
     _prev_position_ids = current_pids
 
     _publish_latest_price(current_price, source="loop_tick")
-
-
-# ── AWE 自适应追踪止损 ──────────────────────────────────────
-
-def _update_trailing_stops(
-    bridge, pos: list, current_price: float, pipeline: dict,
-    atr_price: float, tick: int, log,
-) -> list[ProtectionCandidate]:
-    """Build legacy AWE trailing-stop candidates without mutating broker state.
-
-    追踪松紧度由 AWE composite_conviction() 动态决定:
-        ≥0.7 → 紧追踪 (1.5×ATR), 快速锁利
-        0.4~0.7 → 中等 (2.0×ATR)
-        <0.4 → 松追踪 (3.0×ATR), 只保本
-    """
-    global _trailing_state
-    candidates: list[ProtectionCandidate] = []
-    awe = pipeline.get("awe")
-    if awe is None:
-        return candidates
-
-    try:
-        conviction = awe.composite_conviction()
-    except Exception:
-        return candidates
-
-    for p in pos:
-        try:
-            pid = int((p or {}).get("position_id") or (p or {}).get("ticket") or 0)
-            anchor = _runtime_config_anchor()
-            update = _lifecycle_build_legacy_awe_trailing_update(
-                position=dict(p or {}),
-                existing_state=_trailing_state.get(pid),
-                current_price=current_price,
-                atr_price=atr_price,
-                conviction=conviction,
-                config_version=int(anchor.get("config_version") or 0),
-                config_hash=str(anchor.get("config_hash") or ""),
-            )
-            pid = int(update.get("position_id") or pid or 0)
-            if pid <= 0:
-                continue
-            _trailing_state[pid] = dict(update.get("state") or {})
-            if update.get("activated_now"):
-                log(f"tick {tick}: trail activated pos={pid} "
-                    f"move={float(update.get('price_move') or 0.0):.2f} conviction={conviction:.2f}")
-            payload = update.get("candidate")
-            if payload:
-                candidates.append(ProtectionCandidate(**payload))
-        except Exception as _e2:
-            logger.debug("[live] trail candidate failed: %s", _e2)
-    return candidates
 
 
 def _entry_protection_repair_candidates(
@@ -11236,7 +10864,7 @@ def _handle_protection_execution_applied(
         source=candidate.source,
         action_applied=candidate.action,
         broker="ctrader",
-        strategy_name=str(_loop_strategy_name or "factor_v4"),
+        strategy_name=_current_loop_strategy_name(),
     )
     result_payloads = _lifecycle_build_protection_execution_result_payloads(
         result="applied",
@@ -11362,7 +10990,7 @@ def _prepare_protection_candidate_execution(
     }
 
 
-def _execute_trailing_candidate(
+def _execute_protection_candidate(
     candidate: ProtectionCandidate,
     *,
     bridge,
@@ -11371,6 +10999,12 @@ def _execute_trailing_candidate(
     log,
     acct: dict | None = None,
 ) -> bool:
+    # AWE trailing is historical evidence only. Keep an explicit guard at
+    # the last generic candidate boundary so a stale caller cannot create a
+    # new decision/trace or reach RiskPolicy/broker execution.
+    if candidate.source == "legacy_awe_trailing":
+        log(f"tick {tick}: retired protection candidate ignored pos={candidate.position_id}")
+        return False
     prepared = _prepare_protection_candidate_execution(
         candidate=candidate,
         bridge=bridge,
@@ -11672,16 +11306,12 @@ def _run_position_protection_cycle(
     decision_ts: float | None = None,
 ) -> dict[str, Any]:
     runtime = PositionProtectionCycleRuntime(
-        update_trailing_stops=_update_trailing_stops,
         enforce_holding_timeout=_enforce_holding_timeout,
         entry_protection_repair_candidates=_entry_protection_repair_candidates,
         log_candidate_superseded=_log_protection_candidate_superseded,
-        execute_candidate=_execute_trailing_candidate,
+        execute_candidate=_execute_protection_candidate,
         run_position_supervision=_run_position_supervision,
         protection_candidate_to_safety=protection_candidate_to_safety,
-        candidate_supersede_reason=(
-            _lifecycle_protection_candidate_supersede_reason
-        ),
         build_cycle_result=_lifecycle_build_position_protection_cycle_result,
         record_aux_failure=_record_risk_reduction_aux_failure,
         warning=logger.warning,

@@ -47,9 +47,8 @@ STATE_DB       = DATA_DIR / "state.db"               # 运行态使用此哨兵�
 _DEFAULT_STATE_DB = STATE_DB.resolve()
 EXPERIMENTS_DB = DATA_DIR / "experiments.db"         # 实验记录(独立)
 
-# 兼容旧路径 (逐步迁移后删除)
-LEGACY_ANALYTICS_DB    = DATA_DIR / "analytics.db"
-LEGACY_DECISION_LOG_DB = DATA_DIR / "decision_log.db"
+# 历史分析路径只保留给离线工具；运行态事实统一进入 PostgreSQL/canonical_v2。
+LEGACY_ANALYTICS_DB = DATA_DIR / "analytics.db"
 
 _SQLITE_EXTS: Final[set[str]] = {".db", ".sqlite", ".sqlite3"}
 _DUCKDB_EXTS: Final[set[str]] = {".duckdb"}
@@ -65,7 +64,6 @@ _KNOWN_SQLITE_PATHS: Final[set[Path]] = {
     STATE_DB.resolve(),
     EXPERIMENTS_DB.resolve(),
     LEGACY_ANALYTICS_DB.resolve(),
-    LEGACY_DECISION_LOG_DB.resolve(),
 }
 
 
@@ -364,19 +362,6 @@ STATE_DB_DDL = """
 -- 策略表现 (原 analytics.db)
 -- 注: strategy_perf 表声明已移除(2026-08-19)——全库 0 处真实 SQL 引用,P3 容量审计确认死表;存活代码不读不写该表。
 
--- 决策日志 (原 decision_log.db)
-CREATE TABLE IF NOT EXISTS decision_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id INTEGER, ts REAL, bar_date TEXT,
-    decision_type TEXT NOT NULL,
-    strategy TEXT, regime TEXT,
-    direction INTEGER,
-    confidence REAL, factor_scores TEXT,
-    decision TEXT,
-    meta TEXT DEFAULT '{}',
-    created_at REAL
-);
-
 -- 金丝雀状态
 CREATE TABLE IF NOT EXISTS canary_state (
     factor_name TEXT PRIMARY KEY,
@@ -422,19 +407,6 @@ CREATE TABLE IF NOT EXISTS shadow_trades (
     created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_trades_factor_ts ON shadow_trades(factor, ts);
--- 因子生命周期事件 (原 factor_lifecycle_log.jsonl)
-CREATE TABLE IF NOT EXISTS lifecycle_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp REAL NOT NULL,
-    event TEXT NOT NULL,
-    factor TEXT NOT NULL,
-    source TEXT DEFAULT '',
-    description TEXT DEFAULT '',
-    score REAL DEFAULT 0.0,
-    status TEXT DEFAULT '',
-    reason TEXT DEFAULT ''
-);
-
 -- 权重历史 (原 factor_weight_history.jsonl)
 CREATE TABLE IF NOT EXISTS weight_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -496,116 +468,6 @@ CREATE TABLE IF NOT EXISTS calibrator (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     data_json TEXT NOT NULL,
     updated_at REAL
-);
-
--- 结构化决策账本
-CREATE TABLE IF NOT EXISTS decision_ledger (
-    decision_id TEXT PRIMARY KEY,
-    trade_id TEXT DEFAULT '',
-    position_id TEXT DEFAULT '',
-    event_type TEXT NOT NULL,
-    symbol TEXT DEFAULT '',
-    timeframe TEXT DEFAULT '',
-    decision_ts REAL NOT NULL DEFAULT 0.0,
-    regime_id TEXT DEFAULT '',
-    regime_confidence REAL DEFAULT 0.0,
-    portfolio_state_json TEXT DEFAULT '{}',
-    risk_state_json TEXT DEFAULT '{}',
-    policy_version TEXT DEFAULT '',
-    factor_set_version TEXT DEFAULT '',
-    action_score REAL DEFAULT 0.0,
-    action_reason TEXT DEFAULT '',
-    action_json TEXT DEFAULT '{}',
-    created_at REAL NOT NULL DEFAULT 0.0
-);
-
-CREATE TABLE IF NOT EXISTS decision_factor_snapshot (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    decision_id TEXT NOT NULL,
-    factor TEXT NOT NULL,
-    source TEXT DEFAULT 'registry',
-    raw_value REAL DEFAULT 0.0,
-    normalized_value REAL DEFAULT 0.0,
-    direction REAL DEFAULT 0.0,
-    base_weight REAL DEFAULT 0.0,
-    policy_weight REAL DEFAULT 0.0,
-    shadow_score REAL DEFAULT 0.0,
-    health_score REAL DEFAULT 0.0,
-    gated INTEGER DEFAULT 0,
-    gated_reason TEXT DEFAULT '',
-    contribution_score REAL DEFAULT 0.0,
-    generation INTEGER NOT NULL DEFAULT 0,
-    artifact_hash TEXT NOT NULL DEFAULT '',
-    definition_fingerprint TEXT NOT NULL DEFAULT '',
-    runtime_selection_fingerprint TEXT NOT NULL DEFAULT '',
-    config_hash TEXT NOT NULL DEFAULT '',
-    lineage_status TEXT NOT NULL DEFAULT 'lineage_missing'
-);
-
-CREATE TABLE IF NOT EXISTS order_lifecycle_event (
-    event_id TEXT PRIMARY KEY,
-    decision_id TEXT DEFAULT '',
-    trade_id TEXT DEFAULT '',
-    order_id TEXT DEFAULT '',
-    broker_order_id TEXT DEFAULT '',
-    event_type TEXT NOT NULL,
-    event_ts REAL NOT NULL DEFAULT 0.0,
-    price REAL DEFAULT 0.0,
-    volume REAL DEFAULT 0.0,
-    status TEXT DEFAULT '',
-    details_json TEXT DEFAULT '{}'
-);
-
-CREATE TABLE IF NOT EXISTS position_lifecycle_event (
-    event_id TEXT PRIMARY KEY,
-    position_id TEXT NOT NULL,
-    trade_id TEXT DEFAULT '',
-    symbol TEXT DEFAULT '',
-    event_type TEXT NOT NULL,
-    event_ts REAL NOT NULL DEFAULT 0.0,
-    net_volume REAL DEFAULT 0.0,
-    avg_price REAL DEFAULT 0.0,
-    unrealized_pnl REAL DEFAULT 0.0,
-    realized_pnl REAL DEFAULT 0.0,
-    details_json TEXT DEFAULT '{}'
-);
-
-CREATE TABLE IF NOT EXISTS trade_outcome_review (
-    review_id TEXT PRIMARY KEY,
-    trade_id TEXT DEFAULT '',
-    position_id TEXT DEFAULT '',
-    entry_decision_id TEXT DEFAULT '',
-    exit_decision_id TEXT DEFAULT '',
-    entry_quality REAL DEFAULT 0.0,
-    hold_quality REAL DEFAULT 0.0,
-    exit_quality REAL DEFAULT 0.0,
-    regime_fit_score REAL DEFAULT 0.0,
-    execution_quality REAL DEFAULT 0.0,
-    pnl REAL DEFAULT 0.0,
-    mae REAL DEFAULT 0.0,
-    mfe REAL DEFAULT 0.0,
-    outcome_label TEXT DEFAULT '',
-    failure_tags_json TEXT DEFAULT '[]',
-    summary_text TEXT DEFAULT '',
-    review_json TEXT DEFAULT '{}',
-    created_at REAL NOT NULL DEFAULT 0.0
-);
-
-CREATE TABLE IF NOT EXISTS supervisor_counterfactual_review (
-    counterfactual_id TEXT PRIMARY KEY,
-    review_id TEXT DEFAULT '',
-    trade_id TEXT DEFAULT '',
-    position_id TEXT NOT NULL,
-    close_ts REAL NOT NULL DEFAULT 0.0,
-    close_reason TEXT DEFAULT '',
-    supervisor_event_type TEXT DEFAULT '',
-    supervisor_reason TEXT DEFAULT '',
-    label TEXT DEFAULT '',
-    confidence REAL DEFAULT 0.0,
-    horizons_json TEXT DEFAULT '[]',
-    evidence_json TEXT DEFAULT '{}',
-    created_at REAL NOT NULL DEFAULT 0.0,
-    updated_at REAL NOT NULL DEFAULT 0.0
 );
 
 CREATE TABLE IF NOT EXISTS nursery_exploration_reservation (
@@ -1053,75 +915,6 @@ CREATE TABLE IF NOT EXISTS brain_live_ready_guardrail (
     updated_at REAL NOT NULL DEFAULT 0.0
 );
 
-CREATE TABLE IF NOT EXISTS position_supervisor_trace (
-    trace_id TEXT PRIMARY KEY,
-    decision_id TEXT DEFAULT '',
-    position_id TEXT NOT NULL,
-    trade_id TEXT DEFAULT '',
-    symbol TEXT DEFAULT '',
-    timeframe TEXT DEFAULT '',
-    tick INTEGER DEFAULT 0,
-    event_ts REAL NOT NULL DEFAULT 0.0,
-    action TEXT DEFAULT '',
-    summary_reason TEXT DEFAULT '',
-    confidence REAL DEFAULT 0.0,
-    template_id TEXT DEFAULT '',
-    template_version TEXT DEFAULT '',
-    stage TEXT DEFAULT '',
-    outcome TEXT DEFAULT '',
-    risk_action TEXT DEFAULT '',
-    risk_allowed INTEGER DEFAULT 0,
-    risk_reason TEXT DEFAULT '',
-    execution_status TEXT DEFAULT '',
-    execution_reason TEXT DEFAULT '',
-    context_json TEXT DEFAULT '{}',
-    verdict_json TEXT DEFAULT '{}',
-    risk_verdict_json TEXT DEFAULT '{}',
-    execution_json TEXT DEFAULT '{}',
-    trace_integrity TEXT DEFAULT 'full',
-    config_version INTEGER DEFAULT 0,
-    config_hash TEXT DEFAULT '',
-    evolution_run_id TEXT DEFAULT '',
-    created_at REAL NOT NULL DEFAULT 0.0
-);
-CREATE INDEX IF NOT EXISTS idx_position_supervisor_trace_position_ts
-ON position_supervisor_trace(position_id, event_ts);
-CREATE INDEX IF NOT EXISTS idx_position_supervisor_trace_action_outcome
-ON position_supervisor_trace(action, outcome, event_ts);
-
-CREATE TABLE IF NOT EXISTS autonomous_learning_sample (
-    sample_id TEXT PRIMARY KEY,
-    sample_type TEXT NOT NULL,
-    source_table TEXT DEFAULT '',
-    source_id TEXT DEFAULT '',
-    decision_id TEXT DEFAULT '',
-    trade_id TEXT DEFAULT '',
-    position_id TEXT DEFAULT '',
-    symbol TEXT DEFAULT '',
-    timeframe TEXT DEFAULT '',
-    event_ts REAL NOT NULL DEFAULT 0.0,
-    label_status TEXT DEFAULT 'pending',
-    integrity TEXT DEFAULT 'full',
-    train_weight REAL DEFAULT 1.0,
-    features_json TEXT DEFAULT '{}',
-    verdict_json TEXT DEFAULT '{}',
-    label_json TEXT DEFAULT '{}',
-    trace_json TEXT DEFAULT '{}',
-    evidence_contract_json TEXT DEFAULT '{}',
-    content_fingerprint TEXT NOT NULL DEFAULT '',
-    config_version INTEGER DEFAULT 0,
-    config_hash TEXT DEFAULT '',
-    evolution_run_id TEXT DEFAULT '',
-    system_contaminated INTEGER NOT NULL DEFAULT 0,
-    governance_eligible INTEGER NOT NULL DEFAULT 0,
-    governance_effective_weight REAL NOT NULL DEFAULT 0.0,
-    governance_eligibility_version TEXT NOT NULL DEFAULT '',
-    governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
-    governance_ineligible_reason TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL DEFAULT 0.0,
-    updated_at REAL NOT NULL DEFAULT 0.0
-);
-
 CREATE TABLE IF NOT EXISTS model_permission_audit (
     audit_id TEXT PRIMARY KEY,
     model_type TEXT DEFAULT '',
@@ -1306,24 +1099,10 @@ CREATE TABLE IF NOT EXISTS recovery_position_state (
     close_pnl REAL DEFAULT 0.0
 );
 
-CREATE INDEX IF NOT EXISTS idx_decision_log_ts ON decision_log(ts);
-CREATE INDEX IF NOT EXISTS idx_decision_log_type ON decision_log(decision_type);
-CREATE INDEX IF NOT EXISTS idx_lifecycle_events_factor ON lifecycle_events(factor);
-CREATE INDEX IF NOT EXISTS idx_lifecycle_events_event ON lifecycle_events(event);
 CREATE INDEX IF NOT EXISTS idx_evolution_events_type ON evolution_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_weight_history_factor ON weight_history(factor);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_shadow_factor_perf_updated ON shadow_factor_perf(updated_at);
-CREATE INDEX IF NOT EXISTS idx_decision_ledger_ts ON decision_ledger(decision_ts);
-CREATE INDEX IF NOT EXISTS idx_decision_ledger_pos_event ON decision_ledger(position_id, event_type);
-CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_decision ON decision_factor_snapshot(decision_id);
-CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_factor ON decision_factor_snapshot(factor);
-CREATE INDEX IF NOT EXISTS idx_decision_factor_snapshot_factor_id ON decision_factor_snapshot(factor, id DESC);
-CREATE INDEX IF NOT EXISTS idx_order_lifecycle_trade ON order_lifecycle_event(trade_id, event_ts);
-CREATE INDEX IF NOT EXISTS idx_position_lifecycle_pos ON position_lifecycle_event(position_id, event_ts);
-CREATE INDEX IF NOT EXISTS idx_trade_outcome_review_trade ON trade_outcome_review(trade_id);
-CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_position ON supervisor_counterfactual_review(position_id, close_ts);
-CREATE INDEX IF NOT EXISTS idx_supervisor_counterfactual_label ON supervisor_counterfactual_review(label, updated_at);
 CREATE INDEX IF NOT EXISTS idx_nursery_exploration_budget ON nursery_exploration_reservation(trade_date, status, reason, setup_fingerprint);
 CREATE INDEX IF NOT EXISTS idx_runtime_config_snapshot_hash ON runtime_config_snapshot(config_hash, created_at);
 CREATE INDEX IF NOT EXISTS idx_evolution_run_type ON evolution_run(run_type, status, started_at);
@@ -1383,8 +1162,6 @@ CREATE INDEX IF NOT EXISTS idx_live_autonomy_unlock_created ON live_autonomy_unl
 CREATE INDEX IF NOT EXISTS idx_live_autonomy_unlock_status ON live_autonomy_unlock_event(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_live_ready_guardrail_created ON brain_live_ready_guardrail(created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_live_ready_guardrail_status ON brain_live_ready_guardrail(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_autonomous_learning_sample_type ON autonomous_learning_sample(sample_type, label_status, event_ts);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_autonomous_learning_sample_source ON autonomous_learning_sample(sample_type, source_table, source_id);
 CREATE INDEX IF NOT EXISTS idx_model_permission_audit_created ON model_permission_audit(created_at);
 CREATE INDEX IF NOT EXISTS idx_model_permission_audit_model ON model_permission_audit(model_type, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_factor_contribution_review_trade ON factor_contribution_review(trade_id);
@@ -1423,7 +1200,7 @@ CREATE TABLE IF NOT EXISTS ctrader_deals (
     is_close     INTEGER DEFAULT 0,
     fetched_at   REAL NOT NULL DEFAULT 0.0,
     raw_execution_price REAL DEFAULT 0.0,
-    price_contract TEXT NOT NULL DEFAULT 'legacy_unknown',
+    price_contract TEXT NOT NULL DEFAULT 'unknown',
     price_quality TEXT NOT NULL DEFAULT 'unknown',
     repair_run_id TEXT NOT NULL DEFAULT ''
 );
@@ -1796,8 +1573,9 @@ def _ensure_pg_business_tables() -> None:
         conn.close()
 
 
-# DDL for all business tables that must exist at runtime.
-# Columns match the original state_v1 schema; types use PostgreSQL natives.
+# DDL for mutable operational tables that must exist at runtime.
+# Immutable business facts are owned by canonical_v2 and are created by the
+# forward-only migration runner, not by process startup.
 _PG_BUSINESS_TABLES_DDL: list[str] = [
     # --- evolution ledger ---
     """
@@ -1855,31 +1633,6 @@ _PG_BUSINESS_TABLES_DDL: list[str] = [
         timestamp DOUBLE PRECISION NOT NULL,
         event_type TEXT NOT NULL,
         payload_json TEXT NOT NULL DEFAULT '{}'
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS autonomous_learning_sample (
-        sample_id TEXT PRIMARY KEY,
-        sample_type TEXT NOT NULL,
-        source_table TEXT DEFAULT '',
-        source_id TEXT DEFAULT '',
-        features_json TEXT NOT NULL DEFAULT '{}',
-        label TEXT DEFAULT '',
-        label_status TEXT DEFAULT 'pending',
-        train_weight DOUBLE PRECISION DEFAULT 0.0,
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-        updated_at DOUBLE PRECISION DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS position_supervisor_trace (
-        trace_id TEXT PRIMARY KEY,
-        position_id TEXT DEFAULT '',
-        suggestion_id TEXT DEFAULT '',
-        stage TEXT DEFAULT '',
-        execution_status TEXT DEFAULT '',
-        trace_json TEXT NOT NULL DEFAULT '{}',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
     )
     """,
     """
@@ -2032,40 +1785,6 @@ _PG_BUSINESS_TABLES_DDL: list[str] = [
         recovery_json TEXT NOT NULL DEFAULT '{}',
         last_seen_at DOUBLE PRECISION DEFAULT 0.0,
         updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-    # --- trade review / decision ledger (canonical_v2 event types) ---
-    """
-    CREATE TABLE IF NOT EXISTS trade_outcome_review (
-        review_id TEXT PRIMARY KEY,
-        review_json TEXT NOT NULL DEFAULT '{}',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS decision_ledger (
-        decision_id TEXT PRIMARY KEY,
-        decision_json TEXT NOT NULL DEFAULT '{}',
-        decision_ts DOUBLE PRECISION DEFAULT 0.0,
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS order_lifecycle_event (
-        event_id TEXT PRIMARY KEY,
-        event_type TEXT DEFAULT '',
-        event_json TEXT NOT NULL DEFAULT '{}',
-        event_ts DOUBLE PRECISION DEFAULT 0.0,
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS position_lifecycle_event (
-        event_id TEXT PRIMARY KEY,
-        event_type TEXT DEFAULT '',
-        event_json TEXT NOT NULL DEFAULT '{}',
-        event_ts DOUBLE PRECISION DEFAULT 0.0,
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
     )
     """,
 ]

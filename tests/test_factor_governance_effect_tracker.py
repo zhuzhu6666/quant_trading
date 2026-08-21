@@ -2,6 +2,7 @@ import json
 import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
+from backend.services.canonical_v2 import ensure_sqlite_schema, record_decision_event, record_review
 from backend.services.factor_governance_effect_tracker import FactorGovernanceEffectTrackerService
 from backend.services.learning_application_store import LearningApplicationStore
 
@@ -50,6 +51,7 @@ def test_factor_governance_effect_tracker_reports_observing_application(tmp_path
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         now = _insert_pruning_suggestion(conn)
         conn.commit()
     finally:
@@ -74,40 +76,63 @@ def test_factor_governance_effect_tracker_reconcile_marks_ineffective(tmp_path):
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         _insert_pruning_suggestion(conn)
         for idx in range(2):
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, entry_decision_id, pnl, outcome_label, review_json, created_at)
-                VALUES (?, ?, ?, 30.0, 'good_win', '{}', ?)
-                """,
-                (f"pre_{idx}", f"trade_pre_{idx}", f"entry_pre_{idx}", now - 20 + idx),
+            decision_id = f"entry_pre_{idx}"
+            record_decision_event(
+                conn,
+                decision_id=decision_id,
+                event_type="open",
+                symbol="XAUUSD",
+                timeframe="M1",
+                decision_ts=now - 20 + idx,
+                created_at=now - 20 + idx,
+                factor_snapshots=[
+                    {
+                        "decision_id": decision_id,
+                        "factor": "dsl_auto_effect",
+                        "contribution_score": 0.5,
+                    }
+                ],
             )
-            conn.execute(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, contribution_score)
-                VALUES (?, 'dsl_auto_effect', 0.5)
-                """,
-                (f"entry_pre_{idx}",),
+            record_review(
+                conn,
+                review_id=f"pre_{idx}",
+                trade_id=f"trade_pre_{idx}",
+                entry_decision_id=decision_id,
+                pnl=30.0,
+                outcome_label="good_win",
+                review={},
+                created_at=now - 20 + idx,
             )
         for idx in range(3):
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, entry_decision_id, pnl, outcome_label, review_json, created_at)
-                VALUES (?, ?, ?, -40.0, 'bad_loss', '{}', ?)
-                """,
-                (f"post_{idx}", f"trade_post_{idx}", f"entry_post_{idx}", now + 20 + idx),
+            decision_id = f"entry_post_{idx}"
+            record_decision_event(
+                conn,
+                decision_id=decision_id,
+                event_type="open",
+                symbol="XAUUSD",
+                timeframe="M1",
+                decision_ts=now + 20 + idx,
+                created_at=now + 20 + idx,
+                factor_snapshots=[
+                    {
+                        "decision_id": decision_id,
+                        "factor": "dsl_auto_effect",
+                        "contribution_score": -0.5,
+                    }
+                ],
             )
-            conn.execute(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, contribution_score)
-                VALUES (?, 'dsl_auto_effect', -0.5)
-                """,
-                (f"entry_post_{idx}",),
+            record_review(
+                conn,
+                review_id=f"post_{idx}",
+                trade_id=f"trade_post_{idx}",
+                entry_decision_id=decision_id,
+                pnl=-40.0,
+                outcome_label="bad_loss",
+                review={},
+                created_at=now + 20 + idx,
             )
         conn.commit()
     finally:

@@ -113,6 +113,101 @@ def test_execute_supervisor_reduce_action_partial_success_logs_reduced_event():
     assert calls["logs"] == ["tick 9: supervisor reduce pos=7 vol=25"]
 
 
+def test_reduce_trace_is_real_only_after_fresh_volume_decrease_reconcile():
+    calls = {
+        "traces": [],
+        "supervisor_state": [],
+        "reentry": [],
+        "close_reason": [],
+        "close_verdict": [],
+        "retired": [],
+        "logs": [],
+    }
+
+    class _Bridge:
+        _symbol_meta = {"api_min_volume": 1.0, "api_step_volume": 1.0}
+
+        def close_position(self, pid, volume=None):
+            calls["close_call"] = (pid, volume)
+            return SimpleNamespace(success=True)
+
+    _execute_reduce(
+        bridge=_Bridge(),
+        position={"position_id": 17, "symbol": "XAUUSD+", "volume": 100.0},
+        verdict={"summary_reason": "trim_risk"},
+        risk_action="reduce_position",
+        risk_verdict={"allowed": True, "reason": "ok"},
+        decision_id="decision-reduce-real",
+        cfg=SimpleNamespace(),
+        tick=9,
+        acct=None,
+        controls={"reduce_fraction": 0.25},
+        log=calls["logs"].append,
+        ledger=None,
+        reconcile_positions=lambda _bridge: SimpleNamespace(
+            status="fresh",
+            observed_at=time.time(),
+            reconcile_id="reconcile-reduce-real",
+            positions=({"position_id": 17, "volume": 75.0},),
+        ),
+        **_deps(calls),
+    )
+
+    assert calls["close_call"] == (17, 25.0)
+    assert calls["traces"][0]["stage"] == "executed"
+    assert calls["traces"][0]["outcome"] == "applied"
+    assert calls["traces"][0]["execution"]["is_real_execution"] is True
+    assert calls["traces"][0]["execution"]["reduction_confirmed"] is True
+    assert calls["traces"][0]["execution"]["position_volume_after"] == 75.0
+
+
+def test_reduce_same_volume_reconcile_is_failed_not_applied():
+    calls = {
+        "traces": [],
+        "supervisor_state": [],
+        "reentry": [],
+        "close_reason": [],
+        "close_verdict": [],
+        "retired": [],
+        "logs": [],
+    }
+
+    class _Bridge:
+        _symbol_meta = {"api_min_volume": 1.0, "api_step_volume": 1.0}
+
+        def close_position(self, pid, volume=None):
+            return SimpleNamespace(success=True)
+
+    _execute_reduce(
+        bridge=_Bridge(),
+        position={"position_id": 18, "symbol": "XAUUSD+", "volume": 100.0},
+        verdict={"summary_reason": "trim_risk"},
+        risk_action="reduce_position",
+        risk_verdict={"allowed": True, "reason": "ok"},
+        decision_id="decision-reduce-unverified",
+        cfg=SimpleNamespace(),
+        tick=9,
+        acct=None,
+        controls={"reduce_fraction": 0.25},
+        log=calls["logs"].append,
+        ledger=None,
+        reconcile_positions=lambda _bridge: SimpleNamespace(
+            status="fresh",
+            observed_at=time.time(),
+            reconcile_id="reconcile-reduce-unverified",
+            positions=({"position_id": 18, "volume": 100.0},),
+        ),
+        **_deps(calls),
+    )
+
+    assert calls["traces"][0]["stage"] == "execution_failed"
+    assert calls["traces"][0]["outcome"] == "failed"
+    assert calls["traces"][0]["execution_status"] == "reconcile_unverified"
+    assert calls["traces"][0]["execution"].get("is_real_execution") is not True
+    assert calls["supervisor_state"] == []
+    assert calls["logs"] == []
+
+
 def test_reduce_captures_deal_cursor_before_broker_rpc_and_passes_it_to_sync():
     calls = {
         "traces": [],

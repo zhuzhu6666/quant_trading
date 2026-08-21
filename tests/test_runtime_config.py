@@ -391,8 +391,6 @@ def test_operator_pause_blocks_expansion_but_allows_explicit_tightening(tmp_path
     ("flag", "value"),
     (
         ("live_safety_plane_v2_mode", "enforce"),
-        ("live_generation_controller_v2_enabled", True),
-        ("ctrader_execution_outcome_v2_enabled", True),
         ("governance_mutation_coordinator_v2_mode", "enforce"),
         ("pg_job_queue_v2_enabled", True),
     ),

@@ -216,19 +216,6 @@ def test_migration_connector_is_the_explicit_schema_writer(monkeypatch) -> None:
     ]
 
 
-def test_legacy_sqlite_restore_script_contains_no_schema_writer() -> None:
-    root = Path(__file__).resolve().parents[1]
-    source = (root / "scripts" / "migrate_state_sqlite_to_pg.py").read_text(encoding="utf-8")
-    for statement in (
-        "CREATE SCHEMA",
-        "DROP SCHEMA",
-        "CREATE TABLE",
-        "ALTER TABLE",
-        "CREATE INDEX",
-    ):
-        assert statement not in source.upper()
-
-
 def test_only_explicit_migration_cli_opens_migration_connection() -> None:
     root = Path(__file__).resolve().parents[1]
     callers: set[str] = set()
@@ -238,7 +225,10 @@ def test_only_explicit_migration_cli_opens_migration_connection() -> None:
                 continue
             if "connect_state_migration_store(" in path.read_text(encoding="utf-8"):
                 callers.add(path.relative_to(root).as_posix())
-    assert callers == {"scripts/state_schema_migrate.py"}
+    assert callers == {
+        "scripts/state_schema_migrate.py",
+        "scripts/retire_legacy_fact_tables.py",
+    }
 
 
 def test_backend_and_learning_worker_schema_ensures_are_catalog_validations() -> None:
@@ -275,6 +265,11 @@ def test_runtime_state_ddl_objects_have_a_schema_contract() -> None:
     runtime_objects: set[str] = set()
     for folder in ("backend/services", "backend/runtime", "research"):
         for path in (root / folder).rglob("*.py"):
+            # canonical_v2.py keeps a deliberately isolated SQLite fixture DDL
+            # for offline tests; production canonical facts use the PostgreSQL
+            # migrations below and must not be contracted against this fixture.
+            if path == root / "backend" / "services" / "canonical_v2.py":
+                continue
             runtime_objects.update(
                 match.group(1).lower()
                 for match in object_pattern.finditer(path.read_text(encoding="utf-8"))

@@ -77,8 +77,6 @@ class _OwnedThread:
 
 
 def _enable_phase2(monkeypatch):
-    monkeypatch.setattr(live_service, "_phase2_v2_active", lambda: True)
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
     live_service._live_safety_plane = None
     live_service._live_safety_plane_owner = ""
     today = live_service.datetime.now(live_service.timezone.utc).strftime("%Y-%m-%d")
@@ -89,6 +87,11 @@ def _enable_phase2(monkeypatch):
         circuit_reason="",
         positions=[],
         positions_updated_at=0.0,
+        execution_recovery={
+            "ready": True,
+            "unresolved_count": 0,
+            "recovered": [],
+        },
     )
 
 
@@ -120,6 +123,18 @@ def test_phase2_runs_broker_snapshot_and_safety_before_missing_online_bars(monke
         "_warmup_from_local_db",
         lambda *_args, **_kwargs: order.append("bars") or None,
     )
+    monkeypatch.setattr(
+        live_service,
+        "_bootstrap_position_recovery",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_restore_session_state_for_day",
+        lambda *_args, **_kwargs: live_service._live_state_update(
+            session_state_status="available"
+        ) or True,
+    )
 
     result = live_service._run_live_loop_tick_body(
         broker="ctrader",
@@ -131,7 +146,9 @@ def test_phase2_runs_broker_snapshot_and_safety_before_missing_online_bars(monke
         log=lambda _message: None,
     )
 
-    assert order == ["broker_snapshot", "account_snapshot", "session"]
+    assert order[:2] == ["broker_snapshot", "account_snapshot"]
+    assert "session" in order[2:]
+    assert "bars" not in order
     assert result["safety"]["reconciliation_state"] == "fresh"
     assert result["safety"]["heartbeat_at"] > 0
     assert result["wait_seconds"] == 5.0
@@ -295,7 +312,9 @@ def test_generation_startup_barrier_requires_all_authoritative_steps(monkeypatch
     assert status["ready"] is True
     assert status["accepting_new_risk"] is True
     assert all(status["startup_barrier"].values())
-    assert bridge.calls[-3:] == ["execution_recovery", "positions", "positions"]
+    recovery_index = bridge.calls.index("execution_recovery")
+    assert bridge.calls[recovery_index + 1:]
+    assert all(item == "positions" for item in bridge.calls[recovery_index + 1:])
 
 
 def test_startup_barrier_fails_closed_when_fresh_account_is_unavailable(monkeypatch):
@@ -450,16 +469,9 @@ def test_startup_barrier_rechecks_position_freshness_after_intent_recovery(monke
 def test_draining_generation_keeps_thread_ownership_and_rejects_replacement(monkeypatch):
     controller = LiveLoopController()
     monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", controller)
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: True)
     monkeypatch.setattr(live_service, "_start_live_scheduler", lambda: None)
     monkeypatch.setattr(live_service, "_start_live_safety_watchdog", lambda: False)
     monkeypatch.setattr(live_service.threading, "Thread", _OwnedThread)
-    monkeypatch.setattr(live_service, "_loop_thread", None)
-    monkeypatch.setattr(live_service, "_loop_stop_flag", None)
-    monkeypatch.setattr(live_service, "_loop_broker", None)
-    monkeypatch.setattr(live_service, "_loop_started_at", None)
-    monkeypatch.setattr(live_service, "_loop_strategy_name", None)
-    monkeypatch.setattr(live_service, "_last_loop_end", 0.0)
     monkeypatch.setattr(live_service, "_process_shutdown_requested", False)
     monkeypatch.setattr(live_service, "_runtime_kv_set", lambda *_args, **_kwargs: None)
 
@@ -472,8 +484,9 @@ def test_draining_generation_keeps_thread_ownership_and_rejects_replacement(monk
     assert draining["thread_alive"] is True
     assert replacement["ok"] is False
     assert "live_loop_generation_busy:draining" in replacement["error"]
-    assert live_service._loop_thread is not None
-    assert live_service._loop_thread.is_alive() is True
+    owned = controller.ownership_snapshot()
+    assert owned.thread is not None
+    assert owned.thread.is_alive() is True
 
 
 def test_stop_waits_for_admitted_open_rpc_then_keeps_generation_draining(monkeypatch):
@@ -495,12 +508,6 @@ def test_stop_waits_for_admitted_open_rpc_then_keeps_generation_draining(monkeyp
     loop_thread = _LoopThread()
     controller.bind_thread(generation.generation_id, loop_thread)
     monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", controller)
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: True)
-    monkeypatch.setattr(live_service, "_loop_thread", loop_thread)
-    monkeypatch.setattr(live_service, "_loop_stop_flag", generation.stop_event)
-    monkeypatch.setattr(live_service, "_loop_broker", "ctrader")
-    monkeypatch.setattr(live_service, "_loop_started_at", time.time())
-    monkeypatch.setattr(live_service, "_loop_strategy_name", "factor_v4")
     monkeypatch.setattr(live_service, "_process_shutdown_requested", False)
     monkeypatch.setattr(
         live_service,
@@ -531,6 +538,11 @@ def test_stop_waits_for_admitted_open_rpc_then_keeps_generation_draining(monkeyp
         return SimpleNamespace(success=False, outcome="rejected", comment="test rejection")
 
     monkeypatch.setattr(live_service, "_submit_open_trade_order", _rpc)
+    monkeypatch.setattr(
+        live_service,
+        "_prepare_open_trade_intent",
+        lambda **_kwargs: "decision-draining-open",
+    )
     monkeypatch.setattr(live_service, "_record_open_trade_order_failure", lambda **_kwargs: None)
     candidate = live_service._OpenTradeCandidate(
         direction_name="LONG",
@@ -609,11 +621,6 @@ def test_loop_status_exposes_generation_phase_heartbeats_and_blockers(monkeypatc
     controller.bind_thread(generation.generation_id, thread)
     controller.heartbeat(generation.generation_id, "safety")
     monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", controller)
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: True)
-    monkeypatch.setattr(live_service, "_loop_thread", thread)
-    monkeypatch.setattr(live_service, "_loop_broker", "ctrader")
-    monkeypatch.setattr(live_service, "_loop_started_at", 90.0)
-    monkeypatch.setattr(live_service, "_loop_strategy_name", "factor_v4")
     monkeypatch.setattr(
         live_service,
         "safety_shadow_gate_status",
@@ -657,8 +664,6 @@ def test_loop_status_merges_local_fail_closed_open_blockers(
     for step in controller.status()["startup_barrier"]:
         controller.complete_barrier_step(generation.generation_id, step)
     monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", controller)
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: True)
-    monkeypatch.setattr(live_service, "_loop_thread", thread)
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: latched)
     live_service._live_state_update(**state_patch)
 
@@ -844,22 +849,6 @@ def test_failed_position_reconcile_blocks_open_but_cached_position_protection_co
     )
     monkeypatch.setattr(
         live_service,
-        "_preview_legacy_live_safety_candidates",
-        lambda **_kwargs: SafetyPlan(
-            candidates=(
-                safety_candidate(
-                    action="tighten",
-                    position_id=901,
-                    source="supervisor_tighten",
-                    controls={"target_stop_loss": 2400.5},
-                ),
-            ),
-            arbitration=(),
-            planned_at=100.0,
-        ),
-    )
-    monkeypatch.setattr(
-        live_service,
         "_execute_live_safety_candidate",
         lambda _candidate, *, positions, **_kwargs: (
             protected.extend(positions) or {"ok": True, "status": "dispatched"}
@@ -964,7 +953,6 @@ def test_position_without_stable_broker_identity_blocks_new_risk_without_index_e
 
 def test_phase2_session_restore_failure_is_not_reset_to_zero(monkeypatch):
     reset_calls = []
-    monkeypatch.setattr(live_service, "_phase2_v2_active", lambda: True)
     monkeypatch.setattr(
         live_service,
         "_restore_session_state_for_day",
@@ -1006,7 +994,6 @@ def test_session_drawdown_is_peak_to_trough_not_only_loss_from_start(monkeypatch
             {"net": 100.0, "exec_timestamp": 1.0},
             {"net": -80.0, "exec_timestamp": 2.0},
         ],
-        persisted_state={},
     )
 
     # start=1000, peak=1100, trough=1020 => 80/1100.

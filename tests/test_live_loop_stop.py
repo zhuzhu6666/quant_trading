@@ -1,9 +1,9 @@
 import threading
 from types import SimpleNamespace
 
+from backend.services.live_loop_controller import LiveLoopController
 from backend.services.live_loop_stop import (
     LiveLoopStopRuntime,
-    LoopOwnershipSnapshot,
     stop_live_loop,
 )
 
@@ -15,7 +15,7 @@ class _OwnedThread:
         self.joined = False
 
     def is_alive(self):
-        return True
+        return not self.joined
 
     def join(self):
         self.joined = True
@@ -32,53 +32,18 @@ class _CleanupThread:
         self.started = True
 
 
-class _Controller:
-    def __init__(self, generation=None):
-        self.generation = generation
-        self.stop_requests = []
-
-    def current(self):
-        return self.generation
-
-    def request_stop(self, generation_id):
-        self.stop_requests.append(generation_id)
-
-    def status(self):
-        return {
-            "phase": "draining" if self.stop_requests else "running",
-            "generation": (
-                self.generation.generation_id if self.generation else ""
-            ),
-        }
-
-
-def _runtime(*, generation_enabled, persist=None):
+def _runtime(*, persist=None):
     owned = _OwnedThread()
-    stop_flag = threading.Event()
-    ownership = {
-        "thread": owned,
-        "stop_flag": stop_flag,
-        "broker": "ctrader",
-        "started_at": 900.0,
-        "strategy_name": "factor_v4",
-    }
-    generation = SimpleNamespace(generation_id="generation-123")
-    controller = _Controller(generation if generation_enabled else None)
+    controller = LiveLoopController(clock=lambda: 1_000.0)
+    generation = controller.begin_start(
+        broker="ctrader",
+        strategy_name="factor_v4",
+    )
+    controller.bind_thread(generation.generation_id, owned)
     cleanup_threads = []
     state_updates = []
     kv_updates = []
-    clear_calls = []
     persisted_fail_closed = []
-
-    def snapshot():
-        return LoopOwnershipSnapshot(**ownership)
-
-    def clear(thread, finished_at):
-        clear_calls.append((thread, finished_at))
-        if ownership["thread"] is not thread:
-            return False
-        ownership["thread"] = None
-        return True
 
     def thread_factory(**kwargs):
         thread = _CleanupThread(**kwargs)
@@ -86,11 +51,7 @@ def _runtime(*, generation_enabled, persist=None):
         return thread
 
     runtime = LiveLoopStopRuntime(
-        generation_controller_enabled=lambda: generation_enabled,
         state_lock=threading.RLock(),
-        snapshot_ownership=snapshot,
-        clear_ownership_if=clear,
-        ensure_stop_event=lambda: stop_flag,
         controller=controller,
         admission_lock=threading.RLock(),
         live_state_update=lambda **kwargs: state_updates.append(kwargs),
@@ -106,20 +67,19 @@ def _runtime(*, generation_enabled, persist=None):
     )
     evidence = SimpleNamespace(
         owned=owned,
-        stop_flag=stop_flag,
-        ownership=ownership,
+        stop_flag=generation.stop_event,
+        generation=generation,
         controller=controller,
         cleanup_threads=cleanup_threads,
         state_updates=state_updates,
         kv_updates=kv_updates,
-        clear_calls=clear_calls,
         persisted_fail_closed=persisted_fail_closed,
     )
     return runtime, evidence
 
 
-def test_generation_stop_retains_ownership_until_join_completes():
-    runtime, evidence = _runtime(generation_enabled=True)
+def test_stop_retains_ownership_until_join_completes():
+    runtime, evidence = _runtime()
 
     result = stop_live_loop(
         persist_desired=True,
@@ -128,47 +88,21 @@ def test_generation_stop_retains_ownership_until_join_completes():
     )
 
     assert result["phase"] == "draining"
-    assert evidence.controller.stop_requests == ["generation-123"]
-    assert evidence.ownership["thread"] is evidence.owned
-    assert evidence.clear_calls == []
+    assert result["generation"] == evidence.generation.generation_id
+    assert evidence.controller.status()["phase"] == "draining"
+    assert evidence.controller.ownership_snapshot().thread is evidence.owned
     assert evidence.cleanup_threads[0].started is True
 
     evidence.cleanup_threads[0].target()
     assert evidence.owned.joined is True
-    assert evidence.ownership["thread"] is None
+    assert evidence.controller.ownership_snapshot().thread is None
 
 
-def test_legacy_stop_linearizes_admission_and_retains_ownership():
-    runtime, evidence = _runtime(generation_enabled=False)
-
-    result = stop_live_loop(
-        persist_desired=True,
-        trigger_reason="manual",
-        runtime=runtime,
-    )
-
-    assert result["status"] == "draining"
-    assert evidence.stop_flag.is_set() is True
-    assert evidence.ownership["thread"] is evidence.owned
-    assert len(evidence.state_updates) == 2
-    assert all(
-        update["accepting_new_risk"] is False
-        for update in evidence.state_updates
-    )
-
-    evidence.cleanup_threads[0].target()
-    assert evidence.ownership["thread"] is None
-    completed = evidence.kv_updates[-1][1]
-    assert completed["status"] == "completed"
-    assert completed["ownership_released"] is True
-
-
-def test_legacy_desired_state_failure_does_not_cancel_draining():
+def test_desired_state_failure_does_not_cancel_draining():
     def unavailable(*_args, **_kwargs):
         raise RuntimeError("postgres unavailable")
 
     runtime, evidence = _runtime(
-        generation_enabled=False,
         persist=unavailable,
     )
 

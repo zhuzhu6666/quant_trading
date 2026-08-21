@@ -133,7 +133,6 @@ def test_amended_success_preserves_processing_order_and_context():
             upsert_recovery=lambda **kwargs: events.append(
                 ("recovery", kwargs["entry_decision_id"])
             ),
-            write_decision_log=lambda **_kwargs: events.append("decision_log"),
         ),
     )
 
@@ -144,7 +143,6 @@ def test_amended_success_preserves_processing_order_and_context():
         "learning",
         "ledger",
         ("recovery", "decision-501"),
-        "decision_log",
     ]
     assert logs == []
 
@@ -166,7 +164,6 @@ def test_amended_success_aux_failure_is_logged_after_local_safety_state():
             build_learning_context=lambda **_kwargs: {},
             log_ledger=lambda **_kwargs: "",
             upsert_recovery=lambda **_kwargs: None,
-            write_decision_log=lambda **_kwargs: None,
         ),
     )
 

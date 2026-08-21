@@ -1,12 +1,15 @@
 from backend.core.db import connect_sqlite
 from backend.services import autonomous_learning
-from backend.services.learning_cycle_watermark import FACT_SOURCES, LearningCycleWatermarkService
+from backend.services.learning_cycle_watermark import LearningCycleWatermarkService
 
 
 def _db(path):
     conn = connect_sqlite(path)
-    for table, timestamp_column in FACT_SOURCES:
-        conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, {timestamp_column} REAL NOT NULL DEFAULT 0)")
+    conn.execute(
+        "CREATE TABLE event ("
+        "event_type TEXT NOT NULL, observed_at REAL NOT NULL DEFAULT 0"
+        ")"
+    )
     conn.execute("CREATE TABLE runtime_kv (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at REAL NOT NULL)")
     conn.commit()
     conn.close()
@@ -23,7 +26,10 @@ def test_watermark_runs_once_then_only_when_new_facts_arrive(tmp_path):
     assert service.evaluate()["status"] == "no_new_facts"
 
     conn = connect_sqlite(db_path)
-    conn.execute("INSERT INTO trade_outcome_review (created_at) VALUES (123.0)")
+    conn.execute(
+        "INSERT INTO event (event_type, observed_at) VALUES (?, ?)",
+        ("trade_review", 123.0),
+    )
     conn.commit()
     conn.close()
     changed = service.evaluate()

@@ -2,7 +2,7 @@
 
 The broker contract and local fsynced safety latch/outbox are authoritative.
 Runtime callbacks are injected by ``live_service`` only for process wiring and
-compatibility state updates.
+read-only state projection updates.
 """
 from __future__ import annotations
 
@@ -68,13 +68,7 @@ def fresh_emergency_position_reconcile(bridge: Any) -> dict[str, Any]:
 
     if hasattr(bridge, "reconcile_positions"):
         try:
-            try:
-                raw = bridge.reconcile_positions(force=True, allow_cache_fallback=False)
-            except TypeError:
-                try:
-                    raw = bridge.reconcile_positions(force=True)
-                except TypeError:
-                    raw = bridge.reconcile_positions()
+            raw = bridge.reconcile_positions(force=True, allow_cache_fallback=False)
         except Exception as exc:
             return {
                 "success": False,
@@ -258,7 +252,7 @@ def _execution_recovery_state(runtime: EmergencyCloseRuntime, bridge: Any) -> di
         raw = dict(runtime.recover_execution_intents(bridge) or {})
     except Exception as exc:
         return {
-            "schema": "broker_execution_intent_recovery.v1",
+            "schema": "broker_execution_intent_recovery.v2",
             "ready": False,
             "unresolved_count": None,
             "unresolved": [],
@@ -522,11 +516,9 @@ def run_emergency_close(
         try:
             result = bridge.close_position(pid, volume=volume)
             outcome = str(getattr(result, "outcome", "") or "").strip().lower()
-            if outcome not in {"confirmed", "rejected", "unknown", "simulated"}:
-                # A legacy/malformed bridge result is not broker confirmation.
-                # Only the fresh post-reconcile may prove disappearance; never
-                # infer a terminal outcome from the compatibility ``success``
-                # boolean.
+            if outcome not in {"confirmed", "rejected", "unknown"}:
+                # A malformed bridge result is not broker confirmation. Only
+                # the fresh post-reconcile may prove disappearance.
                 outcome = "unknown"
             outcome_by_position[pid] = outcome
             if outcome == "rejected":

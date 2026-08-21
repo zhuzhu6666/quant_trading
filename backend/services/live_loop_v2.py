@@ -6,8 +6,6 @@ all work remains serial in the owning live-loop generation.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
@@ -79,7 +77,6 @@ class LiveSafetyCycleRuntime:
     safety_reference_price: Callable[[Any, list[dict[str, Any]]], float]
     factor_pipeline: dict[str, Any]
     plan_safety_candidates: Callable[..., Any]
-    plan_legacy_candidates: Callable[..., Any]
     execute_safety_candidate: Callable[..., dict[str, Any]]
     run_position_protection_cycle: Callable[..., Any]
     persist_safety_fail_closed: Callable[..., dict[str, Any]]
@@ -132,7 +129,7 @@ def run_live_safety_cycle(
         has_positions=bool(positions),
         unknown_execution_count=unknown_count,
     )
-    legacy_executed = False
+    supervisor_cycle_executed = False
     execution_payload: dict[str, Any] = {"ok": True, "status": "no_positions"}
     cfg: Any | None = None
     account: dict[str, Any] = {}
@@ -145,13 +142,7 @@ def run_live_safety_cycle(
         "arbitration": [],
         "planned_at": planning_now,
     }
-    legacy_preview_payload: dict[str, Any] = {
-        "candidates": [],
-        "arbitration": [],
-        "planned_at": planning_now,
-    }
     planner_error = ""
-    legacy_preview_error = ""
 
     if due and (positions or plane.mode in {"shadow", "enforce"}):
         try:
@@ -167,6 +158,7 @@ def run_live_safety_cycle(
             atr_price = atr_ratio * current_price if current_price > 0 else 0.0
             if plane.mode in {"shadow", "enforce"}:
                 plan = runtime.plan_safety_candidates(
+                    bridge=bridge,
                     positions=positions,
                     cfg=cfg,
                     account=account,
@@ -183,32 +175,6 @@ def run_live_safety_cycle(
             planner_error = f"{type(exc).__name__}: {exc}"
             logger.warning("[live] independent safety planner failed: {}", planner_error)
 
-        if plane.mode in {"shadow", "enforce"}:
-            try:
-                if cfg is None:
-                    cfg = runtime.runtime_config()
-                if not account:
-                    account = runtime.get_live_state("account", {}, clone=True) or {}
-                legacy_preview = runtime.plan_legacy_candidates(
-                    positions=positions,
-                    cfg=cfg,
-                    account=account,
-                    current_price=current_price,
-                    atr_price=atr_price,
-                    planned_at=planning_now,
-                )
-                legacy_preview_payload = (
-                    dict(legacy_preview.to_dict())
-                    if hasattr(legacy_preview, "to_dict")
-                    else dict(legacy_preview or {})
-                )
-            except Exception as exc:
-                legacy_preview_error = f"{type(exc).__name__}: {exc}"
-                logger.warning(
-                    "[live] read-only legacy safety preview failed: {}",
-                    legacy_preview_error,
-                )
-
     try:
         candidate_preview = [
             item if isinstance(item, SafetyCandidate) else SafetyCandidate(**dict(item))
@@ -220,15 +186,6 @@ def run_live_safety_cycle(
 
     def candidates(_raw_positions) -> list[SafetyCandidate]:
         return list(candidate_preview)
-
-    try:
-        legacy_candidate_preview = [
-            item if isinstance(item, SafetyCandidate) else SafetyCandidate(**dict(item))
-            for item in list(legacy_preview_payload.get("candidates") or [])
-        ]
-    except Exception as exc:
-        legacy_candidate_preview = []
-        legacy_preview_error = legacy_preview_error or f"{type(exc).__name__}: {exc}"
 
     def execute(candidate: SafetyCandidate) -> dict[str, Any]:
         if cfg is None:
@@ -257,11 +214,11 @@ def run_live_safety_cycle(
                 "error": f"{type(exc).__name__}: {exc}",
             }
 
-    def execute_legacy_authoritative() -> dict[str, Any]:
-        nonlocal legacy_executed, execution_payload
-        if legacy_executed:
+    def execute_supervisor_cycle() -> dict[str, Any]:
+        nonlocal supervisor_cycle_executed, execution_payload
+        if supervisor_cycle_executed:
             return execution_payload
-        legacy_executed = True
+        supervisor_cycle_executed = True
         try:
             effective_cfg = cfg if cfg is not None else runtime.runtime_config()
             effective_account = account or runtime.get_live_state(
@@ -299,29 +256,22 @@ def run_live_safety_cycle(
             }
         return execution_payload
 
-    legacy_first_pid = int(
+    supervisor_first_pid = int(
         positions[0].get("position_id") or positions[0].get("ticket") or 0
     ) if positions else 0
-    comparison_independent = bool(
-        plane.mode in {"shadow", "enforce"}
-        and not planner_error
-        and not legacy_preview_error
-    )
     cycle = plane.run_cycle(
         reconcile_result=plane_reconcile_result,
         unknown_execution_count=unknown_count,
         candidate_provider=candidates,
         executor=execute,
-        legacy_candidates=legacy_candidate_preview,
-        comparison_independent=comparison_independent,
-        require_candidate_match=plane.mode in {"shadow", "enforce"},
+        # The supervisor planner/executor is the only live candidate source;
+        # old AWE rows remain audit data and cannot authorize a broker action.
         force_full_cycle=force_full_cycle,
     )
 
-    # Only after both pure plans have been compared may a broker mutation run.
-    # Shadow/off keep the legacy path authoritative.  An enforce comparison
-    # failure is a one-way forced-shadow transition: persist no-new-risk before
-    # invoking the same legacy executor, exactly once, for this full cycle.
+    # The planner/executor is the only candidate authority.  The serial
+    # protection cycle below is retained as the off/shadow runtime entrypoint
+    # for the same supervisor executor; it is not an AWE fallback stream.
     forced_shadow = bool(
         plane.mode == "enforce" and getattr(plane, "forced_shadow", False)
     )
@@ -331,15 +281,13 @@ def run_live_safety_cycle(
         fallback_blockers = set(cycle.blockers) | {"safety_v2_forced_shadow"}
         if planner_error:
             fallback_blockers.add("safety_candidate_planner_failed")
-        if legacy_preview_error:
-            fallback_blockers.add("legacy_safety_preview_failed")
         try:
             fallback_persistence = dict(
                 runtime.persist_safety_fail_closed(
                     blockers=sorted(fallback_blockers),
                     source="safety_v2_forced_shadow",
                     error="; ".join(
-                        item for item in (planner_error, legacy_preview_error) if item
+                        item for item in (planner_error,) if item
                     ),
                 )
                 or {}
@@ -351,10 +299,10 @@ def run_live_safety_cycle(
     if (
         due
         and positions
-        and legacy_first_pid > 0
+        and supervisor_first_pid > 0
         and (plane.mode in {"off", "shadow"} or forced_shadow)
     ):
-        execute_legacy_authoritative()
+        execute_supervisor_cycle()
 
     payload = cycle.to_dict()
     payload["planner"] = {
@@ -363,120 +311,31 @@ def run_live_safety_cycle(
         "error": planner_error,
         "broker_mutation": False,
     }
-    payload["legacy_preview"] = {
-        **legacy_preview_payload,
-        "ok": not bool(legacy_preview_error),
-        "error": legacy_preview_error,
-        "broker_mutation": False,
-    }
-    legacy_result = dict(execution_payload.get("result") or {})
-    payload["legacy_arbitration"] = list(legacy_result.get("safety_arbitration") or [])
-    if plane.mode == "shadow" and legacy_executed:
-        actual_available = "safety_candidates" in legacy_result
-        actual_candidates = list(legacy_result.get("safety_candidates") or [])
-        v2_vs_actual = plane.compare_candidate_sets(
-            candidate_preview,
-            actual_candidates,
-            independent=bool(comparison_independent and actual_available),
-        )
-        preview_vs_actual = plane.compare_candidate_sets(
-            legacy_candidate_preview,
-            actual_candidates,
-            independent=bool(comparison_independent and actual_available),
-        )
-        pre_execution = dict(payload.get("comparison") or {})
-        combined_independent = bool(
-            pre_execution.get("independent")
-            and v2_vs_actual.get("independent")
-            and preview_vs_actual.get("independent")
-        )
-        combined_match = bool(
-            pre_execution.get("match")
-            and v2_vs_actual.get("match")
-            and preview_vs_actual.get("match")
-        )
-        combined_enforce_eligible = bool(
-            pre_execution.get("enforce_eligible")
-            and v2_vs_actual.get("enforce_eligible")
-            and preview_vs_actual.get("enforce_eligible")
-        )
-        combined_duplicate = bool(
-            pre_execution.get("duplicate")
-            or v2_vs_actual.get("duplicate")
-            or preview_vs_actual.get("duplicate")
-        )
-        combined_position_conflict = bool(
-            pre_execution.get("position_conflict")
-            or v2_vs_actual.get("position_conflict")
-            or preview_vs_actual.get("position_conflict")
-        )
-        combined_fingerprint = hashlib.sha256(
-            json.dumps(
-                {
-                    "pre_execution": pre_execution.get("fingerprint", ""),
-                    "v2_vs_actual": v2_vs_actual.get("fingerprint", ""),
-                    "preview_vs_actual": preview_vs_actual.get("fingerprint", ""),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        final_comparison = {
-            **pre_execution,
-            "independent": combined_independent,
-            "match": combined_match,
-            "enforce_eligible": combined_enforce_eligible,
-            "duplicate": combined_duplicate,
-            "position_conflict": combined_position_conflict,
-            "fingerprint": combined_fingerprint,
-            "pre_execution_match": bool(pre_execution.get("match")),
-            "v2_vs_actual_match": bool(v2_vs_actual.get("match")),
-            "legacy_preview_vs_actual_match": bool(preview_vs_actual.get("match")),
-            "actual_recorded": actual_available,
-            "actual_fingerprint": v2_vs_actual.get("fingerprint", ""),
-            "actual_diff": dict(v2_vs_actual.get("diff") or {}),
-            "legacy_preview_actual_diff": dict(preview_vs_actual.get("diff") or {}),
-        }
-        payload["comparison"] = final_comparison
-        plane.remember_comparison(final_comparison)
-        if bool(final_comparison.get("duplicate")):
-            payload["blockers"] = sorted(
-                set(payload.get("blockers", [])) | {"safety_candidate_duplicate"}
-            )
-            payload["accepting_new_risk"] = False
-        elif bool(final_comparison.get("position_conflict")):
-            payload["blockers"] = sorted(
-                set(payload.get("blockers", []))
-                | {"safety_candidate_position_conflict"}
-            )
-            payload["accepting_new_risk"] = False
-        elif not combined_independent:
-            payload["blockers"] = sorted(
-                set(payload.get("blockers", []))
-                | {"safety_candidate_comparison_not_independent"}
-            )
-            payload["accepting_new_risk"] = False
-        elif not combined_match:
-            payload["blockers"] = sorted(
-                set(payload.get("blockers", [])) | {"safety_candidate_mismatch"}
-            )
-            payload["accepting_new_risk"] = False
-    payload["legacy_authoritative"] = bool(
-        plane.mode in {"off", "shadow"} or forced_shadow
+    supervisor_result = dict(execution_payload.get("result") or {})
+    payload["supervisor_arbitration"] = list(
+        supervisor_result.get("safety_arbitration") or []
     )
-    payload["legacy_fail_closed_fallback"] = forced_shadow
+    # Both scheduling modes below invoke the same governed supervisor
+    # executor.  ``off``/``shadow`` only describe whether the cycle is allowed
+    # to mutate the broker; they do not create a second safety authority.
+    payload["supervisor_executor_authoritative"] = True
+    payload["supervisor_execution_path"] = (
+        "governed_supervisor_executor"
+        if supervisor_cycle_executed
+        else "safety_candidate_executor"
+    )
     payload["forced_shadow_persistence"] = {
         "ok": bool(fallback_persistence) and not fallback_persistence_error,
         "result": fallback_persistence,
         "error": fallback_persistence_error,
     }
     payload["protection"] = (
-        execution_payload if legacy_executed else {
+        execution_payload if supervisor_cycle_executed else {
             "ok": not any(not bool(item.get("ok")) for item in payload.get("executed", [])),
             "status": "v2_enforced" if payload.get("executed") else "not_due",
         }
     )
-    if legacy_executed and not bool(execution_payload.get("ok")):
+    if supervisor_cycle_executed and not bool(execution_payload.get("ok")):
         payload["blockers"] = sorted(
             set(payload.get("blockers", [])) | {"safety_protection_cycle_failed"}
         )
@@ -490,11 +349,6 @@ def run_live_safety_cycle(
         payload["blockers"] = sorted(
             set(payload.get("blockers", []))
             | {"safety_forced_shadow_persistence_failed"}
-        )
-        payload["accepting_new_risk"] = False
-    if legacy_preview_error and plane.mode in {"shadow", "enforce"}:
-        payload["blockers"] = sorted(
-            set(payload.get("blockers", [])) | {"legacy_safety_preview_failed"}
         )
         payload["accepting_new_risk"] = False
     if planner_error and plane.mode in {"shadow", "enforce"}:

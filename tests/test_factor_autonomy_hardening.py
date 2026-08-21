@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from backend.core.db import connect_sqlite
+from backend.services.canonical_v2 import ensure_sqlite_schema, record_decision_event
 from backend.services.context_policy import ContextPolicyService
 from backend.services.factor_catalog import latest_factor_catalog_snapshot, persist_factor_catalog_snapshot
 from backend.services.factor_redundancy import RedundancyDetector
@@ -683,29 +684,31 @@ def test_redundancy_detector_groups_live_alpha_only_and_chooses_leader(tmp_path)
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(db_path)
     try:
-        conn.execute(
-            """
-            CREATE TABLE decision_factor_snapshot (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                decision_id TEXT NOT NULL,
-                factor TEXT NOT NULL,
-                normalized_value REAL DEFAULT 0.0
-            )
-            """
-        )
+        ensure_sqlite_schema(conn)
         for i in range(220):
             base = (i - 110) / 100.0
-            conn.executemany(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, normalized_value)
-                VALUES (?, ?, ?)
-                """,
-                [
-                    (f"d{i}", "alpha_leader", base),
-                    (f"d{i}", "alpha_follower", base * 1.01 + 0.001),
-                    (f"d{i}", "context_vol", base),
-                    (f"d{i}", "alpha_independent", 1.0 if i % 2 == 0 else -1.0),
+            decision_id = f"d{i}"
+            record_decision_event(
+                conn,
+                decision_id=decision_id,
+                event_type="open",
+                symbol="XAUUSD",
+                timeframe="M1",
+                decision_ts=float(i),
+                created_at=float(i),
+                factor_snapshots=[
+                    {"decision_id": decision_id, "factor": "alpha_leader", "normalized_value": base},
+                    {
+                        "decision_id": decision_id,
+                        "factor": "alpha_follower",
+                        "normalized_value": base * 1.01 + 0.001,
+                    },
+                    {"decision_id": decision_id, "factor": "context_vol", "normalized_value": base},
+                    {
+                        "decision_id": decision_id,
+                        "factor": "alpha_independent",
+                        "normalized_value": 1.0 if i % 2 == 0 else -1.0,
+                    },
                 ],
             )
         conn.commit()

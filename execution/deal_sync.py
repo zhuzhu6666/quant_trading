@@ -2,7 +2,7 @@
 
 职责:
   1. 从 cTrader get_deals() 拉原始成交记录
-  2. 写入 PostgreSQL state_v1.ctrader_deals 表 (原始数据锚点)
+  2. 写入 PostgreSQL runtime.ctrader_deals 表 (原始数据锚点)
   3. 按 position_id 匹配平仓成交, 提取真实 PnL (gross_profit + swap + signed commission)
   4. 供 live_service.py 平仓检测后调用
 
@@ -19,7 +19,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import math
-import sqlite3
 import time
 from typing import Any, Mapping, MutableMapping
 
@@ -35,7 +34,7 @@ _MAX_ROWS = 100          # 每批最多 100 条
 class DealFetchResult:
     """Explicit broker-deal fetch outcome used by safety/recovery callers.
 
-    The compatibility ``fetch_deals_since`` API still returns a list, but an
+    The convenience ``fetch_deals_since`` API still returns a list, but an
     empty list cannot distinguish an authoritative empty broker response from
     transport failure.  Recovery code must use this contract whenever that
     distinction affects diagnostics or latch release.
@@ -100,7 +99,7 @@ def fetch_deals_since_result(
         if raw_deals is None:
             raise RuntimeError("broker_deal_response_missing")
         if not raw_deals and getattr(bridge, "_last_deals_fetch_ok", None) is False:
-            # CTraderBridge keeps the compatibility list API and therefore
+            # CTraderBridge keeps its list API and therefore
             # returns [] after an RPC failure.  Preserve the explicit fetch
             # contract here so recovery cannot mistake transport failure for
             # an authoritative empty history response.
@@ -133,7 +132,7 @@ def fetch_deals_since(
     to_ts: int | None = None,
     max_rows: int = _MAX_ROWS,
 ) -> list[dict]:
-    """Compatibility list API for callers that do not need fetch authority.
+    """Convenience list API for callers that do not need fetch authority.
 
     Args:
         bridge: CTraderBridge 实例 (已连接).
@@ -155,13 +154,13 @@ def fetch_deals_since(
 
 
 def store_deals(
-    conn: sqlite3.Connection,
+    conn: Any,
     deals: list[dict],
 ) -> int:
     """将成交记录幂等写入 state store 的 ctrader_deals 表.
 
     Args:
-        conn: PostgreSQL state store 连接.
+        conn: PostgreSQL runtime 连接.
         deals: get_deals() 返回的 list[dict].
 
     Returns:
@@ -253,7 +252,7 @@ def store_deals(
 
 
 def find_close_deal(
-    conn: sqlite3.Connection,
+    conn: Any,
     position_id: int,
     *,
     min_exec_timestamp: float = 0.0,
@@ -261,7 +260,7 @@ def find_close_deal(
     """按 position_id 聚合已存储的平仓成交记录.
 
     Args:
-        conn: PostgreSQL state store 连接.
+        conn: PostgreSQL runtime 连接.
         position_id: cTrader 仓位 ID.
 
     Returns:
@@ -291,7 +290,7 @@ def find_close_deal(
     return detail
 
 
-def _aggregate_close_details(rows: list[sqlite3.Row]) -> dict:
+def _aggregate_close_details(rows: list[Any]) -> dict:
     """将同一仓位的所有 close legs 合并为一个 close_detail.
 
     cTrader 对部分平仓和最终平仓分别产生 deal。只取最新一笔会漏掉
@@ -320,7 +319,7 @@ def _aggregate_close_details(rows: list[sqlite3.Row]) -> dict:
 
 def sync_close_deal(
     bridge: Any,
-    conn: sqlite3.Connection,
+    conn: Any,
     position_id: int,
     *,
     from_ts: int | None = None,
@@ -331,13 +330,13 @@ def sync_close_deal(
     """一站式: 为单个平仓 position_id 获取真实 PnL.
 
     流程:
-      1. 先查 PostgreSQL state store 有没有存过该 position_id 的平仓成交
+      1. 先查 PostgreSQL runtime 有没有存过该 position_id 的平仓成交
       2. 如果有 → 直接返回
       3. 如果没有 → 拉最近成交写入 DB, 再查
 
     Args:
         bridge: CTraderBridge 实例 (已连接).
-        conn: PostgreSQL state store 连接.
+        conn: PostgreSQL runtime 连接.
         position_id: 刚消失的仓位 ID.
 
     Returns:
@@ -378,7 +377,7 @@ def sync_close_deal(
 
 def sync_close_deals_batch(
     bridge: Any,
-    conn: sqlite3.Connection,
+    conn: Any,
     position_ids: set[int],
     *,
     from_ts: int | None = None,
@@ -393,7 +392,7 @@ def sync_close_deals_batch(
 
     Args:
         bridge: CTraderBridge 实例.
-        conn: PostgreSQL state store 连接.
+        conn: PostgreSQL runtime 连接.
         position_ids: 刚消失的仓位 ID 集合.
 
     Returns:
@@ -536,7 +535,7 @@ def _cd_to_real_pnl(cd: dict) -> dict:
         "net": gross + swap + commission,
         "entry_price": cd.get("entry_price", 0.0),
         "exec_price": cd.get("exec_price", 0.0),
-        "price_contract": cd.get("price_contract", "legacy_unknown"),
+        "price_contract": cd.get("price_contract", "unknown"),
         "price_quality": cd.get("price_quality", "unknown"),
         "exec_timestamp": cd.get("exec_timestamp", 0.0),
         "balance": cd.get("balance", 0.0),

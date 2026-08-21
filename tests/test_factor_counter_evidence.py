@@ -2,6 +2,7 @@ import json
 import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
+from backend.services.canonical_v2 import ensure_sqlite_schema, record_review
 from backend.services.factor_counter_evidence import FactorCounterEvidenceService
 
 
@@ -11,6 +12,7 @@ def test_factor_counter_evidence_blocks_strong_shadow_and_contribution_keep_sign
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         conn.execute(
             """
             INSERT INTO shadow_factor_perf
@@ -21,13 +23,14 @@ def test_factor_counter_evidence_blocks_strong_shadow_and_contribution_keep_sign
         )
         for idx in range(4):
             review_id = f"review_keep_{idx}"
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, pnl, outcome_label, review_json, created_at)
-                VALUES (?, ?, 25.0, 'good_win', ?, ?)
-                """,
-                (review_id, f"trade_{idx}", json.dumps({"regime": "trend"}), now + idx),
+            record_review(
+                conn,
+                review_id=review_id,
+                trade_id=f"trade_{idx}",
+                pnl=25.0,
+                outcome_label="good_win",
+                review={"regime": "trend"},
+                created_at=now + idx,
             )
             conn.execute(
                 """
@@ -55,6 +58,7 @@ def test_factor_counter_evidence_allows_when_no_keep_signal(tmp_path):
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         conn.commit()
     finally:
         conn.close()
@@ -72,30 +76,25 @@ def test_factor_counter_evidence_ignores_non_entry_responsibility_for_factor_pen
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         for idx in range(4):
             review_id = f"review_exit_{idx}"
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, pnl, outcome_label, review_json, created_at)
-                VALUES (?, ?, -10.0, 'bad_loss', ?, ?)
-                """,
-                (
-                    review_id,
-                    f"trade_exit_{idx}",
-                    json.dumps(
-                        {
-                            "primary_responsibility": "exit" if idx % 2 == 0 else "data_quality",
-                            "largest_contribution_factor": "engulfing",
-                            "factor_attribution": {
-                                "largest_contribution_factor": "engulfing",
-                                "causal_level": "observational",
-                                "causal_claim": False,
-                            },
-                        }
-                    ),
-                    now + idx,
-                ),
+            record_review(
+                conn,
+                review_id=review_id,
+                trade_id=f"trade_exit_{idx}",
+                pnl=-10.0,
+                outcome_label="bad_loss",
+                review={
+                    "primary_responsibility": "exit" if idx % 2 == 0 else "data_quality",
+                    "largest_contribution_factor": "engulfing",
+                    "factor_attribution": {
+                        "largest_contribution_factor": "engulfing",
+                        "causal_level": "observational",
+                        "causal_claim": False,
+                    },
+                },
+                created_at=now + idx,
             )
             conn.execute(
                 """

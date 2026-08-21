@@ -12,7 +12,6 @@ class ClosedPositionCycleRuntime:
     defer_close: Callable[..., Any]
     update_live_state: Callable[..., None]
     collect_attribution: Callable[..., dict[str, Any]]
-    write_close_decision_log: Callable[..., Any]
     lookup_context_integrity: Callable[[int, str], str]
     log_closed_position_ledger: Callable[..., tuple[str, str]]
     run_closed_position_learning: Callable[..., Any]
@@ -118,13 +117,6 @@ def handle_closed_positions_after_tick(
             )
             exit_decision_id = ""
             if canonical_close_price is not None:
-                runtime.write_close_decision_log(
-                    cpid=pid,
-                    bar=bar,
-                    total_pnl=total_pnl,
-                    current_price=canonical_close_price,
-                    tick=tick,
-                )
                 exit_decision_id, context_integrity = (
                     runtime.log_closed_position_ledger(
                         cpid=pid,

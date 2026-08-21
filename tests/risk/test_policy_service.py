@@ -946,7 +946,7 @@ def test_position_supervisor_switch_requires_replay_and_counterfactual_evidence(
     assert verdict.audit_payload["has_counterfactual"] is False
 
 
-def test_position_supervisor_autonomous_switch_requires_demo_mode(monkeypatch):
+def test_position_supervisor_autonomous_switch_requires_demo_mode_after_governed_release(monkeypatch):
     from types import SimpleNamespace
     from config import runtime_config as rc
 
@@ -963,6 +963,7 @@ def test_position_supervisor_autonomous_switch_requires_demo_mode(monkeypatch):
             "evidence": {
                 "replay_summary": {"sample_count": 10},
                 "counterfactual_summary": {"labels": {"over_protected": 3}},
+                "bridge": {"bridge_ready": True},
             },
         },
     )
@@ -1025,6 +1026,7 @@ def test_switch_position_supervisor_template_requires_approval_and_valid_templat
             "evidence": {
                 "replay_summary": {"sample_count": 3},
                 "counterfactual_summary": {"labels": {"over_protected": 1}},
+                "bridge": {"bridge_ready": True},
             },
         },
     )

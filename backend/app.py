@@ -231,7 +231,7 @@ async def lifespan(app: FastAPI):
     runtime_lifecycle = BackendRuntimeLifecycle()
     runtime_lifecycle.start(_lg)
 
-    _lg.info("[lifespan] PostgreSQL state store active; legacy state dual-write worker not started")
+    _lg.info("[lifespan] PostgreSQL state store active; canonical v2/runtime authority enabled")
 
     try:
         yield

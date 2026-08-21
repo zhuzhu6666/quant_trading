@@ -17,6 +17,10 @@ from unittest.mock import MagicMock
 
 from backend.services import live_service
 from backend.services import config_service
+from backend.services.live_loop_controller import (
+    STARTUP_BARRIER_STEPS,
+    LiveLoopController,
+)
 from backend.services.live_safety_state import reset_safety_state_for_tests
 from alpha.registry import factor_registry
 from alpha.registry_adapter import RegistryAdapter
@@ -28,6 +32,7 @@ def _reset_state(monkeypatch, tmp_path):
     """Reset module-level state between tests."""
     monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path / "safety"))
     reset_safety_state_for_tests()
+    monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", LiveLoopController())
     rc.reset_for_tests()
     live_service._local_positions.clear()
     live_service._live_state["account"] = None
@@ -36,7 +41,6 @@ def _reset_state(monkeypatch, tmp_path):
     live_service._live_state["spot_quote"] = None
     live_service._live_state["last_processed_decision_bar_ts"] = 0.0
     live_service._pos_open_api_volume.clear()
-    live_service._loop_stop_flag = None
     live_service._process_shutdown_requested = False
     live_service._live_state_update(
         loop_running=False,
@@ -53,7 +57,6 @@ def _reset_state(monkeypatch, tmp_path):
     live_service._live_state["spot_quote"] = None
     live_service._live_state["last_processed_decision_bar_ts"] = 0.0
     live_service._pos_open_api_volume.clear()
-    live_service._loop_stop_flag = None
     live_service._process_shutdown_requested = False
     live_service._live_state_update(
         loop_running=False,
@@ -89,6 +92,26 @@ def _fake_bridge(position_id=12345, order_id=99):
         success=True, position_id=position_id,
     )
     return bridge
+
+
+def _admitted_generation(thread=None):
+    controller = live_service._LIVE_LOOP_CONTROLLER
+    generation = controller.begin_start(
+        broker="ctrader",
+        strategy_name="factor_v4",
+    )
+    if thread is None:
+        thread = SimpleNamespace(is_alive=lambda: True, ident=12345)
+    controller.bind_thread(generation.generation_id, thread)
+    controller.heartbeat(generation.generation_id, "safety")
+    for step in STARTUP_BARRIER_STEPS:
+        controller.complete_barrier_step(generation.generation_id, step)
+    live_service._live_state_update(
+        loop_running=True,
+        session_state_status="available",
+        accepting_new_risk=True,
+    )
+    return generation
 
 
 def test_resolve_position_api_volume_prefers_refreshed_position():
@@ -430,7 +453,7 @@ def test_entry_protection_repair_preserves_existing_sl_when_restoring_tp(monkeyp
     )
 
     bridge = _Bridge()
-    handled = live_service._execute_trailing_candidate(
+    handled = live_service._execute_protection_candidate(
         candidates[0],
         bridge=bridge,
         cfg=SimpleNamespace(),
@@ -564,10 +587,12 @@ def test_open_trade_context_sizing_does_not_lift_non_positive_upstream_size():
     assert trace["context_policy"]["blocked_reason"] == "kelly_fraction_non_positive"
 
 
-def test_open_trade_pipeline_stops_before_broker_order_when_attach_pending():
+def test_open_trade_pipeline_stops_before_broker_order_when_attach_pending(monkeypatch):
     bridge = _fake_bridge()
     logs: list[str] = []
     gate_result = SimpleNamespace(passed=True, reason="pass")
+    _admitted_generation()
+    monkeypatch.setattr(live_service, "_new_risk_reconciliation_blockers", lambda: [])
 
     returned_gate = live_service._run_open_trade_pipeline(
         bridge=bridge,
@@ -641,7 +666,9 @@ def test_open_trade_pipeline_blocks_draining_before_candidate(monkeypatch):
 def test_open_trade_pipeline_blocks_draining_after_candidate_before_submit(monkeypatch):
     bridge = _fake_bridge()
     logs = []
-    stop_flag = threading.Event()
+    generation = _admitted_generation()
+    stop_flag = generation.stop_event
+    monkeypatch.setattr(live_service, "_new_risk_reconciliation_blockers", lambda: [])
     candidate = SimpleNamespace(
         direction_name="LONG",
         volume=100.0,
@@ -682,8 +709,14 @@ def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
         "_probe_final_open_admission",
         lambda **_kwargs: {"ok": True, "blockers": ()},
     )
+    monkeypatch.setattr(live_service, "_new_risk_reconciliation_blockers", lambda: [])
+    monkeypatch.setattr(
+        live_service,
+        "_prepare_open_trade_intent",
+        lambda **_kwargs: "decision-test",
+    )
 
-    def _order(_bridge, _composite, _volume):
+    def _order(_bridge, _composite, _volume, **_kwargs):
         rpc_entered.set()
         assert allow_rpc_return.wait(2.0)
         return result
@@ -723,11 +756,8 @@ def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
             worker_finished.set()
 
     worker = threading.Thread(target=_run_order)
-    live_service._loop_thread = worker
-    live_service._loop_stop_flag = stop_flag
-    live_service._loop_broker = "ctrader"
-    live_service._loop_started_at = time.time()
-    live_service._loop_strategy_name = "factor_v4"
+    generation = _admitted_generation(worker)
+    stop_flag = generation.stop_event
     worker.start()
     assert rpc_entered.wait(1.0)
 
@@ -743,6 +773,9 @@ def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
     shutdown.start()
     allow_rpc_return.set()
     assert post_fill_entered.wait(1.0)
+    deadline = time.time() + 1.0
+    while live_service._live_state_get("loop_shutdown") is None and time.time() < deadline:
+        time.sleep(0.01)
     assert live_service._live_state_get("loop_shutdown")["status"] == "draining"
     assert live_service._live_state_get("accepting_new_risk") is False
     assert shutdown_finished.is_set() is False
@@ -915,7 +948,6 @@ def test_factor_pipeline_initializes_signal_decision_id_for_flat_signal(monkeypa
     captured = {}
 
     monkeypatch.setattr(live_service, "_LEDGER", None)
-    monkeypatch.setattr(live_service, "_DECISION_LOG", None)
     monkeypatch.setattr(
         live_service,
         "_factor_state_resolve_bar_progress",

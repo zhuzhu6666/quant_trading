@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 from backend.ledger.service import DecisionLedger
+from backend.services.canonical_v2_reader import iter_decision_factor_snapshots
 
 
 def test_new_decision_factor_snapshot_binds_full_runtime_lineage(tmp_path):
@@ -38,17 +39,21 @@ def test_new_decision_factor_snapshot_binds_full_runtime_lineage(tmp_path):
     )
 
     conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     try:
-        row = conn.execute(
-            """SELECT generation, artifact_hash, definition_fingerprint,
-                      runtime_selection_fingerprint, config_hash, lineage_status
-               FROM decision_factor_snapshot
-               WHERE decision_id=? AND factor='candidate_alpha'""",
-            (decision_id,),
-        ).fetchone()
+        row = next(
+            snapshot
+            for snapshot in iter_decision_factor_snapshots(conn, decision_id)
+            if snapshot["factor"] == "candidate_alpha"
+        )
     finally:
         conn.close()
-    assert row == (7, "a" * 64, "d" * 64, "s" * 64, "c" * 64, "bound")
+    assert row["generation"] == 7
+    assert row["artifact_hash"] == "a" * 64
+    assert row["definition_fingerprint"] == "d" * 64
+    assert row["runtime_selection_fingerprint"] == "s" * 64
+    assert row["config_hash"] == "c" * 64
+    assert row["lineage_status"] == "bound"
 
 
 def test_missing_decision_factor_lineage_remains_explicitly_missing(tmp_path):
@@ -61,15 +66,18 @@ def test_missing_decision_factor_lineage_remains_explicitly_missing(tmp_path):
     )
 
     conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     try:
-        row = conn.execute(
-            """SELECT generation, artifact_hash, definition_fingerprint,
-                      runtime_selection_fingerprint, config_hash, lineage_status
-               FROM decision_factor_snapshot
-               WHERE decision_id=? AND factor='legacy_alpha'""",
-            (decision_id,),
-        ).fetchone()
+        row = next(
+            snapshot
+            for snapshot in iter_decision_factor_snapshots(conn, decision_id)
+            if snapshot["factor"] == "legacy_alpha"
+        )
     finally:
         conn.close()
-    assert row == (0, "", "", "", "", "lineage_missing")
-
+    assert row["generation"] == 0
+    assert row["artifact_hash"] == ""
+    assert row["definition_fingerprint"] == ""
+    assert row["runtime_selection_fingerprint"] == ""
+    assert row["config_hash"] == ""
+    assert row["lineage_status"] == "lineage_missing"

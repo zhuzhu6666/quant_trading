@@ -8,12 +8,19 @@ import pytest
 
 from backend.core.db import STATE_DB_DDL
 from backend.services import learning_backfill
+from backend.services.canonical_v2 import (
+    ensure_sqlite_schema,
+    record_decision_event,
+    record_review,
+)
+from backend.services.canonical_v2_reader import iter_review_rows
 
 
 def _init_db(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         conn.commit()
     finally:
         conn.close()
@@ -65,12 +72,12 @@ def test_learning_backfill_recovers_holding_seconds_from_ctrader_deals(monkeypat
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        row = conn.execute("SELECT review_json FROM trade_outcome_review").fetchone()
+        row = iter_review_rows(conn, limit=0)[0]
     finally:
         conn.close()
 
     assert row is not None
-    review = json.loads(row["review_json"] or "{}")
+    review = row["review_json"]
     assert review["entry_ts_source"] == "ctrader_deals"
     assert review["holding_seconds"] == pytest.approx(29_255.0)
     assert review["context_integrity"] == "partial"
@@ -140,12 +147,12 @@ def test_learning_backfill_enriches_path_metrics_from_bars(monkeypatch, tmp_path
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        row = conn.execute("SELECT mae, mfe, review_json FROM trade_outcome_review").fetchone()
+        row = iter_review_rows(conn, limit=0)[0]
     finally:
         conn.close()
 
     assert row is not None
-    review = json.loads(row["review_json"] or "{}")
+    review = row["review_json"]
     assert float(row["mfe"]) > 4.0
     assert float(row["mae"]) >= 0.0
     assert review["path_source"] == "duckdb_bars"
@@ -196,7 +203,7 @@ def test_rebuild_learning_state_preserves_non_factor_policy_suggestions(tmp_path
              regime_id, setup_hash, decision_context_json, outcome_label,
              reward_score, failure_tags_json, recommended_action,
              evidence_strength, artifact_version, created_at)
-            VALUES ('exp_live_keep', 'live_trade', 'trade_outcome_review',
+            VALUES ('exp_live_keep', 'live_trade', 'canonical_v2.trade_review',
                     'review_live_keep', 'live_review', '', 'live_hash',
                     '{}', 'good_win', 0.4, '[]', 'watch', 0.7, 'v1', 100.0)
             """
@@ -237,21 +244,23 @@ def test_rebuild_learning_state_preserves_non_factor_policy_suggestions(tmp_path
 def test_rebuild_learning_state_does_not_write_factor_pattern_stats(tmp_path):
     """S2.3 writer convergence: factor-scope ``experience_pattern_stats`` and
     ``policy_suggestion`` are owned solely by the live policy_suggester path.
-    The legacy batch rebuild must only re-populate experience_memory and must
+    The maintenance rebuild must only re-populate experience_memory and must
     never create or mutate factor-scope pattern stats / suggestions."""
     db_path = str(tmp_path / "state.db")
     _init_db(db_path)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, pnl, outcome_label,
-             failure_tags_json, review_json, created_at)
-            VALUES ('review_factor', 'trade_factor', 'pos_factor', -1.5, 'bad_loss',
-                    '[]', '{"worst_factor":"rsi_14"}', 10.0)
-            """
+        record_review(
+            conn,
+            review_id="review_factor",
+            trade_id="trade_factor",
+            position_id="pos_factor",
+            pnl=-1.5,
+            outcome_label="bad_loss",
+            failure_tags=[],
+            review={"worst_factor": "rsi_14"},
+            created_at=10.0,
         )
         learning_backfill.rebuild_learning_state(conn)
         factor_stats = conn.execute(
@@ -285,17 +294,27 @@ def test_rebuild_learning_state_excludes_contaminated_review_lineage(tmp_path):
                 "labels": ["price_fact_invalid"],
             },
         }
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, pnl, outcome_label,
-             failure_tags_json, review_json, created_at)
-            VALUES ('review_bad', 'trade_bad', 'position_bad', -1.0, 'bad_loss',
-                    '[]', ?, 10.0),
-                   ('review_clean', 'trade_clean', 'position_clean', 1.0, 'good_win',
-                    '[]', '{"worst_factor":"adx"}', 20.0)
-            """,
-            (json.dumps(contaminated),),
+        record_review(
+            conn,
+            review_id="review_bad",
+            trade_id="trade_bad",
+            position_id="position_bad",
+            pnl=-1.0,
+            outcome_label="bad_loss",
+            failure_tags=[],
+            review=contaminated,
+            created_at=10.0,
+        )
+        record_review(
+            conn,
+            review_id="review_clean",
+            trade_id="trade_clean",
+            position_id="position_clean",
+            pnl=1.0,
+            outcome_label="good_win",
+            failure_tags=[],
+            review={"worst_factor": "adx"},
+            created_at=20.0,
         )
 
         learning_backfill.rebuild_learning_state(conn)
@@ -319,16 +338,21 @@ def test_learning_backfill_refreshes_trade_lesson_memory_without_new_reviews(mon
 
     conn = sqlite3.connect(db_path)
     try:
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-             pnl, mae, mfe, outcome_label, failure_tags_json, summary_text,
-             review_json, created_at)
-            VALUES ('review_refresh', 'trade_refresh', 'pos_refresh', '', '',
-                    -8.0, -10.0, 1.0, 'bad_loss', '["weak_entry_signal"]',
-                    'refresh existing lesson', '{"primary_responsibility":"signal_quality"}', 100.0)
-            """
+        record_review(
+            conn,
+            review_id="review_refresh",
+            trade_id="trade_refresh",
+            position_id="pos_refresh",
+            entry_decision_id="",
+            exit_decision_id="",
+            pnl=-8.0,
+            mae=-10.0,
+            mfe=1.0,
+            outcome_label="bad_loss",
+            failure_tags=["weak_entry_signal"],
+            summary_text="refresh existing lesson",
+            review={"primary_responsibility": "signal_quality"},
+            created_at=100.0,
         )
         conn.commit()
     finally:
@@ -362,26 +386,36 @@ def test_learning_backfill_refreshes_trade_lesson_memory_without_new_reviews(mon
     assert "supervisor_feedback" in context
 
 
-def test_learning_backfill_restores_review_regime_from_entry_decision(monkeypatch, tmp_path):
+def test_learning_backfill_audits_immutable_review_regime_from_entry_decision(
+    monkeypatch,
+    tmp_path,
+):
     db_path = str(tmp_path / "state.db")
     _init_db(db_path)
     conn = sqlite3.connect(db_path)
     try:
-        conn.execute(
-            """
-            INSERT INTO decision_ledger
-            (decision_id, event_type, symbol, timeframe, decision_ts, regime_id, created_at)
-            VALUES ('decision_regime', 'open', 'XAUUSD+', 'M5', 100.0, 'trend', 100.0)
-            """
+        record_decision_event(
+            conn,
+            decision_id="decision_regime",
+            event_type="open",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=100.0,
+            regime_id="trend",
+            created_at=100.0,
         )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
-             failure_tags_json, summary_text, review_json, created_at)
-            VALUES ('review_regime', 'trade_regime', 'pos_regime', 'decision_regime', 1.0,
-                    'good_win', '[]', 'regime restore', '{}', 200.0)
-            """
+        record_review(
+            conn,
+            review_id="review_regime",
+            trade_id="trade_regime",
+            position_id="pos_regime",
+            entry_decision_id="decision_regime",
+            pnl=1.0,
+            outcome_label="good_win",
+            failure_tags=[],
+            summary_text="regime restore",
+            review={},
+            created_at=200.0,
         )
         conn.commit()
     finally:
@@ -394,14 +428,18 @@ def test_learning_backfill_restores_review_regime_from_entry_decision(monkeypatc
 
     monkeypatch.setattr(learning_backfill, "get_state_conn", _get_conn)
     result = learning_backfill.run_learning_backfill(limit=10, allow_partial=True, rebuild_learning=True)
-    assert result["regime_backfill"]["updated"] == 1
+    assert result["regime_backfill"]["updated"] == 0
+    assert result["regime_backfill"]["skipped_immutable"] == 1
+    assert result["regime_backfill"]["status"] == "immutable_canonical_review"
 
     conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     try:
-        raw = conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='review_regime'").fetchone()[0]
+        review = next(
+            row["review_json"]
+            for row in iter_review_rows(conn, limit=0)
+            if row["review_id"] == "review_regime"
+        )
     finally:
         conn.close()
-    review = json.loads(raw)
-    assert review["regime_id"] == "trend"
-    assert review["entry_regime"] == "trend"
-    assert review["regime_source"] == "decision_ledger.entry_decision"
+    assert review == {}

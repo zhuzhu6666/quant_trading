@@ -124,7 +124,6 @@ def test_runtime_state_code_does_not_open_state_sqlite_directly():
         # Central helper contains sqlite3 calls but rejects STATE_DB before
         # reaching them; it is the enforcement point, not a state writer.
         "backend/core/db.py",
-        "scripts/migrate_state_sqlite_to_pg.py",
         "scripts/verify_state_pg_parity.py",
     }
     offenders: list[str] = []

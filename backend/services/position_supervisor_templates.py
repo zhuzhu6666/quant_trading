@@ -70,10 +70,11 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "can_auto_deploy": True,
             "auto_deploy_modes": ["demo_autonomous"],
             "requires_offline_replay": False,
-            # Discretionary position management is observation-only until a
-            # governed application explicitly opts into execution.  Hard
-            # risk/timeout actions are not covered by this boundary.
-            "adaptive_execution_mode": "observation_only",
+            # The baseline is the one live supervisor authority in Demo and
+            # future production.  RiskPolicy, broker confirmation and fresh
+            # reconcile remain mandatory; this boundary only selects the
+            # governed execution path.
+            "adaptive_execution_mode": "governed_execute",
         },
     },
     CONSERVATIVE_TEMPLATE_ID: {
@@ -130,7 +131,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "can_auto_deploy": False,
             "auto_deploy_modes": ["demo_autonomous"],
             "requires_offline_replay": True,
-            "adaptive_execution_mode": "observation_only",
+            "adaptive_execution_mode": "governed_execute",
         },
     },
     PROFIT_PROTECTION_TEMPLATE_ID: {
@@ -187,7 +188,7 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "can_auto_deploy": False,
             "auto_deploy_modes": ["demo_autonomous"],
             "requires_offline_replay": True,
-            "adaptive_execution_mode": "observation_only",
+            "adaptive_execution_mode": "governed_execute",
         },
     },
 }
@@ -324,16 +325,12 @@ def get_position_supervisor_template(template_id: str | None = None, *, db_path:
 def latest_applied_position_supervisor_template_id(
     *,
     db_path: str | Path | None = None,
-    require_authority: bool = False,
 ) -> str:
-    """Return the newest applied supervisor template.
+    """Return the newest governance-committed supervisor template.
 
-    ``require_authority`` is the production startup path.  It refuses to turn
-    a legacy application row into live authority unless the row is bound to a
-    committed/current/hash-bound governance mutation.  The only compatibility
-    exception is an explicit operator/backfill marker declaring the legacy
-    control both ``legacy_quarantined`` and tightening-only.  The default
-    remains permissive for one-release read-only compatibility callers.
+    A proposal/application row is never a runtime authority by itself.  The
+    row must point to a committed/current governance mutation with complete
+    config and domain hashes; otherwise startup fails closed.
     """
 
     try:
@@ -352,11 +349,9 @@ def latest_applied_position_supervisor_template_id(
         if not use_pg:
             conn.row_factory = __import__("sqlite3").Row
     except Exception as exc:
-        if require_authority:
-            raise RuntimeError(
-                f"position_supervisor_restore_state_unavailable:{type(exc).__name__}:{exc}"
-            ) from exc
-        return DEFAULT_TEMPLATE_ID
+        raise RuntimeError(
+            f"position_supervisor_restore_state_unavailable:{type(exc).__name__}:{exc}"
+        ) from exc
     try:
         from backend.services.learning_application_store import LearningApplicationStore
 
@@ -377,106 +372,87 @@ def latest_applied_position_supervisor_template_id(
             row = app
             break
         if not row:
-            # Strict startup preserves the release/YAML/committed-overlay
-            # projection when no application fact exists.  It must not
-            # implicitly reset a configured template to the built-in default.
-            return "" if require_authority else DEFAULT_TEMPLATE_ID
+            return DEFAULT_TEMPLATE_ID
 
         template_id = str(row.get("scope_key") or "")
-        if require_authority:
-            details = dict(row)
-            if not isinstance(details, dict):
-                raise RuntimeError(
-                    "legacy_position_supervisor_restore_details_invalid:"
-                    f"{row.get('application_id', '')}"
-                )
-
-            mutation_id = str(row.get("mutation_id") or "")
-            details_mutation_id = str(details.get("mutation_id") or "")
-            committed = False
-            if (
-                mutation_id
-                and details_mutation_id == mutation_id
-                and str(details.get("commit_boundary") or "")
-                == "governance_mutation_coordinator"
-                and state_table_exists(conn, "governance_mutation_intent")
-            ):
-                intent_columns = state_table_columns(conn, "governance_mutation_intent")
-                required = {
-                    "mutation_id",
-                    "status",
-                    "projection_status",
-                    "scope_type",
-                    "committed_config_hash",
-                    "domain_hash",
-                }
-                if required <= intent_columns:
-                    intent = conn.execute(
-                        _sql(
-                            conn,
-                            """
-                            SELECT mutation_id
-                            FROM governance_mutation_intent
-                            WHERE mutation_id=?
-                              AND status='committed'
-                              AND projection_status='current'
-                              AND scope_type='supervisor_template'
-                              AND committed_config_hash<>''
-                              AND domain_hash<>''
-                            LIMIT 1
-                            """,
-                        ),
-                        (mutation_id,),
-                    ).fetchone()
-                    committed = intent is not None
-
-            legacy_quarantined = bool(
-                str(details.get("governance_authority") or "")
-                == "legacy_quarantined"
-                and str(details.get("risk_class") or "") == "risk_tightening"
+        details = dict(row)
+        mutation_id = str(row.get("mutation_id") or "")
+        details_mutation_id = str(details.get("mutation_id") or "")
+        required = {
+            "mutation_id",
+            "status",
+            "projection_status",
+            "scope_type",
+            "committed_config_hash",
+            "domain_hash",
+        }
+        if (
+            not mutation_id
+            or details_mutation_id != mutation_id
+            or str(details.get("commit_boundary") or "")
+            != "governance_mutation_coordinator"
+            or not state_table_exists(conn, "governance_mutation_intent")
+            or not required <= state_table_columns(conn, "governance_mutation_intent")
+        ):
+            raise RuntimeError(
+                "position_supervisor_restore_unverified:"
+                f"{row.get('application_id', '')}:{template_id}"
             )
-            if not committed and not legacy_quarantined:
-                raise RuntimeError(
-                    "legacy_position_supervisor_restore_unverified:"
-                    f"{row['application_id']}:{template_id}"
-                )
+        intent = conn.execute(
+            _sql(
+                conn,
+                """
+                SELECT mutation_id
+                FROM governance_mutation_intent
+                WHERE mutation_id=?
+                  AND status='committed'
+                  AND projection_status='current'
+                  AND scope_type='supervisor_template'
+                  AND committed_config_hash<>''
+                  AND domain_hash<>''
+                LIMIT 1
+                """,
+            ),
+            (mutation_id,),
+        ).fetchone()
+        if intent is None:
+            raise RuntimeError(
+                "position_supervisor_restore_unverified:"
+                f"{row.get('application_id', '')}:{template_id}"
+            )
 
-            if template_id not in _TEMPLATES:
-                evidence = details.get("evidence") if isinstance(details.get("evidence"), dict) else {}
-                snapshot = (
-                    details.get("candidate_template")
-                    or details.get("template_snapshot")
-                    or evidence.get("candidate_template")
-                    or evidence.get("template_snapshot")
-                    or {}
+        if template_id not in _TEMPLATES:
+            evidence = details.get("evidence") if isinstance(details.get("evidence"), dict) else {}
+            snapshot = (
+                details.get("candidate_template")
+                or details.get("template_snapshot")
+                or evidence.get("candidate_template")
+                or evidence.get("template_snapshot")
+                or {}
+            )
+            if (
+                not isinstance(snapshot, dict)
+                or str(snapshot.get("template_id") or "") != template_id
+                or not str(snapshot.get("template_version") or "")
+            ):
+                raise RuntimeError(
+                    "position_supervisor_committed_snapshot_missing:"
+                    f"{row.get('application_id', '')}:{template_id}"
                 )
-                if (
-                    not isinstance(snapshot, dict)
-                    or str(snapshot.get("template_id") or "") != template_id
-                    or not str(snapshot.get("template_version") or "")
-                ):
-                    raise RuntimeError(
-                        "position_supervisor_committed_snapshot_missing:"
-                        f"{row['application_id']}:{template_id}"
-                    )
 
         valid_templates = {str(item.get("template_id") or "") for item in list_position_supervisor_templates(db_path=path)}
         if template_id in valid_templates:
             return template_id
-        if require_authority:
-            raise RuntimeError(
-                "position_supervisor_restore_template_missing:"
-                f"{row['application_id']}:{template_id}"
-            )
-        return DEFAULT_TEMPLATE_ID
+        raise RuntimeError(
+            "position_supervisor_restore_template_missing:"
+            f"{row.get('application_id', '')}:{template_id}"
+        )
     except Exception as exc:
-        if require_authority:
-            if isinstance(exc, RuntimeError):
-                raise
-            raise RuntimeError(
-                f"position_supervisor_restore_failed:{type(exc).__name__}:{exc}"
-            ) from exc
-        return DEFAULT_TEMPLATE_ID
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(
+            f"position_supervisor_restore_failed:{type(exc).__name__}:{exc}"
+        ) from exc
     finally:
         conn.close()
 
@@ -490,4 +466,11 @@ def normalize_position_supervisor_template(template: dict[str, Any] | str | None
     merged = _merge_template(base, template)
     merged["schema_version"] = str(merged.get("schema_version") or SCHEMA_VERSION)
     merged["template_id"] = str(merged.get("template_id") or DEFAULT_TEMPLATE_ID)
+    boundary = dict(merged.get("risk_boundary") or {})
+    # observation_only is retained in historical rows for audit/read paths,
+    # but an active template can no longer authorize a new live trace with
+    # that boundary.
+    if str(merged.get("status") or "").strip().lower() == "active":
+        boundary["adaptive_execution_mode"] = "governed_execute"
+    merged["risk_boundary"] = boundary
     return merged

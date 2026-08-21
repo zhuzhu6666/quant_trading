@@ -50,7 +50,7 @@ def append_safety_shadow_observation(
         "observation_id": str(uuid.uuid4()),
         "observed_at": observed_at,
         "heartbeat_at": float(payload.get("heartbeat_at") or 0.0),
-        "generation_id": str(generation_id or "legacy"),
+        "generation_id": str(generation_id or "unowned"),
         "broker": str(broker or ""),
         "tick": int(tick),
         "mode": str(payload.get("mode") or ""),
@@ -78,7 +78,6 @@ def append_safety_shadow_observation(
                 "actual_recorded",
                 "pre_execution_match",
                 "v2_vs_actual_match",
-                "legacy_preview_vs_actual_match",
                 "fingerprint",
                 "actual_fingerprint",
             )

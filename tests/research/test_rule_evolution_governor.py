@@ -3,6 +3,11 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from backend.services.canonical_v2 import (
+    ensure_sqlite_schema,
+    record_decision_event,
+    record_review,
+)
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.learning_application_store import LearningApplicationStore
@@ -12,7 +17,75 @@ from research.learning.governor import RuleEvolutionGovernor
 def _connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    ensure_sqlite_schema(conn)
     return conn
+
+
+def _record_review(
+    conn: sqlite3.Connection,
+    *,
+    review_id: str,
+    trade_id: str,
+    position_id: str = "",
+    entry_decision_id: str = "",
+    pnl: float = 0.0,
+    outcome_label: str = "",
+    created_at: float,
+    review_payload: dict | None = None,
+) -> None:
+    record_review(
+        conn,
+        review_id=review_id,
+        trade_id=trade_id,
+        position_id=position_id,
+        entry_decision_id=entry_decision_id,
+        pnl=pnl,
+        outcome_label=outcome_label,
+        failure_tags=[],
+        review=review_payload or {"context_integrity": "full"},
+        created_at=created_at,
+    )
+
+
+def _record_factor_review(
+    conn: sqlite3.Connection,
+    *,
+    decision_id: str,
+    factor: str,
+    review_id: str,
+    trade_id: str,
+    position_id: str,
+    ts: float,
+    pnl: float,
+    outcome_label: str,
+    review_payload: dict | None = None,
+) -> None:
+    record_decision_event(
+        conn,
+        decision_id=decision_id,
+        event_type="entry_signal",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=ts,
+        factor_snapshots=[
+            {
+                "decision_id": decision_id,
+                "factor": factor,
+                "contribution_score": pnl / 100.0,
+            }
+        ],
+    )
+    _record_review(
+        conn,
+        review_id=review_id,
+        trade_id=trade_id,
+        position_id=position_id,
+        entry_decision_id=decision_id,
+        pnl=pnl,
+        outcome_label=outcome_label,
+        created_at=ts,
+        review_payload=review_payload,
+    )
 
 
 def _store(path: str) -> LearningApplicationStore:
@@ -441,31 +514,17 @@ def test_reconcile_application_effects_marks_ineffective_and_rolls_back(tmp_path
             decision_id = f"dec_{idx}"
             pnl = 60.0 if ts < 200.0 else -90.0
             review_payload = {"real_pnl": {"net": pnl}, "close_reason": "broker_close", "context_integrity": "full"}
-            conn.execute(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, contribution_score)
-                VALUES (?, 'fragile_factor', ?)
-                """,
-                (decision_id, pnl / 100.0),
-            )
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, '[]', '', ?, ?)
-                """,
-                (
-                    f"r_{idx}",
-                    f"t_{idx}",
-                    f"p_{idx}",
-                    decision_id,
-                    pnl,
-                    "bad_loss" if pnl < 0 else "lucky_win",
-                    json.dumps(review_payload),
-                    ts,
-                ),
+            _record_factor_review(
+                conn,
+                decision_id=decision_id,
+                factor="fragile_factor",
+                review_id=f"r_{idx}",
+                trade_id=f"t_{idx}",
+                position_id=f"p_{idx}",
+                ts=ts,
+                pnl=pnl,
+                outcome_label="bad_loss" if pnl < 0 else "lucky_win",
+                review_payload=review_payload,
             )
         conn.commit()
     finally:
@@ -532,31 +591,17 @@ def test_reconcile_application_effects_reinforces_positive_application(tmp_path)
         for idx, (ts, pnl) in enumerate(samples, start=1):
             decision_id = f"strong_dec_{idx}"
             review_payload = {"real_pnl": {"net": pnl}, "close_reason": "broker_close", "context_integrity": "full"}
-            conn.execute(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, contribution_score)
-                VALUES (?, 'strong_factor', ?)
-                """,
-                (decision_id, pnl / 100.0),
-            )
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, '[]', '', ?, ?)
-                """,
-                (
-                    f"sr_{idx}",
-                    f"st_{idx}",
-                    f"sp_{idx}",
-                    decision_id,
-                    pnl,
-                    "lucky_win",
-                    json.dumps(review_payload),
-                    ts,
-                ),
+            _record_factor_review(
+                conn,
+                decision_id=decision_id,
+                factor="strong_factor",
+                review_id=f"sr_{idx}",
+                trade_id=f"st_{idx}",
+                position_id=f"sp_{idx}",
+                ts=ts,
+                pnl=pnl,
+                outcome_label="lucky_win",
+                review_payload=review_payload,
             )
         conn.commit()
     finally:
@@ -646,23 +691,16 @@ def test_reconcile_application_effects_observes_position_supervisor_template(tmp
                     "action_reason": "profit_giveback_after_mfe",
                 },
             }
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, '[]', '', ?, ?)
-                """,
-                (
-                    review_id,
-                    f"trade_{review_id}",
-                    f"pos_{review_id}",
-                    f"dec_{review_id}",
-                    pnl,
-                    "bad_loss" if pnl < 0 else "good_win",
-                    json.dumps(review_payload),
-                    ts,
-                ),
+            _record_review(
+                conn,
+                review_id=review_id,
+                trade_id=f"trade_{review_id}",
+                position_id=f"pos_{review_id}",
+                entry_decision_id=f"dec_{review_id}",
+                pnl=pnl,
+                outcome_label="bad_loss" if pnl < 0 else "good_win",
+                created_at=ts,
+                review_payload=review_payload,
             )
         conn.commit()
     finally:
@@ -715,30 +753,17 @@ def test_reconcile_application_effects_waits_when_baseline_too_thin(tmp_path):
         for idx, (ts, pnl) in enumerate(samples, start=1):
             decision_id = f"new_dec_{idx}"
             review_payload = {"real_pnl": {"net": pnl}, "close_reason": "broker_close", "context_integrity": "full"}
-            conn.execute(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, contribution_score)
-                VALUES (?, 'new_factor', ?)
-                """,
-                (decision_id, pnl / 100.0),
-            )
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, 'lucky_win', '[]', '', ?, ?)
-                """,
-                (
-                    f"nr_{idx}",
-                    f"nt_{idx}",
-                    f"np_{idx}",
-                    decision_id,
-                    pnl,
-                    json.dumps(review_payload),
-                    ts,
-                ),
+            _record_factor_review(
+                conn,
+                decision_id=decision_id,
+                factor="new_factor",
+                review_id=f"nr_{idx}",
+                trade_id=f"nt_{idx}",
+                position_id=f"np_{idx}",
+                ts=ts,
+                pnl=pnl,
+                outcome_label="lucky_win",
+                review_payload=review_payload,
             )
         conn.commit()
     finally:
@@ -784,31 +809,31 @@ def test_demo_reconcile_terminalizes_comparatively_mixed_effects(tmp_path):
     try:
         for idx in range(3):
             decision_id = f"mixed_post_{idx}"
-            conn.execute(
-                "INSERT INTO decision_factor_snapshot (decision_id, factor) VALUES (?, 'mixed_factor')",
-                (decision_id,),
-            )
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, entry_decision_id, pnl, outcome_label, review_json, created_at)
-                VALUES (?, ?, ?, ?, 'mixed', '{}', ?)
-                """,
-                (f"mixed_post_review_{idx}", f"mixed_trade_{idx}", decision_id, 1.0, 1_700_000_100.0 + idx),
+            _record_factor_review(
+                conn,
+                decision_id=decision_id,
+                factor="mixed_factor",
+                review_id=f"mixed_post_review_{idx}",
+                trade_id=f"mixed_trade_{idx}",
+                position_id=f"mixed_post_position_{idx}",
+                ts=1_700_000_100.0 + idx,
+                pnl=1.0,
+                outcome_label="mixed",
+                review_payload={},
             )
         for idx in range(3):
             decision_id = f"mixed_pre_{idx}"
-            conn.execute(
-                "INSERT INTO decision_factor_snapshot (decision_id, factor) VALUES (?, 'mixed_factor')",
-                (decision_id,),
-            )
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, entry_decision_id, pnl, outcome_label, review_json, created_at)
-                VALUES (?, ?, ?, ?, 'mixed', '{}', ?)
-                """,
-                (f"mixed_pre_review_{idx}", f"mixed_pre_trade_{idx}", decision_id, 1.0, 1_699_999_900.0 + idx),
+            _record_factor_review(
+                conn,
+                decision_id=decision_id,
+                factor="mixed_factor",
+                review_id=f"mixed_pre_review_{idx}",
+                trade_id=f"mixed_pre_trade_{idx}",
+                position_id=f"mixed_pre_position_{idx}",
+                ts=1_699_999_900.0 + idx,
+                pnl=1.0,
+                outcome_label="mixed",
+                review_payload={},
             )
         conn.commit()
     finally:
@@ -847,30 +872,17 @@ def test_reconcile_application_effects_waits_when_no_post_reviews(tmp_path):
             decision_id = f"sleep_dec_{idx}"
             pnl = -30.0
             review_payload = {"real_pnl": {"net": pnl}, "close_reason": "broker_close", "context_integrity": "full"}
-            conn.execute(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, contribution_score)
-                VALUES (?, 'sleeping_factor', ?)
-                """,
-                (decision_id, pnl / 100.0),
-            )
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, 'good_loss', '[]', '', ?, ?)
-                """,
-                (
-                    f"sleep_r_{idx}",
-                    f"sleep_t_{idx}",
-                    f"sleep_p_{idx}",
-                    decision_id,
-                    pnl,
-                    json.dumps(review_payload),
-                    ts,
-                ),
+            _record_factor_review(
+                conn,
+                decision_id=decision_id,
+                factor="sleeping_factor",
+                review_id=f"sleep_r_{idx}",
+                trade_id=f"sleep_t_{idx}",
+                position_id=f"sleep_p_{idx}",
+                ts=ts,
+                pnl=pnl,
+                outcome_label="good_loss",
+                review_payload=review_payload,
             )
         conn.commit()
     finally:
@@ -981,30 +993,17 @@ def test_reconcile_parameter_template_effects_rolls_back_active_template(tmp_pat
         for idx, (ts, pnl) in enumerate(baseline_samples, start=1):
             decision_id = f"base_dec_{idx}"
             review_payload = {"real_pnl": {"net": pnl}, "close_reason": "broker_close", "context_integrity": "full"}
-            conn.execute(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, contribution_score)
-                VALUES (?, 'rsi_14', ?)
-                """,
-                (decision_id, pnl / 100.0),
-            )
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, 'good_win', '[]', '', ?, ?)
-                """,
-                (
-                    f"base_r_{idx}",
-                    f"base_t_{idx}",
-                    f"base_p_{idx}",
-                    decision_id,
-                    pnl,
-                    json.dumps(review_payload),
-                    ts,
-                ),
+            _record_factor_review(
+                conn,
+                decision_id=decision_id,
+                factor="rsi_14",
+                review_id=f"base_r_{idx}",
+                trade_id=f"base_t_{idx}",
+                position_id=f"base_p_{idx}",
+                ts=ts,
+                pnl=pnl,
+                outcome_label="good_win",
+                review_payload=review_payload,
             )
 
         post_samples = (
@@ -1015,30 +1014,17 @@ def test_reconcile_parameter_template_effects_rolls_back_active_template(tmp_pat
         for idx, (ts, pnl) in enumerate(post_samples, start=1):
             decision_id = f"post_dec_{idx}"
             review_payload = {"real_pnl": {"net": pnl}, "close_reason": "broker_close", "context_integrity": "full"}
-            conn.execute(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, contribution_score)
-                VALUES (?, 'rsi_14', ?)
-                """,
-                (decision_id, pnl / 100.0),
-            )
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, 'bad_loss', '[]', '', ?, ?)
-                """,
-                (
-                    f"post_r_{idx}",
-                    f"post_t_{idx}",
-                    f"post_p_{idx}",
-                    decision_id,
-                    pnl,
-                    json.dumps(review_payload),
-                    ts,
-                ),
+            _record_factor_review(
+                conn,
+                decision_id=decision_id,
+                factor="rsi_14",
+                review_id=f"post_r_{idx}",
+                trade_id=f"post_t_{idx}",
+                position_id=f"post_p_{idx}",
+                ts=ts,
+                pnl=pnl,
+                outcome_label="bad_loss",
+                review_payload=review_payload,
             )
         conn.commit()
     finally:
@@ -1381,27 +1367,17 @@ def test_effect_reconciliation_closes_window_before_concurrent_same_scope_change
     try:
         for idx, (ts, pnl) in enumerate(((100.0, -20.0), (120.0, -10.0), (240.0, 80.0), (260.0, 90.0), (280.0, 85.0))):
             decision_id = f"confound_dec_{idx}"
-            conn.execute(
-                "INSERT INTO decision_factor_snapshot (decision_id, factor, contribution_score) VALUES (?, 'rsi_14', ?)",
-                (decision_id, pnl / 100.0),
-            )
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, '[]', '', ?, ?)
-                """,
-                (
-                    f"confound_review_{idx}",
-                    f"confound_trade_{idx}",
-                    f"confound_position_{idx}",
-                    decision_id,
-                    pnl,
-                    "good_win" if pnl > 0 else "bad_loss",
-                    json.dumps({"context_integrity": "full", "close_reason": "broker_close"}),
-                    ts,
-                ),
+            _record_factor_review(
+                conn,
+                decision_id=decision_id,
+                factor="rsi_14",
+                review_id=f"confound_review_{idx}",
+                trade_id=f"confound_trade_{idx}",
+                position_id=f"confound_position_{idx}",
+                ts=ts,
+                pnl=pnl,
+                outcome_label="good_win" if pnl > 0 else "bad_loss",
+                review_payload={"context_integrity": "full", "close_reason": "broker_close"},
             )
         conn.commit()
     finally:
@@ -1445,22 +1421,17 @@ def test_effect_reconciliation_uses_only_evidence_before_next_same_scope_change(
         samples = ((100.0, -20.0), (120.0, -10.0), (205.0, 80.0), (210.0, 90.0), (220.0, 85.0), (240.0, -100.0))
         for idx, (ts, pnl) in enumerate(samples):
             decision_id = f"bounded_dec_{idx}"
-            conn.execute(
-                "INSERT INTO decision_factor_snapshot (decision_id, factor, contribution_score) VALUES (?, 'bounded_factor', ?)",
-                (decision_id, pnl / 100.0),
-            )
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, entry_decision_id, pnl, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, '[]', '', ?, ?)
-                """,
-                (
-                    f"bounded_review_{idx}", f"bounded_trade_{idx}", f"bounded_position_{idx}",
-                    decision_id, pnl, "good_win" if pnl > 0 else "bad_loss",
-                    json.dumps({"context_integrity": "full", "close_reason": "broker_close"}), ts,
-                ),
+            _record_factor_review(
+                conn,
+                decision_id=decision_id,
+                factor="bounded_factor",
+                review_id=f"bounded_review_{idx}",
+                trade_id=f"bounded_trade_{idx}",
+                position_id=f"bounded_position_{idx}",
+                ts=ts,
+                pnl=pnl,
+                outcome_label="good_win" if pnl > 0 else "bad_loss",
+                review_payload={"context_integrity": "full", "close_reason": "broker_close"},
             )
         conn.commit()
     finally:

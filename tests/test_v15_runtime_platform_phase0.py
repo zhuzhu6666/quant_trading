@@ -6,9 +6,18 @@ import pandas as pd
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.autonomy_health import AutonomyHealthService
+from backend.services.canonical_v2 import (
+    record_counterfactual_event,
+    record_decision_event,
+    record_order_event,
+    record_position_event,
+    record_review,
+    record_supervisor_trace_event,
+    record_sample_row,
+)
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services import replay_harness as replay_harness_module
-from tests.canonical_fixture import ensure_training_sample_row_sqlite
+from tests.canonical_fixture import ensure_training_sample_row_sqlite, make_canonical_sqlite
 from backend.services.release_control import ReleaseControlService
 from backend.services.replay_harness import ReplayHarnessService
 from backend.services.v15_phase0 import V15Phase0CompletionService
@@ -42,10 +51,9 @@ def test_replay_harness_persists_factor_gate_risk_report(tmp_path):
     db_path = tmp_path / "state.db"
     now = time.time()
     verdict = {"allowed": True, "reason": "ok", "audit_payload": {"action": "open_trade"}}
-    conn = connect_sqlite(db_path)
+    conn = make_canonical_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
-        ensure_training_sample_row_sqlite(db_path)
         conn.execute(
             """
             INSERT INTO runtime_config_snapshot
@@ -54,27 +62,25 @@ def test_replay_harness_persists_factor_gate_risk_report(tmp_path):
             """,
             (now,),
         )
-        conn.execute(
-            """
-            INSERT INTO decision_ledger
-            (decision_id, event_type, symbol, timeframe, decision_ts, action_score,
-             action_reason, portfolio_state_json, risk_state_json, action_json, created_at)
-            VALUES ('dec_1', 'open', 'XAUUSD+', 'M5', ?, 0.7, 'executed',
-                    '{}', ?, ?, ?)
-            """,
-            (
-                now - 30.0,
-                json.dumps({"policy_verdict": verdict}),
-                json.dumps({"gate_passed": True, "gate_reason": "pass", "risk_verdict": verdict}),
-                now,
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO decision_factor_snapshot
-            (decision_id, factor, normalized_value, policy_weight, contribution_score)
-            VALUES ('dec_1', 'rsi_14', 0.6, 0.2, 0.12)
-            """
+        record_decision_event(
+            conn,
+            decision_id="dec_1",
+            event_type="open",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=now - 30.0,
+            action_score=0.7,
+            action_reason="executed",
+            action={
+                "gate_passed": True,
+                "gate_reason": "pass",
+                "risk_verdict": verdict,
+            },
+            risk_state={"policy_verdict": verdict},
+            created_at=now,
+            factor_snapshots=[
+                {"factor": "rsi_14", "normalized_value": 0.6, "policy_weight": 0.2, "contribution_score": 0.12}
+            ],
         )
         conn.commit()
     finally:
@@ -119,10 +125,9 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
             },
         },
     }
-    conn = connect_sqlite(db_path)
+    conn = make_canonical_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
-        ensure_training_sample_row_sqlite(db_path)
         conn.execute(
             """
             INSERT INTO runtime_config_snapshot
@@ -131,108 +136,137 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
             """,
             (now,),
         )
-        conn.execute(
-            """
-            INSERT INTO decision_ledger
-            (decision_id, trade_id, position_id, event_type, symbol, timeframe, decision_ts, action_score,
-             action_reason, portfolio_state_json, risk_state_json, action_json, created_at)
-            VALUES ('dec_bar_1', 'trade_1', '1001', 'open', 'XAUUSD+', 'M5', ?, 0.8, 'executed',
-                    '{}', ?, ?, ?)
-            """,
-            (
-                now - 30.0,
-                json.dumps({"policy_verdict": verdict}),
-                json.dumps(
-                    {
-                        "direction": 1,
-                        "score": 0.8,
-                        "gate_passed": True,
-                        "gate_reason": "passed",
-                        "requested_volume": 1.0,
-                        "risk_verdict": verdict,
-                    }
-                ),
-                now,
+        record_decision_event(
+            conn,
+            decision_id="dec_bar_1",
+            trade_id="trade_1",
+            position_id="1001",
+            event_type="open",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=now - 30.0,
+            action_score=0.8,
+            action_reason="executed",
+            action={
+                "direction": 1,
+                "score": 0.8,
+                "gate_passed": True,
+                "gate_reason": "passed",
+                "requested_volume": 1.0,
+                "risk_verdict": verdict,
+            },
+            risk_state={"policy_verdict": verdict},
+            created_at=now,
+            factor_snapshots=[
+                {"factor": "rsi_14", "normalized_value": 0.6, "policy_weight": 0.2, "contribution_score": 0.12}
+            ],
+        )
+        record_order_event(
+            conn,
+            event_id="ord_submitted_1",
+            decision_id="dec_bar_1",
+            trade_id="trade_1",
+            order_id="order_1",
+            broker_order_id="broker_1",
+            event_type="submitted",
+            event_ts=now - 29.0,
+            price=1.3,
+            volume=1.0,
+            status="submitted",
+            details={},
+        )
+        record_order_event(
+            conn,
+            event_id="ord_filled_1",
+            decision_id="dec_bar_1",
+            trade_id="trade_1",
+            order_id="order_1",
+            broker_order_id="broker_1",
+            event_type="filled",
+            event_ts=now - 28.0,
+            price=1.31,
+            volume=1.0,
+            status="filled",
+            details={},
+        )
+        record_position_event(
+            conn,
+            event_id="pos_opened_1",
+            position_id="1001",
+            trade_id="trade_1",
+            symbol="XAUUSD+",
+            event_type="opened",
+            event_ts=now - 27.0,
+            net_volume=1.0,
+            avg_price=1.31,
+            unrealized_pnl=0.0,
+            realized_pnl=0.0,
+            details={},
+        )
+        record_position_event(
+            conn,
+            event_id="pos_closed_1",
+            position_id="1001",
+            trade_id="trade_1",
+            symbol="XAUUSD+",
+            event_type="closed",
+            event_ts=now - 9.0,
+            net_volume=0.0,
+            avg_price=1.31,
+            unrealized_pnl=0.0,
+            realized_pnl=-1.25,
+            details={"close_reason": "thesis_broken"},
+        )
+        record_review(
+            conn,
+            review_id="review_1",
+            trade_id="trade_1",
+            position_id="1001",
+            entry_decision_id="dec_bar_1",
+            exit_decision_id="dec_exit_1",
+            pnl=-1.25,
+            outcome_label="bad_loss",
+            summary_text=(
+                "trade trade_1 closed pnl=-1.25; outcome=bad_loss; "
+                "primary_factor=rsi_14; worst_factor=adx"
             ),
+            review={"close_ts": now - 9.0, "close_reason": "thesis_broken"},
+            created_at=now - 8.0,
         )
-        conn.execute(
-            """
-            INSERT INTO decision_factor_snapshot
-            (decision_id, factor, normalized_value, policy_weight, contribution_score)
-            VALUES ('dec_bar_1', 'rsi_14', 0.6, 0.2, 0.12)
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO order_lifecycle_event
-            (event_id, decision_id, trade_id, order_id, broker_order_id,
-             event_type, event_ts, price, volume, status, details_json)
-            VALUES ('ord_submitted_1', 'dec_bar_1', 'trade_1', 'order_1', 'broker_1',
-                    'submitted', ?, 1.3, 1.0, 'submitted', '{}')
-            """,
-            (now - 29.0,),
-        )
-        conn.execute(
-            """
-            INSERT INTO order_lifecycle_event
-            (event_id, decision_id, trade_id, order_id, broker_order_id,
-             event_type, event_ts, price, volume, status, details_json)
-            VALUES ('ord_filled_1', 'dec_bar_1', 'trade_1', 'order_1', 'broker_1',
-                    'filled', ?, 1.31, 1.0, 'filled', '{}')
-            """,
-            (now - 28.0,),
-        )
-        conn.execute(
-            """
-            INSERT INTO position_lifecycle_event
-            (event_id, position_id, trade_id, symbol, event_type, event_ts,
-             net_volume, avg_price, unrealized_pnl, realized_pnl, details_json)
-            VALUES ('pos_opened_1', '1001', 'trade_1', 'XAUUSD+', 'opened', ?,
-                    1.0, 1.31, 0.0, 0.0, '{}')
-            """,
-            (now - 27.0,),
-        )
-        conn.execute(
-            """
-            INSERT INTO position_lifecycle_event
-            (event_id, position_id, trade_id, symbol, event_type, event_ts,
-             net_volume, avg_price, unrealized_pnl, realized_pnl, details_json)
-            VALUES ('pos_closed_1', '1001', 'trade_1', 'XAUUSD+', 'closed', ?,
-                    0.0, 1.31, 0.0, -1.25, ?)
-            """,
-            (
-                now - 9.0,
-                json.dumps({"close_reason": "thesis_broken"}),
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-             pnl, outcome_label, summary_text, review_json, created_at)
-            VALUES ('review_1', 'trade_1', '1001', 'dec_bar_1', 'dec_exit_1',
-                    -1.25, 'bad_loss',
-                    'trade trade_1 closed pnl=-1.25; outcome=bad_loss; primary_factor=rsi_14; worst_factor=adx',
-                    ?, ?)
-            """,
-            (
-                json.dumps({"close_ts": now - 9.0, "close_reason": "thesis_broken"}),
-                now - 8.0,
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO training_sample_row
-            (sample_id, sample_type, source_table, source_id, decision_id,
-             trade_id, position_id, symbol, timeframe, event_ts,
-             label_status, integrity, train_weight, system_contaminated,
-             governance_eligible, governance_effective_weight,
-             created_at, updated_at)
-            VALUES ('als_trade_1', 'trade_review_outcome', 'trade_outcome_review',
-                    'review_1', 'dec_bar_1', 'trade_1', '1001', 'XAUUSD+', 'M5',
-                    ?, 'matured', 'full', 1.0, 0, 1, 1.0, ?, ?)
-            """,
-            (now - 8.0, now - 8.0, now - 8.0),
+        record_sample_row(
+            conn,
+            {
+                "sample_id": "als_trade_1",
+                "sample_type": "trade_review_outcome",
+                "source_table": "canonical_v2.trade_review",
+                "source_id": "review_1",
+                "decision_id": "dec_bar_1",
+                "trade_id": "trade_1",
+                "position_id": "1001",
+                "symbol": "XAUUSD+",
+                "timeframe": "M5",
+                "event_ts": now - 8.0,
+                "label_status": "matured",
+                "integrity": "full",
+                "train_weight": 1.0,
+                "features_json": "{}",
+                "verdict_json": "{}",
+                "label_json": "{}",
+                "trace_json": "{}",
+                "evidence_contract_json": "{}",
+                "config_version": 0,
+                "config_hash": "",
+                "evolution_run_id": "",
+                "system_contaminated": 0,
+                "governance_eligible": 1,
+                "governance_effective_weight": 1.0,
+                "governance_eligibility_version": "",
+                "governance_ineligible_reason": "",
+                "governance_eligibility_fingerprint": "",
+                "content_fingerprint": "",
+                "created_at": now - 8.0,
+                "updated_at": now - 8.0,
+            },
         )
         conn.execute(
             """
@@ -246,54 +280,70 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
             """,
             (now - 27.5, now),
         )
-        conn.execute(
-            """
-            INSERT INTO position_supervisor_trace
-            (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
-             tick, event_ts, action, summary_reason, confidence, template_id,
-             template_version, stage, outcome, risk_action, risk_allowed,
-             risk_reason, execution_status, execution_reason, context_json,
-             verdict_json, risk_verdict_json, execution_json, trace_integrity,
-             config_version, config_hash, evolution_run_id, created_at)
-            VALUES ('sup_trace_1', 'dec_bar_1', '1001', 'trade_1', 'XAUUSD+', 'M5',
-                    1, ?, 'hold', 'ok', 0.7, 'default', 'v1',
-                    'manage', 'observed', 'close_position', 1, 'ok',
-                    'observed', 'no_action', ?, '{}', ?, ?,
-                    'full', 1, 'cfg_hash', '', ?)
-            """,
-            (
-                now - 20.0,
-                json.dumps(
-                    {
-                        "position_id": "1001",
-                        "close_reason": "supervisor",
-                        "loop_running": True,
-                        "bridge_connected": True,
-                        "temporal_context": {"timeframe_seconds": 300},
-                    }
-                ),
-                json.dumps({"allowed": True, "reason": "risk_reducing_action"}),
-                json.dumps({"status": "observed"}),
-                now,
-            ),
+        record_supervisor_trace_event(
+            conn,
+            trace_id="sup_trace_1",
+            decision_id="dec_bar_1",
+            event_ts=now - 20.0,
+            payload={
+                "trace_id": "sup_trace_1",
+                "decision_id": "dec_bar_1",
+                "position_id": "1001",
+                "trade_id": "trade_1",
+                "symbol": "XAUUSD+",
+                "timeframe": "M5",
+                "event_ts": now - 20.0,
+                "action": "hold",
+                "summary_reason": "ok",
+                "confidence": 0.7,
+                "template_id": "default",
+                "template_version": "v1",
+                "stage": "manage",
+                "outcome": "observed",
+                "risk_action": "close_position",
+                "risk_allowed": True,
+                "risk_reason": "ok",
+                "execution_status": "observed",
+                "execution_reason": "no_action",
+                "context": {
+                    "position_id": "1001",
+                    "close_reason": "supervisor",
+                    "loop_running": True,
+                    "bridge_connected": True,
+                    "temporal_context": {"timeframe_seconds": 300},
+                },
+                "verdict": {},
+                "risk_verdict": {"allowed": True, "reason": "risk_reducing_action"},
+                "execution": {"status": "observed"},
+                "trace_integrity": "full",
+                "config_version": 1,
+                "config_hash": "cfg_hash",
+                "evolution_run_id": "",
+                "created_at": now,
+            },
         )
-        conn.execute(
-            """
-            INSERT INTO supervisor_counterfactual_review
-            (counterfactual_id, review_id, trade_id, position_id, close_ts,
-             close_reason, supervisor_event_type, supervisor_reason, label,
-             confidence, horizons_json, evidence_json, created_at, updated_at)
-            VALUES ('cf_1', 'review_1', 'trade_1', '1001', ?, 'broker_close',
-                    'supervisor_close', 'ok', 'correct_stop', 0.76, ?,
-                    ?, ?, ?)
-            """,
-            (
-                now - 10.0,
-                json.dumps([{"horizon_minutes": 30, "future_pnl_delta": -0.2}]),
-                json.dumps({"schema_version": "supervisor_counterfactual.v1", "advisory_only": True}),
-                now,
-                now,
-            ),
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_1",
+            review_id="review_1",
+            trace_id="sup_trace_1",
+            event_ts=now - 10.0,
+            payload={
+                "counterfactual_id": "cf_1",
+                "review_id": "review_1",
+                "trade_id": "trade_1",
+                "position_id": "1001",
+                "close_ts": now - 10.0,
+                "close_reason": "broker_close",
+                "supervisor_event_type": "supervisor_close",
+                "supervisor_reason": "ok",
+                "label": "correct_stop",
+                "confidence": 0.76,
+                "horizons": [{"horizon_minutes": 30, "future_pnl_delta": -0.2}],
+                "evidence": {"schema_version": "supervisor_counterfactual.v1", "advisory_only": True},
+                "created_at": now,
+                "updated_at": now,
+            },
         )
         conn.commit()
     finally:
@@ -485,7 +535,7 @@ def test_autonomy_health_v1_is_machine_readable_and_read_only(tmp_path):
             INSERT INTO training_sample_row
             (sample_id, sample_type, source_table, source_id, event_ts, label_status,
              integrity, train_weight, created_at, updated_at)
-            VALUES ('s1', 'shadow_open_decision', 'decision_ledger', 'dec_1',
+            VALUES ('s1', 'shadow_open_decision', 'canonical_v2.risk_decision', 'dec_1',
                     ?, 'matured', 'full', 0.9, ?, ?)
             """,
             (now, now, now),
@@ -614,7 +664,7 @@ def test_autonomy_health_filters_before_limit_and_uses_governance_weight(tmp_pat
              governance_eligible, governance_effective_weight,
              created_at, updated_at)
             VALUES ('clean_sample', 'trade_review_outcome',
-                    'trade_outcome_review', 'clean_review', 1.0,
+                    'canonical_v2.trade_review', 'clean_review', 1.0,
                     'matured', 'full', 0.0, 0, 1, 0.8, 1.0, 1.0)
             """
         )
@@ -625,7 +675,7 @@ def test_autonomy_health_filters_before_limit_and_uses_governance_weight(tmp_pat
              label_status, integrity, train_weight, system_contaminated,
              governance_eligible, governance_effective_weight,
              created_at, updated_at)
-            VALUES (?, 'trade_review_outcome', 'trade_outcome_review', ?,
+            VALUES (?, 'trade_review_outcome', 'canonical_v2.trade_review', ?,
                     ?, 'matured', 'full', 1.0, 1, 1, 1.0, ?, ?)
             """,
             [
@@ -1087,19 +1137,24 @@ def test_v15_phase0_completion_gate_separates_code_and_operational_evidence():
 def test_bar_decision_choices_fall_back_to_closed_recovery_state(tmp_path):
     db_path = tmp_path / "state.db"
     now = time.time()
-    conn = connect_sqlite(db_path)
+    conn = make_canonical_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
-        conn.execute(
-            """
-            INSERT INTO decision_ledger
-            (decision_id, trade_id, position_id, event_type, symbol, timeframe,
-             decision_ts, action_score, action_reason, portfolio_state_json,
-             risk_state_json, action_json, created_at)
-            VALUES ('dec_recovery_1', 'trade_recovery_1', '2002', 'open',
-                    'XAUUSD+', 'M15', ?, 0.8, 'executed', '{}', '{}', '{}', ?)
-            """,
-            (now - 900.0, now - 100.0),
+        record_decision_event(
+            conn,
+            decision_id="dec_recovery_1",
+            trade_id="trade_recovery_1",
+            position_id="2002",
+            event_type="open",
+            symbol="XAUUSD+",
+            timeframe="M15",
+            decision_ts=now - 900.0,
+            action_score=0.8,
+            action_reason="executed",
+            action={},
+            risk_state={},
+            portfolio_state={},
+            created_at=now - 100.0,
         )
         conn.execute(
             """

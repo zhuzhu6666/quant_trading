@@ -31,9 +31,10 @@ def test_protection_cycle_preserves_priority_and_single_position_authority():
         _LegacyCandidate("entry", "tighten", 20, 2, "tighten_position", {}, "repair"),
     ]
     trailing_candidates = [
-        _LegacyCandidate("trail", "tighten", 50, 2, "tighten_position", {}, "trail"),
-        _LegacyCandidate("trail", "tighten", 50, 4, "tighten_position", {}, "trail"),
+        _LegacyCandidate("legacy_awe_trailing", "tighten", 50, 2, "tighten_position", {}, "trail"),
+        _LegacyCandidate("legacy_awe_trailing", "tighten", 50, 4, "tighten_position", {}, "trail"),
     ]
+    trailing_calls: list[bool] = []
     executed: list[tuple[str, int]] = []
     superseded: list[tuple[int, str]] = []
 
@@ -61,7 +62,6 @@ def test_protection_cycle_preserves_priority_and_single_position_authority():
         return {3}
 
     runtime = PositionProtectionCycleRuntime(
-        update_trailing_stops=lambda *_args, **_kwargs: trailing_candidates,
         enforce_holding_timeout=timeout,
         entry_protection_repair_candidates=lambda *_args, **_kwargs: entry_candidates,
         log_candidate_superseded=lambda item, **kwargs: superseded.append(
@@ -73,11 +73,6 @@ def test_protection_cycle_preserves_priority_and_single_position_authority():
         or True,
         run_position_supervision=supervisor,
         protection_candidate_to_safety=protection_candidate_to_safety,
-        candidate_supersede_reason=lambda *, position_id, protected_position_ids, **_kwargs: (
-            "higher_priority_protection"
-            if position_id in protected_position_ids
-            else ""
-        ),
         build_cycle_result=build_position_protection_cycle_result,
         record_aux_failure=lambda *_args, **_kwargs: None,
         warning=lambda *_args, **_kwargs: None,
@@ -97,18 +92,19 @@ def test_protection_cycle_preserves_priority_and_single_position_authority():
         runtime=runtime,
     )
 
-    assert executed == [("entry", 2), ("trail", 4)]
-    assert superseded == [(1, "holding_timeout"), (2, "higher_priority_protection")]
+    assert executed == [("entry", 2)]
+    assert superseded == [(1, "holding_timeout")]
     assert result["timeout"] == [1]
     assert result["entry_repair"] == [2]
     assert result["supervisor"] == [3]
-    assert result["trailing_applied"] == [4]
-    assert result["trailing_superseded"] == [2]
-    assert [item["position_id"] for item in result["safety_candidates"]] == [1, 2, 3, 4]
-    assert [item["priority"] for item in result["safety_arbitration"]] == [10, 20, 20, 30, 50, 50]
+    assert result["trailing_applied"] == []
+    assert result["trailing_superseded"] == []
+    assert [item["position_id"] for item in result["safety_candidates"]] == [1, 2, 3]
+    assert [item["priority"] for item in result["safety_arbitration"]] == [10, 20, 20, 30]
+    assert trailing_calls == []
 
 
-def test_demo_protection_cycle_observes_legacy_trailing_without_execution():
+def test_protection_cycle_does_not_collect_retired_legacy_trailing():
     candidate = _LegacyCandidate(
         "legacy_awe_trailing",
         "tighten",
@@ -122,7 +118,6 @@ def test_demo_protection_cycle_observes_legacy_trailing_without_execution():
     superseded: list[tuple[int, str]] = []
 
     runtime = PositionProtectionCycleRuntime(
-        update_trailing_stops=lambda *_args, **_kwargs: [candidate],
         enforce_holding_timeout=lambda *_args, **_kwargs: set(),
         entry_protection_repair_candidates=lambda *_args, **_kwargs: [],
         log_candidate_superseded=lambda item, **kwargs: superseded.append(
@@ -131,7 +126,6 @@ def test_demo_protection_cycle_observes_legacy_trailing_without_execution():
         execute_candidate=lambda item, **_kwargs: executed.append(item.position_id) or True,
         run_position_supervision=lambda *_args, **_kwargs: set(),
         protection_candidate_to_safety=protection_candidate_to_safety,
-        candidate_supersede_reason=lambda **_kwargs: "",
         build_cycle_result=build_position_protection_cycle_result,
         record_aux_failure=lambda *_args, **_kwargs: None,
         warning=lambda *_args, **_kwargs: None,
@@ -152,6 +146,6 @@ def test_demo_protection_cycle_observes_legacy_trailing_without_execution():
     )
 
     assert executed == []
-    assert superseded == [(8, "demo_adaptive_observation")]
+    assert superseded == []
     assert result["trailing_applied"] == []
-    assert result["trailing_superseded"] == [8]
+    assert result["trailing_superseded"] == []

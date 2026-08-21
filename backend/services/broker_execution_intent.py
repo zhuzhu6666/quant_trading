@@ -18,7 +18,7 @@ from backend.core.db_helpers import dump_json as _json, row_value as _row_value
 
 
 UNRESOLVED_EXECUTION_STATUSES = frozenset({"prepared", "submitting", "unknown"})
-FINAL_EXECUTION_STATUSES = frozenset({"confirmed", "rejected", "simulated"})
+FINAL_EXECUTION_STATUSES = frozenset({"confirmed", "rejected"})
 EXECUTION_INTENT_STATUSES = UNRESOLVED_EXECUTION_STATUSES | FINAL_EXECUTION_STATUSES
 
 
@@ -97,7 +97,7 @@ class BrokerExecutionIntentStore:
         try:
             conn.execute(
                 """
-                INSERT INTO broker_execution_intent (
+                INSERT INTO runtime.broker_execution_intent (
                     intent_id, idempotency_key, decision_id, trade_id,
                     broker, account_id, symbol, action, side,
                     requested_volume, requested_price, target_stop_loss,
@@ -129,7 +129,7 @@ class BrokerExecutionIntentStore:
                        submitted_at, completed_at, updated_at,
                        requested_price, target_stop_loss, target_take_profit,
                        decision_id, trade_id
-                FROM broker_execution_intent
+                FROM runtime.broker_execution_intent
                 WHERE idempotency_key=%s
                 """,
                 (str(idempotency_key),),
@@ -159,7 +159,7 @@ class BrokerExecutionIntentStore:
             if request is None:
                 conn.execute(
                     """
-                    UPDATE broker_execution_intent
+                    UPDATE runtime.broker_execution_intent
                     SET status='submitting', attempt_count=attempt_count + 1,
                         submitted_at=%s, updated_at=%s
                     WHERE intent_id=%s AND status='prepared'
@@ -169,7 +169,7 @@ class BrokerExecutionIntentStore:
             else:
                 conn.execute(
                     """
-                    UPDATE broker_execution_intent
+                    UPDATE runtime.broker_execution_intent
                     SET status='submitting', attempt_count=attempt_count + 1,
                         request_json=%s, submitted_at=%s, updated_at=%s
                     WHERE intent_id=%s AND status='prepared'
@@ -202,7 +202,7 @@ class BrokerExecutionIntentStore:
         error: Mapping[str, Any] | None = None,
     ) -> BrokerExecutionIntent:
         status = str(outcome or "").strip().lower()
-        if status not in {"confirmed", "rejected", "unknown", "simulated"}:
+        if status not in {"confirmed", "rejected", "unknown"}:
             raise ValueError(f"invalid broker execution outcome: {outcome!r}")
         now = time.time()
         completed_at = 0.0 if status == "unknown" else now
@@ -210,7 +210,7 @@ class BrokerExecutionIntentStore:
         try:
             conn.execute(
                 """
-                UPDATE broker_execution_intent
+                UPDATE runtime.broker_execution_intent
                 SET status=%s, position_id=%s,
                     trade_id=COALESCE(NULLIF(%s, ''), trade_id),
                     broker_order_id=%s,
@@ -267,7 +267,7 @@ class BrokerExecutionIntentStore:
                        submitted_at, completed_at, updated_at,
                        requested_price, target_stop_loss, target_take_profit,
                        decision_id, trade_id
-                FROM broker_execution_intent
+                FROM runtime.broker_execution_intent
                 WHERE {' AND '.join(clauses)}
                 ORDER BY prepared_at ASC
                 LIMIT %s
@@ -296,7 +296,7 @@ class BrokerExecutionIntentStore:
         conn = self._connect(read_only=True)
         try:
             row = conn.execute(
-                f"SELECT COUNT(*) AS n FROM broker_execution_intent WHERE {' AND '.join(clauses)}",
+                f"SELECT COUNT(*) AS n FROM runtime.broker_execution_intent WHERE {' AND '.join(clauses)}",
                 tuple(params),
             ).fetchone()
             return int(_row_value(row, "n", 0, 0) or 0)
@@ -314,7 +314,7 @@ class BrokerExecutionIntentStore:
                    submitted_at, completed_at, updated_at,
                    requested_price, target_stop_loss, target_take_profit,
                    decision_id, trade_id
-            FROM broker_execution_intent
+            FROM runtime.broker_execution_intent
             WHERE intent_id=%s
             """,
             (str(intent_id),),
@@ -368,7 +368,7 @@ def execution_intent_recovery_status(
 
     items = store.unresolved(account_id=account_id, symbol=symbol)
     return {
-        "schema": "broker_execution_intent_recovery.v1",
+        "schema": "broker_execution_intent_recovery.v2",
         "ready": not items,
         "unresolved_count": len(items),
         "unresolved": [

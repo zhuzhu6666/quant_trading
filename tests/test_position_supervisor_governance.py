@@ -1,11 +1,21 @@
 import json
 import sqlite3
 
+from backend.services.canonical_v2 import (
+    record_counterfactual_event,
+    record_position_event,
+    record_review,
+)
+from backend.services.canonical_v2_reader import (
+    iter_counterfactual_rows,
+    iter_review_rows,
+)
 from backend.services.position_supervisor_governance import (
     _counterfactual_summary,
     build_position_supervisor_advisories,
     replay_position_supervisor_templates,
 )
+from tests.canonical_fixture import make_canonical_sqlite
 from backend.services.position_supervisor_templates import (
     CONSERVATIVE_TEMPLATE_ID,
     DEFAULT_TEMPLATE_ID,
@@ -15,37 +25,9 @@ from backend.services.position_supervisor_templates import (
 
 
 def _create_db(path):
-    conn = sqlite3.connect(str(path))
+    conn = make_canonical_sqlite(path)
     conn.executescript(
         """
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            exit_decision_id TEXT DEFAULT '',
-            pnl REAL DEFAULT 0.0,
-            mae REAL DEFAULT 0.0,
-            mfe REAL DEFAULT 0.0,
-            outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]',
-            summary_text TEXT DEFAULT '',
-            review_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE position_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            position_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            symbol TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            net_volume REAL DEFAULT 0.0,
-            avg_price REAL DEFAULT 0.0,
-            unrealized_pnl REAL DEFAULT 0.0,
-            realized_pnl REAL DEFAULT 0.0,
-            details_json TEXT DEFAULT '{}'
-        );
         CREATE TABLE policy_suggestion (
             suggestion_id TEXT PRIMARY KEY,
             scope_type TEXT NOT NULL,
@@ -62,22 +44,6 @@ def _create_db(path):
             governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
             governance_ineligible_reason TEXT NOT NULL DEFAULT '',
             created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE supervisor_counterfactual_review (
-            counterfactual_id TEXT PRIMARY KEY,
-            review_id TEXT DEFAULT '',
-            trade_id TEXT DEFAULT '',
-            position_id TEXT NOT NULL,
-            close_ts REAL NOT NULL DEFAULT 0.0,
-            close_reason TEXT DEFAULT '',
-            supervisor_event_type TEXT DEFAULT '',
-            supervisor_reason TEXT DEFAULT '',
-            label TEXT DEFAULT '',
-            confidence REAL DEFAULT 0.0,
-            horizons_json TEXT DEFAULT '[]',
-            evidence_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0,
-            updated_at REAL NOT NULL DEFAULT 0.0
         );
         """
     )
@@ -101,35 +67,49 @@ def _create_db(path):
         "close_reason": "thesis_broken",
         "real_pnl": {"gross": -1.0, "net": -1.0, "entry_price": 3000.0},
     }
-    conn.execute(
-        """
-        INSERT INTO trade_outcome_review
-        (review_id, trade_id, position_id, pnl, mae, mfe, outcome_label,
-         failure_tags_json, summary_text, review_json, created_at)
-        VALUES ('rev_1', '1001', '1001', -1.0, 1.4, 0.0, 'good_loss',
-                '[]', 'small loss', ?, ?)
-        """,
-        (json.dumps(review), created_at),
+    record_review(
+        conn,
+        review_id="rev_1",
+        trade_id="1001",
+        position_id="1001",
+        pnl=-1.0,
+        mae=1.4,
+        mfe=0.0,
+        outcome_label="good_loss",
+        failure_tags=[],
+        summary_text="small loss",
+        review=review,
+        created_at=created_at,
     )
-    conn.execute(
-        """
-        INSERT INTO position_lifecycle_event
-        (event_id, position_id, trade_id, symbol, event_type, event_ts, details_json)
-        VALUES ('open_1', '1001', '1001', 'XAUUSD+', 'opened', ?, ?)
-        """,
-        (created_at - 60, json.dumps({"sl": 2980.0, "tp": 3040.0})),
+    record_position_event(
+        conn,
+        event_id="open_1",
+        position_id="1001",
+        trade_id="1001",
+        symbol="XAUUSD+",
+        event_type="opened",
+        event_ts=created_at - 60,
+        details={"sl": 2980.0, "tp": 3040.0},
     )
-    conn.execute(
-        """
-        INSERT INTO supervisor_counterfactual_review
-        (counterfactual_id, review_id, trade_id, position_id, close_ts,
-         close_reason, supervisor_event_type, supervisor_reason, label,
-         confidence, horizons_json, evidence_json, created_at, updated_at)
-        VALUES ('cf_1', 'rev_1', '1001', '1001', ?, 'thesis_broken',
-                'supervisor_close', 'thesis_broken', 'protection_too_tight',
-                0.72, '[]', '{}', ?, ?)
-        """,
-        (created_at, created_at, created_at),
+    record_counterfactual_event(
+        conn,
+        counterfactual_id="cf_1",
+        review_id="rev_1",
+        event_ts=created_at,
+        payload={
+            "counterfactual_id": "cf_1",
+            "review_id": "rev_1",
+            "trade_id": "1001",
+            "position_id": "1001",
+            "close_ts": created_at,
+            "close_reason": "thesis_broken",
+            "supervisor_event_type": "supervisor_close",
+            "supervisor_reason": "thesis_broken",
+            "label": "protection_too_tight",
+            "confidence": 0.72,
+            "horizons": [],
+            "evidence": {},
+        },
     )
     conn.commit()
     conn.close()
@@ -167,16 +147,19 @@ def test_replay_and_advisory_filter_contamination_before_effective_limit(tmp_pat
     }
     conn = sqlite3.connect(str(db_path))
     try:
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, pnl, mae, mfe, outcome_label,
-             failure_tags_json, summary_text, review_json, created_at)
-            VALUES ('rev_contaminated', 'contaminated', 'contaminated',
-                    -1.0, 1.0, 4.0, 'bad_loss', '[]',
-                    'contaminated capture failure', ?, 1782439100.0)
-            """,
-            (json.dumps(contaminated),),
+        record_review(
+            conn,
+            review_id="rev_contaminated",
+            trade_id="contaminated",
+            position_id="contaminated",
+            pnl=-1.0,
+            mae=1.0,
+            mfe=4.0,
+            outcome_label="bad_loss",
+            failure_tags=[],
+            summary_text="contaminated capture failure",
+            review=contaminated,
+            created_at=1782439100.0,
         )
         conn.commit()
     finally:
@@ -231,29 +214,76 @@ def test_counterfactual_summary_excludes_contaminated_source_review(tmp_path):
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute(
-            """
-            UPDATE supervisor_counterfactual_review
-            SET evidence_json=?
-            WHERE counterfactual_id='cf_1'
-            """,
-            (json.dumps({"maturity": {"governance_eligible": True}}),),
+        counterfactual = next(
+            row
+            for row in iter_counterfactual_rows(conn, limit=0, reverse=True)
+            if row.get("counterfactual_id") == "cf_1"
+        )
+        updated_counterfactual = {
+            key: counterfactual.get(key)
+            for key in (
+                "counterfactual_id",
+                "review_id",
+                "trade_id",
+                "position_id",
+                "close_ts",
+                "close_reason",
+                "supervisor_event_type",
+                "supervisor_reason",
+                "label",
+                "confidence",
+                "horizons",
+            )
+        }
+        updated_counterfactual["evidence"] = {
+            "maturity": {"governance_eligible": True},
+        }
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_1",
+            review_id="rev_1",
+            event_ts=1782439200.0,
+            payload=updated_counterfactual,
         )
         conn.commit()
         assert _counterfactual_summary(conn, day="2026-06-26")["total"] == 1
 
-        review = json.loads(
-            conn.execute(
-                "SELECT review_json FROM trade_outcome_review WHERE review_id='rev_1'"
-            ).fetchone()[0]
+        review_row = next(
+            row
+            for row in iter_review_rows(conn, limit=0)
+            if row.get("review_id") == "rev_1"
         )
+        review = dict(review_row["review_json"])
         review["system_issue_context"] = {
             "system_contaminated": True,
             "contaminates_learning": True,
         }
-        conn.execute(
-            "UPDATE trade_outcome_review SET review_json=? WHERE review_id='rev_1'",
-            (json.dumps(review),),
+        record_review(
+            conn,
+            review_id="rev_1_contaminated",
+            trade_id=str(review_row.get("trade_id") or "1001"),
+            position_id=str(review_row.get("position_id") or "1001"),
+            entry_decision_id=str(review_row.get("entry_decision_id") or ""),
+            exit_decision_id=str(review_row.get("exit_decision_id") or ""),
+            pnl=review_row.get("pnl"),
+            mae=review_row.get("mae"),
+            mfe=review_row.get("mfe"),
+            outcome_label=str(review_row.get("outcome_label") or ""),
+            failure_tags=[],
+            summary_text=str(review_row.get("summary_text") or ""),
+            review=review,
+            created_at=1782439201.0,
+            producer="test_position_supervisor_governance",
+        )
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_1",
+            review_id="rev_1_contaminated",
+            event_ts=1782439201.0,
+            payload={
+                **updated_counterfactual,
+                "review_id": "rev_1_contaminated",
+            },
         )
         conn.commit()
 
@@ -294,23 +324,29 @@ def test_position_supervisor_advisories_materialize_mfe_capture_failure_template
                 },
                 "real_pnl": {"gross": -1.0, "net": -1.0, "entry_price": 3000.0},
             }
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, pnl, mae, mfe, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, -1.0, 1.0, ?, 'bad_loss',
-                        '[]', 'capture failed', ?, ?)
-                """,
-                (f"cap_rev_{idx}", position_id, position_id, 2.0 + idx, json.dumps(review), base_ts + idx),
+            record_review(
+                conn,
+                review_id=f"cap_rev_{idx}",
+                trade_id=position_id,
+                position_id=position_id,
+                pnl=-1.0,
+                mae=1.0,
+                mfe=2.0 + idx,
+                outcome_label="bad_loss",
+                failure_tags=[],
+                summary_text="capture failed",
+                review=review,
+                created_at=base_ts + idx,
             )
-            conn.execute(
-                """
-                INSERT INTO position_lifecycle_event
-                (event_id, position_id, trade_id, symbol, event_type, event_ts, details_json)
-                VALUES (?, ?, ?, 'XAUUSD+', 'opened', ?, ?)
-                """,
-                (f"cap_open_{idx}", position_id, position_id, base_ts + idx - 90, json.dumps({"sl": 2980.0, "tp": 3040.0})),
+            record_position_event(
+                conn,
+                event_id=f"cap_open_{idx}",
+                position_id=position_id,
+                trade_id=position_id,
+                symbol="XAUUSD+",
+                event_type="opened",
+                event_ts=base_ts + idx - 90,
+                details={"sl": 2980.0, "tp": 3040.0},
             )
         conn.commit()
     finally:
@@ -446,56 +482,49 @@ def test_counterfactual_overprotection_blocks_tighter_generated_template(tmp_pat
                 "close_price": 2999.0,
                 "real_pnl": {"gross": -1.0, "net": -1.0, "entry_price": 3000.0},
             }
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, position_id, pnl, mae, mfe, outcome_label,
-                 failure_tags_json, summary_text, review_json, created_at)
-                VALUES (?, ?, ?, -1.0, 1.0, 2.0, 'bad_loss',
-                        '[]', 'capture failed', ?, ?)
-                """,
-                (
-                    f"overprotected_rev_{idx}",
-                    position_id,
-                    position_id,
-                    json.dumps(review),
-                    base_ts + idx,
-                ),
+            record_review(
+                conn,
+                review_id=f"overprotected_rev_{idx}",
+                trade_id=position_id,
+                position_id=position_id,
+                pnl=-1.0,
+                mae=1.0,
+                mfe=2.0,
+                outcome_label="bad_loss",
+                failure_tags=[],
+                summary_text="capture failed",
+                review=review,
+                created_at=base_ts + idx,
             )
-            conn.execute(
-                """
-                INSERT INTO position_lifecycle_event
-                (event_id, position_id, trade_id, symbol, event_type, event_ts, details_json)
-                VALUES (?, ?, ?, 'XAUUSD+', 'opened', ?, ?)
-                """,
-                (
-                    f"overprotected_open_{idx}",
-                    position_id,
-                    position_id,
-                    base_ts + idx - 90,
-                    json.dumps({"sl": 2980.0, "tp": 3040.0}),
-                ),
+            record_position_event(
+                conn,
+                event_id=f"overprotected_open_{idx}",
+                position_id=position_id,
+                trade_id=position_id,
+                symbol="XAUUSD+",
+                event_type="opened",
+                event_ts=base_ts + idx - 90,
+                details={"sl": 2980.0, "tp": 3040.0},
             )
-            conn.execute(
-                """
-                INSERT INTO supervisor_counterfactual_review
-                (counterfactual_id, review_id, trade_id, position_id, close_ts,
-                 close_reason, supervisor_event_type, supervisor_reason, label,
-                 confidence, horizons_json, evidence_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'stopout', 'supervisor_tighten',
-                        'profit_giveback_after_mfe', 'protection_too_tight',
-                        0.8, '[]', ?, ?, ?)
-                """,
-                (
-                    f"overprotected_cf_{idx}",
-                    f"overprotected_rev_{idx}",
-                    position_id,
-                    position_id,
-                    base_ts + idx,
-                    json.dumps({"maturity": {"governance_eligible": True}}),
-                    base_ts + idx,
-                    base_ts + idx,
-                ),
+            record_counterfactual_event(
+                conn,
+                counterfactual_id=f"overprotected_cf_{idx}",
+                review_id=f"overprotected_rev_{idx}",
+                event_ts=base_ts + idx,
+                payload={
+                    "counterfactual_id": f"overprotected_cf_{idx}",
+                    "review_id": f"overprotected_rev_{idx}",
+                    "trade_id": position_id,
+                    "position_id": position_id,
+                    "close_ts": base_ts + idx,
+                    "close_reason": "stopout",
+                    "supervisor_event_type": "supervisor_tighten",
+                    "supervisor_reason": "profit_giveback_after_mfe",
+                    "label": "protection_too_tight",
+                    "confidence": 0.8,
+                    "horizons": [],
+                    "evidence": {"maturity": {"governance_eligible": True}},
+                },
             )
         conn.commit()
     finally:
@@ -532,13 +561,15 @@ def test_position_supervisor_advisories_skip_unexecutable_stop_legality(tmp_path
     _create_db(db_path)
     conn = sqlite3.connect(str(db_path))
     try:
-        conn.execute(
-            """
-            INSERT INTO position_lifecycle_event
-            (event_id, position_id, trade_id, symbol, event_type, event_ts, details_json)
-            VALUES ('amend_bad_1', '1001', '1001', 'XAUUSD+', 'amend_failed', ?, '{}')
-            """,
-            (1782439200.0,),
+        record_position_event(
+            conn,
+            event_id="amend_bad_1",
+            position_id="1001",
+            trade_id="1001",
+            symbol="XAUUSD+",
+            event_type="amend_failed",
+            event_ts=1782439200.0,
+            details={},
         )
         conn.commit()
     finally:

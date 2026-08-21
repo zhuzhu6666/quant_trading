@@ -2,13 +2,13 @@
 
 面向 cTrader 的生产型自治量化交易系统。当前默认交易标的是 `XAUUSD`，主周期为 `M5`；系统把实时执行、风险控制、因子研究、学习证据和受控治理放在同一条可审计、可回放、fail-closed 的工程链路中。
 
-> 这份 README 用于 GitHub 项目导览，不替代运行态审计。服务、PostgreSQL `state_v1`、`runtime_kv`、日志和 broker 的当前事实，优先于文档快照或 Git 历史。
+> 这份 README 用于 GitHub 项目导览，不替代运行态审计。服务、PostgreSQL `runtime`/`canonical_v2`、`runtime_kv`、日志和 broker 的当前事实，优先于文档快照或 Git 历史。
 
 ## 当前状态
 
 截至 2026-08-19 的发布状态快照：
 
-- S0–S5 全库清空重建（`state_v1` → runtime 75 表 + `canonical_v2` 9 事件表）已完成；冷启动与业务表重建（S7.1–S7.3）与代码修复（S7.4）已完成。
+- S0–S5 的旧事实库清理、`runtime` 运行态重建和 `canonical_v2` 事实域切换已完成；冷启动与业务表重建（S7.1–S7.3）与代码修复（S7.4）已完成。
 - S7.3 重建遗留的 schema 欠账已全部收敛（迁移 0019–0024）：128 个缺失二级索引补齐、6 张极简表补 63 列、7 张漏建活跃表物归原主、`proposal_registry` 缺列与两处索引契约修复。全量回归 **2782 passed / 12 skipped / 0 failed**，迁移台账 v24 / ok / mismatches 0。
 - 双服务（quant-backend / quant-learning-worker）已受控重启加载最新工作区代码并运行验收通过（cTrader 认证 OK、cron 多轮执行成功、无 missing-index 报错）。
 - **S7.6 进化闭环首验仍待真实交易证据**：需等第一笔真实平仓 → canonical `trade_review` 事件 → sample → posterior/effect 链自然闭合，方能更新 README 首页与验收矩阵。
@@ -27,7 +27,7 @@ flowchart LR
     C --> D["RiskPolicy / RiskGovernor"]
     D --> E["broker execution intent 与 reconcile"]
     E --> F["持仓保护 / emergency reduction"]
-    F --> G[("PostgreSQL state_v1")]
+    F --> G[("PostgreSQL runtime + canonical_v2")]
 
     H["learning worker"] --> I["observation / evidence / effect"]
     I --> J["Factor lifecycle / Candidate Review"]
@@ -66,7 +66,7 @@ flowchart LR
 
 ## 数据与事实源
 
-- PostgreSQL `state_v1`：运行态、恢复状态、学习审计、evolution、治理 mutation、RuntimeConfig overlay/snapshot 和 canonical projections。
+- PostgreSQL `runtime`：运行态、恢复状态、治理 mutation、RuntimeConfig overlay/snapshot；`canonical_v2`：决策、订单/仓位生命周期、复盘、监督轨迹、反事实和学习样本事实。
 - `data/bars_monthly/bars_YYYY_MM.duckdb`：按月保存的 K 线；`data/bars.duckdb` 仅作为当前月份兼容链接。
 - `data/external_data.duckdb`：COT、ETF、CB gold、宏观和外部日数据；外部因子必须遵守 `release_at` / PIT 约束。
 - `data/events.duckdb`：经济事件日历与事件缩放输入。
@@ -83,7 +83,7 @@ risk/             RiskPolicy、RiskGovernor 和风险纯计算
 alpha/            因子、组合、选择、健康度与生命周期适配
 research/         学习、证据、评估、回放和治理研究
 config/           YAML 基础配置与 RuntimeConfig 读取边界
-migrations/       PostgreSQL state_v1 的 forward-only migrations
+migrations/       PostgreSQL runtime/canonical_v2 的 forward-only migrations
 web_frontend/     React/Vite Web 操作台
 miniprogram_v2/   微信小程序状态界面与本地 uCharts
 scripts/          worker、状态只读查询、迁移和验收工具

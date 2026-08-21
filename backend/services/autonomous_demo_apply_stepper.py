@@ -407,7 +407,7 @@ class AutonomousDemoApplyStepper:
                 "watch_tables": [
                     "learning_application_log",
                     "learning_application_effect",
-                    "trade_outcome_review",
+                    "canonical_v2.event (trade_review)",
                     "experience_memory",
                     "proposal_registry",
                     "evolution_run",

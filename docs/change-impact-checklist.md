@@ -120,7 +120,7 @@ Safety 不计算 alpha、VaR/CVaR 或最终 candidate volume。
 | factor | role、PIT/closed bar、normalizer cadence、compositor、唯一权重写入口、lifecycle |
 | learning | lineage、污染资格、application/effect、同 scope 并发、terminal prior |
 | governance | typed plan、V16 single-use、Coordinator 原子性、risk direction、rollback |
-| data/schema | PostgreSQL `state_v1`、forward-only migration、幂等、无 SQLite state 写入 |
+| data/schema | PostgreSQL `runtime` + `canonical_v2`、forward-only migration、幂等、无 SQLite state 写入 |
 | API/readiness | canonical contract、component freshness、只读投影、OpenAPI |
 | frontend | endpoint-level decoder、unknown/stale/error、known zero、无旧字段回退 |
 | operations | systemd owner、loaded flags、日志、runtime_kv、重启恢复、回滚 |

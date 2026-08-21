@@ -48,6 +48,17 @@ class LoopGeneration:
     exit_acknowledged: bool = False
 
 
+@dataclass(frozen=True)
+class LoopOwnershipSnapshot:
+    """Read-only ownership view derived from the current generation."""
+
+    thread: threading.Thread | None
+    stop_flag: threading.Event | None
+    broker: str | None
+    started_at: float | None
+    strategy_name: str | None
+
+
 class LiveLoopController:
     """Own exactly one live-loop generation until its thread has exited."""
 
@@ -55,6 +66,7 @@ class LiveLoopController:
         self._clock = clock
         self._lock = threading.RLock()
         self._current: LoopGeneration | None = None
+        self._last_exit_at = 0.0
 
     def begin_start(self, *, broker: str, strategy_name: str) -> LoopGeneration:
         with self._lock:
@@ -191,12 +203,60 @@ class LiveLoopController:
     def acknowledge_exit(self, generation_id: str, *, failed_reason: str = "") -> None:
         with self._lock:
             generation = self._require_owner(generation_id)
+            now = self._clock()
             generation.exit_acknowledged = True
             generation.state = "failed" if failed_reason else "stopped"
             generation.failed_reason = str(failed_reason or "")
             generation.ready = False
             generation.accepting_new_risk = False
-            generation.updated_at = self._clock()
+            generation.updated_at = now
+            self._last_exit_at = now
+
+    def clear_thread_if(
+        self,
+        generation_id: str,
+        thread: threading.Thread,
+        finished_at: float | None = None,
+    ) -> bool:
+        """Release a generation's thread identity only after it has exited."""
+
+        with self._lock:
+            generation = self._require_owner(generation_id)
+            if generation.thread is not thread:
+                return False
+            is_alive = getattr(thread, "is_alive", None)
+            if callable(is_alive) and is_alive():
+                return False
+            finished = float(finished_at if finished_at is not None else self._clock())
+            generation.thread = None
+            generation.updated_at = finished
+            self._last_exit_at = max(self._last_exit_at, finished)
+            return True
+
+    def ownership_snapshot(self) -> LoopOwnershipSnapshot:
+        """Return ownership facts without creating a second state store."""
+
+        with self._lock:
+            generation = self._current
+            if generation is None:
+                return LoopOwnershipSnapshot(
+                    thread=None,
+                    stop_flag=None,
+                    broker=None,
+                    started_at=None,
+                    strategy_name=None,
+                )
+            return LoopOwnershipSnapshot(
+                thread=generation.thread,
+                stop_flag=generation.stop_event,
+                broker=generation.broker,
+                started_at=generation.created_at,
+                strategy_name=generation.strategy_name,
+            )
+
+    def last_exit_at(self) -> float:
+        with self._lock:
+            return float(self._last_exit_at)
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -206,8 +266,10 @@ class LiveLoopController:
                     "phase": "stopped",
                     "generation": "",
                     "thread_alive": False,
+                    "thread_id": None,
                     "ready": False,
                     "accepting_new_risk": False,
+                    "last_exit_at": self._last_exit_at or None,
                     "safety_heartbeat_at": None,
                     "alpha_heartbeat_at": None,
                     "safety_heartbeat_age_sec": None,
@@ -215,6 +277,7 @@ class LiveLoopController:
                     "blockers": [],
                 }
             thread_alive = bool(generation.thread and generation.thread.is_alive())
+            thread_id = getattr(generation.thread, "ident", None)
             now = self._clock()
             safety_age = (
                 max(0.0, now - generation.safety_heartbeat_at)
@@ -249,6 +312,7 @@ class LiveLoopController:
                 "phase": effective_phase,
                 "generation": generation.generation_id,
                 "thread_alive": thread_alive,
+                "thread_id": thread_id,
                 "ready": generation.ready,
                 "accepting_new_risk": bool(
                     generation.accepting_new_risk and heartbeat_healthy
@@ -257,6 +321,7 @@ class LiveLoopController:
                 "strategy_name": generation.strategy_name,
                 "created_at": generation.created_at,
                 "updated_at": generation.updated_at,
+                "last_exit_at": self._last_exit_at or None,
                 "safety_heartbeat_at": generation.safety_heartbeat_at or None,
                 "alpha_heartbeat_at": generation.alpha_heartbeat_at or None,
                 "safety_heartbeat_age_sec": safety_age,

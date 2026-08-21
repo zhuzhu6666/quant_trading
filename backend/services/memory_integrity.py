@@ -14,13 +14,12 @@ from typing import Any
 
 from backend.core.db import STATE_DB, state_table_exists
 from backend.services._brain_helpers import connect, execute, safe_float
-from backend.services.canonical_v2_reader import iter_review_rows
+from backend.services.canonical_v2_reader import canonical_ready, iter_review_rows
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import load_json_payload
 
 
 CANONICAL_APPEND_SOURCE = "trade_lesson_memory.v1"
-CANONICAL_SOURCE_TABLE = "trade_outcome_review"
+CANONICAL_SOURCE_TABLE = "canonical_v2.trade_review"
 REPORT_VERSION = "memory_integrity_report.v1"
 _SAMPLE_LIMIT = 10
 
@@ -71,16 +70,14 @@ class MemoryIntegrityReportService:
         except Exception as exc:
             return self._unavailable(observed_at, f"state_unavailable:{type(exc).__name__}: {exc}")
         try:
-            required_tables = (
-                "trade_outcome_review",
-                "experience_memory",
-                "brain_memory",
-            )
+            required_tables = ("experience_memory", "brain_memory")
             missing_tables = [table for table in required_tables if not state_table_exists(conn, table)]
-            if missing_tables:
+            if missing_tables or not canonical_ready(conn):
                 return self._unavailable(
                     observed_at,
-                    "required_tables_missing:" + ",".join(sorted(missing_tables)),
+                    "required_facts_missing:canonical_v2.trade_review"
+                    if not canonical_ready(conn)
+                    else "required_tables_missing:" + ",".join(sorted(missing_tables)),
                 )
 
             review_rows = [_row_dict(row) for row in iter_review_rows(conn, limit=0)]
@@ -111,14 +108,9 @@ class MemoryIntegrityReportService:
                 for row in review_rows
                 if str(row.get("review_id") or "")
                 and review_has_system_contamination(
-                    load_json_payload(
-                        conn,
-                        source_table="trade_outcome_review",
-                        source_id=str(row.get("review_id") or ""),
-                        inline_json=row.get("review_json"),
-                        archive_hash=row.get("review_archive_hash", ""),
-                        default={},
-                    )
+                    row.get("review_json")
+                    if isinstance(row.get("review_json"), dict)
+                    else {}
                 )
             ]
         except Exception as exc:

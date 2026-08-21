@@ -361,6 +361,34 @@ def test_training_window_archive_migration_is_schema_only() -> None:
     assert "DELETE" not in sql.upper()
 
 
+def test_legacy_fact_retirement_is_guarded_and_drops_only_retired_projections() -> None:
+    migration = next(item for item in STATE_SCHEMA_MIGRATIONS if item.version == 30)
+    sql = migration.sql()
+
+    assert migration.name == "retire_legacy_fact_tables"
+    assert "retired_fact_rows_must_be_empty" in sql
+    assert "SELECT 1 / CASE" in sql
+    for table in (
+        "runtime.decision_ledger",
+        "runtime.decision_factor_snapshot",
+        "runtime.autonomous_learning_sample",
+        "runtime.order_lifecycle_event",
+        "runtime.position_lifecycle_event",
+        "runtime.trade_outcome_review",
+        "runtime.position_supervisor_trace",
+        "runtime.supervisor_counterfactual_review",
+        "runtime.supervisor_counterfactual_history",
+        "runtime.decision_log",
+        "runtime.lifecycle_events",
+    ):
+        assert f"DROP TABLE IF EXISTS {table}" in sql
+    # These two artifacts may already be absent after the canonical cutover;
+    # DROP remains idempotent, while the guard only queries tables guaranteed by
+    # the runtime baseline and therefore remains executable on the current DB.
+    assert "DROP TABLE IF EXISTS runtime.state_payload_archive" in sql
+    assert "DROP TABLE IF EXISTS canonical_v2.legacy_mapping" in sql
+
+
 def test_canonical_v2_foundation_migration_is_schema_only_and_reference_based() -> None:
     migration = next(
         item for item in STATE_SCHEMA_MIGRATIONS if item.version == 16

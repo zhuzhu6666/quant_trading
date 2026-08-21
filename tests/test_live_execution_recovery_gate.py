@@ -4,10 +4,8 @@ import time
 from backend.services import live_service
 
 
-def _flags(*, execution=True, generation=False, safety="off"):
+def _flags(*, generation=False, safety="off"):
     return SimpleNamespace(
-        ctrader_execution_outcome_v2_enabled=execution,
-        live_generation_controller_v2_enabled=generation,
         live_safety_plane_v2_mode=safety,
     )
 
@@ -110,13 +108,6 @@ def _install_tick_boundary(monkeypatch, bridge, order):
         circuit_breaker=False,
         execution_recovery={"enabled": True, "ready": False, "unresolved_count": None},
     )
-
-
-def test_execution_outcome_flag_alone_selects_safety_first_loop(monkeypatch):
-    monkeypatch.setattr(live_service, "_phase2_feature_flags", lambda: _flags())
-
-    assert live_service._generation_controller_enabled() is False
-    assert live_service._phase2_v2_active() is True
 
 
 def test_loop_recovers_delayed_fill_and_runs_safety_before_online_bars(monkeypatch):

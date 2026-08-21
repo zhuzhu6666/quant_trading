@@ -15,6 +15,15 @@ from backend.core.state_store import (
     validate_runtime_state_schema,
 )
 from backend.services.failure_taxonomy import build_failure_taxonomy
+from backend.services.canonical_v2 import record_review
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    iter_decision_rows,
+    iter_order_rows,
+    iter_position_rows,
+    iter_review_rows,
+    iter_review_rows_desc,
+)
 from backend.services.position_metrics import update_position_path_metrics
 from backend.services.review_contract import (
     build_execution_quality_evidence,
@@ -22,13 +31,12 @@ from backend.services.review_contract import (
     normalize_trade_review_contract,
     review_has_system_contamination,
 )
-from backend.services.state_payload_archive import archive_json_payload, load_json_payload
 from backend.services.trade_lesson_memory import trade_review_payload_from_row
 
 from backend.core.db_helpers import (
     conn_is_pg as _conn_is_pg,
-    pg_sql as _sql,
     execute as _execute,
+    load_json as _loads,
 )
 
 
@@ -51,26 +59,16 @@ def _connect_state():
     return get_state_conn()
 
 
-def _review_archive_select(conn: Any, *, alias: str = "", output: str = "review_archive_hash") -> str:
-    try:
-        has_archive = "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
-    except Exception:
-        has_archive = False
-    if not has_archive:
-        return ""
-    prefix = f"{alias}." if alias else ""
-    return f", {prefix}review_archive_hash AS {output}"
-
-
-def _review_payload(conn: Any, row: Any, *, source_id_key: str = "review_id", inline_key: str = "review_json", archive_key: str = "review_archive_hash") -> dict[str, Any]:
-    payload = load_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(row[source_id_key] or ""),
-        inline_json=row[inline_key],
-        archive_hash=row[archive_key] if archive_key in row.keys() else "",
-        default={},
-    )
+def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
+    del conn
+    if isinstance(row, dict):
+        payload = row.get("review_json")
+    else:
+        try:
+            payload = row["review_json"]
+        except (KeyError, IndexError, TypeError):
+            payload = {}
+    payload = _loads(payload, {})
     return payload if isinstance(payload, dict) else {}
 
 
@@ -289,14 +287,14 @@ def _infer_path_metrics_from_bars(
 
 
 def classify_outcome(entry_score: float, pnl: float) -> str:
-    """Deprecated legacy two-track label helper (S3/A2).
+    """Deterministic label helper for reviews without attribution evidence.
 
     The canonical ``trade_review`` label authority is the single
     ``review_contract.classify_4label_outcome`` rule (reviewer 口径).  This
     helper only produces the label provable from ``(entry_score, pnl)``:
     without the attribution ``positive_share`` evidence a profit is always
     ``lucky_win``, matching the authoritative rule's ``positive_share<0.55``
-    branch.  It is retained only for the retiring two-track backfill path.
+    branch.
     """
     return classify_4label_outcome(
         pnl=float(pnl),
@@ -362,9 +360,16 @@ def fetch_missing_positions(
     *,
     limit: int = _DEFAULT_LIMIT,
     require_decision: bool = True,
-) -> list[sqlite3.Row]:
+) -> list[dict[str, Any]]:
+    """Find closed broker positions absent from the canonical review stream.
+
+    ``ctrader_deals`` is intentionally retained here as broker truth. Review,
+    decision, and lifecycle facts are resolved only through canonical readers;
+    no retired fact table participates in the anti-join.
+    """
+    if not canonical_ready(conn):
+        return []
     sql = """
-    WITH close_positions AS (
         SELECT
             position_id,
             MAX(exec_timestamp) AS close_ts,
@@ -381,69 +386,91 @@ def fetch_missing_positions(
         FROM ctrader_deals
         GROUP BY position_id
         HAVING MAX(CASE WHEN is_close = 1 THEN 1 ELSE 0 END) = 1
-    ),
-    missing AS (
-        SELECT c.*
-        FROM close_positions c
-        LEFT JOIN trade_outcome_review r
-            ON CAST(r.position_id AS INTEGER) = c.position_id
-        WHERE r.position_id IS NULL
-    )
-    SELECT
-        m.position_id,
-        m.close_ts,
-        m.net_pnl,
-        m.entry_price,
-        m.exec_price,
-        m.balance,
-        m.deal_id,
-        m.close_commission,
-        m.gross_profit,
-        m.swap,
-        d.decision_id AS entry_decision_id,
-        d.trade_id,
-        d.regime_id,
-        d.action_score AS entry_score,
-        d.decision_ts AS entry_ts,
-        d.action_json AS entry_action_json,
-        d.symbol,
-        d.timeframe,
-        m.broker_entry_ts,
-        m.broker_entry_price
-    FROM missing m
-    LEFT JOIN decision_ledger d
-        ON d.position_id = CAST(m.position_id AS TEXT) AND d.event_type = 'open'
+        ORDER BY close_ts DESC
     """
-    params: list[object] = []
-    if require_decision:
-        sql += " WHERE d.decision_id IS NOT NULL"
-    sql += " ORDER BY m.close_ts DESC LIMIT ?"
-    params.append(int(limit))
     try:
-        return list(_execute(conn, sql, params).fetchall())
+        closed_rows = list(_execute(conn, sql).fetchall())
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc).lower():
             logger.warning("[learning_backfill] skipped: required tables missing: %s", exc)
             return []
         raise
 
+    reviews_by_position: dict[str, dict[str, Any]] = {}
+    for review in iter_review_rows_desc(conn, limit=0):
+        position_id = str(review.get("position_id") or "")
+        if position_id and position_id not in reviews_by_position:
+            reviews_by_position[position_id] = review
+
+    decisions_by_position: dict[str, dict[str, Any]] = {}
+    for decision in iter_decision_rows(conn, limit=0, reverse=True):
+        if str(decision.get("event_type") or "") != "open":
+            continue
+        position_id = str(decision.get("position_id") or "")
+        if position_id and position_id not in decisions_by_position:
+            decisions_by_position[position_id] = decision
+
+    missing: list[dict[str, Any]] = []
+    for broker_row in closed_rows:
+        position_id = str(broker_row["position_id"] or "")
+        if not position_id or position_id in reviews_by_position:
+            continue
+        decision = decisions_by_position.get(position_id) or {}
+        if require_decision and not decision:
+            continue
+        action = _loads(decision.get("action_json"), {})
+        if not isinstance(action, dict):
+            action = {}
+        missing.append(
+            {
+                **dict(broker_row),
+                "position_id": position_id,
+                "entry_decision_id": str(decision.get("decision_id") or ""),
+                "trade_id": str(decision.get("trade_id") or position_id),
+                "regime_id": str(decision.get("regime_id") or ""),
+                "entry_score": _safe_float(
+                    decision.get("action_score")
+                    or action.get("score")
+                    or action.get("action_score")
+                ),
+                "entry_ts": _safe_float(decision.get("decision_ts")),
+                "entry_action_json": decision.get("action_json")
+                or json.dumps(action, ensure_ascii=False, sort_keys=True, default=str),
+                "symbol": str(decision.get("symbol") or ""),
+                "timeframe": str(decision.get("timeframe") or ""),
+            }
+        )
+    return missing[: max(0, int(limit))]
+
 
 def _execution_evidence_for_row(conn: Any, row: sqlite3.Row) -> dict[str, Any]:
     decision_id = str(row["entry_decision_id"] or "")
     trade_id = str(row["trade_id"] or row["position_id"] or "")
-    events = list(
-        _execute(
-            conn,
-            """
-            SELECT event_type, event_ts, price, volume, status, details_json
-            FROM order_lifecycle_event
-            WHERE (? <> '' AND decision_id=?)
-               OR (? <> '' AND trade_id=?)
-            ORDER BY event_ts ASC
-            """,
-            (decision_id, decision_id, trade_id, trade_id),
-        ).fetchall()
+    events = [
+        dict(event)
+        for event in iter_order_rows(conn, limit=0)
+        if (
+            (decision_id and str(event.get("decision_id") or "") == decision_id)
+            or (trade_id and str(event.get("trade_id") or "") == trade_id)
+        )
+    ]
+    events.sort(
+        key=lambda event: (
+            _safe_float(event.get("event_ts")),
+            str(event.get("event_id") or ""),
+        )
     )
+    position_events = [
+        dict(event)
+        for event in iter_position_rows(conn, limit=0)
+        if str(event.get("position_id") or event.get("entity_id") or "")
+        == str(row["position_id"] or "")
+    ]
+    raw_position_id = str(row["position_id"] or "")
+    try:
+        broker_position_id: Any = int(raw_position_id)
+    except (TypeError, ValueError):
+        broker_position_id = raw_position_id
     broker = _execute(
         conn,
         """
@@ -454,14 +481,15 @@ def _execution_evidence_for_row(conn: Any, row: sqlite3.Row) -> dict[str, Any]:
         ORDER BY exec_timestamp ASC
         LIMIT 1
         """,
-        (int(row["position_id"] or 0),),
+        (broker_position_id,),
     ).fetchone()
     try:
         entry_action = json.loads(str(row["entry_action_json"] or "{}"))
     except Exception:
         entry_action = {}
     return {
-        "order_events": [dict(item) for item in events],
+        "order_events": events,
+        "position_events": position_events,
         "entry_action": entry_action if isinstance(entry_action, dict) else {},
         "broker_deal": dict(broker) if broker else {},
     }
@@ -481,7 +509,7 @@ def build_review_record(
     entry_ts = decision_entry_ts if decision_entry_ts > 0 else broker_entry_ts
     close_ts = float(row["close_ts"] or 0.0)
     holding_seconds = max(0.0, close_ts - entry_ts) if entry_ts > 0 and close_ts > 0 else 0.0
-    entry_ts_source = "decision_ledger" if decision_entry_ts > 0 else ("ctrader_deals" if broker_entry_ts > 0 else "")
+    entry_ts_source = "canonical_v2_reader" if decision_entry_ts > 0 else ("ctrader_deals" if broker_entry_ts > 0 else "")
     entry_price = _safe_float(row["entry_price"] or row["broker_entry_price"])
     close_price = _safe_float(row["exec_price"])
     timeframe = str(row["timeframe"] or "M5")
@@ -574,7 +602,6 @@ def build_review_record(
     }
     context_integrity = "full" if row["entry_decision_id"] else ("partial" if broker_entry_ts > 0 else "minimal")
     review_json["context_integrity"] = context_integrity
-    review_archive_payload = dict(review_json)
     review_json = normalize_trade_review_contract(
         review_json,
         entry_quality=review_json["entry_quality"],
@@ -588,11 +615,6 @@ def build_review_record(
     review_json["failure_taxonomy"] = taxonomy
     review_json["primary_responsibility"] = taxonomy["primary_responsibility"]
     review_json["responsibility_labels"] = taxonomy["responsibility_labels"]
-    review_archive_payload = dict(review_json) | {
-        key: review_archive_payload[key]
-        for key in ("inferred_close_supervisor", "responsibility_domains")
-        if key in review_archive_payload
-    }
     failure_tags = [outcome_label]
     for label in taxonomy["responsibility_labels"]:
         if label not in failure_tags:
@@ -615,67 +637,43 @@ def build_review_record(
         "failure_tags_json": json.dumps(failure_tags, ensure_ascii=False),
         "summary_text": summary,
         "review_json": json.dumps(review_json, ensure_ascii=False, default=str),
-        "review_archive_raw": json.dumps(review_archive_payload, ensure_ascii=False, default=str),
         "created_at": float(row["close_ts"] or time.time()),
     }
 
 
-def insert_review(conn: sqlite3.Connection, record: dict) -> None:
-    # P4 单轨：PG 环境 review 已通过 canonical trade_review 事件写入；
-    # SQLite fixture 保留 legacy 写入以兼容测试。
-    if _conn_is_pg(conn):
-        return
-    archive = archive_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(record["review_id"]),
-        payload_kind="review_json",
-        raw_json=str(record.get("review_archive_raw") or record["review_json"] or "{}"),
-    )
-    if archive:
-        _execute(conn,
-            "INSERT INTO trade_outcome_review"
-            " (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,"
-            " entry_quality, hold_quality, exit_quality, regime_fit_score,"
-            " execution_quality, pnl, mae, mfe, outcome_label,"
-            " failure_tags_json, summary_text, review_json, created_at,"
-            " review_archive_hash, review_raw_sha256, review_raw_bytes)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                record["review_id"], record["trade_id"], record["position_id"],
-                record["entry_decision_id"], record["exit_decision_id"],
-                record["entry_quality"], record["hold_quality"], record["exit_quality"],
-                record["regime_fit_score"], record["execution_quality"], record["pnl"],
-                record["mae"], record["mfe"], record["outcome_label"],
-                record["failure_tags_json"], record["summary_text"], record["review_json"],
-                record["created_at"], archive["archive_hash"], archive["raw_sha256"],
-                archive["raw_bytes"],
-            ),
+def insert_review(conn: Any, record: dict) -> dict[str, Any]:
+    """Write a generated review to the canonical immutable review stream."""
+    if not canonical_ready(conn):
+        raise RuntimeStateSchemaMissingError(
+            "canonical_v2 review stream is unavailable; refusing non-canonical review write"
         )
-        return
-    legacy_review = json.loads(str(record["review_json"] or "{}"))
-    archive_review = json.loads(str(record.get("review_archive_raw") or "{}"))
-    if isinstance(legacy_review, dict) and isinstance(archive_review, dict):
-        for key in ("inferred_close_supervisor", "responsibility_domains"):
-            if key in archive_review:
-                legacy_review[key] = archive_review[key]
-    _execute(conn,
-        "INSERT INTO trade_outcome_review"
-        " (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,"
-        " entry_quality, hold_quality, exit_quality, regime_fit_score,"
-        " execution_quality, pnl, mae, mfe, outcome_label,"
-        " failure_tags_json, summary_text, review_json, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (
-            record["review_id"], record["trade_id"], record["position_id"],
-            record["entry_decision_id"], record["exit_decision_id"],
-            record["entry_quality"], record["hold_quality"], record["exit_quality"],
-            record["regime_fit_score"], record["execution_quality"], record["pnl"],
-            record["mae"], record["mfe"], record["outcome_label"],
-            record["failure_tags_json"], record["summary_text"],
-            json.dumps(legacy_review, ensure_ascii=False, default=str),
-            record["created_at"],
-        ),
+    review_payload = _loads(record.get("review_json"), {})
+    if not isinstance(review_payload, dict):
+        review_payload = {}
+    failure_tags = _loads(record.get("failure_tags_json"), [])
+    if not isinstance(failure_tags, list):
+        failure_tags = []
+    return record_review(
+        conn,
+        review_id=str(record.get("review_id") or ""),
+        trade_id=str(record.get("trade_id") or ""),
+        position_id=str(record.get("position_id") or ""),
+        entry_decision_id=str(record.get("entry_decision_id") or ""),
+        exit_decision_id=str(record.get("exit_decision_id") or ""),
+        entry_quality=record.get("entry_quality"),
+        hold_quality=record.get("hold_quality"),
+        exit_quality=record.get("exit_quality"),
+        regime_fit_score=record.get("regime_fit_score"),
+        execution_quality=record.get("execution_quality"),
+        pnl=record.get("pnl"),
+        mae=record.get("mae"),
+        mfe=record.get("mfe"),
+        outcome_label=str(record.get("outcome_label") or ""),
+        failure_tags=failure_tags,
+        summary_text=str(record.get("summary_text") or ""),
+        review=review_payload,
+        created_at=record.get("created_at"),
+        producer="learning_backfill",
     )
 
 
@@ -716,25 +714,25 @@ def _ensure_experience_memory_source_columns(conn: sqlite3.Connection) -> None:
 
 
 def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
-    """Rebuild ``experience_memory`` from trade reviews (idempotent).
+    """Rebuild ``experience_memory`` from canonical review facts (idempotent).
 
     Writer convergence (S2.3): ``experience_pattern_stats`` for the ``factor``
     scope is owned solely by ``policy_suggester.suggest_from_experience`` (the
     live path carrying governance weighting + eligibility fingerprint).  This
-    legacy batch path no longer deletes or writes factor-scope pattern stats /
+    batch path no longer deletes or writes factor-scope pattern stats /
     policy suggestions; it only re-populates ``experience_memory`` through the
     shared ExperienceBuilder so the memory index stays authoritative.
     """
     _ensure_experience_memory_source_columns(conn)
-    reviews = _execute(conn,
-        f"""
-        SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-               pnl, mae, mfe, outcome_label, failure_tags_json,
-               summary_text, review_json, created_at{_review_archive_select(conn)}
-        FROM trade_outcome_review
-        ORDER BY created_at ASC
-        """
-    ).fetchall()
+    if not canonical_ready(conn):
+        return 0, 0
+    reviews = iter_review_rows(conn, limit=0)
+    reviews.sort(
+        key=lambda row: (
+            _safe_float(row.get("created_at")),
+            str(row.get("review_id") or ""),
+        )
+    )
     experience_builder = _experience_builder_for_conn(conn)
     rebuilt = 0
 
@@ -755,27 +753,14 @@ def _refresh_trade_lesson_memory(conn: sqlite3.Connection, *, limit: int = 200) 
     """Refresh recent lesson memory even when no new trade reviews were inserted."""
 
     refresh_limit = max(1, min(int(limit or 200), 500))
-    try:
-        rows = _execute(
-            conn,
-            f"""
-            SELECT review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                   pnl, mae, mfe, outcome_label, failure_tags_json, summary_text,
-                   review_json, created_at{_review_archive_select(conn)}
-            FROM trade_outcome_review
-            ORDER BY created_at DESC, review_id DESC
-            LIMIT ?
-            """,
-            (refresh_limit,),
-        ).fetchall()
-    except Exception as exc:
-        logger.warning("[learning_backfill] lesson memory refresh skipped: %s", exc)
+    if not canonical_ready(conn):
         return {
             "ok": False,
             "status": "skipped",
             "upserted": 0,
-            "reason": f"{type(exc).__name__}: {exc}",
+            "reason": "canonical_v2_unavailable",
         }
+    rows = iter_review_rows_desc(conn, limit=refresh_limit)
 
     experience_builder = _experience_builder_for_conn(conn)
     upserted = 0
@@ -794,23 +779,35 @@ def _refresh_trade_lesson_memory(conn: sqlite3.Connection, *, limit: int = 200) 
 
 
 def _backfill_trade_review_regimes(conn: sqlite3.Connection, *, limit: int = 1000) -> dict[str, Any]:
-    """Copy the factual entry-decision regime into legacy review JSON once."""
+    """Audit regime coverage without mutating immutable canonical reviews.
 
-    rows = _execute(
-        conn,
-        f"""
-        SELECT r.review_id, r.review_json, d.regime_id
-               {_review_archive_select(conn, alias="r")}
-        FROM trade_outcome_review r
-        JOIN decision_ledger d ON d.decision_id=r.entry_decision_id
-        WHERE COALESCE(d.regime_id, '')<>''
-        ORDER BY r.created_at DESC
-        LIMIT ?
-        """,
-        (max(1, min(int(limit or 1000), 10000)),),
-    ).fetchall()
+    ``record_review`` intentionally has immutable ``review_id`` semantics.
+    Existing canonical reviews therefore cannot be updated in place by this
+    maintenance pass; the missing-regime count is reported for a future
+    versioned review-revision owner instead of recreating an UPDATE path.
+    """
+    if not canonical_ready(conn):
+        return {
+            "ok": False,
+            "status": "skipped",
+            "checked": 0,
+            "updated": 0,
+            "skipped_immutable": 0,
+            "source": "canonical_v2_reader",
+            "reason": "canonical_v2_unavailable",
+        }
+    reviews = iter_review_rows_desc(conn, limit=0)
+    decisions = {
+        str(row.get("decision_id") or ""): row
+        for row in iter_decision_rows(conn, limit=0, reverse=True)
+        if str(row.get("decision_id") or "")
+    }
+    bounded_limit = max(1, min(int(limit or 1000), 10000))
     updated = 0
-    for row in rows:
+    skipped_immutable = 0
+    checked = 0
+    for row in reviews[:bounded_limit]:
+        checked += 1
         try:
             review = _review_payload(conn, row)
         except Exception:
@@ -819,47 +816,18 @@ def _backfill_trade_review_regimes(conn: sqlite3.Connection, *, limit: int = 100
             continue
         if str(review.get("regime_id") or review.get("entry_regime") or "").strip():
             continue
-        regime_id = str(row["regime_id"] or "").strip()
+        decision = decisions.get(str(row.get("entry_decision_id") or ""), {})
+        regime_id = str(decision.get("regime_id") or "").strip()
         if not regime_id:
             continue
-        review["regime_id"] = regime_id
-        review["entry_regime"] = regime_id
-        review["regime_source"] = "decision_ledger.entry_decision"
-        raw_review = json.dumps(review, ensure_ascii=False, default=str)
-        archive = archive_json_payload(
-            conn,
-            source_table="trade_outcome_review",
-            source_id=str(row["review_id"] or ""),
-            payload_kind="review_json",
-            raw_json=raw_review,
-        )
-        if archive and "review_archive_hash" in state_table_columns(conn, "trade_outcome_review"):
-            _execute(
-                conn,
-                """UPDATE trade_outcome_review
-                   SET review_json=?, review_archive_hash=?, review_raw_sha256=?, review_raw_bytes=?
-                   WHERE review_id=?""",
-                (
-                    raw_review,
-                    archive["archive_hash"],
-                    archive["raw_sha256"],
-                    archive["raw_bytes"],
-                    str(row["review_id"] or ""),
-                ),
-            )
-        else:
-            _execute(
-                conn,
-                "UPDATE trade_outcome_review SET review_json=? WHERE review_id=?",
-                (raw_review, str(row["review_id"] or "")),
-            )
-        updated += 1
+        skipped_immutable += 1
     return {
         "ok": True,
-        "status": "updated" if updated else "current",
-        "checked": len(rows),
+        "status": "immutable_canonical_review" if skipped_immutable else "current",
+        "checked": checked,
         "updated": updated,
-        "source": "decision_ledger.entry_decision",
+        "skipped_immutable": skipped_immutable,
+        "source": "canonical_v2_reader",
     }
 
 
@@ -871,6 +839,16 @@ def run_learning_backfill(
 ) -> dict:
     conn = _connect_state()
     try:
+        if not canonical_ready(conn):
+            return {
+                "status": "skipped",
+                "reason": "canonical_v2_unavailable",
+                "inserted_reviews": [],
+                "inserted_count": 0,
+                "rebuild_reviews": 0,
+                "rebuild_suggestions": 0,
+                "require_decision": not allow_partial,
+            }
         rows = fetch_missing_positions(conn, limit=limit, require_decision=not allow_partial)
         inserted = []
         for row in rows:

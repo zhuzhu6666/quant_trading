@@ -16,7 +16,6 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
-    state_table_columns,
 )
 from backend.core.state_store import (
     is_state_schema_write_sql,
@@ -28,7 +27,11 @@ from backend.services.review_contract import (
     SYSTEM_CONTAMINATION_LABELS,
     review_execution_evidence_is_trainable,
 )
-from backend.services.state_payload_archive import load_json_payload
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    iter_review_rows_desc,
+    iter_supervisor_trace_rows,
+)
 
 
 def _review_text_contaminated(review_json: str) -> bool:
@@ -36,8 +39,8 @@ def _review_text_contaminated(review_json: str) -> bool:
 
     New-format reviews carry system_issue_context with an explicit
     contaminates_learning flag; a single regex scan beats a full JSON
-    parse of the (large) review payload. Legacy rows without that
-    context fall back to a quoted-label substring check for the
+    parse of the (large) review payload. Reviews without that context
+    use a quoted-label substring check for the
     failure-tag path (responsibility_labels/failure_tags arrays are
     serialized with quoted members), never a full parse.
     """
@@ -228,32 +231,15 @@ def _row_as_dict(row: Any, description: Any = None) -> dict[str, Any]:
     return dict(row)
 
 
-def _review_payload_text(conn: Any, row: dict[str, Any]) -> tuple[str, str]:
-    """Return the complete review JSON text and its source.
+def _review_payload_text(row: dict[str, Any]) -> tuple[str, str]:
+    """Serialize the review payload returned by canonical_v2_reader."""
 
-    Schema 15 makes the archive authoritative whenever a reference exists;
-    the bounded inline projection remains the compatibility path for legacy
-    rows and old SQLite fixtures.  An invalid archived JSON object is a hard
-    error so training cannot silently consume an empty fallback review.
-    """
-
-    archive_hash = str(row.get("review_archive_hash") or "").strip()
-    if not archive_hash:
-        return str(row.get("review_json") or "{}"), "inline"
-    missing = object()
-    payload = load_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(row.get("review_id") or ""),
-        inline_json=row.get("review_json", "{}"),
-        archive_hash=archive_hash,
-        default=missing,
-    )
-    if payload is missing or not isinstance(payload, dict):
-        raise ValueError("archived trade review payload must be a JSON object")
+    payload = _loads(row.get("review_json"), {})
+    if not isinstance(payload, dict):
+        raise ValueError("canonical trade review payload must be a JSON object")
     return (
         json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str),
-        "archive",
+        "canonical",
     )
 
 
@@ -386,32 +372,6 @@ class PositionQualityLightGBMService:
             return conn.execute(rendered)
         return conn.execute(rendered, tuple(params))
 
-    def _payload_byte_length_expression(self, column: str) -> str:
-        return (
-            f"octet_length({column})"
-            if self._use_pg()
-            else f"length(CAST({column} AS BLOB))"
-        )
-
-    def _review_archive_sql(self, conn: Any) -> tuple[str, str, bool]:
-        """Return archive-aware SELECT and byte-budget SQL fragments."""
-
-        columns = state_table_columns(conn, "trade_outcome_review")
-        inline_bytes = self._payload_byte_length_expression("r.review_json")
-        if {"review_archive_hash", "review_raw_bytes"} <= columns:
-            archive_hash = "COALESCE(r.review_archive_hash, '')"
-            raw_bytes = "COALESCE(r.review_raw_bytes, 0)"
-            # A referenced archive without valid byte metadata is not safe to
-            # estimate.  Force the budget gate to fail before JSON fetch.
-            review_bytes = (
-                f"CASE WHEN {archive_hash} <> '' THEN "
-                f"COALESCE(NULLIF({raw_bytes}, 0), {MAX_UNIQUE_REVIEW_BYTES + 1}) "
-                f"ELSE {inline_bytes} END"
-            )
-            projection = ", r.review_archive_hash AS review_archive_hash, r.review_raw_bytes AS review_raw_bytes"
-            return projection, review_bytes, True
-        return ", '' AS review_archive_hash, 0 AS review_raw_bytes", inline_bytes, False
-
     def _conn(self, *, read_only: bool = False):
         conn = (
             get_state_pg_conn(read_only=read_only)
@@ -499,31 +459,41 @@ class PositionQualityLightGBMService:
         conn = self._conn(read_only=read_only)
         self._last_training_queries = []
         try:
-            review_archive_select, review_bytes_expression, archive_columns_available = (
-                self._review_archive_sql(conn)
-            )
+            if not canonical_ready(conn):
+                raise RuntimeError("canonical_v2 reader is unavailable")
             max_positions = max(20, int(limit) // 2)
             horizon_seconds = max(5, int(horizon_minutes)) * 60.0
-            # Estimate before selecting the JSON column.  This keeps a bad
-            # historical window from crossing the Python boundary at all;
-            # the later stream is only opened after the byte budget passes.
-            review_preflight_sql = f"""
-                SELECT COUNT(*) AS review_count,
-                       COALESCE(SUM({review_bytes_expression}), 0)
-                           AS review_bytes
-                FROM trade_outcome_review r
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM position_supervisor_trace t
-                    WHERE t.position_id = r.position_id
-                      AND t.stage='evaluated'
-                      AND COALESCE(t.trace_integrity, 'full')='full'
+            self._remember_training_query(
+                "review_reader", "canonical_v2_reader.iter_review_rows_desc", ()
+            )
+            self._remember_training_query(
+                "trace_reader", "canonical_v2_reader.iter_supervisor_trace_rows", ()
+            )
+            self._remember_training_query(
+                "canonical_training_window", "canonical_v2_reader review/trace join", ()
+            )
+            canonical_traces = [
+                dict(row)
+                for row in iter_supervisor_trace_rows(
+                    conn, limit=0, stage="evaluated", reverse=False
                 )
-                """
-            self._remember_training_query("review_preflight", review_preflight_sql)
-            review_estimate = self._execute(conn, review_preflight_sql).fetchone()
-            estimated_review_count = int(_row_as_dict(review_estimate).get("review_count") or 0)
-            estimated_review_bytes = int(_row_as_dict(review_estimate).get("review_bytes") or 0)
+                if str(row.get("trace_integrity") or "full") == "full"
+            ]
+            trace_positions = {
+                str(row.get("position_id") or "")
+                for row in canonical_traces
+                if str(row.get("position_id") or "")
+            }
+            review_rows = [
+                dict(row)
+                for row in iter_review_rows_desc(conn, limit=0)
+                if str(row.get("position_id") or "") in trace_positions
+            ]
+            estimated_review_count = len(review_rows)
+            estimated_review_bytes = sum(
+                len(_review_payload_text(row)[0].encode("utf-8"))
+                for row in review_rows
+            )
             if estimated_review_bytes > MAX_UNIQUE_REVIEW_BYTES:
                 self.last_data_quality = {
                     "schema_version": "model_training_data_quality.v1",
@@ -535,33 +505,14 @@ class PositionQualityLightGBMService:
                     "peak_buffered_bytes": 0,
                     "horizon_minutes": int(horizon_minutes),
                     "pnl_tolerance": float(pnl_tolerance),
-                    "blocked_before_payload_fetch": True,
+                    "canonical_reader_prefetched": True,
                 }
                 raise TrainingMemoryBudgetExceeded(
                     "estimated unique review payload exceeds training memory budget",
                     data_quality=self.last_data_quality,
                 )
 
-            review_rows = self._stream_query_rows(
-                conn,
-                f"""
-                SELECT r.review_id, r.trade_id, r.position_id, r.pnl,
-                       r.outcome_label, r.failure_tags_json, r.review_json,
-                       r.created_at AS review_created_at
-                       {review_archive_select}
-                FROM trade_outcome_review r
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM position_supervisor_trace t
-                    WHERE t.position_id = r.position_id
-                      AND t.stage='evaluated'
-                      AND COALESCE(t.trace_integrity, 'full')='full'
-                )
-                """,
-            )
-
             # A review is an immutable card for a position.  Parse each card
-            # once, before touching the high-density trace stream.  Multiple
             # cards for one position are ambiguous and therefore excluded
             # rather than silently selecting one by join order.
             review_by_position: dict[str, dict[str, Any]] = {}
@@ -571,30 +522,20 @@ class PositionQualityLightGBMService:
             review_cardinality_ambiguous: set[str] = set()
             excluded_review_contaminated_positions: set[str] = set()
             excluded_review_incomplete_positions: set[str] = set()
-            archive_review_count = 0
-            inline_review_count = 0
             for raw_review in review_rows:
                 review = _row_as_dict(raw_review)
                 position_id = str(review.get("position_id") or "")
                 if not position_id:
                     continue
                 review_counts[position_id] = review_counts.get(position_id, 0) + 1
-                review_json, review_payload_source = _review_payload_text(conn, review)
-                if review_payload_source == "archive":
-                    archive_review_count += 1
-                else:
-                    inline_review_count += 1
+                review_json, _review_payload_source = _review_payload_text(review)
                 failure_tags_json = str(review.get("failure_tags_json") or "[]")
                 unique_review_count += 1
-                archive_raw_bytes = int(review.get("review_raw_bytes") or 0)
-                unique_review_bytes += (
-                    archive_raw_bytes
-                    if review_payload_source == "archive" and archive_raw_bytes > 0
-                    else len(review_json.encode("utf-8"))
-                )
+                unique_review_bytes += len(review_json.encode("utf-8"))
                 review["review_contaminated"] = _review_text_contaminated(review_json)
                 review["review_json"] = review_json
                 review["failure_tags_json"] = failure_tags_json
+                review["review_created_at"] = review.get("created_at", 0.0)
                 review["review_trainable"] = _review_execution_evidence_complete(review)
                 if review["review_contaminated"]:
                     excluded_review_contaminated_positions.add(position_id)
@@ -631,27 +572,12 @@ class PositionQualityLightGBMService:
             candidate_count = 0
             trace_counts: dict[str, int] = {}
             if all_review_positions:
-                placeholders = ",".join("?" for _ in all_review_positions)
-                candidate_trace_sql = f"""
-                    SELECT t.position_id, COUNT(*) AS trace_count
-                    FROM position_supervisor_trace t
-                    WHERE t.stage='evaluated'
-                      AND COALESCE(t.trace_integrity, 'full')='full'
-                      AND t.position_id IN ({placeholders})
-                    GROUP BY t.position_id
-                    """
-                self._remember_training_query(
-                    "candidate_trace_count", candidate_trace_sql, all_review_positions
-                )
-                count_rows = self._execute(
-                    conn, candidate_trace_sql, all_review_positions
-                ).fetchall()
-                for raw_count in count_rows:
-                    count_row = _row_as_dict(raw_count)
-                    position_id = str(count_row.get("position_id") or "")
-                    count = int(count_row.get("trace_count") or 0)
-                    trace_counts[position_id] = count
-                    candidate_count += count
+                for trace in canonical_traces:
+                    position_id = str(trace.get("position_id") or "")
+                    if position_id not in review_by_position:
+                        continue
+                    trace_counts[position_id] = trace_counts.get(position_id, 0) + 1
+                candidate_count = sum(trace_counts.values())
 
             eligible_positions = {
                 position_id
@@ -668,49 +594,36 @@ class PositionQualityLightGBMService:
             oversized_trace_positions: set[str] = set()
             trace_position_bytes: dict[str, int] = {}
             latest_template_version = ""
-            trace_bytes_expression = self._payload_byte_length_expression("t.verdict_json")
             if eligible_positions:
-                eligible_tuple = tuple(sorted(eligible_positions))
-                placeholders = ",".join("?" for _ in eligible_tuple)
-                latest_row = self._execute(
-                    conn,
-                    f"""
-                    SELECT t.template_version
-                    FROM position_supervisor_trace t
-                    WHERE t.stage='evaluated'
-                      AND COALESCE(t.trace_integrity, 'full')='full'
-                      AND t.position_id IN ({placeholders})
-                      AND COALESCE(t.config_hash, '')<>''
-                    ORDER BY t.event_ts DESC, t.position_id ASC, t.trace_id ASC
-                    LIMIT 1
-                    """,
-                    eligible_tuple,
-                ).fetchone()
-                if latest_row is not None:
-                    latest_template_version = str(_row_as_dict(latest_row).get("template_version") or "")
+                eligible_traces = [
+                    trace for trace in canonical_traces
+                    if str(trace.get("position_id") or "") in eligible_positions
+                    and str(trace.get("config_hash") or "")
+                ]
+                latest_template_version = str(
+                    max(
+                        eligible_traces,
+                        key=lambda trace: (
+                            _safe_float(trace.get("event_ts")),
+                            str(trace.get("position_id") or ""),
+                            str(trace.get("trace_id") or trace.get("event_id") or ""),
+                        ),
+                        default={},
+                    ).get("template_version") or ""
+                )
                 if latest_template_version:
-                    trace_size_rows = self._execute(
-                        conn,
-                        f"""
-                        SELECT t.position_id,
-                               SUM({trace_bytes_expression}) AS position_bytes
-                        FROM position_supervisor_trace t
-                        WHERE t.stage='evaluated'
-                          AND COALESCE(t.trace_integrity, 'full')='full'
-                          AND t.position_id IN ({placeholders})
-                          AND t.template_version=?
-                          AND COALESCE(t.config_hash, '')<>''
-                        GROUP BY t.position_id
-                        """,
-                        (*eligible_tuple, latest_template_version),
-                    ).fetchall()
-                    for raw_size in trace_size_rows:
-                        size_row = _row_as_dict(raw_size)
-                        position_id = str(size_row.get("position_id") or "")
-                        position_bytes = int(size_row.get("position_bytes") or 0)
-                        trace_position_bytes[position_id] = position_bytes
-                        if position_bytes > MAX_TRACE_WINDOW_BYTES:
-                            oversized_trace_positions.add(position_id)
+                    for trace in eligible_traces:
+                        if str(trace.get("template_version") or "") != latest_template_version:
+                            continue
+                        position_id = str(trace.get("position_id") or "")
+                        trace_position_bytes[position_id] = trace_position_bytes.get(position_id, 0) + len(
+                            str(trace.get("verdict_json") or "").encode("utf-8")
+                        )
+                    oversized_trace_positions = {
+                        position_id
+                        for position_id, position_bytes in trace_position_bytes.items()
+                        if position_bytes > MAX_TRACE_WINDOW_BYTES
+                    }
                     eligible_positions.difference_update(oversized_trace_positions)
 
             # Select the newest max_positions safe positions in SQL. The
@@ -718,26 +631,25 @@ class PositionQualityLightGBMService:
             # into Python.
             selected_positions: list[str] = []
             if eligible_positions:
-                eligible_tuple = tuple(sorted(eligible_positions))
-                placeholders = ",".join("?" for _ in eligible_tuple)
-                selected_rows = self._execute(
-                    conn,
-                    f"""
-                    SELECT t.position_id, MAX(t.event_ts) AS latest_event_ts
-                    FROM position_supervisor_trace t
-                    WHERE t.stage='evaluated'
-                      AND COALESCE(t.trace_integrity, 'full')='full'
-                      AND t.position_id IN ({placeholders})
-                    GROUP BY t.position_id
-                    ORDER BY latest_event_ts DESC, t.position_id DESC
-                    LIMIT ?
-                    """,
-                    (*eligible_tuple, max_positions),
-                ).fetchall()
+                latest_by_position: dict[str, float] = {}
+                for trace in canonical_traces:
+                    position_id = str(trace.get("position_id") or "")
+                    if (
+                        position_id in eligible_positions
+                        and str(trace.get("template_version") or "") == latest_template_version
+                        and str(trace.get("config_hash") or "")
+                    ):
+                        latest_by_position[position_id] = max(
+                            latest_by_position.get(position_id, 0.0),
+                            _safe_float(trace.get("event_ts")),
+                        )
                 selected_positions = [
-                    str(_row_as_dict(row).get("position_id") or "")
-                    for row in selected_rows
-                    if str(_row_as_dict(row).get("position_id") or "")
+                    position_id
+                    for position_id, _latest in sorted(
+                        latest_by_position.items(),
+                        key=lambda item: (item[1], item[0]),
+                        reverse=True,
+                    )[:max_positions]
                 ]
 
             selected_set = set(selected_positions)
@@ -788,36 +700,21 @@ class PositionQualityLightGBMService:
             def _iter_trace_rows():
                 if not selected_set:
                     return
-                placeholders = ",".join("?" for _ in selected_positions)
-                sql = f"""
-                    SELECT t.trace_id, t.position_id, t.trade_id, t.event_ts,
-                           t.verdict_json, t.template_version, t.config_hash
-                    FROM position_supervisor_trace t
-                    WHERE t.stage='evaluated'
-                      AND COALESCE(t.trace_integrity, 'full')='full'
-                      AND t.position_id IN ({placeholders})
-                      AND t.template_version=?
-                      AND COALESCE(t.config_hash, '')<>''
-                    ORDER BY t.position_id ASC, t.event_ts ASC, t.trace_id ASC
-                """
-                cursor = None
-                try:
-                    params = (*selected_positions, latest_template_version)
-                    self._remember_training_query("trace_stream", sql, params)
-                    if self._use_pg():
-                        cursor = conn.cursor(name=f"position_quality_trace_{id(conn)}")
-                        cursor.execute(self._sql(sql), params)
-                    else:
-                        cursor = conn.execute(sql, params)
-                    while True:
-                        batch = cursor.fetchmany(TRACE_FETCH_BATCH_SIZE)
-                        if not batch:
-                            break
-                        for raw_row in batch:
-                            yield _row_as_dict(raw_row, getattr(cursor, "description", None))
-                finally:
-                    if cursor is not None:
-                        cursor.close()
+                rows = [
+                    dict(row)
+                    for row in canonical_traces
+                    if str(row.get("position_id") or "") in selected_set
+                    and str(row.get("template_version") or "") == latest_template_version
+                    and str(row.get("config_hash") or "")
+                ]
+                rows.sort(
+                    key=lambda row: (
+                        str(row.get("position_id") or ""),
+                        _safe_float(row.get("event_ts")),
+                        str(row.get("trace_id") or row.get("event_id") or ""),
+                    )
+                )
+                yield from rows
 
             def _payload_bytes(item: dict[str, Any]) -> int:
                 return len(str(item.get("verdict_json") or "").encode("utf-8"))
@@ -1056,9 +953,8 @@ class PositionQualityLightGBMService:
                 ),
                 "excluded_reason_counts": excluded_reason_counts,
                 "review_parse_count": unique_review_count,
-                "review_archive_columns_available": archive_columns_available,
-                "archive_review_count": archive_review_count,
-                "inline_review_count": inline_review_count,
+                "canonical_review_reader": True,
+                "canonical_trace_reader": True,
                 "trace_fetch_batch_size": TRACE_FETCH_BATCH_SIZE,
             }
             self.last_data_quality.update(_sample_semantics(samples))
@@ -1067,75 +963,41 @@ class PositionQualityLightGBMService:
             conn.close()
 
     def _explain_training_queries(self) -> list[dict[str, Any]]:
-        """Return read-only plans for the exact bounded reader predicates."""
+        """Describe the canonical readers used by the bounded training window."""
         queries = list(self._last_training_queries)
         if not queries:
-            # A budget failure can happen before the position-specific
-            # queries are built. Keep the preflight fallback read-only and
-            # representative; successful inspection always uses the exact
-            # SQL recorded by load_samples above.
-            metadata_conn = self._conn(read_only=True)
-            try:
-                _review_archive_select, review_bytes_expression, _archive_columns_available = (
-                    self._review_archive_sql(metadata_conn)
-                )
-            finally:
-                metadata_conn.close()
             queries = [
                 (
-                    "review_preflight",
-                    f"""
-                    SELECT COUNT(*) AS review_count,
-                           COALESCE(SUM({review_bytes_expression}), 0)
-                               AS review_bytes
-                    FROM trade_outcome_review r
-                    WHERE EXISTS (
-                        SELECT 1
-                        FROM position_supervisor_trace t
-                        WHERE t.position_id = r.position_id
-                          AND t.stage='evaluated'
-                          AND COALESCE(t.trace_integrity, 'full')='full'
-                    )
-                    """,
+                    "review_reader",
+                    "canonical_v2_reader.iter_review_rows_desc",
+                    (),
+                ),
+                (
+                    "trace_reader",
+                    "canonical_v2_reader.iter_supervisor_trace_rows",
+                    (),
+                ),
+                (
+                    "canonical_training_window",
+                    "canonical_v2_reader review/trace join",
                     (),
                 ),
             ]
-        conn = self._conn(read_only=True)
-        try:
-            plans: list[dict[str, Any]] = []
-            for name, sql, params in queries:
-                started = time.perf_counter()
-                rendered = self._sql(sql)
-                if self._use_pg():
-                    cursor = conn.execute(
-                        "EXPLAIN (FORMAT JSON, COSTS, VERBOSE, SETTINGS) " + rendered,
-                        tuple(params),
-                    )
-                    row = cursor.fetchone()
-                    if row is None:
-                        plan = None
-                    else:
-                        try:
-                            plan = row[0]
-                        except (KeyError, IndexError, TypeError):
-                            values = _row_as_dict(row).values()
-                            plan = next(iter(values), None)
-                else:
-                    rows = conn.execute("EXPLAIN QUERY PLAN " + rendered, tuple(params)).fetchall()
-                    plan = [_row_as_dict(row) for row in rows]
-                plans.append(
-                    {
-                        "name": name,
-                        "sql": rendered,
-                        "params": list(params),
-                        "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
-                        "analyze": False,
-                        "plan": plan,
-                    }
-                )
-            return plans
-        finally:
-            conn.close()
+        return [
+            {
+                "name": name,
+                "reader": reader,
+                "params": list(params),
+                "elapsed_ms": 0.0,
+                "analyze": False,
+                "plan": {
+                    "authority": "canonical_v2_reader",
+                    "reader": reader,
+                    "read_only": True,
+                },
+            }
+            for name, reader, params in queries
+        ]
 
     def inspect_training_window(
         self,

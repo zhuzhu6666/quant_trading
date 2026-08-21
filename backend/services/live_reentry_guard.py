@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.services.canonical_v2_reader import iter_review_rows
-from backend.services.state_payload_archive import load_json_payload
 
 
 @dataclass(frozen=True)
@@ -117,13 +116,10 @@ def recent_review_reentry_block(
             rows = [
                 {
                     **dict(row),
-                    "_review_payload": load_json_payload(
-                        conn,
-                        source_table="trade_outcome_review",
-                        source_id=str(dict(row).get("review_id") or ""),
-                        inline_json=dict(row).get("review_json"),
-                        archive_hash=dict(row).get("review_archive_hash", ""),
-                        default={},
+                    "_review_payload": (
+                        dict(row).get("review_json")
+                        if isinstance(dict(row).get("review_json"), dict)
+                        else _json_object(dict(row).get("review_json"))
                     ),
                 }
                 for row in rows
@@ -176,7 +172,7 @@ def recent_review_reentry_block(
     return {
         "schema_version": "retrospective_reentry_block.v1",
         "active": True,
-        "source": "trade_outcome_review",
+        "source": "canonical_v2.trade_review",
         "action": "block_same_direction_reentry",
         "reason": "repeated_conflicting_thesis_loss",
         "symbol": str(symbol or ""),

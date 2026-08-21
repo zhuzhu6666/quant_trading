@@ -15,6 +15,13 @@ from backend.core.db_helpers import conn_is_pg as _conn_is_pg, execute as _execu
 from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    iter_counterfactual_rows,
+    iter_decision_rows,
+    iter_review_rows,
+    iter_supervisor_trace_rows,
+)
 from backend.services.proposal_registry import ProposalRegistryService
 
 
@@ -235,19 +242,25 @@ class AutonomousEvolutionCycleService:
 
     def _evidence_status(self, *, now: float) -> dict[str, Any]:
         tables = [
-            "decision_ledger",
-            "trade_outcome_review",
+            "canonical_v2.risk_decision",
+            "canonical_v2.trade_review",
             "experience_memory",
             "replay_report",
         ]
-        items = [self._table_freshness(table, now=now) for table in tables]
+        items = [
+            self._canonical_fact_freshness(table, now=now)
+            if table.startswith("canonical_v2.")
+            else self._table_freshness(table, now=now)
+            for table in tables
+        ]
         sample_item = self._sample_freshness(now=now)
         if sample_item is not None:
             items.append(sample_item)
         hard_missing = [
             item["table"]
             for item in items
-            if item["table"] in {"decision_ledger", "canonical_v2.training_sample_row"} and item["count"] <= 0
+            if item["table"] in {"canonical_v2.risk_decision", "canonical_v2.training_sample_row"}
+            and item["count"] <= 0
         ]
         replay_item = next((item for item in items if item["table"] == "replay_report"), {})
         replay_stale = bool(replay_item.get("latest_age_seconds", 0) > 24 * 3600) or _safe_int(replay_item.get("count")) <= 0
@@ -312,6 +325,47 @@ class AutonomousEvolutionCycleService:
                 "latest_created_at": latest,
                 "latest_age_seconds": age,
                 "status": "available" if count > 0 else "empty",
+            }
+        finally:
+            conn.close()
+
+    def _canonical_fact_freshness(self, kind: str, *, now: float) -> dict[str, Any]:
+        """Return freshness for immutable canonical facts, never runtime tables."""
+        conn = _connect(self.db_path, read_only=True)
+        try:
+            if not canonical_ready(conn):
+                return {
+                    "table": kind,
+                    "exists": False,
+                    "count": 0,
+                    "latest_created_at": 0.0,
+                    "latest_age_seconds": 0.0,
+                    "status": "missing",
+                }
+            if kind == "canonical_v2.risk_decision":
+                rows = list(iter_decision_rows(conn, limit=0))
+                timestamp_key = "created_at"
+            elif kind == "canonical_v2.trade_review":
+                rows = iter_review_rows(conn, limit=0)
+                timestamp_key = "created_at"
+            elif kind == "canonical_v2.supervisor_trace":
+                rows = iter_supervisor_trace_rows(conn, limit=0)
+                timestamp_key = "event_ts"
+            elif kind == "canonical_v2.counterfactual_review":
+                rows = iter_counterfactual_rows(conn, limit=0)
+                timestamp_key = "close_ts"
+            else:
+                rows = []
+                timestamp_key = "created_at"
+            latest = max((_safe_float(row.get(timestamp_key)) for row in rows), default=0.0)
+            age = max(0.0, now - latest) if latest > 0 else 0.0
+            return {
+                "table": kind,
+                "exists": True,
+                "count": len(rows),
+                "latest_created_at": latest,
+                "latest_age_seconds": age,
+                "status": "available" if rows else "empty",
             }
         finally:
             conn.close()

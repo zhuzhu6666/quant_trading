@@ -57,55 +57,23 @@ def _safe_int(value: Any, default: int) -> int:
 
 def recover_emergency_execution_intents(
     bridge: Any,
-    *,
-    enabled: bool,
-    read_local_unresolved: Callable[[], list[dict[str, Any]]],
 ) -> dict[str, Any]:
-    """Recover emergency-visible execution outcomes without a PG dependency.
-
-    The broker bridge is authoritative when it implements the immutable
-    recovery contract.  The local fsync ledger is compatibility evidence only:
-    once outcome v2 is enabled, a missing bridge contract remains unknown even
-    when that ledger is empty.
-    """
+    """Recover execution outcomes through the single broker intent contract."""
 
     if hasattr(bridge, "recover_execution_intents"):
         return dict(bridge.recover_execution_intents() or {})
-    try:
-        unresolved = list(read_local_unresolved() or ())
-    except Exception as exc:
-        return {
-            "schema": "broker_execution_intent_recovery.v1",
-            "ready": False,
-            "enabled": bool(enabled),
-            "unresolved_count": None,
-            "unresolved": [],
-            "error": (
-                "local_execution_recovery_unavailable:"
-                f"{type(exc).__name__}:{exc}"
-            ),
-        }
-    if enabled:
-        return {
-            "schema": "broker_execution_intent_recovery.v1",
-            "ready": False,
-            "enabled": True,
-            "unresolved_count": None,
-            "unresolved": unresolved,
-            "error": "bridge_execution_recovery_contract_missing",
-        }
     return {
-        "schema": "broker_execution_intent_recovery.v1",
-        "ready": not unresolved,
-        "enabled": False,
-        "unresolved_count": len(unresolved),
-        "unresolved": unresolved,
+        "schema": "broker_execution_intent_recovery.v2",
+        "ready": False,
+        "enabled": True,
+        "unresolved_count": None,
+        "unresolved": [],
+        "error": "bridge_execution_recovery_contract_missing",
     }
 
 
 def recover_execution_outcomes_before_alpha(
     *,
-    enabled: bool,
     bridge: Any,
     broker: str,
     tick: int,
@@ -122,7 +90,7 @@ def recover_execution_outcomes_before_alpha(
     unknown outcomes that appear after startup.
     """
 
-    if not enabled or (generation_id and generation_startup_pending):
+    if generation_id and generation_startup_pending:
         return safety_result, True
 
     cached = dict(runtime.get_cached_recovery() or {})
@@ -156,7 +124,7 @@ def recover_execution_outcomes_before_alpha(
     if bridge is None or not hasattr(bridge, "recover_execution_intents"):
         return blocked(
             {
-                "schema": "broker_execution_intent_recovery.v1",
+                "schema": "broker_execution_intent_recovery.v2",
                 "enabled": True,
                 "ready": False,
                 "unresolved_count": None,
@@ -171,7 +139,7 @@ def recover_execution_outcomes_before_alpha(
     except Exception as exc:
         return blocked(
             {
-                "schema": "broker_execution_intent_recovery.v1",
+                "schema": "broker_execution_intent_recovery.v2",
                 "enabled": True,
                 "ready": False,
                 "unresolved_count": None,
@@ -181,7 +149,7 @@ def recover_execution_outcomes_before_alpha(
             "execution_recovery_failed",
         )
 
-    status.setdefault("schema", "broker_execution_intent_recovery.v1")
+    status.setdefault("schema", "broker_execution_intent_recovery.v2")
     status["enabled"] = True
     runtime.update_live_state(execution_recovery=status)
     unresolved_count = _safe_int(status.get("unresolved_count"), -1)

@@ -15,7 +15,6 @@ from loguru import logger
 from backend.core.db import (
     STATE_DB,
     connect_sqlite,
-    ensure_sqlite_columns,
     get_state_pg_conn,
     is_state_db_path,
     state_pg_enabled,
@@ -25,13 +24,15 @@ from backend.core.db import (
 from backend.services.canonical_v2_reader import (
     canonical_ready,
     decision_row,
+    iter_counterfactual_rows,
     iter_decision_rows,
     iter_order_rows,
+    iter_position_rows,
     iter_review_rows_desc,
-    review_row,
+    iter_supervisor_trace_rows,
+    load_position_decision_index,
 )
 from backend.services.evolution_ledger import (
-    ensure_evolution_columns,
     ensure_evolution_ledger_tables,
     finish_evolution_run,
     record_evolution_decision,
@@ -50,14 +51,10 @@ from backend.services.review_contract import (
     build_entry_timing_context,
     extract_decision_freshness_context,
     normalize_trade_review_contract,
+    review_consumer_eligibility,
     review_has_system_contamination,
 )
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
-from backend.services.state_payload_archive import (
-    archive_json_payload,
-    load_json_payload,
-    supervisor_trace_archive_text,
-)
 from research.features.evidence_contract import build_evidence_contract
 from backend.services.supervisor_payload_contract import (
     compact_supervisor_mapping as _compact_supervisor_mapping,
@@ -86,6 +83,14 @@ EXECUTABLE_GOVERNANCE_SAMPLE_TYPES = {
     "trade_review_outcome",
     "post_close_counterfactual",
 }
+
+# Logical source identifiers for the canonical_v2 event streams.  These are
+# lineage labels, not physical table names; keeping them canonical prevents a
+# new sample from advertising a retired runtime projection as its authority.
+SOURCE_RISK_DECISION = "canonical_v2.risk_decision"
+SOURCE_TRADE_REVIEW = "canonical_v2.trade_review"
+SOURCE_SUPERVISOR_COUNTERFACTUAL = "canonical_v2.counterfactual_review"
+SOURCE_SUPERVISOR_TRACE = "canonical_v2.supervisor_trace"
 
 OPEN_QUALITY_CONSUMER = "open_quality_lightgbm"
 OPEN_QUALITY_CONTEXT_FIELDS = (
@@ -222,6 +227,12 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
         return
     conn = connect_sqlite(db_path)
     try:
+        # SQLite is used only as a canonical fixture.  Install the same
+        # canonical event/sample schema used by PostgreSQL; never bootstrap a
+        # historical fact table here.
+        from backend.services.canonical_v2 import ensure_sqlite_schema
+
+        ensure_sqlite_schema(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS evolution_events (
@@ -286,62 +297,6 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_tsr_fingerprint
             ON training_sample_row(content_fingerprint, updated_at)
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS position_supervisor_trace (
-                trace_id TEXT PRIMARY KEY,
-                decision_id TEXT DEFAULT '',
-                position_id TEXT NOT NULL,
-                trade_id TEXT DEFAULT '',
-                symbol TEXT DEFAULT '',
-                timeframe TEXT DEFAULT '',
-                tick INTEGER DEFAULT 0,
-                event_ts REAL NOT NULL DEFAULT 0.0,
-                action TEXT DEFAULT '',
-                summary_reason TEXT DEFAULT '',
-                confidence REAL DEFAULT 0.0,
-                template_id TEXT DEFAULT '',
-                template_version TEXT DEFAULT '',
-                stage TEXT DEFAULT '',
-                outcome TEXT DEFAULT '',
-                risk_action TEXT DEFAULT '',
-                risk_allowed INTEGER DEFAULT 0,
-                risk_reason TEXT DEFAULT '',
-                execution_status TEXT DEFAULT '',
-                execution_reason TEXT DEFAULT '',
-                context_json TEXT DEFAULT '{}',
-                verdict_json TEXT DEFAULT '{}',
-                risk_verdict_json TEXT DEFAULT '{}',
-                execution_json TEXT DEFAULT '{}',
-                trace_integrity TEXT DEFAULT 'full',
-                config_version INTEGER DEFAULT 0,
-                config_hash TEXT DEFAULT '',
-                evolution_run_id TEXT DEFAULT '',
-                created_at REAL NOT NULL DEFAULT 0.0
-            )
-            """
-        )
-        trace_cols = state_table_columns(conn, "position_supervisor_trace")
-        if "trace_integrity" not in trace_cols:
-            conn.execute("ALTER TABLE position_supervisor_trace ADD COLUMN trace_integrity TEXT DEFAULT 'full'")
-        if "config_version" not in trace_cols:
-            conn.execute("ALTER TABLE position_supervisor_trace ADD COLUMN config_version INTEGER DEFAULT 0")
-        if "config_hash" not in trace_cols:
-            conn.execute("ALTER TABLE position_supervisor_trace ADD COLUMN config_hash TEXT DEFAULT ''")
-        if "evolution_run_id" not in trace_cols:
-            conn.execute("ALTER TABLE position_supervisor_trace ADD COLUMN evolution_run_id TEXT DEFAULT ''")
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_position_supervisor_trace_position_ts
-            ON position_supervisor_trace(position_id, event_ts)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_position_supervisor_trace_action_outcome
-            ON position_supervisor_trace(action, outcome, event_ts)
             """
         )
         conn.execute(
@@ -416,7 +371,6 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
         conn.commit()
     finally:
         conn.close()
-    ensure_evolution_columns(db_path)
 
 
 def _sample_is_system_contaminated(item: dict[str, Any]) -> bool:
@@ -726,6 +680,16 @@ def _canonical_sample_evidence_inputs(
     return normalized
 
 
+def _consumer_eligibility(
+    item: dict[str, Any],
+    consumer: str,
+) -> dict[str, Any]:
+    value = item.get("consumer_eligibility")
+    if isinstance(value, dict) and isinstance(value.get(consumer), dict):
+        return dict(value[consumer])
+    return {}
+
+
 def _build_sample_evidence_contract(
     item: dict[str, Any],
     *,
@@ -782,6 +746,18 @@ def _build_sample_evidence_contract(
         evidence_contract=contract,
     )
     contract["governance_eligibility"] = eligibility.to_dict()
+    contract.setdefault("consumer_eligibility", {})["governance_mutation"] = {
+        "schema_version": "consumer_eligibility.v1",
+        "consumer": "governance_mutation",
+        "eligible": bool(eligibility.eligible),
+        "model_ready": bool(eligibility.eligible),
+        "allowed_uses": ["governance_mutation"] if eligibility.eligible else [],
+        "blockers": list(eligibility.exclusion_reasons),
+    }
+    for consumer in ("outcome_learning", "supervisor_counterfactual"):
+        explicit = _consumer_eligibility(normalized, consumer)
+        if explicit:
+            contract["consumer_eligibility"][consumer] = explicit
     if str(normalized.get("sample_type") or "") == "shadow_open_decision":
         contract.setdefault("consumer_eligibility", {})[OPEN_QUALITY_CONSUMER] = (
             _open_quality_consumer_eligibility(normalized)
@@ -835,7 +811,12 @@ def _upsert_sample(conn, item: dict[str, Any]) -> bool:
         except Exception:
             existing_label_status = str(existing[0] or "")
             existing_fingerprint = str(existing[1] or "") if len(existing) > 1 else ""
-        if existing_label_status == "matured" and label_status != "matured":
+        exclusion_repair = (
+            label_status == "excluded"
+            and str(normalized_item.get("exclusion_reason") or "")
+            == "never_executed_supervisor_action"
+        )
+        if existing_label_status == "matured" and label_status != "matured" and not exclusion_repair:
             return False
     row_payload = {
         "sample_id": sample_id,
@@ -901,8 +882,6 @@ def _autonomy_mode() -> str:
         from config.runtime_config import shared as runtime_config
 
         cfg = runtime_config()
-        if not bool(getattr(cfg, "autonomy_demo_auto_apply", True)):
-            return "manual"
         return str(getattr(cfg, "autonomy_mode", "") or "manual")
     except Exception:
         return "manual"
@@ -910,6 +889,24 @@ def _autonomy_mode() -> str:
 
 def _demo_autonomous_enabled() -> bool:
     return _autonomy_mode() in {"demo_autonomous", "demo_nursery"}
+
+
+def _demo_autonomy_mutation_enabled() -> bool:
+    """Return whether governed demo mutations may be applied.
+
+    The autonomy mode describes the active governance environment.  The
+    explicit demo flag gates only governed mutations; it must not change the
+    supervisor broker-execution path or make the learning cycle appear to be
+    in manual mode.
+    """
+    if not _demo_autonomous_enabled():
+        return False
+    try:
+        from config.runtime_config import shared as runtime_config
+
+        return bool(getattr(runtime_config(), "autonomy_demo_auto_apply", False))
+    except Exception:
+        return False
 
 
 def _new_experiment_id(prefix: str = "demoauto") -> str:
@@ -927,30 +924,64 @@ def _risk_rejection_label(action_json: dict[str, Any]) -> tuple[str, float]:
     return "matured", 1.0
 
 
-def _reviews_desc(conn: Any, limit: int = 0) -> list[dict[str, Any]] | None:
-    """Newest-first legacy-shaped review rows from canonical (None = legacy path).
+def _reviews_desc(conn: Any, limit: int = 0) -> list[dict[str, Any]]:
+    """Return the newest canonical review revision for each review id.
 
-    Canonical review coverage is complete (exact mapping), so the full stream
-    is cheap (721 rows) and the caller keeps the legacy row shape.
+    Reviews are immutable canonical events.  A learning repair therefore adds
+    a canonical revision instead of mutating a historical hot row.  The reader
+    exposes the event stream, so this consumer-side projection collapses those
+    revisions before building samples.
     """
     if not canonical_ready(conn):
-        return None
-    return iter_review_rows_desc(conn, limit=limit)
+        return []
+
+    def _score(row: Mapping[str, Any], ordinal: int) -> tuple[float, float, int]:
+        def _number(value: Any) -> float:
+            try:
+                return float(value or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                return 0.0
+
+        created = _number(row.get("created_at"))
+        updated = _number(row.get("updated_at"))
+        return (updated or created, created, ordinal)
+
+    latest: dict[str, tuple[tuple[float, float, int], dict[str, Any]]] = {}
+    for ordinal, row in enumerate(iter_review_rows_desc(conn, limit=0)):
+        review_id = str(row.get("review_id") or "")
+        if not review_id:
+            continue
+        score = _score(row, ordinal)
+        previous = latest.get(review_id)
+        if previous is None or score > previous[0]:
+            latest[review_id] = (score, dict(row))
+    rows = [item[1] for item in latest.values()]
+
+    def _sort_number(value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    rows.sort(
+        key=lambda row: (
+            _sort_number(row.get("updated_at") or row.get("created_at")),
+            _sort_number(row.get("created_at")),
+            str(row.get("review_id") or ""),
+        ),
+        reverse=True,
+    )
+    return rows[: int(limit)] if limit and int(limit) > 0 else rows
 
 
 def _decisions_desc(
     conn: Any,
     limit: int = 0,
     predicate: Callable[[dict[str, Any]], bool] | None = None,
-) -> list[dict[str, Any]] | None:
-    """Newest-first legacy-shaped decision rows from canonical (None = legacy path).
-
-    The legacy queries filter BEFORE the LIMIT; the canonical stream has no
-    payload predicate, so the filter is applied here with early exit in
-    reverse observed order (the newest matches first).
-    """
+) -> list[dict[str, Any]]:
+    """Newest-first decision rows from the canonical event stream."""
     if not canonical_ready(conn):
-        return None
+        return []
     out: list[dict[str, Any]] = []
     for row in iter_decision_rows(conn, limit=0, reverse=True):
         if predicate is None or predicate(row):
@@ -978,29 +1009,37 @@ def _review_index(
     return by_entry, by_position
 
 
+def _latest_review_row(conn: Any, review_id: str) -> dict[str, Any] | None:
+    if not review_id:
+        return None
+    return next(
+        (
+            row
+            for row in _reviews_desc(conn)
+            if str(row.get("review_id") or "") == str(review_id)
+        ),
+        None,
+    )
+
+
 def _attach_source_review(conn: Any, row: Any) -> dict[str, Any]:
     """Attach the source review to a counterfactual/trace row.
 
-    Canonical mode splits the legacy JOIN: the review is resolved through the
-    canonical mapping (complete coverage) and shaped like the joined row.
-    Legacy mode returns the row unchanged (the caller's SQL already joins).
+    The source review is resolved through the canonical reader projection; no
+    historical table join is permitted here.
     """
-    if not canonical_ready(conn):
-        return dict(row) if not isinstance(row, Mapping) else row
     review_id = str(_row_value(row, "review_id", "") or "")
-    review = review_row(conn, review_id) if review_id else None
+    review = _latest_review_row(conn, review_id) if review_id else None
     if review is not None:
         return {
             **row,
             "source_review_id": review_id,
             "source_review_json": review.get("review_json") or {},
-            "source_review_archive_hash": "",
         }
     return {
         **row,
         "source_review_id": "",
         "source_review_json": {},
-        "source_review_archive_hash": "",
     }
 
 
@@ -1015,8 +1054,8 @@ def _review_for_open_decision(
     position_id = str(_row_value(row, "position_id", "") or "")
     if not decision_id and not position_id:
         return None
+    # Canonical branch: newest-first indexes built once per caller loop.
     if review_by_entry is not None:
-        # Canonical branch: newest-first indexes built once per caller loop.
         if decision_id:
             matches = review_by_entry.get(decision_id)
             if matches:
@@ -1026,18 +1065,12 @@ def _review_for_open_decision(
             if matches:
                 return matches[0]
         return None
-    return _execute(
-        conn,
-        """
-        SELECT *
-        FROM trade_outcome_review
-        WHERE (? <> '' AND entry_decision_id=?)
-           OR (? <> '' AND position_id=?)
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        (decision_id, decision_id, position_id, position_id),
-    ).fetchone()
+    for candidate in _reviews_desc(conn):
+        if decision_id and str(candidate.get("entry_decision_id") or "") == decision_id:
+            return candidate
+        if position_id and str(candidate.get("position_id") or "") == position_id:
+            return candidate
+    return None
 
 
 def _review_integrity_for_training(review_json: dict[str, Any]) -> tuple[str, float]:
@@ -1117,34 +1150,17 @@ def _open_target_v2(
     }
 
 
-def _review_archive_select(
-    conn: Any,
-    *,
-    alias: str = "r",
-    output: str = "review_archive_hash",
-) -> str:
-    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
-        return ""
-    return f", {alias}.review_archive_hash AS {output}"
-
-
 def _review_payload_value(
     conn: Any,
     row: Any,
     *,
     inline_key: str = "review_json",
-    archive_key: str = "review_archive_hash",
-    source_id_key: str = "review_id",
 ) -> dict[str, Any]:
-    payload = load_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(_row_value(row, source_id_key, "") or ""),
-        inline_json=_row_value(row, inline_key, "{}"),
-        archive_hash=_row_value(row, archive_key, ""),
-        default={},
-    )
-    return payload if isinstance(payload, dict) else {}
+    del conn
+    payload = _row_value(row, inline_key, default={})
+    if isinstance(payload, dict):
+        return dict(payload)
+    return _loads(payload, {}) if payload else {}
 
 
 def _counterfactual_source_is_clean(row: Any, conn: Any | None = None) -> bool:
@@ -1156,8 +1172,6 @@ def _counterfactual_source_is_clean(row: Any, conn: Any | None = None) -> bool:
             conn,
             row,
             inline_key="source_review_json",
-            archive_key="source_review_archive_hash",
-            source_id_key="source_review_id",
         )
         if conn is not None
         else _loads(_row_value(row, "source_review_json", ""), {})
@@ -1267,7 +1281,7 @@ def _sample_from_decision(
             )
     return {
         "sample_type": sample_type,
-        "source_table": "decision_ledger",
+        "source_table": SOURCE_RISK_DECISION,
         "source_id": str(row["decision_id"] or ""),
         "decision_id": str(row["decision_id"] or ""),
         "trade_id": str(row["trade_id"] or ""),
@@ -1337,9 +1351,23 @@ def _sample_from_review(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
     review = _review_payload_value(conn, row) if conn is not None else _loads(row["review_json"], {})
     integrity, train_weight = _review_integrity_for_training(review)
     contamination = _review_system_contamination(review)
+    outcome_review = {
+        **review,
+        "outcome_label": str(row["outcome_label"] or review.get("outcome_label") or ""),
+        "pnl": float(row["pnl"] or review.get("pnl") or 0.0),
+    }
+    real_pnl = dict(outcome_review.get("real_pnl") or {})
+    if not real_pnl.get("close_price") and not real_pnl.get("exec_price"):
+        if outcome_review.get("close_price") not in (None, ""):
+            real_pnl["close_price"] = outcome_review.get("close_price")
+    outcome_review["real_pnl"] = real_pnl
+    outcome_eligibility = review_consumer_eligibility(
+        outcome_review,
+        "outcome_learning",
+    )
     return {
         "sample_type": "trade_review_outcome",
-        "source_table": "trade_outcome_review",
+        "source_table": SOURCE_TRADE_REVIEW,
         "source_id": str(row["review_id"] or ""),
         "decision_id": str(row["exit_decision_id"] or row["entry_decision_id"] or ""),
         "trade_id": str(row["trade_id"] or ""),
@@ -1349,6 +1377,8 @@ def _sample_from_review(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
         "event_ts": float(review.get("close_ts") or row["created_at"] or 0.0),
         "label_status": "matured",
         "executable_governance_allowed": True,
+        "outcome_learning_allowed": bool(outcome_eligibility.get("eligible")),
+        "outcome_learning_weight": float(outcome_eligibility.get("train_weight") or 0.0),
         "integrity": integrity,
         "train_weight": train_weight,
         "causal_level": "intervention_observed",
@@ -1387,6 +1417,9 @@ def _sample_from_review(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
             "exit_decision_id": str(row["exit_decision_id"] or ""),
             "position_id": str(row["position_id"] or ""),
         },
+        "consumer_eligibility": {
+            "outcome_learning": outcome_eligibility,
+        },
     }
 
 
@@ -1401,8 +1434,6 @@ def _sample_from_counterfactual(row: Any, *, conn: Any | None = None) -> dict[st
                 conn,
                 row,
                 inline_key="source_review_json",
-                archive_key="source_review_archive_hash",
-                source_id_key="source_review_id",
             )
             if conn is not None
             else _loads(_row_value(row, "source_review_json", ""), {})
@@ -1430,7 +1461,7 @@ def _sample_from_counterfactual(row: Any, *, conn: Any | None = None) -> dict[st
         label_status = "pending" if maturity_status in {"", "pending"} else label_status
     return {
         "sample_type": "post_close_counterfactual",
-        "source_table": "supervisor_counterfactual_review",
+        "source_table": SOURCE_SUPERVISOR_COUNTERFACTUAL,
         "source_id": str(row["counterfactual_id"] or ""),
         "trade_id": str(row["trade_id"] or ""),
         "position_id": str(row["position_id"] or ""),
@@ -1527,7 +1558,7 @@ def _sample_from_entry_supervisor_feedback(
     review_id = str(row["review_id"] or "")
     return {
         "sample_type": "entry_supervisor_feedback",
-        "source_table": "trade_outcome_review",
+        "source_table": SOURCE_TRADE_REVIEW,
         "source_id": review_id,
         "decision_id": str(row["entry_decision_id"] or review.get("entry_decision_id") or ""),
         "trade_id": str(row["trade_id"] or review.get("trade_id") or ""),
@@ -1593,10 +1624,10 @@ def _sample_from_supervisor_trace(
     source_review_row: Any | None = None,
     conn: Any | None = None,
 ) -> dict[str, Any]:
-    verdict = _loads(row["verdict_json"], {})
-    context = _loads(row["context_json"], {})
-    risk_verdict = _loads(row["risk_verdict_json"], {})
-    execution = _loads(row["execution_json"], {})
+    verdict = _loads(_row_value(row, "verdict_json", "{}"), {})
+    context = _loads(_row_value(row, "context_json", "{}"), {})
+    risk_verdict = _loads(_row_value(row, "risk_verdict_json", "{}"), {})
+    execution = _loads(_row_value(row, "execution_json", "{}"), {})
     review_row = source_review_row if source_review_row is not None else row
     source_review_id = str(_row_value(review_row, "source_review_id", "") or "")
     if source_review_id:
@@ -1605,8 +1636,6 @@ def _sample_from_supervisor_trace(
                 conn,
                 review_row,
                 inline_key="source_review_json",
-                archive_key="source_review_archive_hash",
-                source_id_key="source_review_id",
             )
             if conn is not None
             else _loads(_row_value(review_row, "source_review_json", ""), {})
@@ -1618,26 +1647,42 @@ def _sample_from_supervisor_trace(
             "reason": "canonical_source_review_missing",
         }
     contaminated = bool(source_contamination.get("contaminated"))
-    outcome = str(row["outcome"] or "")
-    execution_status = str(row["execution_status"] or "")
-    label_status = "pending"
-    train_weight = 0.35
-    if outcome in {"blocked", "skipped", "failed"}:
+    outcome = str(_row_value(row, "outcome", "") or "")
+    execution_status = str(_row_value(row, "execution_status", "") or "")
+    real_execution = _supervisor_trace_is_real_execution(row)
+    counterfactual_blockers = []
+    if not real_execution:
+        counterfactual_blockers.append("not_real_execution")
+    if contaminated:
+        counterfactual_blockers.append("review_system_contaminated")
+    label_status = "excluded" if not real_execution else "pending"
+    train_weight = 0.0 if not real_execution else 0.35
+    if real_execution and outcome in {"blocked", "skipped", "failed"}:
         train_weight = 0.45
-    if outcome == "hold":
+    if real_execution and outcome == "hold":
         train_weight = 0.25
+    label = outcome or execution_status or str(_row_value(row, "action", "") or "")
+    if not real_execution:
+        label = "excluded_never_executed_supervisor_action"
     return {
         "sample_type": "supervisor_execution_trace",
-        "source_table": "position_supervisor_trace",
-        "source_id": str(row["trace_id"] or ""),
-        "decision_id": str(row["decision_id"] or ""),
-        "trade_id": str(row["trade_id"] or ""),
-        "position_id": str(row["position_id"] or ""),
-        "symbol": str(row["symbol"] or ""),
-        "timeframe": str(row["timeframe"] or ""),
-        "event_ts": float(row["event_ts"] or row["created_at"] or 0.0),
+        "source_table": SOURCE_SUPERVISOR_TRACE,
+        "source_id": str(_row_value(row, "trace_id", "") or ""),
+        "decision_id": str(_row_value(row, "decision_id", "") or ""),
+        "trade_id": str(_row_value(row, "trade_id", "") or ""),
+        "position_id": str(_row_value(row, "position_id", "") or ""),
+        "symbol": str(_row_value(row, "symbol", "") or ""),
+        "timeframe": str(_row_value(row, "timeframe", "") or ""),
+        "event_ts": float(
+            _row_value(
+                row,
+                "event_ts",
+                default=_row_value(row, "created_at", default=0.0),
+            )
+            or 0.0
+        ),
         "label_status": label_status,
-        "executable_governance_allowed": not contaminated,
+        "executable_governance_allowed": bool(real_execution and not contaminated),
         "integrity": "full" if verdict and not contaminated else "partial",
         "train_weight": 0.0 if contaminated else train_weight,
         "causal_level": "intervention_observed",
@@ -1646,39 +1691,74 @@ def _sample_from_supervisor_trace(
             "verdict": verdict,
             "risk_verdict": risk_verdict,
             "execution": execution,
-            "action": str(row["action"] or ""),
-            "summary_reason": str(row["summary_reason"] or ""),
-            "confidence": float(row["confidence"] or 0.0),
-            "template_id": str(row["template_id"] or ""),
-            "template_version": str(row["template_version"] or ""),
-            "stage": str(row["stage"] or ""),
+            "action": str(_row_value(row, "action", "") or ""),
+            "summary_reason": str(_row_value(row, "summary_reason", "") or ""),
+            "confidence": float(_row_value(row, "confidence", 0.0) or 0.0),
+            "template_id": str(_row_value(row, "template_id", "") or ""),
+            "template_version": str(_row_value(row, "template_version", "") or ""),
+            "stage": str(_row_value(row, "stage", "") or ""),
             "outcome": outcome,
-            "risk_action": str(row["risk_action"] or ""),
-            "risk_allowed": bool(row["risk_allowed"]),
-            "risk_reason": str(row["risk_reason"] or ""),
+            "risk_action": str(_row_value(row, "risk_action", "") or ""),
+            "risk_allowed": bool(_row_value(row, "risk_allowed", False)),
+            "risk_reason": str(_row_value(row, "risk_reason", "") or ""),
             "execution_status": execution_status,
             "system_contamination": source_contamination,
-            "execution_reason": str(row["execution_reason"] or ""),
+            "execution_reason": str(_row_value(row, "execution_reason", "") or ""),
+            "is_real_execution": real_execution,
+            "exclusion_reason": (
+                "never_executed_supervisor_action" if not real_execution else ""
+            ),
         },
         "verdict": {
-            "supervisor_action": str(row["action"] or ""),
-            "summary_reason": str(row["summary_reason"] or ""),
-            "risk_allowed": bool(row["risk_allowed"]),
+            "supervisor_action": str(_row_value(row, "action", "") or ""),
+            "summary_reason": str(_row_value(row, "summary_reason", "") or ""),
+            "risk_allowed": bool(_row_value(row, "risk_allowed", False)),
             "execution_status": execution_status,
+            "is_real_execution": real_execution,
         },
         "label": {
-            "label": outcome or execution_status or str(row["action"] or ""),
-            "stage": str(row["stage"] or ""),
+            "label": label,
+            "stage": str(_row_value(row, "stage", "") or ""),
             "execution_status": execution_status,
+            "exclusion_reason": (
+                "never_executed_supervisor_action" if not real_execution else ""
+            ),
         },
         "trace": {
-            "trace_id": str(row["trace_id"] or ""),
-            "decision_id": str(row["decision_id"] or ""),
-            "position_id": str(row["position_id"] or ""),
-            "trade_id": str(row["trade_id"] or ""),
+            "trace_id": str(_row_value(row, "trace_id", "") or ""),
+            "decision_id": str(_row_value(row, "decision_id", "") or ""),
+            "position_id": str(_row_value(row, "position_id", "") or ""),
+            "trade_id": str(_row_value(row, "trade_id", "") or ""),
             "source_review_id": source_review_id,
         },
+        "consumer_eligibility": {
+            "supervisor_counterfactual": {
+                "schema_version": "consumer_eligibility.v1",
+                "consumer": "supervisor_counterfactual",
+                "eligible": not counterfactual_blockers,
+                "model_ready": not counterfactual_blockers,
+                "allowed_uses": ["counterfactual_training"] if not counterfactual_blockers else [],
+                "blockers": counterfactual_blockers,
+            }
+        },
     }
+
+
+def _supervisor_trace_is_real_execution(row: Any) -> bool:
+    """Require the complete execution proof before supervisor maturity."""
+
+    stage = str(_row_value(row, "stage", "") or "").strip().lower()
+    outcome = str(_row_value(row, "outcome", "") or "").strip().lower()
+    if stage != "executed" or outcome != "applied":
+        return False
+    execution = _loads(_row_value(row, "execution_json", "{}"), {})
+    if not isinstance(execution, dict):
+        return False
+    return bool(
+        execution.get("is_real_execution") is True
+        and execution.get("broker_action_confirmed") is True
+        and execution.get("reconcile_confirmed") is True
+    )
 
 
 def _supervisor_label_from_counterfactual(label: str) -> tuple[str, str, str, float]:
@@ -1742,7 +1822,11 @@ def _trace_label_without_counterfactual(row: Any, base: dict[str, Any]) -> tuple
     action = str(row["action"] or "")
     outcome = str(row["outcome"] or "")
     execution_status = str(row["execution_status"] or "")
-    executed = outcome in {"executed", "legacy_recovered"} or execution_status in {"executed", "filled"}
+    executed = outcome in {"executed", "applied"} or execution_status in {
+        "executed",
+        "filled",
+        "applied",
+    }
     if not executed:
         return "pending", "inconclusive", "hold", 0.2
     # The action was executed — derive a basic label from the action type.
@@ -1767,6 +1851,29 @@ def _matured_sample_from_supervisor_trace(
     conn: Any | None = None,
 ) -> dict[str, Any]:
     base = _sample_from_supervisor_trace(row, source_review_row=cf_row, conn=conn)
+    if not _supervisor_trace_is_real_execution(row):
+        base.update(
+            {
+                "label_status": "excluded",
+                "train_weight": 0.0,
+                "causal_level": "observational",
+                "exclusion_reason": "never_executed_supervisor_action",
+                "label": {
+                    **(base.get("label") or {}),
+                    "label": "excluded_never_executed_supervisor_action",
+                    "exclusion_reason": "never_executed_supervisor_action",
+                },
+                "verdict": {
+                    **(base.get("verdict") or {}),
+                    "exclusion_reason": "never_executed_supervisor_action",
+                },
+                "features": {
+                    **(base.get("features") or {}),
+                    "exclusion_reason": "never_executed_supervisor_action",
+                },
+            }
+        )
+        return base
     cf_label = str(cf_row["label"] or "") if cf_row is not None else ""
     if cf_row is not None:
         label_status, unified_label, recommended_action, weight = _supervisor_label_from_counterfactual(cf_label)
@@ -1777,7 +1884,11 @@ def _matured_sample_from_supervisor_trace(
         label_status, unified_label, recommended_action, weight = _trace_label_without_counterfactual(row, base)
     protection_labels = _dynamic_tpsl_labels(base, cf_label)
     confidence = float(cf_row["confidence"] or 0.0) if cf_row is not None else 0.0
-    integrity = str(row["trace_integrity"] or base["integrity"] or "partial")
+    integrity = str(
+        _row_value(row, "trace_integrity", base["integrity"] or "partial")
+        or base["integrity"]
+        or "partial"
+    )
     if integrity == "missing":
         weight = 0.0
     elif integrity in {"partial", "recovered"}:
@@ -1790,7 +1901,10 @@ def _matured_sample_from_supervisor_trace(
         weight = 0.0
     # A6: when label is derived from trace (no counterfactual), cap confidence
     # at the trace's own confidence to keep the observation bounded.
-    trace_confidence = float(row["confidence"] or 0.0)
+    try:
+        trace_confidence = float(_row_value(row, "confidence", 0.0) or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        trace_confidence = 0.0
     if cf_row is None and trace_confidence > 0:
         confidence = trace_confidence
     base.update(
@@ -1805,7 +1919,7 @@ def _matured_sample_from_supervisor_trace(
                 "counterfactual_label": cf_label,
                 "counterfactual_confidence": confidence,
                 "protection_labels": protection_labels,
-                "source": "supervisor_counterfactual_review" if cf_row is not None else "trace_observation",
+                "source": SOURCE_SUPERVISOR_COUNTERFACTUAL if cf_row is not None else "trace_observation",
             },
             "verdict": {
                 **(base.get("verdict") or {}),
@@ -1830,151 +1944,61 @@ def backfill_position_supervisor_traces(
     db_path: str | Path = STATE_DB,
     limit: int = 1000,
 ) -> dict[str, Any]:
+    """Audit missing supervisor execution evidence without inventing a trace.
+
+    A decision is not an execution proof.  Historical backfill therefore only
+    reports canonical decisions that have no canonical supervisor trace; it
+    never creates ``legacy_recovered`` or an observation-only trace.
+    """
     ensure_autonomous_learning_tables(db_path)
-    run = start_evolution_run(run_type="position_supervisor_trace_backfill", trigger_source="decision_ledger", db_path=db_path)
+    run = start_evolution_run(
+        run_type="position_supervisor_trace_backfill",
+        trigger_source="canonical_decision_stream",
+        db_path=db_path,
+    )
     conn = _connect(db_path)
-    inserted = 0
-    skipped = 0
     try:
-        trace_columns = state_table_columns(conn, "position_supervisor_trace")
-        archive_capable = {
-            "verdict_archive_hash",
-            "verdict_raw_sha256",
-            "verdict_raw_bytes",
-        } <= trace_columns
-        rows = None
-        if canonical_ready(conn):
-            traced_ids: set[str] = set()
-            if state_table_exists(conn, "position_supervisor_trace"):
-                for traced in _execute(
-                    conn,
-                    """
-                    SELECT decision_id
-                    FROM position_supervisor_trace
-                    WHERE NULLIF(decision_id, '') IS NOT NULL
-                    """,
-                ).fetchall():
-                    traced_ids.add(str(_row_value(traced, "decision_id", "") or ""))
-            rows = _decisions_desc(
-                conn,
-                limit=max(1, int(limit)),
-                predicate=lambda r: (
-                    str(r.get("event_type") or "") in {"supervisor_close", "supervisor_reduce", "supervisor_tighten"}
-                    and str(r.get("decision_id") or "") not in traced_ids
-                ),
-            )
-        if rows is None:
-            rows = _execute(
-                conn,
-                """
-                SELECT *
-                FROM decision_ledger
-                WHERE event_type IN ('supervisor_close', 'supervisor_reduce', 'supervisor_tighten')
-                  AND NOT EXISTS (
-                      SELECT 1 FROM position_supervisor_trace t
-                      WHERE t.decision_id = decision_ledger.decision_id
-                  )
-                ORDER BY decision_ts DESC, created_at DESC
-                LIMIT ?
-                """,
-                (max(1, int(limit)),),
-            ).fetchall()
-        for row in rows:
-            action_json = _loads(row["action_json"], {})
-            verdict = action_json.get("supervisor_verdict") or action_json
-            event_type = str(row["event_type"] or "")
-            action = str(verdict.get("action") or event_type.replace("supervisor_", "") or "")
-            trace_id = "psvtrace_legacy_" + hashlib.sha1(str(row["decision_id"] or "").encode("utf-8")).hexdigest()[:16]
-            integrity = "recovered" if verdict else "partial"
-            raw_context = {"legacy_action": action_json, "event_type": event_type}
-            raw_verdict = dict(verdict)
-            context_json = _dumps(raw_context)
-            verdict_json = _dumps(raw_verdict)
-            archive = None
-            if archive_capable:
-                archive = archive_json_payload(
-                    conn,
-                    source_table="position_supervisor_trace",
-                    source_id=trace_id,
-                    payload_kind="supervisor_trace",
-                    raw_json=supervisor_trace_archive_text(
-                        context_json=_dumps(raw_context),
-                        verdict_json=_dumps(raw_verdict),
-                        risk_verdict_json="{}",
-                        execution_json="{}",
-                    ),
-                )
-                if archive:
-                    context_json = _dumps(_compact_supervisor_mapping(raw_context))
-                    verdict_json = _dumps(
-                        _compact_supervisor_mapping(
-                            raw_verdict,
-                            nested_keys=frozenset(
-                                {"evidence", "recommended_controls", "supervisor_template"}
-                            ),
-                        )
-                    )
-            cur = _execute(
-                conn,
-                """
-                INSERT INTO position_supervisor_trace
-                (trace_id, decision_id, position_id, trade_id, symbol, timeframe,
-                 tick, event_ts, action, summary_reason, confidence, template_id,
-                 template_version, stage, outcome, risk_action, risk_allowed,
-                 risk_reason, execution_status, execution_reason, context_json,
-                 verdict_json, risk_verdict_json, execution_json, trace_integrity,
-                 config_version, config_hash, evolution_run_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 'legacy_backfill',
-                        'legacy_recovered', '', 0, '', 'unknown', 'legacy decision_ledger backfill',
-                        ?, ?, '{}', '{}', ?, ?, ?, ?, ?)
-                ON CONFLICT(trace_id) DO NOTHING
-                """,
-                (
-                    trace_id,
-                    str(row["decision_id"] or ""),
-                    str(row["position_id"] or ""),
-                    str(row["trade_id"] or ""),
-                    str(row["symbol"] or ""),
-                    str(row["timeframe"] or ""),
-                    float(row["decision_ts"] or row["created_at"] or 0.0),
-                    action,
-                    str(verdict.get("summary_reason") or row["action_reason"] or ""),
-                    float(verdict.get("confidence", row["action_score"] or 0.0) or 0.0),
-                    str((verdict.get("supervisor_template") or {}).get("template_id") or ""),
-                    str((verdict.get("supervisor_template") or {}).get("template_version") or ""),
-                    context_json,
-                    verdict_json,
-                    integrity,
-                    int(run.get("config_version") or 0),
-                    str(run.get("config_hash") or ""),
-                    str(run.get("run_id") or ""),
-                    time.time(),
-                ),
-            )
-            if archive:
-                _execute(
-                    conn,
-                    """
-                    UPDATE position_supervisor_trace
-                    SET verdict_archive_hash=?, verdict_raw_sha256=?, verdict_raw_bytes=?
-                    WHERE trace_id=?
-                    """,
-                    (
-                        archive["archive_hash"],
-                        archive["raw_sha256"],
-                        archive["raw_bytes"],
-                        trace_id,
-                    ),
-                )
-            if getattr(cur, "rowcount", 0) > 0:
-                inserted += 1
-            else:
-                skipped += 1
+        if not canonical_ready(conn):
+            payload = {
+                "schema_version": "position_supervisor_trace_backfill.v2",
+                "evolution_run_id": str(run.get("run_id") or ""),
+                "status": "unavailable",
+                "reason": "canonical_v2_unavailable",
+                "inserted": 0,
+                "skipped": 0,
+                "not_executed": 0,
+                "missing_trace": 0,
+                "legacy_recovered_created": 0,
+                "limit": int(limit),
+            }
+            finish_evolution_run(str(run.get("run_id") or ""), status="skipped", summary=payload, db_path=db_path)
+            return payload
+
+        traced_ids = {
+            str(_row_value(trace, "decision_id", "") or "")
+            for trace in iter_supervisor_trace_rows(conn, limit=0, reverse=False)
+            if str(_row_value(trace, "decision_id", "") or "")
+        }
+        rows = _decisions_desc(
+            conn,
+            limit=max(1, int(limit)),
+            predicate=lambda row: (
+                str(row.get("event_type") or "")
+                in {"supervisor_close", "supervisor_reduce", "supervisor_tighten"}
+                and str(row.get("decision_id") or "") not in traced_ids
+            ),
+        )
+        missing_trace = len(rows)
         payload = {
-            "schema_version": "position_supervisor_trace_backfill.v1",
+            "schema_version": "position_supervisor_trace_backfill.v2",
             "evolution_run_id": str(run.get("run_id") or ""),
-            "inserted": inserted,
-            "skipped": skipped,
+            "status": "completed",
+            "source": "canonical_v2_reader",
+            "inserted": 0,
+            "skipped": missing_trace,
+            "not_executed": missing_trace,
+            "missing_trace": missing_trace,
+            "legacy_recovered_created": 0,
             "limit": int(limit),
         }
         _insert_evolution_event(conn, "position_supervisor_trace_backfill", payload)
@@ -1983,7 +2007,7 @@ def backfill_position_supervisor_traces(
             run_id=str(run.get("run_id") or ""),
             decision_type="backfill_traces",
             scope_type="position_supervisor_trace",
-            action="legacy_backfill",
+            action="audit_missing_execution_trace",
             status="completed",
             result=payload,
             db_path=db_path,
@@ -2009,76 +2033,80 @@ def mature_position_supervisor_traces(
     conn = _connect(db_path)
     matured = 0
     pending = 0
+    excluded = 0
+    contaminated = 0
+    missing_trace = 0
     try:
-        traces = _execute(
-            conn,
-            """
-            SELECT *
-            FROM position_supervisor_trace
-            WHERE action IN ('close', 'reduce', 'tighten')
-               OR action LIKE 'supervisor_%'
-               OR stage LIKE '%execut%'
-               OR outcome IN ('executed', 'legacy_recovered')
-            ORDER BY event_ts DESC, created_at DESC
-            LIMIT ?
-            """,
-            (max(1, int(limit)),),
-        ).fetchall()
+        if not canonical_ready(conn):
+            payload = {
+                "schema_version": "position_supervisor_trace_maturation.v2",
+                "evolution_run_id": str(run.get("run_id") or ""),
+                "status": "unavailable",
+                "reason": "canonical_v2_unavailable",
+                "matured": 0,
+                "pending": 0,
+                "excluded": 0,
+                "not_executed": 0,
+                "contaminated": 0,
+                "missing_trace": 0,
+                "eligible": 0,
+                "limit": int(limit),
+            }
+            finish_evolution_run(str(run.get("run_id") or ""), status="skipped", summary=payload, db_path=db_path)
+            return payload
+
+        traces: list[dict[str, Any]] = []
+        for candidate in iter_supervisor_trace_rows(conn, limit=0, reverse=True):
+            action = str(_row_value(candidate, "action", "") or "")
+            stage = str(_row_value(candidate, "stage", "") or "")
+            if action not in {"close", "reduce", "tighten"} and stage != "executed" and stage != "learning_shadow":
+                continue
+            traces.append(candidate)
+            if len(traces) >= max(1, int(limit)):
+                break
         for trace in traces:
             cf = None
-            page_offset = 0
-            page_limit = max(1, int(limit))
-            canonical = canonical_ready(conn)
-            while cf is None:
-                cf_rows = _execute(
-                    conn,
-                    (
-                        f"""
-                        SELECT cf.*, r.review_id AS source_review_id,
-                               r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
-                        """
-                        if not canonical
-                        else "SELECT cf.*"
-                    )
-                    + """
-                    FROM supervisor_counterfactual_review cf
-                    """
-                    + ("" if canonical else "JOIN trade_outcome_review r ON r.review_id=cf.review_id")
-                    + """
-                    WHERE cf.position_id=?
-                      AND cf.close_ts >= ?
-                    ORDER BY cf.updated_at DESC, cf.close_ts ASC,
-                             cf.counterfactual_id DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (
-                        str(trace["position_id"] or ""),
-                        float(trace["event_ts"] or 0.0),
-                        page_limit,
-                        page_offset,
-                    ),
-                ).fetchall()
-                if not cf_rows:
+            cf_seen = False
+            position_id = str(_row_value(trace, "position_id", "") or "")
+            event_ts = float(_row_value(trace, "event_ts", 0.0) or 0.0)
+            cf_rows = iter_counterfactual_rows(
+                conn,
+                position_id=position_id,
+                limit=0,
+                reverse=True,
+            )
+            for candidate in cf_rows:
+                close_ts = float(_row_value(candidate, "close_ts", 0.0) or 0.0)
+                if close_ts < event_ts:
+                    continue
+                cf_seen = True
+                attached = _attach_source_review(conn, candidate)
+                if _counterfactual_source_is_clean(attached, conn):
+                    cf = attached
                     break
-                page_offset += len(cf_rows)
-                cf = None
-                for candidate in cf_rows:
-                    attached = _attach_source_review(conn, candidate)
-                    if _counterfactual_source_is_clean(attached, conn):
-                        cf = attached
-                        break
-                del cf_rows
             item = _matured_sample_from_supervisor_trace(trace, cf, run_context=run_context, conn=conn)
-            if _upsert_sample(conn, item):
-                if item["label_status"] == "matured":
-                    matured += 1
+            _upsert_sample(conn, item)
+            if item["label_status"] == "matured":
+                matured += 1
+            elif item["label_status"] == "excluded":
+                excluded += 1
+            else:
+                pending += 1
+            if _supervisor_trace_is_real_execution(trace) and cf is None:
+                if cf_seen:
+                    contaminated += 1
                 else:
-                    pending += 1
+                    missing_trace += 1
         payload = {
-            "schema_version": "position_supervisor_trace_maturation.v1",
+            "schema_version": "position_supervisor_trace_maturation.v2",
             "evolution_run_id": str(run.get("run_id") or ""),
             "matured": matured,
             "pending": pending,
+            "excluded": excluded,
+            "not_executed": excluded,
+            "contaminated": contaminated,
+            "missing_trace": missing_trace,
+            "eligible": matured + pending,
             "limit": int(limit),
         }
         _insert_evolution_event(conn, "position_supervisor_trace_maturation", payload)
@@ -2121,30 +2149,28 @@ def materialize_autonomous_learning_samples(
         "post_close_counterfactual": 0,
     }
     try:
-        canonical = canonical_ready(conn)
-        reviews_desc = _reviews_desc(conn) if canonical else None
-        review_by_entry, review_by_position = _review_index(reviews_desc) if canonical else (None, None)
-        decisions = (
-            _decisions_desc(
-                conn,
-                limit=int(limit),
-                predicate=lambda r: (
-                    str(r.get("event_type") or "") in {"open", "skip"}
-                    or str(r.get("event_type") or "").startswith("supervisor_")
-                ),
-            )
-            if canonical
-            else _execute(
-                conn,
-                """
-                SELECT *
-                FROM decision_ledger
-                WHERE event_type IN ('open', 'skip') OR event_type LIKE 'supervisor_%'
-                ORDER BY decision_ts DESC, created_at DESC
-                LIMIT ?
-                """,
-                (int(limit),),
-            ).fetchall()
+        if not canonical_ready(conn):
+            payload = {
+                "schema_version": "autonomous_learning_samples.v2",
+                "evolution_run_id": str(run.get("run_id") or ""),
+                "status": "unavailable",
+                "reason": "canonical_v2_unavailable",
+                "counts": counts,
+                "total_changed": 0,
+                "limit": int(limit),
+            }
+            finish_evolution_run(str(run.get("run_id") or ""), status="skipped", summary=payload, db_path=db_path)
+            return payload
+
+        reviews_desc = _reviews_desc(conn)
+        review_by_entry, review_by_position = _review_index(reviews_desc)
+        decisions = _decisions_desc(
+            conn,
+            limit=int(limit),
+            predicate=lambda row: (
+                str(row.get("event_type") or "") in {"open", "skip"}
+                or str(row.get("event_type") or "").startswith("supervisor_")
+            ),
         )
         for row in decisions:
             event_type = str(row["event_type"] or "")
@@ -2178,84 +2204,36 @@ def materialize_autonomous_learning_samples(
                     if _upsert_sample(conn, {**_sample_from_decision(row, "risk_rejection", conn=conn), **sample_context}):
                         counts["risk_rejection"] += 1
             if event_type.startswith("supervisor_"):
-                outcome_review = (
-                    _review_for_open_decision(
-                        conn,
-                        row,
-                        review_by_entry=review_by_entry,
-                        review_by_position=review_by_position,
-                    )
-                    if canonical
-                    else _review_for_open_decision(conn, row)
+                outcome_review = _review_for_open_decision(
+                    conn,
+                    row,
+                    review_by_entry=review_by_entry,
+                    review_by_position=review_by_position,
                 )
                 if _upsert_sample(conn, {**_sample_from_decision(row, "supervisor_trajectory", outcome_review=outcome_review, conn=conn), **sample_context}):
                     counts["supervisor_trajectory"] += 1
         del decisions
         gc.collect()
 
-        if state_table_exists(conn, "position_supervisor_trace"):
-            traces = _execute(
-                conn,
-                (
-                    f"""
-                    SELECT t.*, r.review_id AS source_review_id,
-                           r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
-                    """
-                    if not canonical
-                    else "SELECT t.*"
-                )
-                + """
-                FROM position_supervisor_trace t
-                """
-                + (
-                    """
-                    LEFT JOIN trade_outcome_review r
-                      ON r.review_id = (
-                          SELECT r2.review_id
-                          FROM trade_outcome_review r2
-                          WHERE r2.position_id=t.position_id
-                          ORDER BY r2.created_at DESC, r2.review_id DESC
-                          LIMIT 1
-                      )
-                    """
-                    if not canonical
-                    else ""
-                )
-                + """
-                ORDER BY t.event_ts DESC, t.created_at DESC
-                LIMIT ?
-                """,
-                (int(limit),),
-            ).fetchall()
-            for trace_row in traces:
-                row = trace_row
-                if canonical:
-                    position_id = str(_row_value(trace_row, "position_id", "") or "")
-                    source = (review_by_position.get(position_id) or [None])[0]
-                    row = {
-                        **trace_row,
-                        "source_review_id": str(source.get("review_id") or "") if source else "",
-                        "source_review_json": source.get("review_json") or {} if source else {},
-                        "source_review_archive_hash": "",
-                    }
-                if _upsert_sample(conn, {**_sample_from_supervisor_trace(row, conn=conn), **sample_context}):
-                    counts["supervisor_execution_trace"] += 1
-            del traces
-            gc.collect()
+        traces = iter_supervisor_trace_rows(
+            conn,
+            limit=max(1, int(limit)),
+            reverse=True,
+        )
+        for trace_row in traces:
+            position_id = str(_row_value(trace_row, "position_id", "") or "")
+            source = (review_by_position.get(position_id) or [None])[0]
+            row = {
+                **trace_row,
+                "source_review_id": str(source.get("review_id") or "") if source else "",
+                "source_review_json": source.get("review_json") or {} if source else {},
+            }
+            if _upsert_sample(conn, {**_sample_from_supervisor_trace(row, conn=conn), **sample_context}):
+                counts["supervisor_execution_trace"] += 1
+        del traces
+        gc.collect()
 
-        if canonical:
-            reviews = reviews_desc[: int(limit)] if int(limit) > 0 else reviews_desc
-        else:
-            reviews = _execute(
-                conn,
-                """
-                SELECT *
-                FROM trade_outcome_review
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (int(limit),),
-            ).fetchall()
+        reviews = reviews_desc[: int(limit)] if int(limit) > 0 else reviews_desc
         for row in reviews:
             if _upsert_sample(conn, {**_sample_from_review(row, conn=conn), **sample_context}):
                 counts["trade_review_outcome"] += 1
@@ -2265,57 +2243,19 @@ def materialize_autonomous_learning_samples(
         del reviews
         gc.collect()
 
-        if state_table_exists(conn, "supervisor_counterfactual_review"):
-            # Canonical is the only fact source for samples: purge orphans via
-            # the canonical single-writer maintenance op.
-            from backend.services.canonical_v2 import purge_sample_rows_without_source
-            purge_sample_rows_without_source(
-                conn,
-                sample_type="post_close_counterfactual",
-                source_table="supervisor_counterfactual_review",
-                source_table_ref="supervisor_counterfactual_review",
-                source_key_col="counterfactual_id",
-            )
-            accepted_counterfactuals = 0
-            page_offset = 0
-            page_limit = max(1, int(limit))
-            while accepted_counterfactuals < page_limit:
-                cfs = _execute(
-                    conn,
-                    (
-                        f"""
-                        SELECT cf.*, r.review_id AS source_review_id,
-                               r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
-                        """
-                        if not canonical
-                        else "SELECT cf.*"
-                    )
-                    + """
-                    FROM supervisor_counterfactual_review cf
-                    """
-                    + ("" if canonical else "JOIN trade_outcome_review r ON r.review_id=cf.review_id")
-                    + """
-                    ORDER BY cf.updated_at DESC, cf.counterfactual_id DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (page_limit, page_offset),
-                ).fetchall()
-                if not cfs:
-                    break
-                page_offset += len(cfs)
-                for cf_row in cfs:
-                    row = _attach_source_review(conn, cf_row) if canonical else cf_row
-                    if not _counterfactual_source_is_clean(row, conn):
-                        continue
-                    accepted_counterfactuals += 1
-                    if _upsert_sample(conn, {**_sample_from_counterfactual(row, conn=conn), **sample_context}):
-                        counts["post_close_counterfactual"] += 1
-                    if accepted_counterfactuals >= page_limit:
-                        break
-                del cfs
+        accepted_counterfactuals = 0
+        for cf_row in iter_counterfactual_rows(conn, limit=0, reverse=True):
+            row = _attach_source_review(conn, cf_row)
+            if not _counterfactual_source_is_clean(row, conn):
+                continue
+            accepted_counterfactuals += 1
+            if _upsert_sample(conn, {**_sample_from_counterfactual(row, conn=conn), **sample_context}):
+                counts["post_close_counterfactual"] += 1
+            if accepted_counterfactuals >= max(1, int(limit)):
+                break
 
         payload = {
-            "schema_version": "autonomous_learning_samples.v1",
+            "schema_version": "autonomous_learning_samples.v2",
             "evolution_run_id": str(run.get("run_id") or ""),
             "config_version": int(run.get("config_version") or 0),
             "config_hash": str(run.get("config_hash") or ""),
@@ -3649,24 +3589,12 @@ def entry_context_quality_report(*, db_path: str | Path = STATE_DB, limit: int =
         "open_consumer_ready_open_outcome": 0,
     }
     try:
-        if state_table_exists(conn, "decision_ledger") or canonical_ready(conn):
+        if canonical_ready(conn):
             rows = _decisions_desc(
                 conn,
                 limit=max(1, int(limit)),
                 predicate=lambda r: str(r.get("event_type") or "") == "open",
             )
-            if rows is None:
-                rows = _execute(
-                    conn,
-                    """
-                    SELECT decision_id, position_id, symbol, decision_ts, action_json
-                    FROM decision_ledger
-                    WHERE event_type='open'
-                    ORDER BY decision_ts DESC, created_at DESC
-                    LIMIT ?
-                    """,
-                    (max(1, int(limit)),),
-                ).fetchall()
             open_count = len(rows)
             for row in rows:
                 action_json = _loads(row["action_json"], {})
@@ -3823,46 +3751,25 @@ def _latest_protection_evidence_before_close(
     latest: dict[str, Any] = {}
     lower = float(close_ts or time.time()) - max(1.0, float(lookback_sec or 0.0))
     upper = float(close_ts or time.time())
-    try:
-        row = None
-        if canonical_ready(conn):
-            # Bounded window scan (reverse keyset); canonical events carry the
-            # position inside the payload, so the filter is applied here.
-            for candidate in iter_decision_rows(
-                conn,
-                min_observed_epoch=lower,
-                max_observed_epoch=upper,
-                reverse=True,
-            ):
-                if (
-                    str(candidate.get("position_id") or "") == str(position_id)
-                    and (
-                        str(candidate.get("event_type") or "").startswith("supervisor_")
-                        or str(candidate.get("event_type") or "") in ("legacy_awe_trailing", "holding_timeout")
-                    )
-                ):
-                    row = candidate
-                    break
-        else:
-            row = _execute(
-                conn,
-                """
-                SELECT decision_id, event_type, action_reason, action_json, risk_state_json, decision_ts
-                FROM decision_ledger
-                WHERE position_id=?
-                  AND (
-                      event_type LIKE 'supervisor_%'
-                      OR event_type IN ('legacy_awe_trailing', 'holding_timeout')
-                  )
-                  AND decision_ts <= ?
-                  AND decision_ts >= ?
-                ORDER BY decision_ts DESC
-                LIMIT 1
-                """,
-                (str(position_id), upper, lower),
-            ).fetchone()
-    except Exception:
-        row = None
+    if not canonical_ready(conn):
+        return latest
+
+    row = None
+    for candidate in iter_decision_rows(
+        conn,
+        min_observed_epoch=lower,
+        max_observed_epoch=upper,
+        reverse=True,
+    ):
+        if (
+            str(candidate.get("position_id") or "") == str(position_id)
+            and (
+                str(candidate.get("event_type") or "").startswith("supervisor_")
+                or str(candidate.get("event_type") or "") in ("legacy_awe_trailing", "holding_timeout")
+            )
+        ):
+            row = candidate
+            break
     if row:
         action_json = _loads(row["action_json"], {})
         risk_state = _loads(row["risk_state_json"], {})
@@ -3878,26 +3785,22 @@ def _latest_protection_evidence_before_close(
             "evidence": _compact_supervisor_mapping(verdict.get("evidence")),
             "recommended_controls": _compact_supervisor_mapping(verdict.get("recommended_controls")),
             "risk_state": _compact_supervisor_mapping(risk_state),
-            "source_table": "decision_ledger",
+                "source_table": SOURCE_RISK_DECISION,
         }
-    try:
-        trace = _execute(
-            conn,
-            """
-            SELECT trace_id, decision_id, action, summary_reason, event_ts,
-                   verdict_json, risk_verdict_json, execution_json, stage, outcome
-            FROM position_supervisor_trace
-            WHERE position_id=?
-              AND event_ts <= ?
-              AND event_ts >= ?
-              AND action IN ('tighten', 'reduce', 'close')
-            ORDER BY event_ts DESC
-            LIMIT 1
-            """,
-            (str(position_id), upper, lower),
-        ).fetchone()
-    except Exception:
-        trace = None
+    trace = next(
+        (
+            candidate
+            for candidate in iter_supervisor_trace_rows(
+                conn,
+                position_id=str(position_id),
+                limit=0,
+                reverse=True,
+            )
+            if lower <= float(_row_value(candidate, "event_ts", 0.0) or 0.0) <= upper
+            and str(_row_value(candidate, "action", "") or "") in {"tighten", "reduce", "close"}
+        ),
+        None,
+    )
     if trace and (not latest or float(trace["event_ts"] or 0.0) > float(latest.get("decision_ts") or 0.0)):
         verdict = _loads(trace["verdict_json"], {})
         risk_state = _loads(trace["risk_verdict_json"], {})
@@ -3929,7 +3832,7 @@ def _latest_protection_evidence_before_close(
             ),
             "stage": str(trace["stage"] or ""),
             "outcome": str(trace["outcome"] or ""),
-            "source_table": "position_supervisor_trace",
+            "source_table": SOURCE_SUPERVISOR_TRACE,
         }
     return latest
 
@@ -3966,17 +3869,6 @@ def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit
     by_source: dict[str, int] = {}
     try:
         rows = _reviews_desc(conn, limit=max(1, int(limit)))
-        if rows is None:
-            rows = _execute(
-                conn,
-                """
-                SELECT *
-                FROM trade_outcome_review
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (max(1, int(limit)),),
-            ).fetchall()
         now = time.time()
         for row in rows:
             checked += 1
@@ -3995,44 +3887,21 @@ def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit
             review["close_reason_source_backfill"] = {
                 "schema_version": "close_reason_source_backfill.v1",
                 "backfilled_at": now,
-                "method": "decision_ledger_or_position_supervisor_trace" if latest else "conservative_no_system_evidence",
+                "method": "canonical_risk_decision_or_canonical_supervisor_trace" if latest else "conservative_no_system_evidence",
             }
             review_id = str(row["review_id"] or "")
-            hot_json, archive = _review_storage_parts(
-                conn,
-                review_id=review_id,
-                review=review,
+            updated += int(
+                _record_canonical_review_revision(
+                    conn,
+                    row=row,
+                    review_id=review_id,
+                    review=review,
+                )
             )
-            if archive:
-                _execute(
-                    conn,
-                    """
-                    UPDATE trade_outcome_review
-                    SET review_json=?, review_archive_hash=?, review_raw_sha256=?, review_raw_bytes=?
-                    WHERE review_id=?
-                    """,
-                    (
-                        hot_json,
-                        archive["archive_hash"],
-                        archive["raw_sha256"],
-                        archive["raw_bytes"],
-                        review_id,
-                    ),
-                )
-            else:
-                _execute(
-                    conn,
-                    """
-                    UPDATE trade_outcome_review
-                    SET review_json=?
-                    WHERE review_id=?
-                    """,
-                    (hot_json, review_id),
-                )
-            updated += 1
             by_source[source] = by_source.get(source, 0) + 1
         payload = {
-            "schema_version": "trade_review_close_source_backfill.v1",
+            "schema_version": "trade_review_close_source_backfill.v2",
+            "source": "canonical_v2_reader",
             "evolution_run_id": str(run.get("run_id") or ""),
             "checked": checked,
             "updated": updated,
@@ -4064,17 +3933,6 @@ def backfill_trade_review_integrity_markers(*, db_path: str | Path = STATE_DB, l
     updated = 0
     try:
         rows = _reviews_desc(conn, limit=max(1, min(max(int(limit) * 10, int(limit)), 50000)))
-        if rows is None:
-            rows = _execute(
-                conn,
-                """
-                SELECT *
-                FROM trade_outcome_review
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (max(1, min(max(int(limit) * 10, int(limit)), 50000)),),
-            ).fetchall()
         candidate_rows: list[Any] = []
         for row in rows:
             review = _review_payload_from_row(conn, row)
@@ -4098,40 +3956,17 @@ def backfill_trade_review_integrity_markers(*, db_path: str | Path = STATE_DB, l
                 "reason": "legacy_review_missing_integrity_marker",
             }
             review_id = str(row["review_id"] or "")
-            hot_json, archive = _review_storage_parts(
-                conn,
-                review_id=review_id,
-                review=review,
+            updated += int(
+                _record_canonical_review_revision(
+                    conn,
+                    row=row,
+                    review_id=review_id,
+                    review=review,
+                )
             )
-            if archive:
-                _execute(
-                    conn,
-                    """
-                    UPDATE trade_outcome_review
-                    SET review_json=?, review_archive_hash=?, review_raw_sha256=?, review_raw_bytes=?
-                    WHERE review_id=?
-                    """,
-                    (
-                        hot_json,
-                        archive["archive_hash"],
-                        archive["raw_sha256"],
-                        archive["raw_bytes"],
-                        review_id,
-                    ),
-                )
-            else:
-                _execute(
-                    conn,
-                    """
-                    UPDATE trade_outcome_review
-                    SET review_json=?
-                    WHERE review_id=?
-                    """,
-                    (hot_json, review_id),
-                )
-            updated += 1
         payload = {
-            "schema_version": "trade_review_integrity_backfill.v1",
+            "schema_version": "trade_review_integrity_backfill.v2",
+            "source": "canonical_v2_reader",
             "evolution_run_id": str(run.get("run_id") or ""),
             "checked": checked,
             "updated": updated,
@@ -4161,50 +3996,32 @@ def _entry_decision_for_review(
     *,
     open_by_position: dict[str, dict[str, Any]] | None = None,
 ) -> Any | None:
-    """Return the entry decision for a review.
-
-    ``open_by_position`` is the canonical index {position_id: newest open
-    decision} built once per caller loop; when provided the lookups resolve
-    through canonical (direct id lookup + position index).  When None the
-    legacy decision_ledger SQL is used.
-    """
+    """Return the entry decision from the canonical decision stream."""
     entry_decision_id = str(review.get("entry_decision_id") or _row_value(row, "entry_decision_id", "") or "")
     position_id = str(review.get("position_id") or _row_value(row, "position_id", "") or "")
+    if open_by_position is not None and position_id:
+        # The position-indexed canonical open event is authoritative.  A
+        # stale review entry_decision_id must not recreate tick-based timing
+        # or break the position's true lineage.
+        canonical_entry = open_by_position.get(position_id)
+        if canonical_entry is not None:
+            return canonical_entry
     if entry_decision_id:
-        if open_by_position is not None:
-            found = decision_row(conn, entry_decision_id)
-        elif state_table_exists(conn, "decision_ledger"):
-            found = _execute(
-                conn,
-                """
-                SELECT *
-                FROM decision_ledger
-                WHERE decision_id=?
-                LIMIT 1
-                """,
-                (entry_decision_id,),
-            ).fetchone()
-        else:
-            found = None
+        found = decision_row(conn, entry_decision_id)
         if found is not None:
             return found
     if not position_id:
         return None
     if open_by_position is not None:
         return open_by_position.get(position_id)
-    if not state_table_exists(conn, "decision_ledger"):
-        return None
-    return _execute(
-        conn,
-        """
-        SELECT *
-        FROM decision_ledger
-        WHERE position_id=? AND event_type='open'
-        ORDER BY decision_ts DESC
-        LIMIT 1
-        """,
-        (str(position_id),),
-    ).fetchone()
+    return next(
+        (
+            candidate
+            for candidate in _decisions_desc(conn, predicate=lambda item: str(item.get("event_type") or "") == "open")
+            if str(candidate.get("position_id") or "") == position_id
+        ),
+        None,
+    )
 
 
 def _order_event_times_for_review(
@@ -4215,39 +4032,23 @@ def _order_event_times_for_review(
     orders_by_decision: dict[str, list[dict[str, Any]]] | None = None,
     orders_by_trade: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, float]:
-    """First event_ts per order event_type for a review's decision/trade.
-
-    Canonical mode uses preloaded order indexes (payload decision_id/trade_id);
-    legacy mode keeps the indexed SQL.
-    """
+    """First event timestamp per order type from canonical lifecycle events."""
     if not decision_id and not trade_id:
         return {}
     if orders_by_decision is not None:
         matched = list(orders_by_decision.get(decision_id, []))
-        if trade_id:
+        if trade_id and orders_by_trade is not None:
             matched.extend(orders_by_trade.get(trade_id, []))
-        matched.sort(key=lambda e: float(e.get("event_ts") or 0.0))
-        out: dict[str, float] = {}
-        for event in matched:
-            event_type = str(_row_value(event, "event_type", "") or "")
-            if event_type and event_type not in out:
-                out[event_type] = float(_row_value(event, "event_ts", 0.0) or 0.0)
-        return out
-    if not state_table_exists(conn, "order_lifecycle_event"):
-        return {}
-    rows = _execute(
-        conn,
-        """
-        SELECT event_type, event_ts
-        FROM order_lifecycle_event
-        WHERE (? <> '' AND decision_id=?)
-           OR (? <> '' AND trade_id=?)
-        ORDER BY event_ts ASC
-        """,
-        (decision_id, decision_id, trade_id, trade_id),
-    ).fetchall()
+    else:
+        matched = [
+            event
+            for event in iter_order_rows(conn, limit=0)
+            if (decision_id and str(event.get("decision_id") or "") == decision_id)
+            or (trade_id and str(event.get("trade_id") or "") == trade_id)
+        ]
+    matched.sort(key=lambda event: float(_row_value(event, "event_ts", 0.0) or 0.0))
     out = {}
-    for event in rows:
+    for event in matched:
         event_type = str(_row_value(event, "event_type", "") or "")
         if event_type and event_type not in out:
             out[event_type] = float(_row_value(event, "event_ts", 0.0) or 0.0)
@@ -4295,45 +4096,92 @@ def _merge_review_labels(existing: Any, *groups: Any) -> list[str]:
 
 
 def _review_payload_from_row(conn: Any, row: Any) -> dict[str, Any]:
-    """Load a review from its verified archive when the hot row is projected."""
+    """Load the review payload from the canonical reader row."""
     return _review_payload_value(conn, row)
 
 
-def _review_storage_parts(
+def _record_canonical_review_revision(
     conn: Any,
     *,
+    row: Any,
     review_id: str,
     review: dict[str, Any],
-) -> tuple[str, dict[str, Any] | None]:
-    """Prepare one bounded hot review and its optional lossless archive."""
+) -> bool:
+    """Append one idempotent canonical review revision.
+
+    The trade review stream is immutable.  This replaces the old hot-row
+    UPDATE/archive path while preserving the complete review payload for the
+    canonical reader's latest-revision projection.
+    """
+    if not review_id or not canonical_ready(conn):
+        return False
+    from backend.services.canonical_v2 import record_payload_event
 
     full_review = dict(review)
     normalized = normalize_trade_review_contract(full_review)
-    archive = None
-    archive_capable = {
-        "review_archive_hash",
-        "review_raw_sha256",
-        "review_raw_bytes",
-    } <= state_table_columns(conn, "trade_outcome_review")
-    if archive_capable:
-        archive = archive_json_payload(
-            conn,
-            source_table="trade_outcome_review",
-            source_id=str(review_id),
-            payload_kind="review_json",
-            raw_json=_dumps(full_review),
-        )
-    if archive:
-        return _dumps(normalized), archive
 
-    # Pre-15 fixtures/legacy SQLite stores have no archive destination. Keep
-    # their previous complete behavior rather than silently dropping recursive
-    # branches; production PostgreSQL must use the archive branch above.
-    legacy = dict(normalized)
-    for key in ("inferred_close_supervisor", "responsibility_domains"):
-        if key in full_review:
-            legacy[key] = full_review[key]
-    return _dumps(legacy), None
+    def _number(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value or default)
+        except (TypeError, ValueError, OverflowError):
+            return float(default)
+
+    revision_at = 0.0
+    for marker_name in (
+        "close_reason_source_backfill",
+        "integrity_backfill",
+        "timing_system_backfill",
+    ):
+        marker = full_review.get(marker_name)
+        if isinstance(marker, dict) and _number(marker.get("backfilled_at")) > 0.0:
+            revision_at = _number(marker.get("backfilled_at"))
+            break
+    revision_at = revision_at or _number(_row_value(row, "updated_at", 0.0)) or _number(
+        _row_value(row, "created_at", 0.0)
+    )
+    payload = {
+        "review_id": str(review_id),
+        "trade_id": str(full_review.get("trade_id") or _row_value(row, "trade_id", "") or ""),
+        "position_id": str(full_review.get("position_id") or _row_value(row, "position_id", "") or ""),
+        "entry_decision_id": str(
+            full_review.get("entry_decision_id")
+            or _row_value(row, "entry_decision_id", "")
+            or ""
+        ),
+        "exit_decision_id": str(full_review.get("exit_decision_id") or _row_value(row, "exit_decision_id", "") or ""),
+        "entry_quality": _row_value(row, "entry_quality", full_review.get("entry_quality")),
+        "hold_quality": _row_value(row, "hold_quality", full_review.get("hold_quality")),
+        "exit_quality": _row_value(row, "exit_quality", full_review.get("exit_quality")),
+        "regime_fit_score": _row_value(row, "regime_fit_score", full_review.get("regime_fit_score")),
+        "execution_quality": _row_value(row, "execution_quality", full_review.get("execution_quality")),
+        "pnl": _row_value(row, "pnl", full_review.get("pnl")),
+        "mae": _row_value(row, "mae", full_review.get("mae")),
+        "mfe": _row_value(row, "mfe", full_review.get("mfe")),
+        "outcome_label": str(_row_value(row, "outcome_label", full_review.get("outcome_label")) or ""),
+        "failure_tags": full_review.get("failure_tags") or _loads(_row_value(row, "failure_tags_json", "[]"), []),
+        "summary_text": _summary_from_review(
+            full_review,
+            pnl=_number(_row_value(row, "pnl", full_review.get("pnl"))),
+            outcome_label=str(_row_value(row, "outcome_label", full_review.get("outcome_label")) or ""),
+        ),
+        "created_at": _row_value(row, "created_at", full_review.get("created_at")),
+        "updated_at": revision_at,
+        "review": normalized,
+    }
+    digest = hashlib.sha1(_dumps(payload).encode("utf-8")).hexdigest()[:20]
+    record_payload_event(
+        conn,
+        event_type="trade_review",
+        entity_type="review",
+        entity_id=str(review_id),
+        payload=payload,
+        observed_at=revision_at,
+        producer="autonomous_learning",
+        payload_kind="trade_review",
+        event_id=f"learning_review_{review_id}_{digest}",
+        idempotency_key=f"learning_review:{review_id}:{digest}",
+    )
+    return True
 
 
 def _update_factor_contribution_system_notes(
@@ -4395,39 +4243,59 @@ def backfill_trade_review_timing_and_system_markers(
     factor_rows_updated = 0
     contaminated = 0
     try:
-        canonical = canonical_ready(conn)
         rows = _reviews_desc(conn, limit=max(1, int(limit)))
-        if rows is None:
-            rows = _execute(
-                conn,
-                """
-                SELECT *
-                FROM trade_outcome_review
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (max(1, int(limit)),),
-            ).fetchall()
-        open_by_position: dict[str, dict[str, Any]] | None = None
-        orders_by_decision: dict[str, list[dict[str, Any]]] | None = None
-        orders_by_trade: dict[str, list[dict[str, Any]]] | None = None
-        if canonical:
-            open_by_position = {}
-            for candidate in _decisions_desc(conn):
-                if str(candidate.get("event_type") or "") != "open":
-                    continue
-                pid = str(candidate.get("position_id") or "")
-                if pid and pid not in open_by_position:
-                    open_by_position[pid] = candidate
-            orders_by_decision = {}
-            orders_by_trade = {}
-            for order in iter_order_rows(conn, limit=0):
-                oid = str(order.get("decision_id") or "")
-                if oid:
-                    orders_by_decision.setdefault(oid, []).append(order)
-                tid = str(order.get("trade_id") or "")
-                if tid:
-                    orders_by_trade.setdefault(tid, []).append(order)
+        open_by_position: dict[str, dict[str, Any]] = {}
+        close_by_position: dict[str, dict[str, Any]] = {}
+        # The materialized position-decision index is the canonical lineage
+        # authority.  Resolve it first, then fill positions absent from it
+        # from the canonical decision/position streams.
+        position_decision_index = load_position_decision_index(
+            Path(__file__).resolve().parents[2]
+            / "run_artifacts"
+            / "canonical_v2_position_decision_index.json"
+        ) or {}
+        for position_id, index_entry in position_decision_index.items():
+            decision_id = str(index_entry.get("decision_id") or "")
+            if not position_id or not decision_id:
+                continue
+            candidate = decision_row(conn, decision_id)
+            if candidate is None:
+                continue
+            candidate = dict(candidate)
+            candidate.setdefault("position_id", str(position_id))
+            indexed_decision_ts = float(index_entry.get("decision_ts") or 0.0)
+            if indexed_decision_ts > 0.0:
+                candidate["decision_ts"] = indexed_decision_ts
+            indexed_timeframe = str(index_entry.get("timeframe") or "")
+            if indexed_timeframe:
+                candidate["timeframe"] = indexed_timeframe
+            open_by_position[str(position_id)] = candidate
+        for candidate in _decisions_desc(conn):
+            if str(candidate.get("event_type") or "") != "open":
+                continue
+            pid = str(candidate.get("position_id") or "")
+            if pid and pid not in open_by_position:
+                open_by_position[pid] = candidate
+        for position in iter_position_rows(conn, limit=0):
+            event_type = str(position.get("event_type") or "").strip().lower()
+            if event_type not in {"closed", "closed_replayed"}:
+                continue
+            pid = str(position.get("position_id") or "")
+            event_ts = float(position.get("event_ts") or 0.0)
+            if not pid or event_ts <= 0.0:
+                continue
+            previous = close_by_position.get(pid)
+            if previous is None or event_ts > float(previous.get("event_ts") or 0.0):
+                close_by_position[pid] = position
+        orders_by_decision: dict[str, list[dict[str, Any]]] = {}
+        orders_by_trade: dict[str, list[dict[str, Any]]] = {}
+        for order in iter_order_rows(conn, limit=0):
+            oid = str(order.get("decision_id") or "")
+            if oid:
+                orders_by_decision.setdefault(oid, []).append(order)
+            tid = str(order.get("trade_id") or "")
+            if tid:
+                orders_by_trade.setdefault(tid, []).append(order)
         now = time.time()
         for row in rows:
             checked += 1
@@ -4465,16 +4333,35 @@ def backfill_trade_review_timing_and_system_markers(
                 orders_by_decision=orders_by_decision,
                 orders_by_trade=orders_by_trade,
             )
-            close_ts = float(review.get("close_ts") or _row_value(row, "created_at", 0.0) or 0.0)
-            timeframe = str(review.get("timeframe") or _row_value(entry, "timeframe", "") or "")
+            canonical_close = (close_by_position or {}).get(
+                str(review.get("position_id") or _row_value(row, "position_id", "") or ""),
+                {},
+            )
+            close_ts = float(
+                (canonical_close or {}).get("event_ts")
+                or review.get("close_ts")
+                or _row_value(row, "created_at", 0.0)
+                or 0.0
+            )
+            timeframe = str(
+                _row_value(entry, "timeframe", "")
+                or review.get("timeframe")
+                or ""
+            )
+            # Canonical decision_ts is already normalized to epoch seconds by
+            # canonical_v2_reader.  Its audit temporal_context may contain a
+            # tick sequence from the old runtime and must never participate in
+            # timing arithmetic on the canonical path.
+            decision_evaluated_at = signal_bar_ts
             entry_timing = build_entry_timing_context(
                 signal_bar_ts=signal_bar_ts,
-                decision_evaluated_at=temporal_context.get("evaluated_at") or signal_bar_ts,
+                decision_evaluated_at=decision_evaluated_at,
                 order_submitted_at=order_times.get("submitted", 0.0),
                 fill_ts=order_times.get("filled", 0.0),
                 close_ts=close_ts,
                 timeframe=timeframe,
                 source="trade_review_backfill",
+                timestamp_unit="epoch_seconds",
             )
             decision_freshness = extract_decision_freshness_context(
                 entry_action=entry_action if isinstance(entry_action, dict) else {},
@@ -4482,7 +4369,12 @@ def backfill_trade_review_timing_and_system_markers(
                 review_payload=review,
             )
 
-            review["entry_decision_id"] = entry_decision_id or str(review.get("entry_decision_id") or "")
+            previous_entry_decision_id = str(
+                review.get("entry_decision_id")
+                or _row_value(row, "entry_decision_id", "")
+                or ""
+            )
+            review["entry_decision_id"] = entry_decision_id or previous_entry_decision_id
             review["trade_id"] = trade_id or str(review.get("trade_id") or "")
             review["entry_decision_ts"] = signal_bar_ts
             review["signal_bar_ts"] = signal_bar_ts
@@ -4497,8 +4389,22 @@ def backfill_trade_review_timing_and_system_markers(
                 review["holding_minutes"] = round(actual_holding / 60.0, 3)
             review["timing_system_backfill"] = {
                 "schema_version": "trade_review_timing_system_backfill.v1",
-                "backfilled_at": now,
-                "method": "decision_ledger_order_events_runtime_health",
+                "backfilled_at": float(
+                    ((review.get("timing_system_backfill") or {}).get("backfilled_at") or now)
+                ),
+                "method": "canonical_decision_order_position_stream",
+                "canonical_entry_decision_id": entry_decision_id,
+                "previous_entry_decision_id": previous_entry_decision_id,
+                "lineage_repaired": bool(
+                    entry_decision_id
+                    and previous_entry_decision_id
+                    and entry_decision_id != previous_entry_decision_id
+                ),
+                "timestamp_unit": str(entry_timing.get("timestamp_unit") or ""),
+                "timing_valid": bool(entry_timing.get("timing_valid", True)),
+                "timing_invalid_reasons": list(
+                    entry_timing.get("timing_invalid_reasons") or []
+                ),
             }
             full_review = dict(review)
             review = normalize_trade_review_contract(
@@ -4534,35 +4440,14 @@ def backfill_trade_review_timing_and_system_markers(
             if _dumps(review) == before:
                 continue
             review_id = str(_row_value(row, "review_id", "") or "")
-            after, archive = _review_storage_parts(
-                conn,
-                review_id=review_id,
-                review=archive_review,
+            updated += int(
+                _record_canonical_review_revision(
+                    conn,
+                    row=row,
+                    review_id=review_id,
+                    review=archive_review,
+                )
             )
-            if archive:
-                _execute(
-                    conn,
-                    """
-                    UPDATE trade_outcome_review
-                    SET failure_tags_json=?, summary_text=?, review_json=?,
-                        review_archive_hash=?, review_raw_sha256=?, review_raw_bytes=?
-                    WHERE review_id=?
-                    """,
-                    (
-                        _dumps(failure_tags), summary, after, archive["archive_hash"],
-                        archive["raw_sha256"], archive["raw_bytes"], review_id,
-                    ),
-                )
-            else:
-                _execute(
-                    conn,
-                    """
-                    UPDATE trade_outcome_review
-                    SET failure_tags_json=?, summary_text=?, review_json=?
-                    WHERE review_id=?
-                    """,
-                    (_dumps(failure_tags), summary, after, review_id),
-                )
             factor_rows_updated += _update_factor_contribution_system_notes(
                 conn,
                 review_id=review_id,
@@ -4571,7 +4456,8 @@ def backfill_trade_review_timing_and_system_markers(
             updated += 1
 
         payload = {
-            "schema_version": "trade_review_timing_system_backfill.v1",
+            "schema_version": "trade_review_timing_system_backfill.v2",
+            "source": "canonical_v2_reader",
             "evolution_run_id": str(run.get("run_id") or ""),
             "checked": checked,
             "updated": updated,
@@ -5401,72 +5287,46 @@ def _auto_apply_position_supervisor_template_suggestions(
             mature_sessions: set[str] = set()
             mature_regimes: set[str] = set()
             accepted_counterfactuals = 0
-            page_offset = 0
             page_limit = 2000
-            while accepted_counterfactuals < page_limit:
-                cf_rows = _execute(
-                    conn,
-                    (
-                        f"""
-                        SELECT cf.position_id, cf.close_ts, cf.evidence_json,
-                               r.review_id AS source_review_id,
-                               r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
-                        """
-                        if not canonical
-                        else "SELECT cf.position_id, cf.close_ts, cf.evidence_json"
-                    )
-                    + """
-                    FROM supervisor_counterfactual_review cf
-                    """
-                    + ("" if canonical else "JOIN trade_outcome_review r ON r.review_id=cf.review_id")
-                    + """
-                    WHERE cf.close_ts>=?
-                      AND EXISTS (
-                          SELECT 1
-                          FROM position_supervisor_trace t
-                          WHERE t.position_id=cf.position_id
-                            AND t.template_id=?
-                            AND t.stage='learning_shadow'
-                            AND t.execution_status='observation_only'
-                            AND t.trace_integrity='recovered'
-                            AND t.execution_reason=?
-                            AND t.event_ts>=?
-                      )
-                    ORDER BY cf.close_ts DESC, cf.counterfactual_id DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (
-                        float(row["created_at"] or 0.0),
-                        target_template_id,
-                        f"learning_worker_candidate_replay:{suggestion_id}",
-                        float(row["created_at"] or 0.0),
-                        page_limit,
-                        page_offset,
-                    ),
-                ).fetchall()
-                if not cf_rows:
-                    break
-                page_offset += len(cf_rows)
-                for cf_row in cf_rows:
-                    attached = _attach_source_review(conn, cf_row) if canonical else cf_row
+            if canonical:
+                for cf_row in iter_counterfactual_rows(conn, limit=0, reverse=True):
+                    if float(cf_row.get("close_ts") or 0.0) < float(row["created_at"] or 0.0):
+                        continue
+                    attached = _attach_source_review(conn, cf_row)
                     if not _counterfactual_source_is_clean(attached, conn):
                         continue
-                    cf_evidence = _loads(attached["evidence_json"], {})
+                    cf_evidence = _loads(attached.get("evidence_json"), {})
                     if not bool((cf_evidence.get("maturity") or {}).get("governance_eligible")):
                         continue
-                    position_id = str(attached["position_id"] or "")
+                    position_id = str(attached.get("position_id") or "")
                     if not position_id or position_id in mature_positions:
+                        continue
+                    expected_reason = f"learning_worker_candidate_replay:{suggestion_id}"
+                    has_observation = any(
+                        str(trace.get("template_id") or "") == target_template_id
+                        and str(trace.get("stage") or "") == "learning_shadow"
+                        and str(trace.get("execution_reason") or "") == expected_reason
+                        and float(trace.get("event_ts") or 0.0) >= float(row["created_at"] or 0.0)
+                        and _loads(trace.get("execution_json"), {}).get("is_real_execution") is False
+                        and isinstance(trace.get("observation_contract"), dict)
+                        for trace in iter_supervisor_trace_rows(
+                            conn,
+                            position_id=position_id,
+                            limit=0,
+                            reverse=True,
+                        )
+                    )
+                    if not has_observation:
                         continue
                     mature_positions.add(position_id)
                     accepted_counterfactuals += 1
-                    close_hour = time.gmtime(float(attached["close_ts"] or 0.0)).tm_hour
+                    close_hour = time.gmtime(float(attached.get("close_ts") or 0.0)).tm_hour
                     mature_sessions.add("asia" if close_hour < 7 else "europe" if close_hour < 13 else "us")
                     regime = str(cf_evidence.get("regime") or "")
                     if regime and regime != "unknown":
                         mature_regimes.add(regime)
                     if accepted_counterfactuals >= page_limit:
                         break
-                del cf_rows
             evidence_ready = (
                 len(mature_positions) >= canary_required
                 and len(mature_sessions) >= 2
@@ -5877,12 +5737,25 @@ def apply_demo_autonomy(
         db_path=db_path,
         run_id=experiment_id,
     )
-    if not _demo_autonomous_enabled():
+    if not _demo_autonomy_mutation_enabled():
+        try:
+            from config.runtime_config import shared as runtime_config
+
+            auto_apply_enabled = bool(
+                getattr(runtime_config(), "autonomy_demo_auto_apply", False)
+            )
+        except Exception:
+            auto_apply_enabled = False
         payload = {
             "schema_version": "demo_autonomy_apply.v1",
             "enabled": False,
             "mode": _autonomy_mode(),
             "experiment_id": experiment_id,
+            "reason": (
+                "autonomy_demo_auto_apply_disabled"
+                if _demo_autonomous_enabled() and not auto_apply_enabled
+                else "autonomy_mode_not_demo"
+            ),
         }
         finish_evolution_run(str(run.get("run_id") or experiment_id), status="skipped", summary=payload, db_path=db_path)
         return payload
@@ -6128,7 +6001,7 @@ def run_autonomous_learning_cycle(
     sample_limit: int = 500,
     recommendation_limit: int = 20,
     submit_offline_deep: bool = True,
-    apply_demo: bool = False,
+    apply_demo: bool | None = None,
     mutation_capability: bool = True,
 ) -> dict[str, Any]:
     from research.learning.governor import RuleEvolutionGovernor
@@ -6150,6 +6023,13 @@ def run_autonomous_learning_cycle(
             else "worker_observation_continues_without_runtime_mutation"
         ),
     }
+    configured_demo_mutation = _demo_autonomy_mutation_enabled()
+    apply_requested = (
+        configured_demo_mutation if apply_demo is None else bool(apply_demo)
+    )
+    effective_demo_apply = bool(
+        configured_demo_mutation and apply_requested and mutation_allowed
+    )
 
     stages["counterfactuals"] = _run_compact_learning_stage(
         "counterfactuals",
@@ -6286,20 +6166,28 @@ def run_autonomous_learning_cycle(
         "demo_autonomy",
         (
             (lambda: apply_demo_autonomy(db_path=db_path))
-            if apply_demo and mutation_allowed
+            if effective_demo_apply
             else (lambda: {
                 "schema_version": "demo_autonomy_apply.v1",
                 "enabled": False,
                 "mode": _autonomy_mode(),
                 "status": (
-                    "skipped_explicit_apply_required"
-                    if mutation_allowed
-                    else str(mutation_block["status"])
+                    str(mutation_block["status"])
+                    if not mutation_allowed
+                    else "skipped_explicit_apply_required"
                 ),
                 "reason": (
-                    "explicit_apply_not_requested"
-                    if mutation_allowed
-                    else str(mutation_block["reason"])
+                    str(mutation_block["reason"])
+                    if not mutation_allowed
+                    else (
+                        "autonomy_mode_not_demo"
+                        if not _demo_autonomous_enabled()
+                        else (
+                            "autonomy_demo_auto_apply_disabled"
+                            if not configured_demo_mutation
+                            else "explicit_apply_not_requested"
+                        )
+                    )
                 ),
             })
         ),

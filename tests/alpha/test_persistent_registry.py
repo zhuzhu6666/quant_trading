@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 
 from alpha import persistent_registry
+from backend.services.canonical_v2 import record_payload_event
+from tests.canonical_fixture import seed_canonical_sqlite_file
 
 
 class _Adapter:
@@ -22,31 +24,44 @@ class _Adapter:
         return True
 
 
-def _init_lifecycle_db(path):
+def _init_canonical_db(path):
+    seed_canonical_sqlite_file(path)
     conn = sqlite3.connect(path)
-    conn.execute(
-        """
-        CREATE TABLE lifecycle_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp REAL NOT NULL,
-            event TEXT NOT NULL,
-            factor TEXT NOT NULL,
-            source TEXT DEFAULT '',
-            description TEXT DEFAULT '',
-            score REAL DEFAULT 0.0,
-            status TEXT DEFAULT '',
-            reason TEXT DEFAULT ''
-        )
-        """
-    )
     return conn
 
 
-def test_restore_from_log_replays_lifecycle_and_only_restores_active_dsl(tmp_path, monkeypatch):
+def _write_factor_observation_events(conn, rows):
+    for index, (timestamp, event, factor, source, description) in enumerate(rows):
+        payload = {
+            "timestamp": timestamp,
+            "event": event,
+            "factor": factor,
+            "source": source,
+            "lifecycle_source": source,
+            "description": description,
+            "score": 0.0,
+            "status": "UNKNOWN",
+            "reason": "",
+        }
+        record_payload_event(
+            conn,
+            event_type="factor_observation",
+            entity_type="factor_lifecycle",
+            entity_id=factor,
+            payload=payload,
+            observed_at=timestamp,
+            producer="test_persistent_registry",
+            payload_kind="factor_lifecycle",
+            event_id=f"test_factor_lifecycle_{index}",
+            idempotency_key=f"test_factor_lifecycle:{index}",
+        )
+
+
+def test_restore_from_canonical_replays_lifecycle_and_only_restores_active_dsl(tmp_path, monkeypatch):
     import backend.core.db as db
 
     state_db = tmp_path / "state.db"
-    conn = _init_lifecycle_db(state_db)
+    conn = _init_canonical_db(state_db)
     rows = [
         (1.0, "register", "dsl_good", "shadow", "rank(close)"),
         (2.0, "promote", "dsl_good", "", ""),
@@ -56,14 +71,7 @@ def test_restore_from_log_replays_lifecycle_and_only_restores_active_dsl(tmp_pat
         (6.0, "unregister", "dsl_unregistered", "removed", ""),
         (7.0, "register", "pca_factor", "shadow", "PCA component 1"),
     ]
-    conn.executemany(
-        """
-        INSERT INTO lifecycle_events
-        (timestamp, event, factor, source, description)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
+    _write_factor_observation_events(conn, rows)
     conn.commit()
     conn.close()
     monkeypatch.setattr(db, "STATE_DB", state_db)
@@ -77,7 +85,7 @@ def test_restore_from_log_replays_lifecycle_and_only_restores_active_dsl(tmp_pat
 
     adapter = _Adapter()
 
-    restored = persistent_registry.restore_from_log(verbose=False, adapter=adapter)
+    restored = persistent_registry.restore_from_canonical(verbose=False, adapter=adapter)
 
     assert restored == 1
     assert [item["name"] for item in adapter.registered] == ["dsl_good"]
@@ -86,20 +94,17 @@ def test_restore_from_log_replays_lifecycle_and_only_restores_active_dsl(tmp_pat
     assert adapter.registered[0]["log_event"] is False
 
 
-def test_restore_from_log_keeps_preferred_and_limits_cold_runtime_factors(tmp_path, monkeypatch):
+def test_restore_from_canonical_keeps_preferred_and_limits_cold_runtime_factors(tmp_path, monkeypatch):
     import backend.core.db as db
 
     state_db = tmp_path / "state.db"
-    conn = _init_lifecycle_db(state_db)
-    conn.executemany(
-        """
-        INSERT INTO lifecycle_events (timestamp, event, factor, source, description)
-        VALUES (?, 'register', ?, 'discovered', ?)
-        """,
+    conn = _init_canonical_db(state_db)
+    _write_factor_observation_events(
+        conn,
         [
-            (1.0, "preferred_old", "rank(close)"),
-            (2.0, "cold_old", "rank(open)"),
-            (3.0, "cold_new", "rank(high)"),
+            (1.0, "register", "preferred_old", "discovered", "rank(close)"),
+            (2.0, "register", "cold_old", "discovered", "rank(open)"),
+            (3.0, "register", "cold_new", "discovered", "rank(high)"),
         ],
     )
     conn.commit()
@@ -112,7 +117,7 @@ def test_restore_from_log_keeps_preferred_and_limits_cold_runtime_factors(tmp_pa
 
     monkeypatch.setattr(db, "get_state_pg_conn", _test_state_conn)
     adapter = _Adapter()
-    restored = persistent_registry.restore_from_log(
+    restored = persistent_registry.restore_from_canonical(
         verbose=False,
         adapter=adapter,
         preferred_names={"preferred_old"},

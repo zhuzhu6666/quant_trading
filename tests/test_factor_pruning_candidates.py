@@ -1,7 +1,9 @@
 from types import SimpleNamespace
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
+from backend.services.canonical_v2 import record_decision_event, record_review
 from backend.services.factor_pruning_candidates import FactorPruningCandidateService
+from tests.canonical_fixture import seed_canonical_sqlite_file
 
 
 def _cfg(signal_cfg, weights):
@@ -13,22 +15,43 @@ def _cfg(signal_cfg, weights):
     )
 
 
-def test_factor_pruning_candidates_are_candidate_only_and_prioritized(tmp_path):
-    db_path = tmp_path / "state.db"
+def _init_db(db_path):
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    seed_canonical_sqlite_file(db_path)
+
+
+def _snapshot(decision_id, factor, *, policy_weight, contribution_score, source="test"):
+    return {
+        "decision_id": decision_id,
+        "factor": factor,
+        "source": source,
+        "raw_value": 1.0,
+        "normalized_value": 1.0,
+        "direction": 1.0,
+        "base_weight": policy_weight,
+        "policy_weight": policy_weight,
+        "shadow_score": 0.0,
+        "health_score": 20.0,
+        "gated": 0,
+        "gated_reason": "",
+        "contribution_score": contribution_score,
+    }
+
+
+def test_factor_pruning_candidates_are_candidate_only_and_prioritized(tmp_path):
+    db_path = tmp_path / "state.db"
+    _init_db(db_path)
+    conn = connect_sqlite(db_path)
+    try:
         conn.execute(
             """
             INSERT INTO factor_health (factor, score, status, n_obs, rolling_ic)
             VALUES ('dsl_auto_000', 18.0, 'decaying', 220, -0.03)
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, entry_decision_id, pnl, outcome_label, failure_tags_json, review_json, created_at)
-            VALUES ('review_recent_1', 'trade_recent_1', 'decision_recent_1', -1.0, 'bad_loss', '[]', '{}', 1000.0)
             """
         )
         conn.commit()
@@ -51,16 +74,34 @@ def test_factor_pruning_candidates_are_candidate_only_and_prioritized(tmp_path):
 
     conn = connect_sqlite(db_path)
     try:
-        for name in sorted(set(signal_cfg) | set(weights)):
-            conn.execute(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, source, raw_value, normalized_value, direction,
-                 base_weight, policy_weight, shadow_score, health_score, gated, gated_reason, contribution_score)
-                VALUES ('decision_recent_1', ?, 'test', 1.0, 1.0, 1.0, ?, ?, 0.0, 20.0, 0, '', 0.01)
-                """,
-                (name, weights[name], weights[name]),
-            )
+        record_decision_event(
+            conn,
+            decision_id="decision_recent_1",
+            event_type="open",
+            symbol="XAUUSD",
+            timeframe="M1",
+            decision_ts=1000.0,
+            created_at=1000.0,
+            factor_snapshots=[
+                _snapshot(
+                    "decision_recent_1",
+                    name,
+                    policy_weight=weights[name],
+                    contribution_score=0.01,
+                )
+                for name in sorted(set(signal_cfg) | set(weights))
+            ],
+        )
+        record_review(
+            conn,
+            review_id="review_recent_1",
+            trade_id="trade_recent_1",
+            entry_decision_id="decision_recent_1",
+            pnl=-1.0,
+            outcome_label="bad_loss",
+            failure_tags=[],
+            created_at=1000.0,
+        )
         conn.commit()
     finally:
         conn.close()
@@ -105,35 +146,37 @@ def test_factor_pruning_candidates_keep_context_and_disabled_out(tmp_path):
 
 def test_factor_pruning_candidates_prioritize_harmful_live_participants_over_cold_tail(tmp_path):
     db_path = tmp_path / "state.db"
+    _init_db(db_path)
     conn = connect_sqlite(db_path)
     try:
-        conn.executescript(STATE_DB_DDL)
         for idx, pnl in enumerate([-1.2, -0.8, -0.6, 0.4]):
             decision_id = f"decision_live_{idx}"
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, entry_decision_id, pnl, outcome_label, failure_tags_json, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, '{}', ?)
-                """,
-                (
-                    f"review_live_{idx}",
-                    f"trade_live_{idx}",
-                    decision_id,
-                    pnl,
-                    "bad_loss" if pnl <= 0 else "good_win",
-                    '["signal_execution_delay"]' if idx == 0 else "[]",
-                    1000.0 + idx,
-                ),
+            record_decision_event(
+                conn,
+                decision_id=decision_id,
+                event_type="open",
+                symbol="XAUUSD",
+                timeframe="M1",
+                decision_ts=1000.0 + idx,
+                created_at=1000.0 + idx,
+                factor_snapshots=[
+                    _snapshot(
+                        decision_id,
+                        "dsl_auto_hot_bad",
+                        policy_weight=0.3,
+                        contribution_score=0.08 if pnl <= 0 else -0.04,
+                    )
+                ],
             )
-            conn.execute(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, source, raw_value, normalized_value, direction,
-                 base_weight, policy_weight, shadow_score, health_score, gated, gated_reason, contribution_score)
-                VALUES (?, 'dsl_auto_hot_bad', 'test', 1.0, 1.0, 1.0, 0.3, 0.3, 0.0, 30.0, 0, '', ?)
-                """,
-                (decision_id, 0.08 if pnl <= 0 else -0.04),
+            record_review(
+                conn,
+                review_id=f"review_live_{idx}",
+                trade_id=f"trade_live_{idx}",
+                entry_decision_id=decision_id,
+                pnl=pnl,
+                outcome_label="bad_loss" if pnl <= 0 else "good_win",
+                failure_tags=["signal_execution_delay"] if idx == 0 else [],
+                created_at=1000.0 + idx,
             )
         conn.commit()
     finally:
@@ -161,34 +204,38 @@ def test_factor_pruning_candidates_prioritize_harmful_live_participants_over_col
 
 def test_factor_pruning_candidates_include_snapshot_only_discovered_live_factors(tmp_path):
     db_path = tmp_path / "state.db"
+    _init_db(db_path)
     conn = connect_sqlite(db_path)
     try:
-        conn.executescript(STATE_DB_DDL)
         for idx, pnl in enumerate([-1.0, -0.7, -0.5, 0.3]):
             decision_id = f"decision_snapshot_{idx}"
-            conn.execute(
-                """
-                INSERT INTO trade_outcome_review
-                (review_id, trade_id, entry_decision_id, pnl, outcome_label, failure_tags_json, review_json, created_at)
-                VALUES (?, ?, ?, ?, ?, '[]', '{}', ?)
-                """,
-                (
-                    f"review_snapshot_{idx}",
-                    f"trade_snapshot_{idx}",
-                    decision_id,
-                    pnl,
-                    "bad_loss" if pnl <= 0 else "good_win",
-                    2000.0 + idx,
-                ),
+            record_decision_event(
+                conn,
+                decision_id=decision_id,
+                event_type="open",
+                symbol="XAUUSD",
+                timeframe="M1",
+                decision_ts=2000.0 + idx,
+                created_at=2000.0 + idx,
+                factor_snapshots=[
+                    _snapshot(
+                        decision_id,
+                        "dsl_auto_snapshot_hot",
+                        policy_weight=0.3,
+                        contribution_score=0.12 if pnl <= 0 else -0.05,
+                        source="snapshot",
+                    )
+                ],
             )
-            conn.execute(
-                """
-                INSERT INTO decision_factor_snapshot
-                (decision_id, factor, source, raw_value, normalized_value, direction,
-                 base_weight, policy_weight, shadow_score, health_score, gated, gated_reason, contribution_score)
-                VALUES (?, 'dsl_auto_snapshot_hot', 'snapshot', 1.0, 1.0, 1.0, 0.3, 0.3, 0.0, 20.0, 0, '', ?)
-                """,
-                (decision_id, 0.12 if pnl <= 0 else -0.05),
+            record_review(
+                conn,
+                review_id=f"review_snapshot_{idx}",
+                trade_id=f"trade_snapshot_{idx}",
+                entry_decision_id=decision_id,
+                pnl=pnl,
+                outcome_label="bad_loss" if pnl <= 0 else "good_win",
+                failure_tags=[],
+                created_at=2000.0 + idx,
             )
         conn.commit()
     finally:

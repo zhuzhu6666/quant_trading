@@ -608,11 +608,15 @@ def test_session_fact_observation_never_borrows_positions_timestamp():
 
 
 @pytest.mark.parametrize("status", ["unknown", "unavailable", "degraded_cache"])
-def test_legacy_final_open_boundary_blocks_non_authoritative_session(
+def test_current_final_open_boundary_blocks_non_authoritative_session(
     monkeypatch,
     status,
 ):
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
+    monkeypatch.setattr(
+        live_service._LIVE_LOOP_CONTROLLER,
+        "accepting_new_risk",
+        lambda _generation_id: True,
+    )
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: False)
     live_service._process_shutdown_requested = False
     live_service._live_state_update(
@@ -624,8 +628,12 @@ def test_legacy_final_open_boundary_blocks_non_authoritative_session(
     assert live_service._open_trade_draining(lambda: False) is True
 
 
-def test_legacy_final_open_boundary_allows_available_session(monkeypatch):
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
+def test_current_final_open_boundary_allows_available_session(monkeypatch):
+    monkeypatch.setattr(
+        live_service._LIVE_LOOP_CONTROLLER,
+        "accepting_new_risk",
+        lambda _generation_id: True,
+    )
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: False)
     live_service._process_shutdown_requested = False
     live_service._live_state_update(
@@ -639,7 +647,6 @@ def test_legacy_final_open_boundary_allows_available_session(monkeypatch):
 
 
 def test_generation_open_boundary_also_requires_live_session_projection(monkeypatch):
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: True)
     monkeypatch.setattr(live_service, "_current_generation_id", lambda: "gen-ready")
     monkeypatch.setattr(
         live_service._LIVE_LOOP_CONTROLLER,

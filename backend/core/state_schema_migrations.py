@@ -2,8 +2,9 @@
 
 The application processes only validate a minimum schema version.  Applying
 migrations is an explicit operator action through ``scripts/state_schema_migrate.py``.
-Migrations are additive, checksum protected, and serialized by a PostgreSQL
-transaction advisory lock.
+Migrations are forward-only, checksum protected, and serialized by a
+PostgreSQL transaction advisory lock. Most migrations are additive; explicitly
+catalogued retirements guard against non-empty facts before dropping them.
 """
 
 from __future__ import annotations
@@ -24,9 +25,9 @@ STATE_SCHEMA_MIGRATION_DIR: Final[Path] = _PROJECT_ROOT / "migrations" / "state_
 STATE_SCHEMA_MIGRATION_TABLE: Final[str] = "state_schema_migration"
 STATE_SCHEMA_MIGRATION_LOCK_ID: Final[int] = 0x5155414E54534D31  # ASCII: QUANTSM1
 
-# Phase 0B starts from the already-cut-over state_v1 schema.  The explicit
-# runner must never make an empty or partial schema look deployable merely by
-# creating the new migration ledger and foundation tables.
+# The runtime schema is authoritative.  The explicit runner must never make
+# an empty or partial schema look deployable merely by creating the migration
+# ledger and foundation tables.
 STATE_SCHEMA_BASELINE_TABLES: Final[tuple[str, ...]] = (
     # 2026-08-18: 空列表（表已全部删除，由代码 ensure_* 函数重建）
 )
@@ -87,7 +88,7 @@ class StateSchemaMigration:
         return hashlib.sha256(self.sql().encode("utf-8")).hexdigest()
 
     def statements(self) -> tuple[str, ...]:
-        # Migration files are deliberately plain additive DDL. Stored
+        # Migration files are deliberately plain forward-only DDL. Stored
         # procedures/dollar-quoted bodies and semicolons inside SQL literals
         # are prohibited by contract; tests enforce that narrow format.
         return tuple(part.strip() for part in self.sql().split(";") if part.strip())
@@ -122,6 +123,8 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(26, "align_factor_runtime_projection", "0026_align_factor_runtime_projection.sql"),
     StateSchemaMigration(27, "build_backfilled_live_indexes", "0027_build_backfilled_live_indexes.sql"),
     StateSchemaMigration(28, "align_factor_lifecycle_state", "0028_align_factor_lifecycle_state.sql"),
+    StateSchemaMigration(29, "runtime_broker_execution_intent", "0029_runtime_broker_execution_intent.sql"),
+    StateSchemaMigration(30, "retire_legacy_fact_tables", "0030_retire_legacy_fact_tables.sql"),
 )
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
 # Runtime code consumes the complete checked-in state contract.  A process

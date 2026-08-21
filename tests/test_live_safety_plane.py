@@ -97,7 +97,6 @@ def test_shadow_compares_candidates_but_never_executes():
         unknown_execution_count=0,
         candidate_provider=lambda _positions: [candidate],
         executor=lambda item: calls.append(item) or {"ok": True},
-        legacy_candidates=[candidate],
     )
 
     assert result.status == "shadow"
@@ -110,16 +109,11 @@ def test_shadow_mismatch_remains_fail_closed_during_heartbeat_interval():
     now = [100.0]
     plane = LiveSafetyPlane(mode="shadow", clock=lambda: now[0])
     v2 = SafetyCandidate(action="tighten", position_id=7, fingerprint="v2")
-    legacy = SafetyCandidate(action="close", position_id=7, fingerprint="legacy")
-
     first = plane.run_cycle(
         reconcile_result=_reconcile(7),
         unknown_execution_count=0,
-        candidate_provider=lambda _positions: [v2],
+        candidate_provider=lambda _positions: [v2, v2],
         executor=lambda _candidate: {"ok": True},
-        legacy_candidates=[legacy],
-        comparison_independent=True,
-        require_candidate_match=True,
     )
     now[0] = 102.0
     heartbeat = plane.run_cycle(
@@ -129,15 +123,13 @@ def test_shadow_mismatch_remains_fail_closed_during_heartbeat_interval():
             AssertionError("heartbeat must not replan")
         ),
         executor=lambda _candidate: {"ok": True},
-        legacy_candidates=(),
-        comparison_independent=True,
-        require_candidate_match=True,
     )
 
     assert first.accepting_new_risk is False
     assert heartbeat.status == "heartbeat"
-    assert heartbeat.comparison["match"] is False
-    assert "safety_candidate_mismatch" in heartbeat.blockers
+    assert heartbeat.comparison["match"] is True
+    assert heartbeat.comparison["duplicate"] is True
+    assert "safety_candidate_duplicate" in heartbeat.blockers
     assert heartbeat.accepting_new_risk is False
 
 
@@ -152,9 +144,6 @@ def test_enforce_comparison_error_forces_shadow_before_executor():
             {"action": "market_buy", "position_id": 7}
         ],
         executor=lambda candidate: calls.append(candidate) or {"ok": True},
-        legacy_candidates=(),
-        comparison_independent=True,
-        require_candidate_match=True,
     )
 
     assert calls == []
@@ -239,7 +228,6 @@ def test_safety_plane_rejects_entry_order_actions_and_has_no_entry_api_symbols()
     for relative_path in (
         "backend/services/live_safety_plane.py",
         "backend/services/live_safety_planner.py",
-        "backend/services/live_legacy_safety_preview.py",
         "backend/services/live_emergency.py",
         "backend/services/live_loop_v2.py",
     ):

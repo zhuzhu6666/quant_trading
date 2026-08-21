@@ -162,6 +162,7 @@ def test_safety_exception_fails_closed_before_alpha_after_account_fact_attempt()
         recovery_bootstrapped=False,
         stop_requested=lambda: False,
         log=lambda _message: None,
+        generation_id="generation-1",
         runtime=runtime,
     )
 
@@ -196,6 +197,7 @@ def test_account_failure_still_runs_safety_and_blocks_alpha():
         recovery_bootstrapped=False,
         stop_requested=lambda: False,
         log=lambda _message: None,
+        generation_id="generation-1",
         runtime=runtime,
     )
 
@@ -238,6 +240,7 @@ def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
         recovery_bootstrapped=True,
         stop_requested=lambda: False,
         log=lambda _message: None,
+        generation_id="generation-1",
         runtime=runtime,
     )
 
@@ -255,7 +258,9 @@ def test_happy_path_runs_alpha_only_after_safety_account_and_recovery():
     assert any(
         update.get("safety_cycle_active") is True for update in state_updates
     )
-    assert state_updates[-1]["safety_cycle_active"] is False
+    assert any(
+        update.get("safety_cycle_active") is False for update in state_updates
+    )
     assert diagnostics == [
         ((4, "bridge_ready"), {"bridge_ready": True}),
     ]
@@ -286,6 +291,7 @@ def test_risk_metrics_publish_immediately_after_safety_boundary():
         recovery_bootstrapped=False,
         stop_requested=lambda: False,
         log=lambda _message: None,
+        generation_id="generation-1",
         runtime=runtime,
     )
 
@@ -312,6 +318,7 @@ def test_pending_open_retry_runs_after_safety_before_alpha_due_check():
         recovery_bootstrapped=True,
         stop_requested=lambda: False,
         log=lambda _message: None,
+        generation_id="generation-1",
         runtime=runtime,
     )
 
@@ -342,6 +349,7 @@ def test_demo_mode_ignores_observed_session_circuit_and_runs_alpha():
         recovery_bootstrapped=True,
         stop_requested=lambda: False,
         log=lambda _message: None,
+        generation_id="generation-1",
         runtime=runtime,
     )
 

@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+from backend.services.live_loop_controller import LiveLoopController
 from backend.services.live_loop_shell import (
     acknowledge_prepared_factor_projections,
     adaptive_weight_config,
@@ -16,7 +17,7 @@ from backend.services.live_loop_shell import (
     dataframe_to_factor_bars,
     enabled_symbols_from_config,
     execution_gate_config,
-    loop_status_snapshot,
+    loop_identity_snapshot,
     mark_loop_stopped_for_display,
     market_closed_log_message,
     subscribe_spot_once,
@@ -25,7 +26,7 @@ from backend.services.live_loop_shell import (
 )
 
 
-class _Thread:
+class _LoopThread:
     ident = 42
 
     def __init__(self, alive: bool):
@@ -33,13 +34,6 @@ class _Thread:
 
     def is_alive(self) -> bool:
         return self._alive
-
-
-def _state_get_factory(state: dict):
-    def _get(key, default=None, **_kwargs):
-        return state.get(key, default)
-
-    return _get
 
 
 def test_factor_projection_ack_failure_is_non_fatal_to_live_loop():
@@ -79,71 +73,52 @@ def test_factor_projection_ack_uses_process_boot_id_when_generation_controller_i
     assert str(captured["boot_id"]).startswith("live-alpha:")
 
 
-def test_loop_status_snapshot_explicit_stopped_preserves_cached_fields():
-    status = loop_status_snapshot(
-        state_get=_state_get_factory(
-            {
-                "loop_running": False,
-                "broker": "ctrader",
-                "loop_started_at": 123.0,
-                "loop_strategy": "cached_strategy",
-            }
-        ),
-        thread=_Thread(True),
-        broker="legacy_broker",
-        started_at=999.0,
-        strategy_name="legacy_strategy",
-    )
-
-    assert status == {
-        "running": False,
-        "pid": None,
-        "broker": "ctrader",
-        "started_at": 123.0,
-        "strategy_name": "cached_strategy",
-    }
-
-
-def test_loop_status_snapshot_cached_running_wins_over_thread():
-    status = loop_status_snapshot(
-        state_get=_state_get_factory(
-            {
-                "loop_running": True,
-                "broker": "ctrader",
-                "loop_started_at": 321.0,
-                "loop_strategy": "cached_strategy",
-            }
-        ),
-        thread=_Thread(False),
-        broker=None,
-        started_at=None,
-        strategy_name="legacy_strategy",
-    )
-
-    assert status == {
-        "running": True,
-        "pid": None,
-        "broker": "ctrader",
-        "started_at": 321.0,
-        "strategy_name": "cached_strategy",
-    }
-
-
-def test_loop_status_snapshot_falls_back_to_thread_state():
-    status = loop_status_snapshot(
-        state_get=_state_get_factory({"loop_running": None}),
-        thread=_Thread(True),
+def test_loop_identity_snapshot_reads_running_controller_generation():
+    controller = LiveLoopController(clock=lambda: 1_000.0)
+    generation = controller.begin_start(
         broker="ctrader",
-        started_at=456.0,
-        strategy_name="thread_strategy",
+        strategy_name="factor_v4",
     )
+    controller.bind_thread(generation.generation_id, _LoopThread(True))
+    for step in controller.status()["startup_barrier"]:
+        controller.complete_barrier_step(generation.generation_id, step)
+    controller.heartbeat(generation.generation_id, "safety")
+
+    status = loop_identity_snapshot(generation=controller.status())
 
     assert status == {
         "running": True,
         "pid": 42,
         "broker": "ctrader",
-        "started_at": 456.0,
-        "strategy_name": "thread_strategy",
+        "started_at": 1_000.0,
+        "strategy_name": "factor_v4",
+    }
+
+
+def test_loop_identity_snapshot_preserves_stopped_generation_identity():
+    controller = LiveLoopController(clock=lambda: 1_000.0)
+    generation = controller.begin_start(
+        broker="ctrader",
+        strategy_name="factor_v4",
+    )
+    thread = _LoopThread(False)
+    controller.bind_thread(generation.generation_id, thread)
+    controller.acknowledge_exit(generation.generation_id)
+    controller.clear_thread_if(generation.generation_id, thread, 1_001.0)
+
+    generation_status = controller.status()
+    ownership = controller.ownership_snapshot()
+    status = loop_identity_snapshot(generation=generation_status)
+
+    assert ownership.thread is None
+    assert ownership.broker == "ctrader"
+    assert ownership.strategy_name == "factor_v4"
+    assert status == {
+        "running": False,
+        "pid": None,
+        "broker": "ctrader",
+        "started_at": 1_000.0,
+        "strategy_name": "factor_v4",
     }
 
 

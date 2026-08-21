@@ -28,8 +28,6 @@ def _as_bool(value: Any, default: bool = False) -> bool:
 @dataclass(frozen=True)
 class StaticFeatureFlags:
     live_safety_plane_v2_mode: str = "off"
-    live_generation_controller_v2_enabled: bool = False
-    ctrader_execution_outcome_v2_enabled: bool = False
     governance_mutation_coordinator_v2_mode: str = "off"
     pg_job_queue_v2_enabled: bool = False
 
@@ -68,18 +66,6 @@ class StaticFeatureFlags:
             )
         return cls(
             live_safety_plane_v2_mode=safety_mode,
-            live_generation_controller_v2_enabled=_as_bool(
-                env.get(
-                    "QUANT_LIVE_GENERATION_CONTROLLER_V2_ENABLED",
-                    features.get("live_generation_controller_v2_enabled", False),
-                )
-            ),
-            ctrader_execution_outcome_v2_enabled=_as_bool(
-                env.get(
-                    "QUANT_CTRADER_EXECUTION_OUTCOME_V2_ENABLED",
-                    features.get("ctrader_execution_outcome_v2_enabled", False),
-                )
-            ),
             governance_mutation_coordinator_v2_mode=governance_mode,
             pg_job_queue_v2_enabled=_as_bool(
                 env.get(

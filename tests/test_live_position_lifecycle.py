@@ -3,7 +3,6 @@ import time
 from types import SimpleNamespace
 
 from backend.services.live_position_lifecycle import (
-    account_unrealized_pnl,
     active_pending_open_attach_ids,
     adjust_sl_plan_for_tp_only_protection,
     apply_unrealized_pnl_fields,
@@ -93,7 +92,6 @@ from backend.services.live_position_lifecycle import (
     position_id_value,
     position_open_price,
     position_open_timestamp,
-    position_price_pnl_estimate,
     position_symbol_value,
     position_unrealized_pnl,
     remember_close_reason,
@@ -177,7 +175,7 @@ def test_max_abs_entry_score_for_positions_uses_cached_scores():
     ) == 0.9
 
 
-def test_position_price_pnl_estimate_uses_direction_and_display_units():
+def test_position_direction_and_side_normalization():
     assert position_direction_sign({"direction": 1, "type": "sell"}) == 1
     assert position_direction_sign({"direction": 0, "type": "sell"}) == -1
     assert position_direction_from_payload({"side": "long"}) == 1
@@ -187,42 +185,22 @@ def test_position_price_pnl_estimate_uses_direction_and_display_units():
     assert side_name(1) == "long"
     assert side_name(-1) == "short"
     assert side_name(0) == "unknown"
-    assert position_price_pnl_estimate(
-        {
-            "open_price": 4000.0,
-            "current_price": 4010.0,
-            "direction": 1,
-            "volume": 100.0,
-        }
-    ) == 10.0
-    assert position_price_pnl_estimate(
-        {
-            "open_price": 4000.0,
-            "current_price": 3990.0,
-            "type": "sell",
-            "volume": 100.0,
-        }
-    ) == 10.0
+    assert position_unrealized_pnl({"profit": 0.0, "pnl_state": "known"}) == 0.0
 
 
-def test_apply_unrealized_pnl_fields_uses_account_fallback_and_allocation():
-    single = apply_unrealized_pnl_fields(
+def test_apply_unrealized_pnl_fields_requires_broker_component_truth():
+    unknown = apply_unrealized_pnl_fields(
         [{"open_price": 4000.0, "current_price": 4010.0, "direction": 1, "volume": 100.0}],
-        account={"balance": 1000.0, "equity": 1025.5},
     )
-    assert single[0]["pnl"] == 25.5
-    assert single[0]["pnl_source"] == "account_equity"
+    assert unknown[0]["pnl"] is None
+    assert unknown[0]["pnl_state"] == "unknown"
+    assert unknown[0]["pnl_source"] == "unknown"
 
-    allocated = apply_unrealized_pnl_fields(
-        [
-            {"open_price": 4000.0, "current_price": 4010.0, "direction": 1, "volume": 100.0},
-            {"open_price": 4000.0, "current_price": 3980.0, "direction": 1, "volume": 100.0},
-        ],
-        account={"balance": 1000.0, "equity": 1030.0},
+    known = apply_unrealized_pnl_fields(
+        [{"profit": 0.0, "pnl": 0.0, "pnl_state": "known"}],
     )
-    assert allocated[0]["pnl"] == 10.0
-    assert allocated[1]["pnl"] == 20.0
-    assert allocated[0]["pnl_source"] == "account_equity_allocated"
+    assert known[0]["pnl"] == 0.0
+    assert known[0]["pnl_source"] == "broker"
 
 
 def test_position_payload_extractors_accept_objects_and_millisecond_timestamps():
@@ -1254,10 +1232,18 @@ def test_enrich_positions_with_lifecycle_metrics_merges_display_fields_and_callb
 
     def _coerce_positions(positions):
         calls.append(("coerce", list(positions)))
-        return [{"position_id": 1, "symbol": "XAUUSD+", "unrealized_pnl": 0.0}]
+        return [
+            {
+                "position_id": 1,
+                "symbol": "XAUUSD+",
+                "pnl": 0.0,
+                "pnl_state": "known",
+                "unrealized_pnl": 0.0,
+            }
+        ]
 
-    def _apply_unrealized(positions, *, account):
-        calls.append(("pnl", account))
+    def _apply_unrealized(positions):
+        calls.append(("pnl",))
         item = dict(positions[0])
         item["unrealized_pnl"] = 12.5
         return [item]
@@ -1281,7 +1267,6 @@ def test_enrich_positions_with_lifecycle_metrics_merges_display_fields_and_callb
 
     result = enrich_positions_with_lifecycle_metrics(
         [{"position_id": 1}],
-        account={"equity": 1000.0},
         cfg=SimpleNamespace(name="cfg"),
         now_ts=123.0,
         persist=True,
@@ -1298,6 +1283,8 @@ def test_enrich_positions_with_lifecycle_metrics_merges_display_fields_and_callb
         {
             "position_id": 1,
             "symbol": "XAUUSD+",
+            "pnl": 0.0,
+            "pnl_state": "known",
             "unrealized_pnl": 12.5,
             "holding_seconds": 30.0,
             "path_mfe": 22.0,
@@ -1315,7 +1302,7 @@ def test_enrich_positions_with_lifecycle_metrics_merges_display_fields_and_callb
     ]
     assert calls == [
         ("coerce", [{"position_id": 1}]),
-        ("pnl", {"equity": 1000.0}),
+        ("pnl",),
         ("holding", 1, "cfg", 123.0),
         ("path", True, "ctrader", "factor_v4"),
         ("supervisor", 1, True, "ctrader", "factor_v4"),
@@ -2906,6 +2893,11 @@ def test_supervisor_trace_contract_only_marks_executed_applied_as_real():
         stage="executed",
         outcome="applied",
         execution_status="applied",
+        execution={
+            "is_real_execution": True,
+            "broker_action_confirmed": True,
+            "reconcile_confirmed": True,
+        },
     )
     shadow = build_supervisor_trace_ledger_payload(
         **base,
@@ -3124,6 +3116,7 @@ def test_build_legacy_awe_trailing_update_emits_long_candidate_after_activation(
             "symbol": "XAUUSD+",
             "direction": 1,
             "entry_price": 4000.0,
+            "current_price_state": "known",
             "sl": 3990.0,
             "tp": 4030.0,
         },
@@ -3154,6 +3147,7 @@ def test_build_legacy_awe_trailing_update_emits_short_candidate_after_activation
             "symbol": "XAUUSD+",
             "direction": -1,
             "entry_price": 4000.0,
+            "current_price_state": "known",
             "sl": 4010.0,
             "tp": 3970.0,
         },
@@ -3175,7 +3169,13 @@ def test_build_legacy_awe_trailing_update_emits_short_candidate_after_activation
 
 def test_build_legacy_awe_trailing_update_keeps_state_without_candidate_before_activation():
     update = build_legacy_awe_trailing_update(
-        position={"position_id": 703, "direction": 1, "entry_price": 4000.0, "sl": 3990.0},
+        position={
+            "position_id": 703,
+            "direction": 1,
+            "entry_price": 4000.0,
+            "current_price_state": "known",
+            "sl": 3990.0,
+        },
         existing_state=None,
         current_price=4003.0,
         atr_price=5.0,

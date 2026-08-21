@@ -1,25 +1,22 @@
 import sqlite3
 
 from backend.services import live_service
+from backend.services.canonical_v2 import ensure_sqlite_schema, record_review
 
 
 def test_risk_inputs_use_clean_reviews_and_position_notional(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            position_id TEXT,
-            pnl REAL,
-            review_json TEXT,
-            created_at REAL
-        );
-        INSERT INTO trade_outcome_review
-            (review_id, position_id, pnl, review_json, created_at)
-        VALUES ('rev-1', 'position-1', 12.5, '{}', 100.0);
-        """
+    ensure_sqlite_schema(conn)
+    record_review(
+        conn,
+        review_id="rev-1",
+        position_id="position-1",
+        pnl=12.5,
+        review={},
+        created_at=100.0,
     )
+    conn.commit()
     conn.close()
 
     def connect():

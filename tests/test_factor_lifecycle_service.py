@@ -711,7 +711,7 @@ def test_backend_bootstrap_rebuilds_active_registry_from_committed_state_only(
     assert _activate_candidate(service, name, weight=0.25, now=now)["ok"] is True
 
     # Simulate a fresh process: the durable rows remain, process-local
-    # Registry/meta do not.  No lifecycle_events fallback is involved.
+    # Registry/meta do not.  No retired lifecycle fallback is involved.
     factor_registry._factors.pop(name, None)
     adapter.meta.pop(name, None)
     register_before = adapter.register_calls

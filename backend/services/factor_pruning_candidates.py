@@ -10,7 +10,10 @@ from backend.core.db import (
     is_state_db_path,
     state_table_exists,
 )
-from backend.services.canonical_v2_reader import iter_review_rows
+from backend.services.canonical_v2_reader import (
+    iter_decision_factor_snapshots,
+    iter_review_rows,
+)
 from backend.services.factor_blend_health import DEFAULT_LOW_WEIGHT_THRESHOLD, FactorBlendHealthService
 from backend.services.review_contract import review_has_system_contamination
 
@@ -217,20 +220,11 @@ class FactorPruningCandidateService:
             if not clean_review_ids:
                 return []
             entry_ids = sorted({str(r.get("entry_decision_id") or "") for r in clean} - {""})
-            # --- read factor snapshots (canonical first, legacy fallback) ---
-            all_snapshots: list[dict] = []
-            try:
-                from backend.services.canonical_v2_reader import iter_all_decision_factor_snapshots
-                all_snapshots = iter_all_decision_factor_snapshots(conn, entry_ids)
-            except Exception:
-                placeholders = ",".join("?" for _ in entry_ids)
-                all_snapshots = [
-                    dict(r) for r in _execute(
-                        conn,
-                        f"SELECT * FROM decision_factor_snapshot WHERE decision_id IN ({placeholders})",
-                        tuple(entry_ids),
-                    ).fetchall()
-                ]
+            all_snapshots = [
+                snapshot
+                for decision_id in entry_ids
+                for snapshot in iter_decision_factor_snapshots(conn, decision_id)
+            ]
             if not all_snapshots:
                 return []
             # aggregate by factor
@@ -283,7 +277,7 @@ class FactorPruningCandidateService:
                     "current_weight": round(weight, 8),
                     "family": family,
                     "tags": ["live_decision_snapshot", "runtime_missing_config"],
-                    "source": str(row["source"] or "decision_factor_snapshot"),
+                    "source": str(row["source"] or "canonical_risk_decision"),
                     "redundancy_group": "",
                     "snapshot_only": True,
                     "snapshot_decision_review_count": int(_safe_float(row["decision_review_count"])),
@@ -340,19 +334,11 @@ class FactorPruningCandidateService:
             if not clean_review_ids:
                 return {}
             entry_ids = sorted({str(r.get("entry_decision_id") or "") for r in clean} - {""})
-            # --- read factor snapshots (canonical first, legacy fallback) ---
-            try:
-                from backend.services.canonical_v2_reader import iter_all_decision_factor_snapshots
-                dfs_rows = iter_all_decision_factor_snapshots(conn, entry_ids)
-            except Exception:
-                placeholders = ",".join("?" for _ in entry_ids)
-                dfs_rows = [
-                    dict(r) for r in _execute(
-                        conn,
-                        f"SELECT decision_id, factor, contribution_score, policy_weight FROM decision_factor_snapshot WHERE decision_id IN ({placeholders})",
-                        tuple(entry_ids),
-                    ).fetchall()
-                ]
+            dfs_rows = [
+                snapshot
+                for decision_id in entry_ids
+                for snapshot in iter_decision_factor_snapshots(conn, decision_id)
+            ]
             review_by_decision = {str(r.get("entry_decision_id") or ""): r for r in clean}
             groups: dict[str, dict[str, Any]] = {}
 

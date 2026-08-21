@@ -689,7 +689,12 @@ def evaluate_factors(
 
 
 def write_report(result: dict, out_txt: "Path", out_json: "Path") -> dict:
-    """把 evaluate_factors 结果落盘: PostgreSQL state_v1 (主) + json/txt (缓存)。"""
+    """Persist factor health to runtime PostgreSQL and emit explicit reports.
+
+    ``factor_health`` in the ``runtime`` schema is the durable projection;
+    JSON/TXT files are human/API report artifacts and are not alternate fact
+    stores.
+    """
     import json
     from pathlib import Path as _P
 

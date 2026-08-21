@@ -2,7 +2,7 @@
 
 The runtime object makes every stateful or broker-facing dependency explicit.
 This keeps the serial mutation order testable while preserving the live
-service's compatibility entrypoint and monkeypatch boundaries.
+service's public entrypoint and its explicit dependency boundaries.
 """
 
 from __future__ import annotations
@@ -55,57 +55,6 @@ class LiveSupervisionRuntime:
     capture_partial_close_session_cursor: Any
     sync_partial_close_session_fact: Any
     adaptive_duplicate_seen: Any = None
-
-
-def _demo_adaptive_observation_required(
-    verdict: dict[str, Any],
-    cfg: Any,
-) -> bool:
-    """Keep discretionary Demo actions non-mutating until governed release."""
-
-    mode = str(getattr(cfg, "autonomy_mode", "") or "").strip().lower()
-    if mode not in {"demo_autonomous", "demo_nursery"}:
-        return False
-    action = str(verdict.get("action") or "hold").strip().lower()
-    if action == "hold":
-        return False
-    template = dict(verdict.get("supervisor_template") or {})
-    boundary = dict(template.get("risk_boundary") or {})
-    execution_mode = str(
-        verdict.get("adaptive_execution_mode")
-        or boundary.get("adaptive_execution_mode")
-        or "observation_only"
-    ).strip().lower()
-    if execution_mode == "governed_execute":
-        return False
-    from backend.services.position_supervisor import is_hard_supervisor_action
-
-    return not is_hard_supervisor_action(
-        action=action,
-        summary_reason=str(verdict.get("summary_reason") or ""),
-        evidence=dict(verdict.get("evidence") or {}),
-    )
-
-
-def _observed_adaptive_verdict(
-    verdict: dict[str, Any],
-) -> dict[str, Any]:
-    """Annotate a recommendation whose effective live action is hold."""
-
-    normalized = copy.deepcopy(verdict or {})
-    requested = str(
-        normalized.get("requested_action")
-        or normalized.get("recommended_action")
-        or normalized.get("action")
-        or "hold"
-    ).strip().lower()
-    normalized["requested_action"] = requested
-    normalized["recommended_action"] = requested
-    normalized["effective_action"] = "hold"
-    normalized["execution_class"] = "observed"
-    normalized["execution_status"] = "observation_only"
-    normalized["execution_reason"] = "demo_adaptive_observation"
-    return normalized
 
 
 def _is_hard_verdict(verdict: dict[str, Any]) -> bool:
@@ -648,67 +597,6 @@ def run_position_supervision(
                     )
                 continue
 
-        if _demo_adaptive_observation_required(verdict, cfg):
-            observed_verdict = _observed_adaptive_verdict(verdict)
-            observed_action = str(
-                observed_verdict.get("requested_action") or requested_action or action
-            ).strip().lower()
-            controls = dict(observed_verdict.get("recommended_controls") or controls)
-            fingerprint = runtime.build_action_fingerprint(
-                position_id=position_id,
-                action=observed_action,
-                direction=int(position.get("direction", 0) or 0),
-                controls=controls,
-            )
-            observed_verdict["action_fingerprint"] = fingerprint
-            if runtime.adaptive_duplicate_seen is not None and runtime.adaptive_duplicate_seen(
-                position_id,
-                observed_verdict,
-            ):
-                continue
-            if candidate_recorder is not None:
-                try:
-                    candidate_recorder(
-                        runtime.make_candidate(
-                            action=observed_action,
-                            position_id=position_id,
-                            source=f"supervisor_{observed_action}",
-                            controls=controls,
-                        )
-                    )
-                except Exception as exc:
-                    runtime.record_aux_failure(
-                        "safety_candidate_record_failed",
-                        position_id=position_id,
-                        action=observed_action,
-                        error=exc,
-                    )
-            handled.add(position_id)
-            runtime.log_trace(
-                position=position,
-                verdict=observed_verdict,
-                cfg=cfg,
-                tick=tick,
-                stage="execution_skipped",
-                outcome="skipped",
-                execution_status="observation_only",
-                execution_reason="demo_adaptive_observation",
-                execution={
-                    "action_fingerprint": fingerprint,
-                    "requested_action": observed_action,
-                    "effective_action": "hold",
-                    "recommended_action": observed_action,
-                },
-                acct=account,
-            )
-            runtime.remember_state(
-                position,
-                observed_verdict,
-                broker="ctrader",
-                strategy_name=runtime.strategy_name,
-            )
-            continue
-
         verdict["effective_action"] = action
         if action in {"close", "reduce", "tighten"} and candidate_recorder is not None:
             try:
@@ -964,6 +852,8 @@ def run_position_supervision(
                         runtime.sync_partial_close_session_fact
                     ),
                     record_aux_failure=runtime.record_aux_failure,
+                    reconcile_positions=runtime.reconcile_positions,
+                    publish_fresh_positions=runtime.publish_fresh_positions,
                 )
             elif action == "close":
                 runtime.execute_close(
@@ -976,6 +866,8 @@ def run_position_supervision(
                     result_is_position_not_found=runtime.result_is_position_not_found,
                     retire_broker_missing_position=runtime.retire_broker_missing_position,
                     record_aux_failure=runtime.record_aux_failure,
+                    reconcile_positions=runtime.reconcile_positions,
+                    publish_fresh_positions=runtime.publish_fresh_positions,
                 )
         except Exception as exc:
             runtime.log_trace(

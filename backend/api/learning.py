@@ -18,6 +18,7 @@ from backend.core.db_helpers import execute as _execute
 from backend.jobs import get_job_manager
 from backend.services.canonical_v2_reader import (
     canonical_ready,
+    iter_parameter_template_lifecycle_rows,
     iter_review_rows,
     review_row,
 )
@@ -36,7 +37,6 @@ from backend.services.position_supervisor_governance import (
 )
 from backend.services.position_supervisor_templates import list_position_supervisor_templates
 from backend.services.review_contract import normalize_trade_review_contract
-from backend.services.state_payload_archive import load_json_payload
 from backend.services.supervisor_counterfactual import (
     evaluate_counterfactuals,
     list_counterfactuals,
@@ -108,33 +108,23 @@ from risk.policy_service import RiskPolicyService
 
 router = APIRouter(prefix="/api/learning", tags=["learning"])
 
-STATE_DB = None
 _CANDIDATE_ID_RE = re.compile(r"(ptrc_[0-9a-f]{16})")
 _LEARNING_CACHE_TTL_SEC = 30.0
 _LEARNING_CACHE_LOCK = threading.Lock()
 
 
 def _state_conn(*, read_only: bool = True):
-    if STATE_DB is not None and not core_db.is_state_db_path(STATE_DB):
-        conn = core_db.connect_sqlite(STATE_DB, read_only=read_only)
-        conn.row_factory = sqlite3.Row
-        return conn
-    try:
-        return core_db.get_state_conn(read_only=read_only)
-    except TypeError:
-        return core_db.get_state_conn()
+    return core_db.get_state_pg_conn(read_only=read_only)
 
 
 def _state_db_path():
-    return STATE_DB or core_db.STATE_DB
+    """Return the canonical state sentinel used by service constructors.
 
-
-def _state_conn_for_path(db_path, *, read_only: bool = True):
-    if core_db.is_state_db_path(db_path):
-        return _state_conn(read_only=read_only)
-    conn = core_db.connect_sqlite(db_path, read_only=read_only)
-    conn.row_factory = sqlite3.Row
-    return conn
+    Service constructors still accept this internal sentinel so they select
+    their PostgreSQL implementation.  No request or query parameter may
+    override it.
+    """
+    return core_db.STATE_DB
 
 
 def _require_governance_confirm(
@@ -1219,12 +1209,6 @@ def _suggestion_review_result_display(status: str) -> dict[str, str]:
     }
 
 
-def _review_archive_select(conn, *, alias: str = "r") -> str:
-    if "review_archive_hash" not in core_db.state_table_columns(conn, "trade_outcome_review"):
-        return ""
-    return f", {alias}.review_archive_hash AS review_archive_hash"
-
-
 def _parse_review_row(row, conn=None) -> dict:
     item = dict(row)
     try:
@@ -1232,16 +1216,8 @@ def _parse_review_row(row, conn=None) -> dict:
     except Exception:
         item["failure_tags"] = []
     inline_json = item.pop("review_json", "{}")
-    archive_hash = item.pop("review_archive_hash", "")
-    if conn is not None:
-        review = load_json_payload(
-            conn,
-            source_table="trade_outcome_review",
-            source_id=str(item.get("review_id") or ""),
-            inline_json=inline_json,
-            archive_hash=archive_hash,
-            default={},
-        )
+    if isinstance(inline_json, dict):
+        review = inline_json
     else:
         try:
             review = json.loads(inline_json or "{}")
@@ -1405,53 +1381,44 @@ def _latest_parameter_template_lifecycle_for_recommendation(
     candidate_key = str(candidate_id or "").strip()
     if not factor_key and not recommendation_key and not candidate_key:
         return {}
-    try:
-        rows = _execute(
-            conn,
-            """
-            SELECT id, timestamp, event, factor, source, description, score, status, reason
-            FROM lifecycle_events
-            WHERE source='parameter_template' AND factor=?
-            ORDER BY timestamp DESC, id DESC
-            LIMIT 40
-            """,
-            (factor_key,),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        rows = []
+    rows = iter_parameter_template_lifecycle_rows(
+        conn,
+        limit=40,
+        factor_id=factor_key,
+        reverse=True,
+    )
     for row in rows:
-        text = f"{row['description'] or ''} {row['reason'] or ''}"
-        candidate_trace = {}
-        match = _CANDIDATE_ID_RE.search(text)
-        if match:
-            candidate_trace = _candidate_trace_by_id(conn, match.group(1))
+        candidate_trace = _candidate_trace_by_id(
+            conn,
+            str(row.get("candidate_id") or ""),
+        ) if str(row.get("candidate_id") or "") else {}
         trace_recommendation_id = str(candidate_trace.get("recommendation_id") or "")
         trace_candidate_id = str(candidate_trace.get("candidate_id") or "")
         if recommendation_key and trace_recommendation_id == recommendation_key:
             return {
-                "id": int(row["id"] or 0),
-                "ts": float(row["timestamp"] or 0.0),
-                "event": str(row["event"] or ""),
-                "factor": str(row["factor"] or ""),
-                "source": str(row["source"] or ""),
-                "description": str(row["description"] or ""),
-                "score": float(row["score"] or 0.0),
-                "status": str(row["status"] or ""),
-                "reason": str(row["reason"] or row["description"] or ""),
+                "id": row.get("id"),
+                "ts": float(row.get("timestamp") or 0.0),
+                "event": str(row.get("event") or ""),
+                "factor": str(row.get("factor") or ""),
+                "source": str(row.get("source") or ""),
+                "description": str(row.get("description") or ""),
+                "score": float(row.get("score") or 0.0),
+                "status": str(row.get("status") or ""),
+                "reason": str(row.get("reason") or row.get("description") or ""),
                 "candidate_trace": candidate_trace,
                 "trace_locator": _latest_factor_trace_locator(conn, factor_key),
             }
         if candidate_key and trace_candidate_id == candidate_key:
             return {
-                "id": int(row["id"] or 0),
-                "ts": float(row["timestamp"] or 0.0),
-                "event": str(row["event"] or ""),
-                "factor": str(row["factor"] or ""),
-                "source": str(row["source"] or ""),
-                "description": str(row["description"] or ""),
-                "score": float(row["score"] or 0.0),
-                "status": str(row["status"] or ""),
-                "reason": str(row["reason"] or row["description"] or ""),
+                "id": row.get("id"),
+                "ts": float(row.get("timestamp") or 0.0),
+                "event": str(row.get("event") or ""),
+                "factor": str(row.get("factor") or ""),
+                "source": str(row.get("source") or ""),
+                "description": str(row.get("description") or ""),
+                "score": float(row.get("score") or 0.0),
+                "status": str(row.get("status") or ""),
+                "reason": str(row.get("reason") or row.get("description") or ""),
                 "candidate_trace": candidate_trace,
                 "trace_locator": _latest_factor_trace_locator(conn, factor_key),
             }
@@ -1618,7 +1585,6 @@ class ModelPipelineRunRequest(BaseModel):
 
 
 class PositionQualityLightGBMTrainRequest(BaseModel):
-    db_path: str | None = None
     artifact_dir: str | None = None
     registry_db_path: str | None = None
     symbol: str = "XAUUSD+"
@@ -1632,7 +1598,6 @@ class PositionQualityLightGBMTrainRequest(BaseModel):
 
 
 class PositionQualityLightGBMShadowRequest(BaseModel):
-    db_path: str | None = None
     artifact_dir: str | None = None
     artifact_path: str | None = None
     limit: int = 100
@@ -1640,7 +1605,6 @@ class PositionQualityLightGBMShadowRequest(BaseModel):
 
 
 class OpenQualityLightGBMTrainRequest(BaseModel):
-    db_path: str | None = None
     artifact_dir: str | None = None
     registry_db_path: str | None = None
     symbol: str = "XAUUSD+"
@@ -1654,7 +1618,6 @@ class OpenQualityLightGBMTrainRequest(BaseModel):
 
 
 class OpenQualityLightGBMShadowRequest(BaseModel):
-    db_path: str | None = None
     artifact_dir: str | None = None
     artifact_path: str | None = None
     limit: int = 100
@@ -1662,7 +1625,6 @@ class OpenQualityLightGBMShadowRequest(BaseModel):
 
 
 class FactorGovernanceLightGBMTrainRequest(BaseModel):
-    db_path: str | None = None
     artifact_dir: str | None = None
     registry_db_path: str | None = None
     symbol: str = "XAUUSD+"
@@ -1678,7 +1640,6 @@ class FactorGovernanceLightGBMTrainRequest(BaseModel):
 
 
 class FactorGovernanceLightGBMShadowRequest(BaseModel):
-    db_path: str | None = None
     artifact_dir: str | None = None
     artifact_path: str | None = None
     limit: int = 200
@@ -1688,21 +1649,18 @@ class FactorGovernanceLightGBMShadowRequest(BaseModel):
 
 
 class SupervisorCounterfactualRunRequest(BaseModel):
-    db_path: str | None = None
     limit: int = 100
     horizons_minutes: list[int] | None = None
     materialize: bool = True
 
 
 class AutonomousLearningRunRequest(BaseModel):
-    db_path: str | None = None
     sample_limit: int = 500
     recommendation_limit: int = 20
     submit_offline_deep: bool = True
 
 
 class PositionSupervisorTraceMaterializeRequest(BaseModel):
-    db_path: str | None = None
     limit: int = 500
 
 
@@ -1717,12 +1675,10 @@ class ModelPermissionValidateRequest(BaseModel):
     artifact_path: str | None = None
     artifact: dict[str, Any] | None = None
     model_type: str | None = None
-    db_path: str | None = None
     require_shadow: bool = True
 
 
 class LLMAdvisoryRunRequest(BaseModel):
-    db_path: str | None = None
     provider: str | None = None
     model: str | None = None
     base_url: str | None = None
@@ -2027,17 +1983,9 @@ def get_learning_summary(_user: RequireUser) -> dict:
                 ORDER BY created_at DESC
                 """
             ).fetchall()
-            try:
-                lifecycle_count = int(_execute(
-                    conn,
-                    """
-                    SELECT COUNT(*) AS c
-                    FROM lifecycle_events
-                    WHERE source='parameter_template'
-                    """
-                ).fetchone()["c"] or 0)
-            except sqlite3.OperationalError:
-                lifecycle_count = 0
+            lifecycle_count = len(
+                iter_parameter_template_lifecycle_rows(conn, limit=0, reverse=False)
+            )
             all_review_rows = iter_review_rows(conn, limit=0)
             all_review_rows.sort(key=lambda r: float(r.get("created_at") or 0.0), reverse=True)
             review_rows = all_review_rows[0] if all_review_rows else None
@@ -2603,7 +2551,7 @@ def run_position_supervisor_counterfactual(
     req: SupervisorCounterfactualRunRequest,
 ) -> dict:
     payload = evaluate_counterfactuals(
-        db_path=req.db_path or _state_db_path(),
+        db_path=_state_db_path(),
         limit=max(1, int(req.limit)),
         horizons_minutes=req.horizons_minutes,
         materialize=bool(req.materialize),
@@ -2619,10 +2567,9 @@ def get_position_supervisor_counterfactual(
     limit: int = Query(default=100, ge=1, le=1000),
     position_id: str | None = Query(default=None),
     label: str | None = Query(default=None),
-    db_path: str | None = Query(default=None),
 ) -> dict:
     return list_counterfactuals(
-        db_path=db_path or _state_db_path(),
+        db_path=_state_db_path(),
         limit=limit,
         position_id=position_id,
         label=label,
@@ -2635,7 +2582,7 @@ def backfill_position_supervisor_trace_api(
     req: PositionSupervisorTraceMaterializeRequest,
 ) -> dict:
     payload = backfill_position_supervisor_traces(
-        db_path=req.db_path or _state_db_path(),
+        db_path=_state_db_path(),
         limit=max(1, int(req.limit)),
     )
     _learning_cache_invalidate("autonomous:samples", "evolution:")
@@ -2648,7 +2595,7 @@ def materialize_position_supervisor_trace_labels_api(
     req: PositionSupervisorTraceMaterializeRequest,
 ) -> dict:
     payload = mature_position_supervisor_traces(
-        db_path=req.db_path or _state_db_path(),
+        db_path=_state_db_path(),
         limit=max(1, int(req.limit)),
     )
     _learning_cache_invalidate("autonomous:samples", "evolution:")
@@ -2678,7 +2625,7 @@ def get_learning_evolution_run(_user: RequireUser, run_id: str) -> dict:
 @router.post("/autonomous/run")
 def run_learning_autonomous_cycle(_user: RequireUser, req: AutonomousLearningRunRequest) -> dict:
     payload = run_autonomous_learning_cycle(
-        db_path=req.db_path or _state_db_path(),
+        db_path=_state_db_path(),
         sample_limit=max(1, int(req.sample_limit)),
         recommendation_limit=max(1, int(req.recommendation_limit)),
         submit_offline_deep=bool(req.submit_offline_deep),
@@ -2702,11 +2649,10 @@ def get_learning_autonomous_samples(
     sample_type: str | None = Query(default=None),
     label_status: str | None = Query(default=None),
     position_id: str | None = Query(default=None),
-    db_path: str | None = Query(default=None),
 ) -> dict:
     return autonomous_samples_fact_payload(
         list_autonomous_learning_samples(
-            db_path=db_path or _state_db_path(),
+            db_path=_state_db_path(),
             limit=limit,
             sample_type=sample_type,
             label_status=label_status,
@@ -2768,8 +2714,8 @@ def get_parameter_template_recommendations(
     cache_key = f"recommendations:{service.db_path}:{factor_id or '*'}:{int(limit)}"
     def _compute() -> dict:
         items = service.list_recommendations(factor_id=factor_id, limit=limit)
-        validation_service = ParameterTemplateValidationService(service.db_path)
-        conn = _state_conn_for_path(service.db_path, read_only=True)
+        validation_service = ParameterTemplateValidationService()
+        conn = _state_conn(read_only=True)
         try:
             enriched = []
             for item in items:
@@ -3097,7 +3043,7 @@ def list_parameter_template_offline_candidates(
             status=status,
             limit=limit,
         )
-        conn = _state_conn_for_path(service.db_path, read_only=True)
+        conn = _state_conn(read_only=True)
         try:
             enriched = []
             for item in items:
@@ -3343,25 +3289,19 @@ def get_lifecycle(
     def _compute() -> dict:
         conn = _state_conn(read_only=True)
         try:
-            rows = _execute(
+            rows = iter_parameter_template_lifecycle_rows(
                 conn,
-                """
-                SELECT id, timestamp, event, factor, source, description, score, status, reason
-                FROM lifecycle_events
-                ORDER BY timestamp DESC, id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+                limit=limit,
+                reverse=True,
+            )
             items = []
             for row in rows:
                 item = dict(row)
                 candidate_trace = {}
                 if str(item.get("source") or "") == "parameter_template":
-                    text = f"{item.get('description') or ''} {item.get('reason') or ''}"
-                    match = _CANDIDATE_ID_RE.search(text)
-                    if match:
-                        candidate_trace = _candidate_trace_by_id(conn, match.group(1))
+                    candidate_key = str(item.get("candidate_id") or "")
+                    if candidate_key:
+                        candidate_trace = _candidate_trace_by_id(conn, candidate_key)
                     if candidate_trace:
                         candidate_trace["trace_locator"] = _latest_factor_trace_locator(
                             conn,
@@ -3771,7 +3711,7 @@ def list_learning_model_inference_audits(
 def run_learning_llm_advisory(_user: RequireUser, req: LLMAdvisoryRunRequest) -> dict:
     max_output_tokens = max(1, int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "32768") or 32768))
     return LLMAdvisoryService(
-        req.db_path or _state_db_path(),
+        _state_db_path(),
         provider=req.provider,
         model=req.model,
         base_url=req.base_url,
@@ -3794,9 +3734,8 @@ def list_learning_llm_advisory_audits(
     target_type: str | None = Query(default=None),
     target_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
-    db_path: str | None = Query(default=None),
 ) -> dict:
-    return LLMAdvisoryService(db_path or _state_db_path()).list_audits(
+    return LLMAdvisoryService(_state_db_path()).list_audits(
         limit=limit,
         task_type=task_type,
         target_type=target_type,
@@ -3813,7 +3752,7 @@ def validate_learning_model_permissions(_user: RequireUser, req: ModelPermission
     return validate_model_artifact(
         target,
         model_type=req.model_type,
-        db_path=req.db_path or _state_db_path(),
+        db_path=_state_db_path(),
         context={"operation": "api_validate_model_permissions"},
         require_shadow=bool(req.require_shadow),
     )
@@ -3825,10 +3764,9 @@ def list_learning_model_permission_audits(
     limit: int = Query(default=100, ge=1, le=1000),
     model_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
-    db_path: str | None = Query(default=None),
 ) -> dict:
     payload = list_model_permission_audits(
-        db_path=db_path or _state_db_path(),
+        db_path=_state_db_path(),
         limit=limit,
         model_type=model_type,
         status=status,
@@ -3839,7 +3777,7 @@ def list_learning_model_permission_audits(
 @router.post("/model/position-quality-lightgbm/train")
 def train_position_quality_lightgbm(_user: RequireUser, req: PositionQualityLightGBMTrainRequest) -> dict:
     service = PositionQualityLightGBMService(
-        db_path=req.db_path or _state_db_path(),
+        db_path=_state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     result = service.train(
@@ -3863,7 +3801,7 @@ def train_position_quality_lightgbm(_user: RequireUser, req: PositionQualityLigh
 @router.post("/model/position-quality-lightgbm/shadow-run")
 def run_position_quality_lightgbm_shadow(_user: RequireUser, req: PositionQualityLightGBMShadowRequest) -> dict:
     service = PositionQualityLightGBMService(
-        db_path=req.db_path or _state_db_path(),
+        db_path=_state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     return service.score_samples(
@@ -3878,10 +3816,9 @@ def list_position_quality_lightgbm_audits(
     _user: RequireUser,
     limit: int = Query(default=100, ge=1, le=1000),
     position_id: str | None = Query(default=None),
-    db_path: str | None = Query(default=None),
 ) -> dict:
     service = PositionQualityLightGBMService(
-        db_path=db_path or _state_db_path(),
+        db_path=_state_db_path(),
     )
     return model_position_quality_audits_fact_payload(
         service.list_audits(limit=limit, position_id=position_id)
@@ -3891,7 +3828,7 @@ def list_position_quality_lightgbm_audits(
 @router.post("/model/open-quality-lightgbm/train")
 def train_open_quality_lightgbm(_user: RequireUser, req: OpenQualityLightGBMTrainRequest) -> dict:
     service = OpenQualityLightGBMService(
-        db_path=req.db_path or _state_db_path(),
+        db_path=_state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     result = service.train(
@@ -3915,7 +3852,7 @@ def train_open_quality_lightgbm(_user: RequireUser, req: OpenQualityLightGBMTrai
 @router.post("/model/open-quality-lightgbm/shadow-run")
 def run_open_quality_lightgbm_shadow(_user: RequireUser, req: OpenQualityLightGBMShadowRequest) -> dict:
     service = OpenQualityLightGBMService(
-        db_path=req.db_path or _state_db_path(),
+        db_path=_state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     return service.score_samples(
@@ -3930,10 +3867,9 @@ def list_open_quality_lightgbm_audits(
     _user: RequireUser,
     limit: int = Query(default=100, ge=1, le=1000),
     position_id: str | None = Query(default=None),
-    db_path: str | None = Query(default=None),
 ) -> dict:
     service = OpenQualityLightGBMService(
-        db_path=db_path or _state_db_path(),
+        db_path=_state_db_path(),
     )
     return model_open_quality_audits_fact_payload(
         service.list_audits(limit=limit, position_id=position_id)
@@ -3943,7 +3879,7 @@ def list_open_quality_lightgbm_audits(
 @router.post("/model/factor-governance-lightgbm/train")
 def train_factor_governance_lightgbm(_user: RequireUser, req: FactorGovernanceLightGBMTrainRequest) -> dict:
     service = FactorGovernanceLightGBMService(
-        db_path=req.db_path or _state_db_path(),
+        db_path=_state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     result = service.train(
@@ -3969,7 +3905,7 @@ def train_factor_governance_lightgbm(_user: RequireUser, req: FactorGovernanceLi
 @router.post("/model/factor-governance-lightgbm/shadow-run")
 def run_factor_governance_lightgbm_shadow(_user: RequireUser, req: FactorGovernanceLightGBMShadowRequest) -> dict:
     service = FactorGovernanceLightGBMService(
-        db_path=req.db_path or _state_db_path(),
+        db_path=_state_db_path(),
         artifact_dir=req.artifact_dir,
     )
     return service.score_samples(
@@ -3986,10 +3922,9 @@ def list_factor_governance_lightgbm_audits(
     _user: RequireUser,
     limit: int = Query(default=100, ge=1, le=1000),
     factor: str | None = Query(default=None),
-    db_path: str | None = Query(default=None),
 ) -> dict:
     service = FactorGovernanceLightGBMService(
-        db_path=db_path or _state_db_path(),
+        db_path=_state_db_path(),
     )
     return factor_governance_audits_fact_payload(
         service.list_audits(limit=limit, factor=factor)
@@ -4003,10 +3938,9 @@ def list_factor_governance_lightgbm_advisories(
     factor: str | None = Query(default=None),
     materialize: bool = Query(default=False),
     min_weakness_score: float = Query(default=0.65, ge=0.0, le=1.0),
-    db_path: str | None = Query(default=None),
 ) -> dict:
     service = FactorGovernanceLightGBMService(
-        db_path=db_path or _state_db_path(),
+        db_path=_state_db_path(),
     )
     audits = service.list_audits(limit=limit, factor=factor)
     audit_fact = factor_governance_audits_fact_payload(audits)
@@ -4155,4 +4089,3 @@ def run_learning_model_pipeline(_user: RequireUser, req: ModelPipelineRunRequest
         min_trial_success_rate=float(req.min_trial_success_rate),
         min_trial_coverage=float(req.min_trial_coverage),
     )
-

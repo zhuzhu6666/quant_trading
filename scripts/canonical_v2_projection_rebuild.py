@@ -8,8 +8,7 @@ Rebuilds a small, deterministic, canonical-only fact view projection:
     through event_relation(derived_from) to its entry risk_decision event, taking
     decision identity + symbol/timeframe/regime/action fields from the decision
     payload.  Everything is restored from canonical_v2 (payload blob -> event ->
-    relation); state_v1 is only used in --verify/--reconcile as an independent
-    cross-check and is never written.
+    relation); no external or historical state source is consulted.
 
 Rebuild semantics:
     - writes ONLY a canonical_v2.projection_run audit record (run_kind=projection)
@@ -22,7 +21,7 @@ Rebuild semantics:
 Modes:
     --rebuild   compute projection, write projection_run(completed), write file.
     --verify    recompute projection, compare against recorded output_digest.
-    --reconcile read-only cross-check vs state_v1 (count + key set + digest).
+    --reconcile is retired because canonical_v2 is the sole projection source.
     (default dry-run: compute plane + digests, no writes)
 """
 
@@ -174,56 +173,25 @@ def _iso(value: Any) -> str:
         return str(value)
 
 
-def _reconcile_source(conn: Any, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Independent cross-check against state_v1 (read-only)."""
-    source_rows = conn.execute(
-        """
-        SELECT r.review_id AS review_id, d.decision_id AS decision_id,
-               r.outcome_label AS outcome_label, r.pnl AS pnl,
-               r.trade_id AS trade_id, d.symbol AS symbol
-        FROM state_v1.trade_outcome_review r
-        LEFT JOIN state_v1.decision_ledger d ON d.decision_id=r.entry_decision_id
-        WHERE NULLIF(r.entry_decision_id,'') IS NOT NULL
-        """,
-    ).fetchall()
-    src_map = {
-        f"{str(r['review_id']) or ''}|{str(r['decision_id']) or ''}": r
-        for r in source_rows
-        if str(r["review_id"] or "") and str(r["decision_id"] or "")
-    }
-    matched = 0
-    mismatched: list[dict[str, Any]] = []
-    for row in rows:
-        key = f"{row['review_id']}|{row['entry_decision_id']}"
-        src = src_map.get(key)
-        if src is None:
-            mismatched.append({"key": key, "reason": "missing_in_source"})
-            continue
-        if (str(src["outcome_label"] or "") == row["outcome_label"]
-                and abs(float(src["pnl"] or 0.0) - float(row.get("pnl") or 0.0)) < 1e-6
-                and str(src["symbol"] or "") == row["decision_symbol"]):
-            matched += 1
-        else:
-            mismatched.append(
-                {
-                    "key": key,
-                    "reason": "field_mismatch",
-                    "canonical": {"outcome_label": row["outcome_label"], "pnl": row["pnl"], "symbol": row["decision_symbol"]},
-                    "source": {"outcome_label": str(src["outcome_label"] or ""), "pnl": float(src["pnl"] or 0.0), "symbol": str(src["symbol"] or "")},
-                }
-            )
-    return {"source_keys": len(src_map), "matched": matched, "mismatched": len(mismatched), "sample": mismatched[:10]}
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Canonical_v2 projection rebuild minimal pilot")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--rebuild", action="store_true", help="Compute projection and write a completed projection_run record.")
     group.add_argument("--verify", action="store_true", help="Recompute and compare against last projection_run output_digest.")
-    group.add_argument("--reconcile", action="store_true", help="Cross-check rebuilt rows against state_v1 (read-only).")
+    group.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="Retired: canonical_v2 is now the sole projection source.",
+    )
     parser.add_argument("--projection-run-id", default="canonical_v2_trade_outcome_view_pilot")
     parser.add_argument("--output", default="/var/tmp/canonical_v2_trade_outcome_fact_view.json")
     args = parser.parse_args()
+
+    if args.reconcile:
+        raise SystemExit(
+            "--reconcile is retired: canonical_v2 is the sole projection source; "
+            "use --verify for an idempotent projection check"
+        )
 
     conn = None
     try:
@@ -252,12 +220,6 @@ def main() -> int:
                 )
             )
             return 0 if match else 2
-
-        if args.reconcile:
-            result = _reconcile_source(conn, rows)
-            result.update({"rows": len(rows), "digest": digest, "writes_performed": False, "schema_version": "canonical_v2_projection_rebuild.reconcile.v1"})
-            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-            return 0
 
         if args.rebuild:
             before = conn.execute("SELECT count(*) AS n FROM canonical_v2.projection_run").fetchone()["n"]

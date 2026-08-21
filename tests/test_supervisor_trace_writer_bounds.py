@@ -1,8 +1,8 @@
 import json
-import sqlite3
 
 from backend.ledger.service import DecisionLedger
-from backend.services.state_payload_archive import restore_json_payload
+from backend.services.canonical_v2 import read_payload
+from backend.services.canonical_v2_reader import iter_supervisor_trace_rows
 from backend.services.supervisor_payload_contract import strip_recursive_supervisor_snapshots
 
 
@@ -31,7 +31,7 @@ def test_strip_recursive_supervisor_snapshots_keeps_an_explicit_marker():
     assert payload["evidence"]["supervisor_state"]["latest_supervisor"]["action"] == "hold"
 
 
-def test_ledger_trace_is_bounded_without_archive_columns(tmp_path):
+def test_ledger_trace_is_bounded_in_the_canonical_projection(tmp_path):
     ledger = DecisionLedger(str(tmp_path / "state.db"))
     previous = {
         "action": "hold",
@@ -60,53 +60,23 @@ def test_ledger_trace_is_bounded_without_archive_columns(tmp_path):
     )
 
     with ledger._conn() as conn:
-        row = conn.execute(
-            "SELECT verdict_json FROM position_supervisor_trace WHERE trace_id=?",
-            (trace_id,),
-        ).fetchone()
+        rows = iter_supervisor_trace_rows(conn, limit=0, trace_id=trace_id)
 
-    stored = json.loads(row["verdict_json"])
+    assert len(rows) == 1
+    stored = json.loads(rows[0]["verdict_json"])
     assert stored == {
         "action": "tighten",
         "summary_reason": "profit_lock",
         "evidence": {"supervisor_posture": "range_capture"},
     }
-    assert len(row["verdict_json"].encode("utf-8")) < 1024
+    assert len(rows[0]["verdict_json"].encode("utf-8")) < 1024
 
 
-def test_ledger_trace_archive_keeps_sanitized_semantic_payload(tmp_path):
+def test_trace_uses_canonical_payload_and_has_no_archive_path(tmp_path):
     db_path = tmp_path / "state.db"
     ledger = DecisionLedger(str(db_path))
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            "ALTER TABLE position_supervisor_trace ADD COLUMN verdict_archive_hash TEXT NOT NULL DEFAULT ''"
-        )
-        conn.execute(
-            "ALTER TABLE position_supervisor_trace ADD COLUMN verdict_raw_sha256 TEXT NOT NULL DEFAULT ''"
-        )
-        conn.execute(
-            "ALTER TABLE position_supervisor_trace ADD COLUMN verdict_raw_bytes INTEGER NOT NULL DEFAULT 0"
-        )
-        conn.execute(
-            """
-            CREATE TABLE state_payload_archive (
-                archive_hash TEXT PRIMARY KEY,
-                source_table TEXT NOT NULL,
-                source_id TEXT NOT NULL,
-                payload_kind TEXT NOT NULL,
-                codec TEXT NOT NULL,
-                raw_sha256 TEXT NOT NULL,
-                raw_bytes INTEGER NOT NULL,
-                compressed_bytes INTEGER NOT NULL,
-                payload_bytes BLOB NOT NULL,
-                created_at REAL NOT NULL
-            )
-            """
-        )
-        conn.commit()
-
     trace_id = ledger.log_position_supervisor_trace(
-        position_id="archived-1",
+        position_id="canonical-1",
         action="hold",
         verdict={
             "action": "hold",
@@ -123,19 +93,18 @@ def test_ledger_trace_archive_keeps_sanitized_semantic_payload(tmp_path):
     )
 
     with ledger._conn() as conn:
-        row = conn.execute(
-            "SELECT verdict_json, verdict_archive_hash, verdict_raw_sha256, verdict_raw_bytes "
-            "FROM position_supervisor_trace WHERE trace_id=?",
-            (trace_id,),
+        event = conn.execute(
+            "SELECT payload_hash FROM event WHERE event_id=?",
+            (f"live_supervisor_trace_{trace_id}",),
         ).fetchone()
-        restored = restore_json_payload(conn, row["verdict_archive_hash"])
+        payload = read_payload(conn, event["payload_hash"])
+        archive_tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('state_payload_archive', 'position_supervisor_trace')"
+        ).fetchall()
 
-    archive_payload = json.loads(restored)
-    restored_verdict = json.loads(archive_payload["verdict_json"])
-    assert json.loads(row["verdict_json"])["evidence"] == {"supervisor_posture": "trend_hold"}
-    assert restored_verdict["evidence"]["supervisor_state"]["latest_supervisor"] == {
+    assert archive_tables == []
+    assert payload["verdict"]["evidence"] == {"supervisor_posture": "trend_hold"}
+    assert payload["raw_verdict"]["evidence"]["supervisor_state"]["latest_supervisor"] == {
         "omitted": True,
         "reason": "recursive_prior_supervisor_snapshot",
     }
-    assert row["verdict_raw_sha256"] == row["verdict_archive_hash"]
-    assert row["verdict_raw_bytes"] == len(restored.encode("utf-8"))

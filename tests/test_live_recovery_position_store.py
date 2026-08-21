@@ -163,3 +163,73 @@ def test_recovery_position_store_binds_text_position_ids_for_postgres(tmp_path):
         close_pnl=1.0,
         closed_at=110.0,
     )
+
+
+def test_recovery_position_store_purges_only_unbrokered_rows_without_entry_lineage(
+    tmp_path,
+):
+    path = tmp_path / "state.db"
+    connect = _connection_factory(path)
+    conn = connect()
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = RecoveryPositionStore(
+        RecoveryPositionStoreRuntime(
+            get_read_connection=connect,
+            get_write_connection=connect,
+            execute=lambda conn, sql, params=(): conn.execute(sql, params),
+            normalize_position=normalize_position_snapshot,
+            normalize_row=normalize_recovery_position_row,
+            lookup_entry_decision_id=lambda position_id: (
+                "entry-904" if int(position_id) == 904 else ""
+            ),
+            build_meta_update_payload=build_recovery_meta_update_payload,
+            build_closed_update_payload=build_recovery_closed_update_payload,
+            now=lambda: 100.0,
+            local_open_volumes={},
+        )
+    )
+    for position_id in (902, 903):
+        store.upsert(
+            {
+                "position_id": position_id,
+                "symbol": "XAUUSD+",
+                "direction": 1,
+                "open_price": 2400.0,
+                "volume": 100.0,
+            },
+            broker="ctrader",
+            strategy_name="factor_v4",
+        )
+    store.upsert(
+        {
+            "position_id": 904,
+            "symbol": "XAUUSD+",
+            "direction": 1,
+            "open_price": 2400.0,
+            "volume": 100.0,
+            "entry_decision_id": "entry-904",
+        },
+        broker="ctrader",
+        strategy_name="factor_v4",
+    )
+
+    assert store.purge_unbrokered(
+        {902, 903},
+        broker="ctrader",
+        broker_position_ids=set(),
+    ) == [902, 903]
+    assert store.load(902) == {}
+    assert store.load(903) == {}
+    assert store.load(904)["entry_decision_id"] == "entry-904"
+
+    with pytest.raises(ValueError, match="present at broker"):
+        store.purge_unbrokered(
+            {904},
+            broker="ctrader",
+            broker_position_ids={904},
+        )

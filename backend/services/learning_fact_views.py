@@ -431,10 +431,7 @@ def model_offmarket_high_load_audits_fact_payload(
 
 def _connect_state_source(db_path: str | Path):
     if core_db.is_state_db_path(db_path):
-        try:
-            return core_db.get_state_conn(read_only=True)
-        except TypeError:
-            return core_db.get_state_conn()
+        return core_db.get_state_pg_conn(read_only=True)
     return core_db.connect_sqlite(db_path, read_only=True)
 
 

@@ -1,7 +1,7 @@
 # 生产自治修复与架构收敛总方案
 
 > Status: implementation active — P0 complete, P1 runtime acceptance active, P2/P3/P4 complete
-> Last verified: 2026-08-10
+> Last verified: 2026-08-20
 > Scope: production correctness repair, authority convergence, legacy deletion, runtime acceptance, and autonomy graduation
 > Source of truth: 本文只定义阶段、流程和退出条件；当前生产事实以 `docs/system-source-of-truth.md`、代码、PostgreSQL 和运行服务为准
 
@@ -22,7 +22,7 @@
 | P3 学习证据与记忆 | complete | current/history memory 单 projection；application/effect active scope 唯一 |
 | P4 V16 因果调度 | complete | causal grouping、单一 actionable/authority、单次 mutation 与三条 lane 已收口 |
 | P5 持续架构收敛 | active discipline | 不再作为最后才做的“大重构”；每个 P3/P4 批次同时执行删除 |
-| P6 Demo 观察与毕业 | blocked | 等待前置阶段和真实运行证据 |
+| P6 Demo 持仓监督闭环 | runtime acceptance | active template 已收敛为 `governed_execute` 单轨；代码/测试合同完成，等待一次真实 broker lifecycle 与学习闭环证据 |
 
 持续约束：
 
@@ -31,10 +31,12 @@
 - 不切换 Safety、Generation、Execution Outcome、Governance、PG Job Queue 静态发布开关。
 - close/reduce/tighten/rollback 和只读观察继续。
 - 未经 operator 明确授权，不进入 `live_autonomous`。
-- Demo 持仓监督器的自适应动作首版固定为 `observation_only`；强趋势保留利润、震荡按
-  MFE/MAE 路径证据观察，硬风险/timeout/确认退出仍走既有执行链。该重构不解除 freeze、
-  不切静态开关、不清理 active effect、不回滚 mutation；P6 验收以 protection_too_tight
-  下降、MFE capture 改善和 correct_stop 不下降为观察目标，不以扩大自治范围为完成条件。
+- Demo 与未来实盘共用同一持仓监督执行链：active template 只接受 `governed_execute`，普通
+  `tighten/reduce/close` 统一经过 supervisor verdict、RiskPolicy、broker lifecycle 和 fresh
+  reconcile；`observation_only` 只作为历史/learning-shadow 审计值。`autonomy_demo_auto_apply`
+  只控制已通过证据、V16、Admission、RiskPolicy、Coordinator 的治理 mutation，不控制普通监督
+  broker 执行。历史污染样本按消费者隔离：结果可低权重学习，动作不生成 supervisor counterfactual
+  或治理证据；legacy AWE 只保留审计读取，不作为 fallback。
 
 ## 2. 文档和事实优先级
 
@@ -320,9 +322,7 @@ platform 再等待以后迁移。
 静态发布顺序保持：
 
 ```text
-safety_enforce
-  -> generation_enable
-  -> execution_outcome_enable
+supervisor_enforce
   -> governance_enforce
   -> pg_job_queue_enable
   -> pg_job_queue_verify
@@ -474,16 +474,14 @@ Demo 恢复仍采用已确认 profile：
 代码和合同完成不自动授权运行开关。当前必须保持：
 
 ```text
-live_safety_plane_v2_mode=shadow
-live_generation_controller_v2_enabled=false
-ctrader_execution_outcome_v2_enabled=false
+live_safety_plane_v2_mode=enforce
 governance_mutation_coordinator_v2_mode=dual_record
 pg_job_queue_v2_enabled=false
 ```
 
-运行推进顺序仍为 `safety_enforce -> generation_enable -> execution_outcome_enable -> governance_enforce -> pg_job_queue_enable -> pg_job_queue_verify`。每次只推进一个开关，先进入既有 `no_new_risk` 运维姿态并通过对应 release gate、受控重启、配置/投影/日志一致性和观察窗口；失败回退上一静态值并用 Coordinator 回滚 RuntimeConfig，禁止直接 SQL。
+运行推进顺序改为 `supervisor_enforce -> governance_enforce -> pg_job_queue_enable -> pg_job_queue_verify`。generation controller、broker execution intent 和 reconcile 不再作为可关闭的兼容开关；它们属于 supervisor 的唯一执行链。每次仍只推进一个可变静态开关，先进入既有 `no_new_risk` 运维姿态并通过对应 release gate、受控重启、配置/投影/日志一致性和观察窗口；失败回退上一静态值并用 Coordinator 回滚 RuntimeConfig，禁止直接 SQL。
 
-尚不能由代码测试替代的证据：readiness 连续 30 次完整构建 p95<15 秒且无重叠/单核占满、Safety freshness 不抖动、迁移 0013 受控应用、遗留 ACTIVE 真实退回、execution intent 启用后覆盖率 100%，以及一次真实 `open -> close -> learning/effect` 全链生命周期。上述证据完成前不删除静态关闭兼容分支，不推进 P6。
+尚不能由代码测试替代的证据：readiness 连续 30 次完整构建 p95<15 秒且无重叠/单核占满、Safety freshness 不抖动、迁移 0013 受控应用、遗留 ACTIVE 真实退回、execution intent 覆盖率 100%，以及一次真实 `open -> close -> learning/effect` 全链生命周期。上述证据完成前不推进 P6，但不得恢复已删除的静态关闭兼容分支或旧执行器。
 
 ### 13.5 回滚点
 

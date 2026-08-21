@@ -10,15 +10,17 @@ from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.core.state_store import validate_runtime_state_schema
+from backend.services.fact_envelope import observed_epoch
 
 
 WATERMARK_KEY = "autonomous_learning.fact_watermark.v1"
-FACT_SOURCES = (
-    ("decision_ledger", "created_at"),
-    ("order_lifecycle_event", "event_ts"),
-    ("position_lifecycle_event", "event_ts"),
-    ("trade_outcome_review", "created_at"),
-    ("position_supervisor_trace", "created_at"),
+CANONICAL_FACT_TYPES = (
+    "risk_decision",
+    "broker_execution",
+    "position_transition",
+    "trade_review",
+    "supervisor_trace",
+    "counterfactual_review",
 )
 
 
@@ -49,17 +51,23 @@ class LearningCycleWatermarkService:
         conn = self._conn(read_only=True)
         try:
             sources: dict[str, Any] = {}
-            for table, timestamp_column in FACT_SOURCES:
+            event_table = "canonical_v2.event" if self._use_pg() else "event"
+            for event_type in CANONICAL_FACT_TYPES:
                 try:
                     row = conn.execute(
-                        f"SELECT COUNT(*) AS row_count, COALESCE(MAX({timestamp_column}), 0) AS max_ts FROM {table}"
+                        self._sql(
+                            "SELECT COUNT(*) AS row_count, MAX(observed_at) AS max_ts "
+                            f"FROM {event_table} WHERE event_type=?"
+                        ),
+                        (event_type,),
                     ).fetchone()
-                    sources[table] = {
-                        "row_count": int(row["row_count"] or 0),
-                        "max_ts": float(row["max_ts"] or 0.0),
+                    raw_ts = row["max_ts"] if row else None
+                    sources[event_type] = {
+                        "row_count": int((row["row_count"] if row else 0) or 0),
+                        "max_ts": observed_epoch(raw_ts),
                     }
                 except Exception:
-                    sources[table] = {"row_count": 0, "max_ts": 0.0, "unavailable": True}
+                    sources[event_type] = {"row_count": 0, "max_ts": 0.0, "unavailable": True}
             return {
                 "schema_version": "autonomous_learning_fact_watermark.v1",
                 "sources": sources,

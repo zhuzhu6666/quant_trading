@@ -44,7 +44,6 @@ def _connected_bridge():
         send_orders=False,
         account_id=123,
         forced_symbol_id=41,
-        execution_outcome_v2_enabled=False,
     )
     bridge._connected = True
     bridge._app_authed = True
@@ -179,7 +178,6 @@ def test_unrealized_enrichment_preserves_explicit_unknown_and_known_zero():
                 "pnl_state": "known",
             },
         ],
-        account={"balance": 1000.0, "equity": 1100.0},
     )
 
     assert enriched[0]["pnl"] is None
@@ -194,7 +192,6 @@ def test_lifecycle_skips_path_metrics_when_pnl_component_is_unknown():
     path_calls: list[int] = []
     result = enrich_positions_with_lifecycle_metrics(
         [{"position_id": 1}],
-        account={"balance": 1000.0, "equity": 1000.0},
         cfg=SimpleNamespace(),
         now_ts=100.0,
         persist=True,
@@ -294,7 +291,6 @@ def test_safety_planner_blocks_only_metric_dependent_candidates():
         ("repair_entry_protection", 2),
         ("close", 3),
         ("reduce", 4),
-        ("trailing", 7),
     ]
     blocked = [
         item
@@ -302,7 +298,7 @@ def test_safety_planner_blocks_only_metric_dependent_candidates():
         if item.get("decision") == "blocked_component_unknown"
     ]
     assert any(item.get("position_id") == 5 and item.get("action") == "tighten" for item in blocked)
-    assert any(item.get("position_id") == 6 and item.get("action") == "trailing" for item in blocked)
+    assert not any(item.get("action") == "trailing" for item in plan.arbitration)
 
 
 def test_safety_cycle_blocks_new_risk_but_still_runs_existing_protection():
@@ -326,9 +322,6 @@ def test_safety_cycle_blocks_new_risk_but_still_runs_existing_protection():
         safety_reference_price=lambda _bridge, _positions: 100.0,
         factor_pipeline={"last_factor_values": {"atr_ratio": 0.01}},
         plan_safety_candidates=lambda **_kwargs: SafetyPlan(
-            candidates=(), arbitration=(), planned_at=time.time()
-        ),
-        plan_legacy_candidates=lambda **_kwargs: SafetyPlan(
             candidates=(), arbitration=(), planned_at=time.time()
         ),
         execute_safety_candidate=lambda *_args, **_kwargs: {},

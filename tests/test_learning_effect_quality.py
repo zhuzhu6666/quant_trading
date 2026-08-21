@@ -2,8 +2,10 @@ import json
 import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
+from backend.services.canonical_v2 import record_decision_event, record_review
 from backend.services.learning_effect_quality import LearningEffectQualityService
 from backend.services.learning_application_store import LearningApplicationStore
+from tests.canonical_fixture import seed_canonical_sqlite_file
 
 
 def test_learning_effect_quality_requires_new_evidence_for_retry(tmp_path):
@@ -15,6 +17,7 @@ def test_learning_effect_quality_requires_new_evidence_for_retry(tmp_path):
         conn.commit()
     finally:
         conn.close()
+    seed_canonical_sqlite_file(db_path)
 
     store = LearningApplicationStore(db_path)
     app_id = store.prepare_application(
@@ -30,10 +33,30 @@ def test_learning_effect_quality_requires_new_evidence_for_retry(tmp_path):
 
     conn = connect_sqlite(db_path)
     try:
-        conn.execute("INSERT INTO decision_factor_snapshot (decision_id, factor) VALUES ('d1', 'rsi_14')")
-        conn.execute(
-            "INSERT INTO trade_outcome_review (review_id, entry_decision_id, created_at) VALUES ('r1', 'd1', ?)",
-            (now + 10,),
+        record_decision_event(
+            conn,
+            decision_id="d1",
+            event_type="open",
+            symbol="XAUUSD",
+            timeframe="M1",
+            decision_ts=now,
+            created_at=now,
+            factor_snapshots=[
+                {
+                    "decision_id": "d1",
+                    "factor": "rsi_14",
+                    "source": "test",
+                    "normalized_value": 1.0,
+                    "policy_weight": 0.2,
+                    "contribution_score": 0.1,
+                }
+            ],
+        )
+        record_review(
+            conn,
+            review_id="r1",
+            entry_decision_id="d1",
+            created_at=now + 10,
         )
         conn.commit()
     finally:

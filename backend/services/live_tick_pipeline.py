@@ -690,47 +690,6 @@ def build_open_decision_audit_meta(
     }
 
 
-def build_open_decision_log_payload(
-    *,
-    bar: Mapping[str, Any],
-    composite: Any,
-    position_id: int,
-    actual_api_volume: float,
-    requested_volume: float,
-    base_requested_volume: float,
-    event_sizing_context: Mapping[str, Any],
-    sizing_trace: Mapping[str, Any],
-    current_price: float,
-    sl_price: float,
-    tp_price: float,
-    tick: int,
-    fallback_ts: float = 0.0,
-) -> dict[str, Any]:
-    bar_ts = (bar or {}).get("time", 0)
-    ts_value = bar_ts or fallback_ts or time.time()
-    return {
-        "ts": ts_value,
-        "bar_date": time.strftime("%Y-%m-%d", time.gmtime(bar_ts)) if bar_ts else "",
-        "decision_type": "open",
-        "strategy": "factor_v4",
-        "direction": getattr(composite, "direction", 0),
-        "confidence": getattr(composite, "score", 0.0),
-        "decision": "executed",
-        "meta": build_open_decision_audit_meta(
-            position_id=position_id,
-            actual_api_volume=actual_api_volume,
-            requested_volume=requested_volume,
-            base_requested_volume=base_requested_volume,
-            event_sizing_context=event_sizing_context,
-            sizing_trace=sizing_trace,
-            current_price=current_price,
-            sl_price=sl_price,
-            tp_price=tp_price,
-            tick=tick,
-        ),
-    }
-
-
 def build_amend_failed_ledger_payloads(
     *,
     composite: Any,

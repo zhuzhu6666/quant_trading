@@ -3600,7 +3600,7 @@ class FactorGovernanceOrchestrator:
         Priority:
           1. `same_regime_positive_rate` — factor x regime conditional win rate
              (aggregated over the factor's own history in the current regime,
-             from decision_factor_snapshot JOIN decision_ledger; distinguishes
+             from canonical_v2 factor events joined by decision lineage; distinguishes
              factors that fit today's market from those that don't).
           2. `current_regime_fit_score` — trade-level fallback (shared by all
              factors of the same trade, pre-Batch-F schema).

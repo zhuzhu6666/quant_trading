@@ -34,6 +34,31 @@ def test_offmarket_high_load_skips_when_market_open(tmp_path, monkeypatch):
     }
 
 
+def test_offmarket_quality_uses_projection_when_live_session_is_missing(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        live_service,
+        "_live_state_get",
+        lambda key, default=None, clone=False: {},
+    )
+
+    def fake_quality_job(*, session, db_path):
+        captured["session"] = session
+        captured["db_path"] = db_path
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "backend.services.learning_research_jobs.run_offmarket_position_quality_job",
+        fake_quality_job,
+    )
+
+    result = live_service._scheduled_offmarket_position_quality_lightgbm()
+
+    assert result == {"ok": True}
+    assert captured == {"session": None, "db_path": None}
+
+
 def test_offmarket_high_load_runs_training_when_closed(monkeypatch, tmp_path):
     db_path = tmp_path / "offmarket-training.db"
     live_service._live_state["market_session"] = {

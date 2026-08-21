@@ -17,6 +17,7 @@ SYSTEM_CONTAMINATION_LABELS = {
     "decision_bar_stale",
     "market_data_stale",
     "signal_execution_delay",
+    "timing_invalid",
     # 外部/回放终止的持仓不是策略自然生命周期，禁止进入学习
     "restart_replay",
     "manual_close",
@@ -78,7 +79,7 @@ def trusted_broker_close_price(payload: dict[str, Any] | None) -> float | None:
     }:
         return None
     try:
-        price = float(value.get("exec_price") or 0.0)
+        price = float(value.get("exec_price") or value.get("close_price") or 0.0)
     except (TypeError, ValueError, OverflowError):
         return None
     return price if math.isfinite(price) and price > 0.0 else None
@@ -407,6 +408,7 @@ def build_entry_timing_context(
     close_ts: Any = 0.0,
     timeframe: Any = "",
     source: str = "",
+    timestamp_unit: str = "",
 ) -> dict[str, Any]:
     signal_ts = _safe_float(signal_bar_ts)
     evaluated_at = _safe_float(decision_evaluated_at)
@@ -414,7 +416,36 @@ def build_entry_timing_context(
     actual_fill_ts = _safe_float(fill_ts)
     actual_close_ts = _safe_float(close_ts)
     tf_seconds = timeframe_seconds(timeframe)
+    unit = str(timestamp_unit or "").strip().lower()
+    timing_invalid_reasons: list[str] = []
+    timing_values = {
+        "signal_bar_ts": signal_ts,
+        "decision_evaluated_at": evaluated_at,
+        "order_submitted_at": submitted_at,
+        "fill_ts": actual_fill_ts,
+        "close_ts": actual_close_ts,
+    }
+    if unit == "epoch_seconds":
+        for field, value in timing_values.items():
+            if value > 0 and value < 100_000_000:
+                timing_invalid_reasons.append(f"{field}_not_epoch_seconds")
+    if unit == "epoch_seconds" and tf_seconds <= 0:
+        timing_invalid_reasons.append("timeframe_missing_or_invalid")
+    ordered = (
+        ("signal_bar_ts", signal_ts, "decision_evaluated_at", evaluated_at),
+        ("decision_evaluated_at", evaluated_at, "order_submitted_at", submitted_at),
+        ("order_submitted_at", submitted_at, "fill_ts", actual_fill_ts),
+        ("fill_ts", actual_fill_ts, "close_ts", actual_close_ts),
+    )
+    for start_name, start_value, end_name, end_value in ordered:
+        if start_value > 0 and end_value > 0 and end_value < start_value:
+            timing_invalid_reasons.append(f"{end_name}_before_{start_name}")
+    timing_valid = not timing_invalid_reasons
     actual_entry_ts = actual_fill_ts or submitted_at or evaluated_at or signal_ts
+    if not timing_valid:
+        # Keep raw timestamps for audit, but never manufacture a delay or
+        # holding duration from a tick sequence / mixed unit stream.
+        actual_entry_ts = 0.0
 
     def _delta(start: float, end: float) -> float:
         return round(max(0.0, end - start), 6) if start > 0 and end > 0 else 0.0
@@ -422,6 +453,7 @@ def build_entry_timing_context(
     return {
         "schema_version": "entry_timing_context.v1",
         "source": str(source or "review_contract"),
+        "timestamp_unit": unit or "unspecified",
         "timeframe": str(timeframe or ""),
         "timeframe_seconds": tf_seconds,
         "signal_bar_ts": signal_ts,
@@ -430,12 +462,14 @@ def build_entry_timing_context(
         "fill_ts": actual_fill_ts,
         "actual_entry_ts": actual_entry_ts,
         "close_ts": actual_close_ts,
-        "signal_to_decision_delay_seconds": _delta(signal_ts, evaluated_at),
-        "decision_to_order_delay_seconds": _delta(evaluated_at, submitted_at),
-        "order_to_fill_delay_seconds": _delta(submitted_at, actual_fill_ts),
-        "decision_to_fill_delay_seconds": _delta(evaluated_at, actual_fill_ts),
-        "signal_to_fill_delay_seconds": _delta(signal_ts, actual_fill_ts or submitted_at),
-        "actual_holding_seconds": _delta(actual_entry_ts, actual_close_ts),
+        "signal_to_decision_delay_seconds": _delta(signal_ts, evaluated_at) if timing_valid else 0.0,
+        "decision_to_order_delay_seconds": _delta(evaluated_at, submitted_at) if timing_valid else 0.0,
+        "order_to_fill_delay_seconds": _delta(submitted_at, actual_fill_ts) if timing_valid else 0.0,
+        "decision_to_fill_delay_seconds": _delta(evaluated_at, actual_fill_ts) if timing_valid else 0.0,
+        "signal_to_fill_delay_seconds": _delta(signal_ts, actual_fill_ts or submitted_at) if timing_valid else 0.0,
+        "actual_holding_seconds": _delta(actual_entry_ts, actual_close_ts) if timing_valid else 0.0,
+        "timing_valid": timing_valid,
+        "timing_invalid_reasons": list(dict.fromkeys(timing_invalid_reasons)),
     }
 
 
@@ -498,8 +532,9 @@ def extract_decision_freshness_context(
 
 def build_system_issue_context(review_payload: dict[str, Any] | None) -> dict[str, Any]:
     review = _as_dict(review_payload)
-    labels: list[str] = []
-    evidence: dict[str, Any] = {}
+    existing = _as_dict(review.get("system_issue_context"))
+    labels: list[str] = [str(item) for item in list(existing.get("labels") or []) if str(item)]
+    evidence: dict[str, Any] = dict(existing.get("evidence") or {})
     # 外部/回放终止的持仓（operator 手动平仓、重启回放 close）不是策略
     # 自然生命周期产物，持有期与退出价格不代表策略演化，禁止进入学习。
     close_reason = str(
@@ -527,11 +562,17 @@ def build_system_issue_context(review_payload: dict[str, Any] | None) -> dict[st
     )
     stale_threshold = max(180.0, timeframe_sec * 1.5 if timeframe_sec > 0 else 0.0)
 
+    if timing.get("timing_valid") is False:
+        _append_label(labels, "timing_invalid")
+        evidence["timing_invalid_reasons"] = list(
+            timing.get("timing_invalid_reasons") or []
+        )
+
     price_quality = str(real_pnl.get("price_quality") or "").strip().lower()
     if price_quality == "unknown":
         _append_label(labels, "broker_close_price_unknown")
         evidence["broker_close_price"] = {
-            "price_contract": str(real_pnl.get("price_contract") or "legacy_unknown"),
+            "price_contract": str(real_pnl.get("price_contract") or "unknown"),
             "price_quality": "unknown",
         }
 
@@ -596,14 +637,15 @@ def build_system_issue_context(review_payload: dict[str, Any] | None) -> dict[st
         primary = "operator_intervention"
     elif any(label in labels for label in ("decision_bar_stale", "market_data_stale", "data_quality_issue", "bar_data_degraded")):
         primary = "data_quality"
-    elif "signal_execution_delay" in labels:
+    elif "signal_execution_delay" in labels or "timing_invalid" in labels:
         primary = "execution_timing"
 
     return {
         "schema_version": "trade_review_system_issue.v1",
         "system_contaminated": bool(labels),
-        "contaminates_learning": any(label in SYSTEM_CONTAMINATION_LABELS for label in labels),
-        "primary_responsibility": primary,
+        "contaminates_learning": bool(existing.get("contaminates_learning"))
+        or any(label in SYSTEM_CONTAMINATION_LABELS for label in labels),
+        "primary_responsibility": primary or str(existing.get("primary_responsibility") or ""),
         "labels": labels,
         "evidence": evidence,
     }
@@ -639,6 +681,72 @@ def review_execution_evidence_is_trainable(review_payload: dict[str, Any] | None
         and evidence_state == state
         and not review_has_system_contamination(review)
     )
+
+
+def review_consumer_eligibility(
+    review_payload: dict[str, Any] | None,
+    consumer: str,
+) -> dict[str, Any]:
+    """Keep outcome use separate from action attribution and governance.
+
+    A broker-reported result can teach the outcome learner even when the
+    review is contaminated for causal supervisor attribution.  It remains a
+    low-weight, non-model-ready result and never grants governance authority.
+    """
+
+    review = _as_dict(review_payload)
+    consumer = str(consumer or "").strip()
+    if consumer == "outcome_learning":
+        real_pnl = _as_dict(review.get("real_pnl"))
+        price_quality = str(real_pnl.get("price_quality") or "").strip().lower()
+        close_price = trusted_broker_close_price(real_pnl)
+        entry_price = _safe_float(real_pnl.get("entry_price") or review.get("entry_price"))
+        pnl = _safe_float(real_pnl.get("net") or review.get("pnl"))
+        blockers: list[str] = []
+        if price_quality not in {"broker_reported", "broker_reconciled"}:
+            blockers.append("broker_result_not_authoritative")
+        if close_price is None:
+            blockers.append("broker_close_price_missing")
+        if entry_price <= 0:
+            blockers.append("entry_price_missing")
+        if not math.isfinite(pnl):
+            blockers.append("broker_pnl_invalid")
+        if not str(review.get("outcome_label") or "").strip():
+            blockers.append("outcome_label_missing")
+        eligible = not blockers
+        return {
+            "schema_version": "consumer_eligibility.v1",
+            "consumer": consumer,
+            "eligible": eligible,
+            "model_ready": False,
+            "allowed_uses": ["outcome_learning"] if eligible else [],
+            "train_weight": 0.25 if eligible else 0.0,
+            "blockers": blockers,
+        }
+    if consumer == "supervisor_counterfactual":
+        system_issue = build_system_issue_context(review)
+        blockers = []
+        if bool(system_issue.get("contaminates_learning")):
+            blockers.append("review_system_contaminated")
+        if _safe_float(review.get("close_ts")) <= 0.0:
+            blockers.append("close_ts_missing")
+        eligible = not blockers
+        return {
+            "schema_version": "consumer_eligibility.v1",
+            "consumer": consumer,
+            "eligible": eligible,
+            "model_ready": eligible,
+            "allowed_uses": ["counterfactual_training"] if eligible else [],
+            "blockers": blockers,
+        }
+    return {
+        "schema_version": "consumer_eligibility.v1",
+        "consumer": consumer,
+        "eligible": False,
+        "model_ready": False,
+        "allowed_uses": [],
+        "blockers": ["unknown_consumer"],
+    }
 
 
 def normalize_trade_review_contract(
@@ -733,10 +841,6 @@ def normalize_trade_review_contract(
         normalized["entry_timing_context"] = dict(review["entry_timing_context"])
     if isinstance(review.get("decision_freshness_context"), dict):
         normalized["decision_freshness_context"] = dict(review["decision_freshness_context"])
-    system_issue = (
-        dict(review["system_issue_context"])
-        if isinstance(review.get("system_issue_context"), dict)
-        else build_system_issue_context(normalized)
-    )
+    system_issue = build_system_issue_context(normalized)
     normalized["system_issue_context"] = system_issue
     return bounded_review_projection(normalized)

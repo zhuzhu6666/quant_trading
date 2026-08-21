@@ -1,8 +1,8 @@
 """Small helpers for live loop status presentation.
 
-This module intentionally does not own the loop thread or stop flag yet.  It
-only keeps response shaping and display-state mutations outside the large live
-service module while the old globals remain the runtime source of truth.
+This module keeps response shaping and display-state mutations outside the
+large live service module.  It does not own the loop generation or admission
+authority.
 """
 
 from __future__ import annotations
@@ -10,10 +10,9 @@ from __future__ import annotations
 import os
 import math
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 
-StateGet = Callable[..., Any]
 StateUpdate = Callable[..., None]
 _LIVE_FACTOR_PROJECTION_BOOT_ID = f"live-alpha:{os.getpid()}:{uuid.uuid4().hex}"
 
@@ -33,9 +32,9 @@ def acknowledge_prepared_factor_projections(
             service = FactorLifecycleService()
         result = service.acknowledge_loaded_prepared_factors(
             engine=engine,
-            # Generation controller owns this identity when enabled. Legacy
-            # mode still gets a process-boot-unique identity so current demo
-            # can acknowledge without weakening factor generation binding.
+            # A process-boot identity is only a projection fallback for a
+            # pre-generation factor acknowledgement; it cannot authorize live
+            # execution.
             boot_id=str(generation_id or _LIVE_FACTOR_PROJECTION_BOOT_ID),
         )
     except Exception as exc:
@@ -56,49 +55,20 @@ def acknowledge_prepared_factor_projections(
     return result
 
 
-def loop_status_snapshot(
+def loop_identity_snapshot(
     *,
-    state_get: StateGet,
-    thread: Any,
-    broker: str | None,
-    started_at: float | None,
-    strategy_name: str | None,
+    generation: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Return the legacy-compatible live loop status payload."""
+    """Return loop identity strictly from the generation controller snapshot."""
 
-    if state_get("loop_running") is False:
-        return {
-            "running": False,
-            "pid": None,
-            "broker": state_get("broker") or broker,
-            "started_at": state_get("loop_started_at"),
-            "strategy_name": state_get("loop_strategy") or strategy_name,
-        }
-
-    if state_get("loop_running") and state_get("broker"):
-        return {
-            "running": True,
-            "pid": None,
-            "broker": state_get("broker"),
-            "started_at": state_get("loop_started_at"),
-            "strategy_name": state_get("loop_strategy"),
-        }
-
-    if thread is not None and thread.is_alive():
-        return {
-            "running": True,
-            "pid": thread.ident,
-            "broker": broker,
-            "started_at": started_at,
-            "strategy_name": strategy_name,
-        }
-
+    phase = str(generation.get("phase") or "stopped")
+    running = bool(generation.get("thread_alive") and phase != "stopped")
     return {
-        "running": False,
-        "pid": None,
-        "broker": None,
-        "started_at": None,
-        "strategy_name": strategy_name,
+        "running": running,
+        "pid": generation.get("thread_id") if running else None,
+        "broker": generation.get("broker"),
+        "started_at": generation.get("created_at"),
+        "strategy_name": generation.get("strategy_name"),
     }
 
 

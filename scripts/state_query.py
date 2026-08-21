@@ -2,8 +2,9 @@
 """Read-only query helper for the runtime PostgreSQL state store.
 
 Use this for operational state checks instead of opening data/state.db. The
-SQLite state file has been removed; PostgreSQL state_v1 is the only runtime
-state source.
+SQLite state file has been removed; PostgreSQL ``runtime`` is the operational
+state source. Immutable facts and learning samples live in ``canonical_v2``
+and must be queried with their fully-qualified table names.
 """
 
 from __future__ import annotations
@@ -71,7 +72,7 @@ def _validate_read_only(sql: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run a read-only SQL query against PostgreSQL state_v1."
+        description="Run a read-only SQL query against the PostgreSQL runtime state store."
     )
     parser.add_argument("--sql", help="SQL to execute. Only SELECT/WITH/EXPLAIN is allowed.")
     parser.add_argument("--file", help="Read SQL from a file.")

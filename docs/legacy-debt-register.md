@@ -1,21 +1,27 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-08-18
+> Last verified: 2026-08-21
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
 
 ## 1. 全局收敛
 
-### state_v1 多表 payload 重复与 canonical_v2 重建
+### 旧状态 schema 清理（历史记录）
 
-- 状态：`complete`（2026-08-18；**全库清空已完成**：state_v1 86 表已 DROP、public 4 表已 DROP、canonical_v2 数据已 TRUNCATE + legacy_mapping 已 DROP；运行骨架迁入 runtime schema）
-- canonical：`canonical_v2` 9 表空结构；`runtime` schema 6 表（overlay/snapshot/jobs/auth/kv/migration）。
-- 当前：migration 16 和隔离 writer 初版已建立；尚未进行历史 backfill、生产切换或旧 projection 退役。现有 `mutation_payload`、`evolution_events`、`evolution_run`、`governance_mutation_intent`、`brain_memory` 和 factor catalog 仍由旧路径解释。只读审计确认旧 `position_supervisor_trace` 存在递归 `latest_supervisor` payload；新写入边界已修复并由 `tests/test_supervisor_trace_writer_bounds.py` 覆盖，历史行已在本批 archive。2026-08-15 supervisor/review repair manifest 已生成；2026-08-16 已将当前 31 个 supervisor/review 直接读取路径切换到 verified archive loader，静态 coverage 为 `31 migrated / 0 pending`。同日 vertical backfill planner 扫描 16,791 decision、1,357 order、2,956 position、721 review、58,632 sample，并以数据库 `EXISTS` 校验 sample source 引用，quarantine 为 0，mapping digest 为 `ffe1194e39e2a1b80355c700df42d884ce5fd1c0dd15a8ffb62bcc8d94161257`；fresh full compact dry-run 又确认 `brain_action_plan_eval` 为 141,514 行、138,312 条重复 payload 引用行，三域逻辑重复下界约 17.68GB。2026-08-16（当日）用户确认后已完成并验证：payload 三域 apply（14597/141514/44734 行全量 payload_hash + inline 置空，去重 3582/3202/35787 与 dry-run 一致）与 supervisor/review apply（47768/721 行全量 archive，无行删除/合并），`audit_double_write` 5,927 conflicts / 8,489 unmatched 已分类（5926 条为空 config_hash 写边界问题、8489 条未关联），lineage 收敛 88 行（api_canonical→/api→api_unmatched），两批 verify 均 `ok`（payload ref/review archive 缺失、SHA-256、archive metadata、semantic 差异全 0）。`scripts/state_payload_compact.py` PG lineage 回写因运行态 schema 守卫已改为纯 DML executemany（不建临时表）。仍未执行：物理 `--rewrite`、历史 backfill apply、canonical 垂直写入、投影重建、切换退役。
-- 剩余：Phase 6 shadow read 已完成；批次 2/3a/4 已完成。**2026-08-17 C1 单轨完成**：13 模块全部删 legacy 兜底分支，测试适配 + 全量回归 2806 passed / 0 failed。**同日 P2 边界表事件化**：supervisor_counterfactual_review（576）/ position_supervisor_trace（48,319）/ ctrader_deals（1,446）→ canonical 事件 + 映射（migration 0018 扩展 event_type CHECK 约束）；backfill 脚本 `scripts/canonical_v2_boundary_backfill.py`。**P1 样本域数据对齐**：canonical training_sample_row 58,640/58,640 全覆盖（8 条 mirror 缺口已补），reader 函数已创建（`iter_training_sample_rows` / `get_training_sample_row`），SQL 切换待做。**⏳ 待做**：decision_factor_snapshot（4M 行 1.17GB）退役改推导、P4 写者切换、P5 旧库退役、P6 容量治理。详见 [`planning/architecture-audit-2026-08-18.md`](planning/architecture-audit-2026-08-18.md) 与 [`planning/final-execution-checklist.md`](planning/final-execution-checklist.md)。：governance/evolution 事件域 canonical 化（`scripts/canonical_v2_governance_backfill.py`：mutation 2,814→8,177 governance_effect 按 lifecycle stage、evolution 44,796→44,796 governance_command + 722 caused_by 边、config payload 池 14,597；plan_digest `63c36769…` dry-run/apply/幂等重跑三一致；115 条无 run 链 mutation quarantine）、state_version 回填（`scripts/canonical_v2_state_version_backfill.py`：2,556 行 + 12,041 无治理生产者事件 quarantine，digest `b932c6f1…`，幂等重跑零新增）、`decision_factor_snapshot` PIT 决策=不纳入 canonical（对账 13,543/13,543 + 7 模块 98 项消费端回归）、dataset manifest（`scripts/canonical_v2_dataset_manifest.py`：`ds_entry_supervisor_feedback_reference_20260816` + 620 member，verify 0 mismatch、重跑可复现）。修复 `canonical_v2._same_value` 时区比较 bug（UTC 归一化，回归测试覆盖）。`evolution_events`(9,700) 按 occurrence/run lineage 保留 legacy；position-quality 106 样本 manifest 另立项。**同日 A1（`autonomous_learning.py` 17 处读取迁移）完成**：review/decision/order 读取窗全部切 canonical reader（索引预载 + 拆 join + 有界时间窗反向 keyset），新增只读探针 `scripts/canonical_v2_autonomous_learning_equivalence.py`（9 窗口 ok），依赖模块 180 passed；`position_supervisor_trace`/`supervisor_counterfactual_review`/`ctrader_deals`/`decision_factor_snapshot` 保持直读，无新增写入。**同日 A2/A3（live 热路径 + ledger 决策查询）完成**：用户拍板投影物化=文件（`scripts/canonical_v2_position_decision_index.py` → `run_artifacts/canonical_v2_position_decision_index.json`，679 条，幂等 digest `781cd144…`，可删除重建）；`live_service` 4 处（entry_decision_id/open_decision_context 走索引、supervisor 窗口有界扫描、same-bar dedup ±5s 窗口）与 `ledger.get_latest_entry_decision`（索引→decision_row）迁移，探针 `scripts/canonical_v2_live_service_equivalence.py` 5 窗口 2100 例 ok；`test_live_service_bar_dedup` 更新 canonical 契约；未命中/异常回退 legacy（批次 5 前保留），投影重建时机列入批次 5 部署事项。下一步为 E1 服务运行验证（✅ 2026-08-16 完成：双服务运行 >1h、API/WSS/live loop/worker 周期正常、无 canonical 错误、consistency 全量 ok；观察项 `awe_adapt ... v16_command_required` 为设计内治理防护）、E2 全量测试、批次 5 单轨（C1 删 fallback → C2 红蓝观察 → C3–C5）与 D 组物理操作（逐项确认）。服务已按授权启动并保持运行（C2 红蓝观察沿用当前窗口）。下一次接手顺序以 [`planning/final-execution-checklist.md`](planning/final-execution-checklist.md) 为准。**2026-08-17（P0 写侧迁移 + 样本域 + 单轨开始）**：① 增量写入管道上线并生效——`canonical_v2` 新增 `record_decision_event / record_order_event / record_position_event / record_governance_mutation_event / record_governance_command_event / record_sample_row`，`DecisionLedger`（决策/订单/仓位）、`governance_mutation_coordinator`（reserved/committed/aborted/rolled_back/superseded 5 阶段）、`evolution_ledger`（进化命令+配置载荷池）、`autonomous_learning._upsert_sample`（样本行）同事务幂等镜像（fail-open，legacy 单写入者不变，非双写）；② 增量回填管道（`--since-epoch`）与 `scripts/canonical_v2_live_reconcile.py` 对账；③ 样本域 P1：迁移 0017（`canonical_v2.training_sample_row` 30 列）apply，`scripts/canonical_v2_sample_backfill.py` 全量 58,632/58,632 对账 0 缺失，学习任务样本写入实时镜像；④ C1 单轨开始：删除 5 模块 fallback（factor_cards / factor_counter_evidence / trade_lesson_memory / live_reentry_guard / memory_integrity），测试适配，全量回归 0 失败（agent_scorecard 守卫保留双条件，随旧表删除收敛）；⑤ 体检（运行 13h43m）发现并修复：live.increment.v1 运行记录 source_watermark 冲突（142 次镜像失败，fail-open 保护交易）→ 统一参数 + live.increment.v2；71 幽灵事件补映射（`scripts/canonical_v2_repair_ghost_mappings.py`）；15+42 双写清理（回填与实时镜像幂等键不同 → 回填加跳过 live 已镜像守卫，producer IN 三 live 生产者）；worker 随重启加载新代码。验证：六域对账全绿、90,923 payload 一致性 0 失败、全量回归 2803/0。剩余：P3 余 8 模块约 35 处、P2 边界 4 域、P4 写者切换、P5 旧库退役（G1–G7 逐组确认）、P6 容量治理（分区/保留/归档/监控）。
-- 退出：已满足。全库清空重建已完成，旧 v1 表已删除，系统以全空库冷启动。S7 冷启动完成：STATE_SCHEMA 已改为 runtime，75 张业务表已重建，双服务 active。
-- 验证：`docs/planning/final-execution-checklist.md` S7.1 完成门。
+- 状态：`complete`；旧 PostgreSQL `state_v1` schema 与其数据已清空，生产不再读取、写入或重建该 schema。
+- canonical：运行态使用 `runtime`，不可变事件、生命周期事实和学习样本使用 `canonical_v2`。
+- 当前：本条只保留清库和命名迁移的审计背景；不得把历史 migration/backfill/legacy projection 叙述当作当前运行事实。
+
+### runtime 退役事实投影与 broker intent schema（2026-08-21 复核）
+
+- 状态：`resolved`；v30 已通过 service-backed migration/cleanup 完成运行态收敛，旧事实表已退役，`data/state.db` 空残留也已移入回收站。
+- canonical：不可变决策、订单/持仓生命周期、review、监督 trace、counterfactual 和训练样本分别由 `canonical_v2` 事件/样本 writer 与 reader 唯一负责；生产 Python 已无旧事实表 SQL、旧样本表 DDL 或旧监督执行 writer。
+- 已确认运行事实：`runtime.state_schema_migration` 已应用 v29/v30；`runtime.broker_execution_intent` 存在且当前无未决 intent；旧 `runtime` 事实表不存在。backend/learning worker 已重启并加载 `live_safety_plane_v2_mode=enforce`，cTrader fresh account/positions reconcile 成功，空仓且 `unknown_execution_count=0`。
+- 处理边界：旧事实数据已按用户授权清理，不保留兼容查询/写入路径；canonical 事件与审计记录不删除。临时迁移 dump 不再保留。
+- 剩余：仍需一次真实 Demo `tighten/reduce/close -> broker lifecycle -> fresh reconcile -> trace -> counterfactual -> maturity` 证明 supervisor 动作闭环；这不影响旧路径退役状态。
+
 
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
 
@@ -105,15 +111,15 @@
 
 - 状态：`migrating`
 - canonical：先持久化 no-new-risk latch；只有 fresh post-reconcile 确认目标 position ID 消失才算 completed。
-- 剩余：非 safety 调用仍可能使用 legacy `refresh_positions()` 值接口。
+- 已收口：`refresh_positions()` / `refresh_account_info()` 兼容入口已删除；安全、恢复和显示读取统一使用显式 reconcile 结果或其只读投影。
 - 退出：所有安全/恢复调用只接受 immutable authoritative reconcile contract。
 
-### broker unknown outcome 兼容
+### broker unknown outcome fail-closed
 
 - 状态：`migrating`
-- canonical：结果只允许 confirmed/rejected/unknown/simulated；unknown 立即锁存、禁止重发，必须由 broker recovery/reconcile 唯一消解。
-- 当前：Execution Outcome v2 静态开关默认关闭；关闭分支现在显式返回 `execution_intent_status=compat_missing_intent`，不再用空 ID 冒充完整追踪。故障矩阵代码合同已覆盖 intent prepare/submitting/complete/unknown 和恢复边界，仍需当前源码绑定 attestation 与受控 Demo 真实生命周期。
-- 退出：通过发布门后删除 position-ID 猜测和旧 result 兼容；unknown 语义永久保留。
+- canonical：结果只允许 `confirmed/rejected/unknown`；unknown 立即锁存、禁止重发，必须由 broker recovery/reconcile 唯一消解。单一 execution intent writer 和同一 broker executor 不依赖发布开关。
+- 当前：intent prepare/submitting/confirmed/rejected/unknown 的故障矩阵代码合同已覆盖持久化、超时、未知回执和恢复边界，仍需当前源码绑定 attestation 与受控 Demo 真实生命周期。
+- 退出：保留 unknown 事实语义；删除的 flag-off/空 intent/position-ID 猜测路径不得恢复。
 
 ### cTrader deal price 修复运行验收
 
@@ -125,10 +131,10 @@
 
 ### live generation / Safety shadow 兼容
 
-- 状态：`migrating`
-- canonical：旧线程真实退出前保留 ownership；每 tick 由现有 serial owner 按 positions reconcile -> account reconcile/publish -> Safety -> alpha 排序，Safety v2 与独立 legacy preview 比较。broker fresh snapshot 与 active recovery row 不一致时，先复用既有 close-deal retirement/recovery 投影做一次有界确认，证据不足仍保持冲突 latch。已通过门的同一 closed bar 仅在 watchdog 自有 freshness cause 短暂锁存时由现有 serial owner 保留一次内存 admission retry，下一轮 canonical safety/reconcile 后复用原 open pipeline；bar 推进或出现其他 cause 立即丢弃，不新增执行通道。
-- 当前：2026-08-13 已完成代码、针对性测试并完成受控重启前的验证；`safety_freshness` 仍按既有 shadow 观察，尚未满足完整持仓生命周期或 24 小时无仓观察；Generation 开关不变。live-loop 的并发 account/positions refresh 已删除，开仓 admission 不再执行同 tick 二次 reconcile；同一 tick 的账户对账现在复用持仓对账的已知 PnL，不再发重复 PnL RPC；loop 完成时间不再被 tick 开始阶段冒充。`make_initial_ctrader_data_pull` 并行历史 K 线 writer 已删除；cTrader live trendbar 内存 feed 仍是 live bar authority，月库为低频 durable replica。
-- 退出：重启后确认无 legacy startup history pull，完成共享 deadline/阶段耗时验证，观察与故障矩阵通过、受控发布稳定后删除 loop globals 和旧 safety 尾部执行。
+- 状态：`resolved`（2026-08-21 收口）
+- canonical：`LiveLoopController` 是唯一 live loop generation/heartbeat owner；Safety 以 `live_safety_plane_v2_mode=enforce` 运行，监督动作只有 `supervisor -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 一条执行链。独立 legacy preview、双 candidate compare/fallback 和 Demo observation gate 已删除。
+- 当前：旧 loop globals、并发 refresh 入口、legacy startup history pull 和旧 safety 尾部执行已删除；active `legacy_awe_trailing` candidate 在实时执行边界拒绝，旧 trace/close attribution/parity replay 仅诊断读取。重启后 PID 15764 的 backend 与 PID 7828 的 learning worker（本次 backend 二次重载后 worker PID 保持不变）均正常，cTrader 认证、空仓 fresh reconcile 和 `unknown_execution_count=0` 已验证。健康监控也已改为复用带 broker schedule 的同一 live market-session authority。
+- 剩余：只剩一次真实 Demo 持仓生命周期，用于证明 broker lifecycle、trace、counterfactual 和 maturity 的正向证据；这不构成兼容执行路径。
 
 ### live_service 领域重力
 
@@ -160,8 +166,8 @@
 - 状态：`migrating`
 - canonical：持仓模板的自动切换只从 V16 candidate bridge 进入，`V16CommandGate.claim` 与 `PositionSupervisorGovernanceMutationService` 的 Coordinator transaction 共同完成单次授权和 finalize。
 - 当前：历史/显式旧 worker 写入的 non-V16 `position_supervisor_template` advisory 仍可留作审计记录；它们已不再拥有 approve/apply 或 candidate conflict 权力，并将在既有 demo review/apply 路径中 terminalize。`supervisor_learning_scheduler` 只运行反事实证据，不自动 materialize 旧 advisory；显式 materialize API 仅作为 legacy audit 入口保留。新生成候选只能针对一个 control 和一个 regime stratum，完整快照必须能由 evidence 中的单 scalar patch 证明。V16 candidate bridge 已统一为 `active -> bridge_pending -> awaiting_execution -> applied/superseded/rejected`，bridge 事务同时绑定 candidate、suggestion 和 command predicate；`keep/no_change` 或当前模板目标不会进入候选 lane。
-- 剩余：已应用 suggestion 仍需经过 effect observation 与既有 maturity counting，不能据此解锁自治或删除旧 advisory writer。`legacy_awe_trailing` 的非 Demo 兼容 planner/trace/close attribution 仍存在；Demo 已在 protection cycle 中标记 `observed/superseded`，不得与 canonical supervisor 同时 applied。Parity replay 仍是 diagnostic-only，不能替代 broker lifecycle 证据。遗留 `submitted` 行需要通过 service-backed reconciliation 迁移到显式 pending/terminal 状态，禁止 SQL 直接恢复 active。
-- 退出：历史 active advisory 全部 terminalize，连续真实 demo cycle 证明 V16 bridge、claim、Coordinator finalize 和 effect observation 连通后，删除旧 advisory 生成路径；另在 replay、trace、effect 证明 trailing 行为等价后，删除 legacy AWE trailing 执行分支、兼容配置和不再需要的耦合测试。不得通过 SQL 改写历史 review、补 command 或补成熟样本提前满足退出条件。
+- 剩余：已应用 suggestion 仍需经过 effect observation 与既有 maturity counting，不能据此解锁自治；历史/显式旧 advisory 仍需按既有 review/apply 路径 terminalize，遗留 `submitted` 行需要通过 service-backed reconciliation 迁移到显式 pending/terminal 状态，禁止 SQL 直接恢复 active。`legacy_awe_trailing` 的 active planner、candidate writer、executor 和 live fallback 已删除/退役；旧 trace、close attribution 与 parity replay 仅保留诊断读取，不能替代 broker lifecycle 证据。
+- 退出：历史 active advisory 全部 terminalize，连续真实 demo cycle 证明 V16 bridge、claim、Coordinator finalize 和 effect observation 连通后，删除旧 advisory 生成路径。AWE 执行分支的退出条件已满足；不得通过 SQL 改写历史 review、补 command 或补成熟样本提前满足其他治理退出条件。
 
 ### parity replay 尚非 live-equivalent
 
@@ -213,6 +219,7 @@
 
 ## 4. 明确退役，禁止恢复
 
+- 旧 PostgreSQL `state_v1` schema 及其数据；生产只使用 `runtime` 与 `canonical_v2`；
 - SQLite `data/state.db` 运行态主库；
 - 历史 tick 采集与 `ticks.duckdb`；
 - L2 collector、depth 风控字段与历史 L2 库；

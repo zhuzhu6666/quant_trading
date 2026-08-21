@@ -66,11 +66,11 @@ class _IntentStore:
         final_ids = {
             str(item["intent_id"])
             for item in self.completed
-            if item.get("outcome") in {"confirmed", "rejected", "simulated"}
+            if item.get("outcome") in {"confirmed", "rejected"}
         }
         return [
             item for item in self.unresolved_items
-            if str(getattr(item, "intent_id", "")) not in final_ids
+        if str(getattr(item, "intent_id", "")) not in final_ids
         ]
 
     def prepare(self, **kwargs):
@@ -89,12 +89,11 @@ class _IntentStore:
         return SimpleNamespace(intent_id=intent_id, **kwargs)
 
 
-def _bridge(*, store=None, enabled=True):
+def _bridge(*, store=None):
     bridge = CTraderBridge(
         send_orders=True,
         account_id=123,
         forced_symbol_id=41,
-        execution_outcome_v2_enabled=enabled,
         execution_intent_store=store,
     )
     bridge._connected = True
@@ -288,7 +287,7 @@ def test_live_post_resolution_uses_client_order_identity_for_unique_match(monkey
 
 
 def test_unique_new_deal_can_resolve_position_only_when_both_snapshots_are_available():
-    bridge = _bridge(enabled=False)
+    bridge = _bridge()
     pre_deals = {"1": {"deal_id": 1, "position_id": 10, "symbol_id": 41, "trade_side": "buy"}}
     post_deals = {
         **pre_deals,
@@ -358,48 +357,6 @@ def test_intent_prepare_failure_blocks_new_rpc(monkeypatch):
     assert rpc_calls == []
 
 
-def test_compat_mode_unknown_protobuf_is_not_reported_success(monkeypatch):
-    bridge = _bridge(enabled=False)
-    monkeypatch.setattr(bridge, "_send", lambda *_args, **_kwargs: SimpleNamespace(orderId=12))
-
-    result = bridge.market_buy("XAUUSD", 100)
-
-    assert result.success is False
-    assert result.outcome == "unknown"
-    assert result.position_id == 0
-    assert result.intent_id == ""
-    assert result.execution_intent_status == "compat_missing_intent"
-    assert no_new_risk_latch_status()["active"] is True
-
-    rpc_calls = []
-    monkeypatch.setattr(bridge, "_send", lambda *args, **kwargs: rpc_calls.append((args, kwargs)))
-    retry = bridge.market_buy("XAUUSD", 100)
-
-    assert retry.outcome == "rejected"
-    assert retry.error_code == "no_new_risk_latched"
-    assert rpc_calls == []
-
-
-def test_compat_confirmed_receipt_reports_missing_intent_explicitly(monkeypatch):
-    bridge = _bridge(enabled=False)
-    monkeypatch.setattr(
-        bridge,
-        "_send",
-        lambda *_args, **_kwargs: ProtoOAExecutionEvent(
-            position_id=9010,
-            order_id=8010,
-        ),
-    )
-
-    result = bridge.market_buy("XAUUSD", 100)
-
-    assert result.success is True
-    assert result.outcome == "confirmed"
-    assert result.position_id == 9010
-    assert result.intent_id == ""
-    assert result.execution_intent_status == "compat_missing_intent"
-
-
 def test_v2_unknown_protobuf_with_position_shaped_fields_is_not_a_broker_receipt(monkeypatch):
     store = _IntentStore()
     bridge = _bridge(store=store)
@@ -452,27 +409,8 @@ def test_v2_documented_order_error_event_remains_an_explicit_rejection(monkeypat
     assert no_new_risk_latch_status()["active"] is False
 
 
-def test_compat_malformed_unknown_protobuf_is_total_and_latches_unknown(monkeypatch):
-    bridge = _bridge(enabled=False)
-
-    class ProtoOAMalformedEvent:
-        position = SimpleNamespace(positionId="not-an-integer")
-        order = SimpleNamespace(orderId=object(), clientOrderId="")
-        deal = None
-        errorCode = ""
-
-    monkeypatch.setattr(bridge, "_send", lambda *_args, **_kwargs: ProtoOAMalformedEvent())
-
-    result = bridge.market_buy("XAUUSD", 100)
-
-    assert result.success is False
-    assert result.outcome == "unknown"
-    assert result.position_id == 0
-    assert no_new_risk_latch_status()["active"] is True
-
-
 def test_position_reconcile_distinguishes_fresh_empty_from_failure(monkeypatch):
-    bridge = _bridge(enabled=False)
+    bridge = _bridge()
     monkeypatch.setattr(bridge, "_send", lambda *_args, **_kwargs: SimpleNamespace(position=[]))
     monkeypatch.setattr(bridge, "get_unrealized_pnl", lambda: {})
 
@@ -498,7 +436,7 @@ def test_position_reconcile_distinguishes_fresh_empty_from_failure(monkeypatch):
 
 
 def test_position_reconcile_labels_event_snapshot_instead_of_fresh(monkeypatch):
-    bridge = _bridge(enabled=False)
+    bridge = _bridge()
     bridge._merge_position_cache(
         PositionInfo(position_id=88, symbol_id=41, direction=-1, volume=100),
         emit=False,
@@ -519,7 +457,7 @@ def test_position_reconcile_labels_event_snapshot_instead_of_fresh(monkeypatch):
 
 
 def test_account_reconcile_distinguishes_fresh_and_event_fallback(monkeypatch):
-    bridge = _bridge(enabled=False)
+    bridge = _bridge()
     trader = SimpleNamespace(
         balance=123450,
         traderLogin=7001,
@@ -560,7 +498,7 @@ def test_account_reconcile_distinguishes_fresh_and_event_fallback(monkeypatch):
 
 
 def test_account_reconcile_never_marks_failed_unrealized_pnl_as_fresh(monkeypatch):
-    bridge = _bridge(enabled=False)
+    bridge = _bridge()
     trader = SimpleNamespace(
         balance=123450,
         traderLogin=7001,
@@ -597,7 +535,7 @@ def test_account_reconcile_never_marks_failed_unrealized_pnl_as_fresh(monkeypatc
 
 
 def test_account_reconcile_reuses_fresh_confirmed_empty_position_evidence(monkeypatch):
-    bridge = _bridge(enabled=False)
+    bridge = _bridge()
     trader = SimpleNamespace(
         balance=123450,
         traderLogin=7001,
@@ -634,7 +572,7 @@ def test_account_reconcile_reuses_fresh_confirmed_empty_position_evidence(monkey
 
 
 def test_account_reconcile_does_not_trust_stale_or_nonempty_position_evidence(monkeypatch):
-    bridge = _bridge(enabled=False)
+    bridge = _bridge()
     trader = SimpleNamespace(
         balance=123450,
         traderLogin=7001,
@@ -672,7 +610,7 @@ def test_account_reconcile_does_not_trust_stale_or_nonempty_position_evidence(mo
 
 
 def test_account_reconcile_reuses_fresh_known_position_pnl(monkeypatch):
-    bridge = _bridge(enabled=False)
+    bridge = _bridge()
     trader = SimpleNamespace(
         balance=123450,
         traderLogin=7001,
@@ -753,39 +691,8 @@ def test_unresolved_close_intent_blocks_duplicate_broker_rpc(monkeypatch):
     assert rpc_calls == []
 
 
-def test_compat_unknown_close_blocks_same_mutation_without_postgres(monkeypatch):
-    bridge = _bridge(enabled=False)
-    position = PositionInfo(position_id=778, symbol_id=41, direction=1, volume=100)
-    monkeypatch.setattr(
-        bridge,
-        "reconcile_positions",
-        lambda **_kwargs: _reconcile("fresh", [position]),
-    )
-    rpc_calls = []
-    monkeypatch.setattr(
-        bridge,
-        "_send",
-        lambda *_args, **_kwargs: rpc_calls.append(True) or SimpleNamespace(orderId=12),
-    )
-
-    first = bridge.close_position(778, volume=100)
-    second = bridge.close_position(778, volume=100)
-
-    assert first.outcome == "unknown"
-    assert first.execution_intent_status == "compat_missing_intent"
-    assert second.outcome == "unknown"
-    assert second.error_code == "DUPLICATE_MUTATION_BLOCKED"
-    assert second.execution_intent_status == "compat_missing_intent"
-    assert len(rpc_calls) == 1
-    recovery = bridge.execution_intent_recovery_status()
-    assert recovery["ready"] is False
-    assert recovery["unresolved_count"] == 1
-    assert recovery["unresolved"][0]["source"] == "local_safety_latch"
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-def test_unreadable_local_unknown_ledger_is_fail_closed_in_all_modes(monkeypatch, enabled):
-    bridge = _bridge(store=_IntentStore(), enabled=enabled)
+def test_unreadable_local_unknown_ledger_is_fail_closed(monkeypatch):
+    bridge = _bridge(store=_IntentStore())
 
     def unavailable_ledger():
         raise OSError("safety ledger unreadable")
@@ -798,7 +705,7 @@ def test_unreadable_local_unknown_ledger_is_fail_closed_in_all_modes(monkeypatch
     recovery = bridge.execution_intent_recovery_status()
 
     assert recovery["ready"] is False
-    assert recovery["enabled"] is enabled
+    assert recovery["enabled"] is True
     assert recovery["unresolved_count"] is None
     assert recovery["local_safety_latch_status"] == "unavailable"
     assert recovery["error"].startswith("local_unknown_ledger_unavailable:OSError:")
@@ -808,7 +715,8 @@ def test_unreadable_local_unknown_ledger_is_fail_closed_in_all_modes(monkeypatch
 
 def test_durable_unknown_close_blocks_resend_after_bridge_restart(monkeypatch):
     position = PositionInfo(position_id=779, symbol_id=41, direction=1, volume=100)
-    first_bridge = _bridge(enabled=False)
+    store = _IntentStore()
+    first_bridge = _bridge(store=store)
     monkeypatch.setattr(
         first_bridge,
         "reconcile_positions",
@@ -821,7 +729,7 @@ def test_durable_unknown_close_blocks_resend_after_bridge_restart(monkeypatch):
     )
     assert first_bridge.close_position(779, volume=100).outcome == "unknown"
 
-    restarted_bridge = _bridge(enabled=False)
+    restarted_bridge = _bridge(store=store)
     monkeypatch.setattr(
         restarted_bridge,
         "reconcile_positions",
@@ -897,7 +805,7 @@ def test_close_v2_execution_event_without_broker_change_is_unknown_and_latched(m
     assert latched[0]["position_id"] == 502
 
 
-def test_close_v2_pg_intent_failure_does_not_block_risk_reduction(monkeypatch):
+def test_close_requires_persisted_intent_before_risk_reduction(monkeypatch):
     store = _IntentStore(prepare_error=RuntimeError("postgres unavailable"))
     bridge = _bridge(store=store)
     position = PositionInfo(position_id=503, symbol_id=41, direction=-1, volume=100)
@@ -913,12 +821,13 @@ def test_close_v2_pg_intent_failure_does_not_block_risk_reduction(monkeypatch):
 
     result = bridge.close_position(503, volume=100)
 
-    assert result.success is True
-    assert result.outcome == "confirmed"
-    assert rpc_calls and rpc_calls[0]
+    assert result.success is False
+    assert result.outcome == "rejected"
+    assert result.error_code == "execution_intent_persist_failed"
+    assert rpc_calls == []
 
 
-def test_partial_close_v2_pg_intent_failure_still_reduces_existing_position(monkeypatch):
+def test_partial_close_requires_persisted_intent_before_risk_reduction(monkeypatch):
     store = _IntentStore(prepare_error=RuntimeError("postgres unavailable"))
     bridge = _bridge(store=store)
     before = PositionInfo(position_id=504, symbol_id=41, direction=1, volume=200)
@@ -943,14 +852,14 @@ def test_partial_close_v2_pg_intent_failure_still_reduces_existing_position(monk
 
     result = bridge.close_position(504, volume=100)
 
-    assert result.success is True
-    assert result.outcome == "confirmed"
-    assert result.volume == 100
-    assert rpc_calls and rpc_calls[0]
-    assert outbox[0]["event_type"] == "broker_risk_reduction_intent_persist_failed"
+    assert result.success is False
+    assert result.outcome == "rejected"
+    assert result.error_code == "execution_intent_persist_failed"
+    assert rpc_calls == []
+    assert outbox == []
 
 
-def test_amend_v2_pg_intent_failure_still_confirms_fresh_broker_projection(monkeypatch):
+def test_amend_requires_persisted_intent_before_risk_reduction(monkeypatch):
     store = _IntentStore(prepare_error=RuntimeError("postgres unavailable"))
     bridge = _bridge(store=store)
     before = PositionInfo(
@@ -987,9 +896,10 @@ def test_amend_v2_pg_intent_failure_still_confirms_fresh_broker_projection(monke
 
     result = bridge.amend_position_sltp(703, sl=2310.0, tp=2410.0)
 
-    assert result.success is True
-    assert result.outcome == "confirmed"
-    assert outbox[0]["event_type"] == "broker_risk_reduction_intent_persist_failed"
+    assert result.success is False
+    assert result.outcome == "rejected"
+    assert result.error_code == "execution_intent_persist_failed"
+    assert outbox == []
 
 
 def test_amend_v2_requires_fresh_sltp_projection_ack(monkeypatch):
@@ -1253,73 +1163,3 @@ def test_pg_recovery_appends_explicit_local_unknown_resolution(monkeypatch):
     assert result["recovered"][0]["local_resolution"]["released"] == 1
     assert unresolved_broker_outcome_mutations() == []
     assert no_new_risk_latch_status()["active"] is False
-
-
-def test_compat_local_recovery_uses_fresh_absence_and_preserves_incident_cause(
-    monkeypatch,
-):
-    activate_no_new_risk_latch(
-        reason="incident active",
-        actor="operator:test",
-        cause="incident_control",
-        cause_id="runtime_incident_mode",
-    )
-    activate_no_new_risk_latch(
-        reason="broker_execution_outcome_unknown",
-        actor="execution:ctrader_bridge",
-        correlation_id="compat-close-unknown",
-        metadata={
-            "action": "close_position",
-            "position_id": 802,
-            "evidence": {"requested_volume": 100, "position_volume_before": 100},
-        },
-    )
-    bridge = _bridge(enabled=False)
-    monkeypatch.setattr(
-        bridge,
-        "reconcile_positions",
-        lambda **_kwargs: _reconcile("fresh-local"),
-    )
-
-    result = bridge.recover_execution_intents()
-
-    assert result["recovered"][0]["outcome"] == "confirmed"
-    assert result["unresolved_count"] == 0
-    assert result["ready"] is True
-    assert unresolved_broker_outcome_mutations() == []
-    status = no_new_risk_latch_status()
-    assert status["active"] is True
-    assert [item["cause"] for item in status["causes"]] == ["incident_control"]
-
-
-def test_fresh_absence_remains_confirmed_when_local_resolution_append_fails(
-    monkeypatch,
-):
-    from backend.services import live_safety_state as safety_state
-
-    activate_no_new_risk_latch(
-        reason="broker_execution_outcome_unknown",
-        actor="execution:ctrader_bridge",
-        correlation_id="close-resolution-append-fails",
-        metadata={"action": "close_position", "position_id": 803},
-    )
-    bridge = _bridge(enabled=False)
-    monkeypatch.setattr(
-        bridge,
-        "reconcile_positions",
-        lambda **_kwargs: _reconcile("fresh-absent"),
-    )
-    monkeypatch.setattr(
-        safety_state,
-        "resolve_broker_outcome_mutation",
-        lambda **_kwargs: (_ for _ in ()).throw(OSError("safety disk unavailable")),
-    )
-
-    result = bridge.close_position(803, volume=100)
-
-    assert result.outcome == "confirmed"
-    assert result.success is True
-    assert unresolved_broker_outcome_mutations()[0]["intent_id"] == (
-        "close-resolution-append-fails"
-    )
-    assert no_new_risk_latch_status()["active"] is True

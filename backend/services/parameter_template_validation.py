@@ -29,6 +29,10 @@ from backend.jobs.progress import ProgressCB
 from backend.services.backtest_service import run_backtest
 from backend.services.parity_replay import MonthlyPITBarLoader, ParityReplayRequest
 from backend.services.factor_cards import clear_factor_card_cache
+from backend.services.canonical_v2 import (
+    ensure_sqlite_schema,
+    record_parameter_template_lifecycle_event,
+)
 from backend.services.parameter_templates import (
     ParameterTemplateService,
     clear_parameter_template_recommendation_cache,
@@ -66,6 +70,7 @@ class ParameterTemplateValidationService:
         try:
             if not _conn_is_pg(conn):
                 conn.executescript(STATE_DB_DDL)
+                ensure_sqlite_schema(conn)
             conn.commit()
         finally:
             conn.close()
@@ -83,27 +88,30 @@ class ParameterTemplateValidationService:
         description: str,
         reason: str = "",
         score: float = 0.0,
+        candidate_id: str = "",
+        template_id: str = "",
+        regime_key: str = "",
+        details: dict[str, Any] | None = None,
     ) -> None:
         now = time.time()
         conn = get_state_pg_conn() if _use_pg(self.db_path) else connect_sqlite(self.db_path)
         try:
-            _execute(
+            if not _conn_is_pg(conn):
+                ensure_sqlite_schema(conn)
+            record_parameter_template_lifecycle_event(
                 conn,
-                """
-                INSERT INTO lifecycle_events
-                (timestamp, event, factor, source, description, score, status, reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    now,
-                    event,
-                    factor_id,
-                    "parameter_template",
-                    description,
-                    float(score or 0.0),
-                    status,
-                    reason,
-                ),
+                lifecycle_id=f"{factor_id}:{event}:{now:.6f}:{uuid.uuid4().hex[:8]}",
+                event_ts=now,
+                factor_id=factor_id,
+                event=event,
+                status=status,
+                description=description,
+                reason=reason,
+                score=score,
+                candidate_id=candidate_id,
+                template_id=template_id,
+                regime_key=regime_key,
+                details=details,
             )
             conn.commit()
         finally:
@@ -477,6 +485,9 @@ class ParameterTemplateValidationService:
                         "offline_deep_validation_passed"
                     ),
                     score=float(summary.get("candidate_avg_ic") or 0.0),
+                    candidate_id=str(existing["candidate_id"]),
+                    template_id=template_id,
+                    regime_key=regime_key,
                 )
                 self._clear_governance_caches()
                 return self._decorate_release_candidate({
@@ -580,6 +591,9 @@ class ParameterTemplateValidationService:
                 "offline_deep_validation_passed"
             ),
             score=float(summary.get("candidate_avg_ic") or 0.0),
+            candidate_id=candidate_id,
+            template_id=template_id,
+            regime_key=regime_key,
         )
         self._clear_governance_caches()
         return self._decorate_release_candidate(item)
@@ -665,6 +679,9 @@ class ParameterTemplateValidationService:
             description=f"release candidate {candidate_id} reviewed as {status}",
             reason=note or f"candidate_{status}",
             score=float((updated.get("validation_summary") or {}).get("candidate_avg_ic") or 0.0),
+            candidate_id=candidate_id,
+            template_id=str(updated.get("template_id") or ""),
+            regime_key=str(updated.get("regime_key") or ""),
         )
         self._clear_governance_caches()
         return updated
@@ -807,6 +824,9 @@ class ParameterTemplateValidationService:
             description=f"deployed release candidate {candidate_id} to {template_id}",
             reason=note or "gray_release_deployed",
             score=float((updated.get("validation_summary") or {}).get("candidate_avg_ic") or 0.0),
+            candidate_id=candidate_id,
+            template_id=template_id,
+            regime_key=str(updated.get("regime_key") or ""),
         )
         self._clear_governance_caches()
         return {
@@ -871,6 +891,9 @@ class ParameterTemplateValidationService:
             description=f"rolled back release candidate {candidate_id} to {old_template_id}",
             reason=note or "gray_release_rolled_back",
             score=float((updated.get("validation_summary") or {}).get("candidate_avg_ic") or 0.0),
+            candidate_id=candidate_id,
+            template_id=old_template_id,
+            regime_key=str(updated.get("regime_key") or ""),
         )
         self._clear_governance_caches()
         return {

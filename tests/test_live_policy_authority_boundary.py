@@ -1,22 +1,32 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
+from backend.services.canonical_v2 import (
+    record_counterfactual_event,
+    record_review,
+    record_supervisor_trace_event,
+)
+from backend.services.canonical_v2_reader import (
+    iter_counterfactual_rows,
+    iter_review_rows,
+    iter_supervisor_trace_rows,
+)
 from backend.services import live_service
 from backend.services.backend_readiness import BackendReadinessService
 from backend.services.position_supervisor_governance import (
     materialize_position_supervisor_candidate_observations,
 )
+from tests.canonical_fixture import make_canonical_sqlite
 
 
 def _seed_candidate_observation_facts(db_path: Path) -> None:
     candidate_created_at = 1_700_000_000.0
     close_ts = candidate_created_at + 3600.0
-    conn = connect_sqlite(db_path)
+    conn = make_canonical_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
         conn.execute(
@@ -30,52 +40,49 @@ def _seed_candidate_observation_facts(db_path: Path) -> None:
             """,
             (candidate_created_at, candidate_created_at),
         )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-             pnl, mae, mfe, outcome_label, review_json, created_at)
-            VALUES ('review_1', 'trade_1', 'position_1', 'entry_1', 'exit_1',
-                    4.5, -2.0, 8.0, 'win', ?, ?)
-            """,
-            (
-                json.dumps(
-                    {
-                        "position_id": "position_1",
-                        "close_ts": close_ts,
-                        "holding_seconds": 900.0,
-                        "entry_price": 2300.0,
-                        "close_price": 2304.0,
-                        "giveback_ratio": 0.2,
-                        "profit_capture_ratio": 0.7,
-                        "holding_efficiency": 0.8,
-                        "thesis_status": "intact",
-                    }
-                ),
-                close_ts,
-            ),
+        record_review(
+            conn,
+            review_id="review_1",
+            trade_id="trade_1",
+            position_id="position_1",
+            entry_decision_id="entry_1",
+            exit_decision_id="exit_1",
+            pnl=4.5,
+            mae=-2.0,
+            mfe=8.0,
+            outcome_label="win",
+            review={
+                "position_id": "position_1",
+                "close_ts": close_ts,
+                "holding_seconds": 900.0,
+                "entry_price": 2300.0,
+                "close_price": 2304.0,
+                "giveback_ratio": 0.2,
+                "profit_capture_ratio": 0.7,
+                "holding_efficiency": 0.8,
+                "thesis_status": "intact",
+            },
+            created_at=close_ts,
         )
-        conn.execute(
-            """
-            INSERT INTO supervisor_counterfactual_review
-            (counterfactual_id, review_id, trade_id, position_id, close_ts,
-             evidence_json, created_at, updated_at)
-            VALUES ('cf_1', 'review_1', 'trade_1', 'position_1', ?, ?, ?, ?)
-            """,
-            (
-                close_ts,
-                json.dumps(
-                    {
-                        "regime": "trend",
-                        "maturity": {
-                            "status": "governance_ready",
-                            "governance_eligible": True,
-                        },
-                    }
-                ),
-                close_ts,
-                close_ts,
-            ),
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_1",
+            review_id="review_1",
+            event_ts=close_ts,
+            payload={
+                "counterfactual_id": "cf_1",
+                "review_id": "review_1",
+                "trade_id": "trade_1",
+                "position_id": "position_1",
+                "close_ts": close_ts,
+                "evidence": {
+                    "regime": "trend",
+                    "maturity": {
+                        "status": "governance_ready",
+                        "governance_eligible": True,
+                    },
+                },
+            },
         )
         conn.commit()
     finally:
@@ -171,23 +178,18 @@ def test_learning_worker_materializes_bound_non_execution_candidate_trace(tmp_pa
     conn = connect_sqlite(db_path, read_only=True)
     try:
         conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            """
-            SELECT stage, outcome, risk_allowed, execution_status,
-                   execution_reason, trace_integrity, verdict_json, execution_json
-            FROM position_supervisor_trace
-            """
-        ).fetchone()
+        rows = iter_supervisor_trace_rows(conn, limit=1, reverse=False)
+        row = rows[0] if rows else None
     finally:
         conn.close()
     assert row["stage"] == "learning_shadow"
     assert row["outcome"] == "shadow"
     assert row["risk_allowed"] == 0
-    assert row["execution_status"] == "observation_only"
+    assert row["execution_status"] == "not_executed"
     assert row["execution_reason"] == "learning_worker_candidate_replay:candidate_1"
-    assert row["trace_integrity"] == "recovered"
-    verdict = json.loads(row["verdict_json"])
-    execution = json.loads(row["execution_json"])
+    assert row["trace_integrity"] == "canonical_observation"
+    verdict = row["verdict"]
+    execution = row["execution"]
     assert verdict["evidence"]["candidate_suggestion_id"] == "candidate_1"
     assert verdict["evidence"]["non_authoritative"] is True
     assert execution["broker_mutation_attempted"] is False
@@ -198,18 +200,59 @@ def test_learning_worker_skips_contaminated_candidate_review(tmp_path) -> None:
     _seed_candidate_observation_facts(db_path)
     conn = connect_sqlite(db_path)
     try:
-        review = json.loads(
-            conn.execute(
-                "SELECT review_json FROM trade_outcome_review WHERE review_id='review_1'"
-            ).fetchone()[0]
+        conn.row_factory = sqlite3.Row
+        review_row = next(
+            row
+            for row in iter_review_rows(conn, limit=0)
+            if row.get("review_id") == "review_1"
         )
+        review = dict(review_row["review_json"])
         review["system_issue_context"] = {
             "system_contaminated": True,
             "contaminates_learning": True,
         }
-        conn.execute(
-            "UPDATE trade_outcome_review SET review_json=? WHERE review_id='review_1'",
-            (json.dumps(review),),
+        record_review(
+            conn,
+            review_id="review_1_contaminated",
+            trade_id=str(review_row.get("trade_id") or "trade_1"),
+            position_id=str(review_row.get("position_id") or "position_1"),
+            entry_decision_id=str(review_row.get("entry_decision_id") or "entry_1"),
+            exit_decision_id=str(review_row.get("exit_decision_id") or "exit_1"),
+            pnl=review_row.get("pnl"),
+            mae=review_row.get("mae"),
+            mfe=review_row.get("mfe"),
+            outcome_label=str(review_row.get("outcome_label") or "win"),
+            review=review,
+            created_at=1_700_003_600.0,
+            producer="test_live_policy_authority_boundary",
+        )
+        counterfactual = next(
+            row
+            for row in iter_counterfactual_rows(conn, limit=0, reverse=True)
+            if row.get("counterfactual_id") == "cf_1"
+        )
+        updated_counterfactual = {
+            key: counterfactual.get(key)
+            for key in (
+                "counterfactual_id",
+                "trade_id",
+                "position_id",
+                "close_ts",
+                "evidence",
+            )
+        }
+        updated_counterfactual.update(
+            {
+                "review_id": "review_1_contaminated",
+                "evidence": counterfactual.get("evidence") or {},
+            }
+        )
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_1",
+            review_id="review_1_contaminated",
+            event_ts=1_700_003_600.0,
+            payload=updated_counterfactual,
         )
         conn.commit()
     finally:
@@ -225,9 +268,8 @@ def test_learning_worker_skips_contaminated_candidate_review(tmp_path) -> None:
     assert result["evaluated"] == 0
     conn = connect_sqlite(db_path, read_only=True)
     try:
-        trace_count = conn.execute(
-            "SELECT COUNT(*) FROM position_supervisor_trace"
-        ).fetchone()[0]
+        conn.row_factory = sqlite3.Row
+        trace_count = len(iter_supervisor_trace_rows(conn, limit=0))
     finally:
         conn.close()
     assert trace_count == 0
@@ -241,50 +283,45 @@ def test_learning_worker_filters_contamination_before_position_dedupe_and_limit(
     contaminated_close_ts = 1_700_001_800.0
     conn = connect_sqlite(db_path)
     try:
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-             pnl, mae, mfe, outcome_label, review_json, created_at)
-            VALUES ('review_contaminated', 'trade_contaminated', 'position_1',
-                    'entry_contaminated', 'exit_contaminated',
-                    -1.0, -2.0, 3.0, 'loss', ?, ?)
-            """,
-            (
-                json.dumps(
-                    {
-                        "position_id": "position_1",
-                        "close_ts": contaminated_close_ts,
-                        "system_issue_context": {
-                            "system_contaminated": True,
-                            "contaminates_learning": True,
-                        },
-                    }
-                ),
-                contaminated_close_ts,
-            ),
+        record_review(
+            conn,
+            review_id="review_contaminated",
+            trade_id="trade_contaminated",
+            position_id="position_1",
+            entry_decision_id="entry_contaminated",
+            exit_decision_id="exit_contaminated",
+            pnl=-1.0,
+            mae=-2.0,
+            mfe=3.0,
+            outcome_label="loss",
+            review={
+                "position_id": "position_1",
+                "close_ts": contaminated_close_ts,
+                "system_issue_context": {
+                    "system_contaminated": True,
+                    "contaminates_learning": True,
+                },
+            },
+            created_at=contaminated_close_ts,
         )
-        conn.execute(
-            """
-            INSERT INTO supervisor_counterfactual_review
-            (counterfactual_id, review_id, trade_id, position_id, close_ts,
-             evidence_json, created_at, updated_at)
-            VALUES ('cf_contaminated', 'review_contaminated',
-                    'trade_contaminated', 'position_1', ?, ?, ?, ?)
-            """,
-            (
-                contaminated_close_ts,
-                json.dumps(
-                    {
-                        "maturity": {
-                            "status": "governance_ready",
-                            "governance_eligible": True,
-                        }
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_contaminated",
+            review_id="review_contaminated",
+            event_ts=contaminated_close_ts,
+            payload={
+                "counterfactual_id": "cf_contaminated",
+                "review_id": "review_contaminated",
+                "trade_id": "trade_contaminated",
+                "position_id": "position_1",
+                "close_ts": contaminated_close_ts,
+                "evidence": {
+                    "maturity": {
+                        "status": "governance_ready",
+                        "governance_eligible": True,
                     }
-                ),
-                contaminated_close_ts,
-                contaminated_close_ts,
-            ),
+                },
+            },
         )
         conn.commit()
     finally:
@@ -300,13 +337,13 @@ def test_learning_worker_filters_contamination_before_position_dedupe_and_limit(
     assert result["evaluated"] == 1
     conn = connect_sqlite(db_path, read_only=True)
     try:
-        row = conn.execute(
-            "SELECT trade_id, verdict_json FROM position_supervisor_trace"
-        ).fetchone()
+        conn.row_factory = sqlite3.Row
+        rows = iter_supervisor_trace_rows(conn, limit=1, reverse=False)
+        row = rows[0] if rows else None
     finally:
         conn.close()
-    assert row[0] == "trade_1"
-    assert json.loads(row[1])["evidence"]["counterfactual_id"] == "cf_1"
+    assert row["trade_id"] == "trade_1"
+    assert row["verdict"]["evidence"]["counterfactual_id"] == "cf_1"
 
 
 def test_readiness_ignores_legacy_canary_shadow_trace(tmp_path) -> None:
@@ -314,14 +351,18 @@ def test_readiness_ignores_legacy_canary_shadow_trace(tmp_path) -> None:
     _seed_candidate_observation_facts(db_path)
     conn = connect_sqlite(db_path)
     try:
-        conn.execute(
-            """
-            INSERT INTO position_supervisor_trace
-            (trace_id, position_id, template_id, stage, outcome, event_ts, created_at)
-            VALUES ('legacy_live_shadow', 'position_1',
-                    'position_supervisor:conservative.v1',
-                    'canary_shadow', 'shadow', 1700003600, 1700003600)
-            """
+        record_supervisor_trace_event(
+            conn,
+            trace_id="legacy_live_shadow",
+            event_ts=1700003600.0,
+            payload={
+                "trace_id": "legacy_live_shadow",
+                "position_id": "position_1",
+                "template_id": "position_supervisor:conservative.v1",
+                "stage": "canary_shadow",
+                "outcome": "shadow",
+                "event_ts": 1700003600.0,
+            },
         )
         conn.commit()
     finally:

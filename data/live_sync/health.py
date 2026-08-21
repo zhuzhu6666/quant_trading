@@ -184,21 +184,6 @@ class SyncHealth:
             )
         except OSError:
             logger.exception("SyncHealth._save failed for %s", self._path)
-        # ★ 写入 state.db
-        try:
-            from backend.core.db import get_state_conn
-            import time as _t
-            conn = get_state_conn()
-            try:
-                conn.execute(
-                    "INSERT INTO sync_health (status_json, updated_at) VALUES (?, ?)",
-                    (json.dumps(self._record.to_dict(), ensure_ascii=False), _t.time())
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        except Exception:
-            pass
 
     def _emit_metrics(self) -> None:
         try:

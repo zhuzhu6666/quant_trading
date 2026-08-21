@@ -33,6 +33,15 @@ from backend.api.learning import (
     train_learning_dataset,
     update_learning_model_shadow_candidate,
 )
+from backend.services.canonical_v2 import ensure_sqlite_schema, record_decision_event
+from backend.services.canonical_v2_reader import (
+    decision_row,
+    iter_decision_factor_snapshots,
+    iter_decision_rows,
+    iter_order_rows,
+    iter_position_rows,
+    iter_review_rows,
+)
 from backend.ledger.service import DecisionLedger
 from research.features import (
     LearningDatasetBuilder,
@@ -64,11 +73,39 @@ def _rows(db_path: str, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         conn.close()
 
 
+def _canonical_read(db_path: str, reader, *args, **kwargs):
+    """Read a canonical fact from an isolated SQLite test database."""
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        ensure_sqlite_schema(conn)
+        result = reader(conn, *args, **kwargs)
+        if isinstance(result, (dict, type(None))):
+            return result
+        return list(result)
+    finally:
+        conn.close()
+
+
+def _experience_builder(db_path: str | object) -> ExperienceBuilder:
+    """Install canonical-only facts before constructing the test builder."""
+
+    path = str(db_path)
+    conn = sqlite3.connect(path)
+    try:
+        ensure_sqlite_schema(conn)
+        conn.commit()
+    finally:
+        conn.close()
+    return ExperienceBuilder(path)
+
+
 def test_rule_learning_pipeline_persists_full_chain(tmp_path):
     db_path = str(tmp_path / "state.db")
     ledger = DecisionLedger(db_path)
     reviewer = TradeReviewer(db_path)
-    builder = ExperienceBuilder(db_path)
+    builder = _experience_builder(db_path)
     suggester = PolicySuggester(db_path)
     gov = RuleEvolutionGovernor(db_path)
 
@@ -180,20 +217,37 @@ def test_rule_learning_pipeline_persists_full_chain(tmp_path):
     assert review["review_json"]["holding_efficiency"] >= 0.0
     assert experience["decision_context_json"]["holding_minutes"] == pytest.approx(99_999.0 / 60.0)
     assert "primary_responsibility" in experience["decision_context_json"]
-    assert experience["source_table"] == "trade_outcome_review"
+    assert experience["source_table"] == "canonical_v2.trade_review"
     assert experience["source_id"] == review["review_id"]
     assert experience["append_source"] == "trade_lesson_memory.v1"
     assert "overweight_noise_factor" in review["failure_tags"]
     assert experience["recommended_action"] == "downweight"
     assert suggestion is None
 
-    assert len(_rows(db_path, "SELECT * FROM decision_ledger")) == 1
-    assert len(_rows(db_path, "SELECT * FROM decision_factor_snapshot")) == 2
-    assert len(_rows(db_path, "SELECT * FROM trade_outcome_review")) == 1
+    decisions = _canonical_read(db_path, iter_decision_rows, limit=0)
+    factor_snapshots = _canonical_read(
+        db_path, iter_decision_factor_snapshots, entry_decision_id
+    )
+    orders = _canonical_read(db_path, iter_order_rows, limit=0)
+    positions = _canonical_read(db_path, iter_position_rows, limit=0)
+    reviews = _canonical_read(db_path, iter_review_rows, limit=0)
+    assert len(decisions) == 1
+    assert decisions[0]["decision_id"] == entry_decision_id
+    assert len(factor_snapshots) == 2
+    assert {row["factor"] for row in factor_snapshots} == {
+        "trend_alpha",
+        "noise_factor",
+    }
+    assert len(orders) == 2
+    assert [row["event_type"] for row in orders] == ["submitted", "filled"]
+    assert len(positions) == 2
+    assert [row["event_type"] for row in positions] == ["opened", "closed"]
+    assert len(reviews) == 1
+    assert reviews[0]["review_id"] == review["review_id"]
     assert len(_rows(db_path, "SELECT * FROM factor_contribution_review")) == 2
     assert len(_rows(db_path, "SELECT * FROM experience_memory")) == 1
     stored_experience = _rows(db_path, "SELECT * FROM experience_memory")[0]
-    assert stored_experience["source_table"] == "trade_outcome_review"
+    assert stored_experience["source_table"] == "canonical_v2.trade_review"
     assert stored_experience["source_id"] == review["review_id"]
     assert stored_experience["append_source"] == "trade_lesson_memory.v1"
     assert stored_experience["created_at"] == pytest.approx(1_000_000.0)
@@ -340,11 +394,8 @@ def test_ledger_normalizes_nested_policy_temporal_context_to_market_time(tmp_pat
         },
     )
 
-    row = _rows(
-        db_path,
-        "SELECT risk_state_json, action_json FROM decision_ledger WHERE decision_id=?",
-        (decision_id,),
-    )[0]
+    row = _canonical_read(db_path, decision_row, decision_id)
+    assert row is not None
     risk_state = json.loads(row["risk_state_json"])
     action = json.loads(row["action_json"])
     top_tc = risk_state["policy_verdict"]["audit_payload"]["temporal_context"]
@@ -364,18 +415,9 @@ def test_ledger_normalizes_nested_policy_temporal_context_to_market_time(tmp_pat
 
 def test_feature_provider_ignores_drifting_audit_temporal_context(tmp_path):
     db_path = str(tmp_path / "state.db")
-    ledger = DecisionLedger(db_path)
     market_ts = 1_782_979_200.0
     runtime_ts = market_ts + 900.0
-    decision_id = ledger.log_decision(
-        event_type="skip",
-        symbol="XAUUSD+",
-        timeframe="M5",
-        decision_ts=market_ts,
-        action_score=0.5,
-        action_reason="risk",
-        action_json={"gate_passed": False, "gate_reason": "risk"},
-    )
+    decision_id = "canonical_drifting_temporal"
     dirty_risk_state = {
         "policy_verdict": {
             "allowed": False,
@@ -392,10 +434,20 @@ def test_feature_provider_ignores_drifting_audit_temporal_context(tmp_path):
         }
     }
     conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     try:
-        conn.execute(
-            "UPDATE decision_ledger SET risk_state_json=? WHERE decision_id=?",
-            (json.dumps(dirty_risk_state), decision_id),
+        ensure_sqlite_schema(conn)
+        record_decision_event(
+            conn,
+            decision_id=decision_id,
+            event_type="skip",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=market_ts,
+            action_score=0.5,
+            action_reason="risk",
+            action={"gate_passed": False, "gate_reason": "risk"},
+            risk_state=dirty_risk_state,
         )
         conn.commit()
     finally:
@@ -408,7 +460,7 @@ def test_feature_provider_ignores_drifting_audit_temporal_context(tmp_path):
     assert temporal["hour_utc"] == 8
     assert temporal["session_label"] == "europe"
     assert "seconds_since_last_trade" not in temporal
-    assert temporal["temporal_context_source"] == "decision_ledger"
+    assert temporal["temporal_context_source"] == "canonical_v2_reader"
     assert temporal["discarded_audit_decision_ts"] == pytest.approx(runtime_ts)
     assert temporal["audit_market_time_drift_seconds"] == pytest.approx(900.0)
 
@@ -479,7 +531,7 @@ def test_dataset_builder_persists_trade_and_decision_jsonl(tmp_path):
     out_dir = tmp_path / "datasets"
     ledger = DecisionLedger(db_path)
     reviewer = TradeReviewer(db_path)
-    builder = ExperienceBuilder(db_path)
+    builder = _experience_builder(db_path)
 
     decision_id = ledger.log_decision(
         event_type="open",
@@ -573,7 +625,7 @@ def test_dataset_summary_adapter_builds_safe_model_card(tmp_path):
     artifact_dir = tmp_path / "artifacts"
     ledger = DecisionLedger(db_path)
     reviewer = TradeReviewer(db_path)
-    builder = ExperienceBuilder(db_path)
+    builder = _experience_builder(db_path)
 
     decision_id = ledger.log_decision(
         event_type="open",
@@ -659,7 +711,7 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
     artifact_dir = tmp_path / "trained_artifacts"
     ledger = DecisionLedger(db_path)
     reviewer = TradeReviewer(db_path)
-    builder = ExperienceBuilder(db_path)
+    builder = _experience_builder(db_path)
 
     outcomes = [
         ("801", 120.0, 120.0, 0.70),
@@ -1093,7 +1145,7 @@ def test_dataset_readiness_validates_contract_and_thresholds(tmp_path):
     db_path = str(tmp_path / "state.db")
     ledger = DecisionLedger(db_path)
     reviewer = TradeReviewer(db_path)
-    builder = ExperienceBuilder(db_path)
+    builder = _experience_builder(db_path)
 
     decision_id = ledger.log_decision(
         event_type="open",
@@ -1226,7 +1278,7 @@ def test_policy_suggester_downweights_after_repeated_bad_losses(tmp_path):
         suggestion = suggester.suggest_from_experience(
             {
                 "experience_id": f"exp_{idx}",
-                "source_table": "trade_outcome_review",
+                "source_table": "canonical_v2.trade_review",
                 "source_id": f"review_{idx}",
                 "append_source": "live_review",
                 "primary_factor": "fragile_factor",
@@ -1262,7 +1314,7 @@ def test_policy_suggester_cannot_refresh_clean_suggestion_from_contaminated_expe
         suggester.suggest_from_experience(
             {
                 "experience_id": f"clean_exp_{idx}",
-                "source_table": "trade_outcome_review",
+                "source_table": "canonical_v2.trade_review",
                 "source_id": f"clean_review_{idx}",
                 "primary_factor": "guarded_factor",
                 "outcome_label": "bad_loss",
@@ -1282,7 +1334,7 @@ def test_policy_suggester_cannot_refresh_clean_suggestion_from_contaminated_expe
     result = suggester.suggest_from_experience(
         {
             "experience_id": "contaminated_exp",
-            "source_table": "trade_outcome_review",
+            "source_table": "canonical_v2.trade_review",
             "source_id": "unknown_price_review",
             "primary_factor": "guarded_factor",
             "outcome_label": "bad_loss",
@@ -1329,7 +1381,7 @@ def test_policy_suggester_skips_watch_and_promotes_fast_positive_factor(tmp_path
         result = suggester.suggest_from_experience(
             {
                 "experience_id": f"exp_fast_{idx}",
-                "source_table": "trade_outcome_review",
+                "source_table": "canonical_v2.trade_review",
                 "source_id": f"rev_fast_{idx}",
                 "append_source": "live_review",
                 "primary_factor": "fast_factor",
@@ -1351,7 +1403,7 @@ def test_policy_suggester_skips_watch_and_promotes_fast_positive_factor(tmp_path
     )
     assert len(rows) == 1
     evidence = json.loads(rows[0]["evidence_json"])
-    assert evidence["source_table"] == "trade_outcome_review"
+    assert evidence["source_table"] == "canonical_v2.trade_review"
     assert evidence["source_id"] == "rev_fast_4"
     assert evidence["append_source"] == "live_review"
     assert evidence["effective_sample_count"] == 4.0
@@ -1363,7 +1415,7 @@ def test_rule_learning_pipeline_deweights_recovery_replay_samples(tmp_path):
     db_path = str(tmp_path / "state.db")
     ledger = DecisionLedger(db_path)
     reviewer = TradeReviewer(db_path)
-    builder = ExperienceBuilder(db_path)
+    builder = _experience_builder(db_path)
 
     entry_decision_id = ledger.log_decision(
         event_type="open",
@@ -1414,7 +1466,7 @@ def test_rule_learning_pipeline_deweights_recovery_replay_samples(tmp_path):
 
 def test_experience_builder_does_not_downweight_alpha_for_exit_failure(tmp_path):
     db_path = str(tmp_path / "state.db")
-    builder = ExperienceBuilder(db_path)
+    builder = _experience_builder(db_path)
     review = {
         "review_id": "review_exit_failure",
         "trade_id": "exit_failure",
@@ -1442,7 +1494,7 @@ def test_experience_builder_does_not_downweight_alpha_for_exit_failure(tmp_path)
 
 
 def test_experience_builder_drops_recursive_review_payload(tmp_path):
-    builder = ExperienceBuilder(str(tmp_path / "state.db"))
+    builder = _experience_builder(str(tmp_path / "state.db"))
     experience = builder.build_from_review(
         {
             "review_id": "review_recursive_builder",

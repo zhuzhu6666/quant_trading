@@ -37,9 +37,9 @@ def _component_state(position: dict[str, Any], *keys: str) -> str:
 
 
 def _component_known(position: dict[str, Any], *keys: str) -> bool:
-    # Empty preserves the legacy contract.  An explicit component fact is
-    # fail-closed: only ``known`` may be consumed numerically.
-    return _component_state(position, *keys) in {"", "known"}
+    # Canonical broker reconciliation must publish an explicit component fact;
+    # missing state is unknown and cannot authorize numeric supervision.
+    return _component_state(position, *keys) == "known"
 
 
 def _side_name(direction: int) -> str:
@@ -248,10 +248,18 @@ def resolve_supervisor_posture(
 
 
 def adaptive_execution_mode(template: dict[str, Any] | None) -> str:
-    """Return the fail-closed template boundary for discretionary actions."""
+    """Return the template boundary used by the single live supervisor path.
 
-    boundary = dict((template or {}).get("risk_boundary") or {})
+    Historical observation rows remain readable, but an active template is
+    never allowed to advertise ``observation_only`` as a new execution
+    authority.
+    """
+
+    template = template or {}
+    boundary = dict(template.get("risk_boundary") or {})
     mode = str(boundary.get("adaptive_execution_mode") or "observation_only")
+    if str(template.get("status") or "").strip().lower() == "active":
+        return "governed_execute"
     return mode if mode in {"observation_only", "governed_execute"} else "observation_only"
 
 
@@ -261,7 +269,11 @@ def is_hard_supervisor_action(
     summary_reason: str,
     evidence: dict[str, Any] | None = None,
 ) -> bool:
-    """Identify actions that remain executable in Demo observation mode."""
+    """Identify hard risk-reduction actions for policy classification.
+
+    Execution authorization is decided by the governed runtime and RiskPolicy;
+    this predicate does not grant an observation-only or Demo-specific path.
+    """
 
     evidence = dict(evidence or {})
     if str(action or "").strip().lower() == "hold":
@@ -806,9 +818,9 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "market_dimensions_known": bool(posture_info.get("market_dimensions_known")),
         "supervisor_state": supervisor_state,
         "current_pnl": round(current_pnl, 6),
-        "current_price_component_state": price_component_state or "legacy_unspecified",
-        "pnl_component_state": pnl_component_state or "legacy_unspecified",
-        "position_path_metrics_state": path_metrics_state or "legacy_unspecified",
+        "current_price_component_state": price_component_state or "unknown",
+        "pnl_component_state": pnl_component_state or "unknown",
+        "position_path_metrics_state": path_metrics_state or "unknown",
         "volume": round(volume, 6),
         "distance_to_sl": _safe_float(market_space.get("distance_to_sl")),
         "distance_to_tp": _safe_float(market_space.get("distance_to_tp")),

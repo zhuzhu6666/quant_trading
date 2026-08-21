@@ -20,11 +20,6 @@ def _runtime(**overrides):
             (kwargs.get("real_pnl") or {}).get("net") or kwargs["fallback_pnl"]
         ),
         "open_api_volumes": {},
-        "decision_log": None,
-        "decision_log_run_id": "run-1",
-        "safe_decision_log": lambda *_args, **_kwargs: None,
-        "build_close_decision_audit_meta": lambda **kwargs: kwargs,
-        "json_dumps": lambda value, **_kwargs: str(value),
         "ledger": None,
         "ensure_open_ledger": lambda *_args, **_kwargs: "",
         "lookup_context_integrity": lambda _pid, value: value,
@@ -39,7 +34,6 @@ def _runtime(**overrides):
         "policy_suggester": None,
         "build_trade_review_payload": lambda **kwargs: kwargs,
         "mark_recovery_closed": lambda *_args, **_kwargs: None,
-        "trailing_state": {},
         "entry_scores": {},
         "entry_decisions": {},
         "pending_open_attach_until": {},
@@ -209,7 +203,6 @@ def test_rejected_learning_review_never_builds_or_suggests_experience():
 
 
 def test_cleanup_returns_projection_failure_but_always_clears_local_state():
-    trailing = {7: {"sl": 2390.0}}
     scores = {7: 0.5}
     decisions = {7: "entry-7"}
     pending = {7: 120.0}
@@ -226,7 +219,6 @@ def test_cleanup_returns_projection_failure_but_always_clears_local_state():
         factor_contributions={},
         runtime=_runtime(
             mark_recovery_closed=fail_projection,
-            trailing_state=trailing,
             entry_scores=scores,
             entry_decisions=decisions,
             pending_open_attach_until=pending,
@@ -234,7 +226,6 @@ def test_cleanup_returns_projection_failure_but_always_clears_local_state():
     )
 
     assert result is False
-    assert trailing == {}
     assert scores == {}
     assert decisions == {}
     assert pending == {}

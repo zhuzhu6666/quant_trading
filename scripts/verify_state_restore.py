@@ -23,7 +23,12 @@ from backend.core.state_store import connect_state_store
 from backend.services.memory_integrity import MemoryIntegrityReportService
 
 
-TABLES = ("trade_outcome_review", "experience_memory", "brain_memory")
+TABLE_QUERIES = {
+    "canonical_events": "SELECT COUNT(*) AS n FROM canonical_v2.event",
+    "canonical_training_samples": "SELECT COUNT(*) AS n FROM canonical_v2.training_sample",
+    "experience_memory": 'SELECT COUNT(*) AS n FROM "experience_memory"',
+    "brain_memory": 'SELECT COUNT(*) AS n FROM "brain_memory"',
+}
 
 
 def _connection_factory(dsn: str):
@@ -39,8 +44,8 @@ def inspect_state(dsn: str) -> dict[str, Any]:
     try:
         schema = state_schema_status(conn, minimum_version=STATE_SCHEMA_MIN_VERSION)
         counts = {
-            table: int(conn.execute(f'SELECT COUNT(*) AS n FROM "{table}"').fetchone()["n"] or 0)
-            for table in TABLES
+            name: int(conn.execute(sql).fetchone()["n"] or 0)
+            for name, sql in TABLE_QUERIES.items()
         }
     finally:
         conn.close()

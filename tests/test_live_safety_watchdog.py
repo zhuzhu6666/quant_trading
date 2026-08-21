@@ -304,7 +304,7 @@ def test_live_loop_cause_requires_normal_cycle_and_reconciled_facts(monkeypatch)
     assert no_new_risk_latch_status()["causes"] == []
 
 
-def test_watchdog_recovery_refreshes_legacy_live_admission_projection(monkeypatch):
+def test_watchdog_recovery_does_not_authorize_without_owned_generation(monkeypatch):
     now = time.time()
     activate_no_new_risk_latch(
         reason="safety freshness failed",
@@ -330,9 +330,6 @@ def test_watchdog_recovery_refreshes_legacy_live_admission_projection(monkeypatc
         account_reconcile_failed_at=0.0,
         positions_reconcile_failed_at=0.0,
     )
-    monkeypatch.setattr(
-        live_service, "_generation_controller_enabled", lambda: False
-    )
     result = evaluate_safety_freshness(
         {
             "enabled": True,
@@ -349,7 +346,7 @@ def test_watchdog_recovery_refreshes_legacy_live_admission_projection(monkeypatc
     live_service._on_live_safety_watchdog_recovery(result)
 
     assert no_new_risk_latch_status()["active"] is False
-    assert live_service._live_state_get("accepting_new_risk") is True
+    assert live_service._live_state_get("accepting_new_risk") is False
 
 
 def test_live_loop_cause_stays_latched_when_safety_cycle_is_not_ready():
@@ -643,11 +640,6 @@ def test_stale_watchdog_and_unknown_execution_block_open_but_protection_continue
     monkeypatch.setattr(live_service, "_plan_live_safety_candidates", lambda **_kwargs: plan)
     monkeypatch.setattr(
         live_service,
-        "_preview_legacy_live_safety_candidates",
-        lambda **_kwargs: plan,
-    )
-    monkeypatch.setattr(
-        live_service,
         "_execute_live_safety_candidate",
         lambda _candidate, *, positions, **_kwargs: (
             protected.extend(positions) or {"ok": True, "status": "dispatched"}
@@ -672,8 +664,6 @@ def test_stale_watchdog_and_unknown_execution_block_open_but_protection_continue
 
 def test_safety_cycle_exception_retries_in_five_seconds_and_latches(monkeypatch):
     bridge = SimpleNamespace(is_connected=True)
-    monkeypatch.setattr(live_service, "_phase2_v2_active", lambda: True)
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
     monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(live_service, "_explicit_position_reconcile", lambda _bridge: {})
     monkeypatch.setattr(
@@ -700,7 +690,6 @@ def test_safety_cycle_exception_retries_in_five_seconds_and_latches(monkeypatch)
 
 def test_v2_readiness_requires_fresh_account_positions_and_safety(monkeypatch):
     now = time.time()
-    monkeypatch.setattr(live_service, "_phase2_v2_active", lambda: True)
     monkeypatch.setattr(live_service, "_probe_ctrader", lambda: ("connected", None))
     monkeypatch.setattr(
         live_service,

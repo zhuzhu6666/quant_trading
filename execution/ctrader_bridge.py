@@ -6,7 +6,7 @@ execution/ctrader_bridge.py — cTrader Open API 桥接（当前实盘主链）
     close_position / get_positions / account_info / fetch_bars
   - 走 Twisted 异步 + Protobuf 消息 + 回调转 Deferred
   - Pepperstone demo 默认: host=demo.ctraderapi.com:5035, 无 password (走 access_token)
-  - 安全闸: send_orders=False 时 market_buy/sell 仅打印不真发
+  - send_orders=False 只表示当前 broker mutation 未获授权；不会伪造成功结果
 
 当前项目实盘主链固定经此文件对接 cTrader，其它 MT5 路径属于历史/兼容残留。
 """
@@ -58,7 +58,7 @@ except ImportError:  # 包未装
 
 # ── 公共结果类型 ──────────────────────────────────────────
 
-_ORDER_OUTCOMES = frozenset({"confirmed", "rejected", "unknown", "simulated"})
+_ORDER_OUTCOMES = frozenset({"confirmed", "rejected", "unknown"})
 _RISK_REDUCTION_ACTIONS = frozenset({
     "amend_position_sltp",
     "close_position",
@@ -234,12 +234,14 @@ class CTraderOrderResult:
         outcome = str(self.outcome or ("confirmed" if self.success else "rejected")).strip().lower()
         if outcome not in _ORDER_OUTCOMES:
             raise ValueError(f"invalid cTrader order outcome: {outcome!r}")
-        expected_success = outcome in {"confirmed", "simulated"}
+        expected_success = outcome == "confirmed"
         if bool(self.success) != expected_success:
             raise ValueError(
                 "CTraderOrderResult.success must be true only for "
-                f"confirmed/simulated outcomes (outcome={outcome!r})"
+                f"confirmed outcomes (outcome={outcome!r})"
             )
+        if self.success and not str(self.intent_id or "").strip():
+            raise ValueError("confirmed cTrader execution requires a persistent intent_id")
         object.__setattr__(self, "outcome", outcome)
 
 
@@ -322,7 +324,6 @@ class CTraderBridge(BaseBrokerBridge):
                  proxy_url: str = "",
                  proxy_rdns: bool = True,
                  forced_symbol_id: int | None = None,
-                 execution_outcome_v2_enabled: bool | None = None,
                  execution_intent_store: Any | None = None):
         if not HAS_CTRADER:
             raise ImportError("ctrader-open-api 未装; pip install ctrader-open-api")
@@ -335,7 +336,7 @@ class CTraderBridge(BaseBrokerBridge):
         self.symbol = symbol
         self.rate_limit_per_sec = rate_limit_per_sec
         self.request_timeout_sec = request_timeout_sec
-        self.send_orders = send_orders  # 安全闸: False 时只打 log 不真发
+        self.send_orders = bool(send_orders)
         self.proxy_url = str(proxy_url or "").strip()
         self.proxy_rdns = bool(proxy_rdns)
 
@@ -348,19 +349,6 @@ class CTraderBridge(BaseBrokerBridge):
         self._symbol_id: int | None = None
         self._symbol_meta: dict[str, Any] = {}
         self._forced_symbol_id = forced_symbol_id  # ProtoOASymbol 无 name, 需外部指定 ID
-        if execution_outcome_v2_enabled is None:
-            try:
-                from backend.core.static_feature_flags import shared_static_feature_flags
-
-                execution_outcome_v2_enabled = bool(
-                    shared_static_feature_flags().ctrader_execution_outcome_v2_enabled
-                )
-            except Exception:
-                # Configuration resolution must not make bridge construction
-                # fail; when v2 is explicitly enabled, its persistence gate
-                # still fails closed before any broker mutation.
-                execution_outcome_v2_enabled = False
-        self._execution_outcome_v2_enabled = bool(execution_outcome_v2_enabled)
         self._execution_intent_store = execution_intent_store
         self._server_version: str = "v0"  # ★ VersionReq 拿, 给后续 Req clientMsgId 用
         self._trader_login: int = 0  # account_info 返回的 traderLogin, 下单 fallback
@@ -1772,50 +1760,42 @@ class CTraderBridge(BaseBrokerBridge):
                 success=False, position_id=position_id or 0,
                 comment="position_id required"
             )
-        # DRY-RUN 安全闸 (跟 market/close 一致)
+        # The caller's execution authorization remains an independent safety
+        # gate.  A blocked mutation is rejected; it is never reported as a
+        # fabricated broker success.
         if not self.send_orders:
             logger.warning(
-                f"[DRY-RUN] amend_position_sltp pos={position_id} "
-                f"sl={sl} tp={tp} trailing={trailing} (send_orders=False)"
+                "amend_position_sltp blocked before intent preparation "
+                "because broker execution is not authorized pos=%s",
+                position_id,
             )
             return CTraderOrderResult(
-                success=True, outcome="simulated", position_id=position_id,
-                comment=f"DRY-RUN amend sl={sl} tp={tp} (send_orders=False)",
+                success=False,
+                outcome="rejected",
+                position_id=position_id,
+                error_code="execution_not_authorized",
+                comment="broker execution is not authorized",
             )
 
-        pre_result = None
-        if self._execution_outcome_v2_enabled:
-            pre_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
+        pre_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
+        if not pre_result.fresh:
+            return CTraderOrderResult(
+                success=False,
+                outcome="rejected",
+                position_id=int(position_id),
+                error_code="pre_reconcile_failed",
+                comment=pre_result.error_message or pre_result.error_code,
+            )
         if pre_result is not None and pre_result.fresh and not any(
             int(item.position_id) == int(position_id)
             for item in pre_result.positions
         ):
-            self._local_unknown_risk_mutations.pop(
-                ("amend_position_sltp", int(position_id)),
-                None,
-            )
-            try:
-                from backend.services.live_safety_state import (
-                    resolve_broker_outcome_mutation,
-                )
-
-                resolve_broker_outcome_mutation(
-                    action="amend_position_sltp",
-                    position_id=int(position_id),
-                    outcome="confirmed",
-                    evidence={
-                        "source": "fresh_pre_reconcile",
-                        "reconcile_id": str(pre_result.reconcile_id or ""),
-                        "position_present": False,
-                    },
-                )
-            except Exception as exc:
-                logger.error("local amend unknown resolution append failed: %s", exc)
             return CTraderOrderResult(
-                success=True,
-                outcome="confirmed",
+                success=False,
+                outcome="rejected",
                 position_id=int(position_id),
-                comment=f"Position {position_id} already absent in fresh broker reconcile",
+                error_code="position_absent_before_execution",
+                comment=f"Position {position_id} is absent in fresh broker reconcile",
             )
         store, intent_id, client_msg_id, blocked_intent = self._prepare_risk_reduction_intent(
             action="amend_position_sltp",
@@ -1830,6 +1810,18 @@ class CTraderBridge(BaseBrokerBridge):
             },
         )
         if blocked_intent is not None:
+            blocked_status = str(getattr(blocked_intent, "status", "unknown") or "unknown")
+            if blocked_status == "persistence_failed":
+                return CTraderOrderResult(
+                    success=False,
+                    outcome="rejected",
+                    position_id=int(position_id),
+                    error_code="execution_intent_persist_failed",
+                    comment="amend intent could not be persisted; broker RPC was blocked",
+                    intent_id=intent_id,
+                    execution_intent_status="persist_failed",
+                    client_msg_id=client_msg_id,
+                )
             self._latch_unknown_broker_outcome(
                 action="amend_position_sltp",
                 position_id=int(position_id),
@@ -1846,9 +1838,8 @@ class CTraderBridge(BaseBrokerBridge):
                 error_code="DUPLICATE_MUTATION_BLOCKED",
                 comment="unresolved amend intent must be recovered before resubmission",
                 intent_id=intent_id,
-                execution_intent_status=(
-                    "persisted" if store is not None else "compat_missing_intent"
-                ),
+                execution_intent_status="persisted",
+                client_msg_id=client_msg_id,
             )
         req = TradeMsg.ProtoOAAmendPositionSLTPReq()
         req.ctidTraderAccountId = self.account_id
@@ -1881,7 +1872,7 @@ class CTraderBridge(BaseBrokerBridge):
         rejected = self._response_is_explicit_rejection(response)
         if rejected:
             err_code = str(response.get("error_code") or "broker_rejected")
-            self._finalize_risk_reduction_intent(
+            finalized = self._finalize_risk_reduction_intent(
                 store,
                 intent_id,
                 outcome="rejected",
@@ -1889,43 +1880,34 @@ class CTraderBridge(BaseBrokerBridge):
                 broker_response=response,
                 error={"error_code": err_code, "description": response.get("description")},
             )
+            if not finalized:
+                self._latch_unknown_broker_outcome(
+                    action="amend_position_sltp",
+                    position_id=int(position_id),
+                    intent_id=intent_id,
+                    evidence={
+                        **response,
+                        "reason": "intent_finalize_failed_after_rejection",
+                    },
+                )
+                return CTraderOrderResult(
+                    success=False,
+                    outcome="unknown",
+                    position_id=position_id,
+                    error_code="INTENT_FINALIZE_FAILED",
+                    comment="amend rejection could not be persisted",
+                    intent_id=intent_id,
+                    execution_intent_status="persisted",
+                    client_msg_id=client_msg_id,
+                )
             return CTraderOrderResult(
                 success=False,
                 outcome="rejected",
                 position_id=position_id,
                 error_code=err_code,
                 comment=f"amend rejected: {err_code} — {response.get('description') or ''}",
-                intent_id=intent_id if store is not None else "",
-                execution_intent_status=(
-                    "persisted" if store is not None else "compat_missing_intent"
-                ),
-                client_msg_id=client_msg_id,
-            )
-
-        if not self._execution_outcome_v2_enabled:
-            confirmed = (
-                response.get("response_type") == "ProtoOAExecutionEvent"
-                and send_error is None
-            )
-            outcome = "confirmed" if confirmed else "unknown"
-            if not confirmed:
-                self._latch_unknown_broker_outcome(
-                    action="amend_position_sltp",
-                    position_id=int(position_id),
-                    intent_id=intent_id,
-                    evidence={**response, "rpc_error": str(send_error or "")},
-                )
-            return CTraderOrderResult(
-                success=confirmed,
-                outcome=outcome,
-                position_id=position_id,
-                error_code="" if confirmed else "AMEND_OUTCOME_UNKNOWN",
-                comment=(
-                    "amend accepted by ExecutionEvent (compat mode)"
-                    if confirmed
-                    else str(send_error or f"unexpected response: {response.get('response_type') or 'none'}")
-                ),
-                execution_intent_status="compat_missing_intent",
+                intent_id=intent_id,
+                execution_intent_status="persisted",
                 client_msg_id=client_msg_id,
             )
 
@@ -1950,7 +1932,7 @@ class CTraderBridge(BaseBrokerBridge):
             "rpc_error": str(send_error or ""),
         }
         outcome = "confirmed" if confirmed else "unknown"
-        self._finalize_risk_reduction_intent(
+        finalized = self._finalize_risk_reduction_intent(
             store,
             intent_id,
             outcome=outcome,
@@ -1958,7 +1940,20 @@ class CTraderBridge(BaseBrokerBridge):
             broker_response={**response, "resolution": resolution},
             error={} if confirmed else {"reason": "amend_not_freshly_verified"},
         )
-        if not confirmed:
+        if not finalized:
+            outcome = "unknown"
+            confirmed = False
+            self._latch_unknown_broker_outcome(
+                action="amend_position_sltp",
+                position_id=int(position_id),
+                intent_id=intent_id,
+                evidence={
+                    **response,
+                    "reason": "intent_finalize_failed",
+                    "post_reconcile_id": post_result.reconcile_id,
+                },
+            )
+        elif not confirmed:
             self._latch_unknown_broker_outcome(
                 action="amend_position_sltp",
                 position_id=int(position_id),
@@ -1971,10 +1966,8 @@ class CTraderBridge(BaseBrokerBridge):
             position_id=position_id,
             error_code="" if confirmed else "AMEND_OUTCOME_UNKNOWN",
             comment="amend verified by fresh broker reconcile" if confirmed else "amend not freshly verified",
-            intent_id=intent_id if store is not None else "",
-            execution_intent_status=(
-                "persisted" if store is not None else "compat_missing_intent"
-            ),
+            intent_id=intent_id,
+            execution_intent_status="persisted",
             client_msg_id=client_msg_id,
         )
 
@@ -2000,13 +1993,11 @@ class CTraderBridge(BaseBrokerBridge):
         target_take_profit: float = 0.0,
         request: dict[str, Any] | None = None,
     ) -> tuple[Any | None, str, str, Any | None]:
-        """Best-effort intent ledger for close/reduce/tighten mutations.
+        """Persist and advance a risk-reducing mutation before its broker RPC.
 
-        New risk requires PostgreSQL intent persistence before its RPC.  Risk
-        reduction has the opposite availability rule: a state-store failure
-        is written to the local safety outbox but must never suppress the
-        broker mutation.  The returned client message id is always a UUID so
-        broker transport evidence remains correlatable even without PG.
+        Every mutation uses the same durable intent boundary.  A missing
+        runtime table, failed prepare, or failed submitting transition blocks
+        the RPC; there is no local/compatibility execution fallback.
         """
 
         intent_id = str(uuid.uuid4())
@@ -2035,12 +2026,10 @@ class CTraderBridge(BaseBrokerBridge):
                     self._local_unknown_risk_mutations[mutation_key] = blocked
                     return None, blocked.intent_id, client_msg_id, blocked
         except Exception as exc:
-            # A failed durable lookup cannot suppress a first risk reduction.
-            # If that RPC becomes unknown, _latch_unknown_broker_outcome keeps
-            # a process-local identity before attempting durable persistence.
+            # The durable intent store below remains authoritative.  A lookup
+            # failure is therefore handled as an intent persistence failure if
+            # the store cannot complete its own read/prepare transaction.
             logger.error("unknown risk-reduction mutation lookup unavailable: %s", exc)
-        if not self._execution_outcome_v2_enabled:
-            return None, intent_id, client_msg_id, None
         try:
             store = self._intent_store()
             for existing in store.unresolved(
@@ -2089,41 +2078,29 @@ class CTraderBridge(BaseBrokerBridge):
             )
             return store, intent_id, client_msg_id, None
         except Exception as exc:
-            logger.error("risk-reduction intent persistence unavailable; broker action continues: %s", exc)
-            try:
-                from backend.services.live_safety_state import append_safety_outbox
-
-                append_safety_outbox(
-                    event_type="broker_risk_reduction_intent_persist_failed",
-                    correlation_id=intent_id,
-                    payload={
-                        "action": str(action),
-                        "position_id": int(position_id),
-                        "requested_volume": float(requested_volume or 0.0),
-                        "target_stop_loss": float(target_stop_loss or 0.0),
-                        "target_take_profit": float(target_take_profit or 0.0),
-                        "client_msg_id": client_msg_id,
-                    },
-                    error=f"{type(exc).__name__}:{exc}",
-                )
-            except Exception as outbox_exc:
-                logger.error("risk-reduction safety outbox also failed: %s", outbox_exc)
-            return None, intent_id, client_msg_id, None
+            logger.error("risk-reduction intent persistence failed; broker RPC blocked: %s", exc)
+            return (
+                None,
+                intent_id,
+                client_msg_id,
+                _BlockedRiskReductionIntent(
+                    intent_id=intent_id,
+                    status="persistence_failed",
+                ),
+            )
 
     @staticmethod
     def _finalize_risk_reduction_intent(
-        store: Any | None,
+        store: Any,
         intent_id: str,
         *,
         outcome: str,
         position_id: int,
         broker_response: dict[str, Any],
         error: dict[str, Any] | None = None,
-    ) -> None:
-        """Finalize best-effort bookkeeping without rewriting broker truth."""
+    ) -> bool:
+        """Persist the terminal outcome; failure means the broker outcome is unknown."""
 
-        if store is None:
-            return
         try:
             store.complete(
                 intent_id,
@@ -2133,23 +2110,10 @@ class CTraderBridge(BaseBrokerBridge):
                 broker_response=broker_response,
                 error=dict(error or {}),
             )
+            return True
         except Exception as exc:
             logger.error("risk-reduction intent finalize failed: %s", exc)
-            try:
-                from backend.services.live_safety_state import append_safety_outbox
-
-                append_safety_outbox(
-                    event_type="broker_risk_reduction_intent_finalize_failed",
-                    correlation_id=intent_id,
-                    payload={
-                        "outcome": outcome,
-                        "position_id": int(position_id),
-                        "broker_response": broker_response,
-                    },
-                    error=f"{type(exc).__name__}:{exc}",
-                )
-            except Exception as outbox_exc:
-                logger.error("risk-reduction finalize outbox also failed: %s", outbox_exc)
+            return False
 
     def _latch_unknown_broker_outcome(
         self,
@@ -2199,9 +2163,9 @@ class CTraderBridge(BaseBrokerBridge):
             durable_unknown = list(unresolved_broker_outcome_mutations())
         except Exception as exc:
             return {
-                "schema": "broker_execution_intent_recovery.v1",
+                "schema": "broker_execution_intent_recovery.v2",
                 "ready": False,
-                "enabled": bool(self._execution_outcome_v2_enabled),
+                "enabled": True,
                 "unresolved_count": None,
                 "unresolved": [],
                 "local_safety_latch_status": "unavailable",
@@ -2209,17 +2173,6 @@ class CTraderBridge(BaseBrokerBridge):
                     "local_unknown_ledger_unavailable:"
                     f"{type(exc).__name__}:{exc}"
                 )[:500],
-            }
-        if not self._execution_outcome_v2_enabled:
-            return {
-                "schema": "broker_execution_intent_recovery.v1",
-                "ready": not durable_unknown,
-                "enabled": False,
-                "unresolved_count": len(durable_unknown),
-                "unresolved": [
-                    {**item, "source": "local_safety_latch"}
-                    for item in durable_unknown
-                ],
             }
         try:
             from backend.services.broker_execution_intent import execution_intent_recovery_status
@@ -2248,7 +2201,7 @@ class CTraderBridge(BaseBrokerBridge):
             }
         except Exception as exc:
             return {
-                "schema": "broker_execution_intent_recovery.v1",
+                "schema": "broker_execution_intent_recovery.v2",
                 "ready": False,
                 "enabled": True,
                 "unresolved_count": None,
@@ -2660,12 +2613,10 @@ class CTraderBridge(BaseBrokerBridge):
 
     def recover_execution_intents(self) -> dict[str, Any]:
         """Resolve persisted broker intents by action without resubmitting."""
-        if not self._execution_outcome_v2_enabled:
-            return self._recover_local_execution_outcomes()
         store = self._intent_store()
         unresolved = store.unresolved(account_id=str(self.account_id), symbol=str(self.symbol))
         if not unresolved:
-            return self._recover_local_execution_outcomes()
+            return self.execution_intent_recovery_status()
         positions_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
         if not positions_result.fresh:
             return {
@@ -2793,111 +2744,6 @@ class CTraderBridge(BaseBrokerBridge):
             )
         return {**self.execution_intent_recovery_status(), "recovered": recovered}
 
-    def _recover_local_execution_outcomes(self) -> dict[str, Any]:
-        """Resolve compat-mode risk reductions from a fresh broker snapshot."""
-
-        try:
-            from backend.services.live_safety_state import (
-                resolve_broker_outcome_mutation,
-                unresolved_broker_outcome_mutations,
-            )
-
-            unresolved = list(unresolved_broker_outcome_mutations())
-        except Exception as exc:
-            return {
-                **self.execution_intent_recovery_status(),
-                "ready": False,
-                "recovery_error": f"local_unknown_ledger_unavailable:{type(exc).__name__}:{exc}",
-            }
-        if not unresolved:
-            return self.execution_intent_recovery_status()
-        positions_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
-        if not positions_result.fresh:
-            return {
-                **self.execution_intent_recovery_status(),
-                "ready": False,
-                "recovery_error": positions_result.error_code or "position_reconcile_failed",
-            }
-        post_positions = self._position_snapshot_payload(positions_result.positions)
-        digits = int((getattr(self, "_symbol_meta", None) or {}).get("digits", 2))
-        recovered: list[dict[str, Any]] = []
-        for item in unresolved:
-            action = str(item.get("action") or "").strip().lower()
-            position_id = int(item.get("position_id") or 0)
-            evidence = dict(item.get("evidence") or {})
-            nested_resolution = dict(evidence.get("resolution") or {})
-            request = {
-                "position_id": position_id,
-                "position_volume_before": (
-                    evidence.get("position_volume_before")
-                    or nested_resolution.get("position_volume_before")
-                ),
-                "requested_volume": evidence.get("requested_volume"),
-                "target_stop_loss": (
-                    evidence.get("target_stop_loss")
-                    or nested_resolution.get("target_stop_loss")
-                ),
-                "target_take_profit": (
-                    evidence.get("target_take_profit")
-                    or nested_resolution.get("target_take_profit")
-                ),
-            }
-            local_intent = SimpleNamespace(
-                request=request,
-                position_id=position_id,
-                requested_volume=float(request.get("requested_volume") or 0.0),
-                target_stop_loss=float(request.get("target_stop_loss") or 0.0),
-                target_take_profit=float(request.get("target_take_profit") or 0.0),
-            )
-            if action in {"close_position", "reduce_position"}:
-                resolution = self._resolve_close_intent_recovery(
-                    local_intent,
-                    post_positions=post_positions,
-                )
-            elif action == "amend_position_sltp":
-                resolution = self._resolve_amend_intent_recovery(
-                    local_intent,
-                    post_positions=post_positions,
-                    digits=digits,
-                )
-            else:
-                resolution = {
-                    "outcome": "unknown",
-                    "position_id": position_id,
-                    "order_id": 0,
-                    "reason": f"local_recovery_requires_persisted_identity:{action or 'missing'}",
-                }
-            outcome = str(resolution.get("outcome") or "unknown")
-            local_resolution: dict[str, Any] = {}
-            if outcome in {"confirmed", "rejected"}:
-                try:
-                    local_resolution = resolve_broker_outcome_mutation(
-                        intent_id=str(item.get("intent_id") or ""),
-                        action=action,
-                        position_id=position_id,
-                        outcome=outcome,
-                        evidence={
-                            "source": "fresh_local_ledger_recovery",
-                            "reconcile_id": str(positions_result.reconcile_id or ""),
-                            "resolution": resolution,
-                        },
-                    )
-                    self._local_unknown_risk_mutations.pop((action, position_id), None)
-                except Exception as exc:
-                    logger.error("local unknown-outcome resolution append failed: %s", exc)
-                    local_resolution = {
-                        "status": "resolution_append_failed",
-                        "error": f"{type(exc).__name__}:{exc}",
-                    }
-            recovered.append(
-                {
-                    "intent_id": str(item.get("intent_id") or ""),
-                    **resolution,
-                    "local_resolution": local_resolution,
-                }
-            )
-        return {**self.execution_intent_recovery_status(), "recovered": recovered}
-
     def _send_market_order(self, side: int, volume: float, sl: float, tp: float,
                            comment: str, *, decision_id: str = "",
                            trade_id: str = "",
@@ -2925,12 +2771,17 @@ class CTraderBridge(BaseBrokerBridge):
             )
         if not self.send_orders:
             logger.warning(
-                "[DRY-RUN] cTrader market %s vol=%s sl=%s tp=%s (send_orders=False)",
-                side, volume, sl, tp,
+                "market order blocked before intent preparation because "
+                "broker execution is not authorized side=%s volume=%s",
+                side,
+                volume,
             )
             return CTraderOrderResult(
-                success=True, outcome="simulated", comment="DRY-RUN (send_orders=False)",
-                volume=volume, price=sl or tp,
+                success=False,
+                outcome="rejected",
+                error_code="execution_not_authorized",
+                comment="broker execution is not authorized",
+                volume=volume,
             )
 
         try:
@@ -2998,82 +2849,84 @@ class CTraderBridge(BaseBrokerBridge):
             risk_payload = dict(risk_verdict)
         else:
             risk_payload = dict(getattr(risk_verdict, "__dict__", {}) or {})
-        if self._execution_outcome_v2_enabled:
-            try:
-                store = self._intent_store()
-                unresolved = int(
-                    store.unresolved_count(
-                        account_id=str(self.account_id), symbol=str(self.symbol)
-                    )
+        try:
+            store = self._intent_store()
+            unresolved = int(
+                store.unresolved_count(
+                    account_id=str(self.account_id), symbol=str(self.symbol)
                 )
-                if unresolved > 0:
-                    self._latch_unknown_broker_outcome(
-                        action="market_open",
-                        position_id=0,
-                        intent_id=intent_id,
-                        evidence={
-                            "reason": "unresolved_execution_intent",
-                            "unresolved_count": unresolved,
-                        },
-                    )
-                    return CTraderOrderResult(
-                        success=False, outcome="rejected",
-                        error_code="unresolved_execution_intent",
-                        comment=f"blocked: {unresolved} unresolved broker execution intent(s)",
-                        execution_intent_status="persisted",
-                        client_order_id=client_order_id, client_msg_id=client_msg_id,
-                    )
-                pre_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
-                if not pre_result.fresh:
-                    return CTraderOrderResult(
-                        success=False, outcome="rejected", error_code="pre_reconcile_failed",
-                        comment=pre_result.error_message or pre_result.error_code,
-                        client_order_id=client_order_id, client_msg_id=client_msg_id,
-                    )
-                pre_positions = self._position_snapshot_payload(pre_result.positions)
-                pre_deal_rows = self.get_deals(from_ts=int(time.time() - 86400), max_rows=1000)
-                pre_deals_available = bool(self._last_deals_fetch_ok)
-                pre_deals = self._deal_snapshot_payload(pre_deal_rows) if pre_deals_available else {}
-                prepared = store.prepare(
-                    intent_id=intent_id, idempotency_key=intent_id,
-                    broker="ctrader", account_id=str(self.account_id), symbol=str(self.symbol),
+            )
+            if unresolved > 0:
+                self._latch_unknown_broker_outcome(
                     action="market_open",
-                    side="buy" if side == TRADE_SIDE["BUY"] else "sell",
-                    requested_volume=float(req.volume),
-                    target_stop_loss=float(sl or 0.0),
-                    target_take_profit=float(tp or 0.0),
-                    decision_id=str(decision_id or ""),
-                    trade_id=str(trade_id or ""),
-                    request={
-                        "schema": "broker_execution_request.v2",
-                        "symbol_id": int(self._symbol_id or 0),
-                        "client_order_id": client_order_id,
-                        "client_msg_id": client_msg_id,
-                        "comment_token": comment_token,
-                        "comment": req.comment,
-                        "positions_before": pre_positions,
-                        "deals_before": pre_deals,
-                        "deals_before_available": pre_deals_available,
-                        "pre_reconcile_id": pre_result.reconcile_id,
-                        "decision_id": str(decision_id or ""),
-                        "trade_id": str(trade_id or ""),
-                        "risk_verdict": risk_payload,
+                    position_id=0,
+                    intent_id=intent_id,
+                    evidence={
+                        "reason": "unresolved_execution_intent",
+                        "unresolved_count": unresolved,
                     },
                 )
-                intent_id = prepared.intent_id
-                store.mark_submitting(
-                    intent_id,
-                    request={**dict(prepared.request or {}), "submitting_at": time.time()},
-                )
-            except Exception as exc:
-                logger.error("broker execution intent gate failed before RPC: %s", exc)
                 return CTraderOrderResult(
                     success=False, outcome="rejected",
-                    error_code="execution_intent_persist_failed", comment=str(exc),
+                    error_code="unresolved_execution_intent",
+                    comment=f"blocked: {unresolved} unresolved broker execution intent(s)",
                     intent_id=intent_id,
-                    execution_intent_status="persist_failed",
+                    execution_intent_status="persisted",
                     client_order_id=client_order_id, client_msg_id=client_msg_id,
                 )
+            pre_result = self.reconcile_positions(force=True, allow_cache_fallback=False)
+            if not pre_result.fresh:
+                return CTraderOrderResult(
+                    success=False, outcome="rejected", error_code="pre_reconcile_failed",
+                    comment=pre_result.error_message or pre_result.error_code,
+                    intent_id=intent_id,
+                    execution_intent_status="persisted",
+                    client_order_id=client_order_id, client_msg_id=client_msg_id,
+                )
+            pre_positions = self._position_snapshot_payload(pre_result.positions)
+            pre_deal_rows = self.get_deals(from_ts=int(time.time() - 86400), max_rows=1000)
+            pre_deals_available = bool(self._last_deals_fetch_ok)
+            pre_deals = self._deal_snapshot_payload(pre_deal_rows) if pre_deals_available else {}
+            prepared = store.prepare(
+                intent_id=intent_id, idempotency_key=intent_id,
+                broker="ctrader", account_id=str(self.account_id), symbol=str(self.symbol),
+                action="market_open",
+                side="buy" if side == TRADE_SIDE["BUY"] else "sell",
+                requested_volume=float(req.volume),
+                target_stop_loss=float(sl or 0.0),
+                target_take_profit=float(tp or 0.0),
+                decision_id=str(decision_id or ""),
+                trade_id=str(trade_id or ""),
+                request={
+                    "schema": "broker_execution_request.v2",
+                    "symbol_id": int(self._symbol_id or 0),
+                    "client_order_id": client_order_id,
+                    "client_msg_id": client_msg_id,
+                    "comment_token": comment_token,
+                    "comment": req.comment,
+                    "positions_before": pre_positions,
+                    "deals_before": pre_deals,
+                    "deals_before_available": pre_deals_available,
+                    "pre_reconcile_id": pre_result.reconcile_id,
+                    "decision_id": str(decision_id or ""),
+                    "trade_id": str(trade_id or ""),
+                    "risk_verdict": risk_payload,
+                },
+            )
+            intent_id = prepared.intent_id
+            store.mark_submitting(
+                intent_id,
+                request={**dict(prepared.request or {}), "submitting_at": time.time()},
+            )
+        except Exception as exc:
+            logger.error("broker execution intent gate failed before RPC: %s", exc)
+            return CTraderOrderResult(
+                success=False, outcome="rejected",
+                error_code="execution_intent_persist_failed", comment=str(exc),
+                intent_id=intent_id,
+                execution_intent_status="persist_failed",
+                client_order_id=client_order_id, client_msg_id=client_msg_id,
+            )
 
         resp = None
         send_error: Exception | None = None
@@ -3088,76 +2941,40 @@ class CTraderBridge(BaseBrokerBridge):
         rejected = self._response_is_explicit_rejection(response)
         if rejected:
             broker_code = error_code or "broker_rejected"
-            if store is not None:
-                try:
-                    store.complete(
-                        intent_id, outcome="rejected", broker_response=response,
-                        trade_id=str(
-                            trade_id
-                            or response.get("trade_id")
-                            or response.get("position_id")
-                            or ""
-                        ),
-                        error={"error_code": broker_code, "description": response.get("description")},
-                    )
-                except Exception as exc:
-                    logger.error("failed to finalize rejected execution intent: %s", exc)
-                    self._latch_unknown_broker_outcome(
-                        action="market_open",
-                        position_id=int(response.get("position_id") or 0),
-                        intent_id=intent_id,
-                        evidence={
-                            **response,
-                            "reason": "intent_finalize_failed_after_rejection",
-                            "finalize_error": f"{type(exc).__name__}: {exc}",
-                        },
-                    )
-                    return CTraderOrderResult(
-                        success=False, outcome="unknown", error_code="INTENT_FINALIZE_FAILED",
-                        comment=str(exc), intent_id=intent_id,
-                        execution_intent_status="persisted",
-                        client_order_id=client_order_id, client_msg_id=client_msg_id,
-                    )
+            try:
+                store.complete(
+                    intent_id, outcome="rejected", broker_response=response,
+                    trade_id=str(
+                        trade_id
+                        or response.get("trade_id")
+                        or response.get("position_id")
+                        or ""
+                    ),
+                    error={"error_code": broker_code, "description": response.get("description")},
+                )
+            except Exception as exc:
+                logger.error("failed to finalize rejected execution intent: %s", exc)
+                self._latch_unknown_broker_outcome(
+                    action="market_open",
+                    position_id=int(response.get("position_id") or 0),
+                    intent_id=intent_id,
+                    evidence={
+                        **response,
+                        "reason": "intent_finalize_failed_after_rejection",
+                        "finalize_error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+                return CTraderOrderResult(
+                    success=False, outcome="unknown", error_code="INTENT_FINALIZE_FAILED",
+                    comment=str(exc), intent_id=intent_id,
+                    execution_intent_status="persisted",
+                    client_order_id=client_order_id, client_msg_id=client_msg_id,
+                )
             return CTraderOrderResult(
                 success=False, outcome="rejected", error_code=broker_code,
                 comment=f"broker rejected: {broker_code} — {response.get('description') or ''}",
-                intent_id=intent_id if store is not None else "",
-                execution_intent_status=(
-                    "persisted" if store is not None else "compat_missing_intent"
-                ),
-                client_order_id=client_order_id, client_msg_id=client_msg_id,
-            )
-
-        if not self._execution_outcome_v2_enabled:
-            response_pid = int(response.get("position_id") or 0)
-            if (
-                response.get("response_type") == "ProtoOAExecutionEvent"
-                and response_pid > 0
-                and send_error is None
-            ):
-                return CTraderOrderResult(
-                    success=True, outcome="confirmed",
-                    order_id=int(response.get("order_id") or 0), position_id=response_pid,
-                    comment=f"filled: orderId={int(response.get('order_id') or 0)} posId={response_pid}",
-                    execution_intent_status="compat_missing_intent",
-                    client_order_id=client_order_id, client_msg_id=client_msg_id,
-                )
-            self._latch_unknown_broker_outcome(
-                action="market_open",
-                position_id=int(response.get("position_id") or 0),
                 intent_id=intent_id,
-                evidence={
-                    **response,
-                    "reason": "compat_market_open_outcome_unknown",
-                    "rpc_error": str(send_error or ""),
-                },
-            )
-            return CTraderOrderResult(
-                success=False, outcome="unknown",
-                order_id=int(response.get("order_id") or 0),
-                error_code="SEND_OUTCOME_UNKNOWN",
-                comment=str(send_error or f"unexpected response: {response.get('response_type') or 'none'}"),
-                execution_intent_status="compat_missing_intent",
+                execution_intent_status="persisted",
                 client_order_id=client_order_id, client_msg_id=client_msg_id,
             )
 
@@ -3297,7 +3114,7 @@ class CTraderBridge(BaseBrokerBridge):
 
     def _close_position_serial(self, position_id: int,
                                volume: float = 0.0) -> OrderResult:
-        """平仓 (走 ProtoOAClosePositionReq, DRY-RUN 时仅打印).
+        """平仓 (走 ProtoOAClosePositionReq).
 
         Args:
             position_id: 要平的仓位 ID; None 时 broker 默认平当前账户所有仓位
@@ -3312,13 +3129,19 @@ class CTraderBridge(BaseBrokerBridge):
             return OrderResult(success=False, outcome="rejected", comment="Account not authed")
         if position_id <= 0:
             return OrderResult(success=False, outcome="rejected", comment="position_id required")
-        # DRY-RUN 安全闸
         if not self.send_orders:
-            logger.warning(f"[DRY-RUN] close_position pos={position_id} vol={volume} (send_orders=False)")
+            logger.warning(
+                "close_position blocked before intent preparation because "
+                "broker execution is not authorized pos=%s volume=%s",
+                position_id,
+                volume,
+            )
             return OrderResult(
-                success=True, position_id=position_id,
-                outcome="simulated",
-                comment="DRY-RUN close (send_orders=False)",
+                success=False,
+                position_id=position_id,
+                outcome="rejected",
+                error_code="execution_not_authorized",
+                comment="broker execution is not authorized",
             )
         close_volume = 0
         if volume > 0.0:
@@ -3349,37 +3172,13 @@ class CTraderBridge(BaseBrokerBridge):
             None,
         ) if pre_result.fresh else None
         if pre_result is not None and pre_result.fresh and pre_position is None:
-            self._local_unknown_risk_mutations.pop(
-                ("close_position", int(position_id)),
-                None,
-            )
-            self._local_unknown_risk_mutations.pop(
-                ("reduce_position", int(position_id)),
-                None,
-            )
-            try:
-                from backend.services.live_safety_state import (
-                    resolve_broker_outcome_mutation,
-                )
-
-                resolve_broker_outcome_mutation(
-                    action="close_position",
-                    position_id=int(position_id),
-                    outcome="confirmed",
-                    evidence={
-                        "source": "fresh_pre_reconcile",
-                        "reconcile_id": str(pre_result.reconcile_id or ""),
-                        "position_present": False,
-                    },
-                )
-            except Exception as exc:
-                logger.error("local close unknown resolution append failed: %s", exc)
             return OrderResult(
-                success=True,
-                outcome="confirmed",
+                success=False,
+                outcome="rejected",
                 position_id=position_id,
                 volume=float(volume or 0.0),
-                comment=f"Position {position_id} already absent in fresh broker reconcile",
+                error_code="position_absent_before_execution",
+                comment=f"Position {position_id} is absent in fresh broker reconcile",
             )
         if volume <= 0.0:
             if pre_result is None or not pre_result.fresh:
@@ -3421,6 +3220,19 @@ class CTraderBridge(BaseBrokerBridge):
             },
         )
         if blocked_intent is not None:
+            blocked_status = str(getattr(blocked_intent, "status", "unknown") or "unknown")
+            if blocked_status == "persistence_failed":
+                return OrderResult(
+                    success=False,
+                    outcome="rejected",
+                    position_id=int(position_id),
+                    volume=float(close_volume),
+                    error_code="execution_intent_persist_failed",
+                    comment="close intent could not be persisted; broker RPC was blocked",
+                    intent_id=intent_id,
+                    execution_intent_status="persist_failed",
+                    client_msg_id=client_msg_id,
+                )
             self._latch_unknown_broker_outcome(
                 action="close_position",
                 position_id=int(position_id),
@@ -3438,9 +3250,8 @@ class CTraderBridge(BaseBrokerBridge):
                 error_code="DUPLICATE_MUTATION_BLOCKED",
                 comment="unresolved close intent must be recovered before resubmission",
                 intent_id=intent_id,
-                execution_intent_status=(
-                    "persisted" if store is not None else "compat_missing_intent"
-                ),
+                execution_intent_status="persisted",
+                client_msg_id=client_msg_id,
             )
         req = TradeMsg.ProtoOAClosePositionReq()
         req.ctidTraderAccountId = self.account_id
@@ -3458,7 +3269,7 @@ class CTraderBridge(BaseBrokerBridge):
         rejected = self._response_is_explicit_rejection(response)
         if rejected:
             err_code = str(response.get("error_code") or "broker_rejected")
-            self._finalize_risk_reduction_intent(
+            finalized = self._finalize_risk_reduction_intent(
                 store,
                 intent_id,
                 outcome="rejected",
@@ -3466,6 +3277,27 @@ class CTraderBridge(BaseBrokerBridge):
                 broker_response=response,
                 error={"error_code": err_code, "description": response.get("description")},
             )
+            if not finalized:
+                self._latch_unknown_broker_outcome(
+                    action="close_position",
+                    position_id=int(position_id),
+                    intent_id=intent_id,
+                    evidence={
+                        **response,
+                        "reason": "intent_finalize_failed_after_rejection",
+                    },
+                )
+                return OrderResult(
+                    success=False,
+                    outcome="unknown",
+                    position_id=position_id,
+                    volume=float(close_volume),
+                    error_code="INTENT_FINALIZE_FAILED",
+                    comment="close rejection could not be persisted",
+                    intent_id=intent_id,
+                    execution_intent_status="persisted",
+                    client_msg_id=client_msg_id,
+                )
             return OrderResult(
                 success=False,
                 outcome="rejected",
@@ -3473,47 +3305,8 @@ class CTraderBridge(BaseBrokerBridge):
                 volume=float(close_volume),
                 error_code=err_code,
                 comment=f"close rejected: {err_code} — {response.get('description') or ''}",
-                intent_id=intent_id if store is not None else "",
-                execution_intent_status=(
-                    "persisted" if store is not None else "compat_missing_intent"
-                ),
-                client_msg_id=client_msg_id,
-            )
-
-        if not self._execution_outcome_v2_enabled:
-            confirmed = (
-                response.get("response_type") == "ProtoOAExecutionEvent"
-                and send_error is None
-            )
-            outcome = "confirmed" if confirmed else "unknown"
-            evidence = {
-                **response,
-                "rpc_error": str(send_error or ""),
-                "requested_volume": float(close_volume),
-                "position_volume_before": (
-                    float(pre_position.volume or 0.0) if pre_position is not None else None
-                ),
-            }
-            if not confirmed:
-                self._latch_unknown_broker_outcome(
-                    action="close_position",
-                    position_id=int(position_id),
-                    intent_id=intent_id,
-                    evidence=evidence,
-                )
-            return OrderResult(
-                success=confirmed,
-                outcome=outcome,
-                position_id=position_id,
-                volume=float(close_volume),
-                order_id=int(response.get("order_id") or 0),
-                error_code="" if confirmed else "CLOSE_OUTCOME_UNKNOWN",
-                comment=(
-                    "close accepted by ExecutionEvent (compat mode)"
-                    if confirmed
-                    else str(send_error or f"unexpected response: {response.get('response_type') or 'none'}")
-                ),
-                execution_intent_status="compat_missing_intent",
+                intent_id=intent_id,
+                execution_intent_status="persisted",
                 client_msg_id=client_msg_id,
             )
 
@@ -3545,7 +3338,7 @@ class CTraderBridge(BaseBrokerBridge):
             "rpc_error": str(send_error or ""),
         }
         outcome = "confirmed" if confirmed else "unknown"
-        self._finalize_risk_reduction_intent(
+        finalized = self._finalize_risk_reduction_intent(
             store,
             intent_id,
             outcome=outcome,
@@ -3553,7 +3346,20 @@ class CTraderBridge(BaseBrokerBridge):
             broker_response={**response, "resolution": resolution},
             error={} if confirmed else {"reason": "close_not_freshly_verified"},
         )
-        if not confirmed:
+        if not finalized:
+            outcome = "unknown"
+            confirmed = False
+            self._latch_unknown_broker_outcome(
+                action="close_position",
+                position_id=int(position_id),
+                intent_id=intent_id,
+                evidence={
+                    **response,
+                    "resolution": resolution,
+                    "reason": "intent_finalize_failed",
+                },
+            )
+        elif not confirmed:
             self._latch_unknown_broker_outcome(
                 action="close_position",
                 position_id=int(position_id),
@@ -3568,10 +3374,8 @@ class CTraderBridge(BaseBrokerBridge):
             order_id=int(response.get("order_id") or 0),
             error_code="" if confirmed else "CLOSE_OUTCOME_UNKNOWN",
             comment="close verified by fresh broker reconcile" if confirmed else "close not freshly verified",
-            intent_id=intent_id if store is not None else "",
-            execution_intent_status=(
-                "persisted" if store is not None else "compat_missing_intent"
-            ),
+            intent_id=intent_id,
+            execution_intent_status="persisted",
             client_msg_id=client_msg_id,
         )
 
@@ -3595,11 +3399,7 @@ class CTraderBridge(BaseBrokerBridge):
         cached = self._copy_account_cache()
         if cached.account_id or cached.balance or cached.equity:
             return cached
-        return self.refresh_account_info()
-
-    def refresh_account_info(self) -> AccountInfo:
-        """Legacy value-only wrapper around :meth:`reconcile_account`."""
-        result = self.reconcile_account(force=True, allow_cache_fallback=True)
+        result = self.reconcile_account(force=True, allow_cache_fallback=False)
         return result.account or AccountInfo()
 
     def reconcile_account(
@@ -3779,20 +3579,10 @@ class CTraderBridge(BaseBrokerBridge):
             if symbol and self._symbol_id is not None:
                 return [pos for pos in cached_positions if int(pos.symbol_id or 0) == int(self._symbol_id)]
             return cached_positions
-        return self.refresh_positions(symbol)
-
-    def refresh_positions(
-        self,
-        symbol: str = "",
-        *,
-        force: bool = False,
-        allow_cache_fallback: bool = True,
-    ) -> list[PositionInfo]:
-        """Legacy value-only wrapper around :meth:`reconcile_positions`."""
         result = self.reconcile_positions(
             symbol,
-            force=force,
-            allow_cache_fallback=allow_cache_fallback,
+            force=True,
+            allow_cache_fallback=False,
         )
         return [self._copy_position(pos) for pos in result.positions]
 
@@ -3808,7 +3598,7 @@ class CTraderBridge(BaseBrokerBridge):
 
         A fresh empty tuple means the broker confirmed no positions.  A
         failed call is never encoded as an empty list, which is the key safety
-        distinction missing from the legacy ``refresh_positions`` API.
+        distinction between a broker fact and a read-only display snapshot.
         """
         reconcile_id = str(uuid.uuid4())
 
@@ -4154,7 +3944,7 @@ class CTraderBridge(BaseBrokerBridge):
                     "price_contract": (
                         "ctrader.deal.execution_price.raw.v1"
                         if execution_price > 0.0
-                        else "legacy_unknown"
+                        else "unknown"
                     ),
                     "price_quality": price_quality,
                     "trade_side": "buy" if d.tradeSide == TRADE_SIDE["BUY"] else "sell",

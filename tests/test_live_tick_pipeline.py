@@ -13,7 +13,6 @@ from backend.services.live_tick_pipeline import (
     guard_current_price_with_spot_quote,
     build_market_order_block,
     build_open_decision_audit_meta,
-    build_open_decision_log_payload,
     build_open_ledger_payloads,
     build_open_order_preflight,
     build_order_failed_ledger_payloads,
@@ -681,45 +680,6 @@ def test_open_ledger_and_audit_payloads_match_live_contract():
         "sl": 3340.0,
         "tp": 3320.0,
         "tick": 5,
-    }
-
-
-def test_build_open_decision_log_payload_wraps_audit_meta():
-    composite = SimpleNamespace(direction=1, score=0.8123)
-    payload = build_open_decision_log_payload(
-        bar={"time": 1783209600.0},
-        composite=composite,
-        position_id=268,
-        actual_api_volume=120.0,
-        requested_volume=100.0,
-        base_requested_volume=90.0,
-        event_sizing_context={"multiplier": 1.2},
-        sizing_trace={"source": "event"},
-        current_price=4008.456,
-        sl_price=3998.123,
-        tp_price=4028.987,
-        tick=9,
-        fallback_ts=1.0,
-    )
-
-    assert payload["ts"] == 1783209600.0
-    assert payload["bar_date"] == "2026-07-05"
-    assert payload["decision_type"] == "open"
-    assert payload["strategy"] == "factor_v4"
-    assert payload["direction"] == 1
-    assert payload["confidence"] == 0.8123
-    assert payload["decision"] == "executed"
-    assert payload["meta"] == {
-        "position_id": 268,
-        "volume": 120.0,
-        "requested_volume": 100.0,
-        "base_requested_volume": 90.0,
-        "event_sizing": {"multiplier": 1.2},
-        "sizing_trace": {"source": "event"},
-        "price": 4008.46,
-        "sl": 3998.12,
-        "tp": 4028.99,
-        "tick": 9,
     }
 
 

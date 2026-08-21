@@ -27,11 +27,12 @@ def _runtime(calls, **overrides):
         "persist_safety_fail_closed": lambda **kwargs: calls["latched"].append(
             kwargs
         ),
-        "submit_order": lambda *_args: SimpleNamespace(
-            success=True,
-            position_id=7,
-            intent_id="intent-7",
-        ),
+            "submit_order": lambda *_args, **_kwargs: SimpleNamespace(
+                success=True,
+                position_id=7,
+                intent_id="intent-7",
+            ),
+            "prepare_open_intent": lambda **_kwargs: "decision-7",
         "handle_order_success": lambda **kwargs: calls["success"].append(kwargs),
         "record_order_failure": lambda **kwargs: calls["failure"].append(kwargs),
         "reconcile_positions": lambda _bridge: {
@@ -130,7 +131,7 @@ def test_broker_rpc_exception_is_a_consumed_attempt_not_a_resend_signal():
     calls = _calls()
     logs = []
 
-    def timeout(*_args):
+    def timeout(*_args, **_kwargs):
         raise TimeoutError("broker outcome unknown")
 
     result = _submit(_runtime(calls, submit_order=timeout), logs)

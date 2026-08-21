@@ -15,30 +15,19 @@ class _RecoveryBridge:
         return self.payload
 
 
-def test_emergency_recovery_prefers_broker_contract_over_local_ledger():
+def test_emergency_recovery_uses_broker_contract_without_local_fallback():
     bridge = _RecoveryBridge(
         {"ready": True, "unresolved_count": 0, "recovered": []}
     )
-    local_calls = []
-
-    result = recover_emergency_execution_intents(
-        bridge,
-        enabled=True,
-        read_local_unresolved=lambda: local_calls.append(True),
-    )
+    result = recover_emergency_execution_intents(bridge)
 
     assert bridge.calls == 1
-    assert local_calls == []
     assert result["ready"] is True
     assert result["unresolved_count"] == 0
 
 
-def test_enabled_emergency_recovery_missing_bridge_contract_fails_closed():
-    result = recover_emergency_execution_intents(
-        object(),
-        enabled=True,
-        read_local_unresolved=lambda: [],
-    )
+def test_missing_broker_recovery_contract_fails_closed():
+    result = recover_emergency_execution_intents(object())
 
     assert result["ready"] is False
     assert result["enabled"] is True
@@ -46,33 +35,16 @@ def test_enabled_emergency_recovery_missing_bridge_contract_fails_closed():
     assert result["error"] == "bridge_execution_recovery_contract_missing"
 
 
-def test_disabled_compat_recovery_uses_fsynced_local_unknown_ledger():
-    unresolved = [{"mutation_id": "unknown-1"}]
-    result = recover_emergency_execution_intents(
-        object(),
-        enabled=False,
-        read_local_unresolved=lambda: unresolved,
-    )
+def test_emergency_recovery_preserves_broker_unknown_state():
+    payload = {
+        "ready": False,
+        "enabled": True,
+        "unresolved_count": 1,
+        "unresolved": [{"mutation_id": "unknown-1"}],
+        "error": "broker_recovery_pending",
+    }
+    bridge = _RecoveryBridge(payload)
+    result = recover_emergency_execution_intents(bridge)
 
-    assert result["ready"] is False
-    assert result["enabled"] is False
-    assert result["unresolved_count"] == 1
-    assert result["unresolved"] == unresolved
-
-
-def test_local_emergency_recovery_failure_is_unknown_not_empty():
-    def unavailable():
-        raise OSError("ledger unreadable")
-
-    result = recover_emergency_execution_intents(
-        object(),
-        enabled=False,
-        read_local_unresolved=unavailable,
-    )
-
-    assert result["ready"] is False
-    assert result["unresolved_count"] is None
-    assert result["unresolved"] == []
-    assert result["error"].startswith(
-        "local_execution_recovery_unavailable:OSError:ledger unreadable"
-    )
+    assert bridge.calls == 1
+    assert result == payload

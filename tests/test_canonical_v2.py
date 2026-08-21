@@ -18,6 +18,7 @@ from backend.services.canonical_v2 import (
     put_state_version,
     put_training_sample,
     read_payload,
+    record_factor_lifecycle_event,
     record_review,
     start_projection_run,
 )
@@ -860,5 +861,43 @@ def test_record_review_mirrors_live_review_idempotently_and_readable() -> None:
         assert payload["failure_tags"] == ["execution_timing"]
         assert payload["review"]["primary_responsibility"] == "execution_timing"
         assert payload["pnl"] == -4.2
+    finally:
+        conn.close()
+
+
+def test_factor_lifecycle_writer_and_reader_are_canonical_only() -> None:
+    conn = _canonical_sqlite()
+    try:
+        first = record_factor_lifecycle_event(
+            conn,
+            lifecycle_id="factor-event-1",
+            event_ts=1_728_500_000.0,
+            factor="dsl_factor_001",
+            event="register",
+            source="shadow",
+            description="rank(close)",
+        )
+        retry = record_factor_lifecycle_event(
+            conn,
+            lifecycle_id="factor-event-1",
+            event_ts=1_728_500_000.0,
+            factor="dsl_factor_001",
+            event="register",
+            source="shadow",
+            description="rank(close)",
+        )
+        assert first["event_id"] == retry["event_id"]
+        assert retry["created"] is False
+
+        from backend.services.canonical_v2_reader import iter_factor_lifecycle_rows
+
+        rows = iter_factor_lifecycle_rows(conn, limit=0, reverse=False)
+        assert rows[0]["factor"] == "dsl_factor_001"
+        assert rows[0]["event"] == "register"
+        assert rows[0]["description"] == "rank(close)"
+        assert rows[0]["source"] == "shadow"
+        assert conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='lifecycle_events'"
+        ).fetchone() is None
     finally:
         conn.close()

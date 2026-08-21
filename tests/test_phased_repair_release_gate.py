@@ -7,7 +7,6 @@ import pytest
 from backend.core.static_feature_flags import static_feature_flags_fingerprint
 from backend.services.phased_repair_release_gate import (
     evaluate_phased_release_preflight,
-    evaluate_safety_enforce_preflight,
 )
 
 
@@ -15,9 +14,7 @@ def _facts() -> dict:
     facts = {
         "shadow_gate": {"ok": True, "status": "passed"},
         "flags": {
-            "live_safety_plane_v2_mode": "shadow",
-            "live_generation_controller_v2_enabled": False,
-            "ctrader_execution_outcome_v2_enabled": False,
+            "live_safety_plane_v2_mode": "enforce",
             "governance_mutation_coordinator_v2_mode": "dual_record",
             "pg_job_queue_v2_enabled": False,
         },
@@ -86,8 +83,10 @@ def _set_flags(facts: dict, patch: dict) -> None:
     )
 
 
-def test_safety_enforce_preflight_passes_only_with_complete_authoritative_facts():
-    result = evaluate_safety_enforce_preflight(**_facts())
+def test_supervisor_enforce_preflight_passes_with_canonical_authority():
+    result = evaluate_phased_release_preflight(
+        target="supervisor_enforce", **_facts()
+    )
 
     assert result["ok"] is True
     assert result["status"] == "passed"
@@ -98,30 +97,15 @@ def test_safety_enforce_preflight_passes_only_with_complete_authoritative_facts(
     ("target", "flag_patch"),
     [
         (
-            "generation_enable",
-            {"live_safety_plane_v2_mode": "enforce"},
-        ),
-        (
-            "execution_outcome_enable",
-            {
-                "live_safety_plane_v2_mode": "enforce",
-                "live_generation_controller_v2_enabled": True,
-            },
-        ),
-        (
             "governance_enforce",
             {
                 "live_safety_plane_v2_mode": "enforce",
-                "live_generation_controller_v2_enabled": True,
-                "ctrader_execution_outcome_v2_enabled": True,
             },
         ),
         (
             "pg_job_queue_enable",
             {
                 "live_safety_plane_v2_mode": "enforce",
-                "live_generation_controller_v2_enabled": True,
-                "ctrader_execution_outcome_v2_enabled": True,
                 "governance_mutation_coordinator_v2_mode": "enforce",
             },
         ),
@@ -129,8 +113,6 @@ def test_safety_enforce_preflight_passes_only_with_complete_authoritative_facts(
             "pg_job_queue_verify",
             {
                 "live_safety_plane_v2_mode": "enforce",
-                "live_generation_controller_v2_enabled": True,
-                "ctrader_execution_outcome_v2_enabled": True,
                 "governance_mutation_coordinator_v2_mode": "enforce",
                 "pg_job_queue_v2_enabled": True,
             },
@@ -153,11 +135,12 @@ def test_later_transition_preflights_require_exact_predecessor_flags(
 
 def test_later_transition_preflight_rejects_skipped_predecessor():
     facts = _facts()
-    _set_flags(facts, {"live_safety_plane_v2_mode": "enforce"})
-
-    result = evaluate_phased_release_preflight(
-        target="execution_outcome_enable", **facts
+    _set_flags(
+        facts,
+        {"governance_mutation_coordinator_v2_mode": "enforce"},
     )
+
+    result = evaluate_phased_release_preflight(target="governance_enforce", **facts)
 
     assert result["ok"] is False
     assert "static_rollout_flags_unexpected" in result["blockers"]
@@ -165,10 +148,10 @@ def test_later_transition_preflight_rejects_skipped_predecessor():
 
 def test_later_transition_rejects_config_changed_without_backend_restart():
     facts = _facts()
-    facts["flags"].update(live_safety_plane_v2_mode="enforce")
+    facts["flags"].update(governance_mutation_coordinator_v2_mode="enforce")
 
     result = evaluate_phased_release_preflight(
-        target="generation_enable", **facts
+        target="governance_enforce", **facts
     )
 
     assert result["ok"] is False
@@ -177,13 +160,13 @@ def test_later_transition_rejects_config_changed_without_backend_restart():
 
 def test_process_static_flag_projection_is_total_for_malformed_pid():
     facts = _facts()
-    _set_flags(facts, {"live_safety_plane_v2_mode": "enforce"})
+    _set_flags(facts, {"governance_mutation_coordinator_v2_mode": "enforce"})
     facts["readiness_snapshot"]["payload"]["snapshot"][
         "process_static_feature_flags"
     ]["pid"] = "invalid"
 
     result = evaluate_phased_release_preflight(
-        target="generation_enable", **facts
+        target="governance_enforce", **facts
     )
 
     assert result["ok"] is False
@@ -199,11 +182,9 @@ def test_governance_transition_rejects_learning_worker_not_restarted():
         facts,
         {
             "live_safety_plane_v2_mode": "enforce",
-            "live_generation_controller_v2_enabled": True,
-            "ctrader_execution_outcome_v2_enabled": True,
         },
     )
-    worker_projection["values"]["ctrader_execution_outcome_v2_enabled"] = False
+    worker_projection["values"]["governance_mutation_coordinator_v2_mode"] = "enforce"
     worker_projection["fingerprint"] = static_feature_flags_fingerprint(
         worker_projection["values"]
     )
@@ -220,18 +201,9 @@ def test_governance_transition_rejects_learning_worker_not_restarted():
     ("target", "flag_patch"),
     [
         (
-            "governance_enforce",
-            {
-                "live_safety_plane_v2_mode": "enforce",
-                "live_generation_controller_v2_enabled": True,
-            },
-        ),
-        (
             "pg_job_queue_enable",
             {
                 "live_safety_plane_v2_mode": "enforce",
-                "live_generation_controller_v2_enabled": True,
-                "ctrader_execution_outcome_v2_enabled": True,
             },
         ),
     ],
@@ -252,8 +224,6 @@ def test_pg_job_queue_transition_requires_worker_preflight():
         facts,
         {
             "live_safety_plane_v2_mode": "enforce",
-            "live_generation_controller_v2_enabled": True,
-            "ctrader_execution_outcome_v2_enabled": True,
             "governance_mutation_coordinator_v2_mode": "enforce",
         },
     )
@@ -276,7 +246,9 @@ def test_non_queue_transition_does_not_require_worker_preflight():
     facts = _facts()
     facts["job_worker_preflight"] = None
 
-    result = evaluate_safety_enforce_preflight(**facts)
+    result = evaluate_phased_release_preflight(
+        target="supervisor_enforce", **facts
+    )
 
     assert result["ok"] is True
     assert result["checks"]["job_worker_preflight"]["required_for_target"] is False
@@ -288,8 +260,6 @@ def test_pg_job_queue_verify_requires_live_service_and_capability():
         facts,
         {
             "live_safety_plane_v2_mode": "enforce",
-            "live_generation_controller_v2_enabled": True,
-            "ctrader_execution_outcome_v2_enabled": True,
             "governance_mutation_coordinator_v2_mode": "enforce",
             "pg_job_queue_v2_enabled": True,
         },
@@ -318,8 +288,7 @@ def test_governance_transition_requires_integrity_preflight():
         facts,
         {
             "live_safety_plane_v2_mode": "enforce",
-            "live_generation_controller_v2_enabled": True,
-            "ctrader_execution_outcome_v2_enabled": True,
+            "governance_mutation_coordinator_v2_mode": "enforce",
         },
     )
     facts["governance_preflight"] = {
@@ -337,60 +306,19 @@ def test_governance_transition_requires_integrity_preflight():
     assert result["checks"]["governance_preflight"]["required_for_target"] is True
 
 
-def test_execution_transition_does_not_require_governance_integrity_preflight():
-    facts = _facts()
-    _set_flags(
-        facts,
-        {
-            "live_safety_plane_v2_mode": "enforce",
-            "live_generation_controller_v2_enabled": True,
-        },
-    )
-    facts["governance_preflight"] = None
-
-    result = evaluate_phased_release_preflight(
-        target="execution_outcome_enable", **facts
-    )
-
-    assert result["ok"] is True
-    assert result["checks"]["governance_preflight"]["required_for_target"] is False
-
-
-def test_execution_transition_requires_code_bound_fault_matrix():
-    facts = _facts()
-    _set_flags(
-        facts,
-        {
-            "live_safety_plane_v2_mode": "enforce",
-            "live_generation_controller_v2_enabled": True,
-        },
-    )
-    facts["execution_fault_matrix"] = {
-        "ok": False,
-        "status": "missing",
-        "blockers": ["execution_fault_matrix_attestation_missing"],
-    }
-
-    result = evaluate_phased_release_preflight(
-        target="execution_outcome_enable", **facts
-    )
-
-    assert result["ok"] is False
-    assert "execution_outcome_fault_matrix_incomplete" in result["blockers"]
-    assert result["checks"]["execution_fault_matrix"]["required_for_target"] is True
-
-
-def test_non_execution_transition_does_not_require_execution_fault_matrix():
+def test_execution_fault_matrix_is_not_a_separate_release_transition():
     facts = _facts()
     facts["execution_fault_matrix"] = None
 
-    result = evaluate_safety_enforce_preflight(**facts)
+    result = evaluate_phased_release_preflight(
+        target="supervisor_enforce", **facts
+    )
 
     assert result["ok"] is True
     assert result["checks"]["execution_fault_matrix"]["required_for_target"] is False
 
 
-def test_empty_account_safety_transition_requires_fault_matrix():
+def test_supervisor_transition_does_not_require_shadow_fault_matrix():
     facts = _facts()
     facts["safety_fault_matrix"] = {
         "ok": False,
@@ -398,11 +326,12 @@ def test_empty_account_safety_transition_requires_fault_matrix():
         "blockers": ["fault_matrix_attestation_missing"],
     }
 
-    result = evaluate_safety_enforce_preflight(**facts)
+    result = evaluate_phased_release_preflight(
+        target="supervisor_enforce", **facts
+    )
 
-    assert result["ok"] is False
-    assert "safety_fault_matrix_incomplete" in result["blockers"]
-    assert result["checks"]["safety_fault_matrix"]["required_for_target"] is True
+    assert result["ok"] is True
+    assert result["checks"]["safety_fault_matrix"]["required_for_target"] is False
 
 
 def test_complete_lifecycle_safety_transition_does_not_require_fault_matrix():
@@ -410,7 +339,9 @@ def test_complete_lifecycle_safety_transition_does_not_require_fault_matrix():
     facts["shadow_gate"]["complete_lifecycle"] = True
     facts["safety_fault_matrix"] = None
 
-    result = evaluate_safety_enforce_preflight(**facts)
+    result = evaluate_phased_release_preflight(
+        target="supervisor_enforce", **facts
+    )
 
     assert result["ok"] is True
     assert result["checks"]["safety_fault_matrix"]["required_for_target"] is False
@@ -426,9 +357,8 @@ def test_unknown_release_target_is_total_and_fail_closed():
 @pytest.mark.parametrize(
     ("mutation", "blocker"),
     [
-        (lambda f: f["shadow_gate"].update(ok=False), "safety_shadow_gate_incomplete"),
         (
-            lambda f: f["flags"].update(live_generation_controller_v2_enabled=True),
+            lambda f: f["flags"].update(live_safety_plane_v2_mode="shadow"),
             "static_rollout_flags_unexpected",
         ),
         (
@@ -473,11 +403,13 @@ def test_unknown_release_target_is_total_and_fail_closed():
         ),
     ],
 )
-def test_safety_enforce_preflight_fails_closed_for_each_required_fact(mutation, blocker):
+def test_supervisor_enforce_preflight_fails_closed_for_each_required_fact(mutation, blocker):
     facts = copy.deepcopy(_facts())
     mutation(facts)
 
-    result = evaluate_safety_enforce_preflight(**facts)
+    result = evaluate_phased_release_preflight(
+        target="supervisor_enforce", **facts
+    )
 
     assert result["ok"] is False
     assert blocker in result["blockers"]

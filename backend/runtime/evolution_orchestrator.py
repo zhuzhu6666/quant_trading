@@ -5,8 +5,8 @@
 FactorGovernanceOrchestrator，避免两个调度器同时拥有晋升/退役权。
 
 v3 修复 (audit 2026-06-22), PG 迁移更新 (2026-07-01):
-  - 全部运行状态读写改用 PostgreSQL state store, 不再用 decision_log.db
-  - canary_state / decision_log 都从 PostgreSQL state store 读写
+  - 全部运行状态读写改用 PostgreSQL state store
+  - canary_state 从 PostgreSQL state store 读写，shadow 绩效只来自 shadow_factor_perf
   - Evolution 只产生 shadow/canary 证据，晋升、隔离和退役由 FactorGovernance 提交
   - 权重更新推送 factor_portfolio_weights (AWE 读同一字段)
 """
@@ -28,18 +28,24 @@ from strategy import mab_router as _mab_router
 
 logger = logging.getLogger(__name__)
 
-from backend.core.db import connect_sqlite, get_state_pg_conn
+from backend.core.db import get_state_pg_conn
 from backend.core.state_store import RuntimeStateSchemaError, validate_runtime_state_schema
 
 from backend.services.autonomous_learning import _autonomy_mode
 
 
-_CANARY_DB = None
 _EVOLUTION_WATERMARK_KEY = "evolution_cycle_watermark.v1"
 
 
 def _state_conn(*, read_only: bool = False):
     return get_state_pg_conn(read_only=read_only)
+
+
+def _sql(conn: Any, statement: str) -> str:
+    """Render the one canonical runtime query for PG and isolated test conns."""
+    if conn.__class__.__module__.split(".", 1)[0] == "psycopg":
+        return statement.replace("?", "%s")
+    return statement
 
 
 def _ensure_canary_db() -> None:
@@ -839,28 +845,18 @@ def _register_shadow_factors(expressions: list[Any]) -> int:
             return 0
 
         from alpha.factor_identity import factor_definition_fingerprint
-        from alpha.registry_adapter import RegistryAdapter, SOURCE_SHADOW
-        from backend.services.governance_control_plans import (
-            governance_coordinator_mode,
-        )
+        from alpha.registry_adapter import RegistryAdapter
+        from backend.services.factor_lifecycle_service import FactorLifecycleService
+
         adapter = RegistryAdapter.shared()
-        try:
-            coordinator_mode = governance_coordinator_mode()
-        except Exception as exc:
-            logger.warning("[Evolve] shadow register authority unavailable: %s", exc)
-            _emit_evolution_story(
-                "shadow_register_authority_unavailable",
-                {"reason": f"{type(exc).__name__}: {exc}", "applied": False},
-            )
-            return 0
+        lifecycle = FactorLifecycleService(adapter=adapter)
         count = 0
         for expr_score in expressions:
             expression_str = getattr(expr_score, "expression", "") or ""
             proposed_name = str(getattr(expr_score, "name", None) or "")
-            func = None
             if expression_str:
                 try:
-                    from alpha.factor_dsl import evaluate_dsl, parse_dsl
+                    from alpha.factor_dsl import parse_dsl
 
                     parse_dsl(expression_str)
                     fingerprint = factor_definition_fingerprint(expression_str)
@@ -868,7 +864,6 @@ def _register_shadow_factors(expressions: list[Any]) -> int:
                     # derived from the complete canonical DSL AST SHA-256.
                     # The durable factor_id is ``dsl:<same 64 hex>``.
                     name = f"dsl_auto_{fingerprint}"
-                    func = lambda df, _expr=expression_str: evaluate_dsl(_expr, df)
                 except Exception as e:
                     logger.warning(
                         "[Evolve] skip invalid DSL expression for %s: %s",
@@ -890,70 +885,57 @@ def _register_shadow_factors(expressions: list[Any]) -> int:
                 )
                 continue
             try:
-                if coordinator_mode == "off":
-                    # One-release compatibility path.  It deliberately keeps
-                    # the current demo behaviour while using stable identity.
-                    ok = adapter.register_runtime(
-                        name=name,
-                        func=func,
-                        source=SOURCE_SHADOW,
-                        description=expression_str,
-                    )
-                else:
-                    # dual/enforce must commit the durable SHADOW fact before
-                    # Registry is published as a post-commit projection.
-                    from backend.services.factor_lifecycle_service import (
-                        FactorLifecycleService,
-                    )
-
-                    result = FactorLifecycleService(adapter=adapter).register_shadow(
-                        name=name,
-                        expression=expression_str,
-                        artifact_hash=fingerprint,
-                        actor="system:evolution_orchestrator",
-                        reason="scheduled GP candidate registered as governed shadow",
-                        evidence_refs={
-                            "producer": "evolution_orchestrator",
-                            "proposed_name": proposed_name,
-                            "definition_fingerprint": fingerprint,
-                            "direction": int(
-                                getattr(expr_score, "direction", 0) or 0
-                            ),
-                            "polarity": str(
-                                getattr(expr_score, "polarity", "unknown")
-                                or "unknown"
-                            ),
-                            "signed_ic_mean": float(
-                                getattr(expr_score, "signed_ic_mean", 0.0)
-                                or 0.0
-                            ),
-                            "magnitude_ic_mean": float(
-                                getattr(expr_score, "abs_ic_mean", 0.0)
-                                or 0.0
-                            ),
-                            "candidate_validation": dict(
-                                getattr(
-                                    expr_score,
-                                    "candidate_validation",
-                                    {},
-                                )
-                                or {}
-                            ),
+                # The lifecycle service is the only shadow-fact writer.  It
+                # commits the canonical fact and publishes Registry as the
+                # post-commit projection.
+                result = lifecycle.register_shadow(
+                    name=name,
+                    expression=expression_str,
+                    artifact_hash=fingerprint,
+                    actor="system:evolution_orchestrator",
+                    reason="scheduled GP candidate registered as governed shadow",
+                    evidence_refs={
+                        "producer": "evolution_orchestrator",
+                        "proposed_name": proposed_name,
+                        "definition_fingerprint": fingerprint,
+                        "direction": int(
+                            getattr(expr_score, "direction", 0) or 0
+                        ),
+                        "polarity": str(
+                            getattr(expr_score, "polarity", "unknown")
+                            or "unknown"
+                        ),
+                        "signed_ic_mean": float(
+                            getattr(expr_score, "signed_ic_mean", 0.0)
+                            or 0.0
+                        ),
+                        "magnitude_ic_mean": float(
+                            getattr(expr_score, "abs_ic_mean", 0.0)
+                            or 0.0
+                        ),
+                        "candidate_validation": dict(
+                            getattr(
+                                expr_score,
+                                "candidate_validation",
+                                {},
+                            )
+                            or {}
+                        ),
+                    },
+                    idempotency_key=f"evolution-shadow:{fingerprint}",
+                )
+                ok = bool(result.get("ok"))
+                if not ok:
+                    _emit_evolution_story(
+                        "shadow_register_governance_blocked",
+                        {
+                            "factor": name,
+                            "factor_id": f"dsl:{fingerprint}",
+                            "status": str(result.get("status") or "blocked"),
+                            "reason": str(result.get("reason") or ""),
+                            "applied": False,
                         },
-                        idempotency_key=f"evolution-shadow:{fingerprint}",
                     )
-                    ok = bool(result.get("ok"))
-                    if not ok:
-                        _emit_evolution_story(
-                            "shadow_register_governance_blocked",
-                            {
-                                "factor": name,
-                                "factor_id": f"dsl:{fingerprint}",
-                                "status": str(result.get("status") or "blocked"),
-                                "reason": str(result.get("reason") or ""),
-                                "applied": False,
-                            },
-                        )
                 if ok:
                     count += 1
             except Exception as e:
@@ -1126,28 +1108,6 @@ def _run_canary_evaluation(
     return promotions, rollbacks, stay
 
 
-def _execute_promotions(names: list[str]) -> None:
-    """Deprecated compatibility hook; lifecycle writes belong to factor governance."""
-    # Kept as an import-compatible evidence hook for older callers.  The
-    # evolution worker may report canary candidates, but it must never write
-    # RegistryAdapter lifecycle state; FactorGovernanceOrchestrator is the
-    # sole lifecycle executor.
-    _emit_evolution_story("canary_promotion_deferred_to_factor_governance", {
-        "promotion_candidates": list(names),
-        "execution_owner": "factor_governance",
-        "applied": False,
-    })
-
-
-def _execute_rollbacks(names: list[str]) -> None:
-    """Deprecated compatibility hook; lifecycle writes belong to factor governance."""
-    _emit_evolution_story("canary_rollback_deferred_to_factor_governance", {
-        "rollback_candidates": list(names),
-        "execution_owner": "factor_governance",
-        "applied": False,
-    })
-
-
 def _update_shadow_performance(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
     """Refresh shadow/discovered virtual performance for Canary."""
     try:
@@ -1173,9 +1133,9 @@ def _update_shadow_performance(df: pd.DataFrame, symbol: str, timeframe: str) ->
 def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
     """加载因子在 shadow 阶段的真实 OOS 绩效.
 
-    P1.3: 优先使用 shadow_factor_perf 表 (影子虚拟交易真实 PnL),
-          然后 decision_log 中的 close 记录,
-          最后才回退到基于 score 的估算 (并打警告).
+    Canary evidence has one authoritative source: ``shadow_factor_perf``.
+    Missing or unusable shadow performance is reported explicitly and never
+    replaced with a synthetic result.
     """
     from deployment.canary import CanaryEvalContext
 
@@ -1205,26 +1165,6 @@ def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
     except Exception as e:
         logger.debug("[Evolve] shadow canary_ctx(%s) skipped: %s", name, e)
 
-    # ── 次选: decision_log close 记录 ──
-    try:
-        conn = _state_conn(read_only=True)
-        rows = conn.execute(
-            "SELECT meta FROM decision_log WHERE decision_type='close' AND strategy=%s",
-            (name,)
-        ).fetchall()
-        conn.close()
-        if rows:
-            total_pnl = 0.0
-            for r in rows:
-                meta = _json.loads(r["meta"]) if isinstance(r["meta"], str) else (r["meta"] or {})
-                if isinstance(meta, dict):
-                    total_pnl += float(meta.get("pnl", 0.0))
-            logger.info("[Evolve] canary_ctx(%s): decision_log rows=%d pnl=%.4f",
-                        name, len(rows), total_pnl)
-            return CanaryEvalContext(oos_bars=len(rows), oos_pnl=total_pnl)
-    except Exception as e:
-        logger.debug("[Evolve] canary_ctx(%s) decision_log failed: %s", name, e)
-
     logger.warning("[Evolve] canary_ctx(%s): no real shadow perf data; staying in current stage", name)
     return CanaryEvalContext(
         oos_bars=0,
@@ -1247,17 +1187,6 @@ def _check_retirement() -> dict[str, Any]:
     except Exception as e:
         logger.debug("[Evolve] retirement_check: %s", e)
     return result
-
-
-def _try_retire(name: str, reason: str) -> bool:
-    """Deprecated compatibility hook; scheduled evolution no longer calls it."""
-    try:
-        from alpha.registry_adapter import RegistryAdapter
-        adapter = RegistryAdapter.shared()
-        return adapter.retire(name, reason)
-    except Exception as e:
-        logger.debug("[Evolve] retire %s failed: %s", name, e)
-        return False
 
 
 def _collect_learning_suggestions(
@@ -1290,14 +1219,16 @@ def _collect_learning_suggestions(
     approved_biases: dict[str, dict] = {}
     try:
         cutoff = _time.time() - max_age_days * 86400
-        if _CANARY_DB is not None:
-            conn = connect_sqlite(_CANARY_DB, read_only=True)
-            conn.row_factory = __import__("sqlite3").Row
-            cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(policy_suggestion)").fetchall()}
-            reason_expr = "reason" if "reason" in cols else "'' AS reason"
-            evidence_expr = "evidence_json" if "evidence_json" in cols else "'{}' AS evidence_json"
-            review_expr = "review_note" if "review_note" in cols else "'' AS review_note"
-            rows = conn.execute(
+        conn = _state_conn(read_only=True)
+        from backend.core.db import state_table_columns
+
+        cols = set(state_table_columns(conn, "policy_suggestion"))
+        reason_expr = "reason" if "reason" in cols else "'' AS reason"
+        evidence_expr = "evidence_json" if "evidence_json" in cols else "'{}' AS evidence_json"
+        review_expr = "review_note" if "review_note" in cols else "'' AS review_note"
+        rows = conn.execute(
+            _sql(
+                conn,
                 f"""
                 SELECT suggestion_id, scope_key, action, confidence, status,
                        {reason_expr}, {evidence_expr}, {review_expr}, created_at
@@ -1306,27 +1237,9 @@ def _collect_learning_suggestions(
                   AND status IN ('proposed', 'pending_review', 'approved', 'auto_approved', 'applied')
                 ORDER BY created_at DESC
                 """,
-                (cutoff,),
-            ).fetchall()
-        else:
-            conn = _state_conn(read_only=True)
-            from backend.core.db import state_table_columns
-
-            cols = set(state_table_columns(conn, "policy_suggestion"))
-            reason_expr = "reason" if "reason" in cols else "'' AS reason"
-            evidence_expr = "evidence_json" if "evidence_json" in cols else "'{}' AS evidence_json"
-            review_expr = "review_note" if "review_note" in cols else "'' AS review_note"
-            rows = conn.execute(
-                f"""
-                SELECT suggestion_id, scope_key, action, confidence, status,
-                       {reason_expr}, {evidence_expr}, {review_expr}, created_at
-                FROM policy_suggestion
-                WHERE scope_type='factor' AND created_at>=%s
-                  AND status IN ('proposed', 'pending_review', 'approved', 'auto_approved', 'applied')
-                ORDER BY created_at DESC
-                """,
-                (cutoff,),
-            ).fetchall()
+            ),
+            (cutoff,),
+        ).fetchall()
         from backend.services.live_committed_policy import load_live_policy_controls
 
         executable_controls = load_live_policy_controls(

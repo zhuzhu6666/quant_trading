@@ -21,10 +21,15 @@ from backend.core.db_helpers import (
     execute as _execute,
     pg_sql as _sql,
 )
-from backend.services.canonical_v2_reader import canonical_ready, iter_review_rows, review_row
+from backend.services.canonical_v2_reader import (
+    iter_counterfactual_rows,
+    iter_parameter_template_lifecycle_rows,
+    iter_review_rows,
+    iter_supervisor_trace_rows,
+    review_row,
+)
 from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import load_json_payload
 from backend.services.stability import measure, record_timing, timing_snapshot
 
 
@@ -453,52 +458,18 @@ class BackendReadinessService:
                 "memory_integrity": memory_integrity,
             }
         try:
+            review_map = {
+                str(row.get("review_id") or ""): row
+                for row in iter_review_rows(conn, limit=0)
+            }
             maturity_rows = []
-            if _table_exists(conn, "supervisor_counterfactual_review") and (
-                canonical_ready(conn) or _table_exists(conn, "trade_outcome_review")
-            ):
-                cf_rows = _execute(
-                    conn,
-                    """
-                    SELECT c.position_id, c.close_ts, c.evidence_json, c.review_id
-                    FROM supervisor_counterfactual_review c
-                    ORDER BY c.updated_at DESC
-                    """,
-                ).fetchall()
-                if canonical_ready(conn):
-                    # Review facts come from canonical (reader-owned legacy
-                    # fallback); the counterfactual table stays legacy.  One
-                    # canonical stream serves all counterfactual rows.
-                    review_map = {
-                        str(row.get("review_id") or ""): row
-                        for row in iter_review_rows(conn, limit=0)
-                    }
-                    for item in cf_rows:
-                        value = dict(item)
-                        review_id = str(value.get("review_id") or "")
-                        review = review_map.get(review_id)
-                        value["source_review_id"] = review_id if review is not None else ""
-                        value["source_review_json"] = (review or {}).get("review_json") or {}
-                        value["source_review_archive_hash"] = ""
-                        maturity_rows.append(value)
-                else:
-                    review_archive_select = (
-                        ", r.review_archive_hash AS source_review_archive_hash"
-                        if "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
-                        else ""
-                    )
-                    legacy_rows = _execute(
-                        conn,
-                        f"""
-                        SELECT c.position_id, c.close_ts, c.evidence_json,
-                               r.review_id AS source_review_id,
-                               r.review_json AS source_review_json{review_archive_select}
-                        FROM supervisor_counterfactual_review c
-                        LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
-                        ORDER BY c.updated_at DESC
-                        """,
-                    ).fetchall()
-                    maturity_rows = [dict(row) for row in legacy_rows]
+            for item in iter_counterfactual_rows(conn, limit=0, reverse=True):
+                value = dict(item)
+                review_id = str(value.get("review_id") or "")
+                review = review_map.get(review_id)
+                value["source_review_id"] = review_id if review is not None else ""
+                value["source_review_json"] = (review or {}).get("review_json") or {}
+                maturity_rows.append(value)
             canary_started_at = 0.0
             canary_suggestion_id = ""
             canary_template_id = ""
@@ -516,26 +487,22 @@ class BackendReadinessService:
                 canary_started_at = _safe_float(candidate.get("created_at")) if candidate else 0.0
                 canary_suggestion_id = str(candidate.get("suggestion_id") or "") if candidate else ""
                 canary_template_id = str(candidate.get("scope_key") or "") if candidate else ""
-            if canary_template_id and _table_exists(conn, "position_supervisor_trace"):
-                shadow_rows = _execute(
-                    conn,
-                    """
-                    SELECT DISTINCT position_id
-                    FROM position_supervisor_trace
-                    WHERE template_id=?
-                      AND stage='learning_shadow'
-                      AND execution_status='observation_only'
-                      AND trace_integrity='recovered'
-                      AND execution_reason=?
-                      AND event_ts>=?
-                    """,
-                    (
-                        canary_template_id,
-                        f"learning_worker_candidate_replay:{canary_suggestion_id}",
-                        canary_started_at,
-                    ),
-                ).fetchall()
-                shadow_position_ids = {str(dict(row).get("position_id") or "") for row in shadow_rows}
+            if canary_template_id:
+                shadow_position_ids = {
+                    str(row.get("position_id") or "")
+                    for row in iter_supervisor_trace_rows(
+                        conn,
+                        limit=0,
+                        stage="learning_shadow",
+                        reverse=False,
+                    )
+                    if str(row.get("template_id") or "") == canary_template_id
+                    and str(row.get("execution_status") or "") == "observation_only"
+                    and str(row.get("trace_integrity") or "") == "recovered"
+                    and str(row.get("execution_reason") or "")
+                    == f"learning_worker_candidate_replay:{canary_suggestion_id}"
+                    and _safe_float(row.get("event_ts")) >= canary_started_at
+                }
             mature_positions: set[str] = set()
             sessions: set[str] = set()
             regimes: set[str] = set()
@@ -556,16 +523,7 @@ class BackendReadinessService:
                 counterfactual_invalidated = bool((evidence or {}).get("evidence_invalidated"))
                 source_review_invalid = (
                     not str(item.get("source_review_id") or "")
-                    or review_has_system_contamination(
-                        load_json_payload(
-                            conn,
-                            source_table="trade_outcome_review",
-                            source_id=str(item.get("source_review_id") or ""),
-                            inline_json=item.get("source_review_json"),
-                            archive_hash=item.get("source_review_archive_hash", ""),
-                            default={},
-                        )
-                    )
+                    or review_has_system_contamination(item.get("source_review_json") or {})
                 )
                 if counterfactual_invalidated:
                     invalidated_counterfactuals += 1
@@ -871,16 +829,122 @@ class BackendReadinessService:
     def _governance_status(self) -> dict[str, Any]:
         conn = _connect_state(self.db_path)
         try:
+            cfg = None
             try:
                 from config.runtime_config import shared as runtime_config
 
                 cfg = runtime_config()
                 autonomy_mode = str(getattr(cfg, "autonomy_mode", "") or "manual")
                 demo_auto_apply = bool(getattr(cfg, "autonomy_demo_auto_apply", False))
+                send_orders = bool(getattr(cfg, "ctrader_send_orders", False))
             except Exception:
                 autonomy_mode = "unknown"
                 demo_auto_apply = False
-            automatic_execution_enabled = autonomy_mode in {"demo_autonomous", "demo_nursery"} and demo_auto_apply
+                send_orders = False
+            try:
+                from backend.services.position_supervisor_templates import (
+                    normalize_position_supervisor_template,
+                )
+
+                active_template = normalize_position_supervisor_template(
+                    getattr(cfg, "position_supervisor_template_id", "")
+                )
+            except Exception as exc:
+                active_template = {
+                    "template_id": "",
+                    "status": "invalid",
+                    "risk_boundary": {},
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            active_template_id = str(active_template.get("template_id") or "")
+            active_template_status = str(active_template.get("status") or "")
+            active_boundary = dict(active_template.get("risk_boundary") or {})
+            active_execution_mode = str(
+                active_boundary.get("adaptive_execution_mode") or ""
+            ).strip().lower()
+            execution_intent_table_available = bool(
+                _table_exists(conn, "broker_execution_intent")
+            )
+            execution_schema_status: dict[str, Any] = {
+                "ok": execution_intent_table_available,
+                "current_version": None,
+                "minimum_version": None,
+                "reason": (
+                    "broker_execution_intent_table_missing"
+                    if not execution_intent_table_available
+                    else ""
+                ),
+            }
+            if _conn_is_pg(conn):
+                try:
+                    from backend.core.state_schema_migrations import (
+                        STATE_SCHEMA_MIN_VERSION,
+                        state_schema_status,
+                    )
+
+                    state_status = state_schema_status(
+                        conn,
+                        minimum_version=STATE_SCHEMA_MIN_VERSION,
+                    )
+                    execution_schema_status.update(
+                        {
+                            "ok": bool(
+                                execution_intent_table_available
+                                and state_status.get("ok")
+                            ),
+                            "current_version": state_status.get("current_version"),
+                            "minimum_version": state_status.get("minimum_version"),
+                            "missing_required_versions": list(
+                                state_status.get("missing_required_versions") or []
+                            ),
+                            "reason": (
+                                "state_schema_below_runtime_minimum"
+                                if not bool(state_status.get("ok"))
+                                else execution_schema_status["reason"]
+                            ),
+                        }
+                    )
+                except Exception as exc:
+                    execution_schema_status.update(
+                        {
+                            "ok": False,
+                            "reason": f"state_schema_status_unavailable:{type(exc).__name__}",
+                        }
+                    )
+            supervisor_execution_authorized = bool(
+                active_template_status == "active"
+                and active_execution_mode == "governed_execute"
+                and send_orders
+                and execution_schema_status["ok"]
+            )
+            if not execution_schema_status["ok"]:
+                authority_source = "broker_execution_intent_schema_unavailable"
+            elif not send_orders:
+                authority_source = "broker_orders_disabled"
+            elif active_template_id and active_execution_mode == "governed_execute":
+                authority_source = f"position_supervisor_template:{active_template_id}"
+            else:
+                authority_source = "position_supervisor_authority_unavailable"
+            recent_execution = {"status": "none"}
+            trace_row = next(
+                (
+                    row
+                    for row in iter_supervisor_trace_rows(conn, limit=0, reverse=True)
+                    if str(row.get("action") or "").strip().lower() in {"close", "reduce", "tighten"}
+                ),
+                None,
+            )
+            if trace_row:
+                recent_execution = {
+                    "status": str(trace_row.get("outcome") or trace_row.get("execution_status") or "unknown"),
+                    "position_id": str(trace_row.get("position_id") or ""),
+                    "decision_id": str(trace_row.get("decision_id") or ""),
+                    "stage": str(trace_row.get("stage") or ""),
+                    "outcome": str(trace_row.get("outcome") or ""),
+                    "execution_status": str(trace_row.get("execution_status") or ""),
+                    "execution_reason": str(trace_row.get("execution_reason") or ""),
+                    "event_ts": _safe_float(trace_row.get("event_ts")),
+                }
             counts = {}
             normalized_counts = {}
             if _table_exists(conn, "policy_suggestion"):
@@ -902,9 +966,15 @@ class BackendReadinessService:
                 "policy_suggestion_counts_normalized": normalized_counts,
                 "pending_review_count": int(counts.get("proposed", 0)) + int(counts.get("pending_review", 0)),
                 "autonomous_pending_count": int(normalized_counts.get("proposed", 0)),
-                "automatic_execution_enabled": automatic_execution_enabled,
                 "autonomy_mode": autonomy_mode,
                 "autonomy_demo_auto_apply": demo_auto_apply,
+                "supervisor_execution_authorized": supervisor_execution_authorized,
+                "authority_source": authority_source,
+                "active_template_id": active_template_id,
+                "active_template_mode": active_execution_mode,
+                "execution_schema": execution_schema_status,
+                "broker_execution_enabled": send_orders,
+                "recent_supervisor_execution": recent_execution,
                 "factor_governance_runtime": self._factor_governance_runtime_status(),
             }
         finally:
@@ -1085,7 +1155,6 @@ class BackendReadinessService:
             "position_quality_shadow_audit",
             "shadow_factor_perf",
             "factor_health",
-            "lifecycle_events",
             "evolution_decision",
             "factor_catalog_snapshot",
         ]
@@ -1115,6 +1184,26 @@ class BackendReadinessService:
                     "age_seconds": round(age_sec, 3) if age_sec is not None else None,
                     "status": "fresh" if age_sec is not None and age_sec <= 3 * 86400 else "stale_or_empty",
                 }
+            lifecycle_rows = iter_parameter_template_lifecycle_rows(
+                conn,
+                limit=1,
+                reverse=True,
+            )
+            latest_lifecycle = (
+                _safe_float(lifecycle_rows[0].get("timestamp"))
+                if lifecycle_rows
+                else 0.0
+            )
+            lifecycle_age = max(0.0, now - latest_lifecycle) if latest_lifecycle > 0 else None
+            freshness["canonical.parameter_template_lifecycle"] = {
+                "latest_ts": latest_lifecycle,
+                "age_seconds": round(lifecycle_age, 3) if lifecycle_age is not None else None,
+                "status": (
+                    "fresh"
+                    if lifecycle_age is not None and lifecycle_age <= 3 * 86400
+                    else "stale_or_empty"
+                ),
+            }
         finally:
             conn.close()
         return {"tables": freshness}

@@ -14,7 +14,11 @@ from backend.services.live_safety_state import no_new_risk_latch_status
 def _isolated_open_admission(monkeypatch, tmp_path):
     monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path / "safety"))
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: False)
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
+    monkeypatch.setattr(
+        live_service._LIVE_LOOP_CONTROLLER,
+        "accepting_new_risk",
+        lambda _generation_id: True,
+    )
     live_service._process_shutdown_requested = False
     live_service._live_state_update(
         loop_running=True,
@@ -113,6 +117,54 @@ def test_fresh_empty_reconcile_conflicting_with_recovery_blocks_new_risk(monkeyp
         (item["cause"], item["cause_id"])
         for item in no_new_risk_latch_status(fail_closed=True)["causes"]
     }
+
+
+def test_purged_orphan_recovery_row_releases_only_its_session_latch(monkeypatch):
+    now = time.time()
+    _publish_fresh_reconciles(now)
+    monkeypatch.setattr(
+        live_service,
+        "_enrich_positions_with_path_metrics",
+        lambda positions, **_kwargs: positions,
+    )
+    active_calls = {"count": 0}
+
+    def _active_rows(_broker):
+        active_calls["count"] += 1
+        return [{"position_id": 902}] if active_calls["count"] == 1 else []
+
+    store = MagicMock()
+    store.purge_unbrokered.return_value = [902]
+    monkeypatch.setattr(live_service, "_list_active_recovery_positions", _active_rows)
+    monkeypatch.setattr(live_service, "_recovery_position_store", lambda: store)
+    live_service._live_state_update(
+        session_state_status="unavailable",
+        session_state_source="close_deal_pending",
+        session_risk_blockers=["close_deal_pending:902", "session_not_restored"],
+    )
+    live_service.activate_no_new_risk_latch(
+        reason="session_risk_close_deal_unavailable",
+        actor="system:session_restore",
+        correlation_id="902",
+        metadata={"position_id": 902},
+        cause="session_risk_unavailable",
+        cause_id="902",
+    )
+
+    live_service._publish_fresh_position_reconcile(
+        _fresh_position_reconcile(now=now, positions=[]),
+        broker="ctrader",
+        bridge=SimpleNamespace(is_connected=True),
+    )
+
+    assert 902 not in live_service._pending_session_close_causes()
+    assert "close_deal_pending:902" not in live_service._live_state_get(
+        "session_risk_blockers"
+    )
+    assert "session_not_restored" in live_service._live_state_get(
+        "session_risk_blockers"
+    )
+    assert no_new_risk_latch_status(fail_closed=True)["active"] is False
 
 
 def test_fresh_reconcile_keeps_multiple_aligned_recovery_positions_open(monkeypatch):

@@ -2,7 +2,8 @@
 
 Models never execute broker/config mutations here.  This service owns the
 small, deterministic fusion envelope between a model score and an existing
-rule decision, plus an append-only audit trail in ``state_v1``.
+rule decision, plus an append-only audit trail in the PostgreSQL ``runtime``
+schema.
 """
 from __future__ import annotations
 

@@ -24,8 +24,12 @@ from backend.services.live_safety_state import (
 def _isolated_open_admission_state(monkeypatch, tmp_path):
     reset_safety_state_for_tests()
     monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path / "safety"))
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
     monkeypatch.setattr(live_service, "_process_shutdown_requested", False)
+    monkeypatch.setattr(
+        live_service._LIVE_LOOP_CONTROLLER,
+        "accepting_new_risk",
+        lambda _generation_id: True,
+    )
     monkeypatch.setattr(
         live_service,
         "_live_safety_watchdog_probe",

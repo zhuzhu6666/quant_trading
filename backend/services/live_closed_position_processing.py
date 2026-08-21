@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
-import time
 from typing import Any
 
 from backend.services.review_contract import trusted_broker_close_price
@@ -16,11 +15,6 @@ class ClosedPositionProcessingRuntime:
     classify_close_source: Callable[..., Any]
     select_close_total_pnl: Callable[..., float]
     open_api_volumes: MutableMapping[int, float]
-    decision_log: Any
-    decision_log_run_id: str
-    safe_decision_log: Callable[..., Any]
-    build_close_decision_audit_meta: Callable[..., dict[str, Any]]
-    json_dumps: Callable[..., str]
     ledger: Any
     ensure_open_ledger: Callable[..., str]
     lookup_context_integrity: Callable[[int, str], str]
@@ -32,7 +26,6 @@ class ClosedPositionProcessingRuntime:
     policy_suggester: Any
     build_trade_review_payload: Callable[..., dict[str, Any]]
     mark_recovery_closed: Callable[..., None]
-    trailing_state: MutableMapping[int, Any]
     entry_scores: MutableMapping[int, Any]
     entry_decisions: MutableMapping[int, Any]
     pending_open_attach_until: MutableMapping[int, Any]
@@ -100,41 +93,6 @@ def collect_closed_position_attribution(
         "close_price": close_price,
         "total_pnl": total_pnl,
     }
-
-
-def write_close_decision_log(
-    *,
-    position_id: int,
-    bar: dict[str, Any],
-    total_pnl: float,
-    current_price: float,
-    tick: int,
-    runtime: ClosedPositionProcessingRuntime,
-) -> None:
-    if not runtime.decision_log:
-        return
-    bar_ts = bar.get("time", 0)
-    bar_date = time.strftime("%Y-%m-%d", time.gmtime(bar_ts)) if bar_ts else ""
-    runtime.safe_decision_log(
-        runtime.decision_log,
-        run_id=runtime.decision_log_run_id,
-        ts=bar_ts or runtime.now(),
-        bar_date=bar_date,
-        decision_type="close",
-        strategy="factor_v4",
-        direction=0,
-        confidence=round(total_pnl, 2),
-        decision="closed",
-        meta=runtime.json_dumps(
-            runtime.build_close_decision_audit_meta(
-                position_id=int(position_id),
-                total_pnl=float(total_pnl),
-                current_price=float(current_price),
-                tick=tick,
-            ),
-            ensure_ascii=False,
-        ),
-    )
 
 
 def log_closed_position_ledger(
@@ -281,7 +239,6 @@ def cleanup_closed_position(
             pid,
             exc,
         )
-    runtime.trailing_state.pop(pid, None)
     runtime.entry_scores.pop(pid, None)
     runtime.entry_decisions.pop(pid, None)
     runtime.pending_open_attach_until.pop(pid, None)

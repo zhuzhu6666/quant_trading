@@ -41,7 +41,7 @@ def normalize_policy_suggestion_status(row: dict[str, Any]) -> str:
         return "legacy_rejected"
     if status:
         return f"legacy_{status}"
-    return "legacy_unknown"
+    return "unknown"
 
 
 def count_policy_suggestion_statuses(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:

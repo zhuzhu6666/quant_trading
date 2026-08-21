@@ -88,20 +88,23 @@ def _advisory_only_components() -> set[str]:
     return advisory
 
 
-def _market_closed_for_freshness(now: float, latest_market_data_ts: float | None = None) -> tuple[bool, str]:
-    """Return whether stale market data is expected because the instrument is closed."""
-    try:
-        from backend.services.market_session import evaluate_market_session
+def _market_closed_for_freshness(market_session: dict | None) -> tuple[bool, str]:
+    """Return the market-closed state from the live session authority.
 
-        session = evaluate_market_session(
-            symbol="XAUUSD+",
-            now_ts=now,
-            latest_market_data_ts=latest_market_data_ts,
-        )
-        if session.status in {"closed_confirmed", "closed_pending_confirmation", "closed_pending_positions"}:
-            return True, f"{session.status}:{session.reason}"
-    except Exception as exc:
-        logger.debug("[system_health] market session freshness check failed: {}", exc)
+    Freshness monitoring must not recalculate the session with the static
+    schedule.  The live snapshot already contains the broker-provided symbol
+    schedule, quote/account evidence, and the same session decision used by
+    admission.  Recomputing here can report ``open_confirmed`` while the live
+    loop correctly blocks on a broker schedule such as a holiday or rollover.
+    """
+    session = dict(market_session or {})
+    status = str(session.get("status") or "")
+    if status in {
+        "closed_confirmed",
+        "closed_pending_confirmation",
+        "closed_pending_positions",
+    }:
+        return True, f"{status}:{session.get('reason') or 'unknown'}"
     return False, ""
 
 
@@ -332,7 +335,11 @@ class SystemHealth:
             try:
                 from backend.services.live_service import _market_session_snapshot
 
-                report.market_session = dict(_market_session_snapshot(None) or {})
+                # Pass the connected bridge so the shared live authority can
+                # use cTrader's symbol schedule.  Passing None silently falls
+                # back to the static schedule and creates a second session
+                # truth source in monitoring.
+                report.market_session = dict(_market_session_snapshot(bridge) or {})
                 if bridge is not None:
                     report.market_session["broker_connected"] = bool(
                         getattr(bridge, "is_connected", False)
@@ -350,7 +357,9 @@ class SystemHealth:
             # M1
             if m1_ts:
                 age = now - m1_ts
-                market_closed, market_closed_detail = _market_closed_for_freshness(now, float(m1_ts))
+                market_closed, market_closed_detail = _market_closed_for_freshness(
+                    report.market_session
+                )
                 from backend.services.market_session import maintenance_wait_evidence
                 maintenance = maintenance_wait_evidence(
                     report.market_session,
@@ -396,8 +405,6 @@ class SystemHealth:
             # M5
             if m5_ts:
                 age = now - m5_ts
-                if not market_closed:
-                    market_closed, market_closed_detail = _market_closed_for_freshness(now, float(m5_ts))
                 from backend.services.market_session import maintenance_wait_evidence
                 maintenance = maintenance_wait_evidence(
                     report.market_session,

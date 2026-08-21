@@ -5,6 +5,10 @@ import sqlite3
 from types import SimpleNamespace
 
 from backend.ledger.service import DecisionLedger
+from backend.services.canonical_v2_reader import (
+    decision_row,
+    iter_decision_factor_snapshots,
+)
 from backend.services.market_regime import (
     project_current_market_regime,
     resolve_market_regime,
@@ -65,10 +69,7 @@ def test_composite_decision_persists_regime_for_trade_review(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT regime_id, regime_confidence, action_json FROM decision_ledger WHERE decision_id=?",
-            (decision_id,),
-        ).fetchone()
+        row = decision_row(conn, decision_id)
     assert row["regime_id"] == "trend=strong|volatility=high"
     assert row["regime_confidence"] == 0.8
     action = json.loads(row["action_json"])
@@ -91,11 +92,11 @@ def test_composite_decision_preserves_abstain_null_values(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT raw_value, normalized_value, gated, gated_reason "
-            "FROM decision_factor_snapshot WHERE decision_id=?",
-            (decision_id,),
-        ).fetchone()
+        row = next(
+            snapshot
+            for snapshot in iter_decision_factor_snapshots(conn, decision_id)
+            if snapshot["factor"] == "macro"
+        )
 
     assert row["raw_value"] is None
     assert row["normalized_value"] is None

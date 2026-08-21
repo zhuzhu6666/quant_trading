@@ -248,9 +248,7 @@ def build_live_readiness(
         "safety_reconciliation_state": safety_reconciliation_state,
         "safety_accepting_new_risk": safety_accepting_new_risk,
         "safety_blockers": safety_blockers,
-        "safety_authority": (
-            "phase2_serial_safety_plane" if v2_active else "legacy_authoritative"
-        ),
+        "safety_authority": "governed_supervisor_executor",
         "safety_heartbeat_state": (
             "current"
             if safety_age is not None and safety_age <= freshness_seconds

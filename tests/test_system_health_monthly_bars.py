@@ -41,7 +41,7 @@ def test_system_health_reads_previous_month_when_current_month_is_empty(
     monkeypatch.setattr(
         system_health,
         "_market_closed_for_freshness",
-        lambda _now, _latest_ts: (True, "test_closed"),
+        lambda _market_session: (True, "test_closed"),
     )
     monkeypatch.setattr(
         market_session,
@@ -60,3 +60,42 @@ def test_system_health_reads_previous_month_when_current_month_is_empty(
     assert components["bar_m1"].status == "ok"
     assert components["bar_m5"].status == "ok"
     assert errors == []
+
+
+def test_system_health_passes_connected_bridge_to_market_session_authority(monkeypatch):
+    calls = []
+
+    class _Bridge:
+        is_connected = True
+
+        def get_live_bars(self, *, timeframe, n_bars):
+            assert timeframe in {"M1", "M5"}
+            assert n_bars == 1
+            return []
+
+    bridge = _Bridge()
+    authoritative_session = {
+        "status": "closed_confirmed",
+        "reason": "ctrader_symbol_schedule",
+    }
+
+    monkeypatch.setattr(system_health, "bars_monthly_read_paths", lambda **_: [])
+    monkeypatch.setattr(
+        live_service,
+        "_market_session_snapshot",
+        lambda passed_bridge: calls.append(passed_bridge) or authoritative_session,
+    )
+
+    report = system_health.HealthReport()
+    system_health.SystemHealth()._check_data_freshness(
+        {}, [], report=report, bridge=bridge
+    )
+
+    assert calls == [bridge]
+    assert report.market_session["status"] == authoritative_session["status"]
+    assert report.market_session["reason"] == authoritative_session["reason"]
+    assert report.market_session["broker_connected"] is True
+    assert system_health._market_closed_for_freshness(authoritative_session) == (
+        True,
+        "closed_confirmed:ctrader_symbol_schedule",
+    )

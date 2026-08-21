@@ -4,9 +4,10 @@ import time
 from types import SimpleNamespace
 
 from backend.services import live_service
+from backend.services.live_loop_controller import LiveLoopController
 
 
-def test_off_mode_executes_legacy_authority_once_per_due_cycle(monkeypatch):
+def test_off_mode_executes_governed_supervisor_cycle_once_per_due_cycle(monkeypatch):
     position = {"position_id": 901, "current_price": 4000.0}
     reconcile = SimpleNamespace(
         state="fresh",
@@ -54,22 +55,25 @@ def test_off_mode_executes_legacy_authority_once_per_due_cycle(monkeypatch):
         reconcile_result=reconcile,
     )
 
-    assert first["legacy_authoritative"] is True
+    assert first["supervisor_executor_authoritative"] is True
     assert first["protection"]["status"] == "completed"
     assert second["protection"]["status"] == "not_due"
     assert executions == [901]
 
 
-def test_default_off_running_loop_still_enables_safety_watchdog(monkeypatch):
-    monkeypatch.setattr(
-        live_service,
-        "_loop_thread",
-        SimpleNamespace(is_alive=lambda: True),
+def test_running_loop_enables_safety_watchdog(monkeypatch):
+    monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", LiveLoopController())
+    generation = live_service._LIVE_LOOP_CONTROLLER.begin_start(
+        broker="ctrader",
+        strategy_name="factor_v4",
+    )
+    live_service._LIVE_LOOP_CONTROLLER.bind_thread(
+        generation.generation_id,
+        SimpleNamespace(is_alive=lambda: True, ident=902),
     )
     live_service._live_state_update(loop_running=True)
 
     snapshot = live_service._live_safety_watchdog_probe()
 
-    assert live_service._phase2_v2_active() is False
     assert snapshot["enabled"] is True
     assert snapshot["running"] is True

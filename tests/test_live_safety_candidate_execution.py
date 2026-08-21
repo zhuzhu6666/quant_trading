@@ -22,7 +22,7 @@ def _runtime(
             "config_hash": "config-hash",
         },
         protection_candidate_cls=lambda **kwargs: SimpleNamespace(**kwargs),
-        execute_trailing_candidate=(
+        execute_protection_candidate=(
             trailing or (lambda *_args, **_kwargs: False)
         ),
         evaluate_position_supervisor=(

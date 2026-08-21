@@ -11,7 +11,7 @@
 每条可进入学习链路的样本必须带 `evidence_contract`：
 
 - `schema_version`: 当前为 `learning_evidence_contract.v1`
-- `source`: 来源表、source id、decision/review/trade/position 锚点
+- `source`: canonical event type/source id、decision/review/trade/position 锚点
 - `integrity`: `full / recovered / partial / missing`
 - `causal_level`: `observational / counterfactual / replay_validated / intervention_observed`
 - `label_status`: `pending / matured / invalid`
@@ -63,10 +63,10 @@ live decision / supervisor trace / close review
 
 | 表 | 角色 |
 |---|---|
-| `decision_ledger` | open/skip/supervisor 等实时决策事实 |
-| `position_supervisor_trace` | 持仓监督动作轨迹 |
-| `trade_outcome_review` | 成熟交易结果和复盘事实 |
-| `supervisor_counterfactual_review` | 退出反事实成熟化事实 |
+| `canonical_v2.event (risk_decision)` | open/skip/supervisor 等实时决策事实 |
+| `canonical_v2.event (supervisor_trace)` | 持仓监督动作轨迹 |
+| `canonical_v2.event (trade_review)` | 成熟交易结果和复盘事实 |
+| `canonical_v2.event (counterfactual_review)` | 退出反事实成熟化事实 |
 | `factor_contribution_review` | 单因子贡献复盘 |
 | `autonomous_learning_sample` | 学习样本统一表，带 features/label/trace/evidence contract |
 | `policy_suggestion` | 自治建议和执行审计入口 |
@@ -183,12 +183,13 @@ readiness 状态语义：
 特别约束：
 
 - `pending` 样本不得声明 `supervised_training`
-- `supervisor_execution_trace` 是 `autonomous_learning_sample.sample_type`，不是独立表；初始默认是 pending，只能作为轨迹证据
-- supervisor trace 只有结合 `trade_outcome_review / supervisor_counterfactual_review` 成熟后，才能进入强训练候选
+- `supervisor_execution_trace` 是 `autonomous_learning_sample.sample_type`，不是独立表；只有真实 `stage=executed AND outcome=applied` trace 才进入 supervisor maturity；观察、superseded、risk_rejected、execution_failed 和非真实 trace 统一 `label_status=excluded`、`train_weight=0`
+- `evidence_contract.consumer_eligibility` 按消费者隔离：`outcome_learning` 可在污染结果仍有权威 broker PnL/成交事实时低权重学习；`supervisor_counterfactual` 必须有同一 `decision_id` 的真实 supervisor trace、完整 broker lifecycle/fresh reconcile 且无硬污染；`governance_mutation` 仍要求完整、成熟、唯一 lineage、无污染证据
+- supervisor trace 只有满足对应 consumer eligibility 后，才能进入 outcome learning、counterfactual 或治理训练；污染标签不再把整条仓位结果一刀切作废，但也不能跨用途升级证据
 
 ## Open Outcome Samples
 
-开仓质量学习使用 `autonomous_learning_sample.sample_type=shadow_open_decision`，只有开仓样本与 `trade_outcome_review` 对齐并成熟后，才能转换为 `label.label=open_outcome`。开仓模型使用
+开仓质量学习使用 `autonomous_learning_sample.sample_type=shadow_open_decision`，只有开仓样本与 canonical `trade_review` 事件对齐并成熟后，才能转换为 `label.label=open_outcome`。开仓模型使用
 `consumer_eligibility.open_quality_lightgbm` 作为其专项资格；全局 contract 的因子归因/治理要求不能
 反向阻断只需要开仓证据的 `open_quality_lightgbm`，但污染、未成熟、错误目标和执行事实不足仍然阻断训练。
 
@@ -223,6 +224,10 @@ fill price，并把结果写入 `open_context_quality.ready=true`。任一字段
 - `trade_review_outcome` 和成熟 `shadow_open_decision` 必须降为 `integrity=partial` 或更低、`train_weight<=0.25`。
 - `entry_supervisor_feedback` 不得生成 `downweight_entry_factor`，只能生成数据链路/系统质量复核建议。
 - `factor_contribution_review` 行只能作为 audit/explainability，不能作为高置信因子治理训练样本。
+
+污染按消费者隔离，而不是把仓位或结果事实作废：`restart_replay/manual_close`、未知 broker 价格、真实数据陈旧等仍保留原污染含义；它们可以阻断
+`supervisor_counterfactual` 和 `governance_mutation`，但在 broker-reported PnL、成交价和结果标签完整时，允许
+`outcome_learning` 使用低权重结果样本。该结果学习不构造 supervisor 动作效果，也不把历史仓位升级为模板治理证据。
 
 同向簇治理由 `materialize_entry_cluster_governance_suggestions` 消费 matured open outcome 样本：
 
@@ -267,8 +272,8 @@ observation/research 链路，但不能触发 mutation。
 当前数学模型清单：
 
 - `open_quality_lightgbm`: 开仓时机质量影子评分，来源为 matured `shadow_open_decision` + `open_outcome`；使用 evidence contract 中针对该消费者的 `consumer_eligibility`，要求开仓上下文、版本化目标和执行证据完整，不把因子结果归因要求错误施加到开仓模型
-- `position_quality_lightgbm`: 持仓质量影子评分，来源为 `trade_outcome_review`，输出 hold/exit risk shadow audit
-- `factor_governance_lightgbm`: 因子弱化、因子治理建议，来源为 `factor_contribution_review` + `trade_outcome_review`
+- `position_quality_lightgbm`: 持仓质量影子评分，来源为 canonical `trade_review` 事件，输出 hold/exit risk shadow audit
+- `factor_governance_lightgbm`: 因子弱化、因子治理建议，来源为 canonical factor snapshots + `trade_review` 事件
 - `ModelShadowQueue` 通用 shadow 候选: 来源为 dataset snapshot artifact，只能通过 promotion gate 进入 shadow validation
 - LLM advisory: 结构化复盘、治理说明、人工覆盖审计辅助；不进入执行层
 

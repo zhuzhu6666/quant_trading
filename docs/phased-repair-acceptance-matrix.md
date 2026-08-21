@@ -136,9 +136,7 @@ P2 complete 不授权清锁或切换静态 flag。
 阶段切换顺序固定：
 
 ```text
-safety_enforce
-  -> generation_enable
-  -> execution_outcome_enable
+supervisor_enforce
   -> governance_enforce
   -> pg_job_queue_enable
   -> pg_job_queue_verify
@@ -194,7 +192,7 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 - PostgreSQL schema 13 的受控应用与新 lineage 写入；
 - backlog 达预算后真实新 GP 注册数为 0，并持续排空；
 - legacy ACTIVE 在 live selection 中排除并完成 `demote_to_shadow`；
-- `execution_outcome_enable` 后新开仓 execution intent 覆盖率 100%，并完成一次 `open -> close -> learning/effect` 全链生命周期；
-- 六个静态发布目标逐项通过 release gate、受控重启和观察窗口。
+- `supervisor_enforce` 后新开仓与持仓监督 execution intent 覆盖率 100%，并完成一次 `open -> close -> learning/effect` 全链生命周期；
+- 四个静态发布目标逐项通过 release gate、受控重启和观察窗口。
 
 这些证据完成前，P6 和后续静态开关保持关闭；历史缺失 intent/lineage 保持显式缺失，不回填猜测值。

@@ -8,9 +8,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class LiveLoopStartRuntime:
-    generation_controller_enabled: Any
     state_lock: Any
-    snapshot_ownership: Any
     process_shutdown_requested: Any
     controller: Any
     last_loop_end: Any
@@ -18,9 +16,6 @@ class LiveLoopStartRuntime:
     sleep: Any
     logger_warning: Any
     logger_info: Any
-    event_factory: Any
-    prepare_ownership: Any
-    reset_start_ownership: Any
     persist_desired_state: Any
     prime_live_loop_state: Any
     start_safety_watchdog: Any
@@ -29,10 +24,7 @@ class LiveLoopStartRuntime:
     stop_safety_watchdog: Any
     thread_factory: Any
     loop_target: Any
-    install_loop_thread: Any
     live_state_update: Any
-    live_state_get: Any
-    no_new_risk_latched: Any
 
 
 def start_live_loop(
@@ -45,12 +37,10 @@ def start_live_loop(
 ) -> dict[str, Any]:
     """Start one owned generation after double-checked admission."""
 
-    generation_enabled = runtime.generation_controller_enabled()
     with runtime.state_lock:
         rejected = _start_rejection(
             broker=broker,
             strategy_name=strategy_name,
-            generation_enabled=generation_enabled,
             runtime=runtime,
         )
         if rejected is not None:
@@ -69,7 +59,6 @@ def start_live_loop(
         rejected = _post_backoff_rejection(
             broker=broker,
             strategy_name=strategy_name,
-            generation_enabled=generation_enabled,
             runtime=runtime,
         )
         if rejected is not None:
@@ -77,7 +66,6 @@ def start_live_loop(
         return _start_admitted_generation(
             broker=broker,
             strategy_name=strategy_name,
-            generation_enabled=generation_enabled,
             persist_desired=persist_desired,
             trigger_reason=trigger_reason,
             runtime=runtime,
@@ -88,7 +76,6 @@ def _start_rejection(
     *,
     broker: str,
     strategy_name: str,
-    generation_enabled: bool,
     runtime: LiveLoopStartRuntime,
 ) -> dict[str, Any] | None:
     if runtime.process_shutdown_requested():
@@ -98,43 +85,29 @@ def _start_rejection(
             "broker": broker,
             "strategy_name": strategy_name,
         }
-    if generation_enabled:
-        status = runtime.controller.status()
-        if status.get("phase") in {
-            "starting",
-            "running",
-            "degraded",
-            "draining",
-        }:
-            return {
-                "ok": False,
-                "error": (
-                    "live_loop_generation_busy:"
-                    f"{status.get('phase')}:{status.get('generation')}"
-                ),
-                **status,
-            }
-    state = runtime.snapshot_ownership()
-    if state.thread is not None and state.thread.is_alive():
-        draining = bool(
-            not generation_enabled
-            and state.stop_flag is not None
-            and state.stop_flag.is_set()
-        )
+    status = runtime.controller.status()
+    if status.get("phase") in {
+        "starting",
+        "running",
+        "degraded",
+        "draining",
+    }:
         return {
             "ok": False,
             "error": (
-                "live_loop_draining"
-                if draining
-                else f"live loop already running (broker={state.broker})"
+                "live_loop_generation_busy:"
+                f"{status.get('phase')}:{status.get('generation')}"
             ),
-            "broker": state.broker,
-            "started_at": state.started_at,
-            "strategy_name": state.strategy_name,
-            "phase": "draining" if draining else "running",
-            "thread_alive": True,
-            "ready": False if draining else None,
-            "accepting_new_risk": False if draining else None,
+            **status,
+        }
+    if status.get("thread_alive"):
+        return {
+            "ok": False,
+            "error": (
+                "live_loop_generation_exit_pending:"
+                f"{status.get('generation')}"
+            ),
+            **status,
         }
     if broker != "ctrader":
         return {"ok": False, "error": f"unknown broker: {broker}"}
@@ -145,7 +118,6 @@ def _post_backoff_rejection(
     *,
     broker: str,
     strategy_name: str,
-    generation_enabled: bool,
     runtime: LiveLoopStartRuntime,
 ) -> dict[str, Any] | None:
     if runtime.process_shutdown_requested():
@@ -155,25 +127,16 @@ def _post_backoff_rejection(
             "broker": broker,
             "strategy_name": strategy_name,
         }
-    state = runtime.snapshot_ownership()
-    if state.thread is None or not state.thread.is_alive():
+    status = runtime.controller.status()
+    if not status.get("thread_alive"):
         return None
-    draining = bool(
-        not generation_enabled
-        and state.stop_flag is not None
-        and state.stop_flag.is_set()
-    )
     return {
         "ok": False,
         "error": (
-            "live_loop_draining"
-            if draining
-            else "another loop started during backoff wait"
+            "live_loop_generation_exit_pending:"
+            f"{status.get('generation')}"
         ),
-        "phase": "draining" if draining else "running",
-        "thread_alive": True,
-        "ready": False if draining else None,
-        "accepting_new_risk": False if draining else None,
+        **status,
     }
 
 
@@ -181,7 +144,6 @@ def _start_admitted_generation(
     *,
     broker: str,
     strategy_name: str,
-    generation_enabled: bool,
     persist_desired: bool,
     trigger_reason: str,
     runtime: LiveLoopStartRuntime,
@@ -196,34 +158,22 @@ def _start_admitted_generation(
         "leverage": 0,
         "currency": "",
     }
-    generation = None
-    if generation_enabled:
-        try:
-            generation = runtime.controller.begin_start(
-                broker=broker,
-                strategy_name=strategy_name,
-            )
-        except RuntimeError as exc:
-            return {
-                "ok": False,
-                "error": str(exc),
-                **runtime.controller.status(),
-            }
-
-    thread = None
-    started_at = runtime.now()
     try:
-        stop_event = (
-            generation.stop_event
-            if generation is not None
-            else runtime.event_factory()
-        )
-        runtime.prepare_ownership(
-            stop_flag=stop_event,
+        generation = runtime.controller.begin_start(
             broker=broker,
-            started_at=started_at,
             strategy_name=strategy_name,
         )
+    except RuntimeError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            **runtime.controller.status(),
+        }
+
+    thread = None
+    started_at = float(generation.created_at)
+    try:
+        stop_event = generation.stop_event
         if persist_desired:
             runtime.persist_desired_state(
                 True,
@@ -242,28 +192,25 @@ def _start_admitted_generation(
         )
         runtime.start_safety_watchdog()
         runtime.start_scheduler()
-        if generation is not None:
-            runtime.controller.bind_component(
-                generation.generation_id,
-                "scheduler",
-            )
-            runtime.controller.bind_component(
-                generation.generation_id,
-                "refresh_worker_inline",
-            )
+        runtime.controller.bind_component(
+            generation.generation_id,
+            "scheduler",
+        )
+        runtime.controller.bind_component(
+            generation.generation_id,
+            "refresh_worker_inline",
+        )
         thread = runtime.thread_factory(
             target=runtime.loop_target,
             args=(
                 broker,
                 stop_event,
-                generation.generation_id if generation is not None else "",
+                generation.generation_id,
             ),
             name=f"live_loop_{broker}",
             daemon=True,
         )
-        runtime.install_loop_thread(thread)
-        if generation is not None:
-            runtime.controller.bind_thread(generation.generation_id, thread)
+        runtime.controller.bind_thread(generation.generation_id, thread)
         thread.start()
         runtime.logger_info(
             f"live loop started: broker={broker} strategy={strategy_name} "
@@ -271,12 +218,16 @@ def _start_admitted_generation(
         )
     except Exception as exc:
         failed_reason = f"start_failed:{type(exc).__name__}:{exc}"
-        if generation is not None:
-            runtime.controller.acknowledge_exit(
+        runtime.controller.acknowledge_exit(
+            generation.generation_id,
+            failed_reason=failed_reason,
+        )
+        if thread is not None:
+            runtime.controller.clear_thread_if(
                 generation.generation_id,
-                failed_reason=failed_reason,
+                thread,
+                runtime.now(),
             )
-        runtime.reset_start_ownership()
         runtime.live_state_update(
             loop_running=False,
             accepting_new_risk=False,
@@ -290,11 +241,7 @@ def _start_admitted_generation(
         return {
             "ok": False,
             "error": failed_reason,
-            **(
-                runtime.controller.status()
-                if generation is not None
-                else {}
-            ),
+            **runtime.controller.status(),
         }
 
     # The canonical V2 tick owner must complete its broker/safety/session
@@ -309,9 +256,7 @@ def _start_admitted_generation(
         "pid": thread.ident,
         "strategy_name": strategy_name,
         "trigger_reason": trigger_reason,
-        "generation": (
-            generation.generation_id if generation is not None else ""
-        ),
+        "generation": generation.generation_id,
         "phase": "starting",
         "ready": ready,
         "accepting_new_risk": ready,

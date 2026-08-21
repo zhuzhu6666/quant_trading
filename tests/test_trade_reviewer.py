@@ -6,13 +6,16 @@ import sqlite3
 import pytest
 
 from alpha.reflection.reviewer import TradeReviewer
+from backend.core.db import connect_sqlite
+from backend.services.canonical_v2 import record_decision_event, record_order_event
+from backend.services.canonical_v2_reader import iter_review_rows, review_row
 
 
-def _row(db_path: str, sql: str, params: tuple = ()) -> sqlite3.Row:
-    conn = sqlite3.connect(db_path)
+def _review(db_path: str, review_id: str) -> dict:
+    conn = connect_sqlite(db_path, read_only=True)
     conn.row_factory = sqlite3.Row
     try:
-        row = conn.execute(sql, params).fetchone()
+        row = review_row(conn, review_id)
         assert row is not None
         return row
     finally:
@@ -41,13 +44,9 @@ def test_trade_reviewer_uses_broker_close_ts_for_created_at(tmp_path):
     )
 
     assert result["accepted"] is True
-    row = _row(
-        db_path,
-        "SELECT created_at, review_json FROM trade_outcome_review WHERE review_id=?",
-        (result["review_id"],),
-    )
-    payload = json.loads(row["review_json"])
-    assert float(row["created_at"]) == close_ts
+    row = _review(db_path, result["review_id"])
+    payload = row["review_json"]
+    assert row["created_at"] == close_ts
     assert payload["close_ts"] == close_ts
     assert payload["real_pnl"]["deal_id"] == 323453066
     assert payload["signal_score"] is None
@@ -113,9 +112,10 @@ def test_trade_reviewer_deduplicates_same_broker_deal(tmp_path):
     assert second["deduplicated"] is True
     assert second["review_id"] == first["review_id"]
 
-    conn = sqlite3.connect(db_path)
+    conn = connect_sqlite(db_path, read_only=True)
+    conn.row_factory = sqlite3.Row
     try:
-        count = conn.execute("SELECT COUNT(*) FROM trade_outcome_review").fetchone()[0]
+        count = len(iter_review_rows(conn, limit=0))
     finally:
         conn.close()
     assert count == 1
@@ -245,36 +245,49 @@ def test_trade_reviewer_separates_signal_and_fill_time_for_system_contamination(
                 "market_data_age_seconds": 607.0,
             },
         }
-        conn.execute(
-            """
-            INSERT INTO decision_ledger
-            (decision_id, trade_id, position_id, event_type, symbol, timeframe,
-             decision_ts, regime_id, action_score, action_reason, action_json, risk_state_json, created_at)
-            VALUES ('dec_open_delay', 'pos_delay', 'pos_delay', 'open', 'XAUUSD+',
-                    'M5', 1000.0, 'trend', -0.91, 'executed', ?, ?, 1605.0)
-            """,
-            (
-                json.dumps(action),
-                json.dumps({"policy_verdict": risk_verdict}),
-            ),
+        record_decision_event(
+            conn,
+            decision_id="dec_open_delay",
+            trade_id="pos_delay",
+            position_id="pos_delay",
+            event_type="open",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=1000.0,
+            regime_id="trend",
+            action_score=-0.91,
+            action_reason="executed",
+            action=action,
+            risk_state={"policy_verdict": risk_verdict},
+            created_at=1605.0,
         )
-        conn.execute(
-            """
-            INSERT INTO order_lifecycle_event
-            (event_id, decision_id, trade_id, order_id, broker_order_id,
-             event_type, event_ts, price, volume, status, details_json)
-            VALUES ('ord_sub', 'dec_open_delay', 'pos_delay', 'pos_delay', 'pos_delay',
-                    'submitted', 1606.0, 4127.2, 100.0, 'submitted', '{}')
-            """
+        record_order_event(
+            conn,
+            event_id="ord_sub",
+            decision_id="dec_open_delay",
+            trade_id="pos_delay",
+            order_id="pos_delay",
+            broker_order_id="pos_delay",
+            event_type="submitted",
+            event_ts=1606.0,
+            price=4127.2,
+            volume=100.0,
+            status="submitted",
+            details={},
         )
-        conn.execute(
-            """
-            INSERT INTO order_lifecycle_event
-            (event_id, decision_id, trade_id, order_id, broker_order_id,
-             event_type, event_ts, price, volume, status, details_json)
-            VALUES ('ord_fill', 'dec_open_delay', 'pos_delay', 'pos_delay', 'pos_delay',
-                    'filled', 1607.0, 4127.3, 100.0, 'filled', '{}')
-            """
+        record_order_event(
+            conn,
+            event_id="ord_fill",
+            decision_id="dec_open_delay",
+            trade_id="pos_delay",
+            order_id="pos_delay",
+            broker_order_id="pos_delay",
+            event_type="filled",
+            event_ts=1607.0,
+            price=4127.3,
+            volume=100.0,
+            status="filled",
+            details={},
         )
         conn.commit()
     finally:

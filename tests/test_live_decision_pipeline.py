@@ -1,9 +1,6 @@
 from types import SimpleNamespace
 
-from backend.services.live_decision_pipeline import (
-    build_signal_decision_log_payload,
-    run_live_decision_pipeline,
-)
+from backend.services.live_decision_pipeline import run_live_decision_pipeline
 
 
 class _Engine:
@@ -123,81 +120,3 @@ def test_live_decision_pipeline_applies_daily_raw_fallback_before_scoring():
     assert frame.factor_values == {"dxy_corr_20": -0.42}
     assert frame.signals == {"dxy_corr_20": -0.42}
     assert gate.filter_calls[0][1] == {"dxy_corr_20": -0.42}
-
-
-def test_signal_decision_log_payload_matches_legacy_shape():
-    composite = SimpleNamespace(
-        direction=1,
-        score=0.72,
-        tactical_score=0.7,
-        macro_score=0.1,
-        n_active_factors=3,
-        n_available_factors=3,
-        n_scoring_factors=2,
-        n_contributing_factors=1,
-        n_abstain_factors=1,
-    )
-    gate_result = SimpleNamespace(passed=True, reason="passed")
-
-    payload = build_signal_decision_log_payload(
-        bar={"time": 1783209600.0},
-        composite=composite,
-        gate_result=gate_result,
-        tick=9,
-    )
-
-    assert payload == {
-        "ts": 1783209600.0,
-        "bar_date": "2026-07-05",
-        "decision_type": "signal",
-        "strategy": "factor_v4",
-        "direction": 1,
-        "confidence": 0.72,
-        "decision": "execute",
-        "meta": {
-            "gate_reason": "passed",
-            "tick": 9,
-            "tactical_score": 0.7,
-            "macro_score": 0.1,
-            "n_active": 3,
-            "n_available": 3,
-            "n_scoring": 2,
-            "n_contributing": 1,
-            "n_abstain": 1,
-        },
-    }
-    assert build_signal_decision_log_payload(
-        bar={"time": 0},
-        composite=composite,
-        gate_result=gate_result,
-        tick=9,
-    ) is None
-
-
-def test_signal_decision_log_payload_keeps_factor_facts_when_gate_blocks():
-    composite = SimpleNamespace(
-        direction=0,
-        score=0.0,
-        tactical_score=-0.011258,
-        macro_score=-0.577005,
-        n_active_factors=17,
-        n_available_factors=17,
-        n_scoring_factors=8,
-        n_contributing_factors=6,
-        n_abstain_factors=1,
-    )
-    gate_result = SimpleNamespace(passed=False, reason="signal_below_threshold")
-
-    payload = build_signal_decision_log_payload(
-        bar={"time": 1785256800.0},
-        composite=composite,
-        gate_result=gate_result,
-        tick=2064,
-    )
-
-    assert payload["decision"] == "hold"
-    assert payload["direction"] == 0
-    assert payload["meta"]["tactical_score"] == -0.011258
-    assert payload["meta"]["macro_score"] == -0.577005
-    assert payload["meta"]["n_active"] == 17
-    assert payload["meta"]["n_abstain"] == 1

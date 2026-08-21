@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Snapshot: 2026-08-18
+> Snapshot: 2026-08-20
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -18,7 +18,7 @@
 | S4 全量验证 | complete | 2815 passed / 12 skipped |
 | S5 清库物理 | complete | 10.8GB → 9.7MB，canonical_v2 9 表空 + runtime 6 表空结构 |
 | S6 容量阀 P6 | pending | event 分区、保留窗口、归档、容量监控 |
-| S7 启动验证+进化闭环首验 | in_progress | 双服务冷启动 ✅；**evolution_decision 决策写入路径已收敛修复（8 列单轨，PG 落库已实测打通）**；**learning_application_effect/log 域全代码已收敛到精简 schema（唯一 store，2813 测试通过，3 项 factor-governance 目标测试恢复绿）**；进化闭环首次自然闭合仍待下一次 learning 周期真实证据 |
+| S7 启动验证+进化闭环首验 | in_progress | 双服务冷启动 ✅；**evolution_decision 决策写入路径已收敛修复（8 列单轨，PG 落库已实测打通）**；**learning_application_effect/log 域全代码已收敛到精简 schema（唯一 store，2813 测试通过，3 项 factor-governance 目标测试恢复绿）**；持仓监督 active template 已收敛为 `governed_execute` 单轨，首次真实 broker lifecycle/learning 闭环仍待运行证据 |
 
 ## 2. 最近一次运行核对
 
@@ -29,8 +29,8 @@
 - 部署重绑定（2026-08-11 两次）：静态基值放宽使 effective config hash 变化，原 committed mutation 失配，learning worker 按设计 fail-closed。均通过 `RuntimeConfigMutationService` + `GovernanceMutationCoordinator`（operator:zhu，dual_record，risk_tightening/no_change 免 V16）重新提交 cvar 2.5 确认 mutation（`gmut_a8a90e...`、`gmut_ebf5cd...`），绑定新 effective hash，overlay 恢复 committed/current；审计与备份在 `logs/rebind_20260811/`。
 - live loop 保持 operator 手动停止（`live.loop.desired_state.enabled=false, reason=manual`），当前无持仓（operator 已手动平仓）；readiness 因 loop 停止处于 `no_new_risk` 姿态：blockers 为 ctrader warming_up / incident_control no_new_risk / risk_metrics stale，均为 loop 未运行的预期结果，待 operator 处理完成后按 SOP 恢复 loop。
 - learning worker capability 为 `boot_status=ready`、`recovery_status=complete`；overlay 权威恢复后无 quarantine 记录。
-- Safety v2 仍为 `shadow/observing`，尚未满足既有 24 小时连续空仓或完整 broker lifecycle 条件；这不改变当前 safety shadow 的发布门。
-- 静态 flags 保持 `live_safety_plane_v2_mode=shadow`、`live_generation_controller_v2_enabled=false`、`ctrader_execution_outcome_v2_enabled=false`、`governance_mutation_coordinator_v2_mode=dual_record`、`pg_job_queue_v2_enabled=false`。
+- canonical Safety/supervisor 路径已切到 `live_safety_plane_v2_mode=enforce`；generation controller 与 broker execution intent/reconcile 没有独立开关，始终使用 canonical 单轨。当前进程是否已加载该姿态，仍必须以重启后的 process flag projection、PID/start timestamp 和日志复核。
+- 源配置静态 flags 为 `live_safety_plane_v2_mode=enforce`、`governance_mutation_coordinator_v2_mode=dual_record`、`pg_job_queue_v2_enabled=false`。
 
 readiness 的 ready 只表示当前事实和能力可用，不是开关提交权，也不替代 V16、Candidate Review、RiskPolicy、Coordinator 或真实 broker 证据。
 
@@ -279,6 +279,32 @@ Batch: 用户确认"修"最后一项运行态技术欠账。
 - 验证：重启后端 `governance projection recovery attempted=0 current=0 degraded=0`（原 failed warning 消失）；启动无 ERROR；cTrader auth OK；factor 测试 57/1 绿；全量回归 2782/12 0 失败。
 - **代码消费方无需改动**（factor_lifecycle_service/factor_catalog/ledger 本来就按 17 列写，之前是表缺列）。
 
+### 2026-08-20 持仓监督单轨执行与学习闭环修复
+
+Batch: 按“结果可学、动作不可归因”原则，移除 Demo observation gate 和 legacy AWE active fallback；Demo 与未来实盘共用同一 governed supervisor executor。
+
+Canonical authority: active `position_supervisor_template.v1` 只接受 `governed_execute`；普通 `tighten/reduce/close` 唯一路径为 `supervisor verdict -> RiskPolicy -> cTrader broker -> lifecycle -> fresh reconcile -> position_supervisor_trace`。`autonomy_demo_auto_apply` 只控制已通过治理证据的 mutation，不控制普通持仓监督 broker 执行。
+
+Deleted paths: live observation gate、`_observed_adaptive_verdict`、Safety 双 candidate compare/fallback、active `legacy_awe_trailing` planner/candidate writer/executor。历史 AWE/observation trace 只读审计；generic executor 对新的 legacy candidate 明确拒绝。
+
+Contract: `evidence_contract_json.consumer_eligibility` 按 `outcome_learning`、`supervisor_counterfactual`、`governance_mutation` 隔离用途；非真实 observation/superseded trace 幂等 terminalize 为 `excluded/train_weight=0`，真实 applied trace 才进入 supervisor maturity。`restart_replay/manual_close` 仍阻断 supervisor counterfactual，但不抹掉权威 broker PnL 的低权重 outcome learning。
+
+Lineage/timing: review repair 优先读取 canonical position-decision index 和 canonical close/order events，统一 epoch seconds；单位混用、逆序或缺 timeframe 标记 `timing_invalid`，不制造 execution delay。对 `284253609` 的只读验证得到 canonical decision `dec_e58a4e1f3a7d478b`、M5、signal-to-fill 312.784435 秒、timing valid；线上 backfill 尚未执行。
+
+Targeted verification: 监督/风险/生命周期/学习/readiness 针对性回归持续通过；本批新增严格 broker component truth、loop ownership 和旧 preview 净删测试。未用测试伪造 broker applied 事实；运行态重启、readiness、日志和 cTrader fresh reconcile 已验证，真实 supervisor broker lifecycle 仍待有仓位时证明。
+
+Remaining: 仍需在 Demo 运行态验证一次真实 `tighten/reduce/close -> broker lifecycle -> fresh reconcile -> trace -> counterfactual -> maturity`；单测和 readiness 不替代该证据。历史 `284253609` 可在 service-backed backfill 后用于低权重 outcome learning，但不得作为 supervisor counterfactual 或治理证据。
+
+### 2026-08-21 canonical-v2 follow-up：运行态迁移与旧事实清理完成
+
+本批代码继续收敛为 canonical 单轨：生产 `backend/alpha/execution/risk/research/scripts/db` 已无退役事实表的直接 SQL；`autonomous_learning_sample` 已从进程启动 DDL 删除，canonical 样本唯一写入 `canonical_v2.training_sample_row`；readiness 现在同时校验 active `governed_execute` 模板、broker orders 开关、完整 schema 版本和 `runtime.broker_execution_intent`。
+
+运行态复核确认 PostgreSQL migration ledger 已到 v30，`runtime.broker_execution_intent` 存在；旧 `runtime` 事实表已由 service-backed cleanup 清空并由 v30 退役，不再提供兼容查询或写入路径。canonical event 当前承载 decision/order/position/review 事实，历史 AWE/observation 仅可经 replay/audit 读取，不能进入实时 broker executor。
+
+重启验收（2026-08-21）：backend PID `24950`、learning worker PID `7828` 均运行；进程 capability 已加载 `live_safety_plane_v2_mode=enforce`，旧 generation flag 不再出现。cTrader 账户认证、positions/account fresh reconcile 成功，当前空仓、`unknown_execution_count=0`、`reconciliation_state=fresh`。一次完整 `system_health` 周期已输出 `market_session_status=closed_confirmed`，与 `runtime_health_projection.v1` 的 cTrader schedule 事实一致；修复前的静态时段 `open_confirmed` 误报已消失。当前 live execution 仍由 market closed/no-new-risk 事实 fail-closed，没有触发人工或测试下单。
+
+本批额外净删：无调用方的 `live_legacy_safety_preview.py`、死的 `_trailing_state` 清理投影和 lifecycle PnL/account/price 合成回退；缺 broker 明确 `pnl_state=known` 的持仓现在保持 unknown，不再伪造监督指标。新增监控回归后，目标集 `169 passed`，compileall 与 scoped diff check 通过。
+
 ## 4. 仍需真实运行证明
 
 以下证据不能由单测、历史快照或 readiness 替代：
@@ -286,7 +312,7 @@ Batch: 用户确认"修"最后一项运行态技术欠账。
 - post-repair 新 broker deal 的价格/金额合同；
 - restart 后 deal replay 与 position identity 恢复；
 - `open -> protection -> close -> deal sync -> review -> sample` 完整生命周期；
-- Safety shadow 连续 24 小时空仓或一个完整 broker position lifecycle；
+- Safety enforce 连续 24 小时空仓或一个完整 broker position lifecycle；
 - 当前源码绑定的 execution/safety fault matrix；
 - 每次发布阶段的 process-loaded flags、PID、fingerprint 和 release preflight。
 
@@ -302,7 +328,7 @@ Batch: 用户确认"修"最后一项运行态技术欠账。
 1. 只读复核新 broker lifecycle、deal replay、review/sample lineage 和 Safety shadow continuity。
 2. 对 `legacy-debt-register.md` 中仍在迁移的路径逐项收集退出证据，并在 canonical 验证后同批删除旧路径。
 3. 仅在真实证据满足后运行对应 release gate；不通过 SQL 改写历史 review、command、sample 或 maturity。
-4. 保持 Demo adaptive supervisor 为 `observation_only`，不扩大模型、因子或治理生产权限。
+4. 保持 active supervisor 使用 `governed_execute` 单轨；不把历史 observation 记录升级为 live 执行、supervisor counterfactual 或治理证据。
 
 ## 6. 每批状态更新格式
 

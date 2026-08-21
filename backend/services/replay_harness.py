@@ -13,7 +13,6 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
-    state_table_columns,
     state_table_exists,
 )
 from backend.core.state_store import (
@@ -27,12 +26,13 @@ from backend.services.canonical_v2_reader import (
     iter_order_rows,
     iter_position_rows,
     iter_review_rows,
+    iter_supervisor_trace_rows,
+    iter_counterfactual_rows,
     review_row,
 )
 from backend.services.evolution_ledger import current_runtime_config_snapshot
 from backend.services.fact_envelope import observed_epoch
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import load_json_payload, load_supervisor_trace_archive
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -686,7 +686,6 @@ class ReplayHarnessService:
 
     def _load_decisions_canonical(self, conn: Any, *, since_ts: float, limit: int) -> list[dict[str, Any]]:
         """Decision reads through canonical_v2 (legacy-shaped rows)."""
-        has_factor_snapshot = state_table_exists(conn, "decision_factor_snapshot")
         decisions: list[dict[str, Any]] = []
         for row in iter_decision_rows(conn, limit=0):
             if _safe_float(row.get("decision_ts")) < since_ts:
@@ -710,12 +709,7 @@ class ReplayHarnessService:
             )
             return count_decision_factor_snapshots(conn, decision_id)
         except Exception:
-            row = _execute(
-                conn,
-                "SELECT COUNT(*) AS n FROM decision_factor_snapshot WHERE decision_id = ?",
-                (decision_id,),
-            ).fetchone()
-            return _safe_int(row["n"] if row is not None else 0)
+            return 0
 
     @staticmethod
     def _load_factor_snapshots(conn: Any, decision_id: str) -> list[dict[str, Any]]:
@@ -725,20 +719,7 @@ class ReplayHarnessService:
             )
             return iter_decision_factor_snapshots(conn, decision_id)
         except Exception:
-            rows = _execute(
-                conn,
-                "SELECT factor, source, raw_value, normalized_value, direction,"
-                " base_weight, policy_weight, shadow_score, health_score,"
-                " gated, gated_reason, contribution_score,"
-                " generation, artifact_hash, definition_fingerprint,"
-                " runtime_selection_fingerprint, config_hash,"
-                " lineage_status"
-                " FROM decision_factor_snapshot"
-                " WHERE decision_id = ?"
-                " ORDER BY ABS(contribution_score) DESC, factor ASC",
-                (decision_id,),
-            ).fetchall()
-            return [dict(row) for row in rows]
+            return []
 
     def _load_preview_decisions(self, *, since_ts: float, limit: int, decision_id: str = "") -> list[dict[str, Any]]:
         selected_decision_id = str(decision_id or "").strip()
@@ -947,8 +928,8 @@ class ReplayHarnessService:
     def _trade_outcome_learning_preview(self, rows: list[dict[str, Any]], *, max_items: int = 3) -> dict[str, Any]:
         conn = _connect(self.db_path, read_only=True)
         try:
-            has_reviews = state_table_exists(conn, "trade_outcome_review")
-            has_lifecycle = state_table_exists(conn, "position_lifecycle_event")
+            has_reviews = canonical_ready(conn)
+            has_lifecycle = canonical_ready(conn)
             has_recovery = state_table_exists(conn, "recovery_position_state")
             has_samples = True  # canonical training_sample_row is the only sample store
             items = [
@@ -1304,11 +1285,11 @@ class ReplayHarnessService:
             return empty
         conn = _connect(self.db_path, read_only=True)
         try:
-            has_orders = state_table_exists(conn, "order_lifecycle_event") or True
-            has_positions = state_table_exists(conn, "position_lifecycle_event") or True
-            has_supervisor = state_table_exists(conn, "position_supervisor_trace")
+            has_orders = canonical_ready(conn)
+            has_positions = canonical_ready(conn)
+            has_supervisor = canonical_ready(conn)
             has_deals = state_table_exists(conn, "ctrader_deals")
-            has_counterfactuals = state_table_exists(conn, "supervisor_counterfactual_review")
+            has_counterfactuals = canonical_ready(conn)
             orders: dict[str, list[dict[str, Any]]] = {}
             positions: dict[str, list[dict[str, Any]]] = {}
             supervisor: dict[str, list[dict[str, Any]]] = {}
@@ -1318,6 +1299,8 @@ class ReplayHarnessService:
             # run, then filter per decision in memory.
             canonical_orders = iter_order_rows(conn, limit=0)
             canonical_positions = iter_position_rows(conn, limit=0)
+            canonical_supervisor = iter_supervisor_trace_rows(conn, limit=0, reverse=False)
+            canonical_counterfactuals = iter_counterfactual_rows(conn, limit=0, reverse=False)
             for row in rows:
                 decision_id = str(row.get("decision_id") or "")
                 trade_id = str(row.get("trade_id") or "")
@@ -1338,45 +1321,15 @@ class ReplayHarnessService:
                         or (trade_id and str(item.get("trade_id") or "") == trade_id)
                     ]
                 if has_supervisor:
-                    try:
-                        has_trace_archive = "verdict_archive_hash" in state_table_columns(
-                            conn, "position_supervisor_trace"
+                    supervisor_items = [
+                        dict(item)
+                        for item in canonical_supervisor
+                        if (
+                            str(item.get("decision_id") or "") == decision_id
+                            or (position_id and str(item.get("position_id") or "") == position_id)
+                            or (trade_id and str(item.get("trade_id") or "") == trade_id)
                         )
-                    except Exception:
-                        has_trace_archive = False
-                    trace_archive_select = ", verdict_archive_hash" if has_trace_archive else ""
-                    supervisor_rows = _execute(
-                        conn,
-                        f"""
-                        SELECT trace_id, decision_id, position_id, trade_id, symbol,
-                               timeframe, tick, event_ts, action, summary_reason,
-                               confidence, template_id, template_version, stage,
-                               outcome, risk_action, risk_allowed, risk_reason,
-                               execution_status, execution_reason, context_json,
-                               verdict_json, risk_verdict_json, execution_json,
-                               trace_integrity, config_hash, evolution_run_id,
-                               created_at{trace_archive_select}
-                        FROM position_supervisor_trace
-                        WHERE decision_id = ?
-                           OR (? <> '' AND position_id = ?)
-                           OR (? <> '' AND trade_id = ?)
-                        ORDER BY event_ts ASC, trace_id ASC
-                        """,
-                        (
-                            decision_id,
-                            str(position_id),
-                            str(position_id),
-                            trade_id,
-                            trade_id,
-                        ),
-                    ).fetchall()
-                    supervisor_items = []
-                    for item in supervisor_rows:
-                        value = dict(item)
-                        archive_hash = str(value.get("verdict_archive_hash") or "")
-                        if archive_hash:
-                            value.update(load_supervisor_trace_archive(conn, archive_hash))
-                        supervisor_items.append(value)
+                    ]
                     supervisor[decision_id] = supervisor_items
                 if has_deals and numeric_position_id > 0:
                     deal_rows = _execute(
@@ -1396,29 +1349,17 @@ class ReplayHarnessService:
                     deals[decision_id] = [dict(item) for item in deal_rows]
                 if has_counterfactuals:
                     valid_counterfactuals = []
-                    cf_rows = _execute(
-                        conn,
-                        """
-                        SELECT c.counterfactual_id, c.review_id, c.trade_id,
-                               c.position_id, c.close_ts, c.close_reason,
-                               c.supervisor_event_type, c.supervisor_reason,
-                               c.label, c.confidence, c.horizons_json,
-                               c.evidence_json, c.created_at, c.updated_at
-                        FROM supervisor_counterfactual_review c
-                        WHERE (? <> '' AND c.position_id = ?)
-                           OR (? <> '' AND c.trade_id = ?)
-                        ORDER BY c.close_ts ASC, c.counterfactual_id ASC
-                        """,
-                        (
-                            str(position_id),
-                            str(position_id),
-                            trade_id,
-                            trade_id,
-                        ),
-                    ).fetchall()
+                    cf_rows = [
+                        dict(item)
+                        for item in canonical_counterfactuals
+                        if (
+                            (position_id and str(item.get("position_id") or "") == position_id)
+                            or (trade_id and str(item.get("trade_id") or "") == trade_id)
+                        )
+                    ]
                     for item in cf_rows:
                         value = dict(item)
-                        evidence = _loads(value.get("evidence_json"), {})
+                        evidence = value.get("evidence") or _loads(value.get("evidence_json"), {})
                         source_review = review_row(conn, str(value.get("review_id") or ""))
                         if (
                             not str(value.get("review_id") or "")
@@ -1517,7 +1458,7 @@ class ReplayHarnessService:
             "coverage": round(coverage, 6),
             "mismatch_examples": examples,
             "lifecycle_hash": _hash(fingerprints),
-            "risk_policy_boundary": "reads order_lifecycle_event only; does not replay broker execution",
+            "risk_policy_boundary": "reads canonical_v2 broker execution facts only; does not replay broker execution",
         }
         return {"metrics": metrics, "fingerprints": fingerprints}
 
@@ -1687,7 +1628,7 @@ class ReplayHarnessService:
             "max_abs_slippage_points": round(max_abs, 6),
             "examples": examples,
             "slippage_hash": _hash(fingerprints),
-            "risk_policy_boundary": "reads order_lifecycle_event and ctrader_deals only; does not feed circuit breaker",
+            "risk_policy_boundary": "reads canonical_v2 broker execution facts and ctrader_deals only; does not feed circuit breaker",
         }
         return {"metrics": metrics, "fingerprints": fingerprints}
 
@@ -1763,7 +1704,7 @@ class ReplayHarnessService:
             "coverage": round(coverage, 6),
             "mismatch_examples": examples,
             "lifecycle_hash": _hash(fingerprints),
-            "risk_policy_boundary": "reads position_lifecycle_event only; does not mutate positions",
+            "risk_policy_boundary": "reads canonical_v2 position transition facts only; does not mutate positions",
         }
         return {"metrics": metrics, "fingerprints": fingerprints}
 
@@ -1854,7 +1795,7 @@ class ReplayHarnessService:
             "outcomes": dict(sorted(outcomes.items())),
             "integrity_examples": examples,
             "supervisor_hash": _hash(fingerprints),
-            "risk_policy_boundary": "reads position_supervisor_trace only; supervisor actions still require RiskPolicyService in live path",
+            "risk_policy_boundary": "reads canonical_v2 supervisor trace facts only; supervisor actions still require RiskPolicyService in live path",
         }
         return {"metrics": metrics, "fingerprints": fingerprints}
 
@@ -1936,7 +1877,7 @@ class ReplayHarnessService:
             "labels": dict(sorted(labels.items())),
             "examples": examples,
             "counterfactual_hash": _hash(fingerprints),
-            "risk_policy_boundary": "reads supervisor_counterfactual_review only; does not train or switch supervisor templates",
+            "risk_policy_boundary": "reads canonical_v2 counterfactual facts only; does not train or switch supervisor templates",
         }
         return {"metrics": metrics, "fingerprints": fingerprints}
 

@@ -582,16 +582,24 @@ class AutonomousEvolutionNurseryRunner:
 
     def _v16_orchestration_ready(self) -> bool:
         """Require the authoritative posterior/effect ledgers before dispatch."""
-        required = {
-            "replay_report",
-            "trade_outcome_review",
-            "learning_application_effect",
-            "position_supervisor_trace",
-            "supervisor_counterfactual_review",
-        }
+        required_operational = {"replay_report", "learning_application_effect"}
         conn = _connect(self.db_path, read_only=True)
         try:
-            return all(state_table_exists(conn, table) for table in required)
+            if not all(state_table_exists(conn, table) for table in required_operational):
+                return False
+            from backend.services.canonical_v2_reader import (
+                canonical_ready,
+                iter_counterfactual_rows,
+                iter_review_rows,
+                iter_supervisor_trace_rows,
+            )
+
+            return bool(
+                canonical_ready(conn)
+                and iter_review_rows(conn, limit=1)
+                and iter_supervisor_trace_rows(conn, limit=1)
+                and iter_counterfactual_rows(conn, limit=1)
+            )
         finally:
             conn.close()
 

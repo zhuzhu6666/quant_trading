@@ -33,8 +33,10 @@ from backend.services._brain_helpers import (
 )
 from backend.services.canonical_v2_reader import (
     canonical_ready,
+    iter_counterfactual_rows,
     iter_position_rows,
     iter_review_rows_desc,
+    iter_supervisor_trace_rows,
 )
 from backend.services.agent_authority import control_surface, execution_owner
 from backend.services.review_contract import review_has_system_contamination
@@ -306,9 +308,9 @@ class BrainActionPlannerService:
                                                      "requires_risk_policy_verdict": True}},
             "required_services": list(action["required_services"]),
             "shadow_eval": {"schema_version": "brain_shadow_action_eval_contract.v1", "record_only": True,
-                            "compare_to_sources": ["replay_report", "trade_outcome_review",
-                                                    "learning_application_effect", "position_supervisor_trace",
-                                                    "supervisor_counterfactual_review"],
+                            "compare_to_sources": ["replay_report", "canonical_v2.trade_review",
+                                                    "learning_application_effect", "canonical_v2.supervisor_trace",
+                                                    "canonical_v2.counterfactual_review"],
                             "success_metric": "post_action_reward_delta_or_replay_agreement",
                             "minimum_observation": {"replay_required_before_execution": True,
                                                     "live_observed_trade_count_before_governance": 3}},
@@ -406,9 +408,9 @@ class BrainActionPlannerService:
 class BrainActionPlanEvaluatorService:
     """Compare V16 shadow plans with already-recorded posterior evidence."""
 
-    REQUIRED_SOURCES = ["replay_report", "trade_outcome_review",
-                        "learning_application_effect", "position_supervisor_trace"]
-    OPTIONAL_POSTERIOR_SOURCES = ["supervisor_counterfactual_review"]
+    REQUIRED_SOURCES = ["replay_report", "canonical_v2.trade_review",
+                        "learning_application_effect", "canonical_v2.supervisor_trace"]
+    OPTIONAL_POSTERIOR_SOURCES = ["canonical_v2.counterfactual_review"]
 
     def __init__(self, db_path: str | Path = STATE_DB):
         self.db_path = db_path
@@ -513,17 +515,15 @@ class BrainActionPlanEvaluatorService:
                 )
             except Exception:
                 learning_effects = []
-            supervisor_traces = self._fetch_table(conn, "position_supervisor_trace", limit,
-                                                   cols=["trace_id", "decision_id", "position_id",
-                                                         "trade_id", "action", "outcome", "risk_allowed",
-                                                         "risk_reason", "execution_status",
-                                                         "trace_integrity", "event_ts", "created_at"],
-                                                   order_col="event_ts")
-            counterfactuals = self._fetch_table(conn, "supervisor_counterfactual_review", None,
-                                                 cols=["counterfactual_id", "review_id", "trade_id", "position_id",
-                                                       "close_ts", "label", "confidence", "horizons_json",
-                                                       "evidence_json", "updated_at", "created_at"],
-                                                 order_col="updated_at")
+            if not canonical_ready(conn):
+                source_gaps.extend(
+                    ["missing_canonical_v2.supervisor_trace", "missing_canonical_v2.counterfactual_review"]
+                )
+                supervisor_traces = []
+                counterfactuals = []
+            else:
+                supervisor_traces = iter_supervisor_trace_rows(conn, limit=limit)
+                counterfactuals = iter_counterfactual_rows(conn, limit=0)
             counterfactuals = [
                 row
                 for row in counterfactuals
@@ -535,10 +535,10 @@ class BrainActionPlanEvaluatorService:
                     )
                 )
             ][:limit]
-            return {"replay_report": replay, "trade_outcome_review": trade_reviews,
+            return {"replay_report": replay, "canonical_v2.trade_review": trade_reviews,
                     "learning_application_effect": learning_effects,
-                    "position_supervisor_trace": supervisor_traces,
-                    "supervisor_counterfactual_review": counterfactuals,
+                    "canonical_v2.supervisor_trace": supervisor_traces,
+                    "canonical_v2.counterfactual_review": counterfactuals,
                     "source_gaps": source_gaps}
         finally:
             conn.close()
@@ -558,16 +558,16 @@ class BrainActionPlanEvaluatorService:
         scope = dict(plan.get("scope") or {})
         scope_type = str(scope.get("scope_type") or "")
         replay = dict(evidence.get("replay_report") or {})
-        trade_reviews = list(evidence.get("trade_outcome_review") or [])
+        trade_reviews = list(evidence.get("canonical_v2.trade_review") or [])
         learning_effects = [e for e in list(evidence.get("learning_application_effect") or [])
                             if self._matches_scope(scope_type, e)]
-        supervisor_traces = list(evidence.get("position_supervisor_trace") or [])
-        counterfactuals = [self._counterfactual_item(item) for item in list(evidence.get("supervisor_counterfactual_review") or [])]
+        supervisor_traces = list(evidence.get("canonical_v2.supervisor_trace") or [])
+        counterfactuals = [self._counterfactual_item(item) for item in list(evidence.get("canonical_v2.counterfactual_review") or [])]
         source_presence = {"replay_report": bool(replay.get("replay_run_id")),
-                           "trade_outcome_review": bool(trade_reviews),
+                           "canonical_v2.trade_review": bool(trade_reviews),
                            "learning_application_effect": bool(learning_effects),
-                           "position_supervisor_trace": bool(supervisor_traces),
-                           "supervisor_counterfactual_review": bool(counterfactuals)}
+                           "canonical_v2.supervisor_trace": bool(supervisor_traces),
+                           "canonical_v2.counterfactual_review": bool(counterfactuals)}
         # The counterfactual table is an optional posterior enrichment.  It
         # must improve routing quality, not inflate the four-source coverage
         # contract above 1.0.
@@ -588,10 +588,10 @@ class BrainActionPlanEvaluatorService:
                 "comparison_verdict": verdict, "coverage_score": coverage_score,
                 "comparison": comparison,
                 "evidence_refs": {"replay_report": replay.get("replay_run_id") or "",
-                                  "trade_outcome_review": [t.get("review_id") for t in trade_reviews[:5]],
+                                  "canonical_v2.trade_review": [t.get("review_id") for t in trade_reviews[:5]],
                                   "learning_application_effect": [e.get("application_id") for e in learning_effects[:5]],
-                                  "position_supervisor_trace": [t.get("trace_id") for t in supervisor_traces[:5]],
-                                  "supervisor_counterfactual_review": [t.get("counterfactual_id") for t in counterfactuals[:5]]},
+                                  "canonical_v2.supervisor_trace": [t.get("trace_id") for t in supervisor_traces[:5]],
+                                  "canonical_v2.counterfactual_review": [t.get("counterfactual_id") for t in counterfactuals[:5]]},
                 "boundary": self.boundary(), "read_only": True, "affects_trading": False, "created_at": now}
 
     @staticmethod
@@ -1707,26 +1707,20 @@ class BrainLiveReadyGuardrailService:
     def _local_open_position_count(self) -> int:
         conn = connect(self.db_path, read_only=True)
         try:
-            if canonical_ready(conn):
-                opened: set[str] = set()
-                closed: set[str] = set()
-                for row in iter_position_rows(conn, limit=0):
-                    position_id = str(row.get("position_id") or "")
-                    if not position_id:
-                        continue
-                    event_type = str(row.get("event_type") or "")
-                    if event_type in ("opened", "open", "recovered"):
-                        opened.add(position_id)
-                    elif event_type in ("closed", "close", "retired", "failed"):
-                        closed.add(position_id)
-                return len(opened - closed)
-            if not state_table_exists(conn, "position_lifecycle_event"):
+            if not canonical_ready(conn):
                 return 0
-            row = execute(conn, """SELECT COUNT(DISTINCT position_id) AS cnt FROM position_lifecycle_event
-                WHERE event_type IN ('opened', 'open', 'recovered')
-                AND position_id NOT IN (SELECT position_id FROM position_lifecycle_event
-                WHERE event_type IN ('closed', 'close', 'retired', 'failed'))""").fetchone()
-            return int(row["cnt"]) if row and row["cnt"] is not None else 0
+            opened: set[str] = set()
+            closed: set[str] = set()
+            for row in iter_position_rows(conn, limit=0):
+                position_id = str(row.get("position_id") or "")
+                if not position_id:
+                    continue
+                event_type = str(row.get("event_type") or "")
+                if event_type in ("opened", "open", "recovered"):
+                    opened.add(position_id)
+                elif event_type in ("closed", "close", "retired", "failed"):
+                    closed.add(position_id)
+            return len(opened - closed)
         except Exception:
             return 0
         finally:

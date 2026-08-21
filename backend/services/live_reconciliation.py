@@ -3,7 +3,7 @@
 This module is deliberately independent from PostgreSQL and the live service
 state cache.  It normalizes fresh broker observations and evaluates the
 published account/positions snapshot contract; callers decide how to publish
-those observations into compatibility state.
+those observations into the read-only live projection.
 """
 from __future__ import annotations
 
@@ -145,8 +145,6 @@ def explicit_position_reconcile(bridge: Any) -> Any:
         }
     try:
         result = bridge.reconcile_positions(force=True, allow_cache_fallback=False)
-    except TypeError:
-        result = bridge.reconcile_positions(force=True)
     except Exception as exc:
         return {
             "status": "failed",
@@ -216,19 +214,6 @@ def explicit_account_reconcile(
             kwargs["positions_reconcile"] = positions_reconcile
             kwargs["confirmed_empty_positions"] = positions_reconcile
         result = bridge.reconcile_account(**kwargs)
-    except TypeError:
-        # Compatibility for bridges that have not adopted the full same-tick
-        # position evidence argument.  Keep the older empty-position-only
-        # argument before falling back to the original contract.
-        try:
-            kwargs.pop("positions_reconcile", None)
-            result = bridge.reconcile_account(**kwargs)
-        except TypeError:
-            kwargs.pop("confirmed_empty_positions", None)
-            try:
-                result = bridge.reconcile_account(**kwargs)
-            except TypeError:
-                result = bridge.reconcile_account(force=True)
     except Exception:
         return None
     if str(reconcile_value(result, "status", "failed") or "failed") != "fresh":

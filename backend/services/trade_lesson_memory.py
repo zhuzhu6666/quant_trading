@@ -16,7 +16,6 @@ from backend.core.db import (
 )
 from backend.core.state_store import validate_runtime_state_schema
 from backend.services.canonical_v2_reader import canonical_ready, iter_review_rows
-from backend.services.state_payload_archive import load_json_payload
 
 
 APPEND_SOURCE = "trade_lesson_memory.v1"
@@ -54,21 +53,10 @@ from backend.core.db_helpers import (
 )
 
 
-def _review_archive_select(conn: Any) -> str:
-    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
-        return ""
-    return ", review_archive_hash"
-
-
 def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
-    payload = load_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(_row_get(row, "review_id", "") or ""),
-        inline_json=_row_get(row, "review_json", "{}"),
-        archive_hash=_row_get(row, "review_archive_hash", ""),
-        default={},
-    )
+    payload = _row_get(row, "review_json", {})
+    if isinstance(payload, str):
+        payload = _loads(payload, {})
     return payload if isinstance(payload, dict) else {}
 
 
@@ -266,7 +254,7 @@ def build_trade_lesson(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
     return {
         "experience_id": f"trade_lesson:{review_id}",
         "trade_id": str(_row_get(row, "trade_id", "") or ""),
-        "source_table": "trade_outcome_review",
+        "source_table": "canonical_v2.trade_review",
         "source_id": review_id,
         "append_source": APPEND_SOURCE,
         "regime_id": str(context["market_state"]["regime"] or ""),

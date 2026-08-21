@@ -3,7 +3,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from backend.services.live_loop_v2 import LiveSafetyCycleRuntime, run_live_safety_cycle
-from backend.services.live_legacy_safety_preview import preview_legacy_safety_candidates
 from backend.services import live_service
 from backend.services.live_safety_plane import LiveSafetyPlane
 from backend.services.live_safety_planner import (
@@ -69,12 +68,12 @@ def _planner_runtime():
     )
 
 
-def test_pure_planner_covers_all_safety_stages_in_legacy_priority_order():
+def test_pure_planner_excludes_retired_legacy_trailing_candidates():
     positions = [
-        {"position_id": 1, "direction": 1, "sl": 90.0, "tp": 120.0},
-        {"position_id": 2, "direction": 1, "sl": 0.0, "tp": 0.0},
-        {"position_id": 3, "direction": 1, "sl": 90.0, "tp": 120.0},
-        {"position_id": 4, "direction": 1, "sl": 90.0, "tp": 120.0},
+        {"position_id": 1, "direction": 1, "sl": 90.0, "tp": 120.0, "current_price_state": "known", "pnl_state": "known"},
+        {"position_id": 2, "direction": 1, "sl": 0.0, "tp": 0.0, "current_price_state": "known", "pnl_state": "known"},
+        {"position_id": 3, "direction": 1, "sl": 90.0, "tp": 120.0, "current_price_state": "known", "pnl_state": "known"},
+        {"position_id": 4, "direction": 1, "sl": 90.0, "tp": 120.0, "current_price_state": "known", "pnl_state": "known"},
     ]
 
     plan = plan_live_safety_candidates(
@@ -91,35 +90,20 @@ def test_pure_planner_covers_all_safety_stages_in_legacy_priority_order():
         ("timeout", 1),
         ("repair_entry_protection", 2),
         ("reduce", 3),
-        ("trailing", 4),
     ]
     selected_priorities = [
         item["priority"] for item in plan.arbitration if item["decision"] == "selected"
     ]
-    assert selected_priorities == [10, 20, 30, 50]
-    assert len([item for item in plan.arbitration if item["decision"] == "superseded"]) == 3
+    assert selected_priorities == [10, 20, 30]
+    assert len([item for item in plan.arbitration if item["decision"] == "superseded"]) == 0
     assert all(len(item.fingerprint) == 64 for item in plan.candidates)
-
-    legacy_preview = preview_legacy_safety_candidates(
-        positions=positions,
-        cfg=SimpleNamespace(),
-        account={},
-        current_price=110.0,
-        atr_price=2.0,
-        runtime=_planner_runtime(),
-        planned_at=1000.0,
-    )
-    assert [item.fingerprint for item in legacy_preview.candidates] == [
-        item.fingerprint for item in plan.candidates
-    ]
-
 
 class _Bridge:
     def unresolved_execution_intent_count(self):
         return 0
 
 
-def _loop_runtime(*, plane, plan, legacy_result, calls):
+def _loop_runtime(*, plane, plan, supervisor_result, calls):
     return LiveSafetyCycleRuntime(
         get_safety_plane=lambda _owner: plane,
         explicit_position_reconcile=lambda _bridge: {},
@@ -132,12 +116,11 @@ def _loop_runtime(*, plane, plan, legacy_result, calls):
         safety_reference_price=lambda _bridge, _positions: 100.0,
         factor_pipeline={"last_factor_values": {"atr_ratio": 0.01}},
         plan_safety_candidates=lambda **_kwargs: plan,
-        plan_legacy_candidates=lambda **_kwargs: plan,
         execute_safety_candidate=lambda candidate, **_kwargs: (
             calls.append(("v2_execute", candidate)) or {"ok": True, "status": "dispatched"}
         ),
         run_position_protection_cycle=lambda *_args, **_kwargs: (
-            calls.append(("legacy", _kwargs)) or legacy_result
+            calls.append(("supervisor_cycle", _kwargs)) or supervisor_result
         ),
         persist_safety_fail_closed=lambda **payload: (
             calls.append(("persist_fail_closed", payload))
@@ -157,7 +140,7 @@ def _reconcile():
     }
 
 
-def test_shadow_compares_independent_plan_to_actual_legacy_arbitration():
+def test_shadow_uses_single_governed_supervisor_authority():
     candidate = safety_candidate(
         action="tighten",
         position_id=7,
@@ -175,7 +158,7 @@ def test_shadow_compares_independent_plan_to_actual_legacy_arbitration():
         runtime=_loop_runtime(
             plane=LiveSafetyPlane(mode="shadow", clock=lambda: 100.0),
             plan=plan,
-            legacy_result={
+            supervisor_result={
                 "safety_candidates": [candidate.__dict__.copy()],
                 "safety_arbitration": [],
             },
@@ -184,8 +167,8 @@ def test_shadow_compares_independent_plan_to_actual_legacy_arbitration():
         reconcile_result=_reconcile(),
     )
 
-    assert len([item for item in calls if item[0] == "legacy"]) == 1
-    assert payload["legacy_authoritative"] is True
+    assert len([item for item in calls if item[0] == "supervisor_cycle"]) == 1
+    assert payload["supervisor_executor_authoritative"] is True
     assert payload["planner"]["broker_mutation"] is False
     assert payload["comparison"]["independent"] is True
     assert payload["comparison"]["match"] is True
@@ -205,7 +188,7 @@ def test_shadow_empty_account_still_runs_two_pure_plans_without_mutation():
         runtime=_loop_runtime(
             plane=LiveSafetyPlane(mode="shadow", clock=lambda: 100.0),
             plan=plan,
-            legacy_result={},
+            supervisor_result={},
             calls=calls,
         ),
         reconcile_result={**_reconcile(), "positions": []},
@@ -214,10 +197,12 @@ def test_shadow_empty_account_still_runs_two_pure_plans_without_mutation():
     assert payload["comparison"]["independent"] is True
     assert payload["comparison"]["match"] is True
     assert payload["accepting_new_risk"] is True
-    assert not [item for item in calls if item[0] in {"legacy", "v2_execute"}]
+    assert not [
+        item for item in calls if item[0] in {"supervisor_cycle", "v2_execute"}
+    ]
 
 
-def test_shadow_mismatch_is_fail_closed_while_legacy_still_executes():
+def test_shadow_ignores_retired_legacy_projection_and_runs_supervisor_cycle():
     v2 = safety_candidate(action="tighten", position_id=7, source="supervisor_tighten")
     legacy = safety_candidate(action="close", position_id=7, source="supervisor_close")
     calls = []
@@ -230,27 +215,28 @@ def test_shadow_mismatch_is_fail_closed_while_legacy_still_executes():
         runtime=_loop_runtime(
             plane=LiveSafetyPlane(mode="shadow", clock=lambda: 100.0),
             plan=SafetyPlan(candidates=(v2,), arbitration=(), planned_at=100.0),
-            legacy_result={"safety_candidates": [legacy.__dict__.copy()]},
+            supervisor_result={"safety_candidates": [legacy.__dict__.copy()]},
             calls=calls,
         ),
         reconcile_result=_reconcile(),
     )
 
-    assert len([item for item in calls if item[0] == "legacy"]) == 1
+    assert len([item for item in calls if item[0] == "supervisor_cycle"]) == 1
     assert payload["comparison"]["independent"] is True
-    assert payload["comparison"]["match"] is False
-    assert payload["comparison"]["enforce_eligible"] is False
-    assert "safety_candidate_mismatch" in payload["blockers"]
-    assert payload["accepting_new_risk"] is False
+    assert payload["comparison"]["match"] is True
+    assert payload["comparison"]["enforce_eligible"] is True
+    assert payload["comparison"]["authority"] == "supervisor_executor"
+    assert "safety_candidate_mismatch" not in payload["blockers"]
+    assert payload["accepting_new_risk"] is True
 
 
-def test_shadow_planner_exception_falls_back_to_legacy_and_stays_fail_closed():
+def test_shadow_planner_exception_keeps_supervisor_cycle_but_blocks_admission():
     legacy = safety_candidate(action="close", position_id=7, source="supervisor_close")
     calls = []
     runtime = _loop_runtime(
         plane=LiveSafetyPlane(mode="shadow", clock=lambda: 100.0),
         plan=SafetyPlan(candidates=(), arbitration=(), planned_at=100.0),
-        legacy_result={"safety_candidates": [legacy.__dict__.copy()]},
+        supervisor_result={"safety_candidates": [legacy.__dict__.copy()]},
         calls=calls,
     )
     runtime = LiveSafetyCycleRuntime(
@@ -271,22 +257,21 @@ def test_shadow_planner_exception_falls_back_to_legacy_and_stays_fail_closed():
         reconcile_result=_reconcile(),
     )
 
-    assert len([item for item in calls if item[0] == "legacy"]) == 1
-    assert payload["legacy_authoritative"] is True
-    assert payload["comparison"]["independent"] is False
-    assert payload["comparison"]["enforce_eligible"] is False
+    assert len([item for item in calls if item[0] == "supervisor_cycle"]) == 1
+    assert payload["supervisor_executor_authoritative"] is True
+    assert payload["comparison"]["independent"] is True
+    assert payload["comparison"]["enforce_eligible"] is True
     assert "safety_candidate_planner_failed" in payload["blockers"]
     assert payload["accepting_new_risk"] is False
 
 
-def test_enforce_mismatch_forces_shadow_and_executes_legacy_exactly_once():
+def test_enforce_single_authority_executes_candidate_once():
     v2 = safety_candidate(action="tighten", position_id=7, source="supervisor_tighten")
-    legacy = safety_candidate(action="close", position_id=7, source="supervisor_close")
     calls = []
     runtime = _loop_runtime(
         plane=LiveSafetyPlane(mode="enforce", clock=lambda: 100.0),
         plan=SafetyPlan(candidates=(v2,), arbitration=(), planned_at=100.0),
-        legacy_result={},
+        supervisor_result={},
         calls=calls,
     )
     runtime = LiveSafetyCycleRuntime(
@@ -296,10 +281,6 @@ def test_enforce_mismatch_forces_shadow_and_executes_legacy_exactly_once():
                 calls.append(("v2_plan", {}))
                 or SafetyPlan(candidates=(v2,), arbitration=(), planned_at=100.0)
             ),
-            "plan_legacy_candidates": lambda **_kwargs: (
-                calls.append(("legacy_preview", {}))
-                or SafetyPlan(candidates=(legacy,), arbitration=(), planned_at=100.0)
-            ),
         }
     )
 
@@ -312,36 +293,26 @@ def test_enforce_mismatch_forces_shadow_and_executes_legacy_exactly_once():
         reconcile_result=_reconcile(),
     )
 
-    mutation_calls = [item[0] for item in calls if item[0] in {"legacy", "v2_execute"}]
-    assert mutation_calls == ["legacy"]
-    assert [item[0] for item in calls].index("persist_fail_closed") < [
-        item[0] for item in calls
-    ].index("legacy")
-    assert [item[0] for item in calls].index("v2_plan") < [
-        item[0] for item in calls
-    ].index("persist_fail_closed")
-    assert [item[0] for item in calls].index("legacy_preview") < [
-        item[0] for item in calls
-    ].index("persist_fail_closed")
-    assert payload["status"] == "forced_shadow"
-    assert payload["effective_mode"] == "shadow"
-    assert payload["forced_shadow"] is True
-    assert payload["legacy_authoritative"] is True
-    assert payload["legacy_fail_closed_fallback"] is True
+    mutation_calls = [item[0] for item in calls if item[0] in {"supervisor_cycle", "v2_execute"}]
+    assert mutation_calls == ["v2_execute"]
+    assert "persist_fail_closed" not in [item[0] for item in calls]
+    assert payload["status"] == "completed"
+    assert payload["effective_mode"] == "enforce"
+    assert payload["forced_shadow"] is False
+    assert payload["supervisor_executor_authoritative"] is True
     assert payload["comparison"]["independent"] is True
-    assert payload["comparison"]["match"] is False
-    assert "safety_candidate_mismatch" in payload["blockers"]
-    assert "safety_v2_forced_shadow" in payload["blockers"]
-    assert payload["accepting_new_risk"] is False
+    assert payload["comparison"]["match"] is True
+    assert "safety_candidate_mismatch" not in payload["blockers"]
+    assert payload["accepting_new_risk"] is True
 
 
-def test_enforce_planner_exception_falls_back_to_legacy_without_v2_mutation():
+def test_enforce_planner_exception_blocks_without_fallback_mutation():
     candidate = safety_candidate(action="close", position_id=7, source="supervisor_close")
     calls = []
     runtime = _loop_runtime(
         plane=LiveSafetyPlane(mode="enforce", clock=lambda: 100.0),
         plan=SafetyPlan(candidates=(candidate,), arbitration=(), planned_at=100.0),
-        legacy_result={},
+        supervisor_result={},
         calls=calls,
     )
     runtime = LiveSafetyCycleRuntime(
@@ -362,30 +333,26 @@ def test_enforce_planner_exception_falls_back_to_legacy_without_v2_mutation():
         reconcile_result=_reconcile(),
     )
 
-    assert [item[0] for item in calls if item[0] in {"legacy", "v2_execute"}] == [
-        "legacy"
-    ]
-    assert payload["status"] == "forced_shadow"
+    assert [item[0] for item in calls if item[0] in {"supervisor_cycle", "v2_execute"}] == []
+    assert "persist_fail_closed" not in [item[0] for item in calls]
+    assert payload["status"] == "completed"
+    assert payload["forced_shadow"] is False
     assert "safety_candidate_planner_failed" in payload["blockers"]
-    assert "safety_v2_forced_shadow" in payload["blockers"]
     assert payload["accepting_new_risk"] is False
 
 
-def test_enforce_legacy_preview_exception_keeps_legacy_executor_authoritative():
+def test_enforce_uses_the_single_live_safety_authority():
     candidate = safety_candidate(action="close", position_id=7, source="supervisor_close")
     calls = []
     runtime = _loop_runtime(
         plane=LiveSafetyPlane(mode="enforce", clock=lambda: 100.0),
         plan=SafetyPlan(candidates=(candidate,), arbitration=(), planned_at=100.0),
-        legacy_result={},
+        supervisor_result={},
         calls=calls,
     )
     runtime = LiveSafetyCycleRuntime(
         **{
             **runtime.__dict__,
-            "plan_legacy_candidates": lambda **_kwargs: (_ for _ in ()).throw(
-                RuntimeError("legacy preview unavailable")
-            ),
         }
     )
 
@@ -398,31 +365,28 @@ def test_enforce_legacy_preview_exception_keeps_legacy_executor_authoritative():
         reconcile_result=_reconcile(),
     )
 
-    assert [item[0] for item in calls if item[0] in {"legacy", "v2_execute"}] == [
-        "legacy"
+    assert [item[0] for item in calls if item[0] in {"supervisor_cycle", "v2_execute"}] == [
+        "v2_execute"
     ]
-    assert payload["status"] == "forced_shadow"
-    assert "legacy_safety_preview_failed" in payload["blockers"]
-    assert "safety_v2_forced_shadow" in payload["blockers"]
-    assert payload["accepting_new_risk"] is False
+    assert payload["status"] == "completed"
+    assert payload["forced_shadow"] is False
+    assert "legacy_safety_preview_failed" not in payload["blockers"]
+    assert "safety_v2_forced_shadow" not in payload["blockers"]
+    assert payload["accepting_new_risk"] is True
 
 
-def test_enforce_fallback_persistence_failure_does_not_suppress_legacy_protection():
+def test_enforce_does_not_call_retired_fallback_persistence():
     v2 = safety_candidate(action="tighten", position_id=7, source="supervisor_tighten")
-    legacy = safety_candidate(action="close", position_id=7, source="supervisor_close")
     calls = []
     runtime = _loop_runtime(
         plane=LiveSafetyPlane(mode="enforce", clock=lambda: 100.0),
         plan=SafetyPlan(candidates=(v2,), arbitration=(), planned_at=100.0),
-        legacy_result={},
+        supervisor_result={},
         calls=calls,
     )
     runtime = LiveSafetyCycleRuntime(
         **{
             **runtime.__dict__,
-            "plan_legacy_candidates": lambda **_kwargs: SafetyPlan(
-                candidates=(legacy,), arbitration=(), planned_at=100.0
-            ),
             "persist_safety_fail_closed": lambda **_kwargs: (_ for _ in ()).throw(
                 OSError("disk unavailable")
             ),
@@ -438,26 +402,24 @@ def test_enforce_fallback_persistence_failure_does_not_suppress_legacy_protectio
         reconcile_result=_reconcile(),
     )
 
-    assert [item[0] for item in calls if item[0] in {"legacy", "v2_execute"}] == [
-        "legacy"
+    assert [item[0] for item in calls if item[0] in {"supervisor_cycle", "v2_execute"}] == [
+        "v2_execute"
     ]
-    assert "safety_forced_shadow_persistence_failed" in payload["blockers"]
-    assert payload["accepting_new_risk"] is False
-    assert payload["protection"]["ok"] is True
+    assert "safety_forced_shadow_persistence_failed" not in payload["blockers"]
+    assert payload["accepting_new_risk"] is True
+    assert payload["protection"]["status"] == "v2_enforced"
 
 
-def test_enforce_forced_shadow_is_sticky_and_never_mixes_authority():
+def test_enforce_single_authority_never_mixes_legacy_projection():
     now = [100.0]
     plane = LiveSafetyPlane(mode="enforce", clock=lambda: now[0])
     v2 = safety_candidate(action="tighten", position_id=7, source="supervisor_tighten")
-    legacy = safety_candidate(action="close", position_id=7, source="supervisor_close")
     current_v2 = [v2]
-    current_legacy = [legacy]
     calls = []
     runtime = _loop_runtime(
         plane=plane,
         plan=SafetyPlan(candidates=(), arbitration=(), planned_at=100.0),
-        legacy_result={"safety_candidates": [legacy.__dict__.copy()]},
+        supervisor_result={},
         calls=calls,
     )
     runtime = LiveSafetyCycleRuntime(
@@ -465,9 +427,6 @@ def test_enforce_forced_shadow_is_sticky_and_never_mixes_authority():
             **runtime.__dict__,
             "plan_safety_candidates": lambda **_kwargs: SafetyPlan(
                 candidates=tuple(current_v2), arbitration=(), planned_at=now[0]
-            ),
-            "plan_legacy_candidates": lambda **_kwargs: SafetyPlan(
-                candidates=tuple(current_legacy), arbitration=(), planned_at=now[0]
             ),
         }
     )
@@ -480,7 +439,7 @@ def test_enforce_forced_shadow_is_sticky_and_never_mixes_authority():
         runtime=runtime,
         reconcile_result={**_reconcile(), "observed_at": now[0]},
     )
-    current_v2[:] = [legacy]
+    current_v2[:] = [v2]
     now[0] = 105.0
     second = run_live_safety_cycle(
         bridge=_Bridge(),
@@ -491,11 +450,13 @@ def test_enforce_forced_shadow_is_sticky_and_never_mixes_authority():
         reconcile_result={**_reconcile(), "observed_at": now[0]},
     )
 
-    assert first["forced_shadow"] is True
-    assert second["forced_shadow"] is True
+    assert first["forced_shadow"] is False
+    assert second["forced_shadow"] is False
     assert second["comparison"]["match"] is True
-    assert [item[0] for item in calls if item[0] == "legacy"] == ["legacy", "legacy"]
-    assert not [item for item in calls if item[0] == "v2_execute"]
+    assert [item[0] for item in calls if item[0] == "v2_execute"] == [
+        "v2_execute", "v2_execute"
+    ]
+    assert not [item for item in calls if item[0] == "supervisor_cycle"]
 
 
 def test_enforce_duplicate_candidates_cannot_pass_set_like_comparison():
@@ -513,7 +474,7 @@ def test_enforce_duplicate_candidates_cannot_pass_set_like_comparison():
         runtime=_loop_runtime(
             plane=LiveSafetyPlane(mode="enforce", clock=lambda: 100.0),
             plan=duplicate_plan,
-            legacy_result={},
+            supervisor_result={},
             calls=calls,
         ),
         reconcile_result=_reconcile(),
@@ -523,10 +484,11 @@ def test_enforce_duplicate_candidates_cannot_pass_set_like_comparison():
     assert payload["comparison"]["duplicate"] is True
     assert payload["comparison"]["position_conflict"] is True
     assert payload["comparison"]["enforce_eligible"] is False
-    assert [item[0] for item in calls if item[0] in {"legacy", "v2_execute"}] == [
-        "legacy"
-    ]
+    assert [
+        item[0] for item in calls if item[0] in {"supervisor_cycle", "v2_execute"}
+    ] == ["supervisor_cycle"]
     assert "safety_candidate_duplicate" in payload["blockers"]
+    assert payload["supervisor_executor_authoritative"] is True
     assert payload["accepting_new_risk"] is False
 
 
@@ -599,7 +561,6 @@ def test_production_forced_shadow_persistence_records_dedicated_safety_cause(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path))
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
     state_updates = []
     monkeypatch.setattr(
         live_service,
@@ -627,12 +588,11 @@ def test_production_forced_shadow_persistence_records_dedicated_safety_cause(
     assert safety_v2_forced_shadow_status()["active"] is False
 
 
-def test_live_service_enforce_mismatch_uses_persisted_legacy_fallback_exactly_once(
+def test_live_service_enforce_uses_single_supervisor_executor_exactly_once(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path))
     v2 = safety_candidate(action="tighten", position_id=7, source="supervisor_tighten")
-    legacy = safety_candidate(action="close", position_id=7, source="supervisor_close")
     calls = []
     monkeypatch.setattr(
         live_service,
@@ -662,20 +622,13 @@ def test_live_service_enforce_mismatch_uses_persisted_legacy_fallback_exactly_on
     )
     monkeypatch.setattr(
         live_service,
-        "_preview_legacy_live_safety_candidates",
-        lambda **_kwargs: SafetyPlan(
-            candidates=(legacy,), arbitration=(), planned_at=100.0
-        ),
-    )
-    monkeypatch.setattr(
-        live_service,
         "_execute_live_safety_candidate",
         lambda *_args, **_kwargs: calls.append("v2") or {"ok": True},
     )
     monkeypatch.setattr(
         live_service,
         "_run_position_protection_cycle",
-        lambda *_args, **_kwargs: calls.append("legacy") or {},
+        lambda *_args, **_kwargs: calls.append("supervisor_cycle") or {},
     )
 
     payload = live_service._run_live_safety_cycle(
@@ -686,24 +639,17 @@ def test_live_service_enforce_mismatch_uses_persisted_legacy_fallback_exactly_on
         reconcile_result=_reconcile(),
     )
 
-    assert calls == ["legacy"]
-    assert payload["forced_shadow"] is True
-    assert payload["legacy_fail_closed_fallback"] is True
-    assert payload["accepting_new_risk"] is False
-    assert safety_v2_forced_shadow_status()["active"] is True
-
-    release_no_new_risk_latch_cause(
-        cause="safety_v2_forced_shadow",
-        cause_id="candidate_comparison",
-        reason="reviewed",
-        actor="operator:test",
-    )
+    assert calls == ["v2"]
+    assert payload["forced_shadow"] is False
+    assert payload["supervisor_execution_path"] == "safety_candidate_executor"
+    assert payload["accepting_new_risk"] is True
+    assert safety_v2_forced_shadow_status()["active"] is False
 
 
 def test_enforce_match_dispatches_only_v2_candidates_serially():
     candidates = (
         safety_candidate(action="close", position_id=7, source="supervisor_close"),
-        safety_candidate(action="trailing", position_id=8, source="legacy_awe_trailing"),
+        safety_candidate(action="reduce", position_id=8, source="supervisor_reduce"),
     )
     calls = []
     reconcile = {
@@ -720,24 +666,20 @@ def test_enforce_match_dispatches_only_v2_candidates_serially():
         runtime=_loop_runtime(
             plane=LiveSafetyPlane(mode="enforce", clock=lambda: 100.0),
             plan=plan,
-            legacy_result={},
+            supervisor_result={},
             calls=calls,
         ),
         reconcile_result=reconcile,
     )
 
     assert [item[1].position_id for item in calls if item[0] == "v2_execute"] == [7, 8]
-    assert not [item for item in calls if item[0] == "legacy"]
+    assert not [item for item in calls if item[0] == "supervisor_cycle"]
     assert payload["comparison"]["enforce_eligible"] is True
-    assert payload["legacy_authoritative"] is False
     assert payload["status"] == "completed"
 
 
 def test_safety_planner_module_has_no_broker_mutation_or_entry_order_surface():
-    for path in (
-        "backend/services/live_safety_planner.py",
-        "backend/services/live_legacy_safety_preview.py",
-    ):
+    for path in ("backend/services/live_safety_planner.py",):
         source = Path(path).read_text(encoding="utf-8")
         for forbidden in (
             "market" + "_buy",

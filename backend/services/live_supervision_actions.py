@@ -12,6 +12,8 @@ from typing import Any, Callable
 
 from backend.services.live_reconciliation import (
     explicit_position_reconcile,
+    fresh_observation_timestamp,
+    reconcile_value,
     verify_position_protection_projection,
 )
 
@@ -22,6 +24,96 @@ class MappingVerdictProxy:
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self._payload)
+
+
+def _fresh_reconcile_confirms_action(
+    reconcile_result: Any,
+    *,
+    position_id: int,
+    position_should_be_gone: bool = False,
+    position_should_be_reduced: bool = False,
+    prior_volume: float = 0.0,
+    requested_reduction: float = 0.0,
+) -> tuple[bool, dict[str, Any]]:
+    """Return the broker/reconcile proof required by a real supervisor trace."""
+
+    status = str(
+        reconcile_value(reconcile_result, "status", "")
+        or reconcile_value(reconcile_result, "state", "")
+        or ""
+    ).strip().lower()
+    try:
+        observed_at = float(reconcile_value(reconcile_result, "observed_at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        observed_at = 0.0
+    fresh = status == "fresh" and fresh_observation_timestamp(observed_at)
+    positions = list(reconcile_value(reconcile_result, "positions", []) or [])
+    normalized_position_id = int(position_id or 0)
+    current_position: Any | None = None
+    for item in positions:
+        try:
+            item_position_id = int(
+                reconcile_value(
+                    item,
+                    "position_id",
+                    reconcile_value(item, "ticket", 0),
+                )
+                or 0
+            )
+        except (TypeError, ValueError):
+            continue
+        if item_position_id == normalized_position_id:
+            current_position = item
+            break
+
+    position_present = current_position is not None
+    position_volume_after = 0.0
+    if current_position is not None:
+        for field in ("volume", "api_volume", "size", "quantity"):
+            raw_volume = reconcile_value(current_position, field, None)
+            if raw_volume is None:
+                continue
+            try:
+                position_volume_after = max(0.0, float(raw_volume or 0.0))
+            except (TypeError, ValueError):
+                continue
+            break
+    prior_volume_value = max(0.0, float(prior_volume or 0.0))
+    requested_reduction_value = max(0.0, float(requested_reduction or 0.0))
+    reduction_confirmed = bool(
+        position_should_be_reduced
+        and (
+            not position_present
+            or (
+                prior_volume_value > 0.0
+                and position_volume_after + 1e-9 < prior_volume_value
+            )
+        )
+    )
+    confirmed = bool(
+        fresh
+        and (
+            (position_should_be_gone and not position_present)
+            or (position_should_be_reduced and reduction_confirmed)
+            or (
+                not position_should_be_gone
+                and not position_should_be_reduced
+                and position_present
+            )
+        )
+    )
+    return confirmed, {
+        "reconcile_status": status,
+        "reconcile_observed_at": observed_at,
+        "reconcile_fresh": fresh,
+        "reconcile_confirmed": confirmed,
+        "position_id": normalized_position_id,
+        "position_present_after_action": position_present,
+        "position_volume_before": prior_volume_value,
+        "position_volume_after": position_volume_after,
+        "requested_reduction": requested_reduction_value,
+        "reduction_confirmed": reduction_confirmed,
+    }
 
 
 def _best_effort_post_broker_effect(
@@ -609,6 +701,8 @@ def execute_supervisor_close_action(
     result_is_position_not_found: Callable[[Any], bool],
     retire_broker_missing_position: Callable[..., Any],
     record_aux_failure: Callable[..., Any] | None = None,
+    reconcile_positions: Callable[[Any], Any] | None = None,
+    publish_fresh_positions: Callable[[Any], Any] | None = None,
 ) -> None:
     pid = int(position.get("position_id") or position.get("ticket") or 0)
     close_reason = str(controls.get("close_reason") or verdict.get("summary_reason") or "supervisor_close")
@@ -621,6 +715,57 @@ def execute_supervisor_close_action(
         else bridge.close_position(pid)
     )
     if getattr(result, "success", False):
+        reconcile_proof: dict[str, Any] = {
+            "reconcile_status": "not_requested",
+            "reconcile_confirmed": False,
+        }
+        if reconcile_positions is not None:
+            try:
+                reconcile_result = reconcile_positions(bridge)
+                reconcile_ok, reconcile_proof = _fresh_reconcile_confirms_action(
+                    reconcile_result,
+                    position_id=pid,
+                    position_should_be_gone=True,
+                )
+                if publish_fresh_positions is not None and reconcile_ok:
+                    try:
+                        publish_fresh_positions(reconcile_result)
+                    except Exception as exc:
+                        if record_aux_failure is not None:
+                            record_aux_failure(
+                                "supervisor_close_fresh_projection_failed",
+                                position_id=pid,
+                                action="close_position",
+                                error=exc,
+                            )
+            except Exception as exc:
+                reconcile_ok = False
+                reconcile_proof = {
+                    "reconcile_status": "exception",
+                    "reconcile_confirmed": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            if not reconcile_ok:
+                log_supervisor_trace(
+                    position=position,
+                    verdict=verdict,
+                    cfg=cfg,
+                    tick=tick,
+                    stage="execution_failed",
+                    outcome="failed",
+                    decision_id=decision_id,
+                    risk_action=risk_action,
+                    risk_verdict=risk_verdict,
+                    execution_status="reconcile_unverified",
+                    execution_reason="close_broker_success_reconcile_unverified",
+                    execution={
+                        "broker_action_confirmed": True,
+                        **reconcile_proof,
+                        "applied_controls": controls,
+                    },
+                    acct=acct,
+                )
+                return
         _best_effort_post_broker_effect(
             lambda: remember_close_reason(pid, close_reason),
             position_id=pid,
@@ -679,7 +824,14 @@ def execute_supervisor_close_action(
                 risk_verdict=risk_verdict,
                 execution_status="applied",
                 execution_reason="close_position_success",
-                execution={"applied_controls": controls},
+                execution={
+                    "broker_action_confirmed": True,
+                    "is_real_execution": bool(
+                        reconcile_proof.get("reconcile_confirmed")
+                    ),
+                    **reconcile_proof,
+                    "applied_controls": controls,
+                },
                 acct=acct,
             ),
             position_id=pid,
@@ -746,6 +898,8 @@ def execute_supervisor_reduce_action(
     capture_partial_close_session_cursor: Callable[..., Any] | None = None,
     sync_partial_close_session_fact: Callable[..., Any] | None = None,
     record_aux_failure: Callable[..., Any] | None = None,
+    reconcile_positions: Callable[[Any], Any] | None = None,
+    publish_fresh_positions: Callable[[Any], Any] | None = None,
 ) -> None:
     pid = int(position.get("position_id") or position.get("ticket") or 0)
     current_volume = float((execution_plan or {}).get("current_volume") or 0.0)
@@ -833,6 +987,60 @@ def execute_supervisor_reduce_action(
                             )
                         except Exception:
                             pass
+            reconcile_proof: dict[str, Any] = {
+                "reconcile_status": "not_requested",
+                "reconcile_confirmed": False,
+            }
+            if reconcile_positions is not None:
+                try:
+                    reconcile_result = reconcile_positions(bridge)
+                    reconcile_ok, reconcile_proof = _fresh_reconcile_confirms_action(
+                        reconcile_result,
+                        position_id=pid,
+                        position_should_be_reduced=True,
+                        prior_volume=current_volume,
+                        requested_reduction=reduce_volume,
+                    )
+                    if publish_fresh_positions is not None and reconcile_ok:
+                        try:
+                            publish_fresh_positions(reconcile_result)
+                        except Exception as exc:
+                            if record_aux_failure is not None:
+                                record_aux_failure(
+                                    "supervisor_reduce_fresh_projection_failed",
+                                    position_id=pid,
+                                    action="reduce_position",
+                                    error=exc,
+                                )
+                except Exception as exc:
+                    reconcile_ok = False
+                    reconcile_proof = {
+                        "reconcile_status": "exception",
+                        "reconcile_confirmed": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                if not reconcile_ok:
+                    log_supervisor_trace(
+                        position=position,
+                        verdict=verdict,
+                        cfg=cfg,
+                        tick=tick,
+                        stage="execution_failed",
+                        outcome="failed",
+                        decision_id=decision_id,
+                        risk_action=risk_action,
+                        risk_verdict=risk_verdict,
+                        execution_status="reconcile_unverified",
+                        execution_reason="partial_close_broker_success_reconcile_unverified",
+                        execution={
+                            "broker_action_confirmed": True,
+                            **reconcile_proof,
+                            "reduce_volume": reduce_volume,
+                            "applied_controls": controls,
+                        },
+                        acct=acct,
+                    )
+                    return
             if ledger:
                 _best_effort_post_broker_effect(
                     lambda: ledger.log_position_event(
@@ -888,6 +1096,11 @@ def execute_supervisor_reduce_action(
                     execution_status="applied",
                     execution_reason="partial_close_success",
                     execution={
+                        "broker_action_confirmed": True,
+                        "is_real_execution": bool(
+                            reconcile_proof.get("reconcile_confirmed")
+                        ),
+                        **reconcile_proof,
                         "reduce_volume": reduce_volume,
                         "applied_controls": controls,
                         "accounting_recorded": accounting_recorded,

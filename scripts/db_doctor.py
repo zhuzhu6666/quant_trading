@@ -26,11 +26,12 @@ from backend.core.db import (  # noqa: E402
     DUCKDB_EVENTS,
     DUCKDB_TRADES,
     EXPERIMENTS_DB,
-    STATE_DB,
     connect_duckdb,
     connect_sqlite,
+    get_state_pg_conn,
     init_experiments_db,
     init_state_db,
+    state_table_columns,
 )
 from alpha.attribution_engine import _ensure_trades_duckdb_schema  # noqa: E402
 
@@ -93,6 +94,31 @@ def _check_sqlite(path: Path, required: dict[str, set[str]]) -> list[str]:
     return problems
 
 
+def _check_postgres_state(required: dict[str, set[str]]) -> list[str]:
+    """Check the canonical runtime state schema through PostgreSQL only."""
+    problems: list[str] = []
+    try:
+        con = get_state_pg_conn(read_only=True)
+    except Exception as exc:
+        return [f"connect failed via PostgreSQL: {exc}"]
+    try:
+        for table, expected_columns in required.items():
+            try:
+                actual = set(state_table_columns(con, table))
+            except Exception as exc:
+                problems.append(f"{table} schema lookup failed: {exc}")
+                continue
+            if not actual:
+                problems.append(f"missing table {table}")
+                continue
+            missing = sorted(expected_columns - actual)
+            if missing:
+                problems.append(f"{table} missing columns: {', '.join(missing)}")
+    finally:
+        con.close()
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="数据库体检")
     parser.add_argument("--repair", action="store_true", help="先执行标准修复，再体检")
@@ -146,11 +172,9 @@ def main() -> int:
             _check_duckdb(DUCKDB_EVENTS, {"events": {"date", "type", "importance"}}),
         ),
         (
-            STATE_DB.name,
-            _check_sqlite(
-                STATE_DB,
+            "runtime (PostgreSQL)",
+            _check_postgres_state(
                 {
-                    "decision_log": {"decision_type"},
                     "ctrader_deals": {"deal_id", "position_id"},
                 },
             ),

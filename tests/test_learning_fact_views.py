@@ -166,33 +166,41 @@ def test_learning_and_model_console_contracts_use_explicit_endpoint_timestamps()
 
 
 def _create_dataset_source(path: str) -> None:
-    from tests.canonical_fixture import ensure_training_sample_row_sqlite
+    from backend.services.canonical_v2 import (
+        ensure_sqlite_schema,
+        record_decision_event,
+        record_review,
+    )
 
-    ensure_training_sample_row_sqlite(path)
     conn = sqlite3.connect(path)
     try:
-        conn.executescript(
-            """
-            CREATE TABLE decision_ledger (
-                decision_ts REAL,
-                created_at REAL
-            );
-            CREATE TABLE trade_outcome_review (
-                created_at REAL
-            );
-            """
-        )
+        ensure_sqlite_schema(conn)
         conn.execute(
             """
             INSERT INTO training_sample_row
             (sample_id, sample_type, source_table, source_id, event_ts, label_status,
              integrity, train_weight, created_at, updated_at)
-            VALUES ('sample_1', 'shadow_open_decision', 'decision_ledger', 'd1',
+            VALUES ('sample_1', 'shadow_open_decision', 'canonical_v2.risk_decision', 'live_decision_d1',
                     920.0, 'matured', 'full', 1.0, 910.0, 930.0)
             """
         )
-        conn.execute("INSERT INTO decision_ledger VALUES (?, ?)", (970.0, 960.0))
-        conn.execute("INSERT INTO trade_outcome_review VALUES (?)", (950.0,))
+        record_decision_event(
+            conn,
+            decision_id="d1",
+            event_type="open",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=970.0,
+            created_at=960.0,
+        )
+        record_review(
+            conn,
+            review_id="r1",
+            trade_id="t1",
+            position_id="p1",
+            pnl=1.0,
+            created_at=950.0,
+        )
         conn.commit()
     finally:
         conn.close()
@@ -244,7 +252,7 @@ def test_dataset_observation_marks_missing_schema_as_error(tmp_path) -> None:
     )
 
     assert observation.error is not None
-    assert "decision_ledger" in observation.error
+    assert "canonical_v2.training_sample_row" in observation.error
     assert payload["_fact"]["state"] == "error"
 
 
@@ -253,7 +261,7 @@ def test_dataset_authoritative_empty_observation_can_be_known() -> None:
         observed_at=1000.0,
         authoritative_empty=True,
         record_count=0,
-        tables=("autonomous_learning_sample", "decision_ledger"),
+        tables=("canonical_v2.training_sample_row", "canonical_v2.event"),
     )
     payload = dataset_readiness_fact_payload(
         {"ready": False, "blockers": []},
@@ -389,7 +397,7 @@ def test_dataset_readiness_endpoint_uses_explicit_source_observation(monkeypatch
         observed_at=990.0,
         authoritative_empty=False,
         record_count=4,
-        tables=("autonomous_learning_sample", "decision_ledger", "trade_outcome_review"),
+        tables=("canonical_v2.training_sample_row", "canonical_v2.risk_decision", "canonical_v2.trade_review"),
     )
     monkeypatch.setattr(learning_api, "LearningDatasetReadiness", _Readiness)
     monkeypatch.setattr(

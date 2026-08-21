@@ -13,7 +13,6 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
-    state_table_columns,
 )
 from backend.core.state_store import (
     is_state_schema_write_sql,
@@ -26,7 +25,12 @@ from backend.services.review_contract import (
     review_execution_evidence_is_trainable,
     review_has_system_contamination,
 )
-from backend.services.state_payload_archive import load_json_payload
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    decision_row,
+    iter_decision_factor_snapshots,
+    iter_review_rows_desc,
+)
 
 
 MODEL_TYPE = "factor_governance_lightgbm"
@@ -53,9 +57,9 @@ FEATURE_NAMES = [
     "current_regime_fit_score",
     "rolling_regime_fit_avg",
     "rolling_regime_fit_min",
-    # v6.0 (pit.v4): 因子×regime 真条件绩效 —— 数据源升级为
-    # decision_factor_snapshot JOIN decision_ledger(因子决策时点的真实
-    # regime_id),按同 regime 历史聚合 positive_rate/pnl_avg/sample_count,
+    # v6.0 (pit.v4): 因子×regime 真条件绩效 —— 数据源读取 canonical
+    # decision payload 的 factor_snapshots 与 regime_id,按同 regime
+    # 历史聚合 positive_rate/pnl_avg/sample_count,
     # 替代交易级 regime_fit_score 的"全因子共享"局限。
     "same_regime_positive_rate",
     "same_regime_pnl_avg",
@@ -74,23 +78,46 @@ def _loads(raw: str | None, default: Any) -> Any:
         return default
 
 
-def _review_archive_select(conn: Any) -> str:
-    try:
-        has_archive = "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
-    except Exception:
-        has_archive = False
-    return ", r.review_archive_hash AS review_archive_hash" if has_archive else ""
+def _canonical_review_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = _loads(row.get("review_json"), {})
+    return payload if isinstance(payload, dict) else {}
 
 
-def _restore_review_payload(conn: Any, item: dict[str, Any]) -> None:
-    item["review_json"] = load_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(item.get("review_id") or ""),
-        inline_json=item.get("review_json"),
-        archive_hash=item.get("review_archive_hash", ""),
-        default={},
-    )
+def _canonical_factor_contributions(row: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return factor outcome details embedded in a canonical review payload."""
+
+    review = _canonical_review_payload(row)
+    raw = review.get("factor_contributions")
+    if not isinstance(raw, (dict, list)):
+        raw = review.get("contributions")
+    if isinstance(raw, dict):
+        items = [{"factor": factor, "value": value} for factor, value in raw.items()]
+    elif isinstance(raw, list):
+        items = [item for item in raw if isinstance(item, dict)]
+    else:
+        items = []
+    result: dict[str, dict[str, Any]] = {}
+    for item in items:
+        factor = str(item.get("factor") or item.get("name") or "")
+        if not factor:
+            continue
+        value = item.get("value")
+        detail = value if isinstance(value, dict) else item
+        notes = detail.get("notes", detail.get("note", {}))
+        note_payload = notes if isinstance(notes, dict) else _loads(notes, {})
+        result[factor] = {
+            "entry_contribution": _safe_float(detail.get("entry_contribution")),
+            "hold_contribution": _safe_float(detail.get("hold_contribution")),
+            "exit_contribution": _safe_float(detail.get("exit_contribution")),
+            "net_contribution": _safe_float(
+                detail.get("net_contribution", detail.get("net", detail.get("value", value)))
+            ),
+            "confidence": _safe_float(detail.get("confidence")),
+            "notes": json.dumps(note_payload, ensure_ascii=False, default=str)
+            if isinstance(note_payload, (dict, list))
+            else str(notes or ""),
+        }
+    return result
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -179,7 +206,7 @@ def _rolling_factor_features(history: list[dict[str, Any]], *, window: int = 5) 
     n = max(len(items), 1)
     regime_fits = [_safe_float(item.get("regime_fit_score")) for item in items]
     # v6.0 (pit.v4): 因子×regime 真条件绩效 —— 按"同 regime"聚合历史。
-    # regime_id 来自 decision_ledger(因子决策时点的真实市场状态),
+    # regime_id 来自 canonical decision payload(因子决策时点的真实市场状态),
     # 每个因子只在自己的决策快照行上带 regime_id,不再是交易级共享值。
     current_regime = str(current.get("regime_id") or "")
     same_regime_items = (
@@ -331,37 +358,94 @@ class FactorGovernanceLightGBMService:
         finally:
             conn.close()
 
+    @staticmethod
+    def _canonical_factor_rows(
+        conn: Any,
+        *,
+        factor: str = "",
+        limit: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Build factor training rows from canonical review/decision payloads."""
+
+        if not canonical_ready(conn):
+            return []
+        rows: list[dict[str, Any]] = []
+        for review in iter_review_rows_desc(conn, limit=0):
+            review_id = str(review.get("review_id") or "")
+            decision_id = str(review.get("entry_decision_id") or "")
+            if not review_id or not decision_id:
+                continue
+            decision = decision_row(conn, decision_id)
+            if not decision:
+                continue
+            contributions = _canonical_factor_contributions(review)
+            if not contributions:
+                continue
+            review_payload = _canonical_review_payload(review)
+            lineage = review_payload.get("factor_training_lineage") or {}
+            snapshots = iter_decision_factor_snapshots(conn, decision_id)
+            for snapshot in snapshots:
+                factor_name = str(snapshot.get("factor") or "")
+                if not factor_name or (factor and factor_name != str(factor)):
+                    continue
+                if factor_name not in contributions:
+                    continue
+                contribution = dict(contributions[factor_name])
+                entry_contribution = _safe_float(contribution.get("entry_contribution"))
+                if entry_contribution == 0.0:
+                    entry_contribution = _safe_float(snapshot.get("contribution_score"))
+                note_payload = _loads(contribution.get("notes"), {})
+                if not isinstance(note_payload, dict):
+                    note_payload = {}
+                note_payload.setdefault("factor_generation", str(lineage.get("generation") or ""))
+                rows.append(
+                    {
+                        "id": len(rows),
+                        "review_id": review_id,
+                        "trade_id": str(review.get("trade_id") or ""),
+                        "factor": factor_name,
+                        "entry_contribution": entry_contribution,
+                        "hold_contribution": _safe_float(contribution.get("hold_contribution")),
+                        "exit_contribution": _safe_float(contribution.get("exit_contribution")),
+                        "net_contribution": _safe_float(contribution.get("net_contribution")),
+                        "confidence": _safe_float(contribution.get("confidence")),
+                        "notes": json.dumps(note_payload, ensure_ascii=False, default=str),
+                        "position_id": str(review.get("position_id") or ""),
+                        "entry_quality": review.get("entry_quality"),
+                        "hold_quality": review.get("hold_quality"),
+                        "exit_quality": review.get("exit_quality"),
+                        "regime_fit_score": review.get("regime_fit_score"),
+                        "execution_quality": review.get("execution_quality"),
+                        "pnl": review.get("pnl"),
+                        "mae": review.get("mae"),
+                        "mfe": review.get("mfe"),
+                        "outcome_label": str(review.get("outcome_label") or ""),
+                        "failure_tags_json": review.get("failure_tags_json") or "[]",
+                        "review_json": review_payload,
+                        "created_at": review.get("created_at"),
+                        "regime_id": str(decision.get("regime_id") or ""),
+                        "regime_confidence": decision.get("regime_confidence"),
+                        "decision_ts": decision.get("decision_ts"),
+                        "factor_generation": str(lineage.get("generation") or ""),
+                    }
+                )
+        rows.sort(
+            key=lambda item: (
+                -_safe_float(item.get("decision_ts") or item.get("created_at")),
+                str(item.get("review_id") or ""),
+                str(item.get("factor") or ""),
+            )
+        )
+        return rows[: int(limit)] if limit and int(limit) > 0 else rows
+
     def load_samples(self, *, limit: int = 2000) -> list[dict[str, Any]]:
         conn = self._conn()
         try:
-            rows = self._execute(conn,
-                f"""
-                SELECT *
-                FROM (
-                    SELECT f.id, f.review_id, f.trade_id, f.factor, f.entry_contribution,
-                           f.hold_contribution, f.exit_contribution, f.net_contribution,
-                           f.confidence, f.notes, r.position_id, r.entry_quality, r.hold_quality,
-                           r.exit_quality, r.regime_fit_score, r.execution_quality,
-                           r.pnl, r.mae, r.mfe, r.outcome_label, r.failure_tags_json,
-                           r.review_json, r.created_at{_review_archive_select(conn)},
-                           dl.regime_id AS regime_id,
-                           dl.regime_confidence AS regime_confidence,
-                           dl.decision_ts AS decision_ts
-                    FROM decision_factor_snapshot dfs
-                    JOIN decision_ledger dl ON dl.decision_id = dfs.decision_id
-                    JOIN trade_outcome_review r ON r.entry_decision_id = dfs.decision_id
-                    JOIN factor_contribution_review f
-                      ON f.review_id = r.review_id AND f.factor = dfs.factor
-                    ORDER BY dl.decision_ts DESC, dfs.id DESC
-                    LIMIT ?
-                ) recent_factors
-                ORDER BY decision_ts ASC, id ASC
-                """,
-                (int(limit),),
-            ).fetchall()
+            # Canonical reviews carry the outcome contribution payload and
+            # canonical decisions carry the factor snapshots.  Keep the
+            # chronological training order after applying the recent-row cap.
+            rows = list(reversed(self._canonical_factor_rows(conn, limit=int(limit))))
             row_items = [dict(row) for row in rows]
-            for item in row_items:
-                _restore_review_payload(conn, item)
             system_clean_count = sum(1 for item in row_items if not _row_system_contaminated(item))
             row_items = [
                 item
@@ -1225,32 +1309,8 @@ class FactorGovernanceLightGBMService:
         recent-rows limit so quarantined factors are reachable)."""
         conn = self._conn()
         try:
-            rows = self._execute(
-                conn,
-                f"""
-                SELECT f.id, f.review_id, f.trade_id, f.factor, f.entry_contribution,
-                       f.hold_contribution, f.exit_contribution, f.net_contribution,
-                       f.confidence, f.notes, r.position_id, r.entry_quality, r.hold_quality,
-                       r.exit_quality, r.regime_fit_score, r.execution_quality,
-                       r.pnl, r.mae, r.mfe, r.outcome_label, r.failure_tags_json,
-                       r.review_json, r.created_at{_review_archive_select(conn)},
-                       dl.regime_id AS regime_id,
-                       dl.regime_confidence AS regime_confidence,
-                       dl.decision_ts AS decision_ts
-                FROM decision_factor_snapshot dfs
-                JOIN decision_ledger dl ON dl.decision_id = dfs.decision_id
-                JOIN trade_outcome_review r ON r.entry_decision_id = dfs.decision_id
-                JOIN factor_contribution_review f
-                  ON f.review_id = r.review_id AND f.factor = dfs.factor
-                WHERE dfs.factor = ?
-                ORDER BY dl.decision_ts ASC, dfs.id ASC
-                LIMIT ?
-                """,
-                (factor, int(limit)),
-            ).fetchall()
+            rows = self._canonical_factor_rows(conn, factor=factor, limit=int(limit))
             row_items = [dict(row) for row in rows]
-            for item in row_items:
-                _restore_review_payload(conn, item)
             row_items = [
                 item
                 for item in row_items

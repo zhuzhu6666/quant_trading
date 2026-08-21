@@ -3,6 +3,13 @@ import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.backend_readiness import BackendReadinessService
+from backend.services.canonical_v2 import (
+    ensure_sqlite_schema,
+    record_counterfactual_event,
+    record_position_event,
+    record_review,
+    record_supervisor_trace_event,
+)
 from backend.services.v16_brain_planning import BrainActionPlanEvaluatorService
 from backend.services.v16_brain_planning import BrainActionPlannerService
 from backend.services.v16_brain_planning import BrainLowImpactExecutorService
@@ -17,7 +24,6 @@ from backend.services.v16_brain_snapshot import BrainMemoryService
 from backend.services.v16_brain_snapshot import BrainStateService
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.services.learning_application_store import LearningApplicationStore
-from backend.services.state_payload_archive import archive_json_payload
 
 
 def _readiness_fixture() -> dict:
@@ -100,73 +106,6 @@ def test_brain_state_persists_read_only_world_model_snapshot(tmp_path):
     assert status["schema_version"] == "brain_state_readiness.v1"
     assert status["ok"] is True
     assert status["affects_trading"] is False
-
-
-def test_brain_memory_prefers_verified_review_archive_over_bounded_projection(tmp_path):
-    db_path = tmp_path / "state.db"
-    conn = connect_sqlite(db_path)
-    try:
-        conn.executescript(STATE_DB_DDL)
-        conn.execute(
-            "ALTER TABLE trade_outcome_review ADD COLUMN review_archive_hash TEXT DEFAULT ''"
-        )
-        conn.execute(
-            """
-            CREATE TABLE state_payload_archive (
-                archive_hash TEXT PRIMARY KEY,
-                source_table TEXT NOT NULL,
-                source_id TEXT NOT NULL,
-                payload_kind TEXT NOT NULL,
-                codec TEXT NOT NULL DEFAULT 'gzip',
-                raw_sha256 TEXT NOT NULL,
-                raw_bytes INTEGER NOT NULL DEFAULT 0,
-                compressed_bytes INTEGER NOT NULL DEFAULT 0,
-                payload_bytes BLOB NOT NULL,
-                created_at REAL NOT NULL DEFAULT 0.0
-            )
-            """
-        )
-        archive = archive_json_payload(
-            conn,
-            source_table="trade_outcome_review",
-            source_id="review_archived",
-            payload_kind="review_json",
-            raw_json=json.dumps({"regime": "trend", "close_reason": "broker_close"}),
-        )
-        assert archive is not None
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, pnl, outcome_label,
-             failure_tags_json, summary_text, review_json, review_archive_hash, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "review_archived",
-                "trade_archived",
-                "position_archived",
-                -1.0,
-                "bad_loss",
-                "[]",
-                "archived review",
-                json.dumps({"system_contaminated": True}),
-                archive["archive_hash"],
-                100.0,
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
-    try:
-        items = BrainMemoryService(db_path)._trade_outcome_memories(conn, set(), [])
-    finally:
-        conn.close()
-
-    assert len(items) == 1
-    assert items[0]["structured"]["review"]["close_reason"] == "broker_close"
 
 
 def test_backend_readiness_exposes_compact_v16_contract(monkeypatch, tmp_path):
@@ -394,28 +333,38 @@ def test_brain_memory_retrieves_negative_memory_and_counter_evidence(tmp_path):
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         conn.execute(
             """
             INSERT INTO experience_memory
             (experience_id, trade_id, source_table, source_id, append_source,
              regime_id, outcome_label, reward_score,
              failure_tags_json, recommended_action, evidence_strength, created_at)
-            VALUES ('trade_lesson:review_loss_1', 'trade_1', 'trade_outcome_review', 'review_loss_1',
+            VALUES ('trade_lesson:review_loss_1', 'trade_1', 'canonical_v2.trade_review', 'review_loss_1',
                     'trade_lesson_memory.v1', 'defensive', 'loss', -0.8,
                     '["simulation_gap"]', 'observe_only', 0.9, ?)
             """,
             (now - 30.0,),
         )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, pnl, outcome_label, summary_text, created_at)
-            VALUES ('review_win_1', 'trade_2', 'pos_2', 120.0, 'win',
-                    'defensive setup recovered after replay evidence improved', ?),
-                   ('review_loss_1', 'trade_1', 'pos_1', -80.0, 'loss',
-                    'defensive setup failed', ?)
-            """,
-            (now - 20.0, now - 30.0),
+        record_review(
+            conn,
+            review_id="review_win_1",
+            trade_id="trade_2",
+            position_id="pos_2",
+            pnl=120.0,
+            outcome_label="win",
+            summary_text="defensive setup recovered after replay evidence improved",
+            created_at=now - 20.0,
+        )
+        record_review(
+            conn,
+            review_id="review_loss_1",
+            trade_id="trade_1",
+            position_id="pos_1",
+            pnl=-80.0,
+            outcome_label="loss",
+            summary_text="defensive setup failed",
+            created_at=now - 30.0,
         )
         conn.execute(
             """
@@ -460,7 +409,7 @@ def test_brain_memory_retrieves_negative_memory_and_counter_evidence(tmp_path):
     assert indexed["ok"] is True
     assert {item["source_table"] for item in indexed["items"]} >= {
         "experience_memory",
-        "trade_outcome_review",
+        "canonical_v2.trade_review",
         "policy_suggestion",
     }
 
@@ -470,7 +419,7 @@ def test_brain_memory_uses_token_matching_not_generic_substrings():
     assert BrainMemoryService._similarity("factor instability", {"factor"}) > 0.0
 
 
-def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path, monkeypatch):
+def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path):
     db_path = tmp_path / "state.db"
     conn = connect_sqlite(db_path)
     contaminated = {
@@ -483,21 +432,35 @@ def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path, monk
     clean = {"summary": "clean review"}
     try:
         conn.executescript(STATE_DB_DDL)
-        conn.execute(
-            """INSERT INTO trade_outcome_review
-               (review_id, trade_id, position_id, pnl, outcome_label, review_json, created_at)
-               VALUES ('review_bad', 'trade_bad', 'position_bad', -1, 'loss', ?, 20),
-                      ('review_clean', 'trade_clean', 'position_clean', 1, 'win', ?, 10)""",
-            (json.dumps(contaminated), json.dumps(clean)),
+        ensure_sqlite_schema(conn)
+        record_review(
+            conn,
+            review_id="review_bad",
+            trade_id="trade_bad",
+            position_id="position_bad",
+            pnl=-1,
+            outcome_label="loss",
+            review=contaminated,
+            created_at=20,
+        )
+        record_review(
+            conn,
+            review_id="review_clean",
+            trade_id="trade_clean",
+            position_id="position_clean",
+            pnl=1,
+            outcome_label="win",
+            review=clean,
+            created_at=10,
         )
         conn.execute(
             """INSERT INTO experience_memory
                (experience_id, trade_id, source_table, source_id, decision_context_json,
                 append_source, outcome_label, reward_score, evidence_strength, created_at)
-               VALUES ('trade_lesson:review_bad', 'trade_bad', 'trade_outcome_review', 'review_bad', ?,
+               VALUES ('trade_lesson:review_bad', 'trade_bad', 'canonical_v2.trade_review', 'review_bad', ?,
                        'trade_lesson_memory.v1',
                        'loss', -1, 1, 20),
-                      ('trade_lesson:review_clean', 'trade_clean', 'trade_outcome_review', 'review_clean', ?,
+                      ('trade_lesson:review_clean', 'trade_clean', 'canonical_v2.trade_review', 'review_clean', ?,
                        'trade_lesson_memory.v1',
                        'win', 1, 1, 10)""",
             (
@@ -505,19 +468,62 @@ def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path, monk
                 json.dumps({"review_json": clean}),
             ),
         )
-        conn.execute(
-            """INSERT INTO supervisor_counterfactual_review
-               (counterfactual_id, review_id, trade_id, position_id, close_ts, label,
-                confidence, horizons_json, evidence_json, created_at, updated_at)
-               VALUES ('cf_bad', 'review_bad', 'trade_bad', 'position_bad', 20,
-                       'premature_tighten', 0.9, '[{}]', '{}', 20, 20),
-                      ('cf_clean', 'review_clean', 'trade_clean', 'position_clean', 10,
-                       'premature_tighten', 0.9, '[{}]',
-                       '{"maturity":{"governance_eligible":true}}', 10, 10),
-                      ('cf_invalidated', 'review_clean', 'trade_clean', 'position_clean', 9,
-                       'premature_tighten', 0.9, '[{}]',
-                       '{"evidence_invalidated":true,"maturity":{"governance_eligible":false}}',
-                       9, 9)"""
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_bad",
+            review_id="review_bad",
+            event_ts=20,
+            payload={
+                "counterfactual_id": "cf_bad",
+                "review_id": "review_bad",
+                "trade_id": "trade_bad",
+                "position_id": "position_bad",
+                "close_ts": 20,
+                "label": "premature_tighten",
+                "confidence": 0.9,
+                "horizons": [{}],
+                "evidence": {},
+                "updated_at": 20,
+            },
+        )
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_clean",
+            review_id="review_clean",
+            event_ts=10,
+            payload={
+                "counterfactual_id": "cf_clean",
+                "review_id": "review_clean",
+                "trade_id": "trade_clean",
+                "position_id": "position_clean",
+                "close_ts": 10,
+                "label": "premature_tighten",
+                "confidence": 0.9,
+                "horizons": [{}],
+                "evidence": {"maturity": {"governance_eligible": True}},
+                "updated_at": 10,
+            },
+        )
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_invalidated",
+            review_id="review_clean",
+            event_ts=9,
+            payload={
+                "counterfactual_id": "cf_invalidated",
+                "review_id": "review_clean",
+                "trade_id": "trade_clean",
+                "position_id": "position_clean",
+                "close_ts": 9,
+                "label": "premature_tighten",
+                "confidence": 0.9,
+                "horizons": [{}],
+                "evidence": {
+                    "evidence_invalidated": True,
+                    "maturity": {"governance_eligible": False},
+                },
+                "updated_at": 9,
+            },
         )
         conn.execute(
             """INSERT INTO policy_suggestion
@@ -533,34 +539,6 @@ def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path, monk
     result = BrainMemoryService(db_path).retrieve(persist=False, limit=50)
     source_ids = {item["source_id"] for item in result["items"]}
 
-    # Trade reviews are read through the canonical review stream only; the
-    # fixture serves legacy-shaped rows via the reader function.
-    monkeypatch.setattr(
-        "backend.services.v16_brain_planning.iter_review_rows_desc",
-        lambda _conn, limit=100: [
-            {
-                "review_id": "review_bad",
-                "trade_id": "trade_bad",
-                "position_id": "position_bad",
-                "pnl": -1,
-                "outcome_label": "loss",
-                "review_json": contaminated,
-                "review_archive_hash": "",
-                "created_at": 20.0,
-            },
-            {
-                "review_id": "review_clean",
-                "trade_id": "trade_clean",
-                "position_id": "position_clean",
-                "pnl": 1,
-                "outcome_label": "win",
-                "review_json": clean,
-                "review_archive_hash": "",
-                "created_at": 10.0,
-            },
-        ][:limit],
-    )
-
     # Trade review and experience memory share the same trade lineage and may
     # be deduplicated into one current memory item.
     assert {"trade_lesson:review_clean", "cf_clean"} <= source_ids
@@ -569,11 +547,11 @@ def test_brain_memory_excludes_system_contaminated_review_lineage(tmp_path, monk
 
     planning_evidence = BrainActionPlanEvaluatorService(db_path)._load_evidence(limit=50)
     assert {
-        item["review_id"] for item in planning_evidence["trade_outcome_review"]
+        item["review_id"] for item in planning_evidence["canonical_v2.trade_review"]
     } == {"review_clean"}
     assert {
         item["counterfactual_id"]
-        for item in planning_evidence["supervisor_counterfactual_review"]
+        for item in planning_evidence["canonical_v2.counterfactual_review"]
     } == {"cf_clean"}
 
 
@@ -594,18 +572,22 @@ def test_brain_memory_projects_recursive_review_lineage(tmp_path):
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
-        conn.execute(
-            """INSERT INTO trade_outcome_review
-               (review_id, trade_id, position_id, pnl, outcome_label, review_json, created_at)
-               VALUES ('review_recursive', 'trade_recursive', 'position_recursive', -2,
-                       'loss', ?, 20)""",
-            (json.dumps(review),),
+        ensure_sqlite_schema(conn)
+        record_review(
+            conn,
+            review_id="review_recursive",
+            trade_id="trade_recursive",
+            position_id="position_recursive",
+            pnl=-2,
+            outcome_label="loss",
+            review=review,
+            created_at=20,
         )
         conn.execute(
             """INSERT INTO experience_memory
                (experience_id, trade_id, source_table, source_id, decision_context_json,
                 append_source, outcome_label, reward_score, evidence_strength, created_at)
-               VALUES ('trade_lesson:review_recursive', 'trade_recursive', 'trade_outcome_review',
+               VALUES ('trade_lesson:review_recursive', 'trade_recursive', 'canonical_v2.trade_review',
                        'review_recursive', ?, 'trade_lesson_memory.v1', 'loss', -1, 1, 20)""",
             (json.dumps({"review_json": review, "lesson": {"summary": "recursive"}}),),
         )
@@ -643,7 +625,7 @@ def test_brain_persistence_bounds_rebuildable_memory_payloads(tmp_path):
         "regime": "trend",
         "text_summary": "bounded lesson",
         "structured": {
-            "source_table": "trade_outcome_review",
+            "source_table": "canonical_v2.trade_review",
             "source_id": "review_large",
             "lesson": {
                 "recommended_action": "hold",
@@ -718,7 +700,7 @@ def test_brain_snapshot_persists_memory_evidence_as_references(tmp_path):
         "source_id": "trade_lesson:review_reference",
         "text_summary": "reference metadata",
         "structured": {"raw_review_blob": "x" * 2_000_000},
-        "evidence_sources": [{"source_table": "trade_outcome_review", "source_id": "review_reference"}],
+        "evidence_sources": [{"source_table": "canonical_v2.trade_review", "source_id": "review_reference"}],
         "evidence_score": 0.8,
         "similarity_score": 0.9,
         "polarity": "negative",
@@ -818,12 +800,13 @@ def test_brain_action_planner_records_shadow_only_action_plans(tmp_path):
     assert status["affects_trading"] is False
 
 
-def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence(tmp_path, monkeypatch):
+def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence(tmp_path):
     db_path = tmp_path / "state.db"
     now = time.time()
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         conn.execute(
             """
             INSERT INTO replay_report
@@ -833,24 +816,33 @@ def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence
             """,
             (now - 40.0,),
         )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, pnl, outcome_label, summary_text, created_at)
-            VALUES ('review_1', 'trade_1', 'pos_1', 12.5, 'win',
-                    'posterior outcome supports shadow comparison', ?)
-            """,
-            (now - 30.0,),
+        record_review(
+            conn,
+            review_id="review_1",
+            trade_id="trade_1",
+            position_id="pos_1",
+            pnl=12.5,
+            outcome_label="win",
+            summary_text="posterior outcome supports shadow comparison",
+            created_at=now - 30.0,
         )
-        conn.execute(
-            """
-            INSERT INTO position_supervisor_trace
-            (trace_id, decision_id, position_id, trade_id, event_ts, action,
-             outcome, risk_allowed, execution_status, trace_integrity, created_at)
-            VALUES ('trace_1', 'dec_1', 'pos_1', 'trade_1', ?, 'hold',
-                    'observed', 1, 'observed', 'full', ?)
-            """,
-            (now - 10.0, now - 10.0),
+        record_supervisor_trace_event(
+            conn,
+            trace_id="trace_1",
+            decision_id="dec_1",
+            event_ts=now - 10.0,
+            payload={
+                "trace_id": "trace_1",
+                "decision_id": "dec_1",
+                "position_id": "pos_1",
+                "trade_id": "trade_1",
+                "event_ts": now - 10.0,
+                "action": "hold",
+                "outcome": "observed",
+                "risk_allowed": 1,
+                "execution_status": "observed",
+                "trace_integrity": "full",
+            },
         )
         conn.commit()
     finally:
@@ -874,24 +866,6 @@ def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence
 
     snapshot = BrainStateService(db_path).build(readiness=_readiness_fixture(), source="test")
     BrainActionPlannerService(db_path).build_plans(brain_state=snapshot, persist=True, source="test")
-    # Trade reviews are read through the canonical review stream only; the
-    # fixture serves legacy-shaped rows via the reader function.
-    monkeypatch.setattr(
-        "backend.services.v16_brain_planning.iter_review_rows_desc",
-        lambda _conn, limit=100: [
-            {
-                "review_id": "review_1",
-                "trade_id": "trade_1",
-                "position_id": "pos_1",
-                "pnl": 12.5,
-                "outcome_label": "win",
-                "summary_text": "posterior outcome supports shadow comparison",
-                "review_json": {},
-                "review_archive_hash": "",
-                "created_at": now - 30.0,
-            }
-        ][:limit],
-    )
     run = BrainActionPlanEvaluatorService(db_path).evaluate_latest_plans(limit=10, persist=True)
 
     assert run["schema_version"] == "brain_action_plan_eval_run.v1"
@@ -904,8 +878,8 @@ def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence
     for item in run["evals"]:
         assert item["boundary"]["does_not_execute_action_plan"] is True
         assert item["comparison"]["source_presence"]["replay_report"] is True
-        assert item["comparison"]["source_presence"]["trade_outcome_review"] is True
-        assert item["comparison"]["source_presence"]["position_supervisor_trace"] is True
+        assert item["comparison"]["source_presence"]["canonical_v2.trade_review"] is True
+        assert item["comparison"]["source_presence"]["canonical_v2.supervisor_trace"] is True
         assert item["coverage_score"] >= 0.75
 
     latest = BrainActionPlanEvaluatorService(db_path).latest_evals(limit=10)
@@ -926,6 +900,7 @@ def test_brain_low_impact_executor_runs_replay_job_through_risk_policy(tmp_path)
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         conn.execute(
             """
             INSERT INTO replay_report
@@ -935,23 +910,33 @@ def test_brain_low_impact_executor_runs_replay_job_through_risk_policy(tmp_path)
             """,
             (now - 40.0,),
         )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, pnl, outcome_label, summary_text, created_at)
-            VALUES ('review_seed', 'trade_1', 'pos_1', 1.0, 'win', 'ok', ?)
-            """,
-            (now - 30.0,),
+        record_review(
+            conn,
+            review_id="review_seed",
+            trade_id="trade_1",
+            position_id="pos_1",
+            pnl=1.0,
+            outcome_label="win",
+            summary_text="ok",
+            created_at=now - 30.0,
         )
-        conn.execute(
-            """
-            INSERT INTO position_supervisor_trace
-            (trace_id, decision_id, position_id, trade_id, event_ts, action,
-             outcome, risk_allowed, execution_status, trace_integrity, created_at)
-            VALUES ('trace_seed', 'dec_1', 'pos_1', 'trade_1', ?, 'hold',
-                    'observed', 1, 'observed', 'full', ?)
-            """,
-            (now - 10.0, now - 10.0),
+        record_supervisor_trace_event(
+            conn,
+            trace_id="trace_seed",
+            decision_id="dec_1",
+            event_ts=now - 10.0,
+            payload={
+                "trace_id": "trace_seed",
+                "decision_id": "dec_1",
+                "position_id": "pos_1",
+                "trade_id": "trade_1",
+                "event_ts": now - 10.0,
+                "action": "hold",
+                "outcome": "observed",
+                "risk_allowed": 1,
+                "execution_status": "observed",
+                "trace_integrity": "full",
+            },
         )
         conn.commit()
     finally:
@@ -990,12 +975,13 @@ def test_brain_low_impact_executor_runs_replay_job_through_risk_policy(tmp_path)
     assert status["low_impact_only"] is True
 
 
-def test_brain_medium_impact_governance_materializes_governance_candidates_only(tmp_path, monkeypatch):
+def test_brain_medium_impact_governance_materializes_governance_candidates_only(tmp_path):
     db_path = tmp_path / "state.db"
     now = time.time()
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
         conn.execute(
             """
             INSERT INTO replay_report
@@ -1005,23 +991,33 @@ def test_brain_medium_impact_governance_materializes_governance_candidates_only(
             """,
             (now - 40.0,),
         )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, pnl, outcome_label, summary_text, created_at)
-            VALUES ('review_p4', 'trade_1', 'pos_1', 8.0, 'win', 'ok', ?)
-            """,
-            (now - 30.0,),
+        record_review(
+            conn,
+            review_id="review_p4",
+            trade_id="trade_1",
+            position_id="pos_1",
+            pnl=8.0,
+            outcome_label="win",
+            summary_text="ok",
+            created_at=now - 30.0,
         )
-        conn.execute(
-            """
-            INSERT INTO position_supervisor_trace
-            (trace_id, decision_id, position_id, trade_id, event_ts, action,
-             outcome, risk_allowed, execution_status, trace_integrity, created_at)
-            VALUES ('trace_p4', 'dec_1', 'pos_1', 'trade_1', ?, 'hold',
-                    'observed', 1, 'observed', 'full', ?)
-            """,
-            (now - 10.0, now - 10.0),
+        record_supervisor_trace_event(
+            conn,
+            trace_id="trace_p4",
+            decision_id="dec_1",
+            event_ts=now - 10.0,
+            payload={
+                "trace_id": "trace_p4",
+                "decision_id": "dec_1",
+                "position_id": "pos_1",
+                "trade_id": "trade_1",
+                "event_ts": now - 10.0,
+                "action": "hold",
+                "outcome": "observed",
+                "risk_allowed": 1,
+                "execution_status": "observed",
+                "trace_integrity": "full",
+            },
         )
         conn.commit()
     finally:
@@ -1045,24 +1041,6 @@ def test_brain_medium_impact_governance_materializes_governance_candidates_only(
 
     snapshot = BrainStateService(db_path).build(readiness=_readiness_fixture(), source="test")
     BrainActionPlannerService(db_path).build_plans(brain_state=snapshot, persist=True, source="test")
-    # Trade reviews are read through the canonical review stream only; the
-    # fixture serves legacy-shaped rows via the reader function.
-    monkeypatch.setattr(
-        "backend.services.v16_brain_planning.iter_review_rows_desc",
-        lambda _conn, limit=100: [
-            {
-                "review_id": "review_p4",
-                "trade_id": "trade_1",
-                "position_id": "pos_1",
-                "pnl": 8.0,
-                "outcome_label": "win",
-                "summary_text": "ok",
-                "review_json": {},
-                "review_archive_hash": "",
-                "created_at": now - 30.0,
-            }
-        ][:limit],
-    )
     BrainActionPlanEvaluatorService(db_path).evaluate_latest_plans(limit=4, persist=True)
 
     run = BrainMediumImpactGovernanceService(db_path).materialize_latest(limit=4)
@@ -1096,8 +1074,12 @@ def test_brain_medium_impact_governance_materializes_governance_candidates_only(
     latest = BrainMediumImpactGovernanceService(db_path).latest_governance(limit=10)
     assert latest["schema_version"] == "brain_medium_impact_governance_list.v1"
     assert latest["ok"] is True
-    assert latest["items"][0]["boundary"]["does_not_apply_factor_weights"] is True
-    assert latest["items"][0]["candidate_id"]
+    candidate_items = [
+        item for item in latest["items"] if item["status"] == "candidate_materialized"
+    ]
+    assert candidate_items
+    assert candidate_items[0]["boundary"]["does_not_apply_factor_weights"] is True
+    assert candidate_items[0]["candidate_id"]
 
     status = BrainMediumImpactGovernanceService(db_path).status(limit=10)
     assert status["schema_version"] == "brain_medium_impact_governance_readiness.v1"
@@ -1360,9 +1342,9 @@ def test_brain_governance_candidate_review_classifies_bridge_readiness(monkeypat
         expected_effect={
             "source_presence": {
                 "replay_report": True,
-                "trade_outcome_review": True,
+                "canonical_v2.trade_review": True,
                 "learning_application_effect": True,
-                "position_supervisor_trace": True,
+                "canonical_v2.supervisor_trace": True,
             },
             "replay": {"replay_run_id": "replay_ready", "status": "completed"},
             "supervisor": {"trace_count": 3, "risk_allowed_coverage": 1.0},
@@ -1458,9 +1440,9 @@ def test_brain_governance_candidate_review_uses_agent_reliability_gate(tmp_path)
         expected_effect={
             "source_presence": {
                 "replay_report": True,
-                "trade_outcome_review": True,
+                "canonical_v2.trade_review": True,
                 "learning_application_effect": True,
-                "position_supervisor_trace": True,
+                "canonical_v2.supervisor_trace": True,
             },
             "replay": {"replay_run_id": "replay_ready", "status": "completed"},
             "supervisor": {"trace_count": 3, "risk_allowed_coverage": 1.0},
@@ -1711,13 +1693,16 @@ def test_brain_live_ready_guardrail_locks_when_evidence_is_complete(tmp_path):
     conn = connect_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
-        conn.execute(
-            """
-            INSERT INTO position_lifecycle_event
-            (event_id, position_id, trade_id, symbol, event_type, event_ts, net_volume)
-            VALUES ('pos_open_p5', 'pos_1', 'trade_1', 'XAUUSD', 'opened', ?, 100.0)
-            """,
-            (now - 20.0,),
+        ensure_sqlite_schema(conn)
+        record_position_event(
+            conn,
+            event_id="pos_open_p5",
+            position_id="pos_1",
+            trade_id="trade_1",
+            symbol="XAUUSD",
+            event_type="opened",
+            event_ts=now - 20.0,
+            net_volume=100.0,
         )
         conn.execute(
             """

@@ -1,10 +1,12 @@
-import json
 import sqlite3
 import time
 
 from backend.api import risk as risk_api
+from backend.core.db import STATE_DB_DDL
+from backend.services.canonical_v2 import record_decision_event
 from backend.services.position_supervisor import evaluate_position_supervisor
 from backend.services.position_supervisor_templates import CONSERVATIVE_TEMPLATE_ID, PROFIT_PROTECTION_TEMPLATE_ID
+from tests.canonical_fixture import make_canonical_sqlite
 
 
 def test_position_supervisor_derives_completed_bars_when_temporal_value_is_missing():
@@ -32,6 +34,8 @@ def test_position_supervisor_strong_trend_holds_near_take_profit():
                 "current_price": 3038.5,
                 "volume": 100.0,
                 "unrealized_pnl": 38.5,
+                "current_price_state": "known",
+                "pnl_state": "known",
                 "sl": 2990.0,
                 "tp": 3040.0,
             },
@@ -74,6 +78,8 @@ def test_position_supervisor_range_capture_allows_mature_giveback_recommendation
                 "current_price": 3010.0,
                 "volume": 100.0,
                 "unrealized_pnl": 10.0,
+                "current_price_state": "known",
+                "pnl_state": "known",
                 "sl": 2990.0,
                 "tp": 3040.0,
             },
@@ -116,6 +122,8 @@ def test_position_supervisor_unknown_market_context_observes_non_hard_management
                 "current_price": 4081.0,
                 "volume": 100.0,
                 "unrealized_pnl": 19.0,
+                "current_price_state": "known",
+                "pnl_state": "known",
                 "sl": 4110.0,
                 "tp": 4080.0,
             },
@@ -466,6 +474,8 @@ def test_position_supervisor_captures_when_near_take_profit():
                 "current_price": 4081.0,
                 "volume": 100.0,
                 "unrealized_pnl": 19.0,
+                "current_price_state": "known",
+                "pnl_state": "known",
                 "sl": 4110.0,
                 "tp": 4080.0,
             },
@@ -501,6 +511,8 @@ def test_profit_protection_template_outputs_dynamic_tpsl_candidate_near_take_pro
                 "current_price": 4028.0,
                 "volume": 100.0,
                 "unrealized_pnl": 28.0,
+                "current_price_state": "known",
+                "pnl_state": "known",
                 "sl": 3990.0,
                 "tp": 4030.0,
             },
@@ -543,6 +555,8 @@ def test_position_supervisor_preempts_when_near_stop_loss_and_weak():
                 "current_price": 4109.0,
                 "volume": 100.0,
                 "unrealized_pnl": -9.0,
+                "current_price_state": "known",
+                "pnl_state": "known",
                 "sl": 4110.0,
                 "tp": 4080.0,
             },
@@ -573,6 +587,8 @@ def test_position_supervisor_does_not_self_trigger_from_tightened_stop():
                 "current_price": 4096.73,
                 "volume": 100.0,
                 "unrealized_pnl": -1.95,
+                "current_price_state": "known",
+                "pnl_state": "known",
                 "sl": 4097.07,
                 "tp": 4085.28,
             },
@@ -604,157 +620,53 @@ def test_position_supervisor_does_not_self_trigger_from_tightened_stop():
 
 def test_trade_trace_exposes_position_supervisor_events(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE decision_ledger (
-            decision_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            decision_ts REAL NOT NULL DEFAULT 0.0,
-            regime_id TEXT DEFAULT '',
-            regime_confidence REAL DEFAULT 0.0,
-            portfolio_state_json TEXT DEFAULT '{}',
-            risk_state_json TEXT DEFAULT '{}',
-            policy_version TEXT DEFAULT '',
-            factor_set_version TEXT DEFAULT '',
-            action_score REAL DEFAULT 0.0,
-            action_reason TEXT DEFAULT '',
-            action_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE position_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            position_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            symbol TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            net_volume REAL DEFAULT 0.0,
-            avg_price REAL DEFAULT 0.0,
-            unrealized_pnl REAL DEFAULT 0.0,
-            realized_pnl REAL DEFAULT 0.0,
-            details_json TEXT DEFAULT '{}'
-        );
-        CREATE TABLE order_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            decision_id TEXT DEFAULT '',
-            trade_id TEXT DEFAULT '',
-            order_id TEXT DEFAULT '',
-            broker_order_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            price REAL DEFAULT 0.0,
-            volume REAL DEFAULT 0.0,
-            status TEXT DEFAULT '',
-            details_json TEXT DEFAULT '{}'
-        );
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            exit_decision_id TEXT DEFAULT '',
-            entry_quality REAL DEFAULT 0.0,
-            hold_quality REAL DEFAULT 0.0,
-            exit_quality REAL DEFAULT 0.0,
-            regime_fit_score REAL DEFAULT 0.0,
-            execution_quality REAL DEFAULT 0.0,
-            pnl REAL DEFAULT 0.0,
-            mae REAL DEFAULT 0.0,
-            mfe REAL DEFAULT 0.0,
-            outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]',
-            summary_text TEXT DEFAULT '',
-            review_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE factor_contribution_review (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            review_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            factor TEXT NOT NULL,
-            entry_contribution REAL DEFAULT 0.0,
-            hold_contribution REAL DEFAULT 0.0,
-            exit_contribution REAL DEFAULT 0.0,
-            net_contribution REAL DEFAULT 0.0,
-            confidence REAL DEFAULT 0.0,
-            notes TEXT DEFAULT ''
-        );
-        CREATE TABLE recovery_position_state (
-            position_id INTEGER PRIMARY KEY,
-            broker TEXT DEFAULT 'ctrader',
-            symbol TEXT DEFAULT '',
-            direction INTEGER DEFAULT 0,
-            open_price REAL DEFAULT 0.0,
-            volume REAL DEFAULT 0.0,
-            first_seen_at REAL DEFAULT 0.0,
-            last_seen_at REAL DEFAULT 0.0,
-            status TEXT DEFAULT 'open',
-            strategy_name TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            context_integrity TEXT DEFAULT 'full',
-            recovery_meta_json TEXT DEFAULT '{}',
-            closed_at REAL DEFAULT 0.0,
-            close_reason TEXT DEFAULT '',
-            close_pnl REAL DEFAULT 0.0
-        );
-        """
+    conn = make_canonical_sqlite(db_path)
+    conn.executescript(STATE_DB_DDL)
+    record_decision_event(
+        conn,
+        decision_id="dec_open",
+        trade_id="9001",
+        position_id="9001",
+        event_type="open",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=100.0,
+        action={"side": "sell"},
+        action_score=0.7,
+        action_reason="opened",
+        created_at=100.0,
     )
-    conn.executemany(
-        """
-        INSERT INTO decision_ledger
-        (decision_id, trade_id, position_id, event_type, symbol, timeframe, decision_ts,
-         portfolio_state_json, risk_state_json, action_score, action_reason, action_json, created_at)
-        VALUES (?, ?, ?, ?, 'XAUUSD+', 'M5', ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                "dec_open",
-                "9001",
-                "9001",
-                "open",
-                100.0,
-                "{}",
-                "{}",
-                0.7,
-                "opened",
-                json.dumps({"side": "sell"}),
-                100.0,
-            ),
-            (
-                "dec_supervisor",
-                "9001",
-                "9001",
-                "supervisor_reduce",
-                150.0,
-                "{}",
-                json.dumps({"policy_verdict": {"allowed": True, "reason": "risk_reducing_action"}}),
-                0.86,
-                "profit_giveback_after_mfe",
-                json.dumps(
-                    {
-                        "supervisor_verdict": {
-                            "action": "reduce",
-                            "human_summary": "系统判断这笔仓位仍有逻辑，但不值得继续满仓承受同样风险，建议先降一部分。",
-                        },
-                        "risk_verdict": {"allowed": True, "reason": "risk_reducing_action"},
-                    }
-                ),
-                150.0,
-            ),
-        ],
+    record_decision_event(
+        conn,
+        decision_id="dec_supervisor",
+        trade_id="9001",
+        position_id="9001",
+        event_type="supervisor_reduce",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=150.0,
+        action_reason="profit_giveback_after_mfe",
+        action={
+            "supervisor_verdict": {
+                "action": "reduce",
+                "human_summary": "系统判断这笔仓位仍有逻辑，但不值得继续满仓承受同样风险，建议先降一部分。",
+            },
+            "risk_verdict": {"allowed": True, "reason": "risk_reducing_action"},
+        },
+        created_at=150.0,
     )
     conn.execute(
         """
         INSERT INTO recovery_position_state
-        (position_id, broker, symbol, direction, open_price, volume, status, entry_decision_id, context_integrity, recovery_meta_json)
-        VALUES (9001, 'ctrader', 'XAUUSD+', -1, 3992.0, 100, 'open', 'dec_open', 'full', ?)
+        (position_id, broker, symbol, direction, open_price, volume, status,
+         entry_decision_id, context_integrity, recovery_meta_json)
+        VALUES (?, 'ctrader', 'XAUUSD+', -1, 3992.0, 100, 'open', ?, 'full', ?)
         """,
-        (json.dumps({"latest_supervisor": {"action": "reduce"}}),),
+        (
+            9001,
+            "dec_open",
+            '{"latest_supervisor": {"action": "reduce"}}',
+        ),
     )
     conn.commit()
     conn.close()

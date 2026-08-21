@@ -10,6 +10,8 @@ import pytest
 from alpha.registry_adapter import reset_shared
 from backend.api import learning as learning_api
 from backend.core.db import STATE_DB_DDL
+from backend.services.canonical_v2 import read_payload, record_decision_event, record_review
+from backend.services.canonical_v2_reader import iter_parameter_template_lifecycle_rows
 from backend.services.factor_cards import (
     FactorCardService,
     build_factor_admission_evidence,
@@ -23,6 +25,19 @@ from backend.services.parameter_template_validation import (
 from backend.services.research_evidence import ResearchEvidenceRejected
 from config import runtime_config as rc
 from research.learning.governor import RuleEvolutionGovernor
+from tests.canonical_fixture import seed_canonical_sqlite_file
+
+
+def _patch_local_learning_state(monkeypatch, db_path):
+    """Bind API service/query seams to an isolated canonical SQLite fixture."""
+
+    def _conn(*_args, **_kwargs):
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(learning_api, "_state_conn", _conn)
+    monkeypatch.setattr(learning_api, "_state_db_path", lambda: db_path)
 
 
 def _valid_parameter_template_research_evidence() -> dict:
@@ -107,44 +122,42 @@ def _seed_factor_card_state(db_path: str) -> None:
                 1_800_000.0,
             ),
         )
-        conn.execute(
-            """
-            INSERT INTO decision_factor_snapshot
-            (decision_id, factor, source, raw_value, normalized_value, direction,
-             base_weight, policy_weight, shadow_score, health_score, gated,
-             gated_reason, contribution_score)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "dec_1",
-                "rsi_14",
-                "registry",
-                61.0,
-                0.64,
-                1.0,
-                0.25,
-                0.2,
-                0.18,
-                72.5,
-                0,
-                "",
-                0.12,
-            ),
+        conn.commit()
+        seed_canonical_sqlite_file(db_path)
+        record_decision_event(
+            conn,
+            decision_id="dec_1",
+            event_type="open",
+            symbol="XAUUSD",
+            timeframe="M1",
+            decision_ts=1_800_000.0,
+            created_at=1_800_000.0,
+            factor_snapshots=[
+                {
+                    "decision_id": "dec_1",
+                    "factor": "rsi_14",
+                    "source": "registry",
+                    "raw_value": 61.0,
+                    "normalized_value": 0.64,
+                    "direction": 1.0,
+                    "base_weight": 0.25,
+                    "policy_weight": 0.2,
+                    "shadow_score": 0.18,
+                    "health_score": 72.5,
+                    "gated": 0,
+                    "gated_reason": "",
+                    "contribution_score": 0.12,
+                }
+            ],
         )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, outcome_label, review_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "rev_1",
-                "t1",
-                "p1",
-                "bad_loss",
-                json.dumps({"primary_responsibility": "parameter"}),
-                1_850_000.0,
-            ),
+        record_review(
+            conn,
+            review_id="rev_1",
+            trade_id="t1",
+            position_id="p1",
+            outcome_label="bad_loss",
+            review={"primary_responsibility": "parameter"},
+            created_at=1_850_000.0,
         )
         conn.execute(
             """
@@ -736,6 +749,7 @@ def test_parameter_template_recommendations_surface_parameter_suspicion(tmp_path
             super().__init__(db_path)
 
     monkeypatch.setattr(learning_api, "ParameterTemplateService", BoundParameterTemplateService)
+    _patch_local_learning_state(monkeypatch, db_path)
 
     result = learning_api.get_parameter_template_recommendations(None, factor_id="rsi_14", limit=10)
 
@@ -1673,15 +1687,11 @@ def test_parameter_template_release_candidate_review_release_and_rollback(tmp_pa
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        events = conn.execute(
-            """
-            SELECT event, status, source
-            FROM lifecycle_events
-            WHERE factor=?
-            ORDER BY id ASC
-            """,
-            ("rsi_14",),
-        ).fetchall()
+        events = iter_parameter_template_lifecycle_rows(
+            conn,
+            factor_id="rsi_14",
+            reverse=False,
+        )
     finally:
         conn.close()
 
@@ -1697,7 +1707,21 @@ def test_parameter_template_release_candidate_review_release_and_rollback(tmp_pa
         "deployed",
         "rolled_back",
     ]
-    assert all(row["source"] == "parameter_template" for row in events[-4:])
+    assert all(row["canonical_event_id"] for row in events[-4:])
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        payloads = []
+        for row in events[-4:]:
+            event_row = conn.execute(
+                "SELECT payload_hash FROM event WHERE event_id=?",
+                (row["canonical_event_id"],),
+            ).fetchone()
+            assert event_row is not None
+            payloads.append(read_payload(conn, event_row["payload_hash"]))
+    finally:
+        conn.close()
+    assert all(payload["source"] == "parameter_template" for payload in payloads)
 
 
 def test_parameter_template_legacy_candidate_requires_revalidation_before_deploy(tmp_path):
@@ -1908,7 +1932,7 @@ def test_parameter_template_release_candidate_api_endpoints_work(tmp_path, monke
     assert "复核回滚原因" in rolled_back["result_summary"]
 
 
-def test_learning_summary_includes_parameter_template_candidate_stats(tmp_path):
+def test_learning_summary_includes_parameter_template_candidate_stats(tmp_path, monkeypatch):
     db_path = str(tmp_path / "state.db")
     reset_shared()
     _seed_factor_card_state(db_path)
@@ -1958,23 +1982,8 @@ def test_learning_summary_includes_parameter_template_candidate_stats(tmp_path):
     learning_api._LEARNING_CACHE.clear()
     learning_api._LEARNING_LAST_GOOD.clear()
     ParameterTemplateService(db_path).list_recommendations(limit=20)
-    import backend.core.db as core_db
-
-    original_get_state_conn = core_db.get_state_conn
-    original_state_db = core_db.STATE_DB
-    core_db.STATE_DB = Path(db_path)
-
-    def _temp_conn():
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    core_db.get_state_conn = _temp_conn
-    try:
-        summary = learning_api.get_learning_summary(None)
-    finally:
-        core_db.get_state_conn = original_get_state_conn
-        core_db.STATE_DB = original_state_db
+    _patch_local_learning_state(monkeypatch, db_path)
+    summary = learning_api.get_learning_summary(None)
 
     assert summary["parameter_template_candidates"]["pending_review"] == 1
     assert summary["parameter_template_candidates"]["approved"] == 1
@@ -2030,10 +2039,7 @@ def test_learning_summary_returns_last_good_when_state_db_locked(tmp_path, monke
     _seed_factor_card_state(db_path)
     learning_api._LEARNING_CACHE.clear()
     learning_api._LEARNING_LAST_GOOD.clear()
-
-    import backend.core.db as core_db
-
-    monkeypatch.setattr(core_db, "STATE_DB", Path(db_path))
+    _patch_local_learning_state(monkeypatch, db_path)
     good_summary = learning_api.get_learning_summary(None)
     assert good_summary["stale"] is False
     learning_api._LEARNING_CACHE.clear()
@@ -2041,7 +2047,7 @@ def test_learning_summary_returns_last_good_when_state_db_locked(tmp_path, monke
     def _locked_connect(*_args, **_kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(core_db, "connect_sqlite", _locked_connect)
+    monkeypatch.setattr(learning_api, "_state_conn", _locked_connect)
     stale_summary = learning_api.get_learning_summary(None)
 
     assert stale_summary["stale"] is True
@@ -2214,7 +2220,7 @@ def test_factor_card_governance_state_includes_candidate_trace(tmp_path):
     assert "factor_logic_ok_but_param_suspect" in card["governance_state"]["latest_template_candidate_trace"]["responsibility_labels"]
 
 
-def test_learning_lifecycle_includes_parameter_template_candidate_events(tmp_path):
+def test_learning_lifecycle_includes_parameter_template_candidate_events(tmp_path, monkeypatch):
     db_path = str(tmp_path / "state.db")
     reset_shared()
     rc.reset_for_tests()
@@ -2275,29 +2281,28 @@ def test_learning_lifecycle_includes_parameter_template_candidate_events(tmp_pat
         note="approve lifecycle candidate",
     )
 
-    import backend.core.db as core_db
-
-    original_get_state_conn = core_db.get_state_conn
-    original_state_db = core_db.STATE_DB
-    core_db.STATE_DB = Path(db_path)
-
-    def _temp_conn():
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    core_db.get_state_conn = _temp_conn
-    try:
-        lifecycle = learning_api.get_lifecycle(None, limit=10)
-    finally:
-        core_db.get_state_conn = original_get_state_conn
-        core_db.STATE_DB = original_state_db
+    _patch_local_learning_state(monkeypatch, db_path)
+    lifecycle = learning_api.get_lifecycle(None, limit=10)
 
     assert lifecycle["items"]
     assert lifecycle["items"][0]["kind"] == "factor_lifecycle"
-    assert lifecycle["items"][0]["source"] == "parameter_template"
     assert lifecycle["items"][0]["event"] == "parameter_template_candidate_reviewed"
     assert lifecycle["items"][1]["event"] == "parameter_template_candidate_registered"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        payloads = []
+        for item in lifecycle["items"][:2]:
+            assert item["id"]
+            event_row = conn.execute(
+                "SELECT payload_hash FROM event WHERE event_id=?",
+                (item["id"],),
+            ).fetchone()
+            assert event_row is not None
+            payloads.append(read_payload(conn, event_row["payload_hash"]))
+    finally:
+        conn.close()
+    assert all(payload["source"] == "parameter_template" for payload in payloads)
     assert lifecycle["items"][0]["governance"]["status_label"] == "等待发布"
     assert lifecycle["items"][0]["governance"]["stage_tone"] == "positive"
     assert lifecycle["items"][0]["governance"]["action_label"] == "去发布"
@@ -2342,34 +2347,24 @@ def test_offline_candidates_endpoint_includes_trace_locator(tmp_path, monkeypatc
     )
 
     monkeypatch.setattr(learning_api, "ParameterTemplateValidationService", BoundParameterTemplateValidationService)
-    import backend.core.db as core_db
-
-    original_get_state_conn = core_db.get_state_conn
-    original_state_db = core_db.STATE_DB
-    core_db.STATE_DB = Path(db_path)
-
-    def _temp_conn():
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    core_db.get_state_conn = _temp_conn
-    try:
-        result = learning_api.list_parameter_template_offline_candidates(None, factor_id="rsi_14", limit=10)
-    finally:
-        core_db.get_state_conn = original_get_state_conn
-        core_db.STATE_DB = original_state_db
+    _patch_local_learning_state(monkeypatch, db_path)
+    result = learning_api.list_parameter_template_offline_candidates(None, factor_id="rsi_14", limit=10)
 
     assert result["items"]
     assert result["items"][0]["trace_locator"]["review_id"] == "rev_1"
     assert result["items"][0]["trace_locator"]["position_id"] == "p1"
 
 
-def test_apply_position_supervisor_template_switch_requires_approved_suggestion(monkeypatch, tmp_path):
+def test_apply_position_supervisor_template_switch_requires_governed_release_binding(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(str(db_path))
     try:
         conn.executescript(STATE_DB_DDL)
+        # Governance/evolution mirrors are canonical_v2 facts; an approved
+        # suggestion must exercise the same schema as production.
+        from backend.services.canonical_v2 import ensure_sqlite_schema
+
+        ensure_sqlite_schema(conn)
         conn.execute(
             """
             INSERT INTO policy_suggestion
@@ -2395,7 +2390,7 @@ def test_apply_position_supervisor_template_switch_requires_approved_suggestion(
     finally:
         conn.close()
 
-    monkeypatch.setattr(learning_api, "STATE_DB", db_path)
+    _patch_local_learning_state(monkeypatch, db_path)
     rc.reset_for_tests()
     try:
         result = learning_api.apply_position_supervisor_template_switch(
@@ -2405,23 +2400,19 @@ def test_apply_position_supervisor_template_switch_requires_approved_suggestion(
                 note="pytest apply",
             ),
         )
-        assert result["blocked"] is False
-        assert result["previous_template_id"] == "position_supervisor:default.v1"
-        assert result["target_template_id"] == "position_supervisor:conservative.v1"
-        assert rc.shared().position_supervisor_template_id == "position_supervisor:conservative.v1"
+        assert result["blocked"] is True
+        assert result["risk_verdict"]["reason"] == "adaptive_execution_release_not_governed"
 
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         try:
-            suggestion = conn.execute("SELECT status FROM policy_suggestion WHERE suggestion_id='psv_test_apply'").fetchone()
+            suggestion = conn.execute(
+                "SELECT status FROM policy_suggestion WHERE suggestion_id='psv_test_apply'"
+            ).fetchone()
             application = conn.execute("SELECT * FROM learning_application_log").fetchone()
-            overlay = conn.execute("SELECT overlay_json FROM runtime_config_overlay").fetchone()
         finally:
             conn.close()
-        assert suggestion["status"] == "applied"
-        application_details = json.loads(application["details_json"] or "{}")
-        assert application_details.get("scope_type") == "position_supervisor_template"
-        overlay_json = json.loads(overlay["overlay_json"])
-        assert overlay_json["position_supervisor_template_id"] == "position_supervisor:conservative.v1"
+        assert suggestion["status"] == "approved"
+        assert application is None
     finally:
         rc.reset_for_tests()

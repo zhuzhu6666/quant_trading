@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typing import Any
 
 from backend.core.auth import RequireUser
-from backend.core.db import get_state_pg_conn, state_table_columns
+from backend.core.db import get_state_pg_conn
 from backend.risk import VaRCalculator, KellyCriterion, StressTest, ConcentrationChecker
 from backend.services.api_fact_views import (
     policy_verdicts_fact_payload,
@@ -17,17 +17,17 @@ from backend.services.api_fact_views import (
     trade_traces_fact_payload,
 )
 from backend.services.canonical_v2_reader import (
-    canonical_ready,
     decision_row,
     iter_decision_rows,
     iter_order_rows,
+    iter_parameter_template_lifecycle_rows,
     iter_position_rows,
     iter_review_rows,
+    iter_supervisor_trace_rows,
     review_row,
 )
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.review_contract import normalize_trade_review_contract
-from backend.services.state_payload_archive import load_json_payload
 
 router = APIRouter(prefix="/api/risk", tags=["risk"])
 
@@ -201,79 +201,6 @@ def _advisory_only_components() -> set[str]:
     return advisory
 
 
-def _legacy_policy_verdict_rows(
-    conn: sqlite3.Connection, *, limit: int, pre_policy_limit: int
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Legacy decision_ledger reads (pre-cutover environments only)."""
-    query = """
-        SELECT decision_id, position_id, event_type, symbol, timeframe, decision_ts,
-               action_reason, action_json, risk_state_json
-        FROM decision_ledger
-        WHERE risk_state_json LIKE '%policy_verdict%'
-           OR action_json LIKE '%risk_verdict%'
-        ORDER BY decision_ts DESC, created_at DESC
-        LIMIT ?
-        """
-    try:
-        rows = conn.execute(_state_sql(query), (limit,)).fetchall()
-    except Exception as exc:
-        if "position_id" not in str(exc).lower():
-            raise
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        rows = conn.execute(
-            _state_sql("""
-            SELECT decision_id, '' AS position_id, event_type, symbol, timeframe, decision_ts,
-                   action_reason, action_json, risk_state_json
-            FROM decision_ledger
-            WHERE risk_state_json LIKE '%policy_verdict%'
-               OR action_json LIKE '%risk_verdict%'
-            ORDER BY decision_ts DESC, created_at DESC
-            LIMIT ?
-            """),
-            (limit,),
-        ).fetchall()
-    # A signal can pass the factor gate and still be stopped by the live
-    # open-admission gate before RiskPolicy is called. Those observations
-    # deliberately have no policy_verdict, so keep them as a separate
-    # read-only projection instead of counting them as policy decisions.
-    pre_policy_query = """
-        SELECT decision_id, position_id, event_type, symbol, timeframe, decision_ts,
-               action_reason, action_json, risk_state_json
-        FROM decision_ledger
-        WHERE event_type = 'skip'
-          AND action_json LIKE '%before_candidate%'
-        ORDER BY decision_ts DESC, created_at DESC
-        LIMIT ?
-        """
-    try:
-        pre_policy_rows = conn.execute(
-            _state_sql(pre_policy_query), (pre_policy_limit,)
-        ).fetchall()
-    except Exception as exc:
-        if "position_id" not in str(exc).lower():
-            raise
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        pre_policy_rows = conn.execute(
-            _state_sql("""
-            SELECT decision_id, '' AS position_id, event_type, symbol, timeframe, decision_ts,
-                   action_reason, action_json, risk_state_json
-            FROM decision_ledger
-            WHERE event_type = 'skip'
-              AND action_json LIKE '%before_candidate%'
-            ORDER BY decision_ts DESC, created_at DESC
-            LIMIT ?
-            """),
-            (pre_policy_limit,),
-        ).fetchall()
-    return [dict(row) for row in rows], [dict(row) for row in pre_policy_rows]
-
-
 def _canonical_policy_verdict_rows(
     conn: Any, *, limit: int, pre_policy_limit: int
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -403,26 +330,10 @@ def _recent_policy_verdicts(limit: int = 50) -> dict[str, Any]:
             if str(row["decision_id"] or "")
         }
         if decision_ids:
-            placeholders = ",".join("?" for _ in decision_ids)
-            try:
-                trace_rows = conn.execute(
-                    _state_sql(f"""
-                    SELECT decision_id, stage, outcome, execution_status,
-                           execution_reason, event_ts
-                    FROM position_supervisor_trace
-                    WHERE decision_id IN ({placeholders})
-                    ORDER BY event_ts DESC, created_at DESC
-                    """),
-                    tuple(decision_ids),
-                ).fetchall()
-                for trace_row in trace_rows:
-                    decision_id = str(trace_row["decision_id"] or "")
+            for trace_row in iter_supervisor_trace_rows(conn, limit=0, reverse=True):
+                decision_id = str(trace_row.get("decision_id") or "")
+                if decision_id in decision_ids:
                     trace_by_decision.setdefault(decision_id, dict(trace_row))
-            except Exception:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
 
         position_directions: dict[str, int] = {}
         if position_ids:
@@ -575,28 +486,11 @@ def _risk_component(name: str, fallback: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _review_archive_select(conn, *, alias: str = "r") -> str:
-    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
-        return ""
-    return f", {alias}.review_archive_hash AS review_archive_hash"
-
-
 def _parse_review_row(row: sqlite3.Row, conn=None) -> dict[str, Any]:
     item = dict(row)
     item["failure_tags"] = _loads_json(item.pop("failure_tags_json", None), [])
     inline_json = item.pop("review_json", None)
-    archive_hash = item.pop("review_archive_hash", "")
-    if conn is not None:
-        review = load_json_payload(
-            conn,
-            source_table="trade_outcome_review",
-            source_id=str(item.get("review_id") or ""),
-            inline_json=inline_json,
-            archive_hash=archive_hash,
-            default={},
-        )
-    else:
-        review = _loads_json(inline_json, {})
+    review = inline_json if isinstance(inline_json, dict) else _loads_json(inline_json, {})
     if not isinstance(review, dict):
         review = {}
     normalized = normalize_trade_review_contract(
@@ -1531,55 +1425,45 @@ def _latest_parameter_template_lifecycle_for_recommendation(
 ) -> dict[str, Any]:
     factor_key = str(factor_id or "").strip()
     recommendation_key = str(recommendation_id or "").strip()
-    candidate_key = str(candidate_id or "").strip()
-    if not factor_key and not recommendation_key and not candidate_key:
+    requested_candidate_key = str(candidate_id or "").strip()
+    if not factor_key and not recommendation_key and not requested_candidate_key:
         return {}
-    try:
-        rows = conn.execute(
-            _state_sql("""
-            SELECT id, timestamp, event, factor, source, description, score, status, reason
-            FROM lifecycle_events
-            WHERE source='parameter_template' AND factor=?
-            ORDER BY timestamp DESC, id DESC
-            LIMIT 40
-            """),
-            (factor_key,),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        rows = []
+    rows = iter_parameter_template_lifecycle_rows(
+        conn,
+        limit=40,
+        factor_id=factor_key,
+        reverse=True,
+    )
     for row in rows:
-        text = f"{row['description'] or ''} {row['reason'] or ''}"
-        candidate_trace = {}
-        match = _CANDIDATE_ID_RE.search(text)
-        if match:
-            candidate_trace = _candidate_trace_by_id(conn, match.group(1))
+        row_candidate_key = str(row.get("candidate_id") or "")
+        candidate_trace = _candidate_trace_by_id(conn, row_candidate_key) if row_candidate_key else {}
         trace_recommendation_id = str(candidate_trace.get("recommendation_id") or "")
         trace_candidate_id = str(candidate_trace.get("candidate_id") or "")
         if recommendation_key and trace_recommendation_id == recommendation_key:
             return {
-                "id": int(row["id"] or 0),
-                "ts": float(row["timestamp"] or 0.0),
-                "event": str(row["event"] or ""),
-                "factor": str(row["factor"] or ""),
-                "source": str(row["source"] or ""),
-                "description": str(row["description"] or ""),
-                "score": float(row["score"] or 0.0),
-                "status": str(row["status"] or ""),
-                "reason": str(row["reason"] or row["description"] or ""),
+                "id": row.get("id"),
+                "ts": float(row.get("timestamp") or 0.0),
+                "event": str(row.get("event") or ""),
+                "factor": str(row.get("factor") or ""),
+                "source": str(row.get("source") or ""),
+                "description": str(row.get("description") or ""),
+                "score": float(row.get("score") or 0.0),
+                "status": str(row.get("status") or ""),
+                "reason": str(row.get("reason") or row.get("description") or ""),
                 "candidate_trace": candidate_trace,
                 "trace_locator": _latest_factor_trace_locator(conn, factor_key),
             }
-        if candidate_key and trace_candidate_id == candidate_key:
+        if requested_candidate_key and trace_candidate_id == requested_candidate_key:
             return {
-                "id": int(row["id"] or 0),
-                "ts": float(row["timestamp"] or 0.0),
-                "event": str(row["event"] or ""),
-                "factor": str(row["factor"] or ""),
-                "source": str(row["source"] or ""),
-                "description": str(row["description"] or ""),
-                "score": float(row["score"] or 0.0),
-                "status": str(row["status"] or ""),
-                "reason": str(row["reason"] or row["description"] or ""),
+                "id": row.get("id"),
+                "ts": float(row.get("timestamp") or 0.0),
+                "event": str(row.get("event") or ""),
+                "factor": str(row.get("factor") or ""),
+                "source": str(row.get("source") or ""),
+                "description": str(row.get("description") or ""),
+                "score": float(row.get("score") or 0.0),
+                "status": str(row.get("status") or ""),
+                "reason": str(row.get("reason") or row.get("description") or ""),
                 "candidate_trace": candidate_trace,
                 "trace_locator": _latest_factor_trace_locator(conn, factor_key),
             }

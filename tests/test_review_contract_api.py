@@ -4,8 +4,10 @@ from backend.api import learning as learning_api
 from backend.api import risk as risk_api
 from backend.services.review_contract import (
     build_execution_quality_evidence,
+    build_entry_timing_context,
     build_system_issue_context,
     classify_4label_outcome,
+    review_consumer_eligibility,
 )
 
 
@@ -250,3 +252,47 @@ def test_normal_close_does_not_contaminate():
 
     assert issue["contaminates_learning"] is False
     assert issue["labels"] == []
+
+
+def test_tick_like_canonical_timing_is_invalid_and_never_becomes_execution_delay():
+    timing = build_entry_timing_context(
+        signal_bar_ts=3372,
+        decision_evaluated_at=3373,
+        order_submitted_at=3374,
+        fill_ts=3375,
+        close_ts=3376,
+        timeframe="M5",
+        timestamp_unit="epoch_seconds",
+        source="canonical_position_decision",
+    )
+
+    assert timing["timing_valid"] is False
+    assert "signal_bar_ts_not_epoch_seconds" in timing["timing_invalid_reasons"]
+    assert timing["actual_entry_ts"] == 0.0
+    assert timing["signal_to_fill_delay_seconds"] == 0.0
+    assert timing["actual_holding_seconds"] == 0.0
+
+
+def test_restart_replay_result_is_outcome_learning_only():
+    review = {
+        "close_reason": "restart_replay",
+        "close_ts": 1787188000,
+        "outcome_label": "good_win",
+        "real_pnl": {
+            "net": 14.34,
+            "entry_price": 2390.0,
+            "exec_price": 2401.0,
+            "price_quality": "broker_reconciled",
+        },
+    }
+
+    outcome = review_consumer_eligibility(review, "outcome_learning")
+    counterfactual = review_consumer_eligibility(review, "supervisor_counterfactual")
+
+    assert outcome["eligible"] is True
+    assert outcome["model_ready"] is False
+    assert outcome["allowed_uses"] == ["outcome_learning"]
+    assert outcome["train_weight"] == 0.25
+    assert counterfactual["eligible"] is False
+    assert counterfactual["model_ready"] is False
+    assert "review_system_contaminated" in counterfactual["blockers"]

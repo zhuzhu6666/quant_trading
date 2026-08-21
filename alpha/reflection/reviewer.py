@@ -15,7 +15,13 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
-    state_table_columns,
+)
+from backend.services.canonical_v2 import ensure_sqlite_schema as ensure_canonical_sqlite_schema
+from backend.services.canonical_v2_reader import (
+    iter_decision_factor_snapshots,
+    iter_decision_rows,
+    iter_order_rows,
+    iter_review_rows,
 )
 from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
@@ -27,7 +33,6 @@ from backend.services.review_contract import (
     normalize_trade_review_contract,
     trusted_broker_close_price,
 )
-from backend.services.state_payload_archive import archive_json_payload, load_json_payload
 
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -225,6 +230,7 @@ class TradeReviewer:
         with self._conn() as conn:
             if not self._use_pg():
                 conn.executescript(STATE_DB_DDL)
+                ensure_canonical_sqlite_schema(conn)
 
     @staticmethod
     def _new_id(prefix: str) -> str:
@@ -299,18 +305,18 @@ class TradeReviewer:
                 },
             }
         with self._conn() as conn:
-            entry = self._execute(conn,
-                """
-                SELECT * FROM decision_ledger
-                WHERE position_id=? AND event_type='open'
-                ORDER BY decision_ts DESC LIMIT 1
-                """,
-                (position_id,),
-            ).fetchone()
-            # Fallback: decision_ledger can be empty for new live positions
-            # (e.g. after a stale index rebuild gap). Recover entry context
-            # from the durable recovery meta / order events so the next close
-            # review is not forced into restart_replay / missing attribution.
+            entry = next(
+                (
+                    row
+                    for row in iter_decision_rows(conn, limit=0, reverse=True)
+                    if str(row.get("position_id") or "") == str(position_id)
+                    and str(row.get("event_type") or "") == "open"
+                ),
+                None,
+            )
+            # If the canonical entry decision is genuinely absent, retain the
+            # operational recovery evidence as incomplete context. It is not
+            # promoted into a synthetic decision or a second fact ledger.
             fallback_meta: dict = {}
             fallback_order: dict | None = None
             if entry is None:
@@ -328,54 +334,42 @@ class TradeReviewer:
                         fallback_meta = json.loads(rec_fallback["recovery_meta_json"])
                     except Exception:
                         fallback_meta = {}
-                # order event is the second fallback (filled order always exists)
-                ord_fallback = self._execute(conn,
-                    """
-                    SELECT decision_id, trade_id, event_ts, details_json
-                    FROM order_lifecycle_event
-                    WHERE trade_id=?
-                    ORDER BY event_ts DESC LIMIT 1
-                    """,
-                    (str(position_id),),
-                ).fetchone()
-                if ord_fallback:
-                    fallback_order = dict(ord_fallback)
-                # synthesize a minimal entry_decision_id from recovery/order
-                if not fallback_meta and not fallback_order:
-                    fallback_meta = {}
-            entry_decision_id = str(entry["decision_id"]) if entry else str(
+                fallback_order = next(
+                    (
+                        row
+                        for row in iter_order_rows(conn, limit=0)
+                        if str(row.get("trade_id") or "") == str(position_id)
+                    ),
+                    None,
+                )
+            entry_decision_id = str(entry.get("decision_id") or "") if entry else str(
                 fallback_meta.get("entry_decision_id") or fallback_meta.get("parent_decision_id")
                 or (fallback_order.get("decision_id") if fallback_order else "") or ""
             )
-            trade_id = str(entry["trade_id"]) if entry and entry["trade_id"] else str(
+            trade_id = str(entry.get("trade_id") or "") if entry and entry.get("trade_id") else str(
                 fallback_order.get("trade_id") if fallback_order and fallback_order.get("trade_id") else str(position_id)
             )
             entry_score = (
-                float(entry["action_score"])
-                if entry and entry["action_score"] is not None
+                float(entry.get("action_score") or 0.0)
+                if entry and entry.get("action_score") is not None
                 else None
             )
-            regime_id = str(entry["regime_id"] or "") if entry else str(fallback_meta.get("entry_regime") or "")
-            entry_decision_ts = float(entry["decision_ts"] or 0.0) if entry else float(
+            regime_id = str(entry.get("regime_id") or "") if entry else str(fallback_meta.get("entry_regime") or "")
+            entry_decision_ts = float(entry.get("decision_ts") or 0.0) if entry else float(
                 fallback_meta.get("tick", 0) or (fallback_order.get("event_ts") if fallback_order else 0) or 0.0
             )
-            timeframe = str(entry["timeframe"] or "") if entry else str(fallback_meta.get("timeframe") or "")
-            entry_action = _loads(entry["action_json"], {}) if entry else dict(
+            timeframe = str(entry.get("timeframe") or "") if entry else str(fallback_meta.get("timeframe") or "")
+            entry_action = _loads(entry.get("action_json"), {}) if entry else dict(
                 fallback_meta.get("entry_action") or fallback_meta.get("trade_attribution") or {}
             )
-            entry_risk_state = _loads(entry["risk_state_json"], {}) if entry else dict(
+            entry_risk_state = _loads(entry.get("risk_state_json"), {}) if entry else dict(
                 fallback_meta.get("entry_risk_state") or {}
             )
-            entry_factors = list(
-                self._execute(conn,
-                    """
-                    SELECT * FROM decision_factor_snapshot
-                    WHERE decision_id=?
-                    ORDER BY ABS(contribution_score) DESC, factor ASC
-                    """,
-                    (entry_decision_id,),
-                )
-            ) if entry_decision_id else []
+            entry_factors = (
+                iter_decision_factor_snapshots(conn, entry_decision_id)
+                if entry_decision_id
+                else []
+            )
             recovery = self._execute(conn,
                 """
                 SELECT recovery_meta_json
@@ -385,18 +379,16 @@ class TradeReviewer:
                 """,
                 (position_id,),
             ).fetchone()
-            order_events = list(
-                self._execute(conn,
-                    """
-                    SELECT event_type, event_ts, price, volume, status, details_json
-                    FROM order_lifecycle_event
-                    WHERE (? <> '' AND decision_id=?)
-                       OR (? <> '' AND trade_id=?)
-                    ORDER BY event_ts ASC
-                    """,
-                    (entry_decision_id, entry_decision_id, trade_id, trade_id),
+            order_events = [
+                row
+                for row in iter_order_rows(conn, limit=0)
+                if (
+                    entry_decision_id
+                    and str(row.get("decision_id") or "") == entry_decision_id
                 )
-            ) if entry_decision_id or trade_id else []
+                or (trade_id and str(row.get("trade_id") or "") == trade_id)
+            ] if entry_decision_id or trade_id else []
+            order_events.sort(key=lambda row: _safe_float(row.get("event_ts")))
             broker_entry = self._execute(
                 conn,
                 """
@@ -789,7 +781,6 @@ class TradeReviewer:
             "regime_fit": round(regime_fit_score, 4),
             "execution_quality": round(execution_quality, 4),
         }
-        review_archive_payload = dict(review_json)
         review_json = normalize_trade_review_contract(
             review_json,
             entry_quality=entry_quality,
@@ -802,11 +793,6 @@ class TradeReviewer:
         review_json["failure_taxonomy"] = taxonomy
         review_json["primary_responsibility"] = taxonomy["primary_responsibility"]
         review_json["responsibility_labels"] = taxonomy["responsibility_labels"]
-        review_archive_payload = dict(review_json) | {
-            key: review_archive_payload[key]
-            for key in ("inferred_close_supervisor", "responsibility_domains")
-            if key in review_archive_payload
-        }
         for label in taxonomy["responsibility_labels"]:
             if label not in failure_tags:
                 failure_tags.append(label)
@@ -846,95 +832,27 @@ class TradeReviewer:
                     "review_json": existing_review,
                     "deduplicated": True,
                 }
-            archive = archive_json_payload(
+            self._record_canonical_review(
                 conn,
-                source_table="trade_outcome_review",
-                source_id=review_id,
-                payload_kind="review_json",
-                raw_json=json.dumps(review_archive_payload, ensure_ascii=False, default=str),
+                review_id=review_id,
+                trade_id=trade_id,
+                position_id=position_id,
+                entry_decision_id=entry_decision_id,
+                exit_decision_id=exit_decision_id,
+                entry_quality=entry_quality,
+                hold_quality=hold_quality,
+                exit_quality=exit_quality,
+                regime_fit_score=regime_fit_score,
+                execution_quality=execution_quality,
+                pnl=pnl,
+                mae=mae,
+                mfe=mfe,
+                outcome_label=outcome_label,
+                failure_tags=failure_tags,
+                summary_text=summary,
+                review=review_json,
+                created_at=close_ts,
             )
-            if archive:
-                self._execute(
-                    conn,
-                    """
-                    INSERT INTO trade_outcome_review
-                    (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                     entry_quality, hold_quality, exit_quality, regime_fit_score,
-                     execution_quality, pnl, mae, mfe, outcome_label,
-                     failure_tags_json, summary_text, review_json, created_at,
-                     review_archive_hash, review_raw_sha256, review_raw_bytes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                        round(entry_quality, 4), round(hold_quality, 4), round(exit_quality, 4),
-                        round(regime_fit_score, 4), round(execution_quality, 4), round(float(pnl), 6),
-                        round(mae, 6), round(mfe, 6), outcome_label,
-                        json.dumps(failure_tags, ensure_ascii=False), summary,
-                        json.dumps(review_json, ensure_ascii=False, default=str), close_ts,
-                        archive["archive_hash"], archive["raw_sha256"], archive["raw_bytes"],
-                    ),
-                )
-            else:
-                self._execute(
-                    conn,
-                    """
-                    INSERT INTO trade_outcome_review
-                    (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-                     entry_quality, hold_quality, exit_quality, regime_fit_score,
-                     execution_quality, pnl, mae, mfe, outcome_label,
-                     failure_tags_json, summary_text, review_json, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        review_id,
-                        trade_id,
-                        position_id,
-                        entry_decision_id,
-                        exit_decision_id,
-                        round(entry_quality, 4),
-                        round(hold_quality, 4),
-                        round(exit_quality, 4),
-                        round(regime_fit_score, 4),
-                        round(execution_quality, 4),
-                        round(float(pnl), 6),
-                        round(mae, 6),
-                        round(mfe, 6),
-                        outcome_label,
-                        json.dumps(failure_tags, ensure_ascii=False),
-                        summary,
-                        # Without the archive table this is still an old
-                        # fixture/pre-15 store; retain the complete review
-                        # rather than persisting only its bounded projection.
-                        json.dumps(review_archive_payload, ensure_ascii=False, default=str),
-                        close_ts,
-                    ),
-                )
-            if self._use_pg():
-                # A1: mirror the live review into canonical within the same
-                # transaction as the legacy write so the canonical trade_review
-                # stream stays authoritative after the full data flush.
-                self._record_canonical_review(
-                    conn,
-                    review_id=review_id,
-                    trade_id=trade_id,
-                    position_id=position_id,
-                    entry_decision_id=entry_decision_id,
-                    exit_decision_id=exit_decision_id,
-                    entry_quality=entry_quality,
-                    hold_quality=hold_quality,
-                    exit_quality=exit_quality,
-                    regime_fit_score=regime_fit_score,
-                    execution_quality=execution_quality,
-                    pnl=pnl,
-                    mae=mae,
-                    mfe=mfe,
-                    outcome_label=outcome_label,
-                    failure_tags=failure_tags,
-                    summary_text=summary,
-                    review=review_json,
-                    created_at=close_ts,
-                )
 
             for factor, mc in contributions.items():
                 entry_contribution = 0.0
@@ -999,13 +917,7 @@ class TradeReviewer:
 
 
     def _record_canonical_review(self, conn, **fields: Any) -> dict[str, Any] | None:
-        """Mirror one accepted live review into the canonical trade_review stream.
-
-        Called within the reviewer's open PG transaction so the legacy review
-        row and its canonical mirror commit atomically.  Runs only when the
-        store is PostgreSQL (canonical schema available); SQLite fixtures keep
-        the legacy-only path for test compatibility.
-        """
+        """Persist one accepted live review in the canonical trade stream."""
         from backend.services.canonical_v2 import record_review
 
         return record_review(conn, producer="live_closed_position", **fields)
@@ -1019,57 +931,37 @@ class TradeReviewer:
         close_ts: float,
     ) -> dict | None:
         real_deal_id = _safe_int((real_pnl or {}).get("deal_id"))
-        try:
-            review_archive_select = (
-                ", review_archive_hash"
-                if "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
-                else ""
-            )
-        except Exception:
-            review_archive_select = ""
-        rows = self._execute(conn,
-            f"""
-            SELECT review_id, trade_id, position_id, outcome_label, pnl,
-                   failure_tags_json, summary_text, review_json, created_at{review_archive_select}
-            FROM trade_outcome_review
-            WHERE position_id=?
-            ORDER BY created_at DESC
-            LIMIT 20
-            """,
-            (position_id,),
-        ).fetchall()
+        rows = [
+            row
+            for row in iter_review_rows(conn, limit=0)
+            if str(row.get("position_id") or "") == str(position_id)
+        ]
+        rows.sort(
+            key=lambda row: (_safe_float(row.get("created_at")), str(row.get("review_id") or "")),
+            reverse=True,
+        )
+        rows = rows[:20]
         for row in rows:
-            try:
-                review_json = load_json_payload(
-                    conn,
-                    source_table="trade_outcome_review",
-                    source_id=str(row["review_id"] or ""),
-                    inline_json=row["review_json"],
-                    archive_hash=row["review_archive_hash"] if "review_archive_hash" in row.keys() else "",
-                    default={},
-                )
-                if not isinstance(review_json, dict):
-                    review_json = {}
-            except Exception:
+            review_json = row.get("review_json") or {}
+            if isinstance(review_json, str):
+                review_json = _loads(review_json, {})
+            if not isinstance(review_json, dict):
                 review_json = {}
             existing_real = review_json.get("real_pnl") or {}
             existing_deal_id = _safe_int(existing_real.get("deal_id"))
-            existing_close_ts = _safe_float(review_json.get("close_ts"), _safe_float(row["created_at"]))
+            existing_close_ts = _safe_float(review_json.get("close_ts"), _safe_float(row.get("created_at")))
             same_deal = real_deal_id > 0 and existing_deal_id == real_deal_id
             same_close = real_deal_id <= 0 and existing_close_ts > 0 and abs(existing_close_ts - close_ts) < 1.0
             if not (same_deal or same_close):
                 continue
-            try:
-                failure_tags = json.loads(row["failure_tags_json"] or "[]")
-            except Exception:
-                failure_tags = []
+            failure_tags = row.get("failure_tags") or _loads(row.get("failure_tags_json"), [])
             return {
-                "review_id": str(row["review_id"]),
-                "trade_id": str(row["trade_id"] or position_id),
-                "outcome_label": str(row["outcome_label"] or ""),
-                "pnl": float(row["pnl"] or 0.0),
+                "review_id": str(row.get("review_id") or ""),
+                "trade_id": str(row.get("trade_id") or position_id),
+                "outcome_label": str(row.get("outcome_label") or ""),
+                "pnl": float(row.get("pnl") or 0.0),
                 "failure_tags": failure_tags if isinstance(failure_tags, list) else [],
-                "summary_text": str(row["summary_text"] or ""),
+                "summary_text": str(row.get("summary_text") or ""),
                 "review_json": review_json,
             }
         return None

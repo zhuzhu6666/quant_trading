@@ -1,46 +1,42 @@
-import json
 import time
 
+import pytest
+
 from backend.core.db import STATE_DB_DDL, connect_sqlite
+from backend.services.canonical_v2 import record_review
+from backend.services.canonical_v2_reader import iter_review_rows
 from backend.services.v16_brain_snapshot import BrainMemoryService
 from backend.services.memory_integrity import MemoryIntegrityReportService
 from backend.services.trade_lesson_memory import upsert_trade_lesson_memory
+from tests.canonical_fixture import make_canonical_sqlite
 
 
 def _seed_review(db_path, *, review_id="review-1", contaminated=False):
     now = time.time()
-    conn = connect_sqlite(db_path)
-    conn.row_factory = __import__("sqlite3").Row
+    conn = make_canonical_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, outcome_label, failure_tags_json,
-             summary_text, review_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                review_id,
-                f"trade-{review_id}",
-                f"position-{review_id}",
-                "bad_loss",
-                json.dumps(["weak_entry_signal"]),
-                "weak entry failed during noisy range",
-                json.dumps(
-                    {
-                        "regime": "noisy_range",
-                        "system_issue_context": {
-                            "contaminates_learning": contaminated,
-                        },
-                    }
-                ),
-                now,
-            ),
+        record_review(
+            conn,
+            review_id=review_id,
+            trade_id=f"trade-{review_id}",
+            position_id=f"position-{review_id}",
+            outcome_label="bad_loss",
+            failure_tags=["weak_entry_signal"],
+            summary_text="weak entry failed during noisy range",
+            review={
+                "regime": "noisy_range",
+                "system_issue_context": {
+                    "contaminates_learning": contaminated,
+                },
+            },
+            created_at=now,
         )
-        row = conn.execute(
-            "SELECT * FROM trade_outcome_review WHERE review_id=?", (review_id,)
-        ).fetchone()
+        row = next(
+            row
+            for row in iter_review_rows(conn, limit=0)
+            if row["review_id"] == review_id
+        )
         upsert_trade_lesson_memory(conn, row)
         conn.commit()
     finally:
@@ -68,7 +64,7 @@ def test_memory_integrity_reports_healthy_rebuildable_three_layer_path(tmp_path)
     assert report["retrieval_index"]["window_available"] is True
     assert report["boundary"]["does_not_authorize_actions"] is True
     assert report["boundary"]["affects_trading"] is False
-    assert report["raw_evidence"]["latest_created_at"] == created_at
+    assert report["raw_evidence"]["latest_created_at"] == pytest.approx(created_at)
 
 
 def test_memory_integrity_exposes_projection_and_index_breaks_without_mutating_sources(tmp_path):
@@ -82,14 +78,20 @@ def test_memory_integrity_exposes_projection_and_index_breaks_without_mutating_s
     conn = connect_sqlite(db_path)
     conn.row_factory = __import__("sqlite3").Row
     try:
-        original = conn.execute(
-            "SELECT review_json, created_at FROM trade_outcome_review WHERE review_id='review-1'"
-        ).fetchone()
+        original_row = next(
+            row
+            for row in iter_review_rows(conn, limit=0)
+            if row["review_id"] == "review-1"
+        )
+        original = {
+            "review_json": original_row["review_json"],
+            "created_at": original_row["created_at"],
+        }
         conn.execute(
             """
             INSERT INTO experience_memory
             (experience_id, source_table, source_id, append_source, created_at)
-            VALUES ('duplicate-lesson', 'trade_outcome_review', 'review-1',
+            VALUES ('duplicate-lesson', 'canonical_v2.trade_review', 'review-1',
                     'trade_lesson_memory.v1', ?)
             """,
             (float(original["created_at"]) + 1.0,),
@@ -115,9 +117,15 @@ def test_memory_integrity_exposes_projection_and_index_breaks_without_mutating_s
     conn = connect_sqlite(db_path, read_only=True)
     conn.row_factory = __import__("sqlite3").Row
     try:
-        unchanged = conn.execute(
-            "SELECT review_json, created_at FROM trade_outcome_review WHERE review_id='review-1'"
-        ).fetchone()
+        unchanged_row = next(
+            row
+            for row in iter_review_rows(conn, limit=0)
+            if row["review_id"] == "review-1"
+        )
+        unchanged = {
+            "review_json": unchanged_row["review_json"],
+            "created_at": unchanged_row["created_at"],
+        }
     finally:
         conn.close()
     assert dict(unchanged) == dict(original)
@@ -126,7 +134,7 @@ def test_memory_integrity_exposes_projection_and_index_breaks_without_mutating_s
 def test_memory_integrity_exposes_missing_and_noncanonical_projections(tmp_path):
     db_path = tmp_path / "state.db"
     _seed_review(db_path)
-    conn = connect_sqlite(db_path)
+    conn = make_canonical_sqlite(db_path)
     try:
         conn.execute(
             "DELETE FROM experience_memory WHERE source_id='review-1'"
@@ -151,7 +159,7 @@ def test_memory_integrity_exposes_missing_and_noncanonical_projections(tmp_path)
 
 def test_memory_integrity_treats_an_empty_initialized_corpus_as_healthy(tmp_path):
     db_path = tmp_path / "state.db"
-    conn = connect_sqlite(db_path)
+    conn = make_canonical_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
         conn.commit()

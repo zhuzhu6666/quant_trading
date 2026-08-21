@@ -1,4 +1,4 @@
-"""Read-only staged release preflight for the phased repair rollout."""
+"""Read-only release preflight for the canonical live/governance path."""
 from __future__ import annotations
 
 import subprocess
@@ -9,45 +9,23 @@ SCHEMA_VERSION = "phased_repair_release_preflight.v1"
 REQUIRED_SERVICES = ("quant-backend.service", "quant-learning-worker.service")
 JOB_WORKER_SERVICE = "quant-job-worker.service"
 TARGET_EXPECTED_FLAGS = {
-    "safety_enforce": {
-        "live_safety_plane_v2_mode": "shadow",
-        "live_generation_controller_v2_enabled": False,
-        "ctrader_execution_outcome_v2_enabled": False,
-        "governance_mutation_coordinator_v2_mode": "dual_record",
-        "pg_job_queue_v2_enabled": False,
-    },
-    "generation_enable": {
+    "supervisor_enforce": {
         "live_safety_plane_v2_mode": "enforce",
-        "live_generation_controller_v2_enabled": False,
-        "ctrader_execution_outcome_v2_enabled": False,
-        "governance_mutation_coordinator_v2_mode": "dual_record",
-        "pg_job_queue_v2_enabled": False,
-    },
-    "execution_outcome_enable": {
-        "live_safety_plane_v2_mode": "enforce",
-        "live_generation_controller_v2_enabled": True,
-        "ctrader_execution_outcome_v2_enabled": False,
         "governance_mutation_coordinator_v2_mode": "dual_record",
         "pg_job_queue_v2_enabled": False,
     },
     "governance_enforce": {
         "live_safety_plane_v2_mode": "enforce",
-        "live_generation_controller_v2_enabled": True,
-        "ctrader_execution_outcome_v2_enabled": True,
         "governance_mutation_coordinator_v2_mode": "dual_record",
         "pg_job_queue_v2_enabled": False,
     },
     "pg_job_queue_enable": {
         "live_safety_plane_v2_mode": "enforce",
-        "live_generation_controller_v2_enabled": True,
-        "ctrader_execution_outcome_v2_enabled": True,
         "governance_mutation_coordinator_v2_mode": "enforce",
         "pg_job_queue_v2_enabled": False,
     },
     "pg_job_queue_verify": {
         "live_safety_plane_v2_mode": "enforce",
-        "live_generation_controller_v2_enabled": True,
-        "ctrader_execution_outcome_v2_enabled": True,
         "governance_mutation_coordinator_v2_mode": "enforce",
         "pg_job_queue_v2_enabled": True,
     },
@@ -143,7 +121,10 @@ def evaluate_phased_release_preflight(
     }
     if flag_mismatches:
         blockers.append("static_rollout_flags_unexpected")
-    shadow_gate_required = target == "safety_enforce"
+    # Shadow continuity was a pre-cutover observation gate.  The canonical
+    # supervisor path is already the active authority, so no target may
+    # reintroduce a shadow/legacy transition.
+    shadow_gate_required = False
     if shadow_gate_required and not bool(shadow_gate.get("ok")):
         blockers.append("safety_shadow_gate_incomplete")
     safety_fault_matrix_required = bool(
@@ -159,17 +140,14 @@ def evaluate_phased_release_preflight(
         and safety_fault_matrix_payload.get("ok") is not True
     ):
         blockers.append("safety_fault_matrix_incomplete")
-    execution_fault_matrix_required = target == "execution_outcome_enable"
+    # Broker execution outcome is no longer a staged release target.  It is an
+    # always-on prerequisite of the single mutation chain.
+    execution_fault_matrix_required = False
     execution_fault_matrix_payload = (
         dict(execution_fault_matrix or {})
         if isinstance(execution_fault_matrix, Mapping)
         else {}
     )
-    if (
-        execution_fault_matrix_required
-        and execution_fault_matrix_payload.get("ok") is not True
-    ):
-        blockers.append("execution_outcome_fault_matrix_incomplete")
     required_services = REQUIRED_SERVICES + (
         (JOB_WORKER_SERVICE,) if target == "pg_job_queue_verify" else ()
     )
@@ -215,7 +193,7 @@ def evaluate_phased_release_preflight(
     if not readiness_ok:
         blockers.append("release_readiness_unavailable_or_divergent")
 
-    process_flags_required = target != "safety_enforce"
+    process_flags_required = True
     snapshot_meta = (
         dict(readiness_payload.get("snapshot") or {})
         if isinstance(readiness_payload.get("snapshot"), Mapping)
@@ -360,12 +338,6 @@ def evaluate_phased_release_preflight(
     }
 
 
-def evaluate_safety_enforce_preflight(**facts: Any) -> dict[str, Any]:
-    """Backward-compatible evaluator for the first staged transition."""
-
-    return evaluate_phased_release_preflight(target="safety_enforce", **facts)
-
-
 def _service_states(*, target: str) -> dict[str, str]:
     states: dict[str, str] = {}
     names = REQUIRED_SERVICES + (
@@ -407,8 +379,6 @@ def collect_phased_release_preflight(
     static = shared_static_feature_flags()
     flags = {
         "live_safety_plane_v2_mode": static.live_safety_plane_v2_mode,
-        "live_generation_controller_v2_enabled": static.live_generation_controller_v2_enabled,
-        "ctrader_execution_outcome_v2_enabled": static.ctrader_execution_outcome_v2_enabled,
         "governance_mutation_coordinator_v2_mode": (
             static.governance_mutation_coordinator_v2_mode
         ),
@@ -455,15 +425,10 @@ def collect_phased_release_preflight(
 
         governance_preflight = collect_governance_release_preflight()
     safety_fault_matrix: Mapping[str, Any] | None = None
-    if target == "safety_enforce":
+    if target == "supervisor_enforce":
         from backend.services.live_safety_fault_matrix import fault_matrix_status
 
         safety_fault_matrix = fault_matrix_status()
-    execution_fault_matrix: Mapping[str, Any] | None = None
-    if target == "execution_outcome_enable":
-        from backend.services.execution_outcome_fault_matrix import fault_matrix_status
-
-        execution_fault_matrix = fault_matrix_status()
     return evaluate_phased_release_preflight(
         target=target,
         shadow_gate=safety_shadow_gate_status(
@@ -479,18 +444,5 @@ def collect_phased_release_preflight(
         job_worker_preflight=job_worker_preflight,
         governance_preflight=governance_preflight,
         safety_fault_matrix=safety_fault_matrix,
-        execution_fault_matrix=execution_fault_matrix,
         job_worker_capability=job_worker_capability,
-    )
-
-
-def collect_safety_enforce_preflight(
-    *, required_hours: float = 24.0, max_gap_sec: float = 75.0
-) -> dict[str, Any]:
-    """Backward-compatible collector for the first staged transition."""
-
-    return collect_phased_release_preflight(
-        target="safety_enforce",
-        required_hours=required_hours,
-        max_gap_sec=max_gap_sec,
     )

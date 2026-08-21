@@ -1,139 +1,211 @@
 import json
 import sqlite3
 from types import SimpleNamespace
-import json
 
 from backend.api import risk as risk_api
+from backend.core.db import STATE_DB_DDL
+from backend.services.canonical_v2 import (
+    record_decision_event,
+    record_order_event,
+    record_position_event,
+    record_review,
+    record_supervisor_trace_event,
+)
+from tests.canonical_fixture import make_canonical_sqlite
+
+
+def _canonical_db(path):
+    conn = make_canonical_sqlite(path)
+    conn.executescript(STATE_DB_DDL)
+    return conn
+
+
+def _insert_factor_contribution(
+    conn,
+    *,
+    review_id,
+    trade_id,
+    factor,
+    entry_contribution=0.0,
+    hold_contribution=0.0,
+    exit_contribution=0.0,
+    net_contribution=0.0,
+    confidence=0.0,
+    notes=None,
+):
+    conn.execute(
+        """
+        INSERT INTO factor_contribution_review
+        (review_id, trade_id, factor, entry_contribution, hold_contribution,
+         exit_contribution, net_contribution, confidence, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            review_id,
+            trade_id,
+            factor,
+            entry_contribution,
+            hold_contribution,
+            exit_contribution,
+            net_contribution,
+            confidence,
+            json.dumps(notes or {}, ensure_ascii=False),
+        ),
+    )
+
+
+def _insert_parameter_candidate(
+    conn,
+    *,
+    candidate_id,
+    factor_id,
+    status="approved",
+    validation_summary=None,
+    created_at=0.0,
+    updated_at=0.0,
+):
+    conn.execute(
+        """
+        INSERT INTO parameter_template_release_candidate
+        (candidate_id, factor_id, template_id, regime_key, status,
+         validation_summary_json, validation_report_path, created_at, updated_at)
+        VALUES (?, ?, ?, '', ?, ?, '', ?, ?)
+        """,
+        (
+            candidate_id,
+            factor_id,
+            f"{factor_id}:conservative.v1:default",
+            status,
+            json.dumps(validation_summary or {}, ensure_ascii=False),
+            created_at,
+            updated_at,
+        ),
+    )
 
 
 def test_recent_policy_verdicts_summarizes_decision_ledger(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE decision_ledger (
-            decision_id TEXT PRIMARY KEY,
-            position_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            decision_ts REAL NOT NULL DEFAULT 0.0,
-            action_reason TEXT DEFAULT '',
-            action_json TEXT DEFAULT '{}',
-            risk_state_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE position_supervisor_trace (
-            trace_id TEXT PRIMARY KEY,
-            decision_id TEXT DEFAULT '',
-            stage TEXT DEFAULT '',
-            outcome TEXT DEFAULT '',
-            execution_status TEXT DEFAULT '',
-            execution_reason TEXT DEFAULT '',
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE recovery_position_state (
-            position_id TEXT PRIMARY KEY,
-            direction INTEGER DEFAULT 0
-        );
-        """
+    conn = _canonical_db(db_path)
+    record_decision_event(
+        conn,
+        decision_id="dec_allowed",
+        position_id="284214987",
+        event_type="open",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=200.0,
+        action={
+            "risk_verdict": {
+                "allowed": True,
+                "reason": "ok",
+                "audit_payload": {"action": "open_trade"},
+            }
+        },
+        risk_state={
+            "policy_verdict": {
+                "allowed": True,
+                "reason": "ok",
+                "audit_payload": {"action": "open_trade"},
+            }
+        },
     )
-    conn.executemany(
-        """
-        INSERT INTO decision_ledger
-        (decision_id, position_id, event_type, symbol, timeframe, decision_ts,
-         action_reason, action_json, risk_state_json, created_at)
-        VALUES (?, ?, ?, 'XAUUSD+', 'M5', ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                "dec_allowed",
-                "284214987",
-                "open",
-                200.0,
-                "executed",
-                json.dumps({"risk_verdict": {"allowed": True, "reason": "ok", "audit_payload": {"action": "open_trade"}}}),
-                "{}",
-                200.0,
-            ),
-            (
-                "dec_skipped",
-                "",
-                "supervisor_reduce",
-                150.0,
-                "risk_reducing_action",
-                json.dumps({"risk_verdict": {"allowed": True, "reason": "risk_reducing_action", "audit_payload": {"action": "reduce_position"}}}),
-                "{}",
-                150.0,
-            ),
-            (
-                "dec_blocked",
-                "",
-                "skip",
-                100.0,
-                "仓位上限: 3/3",
-                "{}",
-                json.dumps({"policy_verdict": {"allowed": False, "reason": "仓位上限: 3/3", "audit_payload": {"action": "open_trade"}}}),
-                100.0,
-            ),
-            (
-                "dec_pre_policy",
-                "",
-                "skip",
-                175.0,
-                "no_new_risk_latched",
-                json.dumps({
-                    "tick": 7,
-                    "direction": 1,
-                    "gate_passed": True,
-                    "gate_reason": "passed",
-                    "skip_stage": "before_candidate",
-                    "risk_stage": "not_reached",
-                    "risk_policy_reached": False,
-                    "admission_gate_passed": False,
-                    "blockers": ["no_new_risk_latched", "accepting_new_risk_false"],
-                    "execution_intent_created": False,
-                    "action_reason": "no_new_risk_latched",
-                }),
-                "{}",
-                175.0,
-            ),
-        ],
+    record_decision_event(
+        conn,
+        decision_id="dec_skipped",
+        event_type="supervisor_reduce",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=150.0,
+        action={
+            "risk_verdict": {
+                "allowed": True,
+                "reason": "risk_reducing_action",
+                "audit_payload": {"action": "reduce_position"},
+            }
+        },
+        risk_state={
+            "policy_verdict": {
+                "allowed": True,
+                "reason": "risk_reducing_action",
+                "audit_payload": {"action": "reduce_position"},
+            }
+        },
+    )
+    record_decision_event(
+        conn,
+        decision_id="dec_blocked",
+        event_type="skip",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=100.0,
+        action={
+            "risk_verdict": {
+                "allowed": False,
+                "reason": "仓位上限: 3/3",
+                "audit_payload": {"action": "open_trade"},
+            }
+        },
+        risk_state={
+            "policy_verdict": {
+                "allowed": False,
+                "reason": "仓位上限: 3/3",
+                "audit_payload": {"action": "open_trade"},
+            }
+        },
+    )
+    record_decision_event(
+        conn,
+        decision_id="dec_pre_policy",
+        event_type="skip",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=175.0,
+        action={
+            "tick": 7,
+            "direction": 1,
+            "gate_passed": True,
+            "gate_reason": "passed",
+            "skip_stage": "before_candidate",
+            "risk_stage": "not_reached",
+            "risk_policy_reached": False,
+            "admission_gate_passed": False,
+            "blockers": ["no_new_risk_latched", "accepting_new_risk_false"],
+            "execution_intent_created": False,
+            "action_reason": "no_new_risk_latched",
+        },
+        risk_state={},
+    )
+    record_supervisor_trace_event(
+        conn,
+        trace_id="trace-applied",
+        decision_id="dec_allowed",
+        event_ts=200.0,
+        payload={
+            "trace_id": "trace-applied",
+            "decision_id": "dec_allowed",
+            "stage": "executed",
+            "outcome": "applied",
+            "execution_status": "applied",
+            "execution_reason": "broker_confirmed",
+        },
+    )
+    record_supervisor_trace_event(
+        conn,
+        trace_id="trace-skipped",
+        decision_id="dec_skipped",
+        event_ts=150.0,
+        payload={
+            "trace_id": "trace-skipped",
+            "decision_id": "dec_skipped",
+            "stage": "no_op_suppressed",
+            "outcome": "skipped",
+            "execution_status": "no_op",
+            "execution_reason": "invalid_reduce_volume",
+        },
     )
     conn.execute(
         "INSERT INTO recovery_position_state(position_id, direction) VALUES (?, ?)",
-        ("284214987", 1),
-    )
-    conn.executemany(
-        """
-        INSERT INTO position_supervisor_trace
-        (trace_id, decision_id, stage, outcome, execution_status,
-         execution_reason, event_ts, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                "trace-applied",
-                "dec_allowed",
-                "executed",
-                "applied",
-                "applied",
-                "broker_confirmed",
-                200.0,
-                200.0,
-            ),
-            (
-                "trace-skipped",
-                "dec_skipped",
-                "no_op_suppressed",
-                "skipped",
-                "no_op",
-                "invalid_reduce_volume",
-                150.0,
-                150.0,
-            ),
-        ],
+        (284214987, 1),
     )
     conn.commit()
     conn.close()
@@ -202,7 +274,11 @@ def test_system_health_summary_serializes_latest_report(monkeypatch):
                 },
             )
 
-    monkeypatch.setattr(risk_api, "_get_system_health_report", lambda: _SystemHealth().get_last_report())
+    monkeypatch.setattr(
+        risk_api,
+        "_get_system_health_report",
+        lambda: _SystemHealth().get_last_report(),
+    )
     monkeypatch.setattr(
         risk_api,
         "_runtime_risk_policy",
@@ -221,214 +297,142 @@ def test_system_health_summary_serializes_latest_report(monkeypatch):
     assert result["components"]["disk_space"]["detail"] == "3.2 GB left"
 
 
-
 def test_trade_trace_collects_ledger_review_and_lifecycle(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE decision_ledger (
-            decision_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            decision_ts REAL NOT NULL DEFAULT 0.0,
-            regime_id TEXT DEFAULT '',
-            regime_confidence REAL DEFAULT 0.0,
-            portfolio_state_json TEXT DEFAULT '{}',
-            risk_state_json TEXT DEFAULT '{}',
-            policy_version TEXT DEFAULT '',
-            factor_set_version TEXT DEFAULT '',
-            action_score REAL DEFAULT 0.0,
-            action_reason TEXT DEFAULT '',
-            action_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE position_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            position_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            symbol TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            net_volume REAL DEFAULT 0.0,
-            avg_price REAL DEFAULT 0.0,
-            unrealized_pnl REAL DEFAULT 0.0,
-            realized_pnl REAL DEFAULT 0.0,
-            details_json TEXT DEFAULT '{}'
-        );
-        CREATE TABLE order_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            decision_id TEXT DEFAULT '',
-            trade_id TEXT DEFAULT '',
-            order_id TEXT DEFAULT '',
-            broker_order_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            price REAL DEFAULT 0.0,
-            volume REAL DEFAULT 0.0,
-            status TEXT DEFAULT '',
-            details_json TEXT DEFAULT '{}'
-        );
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            exit_decision_id TEXT DEFAULT '',
-            entry_quality REAL DEFAULT 0.0,
-            hold_quality REAL DEFAULT 0.0,
-            exit_quality REAL DEFAULT 0.0,
-            regime_fit_score REAL DEFAULT 0.0,
-            execution_quality REAL DEFAULT 0.0,
-            pnl REAL DEFAULT 0.0,
-            mae REAL DEFAULT 0.0,
-            mfe REAL DEFAULT 0.0,
-            outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]',
-            summary_text TEXT DEFAULT '',
-            review_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE factor_contribution_review (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            review_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            factor TEXT NOT NULL,
-            entry_contribution REAL DEFAULT 0.0,
-            hold_contribution REAL DEFAULT 0.0,
-            exit_contribution REAL DEFAULT 0.0,
-            net_contribution REAL DEFAULT 0.0,
-            confidence REAL DEFAULT 0.0,
-            notes TEXT DEFAULT ''
-        );
-        CREATE TABLE recovery_position_state (
-            position_id TEXT PRIMARY KEY,
-            broker TEXT DEFAULT 'ctrader',
-            symbol TEXT DEFAULT '',
-            direction INTEGER DEFAULT 0,
-            open_price REAL DEFAULT 0.0,
-            volume REAL DEFAULT 0.0,
-            first_seen_at REAL DEFAULT 0.0,
-            last_seen_at REAL DEFAULT 0.0,
-            status TEXT DEFAULT 'open',
-            strategy_name TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            context_integrity TEXT DEFAULT 'full',
-            recovery_meta_json TEXT DEFAULT '{}',
-            closed_at REAL DEFAULT 0.0,
-            close_reason TEXT DEFAULT '',
-            close_pnl REAL DEFAULT 0.0
-        );
-        """
+    conn = _canonical_db(db_path)
+    record_decision_event(
+        conn,
+        decision_id="dec_open",
+        trade_id="9001",
+        position_id="9001",
+        event_type="open",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=100.0,
+        portfolio_state={"equity": 10000},
+        risk_state={"policy_verdict": {"allowed": True, "reason": "ok"}},
+        action={"side": "sell"},
+        action_score=0.7,
+        action_reason="opened",
+        created_at=100.0,
     )
-    conn.executemany(
-        """
-        INSERT INTO decision_ledger
-        (decision_id, trade_id, position_id, event_type, symbol, timeframe, decision_ts,
-         portfolio_state_json, risk_state_json, action_score, action_reason, action_json, created_at)
-        VALUES (?, ?, ?, ?, 'XAUUSD+', 'M5', ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                "dec_open",
-                "9001",
-                "9001",
-                "open",
-                100.0,
-                json.dumps({"equity": 10000}),
-                json.dumps({"policy_verdict": {"allowed": True, "reason": "ok"}}),
-                0.7,
-                "opened",
-                json.dumps({"side": "sell"}),
-                100.0,
-            ),
-            (
-                "dec_close",
-                "9001",
-                "9001",
-                "close",
-                150.0,
-                "{}",
-                json.dumps({"policy_verdict": {"allowed": True, "reason": "manual_close"}}),
-                0.0,
-                "manual_close",
-                json.dumps({"close_reason": "broker_close"}),
-                200.0,
-            ),
-            (
-                "dec_supervisor_close",
-                "9001",
-                "9001",
-                "supervisor_close",
-                180.0,
-                "{}",
-                json.dumps({"policy_verdict": {"allowed": True, "reason": "risk_reducing_action"}}),
-                0.91,
-                "thesis_broken",
-                json.dumps(
-                    {
-                        "supervisor_verdict": {
-                            "action": "close",
-                            "summary_reason": "thesis_broken",
-                            "evidence": {"holding_efficiency": 0.08},
-                            "recommended_controls": {"protection_mode": "full_exit"},
-                        },
-                        "risk_verdict": {"allowed": True, "reason": "risk_reducing_action"},
-                    }
-                ),
-                180.0,
-            ),
-        ],
+    record_decision_event(
+        conn,
+        decision_id="dec_close",
+        trade_id="9001",
+        position_id="9001",
+        event_type="close",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=150.0,
+        risk_state={"policy_verdict": {"allowed": True, "reason": "manual_close"}},
+        action={"close_reason": "broker_close"},
+        action_reason="manual_close",
+        created_at=200.0,
     )
-    conn.execute(
-        """
-        INSERT INTO position_lifecycle_event
-        (event_id, position_id, trade_id, symbol, event_type, event_ts, net_volume, avg_price, realized_pnl, details_json)
-        VALUES ('pos_evt_close', '9001', '9001', 'XAUUSD+', 'closed', 200.0, 0, 3988.2, 12.5, ?)
-        """,
-        (json.dumps({"reason": "broker_close"}),),
+    record_decision_event(
+        conn,
+        decision_id="dec_supervisor_close",
+        trade_id="9001",
+        position_id="9001",
+        event_type="supervisor_close",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=180.0,
+        action_score=0.91,
+        action_reason="thesis_broken",
+        action={
+            "supervisor_verdict": {
+                "action": "close",
+                "summary_reason": "thesis_broken",
+                "evidence": {"holding_efficiency": 0.08},
+                "recommended_controls": {"protection_mode": "full_exit"},
+            },
+            "risk_verdict": {"allowed": True, "reason": "risk_reducing_action"},
+        },
+        risk_state={"policy_verdict": {"allowed": True, "reason": "risk_reducing_action"}},
+        created_at=180.0,
     )
-    conn.execute(
-        """
-        INSERT INTO order_lifecycle_event
-        (event_id, decision_id, trade_id, order_id, broker_order_id, event_type, event_ts, price, volume, status, details_json)
-        VALUES ('ord_evt_fill', 'dec_open', '9001', 'ord-1', 'brk-1', 'filled', 101.0, 3992.0, 100, 'filled', ?)
-        """,
-        (json.dumps({"sl": 4020.0, "tp": 3960.0}),),
+    record_position_event(
+        conn,
+        event_id="pos_evt_close",
+        position_id="9001",
+        trade_id="9001",
+        symbol="XAUUSD+",
+        event_type="closed",
+        event_ts=200.0,
+        net_volume=0,
+        avg_price=3988.2,
+        realized_pnl=12.5,
+        details={"reason": "broker_close"},
     )
-    conn.execute(
-        """
-        INSERT INTO trade_outcome_review
-        (review_id, trade_id, position_id, entry_decision_id, exit_decision_id, pnl, outcome_label,
-         failure_tags_json, summary_text, review_json, created_at)
-        VALUES ('rev_1', '9001', '9001', 'dec_open', 'dec_close', 12.5, 'win', ?, '手动平仓已记录', ?, 220.0)
-        """,
-        (
-            json.dumps(["manual"]),
-            json.dumps({"close_reason": "broker_close", "real_pnl": {"net": 12.5}}),
-        ),
+    record_order_event(
+        conn,
+        event_id="ord_evt_fill",
+        decision_id="dec_open",
+        trade_id="9001",
+        order_id="ord-1",
+        broker_order_id="brk-1",
+        event_type="filled",
+        event_ts=101.0,
+        price=3992.0,
+        volume=100,
+        status="filled",
+        details={"sl": 4020.0, "tp": 3960.0},
     )
-    conn.executemany(
-        """
-        INSERT INTO factor_contribution_review
-        (review_id, trade_id, factor, entry_contribution, hold_contribution, exit_contribution, net_contribution, confidence, notes)
-        VALUES ('rev_1', '9001', ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            ("macd_hist", 0.4, 0.2, 0.0, 0.6, 0.8, json.dumps({"source": "rule_review", "primary_responsibility": "exit", "responsibility_labels": ["entry_good_exit_bad"], "factor_role": "helpful"})),
-            ("rsi_14", -0.1, 0.0, 0.0, -0.1, 0.5, json.dumps({"source": "rule_review", "primary_responsibility": "exit", "responsibility_labels": ["entry_good_exit_bad"], "factor_role": "harmful"})),
-        ],
+    record_review(
+        conn,
+        review_id="rev_1",
+        trade_id="9001",
+        position_id="9001",
+        entry_decision_id="dec_open",
+        exit_decision_id="dec_close",
+        pnl=12.5,
+        outcome_label="win",
+        failure_tags=["manual"],
+        summary_text="手动平仓已记录",
+        review={"close_reason": "broker_close", "real_pnl": {"net": 12.5}},
+        created_at=220.0,
+    )
+    _insert_factor_contribution(
+        conn,
+        review_id="rev_1",
+        trade_id="9001",
+        factor="macd_hist",
+        entry_contribution=0.4,
+        hold_contribution=0.2,
+        net_contribution=0.6,
+        confidence=0.8,
+        notes={
+            "source": "rule_review",
+            "primary_responsibility": "exit",
+            "responsibility_labels": ["entry_good_exit_bad"],
+            "factor_role": "helpful",
+        },
+    )
+    _insert_factor_contribution(
+        conn,
+        review_id="rev_1",
+        trade_id="9001",
+        factor="rsi_14",
+        entry_contribution=-0.1,
+        net_contribution=-0.1,
+        confidence=0.5,
+        notes={
+            "source": "rule_review",
+            "primary_responsibility": "exit",
+            "responsibility_labels": ["entry_good_exit_bad"],
+            "factor_role": "harmful",
+        },
     )
     conn.execute(
         """
         INSERT INTO recovery_position_state
-        (position_id, broker, symbol, direction, open_price, volume, status, entry_decision_id, context_integrity, recovery_meta_json, close_reason, close_pnl)
-        VALUES (9001, 'ctrader', 'XAUUSD+', -1, 3992.0, 100, 'closed', 'dec_open', 'full', ?, 'broker_close', 12.5)
+        (position_id, broker, symbol, direction, open_price, volume, status,
+         entry_decision_id, context_integrity, recovery_meta_json, close_reason, close_pnl)
+        VALUES (?, 'ctrader', 'XAUUSD+', -1, 3992.0, 100, 'closed', ?, 'full', ?, 'broker_close', 12.5)
         """,
-        (json.dumps({"source": "replay"}),),
+        (9001, "dec_open", json.dumps({"source": "replay"})),
     )
     conn.commit()
     conn.close()
@@ -477,156 +481,80 @@ def test_trade_trace_collects_ledger_review_and_lifecycle(monkeypatch, tmp_path)
 
 def test_recent_trade_trace_index_surfaces_recent_samples(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE decision_ledger (
-            decision_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            decision_ts REAL NOT NULL DEFAULT 0.0,
-            regime_id TEXT DEFAULT '',
-            regime_confidence REAL DEFAULT 0.0,
-            portfolio_state_json TEXT DEFAULT '{}',
-            risk_state_json TEXT DEFAULT '{}',
-            policy_version TEXT DEFAULT '',
-            factor_set_version TEXT DEFAULT '',
-            action_score REAL DEFAULT 0.0,
-            action_reason TEXT DEFAULT '',
-            action_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            exit_decision_id TEXT DEFAULT '',
-            entry_quality REAL DEFAULT 0.0,
-            hold_quality REAL DEFAULT 0.0,
-            exit_quality REAL DEFAULT 0.0,
-            regime_fit_score REAL DEFAULT 0.0,
-            execution_quality REAL DEFAULT 0.0,
-            pnl REAL DEFAULT 0.0,
-            mae REAL DEFAULT 0.0,
-            mfe REAL DEFAULT 0.0,
-            outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]',
-            summary_text TEXT DEFAULT '',
-            review_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE factor_contribution_review (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            review_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            factor TEXT NOT NULL,
-            entry_contribution REAL DEFAULT 0.0,
-            hold_contribution REAL DEFAULT 0.0,
-            exit_contribution REAL DEFAULT 0.0,
-            net_contribution REAL DEFAULT 0.0,
-            confidence REAL DEFAULT 0.0,
-            notes TEXT DEFAULT ''
-        );
-        CREATE TABLE position_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            position_id TEXT DEFAULT '',
-            trade_id TEXT DEFAULT '',
-            symbol TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            net_volume REAL DEFAULT 0.0,
-            avg_price REAL DEFAULT 0.0,
-            unrealized_pnl REAL DEFAULT 0.0,
-            realized_pnl REAL DEFAULT 0.0,
-            details_json TEXT DEFAULT '{}'
-        );
-        CREATE TABLE parameter_template_release_candidate (
-            candidate_id TEXT PRIMARY KEY,
-            factor_id TEXT NOT NULL,
-            template_id TEXT NOT NULL,
-            regime_key TEXT DEFAULT '',
-            status TEXT DEFAULT 'pending_review',
-            validation_summary_json TEXT DEFAULT '{}',
-            validation_report_path TEXT DEFAULT '',
-            created_at REAL NOT NULL DEFAULT 0.0,
-            updated_at REAL NOT NULL DEFAULT 0.0
-        );
-        """
+    conn = _canonical_db(db_path)
+    for decision_id, position_id, decision_ts in (
+        ("entry_old", "8001", 100.0),
+        ("entry_new", "8002", 200.0),
+    ):
+        record_decision_event(
+            conn,
+            decision_id=decision_id,
+            trade_id=position_id,
+            position_id=position_id,
+            event_type="open",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=decision_ts,
+            created_at=decision_ts,
+            action={},
+            risk_state={},
+        )
+    record_review(
+        conn,
+        review_id="rev_old",
+        trade_id="8001",
+        position_id="8001",
+        entry_decision_id="entry_old",
+        exit_decision_id="dec_old",
+        pnl=4.2,
+        outcome_label="win",
+        failure_tags=["manual"],
+        summary_text="旧样本",
+        review={"close_reason": "broker_close", "real_pnl": {"net": 4.2}},
+        created_at=150.0,
     )
-    conn.executemany(
-        """
-        INSERT INTO decision_ledger
-        (decision_id, trade_id, position_id, event_type, symbol, timeframe, decision_ts, created_at)
-        VALUES (?, ?, ?, 'close', 'XAUUSD+', 'M5', ?, ?)
-        """,
-        [
-            ("dec_old", "8001", "8001", 100.0, 100.0),
-            ("dec_new", "8002", "8002", 200.0, 200.0),
-        ],
+    record_review(
+        conn,
+        review_id="rev_new",
+        trade_id="8002",
+        position_id="8002",
+        entry_decision_id="entry_new",
+        exit_decision_id="dec_new",
+        pnl=-5.0,
+        outcome_label="bad_loss",
+        failure_tags=["param_suspect"],
+        summary_text="新样本",
+        review={
+            "close_reason": "thesis_broken",
+            "real_pnl": {"net": -5.0},
+            "primary_responsibility": "parameter",
+            "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
+            "failure_taxonomy": {
+                "primary_responsibility": "parameter",
+                "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
+            },
+        },
+        created_at=250.0,
     )
-    conn.executemany(
-        """
-        INSERT INTO position_lifecycle_event
-        (event_id, position_id, trade_id, symbol, event_type, event_ts, details_json)
-        VALUES (?, ?, ?, 'XAUUSD+', 'opened', ?, '{}')
-        """,
-        [
-            ("posevt_old", "8001", "8001", 50.0),
-            ("posevt_new", "8002", "8002", 150.0),
-        ],
+    _insert_factor_contribution(
+        conn,
+        review_id="rev_new",
+        trade_id="8002",
+        factor="rsi_14",
+        net_contribution=-0.7,
+        confidence=0.9,
+        notes={
+            "primary_responsibility": "parameter",
+            "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
+        },
     )
-    conn.executemany(
-        """
-        INSERT INTO trade_outcome_review
-        (review_id, trade_id, position_id, entry_decision_id, exit_decision_id, pnl, outcome_label,
-         failure_tags_json, summary_text, review_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                "rev_old", "8001", "8001", "entry_old", "dec_old", 4.2, "win",
-                json.dumps(["manual"]), "旧样本", json.dumps({"close_reason": "broker_close", "real_pnl": {"net": 4.2}}), 150.0,
-            ),
-            (
-                "rev_new", "8002", "8002", "entry_new", "dec_new", -5.0, "bad_loss",
-                json.dumps(["param_suspect"]), "新样本", json.dumps({
-                    "close_reason": "thesis_broken",
-                    "real_pnl": {"net": -5.0},
-                    "primary_responsibility": "parameter",
-                    "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
-                    "failure_taxonomy": {
-                        "primary_responsibility": "parameter",
-                        "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
-                    },
-                }), 250.0,
-            ),
-        ],
-    )
-    conn.execute(
-        """
-        INSERT INTO factor_contribution_review
-        (review_id, trade_id, factor, net_contribution, confidence, notes)
-        VALUES ('rev_new', '8002', 'rsi_14', -0.7, 0.9, ?)
-        """,
-        (
-            json.dumps(
-                {
-                    "primary_responsibility": "parameter",
-                    "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
-                }
-            ),
-        ),
-    )
-    conn.execute(
-        """
-        INSERT INTO parameter_template_release_candidate
-        (candidate_id, factor_id, template_id, status, validation_summary_json, created_at, updated_at)
-        VALUES ('ptrc_recent', 'rsi_14', 'rsi_14:conservative.v1:default', 'approved', '{}', 300.0, 310.0)
-        """
+    _insert_parameter_candidate(
+        conn,
+        candidate_id="ptrc_recent",
+        factor_id="rsi_14",
+        status="approved",
+        created_at=300.0,
+        updated_at=310.0,
     )
     conn.commit()
     conn.close()
@@ -637,6 +565,7 @@ def test_recent_trade_trace_index_surfaces_recent_samples(monkeypatch, tmp_path)
         return c
 
     monkeypatch.setattr(risk_api, "get_state_conn", _conn)
+    monkeypatch.setattr(risk_api, "_db_path_from_conn", lambda _conn: str(db_path))
 
     result = risk_api._recent_trade_trace_index(limit=5)
 
@@ -647,7 +576,10 @@ def test_recent_trade_trace_index_surfaces_recent_samples(monkeypatch, tmp_path)
     assert result["items"][0]["parameter_governance_factor"] == "rsi_14"
     assert result["items"][0]["parameter_candidate_status"] == "approved"
     assert result["items"][0]["parameter_candidate_id"] == "ptrc_recent"
-    assert result["items"][0]["parameter_recommendation_id"] == ""
+    assert (
+        result["items"][0]["parameter_recommendation_id"]
+        == "ptr_rsi_14_rsi_14_conservative.v1_default"
+    )
     assert result["items"][0]["parameter_governance_stage"] == "等待发布"
     assert "切到运行态" in result["items"][0]["parameter_governance_next_step"]
     assert result["items"][0]["parameter_governance_entry_type"] == "candidate"
@@ -658,187 +590,81 @@ def test_recent_trade_trace_index_surfaces_recent_samples(monkeypatch, tmp_path)
 
 def test_trade_trace_includes_parameter_governance_context(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE decision_ledger (
-            decision_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            decision_ts REAL NOT NULL DEFAULT 0.0,
-            regime_id TEXT DEFAULT '',
-            regime_confidence REAL DEFAULT 0.0,
-            portfolio_state_json TEXT DEFAULT '{}',
-            risk_state_json TEXT DEFAULT '{}',
-            policy_version TEXT DEFAULT '',
-            factor_set_version TEXT DEFAULT '',
-            action_score REAL DEFAULT 0.0,
-            action_reason TEXT DEFAULT '',
-            action_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            exit_decision_id TEXT DEFAULT '',
-            entry_quality REAL DEFAULT 0.0,
-            hold_quality REAL DEFAULT 0.0,
-            exit_quality REAL DEFAULT 0.0,
-            regime_fit_score REAL DEFAULT 0.0,
-            execution_quality REAL DEFAULT 0.0,
-            pnl REAL DEFAULT 0.0,
-            mae REAL DEFAULT 0.0,
-            mfe REAL DEFAULT 0.0,
-            outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]',
-            summary_text TEXT DEFAULT '',
-            review_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE factor_contribution_review (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            review_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            factor TEXT NOT NULL,
-            entry_contribution REAL DEFAULT 0.0,
-            hold_contribution REAL DEFAULT 0.0,
-            exit_contribution REAL DEFAULT 0.0,
-            net_contribution REAL DEFAULT 0.0,
-            confidence REAL DEFAULT 0.0,
-            notes TEXT DEFAULT ''
-        );
-        CREATE TABLE position_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            position_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            symbol TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            net_volume REAL DEFAULT 0.0,
-            avg_price REAL DEFAULT 0.0,
-            unrealized_pnl REAL DEFAULT 0.0,
-            realized_pnl REAL DEFAULT 0.0,
-            details_json TEXT DEFAULT '{}'
-        );
-        CREATE TABLE order_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            decision_id TEXT DEFAULT '',
-            trade_id TEXT DEFAULT '',
-            order_id TEXT DEFAULT '',
-            broker_order_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            price REAL DEFAULT 0.0,
-            volume REAL DEFAULT 0.0,
-            status TEXT DEFAULT '',
-            details_json TEXT DEFAULT '{}'
-        );
-        CREATE TABLE recovery_position_state (
-            position_id INTEGER PRIMARY KEY,
-            broker TEXT DEFAULT 'ctrader',
-            symbol TEXT DEFAULT '',
-            direction INTEGER DEFAULT 0,
-            open_price REAL DEFAULT 0.0,
-            volume REAL DEFAULT 0.0,
-            first_seen_at REAL DEFAULT 0.0,
-            last_seen_at REAL DEFAULT 0.0,
-            status TEXT DEFAULT 'open',
-            strategy_name TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            context_integrity TEXT DEFAULT 'full',
-            recovery_meta_json TEXT DEFAULT '{}',
-            closed_at REAL DEFAULT 0.0,
-            close_reason TEXT DEFAULT '',
-            close_pnl REAL DEFAULT 0.0
-        );
-        CREATE TABLE parameter_template_release_candidate (
-            candidate_id TEXT PRIMARY KEY,
-            factor_id TEXT NOT NULL,
-            template_id TEXT NOT NULL,
-            regime_key TEXT DEFAULT '',
-            status TEXT DEFAULT 'pending_review',
-            validation_summary_json TEXT DEFAULT '{}',
-            validation_report_path TEXT DEFAULT '',
-            created_at REAL NOT NULL DEFAULT 0.0,
-            updated_at REAL NOT NULL DEFAULT 0.0
-        );
-        """
+    conn = _canonical_db(db_path)
+    record_decision_event(
+        conn,
+        decision_id="dec_entry",
+        trade_id="9101",
+        position_id="9101",
+        event_type="open",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=100.0,
+        action_score=0.6,
+        action_reason="opened",
+        created_at=100.0,
+        action={},
+        risk_state={},
     )
-    conn.execute(
-        """
-        INSERT INTO decision_ledger
-        (decision_id, trade_id, position_id, event_type, symbol, timeframe, decision_ts,
-         portfolio_state_json, risk_state_json, action_score, action_reason, action_json, created_at)
-        VALUES ('dec_entry', '9101', '9101', 'open', 'XAUUSD+', 'M5', 100.0, '{}', '{}', 0.6, 'opened', '{}', 100.0)
-        """
+    record_review(
+        conn,
+        review_id="rev_param",
+        trade_id="9101",
+        position_id="9101",
+        entry_decision_id="dec_entry",
+        exit_decision_id="dec_exit",
+        pnl=-8.5,
+        outcome_label="bad_loss",
+        failure_tags=["param_suspect"],
+        summary_text="参数疑似失配",
+        review={
+            "close_reason": "thesis_broken",
+            "real_pnl": {"net": -8.5},
+            "primary_responsibility": "parameter",
+            "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
+            "failure_taxonomy": {
+                "primary_responsibility": "parameter",
+                "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
+            },
+        },
+        created_at=220.0,
     )
-    conn.execute(
-        """
-        INSERT INTO trade_outcome_review
-        (review_id, trade_id, position_id, entry_decision_id, exit_decision_id, pnl, outcome_label,
-         failure_tags_json, summary_text, review_json, created_at)
-        VALUES ('rev_param', '9101', '9101', 'dec_entry', 'dec_exit', -8.5, 'bad_loss', ?, '参数疑似失配', ?, 220.0)
-        """,
-        (
-            json.dumps(["param_suspect"]),
-            json.dumps(
-                {
-                    "close_reason": "thesis_broken",
-                    "real_pnl": {"net": -8.5},
+    _insert_factor_contribution(
+        conn,
+        review_id="rev_param",
+        trade_id="9101",
+        factor="rsi_14",
+        entry_contribution=0.2,
+        hold_contribution=-0.4,
+        exit_contribution=-0.3,
+        net_contribution=-0.5,
+        confidence=0.88,
+        notes={
+            "source": "rule_review",
+            "primary_responsibility": "parameter",
+            "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
+            "factor_role": "harmful",
+        },
+    )
+    _insert_parameter_candidate(
+        conn,
+        candidate_id="ptrc_param_9101",
+        factor_id="rsi_14",
+        status="approved",
+        validation_summary={
+            "recommendation_source": {
+                "source": "parameter_template_recommendation",
+                "recommendation_id": "ptr_rsi_9101",
+                "reason": "parameter drift observed",
+                "responsibility": {
                     "primary_responsibility": "parameter",
                     "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
-                    "failure_taxonomy": {
-                        "primary_responsibility": "parameter",
-                        "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
-                    },
-                }
-            ),
-        ),
-    )
-    conn.execute(
-        """
-        INSERT INTO factor_contribution_review
-        (review_id, trade_id, factor, entry_contribution, hold_contribution, exit_contribution, net_contribution, confidence, notes)
-        VALUES ('rev_param', '9101', 'rsi_14', 0.2, -0.4, -0.3, -0.5, 0.88, ?)
-        """,
-        (
-            json.dumps(
-                {
-                    "source": "rule_review",
-                    "primary_responsibility": "parameter",
-                    "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
-                    "factor_role": "harmful",
-                }
-            ),
-        ),
-    )
-    conn.execute(
-        """
-        INSERT INTO parameter_template_release_candidate
-        (candidate_id, factor_id, template_id, regime_key, status, validation_summary_json, validation_report_path, created_at, updated_at)
-        VALUES ('ptrc_param_9101', 'rsi_14', 'rsi_14:conservative.v1:default', '', 'approved', ?, '/tmp/report.json', 230.0, 240.0)
-        """,
-        (
-            json.dumps(
-                {
-                    "recommendation_source": {
-                        "source": "parameter_template_recommendation",
-                        "recommendation_id": "ptr_rsi_9101",
-                        "reason": "parameter drift observed",
-                        "responsibility": {
-                            "primary_responsibility": "parameter",
-                            "responsibility_labels": ["factor_logic_ok_but_param_suspect"],
-                        },
-                        "approval_path": "offline_validation_then_gray_release",
-                    }
-                }
-            ),
-        ),
+                },
+                "approval_path": "offline_validation_then_gray_release",
+            }
+        },
+        created_at=230.0,
+        updated_at=240.0,
     )
     conn.commit()
     conn.close()
@@ -849,6 +675,7 @@ def test_trade_trace_includes_parameter_governance_context(monkeypatch, tmp_path
         return c
 
     monkeypatch.setattr(risk_api, "get_state_conn", _conn)
+    monkeypatch.setattr(risk_api, "_db_path_from_conn", lambda _conn: str(db_path))
 
     result = risk_api._trade_trace(position_id="9101")
 
@@ -868,113 +695,29 @@ def test_trade_trace_includes_parameter_governance_context(monkeypatch, tmp_path
     assert governance_actions[0]["candidate_id"] == "ptrc_param_9101"
     assert governance_actions[0]["factor_id"] == "rsi_14"
     assert governance_actions[0]["source"] == "trade_trace_timeline"
-    assert any(item["type"] == "template_recommendation" and item["recommendation_id"] == "ptr_rsi_9101" for item in governance_actions)
+    assert any(
+        item["type"] == "template_recommendation"
+        and item["recommendation_id"] == "ptr_rsi_9101"
+        for item in governance_actions
+    )
 
 
 def test_trade_trace_resolves_from_decision_id(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE decision_ledger (
-            decision_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            decision_ts REAL NOT NULL DEFAULT 0.0,
-            regime_id TEXT DEFAULT '',
-            regime_confidence REAL DEFAULT 0.0,
-            portfolio_state_json TEXT DEFAULT '{}',
-            risk_state_json TEXT DEFAULT '{}',
-            policy_version TEXT DEFAULT '',
-            factor_set_version TEXT DEFAULT '',
-            action_score REAL DEFAULT 0.0,
-            action_reason TEXT DEFAULT '',
-            action_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE position_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            position_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            symbol TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            net_volume REAL DEFAULT 0.0,
-            avg_price REAL DEFAULT 0.0,
-            unrealized_pnl REAL DEFAULT 0.0,
-            realized_pnl REAL DEFAULT 0.0,
-            details_json TEXT DEFAULT '{}'
-        );
-        CREATE TABLE order_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            decision_id TEXT DEFAULT '',
-            trade_id TEXT DEFAULT '',
-            order_id TEXT DEFAULT '',
-            broker_order_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            price REAL DEFAULT 0.0,
-            volume REAL DEFAULT 0.0,
-            status TEXT DEFAULT '',
-            details_json TEXT DEFAULT '{}'
-        );
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            exit_decision_id TEXT DEFAULT '',
-            entry_quality REAL DEFAULT 0.0,
-            hold_quality REAL DEFAULT 0.0,
-            exit_quality REAL DEFAULT 0.0,
-            regime_fit_score REAL DEFAULT 0.0,
-            execution_quality REAL DEFAULT 0.0,
-            pnl REAL DEFAULT 0.0,
-            mae REAL DEFAULT 0.0,
-            mfe REAL DEFAULT 0.0,
-            outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]',
-            summary_text TEXT DEFAULT '',
-            review_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE factor_contribution_review (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            review_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            factor TEXT NOT NULL,
-            entry_contribution REAL DEFAULT 0.0,
-            hold_contribution REAL DEFAULT 0.0,
-            exit_contribution REAL DEFAULT 0.0,
-            net_contribution REAL DEFAULT 0.0,
-            confidence REAL DEFAULT 0.0,
-            notes TEXT DEFAULT ''
-        );
-        CREATE TABLE recovery_position_state (
-            position_id INTEGER PRIMARY KEY,
-            broker TEXT DEFAULT 'ctrader',
-            symbol TEXT DEFAULT '',
-            direction INTEGER DEFAULT 0,
-            open_price REAL DEFAULT 0.0,
-            volume REAL DEFAULT 0.0,
-            first_seen_at REAL DEFAULT 0.0,
-            last_seen_at REAL DEFAULT 0.0,
-            status TEXT DEFAULT 'open',
-            strategy_name TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            context_integrity TEXT DEFAULT 'full',
-            recovery_meta_json TEXT DEFAULT '{}',
-            closed_at REAL DEFAULT 0.0,
-            close_reason TEXT DEFAULT '',
-            close_pnl REAL DEFAULT 0.0
-        );
-        INSERT INTO decision_ledger
-        (decision_id, trade_id, position_id, event_type, symbol, timeframe, decision_ts, action_reason, action_json, created_at)
-        VALUES ('dec_only', '3003', '3003', 'open', 'XAUUSD+', 'M5', 10.0, 'opened', '{}', 10.0);
-        """
+    conn = _canonical_db(db_path)
+    record_decision_event(
+        conn,
+        decision_id="dec_only",
+        trade_id="3003",
+        position_id="3003",
+        event_type="open",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=10.0,
+        action_reason="opened",
+        created_at=10.0,
+        action={},
+        risk_state={},
     )
     conn.commit()
     conn.close()
@@ -995,111 +738,18 @@ def test_trade_trace_resolves_from_decision_id(monkeypatch, tmp_path):
 
 def test_trade_trace_uses_position_when_decision_ledger_is_missing(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(
-        """
-        CREATE TABLE decision_ledger (
-            decision_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            decision_ts REAL NOT NULL DEFAULT 0.0,
-            regime_id TEXT DEFAULT '',
-            regime_confidence REAL DEFAULT 0.0,
-            portfolio_state_json TEXT DEFAULT '{}',
-            risk_state_json TEXT DEFAULT '{}',
-            policy_version TEXT DEFAULT '',
-            factor_set_version TEXT DEFAULT '',
-            action_score REAL DEFAULT 0.0,
-            action_reason TEXT DEFAULT '',
-            action_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE position_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            position_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            symbol TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            net_volume REAL DEFAULT 0.0,
-            avg_price REAL DEFAULT 0.0,
-            unrealized_pnl REAL DEFAULT 0.0,
-            realized_pnl REAL DEFAULT 0.0,
-            details_json TEXT DEFAULT '{}'
-        );
-        CREATE TABLE order_lifecycle_event (
-            event_id TEXT PRIMARY KEY,
-            decision_id TEXT DEFAULT '',
-            trade_id TEXT DEFAULT '',
-            order_id TEXT DEFAULT '',
-            broker_order_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            price REAL DEFAULT 0.0,
-            volume REAL DEFAULT 0.0,
-            status TEXT DEFAULT '',
-            details_json TEXT DEFAULT '{}'
-        );
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            exit_decision_id TEXT DEFAULT '',
-            entry_quality REAL DEFAULT 0.0,
-            hold_quality REAL DEFAULT 0.0,
-            exit_quality REAL DEFAULT 0.0,
-            regime_fit_score REAL DEFAULT 0.0,
-            execution_quality REAL DEFAULT 0.0,
-            pnl REAL DEFAULT 0.0,
-            mae REAL DEFAULT 0.0,
-            mfe REAL DEFAULT 0.0,
-            outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]',
-            summary_text TEXT DEFAULT '',
-            review_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE factor_contribution_review (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            review_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            factor TEXT NOT NULL,
-            entry_contribution REAL DEFAULT 0.0,
-            hold_contribution REAL DEFAULT 0.0,
-            exit_contribution REAL DEFAULT 0.0,
-            net_contribution REAL DEFAULT 0.0,
-            confidence REAL DEFAULT 0.0,
-            notes TEXT DEFAULT ''
-        );
-        CREATE TABLE recovery_position_state (
-            position_id INTEGER PRIMARY KEY,
-            broker TEXT DEFAULT 'ctrader',
-            symbol TEXT DEFAULT '',
-            direction INTEGER DEFAULT 0,
-            open_price REAL DEFAULT 0.0,
-            volume REAL DEFAULT 0.0,
-            first_seen_at REAL DEFAULT 0.0,
-            last_seen_at REAL DEFAULT 0.0,
-            status TEXT DEFAULT 'open',
-            strategy_name TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            context_integrity TEXT DEFAULT 'full',
-            recovery_meta_json TEXT DEFAULT '{}',
-            closed_at REAL DEFAULT 0.0,
-            close_reason TEXT DEFAULT '',
-            close_pnl REAL DEFAULT 0.0
-        );
-        INSERT INTO trade_outcome_review
-        (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-         outcome_label, summary_text, review_json, created_at)
-        VALUES
-        ('review_recent', 'trade_recent', '268728362', 'dec_entry_missing', 'dec_exit_missing',
-         'acceptable_loss', '复盘记录已生成', '{"symbol":"XAUUSD+","close_reason":"thesis_invalid"}', 20.0);
-        """
+    conn = _canonical_db(db_path)
+    record_review(
+        conn,
+        review_id="review_recent",
+        trade_id="trade_recent",
+        position_id="268728362",
+        entry_decision_id="dec_entry_missing",
+        exit_decision_id="dec_exit_missing",
+        outcome_label="acceptable_loss",
+        summary_text="复盘记录已生成",
+        review={"symbol": "XAUUSD+", "close_reason": "thesis_invalid"},
+        created_at=20.0,
     )
     conn.commit()
     conn.close()

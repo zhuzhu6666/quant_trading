@@ -45,7 +45,6 @@ class _Adapter:
     def __init__(self, source="shadow"):
         self._meta = {"foo": {"source": source, "score": 1.0}}
         self.promoted = []
-        self.registered = []
 
     def get_meta(self, name):
         return dict(self._meta[name])
@@ -54,12 +53,6 @@ class _Adapter:
         self.promoted.append((name, new_source, reason))
         self._meta[name]["source"] = new_source
         return True
-
-    def register_runtime(self, name, func, source, description=""):
-        self.registered.append((name, source, description))
-        self._meta[name] = {"source": source, "score": 0.0, "description": description}
-        return True
-
 
 class _RiskVerdict:
     def __init__(self, allowed=True, reason="ok"):
@@ -613,7 +606,6 @@ def test_collect_learning_suggestions_keeps_approved_observational(tmp_path, mon
     import sqlite3
 
     db_path = tmp_path / "state.db"
-    monkeypatch.setattr(evo, "_CANARY_DB", db_path)
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
         """
@@ -647,6 +639,13 @@ def test_collect_learning_suggestions_keeps_approved_observational(tmp_path, mon
     conn.commit()
     conn.close()
 
+    def _state_conn(*, read_only=False):
+        state = sqlite3.connect(str(db_path))
+        state.row_factory = sqlite3.Row
+        return state
+
+    monkeypatch.setattr(evo, "_state_conn", _state_conn)
+
     monkeypatch.setattr(evo._time, "time", lambda: 10_000_000_000)
     summary, biases = evo._collect_learning_suggestions(max_age_days=30)
 
@@ -667,7 +666,6 @@ def test_collect_learning_suggestions_requires_applied_authority_for_biases(tmp_
     import sqlite3
 
     db_path = tmp_path / "state.db"
-    monkeypatch.setattr(evo, "_CANARY_DB", db_path)
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
         """
@@ -712,6 +710,13 @@ def test_collect_learning_suggestions_requires_applied_authority_for_biases(tmp_
     )
     conn.commit()
     conn.close()
+
+    def _state_conn(*, read_only=False):
+        state = sqlite3.connect(str(db_path))
+        state.row_factory = sqlite3.Row
+        return state
+
+    monkeypatch.setattr(evo, "_state_conn", _state_conn)
 
     monkeypatch.setattr(evo._time, "time", lambda: 10_000_000_000)
     summary, dual_biases = evo._collect_learning_suggestions(
@@ -814,15 +819,30 @@ def test_evolution_shadow_register_blocked_by_risk_policy(monkeypatch):
 def test_evolution_shadow_register_skips_invalid_dsl_before_registration(monkeypatch):
     import risk.policy_service as policy_service
     from alpha.factor_identity import factor_definition_fingerprint
+    import backend.services.factor_lifecycle_service as lifecycle_module
     import backend.services.governance_control_plans as control_plans
 
     adapter = _Adapter()
     policy = _RiskPolicy(allowed=True)
     stories = []
+    committed = []
     monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: policy))
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: adapter))
+    # The former coordinator-off branch bypassed the canonical writer.
+    # Keep the mode explicitly off so this test proves it no longer selects
+    # a second writer.
     monkeypatch.setattr(control_plans, "governance_coordinator_mode", lambda: "off")
     monkeypatch.setattr(evo, "_emit_evolution_story", lambda event, payload: stories.append((event, payload)))
+
+    class _Lifecycle:
+        def __init__(self, *args, **kwargs):
+            assert kwargs["adapter"] is adapter
+
+        def register_shadow(self, **kwargs):
+            committed.append(kwargs)
+            return {"ok": True, "status": "committed", "mutation_id": "mut-shadow"}
+
+    monkeypatch.setattr(lifecycle_module, "FactorLifecycleService", _Lifecycle)
 
     class _BadExpr:
         name = "dsl_auto_bad"
@@ -834,25 +854,27 @@ def test_evolution_shadow_register_skips_invalid_dsl_before_registration(monkeyp
 
     assert evo._register_shadow_factors([_BadExpr(), _GoodExpr()]) == 1
     stable_name = f"dsl_auto_{factor_definition_fingerprint('rank(close)')}"
-    assert adapter.registered == [(stable_name, "shadow", "rank(close)")]
+    assert committed[0]["name"] == stable_name
+    assert committed[0]["expression"] == "rank(close)"
+    assert committed[0]["idempotency_key"] == (
+        f"evolution-shadow:{factor_definition_fingerprint('rank(close)')}"
+    )
     assert stories[0][0] == "shadow_register_invalid_dsl_skipped"
     assert stories[0][1]["factor"] == "dsl_auto_bad"
 
 
-def test_evolution_shadow_register_commits_lifecycle_before_registry_in_enforce(
+def test_evolution_shadow_register_passes_canonical_identity_and_evidence(
     monkeypatch,
 ):
     import risk.policy_service as policy_service
     from alpha.factor_identity import factor_definition_fingerprint
     import backend.services.factor_lifecycle_service as lifecycle_module
-    import backend.services.governance_control_plans as control_plans
 
     adapter = _Adapter()
     policy = _RiskPolicy(allowed=True)
     committed = []
     monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: policy))
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: adapter))
-    monkeypatch.setattr(control_plans, "governance_coordinator_mode", lambda: "enforce")
 
     class _Lifecycle:
         def __init__(self, *args, **kwargs):
@@ -873,7 +895,7 @@ def test_evolution_shadow_register_commits_lifecycle_before_registry_in_enforce(
     assert committed[0]["name"] == f"dsl_auto_{fingerprint}"
     assert committed[0]["artifact_hash"] == fingerprint
     assert committed[0]["idempotency_key"] == f"evolution-shadow:{fingerprint}"
-    assert adapter.registered == []
+    assert committed[0]["evidence_refs"]["producer"] == "evolution_orchestrator"
 
 
 def test_shadow_promote_blocked_by_risk_policy(monkeypatch):

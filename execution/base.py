@@ -29,13 +29,13 @@ class OrderResult:
     comment: str = ""
     price: float = 0.0
     volume: float = 0.0
-    # Additive compatibility field.  cTrader v2 always fills this with one of
-    # confirmed/rejected/unknown/simulated; legacy bridges may leave it empty.
+    # Broker execution outcome.  The cTrader execution path uses the single
+    # confirmed/rejected/unknown contract for every mutation.
     outcome: str = ""
     intent_id: str = ""
-    # Explicit tracking contract.  In compatibility mode this is
-    # ``compat_missing_intent`` instead of allowing an empty intent_id to be
-    # mistaken for complete broker lineage.
+    # Persistent runtime intent status.  A successful broker mutation always
+    # carries a durable intent_id; an empty value is only valid for a local
+    # rejection that never reached the execution boundary.
     execution_intent_status: str = ""
     client_order_id: str = ""
     client_msg_id: str = ""
@@ -61,10 +61,9 @@ class PositionInfo:
     commission: float = 0.0
     swap: float = 0.0
     open_timestamp: float = 0.0  # epoch seconds
-    # Additive component truth.  Empty means a legacy producer that did not
-    # publish component state; the cTrader reconcile/event paths always fill
-    # these fields explicitly.  In particular, ``pnl == 0`` is only a known
-    # flat PnL when ``pnl_state == "known"``.
+    # Component truth from the canonical broker reconcile/event path. In
+    # particular, ``pnl == 0`` is only a known flat PnL when
+    # ``pnl_state == "known"``; an empty state is unknown.
     current_price_state: str = ""
     current_price_source: str = ""
     current_price_observed_at: float = 0.0
@@ -77,7 +76,8 @@ class PositionInfo:
     def get(self, key: str, default: Any = None) -> Any:
         """Dict-like accessor for canonical fields.
 
-        Only the broker/API volume field is supported for size. Legacy volume aliases are intentionally not mapped here.
+        Only the broker/API volume field is supported for size. Old volume
+        aliases are intentionally not mapped here.
         """
         if key == "type":
             return "buy" if self.direction == 1 else "sell" if self.direction == -1 else default
@@ -202,7 +202,7 @@ class PositionReconcileResult:
             object.__setattr__(self, "protection_component", snapshot_fact)
         unspecified = ReconcileComponentFact(
             state="unknown" if self.status != "failed" else "error",
-            source="legacy_unspecified",
+            source="reconcile_component_missing",
             observed_at=0.0,
             reason_code=(
                 "component_not_reported"

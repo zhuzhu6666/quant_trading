@@ -99,6 +99,14 @@ class _Bridge:
             return self.reconciles.pop(0)
         return self.reconciles[0]
 
+    def recover_execution_intents(self):
+        return {
+            "schema": "broker_execution_intent_recovery.v1",
+            "ready": True,
+            "unresolved_count": 0,
+            "unresolved": [],
+        }
+
     def close_position(self, position_id, volume=0.0):
         self.close_calls.append((position_id, volume))
         return self.close_result

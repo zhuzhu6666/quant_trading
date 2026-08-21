@@ -20,7 +20,12 @@ from backend.core.db import (
     is_state_db_path,
     state_pg_enabled,
 )
-from backend.services.canonical_v2_reader import review_row
+from backend.services.canonical_v2_reader import (
+    iter_decision_factor_snapshots,
+    iter_decision_factor_snapshots_by_factor,
+    iter_decision_rows,
+    review_row,
+)
 from backend.core.db_helpers import (
     conn_is_pg as _conn_is_pg,
     execute as _execute,
@@ -600,36 +605,19 @@ class FactorCardService:
         ):
             rows = _execute(conn, f"SELECT DISTINCT {column} AS value FROM {table}").fetchall()
             names.update(str(row["value"] or "") for row in rows if str(row["value"] or ""))
-        # factor names from canonical factor_snapshots (derived, not legacy table)
+        # Factor names from canonical risk-decision payloads, using the public
+        # reader contract rather than reading event/payload internals here.
         try:
-            from backend.services.canonical_v2_reader import (
-                _canonical_ready, _parse_factor_snapshots, read_payload,
-            )
-            if _canonical_ready(conn):
-                event_rows = _execute(
-                    conn,
-                    "SELECT payload_hash FROM canonical_v2.event"
-                    " WHERE event_type = 'risk_decision'"
-                    " ORDER BY created_at DESC LIMIT 500",
-                ).fetchall()
-                for er in event_rows:
-                    try:
-                        payload = read_payload(conn, str(er["payload_hash"]))
-                    except Exception:
-                        continue
-                    for s in _parse_factor_snapshots(payload):
-                        fn = str(s.get("factor") or "")
-                        if fn:
-                            names.add(fn)
+            for decision in iter_decision_rows(conn, limit=500, reverse=True):
+                decision_id = str(decision.get("decision_id") or "")
+                if not decision_id:
+                    continue
+                for snapshot in iter_decision_factor_snapshots(conn, decision_id):
+                    fn = str(snapshot.get("factor") or "")
+                    if fn:
+                        names.add(fn)
         except Exception:
             pass
-        # legacy fallback
-        if not names:
-            try:
-                rows = _execute(conn, "SELECT DISTINCT factor AS value FROM decision_factor_snapshot").fetchall()
-                names.update(str(row["value"] or "") for row in rows if str(row["value"] or ""))
-            except Exception:
-                pass
         rows = _execute(
             conn,
             """
@@ -924,22 +912,11 @@ class FactorCardService:
             """,
             (factor_id,),
         ).fetchone()
-        # --- read factor snapshots (canonical first, legacy fallback) ---
-        snapshot_rows: list = []
-        try:
-            from backend.services.canonical_v2_reader import iter_decision_factor_snapshots_by_factor
-            snapshot_rows = iter_decision_factor_snapshots_by_factor(conn, factor_id, limit=_EVIDENCE_SNAPSHOT_LIMIT)
-        except Exception:
-            pass
-        if not snapshot_rows:
-            snapshot_rows = [
-                dict(r) for r in _execute(
-                    conn,
-                    "SELECT shadow_score, contribution_score FROM decision_factor_snapshot"
-                    " WHERE factor=? ORDER BY id DESC LIMIT ?",
-                    (factor_id, _EVIDENCE_SNAPSHOT_LIMIT),
-                ).fetchall()
-            ]
+        snapshot_rows = iter_decision_factor_snapshots_by_factor(
+            conn,
+            factor_id,
+            limit=_EVIDENCE_SNAPSHOT_LIMIT,
+        )
         if snapshot_rows:
             shadow_scores = [float(r.get("shadow_score") or 0) for r in snapshot_rows]
             contrib_scores = [float(r.get("contribution_score") or 0) for r in snapshot_rows]

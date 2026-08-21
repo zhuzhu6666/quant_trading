@@ -30,11 +30,11 @@ from backend.services._brain_helpers import (
 )
 from backend.services.canonical_v2_reader import (
     canonical_ready,
+    iter_counterfactual_rows,
     iter_review_rows,
     review_row,
 )
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import load_json_payload
 from backend.services.supervisor_payload_contract import (
     compact_supervisor_mapping as _compact_supervisor_mapping,
 )
@@ -53,14 +53,6 @@ def _status_from_component(component: dict[str, Any], default: str = "unknown") 
     return str(component.get("status") or component.get("overall") or component.get("mode") or default)
 
 
-def _review_archive_select(conn: Any, *, alias: str = "r", output: str = "source_review_archive_hash") -> str:
-    """Select the authoritative review archive reference when the schema has it."""
-
-    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
-        return ""
-    return f", {alias}.review_archive_hash AS {output}"
-
-
 def _row_value(row: Any, key: str, default: Any = None) -> Any:
     try:
         if hasattr(row, "keys") and key not in row.keys():
@@ -77,16 +69,10 @@ def _review_payload_from_row(
     *,
     source_id_key: str,
     inline_key: str,
-    archive_key: str = "source_review_archive_hash",
 ) -> dict[str, Any]:
-    payload = load_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(_row_value(row, source_id_key, "") or ""),
-        inline_json=_row_value(row, inline_key, "{}"),
-        archive_hash=_row_value(row, archive_key, ""),
-        default={},
-    )
+    payload = _row_value(row, inline_key, {})
+    if isinstance(payload, str):
+        payload = loads(payload, {})
     return payload if isinstance(payload, dict) else {}
 
 
@@ -422,7 +408,7 @@ def build_posterior_arbitration(
             "counterfactual_label": label,
             "confidence": confidence,
             "evidence_score": round(confidence * (0.6 if is_weak else 1.0) * (1.0 if "no_future_bars" not in tags else 0.5), 6),
-            "source_ref_type": "supervisor_counterfactual_review",
+            "source_ref_type": "canonical_v2.counterfactual_review",
             "source_ref_id": str(item.get("counterfactual_id") or ""),
             "position_id": str(item.get("position_id") or ""),
             "review_id": str(item.get("review_id") or ""),
@@ -503,7 +489,7 @@ def build_posterior_arbitration(
                 "failure_tags": tags,
                 "confidence": 0.75 if primary else 0.55,
                 "evidence_score": 0.75,
-                "source_ref_type": "trade_outcome_review",
+                "source_ref_type": "canonical_v2.trade_review",
                 "source_ref_id": str(review.get("review_id") or ""),
                 "position_id": str(review.get("position_id") or ""),
                 "trade_id": str(review.get("trade_id") or ""),
@@ -542,7 +528,7 @@ def build_posterior_arbitration(
                 "failure_tags": [],
                 "confidence": 0.65,
                 "evidence_score": 0.60,
-                "source_ref_type": "trade_outcome_review",
+                "source_ref_type": "canonical_v2.trade_review",
                 "source_ref_id": str(entry.get("source_ref_id") or ""),
                 "position_id": str(entry.get("position_id") or ""),
                 "trade_id": str(entry.get("trade_id") or ""),
@@ -571,7 +557,7 @@ def build_posterior_arbitration(
     if supervisor:
         selection_reason = "mature_counterfactual_has_highest_causal_evidence"
     elif entry_actionable:
-        selection_reason = "trade_outcome_review_is_current_best_source"
+        selection_reason = "canonical_v2_trade_review_is_current_best_source"
     elif positive_entry:
         selection_reason = "positive_trade_reinforcement"
     else:
@@ -1223,15 +1209,15 @@ class BrainMemoryService:
         counterfactuals: dict[str, dict[str, Any]] = {}
         for item in items:
             source_table, source_id, structured = cls._source_identity(item)
-            if source_table == "trade_outcome_review" and source_id:
+            if source_table == "canonical_v2.trade_review" and source_id:
                 payload = dict(structured)
                 payload.setdefault("review_id", source_id)
                 payload.setdefault("source_id", source_id)
-                priority = 2 if str(item.get("source_table") or "") == "trade_outcome_review" else 1
+                priority = 2 if str(item.get("source_table") or "") == "canonical_v2.trade_review" else 1
                 if priority >= review_priority.get(source_id, -1):
                     reviews[source_id] = payload
                     review_priority[source_id] = priority
-            elif source_table == "supervisor_counterfactual_review" and source_id:
+            elif source_table == "canonical_v2.counterfactual_review" and source_id:
                 payload = dict(structured)
                 payload.setdefault("counterfactual_id", source_id)
                 counterfactuals[source_id] = payload
@@ -1258,10 +1244,10 @@ class BrainMemoryService:
         payload.setdefault("review_id", review_id)
         payload.setdefault("source_id", review_id)
         item = {
-            "source_table": "trade_outcome_review",
+            "source_table": "canonical_v2.trade_review",
             "source_id": review_id,
             "structured": {
-                "source_table": "trade_outcome_review",
+                "source_table": "canonical_v2.trade_review",
                 "source_id": review_id,
             },
         }
@@ -1295,7 +1281,7 @@ class BrainMemoryService:
         actionable = True
         local_arbitration: dict[str, Any] = {}
 
-        if source_table == "trade_outcome_review" and source_id:
+        if source_table == "canonical_v2.trade_review" and source_id:
             review = next((row for row in trade_reviews if str(row.get("review_id") or row.get("source_id") or "") == source_id), {})
             review_id = source_id
             related_cfs = [
@@ -1325,7 +1311,7 @@ class BrainMemoryService:
                 status = "selected_entry_conclusion"
             elif review:
                 status = "entry_observation_pending_supervisor_posterior"
-        elif source_table == "supervisor_counterfactual_review" and source_id:
+        elif source_table == "canonical_v2.counterfactual_review" and source_id:
             related = next((row for row in counterfactuals if str(row.get("counterfactual_id") or "") == source_id), {})
             review_id = str(related.get("review_id") or structured.get("review_id") or "")
             related_reviews = [
@@ -1428,9 +1414,9 @@ class BrainMemoryService:
         source_table = str(structured.get("source_table") or item_source)
         source_id = str(structured.get("source_id") or item.get("source_id") or "")
         trade_id = str(structured.get("trade_id") or "")
-        if source_table == "trade_outcome_review" and source_id:
+        if source_table == "canonical_v2.trade_review" and source_id:
             return f"trade_review:{source_id}"
-        if item_source == "trade_outcome_review" and source_id:
+        if item_source == "canonical_v2.trade_review" and source_id:
             return f"trade_review:{source_id}"
         if trade_id and item_source == "experience_memory":
             return f"trade:{trade_id}"
@@ -1528,7 +1514,7 @@ class BrainMemoryService:
             # counterfactual/final-arbitration record looking current.
             execute(
                 conn,
-                "DELETE FROM brain_memory WHERE source_table IN ('supervisor_counterfactual_review', 'posterior_arbitration')",
+                "DELETE FROM brain_memory WHERE source_table IN ('canonical_v2.counterfactual_review', 'posterior_arbitration')",
             )
             if state_table_exists(conn, "policy_suggestion"):
                 execute(
@@ -1555,29 +1541,19 @@ class BrainMemoryService:
                              SELECT experience_id FROM experience_memory
                          )""",
                 )
-            if canonical_ready(conn) or state_table_exists(conn, "trade_outcome_review"):
-                if canonical_ready(conn):
-                    review_ids = {
-                        str(r.get("review_id") or "") for r in iter_review_rows(conn, limit=0)
-                    }
-                    review_ids.discard("")
-                    if review_ids:
-                        placeholders = ",".join("?" for _ in review_ids)
-                        execute(
-                            conn,
-                            f"""DELETE FROM brain_memory
-                               WHERE source_table='trade_outcome_review'
-                                 AND source_id NOT IN ({placeholders})""",
-                            tuple(review_ids),
-                        )
-                else:
+            if canonical_ready(conn):
+                review_ids = {
+                    str(r.get("review_id") or "") for r in iter_review_rows(conn, limit=0)
+                }
+                review_ids.discard("")
+                if review_ids:
+                    placeholders = ",".join("?" for _ in review_ids)
                     execute(
                         conn,
-                        """DELETE FROM brain_memory
-                           WHERE source_table='trade_outcome_review'
-                             AND source_id NOT IN (
-                                 SELECT review_id FROM trade_outcome_review
-                           )""",
+                        f"""DELETE FROM brain_memory
+                           WHERE source_table='canonical_v2.trade_review'
+                             AND source_id NOT IN ({placeholders})""",
+                        tuple(review_ids),
                     )
             for item in items:
                 persisted_item = _persisted_memory_item(item)
@@ -1621,28 +1597,15 @@ class BrainMemoryService:
             FROM experience_memory e
             WHERE e.append_source='trade_lesson_memory.v1'
             ORDER BY e.created_at DESC""").fetchall()
-        if canonical_ready(conn):
-            built: list[dict[str, Any]] = []
-            for item in memory_rows:
-                value = dict(item)
-                source_id = str(value.get("source_id") or "")
-                review = review_row(conn, source_id) if source_id else None
-                value["source_review_id"] = source_id if review is not None else ""
-                value["source_review_json"] = (review or {}).get("review_json") or {}
-                value["source_review_archive_hash"] = ""
-                built.append(value)
-            rows = built
-        else:
-            archive_select = _review_archive_select(conn)
-            rows = execute(conn, f"""SELECT e.experience_id, e.trade_id, e.source_table, e.source_id,
-                e.regime_id, e.decision_context_json, e.outcome_label, e.reward_score,
-                e.failure_tags_json, e.recommended_action, e.evidence_strength,
-                e.append_source, e.artifact_version, e.created_at,
-                r.review_id AS source_review_id, r.review_json AS source_review_json{archive_select}
-                FROM experience_memory e
-                LEFT JOIN trade_outcome_review r ON r.review_id=e.source_id
-                WHERE e.append_source='trade_lesson_memory.v1'
-                ORDER BY e.created_at DESC""").fetchall()
+        built: list[dict[str, Any]] = []
+        for item in memory_rows:
+            value = dict(item)
+            source_id = str(value.get("source_id") or "")
+            review = review_row(conn, source_id) if source_id else None
+            value["source_review_id"] = source_id if review is not None else ""
+            value["source_review_json"] = (review or {}).get("review_json") or {}
+            built.append(value)
+        rows = built
         items = []
         for row in rows:
             source_review = _review_payload_from_row(
@@ -1702,26 +1665,19 @@ class BrainMemoryService:
         return items
 
     def _trade_outcome_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
-        if not canonical_ready(conn) and not state_table_exists(conn, "trade_outcome_review"):
-            gaps.append("trade_outcome_review")
+        if not canonical_ready(conn):
+            gaps.append("canonical_v2.trade_review")
             return []
-        if canonical_ready(conn):
-            rows = iter_review_rows(conn, limit=0)
-            rows.sort(key=lambda r: float(r.get("created_at") or 0.0), reverse=True)
-        else:
-            archive_select = _review_archive_select(conn, output="review_archive_hash")
-            rows = execute(conn, f"""SELECT review_id, trade_id, position_id, entry_decision_id, pnl,
-                outcome_label, failure_tags_json, summary_text, review_json, created_at{archive_select}
-                FROM trade_outcome_review AS r ORDER BY created_at DESC""").fetchall()
+        rows = iter_review_rows(conn, limit=0)
+        rows.sort(key=lambda r: float(r.get("created_at") or 0.0), reverse=True)
         items = []
         for row in rows:
-            tags = loads(row["failure_tags_json"], [])
+            tags = row.get("failure_tags") or loads(row.get("failure_tags_json"), [])
             review = _review_payload_from_row(
                 conn,
                 row,
                 source_id_key="review_id",
                 inline_key="review_json",
-                archive_key="review_archive_hash",
             )
             if review_has_system_contamination(review):
                 continue
@@ -1735,7 +1691,7 @@ class BrainMemoryService:
             summary = " ".join(str(part or "") for part in [row["outcome_label"],
                 row["summary_text"], " ".join(str(t) for t in tags)]).strip()
             items.append(self._item(
-                source_table="trade_outcome_review", source_id=str(row["review_id"] or ""),
+                source_table="canonical_v2.trade_review", source_id=str(row["review_id"] or ""),
                 memory_type="negative" if polarity == "negative" else "episodic",
                 text_summary=summary or "trade outcome review",
                 structured={"review_id": str(row["review_id"] or ""),
@@ -1760,41 +1716,27 @@ class BrainMemoryService:
         return items
 
     def _counterfactual_memories(self, conn, terms: set[str], gaps: list[str]) -> list[dict[str, Any]]:
-        if not state_table_exists(conn, "supervisor_counterfactual_review"):
-            gaps.append("supervisor_counterfactual_review")
+        if not canonical_ready(conn):
+            gaps.append("canonical_v2.counterfactual_review")
             return []
-        cf_rows = execute(conn, """SELECT c.counterfactual_id, c.review_id, c.trade_id, c.position_id,
-            c.close_ts, c.close_reason, c.supervisor_event_type, c.supervisor_reason, c.label,
-            c.confidence, c.horizons_json, c.evidence_json, c.created_at, c.updated_at
-            FROM supervisor_counterfactual_review c
-            ORDER BY c.close_ts DESC, c.updated_at DESC""").fetchall()
-        if canonical_ready(conn):
-            built: list[dict[str, Any]] = []
-            for item in cf_rows:
-                value = dict(item)
-                review_id = str(value.get("review_id") or "")
-                review = review_row(conn, review_id) if review_id else None
-                value["source_review_id"] = review_id if review is not None else ""
-                value["source_review_json"] = (review or {}).get("review_json") or {}
-                value["source_review_archive_hash"] = ""
-                built.append(value)
-            rows = built
-        else:
-            archive_select = _review_archive_select(conn)
-            rows = execute(conn, f"""SELECT c.counterfactual_id, c.review_id, c.trade_id, c.position_id,
-                c.close_ts, c.close_reason, c.supervisor_event_type, c.supervisor_reason, c.label,
-                c.confidence, c.horizons_json, c.evidence_json, c.created_at, c.updated_at,
-                r.review_id AS source_review_id, r.review_json AS source_review_json{archive_select}
-                -- close_ts is the event-time ordering.  updated_at is only the
-                -- batch/recompute timestamp and must not decide which posterior
-                -- enters the brain's bounded evidence window.
-                FROM supervisor_counterfactual_review c
-                LEFT JOIN trade_outcome_review r ON r.review_id=c.review_id
-                ORDER BY c.close_ts DESC, c.updated_at DESC""").fetchall()
+        rows = iter_counterfactual_rows(conn, limit=0, reverse=True)
+        review_map = {
+            str(item.get("review_id") or ""): item
+            for item in iter_review_rows(conn, limit=0)
+        }
+        built: list[dict[str, Any]] = []
+        for item in rows:
+            value = dict(item)
+            review_id = str(value.get("review_id") or "")
+            review = review_map.get(review_id)
+            value["source_review_id"] = review_id if review is not None else ""
+            value["source_review_json"] = (review or {}).get("review_json") or {}
+            built.append(value)
+        rows = built
         items = []
         for row in rows:
             if (
-                not str(row["source_review_id"] or "")
+                not str(row.get("source_review_id") or "")
                 or review_has_system_contamination(
                     _review_payload_from_row(
                         conn,
@@ -1805,26 +1747,31 @@ class BrainMemoryService:
                 )
             ):
                 continue
-            horizons = loads(row["horizons_json"], [])
-            evidence = loads(row["evidence_json"], {})
+            horizons = row.get("horizons") or loads(row.get("horizons_json"), [])
+            evidence = row.get("evidence") or loads(row.get("evidence_json"), {})
             if bool(evidence.get("evidence_invalidated")):
                 continue
-            label = str(row["label"] or "")
-            confidence = safe_float(row["confidence"])
+            label = str(row.get("label") or "")
+            confidence = safe_float(row.get("confidence"))
             mapped = _SUPERVISOR_COUNTERFACTUAL_ACTIONS.get(label)
             summary = " ".join(
                 str(part or "")
-                for part in [label, row["supervisor_reason"], row["supervisor_event_type"], " ".join(evidence.get("tags") or [])]
+                for part in [
+                    label,
+                    row.get("supervisor_reason"),
+                    row.get("supervisor_event_type"),
+                    " ".join(evidence.get("tags") or []),
+                ]
             ).strip()
             structured = {
-                "counterfactual_id": str(row["counterfactual_id"] or ""),
-                "review_id": str(row["review_id"] or ""),
-                "trade_id": str(row["trade_id"] or ""),
-                "position_id": str(row["position_id"] or ""),
-                "close_ts": safe_float(row["close_ts"]),
-                "close_reason": str(row["close_reason"] or ""),
-                "supervisor_event_type": str(row["supervisor_event_type"] or ""),
-                "supervisor_reason": str(row["supervisor_reason"] or ""),
+                "counterfactual_id": str(row.get("counterfactual_id") or ""),
+                "review_id": str(row.get("review_id") or ""),
+                "trade_id": str(row.get("trade_id") or ""),
+                "position_id": str(row.get("position_id") or ""),
+                "close_ts": safe_float(row.get("close_ts")),
+                "close_reason": str(row.get("close_reason") or ""),
+                "supervisor_event_type": str(row.get("supervisor_event_type") or ""),
+                "supervisor_reason": str(row.get("supervisor_reason") or ""),
                 "label": label,
                 "confidence": confidence,
                 "horizons": horizons,
@@ -1837,14 +1784,14 @@ class BrainMemoryService:
             # intervention even when the realized trade itself was a loss.
             polarity = "positive" if mapped and confidence >= 0.5 and horizons else "neutral"
             items.append(self._item(
-                source_table="supervisor_counterfactual_review",
-                source_id=str(row["counterfactual_id"] or ""),
+                source_table="canonical_v2.counterfactual_review",
+                source_id=str(row.get("counterfactual_id") or ""),
                 memory_type="counterfactual",
                 text_summary=summary or "supervisor counterfactual review",
                 structured=structured,
                 evidence_score=max(0.0, min(1.0, confidence)),
                 polarity=polarity,
-                created_at=safe_float(row["updated_at"] or row["created_at"]),
+                created_at=safe_float(row.get("updated_at") or row.get("created_at")),
                 terms=terms,
             ))
             if len(items) >= 50:

@@ -99,7 +99,7 @@ Windows 仅在需要平台工具时用于补充验证：
 - 经济事件日历独立保存：
   - `data/events.duckdb`
   - 风控事件缩放模块 `execution/event_sizing.py` 直接读取该库
-- 运行时状态与学习审计主库是 PostgreSQL `state_v1`：
+- 运行时状态主库是 PostgreSQL `runtime`，事实与学习事件主库是 `canonical_v2`：
   - `data/state.db` 活跃路径不再保留，也不再保留本地 SQLite 冷备
   - 排查运行态状态禁止用 `sqlite3 data/state.db` 或手写 `sqlite3.connect("data/state.db")`
   - 只读查询统一用 `.venv/bin/python scripts/state_query.py --sql "..."`
@@ -152,6 +152,6 @@ Windows 仅在需要平台工具时用于补充验证：
 1. 读 [docs/README.md](docs/README.md)，获取阶段、运行姿态、当前主线和文档路由。
 2. 系统级修改再依次读事实源、活跃旧债和影响面清单。
 3. 只按任务读取对应领域合同或 [docs/server-backend-sop.md](docs/server-backend-sop.md)。
-4. 用代码、服务、PostgreSQL `state_v1`、`runtime_kv`、日志和测试刷新易变事实。
+4. 用代码、服务、PostgreSQL `runtime`/`canonical_v2`、`runtime_kv`、日志和测试刷新易变事实。
 
 完整文档治理规则见 [docs/documentation-governance.md](docs/documentation-governance.md)。

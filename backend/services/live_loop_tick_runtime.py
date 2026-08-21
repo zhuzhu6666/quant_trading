@@ -192,10 +192,22 @@ def run_live_loop_tick_body(
 
     circuit_enforced = bool(runtime.session_circuit_breaker_enforced())
     drawdown = runtime.evaluate_daily_drawdown()
-    if circuit_enforced and (
-        runtime.live_state_get("circuit_breaker", False)
-        or drawdown["tripped"]
-    ):
+    circuit_blocked = bool(
+        circuit_enforced
+        and (
+            runtime.live_state_get("circuit_breaker", False)
+            or drawdown["tripped"]
+        )
+    )
+    if circuit_blocked:
+        _refresh_generation_admission(
+            generation_id,
+            safety=safety,
+            account_blockers=account_blockers,
+            market_session=None,
+            circuit_blocked=True,
+            runtime=runtime,
+        )
         log(
             f"tick {tick}: session circuit blocks new risk; "
             "safety already completed"
@@ -207,8 +219,22 @@ def run_live_loop_tick_body(
         )
 
     market_session = runtime.market_session_snapshot(bridge)
+    admission_ready = _refresh_generation_admission(
+        generation_id,
+        safety=safety,
+        account_blockers=account_blockers,
+        market_session=market_session,
+        circuit_blocked=circuit_blocked,
+        runtime=runtime,
+    )
     if str(market_session.get("status") or "") == "closed_confirmed":
         runtime.set_loop_diagnostic(tick, "market_closed", bridge_ready=True)
+        return _tick_result(
+            recovery_bootstrapped=recovery_bootstrapped,
+            wait_seconds=wait_seconds,
+            safety=safety,
+        )
+    if not admission_ready:
         return _tick_result(
             recovery_bootstrapped=recovery_bootstrapped,
             wait_seconds=wait_seconds,
@@ -264,22 +290,6 @@ def run_live_loop_tick_body(
             wait_seconds=wait_seconds,
             safety=safety,
         )
-    if generation_id and not runtime.loop_controller.accepting_new_risk(
-        generation_id
-    ):
-        runtime.live_state_update(accepting_new_risk=False)
-        return _tick_result(
-            recovery_bootstrapped=recovery_bootstrapped,
-            wait_seconds=wait_seconds,
-            safety=safety,
-        )
-    if not generation_id and not bool(safety.get("accepting_new_risk", False)):
-        return _tick_result(
-            recovery_bootstrapped=recovery_bootstrapped,
-            wait_seconds=wait_seconds,
-            safety=safety,
-        )
-
     runtime.process_tick(
         bridge,
         None,
@@ -550,6 +560,73 @@ def _update_generation_blockers(
         blockers=tuple(safety.get("blockers") or ())
         + tuple(extra_blockers or ()),
     )
+
+
+def _refresh_generation_admission(
+    generation_id: str,
+    *,
+    safety: dict[str, Any],
+    account_blockers: Any,
+    market_session: dict[str, Any] | None,
+    circuit_blocked: bool,
+    runtime: LiveLoopTickRuntime,
+) -> bool:
+    """Publish the one final runtime admission decision for this tick.
+
+    The shared live-state value is a projection only.  The generation
+    controller receives every same-tick blocker that can prevent a new open,
+    including session and market-data freshness, so status/readiness and the
+    final open gate cannot disagree about the source of ``False``.
+    """
+
+    blockers = {
+        str(item)
+        for item in (safety.get("blockers") or ())
+        if str(item or "").strip()
+    }
+    blockers.update(
+        str(item)
+        for item in (account_blockers or ())
+        if str(item or "").strip()
+    )
+    if not bool(safety.get("accepting_new_risk", False)) and not blockers:
+        blockers.add("safety_not_accepting_new_risk")
+    session_status = str(
+        runtime.live_state_get("session_state_status", "unknown") or "unknown"
+    )
+    if session_status != "available":
+        blockers.add(f"session_state_{session_status}")
+    if circuit_blocked:
+        blockers.add("session_circuit_breaker")
+    if isinstance(market_session, dict) and (
+        str(market_session.get("status") or "") == "closed_confirmed"
+        or (
+            "can_open_positions" in market_session
+            and not bool(market_session.get("can_open_positions"))
+        )
+    ):
+        blockers.add("market_session_blocks_open")
+
+    if not generation_id:
+        # Direct calls without an owned generation are test/offline invocations;
+        # production start always supplies the controller-owned ID.
+        runtime.live_state_update(accepting_new_risk=False)
+        return False
+    try:
+        accepted_result = runtime.loop_controller.update_runtime_health(
+            generation_id,
+            blockers=tuple(sorted(blockers)),
+        )
+        accepted = (
+            bool(accepted_result)
+            if accepted_result is not None
+            else bool(runtime.loop_controller.accepting_new_risk(generation_id))
+        )
+    except RuntimeError:
+        runtime.live_state_update(accepting_new_risk=False)
+        return False
+    runtime.live_state_update(accepting_new_risk=bool(accepted))
+    return bool(accepted)
 
 
 def _safety_wait_seconds(safety: dict[str, Any]) -> float:

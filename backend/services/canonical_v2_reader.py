@@ -344,7 +344,6 @@ def _review_to_row(record: Mapping[str, Any]) -> dict[str, Any]:
         row["failure_tags_json"] = json.dumps(row["failure_tags"])
     nested_review = row.get("review")
     row["review_json"] = nested_review if isinstance(nested_review, dict) else {}
-    row["review_archive_hash"] = ""
     return row
 
 
@@ -563,6 +562,7 @@ def _iter_canonical_payload_events(
     conn: Any,
     event_type: str,
     *,
+    entity_type: str = "",
     limit: int = 0,
     reverse: bool = True,
     filters: Mapping[str, str] | None = None,
@@ -573,15 +573,20 @@ def _iter_canonical_payload_events(
     expected = {str(key): str(value) for key, value in (filters or {}).items() if value not in (None, "")}
     direction = "DESC" if reverse else "ASC"
     bound = f" LIMIT {int(limit)}" if limit and int(limit) > 0 and not expected else ""
+    entity_clause = " AND e.entity_type=?" if entity_type else ""
+    query_params: list[Any] = [event_type]
+    if entity_type:
+        query_params.append(str(entity_type))
     rows = conn.execute(
         _sql(
             conn,
             "SELECT e.event_id, e.event_type, e.entity_type, e.entity_id, "
             "e.payload_hash, e.observed_at, e.created_at "
-            "FROM canonical_v2.event e WHERE e.event_type=? "
+            "FROM canonical_v2.event e WHERE e.event_type=?"
+            + entity_clause + " "
             f"ORDER BY e.observed_at {direction}, e.event_id {direction}" + bound,
         ),
-        (event_type,),
+        tuple(query_params),
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -594,6 +599,75 @@ def _iter_canonical_payload_events(
         if limit and int(limit) > 0 and len(out) >= int(limit):
             break
     return out
+
+
+def iter_parameter_template_lifecycle_rows(
+    conn: Any,
+    limit: int = 0,
+    *,
+    factor_id: str = "",
+    candidate_id: str = "",
+    reverse: bool = True,
+) -> list[dict[str, Any]]:
+    """Return parameter-template lifecycle facts from canonical governance events."""
+
+    events = _iter_canonical_payload_events(
+        conn,
+        "governance_effect",
+        entity_type="parameter_template_lifecycle",
+        limit=limit,
+        reverse=reverse,
+        filters={"factor_id": factor_id, "candidate_id": candidate_id},
+    )
+    rows: list[dict[str, Any]] = []
+    for item in events:
+        rows.append(
+            {
+                "id": str(item.get("canonical_event_id") or item.get("event_id") or ""),
+                "timestamp": observed_epoch(item.get("observed_at")),
+                "event": str(item.get("event") or ""),
+                "factor": str(item.get("factor_id") or item.get("factor") or ""),
+                # ``_flatten_canonical_event`` marks the read authority as
+                # ``canonical``. This domain reader must expose the business
+                # source so API consumers can retain their governance
+                # semantics without inspecting payload blobs themselves.
+                "source": str(item.get("source") or "parameter_template")
+                if str(item.get("source") or "") != "canonical"
+                else "parameter_template",
+                "description": str(item.get("description") or ""),
+                "score": item.get("score", 0.0),
+                "status": str(item.get("status") or ""),
+                "reason": str(item.get("reason") or ""),
+                "candidate_id": str(item.get("candidate_id") or ""),
+                "template_id": str(item.get("template_id") or ""),
+                "regime_key": str(item.get("regime_key") or ""),
+                "details": item.get("details") if isinstance(item.get("details"), Mapping) else {},
+                "canonical_event_id": str(item.get("canonical_event_id") or ""),
+            }
+        )
+    return rows
+
+
+def iter_factor_lifecycle_rows(
+    conn: Any,
+    limit: int = 0,
+    *,
+    factor: str = "",
+    reverse: bool = True,
+) -> list[dict[str, Any]]:
+    """Return factor lifecycle facts from the canonical observation stream."""
+
+    rows = _iter_canonical_payload_events(
+        conn,
+        "factor_observation",
+        entity_type="factor_lifecycle",
+        limit=limit,
+        reverse=reverse,
+        filters={"factor": factor},
+    )
+    for row in rows:
+        row["source"] = str(row.get("factor_source") or row.get("source") or "")
+    return rows
 
 
 def iter_supervisor_trace_events(
@@ -662,10 +736,13 @@ def iter_counterfactual_rows(
     reverse: bool = True,
 ) -> list[dict[str, Any]]:
     """Return flattened canonical ``counterfactual_review`` rows."""
-    return _iter_canonical_payload_events(
+    rows = _iter_canonical_payload_events(
         conn,
         "counterfactual_review",
-        limit=limit,
+        # A counterfactual can have multiple immutable maturity versions.  A
+        # consumer sees only the newest version for each logical id; apply the
+        # requested limit after that deduplication.
+        limit=0,
         reverse=reverse,
         filters={
             "position_id": position_id,
@@ -674,6 +751,15 @@ def iter_counterfactual_rows(
             "label": label,
         },
     )
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = str(row.get("counterfactual_id") or row.get("entity_id") or "")
+        if key and key not in latest:
+            latest[key] = row
+    result = list(latest.values())
+    if limit and int(limit) > 0:
+        return result[: int(limit)]
+    return result
 
 
 def order_row(conn: Any, event_id: str) -> dict[str, Any] | None:

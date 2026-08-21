@@ -41,6 +41,20 @@ def _fresh(reconcile_id, positions):
     )
 
 
+def _isolate_close_intent(monkeypatch, bridge):
+    """Keep close-path assertions independent of durable intent history."""
+    monkeypatch.setattr(
+        bridge,
+        "_prepare_risk_reduction_intent",
+        lambda **_kwargs: (object(), "intent-test", "client-test", None),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_finalize_risk_reduction_intent",
+        lambda *_args, **_kwargs: True,
+    )
+
+
 def test_spot_event_still_updates_realtime_quote_after_depth_removal(monkeypatch):
     from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASpotEvent
 
@@ -192,7 +206,7 @@ def test_get_deals_keeps_zero_money_digits_and_marks_invalid_price_unknown(monke
     result = bridge.get_deals()[0]
 
     assert result["execution_price"] == 0.0
-    assert result["price_contract"] == "legacy_unknown"
+    assert result["price_contract"] == "unknown"
     assert result["price_quality"] == "unknown"
     assert result["commission"] == -3.0
 
@@ -299,6 +313,7 @@ def test_broker_deal_price_reaches_restart_payload_without_money_scaling(
 
 def test_close_position_refreshes_for_full_close_and_rejects_order_error(monkeypatch):
     bridge = _bridge(monkeypatch)
+    _isolate_close_intent(monkeypatch, bridge)
     refresh_calls = []
 
     def _reconcile_positions(*, force=False, allow_cache_fallback=True):
@@ -319,9 +334,11 @@ def test_close_position_refreshes_for_full_close_and_rejects_order_error(monkeyp
 
     assert refresh_calls == [(True, False)]
     assert result.success is False
+    assert result.outcome == "rejected"
     assert result.position_id == 269
     assert result.volume == pytest.approx(100.0)
     assert result.error_code == "TRADING_BAD_VOLUME"
+    assert result.execution_intent_status == "persisted"
 
 
 def test_close_position_rejects_zero_volume_before_send(monkeypatch):
@@ -360,7 +377,28 @@ def test_close_position_rejects_volume_below_symbol_step_before_send(monkeypatch
 
 def test_close_position_accepts_execution_event(monkeypatch):
     bridge = _bridge(monkeypatch)
+    _isolate_close_intent(monkeypatch, bridge)
     sent = []
+    refresh_calls = []
+
+    def _reconcile_positions(*, force=False, allow_cache_fallback=True):
+        refresh_calls.append((force, allow_cache_fallback))
+        if len(refresh_calls) == 1:
+            return _fresh(
+                "execution-pre",
+                [
+                    PositionInfo(
+                        position_id=269,
+                        symbol_id=41,
+                        symbol="XAUUSD",
+                        direction=1,
+                        volume=100.0,
+                    )
+                ],
+            )
+        return _fresh("execution-post", [])
+
+    monkeypatch.setattr(bridge, "reconcile_positions", _reconcile_positions)
 
     def _send(req, timeout=None, *, client_msg_id=""):
         assert client_msg_id
@@ -372,8 +410,10 @@ def test_close_position_accepts_execution_event(monkeypatch):
     result = bridge.close_position(269, volume=100.0)
 
     assert result.success is True
+    assert result.outcome == "confirmed"
     assert result.position_id == 269
     assert result.volume == pytest.approx(100.0)
+    assert refresh_calls == [(True, False), (True, False)]
     assert sent[0].positionId == 269
     assert sent[0].volume == 100
 

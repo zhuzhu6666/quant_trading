@@ -469,7 +469,7 @@ def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": "parity_learning_bundle.v1",
         "source": "historical_replay",
-        "causal_level": "simulated",
+        "causal_level": "replay",
         "governance_eligible": False,
         "trainable": trainable,
         "blockers": list(dict.fromkeys(blockers)),
@@ -2193,8 +2193,12 @@ class ParityReplayRunner:
             "symbol": self.request.symbol,
             "current_price": current_price,
             "price_current": current_price,
+            "current_price_state": "known",
+            "current_price_source": "replay_bar",
             "profit": self._position_unrealized_pnl(position, row=row),
             "pnl": self._position_unrealized_pnl(position, row=row),
+            "pnl_state": "known",
+            "pnl_source": "replay_bar",
             "volume": self.request.volume_lots
             * _safe_float(position.get("remaining_fraction"), 1.0),
             "open_time": _safe_float(position.get("entry_ts"), 0.0),

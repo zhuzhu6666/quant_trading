@@ -14,10 +14,19 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
-    state_table_columns,
+)
+from backend.services.canonical_v2_reader import (
+    canonical_ready,
+    decision_row,
+    iter_decision_factor_snapshots,
+    iter_decision_rows,
+    iter_order_rows,
+    iter_position_rows,
+    iter_review_rows_desc,
+    iter_training_sample_rows,
+    review_row,
 )
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import load_json_payload
 from backend.services.learning_application_store import LearningApplicationStore
 from research.features.evidence_contract import build_evidence_contract
 
@@ -68,30 +77,65 @@ def _chunks(items: list[str], size: int = 500) -> list[list[str]]:
     return [items[idx: idx + size] for idx in range(0, len(items), max(1, int(size)))]
 
 
-def _review_archive_select(conn: Any, *, alias: str = "r", output: str = "review_archive_hash") -> str:
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
     try:
-        has_archive = "review_archive_hash" in state_table_columns(conn, "trade_outcome_review")
-    except Exception:
-        has_archive = False
-    return f", {alias}.review_archive_hash AS {output}" if has_archive else ""
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
 
 
-def _restore_review_payload(
-    conn: Any,
-    row: dict[str, Any],
-    *,
-    source_id_key: str = "review_id",
-    inline_key: str = "review_json",
-    archive_key: str = "review_archive_hash",
-) -> None:
-    row[inline_key] = load_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(row.get(source_id_key) or ""),
-        inline_json=row.get(inline_key),
-        archive_hash=row.get(archive_key, ""),
-        default={},
-    )
+def _canonical_review_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = _loads(row.get("review_json"), {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _canonical_factor_contribution_rows(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Derive factor outcome rows from the canonical review payload only."""
+
+    review = _canonical_review_payload(row)
+    raw = review.get("factor_contributions")
+    if not isinstance(raw, (dict, list)):
+        raw = review.get("contributions")
+    if isinstance(raw, dict):
+        items = [{"factor": factor, "value": value} for factor, value in raw.items()]
+    elif isinstance(raw, list):
+        items = [item for item in raw if isinstance(item, dict)]
+    else:
+        items = []
+
+    result: list[dict[str, Any]] = []
+    for item in items:
+        factor = str(item.get("factor") or item.get("name") or "")
+        if not factor:
+            continue
+        value = item.get("value")
+        if isinstance(value, dict):
+            detail = value
+        else:
+            detail = item
+        net = _safe_float(
+            detail.get("net_contribution", detail.get("net", detail.get("value", value)))
+        )
+        notes = detail.get("notes", detail.get("note", {}))
+        note_payload = notes if isinstance(notes, dict) else _loads(notes, {})
+        result.append(
+            {
+                "review_id": str(row.get("review_id") or ""),
+                "factor": factor,
+                "entry_contribution": _safe_float(detail.get("entry_contribution")),
+                "hold_contribution": _safe_float(detail.get("hold_contribution")),
+                "exit_contribution": _safe_float(detail.get("exit_contribution")),
+                "net_contribution": net,
+                "confidence": _safe_float(detail.get("confidence")),
+                "notes": json.dumps(note_payload, ensure_ascii=False, default=str)
+                if isinstance(note_payload, (dict, list))
+                else str(notes or ""),
+                "note_payload": note_payload if isinstance(note_payload, dict) else {},
+            }
+        )
+    return sorted(result, key=lambda item: (-abs(_safe_float(item.get("net_contribution"))), str(item.get("factor") or "")))
 
 
 def _base_temporal_context(decision_ts: float, timeframe: str) -> dict:
@@ -135,7 +179,7 @@ def _derive_temporal_context(decision_ts: float, timeframe: str, risk_state: dic
     verdict = ((risk_state.get("policy_verdict") or {}).get("audit_payload") or {})
     existing = verdict.get("temporal_context") or {}
     if not isinstance(existing, dict) or not existing:
-        base["temporal_context_source"] = "decision_ledger"
+        base["temporal_context_source"] = "canonical_v2_reader"
         return base
 
     existing_ts = _safe_float(existing.get("decision_ts"))
@@ -154,7 +198,7 @@ def _derive_temporal_context(decision_ts: float, timeframe: str, risk_state: dic
         base["temporal_context_source"] = "risk_audit_verified"
         return base
 
-    base["temporal_context_source"] = "decision_ledger"
+    base["temporal_context_source"] = "canonical_v2_reader"
     if existing_ts > 0:
         base["discarded_audit_decision_ts"] = existing_ts
         base["audit_market_time_drift_seconds"] = round(drift, 6)
@@ -210,18 +254,18 @@ class LearningFeatureProvider:
     def _parse_factor_snapshot_rows(rows: list[Any]) -> list[dict]:
         return [
             {
-                "factor": str(row["factor"] or ""),
-                "source": str(row["source"] or "registry"),
-                "raw_value": _safe_float(row["raw_value"]),
-                "normalized_value": _safe_float(row["normalized_value"]),
-                "direction": _safe_float(row["direction"]),
-                "base_weight": _safe_float(row["base_weight"]),
-                "policy_weight": _safe_float(row["policy_weight"]),
-                "shadow_score": _safe_float(row["shadow_score"]),
-                "health_score": _safe_float(row["health_score"]),
-                "gated": bool(row["gated"]),
-                "gated_reason": str(row["gated_reason"] or ""),
-                "contribution_score": _safe_float(row["contribution_score"]),
+                "factor": str(_row_value(row, "factor", "") or ""),
+                "source": str(_row_value(row, "source", "registry") or "registry"),
+                "raw_value": _safe_float(_row_value(row, "raw_value")),
+                "normalized_value": _safe_float(_row_value(row, "normalized_value")),
+                "direction": _safe_float(_row_value(row, "direction")),
+                "base_weight": _safe_float(_row_value(row, "base_weight")),
+                "policy_weight": _safe_float(_row_value(row, "policy_weight")),
+                "shadow_score": _safe_float(_row_value(row, "shadow_score")),
+                "health_score": _safe_float(_row_value(row, "health_score")),
+                "gated": bool(_row_value(row, "gated")),
+                "gated_reason": str(_row_value(row, "gated_reason", "") or ""),
+                "contribution_score": _safe_float(_row_value(row, "contribution_score")),
             }
             for row in rows
         ]
@@ -230,115 +274,63 @@ class LearningFeatureProvider:
         if not decision_id:
             return []
         with self._conn() as conn:
-            p = self._p()
-            rows = conn.execute(
-                f"""
-                SELECT factor, source, raw_value, normalized_value, direction,
-                       base_weight, policy_weight, shadow_score, health_score,
-                       gated, gated_reason, contribution_score
-                FROM decision_factor_snapshot
-                WHERE decision_id={p}
-                ORDER BY ABS(contribution_score) DESC, factor ASC
-                """,
-                (decision_id,),
-            ).fetchall()
+            rows = iter_decision_factor_snapshots(conn, decision_id)
         return self._parse_factor_snapshot_rows(rows)
 
     def _factor_snapshots_by_decision(self, decision_ids: list[str]) -> dict[str, list[dict]]:
         ids = [str(item) for item in decision_ids if str(item)]
         if not ids:
             return {}
-        by_decision: dict[str, list[Any]] = defaultdict(list)
-        p = self._p()
+        by_decision: dict[str, list[dict]] = {}
         with self._conn() as conn:
-            for chunk in _chunks(ids):
-                placeholders = ",".join(p for _ in chunk)
-                rows = conn.execute(
-                    f"""
-                    SELECT decision_id, factor, source, raw_value, normalized_value, direction,
-                           base_weight, policy_weight, shadow_score, health_score,
-                           gated, gated_reason, contribution_score
-                    FROM decision_factor_snapshot
-                    WHERE decision_id IN ({placeholders})
-                    ORDER BY decision_id ASC, ABS(contribution_score) DESC, factor ASC
-                    """,
-                    tuple(chunk),
-                ).fetchall()
-                for row in rows:
-                    by_decision[str(row["decision_id"] or "")].append(row)
-        return {decision_id: self._parse_factor_snapshot_rows(rows) for decision_id, rows in by_decision.items()}
+            for decision_id in ids:
+                by_decision[decision_id] = self._parse_factor_snapshot_rows(
+                    iter_decision_factor_snapshots(conn, decision_id)
+                )
+        return by_decision
 
     def _factor_contribution_reviews(self, review_id: str) -> list[dict]:
         if not review_id:
             return []
         with self._conn() as conn:
-            p = self._p()
-            rows = conn.execute(
-                f"""
-                SELECT factor, entry_contribution, hold_contribution,
-                       exit_contribution, net_contribution, confidence, notes
-                FROM factor_contribution_review
-                WHERE review_id={p}
-                ORDER BY ABS(net_contribution) DESC, factor ASC
-                """,
-                (review_id,),
-            ).fetchall()
-        return [
-            self._parse_factor_contribution_row(row)
-            for row in rows
-        ]
+            row = review_row(conn, review_id)
+        return _canonical_factor_contribution_rows(row) if row else []
 
     @staticmethod
     def _parse_factor_contribution_row(row: Any) -> dict:
         return {
-            "factor": str(row["factor"] or ""),
-            "entry_contribution": _safe_float(row["entry_contribution"]),
-            "hold_contribution": _safe_float(row["hold_contribution"]),
-            "exit_contribution": _safe_float(row["exit_contribution"]),
-            "net_contribution": _safe_float(row["net_contribution"]),
-            "confidence": _safe_float(row["confidence"]),
-            "notes": str(row["notes"] or ""),
-            "note_payload": _loads(row["notes"], {}) if str(row["notes"] or "").startswith("{") else {},
+            "factor": str(_row_value(row, "factor", "") or ""),
+            "entry_contribution": _safe_float(_row_value(row, "entry_contribution")),
+            "hold_contribution": _safe_float(_row_value(row, "hold_contribution")),
+            "exit_contribution": _safe_float(_row_value(row, "exit_contribution")),
+            "net_contribution": _safe_float(_row_value(row, "net_contribution")),
+            "confidence": _safe_float(_row_value(row, "confidence")),
+            "notes": str(_row_value(row, "notes", "") or ""),
+            "note_payload": _row_value(row, "note_payload", {}) or {},
         }
 
     def _factor_contribution_reviews_by_review(self, review_ids: list[str]) -> dict[str, list[dict]]:
         ids = [str(item) for item in review_ids if str(item)]
         if not ids:
             return {}
-        p = self._p()
-        by_review: dict[str, list[dict]] = defaultdict(list)
+        by_review: dict[str, list[dict]] = {}
         with self._conn() as conn:
-            for chunk in _chunks(ids):
-                placeholders = ",".join(p for _ in chunk)
-                rows = conn.execute(
-                    f"""
-                    SELECT review_id, factor, entry_contribution, hold_contribution,
-                           exit_contribution, net_contribution, confidence, notes
-                    FROM factor_contribution_review
-                    WHERE review_id IN ({placeholders})
-                    ORDER BY review_id ASC, ABS(net_contribution) DESC, factor ASC
-                    """,
-                    tuple(chunk),
-                ).fetchall()
-                for row in rows:
-                    by_review[str(row["review_id"] or "")].append(self._parse_factor_contribution_row(row))
+            for review_id in ids:
+                row = review_row(conn, review_id)
+                if row:
+                    by_review[review_id] = _canonical_factor_contribution_rows(row)
         return dict(by_review)
 
     def _decision_rows_by_id(self, decision_ids: list[str]) -> dict[str, Any]:
         ids = [str(item) for item in decision_ids if str(item)]
         if not ids:
             return {}
-        p = self._p()
-        found = {}
+        found: dict[str, dict[str, Any]] = {}
         with self._conn() as conn:
-            for chunk in _chunks(ids):
-                placeholders = ",".join(p for _ in chunk)
-                rows = conn.execute(
-                    f"SELECT * FROM decision_ledger WHERE decision_id IN ({placeholders})",
-                    tuple(chunk),
-                ).fetchall()
-                for row in rows:
-                    found[str(row["decision_id"] or "")] = row
+            for decision_id in ids:
+                row = decision_row(conn, decision_id)
+                if row:
+                    found[decision_id] = row
         return found
 
     def _experiences_by_trade(self, trade_ids: list[str]) -> dict[str, dict]:
@@ -352,11 +344,8 @@ class LearningFeatureProvider:
                 placeholders = ",".join(p for _ in chunk)
                 rows = conn.execute(
                     f"""
-                    SELECT e.*, r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
+                    SELECT e.*
                     FROM experience_memory e
-                    JOIN trade_outcome_review r
-                      ON e.source_table='trade_outcome_review'
-                     AND r.review_id=e.source_id
                     WHERE e.append_source='trade_lesson_memory.v1'
                       AND e.trade_id IN ({placeholders})
                     ORDER BY e.trade_id ASC, e.created_at DESC
@@ -365,16 +354,14 @@ class LearningFeatureProvider:
                 ).fetchall()
                 for row in rows:
                     item = dict(row)
-                    _restore_review_payload(
-                        conn,
-                        item,
-                        source_id_key="source_id",
-                        inline_key="source_review_json",
-                        archive_key="source_review_archive_hash",
+                    source_review = review_row(conn, str(item.get("source_id") or ""))
+                    source_review_json = (
+                        (source_review or {}).get("review_json") if source_review else {}
                     )
-                    if review_has_system_contamination(item.get("source_review_json")):
+                    item["source_review_json"] = source_review_json
+                    if not source_review or review_has_system_contamination(source_review_json):
                         continue
-                    trade_id = str(item["trade_id"] or "")
+                    trade_id = str(item.get("trade_id") or "")
                     if trade_id and trade_id not in found:
                         found[trade_id] = self._parse_experience(item)
         return found
@@ -444,29 +431,15 @@ class LearningFeatureProvider:
 
     def _order_events(self, *, decision_ids: list[str] | None = None, trade_id: str = "") -> list[dict]:
         ids = [str(item) for item in (decision_ids or []) if str(item)]
-        clauses = []
-        params: list[Any] = []
-        p = self._p()
-        if trade_id:
-            clauses.append(f"trade_id={p}")
-            params.append(str(trade_id))
-        if ids:
-            placeholders = ",".join(p for _ in ids)
-            clauses.append(f"decision_id IN ({placeholders})")
-            params.extend(ids)
-        if not clauses:
+        if not ids and not trade_id:
             return []
         with self._conn() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT event_id, decision_id, trade_id, order_id, broker_order_id,
-                       event_type, event_ts, price, volume, status, details_json
-                FROM order_lifecycle_event
-                WHERE {" OR ".join(clauses)}
-                ORDER BY event_ts ASC, event_id ASC
-                """,
-                tuple(params),
-            ).fetchall()
+            rows = iter_order_rows(conn, limit=0)
+        rows = [
+            row for row in rows
+            if (trade_id and str(row.get("trade_id") or "") == str(trade_id))
+            or (ids and str(row.get("decision_id") or "") in set(ids))
+        ]
         return self._parse_order_event_rows(rows)
 
     @staticmethod
@@ -500,62 +473,25 @@ class LearningFeatureProvider:
         trades = [str(item) for item in (trade_ids or []) if str(item)]
         if not ids and not trades:
             return []
-        p = self._p()
-        rows: list[Any] = []
         with self._conn() as conn:
-            for chunk in _chunks(ids):
-                placeholders = ",".join(p for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        SELECT event_id, decision_id, trade_id, order_id, broker_order_id,
-                               event_type, event_ts, price, volume, status, details_json
-                        FROM order_lifecycle_event
-                        WHERE decision_id IN ({placeholders})
-                        ORDER BY event_ts ASC, event_id ASC
-                        """,
-                        tuple(chunk),
-                    ).fetchall()
-                )
-            for chunk in _chunks(trades):
-                placeholders = ",".join(p for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        SELECT event_id, decision_id, trade_id, order_id, broker_order_id,
-                               event_type, event_ts, price, volume, status, details_json
-                        FROM order_lifecycle_event
-                        WHERE trade_id IN ({placeholders})
-                        ORDER BY event_ts ASC, event_id ASC
-                        """,
-                        tuple(chunk),
-                    ).fetchall()
-                )
+            rows = iter_order_rows(conn, limit=0)
+        rows = [
+            row for row in rows
+            if str(row.get("decision_id") or "") in set(ids)
+            or str(row.get("trade_id") or "") in set(trades)
+        ]
         return sorted(self._parse_order_event_rows(rows), key=lambda item: (_safe_float(item.get("event_ts")), str(item.get("event_id") or "")))
 
     def _position_events(self, *, position_id: str = "", trade_id: str = "") -> list[dict]:
-        clauses = []
-        params: list[Any] = []
-        p = self._p()
-        if position_id:
-            clauses.append(f"position_id={p}")
-            params.append(str(position_id))
-        if trade_id:
-            clauses.append(f"trade_id={p}")
-            params.append(str(trade_id))
-        if not clauses:
+        if not position_id and not trade_id:
             return []
         with self._conn() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT event_id, position_id, trade_id, symbol, event_type, event_ts,
-                       net_volume, avg_price, unrealized_pnl, realized_pnl, details_json
-                FROM position_lifecycle_event
-                WHERE {" OR ".join(clauses)}
-                ORDER BY event_ts ASC, event_id ASC
-                """,
-                tuple(params),
-            ).fetchall()
+            rows = iter_position_rows(conn, limit=0)
+        rows = [
+            row for row in rows
+            if (position_id and str(row.get("position_id") or "") == str(position_id))
+            or (trade_id and str(row.get("trade_id") or "") == str(trade_id))
+        ]
         return self._parse_position_event_rows(rows)
 
     @staticmethod
@@ -589,37 +525,13 @@ class LearningFeatureProvider:
         trades = [str(item) for item in (trade_ids or []) if str(item)]
         if not positions and not trades:
             return []
-        p = self._p()
-        rows: list[Any] = []
         with self._conn() as conn:
-            for chunk in _chunks(positions):
-                placeholders = ",".join(p for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        SELECT event_id, position_id, trade_id, symbol, event_type, event_ts,
-                               net_volume, avg_price, unrealized_pnl, realized_pnl, details_json
-                        FROM position_lifecycle_event
-                        WHERE position_id IN ({placeholders})
-                        ORDER BY event_ts ASC, event_id ASC
-                        """,
-                        tuple(chunk),
-                    ).fetchall()
-                )
-            for chunk in _chunks(trades):
-                placeholders = ",".join(p for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        SELECT event_id, position_id, trade_id, symbol, event_type, event_ts,
-                               net_volume, avg_price, unrealized_pnl, realized_pnl, details_json
-                        FROM position_lifecycle_event
-                        WHERE trade_id IN ({placeholders})
-                        ORDER BY event_ts ASC, event_id ASC
-                        """,
-                        tuple(chunk),
-                    ).fetchall()
-                )
+            rows = iter_position_rows(conn, limit=0)
+        rows = [
+            row for row in rows
+            if str(row.get("position_id") or "") in set(positions)
+            or str(row.get("trade_id") or "") in set(trades)
+        ]
         return sorted(self._parse_position_event_rows(rows), key=lambda item: (_safe_float(item.get("event_ts")), str(item.get("event_id") or "")))
 
     @staticmethod
@@ -890,27 +802,27 @@ class LearningFeatureProvider:
         }
 
     def _decision_features_from_row(self, row: Any, factors: list[dict]) -> dict:
-        action = _loads(row["action_json"], {})
-        risk_state = _loads(row["risk_state_json"], {})
-        portfolio_state = _loads(row["portfolio_state_json"], {})
+        action = _loads(_row_value(row, "action_json"), {})
+        risk_state = _loads(_row_value(row, "risk_state_json"), {})
+        portfolio_state = _loads(_row_value(row, "portfolio_state_json"), {})
         tags_breakdown = action.get("tags_breakdown") if isinstance(action, dict) else {}
         temporal_context = _derive_temporal_context(
-            _safe_float(row["decision_ts"]),
-            str(row["timeframe"] or ""),
+            _safe_float(_row_value(row, "decision_ts")),
+            str(_row_value(row, "timeframe", "") or ""),
             risk_state,
         )
         return {
-            "decision_id": str(row["decision_id"]),
-            "event_type": str(row["event_type"] or ""),
-            "symbol": str(row["symbol"] or ""),
-            "timeframe": str(row["timeframe"] or ""),
-            "decision_ts": _safe_float(row["decision_ts"]),
-            "regime_id": str(row["regime_id"] or ""),
-            "regime_confidence": _safe_float(row["regime_confidence"]),
-            "policy_version": str(row["policy_version"] or ""),
-            "factor_set_version": str(row["factor_set_version"] or ""),
-            "action_score": _safe_float(row["action_score"]),
-            "action_reason": str(row["action_reason"] or ""),
+            "decision_id": str(_row_value(row, "decision_id", "") or ""),
+            "event_type": str(_row_value(row, "event_type", "") or ""),
+            "symbol": str(_row_value(row, "symbol", "") or ""),
+            "timeframe": str(_row_value(row, "timeframe", "") or ""),
+            "decision_ts": _safe_float(_row_value(row, "decision_ts")),
+            "regime_id": str(_row_value(row, "regime_id", "") or ""),
+            "regime_confidence": _safe_float(_row_value(row, "regime_confidence")),
+            "policy_version": str(_row_value(row, "policy_version", "") or ""),
+            "factor_set_version": str(_row_value(row, "factor_set_version", "") or ""),
+            "action_score": _safe_float(_row_value(row, "action_score")),
+            "action_reason": str(_row_value(row, "action_reason", "") or ""),
             "action": action,
             "risk_state": risk_state,
             "portfolio_state": portfolio_state,
@@ -924,11 +836,7 @@ class LearningFeatureProvider:
 
     def build_decision_features(self, decision_id: str) -> dict:
         with self._conn() as conn:
-            p = self._p()
-            row = conn.execute(
-                f"SELECT * FROM decision_ledger WHERE decision_id={p}",
-                (decision_id,),
-            ).fetchone()
+            row = decision_row(conn, decision_id)
         if not row:
             raise KeyError(f"decision not found: {decision_id}")
 
@@ -1018,7 +926,8 @@ class LearningFeatureProvider:
             sample_id=sample_id,
             sample_kind="decision",
             source={
-                "table": "decision_ledger",
+                "authority": "canonical_v2",
+                "reader": "canonical_v2_reader",
                 "source_id": decision_id,
                 "decision_id": decision_id,
                 "event_type": event_type,
@@ -1060,11 +969,8 @@ class LearningFeatureProvider:
             p = self._p()
             raw_rows = conn.execute(
                 f"""
-                SELECT e.*, r.review_json AS source_review_json{_review_archive_select(conn, output="source_review_archive_hash")}
+                SELECT e.*
                 FROM experience_memory e
-                JOIN trade_outcome_review r
-                  ON e.source_table='trade_outcome_review'
-                 AND r.review_id=e.source_id
                 WHERE e.append_source='trade_lesson_memory.v1' AND e.trade_id={p}
                 ORDER BY e.created_at DESC
                 """,
@@ -1073,13 +979,12 @@ class LearningFeatureProvider:
             rows = []
             for raw_row in raw_rows:
                 item = dict(raw_row)
-                _restore_review_payload(
-                    conn,
-                    item,
-                    source_id_key="source_id",
-                    inline_key="source_review_json",
-                    archive_key="source_review_archive_hash",
+                source_review = review_row(conn, str(item.get("source_id") or ""))
+                item["source_review_json"] = (
+                    (source_review or {}).get("review_json") if source_review else {}
                 )
+                if not source_review:
+                    continue
                 rows.append(item)
         for item in rows:
             if not review_has_system_contamination(item.get("source_review_json")):
@@ -1220,20 +1125,15 @@ class LearningFeatureProvider:
 
     def build_trade_features(self, trade_id: str) -> dict:
         with self._conn() as conn:
-            p = self._p()
-            row = conn.execute(
-                f"""
-                SELECT *
-                FROM trade_outcome_review
-                WHERE trade_id={p} OR position_id={p} OR review_id={p}
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (trade_id, trade_id, trade_id),
-            ).fetchone()
-            if row:
-                row = dict(row)
-                _restore_review_payload(conn, row)
+            row = next(
+                (
+                    item for item in iter_review_rows_desc(conn, limit=0)
+                    if str(item.get("trade_id") or "") == str(trade_id)
+                    or str(item.get("position_id") or "") == str(trade_id)
+                    or str(item.get("review_id") or "") == str(trade_id)
+                ),
+                None,
+            )
         if not row:
             raise KeyError(f"trade review not found: {trade_id}")
         return self._sample_from_review_row(row)
@@ -1388,7 +1288,8 @@ class LearningFeatureProvider:
             sample_id=sample_id,
             sample_kind="trade",
             source={
-                "table": "trade_outcome_review",
+                "authority": "canonical_v2",
+                "reader": "canonical_v2_reader",
                 "source_id": review["review_id"],
                 "review_id": review["review_id"],
                 "trade_id": review["trade_id"],
@@ -1445,19 +1346,7 @@ class LearningFeatureProvider:
         model_ready_only: bool = False,
     ) -> list[dict]:
         with self._conn() as conn:
-            p = self._p()
-            rows = conn.execute(
-                f"""
-                SELECT *
-                FROM trade_outcome_review
-                ORDER BY created_at DESC
-                LIMIT {p}
-                """,
-                (int(limit),),
-            ).fetchall()
-            rows = [dict(row) for row in rows]
-            for row in rows:
-                _restore_review_payload(conn, row)
+            rows = iter_review_rows_desc(conn, limit=int(limit))
         entry_decision_ids = [str(row["entry_decision_id"] or "") for row in rows if str(row["entry_decision_id"] or "")]
         exit_decision_ids = [str(row["exit_decision_id"] or "") for row in rows if str(row["exit_decision_id"] or "")]
         all_decision_ids = list(dict.fromkeys(entry_decision_ids + exit_decision_ids))
@@ -1530,70 +1419,42 @@ class LearningFeatureProvider:
         }
         try:
             with self._conn() as conn:
-                p = self._p()
-                placeholders = ",".join(p for _ in ids)
-                rows = conn.execute(
-                    f"""
-                    SELECT factor, COUNT(*) AS n
-                    FROM decision_factor_snapshot
-                    WHERE factor IN ({placeholders})
-                    GROUP BY factor
-                    """,
-                    tuple(ids),
-                ).fetchall()
-                for row in rows:
-                    factor_id = str(row["factor"] or "")
-                    if factor_id in result:
-                        result[factor_id]["decision_observations"] = int(row["n"] or 0)
-
-                rows = conn.execute(
-                    f"""
-                    SELECT f.factor, COUNT(DISTINCT f.review_id) AS n
-                    FROM factor_contribution_review f
-                    JOIN trade_outcome_review r ON r.review_id=f.review_id
-                    WHERE f.factor IN ({placeholders})
-                    GROUP BY f.factor
-                    """,
-                    tuple(ids),
-                ).fetchall()
-                for row in rows:
-                    factor_id = str(row["factor"] or "")
-                    if factor_id in result:
-                        result[factor_id]["factor_linked_trade_reviews"] = int(row["n"] or 0)
-
-                from backend.services.canonical_v2_reader import iter_training_sample_rows
+                if not canonical_ready(conn):
+                    raise RuntimeError("canonical_v2 reader is unavailable")
                 sampled_rows = iter_training_sample_rows(conn, limit=0)
                 linked: dict[str, list[dict[str, Any]]] = {factor_id: [] for factor_id in ids}
                 d_factors: dict[str, list[str]] = defaultdict(list)
                 r_factors: dict[str, list[str]] = defaultdict(list)
-                if ids:
-                    rows = conn.execute(
-                        f"SELECT decision_id, factor FROM decision_factor_snapshot "
-                        f"WHERE factor IN ({placeholders})",
-                        tuple(ids),
-                    ).fetchall()
-                    for row in rows:
-                        d_factors[str(row["decision_id"] or "")].append(str(row["factor"] or ""))
-                    rows = conn.execute(
-                        f"""
-                        SELECT r.review_id, f.factor
-                        FROM factor_contribution_review f
-                        JOIN trade_outcome_review r ON r.review_id=f.review_id
-                        WHERE f.factor IN ({placeholders})
-                        """,
-                        tuple(ids),
-                    ).fetchall()
-                    for row in rows:
-                        r_factors[str(row["review_id"] or "")].append(str(row["factor"] or ""))
+                decision_observations: dict[str, int] = defaultdict(int)
+                for decision in iter_decision_rows(conn, limit=0):
+                    decision_id = str(decision.get("decision_id") or "")
+                    for snapshot in iter_decision_factor_snapshots(conn, decision_id):
+                        factor = str(snapshot.get("factor") or "")
+                        if factor not in result:
+                            continue
+                        d_factors[decision_id].append(factor)
+                        decision_observations[factor] += 1
+
+                review_links: dict[str, set[str]] = defaultdict(set)
+                for review in iter_review_rows_desc(conn, limit=0):
+                    review_id = str(review.get("review_id") or "")
+                    for contribution in _canonical_factor_contribution_rows(review):
+                        factor = str(contribution.get("factor") or "")
+                        if factor in result:
+                            r_factors[review_id].append(factor)
+                            review_links[factor].add(review_id)
+
+                for factor_id in ids:
+                    result[factor_id]["decision_observations"] = int(decision_observations.get(factor_id, 0))
+                    result[factor_id]["factor_linked_trade_reviews"] = len(review_links.get(factor_id, set()))
                 for s in sampled_rows:
                     factors: set[str] = set()
                     decision_id = str(s.get("decision_id") or "")
                     for fid in d_factors.get(decision_id, ()):
                         factors.add(fid)
-                    if str(s.get("source_table") or "") == "trade_outcome_review":
-                        source_id = str(s.get("source_id") or "")
-                        for fid in r_factors.get(source_id, ()):
-                            factors.add(fid)
+                    source_id = str(s.get("source_id") or "")
+                    for fid in r_factors.get(source_id, ()):
+                        factors.add(fid)
                     for factor_id in factors:
                         linked[factor_id].append(s)
                 for factor_id, items in linked.items():
@@ -1636,27 +1497,12 @@ class LearningFeatureProvider:
         event_types: list[str] | None = None,
         model_ready_only: bool = False,
     ) -> list[dict]:
-        params: list[Any] = []
-        where = ""
-        if event_types:
-            clean = [str(item) for item in event_types if str(item)]
-            if clean:
-                placeholders = ",".join(self._p() for _ in clean)
-                where = f"WHERE event_type IN ({placeholders})"
-                params.extend(clean)
-        params.append(int(limit))
         with self._conn() as conn:
-            p = self._p()
-            rows = conn.execute(
-                f"""
-                SELECT *
-                FROM decision_ledger
-                {where}
-                ORDER BY decision_ts DESC, created_at DESC
-                LIMIT {p}
-                """,
-                tuple(params),
-            ).fetchall()
+            clean = {str(item) for item in (event_types or []) if str(item)}
+            rows = [
+                row for row in iter_decision_rows(conn, limit=0, reverse=True)
+                if not clean or str(row.get("event_type") or "") in clean
+            ][: int(limit)]
         decision_ids = [str(row["decision_id"] or "") for row in rows if str(row["decision_id"] or "")]
         factors_by_decision = self._factor_snapshots_by_decision(decision_ids)
         decisions = [

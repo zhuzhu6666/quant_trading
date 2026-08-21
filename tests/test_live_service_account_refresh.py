@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from backend.services import live_service
+from backend.services.live_loop_controller import LiveLoopController
 
 
 def test_recent_review_reentry_block_uses_consecutive_conflicting_losses(monkeypatch):
@@ -74,7 +75,8 @@ def test_recent_review_reentry_block_requires_consecutive_failures(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _reset_state():
+def _reset_state(monkeypatch):
+    monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", LiveLoopController())
     live_service._live_state["loop_running"] = False
     live_service._live_state["account"] = None
     live_service._live_state["account_reconciled"] = None
@@ -170,7 +172,6 @@ def test_http_reads_preserve_fresh_broker_observation_timestamp(monkeypatch):
         "_enrich_positions_with_path_metrics",
         _enrich,
     )
-    monkeypatch.setattr(live_service, "_loop_thread", None)
     live_service._live_state["loop_running"] = False
 
     account = live_service.get_account("ctrader")
@@ -233,7 +234,6 @@ def test_ctrader_events_never_rejuvenate_reconciled_account_or_positions(monkeyp
         "_enrich_positions_with_path_metrics",
         lambda positions, **_kwargs: list(positions),
     )
-    monkeypatch.setattr(live_service, "_phase2_v2_active", lambda: False)
     monkeypatch.setattr(live_service, "_probe_ctrader", lambda: ("connected", None))
     monkeypatch.setattr(
         live_service,
@@ -324,7 +324,6 @@ def test_ctrader_events_never_rejuvenate_reconciled_account_or_positions(monkeyp
 
 def test_readiness_cannot_be_green_when_loop_or_safety_blocks_new_risk(monkeypatch):
     now = time.time()
-    monkeypatch.setattr(live_service, "_phase2_v2_active", lambda: True)
     monkeypatch.setattr(live_service, "_probe_ctrader", lambda: ("connected", None))
     monkeypatch.setattr(
         live_service,
@@ -368,7 +367,6 @@ def test_readiness_cannot_be_green_when_loop_or_safety_blocks_new_risk(monkeypat
 
 def test_readiness_recovers_missed_bridge_edge_from_accepting_generation(monkeypatch):
     now = time.time()
-    monkeypatch.setattr(live_service, "_phase2_v2_active", lambda: True)
     monkeypatch.setattr(live_service, "_probe_ctrader", lambda: ("connected", None))
     monkeypatch.setattr(
         live_service,
@@ -453,7 +451,6 @@ def test_http_reads_do_not_rejuvenate_non_fresh_broker_cache(monkeypatch):
         "_enrich_positions_with_path_metrics",
         lambda positions, **_kwargs: list(positions),
     )
-    monkeypatch.setattr(live_service, "_loop_thread", None)
     live_service._live_state.update(
         {
             "loop_running": False,

@@ -223,6 +223,76 @@ class RecoveryPositionStore:
         finally:
             conn.close()
 
+    def purge_unbrokered(
+        self,
+        position_ids: set[int],
+        *,
+        broker: str,
+        broker_position_ids: set[int],
+    ) -> list[int]:
+        """Delete explicitly verified local rows absent from the broker.
+
+        This is a repair boundary for orphaned/test recovery rows, not a
+        generic close path.  The caller must provide a fresh broker identity
+        set; an overlap aborts the operation.  Rows with entry lineage are
+        never deleted here because they may describe a real trade whose
+        broker close evidence is merely delayed.
+        """
+
+        normalized = {
+            int(position_id)
+            for position_id in position_ids or set()
+            if int(position_id or 0) > 0
+        }
+        broker_ids = {
+            int(position_id)
+            for position_id in broker_position_ids or set()
+            if int(position_id or 0) > 0
+        }
+        overlap = sorted(normalized & broker_ids)
+        if overlap:
+            raise ValueError(
+                "cannot purge recovery rows present at broker: "
+                + ",".join(str(position_id) for position_id in overlap)
+            )
+        if not normalized:
+            return []
+
+        broker_name = str(broker or "")
+        conn = self.runtime.get_write_connection()
+        deleted: list[int] = []
+        try:
+            for position_id in sorted(normalized):
+                position_key = str(position_id)
+                row = self.runtime.execute(
+                    conn,
+                    """
+                    SELECT broker, status, entry_decision_id
+                    FROM recovery_position_state
+                    WHERE position_id=?
+                    LIMIT 1
+                    """,
+                    (position_key,),
+                ).fetchone()
+                if row is None:
+                    continue
+                if str(row["broker"] or "") != broker_name:
+                    continue
+                if str(row["status"] or "") not in {"open", "recovered"}:
+                    continue
+                if str(row["entry_decision_id"] or ""):
+                    continue
+                self.runtime.execute(
+                    conn,
+                    "DELETE FROM recovery_position_state WHERE position_id=?",
+                    (position_key,),
+                )
+                deleted.append(position_id)
+            conn.commit()
+            return deleted
+        finally:
+            conn.close()
+
     def last_seen_by_position(self, position_ids: set[int]) -> dict[int, float]:
         normalized = sorted(
             {int(pid) for pid in position_ids if int(pid or 0) > 0}

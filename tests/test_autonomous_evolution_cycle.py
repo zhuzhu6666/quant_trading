@@ -8,6 +8,7 @@ from backend.services.autonomous_evolution_cycle import AutonomousEvolutionCycle
 from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
 from backend.services.brain_governance_candidate_review import ensure_brain_governance_candidate_review_table
 from backend.services.brain_governance_candidates import ensure_brain_governance_candidate_table
+from backend.services.canonical_v2 import ensure_sqlite_schema, record_decision_event, record_review
 from backend.services.proposal_registry import ensure_proposal_registry_table
 from backend.services.replay_harness import ReplayHarnessService
 from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
@@ -36,22 +37,43 @@ def _create_core_tables(db_path, *, include_replay: bool, include_effect: bool) 
     now = time.time()
     conn = connect_sqlite(db_path)
     try:
-        for table in [
-            "decision_ledger",
-            "trade_outcome_review",
-            "experience_memory",
-            "learning_application_log",
-            "learning_application_effect",
-            "replay_report",
-        ]:
-            conn.execute(f"CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY, created_at REAL)")
-        for table in [
-            "decision_ledger",
-            "trade_outcome_review",
-            "experience_memory",
-            "learning_application_log",
-        ]:
-            conn.execute(f"INSERT INTO {table} (id, created_at) VALUES (?, ?)", (f"{table}_1", now))
+        conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
+        record_decision_event(
+            conn,
+            decision_id="decision_1",
+            event_type="open",
+            symbol="XAUUSD",
+            timeframe="M1",
+            decision_ts=now,
+            created_at=now,
+        )
+        record_review(
+            conn,
+            review_id="review_1",
+            trade_id="trade_1",
+            position_id="position_1",
+            entry_decision_id="decision_1",
+            outcome_label="good_win",
+            review={},
+            created_at=now,
+        )
+        conn.execute(
+            """
+            INSERT INTO experience_memory
+            (experience_id, trade_id, source_table, source_id, outcome_label, created_at)
+            VALUES ('experience_1', 'trade_1', 'canonical_v2.trade_review', 'review_1', 'good_win', ?)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO learning_application_log
+            (application_id, run_id, source, status, created_at, updated_at)
+            VALUES ('application_1', 'run_1', 'pytest', 'prepared', ?, ?)
+            """,
+            (now, now),
+        )
         from tests.canonical_fixture import create_training_sample_row_tables
         create_training_sample_row_tables(conn)
         conn.execute(
@@ -59,14 +81,20 @@ def _create_core_tables(db_path, *, include_replay: bool, include_effect: bool) 
             INSERT INTO training_sample_row
             (sample_id, sample_type, source_table, source_id, event_ts, label_status,
              integrity, train_weight, created_at, updated_at)
-            VALUES (?, 'shadow_open_decision', 'decision_ledger', ?, ?, 'matured', 'full', 1.0, ?, ?)
+            VALUES (?, 'shadow_open_decision', 'canonical_v2.risk_decision', 'decision_1', ?, 'matured', 'full', 1.0, ?, ?)
             """,
-            (f"sample_{now}", f"dec_{now}", now, now, now),
+            (f"sample_{now}", now, now, now),
         )
         if include_replay:
-            conn.execute("INSERT INTO replay_report (id, created_at) VALUES (?, ?)", ("replay_1", now))
+            conn.execute(
+                "INSERT INTO replay_report (replay_run_id, status, created_at) VALUES (?, 'completed', ?)",
+                ("replay_1", now),
+            )
         if include_effect:
-            conn.execute("INSERT INTO learning_application_effect (id, created_at) VALUES (?, ?)", ("effect_1", now))
+            conn.execute(
+                "INSERT INTO learning_application_effect (effect_id, application_id, scope, created_at) VALUES (?, ?, ?, ?)",
+                ("effect_1", "application_1", "pytest", now),
+            )
         conn.commit()
     finally:
         conn.close()

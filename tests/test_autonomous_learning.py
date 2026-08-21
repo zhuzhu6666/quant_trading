@@ -4,18 +4,225 @@ import time
 from pathlib import Path
 
 from backend.core.db import STATE_DB_DDL
+from backend.services.canonical_v2 import (
+    record_counterfactual_event,
+    record_decision_event,
+    record_order_event,
+    record_payload_event,
+    record_review,
+    record_supervisor_trace_event,
+)
+from backend.services.canonical_v2_reader import (
+    iter_counterfactual_rows,
+    iter_decision_rows,
+    iter_review_rows_desc,
+    iter_supervisor_trace_rows,
+)
 from backend.services import autonomous_learning as al
 from backend.services import evolution_ledger
 from backend.services.evolution_ledger import expire_stale_evolution_runs, start_evolution_run
 from backend.services.v16_command_gate import V16CommandGate
 from config import runtime_config as rc
+from tests.canonical_fixture import make_canonical_sqlite
+
+
+CANONICAL_RISK_DECISION = "canonical_v2.risk_decision"
+CANONICAL_TRADE_REVIEW = "canonical_v2.trade_review"
+CANONICAL_COUNTERFACTUAL_REVIEW = "canonical_v2.counterfactual_review"
+CANONICAL_SUPERVISOR_TRACE = "canonical_v2.supervisor_trace"
+
+
+def _canonical_connection(path):
+    conn = make_canonical_sqlite(path)
+    conn.executescript(STATE_DB_DDL)
+    return conn
+
+
+def _json_value(value, default):
+    if isinstance(value, (dict, list)):
+        return value
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _latest_review_row(conn, review_id):
+    rows = [
+        row
+        for row in iter_review_rows_desc(conn, limit=0)
+        if str(row.get("review_id") or "") == str(review_id)
+    ]
+    rows.sort(
+        key=lambda row: (
+            float(row.get("updated_at") or row.get("created_at") or 0.0),
+            float(row.get("created_at") or 0.0),
+        ),
+        reverse=True,
+    )
+    return rows[0] if rows else None
+
+
+def _latest_decision_row(conn, decision_id):
+    rows = [
+        row
+        for row in iter_decision_rows(conn, limit=0, reverse=True)
+        if str(row.get("decision_id") or "") == str(decision_id)
+    ]
+    return rows[0] if rows else None
+
+
+def _record_review_revision(
+    path,
+    review_id,
+    review,
+    *,
+    revision_tag,
+    created_at=None,
+    failure_tags=None,
+):
+    conn = _canonical_connection(path)
+    try:
+        current = _latest_review_row(conn, review_id)
+        assert current is not None, f"missing canonical review fixture: {review_id}"
+        observed_at = float(
+            created_at
+            or (review or {}).get("close_ts")
+            or current.get("updated_at")
+            or current.get("created_at")
+            or time.time()
+        )
+        payload = {
+            "review_id": str(review_id),
+            "trade_id": str(current.get("trade_id") or review.get("trade_id") or ""),
+            "position_id": str(current.get("position_id") or review.get("position_id") or ""),
+            "entry_decision_id": str(current.get("entry_decision_id") or review.get("entry_decision_id") or ""),
+            "exit_decision_id": str(current.get("exit_decision_id") or review.get("exit_decision_id") or ""),
+            "entry_quality": current.get("entry_quality"),
+            "hold_quality": current.get("hold_quality"),
+            "exit_quality": current.get("exit_quality"),
+            "regime_fit_score": current.get("regime_fit_score"),
+            "execution_quality": current.get("execution_quality"),
+            "pnl": current.get("pnl"),
+            "mae": current.get("mae"),
+            "mfe": current.get("mfe"),
+            "outcome_label": str(current.get("outcome_label") or ""),
+            "failure_tags": (
+                failure_tags
+                if failure_tags is not None
+                else _json_value(current.get("failure_tags_json"), [])
+            ),
+            "summary_text": str(current.get("summary_text") or ""),
+            "created_at": float(created_at) if created_at is not None else current.get("created_at"),
+            "updated_at": observed_at,
+            "review": dict(review or {}),
+        }
+        record_payload_event(
+            conn,
+            event_type="trade_review",
+            entity_type="review",
+            entity_id=str(review_id),
+            payload=payload,
+            observed_at=observed_at,
+            producer="test_autonomous_learning",
+            payload_kind="trade_review",
+            event_id=f"test_review_revision_{review_id}_{revision_tag}",
+            idempotency_key=f"test_review_revision:{review_id}:{revision_tag}",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _record_decision_revision(path, decision_id, *, action, risk_state, decision_ts, revision_tag):
+    conn = _canonical_connection(path)
+    try:
+        current = _latest_decision_row(conn, decision_id)
+        assert current is not None, f"missing canonical decision fixture: {decision_id}"
+        payload = {
+            "decision_id": str(decision_id),
+            "trade_id": str(current.get("trade_id") or ""),
+            "position_id": str(current.get("position_id") or ""),
+            "event_type": str(current.get("event_type") or ""),
+            "symbol": str(current.get("symbol") or ""),
+            "timeframe": str(current.get("timeframe") or ""),
+            "decision_ts": float(decision_ts),
+            "regime_id": str(current.get("regime_id") or ""),
+            "regime_confidence": current.get("regime_confidence"),
+            "policy_version": str(current.get("policy_version") or ""),
+            "factor_set_version": str(current.get("factor_set_version") or ""),
+            "action_score": current.get("action_score"),
+            "action_reason": str(current.get("action_reason") or ""),
+            "action": action,
+            "risk_state": risk_state,
+            "portfolio_state": _json_value(current.get("portfolio_state_json"), {}),
+            "created_at": current.get("created_at") or decision_ts,
+        }
+        record_payload_event(
+            conn,
+            event_type="risk_decision",
+            entity_type="decision",
+            entity_id=str(decision_id),
+            payload=payload,
+            observed_at=float(decision_ts),
+            producer="test_autonomous_learning",
+            payload_kind="risk_decision",
+            event_id=f"test_decision_revision_{decision_id}_{revision_tag}",
+            idempotency_key=f"test_decision_revision:{decision_id}:{revision_tag}",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _write_supervisor_trace(path, *, trace_id, decision_id="", position_id="", trade_id="", event_ts=0.0, action="", stage="", outcome="", execution_status="", execution_reason="", template_id="position_supervisor:default.v1", trace_integrity="full", symbol="XAUUSD+", timeframe="M5", verdict=None, risk_verdict=None, execution=None):
+    conn = _canonical_connection(path)
+    try:
+        record_supervisor_trace_event(
+            conn,
+            trace_id=trace_id,
+            decision_id=decision_id,
+            event_ts=event_ts,
+            payload={
+                "trace_id": trace_id,
+                "decision_id": decision_id,
+                "position_id": position_id,
+                "trade_id": trade_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "event_ts": event_ts,
+                "action": action,
+                "summary_reason": "thesis_weakening" if action == "tighten" else "",
+                "confidence": 0.66 if action == "tighten" else 0.0,
+                "template_id": template_id,
+                "template_version": "default.v1",
+                "stage": stage,
+                "outcome": outcome,
+                "risk_action": "tighten_position" if action == "tighten" else "",
+                "risk_allowed": True if action == "tighten" else False,
+                "risk_reason": "risk_reducing_action" if action == "tighten" else "",
+                "execution_status": execution_status,
+                "execution_reason": execution_reason,
+                "trace_integrity": trace_integrity,
+                "context": {"position": {"position_id": position_id, "pnl": 0.2}},
+                "verdict": verdict or ({"action": action, "summary_reason": "thesis_weakening"} if action else {}),
+                "risk_verdict": risk_verdict or ({"allowed": True, "reason": "risk_reducing_action"} if action == "tighten" else {}),
+                "execution": execution or {},
+                "created_at": event_ts,
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _v16_supervisor_bridge_evidence(candidate_id: str) -> dict:
     return {
         "candidate_id": candidate_id,
         "source_agent": "v16_brain",
-        "bridge": {"command_owner": "v16_brain"},
+        "bridge": {"command_owner": "v16_brain", "bridge_ready": True},
         "governance_eligibility": {
             "governance_eligible": True,
             "governance_eligibility_version": "governance_eligibility.v1",
@@ -58,172 +265,104 @@ def _seed_v16_supervisor_command(
 
 
 def _create_sample_db(path):
-    conn = sqlite3.connect(str(path))
-    conn.executescript(
-        """
-        CREATE TABLE decision_ledger (
-            decision_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            event_type TEXT NOT NULL,
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            decision_ts REAL NOT NULL DEFAULT 0.0,
-            regime_id TEXT DEFAULT '',
-            regime_confidence REAL DEFAULT 0.0,
-            portfolio_state_json TEXT DEFAULT '{}',
-            risk_state_json TEXT DEFAULT '{}',
-            policy_version TEXT DEFAULT '',
-            factor_set_version TEXT DEFAULT '',
-            action_score REAL DEFAULT 0.0,
-            action_reason TEXT DEFAULT '',
-            action_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE trade_outcome_review (
-            review_id TEXT PRIMARY KEY,
-            trade_id TEXT DEFAULT '',
-            position_id TEXT DEFAULT '',
-            entry_decision_id TEXT DEFAULT '',
-            exit_decision_id TEXT DEFAULT '',
-            entry_quality REAL DEFAULT 0.0,
-            hold_quality REAL DEFAULT 0.0,
-            exit_quality REAL DEFAULT 0.0,
-            regime_fit_score REAL DEFAULT 0.0,
-            execution_quality REAL DEFAULT 0.0,
-            pnl REAL DEFAULT 0.0,
-            mae REAL DEFAULT 0.0,
-            mfe REAL DEFAULT 0.0,
-            outcome_label TEXT DEFAULT '',
-            failure_tags_json TEXT DEFAULT '[]',
-            summary_text TEXT DEFAULT '',
-            review_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE supervisor_counterfactual_review (
-            counterfactual_id TEXT PRIMARY KEY,
-            review_id TEXT DEFAULT '',
-            trade_id TEXT DEFAULT '',
-            position_id TEXT NOT NULL,
-            close_ts REAL NOT NULL DEFAULT 0.0,
-            close_reason TEXT DEFAULT '',
-            supervisor_event_type TEXT DEFAULT '',
-            supervisor_reason TEXT DEFAULT '',
-            label TEXT DEFAULT '',
-            confidence REAL DEFAULT 0.0,
-            horizons_json TEXT DEFAULT '[]',
-            evidence_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0,
-            updated_at REAL NOT NULL DEFAULT 0.0
-        );
-        CREATE TABLE position_supervisor_trace (
-            trace_id TEXT PRIMARY KEY,
-            decision_id TEXT DEFAULT '',
-            position_id TEXT NOT NULL,
-            trade_id TEXT DEFAULT '',
-            symbol TEXT DEFAULT '',
-            timeframe TEXT DEFAULT '',
-            tick INTEGER DEFAULT 0,
-            event_ts REAL NOT NULL DEFAULT 0.0,
-            action TEXT DEFAULT '',
-            summary_reason TEXT DEFAULT '',
-            confidence REAL DEFAULT 0.0,
-            template_id TEXT DEFAULT '',
-            template_version TEXT DEFAULT '',
-            stage TEXT DEFAULT '',
-            outcome TEXT DEFAULT '',
-            risk_action TEXT DEFAULT '',
-            risk_allowed INTEGER DEFAULT 0,
-            risk_reason TEXT DEFAULT '',
-            execution_status TEXT DEFAULT '',
-            execution_reason TEXT DEFAULT '',
-            context_json TEXT DEFAULT '{}',
-            verdict_json TEXT DEFAULT '{}',
-            risk_verdict_json TEXT DEFAULT '{}',
-            execution_json TEXT DEFAULT '{}',
-            created_at REAL NOT NULL DEFAULT 0.0
-        );
-        """
-    )
+    conn = _canonical_connection(path)
     risk_verdict = {"allowed": False, "reason": "max_positions_reached"}
-    conn.execute(
-        """
-        INSERT INTO decision_ledger
-        (decision_id, event_type, symbol, timeframe, decision_ts, action_reason,
-         action_score, portfolio_state_json, risk_state_json, action_json, created_at)
-        VALUES ('dec_skip', 'skip', 'XAUUSD+', 'M5', 100.0, 'max_positions_reached',
-                0.71, ?, ?, ?, 100.0)
-        """,
-        (
-            json.dumps({"n_positions": 1}),
-            json.dumps({"policy_verdict": risk_verdict}),
-            json.dumps({"skip_stage": "risk_policy", "risk_verdict": risk_verdict}),
-        ),
+    record_decision_event(
+        conn,
+        decision_id="dec_skip",
+        event_type="skip",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=100.0,
+        action_reason="max_positions_reached",
+        action_score=0.71,
+        portfolio_state={"n_positions": 1},
+        risk_state={"policy_verdict": risk_verdict},
+        action={"skip_stage": "risk_policy", "risk_verdict": risk_verdict},
+        created_at=100.0,
     )
-    conn.execute(
-        """
-        INSERT INTO decision_ledger
-        (decision_id, trade_id, position_id, event_type, symbol, timeframe,
-         decision_ts, action_reason, action_score, portfolio_state_json,
-         risk_state_json, action_json, created_at)
-        VALUES ('dec_open', 'p1', 'p1', 'open', 'XAUUSD+', 'M5',
-                90.0, 'executed', -0.62, '{"n_positions": 0}',
-                '{"policy_verdict": {"allowed": true}}', ?, 90.0)
-        """,
-        (
-            json.dumps(
-                {
-                    "direction": -1,
-                    "score": -0.62,
-                    "entry_cluster": {"same_direction_open_count_before": 2},
-                    "same_direction_open_count": 2,
-                    "recent_same_direction_entries": {"15m": 2},
-                    "portfolio_exposure": {"same_direction_open_count_after": 3},
-                }
-            ),
-        ),
+    record_decision_event(
+        conn,
+        decision_id="dec_open",
+        event_type="open",
+        trade_id="p1",
+        position_id="p1",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=90.0,
+        action_reason="executed",
+        action_score=-0.62,
+        portfolio_state={"n_positions": 0},
+        risk_state={"policy_verdict": {"allowed": True}},
+        action={
+            "direction": -1,
+            "score": -0.62,
+            "entry_cluster": {"same_direction_open_count_before": 2},
+            "same_direction_open_count": 2,
+            "recent_same_direction_entries": {"15m": 2},
+            "portfolio_exposure": {"same_direction_open_count_after": 3},
+        },
+        created_at=90.0,
     )
-    conn.execute(
-        """
-        INSERT INTO decision_ledger
-        (decision_id, trade_id, position_id, event_type, symbol, timeframe,
-         decision_ts, action_reason, action_score, action_json, created_at)
-        VALUES ('dec_sup', 'p1', 'p1', 'supervisor_tighten', 'XAUUSD+', 'M5',
-                120.0, 'thesis_weakening', 0.66, ?, 120.0)
-        """,
-        (
-            json.dumps(
-                {
-                    "supervisor_verdict": {
-                        "action": "tighten",
-                        "summary_reason": "thesis_weakening",
-                        "evidence": {"giveback_ratio": 0.5},
-                    }
-                }
-            ),
-        ),
+    record_decision_event(
+        conn,
+        decision_id="dec_sup",
+        event_type="supervisor_tighten",
+        trade_id="p1",
+        position_id="p1",
+        symbol="XAUUSD+",
+        timeframe="M5",
+        decision_ts=120.0,
+        action_reason="thesis_weakening",
+        action_score=0.66,
+        portfolio_state={},
+        risk_state={},
+        action={
+            "supervisor_verdict": {
+                "action": "tighten",
+                "summary_reason": "thesis_weakening",
+                "evidence": {"giveback_ratio": 0.5},
+            }
+        },
+        created_at=120.0,
     )
-    conn.execute(
-        """
-        INSERT INTO position_supervisor_trace
-        (trace_id, decision_id, position_id, trade_id, symbol, timeframe, tick,
-         event_ts, action, summary_reason, confidence, template_id,
-         template_version, stage, outcome, risk_action, risk_allowed,
-         risk_reason, execution_status, execution_reason, context_json,
-         verdict_json, risk_verdict_json, execution_json, created_at)
-        VALUES ('trace1', 'dec_sup', 'p1', 'p1', 'XAUUSD+', 'M5', 7,
-                121.0, 'tighten', 'thesis_weakening', 0.66,
-                'position_supervisor:default.v1', 'default.v1',
-                'executed', 'applied', 'tighten_position', 1,
-                'risk_reducing_action', 'applied', 'amend_position_sltp_success',
-                ?, ?, ?, ?, 121.0)
-        """,
-        (
-            json.dumps({"position": {"position_id": "p1", "pnl": 0.2}}),
-            json.dumps({"action": "tighten", "summary_reason": "thesis_weakening"}),
-            json.dumps({"allowed": True, "reason": "risk_reducing_action"}),
-            json.dumps({"target_stop_loss_sent": 4000.0}),
-        ),
+    record_supervisor_trace_event(
+        conn,
+        trace_id="trace1",
+        decision_id="dec_sup",
+        event_ts=121.0,
+        payload={
+            "trace_id": "trace1",
+            "decision_id": "dec_sup",
+            "position_id": "p1",
+            "trade_id": "p1",
+            "symbol": "XAUUSD+",
+            "timeframe": "M5",
+            "event_ts": 121.0,
+            "action": "tighten",
+            "summary_reason": "thesis_weakening",
+            "confidence": 0.66,
+            "template_id": "position_supervisor:default.v1",
+            "template_version": "default.v1",
+            "stage": "executed",
+            "outcome": "applied",
+            "risk_action": "tighten_position",
+            "risk_allowed": True,
+            "risk_reason": "risk_reducing_action",
+            "execution_status": "applied",
+            "execution_reason": "amend_position_sltp_success",
+            "trace_integrity": "full",
+            "context": {"position": {"position_id": "p1", "pnl": 0.2}},
+            "verdict": {"action": "tighten", "summary_reason": "thesis_weakening"},
+            "risk_verdict": {"allowed": True, "reason": "risk_reducing_action"},
+            "execution": {
+                "target_stop_loss_sent": 4000.0,
+                "is_real_execution": True,
+                "broker_action_confirmed": True,
+                "reconcile_confirmed": True,
+            },
+            "created_at": 121.0,
+        },
     )
     review = {
         "symbol": "XAUUSD+",
@@ -238,116 +377,122 @@ def _create_sample_db(path):
             "replay_verified": True,
         },
     }
-    conn.execute(
-        """
-        INSERT INTO trade_outcome_review
-        (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-         entry_quality, hold_quality, exit_quality, pnl, mae, mfe, outcome_label,
-         failure_tags_json, review_json, created_at)
-        VALUES ('rev1', 'p1', 'p1', 'dec_open', 'dec_sup', 0.4, 0.5, 0.6,
-                -1.2, 1.5, 0.1, 'bad_loss', '["exit"]', ?, 180.0)
-        """,
-        (json.dumps(review),),
+    record_review(
+        conn,
+        review_id="rev1",
+        trade_id="p1",
+        position_id="p1",
+        entry_decision_id="dec_open",
+        exit_decision_id="dec_sup",
+        entry_quality=0.4,
+        hold_quality=0.5,
+        exit_quality=0.6,
+        pnl=-1.2,
+        mae=1.5,
+        mfe=0.1,
+        outcome_label="bad_loss",
+        failure_tags=["exit"],
+        review=review,
+        created_at=180.0,
     )
-    conn.execute(
-        """
-        INSERT INTO supervisor_counterfactual_review
-        (counterfactual_id, review_id, trade_id, position_id, close_ts,
-         close_reason, supervisor_event_type, supervisor_reason, label,
-         confidence, horizons_json, evidence_json, created_at, updated_at)
-        VALUES ('scf1', 'rev1', 'p1', 'p1', 180.0, 'broker_close',
-                'supervisor_tighten', 'thesis_weakening', 'premature_tighten',
-                0.78, '[{"horizon_minutes": 60, "matured": true}]',
-                '{"advisory_only": true, "maturity": {"status": "governance_ready", "governance_eligible": true}}',
-                181.0, 181.0)
-        """
+    record_counterfactual_event(
+        conn,
+        counterfactual_id="scf1",
+        review_id="rev1",
+        decision_id="dec_sup",
+        trace_id="trace1",
+        event_ts=181.0,
+        payload={
+            "counterfactual_id": "scf1",
+            "review_id": "rev1",
+            "trade_id": "p1",
+            "position_id": "p1",
+            "close_ts": 180.0,
+            "close_reason": "broker_close",
+            "supervisor_event_type": "supervisor_tighten",
+            "supervisor_reason": "thesis_weakening",
+            "label": "premature_tighten",
+            "confidence": 0.78,
+            "horizons": [{"horizon_minutes": 60, "matured": True}],
+            "evidence": {
+                "advisory_only": True,
+                "maturity": {"status": "governance_ready", "governance_eligible": True},
+            },
+        },
     )
     conn.commit()
     conn.close()
 
 
 def _seed_unusable_counterfactuals_ahead_of_clean_evidence(path):
-    conn = sqlite3.connect(str(path))
+    conn = _canonical_connection(path)
     try:
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, entry_decision_id, exit_decision_id,
-             pnl, review_json, created_at)
-            VALUES ('rev_contaminated', 'p1', 'p1', 'dec_open', 'dec_sup',
-                    -1.2, ?, 180.0)
-            """,
-            (
-                json.dumps(
-                    {
-                        "close_ts": 180.0,
-                        "system_issue_context": {
-                            "contaminates_learning": True,
-                            "labels": ["market_data_stale"],
-                        },
-                    }
-                ),
-            ),
+        record_review(
+            conn,
+            review_id="rev_contaminated",
+            trade_id="p1",
+            position_id="p1",
+            entry_decision_id="dec_open",
+            exit_decision_id="dec_sup",
+            pnl=-1.2,
+            failure_tags=[],
+            review={
+                "close_ts": 180.0,
+                "system_issue_context": {
+                    "contaminates_learning": True,
+                    "labels": ["market_data_stale"],
+                },
+            },
+            created_at=180.0,
         )
         rows = [
             (
                 "scf_missing_review",
                 "rev_missing",
                 "correct_stop",
-                json.dumps(
-                    {
-                        "maturity": {
-                            "status": "governance_ready",
-                            "governance_eligible": True,
-                        }
-                    }
-                ),
+                {"maturity": {"status": "governance_ready", "governance_eligible": True}},
                 600.0,
             ),
             (
                 "scf_contaminated",
                 "rev_contaminated",
                 "correct_stop",
-                json.dumps(
-                    {
-                        "maturity": {
-                            "status": "governance_ready",
-                            "governance_eligible": True,
-                        }
-                    }
-                ),
+                {"maturity": {"status": "governance_ready", "governance_eligible": True}},
                 500.0,
             ),
             (
                 "scf_invalidated",
                 "rev1",
                 "correct_stop",
-                json.dumps(
-                    {
-                        "evidence_invalidated": True,
-                        "invalidation_reason": "late_evidence_rejected",
-                        "maturity": {
-                            "status": "governance_ready",
-                            "governance_eligible": True,
-                        },
-                    }
-                ),
+                {
+                    "evidence_invalidated": True,
+                    "invalidation_reason": "late_evidence_rejected",
+                    "maturity": {"status": "governance_ready", "governance_eligible": True},
+                },
                 400.0,
             ),
         ]
-        conn.executemany(
-            """
-            INSERT INTO supervisor_counterfactual_review
-            (counterfactual_id, review_id, trade_id, position_id, close_ts,
-             close_reason, supervisor_event_type, supervisor_reason, label,
-             confidence, horizons_json, evidence_json, created_at, updated_at)
-            VALUES (?, ?, 'p1', 'p1', 180.0, 'broker_close',
-                    'supervisor_tighten', 'thesis_weakening', ?, 0.95,
-                    '[]', ?, ?, ?)
-            """,
-            [(counterfactual_id, review_id, label, evidence, updated_at, updated_at)
-             for counterfactual_id, review_id, label, evidence, updated_at in rows],
-        )
+        for counterfactual_id, review_id, label, evidence, updated_at in rows:
+            record_counterfactual_event(
+                conn,
+                counterfactual_id=counterfactual_id,
+                review_id=review_id,
+                event_ts=updated_at,
+                payload={
+                    "counterfactual_id": counterfactual_id,
+                    "review_id": review_id,
+                    "trade_id": "p1",
+                    "position_id": "p1",
+                    "close_ts": 180.0,
+                    "close_reason": "broker_close",
+                    "supervisor_event_type": "supervisor_tighten",
+                    "supervisor_reason": "thesis_weakening",
+                    "label": label,
+                    "confidence": 0.95,
+                    "horizons": [],
+                    "evidence": evidence,
+                },
+            )
         conn.commit()
     finally:
         conn.close()
@@ -420,7 +565,7 @@ def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path
              trace_json, created_at, updated_at, evidence_contract_json,
              config_version, config_hash, evolution_run_id)
             VALUES ('stale_cf_sample', 'post_close_counterfactual',
-                    'supervisor_counterfactual_review', 'missing_cf', 'matured',
+                    'canonical_v2.counterfactual_review', 'missing_cf', 'matured',
                     'full', 1.0, '{}', '{}', '{}', '{}', 1.0, 1.0, '{}',
                     1, 'hash', 'run')
             """
@@ -433,18 +578,33 @@ def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path
 
     conn = sqlite3.connect(str(db_path))
     try:
-        stale_count = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM training_sample_row s
-            LEFT JOIN supervisor_counterfactual_review cf ON cf.counterfactual_id=s.source_id
-            WHERE s.sample_type='post_close_counterfactual'
-              AND cf.counterfactual_id IS NULL
-            """
-        ).fetchone()[0]
+        sample_ids = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT source_id
+                FROM training_sample_row
+                WHERE sample_type='post_close_counterfactual'
+                  AND source_table=?
+                """,
+                (CANONICAL_COUNTERFACTUAL_REVIEW,),
+            ).fetchall()
+        }
     finally:
         conn.close()
-    assert stale_count == 0
+    canonical_conn = _canonical_connection(db_path)
+    try:
+        canonical_ids = {
+            str(row.get("counterfactual_id") or "")
+            for row in iter_counterfactual_rows(canonical_conn, limit=0, reverse=True)
+        }
+    finally:
+        canonical_conn.close()
+    # Materialization does not delete immutable training/audit rows.  The
+    # canonical reader must nevertheless remain the authority for which
+    # counterfactuals are real evidence.
+    assert canonical_ids == {"scf1"}
+    assert sample_ids - canonical_ids == {"missing_cf"}
     assert ("autonomous_learning_samples",) in events
     assert ("autonomous_learning_samples", "completed") in runs
 
@@ -452,7 +612,7 @@ def test_materialize_autonomous_learning_samples_from_existing_evidence(tmp_path
 def test_open_consumer_eligibility_does_not_require_factor_attribution():
     item = {
         "sample_type": "shadow_open_decision",
-        "source_table": "decision_ledger",
+        "source_table": CANONICAL_RISK_DECISION,
         "source_id": "dec_open_consumer_scope",
         "sample_id": "als_open_consumer_scope",
         "config_hash": "cfg-current",
@@ -541,45 +701,45 @@ def test_counterfactual_materialization_filters_before_limit(tmp_path):
 def test_supervisor_trace_uses_one_canonical_review_and_missing_review_fails_closed(tmp_path):
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = _canonical_connection(db_path)
     try:
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, review_json, created_at)
-            VALUES ('rev_old_contaminated', 'p1', 'p1', ?, 100.0)
-            """,
-            (
-                json.dumps(
-                    {
-                        "system_issue_context": {
-                            "contaminates_learning": True,
-                            "labels": ["market_data_stale"],
-                        }
-                    }
-                ),
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO position_supervisor_trace
-            (trace_id, position_id, trade_id, event_ts, action, outcome,
-             verdict_json, created_at)
-            VALUES ('trace_missing_review', 'p_missing', 'p_missing', 130.0,
-                    'close', 'executed', '{"action":"close"}', 130.0)
-            """
+        record_review(
+            conn,
+            review_id="rev_old_contaminated",
+            trade_id="p1",
+            position_id="p1",
+            failure_tags=[],
+            review={
+                "system_issue_context": {
+                    "contaminates_learning": True,
+                    "labels": ["market_data_stale"],
+                }
+            },
+            created_at=100.0,
         )
         conn.commit()
     finally:
         conn.close()
+    _write_supervisor_trace(
+        db_path,
+        trace_id="trace_missing_review",
+        position_id="p_missing",
+        trade_id="p_missing",
+        event_ts=130.0,
+        action="close",
+        outcome="executed",
+        verdict={"action": "close"},
+    )
 
     materialized = al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
     assert materialized["counts"]["supervisor_execution_trace"] == 2
 
     matured = al.mature_position_supervisor_traces(db_path=db_path, limit=20)
-    # A6: traces with executed outcome now mature observationally even without
-    # a counterfactual review, so pending count is 0 (both traces matured).
+    # A6: only a broker-confirmed executed/applied trace may mature.  A trace
+    # without execution proof is terminally excluded, even when its old row
+    # said "executed".
     assert matured["matured"] >= 1
+    assert matured["excluded"] >= 1
     conn = sqlite3.connect(str(db_path))
     try:
         rows = {
@@ -595,8 +755,8 @@ def test_supervisor_trace_uses_one_canonical_review_and_missing_review_fails_clo
     finally:
         conn.close()
     assert json.loads(rows["trace1"][2])["source_review_id"] == "rev1"
-    # A6: trace_missing_review is now matured observationally (not pending),
-    # but still contaminated because it has no source review.
+    # trace_missing_review is terminally excluded and remains contaminated
+    # because it has no canonical source review.
     assert rows["trace_missing_review"][0] == 0.0
     contamination = json.loads(rows["trace_missing_review"][1])["system_contamination"]
     assert contamination["contaminated"] is True
@@ -655,33 +815,35 @@ def test_materialize_autonomous_learning_orders_decisions_by_event_time(tmp_path
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)
     risk_verdict = {"allowed": False, "reason": "test"}
-    conn = sqlite3.connect(str(db_path))
+    conn = _canonical_connection(db_path)
     try:
-        conn.execute(
-            """
-            INSERT INTO decision_ledger
-            (decision_id, event_type, symbol, timeframe, decision_ts, action_reason,
-             action_score, portfolio_state_json, risk_state_json, action_json, created_at)
-            VALUES ('dec_old_replay', 'skip', 'XAUUSD+', 'M5', 50.0, 'old_replay',
-                    0.1, '{}', ?, ?, 5000.0)
-            """,
-            (
-                json.dumps({"policy_verdict": risk_verdict}),
-                json.dumps({"skip_stage": "risk_policy", "risk_verdict": risk_verdict}),
-            ),
+        record_decision_event(
+            conn,
+            decision_id="dec_old_replay",
+            event_type="skip",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=50.0,
+            action_reason="old_replay",
+            action_score=0.1,
+            portfolio_state={},
+            risk_state={"policy_verdict": risk_verdict},
+            action={"skip_stage": "risk_policy", "risk_verdict": risk_verdict},
+            created_at=5000.0,
         )
-        conn.execute(
-            """
-            INSERT INTO decision_ledger
-            (decision_id, event_type, symbol, timeframe, decision_ts, action_reason,
-             action_score, portfolio_state_json, risk_state_json, action_json, created_at)
-            VALUES ('dec_new_event', 'skip', 'XAUUSD+', 'M5', 500.0, 'new_event',
-                    0.1, '{}', ?, ?, 10.0)
-            """,
-            (
-                json.dumps({"policy_verdict": risk_verdict}),
-                json.dumps({"skip_stage": "risk_policy", "risk_verdict": risk_verdict}),
-            ),
+        record_decision_event(
+            conn,
+            decision_id="dec_new_event",
+            event_type="skip",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=500.0,
+            action_reason="new_event",
+            action_score=0.1,
+            portfolio_state={},
+            risk_state={"policy_verdict": risk_verdict},
+            action={"skip_stage": "risk_policy", "risk_verdict": risk_verdict},
+            created_at=10.0,
         )
         conn.commit()
     finally:
@@ -697,8 +859,9 @@ def test_materialize_autonomous_learning_orders_decisions_by_event_time(tmp_path
                 """
                 SELECT source_id
                 FROM training_sample_row
-                WHERE source_table='decision_ledger'
-                """
+                WHERE source_table=?
+                """,
+                (CANONICAL_RISK_DECISION,),
             ).fetchall()
         }
     finally:
@@ -799,7 +962,7 @@ def test_entry_cluster_governance_materializes_policy_suggestion(tmp_path):
                  label_status, integrity, train_weight, event_ts, features_json,
                  verdict_json, label_json, trace_json, evidence_contract_json,
                  created_at, updated_at)
-                VALUES (?, 'shadow_open_decision', 'decision_ledger', ?, ?,
+                VALUES (?, 'shadow_open_decision', 'canonical_v2.risk_decision', ?, ?,
                         'matured', 'full', 1.0, ?, ?, '{}', ?, ?, ?, ?, ?)
                 """,
                 (
@@ -891,7 +1054,7 @@ def test_event_window_governance_materializes_policy_suggestion(tmp_path):
                  label_status, integrity, train_weight, event_ts, features_json,
                  verdict_json, label_json, trace_json, evidence_contract_json,
                  created_at, updated_at)
-                VALUES (?, 'shadow_open_decision', 'decision_ledger', ?, ?,
+                VALUES (?, 'shadow_open_decision', 'canonical_v2.risk_decision', ?, ?,
                         'matured', 'full', 1.0, ?, ?, '{}', ?, ?, ?, ?, ?)
                 """,
                 (
@@ -978,7 +1141,7 @@ def test_entry_quality_governance_materializes_policy_suggestions(tmp_path):
                  label_status, integrity, train_weight, event_ts, features_json,
                  verdict_json, label_json, trace_json, evidence_contract_json,
                  created_at, updated_at)
-                VALUES (?, 'trade_review_outcome', 'trade_outcome_review', ?, ?,
+                VALUES (?, 'trade_review_outcome', 'canonical_v2.trade_review', ?, ?,
                         'matured', 'full', 1.0, ?, ?, '{}', ?, ?, ?, ?, ?)
                 """,
                 (
@@ -1108,7 +1271,7 @@ def test_entry_quality_observational_factor_does_not_penalize_non_entry_responsi
                  position_id, label_status, integrity, train_weight, event_ts,
                  features_json, verdict_json, label_json, trace_json,
                  evidence_contract_json, created_at, updated_at)
-                VALUES (?, 'trade_review_outcome', 'trade_outcome_review', ?, ?, ?,
+                VALUES (?, 'trade_review_outcome', 'canonical_v2.trade_review', ?, ?, ?,
                         'matured', 'full', 1.0, ?, ?, '{}', ?, ?, ?, ?, ?)
                 """,
                 (
@@ -1188,7 +1351,7 @@ def test_event_window_governance_ignores_legacy_gradient_samples(tmp_path):
                  label_status, integrity, train_weight, event_ts, features_json,
                  verdict_json, label_json, trace_json, evidence_contract_json,
                  created_at, updated_at)
-                VALUES (?, 'shadow_open_decision', 'decision_ledger', ?, ?,
+                VALUES (?, 'shadow_open_decision', 'canonical_v2.risk_decision', ?, ?,
                         'matured', 'full', 1.0, ?, ?, '{}', ?, ?, ?, ?, ?)
                 """,
                 (
@@ -1217,26 +1380,18 @@ def test_event_window_governance_ignores_legacy_gradient_samples(tmp_path):
 def test_backfill_trade_review_close_sources_from_protection_trace(tmp_path):
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        review = {
+    _record_review_revision(
+        db_path,
+        "rev1",
+        {
             "symbol": "XAUUSD+",
             "timeframe": "M5",
             "close_ts": 180.0,
             "close_reason": "broker_close",
             "attribution_integrity": "recovered",
-        }
-        conn.execute(
-            """
-            UPDATE trade_outcome_review
-            SET review_json=?
-            WHERE review_id='rev1'
-            """,
-            (json.dumps(review),),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        },
+        revision_tag="close_source_input",
+    )
 
     result = al.backfill_trade_review_close_sources(db_path=db_path, limit=20)
 
@@ -1244,7 +1399,6 @@ def test_backfill_trade_review_close_sources_from_protection_trace(tmp_path):
     assert result["by_source"]["supervisor_tighten_stopout"] == 1
     conn = sqlite3.connect(str(db_path))
     try:
-        raw = conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='rev1'").fetchone()[0]
         decision = conn.execute(
             """
             SELECT decision_type, decision_json
@@ -1254,7 +1408,11 @@ def test_backfill_trade_review_close_sources_from_protection_trace(tmp_path):
         ).fetchone()
     finally:
         conn.close()
-    repaired = json.loads(raw)
+    canonical_conn = _canonical_connection(db_path)
+    try:
+        repaired = _latest_review_row(canonical_conn, "rev1")["review_json"]
+    finally:
+        canonical_conn.close()
     assert repaired["close_reason_source"] == "supervisor_tighten_stopout"
     assert repaired["inferred_close_supervisor"]["event_type"] == "supervisor_tighten"
     assert decision is not None
@@ -1265,25 +1423,17 @@ def test_backfill_trade_review_close_sources_from_protection_trace(tmp_path):
 def test_backfill_trade_review_integrity_markers_prevents_legacy_full_training(tmp_path):
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        review = {
+    _record_review_revision(
+        db_path,
+        "rev1",
+        {
             "symbol": "XAUUSD+",
             "timeframe": "M5",
             "close_ts": 180.0,
             "close_reason_source": "external_broker_close",
-        }
-        conn.execute(
-            """
-            UPDATE trade_outcome_review
-            SET review_json=?
-            WHERE review_id='rev1'
-            """,
-            (json.dumps(review),),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        },
+        revision_tag="integrity_input",
+    )
 
     result = al.backfill_trade_review_integrity_markers(db_path=db_path, limit=20)
     al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
@@ -1291,7 +1441,6 @@ def test_backfill_trade_review_integrity_markers_prevents_legacy_full_training(t
     assert result["updated"] == 1
     conn = sqlite3.connect(str(db_path))
     try:
-        review_raw = conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='rev1'").fetchone()[0]
         sample = conn.execute(
             """
             SELECT integrity, train_weight, evidence_contract_json
@@ -1308,7 +1457,11 @@ def test_backfill_trade_review_integrity_markers_prevents_legacy_full_training(t
         ).fetchone()
     finally:
         conn.close()
-    review = json.loads(review_raw)
+    canonical_conn = _canonical_connection(db_path)
+    try:
+        review = _latest_review_row(canonical_conn, "rev1")["review_json"]
+    finally:
+        canonical_conn.close()
     contract = json.loads(sample[2])
     assert review["attribution_integrity"] == "missing"
     assert sample[0] == "missing"
@@ -1323,97 +1476,83 @@ def test_backfill_trade_review_integrity_markers_prevents_legacy_full_training(t
 def test_backfill_trade_review_timing_marks_system_contamination(tmp_path):
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS order_lifecycle_event (
-                event_id TEXT PRIMARY KEY,
-                decision_id TEXT DEFAULT '',
-                trade_id TEXT DEFAULT '',
-                order_id TEXT DEFAULT '',
-                broker_order_id TEXT DEFAULT '',
-                event_type TEXT NOT NULL,
-                event_ts REAL NOT NULL DEFAULT 0.0,
-                price REAL DEFAULT 0.0,
-                volume REAL DEFAULT 0.0,
-                status TEXT DEFAULT '',
-                details_json TEXT DEFAULT '{}'
-            );
-            CREATE TABLE IF NOT EXISTS factor_contribution_review (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                review_id TEXT NOT NULL,
-                trade_id TEXT DEFAULT '',
-                factor TEXT NOT NULL,
-                entry_contribution REAL DEFAULT 0.0,
-                hold_contribution REAL DEFAULT 0.0,
-                exit_contribution REAL DEFAULT 0.0,
-                net_contribution REAL DEFAULT 0.0,
-                confidence REAL DEFAULT 0.0,
-                notes TEXT DEFAULT ''
-            );
-            """
-        )
-        risk_verdict = {
-            "allowed": True,
-            "reason": "ok",
-            "audit_payload": {
-                "temporal_context": {
-                    "evaluated_at": 700.0,
-                    "timeframe": "M5",
-                    "timeframe_seconds": 300,
-                },
-                "state": {
-                    "runtime_health_snapshot": {
-                        "data_lag_seconds": 610.0,
-                        "raw": {
-                            "sync_health": {
-                                "fresh": True,
-                                "stale": False,
-                                "degraded": False,
-                            }
-                        },
-                    }
-                },
+    timing_base = time.time() - 900.0
+    decision_ts = timing_base
+    submitted_ts = timing_base + 611.0
+    fill_ts = timing_base + 612.0
+    close_ts = timing_base + 810.0
+    risk_verdict = {
+        "allowed": True,
+        "reason": "ok",
+        "audit_payload": {
+            "temporal_context": {
+                "evaluated_at": timing_base + 610.0,
+                "timeframe": "M5",
+                "timeframe_seconds": 300,
             },
-        }
-        action = {
-            "direction": -1,
-            "risk_verdict": risk_verdict,
-            "data_quality_context": {"quote_fresh": True},
-            "market_session": {"market_data_age_seconds": 610.0},
-        }
-        conn.execute(
-            """
-            UPDATE decision_ledger
-            SET decision_ts=90.0, action_json=?, risk_state_json=?
-            WHERE decision_id='dec_open'
-            """,
-            (json.dumps(action), json.dumps({"policy_verdict": risk_verdict})),
+            "state": {
+                "runtime_health_snapshot": {
+                    "data_lag_seconds": 610.0,
+                    "raw": {
+                        "sync_health": {
+                            "fresh": True,
+                            "stale": False,
+                            "degraded": False,
+                        }
+                    },
+                }
+            },
+        },
+    }
+    action = {
+        "direction": -1,
+        "risk_verdict": risk_verdict,
+        "data_quality_context": {"quote_fresh": True},
+        "market_session": {"market_data_age_seconds": 610.0},
+    }
+    _record_decision_revision(
+        db_path,
+        "dec_open",
+        action=action,
+        risk_state={"policy_verdict": risk_verdict},
+        decision_ts=decision_ts,
+        revision_tag="timing_input",
+    )
+    review_conn = _canonical_connection(db_path)
+    try:
+        base_review = dict(_latest_review_row(review_conn, "rev1")["review_json"])
+    finally:
+        review_conn.close()
+    _record_review_revision(
+        db_path,
+        "rev1",
+        {**base_review, "close_ts": close_ts},
+        revision_tag="timing_input",
+        created_at=close_ts,
+    )
+    conn = _canonical_connection(db_path)
+    try:
+        record_order_event(
+            conn,
+            event_id="sub1",
+            decision_id="dec_open",
+            trade_id="p1",
+            event_type="submitted",
+            event_ts=submitted_ts,
+            price=4000.0,
+            volume=100.0,
+            status="submitted",
         )
-        review = json.loads(conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='rev1'").fetchone()[0])
-        review["close_ts"] = 900.0
-        conn.execute(
-            """
-            UPDATE trade_outcome_review
-            SET review_json=?, created_at=900.0
-            WHERE review_id='rev1'
-            """,
-            (json.dumps(review),),
-        )
-        conn.execute(
-            """
-            INSERT INTO order_lifecycle_event
-            (event_id, decision_id, trade_id, event_type, event_ts, price, volume, status)
-            VALUES ('sub1', 'dec_open', 'p1', 'submitted', 701.0, 4000.0, 100.0, 'submitted')
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO order_lifecycle_event
-            (event_id, decision_id, trade_id, event_type, event_ts, price, volume, status)
-            VALUES ('fill1', 'dec_open', 'p1', 'filled', 702.0, 4000.1, 100.0, 'filled')
-            """
+        record_order_event(
+            conn,
+            event_id="fill1",
+            decision_id="dec_open",
+            trade_id="p1",
+            event_type="filled",
+            event_ts=fill_ts,
+            price=4000.1,
+            volume=100.0,
+            status="filled",
         )
         conn.execute(
             """
@@ -1434,7 +1573,6 @@ def test_backfill_trade_review_timing_marks_system_contamination(tmp_path):
     assert result["factor_contribution_rows_updated"] == 1
     conn = sqlite3.connect(str(db_path))
     try:
-        review_raw = conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='rev1'").fetchone()[0]
         factor = conn.execute(
             "SELECT confidence, notes FROM factor_contribution_review WHERE review_id='rev1'"
         ).fetchone()
@@ -1448,8 +1586,15 @@ def test_backfill_trade_review_timing_marks_system_contamination(tmp_path):
     finally:
         conn.close()
 
-    review = json.loads(review_raw)
-    assert review["entry_ts"] == 702.0
+    canonical_conn = _canonical_connection(db_path)
+    try:
+        review = _latest_review_row(canonical_conn, "rev1")["review_json"]
+    finally:
+        canonical_conn.close()
+    timing = review["entry_timing_context"]
+    assert timing["timing_valid"] is True
+    assert abs(timing["actual_entry_ts"] - fill_ts) < 1e-3
+    assert timing["actual_holding_seconds"] == 198.0
     assert review["holding_seconds"] == 198.0
     assert review["primary_responsibility"] == "data_quality"
     assert "signal_execution_delay" in review["responsibility_labels"]
@@ -1464,10 +1609,9 @@ def test_backfill_trade_review_timing_marks_system_contamination(tmp_path):
 def test_system_contaminated_trade_review_materializes_partial_learning_samples(tmp_path):
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = _canonical_connection(db_path)
     try:
-        raw = conn.execute("SELECT review_json FROM trade_outcome_review WHERE review_id='rev1'").fetchone()[0]
-        review = json.loads(raw)
+        review = dict(_latest_review_row(conn, "rev1")["review_json"])
         review["system_issue_context"] = {
             "schema_version": "trade_review_system_issue.v1",
             "system_contaminated": True,
@@ -1478,17 +1622,15 @@ def test_system_contaminated_trade_review_materializes_partial_learning_samples(
         }
         review["responsibility_labels"] = ["market_data_stale", "signal_execution_delay"]
         review["primary_responsibility"] = "data_quality"
-        conn.execute(
-            """
-            UPDATE trade_outcome_review
-            SET review_json=?, failure_tags_json='["bad_loss","market_data_stale"]'
-            WHERE review_id='rev1'
-            """,
-            (json.dumps(review),),
-        )
-        conn.commit()
     finally:
         conn.close()
+    _record_review_revision(
+        db_path,
+        "rev1",
+        review,
+        revision_tag="contamination_input",
+        failure_tags=["bad_loss", "market_data_stale"],
+    )
 
     al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
 
@@ -1536,26 +1678,18 @@ def test_system_contaminated_trade_review_materializes_partial_learning_samples(
 def test_trade_review_minimal_integrity_materializes_as_missing(tmp_path):
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        review = {
+    _record_review_revision(
+        db_path,
+        "rev1",
+        {
             "symbol": "XAUUSD+",
             "timeframe": "M5",
             "close_ts": 180.0,
             "context_integrity": "minimal",
             "close_reason_source": "external_broker_close",
-        }
-        conn.execute(
-            """
-            UPDATE trade_outcome_review
-            SET review_json=?
-            WHERE review_id='rev1'
-            """,
-            (json.dumps(review),),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        },
+        revision_tag="minimal_integrity_input",
+    )
 
     al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
 
@@ -1662,30 +1796,30 @@ def test_materialization_does_not_downgrade_matured_supervisor_trace(tmp_path):
     assert json.loads(row[2])["model_ready"] is True
 
 
-def test_position_supervisor_trace_backfill_from_decision_ledger(tmp_path):
+def test_position_supervisor_trace_backfill_reports_missing_execution_trace(tmp_path):
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = _canonical_connection(db_path)
     try:
-        conn.execute(
-            """
-            INSERT INTO decision_ledger
-            (decision_id, trade_id, position_id, event_type, symbol, timeframe,
-             decision_ts, action_reason, action_score, action_json, created_at)
-            VALUES ('dec_legacy_close', 'p2', 'p2', 'supervisor_close', 'XAUUSD+', 'M5',
-                    130.0, 'thesis_broken', 0.7, ?, 130.0)
-            """,
-            (
-                json.dumps(
-                    {
-                        "supervisor_verdict": {
-                            "action": "close",
-                            "summary_reason": "thesis_broken",
-                            "confidence": 0.7,
-                        }
-                    }
-                ),
-            ),
+        record_decision_event(
+            conn,
+            decision_id="dec_missing_trace",
+            trade_id="p2",
+            position_id="p2",
+            event_type="supervisor_close",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=130.0,
+            action_reason="thesis_broken",
+            action_score=0.7,
+            action={
+                "supervisor_verdict": {
+                    "action": "close",
+                    "summary_reason": "thesis_broken",
+                    "confidence": 0.7,
+                }
+            },
+            created_at=130.0,
         )
         conn.commit()
     finally:
@@ -1693,31 +1827,26 @@ def test_position_supervisor_trace_backfill_from_decision_ledger(tmp_path):
 
     result = al.backfill_position_supervisor_traces(db_path=db_path, limit=20)
 
-    assert result["inserted"] == 1
-    conn = sqlite3.connect(str(db_path))
+    assert result["inserted"] == 0
+    assert result["missing_trace"] == 1
+    assert result["not_executed"] == 1
+    conn = _canonical_connection(db_path)
     try:
-        row = conn.execute(
-            """
-            SELECT action, stage, outcome, trace_integrity, evolution_run_id
-            FROM position_supervisor_trace
-            WHERE decision_id='dec_legacy_close'
-            """
-        ).fetchone()
+        rows = [
+            row
+            for row in iter_supervisor_trace_rows(conn, limit=0, reverse=False)
+            if str(row.get("decision_id") or "") == "dec_missing_trace"
+        ]
     finally:
         conn.close()
-    assert row[0] == "close"
-    assert row[1] == "legacy_backfill"
-    assert row[2] == "legacy_recovered"
-    assert row[3] == "recovered"
-    assert row[4]
+    assert rows == []
 
 
 def test_candidate_observation_replays_current_applied_supervisor_effect(tmp_path):
     db_path = tmp_path / "state.db"
     candidate_started_at = time.time() - 7200
-    conn = sqlite3.connect(str(db_path))
+    conn = _canonical_connection(db_path)
     try:
-        conn.executescript(STATE_DB_DDL)
         conn.execute(
             """
             INSERT INTO policy_suggestion
@@ -1730,33 +1859,31 @@ def test_candidate_observation_replays_current_applied_supervisor_effect(tmp_pat
             """,
             (candidate_started_at,),
         )
-        conn.execute(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, review_json, created_at)
-            VALUES ('review_current', 'trade_current', 'position_current', '{}', ?)
-            """,
-            (candidate_started_at + 3600,),
+        record_review(
+            conn,
+            review_id="review_current",
+            trade_id="trade_current",
+            position_id="position_current",
+            failure_tags=[],
+            review={},
+            created_at=candidate_started_at + 3600,
         )
-        conn.execute(
-            """
-            INSERT INTO supervisor_counterfactual_review
-            (counterfactual_id, review_id, trade_id, position_id, close_ts,
-             evidence_json, created_at, updated_at)
-            VALUES ('cf_current', 'review_current', 'trade_current',
-                    'position_current', ?, ?, ?, ?)
-            """,
-            (
-                candidate_started_at + 3600,
-                json.dumps(
-                    {
-                        "maturity": {"governance_eligible": True},
-                        "regime": "current_regime",
-                    }
-                ),
-                candidate_started_at + 3600,
-                candidate_started_at + 3600,
-            ),
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_current",
+            review_id="review_current",
+            event_ts=candidate_started_at + 3600,
+            payload={
+                "counterfactual_id": "cf_current",
+                "review_id": "review_current",
+                "trade_id": "trade_current",
+                "position_id": "position_current",
+                "close_ts": candidate_started_at + 3600,
+                "evidence": {
+                    "maturity": {"governance_eligible": True},
+                    "regime": "current_regime",
+                },
+            },
         )
         conn.commit()
     finally:
@@ -1785,22 +1912,25 @@ def test_candidate_observation_replays_current_applied_supervisor_effect(tmp_pat
     )
 
     assert result["inserted"] == 1
-    conn = sqlite3.connect(str(db_path))
+    conn = _canonical_connection(db_path)
     try:
-        row = conn.execute(
-            """
-            SELECT template_id, stage, execution_reason, trace_integrity
-            FROM position_supervisor_trace
-            WHERE position_id='position_current'
-            """
-        ).fetchone()
+        row = next(
+            item
+            for item in iter_supervisor_trace_rows(conn, limit=0, reverse=True)
+            if str(item.get("position_id") or "") == "position_current"
+        )
     finally:
         conn.close()
-    assert row == (
+    assert (
+        row["template_id"],
+        row["stage"],
+        row["execution_reason"],
+        row["trace_integrity"],
+    ) == (
         "position_supervisor:conservative.v1",
         "learning_shadow",
         "learning_worker_candidate_replay:applied_current",
-        "recovered",
+        "canonical_observation",
     )
 
 
@@ -1965,9 +2095,8 @@ def test_auto_apply_position_supervisor_template_requires_matching_shadow_trace(
     rc.reset_for_tests()
     db_path = tmp_path / "state.db"
     created_at = time.time() - 7200
-    conn = sqlite3.connect(str(db_path))
+    conn = _canonical_connection(db_path)
     try:
-        conn.executescript(STATE_DB_DDL)
         conn.execute(
             """
             INSERT INTO policy_suggestion
@@ -1983,18 +2112,19 @@ def test_auto_apply_position_supervisor_template_requires_matching_shadow_trace(
                 created_at,
             ),
         )
-        conn.execute(
-            """
-            INSERT INTO supervisor_counterfactual_review
-            (counterfactual_id, position_id, close_ts, evidence_json, created_at, updated_at)
-            VALUES ('cf_unmatched', 'position_without_shadow', ?, ?, ?, ?)
-            """,
-            (
-                created_at + 3600,
-                json.dumps({"regime": "trend", "maturity": {"governance_eligible": True}}),
-                time.time(),
-                time.time(),
-            ),
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_unmatched",
+            event_ts=created_at + 3600,
+            payload={
+                "counterfactual_id": "cf_unmatched",
+                "position_id": "position_without_shadow",
+                "close_ts": created_at + 3600,
+                "evidence": {
+                    "regime": "trend",
+                    "maturity": {"governance_eligible": True},
+                },
+            },
         )
         conn.commit()
     finally:
@@ -2025,9 +2155,8 @@ def test_auto_apply_position_supervisor_template_excludes_unusable_canary_eviden
     rc.reset_for_tests()
     db_path = tmp_path / "state.db"
     created_at = time.time() - 7200
-    conn = sqlite3.connect(str(db_path))
+    conn = _canonical_connection(db_path)
     try:
-        conn.executescript(STATE_DB_DDL)
         conn.execute(
             """
             INSERT INTO policy_suggestion
@@ -2043,103 +2172,86 @@ def test_auto_apply_position_supervisor_template_excludes_unusable_canary_eviden
                 created_at,
             ),
         )
-        conn.executemany(
-            """
-            INSERT INTO trade_outcome_review
-            (review_id, trade_id, position_id, review_json, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    "review_contaminated_canary",
-                    "position_contaminated_canary",
-                    "position_contaminated_canary",
-                    json.dumps(
-                        {
-                            "system_issue_context": {
-                                "contaminates_learning": True,
-                                "labels": ["market_data_stale"],
-                            }
-                        }
-                    ),
-                    created_at + 3600,
-                ),
-                (
-                    "review_invalidated_canary",
-                    "position_invalidated_canary",
-                    "position_invalidated_canary",
-                    "{}",
-                    created_at + 7200,
-                ),
-            ],
+        record_review(
+            conn,
+            review_id="review_contaminated_canary",
+            trade_id="position_contaminated_canary",
+            position_id="position_contaminated_canary",
+            failure_tags=[],
+            review={
+                "system_issue_context": {
+                    "contaminates_learning": True,
+                    "labels": ["market_data_stale"],
+                }
+            },
+            created_at=created_at + 3600,
         )
-        conn.executemany(
-            """
-            INSERT INTO supervisor_counterfactual_review
-            (counterfactual_id, review_id, trade_id, position_id, close_ts,
-             evidence_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    "cf_contaminated_canary",
-                    "review_contaminated_canary",
-                    "position_contaminated_canary",
-                    "position_contaminated_canary",
-                    created_at + 3600,
-                    json.dumps(
-                        {
-                            "regime": "trend",
-                            "maturity": {"governance_eligible": True},
-                        }
-                    ),
-                    time.time(),
-                    time.time(),
-                ),
-                (
-                    "cf_invalidated_canary",
-                    "review_invalidated_canary",
-                    "position_invalidated_canary",
-                    "position_invalidated_canary",
-                    created_at + 7200,
-                    json.dumps(
-                        {
-                            "regime": "range",
-                            "evidence_invalidated": True,
-                            "maturity": {"governance_eligible": True},
-                        }
-                    ),
-                    time.time(),
-                    time.time(),
-                ),
-            ],
+        record_review(
+            conn,
+            review_id="review_invalidated_canary",
+            trade_id="position_invalidated_canary",
+            position_id="position_invalidated_canary",
+            failure_tags=[],
+            review={},
+            created_at=created_at + 7200,
         )
-        conn.executemany(
-            """
-            INSERT INTO position_supervisor_trace
-            (trace_id, position_id, trade_id, event_ts, template_id, stage,
-             execution_status, execution_reason, trace_integrity, created_at)
-            VALUES (?, ?, ?, ?, 'position_supervisor:conservative.v1',
-                    'learning_shadow', 'observation_only',
-                    'learning_worker_candidate_replay:psv_unusable_canary',
-                    'recovered', ?)
-            """,
-            [
-                (
-                    "trace_contaminated_canary",
-                    "position_contaminated_canary",
-                    "position_contaminated_canary",
-                    created_at + 3500,
-                    created_at + 3500,
-                ),
-                (
-                    "trace_invalidated_canary",
-                    "position_invalidated_canary",
-                    "position_invalidated_canary",
-                    created_at + 7100,
-                    created_at + 7100,
-                ),
-            ],
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_contaminated_canary",
+            review_id="review_contaminated_canary",
+            event_ts=created_at + 3600,
+            payload={
+                "counterfactual_id": "cf_contaminated_canary",
+                "review_id": "review_contaminated_canary",
+                "trade_id": "position_contaminated_canary",
+                "position_id": "position_contaminated_canary",
+                "close_ts": created_at + 3600,
+                "evidence": {
+                    "regime": "trend",
+                    "maturity": {"governance_eligible": True},
+                },
+            },
+        )
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_invalidated_canary",
+            review_id="review_invalidated_canary",
+            event_ts=created_at + 7200,
+            payload={
+                "counterfactual_id": "cf_invalidated_canary",
+                "review_id": "review_invalidated_canary",
+                "trade_id": "position_invalidated_canary",
+                "position_id": "position_invalidated_canary",
+                "close_ts": created_at + 7200,
+                "evidence": {
+                    "regime": "range",
+                    "evidence_invalidated": True,
+                    "maturity": {"governance_eligible": True},
+                },
+            },
+        )
+        conn.commit()
+        _write_supervisor_trace(
+            db_path,
+            trace_id="trace_contaminated_canary",
+            position_id="position_contaminated_canary",
+            trade_id="position_contaminated_canary",
+            event_ts=created_at + 3500,
+            stage="learning_shadow",
+            execution_status="observation_only",
+            execution_reason="learning_worker_candidate_replay:psv_unusable_canary",
+            trace_integrity="recovered",
+        )
+        _write_supervisor_trace(
+            db_path,
+            trace_id="trace_invalidated_canary",
+            position_id="position_invalidated_canary",
+            trade_id="position_invalidated_canary",
+            event_ts=created_at + 7100,
+            stage="learning_shadow",
+            execution_status="observation_only",
+            execution_reason="learning_worker_candidate_replay:psv_unusable_canary",
+            trace_integrity="recovered",
         )
         conn.commit()
     finally:
@@ -2816,8 +2928,8 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     calls.clear()
     result = al.run_autonomous_learning_cycle(db_path=db_path, sample_limit=20)
 
-    assert result["demo_autonomy"]["status"] == "skipped_explicit_apply_required"
-    assert "demo_apply" not in calls
+    assert result["demo_autonomy"]["enabled"] is True
+    assert "demo_apply" in calls
 
     calls.clear()
     result = al.run_autonomous_learning_cycle(

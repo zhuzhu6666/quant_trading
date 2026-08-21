@@ -8,6 +8,7 @@ import pytest
 
 from backend.ledger.service import DecisionLedger
 from backend.services import live_service
+from backend.services.live_loop_controller import LiveLoopController
 
 
 class _IdleThread:
@@ -29,16 +30,21 @@ class _IdleThread:
         self._alive = False
 
 
+def _bind_generation(thread, *, broker="ctrader", strategy_name="factor_v4"):
+    controller = live_service._LIVE_LOOP_CONTROLLER
+    generation = controller.begin_start(
+        broker=broker,
+        strategy_name=strategy_name,
+    )
+    controller.bind_thread(generation.generation_id, thread)
+    return generation
+
+
 @pytest.fixture(autouse=True)
 def _reset_loop_state(monkeypatch, tmp_path):
     monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path / "safety"))
+    monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", LiveLoopController())
     live_service._process_shutdown_requested = False
-    live_service._loop_thread = None
-    live_service._loop_stop_flag = None
-    live_service._loop_broker = None
-    live_service._loop_started_at = None
-    live_service._loop_strategy_name = None
-    live_service._last_loop_end = None
     live_service._pending_close_reasons.clear()
     live_service._pending_close_verdicts.clear()
     live_service._recovery_zero_confirmations.clear()
@@ -68,13 +74,7 @@ def _reset_loop_state(monkeypatch, tmp_path):
 
     live_service._reset_session_state_for_new_day()
     yield
-    live_service._loop_thread = None
     live_service._process_shutdown_requested = False
-    live_service._loop_stop_flag = None
-    live_service._loop_broker = None
-    live_service._loop_started_at = None
-    live_service._loop_strategy_name = None
-    live_service._last_loop_end = None
     live_service._pending_close_reasons.clear()
     live_service._pending_close_verdicts.clear()
     live_service._recovery_zero_confirmations.clear()
@@ -240,7 +240,6 @@ def test_closed_position_handler_preserves_close_source_mapping(monkeypatch):
             "total_pnl": -1.0,
         },
     )
-    monkeypatch.setattr(live_service, "_write_close_decision_log_after_tick", lambda **kwargs: None)
     monkeypatch.setattr(live_service, "_lookup_recovery_context_integrity", lambda *args: "full")
 
     def _capture_ledger(**kwargs):
@@ -758,7 +757,14 @@ def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
     assert result["ready"] is False
     assert result["accepting_new_risk"] is False
     assert scheduler_calls == ["started"]
-    assert isinstance(live_service._loop_stop_flag, threading.Event)
+    generation = live_service._LIVE_LOOP_CONTROLLER.current()
+    ownership = live_service._LIVE_LOOP_CONTROLLER.ownership_snapshot()
+    assert generation is not None
+    assert generation.generation_id == result["generation"]
+    assert isinstance(ownership.stop_flag, threading.Event)
+    assert ownership.broker == "ctrader"
+    assert ownership.strategy_name == "smoke"
+    assert live_service._LIVE_LOOP_CONTROLLER.status()["thread_id"] == 12345
     assert live_service._live_state_get("loop_running") is True
     assert live_service._live_state_get("broker") == "ctrader"
     assert live_service._live_state_get("loop_strategy") == "smoke"
@@ -778,158 +784,13 @@ def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
     assert live_service._live_state_get("session_pnl") == 0.0
 
 
-def test_legacy_stop_retains_ownership_and_rejects_start_while_draining(monkeypatch):
-    class _DrainingThread:
-        ident = 24680
-
-        def __init__(self):
-            self._alive = True
-            self.join_started = threading.Event()
-            self.release = threading.Event()
-
-        def is_alive(self):
-            return self._alive
-
-        def join(self, timeout=None):
-            self.join_started.set()
-            assert self.release.wait(timeout=2.0)
-            self._alive = False
-
-    thread = _DrainingThread()
-    stop_flag = threading.Event()
-    writes = []
-    live_service._loop_thread = thread
-    live_service._loop_stop_flag = stop_flag
-    live_service._loop_broker = "ctrader"
-    live_service._loop_started_at = 123.0
-    live_service._loop_strategy_name = "factor_v4"
-    live_service._live_state_update(
-        loop_running=True,
-        loop_strategy="factor_v4",
-        accepting_new_risk=True,
-    )
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
-    monkeypatch.setattr(
-        live_service,
-        "_persist_loop_desired_state",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_set",
-        lambda key, value: writes.append((key, value)),
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_start_live_scheduler",
-        lambda: pytest.fail("a replacement scheduler must not start while draining"),
-    )
-
-    draining = live_service.stop_loop(persist_desired=False)
-    assert thread.join_started.wait(timeout=1.0)
-    replacement = live_service.start_loop("ctrader", persist_desired=False)
-    status = live_service.loop_status()
-
-    assert draining["phase"] == "draining"
-    assert draining["thread_alive"] is True
-    assert replacement["ok"] is False
-    assert replacement["error"] == "live_loop_draining"
-    assert replacement["phase"] == "draining"
-    assert live_service._loop_thread is thread
-    assert live_service._loop_stop_flag is stop_flag
-    assert live_service._live_state_get("loop_running") is True
-    assert live_service._live_state_get("accepting_new_risk") is False
-    assert status["phase"] == "draining"
-    assert status["thread_alive"] is True
-    assert status["accepting_new_risk"] is False
-    assert "live_loop_draining" in status["blockers"]
-
-    thread.release.set()
-    deadline = time.time() + 1.0
-    while live_service._loop_thread is not None and time.time() < deadline:
-        time.sleep(0.01)
-
-    assert live_service._loop_thread is None
-    assert live_service._loop_stop_flag is None
-    assert live_service._live_state_get("loop_running") is False
-    assert live_service._live_state_get("loop_shutdown")["status"] == "completed"
-    assert writes[0][1]["status"] == "draining"
-    assert writes[-1][1]["status"] == "completed"
-
-
-def test_legacy_stop_waits_for_admitted_open_rpc_before_returning(monkeypatch):
-    class _LoopThread:
-        ident = 13579
-
-        def __init__(self):
-            self._alive = True
-            self.release = threading.Event()
-
-        def is_alive(self):
-            return self._alive
-
-        def join(self, timeout=None):
-            assert self.release.wait(timeout=2.0)
-            self._alive = False
-
-    thread = _LoopThread()
-    stop_flag = threading.Event()
-    live_service._loop_thread = thread
-    live_service._loop_stop_flag = stop_flag
-    live_service._loop_broker = "ctrader"
-    live_service._loop_started_at = time.time()
-    live_service._loop_strategy_name = "factor_v4"
-    live_service._live_state_update(
-        loop_running=True,
-        loop_strategy="factor_v4",
-        accepting_new_risk=True,
-    )
-    monkeypatch.setattr(live_service, "_generation_controller_enabled", lambda: False)
-    monkeypatch.setattr(live_service, "_runtime_kv_set", lambda *_args, **_kwargs: None)
-
-    result = {}
-    live_service._OPEN_TRADE_ADMISSION_LOCK.acquire()
-    try:
-        stop_thread = threading.Thread(
-            target=lambda: result.setdefault(
-                "value", live_service.stop_loop(persist_desired=False)
-            )
-        )
-        stop_thread.start()
-        deadline = time.time() + 1.0
-        while not stop_flag.is_set() and time.time() < deadline:
-            time.sleep(0.01)
-
-        assert stop_flag.is_set() is True
-        assert stop_thread.is_alive() is True
-        assert live_service._loop_thread is thread
-        assert live_service._live_state_get("accepting_new_risk") is False
-    finally:
-        live_service._OPEN_TRADE_ADMISSION_LOCK.release()
-
-    stop_thread.join(timeout=1.0)
-    assert stop_thread.is_alive() is False
-    assert result["value"]["phase"] == "draining"
-    assert live_service._loop_thread is thread
-
-    thread.release.set()
-    deadline = time.time() + 1.0
-    while live_service._loop_thread is not None and time.time() < deadline:
-        time.sleep(0.01)
-    assert live_service._loop_thread is None
-
-
 def test_process_shutdown_joins_loop_preserves_desired_and_releases_ownership(monkeypatch):
     thread = _IdleThread()
     thread.start()
-    stop_flag = threading.Event()
+    generation = _bind_generation(thread, strategy_name="smoke")
+    stop_flag = generation.stop_event
     runtime_writes = []
     desired_writes = []
-    live_service._loop_thread = thread
-    live_service._loop_stop_flag = stop_flag
-    live_service._loop_broker = "ctrader"
-    live_service._loop_started_at = 123.0
-    live_service._loop_strategy_name = "smoke"
     live_service._live_state_update(loop_running=True, loop_strategy="smoke")
     monkeypatch.setattr(
         live_service,
@@ -949,11 +810,8 @@ def test_process_shutdown_joins_loop_preserves_desired_and_releases_ownership(mo
     assert result["desired_state_preserved"] is True
     assert result["ownership_released"] is True
     assert stop_flag.is_set() is True
-    assert live_service._loop_thread is None
-    assert live_service._loop_stop_flag is None
-    assert live_service._loop_broker is None
-    assert live_service._loop_started_at is None
-    assert live_service._loop_strategy_name is None
+    assert live_service._LIVE_LOOP_CONTROLLER.ownership_snapshot().thread is None
+    assert live_service._LIVE_LOOP_CONTROLLER.status()["phase"] == "stopped"
     assert live_service._live_state_get("loop_running") is False
     assert live_service._live_state_get("loop_shutdown") == result
     assert desired_writes == []
@@ -967,13 +825,9 @@ def test_process_shutdown_timeout_keeps_thread_ownership_for_recovery(monkeypatc
 
     thread = _TimeoutThread()
     thread.start()
-    stop_flag = threading.Event()
+    generation = _bind_generation(thread, strategy_name="smoke")
+    stop_flag = generation.stop_event
     runtime_writes = []
-    live_service._loop_thread = thread
-    live_service._loop_stop_flag = stop_flag
-    live_service._loop_broker = "ctrader"
-    live_service._loop_started_at = 456.0
-    live_service._loop_strategy_name = "smoke"
     live_service._live_state_update(loop_running=True, loop_strategy="smoke")
     monkeypatch.setattr(
         live_service,
@@ -988,11 +842,11 @@ def test_process_shutdown_timeout_keeps_thread_ownership_for_recovery(monkeypatc
     assert result["ownership_released"] is False
     assert thread.join_timeout == 2.5
     assert stop_flag.is_set() is True
-    assert live_service._loop_thread is thread
-    assert live_service._loop_stop_flag is stop_flag
-    assert live_service._loop_broker == "ctrader"
-    assert live_service._loop_started_at == 456.0
-    assert live_service._loop_strategy_name == "smoke"
+    ownership = live_service._LIVE_LOOP_CONTROLLER.ownership_snapshot()
+    assert ownership.thread is thread
+    assert ownership.stop_flag is stop_flag
+    assert ownership.broker == "ctrader"
+    assert ownership.strategy_name == "smoke"
     assert live_service._live_state_get("loop_running") is True
     assert live_service._live_state_get("loop_shutdown") == result
     assert runtime_writes == [(live_service._RUNTIME_KV_LAST_SHUTDOWN, result)]
@@ -1063,47 +917,8 @@ def test_process_shutdown_latch_blocks_start_and_delayed_auto_resume(monkeypatch
     assert live_service._process_shutdown_requested is True
     assert direct["error"] == "process_shutdown_in_progress"
     assert scheduled is True
-    assert live_service._loop_thread is None
+    assert live_service._LIVE_LOOP_CONTROLLER.status()["thread_alive"] is False
     assert scheduler_starts == []
-
-
-def test_process_shutdown_does_not_clear_replacement_thread_state(monkeypatch):
-    replacement = _IdleThread()
-    replacement.start()
-
-    class _ReplacingThread(_IdleThread):
-        def join(self, timeout=None):
-            self._alive = False
-            live_service._loop_thread = replacement
-            live_service._loop_stop_flag = threading.Event()
-            live_service._loop_broker = "replacement"
-            live_service._loop_started_at = 999.0
-            live_service._loop_strategy_name = "replacement_strategy"
-            live_service._live_state_update(
-                loop_running=True,
-                loop_strategy="replacement_strategy",
-            )
-
-    original = _ReplacingThread()
-    original.start()
-    live_service._loop_thread = original
-    live_service._loop_stop_flag = threading.Event()
-    live_service._loop_broker = "ctrader"
-    live_service._loop_started_at = 321.0
-    live_service._loop_strategy_name = "original"
-    monkeypatch.setattr(live_service, "_runtime_kv_set", lambda _key, _value: None)
-
-    result = live_service.stop_loop_for_process_shutdown(timeout_sec=3.0)
-
-    assert result["status"] == "completed"
-    assert result["ownership_released"] is False
-    assert result["replacement_detected"] is True
-    assert live_service._loop_thread is replacement
-    assert live_service._loop_broker == "replacement"
-    assert live_service._loop_started_at == 999.0
-    assert live_service._loop_strategy_name == "replacement_strategy"
-    assert live_service._live_state_get("loop_running") is True
-    assert live_service._live_state_get("loop_strategy") == "replacement_strategy"
 
 
 def test_process_shutdown_latch_rejects_new_loop_generation(monkeypatch):
@@ -1434,7 +1249,6 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
         "orders": [],
         "positions": [],
         "upserts": [],
-        "decision_logs": [],
     }
 
     class _Ledger:
@@ -1471,8 +1285,6 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
     risk_verdict = SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"})
 
     monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
-    monkeypatch.setattr(live_service, "_DECISION_LOG", object())
-    monkeypatch.setattr(live_service, "_DECISION_LOG_RUN_ID", 88)
     monkeypatch.setattr(live_service, "_exec_quality", _ExecQuality())
     monkeypatch.setattr(live_service, "_track_local_sl_tp", lambda *args, **kwargs: calls["track"].append((args, kwargs)))
     monkeypatch.setattr(
@@ -1494,11 +1306,6 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
         live_service,
         "_upsert_recovery_position_state",
         lambda raw, **kwargs: calls["upserts"].append((raw, kwargs)),
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_safe_decision_log",
-        lambda log_store, **kwargs: calls["decision_logs"].append((log_store, kwargs)),
     )
 
     logs: list[str] = []
@@ -1545,9 +1352,6 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
     assert calls["upserts"][0][0]["entry_decision_id"] == "dec_open_amended"
     assert calls["upserts"][0][1]["meta"]["entry_protection_plan"]["status"] == "applied"
     assert calls["upserts"][0][1]["meta"]["entry_protection_plan"]["applied_stop_loss"] == 3998.0
-    assert calls["decision_logs"][0][1]["run_id"] == 88
-    assert calls["decision_logs"][0][1]["bar_date"] == "2026-07-05"
-    assert '"position_id": 268' in calls["decision_logs"][0][1]["meta"]
 
 
 def test_delegate_timeout_supervisor_close_logs_timeout_trace(monkeypatch):
@@ -1853,11 +1657,27 @@ def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
 
         def close_position(self, pid, volume=0.0):
             close_calls.append((pid, volume))
-            return SimpleNamespace(success=True, outcome="confirmed", position_id=pid)
+            return SimpleNamespace(
+                success=True,
+                outcome="confirmed",
+                position_id=pid,
+                execution_intent_id="intent-emergency-268",
+                execution_intent_status="persisted",
+            )
 
     bridge = _Bridge()
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
     monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(
+        live_service,
+        "_recover_emergency_execution_intents",
+        lambda _bridge: {
+            "schema": "broker_execution_intent_recovery.v2",
+            "ready": True,
+            "unresolved_count": 0,
+            "unresolved": [],
+        },
+    )
 
     result = live_service.emergency_close("ctrader", "XAUUSD+")
 
@@ -2922,14 +2742,8 @@ def test_recovered_close_repairs_missing_open_ledger(monkeypatch, tmp_path):
         close_reason="broker_close",
     )
 
-    rows = []
     conn = _conn()
     try:
-        rows = list(
-            conn.execute(
-                "SELECT * FROM decision_ledger WHERE position_id='268046003' AND event_type='open'"
-            )
-        )
         recovery = conn.execute(
             "SELECT entry_decision_id, context_integrity FROM recovery_position_state WHERE position_id=268046003"
         ).fetchone()
@@ -2937,8 +2751,9 @@ def test_recovered_close_repairs_missing_open_ledger(monkeypatch, tmp_path):
         conn.close()
 
     assert decision_id
-    assert len(rows) == 1
-    assert rows[0]["action_reason"] == "live_close_open_repair"
+    entry = ledger.get_latest_entry_decision("268046003")
+    assert entry is not None
+    assert entry["action_reason"] == "live_close_open_repair"
     # Recovery entry_decision_id is re-read from the position-decision index
     # by the store; newly created decisions are not in the index until the
     # next projection rebuild (batch-5 deployment item).
@@ -3214,45 +3029,6 @@ def test_position_path_metrics_keeps_flat_new_position_intact(monkeypatch, tmp_p
     assert metrics["thesis_status"] == "intact"
 
 
-def test_awe_trailing_builds_candidate_without_direct_broker_amend():
-    class _Awe:
-        def composite_conviction(self):
-            return 0.8
-
-    class _Bridge:
-        def amend_position_sltp(self, *args, **kwargs):
-            raise AssertionError("trailing must not directly amend broker state")
-
-    live_service._trailing_state.clear()
-    candidates = live_service._update_trailing_stops(
-        _Bridge(),
-        [
-            {
-                "position_id": 701,
-                "symbol": "XAUUSD+",
-                "direction": 1,
-                "entry_price": 4000.0,
-                "current_price": 4012.0,
-                "sl": 3990.0,
-                "tp": 4030.0,
-                "volume": 100.0,
-            }
-        ],
-        current_price=4012.0,
-        pipeline={"awe": _Awe()},
-        atr_price=5.0,
-        tick=1,
-        log=lambda msg: None,
-    )
-
-    assert len(candidates) == 1
-    candidate = candidates[0]
-    assert candidate.source == "legacy_awe_trailing"
-    assert candidate.action == "tighten"
-    assert candidate.risk_action == "tighten_position"
-    assert candidate.controls["target_stop_loss"] == pytest.approx(4004.5)
-
-
 def test_supervisor_tighten_trace_keeps_decision_id(monkeypatch):
     traces = []
     decisions = []
@@ -3505,29 +3281,54 @@ def test_supervisor_hold_trace_is_deduplicated_by_decision_evidence(monkeypatch)
     assert traces[0]["execution_status"] == "not_required"
 
 
-def test_demo_adaptive_supervisor_action_is_observed_without_risk_or_broker_mutation(monkeypatch):
+def test_demo_adaptive_supervisor_action_uses_governed_execution_chain(monkeypatch):
     traces = []
+    decisions = []
+    events = []
+    policy_calls = []
+    amend_calls = []
+    _patch_fresh_projection_publish_without_state_store(monkeypatch)
+    _patch_close_context_metadata(monkeypatch)
 
     class _Ledger:
         def log_position_supervisor_trace(self, **kwargs):
             traces.append(kwargs)
-            return "trace_demo_observed"
+            return "trace_demo_governed"
 
-        def log_decision(self, **_kwargs):
-            raise AssertionError("Demo adaptive observation must not enter RiskPolicy ledger")
+        def log_decision(self, **kwargs):
+            decisions.append(kwargs)
+            return "dec_demo_governed"
+
+        def log_position_event(self, **kwargs):
+            events.append(kwargs)
 
     class _Policy:
-        def evaluate(self, *_args, **_kwargs):
-            raise AssertionError("Demo adaptive observation must not call RiskPolicy")
+        def evaluate(self, action, context):
+            policy_calls.append((action, context))
+            return SimpleNamespace(
+                allowed=True,
+                reason="risk_reducing_action",
+                to_dict=lambda: {"allowed": True, "reason": "risk_reducing_action"},
+            )
 
     class _Bridge:
         is_connected = True
 
         def get_spot_quote(self):
-            raise AssertionError("Demo adaptive observation must not read a broker quote")
+            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05, "ts": time.time()}
 
-        def amend_position_sltp(self, *_args, **_kwargs):
-            raise AssertionError("Demo adaptive observation must not amend broker SL/TP")
+        def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
+            amend_calls.append((pid, sl, tp))
+            return SimpleNamespace(success=True, position_id=pid, sl=sl, tp=tp)
+
+        def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
+            return SimpleNamespace(
+                status="fresh",
+                reconcile_id="demo-governed-reconcile",
+                observed_at=time.time(),
+                generated_at=time.time(),
+                positions=({"position_id": 907, "sl": 4005.0, "tp": 4030.0},),
+            )
 
     verdict = {
         "position_id": "demo-observed",
@@ -3584,13 +3385,18 @@ def test_demo_adaptive_supervisor_action_is_observed_without_risk_or_broker_muta
 
     assert handled == {907}
     assert traces
-    observed = traces[-1]
-    assert observed["stage"] == "execution_skipped"
-    assert observed["execution_status"] == "observation_only"
-    assert observed["execution"]["execution_class"] == "observed"
-    assert observed["execution"]["requested_action"] == "tighten"
-    assert observed["execution"]["effective_action"] == "hold"
-    assert observed["execution"]["is_real_execution"] is False
+    assert policy_calls
+    assert policy_calls[0][0] == "tighten_position"
+    assert decisions[0]["event_type"] == "supervisor_tighten"
+    assert amend_calls == [(907, 4005.0, 4030.0)]
+    applied = [item for item in traces if item["outcome"] == "applied"]
+    assert applied
+    assert applied[-1]["stage"] == "executed"
+    assert applied[-1]["execution_status"] == "applied"
+    assert applied[-1]["execution"]["is_real_execution"] is True
+    assert applied[-1]["execution"]["broker_action_confirmed"] is True
+    assert applied[-1]["execution"]["reconcile_confirmed"] is True
+    assert events[0]["event_type"] == "tightened"
 
 
 def test_adaptive_duplicate_requires_same_bar_episode_posture_and_fingerprint(monkeypatch):
@@ -3840,20 +3646,8 @@ def test_supervisor_dynamic_tpsl_sends_extended_take_profit(monkeypatch):
     assert applied["execution"]["target_take_profit_changed"] is True
 
 
-def test_protection_cycle_supersedes_trailing_when_supervisor_handles_position(monkeypatch):
+def test_protection_cycle_does_not_collect_retired_trailing_when_supervisor_handles_position(monkeypatch):
     superseded = []
-    candidate = live_service.ProtectionCandidate(
-        source="legacy_awe_trailing",
-        action="tighten",
-        priority=50,
-        position_id=703,
-        risk_action="tighten_position",
-        controls={"target_stop_loss": 4005.0},
-        reason="legacy_awe_trailing",
-        position={"position_id": 703, "symbol": "XAUUSD+", "direction": 1},
-    )
-
-    monkeypatch.setattr(live_service, "_update_trailing_stops", lambda *args, **kwargs: [candidate])
     monkeypatch.setattr(live_service, "_enforce_holding_timeout", lambda *args, **kwargs: set())
     monkeypatch.setattr(live_service, "_entry_protection_repair_candidates", lambda *args, **kwargs: [])
     monkeypatch.setattr(live_service, "_run_position_supervision", lambda *args, **kwargs: {703})
@@ -3864,7 +3658,7 @@ def test_protection_cycle_supersedes_trailing_when_supervisor_handles_position(m
     )
     monkeypatch.setattr(
         live_service,
-        "_execute_trailing_candidate",
+        "_execute_protection_candidate",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("superseded candidate must not execute")),
     )
 
@@ -3881,8 +3675,9 @@ def test_protection_cycle_supersedes_trailing_when_supervisor_handles_position(m
     )
 
     assert result["supervisor"] == [703]
-    assert result["trailing_superseded"] == [703]
-    assert superseded == [(703, "position_supervisor")]
+    assert result["trailing_superseded"] == []
+    assert result["trailing_applied"] == []
+    assert superseded == []
 
 
 def test_risk_reduction_policy_exception_returns_allow_and_defers_audit(monkeypatch):
@@ -3909,21 +3704,9 @@ def test_risk_reduction_policy_exception_returns_allow_and_defers_audit(monkeypa
     assert events[0]["event_type"] == "risk_reduction_policy_unavailable"
 
 
-def test_protection_cycle_continues_trailing_when_supervisor_stage_fails(monkeypatch):
-    candidate = live_service.ProtectionCandidate(
-        source="legacy_awe_trailing",
-        action="tighten",
-        priority=50,
-        position_id=704,
-        risk_action="tighten_position",
-        controls={"target_stop_loss": 4005.0},
-        reason="legacy_awe_trailing",
-        position={"position_id": 704, "symbol": "XAUUSD+", "direction": 1},
-    )
+def test_protection_cycle_does_not_execute_retired_trailing_when_supervisor_stage_fails(monkeypatch):
     executed = []
     outbox = []
-
-    monkeypatch.setattr(live_service, "_update_trailing_stops", lambda *args, **kwargs: [candidate])
     monkeypatch.setattr(live_service, "_enforce_holding_timeout", lambda *args, **kwargs: set())
     monkeypatch.setattr(live_service, "_entry_protection_repair_candidates", lambda *args, **kwargs: [])
     monkeypatch.setattr(
@@ -3933,7 +3716,7 @@ def test_protection_cycle_continues_trailing_when_supervisor_stage_fails(monkeyp
     )
     monkeypatch.setattr(
         live_service,
-        "_execute_trailing_candidate",
+        "_execute_protection_candidate",
         lambda item, **kwargs: executed.append(item.position_id) or True,
     )
     monkeypatch.setattr(
@@ -3954,63 +3737,16 @@ def test_protection_cycle_continues_trailing_when_supervisor_stage_fails(monkeyp
         log=lambda msg: None,
     )
 
-    assert executed == [704]
-    assert result["trailing_applied"] == [704]
+    assert executed == []
+    assert result["trailing_applied"] == []
+    assert result["trailing_superseded"] == []
     assert result["stage_errors"][0]["stage"] == "position_supervisor"
     assert outbox[0]["event_type"] == "position_protection_stage_failed"
 
 
-def test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown(monkeypatch):
-    traces = []
-    decisions = []
-    protection_states = []
-    _patch_close_context_metadata(monkeypatch)
-    _patch_fresh_projection_publish_without_state_store(monkeypatch)
-
-    class _Ledger:
-        def log_decision(self, **kwargs):
-            decisions.append(kwargs)
-            return "dec_legacy_awe"
-
-        def log_position_supervisor_trace(self, **kwargs):
-            traces.append(kwargs)
-            return "trace_legacy_awe"
-
-        def log_position_event(self, **kwargs):
-            pass
-
-    class _Policy:
-        def evaluate(self, action, context):
-            return SimpleNamespace(
-                allowed=True,
-                reason="risk_reducing_action",
-                to_dict=lambda: {"allowed": True, "reason": "risk_reducing_action"},
-            )
-
-    class _Bridge:
-        is_connected = True
-
-        def get_spot_quote(self):
-            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05, "ts": time.time()}
-
-        def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
-            return SimpleNamespace(success=True, position_id=pid, sl=sl, tp=tp)
-
-        def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
-            return SimpleNamespace(
-                status="fresh",
-                reconcile_id="trailing-applied-r1",
-                observed_at=time.time(),
-                generated_at=time.time(),
-                positions=(
-                    {
-                        "position_id": 704,
-                        "symbol": "XAUUSD+",
-                        "sl": 4005.0,
-                        "tp": 4030.0,
-                    },
-                ),
-            )
+def test_retired_legacy_awe_candidate_cannot_enter_live_executor(monkeypatch):
+    logs = []
+    prepare_calls = []
 
     candidate = live_service.ProtectionCandidate(
         source="legacy_awe_trailing",
@@ -4018,264 +3754,30 @@ def test_legacy_awe_trailing_records_protection_state_not_supervisor_cooldown(mo
         priority=50,
         position_id=704,
         risk_action="tighten_position",
-        controls={"target_stop_loss": 4005.0, "target_take_profit": 4030.0},
-        evidence={"confidence": 0.4},
+        controls={"target_stop_loss": 4005.0},
         reason="legacy_awe_trailing",
-        position={
-            "position_id": 704,
-            "symbol": "XAUUSD+",
-            "direction": 1,
-            "entry_price": 4000.0,
-            "current_price": 4010.0,
-            "sl": 3990.0,
-            "tp": 4030.0,
-            "volume": 100.0,
-        },
+        position={"position_id": 704, "symbol": "XAUUSD+", "direction": 1},
     )
 
-    monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
-    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
     monkeypatch.setattr(
         live_service,
-        "_remember_supervisor_state",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy AWE must not update supervisor cooldown")),
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_remember_protection_state",
-        lambda *args, **kwargs: protection_states.append(kwargs),
+        "_prepare_protection_candidate_execution",
+        lambda *args, **kwargs: prepare_calls.append((args, kwargs)),
     )
 
-    handled = live_service._execute_trailing_candidate(
+    result = live_service._execute_protection_candidate(
         candidate,
-        bridge=_Bridge(),
-        cfg=SimpleNamespace(timeframe="M5"),
-        tick=5,
-        log=lambda msg: None,
-        acct={},
-    )
-
-    assert handled is True
-    assert decisions[0]["event_type"] == "legacy_awe_trailing"
-    assert protection_states[0]["source"] == "legacy_awe_trailing"
-    assert protection_states[0]["action_applied"] == "tighten"
-    assert traces[0]["decision_id"] == "dec_legacy_awe"
-
-
-def test_trailing_candidate_risk_rejected_logs_trace_without_amend(monkeypatch):
-    traces: list[dict] = []
-    events: list[dict] = []
-    _patch_close_context_metadata(monkeypatch)
-
-    class _Policy:
-        def evaluate(self, action, context):
-            return SimpleNamespace(to_dict=lambda: {"allowed": False, "reason": "blocked"})
-
-    class _Bridge:
-        is_connected = True
-
-        def amend_position_sltp(self, *args, **kwargs):
-            raise AssertionError("risk rejected candidate must not amend")
-
-    candidate = live_service.ProtectionCandidate(
-        source="legacy_awe_trailing",
-        action="tighten",
-        priority=50,
-        position_id=704,
-        risk_action="tighten_position",
-        controls={"target_stop_loss": 4005.0, "target_take_profit": 4030.0},
-        evidence={"confidence": 0.4},
-        reason="legacy_awe_trailing",
-        position={"position_id": 704, "symbol": "XAUUSD+", "direction": 1, "current_price": 4010.0},
-    )
-
-    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
-    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec_blocked")
-    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: traces.append(kwargs))
-    monkeypatch.setattr(live_service, "_log_supervisor_position_event", lambda **kwargs: events.append(kwargs))
-
-    handled = live_service._execute_trailing_candidate(
-        candidate,
-        bridge=_Bridge(),
-        cfg=SimpleNamespace(timeframe="M5"),
-        tick=6,
-        log=lambda msg: None,
-        acct={},
-    )
-
-    assert handled is True
-    assert traces[0]["stage"] == "risk_rejected"
-    assert traces[0]["execution_status"] == "blocked"
-    assert events == []
-
-
-def test_trailing_candidate_amend_failed_logs_event_and_trace(monkeypatch):
-    traces: list[dict] = []
-    events: list[dict] = []
-    logs: list[str] = []
-    _patch_close_context_metadata(monkeypatch)
-
-    class _Policy:
-        def evaluate(self, action, context):
-            return SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"})
-
-    class _Bridge:
-        is_connected = True
-
-        def get_spot_quote(self):
-            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05, "ts": time.time()}
-
-        def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
-            return SimpleNamespace(success=False, comment="bad_stops")
-
-    candidate = live_service.ProtectionCandidate(
-        source="legacy_awe_trailing",
-        action="tighten",
-        priority=50,
-        position_id=704,
-        risk_action="tighten_position",
-        controls={"target_stop_loss": 4005.0, "target_take_profit": 4030.0},
-        evidence={"confidence": 0.4},
-        reason="legacy_awe_trailing",
-        position={
-            "position_id": 704,
-            "symbol": "XAUUSD+",
-            "direction": 1,
-            "current_price": 4010.0,
-            "sl": 3990.0,
-            "tp": 4030.0,
-        },
-    )
-
-    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
-    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec_failed")
-    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: traces.append(kwargs))
-    monkeypatch.setattr(live_service, "_log_supervisor_position_event", lambda **kwargs: events.append(kwargs))
-
-    handled = live_service._execute_trailing_candidate(
-        candidate,
-        bridge=_Bridge(),
-        cfg=SimpleNamespace(timeframe="M5"),
-        tick=7,
-        log=logs.append,
-        acct={},
-    )
-
-    assert handled is True
-    assert events[0]["event_type"] == "amend_failed"
-    assert traces[0]["stage"] == "execution_failed"
-    assert traces[0]["execution_reason"] == "bad_stops"
-    assert "AMEND FAILED" in logs[0]
-
-
-@pytest.mark.parametrize(
-    ("reconcile_mode", "expected_reason"),
-    [
-        ("unchanged", "stop_loss_mismatch"),
-        ("failed", "position_reconcile_exception"),
-    ],
-)
-def test_trailing_candidate_requires_fresh_broker_projection_before_applied(
-    monkeypatch,
-    reconcile_mode,
-    expected_reason,
-):
-    traces: list[dict] = []
-    events: list[dict] = []
-    logs: list[str] = []
-    fail_closed: list[dict] = []
-    auxiliary_failures: list[tuple[str, dict]] = []
-    tracked: list[tuple] = []
-    _patch_close_context_metadata(monkeypatch)
-
-    class _Policy:
-        def evaluate(self, action, context):
-            return SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"})
-
-    class _Bridge:
-        is_connected = True
-
-        def get_spot_quote(self):
-            return {"bid": 4010.0, "ask": 4010.1, "mid": 4010.05, "ts": time.time()}
-
-        def amend_position_sltp(self, pid, sl=0.0, tp=0.0):
-            return SimpleNamespace(success=True, outcome="confirmed", position_id=pid)
-
-        def reconcile_positions(self, *, force=True, allow_cache_fallback=False):
-            if reconcile_mode == "failed":
-                raise TimeoutError("broker reconcile timeout")
-            return SimpleNamespace(
-                status="fresh",
-                reconcile_id="unchanged-r1",
-                observed_at=time.time(),
-                generated_at=time.time(),
-                positions=(
-                    {
-                        "position_id": 705,
-                        "symbol": "XAUUSD+",
-                        "sl": 3990.0,
-                        "tp": 4030.0,
-                    },
-                ),
+        bridge=SimpleNamespace(
+            amend_position_sltp=lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("retired AWE candidate must not reach broker")
             )
-
-    candidate = live_service.ProtectionCandidate(
-        source="legacy_awe_trailing",
-        action="tighten",
-        priority=50,
-        position_id=705,
-        risk_action="tighten_position",
-        controls={"target_stop_loss": 4005.0, "target_take_profit": 4030.0},
-        evidence={"confidence": 0.4},
-        reason="legacy_awe_trailing",
-        position={
-            "position_id": 705,
-            "symbol": "XAUUSD+",
-            "direction": 1,
-            "current_price": 4010.0,
-            "sl": 3990.0,
-            "tp": 4030.0,
-            "digits": 2,
-        },
-    )
-
-    monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
-    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec-unverified")
-    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: traces.append(kwargs))
-    monkeypatch.setattr(live_service, "_log_supervisor_position_event", lambda **kwargs: events.append(kwargs))
-    monkeypatch.setattr(live_service, "_track_local_sl_tp", lambda *args, **kwargs: tracked.append((args, kwargs)))
-    monkeypatch.setattr(
-        live_service,
-        "_remember_protection_state",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("unverified amend must not be marked applied")
         ),
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_persist_safety_fail_closed",
-        lambda **kwargs: fail_closed.append(kwargs) or {"status": "no_new_risk_latched"},
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_record_risk_reduction_aux_failure",
-        lambda event_type, **kwargs: auxiliary_failures.append((event_type, kwargs)),
-    )
-
-    handled = live_service._execute_trailing_candidate(
-        candidate,
-        bridge=_Bridge(),
         cfg=SimpleNamespace(timeframe="M5"),
-        tick=8,
+        tick=9,
         log=logs.append,
         acct={},
     )
 
-    assert handled is True
-    assert tracked == []
-    assert events[0]["event_type"] == "amend_failed"
-    assert traces[0]["stage"] == "execution_failed"
-    assert expected_reason in traces[0]["execution_reason"]
-    assert fail_closed[0]["blockers"] == ("amend_projection_unverified",)
-    assert auxiliary_failures[0][0] == "protection_amend_projection_unverified"
-    assert "AMEND FAILED" in logs[0]
+    assert result is False
+    assert prepare_calls == []
+    assert logs == ["tick 9: retired protection candidate ignored pos=704"]

@@ -1,9 +1,9 @@
-"""Canonical v2 facts, payloads, lineage, and dataset references.
+"""Canonical facts, payloads, lineage, and dataset references.
 
-This module is intentionally isolated from the existing ``state_v1`` writers.
-It provides small, shared write authorities for the new ``canonical_v2``
-schema; callers own the transaction and must not use it as an implicit reader
-side effect.  Historical backfill and production cutover are separate gates.
+This module is the single write authority for immutable business facts in
+``canonical_v2``.  Mutable operational state remains in the PostgreSQL
+``runtime`` schema; it is not a second fact ledger.  Callers own the
+transaction and this module never performs implicit reads or commits.
 """
 
 from __future__ import annotations
@@ -23,6 +23,83 @@ CANONICAL_SCHEMA = "canonical_v2"
 CANONICAL_PAYLOAD_SCHEMA = "canonical_payload.v1"
 CANONICAL_EVENT_SCHEMA = "canonical_event.v1"
 CANONICAL_SAMPLE_SCHEMA = "canonical_training_sample.v1"
+
+# SQLite is used only by isolated tests/offline tools.  It still uses the
+# canonical contract so those callers cannot silently exercise the retired
+# legacy fact tables.
+CANONICAL_SQLITE_DDL = """
+CREATE TABLE IF NOT EXISTS payload_blob (
+    payload_hash TEXT PRIMARY KEY,
+    payload_kind TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    canonical_bytes BLOB NOT NULL,
+    codec TEXT NOT NULL DEFAULT 'gzip',
+    raw_sha256 TEXT NOT NULL,
+    raw_bytes INTEGER NOT NULL,
+    compressed_bytes INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS event (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    producer TEXT NOT NULL,
+    producer_version TEXT NOT NULL DEFAULT '',
+    schema_version TEXT NOT NULL,
+    correlation_id TEXT NOT NULL DEFAULT '',
+    causation_id TEXT NOT NULL DEFAULT '',
+    parent_event_id TEXT,
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    payload_hash TEXT NOT NULL REFERENCES payload_blob(payload_hash),
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_canonical_event_idempotency
+    ON event(producer, idempotency_key) WHERE idempotency_key <> '';
+CREATE TABLE IF NOT EXISTS event_relation (
+    from_event_id TEXT NOT NULL REFERENCES event(event_id),
+    to_event_id TEXT NOT NULL REFERENCES event(event_id),
+    relation_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (from_event_id, to_event_id, relation_type)
+);
+CREATE TABLE IF NOT EXISTS projection_run (
+    projection_run_id TEXT PRIMARY KEY,
+    run_kind TEXT NOT NULL,
+    projection_name TEXT NOT NULL,
+    source_watermark TEXT NOT NULL,
+    code_version TEXT NOT NULL,
+    input_digest TEXT NOT NULL,
+    output_digest TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    error_code TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_canonical_projection_identity
+    ON projection_run(run_kind, projection_name, source_watermark, code_version, input_digest);
+CREATE TABLE IF NOT EXISTS training_sample_row (
+    sample_id TEXT PRIMARY KEY,
+    sample_type TEXT NOT NULL DEFAULT '', source_table TEXT NOT NULL DEFAULT '',
+    source_id TEXT NOT NULL DEFAULT '', decision_id TEXT NOT NULL DEFAULT '',
+    trade_id TEXT NOT NULL DEFAULT '', position_id TEXT NOT NULL DEFAULT '',
+    symbol TEXT NOT NULL DEFAULT '', timeframe TEXT NOT NULL DEFAULT '', event_ts REAL,
+    label_status TEXT NOT NULL DEFAULT '', integrity TEXT NOT NULL DEFAULT '',
+    train_weight REAL NOT NULL DEFAULT 1.0, features_json TEXT NOT NULL DEFAULT '{}',
+    verdict_json TEXT NOT NULL DEFAULT '{}', label_json TEXT NOT NULL DEFAULT '{}',
+    trace_json TEXT NOT NULL DEFAULT '{}', evidence_contract_json TEXT NOT NULL DEFAULT '{}',
+    config_version INTEGER NOT NULL DEFAULT 0, config_hash TEXT NOT NULL DEFAULT '',
+    evolution_run_id TEXT NOT NULL DEFAULT '', system_contaminated INTEGER NOT NULL DEFAULT 0,
+    governance_eligible INTEGER NOT NULL DEFAULT 0, governance_effective_weight REAL NOT NULL DEFAULT 1.0,
+    governance_eligibility_version TEXT NOT NULL DEFAULT '',
+    governance_ineligible_reason TEXT NOT NULL DEFAULT '',
+    governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
+    content_fingerprint TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
+"""
 
 EVENT_TYPES = frozenset(
     {
@@ -507,7 +584,166 @@ def _payload_iso(value: Any) -> str | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
+def ensure_sqlite_schema(conn: Any) -> None:
+    """Install the canonical-only SQLite fixture schema on an open connection."""
+
+    if _is_pg(conn):
+        return
+    conn.executescript(CANONICAL_SQLITE_DDL)
+
+
 LIVE_INCREMENT_RUN = "live.increment.v2"
+
+
+def record_payload_event(
+    conn: Any,
+    *,
+    event_type: str,
+    entity_type: str,
+    entity_id: str,
+    payload: Mapping[str, Any] | Any,
+    observed_at: Any,
+    producer: str,
+    payload_kind: str | None = None,
+    event_id: str | None = None,
+    idempotency_key: str | None = None,
+    causation_id: str = "",
+    parent_event_id: str = "",
+    status: str = "completed",
+) -> dict[str, Any]:
+    """Persist one immutable canonical event from an already-shaped payload."""
+
+    normalized_event_type = str(event_type or "")
+    normalized_entity_id = str(entity_id or "")
+    if normalized_event_type not in EVENT_TYPES:
+        raise CanonicalV2Error(f"unsupported canonical event_type: {normalized_event_type}")
+    if not normalized_entity_id:
+        raise CanonicalV2Error("canonical event entity_id must not be empty")
+    ref = put_payload(
+        conn,
+        payload,
+        payload_kind=str(payload_kind or normalized_event_type),
+        schema_version=CANONICAL_PAYLOAD_SCHEMA,
+        created_at=observed_at,
+    )
+    event = append_event(
+        conn,
+        event_id=str(event_id or "") or None,
+        event_type=normalized_event_type,
+        entity_type=str(entity_type or ""),
+        entity_id=normalized_entity_id,
+        payload_hash=ref.payload_hash,
+        producer=str(producer or ""),
+        observed_at=observed_at,
+        idempotency_key=str(idempotency_key or event_id or normalized_entity_id),
+        causation_id=str(causation_id or ""),
+        parent_event_id=str(parent_event_id or ""),
+        status=str(status or "completed"),
+    )
+    start_projection_run(
+        conn,
+        projection_run_id=LIVE_INCREMENT_RUN,
+        run_kind="backfill",
+        projection_name="live_increment",
+        source_watermark="live",
+        code_version=LIVE_INCREMENT_RUN,
+        input_digest="live",
+    )
+    return event
+
+
+def record_supervisor_trace_event(
+    conn: Any,
+    *,
+    trace_id: str,
+    decision_id: str = "",
+    event_ts: Any,
+    payload: Mapping[str, Any],
+    producer: str = "position_supervisor",
+) -> dict[str, Any]:
+    """Write one supervisor trace as an immutable canonical event."""
+
+    event = record_payload_event(
+        conn,
+        event_type="supervisor_trace",
+        entity_type="position_supervisor_trace",
+        entity_id=str(trace_id),
+        payload=dict(payload),
+        observed_at=event_ts,
+        producer=producer,
+        payload_kind="supervisor_trace",
+        event_id=f"live_supervisor_trace_{str(trace_id)}",
+        idempotency_key=str(trace_id),
+        causation_id=(f"live_decision_{decision_id}" if decision_id else ""),
+    )
+    if decision_id and conn.execute(
+        _sql(conn, "SELECT 1 FROM canonical_v2.event WHERE event_id=? LIMIT 1"),
+        (f"live_decision_{str(decision_id)}",),
+    ).fetchone() is not None:
+        append_relation(
+            conn,
+            from_event_id=str(event["event_id"]),
+            to_event_id=f"live_decision_{str(decision_id)}",
+            relation_type="caused_by",
+            created_at=event_ts,
+        )
+    return event
+
+
+def record_counterfactual_event(
+    conn: Any,
+    *,
+    counterfactual_id: str,
+    review_id: str = "",
+    decision_id: str = "",
+    trace_id: str = "",
+    event_ts: Any,
+    payload: Mapping[str, Any],
+    producer: str = "supervisor_counterfactual",
+) -> dict[str, Any]:
+    """Write one counterfactual result as an immutable canonical event.
+
+    Counterfactuals are derived evidence, not a mutable fact table.  The
+    deterministic event/idempotency keys make a learning cycle retry safe;
+    lineage edges are added only when the source event is present so an
+    incomplete historical sample cannot invent a relation.
+    """
+    normalized_id = str(counterfactual_id or "")
+    if not normalized_id:
+        raise CanonicalV2Error("canonical counterfactual requires counterfactual_id")
+    version_hash = hashlib.sha1(stable_json(dict(payload)).encode("utf-8")).hexdigest()[:20]
+    event = record_payload_event(
+        conn,
+        event_type="counterfactual_review",
+        entity_type="supervisor_counterfactual",
+        entity_id=normalized_id,
+        payload=dict(payload),
+        observed_at=event_ts,
+        producer=producer,
+        payload_kind="counterfactual_review",
+        event_id=f"live_counterfactual_{normalized_id}_{version_hash}",
+        idempotency_key=f"{normalized_id}:{version_hash}",
+    )
+    source_ids = (
+        (f"live_review_{str(review_id)}", "reviews"),
+        (f"live_decision_{str(decision_id)}", "derived_from"),
+        (f"live_supervisor_trace_{str(trace_id)}", "derived_from"),
+    )
+    for source_event_id, relation_type in source_ids:
+        if not source_event_id.endswith("_"):
+            exists = conn.execute(
+                _sql(conn, "SELECT 1 FROM canonical_v2.event WHERE event_id=? LIMIT 1"),
+                (source_event_id,),
+            ).fetchone()
+            if exists is not None:
+                append_relation(
+                    conn,
+                    from_event_id=str(event["event_id"]),
+                    to_event_id=source_event_id,
+                    relation_type=relation_type,
+                    created_at=event_ts,
+                )
+    return event
 
 
 def record_decision_event(
@@ -544,7 +780,7 @@ def record_decision_event(
 
     When *factor_snapshots* is provided the per-factor detail is embedded in the
     payload, enabling consumers to derive factor data from the canonical event
-    instead of reading the legacy ``decision_factor_snapshot`` table.
+    instead of reading a retired runtime projection table.
     """
     payload: dict[str, Any] = {
         "decision_id": str(decision_id or ""),
@@ -775,6 +1011,101 @@ def record_governance_mutation_event(
         code_version=LIVE_INCREMENT_RUN, input_digest="live",
     )
     return evt
+
+
+def record_parameter_template_lifecycle_event(
+    conn: Any,
+    *,
+    lifecycle_id: str,
+    event_ts: Any,
+    factor_id: str,
+    event: str,
+    status: str,
+    description: str,
+    reason: str = "",
+    score: Any = 0.0,
+    candidate_id: str = "",
+    template_id: str = "",
+    regime_key: str = "",
+    details: Mapping[str, Any] | None = None,
+    producer: str = "parameter_template_validation",
+) -> dict[str, Any]:
+    """Write parameter-template lifecycle history to canonical governance facts."""
+
+    normalized_id = str(lifecycle_id or uuid.uuid4().hex)
+    payload = {
+        "lifecycle_id": normalized_id,
+        "factor_id": str(factor_id or ""),
+        "factor": str(factor_id or ""),
+        "event": str(event or ""),
+        "status": str(status or ""),
+        "source": "parameter_template",
+        "description": str(description or ""),
+        "reason": str(reason or ""),
+        "score": float(score or 0.0),
+        "candidate_id": str(candidate_id or ""),
+        "template_id": str(template_id or ""),
+        "regime_key": str(regime_key or ""),
+        "details": _json_value(details or {}),
+    }
+    return record_payload_event(
+        conn,
+        event_type="governance_effect",
+        entity_type="parameter_template_lifecycle",
+        entity_id=normalized_id,
+        payload=payload,
+        observed_at=event_ts,
+        producer=producer,
+        payload_kind="parameter_template_lifecycle",
+        event_id=f"live_param_tpl_lifecycle_{normalized_id}",
+        idempotency_key=f"parameter_template_lifecycle:{normalized_id}",
+    )
+
+
+def record_factor_lifecycle_event(
+    conn: Any,
+    *,
+    lifecycle_id: str,
+    event_ts: Any,
+    factor: str,
+    event: str,
+    source: str,
+    description: str = "",
+    score: Any = 0.0,
+    status: str = "UNKNOWN",
+    reason: str = "",
+    producer: str = "registry_adapter",
+) -> dict[str, Any]:
+    """Write one immutable runtime factor lifecycle fact to canonical_v2."""
+
+    normalized_id = str(lifecycle_id or "")
+    normalized_factor = str(factor or "")
+    if not normalized_id or not normalized_factor:
+        raise CanonicalV2Error("canonical factor lifecycle requires id and factor")
+    payload = {
+        "lifecycle_id": normalized_id,
+        "timestamp": float(event_ts or 0.0),
+        "event": str(event or ""),
+        "factor": normalized_factor,
+        "source": str(source or ""),
+        "factor_source": str(source or ""),
+        "description": str(description or ""),
+        "score": float(score or 0.0),
+        "status": str(status or "UNKNOWN"),
+        "reason": str(reason or ""),
+    }
+    return record_payload_event(
+        conn,
+        event_type="factor_observation",
+        entity_type="factor_lifecycle",
+        entity_id=normalized_id,
+        payload=payload,
+        observed_at=event_ts,
+        producer=producer,
+        payload_kind="factor_lifecycle",
+        event_id=f"live_factor_lifecycle_{normalized_id}",
+        idempotency_key=f"factor_lifecycle:{normalized_id}",
+    )
 
 
 def _json_value(value: Any) -> Any:

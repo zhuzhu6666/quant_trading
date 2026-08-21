@@ -18317,7 +18317,7 @@
     },
     "/api/v4/recent-ticks": {
       "get": {
-        "description": "返回最近 N 个 v4 信号记录 (从主状态库 decision_log 读取)。",
+        "description": "返回最近 N 个 v4 信号记录 (从 canonical_v2 risk_decision 读取)。",
         "operationId": "get_recent_ticks_api_v4_recent_ticks_get",
         "parameters": [
           {

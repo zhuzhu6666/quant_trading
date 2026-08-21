@@ -207,9 +207,13 @@ PY
 常用验证：
 
 ```bash
-python scripts/phase_a_health_check.py
-python scripts/phase_c_supervisor_check.py --limit 30
+.venv/bin/python scripts/canonical_v2_consistency.py --max-payloads 1000
+.venv/bin/python scripts/canonical_v2_live_reconcile.py --since-epoch "$(date -d '6 hours ago' +%s)"
+.venv/bin/python scripts/phased_repair_release_gate.py --target supervisor_enforce
 ```
+
+以上命令都是当前 canonical/runtime 单轨检查；已退役的
+`phase_a_health_check.py`、`phase_c_supervisor_check.py` 不得恢复或继续引用。
 
 判断原则：
 
@@ -250,7 +254,7 @@ Environment=QUANT_LEARNING_WORKER_CPU_AFFINITY=2,3
 
 - `quant-backend.service`: API、WebSocket、cTrader 连接、live loop、轻量健康检查、数据同步入口
 - `quant-learning-worker.service`: 学习调度、反事实成熟化、自治学习周期、特征工程、盘外模型重训练
-- PostgreSQL `state_v1`: live runtime state 与学习审计主库
+- PostgreSQL `runtime`: live runtime state 与运行审计主库；不可变事实与学习样本在 `canonical_v2`
 - SQLite `data/state.db`: 已删除；不再保留本地冷备，运行态状态只查 PostgreSQL
 
 学习 worker 当前固定使用 `CPUAffinity=2 3`，可以让重训练任务吃满 2 个核心；不要再把高 CPU 学习任务放回 backend 进程。

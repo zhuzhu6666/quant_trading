@@ -44,7 +44,7 @@ def _classify_runtime_patch(
 ) -> dict[str, Any]:
     """Derive governance risk from the effective before/target values.
 
-    This compatibility-path precheck is intentionally based on facts rather
+    This precheck is intentionally based on facts rather
     than ``risk_reduction`` or action-name hints supplied by a caller.  The
     coordinator performs the authoritative recheck under the scope lock.
     """
@@ -113,8 +113,6 @@ class RuntimeConfigMutationService:
     ) -> dict[str, Any]:
         static_release_flags = {
             "live_safety_plane_v2_mode",
-            "live_generation_controller_v2_enabled",
-            "ctrader_execution_outcome_v2_enabled",
             "governance_mutation_coordinator_v2_mode",
             "pg_job_queue_v2_enabled",
         }

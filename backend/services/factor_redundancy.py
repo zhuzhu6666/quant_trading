@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
+from backend.services.canonical_v2_reader import iter_decision_factor_snapshots_by_factor
 
 
 def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
@@ -14,10 +15,6 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     conn = connect_sqlite(db_path)
     conn.row_factory = __import__("sqlite3").Row
     return conn
-
-
-def _p(db_path: str | Path, sql: str) -> str:
-    return sql.replace("?", "%s") if is_state_db_path(db_path) else sql
 
 
 class RedundancyDetector:
@@ -80,24 +77,13 @@ class RedundancyDetector:
         conn = _connect(self.db_path, read_only=True)
         try:
             for name in names:
-                rows = []
-                try:
-                    from backend.services.canonical_v2_reader import iter_decision_factor_snapshots_by_factor
-                    snapshots = iter_decision_factor_snapshots_by_factor(conn, name, limit=int(limit_per_factor))
-                    if snapshots:
-                        rows = [{"normalized_value": s.get("normalized_value")} for s in snapshots]
-                except Exception:
-                    pass
-                if not rows:
-                    try:
-                        rows = conn.execute(
-                            _p(self.db_path, "SELECT normalized_value FROM decision_factor_snapshot WHERE factor=? ORDER BY id DESC LIMIT ?"),
-                            (name, int(limit_per_factor)),
-                        ).fetchall()
-                    except Exception:
-                        rows = []
+                snapshots = iter_decision_factor_snapshots_by_factor(
+                    conn,
+                    name,
+                    limit=int(limit_per_factor),
+                )
                 series = []
-                for row in rows:
+                for row in snapshots:
                     try:
                         val = float(row["normalized_value"])
                     except Exception:

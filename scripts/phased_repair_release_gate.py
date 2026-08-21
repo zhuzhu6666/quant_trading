@@ -22,7 +22,7 @@ def main() -> int:
     parser.add_argument(
         "--target",
         choices=tuple(TARGET_EXPECTED_FLAGS),
-        default="safety_enforce",
+        default="supervisor_enforce",
     )
     parser.add_argument("--required-hours", type=float, default=24.0)
     parser.add_argument("--max-gap-sec", type=float, default=75.0)

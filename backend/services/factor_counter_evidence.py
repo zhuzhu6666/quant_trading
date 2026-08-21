@@ -8,7 +8,6 @@ from backend.core.db import (
     connect_sqlite,
     get_state_pg_conn,
     is_state_db_path,
-    state_table_columns,
     state_table_exists,
 )
 from backend.core.db_helpers import (
@@ -20,7 +19,6 @@ from backend.services._brain_helpers import loads
 from backend.services.canonical_v2_reader import review_row
 from backend.services.failure_taxonomy import FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.state_payload_archive import load_json_payload
 
 
 KEEP_BLOCK_THRESHOLD = 0.65
@@ -47,29 +45,21 @@ def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
     return conn
 
 
-def _review_archive_select(conn: Any, *, alias: str = "r", output: str = "review_archive_hash") -> str:
-    if "review_archive_hash" not in state_table_columns(conn, "trade_outcome_review"):
-        return ""
-    return f", {alias}.review_archive_hash AS {output}"
-
-
-def _review_payload(conn: Any, row: Any, *, source_id_key: str = "review_id", inline_key: str = "review_json", archive_key: str = "review_archive_hash") -> dict[str, Any]:
+def _review_payload(row: Any, *, inline_key: str = "review_json") -> dict[str, Any]:
     try:
         keys = row.keys() if hasattr(row, "keys") else ()
-        source_id = row[source_id_key] if source_id_key in keys else ""
         inline_json = row[inline_key] if inline_key in keys else "{}"
-        archive_hash = row[archive_key] if archive_key in keys else ""
     except Exception:
-        source_id, inline_json, archive_hash = "", "{}", ""
-    payload = load_json_payload(
-        conn,
-        source_table="trade_outcome_review",
-        source_id=str(source_id or ""),
-        inline_json=inline_json,
-        archive_hash=archive_hash,
-        default={},
-    )
-    return payload if isinstance(payload, dict) else {}
+        inline_json = "{}"
+    if isinstance(inline_json, dict):
+        return dict(inline_json)
+    if isinstance(inline_json, str):
+        try:
+            value = loads(inline_json, {})
+        except Exception:
+            value = {}
+        return value if isinstance(value, dict) else {}
+    return {}
 
 
 class FactorCounterEvidenceService:
@@ -188,7 +178,7 @@ class FactorCounterEvidenceService:
         rows = [
             row
             for row in rows
-            if self._primary_responsibility(_review_payload(conn, row))
+            if self._primary_responsibility(_review_payload(row))
             not in FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES
         ]
         if not rows:
@@ -207,7 +197,7 @@ class FactorCounterEvidenceService:
                 positive += 1
             elif net < 0:
                 negative += 1
-            regime = self._extract_regime(_review_payload(conn, row))
+            regime = self._extract_regime(_review_payload(row))
             bucket = by_regime.setdefault(regime, {"count": 0.0, "net": 0.0, "confidence": 0.0})
             bucket["count"] += 1.0
             bucket["net"] += net * confidence
@@ -267,7 +257,6 @@ class FactorCounterEvidenceService:
                     **review,
                     "source_review_id": str(row["source_id"] or ""),
                     "source_review_json": review.get("review_json") or {},
-                    "source_review_archive_hash": "",
                 }
             )
         if not rows:
@@ -278,13 +267,7 @@ class FactorCounterEvidenceService:
         negative = 0
         sample_count = 0
         for row in rows:
-            review = _review_payload(
-                conn,
-                row,
-                source_id_key="source_review_id",
-                inline_key="source_review_json",
-                archive_key="source_review_archive_hash",
-            )
+            review = _review_payload(row, inline_key="source_review_json")
             if review_has_system_contamination(review):
                 continue
             if self._primary_responsibility(review) in FACTOR_PENALTY_BLOCKED_RESPONSIBILITIES:

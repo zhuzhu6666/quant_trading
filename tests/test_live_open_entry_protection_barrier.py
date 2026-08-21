@@ -35,7 +35,7 @@ def test_confirmed_open_latches_before_fallible_position_refresh(monkeypatch):
     class _Bridge:
         symbol = "XAUUSD+"
 
-        def get_positions(self, _symbol):
+        def reconcile_positions(self, *_args, **_kwargs):
             raise RuntimeError("position refresh failed after confirmed fill")
 
     with pytest.raises(RuntimeError, match="position refresh failed"):
@@ -85,6 +85,12 @@ def test_submit_contains_confirmed_open_post_fill_exception(monkeypatch):
         live_service,
         "_probe_final_open_admission",
         lambda **_kwargs: {"ok": True, "blockers": ()},
+    )
+    monkeypatch.setattr(live_service, "_open_trade_draining", lambda _stop: False)
+    monkeypatch.setattr(
+        live_service,
+        "_prepare_open_trade_intent",
+        lambda **_kwargs: "decision-open-777",
     )
     monkeypatch.setattr(
         live_service,

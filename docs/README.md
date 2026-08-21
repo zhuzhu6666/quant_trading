@@ -1,18 +1,19 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-08-18 (S7 冷启动完成：双服务 active、API 可用、75 张 runtime 表已重建)
+> Last verified: 2026-08-21 (runtime/canonical_v2 v30、旧事实清理和重启验收完成)
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读对应合同。
 
 ## 1. 当前结论
 
-- 当前分支为 `main`。
-- **当前姿态（2026-08-18）**：**S7 冷启动完成**——quant-backend `active`、quant-learning-worker `active`；全库已清空并重建，runtime schema 75 张表、canonical_v2 9 张表（空）；API `status=ok, db=connected`。
-- **全库清空（已完成）**：`state_v1`（86 表）已 DROP、`public`（4 表）已 DROP、`canonical_v2` 数据已 TRUNCATE（9 表 0 行）+ `legacy_mapping` 已 DROP；运行骨架迁入 `runtime` schema（6 表）；数据库 10.8GB → 9.7MB。
+- 开发基线为 `main`；发布流程会从该基线创建临时发布分支。
+- **当前姿态（2026-08-21）**：生产运行态统一使用 PostgreSQL `runtime`，不可变事实与学习样本统一使用 `canonical_v2`；migration ledger 已到 v30，`runtime.broker_execution_intent` 已存在，旧 runtime 事实表已退役。
+- **旧库清理（已完成）**：旧 `state_v1`、`public`、`legacy_mapping` 和本地 SQLite `data/state.db` 运行路径均已退役；生产代码不再读取、写入或重建这些路径。
+- **运行态迁移门（已完成，运行时风险门仍独立生效）**：service-backed cleanup 已清理旧 runtime 事实，普通监督执行使用 `governed_execute -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 单轨链。当前若 readiness 阻断，只能来自实时 market/session、Safety、incident 或 broker 事实，不代表迁移回退或兼容路径仍在。
 - **A 类结构修复（已完成）**：A1 trade_review 实时写入器 ✅ / A2 label 单一口径 ✅ / A3 posterior 触发放宽 ✅ / A4 win 单正反馈 ✅ / A5 effect 归因链代码就绪 ✅ / A6 supervisor_trace 成熟链 ✅。
-- **代码收敛（S2/S3 完成）**：db_helpers 公共层（33 文件）+ 四域清扫（9 空壳 + EvolutionKernel + 零调用转发 + consume 包装器）+ A1–A6 / B1–B5 结构修复；全量回归 2815 passed / 12 skipped。
+- **代码收敛（S2/S3 完成）**：db_helpers 公共层（33 文件）+ 四域清扫（9 空壳 + EvolutionKernel + 零调用转发 + consume 包装器）+ A1–A6 / B1–B5 结构修复；历史全量回归记录保留在对应 rollout 文档，当前发布以本批新鲜针对性/全量验证为准。
 - legacy 事实迁移的旧表述（P1/P2/P4/P5、1,702 处、schema version 20）已被"全库清空重建"取代，仅历史参考。
 - 前端（miniprogram_v2 / web_frontend）在 Windows 本地维护；服务器后端-only sparse checkout，只提供 API 与 `/ws/state`。
 
@@ -27,8 +28,8 @@ cTrader spot/account/positions/execution
      -> canonical RiskPolicy / RiskGovernor
      -> broker execution intent and reconcile
      -> position protection / emergency reduction
-  -> PostgreSQL state_v1
-     -> canonical runtime snapshots
+  -> PostgreSQL runtime operational state
+  -> canonical_v2 immutable events / samples
      -> read-only readiness and fact.v1 APIs
      -> Tauri desktop full console / mini-program status surface
 
@@ -43,7 +44,8 @@ learning worker
 | 领域 | 唯一事实或执行权 |
 |---|---|
 | broker 账户、仓位、成交 | cTrader 权威响应 + fresh reconcile |
-| 运行态、恢复、学习审计 | PostgreSQL `state_v1` |
+| 运行态、恢复、执行审计 | PostgreSQL `runtime` |
+| 不可变事实、生命周期事件、学习样本 | PostgreSQL `canonical_v2` |
 | 开仓/改仓/治理风险裁决 | `RiskPolicyService` / canonical risk calculator |
 | Safety | serial safety plane；旧链只在发布观察期做只读比较 |
 | RuntimeConfig 变更 | typed governance mutation + committed projection |

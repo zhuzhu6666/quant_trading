@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 from backend.core.db import (
     STATE_DB,
     connect_sqlite,
-    ensure_sqlite_columns,
     get_state_pg_conn,
     is_state_db_path,
     state_pg_enabled,
@@ -211,21 +210,6 @@ def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
         ensure_state_payload_schema(db_path)
     finally:
         conn.close()
-
-
-def ensure_evolution_columns(db_path: str | Path = STATE_DB) -> None:
-    if _use_pg(db_path):
-        return
-    ensure_sqlite_columns(
-        db_path,
-        "position_supervisor_trace",
-        {
-            "trace_integrity": "trace_integrity TEXT DEFAULT 'full'",
-            "config_version": "config_version INTEGER DEFAULT 0",
-            "config_hash": "config_hash TEXT DEFAULT ''",
-            "evolution_run_id": "evolution_run_id TEXT DEFAULT ''",
-        },
-    )
 
 
 def persist_runtime_config_snapshot(

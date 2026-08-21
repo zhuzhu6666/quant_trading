@@ -12,7 +12,7 @@ class SafetyCandidateExecutionRuntime:
     entry_protection_repair_source: str
     runtime_config_anchor: Any
     protection_candidate_cls: Any
-    execute_trailing_candidate: Any
+    execute_protection_candidate: Any
     evaluate_position_supervisor: Any
     build_safety_candidate: Any
     run_position_supervision: Any
@@ -64,7 +64,7 @@ def execute_live_safety_candidate(
             ),
         }
 
-    if candidate.action in {"repair_entry_protection", "trailing"}:
+    if candidate.action == "repair_entry_protection":
         return _execute_protection_candidate(
             candidate,
             position=position,
@@ -108,17 +108,12 @@ def _execute_protection_candidate(
     log: Any,
     runtime: SafetyCandidateExecutionRuntime,
 ) -> dict[str, Any]:
-    is_repair = candidate.action == "repair_entry_protection"
-    source = (
-        runtime.entry_protection_repair_source
-        if is_repair
-        else "legacy_awe_trailing"
-    )
+    source = runtime.entry_protection_repair_source
     anchor = runtime.runtime_config_anchor()
     protection = runtime.protection_candidate_cls(
         source=source,
-        action="repair_entry_protection" if is_repair else "tighten",
-        priority=20 if is_repair else 50,
+        action="repair_entry_protection",
+        priority=20,
         position_id=position_id,
         risk_action="tighten_position",
         controls=dict(candidate.controls or {}),
@@ -127,7 +122,7 @@ def _execute_protection_candidate(
         config_version=int(anchor.get("config_version") or 0),
         config_hash=str(anchor.get("config_hash") or ""),
     )
-    applied = runtime.execute_trailing_candidate(
+    applied = runtime.execute_protection_candidate(
         protection,
         bridge=bridge,
         cfg=cfg,
