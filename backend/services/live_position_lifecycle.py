@@ -283,6 +283,7 @@ def normalize_position_snapshot(raw: Any) -> dict[str, Any]:
             "open_price": float(getattr(raw, "open_price", 0.0) or getattr(raw, "entry_price", 0.0) or 0.0),
             "entry_price": float(getattr(raw, "entry_price", 0.0) or getattr(raw, "open_price", 0.0) or 0.0),
             "volume": float(getattr(raw, "volume", 0.0) or getattr(raw, "api_volume", 0.0) or 0.0),
+            "entry_decision_id": str(getattr(raw, "entry_decision_id", "") or ""),
         }
     direction = int(data.get("direction") or 0)
     if direction == 0:
@@ -296,6 +297,11 @@ def normalize_position_snapshot(raw: Any) -> dict[str, Any]:
         "open_price": float(data.get("open_price") or data.get("entry_price") or 0.0),
         "volume": float(data.get("api_volume") or data.get("volume") or 0.0),
         "type": str(data.get("type") or ("buy" if direction >= 0 else "sell")),
+        # Caller-supplied entry lineage (the live open-ledger decision id) must
+        # survive normalization: the recovery store persists it and its purge
+        # path treats rows without it as orphans.  Broker snapshots never carry
+        # it; only filled-open/repaired-open payloads do, so the default "".
+        "entry_decision_id": str(data.get("entry_decision_id") or ""),
         "raw": data,
     }
 

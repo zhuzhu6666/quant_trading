@@ -107,7 +107,13 @@ class RecoveryPositionStore:
         # Prefer the caller-supplied entry_decision_id (the live ledger return)
         # over the stale file index. The file index from 2026-08-16 has no
         # 284* positions and would wash a freshly-created decision id to "".
-        snapshot_entry = str(snapshot.get("entry_decision_id") or "")
+        raw_payload = snapshot.get("raw")
+        raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
+        snapshot_entry = str(
+            snapshot.get("entry_decision_id")
+            or raw_payload.get("entry_decision_id")
+            or ""
+        )
         lookup_entry = str(
             self.runtime.lookup_entry_decision_id(position_id) or ""
         )

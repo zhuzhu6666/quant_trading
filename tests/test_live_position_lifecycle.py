@@ -235,6 +235,7 @@ def test_normalize_position_snapshot_handles_dict_and_object_payloads():
     assert dict_snapshot["direction"] == -1
     assert dict_snapshot["volume"] == 250.0
     assert dict_snapshot["type"] == "sell"
+    assert dict_snapshot["entry_decision_id"] == ""
     assert dict_snapshot["raw"]["ticket"] == 101
     assert object_snapshot == {
         "position_id": 202,
@@ -243,6 +244,7 @@ def test_normalize_position_snapshot_handles_dict_and_object_payloads():
         "open_price": 1.085,
         "volume": 1000.0,
         "type": "buy",
+        "entry_decision_id": "",
         "raw": {
             "position_id": 202,
             "ticket": 202,
@@ -252,6 +254,7 @@ def test_normalize_position_snapshot_handles_dict_and_object_payloads():
             "open_price": 1.085,
             "entry_price": 1.085,
             "volume": 1000.0,
+            "entry_decision_id": "",
         },
     }
 

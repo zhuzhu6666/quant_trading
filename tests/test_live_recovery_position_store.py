@@ -233,3 +233,67 @@ def test_recovery_position_store_purges_only_unbrokered_rows_without_entry_linea
             broker="ctrader",
             broker_position_ids={904},
         )
+
+
+def test_recovery_store_keeps_lineage_when_index_is_stale(tmp_path):
+    """Regression: 2026-08-21 orphan purge of position 284485647.
+
+    A fresh open persists its recovery row while the position-decision index
+    has not been rebuilt yet, so lookup_entry_decision_id resolves to "".  The
+    caller-supplied entry_decision_id must survive normalization and the row
+    must then be protected from purge_unbrokered after the broker close.
+    """
+
+    path = tmp_path / "state.db"
+    connect = _connection_factory(path)
+    conn = connect()
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = RecoveryPositionStore(
+        RecoveryPositionStoreRuntime(
+            get_read_connection=connect,
+            get_write_connection=connect,
+            execute=lambda conn, sql, params=(): conn.execute(sql, params),
+            normalize_position=normalize_position_snapshot,
+            normalize_row=normalize_recovery_position_row,
+            lookup_entry_decision_id=lambda _position_id: "",  # stale index
+            build_meta_update_payload=build_recovery_meta_update_payload,
+            build_closed_update_payload=build_recovery_closed_update_payload,
+            now=lambda: 100.0,
+            local_open_volumes={},
+        )
+    )
+
+    # Same shape as _lifecycle_build_filled_open_recovery_payloads state_payload.
+    store.upsert(
+        {
+            "position_id": 284485647,
+            "symbol": "XAUUSD+",
+            "direction": -1,
+            "open_price": 4534.20,
+            "volume": 100.0,
+            "entry_decision_id": "dec_87ae51b36fe44742",
+        },
+        broker="ctrader",
+        strategy_name="factor_v4",
+        status="open",
+        context_integrity="full",
+    )
+    row = store.load(284485647)
+    assert row["entry_decision_id"] == "dec_87ae51b36fe44742"
+    assert row["context_integrity"] == "full"
+
+    # Broker closed the position: the row must NOT be purgeable as an orphan.
+    assert (
+        store.purge_unbrokered(
+            {284485647},
+            broker="ctrader",
+            broker_position_ids=set(),
+        )
+        == []
+    )
+    assert store.load(284485647)["entry_decision_id"] == "dec_87ae51b36fe44742"
