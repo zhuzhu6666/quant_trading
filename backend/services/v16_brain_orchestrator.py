@@ -125,6 +125,30 @@ def ensure_v16_brain_command_table(db_path: str | Path = STATE_DB) -> None:
         conn.close()
 
 
+def cancel_expired_v16_commands(
+    db_path: str | Path = STATE_DB,
+    *,
+    max_age_seconds: float | None = None,
+) -> dict[str, int]:
+    """Terminalize non-actionable V16 commands without running the full loop.
+
+    This is the standalone command-hygiene entry point.  It exists so the
+    specialist inbox can be swept (observation records, stale delegates,
+    authority-expired delegates) even when the full orchestration cycle is
+    gated off by ``_v16_orchestration_ready`` — otherwise expired commands
+    would linger as ``available`` until the gate happened to reopen.
+    The orchestrator's ``run_once`` calls the same logic via
+    ``_cancel_non_actionable_commands``; this function must stay the single
+    implementation of those UPDATE rules.
+    """
+
+    service = V16BrainOrchestratorService(db_path)
+    return service._cancel_non_actionable_commands(
+        persist=True,
+        max_age_seconds=max_age_seconds,
+    )
+
+
 class V16BrainOrchestratorService:
     """Run the V16 perception -> judgement -> delegation loop."""
 
@@ -307,7 +331,12 @@ class V16BrainOrchestratorService:
         finally:
             conn.close()
 
-    def _cancel_non_actionable_commands(self, *, persist: bool) -> dict[str, int]:
+    def _cancel_non_actionable_commands(
+        self,
+        *,
+        persist: bool,
+        max_age_seconds: float | None = None,
+    ) -> dict[str, int]:
         """Terminalize observation records and delegates whose candidate is stale."""
         if not persist:
             return {
@@ -402,7 +431,16 @@ class V16BrainOrchestratorService:
                   AND COALESCE(apply_count, 0)<COALESCE(max_apply_count, 1)
                   AND authority_issued_at<?
                 """,
-                (now, now, now - V16CommandGate._max_age_seconds()),
+                (
+                    now,
+                    now,
+                    now
+                    - (
+                        max(60.0, float(max_age_seconds))
+                        if max_age_seconds is not None
+                        else V16CommandGate._max_age_seconds()
+                    ),
+                ),
             )
             conn.commit()
             observation_count = int(observation.rowcount or 0)
@@ -957,7 +995,17 @@ class V16BrainOrchestratorService:
             correction_contract.get("policy_decision_id") or ""
         )
         candidate_id = str(governance.get("candidate_id") or "")
-        decision = "delegate" if candidate_id and governance.get("status") == "candidate_materialized" else "observe"
+        # 'candidate_already_materialized' is the idempotent re-run of a
+        # materialization: the candidate exists and the delegation must stay
+        # live, otherwise a second cycle would downgrade an existing delegate
+        # command to a mere observation.
+        decision = (
+            "delegate"
+            if candidate_id
+            and governance.get("status")
+            in {"candidate_materialized", "candidate_already_materialized"}
+            else "observe"
+        )
         action = str(governance.get("governance_action") or evaluation.get("action_type") or "observe")
         status = "delegated_to_specialist" if decision == "delegate" else str(governance.get("status") or evaluation.get("comparison_verdict") or "observing")
         posterior_fingerprint = str(posterior.get("fingerprint") or "")
@@ -972,13 +1020,19 @@ class V16BrainOrchestratorService:
         # IDs and timestamps are audit coordinates, not new evidence. Hash only
         # the substantive verdict so a periodic rerun updates one command
         # instead of manufacturing a new command for the same posterior.
+        # 'candidate_already_materialized' must hash identically to
+        # 'candidate_materialized': it is the idempotent re-run of the same
+        # materialization, not new evidence.
+        governance_status = str(governance.get("status") or "")
+        if governance_status == "candidate_already_materialized":
+            governance_status = "candidate_materialized"
         evidence_fingerprint = hashlib.sha256(dumps({
             "posterior_fingerprint": posterior_fingerprint,
             "selected_scope": posterior.get("selected_scope"),
             "selected_conclusion": posterior.get("selected_conclusion"),
             "comparison_verdict": evaluation.get("comparison_verdict"),
             "coverage_score": round(safe_float(evaluation.get("coverage_score")), 6),
-            "governance_status": governance.get("status"),
+            "governance_status": governance_status,
             "candidate_id": candidate_id,
             "scope_type": governance.get("scope_type") or evaluation.get("scope_type"),
             "scope_key": governance.get("scope_key") or scope.get("scope_key"),

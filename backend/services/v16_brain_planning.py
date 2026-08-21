@@ -1147,8 +1147,51 @@ class BrainMediumImpactGovernanceService:
             target_agent = execution_owner(
                 control_surface(mapped["scope_type"], mapped["policy_action"])
             )
-            candidate = BrainGovernanceCandidateService(self.db_path).create_candidate(
-                candidate_id=self._candidate_id(evaluation=evaluation, mapped=mapped),
+            candidate_service = BrainGovernanceCandidateService(self.db_path)
+            candidate_id_deterministic = self._candidate_id(
+                evaluation=evaluation, mapped=mapped
+            )
+            # Idempotent materialization: the deterministic candidate_id is a
+            # pure function of (posterior fingerprint, scope, action, target).
+            # When the same posterior conclusion is re-evaluated on a later
+            # cycle the candidate already exists — re-recording another
+            # 'candidate_materialized' governance row for it would grow the
+            # audit ledger by one row per run while carrying zero new facts.
+            existing_candidate = (
+                candidate_service.load_candidate(candidate_id_deterministic)
+                if persist_candidate
+                else {}
+            )
+            if existing_candidate:
+                return {
+                    "governance_id": f"brain_p4_gov_{uuid.uuid4().hex[:16]}",
+                    "schema_version": "brain_medium_impact_governance.v1",
+                    "plan_id": str(evaluation.get("plan_id") or ""),
+                    "eval_id": str(evaluation.get("eval_id") or ""),
+                    "governance_action": mapped["policy_action"],
+                    "scope_type": mapped["scope_type"],
+                    "scope_key": mapped["scope_key"],
+                    "status": "candidate_already_materialized",
+                    "candidate_id": candidate_id_deterministic,
+                    "suggestion_id": "",
+                    "evidence_score": evidence_score,
+                    "critic_verdict": critic_verdict,
+                    "comparison_verdict": comparison_verdict,
+                    "risk_verdict": risk_verdict,
+                    "decision_policy": decision_policy,
+                    "rollback_plan": self._rollback_plan(mapped),
+                    "posterior_refs": {
+                        **dict(evaluation.get("evidence_refs") or {}),
+                        "correction_contract": correction_contract,
+                        "parent_policy_decision_id": parent_policy_decision_id,
+                    },
+                    "autonomy_guard": autonomy_guard,
+                    "boundary": self.boundary(),
+                    "created_at": now,
+                    "updated_at": time.time(),
+                }
+            candidate = candidate_service.create_candidate(
+                candidate_id=candidate_id_deterministic,
                 source_agent="v16_brain", source_kind="brain_medium_impact_governance",
                 source_ref_type=("v16_posterior_arbitration" if arbitration.get("fingerprint") else "brain_action_plan_eval"),
                 source_ref_id=str(arbitration.get("fingerprint") or evaluation.get("eval_id") or ""),

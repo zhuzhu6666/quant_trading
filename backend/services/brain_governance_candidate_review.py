@@ -114,6 +114,23 @@ class BrainGovernanceCandidateReviewService:
     ) -> dict[str, Any]:
         ensure_brain_governance_candidate_review_table(self.db_path)
         lifecycle = self.candidates.reconcile_expired_candidates()
+        # Sweep the V16 command inbox on the same cadence.  The full
+        # orchestration cycle is gated by posterior-evidence readiness and may
+        # legitimately stay closed for a long time; without this sweep its
+        # expired/observation-only commands would linger as 'available' in the
+        # specialist inbox (they are already unactionable via the authority
+        # age check, but the ledger would never be terminalized).
+        if persist:
+            try:
+                from backend.services.v16_brain_orchestrator import (
+                    cancel_expired_v16_commands,
+                )
+
+                cancel_expired_v16_commands(self.db_path)
+            except Exception:
+                # Command-hygiene is best-effort here; candidate review must
+                # not fail because the command store is unavailable.
+                pass
         limit = max(1, min(int(limit), 200))
         latest = self.candidates.latest_candidates(limit=limit)
         candidates = list(latest.get("items") or [])

@@ -1898,7 +1898,7 @@ def _log_supervisor_decision(
             )
         )
     except Exception as exc:
-        logger.debug("[live] supervisor ledger failed for pos %s: %s", position.get("position_id"), exc)
+        logger.warning("[live] supervisor ledger failed for pos %s: %s", position.get("position_id"), exc)
         return ""
 
 
@@ -2053,7 +2053,7 @@ def _log_supervisor_trace(
             )
         )
     except Exception as exc:
-        logger.debug("[live] supervisor trace failed for pos %s: %s", position.get("position_id"), exc)
+        logger.warning("[live] supervisor trace failed for pos %s: %s", position.get("position_id"), exc)
         return ""
 
 
@@ -10492,7 +10492,7 @@ def _process_tick_factor_pipeline(
             )
             pipeline["last_signal_decision_id"] = str(signal_decision_id or "")
         except Exception as _ledger_err:
-            logger.debug("[live] ledger signal failed: %s", _ledger_err)
+            logger.warning("[live] ledger signal failed: %s", _ledger_err)
             pipeline["last_signal_decision_id"] = ""
     else:
         pipeline["last_signal_decision_id"] = ""
