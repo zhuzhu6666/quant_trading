@@ -5656,6 +5656,13 @@ def _start_live_scheduler():
             "min_level": "WARNING",
         }).send)
         sched.add_job("system_health", "* * * * *", _sys_health.run)
+        # D13: 关键持久化失败统一走同一 Alerter (多通道)。
+        from monitor.persistence_alerts import register_alerter
+
+        register_alerter(Alerter({
+            "log_file": "logs/alerts.log",
+            "min_level": "WARNING",
+        }).send)
     except Exception as e:
         logger.warning("[live] system_health registration failed: {}", e)
 

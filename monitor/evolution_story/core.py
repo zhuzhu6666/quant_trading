@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -27,6 +28,15 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# D7 (audit-defects-2026-08-21 增补): pytest 进程(含测试拉起的子进程)默认
+# 改道临时目录, 与 logging.py v10 对文件 sink 的隔离同一思路——生产事件流
+# data/charts/evolution_story.jsonl 不再被测试进程追加污染。
+def _default_story_path() -> str:
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("PYTEST_VERSION"):
+        tmp = Path(tempfile.gettempdir()) / "quant_evolution_story_pytest"
+        return str(tmp / "evolution_story.jsonl")
+    return "data/charts/evolution_story.jsonl"
 
 
 class EvolutionStory:
@@ -36,8 +46,7 @@ class EvolutionStory:
     _lock = threading.Lock()
 
     def __init__(self, path: Optional[str] = None) -> None:
-        default_path = "data/charts/evolution_story.jsonl"
-        self._path: str = path or default_path
+        self._path: str = path or _default_story_path()
         Path(self._path).parent.mkdir(parents=True, exist_ok=True)
         self._fp_lock = threading.Lock()
 

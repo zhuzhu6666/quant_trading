@@ -777,6 +777,17 @@ def write_report(result: dict, out_txt: "Path", out_json: "Path") -> dict:
         finally:
             conn.close()
     except Exception as e:
+        # D13: 关键持久化失败必须可见, 不再只记 debug 静默降级。
+        try:
+            from monitor.persistence_alerts import persistence_failure_alert
+
+            persistence_failure_alert(
+                "factor_health_db",
+                "因子健康报告落库失败",
+                f"{type(e).__name__}: {e} (学习链将停滞, V16 将因无健康快照跳过)",
+            )
+        except Exception:
+            pass
         logger.debug("write_report DB: %s", e)
         persistence["error"] = f"{type(e).__name__}:{e}"[:300]
     return persistence

@@ -88,6 +88,24 @@ def _isolate_live_safety_ledgers(tmp_path_factory):
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _isolate_evolution_story(tmp_path_factory):
+    """D7: keep pytest processes from appending to the production story JSONL."""
+    from monitor.evolution_story import EvolutionStory
+
+    sandbox = tmp_path_factory.mktemp("evolution_story") / "evolution_story.jsonl"
+    previous_instance = EvolutionStory._instance
+    EvolutionStory.reset_singleton()
+    EvolutionStory.shared(str(sandbox))
+    try:
+        yield
+    finally:
+        with EvolutionStory._lock:
+            EvolutionStory._instance = previous_instance
+        # 子进程兜底: 显式清掉 pytest 标记也无济于事的场景由
+        # core._default_story_path() 的环境检测覆盖, 这里无需恢复文件系统。
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _shutdown_background_job_loops():
     yield
     try:

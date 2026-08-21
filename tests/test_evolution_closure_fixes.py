@@ -359,6 +359,8 @@ def test_canary_canary50_enters_probation_without_execution(monkeypatch):
 def test_canary_only_active_stage_executes_promotion(monkeypatch):
     rc.patch({"autonomy_expansion_frozen": False})
     saved = {}
+    # D1 门: 跨入 ACTIVE 需要权威 lifecycle 表背书, 测试直接伪造背书为真。
+    monkeypatch.setattr(evo, "_has_committed_active_backing", lambda name: True)
     monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
     monkeypatch.setattr(
         evo,
@@ -378,6 +380,31 @@ def test_canary_only_active_stage_executes_promotion(monkeypatch):
     assert rollbacks == []
     assert stay == []
     assert saved["foo"]["stage"] == ACTIVE
+
+
+def test_canary_active_entry_blocked_without_committed_backing(monkeypatch):
+    """D1: PROBATION→ACTIVE 无 committed 背书时必须拦截, 不得直写 canary_state。"""
+    rc.patch({"autonomy_expansion_frozen": False})
+    saved = {}
+    monkeypatch.setattr(evo, "_has_committed_active_backing", lambda name: False)
+    monkeypatch.setattr(RegistryAdapter, "shared", staticmethod(lambda: _Adapter("shadow")))
+    monkeypatch.setattr(
+        evo,
+        "_load_canary_states",
+        lambda: {"foo": {"stage": PROBATION, "oos_bars": 100, "cumulative_pnl": 0.01}},
+    )
+    monkeypatch.setattr(evo, "_save_canary_states", lambda states: saved.update(states))
+    monkeypatch.setattr(
+        evo,
+        "_load_canary_ctx_from_log",
+        lambda name, score: CanaryEvalContext(oos_bars=120, oos_pnl=0.012),
+    )
+
+    promotions, rollbacks, stay = evo._run_canary_evaluation("XAUUSD+", "M5", 1000)
+
+    assert promotions == []
+    assert stay == ["foo"]
+    assert saved["foo"]["stage"] == PROBATION
 
 
 def test_canary_restores_legacy_lowercase_shadow(monkeypatch):

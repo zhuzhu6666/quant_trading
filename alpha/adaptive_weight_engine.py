@@ -487,13 +487,26 @@ class AdaptiveWeightEngine:
     # ── 权重历史 ────────────────────────────────────────
 
     def _write_weight_history(self, patches: dict[str, dict]):
-        """写入权重变更记录到主状态库 weight_history 表。"""
+        """写入权重变更记录到主状态库 weight_history 表。
+
+        D3 (audit-defects-2026-08-21): old==new 的"记录"是零信息噪声,
+        只记真实变更。
+        """
         try:
             from backend.core.db import get_state_pg_conn
             ts = time.time()
+            real_changes = {
+                name: p
+                for name, p in patches.items()
+                if float(p.get("weight", 0) or 0) != float(
+                    self._current_weights.get(name, 0) or 0
+                )
+            }
+            if not real_changes:
+                return
             conn = get_state_pg_conn()
             try:
-                for name, p in patches.items():
+                for name, p in real_changes.items():
                     sql = (
                         "INSERT INTO weight_history (timestamp, factor, old_weight, new_weight, reason) "
                         "VALUES (%s, %s, %s, %s, %s)"

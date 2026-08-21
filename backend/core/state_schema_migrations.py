@@ -125,6 +125,8 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(28, "align_factor_lifecycle_state", "0028_align_factor_lifecycle_state.sql"),
     StateSchemaMigration(29, "runtime_broker_execution_intent", "0029_runtime_broker_execution_intent.sql"),
     StateSchemaMigration(30, "retire_legacy_fact_tables", "0030_retire_legacy_fact_tables.sql"),
+    StateSchemaMigration(31, "align_factor_health", "0031_align_factor_health.sql"),
+    StateSchemaMigration(32, "restore_jobs_primary_key", "0032_restore_jobs_primary_key.sql"),
 )
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
 # Runtime code consumes the complete checked-in state contract.  A process

@@ -960,7 +960,7 @@ def _run_canary_evaluation(
 
     try:
         from config.runtime_config import autonomy_expansion_freeze_applies, shared as runtime_config
-        from deployment.canary import ACTIVE, CANARY_STAGES, SHADOW, QUARANTINED, RETIRED, TERMINAL_STAGES, CanaryDirector, CanaryEvalContext
+        from deployment.canary import ACTIVE, CANARY_STAGES, PROBATION, SHADOW, QUARANTINED, RETIRED, TERMINAL_STAGES, CanaryDirector, CanaryEvalContext
         from alpha.registry_adapter import RegistryAdapter
         adapter = RegistryAdapter.shared()
 
@@ -1064,6 +1064,24 @@ def _run_canary_evaluation(
                             name,
                         )
                         stay.append(name)
+                    elif (
+                        director.get_stage(name) == PROBATION
+                        and not _has_committed_active_backing(name)
+                    ):
+                        # D1: committed mutation 台账是激活事实的唯一背书
+                        # (system-source-of-truth)。canary 证据达标只说明可以
+                        # 申请晋升; 权威 factor_lifecycle_state 未到 ACTIVE
+                        # 就直写 canary_state 会制造幽灵毕业。
+                        logger.warning(
+                            "[Evolve] canary promotion blocked: no committed "
+                            "ACTIVE backing in authoritative lifecycle (%s)",
+                            name,
+                        )
+                        _emit_evolution_story("canary_promotion_blocked_unbacked", {
+                            "factor": name,
+                            "reason": "no_committed_active_lifecycle",
+                        })
+                        stay.append(name)
                     else:
                         director.promote(name)
                         if director.get_stage(name) == ACTIVE:
@@ -1103,6 +1121,17 @@ def _run_canary_evaluation(
         _save_canary_states(new_states)
 
     except Exception as e:
+        # D13: canary 评估整体失败不能只记 exception 后无声无息。
+        try:
+            from monitor.persistence_alerts import persistence_failure_alert
+
+            persistence_failure_alert(
+                "canary_eval",
+                "canary 评估失败",
+                f"{type(e).__name__}: {e}",
+            )
+        except Exception:
+            pass
         logger.exception("[Evolve] canary eval failed: %s", e)
 
     return promotions, rollbacks, stay
@@ -1128,6 +1157,34 @@ def _update_shadow_performance(df: pd.DataFrame, symbol: str, timeframe: str) ->
     except Exception as e:
         logger.debug("[Evolve] shadow perf refresh skipped: %s", e)
         return 0
+
+
+def _has_committed_active_backing(name: str) -> bool:
+    """D1: promotion into the ACTIVE stage requires an authoritative backing."""
+    try:
+        conn = _state_conn(read_only=True)
+        try:
+            row = conn.execute(
+                _sql(
+                    conn,
+                    """
+                    SELECT 1 FROM factor_lifecycle_state
+                    WHERE factor_name = ?
+                      AND lifecycle_stage = 'ACTIVE'
+                    LIMIT 1
+                    """,
+                ),
+                (name,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return bool(row)
+    except Exception as e:
+        # fail-closed: if the backing lookup fails, do not wave it through.
+        logger.warning(
+            "[Evolve] committed-ACTIVE backing lookup failed (%s): %s", name, e
+        )
+        return False
 
 
 def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
@@ -1712,8 +1769,13 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
             source_agent="factor_governance",
         )
         if weight_result.get("status") != "applied":
+            # D6: 透传诊断字段, blocked 时事件必须能说明真实原因
+            # (v16_authority / admission_status / reason), 否则观测流失语。
             _emit_evolution_story("weights_blocked", {
                 "status": weight_result.get("status"),
+                "reason": str(weight_result.get("reason") or ""),
+                "admission_status": str(weight_result.get("admission_status") or ""),
+                "v16_authority": weight_result.get("v16_authority") or {},
                 "risk_verdict": weight_result.get("risk_verdict") or {},
                 "admissions": weight_result.get("admissions") or {},
             })

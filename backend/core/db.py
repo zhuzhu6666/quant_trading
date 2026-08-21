@@ -1706,11 +1706,13 @@ _PG_BUSINESS_TABLES_DDL: list[str] = [
     """,
     """
     CREATE TABLE IF NOT EXISTS factor_health (
-        factor_id TEXT PRIMARY KEY,
-        health_score DOUBLE PRECISION DEFAULT 0.0,
+        factor TEXT PRIMARY KEY,
+        score DOUBLE PRECISION DEFAULT 50.0,
         status TEXT DEFAULT 'UNKNOWN',
+        section TEXT DEFAULT 'unknown',
         rolling_ic DOUBLE PRECISION DEFAULT 0.0,
         components_json TEXT NOT NULL DEFAULT '{}',
+        n_obs INTEGER DEFAULT 0,
         updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
     )
     """,

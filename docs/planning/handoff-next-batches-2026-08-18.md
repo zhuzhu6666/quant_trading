@@ -97,4 +97,5 @@
 - `docs/legacy-debt-register.md` — 债务（learning_application 已 resolved；schema-guard 新增）
 - `docs/system-source-of-truth.md` — 事实源（learning_application_log/effect 精简契约 + 唯一 store 已写）
 - `docs/change-impact-checklist.md` — 影响面
-- 本文件即是该 handoff 的唯一待办入口
+- `docs/planning/handoff-next-batches-2026-08-18.md` — 项目接续总览（本文件即是该 handoff 的唯一待办入口）
+- `docs/planning/audit-defects-2026-08-21.md` — **全项目缺陷审计（D1–D10，未修复待处理）**：幽灵 ACTIVE/applied 账本矛盾、测试写生产事件流、双头配置等，处理前先读此文件
