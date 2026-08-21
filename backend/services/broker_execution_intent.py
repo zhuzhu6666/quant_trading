@@ -320,7 +320,7 @@ class BrokerExecutionIntentStore:
             (str(intent_id),),
         ).fetchone()
 
-    def latest_stop_loss_for_position(
+    def latest_protection_for_position(
         self,
         position_id: int | str,
         *,
@@ -330,7 +330,8 @@ class BrokerExecutionIntentStore:
 
         Read-only reference lookup.  Callers receive the durable intent row
         itself — never a copy of its payload — so the close-reason classifier
-        can cite the broker-side stop-loss authority without duplicating it.
+        can cite the broker-side protective order (stop-loss *or* take-profit)
+        without duplicating it.
         """
 
         pid = str(int(position_id or 0) or 0)
@@ -351,6 +352,7 @@ class BrokerExecutionIntentStore:
                 WHERE position_id=%s AND broker=%s
                   AND action IN ('amend_position_sltp', 'market_open')
                   AND status='confirmed'
+                  AND (target_stop_loss > 0 OR target_take_profit > 0)
                 ORDER BY prepared_at DESC
                 LIMIT 1
                 """,

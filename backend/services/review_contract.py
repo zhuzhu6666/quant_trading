@@ -85,11 +85,11 @@ def trusted_broker_close_price(payload: dict[str, Any] | None) -> float | None:
     return price if math.isfinite(price) and price > 0.0 else None
 
 
-# Broker-side stop-loss execution carries normal slippage.  A replayed close
-# whose fill lands within this tolerance of the durable amend intent's SL is a
-# broker stop-out on the strategy's own protective order — the strategy's
-# natural lifecycle observed through recovery reconciliation, not an
-# operator/replay termination.
+# Broker-side protective-order execution carries normal slippage.  A replayed
+# close whose fill lands within this tolerance of the durable amend intent's
+# stop-loss *or* take-profit is a broker exit on the strategy's own protective
+# order — the strategy's natural lifecycle observed through recovery
+# reconciliation, not an operator/replay termination.
 BROKER_SL_HIT_TOLERANCE_RATIO = 0.0005  # 5 bps of price (XAUUSD@4600 ≈ 2.3 pts)
 
 
@@ -98,14 +98,14 @@ def broker_stop_hit_evidence(
     real_pnl: dict[str, Any] | None,
     position_state: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Prove (or refute) that a replayed close was our broker-side stop-loss.
+    """Prove (or refute) that a replayed close was our broker-side SL/TP.
 
     References existing durable records only — the amend intent row and the
     authoritative close deal — never copying their payloads into the review.
-    Returns a small evidence dict suitable for ``close_reason_source_backfill``
-    style consumption:
+    Returns a small evidence dict:
 
     - ``matched``            → close_reason may be reclassified to broker_close
+    - ``hit``                → which protective order was filled ("sl"/"tp")
     - ``intent_id``/``deal_id`` are citations (IDs), not duplicated payloads
     """
 
@@ -124,29 +124,37 @@ def broker_stop_hit_evidence(
     try:
         from backend.services.broker_execution_intent import BrokerExecutionIntentStore
 
-        intent = BrokerExecutionIntentStore().latest_stop_loss_for_position(
+        intent = BrokerExecutionIntentStore().latest_protection_for_position(
             str(state.get("position_id") or ""),
         )
     except Exception:
         intent = None
-    target_sl = float(getattr(intent, "target_stop_loss", 0.0) or 0.0)
-    if target_sl <= 0.0:
-        return {"matched": False}
 
     # A stop-out fill lands *at* the stop (± slippage tolerance), regardless
     # of side: a long's SL is below and fills at/below it, a short's SL is
-    # above and fills at/above it.  An absolute-ratio window around the stop
-    # captures both without letting distant TP/manual fills through.
-    if abs(fill - target_sl) / target_sl > BROKER_SL_HIT_TOLERANCE_RATIO:
-        return {
-            "matched": False,
-            "intent_id": str(getattr(intent, "intent_id", "") or ""),
-        }
+    # above and fills at/above it.  An absolute-ratio window around the order
+    # captures both without letting distant manual/liquidation fills through.
+    def _fill_matches(level: float) -> bool:
+        return level > 0.0 and abs(fill - level) / level <= BROKER_SL_HIT_TOLERANCE_RATIO
+
+    target_sl = float(getattr(intent, "target_stop_loss", 0.0) or 0.0)
+    if _fill_matches(target_sl):
+        hit = "sl"
+    else:
+        target_tp = float(getattr(intent, "target_take_profit", 0.0) or 0.0)
+        if not _fill_matches(target_tp):
+            cited = str(getattr(intent, "intent_id", "") or "") if intent is not None else ""
+            return {
+                "matched": False,
+                **({"intent_id": cited} if cited else {}),
+            }
+        hit = "tp"
 
     return {
         "matched": True,
-        "method": "broker_sl_fill_match",
+        "method": "broker_protective_fill_match",
         "schema_version": "broker_sl_hit_evidence.v1",
+        "hit": hit,
         "intent_id": str(getattr(intent, "intent_id", "") or ""),
         "decision_id": str(getattr(intent, "decision_id", "") or ""),
         "target_stop_loss": target_sl,

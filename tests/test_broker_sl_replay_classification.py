@@ -35,17 +35,25 @@ def _intent_store(monkeypatch):
 
     monkeypatch.setattr(
         BrokerExecutionIntentStore,
-        "latest_stop_loss_for_position",
+        "latest_protection_for_position",
         _fake_latest,
     )
     return holder
 
 
-def _set_intent(holder, *, sl: float, intent_id: str = "int-1", decision_id: str = "dec-1"):
+def _set_intent(
+    holder,
+    *,
+    sl: float,
+    tp: float = 0.0,
+    intent_id: str = "int-1",
+    decision_id: str = "dec-1",
+):
     holder["intent"] = SimpleNamespace(
         intent_id=intent_id,
         decision_id=decision_id,
         target_stop_loss=sl,
+        target_take_profit=tp,
         status="confirmed",
         action="amend_position_sltp",
     )
@@ -53,7 +61,7 @@ def _set_intent(holder, *, sl: float, intent_id: str = "int-1", decision_id: str
 
 def test_short_position_fill_at_sl_reclassifies_to_broker_close(_intent_store):
     # XAUUSD short @4583, SL 4597.27; broker filled at 4597.29 (+0.02 slippage)
-    _set_intent(_intent_store, sl=4597.27)
+    _set_intent(_intent_store, sl=4597.27, tp=4561.60)
     evidence = broker_stop_hit_evidence(
         real_pnl={
             "net": -12.41,
@@ -66,6 +74,7 @@ def test_short_position_fill_at_sl_reclassifies_to_broker_close(_intent_store):
     )
 
     assert evidence["matched"] is True
+    assert evidence["hit"] == "sl"
     assert evidence["intent_id"] == "int-1"
     assert evidence["decision_id"] == "dec-1"
     assert evidence["target_stop_loss"] == pytest.approx(4597.27)
@@ -82,9 +91,40 @@ def test_short_position_fill_at_sl_reclassifies_to_broker_close(_intent_store):
     assert resolution["close_reason"] == "broker_close"
 
 
+def test_short_position_fill_at_tp_reclassifies_to_broker_close(_intent_store):
+    # 2026-08-21 pos 284536615: short SL 4597.04 / TP 4564.94; the broker
+    # filled the take-profit at 4564.89 (-0.05 slippage), +16.32 win.  A TP
+    # fill is equally part of the strategy's natural lifecycle.
+    _set_intent(_intent_store, sl=4597.04, tp=4564.94)
+    evidence = broker_stop_hit_evidence(
+        real_pnl={
+            "net": 16.32,
+            "exec_price": 4564.89,
+            "price_quality": "broker_reported",
+            "deal_id": 330158661,
+            "source": "ctrader_deals",
+        },
+        position_state={"position_id": "284536615", "direction": -1},
+    )
+
+    assert evidence["matched"] is True
+    assert evidence["hit"] == "tp"
+
+    resolution = classify_close_reason_from_recovery(
+        replayed=True,
+        real_pnl={
+            "net": 16.32,
+            "exec_price": 4564.89,
+            "price_quality": "broker_reported",
+        },
+        position_state={"position_id": "284536615", "direction": -1},
+    )
+    assert resolution["close_reason"] == "broker_close"
+
+
 def test_long_position_fill_below_sl_matches(_intent_store):
     # Long: stop sits below entry; fill at or under SL proves the stop-out.
-    _set_intent(_intent_store, sl=100.0)
+    _set_intent(_intent_store, sl=100.0, tp=110.0)
     evidence = broker_stop_hit_evidence(
         real_pnl={
             "net": -5.0,
@@ -97,12 +137,13 @@ def test_long_position_fill_below_sl_matches(_intent_store):
 
 
 def test_fill_far_from_sl_keeps_restart_replay(_intent_store):
-    # Short with SL 4597.27 but fill nowhere near it: no reclassification.
-    _set_intent(_intent_store, sl=4597.27)
+    # Short with SL 4597.27 / TP 4561.60 but fill nowhere near either: no
+    # reclassification (e.g. manual close or liquidation at an odd price).
+    _set_intent(_intent_store, sl=4597.27, tp=4561.60)
     evidence = broker_stop_hit_evidence(
         real_pnl={
             "net": 3.3,
-            "exec_price": 4562.0,
+            "exec_price": 4580.0,
             "price_quality": "broker_reported",
         },
         position_state={"position_id": "284513709", "direction": -1},
@@ -113,7 +154,7 @@ def test_fill_far_from_sl_keeps_restart_replay(_intent_store):
         replayed=True,
         real_pnl={
             "net": 3.3,
-            "exec_price": 4562.0,
+            "exec_price": 4580.0,
             "price_quality": "broker_reported",
         },
         position_state={"position_id": "284513709", "direction": -1},
@@ -130,10 +171,11 @@ def test_missing_intent_or_untrusted_price_stays_conservative(_intent_store):
         real_pnl={"net": -1.0, "exec_price": 4597.29, "price_quality": "broker_reported"},
         position_state={"position_id": "x", "direction": -1},
     )
-    assert evidence == {"matched": False}
+    assert evidence["matched"] is False
+    assert "hit" not in evidence
 
     # Untrusted price quality can never match either.
-    _set_intent(_intent_store, sl=4597.27)
+    _set_intent(_intent_store, sl=4597.27, tp=4564.94)
     evidence = broker_stop_hit_evidence(
         real_pnl={"net": -1.0, "exec_price": 4597.29, "price_quality": "estimated"},
         position_state={"position_id": "x", "direction": -1},
