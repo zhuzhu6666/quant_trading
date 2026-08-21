@@ -24,6 +24,7 @@ class RecoveredCloseReplayRuntime:
     trade_reviewer: Any = None
     experience_builder: Any = None
     policy_suggester: Any = None
+    attr_engine: Any = None
     debug: Callable[..., Any] = lambda *_args, **_kwargs: None
 
 
@@ -84,6 +85,7 @@ def replay_recovered_close(
         now_ts=runtime.now(),
         context_integrity_default=runtime.partial_context,
         sl_hit_evidence=reason_resolution.get("sl_hit_evidence"),
+        attr_engine=runtime.attr_engine,
     )
     total_pnl = float(payloads["total_pnl"])
     close_ts = float(payloads["close_ts"])

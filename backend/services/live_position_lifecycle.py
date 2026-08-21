@@ -1579,6 +1579,72 @@ def normalize_protection_trace_row(row: Any, *, close_ts: float) -> dict[str, An
     }
 
 
+def replay_close_attribution(
+    position_id: int,
+    *,
+    attr_engine: Any,
+    close_price: float,
+    close_ts: float,
+    real_pnl: dict[str, Any] | None,
+    recovery_meta: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, float], str]:
+    """Attribute a replayed close using data that already exists — never a copy.
+
+    Order of evidence:
+      1. The in-memory attribution engine still holds this position's open
+         context (tick loop opened it and nobody evicted it) → compute the
+         marginal contributions at full integrity.
+      2. The durable open snapshot stored in ``recovery_meta.trade_attribution``
+         (persisted by ``record_open``) is restored into the engine via its own
+         ``restore_open`` contract (which self-labels the context ``recovered``)
+         → compute at recovered weight.
+      3. Neither source has anything → stay conservative: no contributions,
+         integrity ``missing``.
+
+    Returns ``(factor_contributions, attribution_integrity)``.  On any engine
+    error the result degrades to the conservative outcome rather than blocking
+    the replayed close.
+    """
+
+    pid = int(position_id)
+    if attr_engine is None or close_price <= 0.0:
+        return {}, "missing"
+
+    # 1) Live in-memory context.
+    try:
+        if bool(getattr(attr_engine, "has_open", lambda _p: False)(pid)):
+            contributions = attr_engine.record_close(
+                pid,
+                close_price=close_price,
+                close_ts=close_ts,
+                real_pnl=real_pnl,
+            ) or {}
+            if contributions:
+                return dict(contributions), "full"
+    except Exception:
+        pass
+
+    # 2) Durable open snapshot from the position's own recovery metadata.
+    meta = dict(recovery_meta or {})
+    snapshot = meta.get("trade_attribution")
+    restore_open = getattr(attr_engine, "restore_open", None)
+    if isinstance(snapshot, dict) and snapshot and callable(restore_open):
+        try:
+            if restore_open(pid, snapshot):
+                contributions = attr_engine.record_close(
+                    pid,
+                    close_price=close_price,
+                    close_ts=close_ts,
+                    real_pnl=real_pnl,
+                ) or {}
+                if contributions:
+                    return dict(contributions), "recovered"
+        except Exception:
+            pass
+
+    return {}, "missing"
+
+
 def build_replayed_close_payloads(
     *,
     position_id: int,
@@ -1588,6 +1654,7 @@ def build_replayed_close_payloads(
     now_ts: float,
     context_integrity_default: str,
     sl_hit_evidence: dict[str, Any] | None = None,
+    attr_engine: Any = None,
 ) -> dict[str, Any]:
     state = position_state or {}
     pnl_payload = real_pnl or {}
@@ -1601,6 +1668,19 @@ def build_replayed_close_payloads(
     # dict cites the durable intent/deal IDs; it never duplicates payloads.
     evidence = dict(sl_hit_evidence or {})
     close_reason = "broker_close" if evidence.get("matched") else "restart_replay"
+    # Attribution: prefer the live engine context, then the durable open
+    # snapshot already stored in this row's recovery metadata.  Both are
+    # references to existing data — the snapshot is passed back through the
+    # engine's own restore contract instead of being duplicated here.
+    prior_meta = dict(state.get("recovery_meta") or {})
+    contributions, attribution_integrity = replay_close_attribution(
+        int(position_id),
+        attr_engine=attr_engine,
+        close_price=close_price,
+        close_ts=close_ts,
+        real_pnl=pnl_payload,
+        recovery_meta=prior_meta,
+    )
     replay_meta = {
         "replayed_at": float(now_ts or 0.0),
         "strategy_name": str(strategy_name or ""),
@@ -1652,8 +1732,8 @@ def build_replayed_close_payloads(
             "pnl": total_pnl,
             "close_price": close_price,
             "close_ts": close_ts,
-            "contributions": {},
-            "attribution_integrity": "missing",
+            "contributions": contributions,
+            "attribution_integrity": attribution_integrity,
             "real_pnl": real_pnl,
             "close_reason": close_reason,
             "context_integrity": context_integrity,

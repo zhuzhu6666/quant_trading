@@ -3611,6 +3611,7 @@ def _replay_recovered_close(
             trade_reviewer=_TRADE_REVIEWER,
             experience_builder=_EXPERIENCE_BUILDER,
             policy_suggester=_POLICY_SUGGESTER,
+            attr_engine=(_factor_pipeline or {}).get("attribution"),
             debug=logger.debug,
         ),
     )
