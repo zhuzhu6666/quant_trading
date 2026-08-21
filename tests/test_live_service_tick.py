@@ -715,6 +715,16 @@ def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
         "_prepare_open_trade_intent",
         lambda **_kwargs: "decision-test",
     )
+    # This concurrency test intentionally forces the post-fill callback to
+    # block.  If the timing assertions fail, the production path would
+    # correctly fail closed; the test must not persist that synthetic safety
+    # incident into the shared runtime safety ledger.
+    monkeypatch.setattr(
+        live_service,
+        "_persist_safety_fail_closed",
+        lambda **_kwargs: {"active": False, "state": "test_isolated"},
+    )
+    monkeypatch.setattr(live_service, "append_safety_outbox", lambda **_kwargs: {})
 
     def _order(_bridge, _composite, _volume, **_kwargs):
         rpc_entered.set()
