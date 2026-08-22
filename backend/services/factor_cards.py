@@ -332,7 +332,11 @@ def build_factor_admission_evidence(
     ):
         if not validation[field]:
             preflight_blockers.append(code)
-    if str(canary.get("stage") or "").upper() != "ACTIVE":
+    if str(canary.get("stage") or "").upper() not in {"ACTIVE", "PROBATION"}:
+        # PROBATION is the terminal canary evidence stage.  The final hop to
+        # ACTIVE requires committed lifecycle backing (D1 gate), and lifecycle
+        # activation is produced by the promotion path that consumes this
+        # preflight — requiring ACTIVE here circularly starved the pipeline.
         preflight_blockers.append("bar_oos_canary_incomplete")
     if mature_count < _ADMISSION_MIN_MATURE_EVIDENCE:
         preflight_blockers.append("independent_mature_evidence_below_20")

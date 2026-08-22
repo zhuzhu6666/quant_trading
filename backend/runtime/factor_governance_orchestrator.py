@@ -3375,7 +3375,16 @@ class FactorGovernanceOrchestrator:
         legacy_blockers = [
             code
             for code, blocked in (
-                ("bar_oos_canary_incomplete", canary_stage != "ACTIVE"),
+                # Canary evidence ladder ends at PROBATION; the final
+                # PROBATION -> ACTIVE hop requires committed ACTIVE backing in
+                # factor_lifecycle_state (D1 gate).  Requiring canary == ACTIVE
+                # here inverted the dependency: lifecycle activation IS the
+                # backing producer, so preparation accepts PROBATION as
+                # completed canary evidence.  Intermediate stages stay blocked.
+                (
+                    "bar_oos_canary_incomplete",
+                    canary_stage not in {"ACTIVE", "PROBATION"},
+                ),
                 ("bar_oos_below_minimum", oos_bars < min_oos),
                 ("bar_valid_samples_below_minimum", n_valid < min_valid),
                 ("bar_oos_pnl_non_positive", cumulative_pnl <= 0.0),
