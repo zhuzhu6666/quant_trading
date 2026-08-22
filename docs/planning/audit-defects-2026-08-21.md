@@ -146,6 +146,8 @@
 
 **运行态复验（03:50）：** 双服务 active、NRestarts=0、重启后 0 ERROR；system_health overall=healthy errors=0；19:23 UTC 周期 persisted=True；v16_brain_command 出现新命令（specialist_no_action，fail-closed 正常）；weights 仍按设计 observation-only。
 
+**部署后周末复核（2026-08-22 13:45 只读）：** 双服务连续运行 9.5h+ 零自动重启、零 ERROR；worker IC 刷新每 30 分钟一轮 errors=0，仅 canary 等影子数据提示与一条无效 DSL 表达式跳过（均无害）。D2 残留精确化：`policy_suggestion` 仍有 **27 条无 mutation 背书的 applied 幽灵历史行**待清；修复部署后新增 applied 行共 2 条（brain_bridge downweight supertrend_str / stoch_k）**均带 gmut_ 治理背书，属合法记录非复发**。D8 的根目录 backtest settings.yaml 实测仍存在，删除动作未执行（无加载路径已证伪风险）。
+
 ## 增补审计（2026-08-22 00:30–01:10 CST，只读复核 + 全仓静态扫描）
 
 > 方式：逐缺陷沿「写入者→存储→消费者→真实决策影响」链路核实；全仓 ON CONFLICT 目标 vs PG 唯一索引静态扫描（40 对）+ 只读 EXPLAIN 验证。未写库、未改代码。

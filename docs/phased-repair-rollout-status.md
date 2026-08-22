@@ -305,6 +305,24 @@ Remaining: 仍需在 Demo 运行态验证一次真实 `tighten/reduce/close -> b
 
 本批额外净删：无调用方的 `live_legacy_safety_preview.py`、死的 `_trailing_state` 清理投影和 lifecycle PnL/account/price 合成回退；缺 broker 明确 `pnl_state=known` 的持仓现在保持 unknown，不再伪造监督指标。新增监控回归后，目标集 `169 passed`，compileall 与 scoped diff check 通过。
 
+### 2026-08-22 审计缺陷批 D1–D13（修复 + 部署 + 周末运行验收）
+
+Batch: planning/audit-defects-2026-08-21.md 中 D1/D3/D6/D7/D11/D12/D13 六项修复端到端落地；D11 为学习链总断点真凶。迁移 0031_align_factor_health（factor_health 删死列、主键→factor，db.py 极简 DDL 对齐）+ 0032_restore_jobs_primary_key。
+
+Canonical authority: factor_health 唯一写合同 = `ON CONFLICT(factor)` 标准列集；canary PROMOTION→ACTIVE 需 `_has_committed_active_backing` 台账背书；evolution_story 生产路径 pytest 全量改道（core 默认路径 + conftest 单例沙箱双保险）；关键持久化失败经 monitor/persistence_alerts.py 升级告警（1h 同键抑制）。
+
+Deleted paths: weight_history old==new 零信息行停写；生产 evolution_story.jsonl 176 条污染行原子清洗（备份 .bak_20260822）；4 条幽灵 ACTIVE canary 降回 PROBATION。
+
+Targeted verification: 全量回归 2775 passed / 12 skipped；gate 测试与 73 项相关测试绿；EXPLAIN ON CONFLICT(id) 通过 + 临时 schema 重放测试绿。
+
+Runtime verification: 双服务受控重启（backend 04:08、worker 03:06），NRestarts=0；重启后 60 分钟 0 ERROR；cTrader fully authenticated；factor_health 健康报告首次落库成功（64 行 persisted=True，40 余天来首次）；v16_brain_command 新增 specialist_no_action（fail-closed 正常）。周末休市复核（08-22 13:43）：system_health degraded 系 market closed_pending_positions 设计态 fail-closed（挂单仓位 284602893 无新报价），非故障；readiness ok:true，仅 live_execution 因 market_session_blocks_open + broker_position_price_unknown 阻断，符合预期。
+
+Migration incidents: 迁移 SQL 注释含分号类标点导致 psycopg 解析失败（已按规范重写注释）；0032 apply 后改文件致校验和失配 → 服务拒启一次 → 按先例 restamp ledger v31/v32（run_artifacts/restamp_ledger_31_32.py）后干净重启。
+
+Unresolved live evidence: 部署后新开仓位的完整 lifecycle 样本（S7.6 终验）未取得——284485647 于 8/21 重算转正 full/1.0 证明链路通，但属部署前开仓；挂单 284602893 同为旧仓不计入。周一开盘后第一笔新平仓为判定点。
+
+Remaining compatibility: policy_suggestion 仍有 27 条无 mutation 背书的 applied 幽灵历史行待清（修复后新增 applied 行均带 gmut_ 背书，合法）；根目录 backtest settings.yaml 已证实无加载路径，删除即可（D9 死代码债）。
+
 ## 4. 仍需真实运行证明
 
 以下证据不能由单测、历史快照或 readiness 替代：

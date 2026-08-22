@@ -1,7 +1,7 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-08-21 (runtime/canonical_v2 v30、旧事实清理和重启验收完成)
+> Last verified: 2026-08-22 (缺陷批 D1–D13 部署验收完成、migration ledger v32、双服务周末休市期稳定运行)
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读对应合同。
@@ -9,10 +9,13 @@
 ## 1. 当前结论
 
 - 开发基线为 `main`；发布流程会从该基线创建临时发布分支。
-- **当前姿态（2026-08-21）**：生产运行态统一使用 PostgreSQL `runtime`，不可变事实与学习样本统一使用 `canonical_v2`；migration ledger 已到 v30，`runtime.broker_execution_intent` 已存在，旧 runtime 事实表已退役。
+- **当前姿态（2026-08-22）**：生产运行态统一使用 PostgreSQL `runtime`，不可变事实与学习样本统一使用 `canonical_v2`；migration ledger 已到 v32（0031 factor_health 合同对齐、0032 jobs 主键恢复），旧 runtime 事实表已退役。
 - **旧库清理（已完成）**：旧 `state_v1`、`public`、`legacy_mapping` 和本地 SQLite `data/state.db` 运行路径均已退役；生产代码不再读取、写入或重建这些路径。
 - **运行态迁移门（已完成，运行时风险门仍独立生效）**：service-backed cleanup 已清理旧 runtime 事实，普通监督执行使用 `governed_execute -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 单轨链。当前若 readiness 阻断，只能来自实时 market/session、Safety、incident 或 broker 事实，不代表迁移回退或兼容路径仍在。
 - **A 类结构修复（已完成）**：A1 trade_review 实时写入器 ✅ / A2 label 单一口径 ✅ / A3 posterior 触发放宽 ✅ / A4 win 单正反馈 ✅ / A5 effect 归因链代码就绪 ✅ / A6 supervisor_trace 成熟链 ✅。
+- **缺陷批 D1–D13（2026-08-22 已部署生效，详见 planning/audit-defects-2026-08-21.md）**：D11 factor_health 表合同错位（学习链总断点）、D12 jobs 主键、D7 测试污染生产 JSONL、D1 幽灵 canary 毕业、D3/D6 权重噪声与诊断字段、D13 关键写失败静默。全量回归 2775 passed 后受控重启，重启后 60 分钟 0 ERROR；factor_health 健康报告首次落库成功（64 行，40 余天来首次）。学习链断点已解除。
+- **闭环证据现状（2026-08-22 只读复核）**：历史 9 笔平仓中仅 `284485647` 拿到完整合格样本（integrity=full、权重 1.0，8/21 重启后重算转正）；其余 8 笔因重启回放降级为审计用途（train_weight=0），按硬边界保留不洗白。S7.6 验收标准 = 部署之后新开仓位完整走通 `open -> protection -> close -> deal sync -> review -> sample` 且样本直接 full/1.0；当前挂单 `284602893` 为部署前旧仓不计入。
+- **Git 基线（已解除风险）**：截至 2026-08-22 全部收敛成果已提交并推送至 origin/main（最新 ef989d7），本地无未提交改动；handoff §7 的"186 文件 uncommitted"表述已过时。
 - **代码收敛（S2/S3 完成）**：db_helpers 公共层（33 文件）+ 四域清扫（9 空壳 + EvolutionKernel + 零调用转发 + consume 包装器）+ A1–A6 / B1–B5 结构修复；历史全量回归记录保留在对应 rollout 文档，当前发布以本批新鲜针对性/全量验证为准。
 - legacy 事实迁移的旧表述（P1/P2/P4/P5、1,702 处、schema version 20）已被"全库清空重建"取代，仅历史参考。
 - 前端（miniprogram_v2 / web_frontend）在 Windows 本地维护；服务器后端-only sparse checkout，只提供 API 与 `/ws/state`。
@@ -58,10 +61,10 @@ learning worker
 
 ## 3. 当前主线
 
-1. 继续收集 P1 的 post-repair 新成交、重启 replay 和 `open -> protection -> close -> deal sync -> review -> sample` 完整生命周期证据。
+1. 继续收集 P1 的 post-repair 新成交、重启 replay 和 `open -> protection -> close -> deal sync -> review -> sample` 完整生命周期证据；S7.6 验收 = 缺陷批部署后新开仓位样本直接 integrity=full / train_weight=1.0（参照 284485647 于 2026-08-21 重算转正）。若修复后干净样本产率仍持续偏低，需与用户显式重新校准证据门槛（审计 D5 已定性为策略决策），不得默默等待。
 2. 继续观察 Safety shadow，满足既有 24 小时空仓或完整 lifecycle 门槛后，才可单独讨论 Safety 发布门。
-3. 对 `legacy-debt-register.md` 中仍处于 `migrating`、`quarantined` 或 `regressed` 的路径逐条收集退出证据，同批删除旧 authority、旧重算、旧字段回退或无意义 wrapper。
-4. 不扩展新的 V16 调度层，不新增 Brain、PosteriorService、FactorCardV2、表、线程、调度器或平行生产 writer。
+3. 对 `legacy-debt-register.md` 中仍处于 `migrating`、`quarantined` 或 `regressed` 的路径逐条收集退出证据，同批删除旧 authority、旧重算、旧字段回退或无意义 wrapper；所有过渡态/双记录模式须登记退役条件与期限，不允许无限期双轨。
+4. 不扩展新的 V16 调度层，不新增 Brain、PosteriorService、FactorCardV2、表、线程、调度器或平行生产 writer；治理底盘已领先策略内容，工程精力优先投向 alpha 研究与真实闭环数据积累，暂停新增基础设施。
 5. 按前端重构文档继续完成真实接口和个人本机桌面验收；公网浏览器静态入口已退出并验证根路径 404，
    服务器只提供 API/WSS，本机认证和基本使用已确认通过，仍需完成 WS/缓存隔离、离线恢复、工作区排版、
    跨工作区数据流和危险动作安全验收。公开

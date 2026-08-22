@@ -1,9 +1,10 @@
 # Handoff / Next-Batches TODO（项目接续总览）
 
-> Status: active handoff — 2026-08-18
+> Status: active handoff — 2026-08-18（**2026-08-22 刷新**：缺陷批 D1–D13 部署完成、cTrader token 已续期、全部改动已 commit+push；最新状态先读 docs/README.md「当前结论」，本文件待办项仍有效）
 > 用途：给**新会话**的唯一"剩余待办"入口；动手前必须先以只读方式复核真实状态，再执行。
 > 已验证基线（2026-08-18 收敛批交付后实测）：全量回归 **2813 passed / 12 skipped**；
 > 剩余 3 项 `test_state_store_schema_guard` 失败为 S 阶段既有债务（见 §P4）。
+> 最新基线：2026-08-22 缺陷批后全量回归 **2775 passed / 12 skipped**（数量差异来自 D7 测试隔离与净删，无回退）。
 
 ---
 
@@ -30,6 +31,7 @@
 - [x] **受控重启双服务加载当前工作区代码（完成 2026-08-19 19:51，用户授权）**：quant-backend / quant-learning-worker 均已加载最新工作区代码（P2 清扫 / P4 schema-guard / learning_application 收敛 / 0019 索引全部随重启生效）。验：backend 启动 0 模块/导入错误、cTrader App→Account→fully authenticated、background connect OK、symbol schedule 加载；worker 数据库初始化、RuntimeConfig 加载、调度器启动、nursery 注册正常；首次 utility 周期 evolution_hourly `executed successfully`；**重启后 missing-index 报错 0 次**（0019 修复在运行态生效）；三服务均 active。
 - [ ] **S7.5 观察**：重启后 60 分钟启动日志持续观察、live loop 安全态（当前手动停止、fail-closed）、cron 多轮完成。
 - [ ] **S7.6 进化闭环首验（核心）**：等**第一笔真实平仓** → canonical `trade_review` 实时事件（A1 写入器）→ sample 进入 → posterior/effect 链（A5）→ **闭环第一次自然闭合**。README 首页更新必须以该真实证据为准。
+  - 进展（2026-08-22 只读复核）：链路已首次走通——`284485647` 平仓样本于 8/21 worker 重启重算后 integrity=full / train_weight=1.0 / governance_eligible=1，证明"开仓→保护→平仓→同步→复盘→合格样本"全链条可产出干净样本；但该仓属 D11 修复部署前开仓，S7.6 终验标准 = 部署后新开仓位平仓时样本直接 full/1.0（无回放降级）。当前挂单 284602893 为旧仓不计入；周一开盘后第一笔新平仓为判定点。历史 8 笔回放降级样本（train_weight=0）按硬边界保留审计用途。
 - 备注：旧卡死 run `evorun_552d20cc1bd84204`（position_supervisor_trace_maturation）会在下次 evolution run 启动时被 `expire_stale_evolution_runs` 自动 expire；下个周期 trace maturation 应能正常落库闭合。
 
 ## 3. 待办 P2 — S3 遗留清扫（代码批，可开工，默认下一批）
@@ -69,7 +71,7 @@
 - [ ] **standard 表定义与消费不一致**（recovery_position_state 已在 0020 补列；旧条目修正为已解决）。
 - [x] **死表声明清理（完成 2026-08-19）**：`strategy_perf` / `sync_health` 的 STATE_DB_DDL CREATE 声明已删除（0 真实 SQL 引用确认；sync_health 为 Python `SyncHealth` 对象名非表）。测试 28 passed 无破坏。注：`lifecycle_events` 前记为"死表改代码"系误判，实测为活表（0021 已补建）。
 - [x] `scripts/validate_ctrader_token.py`（完成 2026-08-19）：Twisted 二次 run bug 修复——重写为单 reactor 单 client 只读探针，实测 app auth OK + token VALID exit 0。
-- [ ] cTrader access token 过期时间 **2026-08-22**，届时需刷新用户侧。
+- [ ] cTrader access token 过期时间 2026-08-22（**已完成续期 2026-08-22 凌晨随缺陷批部署**：refresh token 流程走通，.env 已更新，新有效期约 30 天；下次到期约 2026-09-21）。
 - [x] **日志文件被测试/子进程污染（已解决 2026-08-19，logging.py v10）**：前端 `/api/logs/tail?source=backend` 面板显示大量历史错误（`no such table: payload_blob`、`current_version=0` boot failure）——根因是**测试子进程 import 后端模块时同样触发 `setup_logging`，把 pytest 堆栈和一次性 lifespan/boot 日志写进生产 backend.log/debug.log**（backlog 中 pytest 产物 29 万行/debug.log 26MB）。修复：`backend/core/logging.py` v10 在 pytest 环境（`PYTEST_CURRENT_TEST`/`PYTEST_VERSION` 检测）下跳过文件 sink，只写 stderr。验证：真实 pytest 跑后 backend.log 行数不变（13518→13518）；普通进程仍写文件。历史污染已归档（`logs/*.bak-20260819-2250`）+ 重启后端重建干净日志，当前面板 0 ERROR/WARN。test_logs_api 2 passed。
 - [x] **factor_lifecycle_service 旧 schema 列名引用（已解决 2026-08-19，迁移 0028）**：根因 = `factor_lifecycle_state` 表被 S7.3 重建时用 db.py 极简 DDL 创成 7 列版（factor_id/stage/origin/artifact_hash/evidence_json/created_at/updated_at），但权威定义（0001 迁移 + 所有消费方 factor_lifecycle_service/factor_catalog/ledger service）是 **17 列完整版**（factor_name/definition_fingerprint/lifecycle_stage/generation/runtime_admission/mutation_id/config_version/config_hash/metadata_json/activated_at/retired_at）。启动报 `column s.mutation_id does not exist`（non-fatal）即此。修复：**0028 迁移 ADD 11 缺失列 + 建 idx_factor_lifecycle_unique_name 唯一索引**（apply 27→28，12 语句）。验证：重启后端后 `[lifespan] committed governance projection recovery attempted=0 current=0 degraded=0`（原 `recovery failed: s.mutation_id` 消失）；启动无 ERROR；cTrader auth OK；factor 相关测试 57 passed/1 skipped。同理已确认：0001 的 3 个 factor_lifecycle 索引契约（name_stage/admission/mutation）之前因缺列不可建，现列已齐（idx_factor_lifecycle_unique_name 已建，另 2 个 name_stage/admission 属于 C 类契约差异，可后置）。
 - [x] **factor_runtime_projection 缺列（完成 2026-08-19，迁移 0026）**：启动 warning `column process_role does not exist` 根因 = S7.3 用 `_PG_BUSINESS_TABLES_DDL` 4 列极简版建表（projection_id 主键版被替换为 factor_id 主键 4 列），而 0001 迁移/代码消费 18 列完整版。0026 ADD 15 缺失列（projection_id/factor_name/process_role/process_id/boot_id/generation/artifact_hash/mutation_id/config_version/config_hash/loaded/status/error_message/heartbeat_at/created_at，保留现有 factor_id 主键 + projection_json）+ 建 0001 3 索引（identity/health/factor）。applied 25→26。重启后端后 `process_role` warning 消失 ✅。**新暴露同类**：recover_governance_projections 的 `s.mutation_id` 旧列名（见上条，改代码待办）。
@@ -87,7 +89,7 @@
 
 ## 7. 当前未提交改动
 
-- 工作区 186 文件 uncommitted diff（136 M / 29 D / 21 ??，2026-08-19 P4 批后）= S 阶段 + evolution_decision 批 + learning_application 批 + P2/S3 遗留清扫批 + P4 schema-guard 批 + 文档；**全部未 commit / 未 push**，按用户约束保留。（注：21 个 untracked 均为正式新文件——`tests/canonical_fixture.py`（本批）、`canonical_v2_reader.py`/`db_helpers.py`/`learning_application_store.py`（前批）、4 个 KEEP 运维脚本、2 个 audit 脚本、2 个迁移 SQL、4 个文档、3 个测试，均为资产非垃圾）
+- ~~工作区 186 文件 uncommitted diff~~ **（2026-08-22 已过时）**：全部改动已随 2026-08-20/21/22 各批提交并推送至 origin/main（最新 ef989d7 缺陷批 D1–D13），本地与远端一致，无未提交内容。历史记录见 Git log。
 
 ## 8. 相关文档路由
 
