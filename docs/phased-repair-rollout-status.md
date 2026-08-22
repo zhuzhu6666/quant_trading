@@ -323,6 +323,22 @@ Unresolved live evidence: 部署后新开仓位的完整 lifecycle 样本（S7.6
 
 Remaining compatibility: policy_suggestion 仍有 27 条无 mutation 背书的 applied 幽灵历史行待清（修复后新增 applied 行均带 gmut_ 背书，合法）；根目录 backtest settings.yaml 已证实无加载路径，删除即可（D9 死代码债）。
 
+### 2026-08-22 因子模块批（B 换血 / D 定性 / A 解锁晋升 / C 宏观观察态接入）
+
+Batch: 因子模块四向推进，全程治理 mutation 通道、零手改生产状态。
+
+B 权重换血：factor_health 2000-bar 证据显示 supertrend_str 方向反了（rolling_ic=-0.0022）、engulfing 无信号（0.0013）；经 `gmut_ad05e2f066c0404881acfa2712d48f6a` 双双降权至 0（risk_tightening 免审批）。运行态验证：runtime_factor_selection 投影两因子权重已为 0，backend 未重启自动感知。
+
+D 评分定性：HEALTHY 高分但负 IC 系设计使然——mean_abs_ic 占 40% 奖励预测强度不问方向；direction 字段已预留反向使用契约，留待管道打通后评估。
+
+A 晋升死锁修复（commit e91a053）：准入预检要求 canary==ACTIVE 与 D1 背书门构成循环依赖（lifecycle 激活本身是背书的生产者），13 个全条件达标 GP 因子（oos 967–1408 bars、正 PnL、1599 valid）卡死 CANARY_5。修复：orchestrator `_promotion_evidence` 与 factor_cards preflight 两处接受 PROBATION 为完成态证据；中间阶段仍拦；激活侧全部门禁不变。回归 5 新增测试绿 + 相关面 91 passed（1 失败为基线既有）。
+
+C 宏观观察态接入（gmut_7e1195d43a6c4b6f8571c1751cefffdd）：real_yield_chg / cot_mm_net_chg_4w / cot_mm_net_zscore_52w / cb_total_chg_3m / gld_tonnes_chg_20d / slv_gld_ratio 六个 PIT 安全宏观因子以 role=observe 进入信号配置（no_change 分类）。沿用 dxy_corr_20 先例破"alpha 要证据、证据要被计算"死圈；horizon_ics 在 UNKNOWN 态照常测量，alpha 升格留待数据说话（独立风险分类 mutation）。
+
+Runtime verification: 双 mutation 均 committed/current，后端零重启热加载；health ok；journal 仅周末休市心跳。
+
+Remaining: 周一开盘后观察 observe 因子 n_obs 增长与 horizon_ic 质量；GP 因子走完 PROBATION→治理激活→canary ACTIVE 全链路需下个 evolution cycle 验证。
+
 ## 4. 仍需真实运行证明
 
 以下证据不能由单测、历史快照或 readiness 替代：
