@@ -123,6 +123,13 @@ def test_quarantine_review_acquits_frozen_factor_without_health_ok(monkeypatch):
 
     monkeypatch.setattr(governance_module, "FactorLifecycleService", _FakeLifecycle)
     orchestrator = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    # Hermeticity: pending-effect lookup must not leak ambient runtime rows
+    # into the candidate gate (same mock contract as the prepared-GP test).
+    monkeypatch.setattr(
+        orchestrator,
+        "_factor_has_pending_effect",
+        lambda _factor_id: False,
+    )
     monkeypatch.setattr(
         orchestrator,
         "_ensure_quarantine_review",
