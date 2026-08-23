@@ -611,6 +611,36 @@ def test_factor_catalog_snapshot_round_trips_full_catalog_json(tmp_path):
     assert latest["catalog_hash"] == snapshot["catalog_hash"]
 
 
+def test_factor_catalog_full_snapshot_preserves_historical_freshness_fields(
+    monkeypatch, tmp_path
+):
+    import backend.services.factor_catalog as catalog_module
+
+    db_path = tmp_path / "state.db"
+    catalog = [
+        {
+            "factor_id": "rsi_14",
+            "health_updated_at": 100.0,
+            "canary": {"stage": "SHADOW", "updated_at": 101.0},
+        }
+    ]
+    persist_factor_catalog_snapshot(catalog, run_id="run_history", db_path=db_path)
+    monkeypatch.setattr(
+        catalog_module,
+        "_health_by_factor",
+        lambda _db_path: {"rsi_14": {"updated_at": 200.0}},
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "_canary_by_factor",
+        lambda _db_path: {"rsi_14": {"updated_at": 201.0}},
+    )
+
+    latest = latest_factor_catalog_snapshot(db_path)
+
+    assert latest["items"] == catalog
+
+
 def test_factor_catalog_snapshot_interns_semantic_payload_but_keeps_occurrences(tmp_path):
     db_path = tmp_path / "state.db"
     first_catalog = [

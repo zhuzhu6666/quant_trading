@@ -56,18 +56,42 @@ _CATALOG_VOLATILE_FIELDS = {
     "latest_catalog_snapshot_id",
     "latest_catalog_snapshot_run_id",
 }
+# Per-cycle timestamps that change on every governance tick even when no
+# factor fact changed.  They are excluded from the semantic hash so the
+# dedup reference path stays effective, and are re-hydrated from the live
+# factor_health / canary_state tables on read (they are display-only
+# freshness stamps; consumers recompute freshness against now()).
 _CATALOG_PAYLOAD_REF = "__catalog_payload_ref__"
 
 
+def _strip_volatile_nested(item: dict[str, Any]) -> dict[str, Any]:
+    stripped = {
+        key: value
+        for key, value in item.items()
+        if key not in _CATALOG_VOLATILE_FIELDS and key != "health_updated_at"
+    }
+    canary = stripped.get("canary")
+    if isinstance(canary, dict) and "updated_at" in canary:
+        canary = {k: v for k, v in canary.items() if k != "updated_at"}
+        if canary:
+            stripped["canary"] = canary
+        else:
+            stripped.pop("canary", None)
+    return stripped
+
+
 def _catalog_semantic_payload(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Remove occurrence metadata before deciding whether content is reused."""
+    """Remove occurrence metadata before deciding whether content is reused.
+
+    ``health_updated_at`` and ``canary.updated_at`` refresh every cycle even
+    when no factor fact moved; including them in the hash defeated the
+    content-addressed reference path (every snapshot stored a fresh full
+    2.6 MB copy).  Both are re-hydrated from their authoritative tables on
+    read via :func:`_hydrate_volatile_fields`.
+    """
 
     return [
-        {
-            key: value
-            for key, value in item.items()
-            if key not in _CATALOG_VOLATILE_FIELDS
-        }
+        _strip_volatile_nested(item)
         if isinstance(item, dict)
         else item
         for item in catalog
@@ -138,6 +162,42 @@ def _apply_catalog_occurrence_metadata(
             elif field in updated and field in metadata:
                 # Read compatibility for an early reference encoding.
                 updated[field] = metadata[field]
+        result.append(updated)
+    return result
+
+
+def _hydrate_volatile_fields(
+    catalog: list[dict[str, Any]],
+    db_path: str | Path = STATE_DB,
+) -> list[dict[str, Any]]:
+    """Re-attach per-cycle freshness stamps from their authoritative tables.
+
+    Reference-encoded snapshots omit ``health_updated_at`` and
+    ``canary.updated_at`` (they change every cycle and would defeat the
+    semantic hash).  Both live in ``factor_health`` / ``canary_state``; read
+    them fresh so consumers see the same values a full copy would have had,
+    without paying the storage cost.
+    """
+
+    health = _health_by_factor(db_path)
+    canary = _canary_by_factor(db_path)
+    if not health and not canary:
+        return catalog
+    result: list[dict[str, Any]] = []
+    for item in catalog:
+        if not isinstance(item, dict):
+            result.append(item)
+            continue
+        updated = dict(item)
+        name = str(updated.get("factor_id") or "")
+        h = health.get(name)
+        if isinstance(h, dict):
+            updated["health_updated_at"] = float(h.get("updated_at") or 0.0)
+        c = canary.get(name)
+        if c is not None:
+            canary_dict = dict(updated.get("canary") or {})
+            canary_dict["updated_at"] = float(c.get("updated_at") or 0.0)
+            updated["canary"] = canary_dict
         result.append(updated)
     return result
 
@@ -948,7 +1008,9 @@ def latest_factor_catalog_snapshot(db_path: str | Path = STATE_DB) -> dict[str, 
         if not row:
             return {"ok": False, "status": "missing", "items": [], "count": 0}
         items = _loads(row["catalog_json"], [])
+        reference_encoded = False
         if isinstance(items, dict) and items.get(_CATALOG_PAYLOAD_REF):
+            reference_encoded = True
             payload_row = conn.execute(
                 _p(
                     db_path,
@@ -967,6 +1029,11 @@ def latest_factor_catalog_snapshot(db_path: str | Path = STATE_DB) -> dict[str, 
             )
         if not isinstance(items, list):
             items = []
+        if reference_encoded:
+            # Reference rows omit per-cycle freshness stamps; hydrate only
+            # those rows.  A full snapshot is an historical audit record and
+            # must retain the values captured at its own creation time.
+            items = _hydrate_volatile_fields(items, db_path)
         return {
             "ok": True,
             "schema_version": "factor_catalog_snapshot.v1",

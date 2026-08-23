@@ -18,6 +18,7 @@ from backend.services.governance_eligibility import evaluate_governance_eligibil
 from backend.services.governance_mutation_coordinator import (
     GovernanceMutationCoordinator,
     GovernanceMutationPlan,
+    _deep_slice,
     classify_governance_risk,
 )
 from backend.services._brain_helpers import connect, execute
@@ -106,6 +107,61 @@ def test_risk_classification_ignores_caller_labels_and_fails_unknown_changes_clo
     )
     assert template.risk_class == "risk_expanding"
     assert template.v16_required is True
+
+
+def test_deep_slice_does_not_reintroduce_untouched_nested_siblings():
+    payload = {
+        "factor_signal_config": {
+            "existing": {"enabled": True, "weight": 0.2},
+            "untouched": {"enabled": True, "weight": 0.1},
+        }
+    }
+    patch = {
+        "factor_signal_config": {
+            "new_factor": {"enabled": False, "lifecycle_status": "SHADOW"}
+        }
+    }
+
+    assert _deep_slice(payload, patch) == {}
+    assert _deep_slice(
+        {
+            **payload,
+            "factor_signal_config": {
+                **payload["factor_signal_config"],
+                "new_factor": patch["factor_signal_config"]["new_factor"],
+            },
+        },
+        patch,
+    ) == {
+        "factor_signal_config": {
+            "new_factor": patch["factor_signal_config"]["new_factor"]
+        }
+    }
+
+
+def test_factor_governance_audit_scope_keeps_non_factor_runtime_controls():
+    from backend.runtime.factor_governance_orchestrator import FactorGovernanceOrchestrator
+
+    payload = {
+        "runtime_config": {
+            "factor_signal_config": {
+                "alpha": {"enabled": True, "weight": 0.2},
+                "untouched": {"enabled": True, "weight": 0.1},
+            },
+            "factor_portfolio_weights": {"alpha": 0.2, "untouched": 0.1},
+            "autonomy_mode": "demo_autonomous",
+        },
+        "evidence": {"review_id": "review-1"},
+    }
+
+    scoped = FactorGovernanceOrchestrator._scope_audit_config(payload, "alpha")
+
+    assert scoped["runtime_config"]["factor_signal_config"] == {
+        "alpha": {"enabled": True, "weight": 0.2}
+    }
+    assert scoped["runtime_config"]["factor_portfolio_weights"] == {"alpha": 0.2}
+    assert scoped["runtime_config"]["autonomy_mode"] == "demo_autonomous"
+    assert scoped["runtime_config"]["factor_signal_config"].get("untouched") is None
 
 
 def test_model_influence_terminal_stage_is_tightening_but_reverse_is_expansion():

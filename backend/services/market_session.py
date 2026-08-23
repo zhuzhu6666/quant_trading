@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -20,6 +20,9 @@ DAY_ALIASES = {
     "saturday": 5,
     "sunday": 6,
 }
+
+_CTRADER_EPOCH_DATE = date(1970, 1, 1)
+_BrokerHoliday = tuple[date, bool, int, int, str, Any]
 
 
 @dataclass
@@ -214,17 +217,11 @@ def _resolve_broker_schedule_timezone(value: Any) -> tuple[str, Any | None]:
         return name, None
 
 
-def _broker_schedule_window(
-    now: datetime,
+def _parse_broker_schedule(
     broker_schedule: dict[str, Any] | None,
-) -> tuple[bool, float | None, float | None, str] | None:
-    """Calculate the current broker session from ProtoOASymbol intervals.
+) -> tuple[str, Any, list[tuple[int, int]], list[_BrokerHoliday]] | None:
+    """Validate and normalize cTrader weekly intervals and holidays."""
 
-    cTrader expresses intervals as seconds from Sunday 00:00 in the symbol's
-    own timezone.  Keeping this conversion here makes the broker schedule a
-    drop-in replacement for the static YAML fallback without creating a
-    second session authority.
-    """
     if not isinstance(broker_schedule, dict):
         return None
     intervals: list[tuple[int, int]] = []
@@ -248,34 +245,307 @@ def _broker_schedule_window(
     )
     if schedule_tz is None:
         return None
+    holidays: list[_BrokerHoliday] = []
+    for item in broker_schedule.get("holidays") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            holiday_date = _CTRADER_EPOCH_DATE + timedelta(
+                days=int(item.get("holiday_date"))
+            )
+            start_second = int(item.get("start_second"))
+            end_second = int(item.get("end_second"))
+        except (OverflowError, TypeError, ValueError):
+            continue
+        if not (0 <= start_second <= 86400 and 0 <= end_second <= 86400):
+            continue
+        # The bridge normalizes omitted optional boundaries to 00:00-24:00;
+        # tolerate a legacy 0/0 representation as a full-day closure. Other
+        # equal non-zero boundaries carry no usable duration.
+        if start_second == end_second and start_second != 0:
+            continue
+        holiday_timezone_name, holiday_tz = _resolve_broker_schedule_timezone(
+            item.get("timezone") or timezone_name
+        )
+        if holiday_tz is None:
+            continue
+        holidays.append(
+            (
+                holiday_date,
+                bool(item.get("is_recurring", False)),
+                start_second,
+                end_second,
+                holiday_timezone_name,
+                holiday_tz,
+            )
+        )
+    return timezone_name, schedule_tz, intervals, holidays
 
-    local_now = now.astimezone(schedule_tz)
-    sunday_date = local_now.date() - timedelta(days=(local_now.weekday() + 1) % 7)
+
+def _holiday_windows_for_range(
+    *,
+    start_ts: float,
+    end_ts: float,
+    holidays: list[_BrokerHoliday],
+) -> list[tuple[float, float]]:
+    """Expand cTrader one-off/recurring holiday closures into UTC windows."""
+
+    if end_ts <= start_ts or not holidays:
+        return []
+    windows: list[tuple[float, float]] = []
+    for base_date, recurring, start_second, end_second, _tz_name, holiday_tz in holidays:
+        local_start = datetime.fromtimestamp(
+            start_ts - 86400, tz=holiday_tz
+        ).date()
+        local_end = datetime.fromtimestamp(
+            end_ts + 86400, tz=holiday_tz
+        ).date()
+        if recurring:
+            holiday_dates: list[date] = []
+            for year in range(local_start.year, local_end.year + 1):
+                try:
+                    holiday_dates.append(base_date.replace(year=year))
+                except ValueError:
+                    # A recurring 29-Feb entry has no occurrence in a
+                    # non-leap year; cTrader's next leap-year entry remains
+                    # the only valid date.
+                    continue
+        else:
+            holiday_dates = [base_date]
+        for holiday_date in holiday_dates:
+            start_dt = datetime.combine(
+                holiday_date,
+                dtime.min,
+                tzinfo=holiday_tz,
+            ) + timedelta(seconds=start_second)
+            end_second_offset = end_second
+            if end_second_offset <= start_second:
+                end_second_offset += 86400
+            end_dt = datetime.combine(
+                holiday_date,
+                dtime.min,
+                tzinfo=holiday_tz,
+            ) + timedelta(seconds=end_second_offset)
+            window_start = start_dt.timestamp()
+            window_end = end_dt.timestamp()
+            if (
+                window_end > start_ts
+                and window_start < end_ts
+                and window_end > window_start
+            ):
+                windows.append((window_start, window_end))
+    return windows
+
+
+def _subtract_windows(
+    open_windows: list[tuple[float, float]],
+    closed_windows: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Remove broker holiday windows from weekly open windows."""
+
+    if not closed_windows:
+        return open_windows
+    result: list[tuple[float, float]] = []
+    for open_start, open_end in open_windows:
+        pieces = [(open_start, open_end)]
+        for closed_start, closed_end in closed_windows:
+            next_pieces: list[tuple[float, float]] = []
+            for piece_start, piece_end in pieces:
+                if closed_end <= piece_start or closed_start >= piece_end:
+                    next_pieces.append((piece_start, piece_end))
+                    continue
+                if piece_start < closed_start:
+                    next_pieces.append((piece_start, min(piece_end, closed_start)))
+                if closed_end < piece_end:
+                    next_pieces.append((max(piece_start, closed_end), piece_end))
+            pieces = next_pieces
+            if not pieces:
+                break
+        result.extend((start, end) for start, end in pieces if end > start)
+    return sorted(result, key=lambda item: item[0])
+
+
+def _broker_schedule_window(
+    now: datetime,
+    broker_schedule: dict[str, Any] | None,
+) -> tuple[bool, float | None, float | None, str, bool] | None:
+    """Calculate the current broker session from ProtoOASymbol intervals.
+
+    cTrader expresses intervals as seconds from Sunday 00:00 in the symbol's
+    own timezone.  Keeping this conversion here makes the broker schedule a
+    drop-in replacement for the static YAML fallback without creating a
+    second session authority.
+    """
+    parsed = _parse_broker_schedule(broker_schedule)
+    if parsed is None:
+        return None
+    timezone_name, schedule_tz, intervals, holidays = parsed
+
+    now_ts = now.timestamp()
+    weekly_windows = _schedule_windows_for_range(
+        start_ts=now_ts - 7 * 86400,
+        end_ts=now_ts + 21 * 86400,
+        schedule_tz=schedule_tz,
+        intervals=intervals,
+    )
+    holiday_windows = _holiday_windows_for_range(
+        start_ts=now_ts - 7 * 86400,
+        end_ts=now_ts + 21 * 86400,
+        holidays=holidays,
+    )
+    windows = _subtract_windows(weekly_windows, holiday_windows)
+
+    current_close: float | None = None
+    next_open: float | None = None
+    for start_ts, end_ts in windows:
+        if start_ts <= now_ts < end_ts:
+            seconds = max(0.0, end_ts - now_ts)
+            current_close = (
+                seconds
+                if current_close is None
+                else min(current_close, seconds)
+            )
+        elif start_ts > now_ts:
+            seconds = max(0.0, start_ts - now_ts)
+            next_open = (
+                seconds
+                if next_open is None
+                else min(next_open, seconds)
+            )
+    holiday_active = any(
+        window_start <= now_ts < window_end
+        for window_start, window_end in holiday_windows
+    )
+    return (
+        current_close is not None,
+        current_close,
+        next_open,
+        timezone_name,
+        holiday_active,
+    )
+
+
+def _config_schedule_intervals(symbol: str) -> list[tuple[int, int]]:
+    """Convert the static YAML fallback into the same Sunday-based format."""
+
+    intervals: list[tuple[int, int]] = []
+    for day, start, end in _load_hours(symbol):
+        start_second = ((day + 1) % 7) * 86400 + (
+            start.hour * 3600 + start.minute * 60 + start.second
+        )
+        end_second = ((day + 1) % 7) * 86400 + (
+            end.hour * 3600 + end.minute * 60 + end.second
+        )
+        if end_second <= start_second:
+            end_second += 604800
+        intervals.append((start_second, end_second))
+    return intervals
+
+
+def _schedule_windows_for_range(
+    *,
+    start_ts: float,
+    end_ts: float,
+    schedule_tz: Any,
+    intervals: list[tuple[int, int]],
+) -> list[tuple[float, float]]:
+    """Expand weekly local-time intervals into UTC epoch windows."""
+
+    start_local = datetime.fromtimestamp(start_ts, tz=schedule_tz)
+    end_local = datetime.fromtimestamp(end_ts, tz=schedule_tz)
+    sunday_date = start_local.date() - timedelta(days=(start_local.weekday() + 1) % 7)
     week_start = datetime.combine(sunday_date, dtime.min, tzinfo=schedule_tz)
-    windows: list[tuple[datetime, datetime]] = []
-    for week_offset in range(-1, 3):
+    weeks_after_start = max(0, (end_local.date() - sunday_date).days // 7)
+    windows: list[tuple[float, float]] = []
+    for week_offset in range(-1, weeks_after_start + 2):
         base = week_start + timedelta(days=7 * week_offset)
         for start_second, end_second in intervals:
             end_offset = end_second
             if end_offset <= start_second:
                 end_offset += 604800
-            windows.append(
-                (
-                    base + timedelta(seconds=start_second),
-                    base + timedelta(seconds=end_offset),
-                )
-            )
+            start_dt = base + timedelta(seconds=start_second)
+            end_dt = base + timedelta(seconds=end_offset)
+            windows.append((start_dt.timestamp(), end_dt.timestamp()))
+    return windows
 
-    current_close: float | None = None
-    next_open: float | None = None
-    for start_dt, end_dt in sorted(windows, key=lambda item: item[0]):
-        if start_dt <= local_now < end_dt:
-            seconds = max(0.0, (end_dt - local_now).total_seconds())
-            current_close = seconds if current_close is None else min(current_close, seconds)
-        elif start_dt > local_now:
-            seconds = max(0.0, (start_dt - local_now).total_seconds())
-            next_open = seconds if next_open is None else min(next_open, seconds)
-    return current_close is not None, current_close, next_open, timezone_name
+
+def _market_open_seconds_between_with_source(
+    start_ts: float,
+    end_ts: float,
+    *,
+    symbol: str = "XAUUSD+",
+    broker_schedule: dict[str, Any] | None = None,
+) -> tuple[float, str]:
+    start = float(start_ts or 0.0)
+    end = float(end_ts or 0.0)
+    if end <= start:
+        return 0.0, "config"
+
+    parsed = _parse_broker_schedule(broker_schedule)
+    if parsed is not None:
+        _timezone_name, schedule_tz, intervals, holidays = parsed
+        source = "ctrader_symbol"
+    else:
+        schedule_tz = timezone.utc
+        intervals = _config_schedule_intervals(symbol)
+        source = "config_fallback" if broker_schedule else "config"
+
+    # This matches _schedule_window's behavior for a symbol without a static
+    # schedule: no configured hours means no known closure, so preserve the
+    # wall-clock duration instead of inventing a weekend.
+    if not intervals:
+        return end - start, source
+
+    weekly_windows = _schedule_windows_for_range(
+        start_ts=start,
+        end_ts=end,
+        schedule_tz=schedule_tz,
+        intervals=intervals,
+    )
+    holiday_windows = _holiday_windows_for_range(
+        start_ts=start - 7 * 86400,
+        end_ts=end + 7 * 86400,
+        holidays=holidays if parsed is not None else [],
+    )
+    total = 0.0
+    for window_start, window_end in _subtract_windows(weekly_windows, holiday_windows):
+        total += max(0.0, min(end, window_end) - max(start, window_start))
+    return total, source
+
+
+def market_open_seconds_between(
+    start_ts: float,
+    end_ts: float,
+    *,
+    symbol: str = "XAUUSD+",
+    broker_schedule: dict[str, Any] | None = None,
+) -> float:
+    """Count open-market seconds using cTrader schedule, then YAML fallback."""
+
+    seconds, _source = _market_open_seconds_between_with_source(
+        start_ts,
+        end_ts,
+        symbol=symbol,
+        broker_schedule=broker_schedule,
+    )
+    return seconds
+
+
+def market_open_seconds_between_with_source(
+    start_ts: float,
+    end_ts: float,
+    *,
+    symbol: str = "XAUUSD+",
+    broker_schedule: dict[str, Any] | None = None,
+) -> tuple[float, str]:
+    """Return open seconds plus the schedule authority used for the result."""
+
+    return _market_open_seconds_between_with_source(
+        start_ts,
+        end_ts,
+        symbol=symbol,
+        broker_schedule=broker_schedule,
+    )
 
 
 def evaluate_market_session(
@@ -303,9 +573,16 @@ def evaluate_market_session(
     overrides = _load_session_overrides(symbol)
     schedule_source = "config"
     schedule_timezone = "UTC"
+    holiday_active = False
     broker_window = _broker_schedule_window(now, broker_schedule)
     if broker_window is not None:
-        in_schedule, seconds_to_close, seconds_to_open, schedule_timezone = broker_window
+        (
+            in_schedule,
+            seconds_to_close,
+            seconds_to_open,
+            schedule_timezone,
+            holiday_active,
+        ) = broker_window
         schedule_source = "ctrader_symbol"
     else:
         in_schedule, seconds_to_close, seconds_to_open = _schedule_window(now, hours)
@@ -361,6 +638,10 @@ def evaluate_market_session(
         evidence.append("trading_hour_override_active")
     if schedule_source == "ctrader_symbol":
         evidence.append("ctrader_symbol_schedule")
+        if isinstance(broker_schedule, dict) and broker_schedule.get("holidays"):
+            evidence.append("ctrader_symbol_holiday_data")
+        if holiday_active:
+            evidence.append("ctrader_symbol_holiday_active")
     elif broker_schedule:
         evidence.append("ctrader_schedule_unavailable")
     near_close = (
@@ -413,8 +694,12 @@ def evaluate_market_session(
             reason=(
                 str(override.get("reason") or "trading_hour_override_closed")
                 if override_active and confirmed
+                else "broker_symbol_holiday"
+                if holiday_active and confirmed
                 else "scheduled_closed"
                 if confirmed
+                else "broker_symbol_holiday_waiting_confirmation"
+                if holiday_active
                 else str(override.get("reason") or "scheduled_closed_waiting_confirmation")
             ),
             now_ts=ts,

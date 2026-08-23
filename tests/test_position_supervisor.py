@@ -263,6 +263,30 @@ def test_position_supervisor_recommends_close_when_timeout_exceeded():
     assert verdict["recommended_controls"]["protection_mode"] == "full_exit"
 
 
+def test_position_supervisor_does_not_use_wall_clock_when_market_timeout_is_pending():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "market-closed-timeout",
+                "direction": 1,
+                "entry_price": 3000.0,
+                "current_price": 3000.0,
+                "volume": 100.0,
+                "unrealized_pnl": 0.0,
+            },
+            "risk": {
+                "max_holding_seconds": 1800.0,
+                "holding_timeout_ratio": 0.5,
+                "holding_timeout_exceeded": False,
+                "thesis_status": "intact",
+            },
+            "temporal_context": {"holding_seconds": 3600.0},
+        }
+    )
+
+    assert verdict["summary_reason"] != "holding_timeout_exceeded"
+
+
 def test_position_supervisor_default_template_delays_thesis_break_until_complete_bars():
     verdict = evaluate_position_supervisor(
         {

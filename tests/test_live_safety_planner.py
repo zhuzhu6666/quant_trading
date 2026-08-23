@@ -98,6 +98,36 @@ def test_pure_planner_excludes_retired_legacy_trailing_candidates():
     assert len([item for item in plan.arbitration if item["decision"] == "superseded"]) == 0
     assert all(len(item.fingerprint) == 64 for item in plan.candidates)
 
+
+def test_pure_planner_does_not_select_wall_clock_timeout_during_market_closure():
+    runtime = SafetyPlannerRuntime(
+        build_timeout_context=lambda *_args: {
+            "holding_seconds": 3600.0,
+            "holding_seconds_state": "known",
+            "max_holding_seconds": 1800.0,
+            "market_time_budget": {
+                "market_open_holding_seconds": 900.0,
+                "market_closed_pending": True,
+                "timeout_on_market_time": False,
+            },
+        },
+        load_entry_protection_plan=lambda _pid: {},
+        evaluate_supervisor=lambda *_args: {"action": "hold"},
+    )
+
+    plan = plan_live_safety_candidates(
+        positions=[{"position_id": 91}],
+        cfg=SimpleNamespace(),
+        account={},
+        current_price=100.0,
+        atr_price=1.0,
+        runtime=runtime,
+        planned_at=1000.0,
+    )
+
+    assert plan.candidates == ()
+
+
 class _Bridge:
     def unresolved_execution_intent_count(self):
         return 0

@@ -1743,6 +1743,14 @@ def test_build_close_position_risk_context_payload_computes_holding_timeout_fiel
         "timeframe_seconds": 300,
         "max_holding_bars": 12,
         "max_holding_seconds": 3_600.0,
+        "market_time_budget": {
+            "wall_clock_holding_seconds": 3_900.0,
+            "market_open_holding_seconds": 3_900.0,
+            "market_closed_in_window": False,
+            "market_closed_pending": False,
+            "timeout_on_market_time": True,
+            "schedule_source": "config",
+        },
         "temporal_context": {"decision_ts": 4_900.0, "timeframe_seconds": 300, "timeframe": "M5"},
     }
 
@@ -1811,6 +1819,28 @@ def test_build_holding_summary_from_close_context_reports_watch_and_remaining_ti
     assert summary["holding_timeout_ratio"] == 0.8333
     assert summary["holding_timeout_status"] == "watch"
     assert summary["holding_timeout_remaining_seconds"] == 600.0
+
+
+def test_build_holding_summary_uses_market_time_for_timeout_during_closure():
+    summary = build_holding_summary_from_close_context(
+        {
+            "holding_seconds": 3600.0,
+            "max_holding_seconds": 1800.0,
+            "market_time_budget": {
+                "wall_clock_holding_seconds": 3600.0,
+                "market_open_holding_seconds": 900.0,
+                "market_closed_pending": True,
+                "timeout_on_market_time": False,
+                "schedule_source": "ctrader_symbol",
+            },
+        }
+    )
+
+    assert summary["holding_timeout_exceeded"] is False
+    assert summary["holding_timeout_status"] == "normal"
+    assert summary["holding_timeout_ratio"] == 0.5
+    assert summary["holding_timeout_remaining_seconds"] == 900.0
+    assert summary["market_open_holding_seconds"] == 900.0
 
 
 def test_build_holding_summary_from_close_context_reports_disabled_and_expired_states():

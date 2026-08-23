@@ -1,6 +1,7 @@
 import threading
 import sqlite3
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import duckdb
@@ -2896,7 +2897,9 @@ def test_holding_summary_for_position_reports_watch_status(monkeypatch, tmp_path
 
     _patch_live_state_conn(monkeypatch, _conn)
 
-    open_ts = time.time() - 3000.0
+    # Keep the test inside a configured open interval; market-time accounting
+    # intentionally excludes the weekend instead of using wall-clock age.
+    open_ts = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc).timestamp()
     ledger.log_decision(
         event_type="open",
         symbol="XAUUSD+",
@@ -3781,3 +3784,267 @@ def test_retired_legacy_awe_candidate_cannot_enter_live_executor(monkeypatch):
     assert result is False
     assert prepare_calls == []
     assert logs == ["tick 9: retired protection candidate ignored pos=704"]
+
+
+def _timeout_cfg():
+    return SimpleNamespace(timeframe="M5", risk_max_holding_bars=288)
+
+
+def _market_closed_position(entry_ts: float) -> dict:
+    return {
+        "position_id": 901,
+        "symbol": "XAUUSD+",
+        "direction": -1,
+        "volume": 100.0,
+        "open_timestamp": entry_ts,
+    }
+
+
+def test_holding_timeout_defers_when_market_closed(monkeypatch, tmp_path):
+    """Wall-clock timeout during a weekend closure defers; no broker call, no risk_decision."""
+
+    db_path = tmp_path / "state.db"
+    ledger = DecisionLedger(str(db_path))
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _patch_live_state_conn(monkeypatch, _conn)
+
+    # Entry Friday 20:00 UTC, evaluated Sunday 10:00 UTC: wall clock is past
+    # the limit but the market was closed for most of the window.
+    friday_2000 = datetime(2026, 8, 21, 20, 0, tzinfo=timezone.utc).timestamp()
+    sunday_1000 = datetime(2026, 8, 23, 10, 0, tzinfo=timezone.utc).timestamp()
+
+    monkeypatch.setattr(
+        live_service,
+        "_lookup_open_decision_context",
+        lambda _pid: {"entry_ts": friday_2000, "timeframe": "M5", "source": "test"},
+    )
+    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *a, **k: None)
+
+    traces = []
+    monkeypatch.setattr(
+        live_service,
+        "_log_supervisor_trace",
+        lambda **kwargs: traces.append(kwargs),
+    )
+    decisions = []
+    monkeypatch.setattr(
+        live_service,
+        "_log_supervisor_decision",
+        lambda **kwargs: decisions.append(kwargs) or "dec-x",
+    )
+
+    class _NoCloseBridge:
+        def close_position(self, *_args, **_kwargs):  # pragma: no cover - must not run
+            raise AssertionError("close must not be attempted while market closed")
+
+    handled = live_service._enforce_holding_timeout(
+        _NoCloseBridge(),
+        [_market_closed_position(friday_2000)],
+        cfg=_timeout_cfg(),
+        tick=7,
+        log=lambda _msg: None,
+        decision_ts=sunday_1000,
+    )
+
+    assert handled == {901}
+    assert decisions == []
+    assert len(traces) == 1
+    trace = traces[0]
+    assert trace["stage"] == "execution_deferred"
+    assert trace["execution_status"] == "deferred"
+    assert trace["execution_reason"] == "market_closed_pending"
+    # The static fallback in config/instruments.yaml closes XAUUSD+ at 21:59,
+    # so this intentionally measures 1 minute less than the wall-clock 20:00
+    # to Sunday 10:00 interval.  A live bridge schedule is tested separately.
+    assert trace["execution"]["market_open_holding_seconds"] == pytest.approx(7140.0)
+
+
+def test_holding_timeout_uses_ctrader_schedule_for_intraday_break(monkeypatch, tmp_path):
+    """A broker-reported break blocks a wall-clock timeout until open time accrues."""
+
+    db_path = tmp_path / "state.db"
+    DecisionLedger(str(db_path))
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _patch_live_state_conn(monkeypatch, _conn)
+
+    thursday_1130 = datetime(2026, 8, 20, 11, 30, tzinfo=timezone.utc).timestamp()
+    thursday_1245 = datetime(2026, 8, 20, 12, 45, tzinfo=timezone.utc).timestamp()
+    schedule = {
+        "timezone": "UTC",
+        "intervals": [
+            {"start_second": 86400, "end_second": 4 * 86400 + 12 * 3600},
+            {"start_second": 4 * 86400 + 13 * 3600, "end_second": 5 * 86400 + 22 * 3600},
+        ],
+    }
+
+    monkeypatch.setattr(
+        live_service,
+        "_lookup_open_decision_context",
+        lambda _pid: {"entry_ts": thursday_1130, "timeframe": "M5", "source": "test"},
+    )
+    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *a, **k: None)
+    traces = []
+    monkeypatch.setattr(
+        live_service,
+        "_log_supervisor_trace",
+        lambda **kwargs: traces.append(kwargs),
+    )
+
+    class _NoCloseBridge:
+        _symbol_meta = {"broker_schedule": schedule}
+
+        def close_position(self, *_args, **_kwargs):  # pragma: no cover - must not run
+            raise AssertionError("close must not be attempted during the broker break")
+
+    handled = live_service._enforce_holding_timeout(
+        _NoCloseBridge(),
+        [_market_closed_position(thursday_1130)],
+        cfg=SimpleNamespace(timeframe="M5", risk_max_holding_bars=12),
+        tick=8,
+        log=lambda _msg: None,
+        decision_ts=thursday_1245,
+    )
+
+    assert handled == {901}
+    assert len(traces) == 1
+    assert traces[0]["execution_reason"] == "market_closed_pending"
+    assert traces[0]["execution"]["market_open_holding_seconds"] == pytest.approx(1800.0)
+
+
+def test_holding_timeout_market_open_still_closes(monkeypatch, tmp_path):
+    """A genuinely expired position on an open market still reaches the broker."""
+
+    db_path = tmp_path / "state.db"
+    DecisionLedger(str(db_path))
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _patch_live_state_conn(monkeypatch, _conn)
+
+    wednesday = datetime(2026, 8, 19, 0, 0, tzinfo=timezone.utc).timestamp()
+    thursday = datetime(2026, 8, 20, 3, 0, tzinfo=timezone.utc).timestamp()
+
+    monkeypatch.setattr(
+        live_service,
+        "_lookup_open_decision_context",
+        lambda _pid: {"entry_ts": wednesday, "timeframe": "M5", "source": "test"},
+    )
+    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *a, **k: None)
+
+    close_calls = []
+
+    class _Bridge:
+        def close_position(self, pid, volume=0.0):
+            close_calls.append((pid, volume))
+            return SimpleNamespace(success=True, outcome="confirmed", position_id=pid)
+
+    monkeypatch.setattr(live_service, "_remember_close_reason", lambda *a, **k: None)
+    monkeypatch.setattr(live_service, "_remember_close_verdict", lambda *a, **k: None)
+    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: None)
+    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec-y")
+
+    handled = live_service._enforce_holding_timeout(
+        _Bridge(),
+        [_market_closed_position(wednesday)],
+        cfg=_timeout_cfg(),
+        tick=9,
+        log=lambda _msg: None,
+        decision_ts=thursday,
+    )
+
+    assert handled == {901}
+    assert close_calls == [(901, 100.0)]
+
+
+def test_market_closed_rejection_records_suppression(monkeypatch, tmp_path):
+    """A MARKET_CLOSED rejection from the broker records suppression meta."""
+
+    db_path = tmp_path / "state.db"
+    DecisionLedger(str(db_path))
+
+    def _conn():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    _patch_live_state_conn(monkeypatch, _conn)
+
+    thursday = datetime(2026, 8, 20, 0, 0, tzinfo=timezone.utc).timestamp()
+    friday = datetime(2026, 8, 21, 3, 0, tzinfo=timezone.utc).timestamp()
+
+    monkeypatch.setattr(
+        live_service,
+        "_lookup_open_decision_context",
+        lambda _pid: {"entry_ts": thursday, "timeframe": "M5", "source": "test"},
+    )
+
+    merged = []
+    monkeypatch.setattr(
+        live_service,
+        "_merge_recovery_position_meta",
+        lambda pid, meta: merged.append((pid, dict(meta))),
+    )
+    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: None)
+    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec-z")
+
+    class _RejectedBridge:
+        def close_position(self, pid, volume=0.0):
+            return SimpleNamespace(
+                success=False,
+                outcome="rejected",
+                error_code="MARKET_CLOSED",
+                comment="close rejected: MARKET_CLOSED — Trading is not available: Market is closed.",
+                position_id=pid,
+            )
+
+    handled = live_service._enforce_holding_timeout(
+        _RejectedBridge(),
+        [_market_closed_position(thursday)],
+        cfg=_timeout_cfg(),
+        tick=11,
+        log=lambda _msg: None,
+        decision_ts=friday,
+    )
+
+    assert handled == {901}
+    assert len(merged) == 1
+    pid, meta = merged[0]
+    assert pid == 901
+    assert meta[live_service.MARKET_CLOSED_DEFER_REASON_KEY] == "market_closed_pending"
+    assert meta[live_service.MARKET_CLOSED_DEFER_TS_KEY] == pytest.approx(friday)
+    assert "MARKET_CLOSED" in meta["market_closed_close_rejection"]
+    assert live_service.market_closed_deferral_active(meta, friday + 60.0) is True
+    assert (
+        live_service.market_closed_deferral_active(meta, friday + 3601.0) is False
+    )
+
+
+def test_market_closed_classifier_is_case_insensitive_but_not_overbroad():
+    assert live_service.is_deterministic_market_closed_rejection(
+        "Trading is not available: MARKET IS CLOSED"
+    ) is True
+    assert live_service.is_deterministic_market_closed_rejection(
+        "Trading is not available: account permissions"
+    ) is False
+
+
+def test_market_closed_deferral_rejects_future_timestamp():
+    meta = {
+        live_service.MARKET_CLOSED_DEFER_REASON_KEY: "market_closed_pending",
+        live_service.MARKET_CLOSED_DEFER_TS_KEY: 200.0,
+    }
+
+    assert live_service.market_closed_deferral_active(meta, 199.0) is False

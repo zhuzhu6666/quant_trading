@@ -1,10 +1,153 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
-from backend.services.market_session import evaluate_market_session
+from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOAHoliday
+
+from execution.ctrader_bridge import _extract_broker_schedule
+
+from backend.services.market_session import (
+    evaluate_market_session,
+    market_open_seconds_between_with_source,
+)
 
 
 def _ts(year, month, day, hour, minute=0):
     return datetime(year, month, day, hour, minute, tzinfo=timezone.utc).timestamp()
+
+
+def test_ctrader_symbol_holidays_are_preserved_from_the_broker_payload():
+    holiday = SimpleNamespace(
+        holidayId=91,
+        name="Broker temporary closure",
+        description="returned by cTrader",
+        scheduleTimeZone="UTC",
+        holidayDate=(date(2026, 6, 25) - date(1970, 1, 1)).days,
+        isRecurring=False,
+        startSecond=12 * 3600,
+        endSecond=13 * 3600,
+    )
+    schedule = _extract_broker_schedule(
+        SimpleNamespace(
+            schedule=[SimpleNamespace(startSecond=0, endSecond=604800)],
+            scheduleTimeZone="UTC",
+            holiday=[holiday],
+        )
+    )
+
+    assert schedule["holidays"] == [
+        {
+            "holiday_id": 91,
+            "name": "Broker temporary closure",
+            "description": "returned by cTrader",
+            "timezone": "UTC",
+            "holiday_date": holiday.holidayDate,
+            "is_recurring": False,
+            "start_second": 12 * 3600,
+            "end_second": 13 * 3600,
+        }
+    ]
+
+
+def test_ctrader_holiday_without_optional_boundaries_is_fail_closed_full_day():
+    holiday = ProtoOAHoliday(
+        holidayId=92,
+        holidayDate=(date(2026, 6, 25) - date(1970, 1, 1)).days,
+        isRecurring=False,
+    )
+    schedule = _extract_broker_schedule(
+        SimpleNamespace(
+            schedule=[SimpleNamespace(startSecond=0, endSecond=604800)],
+            scheduleTimeZone="UTC",
+            holiday=[holiday],
+        )
+    )
+
+    assert schedule["holidays"][0]["start_second"] == 0
+    assert schedule["holidays"][0]["end_second"] == 86400
+
+
+def test_ctrader_one_off_holiday_closes_session_without_a_calendar_constant():
+    now = _ts(2026, 6, 25, 12, 30)
+    schedule = {
+        "timezone": "UTC",
+        "intervals": [{"start_second": 0, "end_second": 604800}],
+        "holidays": [
+            {
+                "holiday_date": (date(2026, 6, 25) - date(1970, 1, 1)).days,
+                "is_recurring": False,
+                "start_second": 12 * 3600,
+                "end_second": 13 * 3600,
+                "timezone": "UTC",
+            }
+        ],
+    }
+    state = evaluate_market_session(
+        symbol="XAUUSD+",
+        now_ts=now,
+        latest_quote_ts=now - 600,
+        broker_schedule=schedule,
+    )
+
+    assert state.status == "closed_confirmed"
+    assert state.reason == "broker_symbol_holiday"
+    assert state.schedule_source == "ctrader_symbol"
+    assert state.seconds_to_open == 30 * 60
+    assert "ctrader_symbol_holiday_active" in state.evidence
+
+
+def test_ctrader_recurring_holiday_is_applied_by_month_and_day():
+    now = _ts(2026, 6, 25, 12, 30)
+    schedule = {
+        "timezone": "UTC",
+        "intervals": [{"start_second": 0, "end_second": 604800}],
+        "holidays": [
+            {
+                "holiday_date": (date(2025, 6, 25) - date(1970, 1, 1)).days,
+                "is_recurring": True,
+                "start_second": 12 * 3600,
+                "end_second": 13 * 3600,
+                "timezone": "UTC",
+            }
+        ],
+    }
+
+    open_seconds, source = market_open_seconds_between_with_source(
+        _ts(2026, 6, 25, 11),
+        _ts(2026, 6, 25, 14),
+        symbol="XAUUSD+",
+        broker_schedule=schedule,
+    )
+
+    assert open_seconds == 2 * 3600
+    assert source == "ctrader_symbol"
+
+
+def test_ctrader_holiday_uses_its_own_timezone():
+    now = _ts(2026, 6, 25, 16, 30)  # 12:30 in America/New_York
+    schedule = {
+        "timezone": "UTC",
+        "intervals": [{"start_second": 0, "end_second": 604800}],
+        "holidays": [
+            {
+                "holiday_date": (date(2026, 6, 25) - date(1970, 1, 1)).days,
+                "is_recurring": False,
+                "start_second": 12 * 3600,
+                "end_second": 13 * 3600,
+                "timezone": "America/New_York",
+            }
+        ],
+    }
+
+    state = evaluate_market_session(
+        symbol="XAUUSD+",
+        now_ts=now,
+        latest_quote_ts=now - 600,
+        broker_schedule=schedule,
+    )
+
+    assert state.status == "closed_confirmed"
+    assert state.seconds_to_open == 30 * 60
+    assert "ctrader_symbol_holiday_active" in state.evidence
 
 
 def test_xauusd_session_uses_utc_schedule_not_local_time():
@@ -43,6 +186,28 @@ def test_broker_symbol_schedule_overrides_static_yaml_for_daily_break():
     assert state.schedule_source == "ctrader_symbol"
     assert state.seconds_to_open == 30 * 60
     assert "ctrader_symbol_schedule" in state.evidence
+
+
+def test_broker_symbol_schedule_is_used_for_elapsed_open_budget():
+    # Monday 00:00 through Thursday 12:00, then Thursday 13:00 through
+    # Friday 22:00.  The one-hour break is deliberately different from the
+    # static YAML so the authority is observable in the elapsed calculation.
+    schedule = {
+        "timezone": "UTC",
+        "intervals": [
+            {"start_second": 86400, "end_second": 4 * 86400 + 12 * 3600},
+            {"start_second": 4 * 86400 + 13 * 3600, "end_second": 5 * 86400 + 22 * 3600},
+        ],
+    }
+    open_seconds, source = market_open_seconds_between_with_source(
+        _ts(2026, 6, 25, 11),
+        _ts(2026, 6, 25, 14),
+        symbol="XAUUSD+",
+        broker_schedule=schedule,
+    )
+
+    assert open_seconds == 2 * 3600
+    assert source == "ctrader_symbol"
 
 
 def test_xauusd_scheduled_closed_waits_for_confirmation_when_flat():

@@ -112,8 +112,25 @@ def _parse_broker_money_amount(value: Any, money_digits: Any, *, default_digits:
     return amount / (10.0 ** digits)
 
 
+def _proto_field_present(message: Any, field_name: str) -> bool:
+    """Return protobuf field presence while supporting light test doubles."""
+
+    has_field = getattr(message, "HasField", None)
+    if callable(has_field):
+        try:
+            return bool(has_field(field_name))
+        except (KeyError, ValueError):
+            pass
+    return hasattr(message, field_name)
+
+
 def _extract_broker_schedule(symbol: Any) -> dict[str, Any]:
-    """Keep the broker's weekly symbol intervals for session evaluation."""
+    """Keep the broker's symbol schedule and holidays for session evaluation.
+
+    ``ProtoOASymbol.holiday`` is broker-owned data.  Preserve the values as
+    normalized metadata so the session layer can apply one-off and recurring
+    closures without embedding calendar dates in the application.
+    """
     intervals: list[dict[str, int]] = []
     for interval in getattr(symbol, "schedule", ()) or ():
         try:
@@ -128,11 +145,51 @@ def _extract_broker_schedule(symbol: Any) -> dict[str, Any]:
                     "end_second": end_second,
                 }
             )
-    if not intervals:
+    schedule_timezone = str(getattr(symbol, "scheduleTimeZone", "") or "UTC")
+    holidays: list[dict[str, Any]] = []
+    for holiday in getattr(symbol, "holiday", ()) or ():
+        try:
+            holiday_date = int(getattr(holiday, "holidayDate", -1))
+            start_present = _proto_field_present(holiday, "startSecond")
+            end_present = _proto_field_present(holiday, "endSecond")
+            start_second = (
+                int(getattr(holiday, "startSecond", 0))
+                if start_present
+                else 0
+            )
+            end_second = (
+                int(getattr(holiday, "endSecond", 86400))
+                if end_present
+                else 86400
+            )
+        except (TypeError, ValueError):
+            continue
+        if holiday_date < 0:
+            continue
+        if not (0 <= start_second <= 86400 and 0 <= end_second <= 86400):
+            continue
+        if start_second == end_second and start_second != 0:
+            continue
+        holidays.append(
+            {
+                "holiday_id": int(getattr(holiday, "holidayId", 0) or 0),
+                "name": str(getattr(holiday, "name", "") or ""),
+                "description": str(getattr(holiday, "description", "") or ""),
+                "timezone": str(
+                    getattr(holiday, "scheduleTimeZone", "") or schedule_timezone
+                ),
+                "holiday_date": holiday_date,
+                "is_recurring": bool(getattr(holiday, "isRecurring", False)),
+                "start_second": start_second,
+                "end_second": end_second,
+            }
+        )
+    if not intervals and not holidays:
         return {}
     return {
-        "timezone": str(getattr(symbol, "scheduleTimeZone", "") or "UTC"),
+        "timezone": schedule_timezone,
         "intervals": intervals,
+        "holidays": holidays,
     }
 
 
@@ -680,10 +737,23 @@ class CTraderBridge(BaseBrokerBridge):
                                         except Exception as exc:
                                             logger.warning("Symbol metadata parse failed: %s", exc)
                                             return resp2
+                                        broker_schedule = self._symbol_meta.get("broker_schedule", {})
+                                        holiday_summary = [
+                                            {
+                                                "holiday_date": item.get("holiday_date"),
+                                                "is_recurring": item.get("is_recurring", False),
+                                                "timezone": item.get("timezone", ""),
+                                                "start_second": item.get("start_second"),
+                                                "end_second": item.get("end_second"),
+                                            }
+                                            for item in broker_schedule.get("holidays", [])
+                                        ]
                                         logger.info(
-                                            "Symbol schedule loaded: timezone=%s intervals=%d",
-                                            self._symbol_meta.get("broker_schedule", {}).get("timezone", ""),
-                                            len(self._symbol_meta.get("broker_schedule", {}).get("intervals", [])),
+                                            "Symbol schedule loaded: timezone=%s intervals=%d holidays=%d holiday_entries=%s",
+                                            broker_schedule.get("timezone", ""),
+                                            len(broker_schedule.get("intervals", [])),
+                                            len(holiday_summary),
+                                            holiday_summary,
                                         )
                                         return resp2
 

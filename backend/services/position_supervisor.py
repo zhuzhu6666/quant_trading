@@ -363,6 +363,12 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     timeout_ratio = _safe_float(risk.get("holding_timeout_ratio"))
     if timeout_ratio <= 0 and max_holding_seconds > 0:
         timeout_ratio = holding_seconds / max_holding_seconds
+    timeout_exceeded_value = risk.get("holding_timeout_exceeded")
+    timeout_exceeded = (
+        bool(timeout_exceeded_value)
+        if timeout_exceeded_value is not None
+        else max_holding_seconds > 0 and holding_seconds >= max_holding_seconds
+    )
 
     mfe = _safe_float(risk.get("mfe"))
     mae = _safe_float(risk.get("mae"))
@@ -582,7 +588,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         action = "close"
         summary_reason = "hard_risk_active"
         severity = "error"
-    elif max_holding_seconds > 0 and holding_seconds >= max_holding_seconds:
+    elif timeout_exceeded:
         trigger_tags.append("holding_timeout_exceeded")
         action = "close"
         summary_reason = "holding_timeout_exceeded"

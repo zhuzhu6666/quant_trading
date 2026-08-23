@@ -16,6 +16,7 @@ import json
 import logging
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -110,8 +111,53 @@ def _mirror_mutation_stage(
         )
 
 
-def _slice(payload: Mapping[str, Any], keys: list[str]) -> dict[str, Any]:
-    return {key: payload.get(key) for key in keys if key in payload}
+def _deep_slice(payload: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    """Project ``payload`` down to the leaf paths a patch actually touches.
+
+    The historical ``_slice`` copied the *entire* value of every top-level
+    patch key, so one ``register_shadow_factor`` mutation stored three full
+    copies of the 500+ entry ``factor_signal_config`` map (~800 KB/row) even
+    though its patch touched exactly one factor.  This projection keeps only
+    the branches the patch reaches; untouched siblings are omitted.
+
+    Classification equivalence: :func:`classify_governance_risk` walks
+    changed leaves only, and for any path the patch touches, this projection
+    preserves the same before/target leaf values as a full slice (absent
+    branches stay absent on both sides).  Paths outside the patch are
+    unchanged by definition of the overlay merge and contribute no leaves.
+    """
+
+    projected: dict[str, Any] = {}
+
+    def _walk(src: Mapping[str, Any], pat: Mapping[str, Any], out: dict[str, Any]) -> None:
+        for key, patch_value in pat.items():
+            present = isinstance(src, Mapping) and key in src
+            src_value = src.get(key) if present else None
+            if isinstance(patch_value, Mapping):
+                if isinstance(src_value, Mapping):
+                    branch: dict[str, Any] = {}
+                    _walk(src_value, patch_value, branch)
+                    # An empty branch means that the patch only adds keys
+                    # absent from this source.  Do not fall back to the full
+                    # source mapping: doing so reintroduces all untouched
+                    # siblings into the before projection.
+                    if branch:
+                        out[key] = branch
+                elif present:
+                    # _deep_merge replaces a non-mapping value with a mapping;
+                    # retain that old scalar so the before/after classifier can
+                    # see the replacement without copying unrelated data.
+                    out[key] = deepcopy(src_value)
+                # An absent mapping is represented by omission.  The target
+                # projection contains the newly added leaves, so the reader
+                # still observes an additive change.
+            elif present:
+                out[key] = deepcopy(src_value)
+            # Absent scalar keys are omitted for the same overlay semantics.
+
+    if isinstance(payload, Mapping):
+        _walk(payload, patch, projected)
+    return projected
 
 
 def _changed_leaves(before: Any, target: Any, path: tuple[str, ...] = ()) -> list[tuple[tuple[str, ...], Any, Any]]:
@@ -523,7 +569,6 @@ class GovernanceMutationCoordinator:
                 "boundary": self.boundary(),
             }
         self._prepare_storage()
-        keys = sorted(sanitized)
         evidence_refs = dict(plan.evidence_refs or {})
         evidence_fingerprint = str(plan.evidence_fingerprint or _hash(evidence_refs))
         idempotency_key = str(
@@ -578,8 +623,12 @@ class GovernanceMutationCoordinator:
             current_config = runtime_config.config_from_overlay(current_overlay, self.db_path)
             target_overlay = _deep_merge(current_overlay, sanitized)
             target_config = runtime_config.config_from_overlay(target_overlay, self.db_path)
-            before = domain_before if domain_only else _slice(current_config.to_dict(), keys)
-            target = domain_target if domain_only else _slice(target_config.to_dict(), keys)
+            # Deep projection: store only the branches the patch touches so a
+            # single-factor mutation does not persist three full copies of the
+            # factor map.  Classification and the prepare-stage drift check
+            # both consume the same projected shape, keeping them consistent.
+            before = domain_before if domain_only else _deep_slice(current_config.to_dict(), sanitized)
+            target = domain_target if domain_only else _deep_slice(target_config.to_dict(), sanitized)
             rollback = dict(plan.rollback or before)
             classification = classify_governance_risk(before, target)
             current_paused = bool(
@@ -971,7 +1020,9 @@ class GovernanceMutationCoordinator:
             current_overlay = self._read_overlay(conn)
             current_config = runtime_config.config_from_overlay(current_overlay, self.db_path)
             if keys:
-                current_before = _slice(current_config.to_dict(), keys)
+                # Compare like-for-like: reserved-stage before_json is a deep
+                # projection of the patch-touched branches only.
+                current_before = _deep_slice(current_config.to_dict(), patch)
                 expected_before = _loads(intent.get("before_json"), {})
                 if _hash(current_before) != _hash(expected_before):
                     raise GovernanceMutationError("before_state_changed")

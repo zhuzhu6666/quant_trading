@@ -14,9 +14,10 @@ import math
 import sqlite3
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from alpha.decision_policy import DecisionPolicy
 from alpha.portfolio_compositor import resolve_factor_role
@@ -3759,6 +3760,53 @@ class FactorGovernanceOrchestrator:
             },
         )
 
+    @staticmethod
+    def _scope_audit_config(
+        payload: dict[str, Any] | None,
+        factor_id: str,
+    ) -> dict[str, Any]:
+        """Project an audit ``before/after/rollback`` config to factor scope.
+
+        Historical behaviour embedded the full runtime configuration (a
+        ~300 KB JSON copy of all 500+ factors) into every audit decision's
+        before/after/rollback, tripling storage per action.  The only
+        consumers of these audit configs are factor-scoped: the rollback
+        reader (:meth:`_scoped_factor_rollback_patch`) reads
+        ``factor_signal_config[factor_id]`` and the weight map entry for the
+        same factor.  The complete configuration is already persisted once,
+        content-addressed by hash, via ``persist_runtime_config_snapshot``
+        below, so the full copy here was redundant.
+        """
+
+        if not isinstance(payload, dict) or not factor_id:
+            return deepcopy(payload) if isinstance(payload, dict) else {}
+        cfg = payload.get("runtime_config")
+        if not isinstance(cfg, Mapping):
+            return deepcopy(payload)
+        scoped = {
+            key: deepcopy(value) for key, value in payload.items() if key != "runtime_config"
+        }
+        runtime_scoped = {
+            key: deepcopy(value)
+            for key, value in cfg.items()
+            if key not in {"factor_signal_config", "factor_portfolio_weights"}
+        }
+        signal_cfg = cfg.get("factor_signal_config")
+        weights_cfg = cfg.get("factor_portfolio_weights")
+        if isinstance(signal_cfg, Mapping):
+            runtime_scoped["factor_signal_config"] = (
+                {factor_id: deepcopy(signal_cfg.get(factor_id) or {})}
+                if factor_id in signal_cfg
+                else {}
+            )
+        if isinstance(weights_cfg, Mapping):
+            runtime_scoped["factor_portfolio_weights"] = {
+                factor_id: deepcopy(weights_cfg.get(factor_id))
+            }
+        if runtime_scoped or signal_cfg is not None or weights_cfg is not None:
+            scoped["runtime_config"] = runtime_scoped
+        return scoped
+
     def _audit_action(
         self,
         run: dict[str, Any],
@@ -3781,6 +3829,9 @@ class FactorGovernanceOrchestrator:
             run_id=str(run.get("run_id") or ""),
         )
         factor_id = str(item.get("factor_id") or "")
+        before_scoped = self._scope_audit_config(before, factor_id)
+        after_scoped = self._scope_audit_config(after, factor_id)
+        rollback_scoped = self._scope_audit_config(rollback, factor_id)
         decision_id = record_evolution_decision(
             run_id=str(run.get("run_id") or ""),
             decision_type="factor_governance_autonomous",
@@ -3790,23 +3841,32 @@ class FactorGovernanceOrchestrator:
             status=status,
             evidence=evidence,
             risk_verdict=verdict.to_dict(),
-            before=before or {},
-            after=after or {},
+            before=before_scoped,
+            after=after_scoped,
             result=result or {},
-            rollback=rollback or {},
+            rollback=rollback_scoped,
             config_version=int(snapshot.get("config_version") or 0),
             config_hash=str(snapshot.get("config_hash") or ""),
         )
         suggestion_id = self._record_policy_suggestion(factor_id, action, status, evidence, decision_id)
-        self._record_learning_application(factor_id, action, status, suggestion_id, before, after, result, decision_id=decision_id)
+        self._record_learning_application(
+            factor_id,
+            action,
+            status,
+            suggestion_id,
+            before_scoped,
+            after_scoped,
+            result,
+            decision_id=decision_id,
+        )
         record_api_mutation(
             user="system:factor_governance",
             endpoint="backend.runtime.factor_governance_orchestrator",
             run_id=str(run.get("run_id") or ""),
             action=action,
             status=status,
-            before=before or {},
-            after=after or {},
+            before=before_scoped,
+            after=after_scoped,
             # The API row is a projection of the canonical decision. The
             # audit helper retains request fingerprints and the canonical row
             # retains the exact result JSON.

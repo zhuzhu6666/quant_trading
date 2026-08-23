@@ -264,7 +264,19 @@ def plan_live_safety_candidates(
         context = dict(runtime.build_timeout_context(position, cfg, now_ts) or {})
         limit = _float(context.get("max_holding_seconds"))
         held = _float(context.get("holding_seconds"))
-        if limit > 0 and held >= limit:
+        holding_state = str(context.get("holding_seconds_state") or "known")
+        market_budget = dict(context.get("market_time_budget") or {})
+        if market_budget:
+            timeout_expired = holding_state != "known"
+            if not timeout_expired:
+                timeout_expired = (
+                    bool(market_budget.get("timeout_on_market_time"))
+                    if "timeout_on_market_time" in market_budget
+                    else _float(market_budget.get("market_open_holding_seconds")) >= limit
+                )
+        else:
+            timeout_expired = held >= limit
+        if limit > 0 and timeout_expired:
             candidate = safety_candidate(
                 action="timeout",
                 position_id=pid,

@@ -42,6 +42,7 @@ def build_close_position_risk_context(
     position: Any | None = None,
     cfg: Any = None,
     decision_ts: float | None = None,
+    broker_schedule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build close context with broker position time as primary truth."""
 
@@ -88,17 +89,20 @@ def build_close_position_risk_context(
     max_holding_bars = int(
         getattr(cfg, "risk_max_holding_bars", 0) or 0
     )
-    return runtime.build_close_context_payload(
-        position_id=position_id,
-        close_reason=close_reason,
-        mode=mode,
-        broker=broker,
-        symbol=symbol,
-        entry_ts=entry_ts,
-        entry_ts_source=entry_ts_source,
-        temporal_context=temporal_context,
-        max_holding_bars=max_holding_bars,
-    )
+    payload_kwargs = {
+        "position_id": position_id,
+        "close_reason": close_reason,
+        "mode": mode,
+        "broker": broker,
+        "symbol": symbol,
+        "entry_ts": entry_ts,
+        "entry_ts_source": entry_ts_source,
+        "temporal_context": temporal_context,
+        "max_holding_bars": max_holding_bars,
+    }
+    if broker_schedule is not None:
+        payload_kwargs["broker_schedule"] = broker_schedule
+    return runtime.build_close_context_payload(**payload_kwargs)
 
 
 def record_risk_reduction_aux_failure(

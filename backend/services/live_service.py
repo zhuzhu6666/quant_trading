@@ -340,6 +340,7 @@ from backend.services.live_position_lifecycle import (
     build_filled_open_recovery_payloads as _lifecycle_build_filled_open_recovery_payloads,
     build_entry_protection_plan_payload as _lifecycle_build_entry_protection_plan_payload,
     build_holding_summary_from_close_context as _lifecycle_build_holding_summary_from_close_context,
+    build_holding_timeout_market_budget as _lifecycle_build_holding_timeout_market_budget,
     build_holding_timeout_result_trace_fields as _lifecycle_build_holding_timeout_result_trace_fields,
     build_holding_timeout_verdict_payload as _lifecycle_build_holding_timeout_verdict_payload,
     build_market_micro_context_payload as _lifecycle_build_market_micro_context_payload,
@@ -352,6 +353,7 @@ from backend.services.live_position_lifecycle import (
     build_recovered_open_ledger_payloads as _lifecycle_build_recovered_open_ledger_payloads,
     build_protection_execution_plan as _lifecycle_build_protection_execution_plan,
     build_protection_execution_result_payloads as _lifecycle_build_protection_execution_result_payloads,
+    market_open_seconds_between as _lifecycle_market_open_seconds_between,
     build_position_supervisor_context_inputs as _lifecycle_build_position_supervisor_context_inputs,
     build_position_supervisor_context_payload as _lifecycle_build_position_supervisor_context_payload,
     build_position_protection_cycle_result as _lifecycle_build_position_protection_cycle_result,
@@ -1226,6 +1228,14 @@ def _risk_reduction_runtime() -> RiskReductionRuntime:
     )
 
 
+def _broker_schedule_from_bridge(bridge: Any) -> dict[str, Any] | None:
+    """Return the latest cTrader symbol schedule without making a broker call."""
+
+    meta = getattr(bridge, "_symbol_meta", None) if bridge is not None else None
+    schedule = meta.get("broker_schedule") if isinstance(meta, dict) else None
+    return dict(schedule) if isinstance(schedule, dict) else None
+
+
 def _build_close_position_risk_context(
     *,
     position_id: int,
@@ -1236,6 +1246,7 @@ def _build_close_position_risk_context(
     position: Any | None = None,
     cfg=None,
     decision_ts: float | None = None,
+    broker_schedule: dict[str, Any] | None = None,
 ) -> dict:
     return _risk_reduction_build_close_context(
         position_id=position_id,
@@ -1246,6 +1257,7 @@ def _build_close_position_risk_context(
         position=position,
         cfg=cfg,
         decision_ts=decision_ts,
+        broker_schedule=broker_schedule,
         runtime=_risk_reduction_runtime(),
     )
 
@@ -1315,7 +1327,13 @@ def _evaluate_risk_reduction_policy(
     )
 
 
-def _holding_summary_for_position(position: Any, *, cfg=None, now_ts: float | None = None) -> dict:
+def _holding_summary_for_position(
+    position: Any,
+    *,
+    cfg=None,
+    now_ts: float | None = None,
+    broker_schedule: dict[str, Any] | None = None,
+) -> dict:
     try:
         pid = int(
             (position.get("position_id") if isinstance(position, dict) else getattr(position, "position_id", None))
@@ -1334,6 +1352,7 @@ def _holding_summary_for_position(position: Any, *, cfg=None, now_ts: float | No
         position=position,
         cfg=cfg,
         decision_ts=now_ts,
+        broker_schedule=broker_schedule,
     )
     return _lifecycle_build_holding_summary_from_close_context(close_context)
 
@@ -1575,6 +1594,7 @@ def _build_position_supervisor_context(
     acct: dict | None = None,
     now_ts: float | None = None,
     positions: list[Any] | None = None,
+    broker_schedule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now_ts = float(now_ts or time.time())
     temporal_context = _build_close_position_risk_context(
@@ -1585,6 +1605,7 @@ def _build_position_supervisor_context(
         position=position,
         cfg=cfg,
         decision_ts=now_ts,
+        broker_schedule=broker_schedule,
     )
     position_metrics = _position_path_metrics_for_position(position, cfg=cfg, now_ts=now_ts, persist=False)
     supervisor_row = _load_recovery_row_for_risk_reduction(
@@ -1639,12 +1660,17 @@ def _evaluate_position_supervisor_for_position(
     persist: bool = False,
     broker: str = "",
     strategy_name: str = "",
+    broker_schedule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from backend.services.model_influence import shared_model_influence_service
     from backend.services.position_supervisor import build_model_tighten_controls
 
     runtime = PositionSupervisorEvaluationRuntime(
-        build_context=_build_position_supervisor_context,
+        build_context=lambda position, **kwargs: _build_position_supervisor_context(
+            position,
+            broker_schedule=broker_schedule,
+            **kwargs,
+        ),
         evaluate_rule=evaluate_position_supervisor,
         get_quality_advisor=_get_position_quality_advisor,
         set_quality_advisor=_set_position_quality_advisor,
@@ -1702,6 +1728,7 @@ def _supervisor_risk_context(
     *,
     cfg=None,
     mode: str = "live",
+    broker_schedule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     close_inputs = _lifecycle_build_supervisor_close_context_inputs(
         position=position,
@@ -1712,6 +1739,7 @@ def _supervisor_risk_context(
     close_context = _build_close_position_risk_context(
         **close_inputs,
         cfg=cfg,
+        broker_schedule=broker_schedule,
     )
     return _lifecycle_build_supervisor_risk_context_payload(
         close_context=close_context,
@@ -2064,6 +2092,7 @@ def _delegate_timeout_supervisor_close(
     cfg: Any,
     tick: int,
     acct: dict[str, Any],
+    broker_schedule: dict[str, Any] | None = None,
 ) -> bool:
     pid = int(position.get("position_id") or position.get("ticket") or 0)
     timeout_context = _build_close_position_risk_context(
@@ -2074,6 +2103,7 @@ def _delegate_timeout_supervisor_close(
         symbol=str(position.get("symbol") or "XAUUSD+"),
         position=position,
         cfg=cfg,
+        broker_schedule=broker_schedule,
     )
     timeout_holding_seconds = float(timeout_context.get("holding_seconds", 0.0) or 0.0)
     timeout_limit_seconds = float(timeout_context.get("max_holding_seconds", 0.0) or 0.0)
@@ -2089,35 +2119,35 @@ def _delegate_timeout_supervisor_close(
         execution={"timeout_context": timeout_context},
         acct=acct,
     )
-    return bool(timeout_limit_seconds > 0 and timeout_holding_seconds >= timeout_limit_seconds)
+    return bool(
+        timeout_limit_seconds > 0
+        and _lifecycle_holding_timeout_is_expired(timeout_context)
+    )
 
 
-@record_timed("live.position_supervision")
-def _run_position_supervision(
-    bridge,
-    pos: list,
+def _build_position_supervision_runtime(
+    bridge: Any,
     *,
-    cfg,
-    acct: dict,
     tick: int,
-    log,
-    skip_position_ids: set[int] | None = None,
-    preaudited_skip_position_ids: set[int] | None = None,
-    record_partial_close_execution=None,
-    decision_ts: float | None = None,
-    candidate_recorder=None,
-    planned_verdicts: dict[int, dict[str, Any]] | None = None,
-) -> set[int]:
-    runtime = LiveSupervisionRuntime(
+) -> LiveSupervisionRuntime:
+    broker_schedule = _broker_schedule_from_bridge(bridge)
+    return LiveSupervisionRuntime(
         logger=logger,
         strategy_name=_current_loop_strategy_name(),
         ledger=_LEDGER,
-        evaluate_position=_evaluate_position_supervisor_for_position,
+        evaluate_position=lambda position, **kwargs: _evaluate_position_supervisor_for_position(
+            position,
+            broker_schedule=broker_schedule,
+            **kwargs,
+        ),
         record_aux_failure=_record_risk_reduction_aux_failure,
         log_trace=_log_supervisor_trace,
         make_candidate=safety_candidate,
         recently_applied=_supervisor_recently_applied,
-        delegate_timeout_close=_delegate_timeout_supervisor_close,
+        delegate_timeout_close=lambda **kwargs: _delegate_timeout_supervisor_close(
+            broker_schedule=broker_schedule,
+            **kwargs,
+        ),
         build_tighten_execution_plan=_lifecycle_build_supervisor_tighten_execution_plan,
         build_action_fingerprint=_lifecycle_build_supervisor_action_fingerprint,
         noop_fingerprint_seen=_supervisor_noop_fingerprint_seen,
@@ -2126,7 +2156,12 @@ def _run_position_supervision(
         build_risk_evaluation_inputs=(
             _lifecycle_build_supervisor_runtime_risk_evaluation_inputs
         ),
-        supervisor_risk_context=_supervisor_risk_context,
+        supervisor_risk_context=lambda position, verdict, **kwargs: _supervisor_risk_context(
+            position,
+            verdict,
+            broker_schedule=broker_schedule,
+            **kwargs,
+        ),
         live_state_get=_live_state_get,
         evaluate_risk_policy=_evaluate_risk_reduction_policy,
         log_decision=_log_supervisor_decision,
@@ -2172,6 +2207,25 @@ def _run_position_supervision(
         ),
         adaptive_duplicate_seen=_supervisor_adaptive_duplicate_seen,
     )
+
+
+@record_timed("live.position_supervision")
+def _run_position_supervision(
+    bridge,
+    pos: list,
+    *,
+    cfg,
+    acct: dict,
+    tick: int,
+    log,
+    skip_position_ids: set[int] | None = None,
+    preaudited_skip_position_ids: set[int] | None = None,
+    record_partial_close_execution=None,
+    decision_ts: float | None = None,
+    candidate_recorder=None,
+    planned_verdicts: dict[int, dict[str, Any]] | None = None,
+) -> set[int]:
+    runtime = _build_position_supervision_runtime(bridge, tick=tick)
     return _runtime_run_position_supervision(
         bridge,
         pos,
@@ -6610,6 +6664,8 @@ def _safety_reference_price(bridge: Any, positions: list[dict[str, Any]]) -> flo
 def _live_safety_planner_runtime(bridge: Any) -> SafetyPlannerRuntime:
     """Build read-only adapters shared by two independent planning algorithms."""
 
+    broker_schedule = _broker_schedule_from_bridge(bridge)
+
     def build_timeout_context(position, effective_cfg, now_ts):
         pid = int(position.get("position_id") or position.get("ticket") or 0)
         timeframe = str(getattr(effective_cfg, "timeframe", "M5") or "M5")
@@ -6629,6 +6685,7 @@ def _live_safety_planner_runtime(bridge: Any) -> SafetyPlannerRuntime:
             max_holding_bars=int(
                 getattr(effective_cfg, "risk_max_holding_bars", 0) or 0
             ),
+            broker_schedule=broker_schedule,
         )
 
     def load_entry_plan(position_id: int) -> dict[str, Any]:
@@ -6750,15 +6807,20 @@ def _plan_live_safety_candidates(
     )
 
 
-def _safety_candidate_execution_runtime() -> SafetyCandidateExecutionRuntime:
+def _safety_candidate_execution_runtime(
+    bridge: Any | None = None,
+) -> SafetyCandidateExecutionRuntime:
+    broker_schedule = _broker_schedule_from_bridge(bridge)
     return SafetyCandidateExecutionRuntime(
         enforce_holding_timeout=_enforce_holding_timeout,
         entry_protection_repair_source=_ENTRY_PROTECTION_REPAIR_SOURCE,
         runtime_config_anchor=_runtime_config_anchor,
         protection_candidate_cls=ProtectionCandidate,
         execute_protection_candidate=_execute_protection_candidate,
-        evaluate_position_supervisor=(
-            _evaluate_position_supervisor_for_position
+        evaluate_position_supervisor=lambda position, **kwargs: _evaluate_position_supervisor_for_position(
+            position,
+            broker_schedule=broker_schedule,
+            **kwargs,
         ),
         build_safety_candidate=safety_candidate,
         run_position_supervision=_run_position_supervision,
@@ -6790,7 +6852,7 @@ def _execute_live_safety_candidate(
         tick=tick,
         log=log,
         decision_ts=decision_ts,
-        runtime=_safety_candidate_execution_runtime(),
+        runtime=_safety_candidate_execution_runtime(bridge),
     )
 
 
@@ -10970,6 +11032,7 @@ def _prepare_protection_candidate_execution(
         symbol=str(position.get("symbol") or "XAUUSD+"),
         position=position,
         cfg=cfg,
+        broker_schedule=_broker_schedule_from_bridge(bridge),
     )
     risk_context = _lifecycle_build_protection_candidate_risk_context_from_candidate(
         close_context=close_context,
@@ -11159,6 +11222,114 @@ def _execute_protection_candidate(
     )
 
 
+_MARKET_CLOSED_ERROR_PATTERNS = (
+    "MARKET_CLOSED",
+    "OFF_QUOTES",
+    "NO_QUOTES",
+    "MARKET IS CLOSED",
+)
+
+# Recovery-meta keys shared by every risk-reducing close path: the first
+# deterministic MARKET_CLOSED-style rejection records them, and repeats stay
+# suppressed until the hourly heartbeat falls due (then one bounded attempt
+# re-checks the broker).  Broker-side SL/TP protection stays active meanwhile.
+MARKET_CLOSED_DEFER_REASON_KEY = "market_closed_defer_reason"
+MARKET_CLOSED_DEFER_TS_KEY = "market_closed_defer_ts"
+MARKET_CLOSED_DEFER_HEARTBEAT_SECONDS = 3600.0
+
+
+def is_deterministic_market_closed_rejection(reason: str) -> bool:
+    text = str(reason or "").upper()
+    return any(pattern in text for pattern in _MARKET_CLOSED_ERROR_PATTERNS)
+
+
+def market_closed_deferral_active(recovery_meta: Mapping[str, Any], now_ts: float) -> bool:
+    """True when a recent deterministic market-closed rejection is suppressing retries."""
+
+    meta = dict(recovery_meta or {})
+    if str(meta.get(MARKET_CLOSED_DEFER_REASON_KEY) or "") != "market_closed_pending":
+        return False
+    try:
+        last_ts = float(meta.get(MARKET_CLOSED_DEFER_TS_KEY, 0.0) or 0.0)
+        elapsed = float(now_ts) - last_ts
+    except (TypeError, ValueError):
+        return False
+    return last_ts > 0 and 0.0 <= elapsed < MARKET_CLOSED_DEFER_HEARTBEAT_SECONDS
+
+
+def _defer_market_closed_holding_timeout(
+    *,
+    position: dict,
+    pid: int,
+    cfg,
+    tick: int,
+    now_ts: float,
+    holding_seconds: float,
+    max_holding_seconds: float,
+    market_open_holding: float,
+) -> None:
+    """Trace a timeout deferral once per closed-market episode.
+
+    The verdict stays "close when the market reopens"; only the futile
+    per-tick repetition is suppressed.  A single trace is emitted when the
+    deferral starts, then again only if the wall-clock holding time grows by
+    more than an hour (a bounded heartbeat) — never one row per tick.
+    """
+
+    verdict_payload = _lifecycle_build_holding_timeout_verdict_payload(
+        position_id=pid,
+        decision_ts=now_ts,
+        holding_seconds=holding_seconds,
+        max_holding_seconds=max_holding_seconds,
+    )
+    meta = dict(
+        (_load_recovery_row_for_risk_reduction(pid, operation="timeout_defer") or {}).get(
+            "recovery_meta"
+        )
+        or {}
+    )
+    if market_closed_deferral_active(meta, now_ts):
+        return
+    execution = {
+        "close_deferred": True,
+        "defer_reason": "market_closed_pending",
+        "wall_clock_holding_seconds": round(holding_seconds, 3),
+        "market_open_holding_seconds": round(market_open_holding, 3),
+        "max_holding_seconds": round(max_holding_seconds, 3),
+        "applied_controls": {"close_reason": "holding_timeout"},
+        "duplicate_audit": False,
+    }
+    _log_supervisor_trace(
+        position=position,
+        verdict=verdict_payload,
+        cfg=cfg,
+        tick=tick,
+        stage="execution_deferred",
+        outcome="skipped",
+        risk_action="close_position",
+        execution_status="deferred",
+        execution_reason="market_closed_pending",
+        execution=execution,
+    )
+    try:
+        _merge_recovery_position_meta(
+            pid,
+            {
+                MARKET_CLOSED_DEFER_REASON_KEY: "market_closed_pending",
+                MARKET_CLOSED_DEFER_TS_KEY: now_ts,
+                "market_closed_defer_wall_holding_seconds": round(holding_seconds, 3),
+                "market_closed_defer_open_holding_seconds": round(market_open_holding, 3),
+            },
+        )
+    except Exception as exc:
+        _record_risk_reduction_aux_failure(
+            "risk_reduction_state_persist_failed",
+            position_id=pid,
+            action="holding_timeout_defer",
+            error=exc,
+        )
+
+
 def _enforce_holding_timeout(
     bridge,
     pos: list,
@@ -11192,9 +11363,62 @@ def _enforce_holding_timeout(
             position=p,
             cfg=cfg,
             decision_ts=now_ts,
+            broker_schedule=_broker_schedule_from_bridge(bridge),
         )
         max_holding_seconds = float(close_context.get("max_holding_seconds", 0.0) or 0.0)
         holding_seconds = float(close_context.get("holding_seconds", 0.0) or 0.0)
+
+        # A previously recorded market-closed deferral/rejection stays
+        # suppressed until its hourly heartbeat falls due; the position keeps
+        # its broker-side SL/TP protection meanwhile.
+        defer_meta = dict(
+            (
+                _load_recovery_row_for_risk_reduction(
+                    pid, operation="timeout_defer"
+                )
+                or {}
+            ).get("recovery_meta")
+            or {}
+        )
+        if market_closed_deferral_active(defer_meta, now_ts):
+            handled.add(pid)
+            continue
+
+        # Timeout is a wall-clock budget, but the close must be executable to
+        # be a protection.  A position whose wall-clock holding time crossed
+        # the limit only because the market was closed for part of the window
+        # is deferred, not closed: every attempt during the closure is
+        # deterministically rejected (MARKET_CLOSED) and would otherwise
+        # retry every tick until reopen.
+        market_budget = dict(close_context.get("market_time_budget") or {})
+        entry_ts_for_budget = float(close_context.get("entry_ts", 0.0) or 0.0)
+        market_open_holding = float(
+            market_budget.get("market_open_holding_seconds", 0.0) or 0.0
+        )
+        if not market_budget and entry_ts_for_budget > 0:
+            market_open_holding = _lifecycle_market_open_seconds_between(
+                entry_ts_for_budget,
+                now_ts,
+                symbol=str(p.get("symbol") or "XAUUSD+"),
+                broker_schedule=_broker_schedule_from_bridge(bridge),
+            )
+        if (
+            market_budget.get("market_closed_pending")
+            and market_open_holding < max_holding_seconds
+        ):
+            _defer_market_closed_holding_timeout(
+                position=dict(p),
+                pid=pid,
+                cfg=cfg,
+                tick=tick,
+                now_ts=now_ts,
+                holding_seconds=holding_seconds,
+                max_holding_seconds=max_holding_seconds,
+                market_open_holding=market_open_holding,
+            )
+            handled.add(pid)
+            continue
+
         if not _lifecycle_holding_timeout_is_expired(close_context):
             continue
 
@@ -11285,6 +11509,28 @@ def _enforce_holding_timeout(
             )
         else:
             handled.add(pid)
+            failure_reason = str(
+                getattr(result, "comment", "") or getattr(result, "error", "") or "close_failed"
+            )
+            error_code = str(getattr(result, "error_code", "") or "")
+            rejection_text = f"{error_code} {failure_reason}"
+            if is_deterministic_market_closed_rejection(rejection_text):
+                try:
+                    _merge_recovery_position_meta(
+                        pid,
+                        {
+                            MARKET_CLOSED_DEFER_REASON_KEY: "market_closed_pending",
+                            MARKET_CLOSED_DEFER_TS_KEY: now_ts,
+                            "market_closed_close_rejection": rejection_text[:300],
+                        },
+                    )
+                except Exception as exc:
+                    _record_risk_reduction_aux_failure(
+                        "risk_reduction_state_persist_failed",
+                        position_id=pid,
+                        action="holding_timeout_market_closed_rejection",
+                        error=exc,
+                    )
             _log_supervisor_trace(
                 position=dict(p),
                 verdict=verdict_payload,

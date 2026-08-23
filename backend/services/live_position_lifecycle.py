@@ -14,6 +14,10 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, MutableMapping
 
 from backend.services.market_regime import resolve_market_regime
+from backend.services.market_session import (
+    market_open_seconds_between,
+    market_open_seconds_between_with_source,
+)
 from backend.services.review_contract import (
     build_execution_quality_event_details,
     trusted_broker_close_price,
@@ -1785,6 +1789,7 @@ def build_close_position_risk_context_payload(
     entry_ts_source: str,
     temporal_context: dict[str, Any],
     max_holding_bars: int,
+    broker_schedule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = float((temporal_context or {}).get("decision_ts") or 0.0)
     entry_timestamp = float(entry_ts or 0.0)
@@ -1801,6 +1806,15 @@ def build_close_position_risk_context_payload(
         if entry_timestamp_known
         else max_holding_seconds if max_holding_seconds > 0 else 0.0
     )
+    market_budget: dict[str, Any] | None = None
+    if entry_timestamp_known and max_holding_seconds > 0:
+        market_budget = build_holding_timeout_market_budget(
+            entry_ts=entry_timestamp,
+            now_ts=now,
+            max_holding_seconds=max_holding_seconds,
+            symbol=symbol or "XAUUSD+",
+            broker_schedule=broker_schedule,
+        )
     return {
         "position_id": str(position_id),
         "close_reason": close_reason,
@@ -1820,6 +1834,7 @@ def build_close_position_risk_context_payload(
         "timeframe_seconds": timeframe_seconds,
         "max_holding_bars": max_bars,
         "max_holding_seconds": max_holding_seconds,
+        "market_time_budget": market_budget or {},
         "temporal_context": temporal_context,
     }
 
@@ -1832,18 +1847,42 @@ def build_holding_summary_from_close_context(close_context: dict[str, Any]) -> d
     )
     unknown_timestamp = holding_seconds_state != "known"
     timeout_enabled = bool(max_holding_seconds > 0)
-    timeout_ratio = (holding_seconds / max_holding_seconds) if timeout_enabled and max_holding_seconds > 0 else 0.0
+    market_budget = dict(close_context.get("market_time_budget") or {})
+    market_open_holding = float(
+        market_budget.get("market_open_holding_seconds", holding_seconds) or 0.0
+    )
+    if timeout_enabled and max_holding_seconds > 0 and not unknown_timestamp:
+        timeout_ratio = market_open_holding / max_holding_seconds
+        timeout_exceeded = (
+            bool(market_budget.get("timeout_on_market_time"))
+            if "timeout_on_market_time" in market_budget
+            else market_open_holding >= max_holding_seconds
+        )
+    else:
+        timeout_ratio = (
+            holding_seconds / max_holding_seconds
+            if timeout_enabled and max_holding_seconds > 0
+            else 0.0
+        )
+        timeout_exceeded = bool(
+            max_holding_seconds > 0
+            and (unknown_timestamp or holding_seconds >= max_holding_seconds)
+        )
     if not timeout_enabled:
         timeout_status = "disabled"
     elif unknown_timestamp:
         timeout_status = "expired_unknown_timestamp"
-    elif holding_seconds >= max_holding_seconds:
+    elif timeout_exceeded:
         timeout_status = "expired"
     elif timeout_ratio >= 0.8:
         timeout_status = "watch"
     else:
         timeout_status = "normal"
-    remaining_seconds = max(0.0, max_holding_seconds - holding_seconds) if timeout_enabled else 0.0
+    remaining_seconds = (
+        max(0.0, max_holding_seconds - market_open_holding)
+        if timeout_enabled and not unknown_timestamp
+        else 0.0
+    )
     return {
         "holding_seconds": round(holding_seconds, 3),
         "holding_seconds_state": holding_seconds_state,
@@ -1851,16 +1890,17 @@ def build_holding_summary_from_close_context(close_context: dict[str, Any]) -> d
         "timeout_enabled": timeout_enabled,
         "max_holding_bars": int(close_context.get("max_holding_bars", 0) or 0),
         "max_holding_seconds": round(max_holding_seconds, 3) if max_holding_seconds > 0 else 0.0,
-        "holding_timeout_exceeded": bool(
-            close_context.get("max_holding_seconds", 0.0)
-            and (unknown_timestamp or holding_seconds >= max_holding_seconds)
-        ),
+        "holding_timeout_exceeded": bool(timeout_exceeded),
         "holding_timeout_fail_closed": bool(
             timeout_enabled and unknown_timestamp
         ),
         "holding_timeout_ratio": round(timeout_ratio, 4) if timeout_enabled else 0.0,
         "holding_timeout_status": timeout_status,
         "holding_timeout_remaining_seconds": round(remaining_seconds, 3) if timeout_enabled else 0.0,
+        "market_open_holding_seconds": round(market_open_holding, 3)
+        if market_budget
+        else None,
+        "market_time_budget": market_budget,
     }
 
 
@@ -1870,10 +1910,64 @@ def holding_timeout_is_expired(close_context: dict[str, Any]) -> bool:
     holding_seconds_state = str(
         (close_context or {}).get("holding_seconds_state") or "known"
     )
-    return bool(
-        max_holding_seconds > 0
-        and (holding_seconds_state != "known" or holding_seconds >= max_holding_seconds)
+    if max_holding_seconds <= 0:
+        return False
+    if holding_seconds_state != "known":
+        return True
+    market_budget = close_context.get("market_time_budget") or {}
+    if isinstance(market_budget, dict) and market_budget:
+        if "timeout_on_market_time" in market_budget:
+            return bool(market_budget.get("timeout_on_market_time"))
+        try:
+            return float(market_budget.get("market_open_holding_seconds", 0.0) or 0.0) >= max_holding_seconds
+        except (TypeError, ValueError):
+            return False
+    return holding_seconds >= max_holding_seconds
+
+
+def build_holding_timeout_market_budget(
+    *,
+    entry_ts: float,
+    now_ts: float,
+    max_holding_seconds: float,
+    symbol: str = "XAUUSD+",
+    broker_schedule: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Market-open timeout accounting for one evaluation.
+
+    ``market_holding_seconds`` counts only tradable time since entry;
+    ``market_closed_pending`` flags that the wall-clock holding time has
+    crossed the limit purely because the market was closed for part of it.
+    """
+
+    entry = float(entry_ts or 0.0)
+    now = float(now_ts or 0.0)
+    wall_holding = max(0.0, now - entry) if entry > 0 else 0.0
+    open_holding, schedule_source = (
+        market_open_seconds_between_with_source(
+            entry,
+            now,
+            symbol=symbol or "XAUUSD+",
+            broker_schedule=broker_schedule,
+        )
+        if entry > 0 and now > entry
+        else (0.0, "config")
     )
+    closed_in_window = bool(
+        entry > 0
+        and now > entry
+        and open_holding < (now - entry)
+    )
+    timed_out_wall = bool(max_holding_seconds > 0 and wall_holding >= max_holding_seconds)
+    timed_out_open = bool(max_holding_seconds > 0 and open_holding >= max_holding_seconds)
+    return {
+        "wall_clock_holding_seconds": round(wall_holding, 3),
+        "market_open_holding_seconds": round(open_holding, 3),
+        "market_closed_in_window": closed_in_window,
+        "market_closed_pending": timed_out_wall and not timed_out_open,
+        "timeout_on_market_time": timed_out_open,
+        "schedule_source": schedule_source,
+    }
 
 
 def build_holding_timeout_verdict_payload(
@@ -2021,6 +2115,23 @@ def build_position_supervisor_context_payload(
     holding_timeout_ratio = float(position.get("holding_timeout_ratio", 0.0) or 0.0)
     timeframe_seconds = int(temporal_context.get("timeframe_seconds", 0) or 0)
     holding_seconds = float(temporal_context.get("holding_seconds", 0.0) or 0.0)
+    market_budget = dict(temporal_context.get("market_time_budget") or {})
+    market_open_holding = float(
+        market_budget.get("market_open_holding_seconds", holding_seconds) or 0.0
+    )
+    max_holding_seconds = float(position.get("max_holding_seconds", 0.0) or 0.0)
+    if max_holding_seconds > 0:
+        if market_budget and str(temporal_context.get("holding_seconds_state") or "known") != "unknown_infinite_stale":
+            holding_timeout_ratio = market_open_holding / max_holding_seconds
+            holding_timeout_exceeded = (
+                bool(market_budget.get("timeout_on_market_time"))
+                if "timeout_on_market_time" in market_budget
+                else market_open_holding >= max_holding_seconds
+            )
+        else:
+            holding_timeout_exceeded = holding_seconds >= max_holding_seconds
+    else:
+        holding_timeout_exceeded = False
     raw_market_context = dict(market_context or {})
     context_state = raw_market_context.get("context_state")
     if not isinstance(context_state, dict):
@@ -2074,11 +2185,16 @@ def build_position_supervisor_context_payload(
         "risk_snapshot": risk_snapshot or {},
         "policy_state": {},
         "max_holding_bars": int(max_holding_bars or 0),
-        "max_holding_seconds": float(position.get("max_holding_seconds", 0.0) or 0.0),
+        "max_holding_seconds": max_holding_seconds,
         "open_position_count": int(open_position_count or 0),
         "total_api_volume": total_api_volume,
-        "holding_timeout_ratio": holding_timeout_ratio,
         **position_metrics,
+        "holding_timeout_ratio": holding_timeout_ratio,
+        "holding_timeout_exceeded": bool(holding_timeout_exceeded),
+        "market_open_holding_seconds": round(market_open_holding, 3)
+        if market_budget
+        else None,
+        "market_time_budget": market_budget,
         # Canonical market facts are written after the path-metric projection:
         # an empty/legacy metric field must not erase a real regime fact.
         "current_regime": str(position_metrics.get("current_regime") or regime_id),
