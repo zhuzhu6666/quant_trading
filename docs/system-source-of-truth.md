@@ -109,6 +109,7 @@ release preflight 和前端只能复用该结果，不得通过再次读取原�
 | 进化研究周期 | learning worker `backend.runtime.evolution_orchestrator` + `runtime_kv[evolution_cycle_watermark.v1]` | learning worker 是重任务唯一生产 owner；minute `23,53` 运行。watermark 单写记录 symbol/timeframe、最后闭合 bar、输入指纹、配置 hash、代码版本和完成时间，同一输入只跳过 GP 搜索，健康、Canary、退休和 effect 维护继续；GP 成功或确认无新候选才推进。非终态候选达到既有 `QUANT_CANARY_EVALUATION_LIMIT` 时停止注册新 GP 因子并排空存量；Backend 不再注册 evolution 重任务或启动补偿 |
 | Canary 增量证据 | `shadow_factor_perf.metrics_json` + PostgreSQL `canary_state` evidence watermark | 数据窗口、因子结果和最新 bar 均有指纹；同一 evidence hash 不能重复推进阶段，CANARY_20 以后必须累计阶段所需的新 bar；单轮评估按高阶段、最久未评估、分数排序并受 `QUANT_CANARY_EVALUATION_LIMIT` 限额，未选中的状态保留到后续轮转 |
 | 重型自治工作协调 | `backend.services.evolution_work_coordinator` | PostgreSQL session advisory lock 串行化 evolution、factor governance、nursery、feature/model research；不是新决策智能体，不拥有配置或生命周期写权限 |
+| Evolution 运行 owner/recovery | `runtime.evolution_run.summary_json._owner` + `backend.services.evolution_ledger` | 新 run 记录 `evolution_run_owner.v1` 的 worker boot_id、PID、Linux process-start ticks、machine-id 和 host boot-id；learning worker 启动只在 owner 可证明已死、同 machine 且 boot 重启、且 coordinator advisory lock 不存在时标记 `interrupted`。跨 machine、无法读 lock、owner 仍存活或 ownerless legacy row 均 fail-safe 不自动改写；ownerless legacy 只由既有 age-based expiry/一次性人工收口处理。该 metadata 放在既有 `summary_json`，PG/SQLite 不新增表或 migration。 |
 
 判断原则：
 

@@ -319,6 +319,11 @@ def test_learning_worker_critical_boot_failures_propagate(
         else (lambda: None),
     )
     monkeypatch.setattr(ledger, "expire_stale_evolution_runs", lambda **_kwargs: {"expired_count": 0})
+    monkeypatch.setattr(
+        ledger,
+        "recover_orphaned_evolution_runs",
+        lambda **_kwargs: {"interrupted_count": 0, "items": []},
+    )
 
     class _GovernanceRecovery:
         def run(self, **_kwargs):

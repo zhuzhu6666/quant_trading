@@ -73,6 +73,9 @@ def _bootstrap_runtime(
     capability: LearningWorkerCapability | None = None,
 ) -> LearningWorkerCapability:
     capability = capability or _worker_capability
+    from backend.services.evolution_ledger import set_evolution_owner_identity
+
+    set_evolution_owner_identity(boot_id=str(capability.snapshot()["boot_id"]))
     from backend.core.logging import setup_logging
 
     setup_logging()
@@ -87,11 +90,17 @@ def _bootstrap_runtime(
         raise
 
     try:
-        from backend.services.evolution_ledger import expire_stale_evolution_runs
+        from backend.services.evolution_ledger import (
+            expire_stale_evolution_runs,
+            recover_orphaned_evolution_runs,
+        )
         from backend.services.governance_startup_recovery import (
             GovernanceStartupRecoveryService,
         )
 
+        orphaned = recover_orphaned_evolution_runs()
+        if orphaned.get("interrupted_count"):
+            logger.info("[learning_worker] interrupted orphaned runs: {}", orphaned)
         expired = expire_stale_evolution_runs(max_age_sec=3600.0)
         if expired.get("expired_count"):
             logger.info("[learning_worker] expired stale interrupted runs: {}", expired)

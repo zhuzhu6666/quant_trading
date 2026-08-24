@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import asdict, is_dataclass
@@ -10,6 +11,103 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_OWNER_SCHEMA_VERSION = "evolution_run_owner.v1"
+_COORDINATOR_LOCK_NAME = "quant_autonomous_evolution_work"
+
+
+def _host_boot_id() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _machine_id() -> str:
+    try:
+        return Path("/etc/machine-id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _proc_start_ticks(pid: int) -> int:
+    """Return Linux process start ticks, or zero when unavailable."""
+    try:
+        stat = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8")
+        after_comm = stat.rsplit(")", 1)[1].split()
+        # The first item after comm is field 3; starttime is field 22.
+        return int(after_comm[19])
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+_OWNER_IDENTITY: dict[str, Any] = {
+    "schema_version": _OWNER_SCHEMA_VERSION,
+    "boot_id": str(uuid.uuid4()),
+    "pid": int(os.getpid()),
+    "machine_id": _machine_id(),
+    "host_boot_id": _host_boot_id(),
+    "proc_start_ticks": _proc_start_ticks(os.getpid()),
+    "process_started_at": time.time(),
+    "process_role": str(os.getenv("QUANT_PROCESS_ROLE") or ""),
+}
+
+
+def set_evolution_owner_identity(*, boot_id: str) -> dict[str, Any]:
+    """Bind ledger rows to the worker capability boot identity."""
+    _OWNER_IDENTITY["boot_id"] = str(boot_id or _OWNER_IDENTITY["boot_id"])
+    _OWNER_IDENTITY["pid"] = int(os.getpid())
+    _OWNER_IDENTITY["machine_id"] = _machine_id()
+    _OWNER_IDENTITY["host_boot_id"] = _host_boot_id()
+    _OWNER_IDENTITY["proc_start_ticks"] = _proc_start_ticks(os.getpid())
+    _OWNER_IDENTITY["process_started_at"] = time.time()
+    _OWNER_IDENTITY["process_role"] = str(os.getenv("QUANT_PROCESS_ROLE") or "")
+    return dict(_OWNER_IDENTITY)
+
+
+def _refresh_owner_identity_after_fork() -> None:
+    current_pid = int(os.getpid())
+    if int(_OWNER_IDENTITY.get("pid") or 0) == current_pid:
+        return
+    _OWNER_IDENTITY.update(
+        {
+            "boot_id": str(uuid.uuid4()),
+            "pid": current_pid,
+            "machine_id": _machine_id(),
+            "host_boot_id": _host_boot_id(),
+            "proc_start_ticks": _proc_start_ticks(current_pid),
+            "process_started_at": time.time(),
+            "process_role": str(os.getenv("QUANT_PROCESS_ROLE") or ""),
+        }
+    )
+
+
+def evolution_owner_identity() -> dict[str, Any]:
+    _refresh_owner_identity_after_fork()
+    return dict(_OWNER_IDENTITY)
+
+
+def _owner_is_alive(owner: Any) -> bool | None:
+    """Return True/False, or None when legacy identity cannot be verified."""
+    if not isinstance(owner, dict) or owner.get("schema_version") != _OWNER_SCHEMA_VERSION:
+        return None
+    owner_machine = str(owner.get("machine_id") or "")
+    current_machine = _machine_id()
+    if not owner_machine or not current_machine or owner_machine != current_machine:
+        return None
+    owner_host = str(owner.get("host_boot_id") or "")
+    current_host = _host_boot_id()
+    if owner_host and current_host and owner_host != current_host:
+        return False
+    try:
+        pid = int(owner.get("pid") or 0)
+        expected_ticks = int(owner.get("proc_start_ticks") or 0)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0 or expected_ticks <= 0:
+        return None
+    actual_ticks = _proc_start_ticks(pid)
+    return bool(actual_ticks and actual_ticks == expected_ticks)
 
 from backend.core.db import (
     STATE_DB,
@@ -389,6 +487,10 @@ def start_evolution_run(
     snapshot = persist_runtime_config_snapshot(config, source=f"evolution_run:{run_type}", db_path=db_path, run_id=run_id) if config is not None else current_runtime_config_snapshot(db_path=db_path)
     rid = str(run_id or _new_id("evorun"))
     now = time.time()
+    stored_summary = dict(summary or {})
+    # The owner identity is metadata only; the coordinator/advisory lock and
+    # the domain transactions remain the execution authorities.
+    stored_summary["_owner"] = evolution_owner_identity()
     conn = _connect(db_path)
     try:
         conn.execute(
@@ -413,7 +515,7 @@ def start_evolution_run(
                 str(trigger_source or ""),
                 int(snapshot.get("config_version") or 0),
                 str(snapshot.get("config_hash") or ""),
-                _dumps(summary or {}),
+                _dumps(stored_summary),
                 now,
             ),
         )
@@ -422,6 +524,128 @@ def start_evolution_run(
         # snapshot. The evolution ledger owns a distinct run id, so it must
         # win when callers later pass this payload to finish_evolution_run().
         return {**snapshot, "run_id": rid, "started_at": now}
+    finally:
+        conn.close()
+
+
+def _try_acquire_coordinator_lock(conn: Any, db_path: str | Path) -> bool | None:
+    """Acquire the coordinator lock in the caller's transaction.
+
+    Keeping acquisition and the evolution_run scan/update on one connection
+    closes the check-then-act window. SQLite has no process-independent
+    advisory lock, so its isolated test database treats the helper as held.
+    """
+    if not _use_pg(db_path):
+        return True
+    try:
+        row = conn.execute(
+            _p(
+                db_path,
+                """
+                SELECT pg_try_advisory_xact_lock(hashtext(?)) AS acquired
+                """,
+            ),
+            (_COORDINATOR_LOCK_NAME,),
+        ).fetchone()
+        return bool(row[0]) if row is not None else False
+    except Exception:
+        logger.exception("failed to acquire evolution coordinator advisory lock")
+        return None
+
+
+def _mark_orphaned_run_interrupted(
+    conn: Any,
+    db_path: str | Path,
+    *,
+    run_id: str,
+    summary_json: str,
+    ended_at: float,
+) -> int:
+    cursor = conn.execute(
+        _p(
+            db_path,
+            """
+            UPDATE evolution_run
+            SET status='interrupted', summary_json=?, ended_at=?
+            WHERE run_id=? AND status='running'
+            """,
+        ),
+        (summary_json, ended_at, run_id),
+    )
+    return int(cursor.rowcount or 0)
+
+
+def recover_orphaned_evolution_runs(
+    *,
+    db_path: str | Path = STATE_DB,
+) -> dict[str, Any]:
+    """Interrupt only running rows whose recorded owner is proven dead.
+
+    New rows carry a PID plus Linux process start ticks and host boot id.  A
+    PID alone is never sufficient because it can be reused. Legacy rows
+    without owner identity remain on the age-based expiry path. The
+    coordinator advisory xact lock is acquired on the same connection
+    used for the scan and CAS updates; contention or acquisition failure
+    leaves rows untouched.
+    """
+    ensure_evolution_ledger_tables(db_path)
+    conn = _connect(db_path)
+    if not _use_pg(db_path):
+        conn.row_factory = __import__("sqlite3").Row
+    try:
+        lock_acquired = _try_acquire_coordinator_lock(conn, db_path)
+        if lock_acquired is not True:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            reason = "coordinator_lock_contended" if lock_acquired is False else "coordinator_lock_unavailable"
+            return {"interrupted_count": 0, "items": [], "reason": reason}
+        now = time.time()
+        interrupted: list[dict[str, Any]] = []
+        rows = conn.execute(
+            _p(
+                db_path,
+                """
+                SELECT run_id, run_type, started_at, summary_json
+                FROM evolution_run
+                WHERE status='running' AND started_at > 0
+                """,
+            )
+        ).fetchall()
+        for row in rows:
+            summary = _loads(row["summary_json"], {})
+            owner = summary.get("_owner") if isinstance(summary, dict) else None
+            owner_alive = _owner_is_alive(owner)
+            if owner_alive is not False:
+                continue
+            run_id = str(row["run_id"] or "")
+            recovery_summary = summary if isinstance(summary, dict) else {}
+            recovery_summary["orphan_recovery"] = {
+                "schema_version": "evolution_run_orphan_recovery.v1",
+                "status": "interrupted",
+                "recovered_at": now,
+                "reason": "owner_process_not_alive_and_coordinator_lock_absent",
+                "owner": owner,
+            }
+            updated = _mark_orphaned_run_interrupted(
+                conn,
+                db_path,
+                run_id=run_id,
+                summary_json=_dumps(recovery_summary),
+                ended_at=now,
+            )
+            if updated != 1:
+                continue
+            interrupted.append(
+                {
+                    "run_id": run_id,
+                    "run_type": str(row["run_type"] or ""),
+                    "reason": "owner_process_not_alive_and_coordinator_lock_absent",
+                }
+            )
+        conn.commit()
+        return {"interrupted_count": len(interrupted), "items": interrupted}
     finally:
         conn.close()
 

@@ -20,7 +20,11 @@ from backend.services.canonical_v2_reader import (
 )
 from backend.services import autonomous_learning as al
 from backend.services import evolution_ledger
-from backend.services.evolution_ledger import expire_stale_evolution_runs, start_evolution_run
+from backend.services.evolution_ledger import (
+    expire_stale_evolution_runs,
+    recover_orphaned_evolution_runs,
+    start_evolution_run,
+)
 from backend.services.v16_command_gate import V16CommandGate
 from config import runtime_config as rc
 from tests.canonical_fixture import make_canonical_sqlite
@@ -785,6 +789,192 @@ def test_expire_stale_evolution_runs_marks_only_old_running_rows(tmp_path):
         conn.close()
     assert rows[stale["run_id"]] == "expired"
     assert rows[fresh["run_id"]] == "running"
+
+
+def test_recover_orphaned_evolution_runs_marks_dead_owner_without_touching_legacy(
+    tmp_path,
+):
+    db_path = tmp_path / "state.db"
+    owned = start_evolution_run(run_type="factor_governance_autonomous", db_path=db_path)
+    legacy_id = "legacy-running"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        owner = json.loads(
+            conn.execute(
+                "SELECT summary_json FROM evolution_run WHERE run_id=?",
+                (owned["run_id"],),
+            ).fetchone()[0]
+        )["_owner"]
+        owner["pid"] = 999999999
+        owner["proc_start_ticks"] = 1
+        conn.execute(
+            "UPDATE evolution_run SET summary_json=? WHERE run_id=?",
+            (json.dumps({"_owner": owner}), owned["run_id"]),
+        )
+        conn.execute(
+            """INSERT INTO evolution_run
+               (run_id, run_type, status, started_at, ended_at, summary_json)
+               VALUES (?, ?, 'running', ?, 0.0, '{}')""",
+            (
+                legacy_id,
+                "legacy_job",
+                time.time() - 7200,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = recover_orphaned_evolution_runs(db_path=db_path)
+
+    assert result["interrupted_count"] == 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = dict(conn.execute("SELECT run_id, status FROM evolution_run").fetchall())
+    finally:
+        conn.close()
+    assert rows[owned["run_id"]] == "interrupted"
+    assert rows[legacy_id] == "running"
+
+
+def test_recover_orphaned_evolution_runs_preserves_live_owner_and_held_lock(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "state.db"
+    live = start_evolution_run(run_type="factor_governance_autonomous", db_path=db_path)
+
+    assert recover_orphaned_evolution_runs(db_path=db_path)["interrupted_count"] == 0
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        owner = json.loads(
+            conn.execute(
+                "SELECT summary_json FROM evolution_run WHERE run_id=?",
+                (live["run_id"],),
+            ).fetchone()[0]
+        )["_owner"]
+    finally:
+        conn.close()
+
+    owner["pid"] = 999999999
+    owner["proc_start_ticks"] = 1
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "UPDATE evolution_run SET summary_json=? WHERE run_id=?",
+            (json.dumps({"_owner": owner}), live["run_id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        evolution_ledger,
+        "_try_acquire_coordinator_lock",
+        lambda *_args, **_kwargs: False,
+    )
+    result = recover_orphaned_evolution_runs(db_path=db_path)
+
+    assert result["interrupted_count"] == 0
+    assert result["reason"] == "coordinator_lock_contended"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        assert conn.execute(
+            "SELECT status FROM evolution_run WHERE run_id=?", (live["run_id"],)
+        ).fetchone()[0] == "running"
+    finally:
+        conn.close()
+
+
+def test_recover_orphaned_evolution_runs_fails_closed_when_lock_unavailable(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "state.db"
+    run = start_evolution_run(run_type="factor_governance_autonomous", db_path=db_path)
+    monkeypatch.setattr(
+        evolution_ledger,
+        "_try_acquire_coordinator_lock",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = recover_orphaned_evolution_runs(db_path=db_path)
+
+    assert result == {
+        "interrupted_count": 0,
+        "items": [],
+        "reason": "coordinator_lock_unavailable",
+    }
+    conn = sqlite3.connect(str(db_path))
+    try:
+        assert conn.execute(
+            "SELECT status FROM evolution_run WHERE run_id=?", (run["run_id"],)
+        ).fetchone()[0] == "running"
+    finally:
+        conn.close()
+
+
+def test_recover_orphaned_evolution_runs_does_not_report_cas_miss(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "state.db"
+    run = start_evolution_run(run_type="factor_governance_autonomous", db_path=db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        summary = json.loads(
+            conn.execute(
+                "SELECT summary_json FROM evolution_run WHERE run_id=?",
+                (run["run_id"],),
+            ).fetchone()[0]
+        )
+        summary["_owner"]["pid"] = 999999999
+        summary["_owner"]["proc_start_ticks"] = 1
+        conn.execute(
+            "UPDATE evolution_run SET summary_json=? WHERE run_id=?",
+            (json.dumps(summary), run["run_id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        evolution_ledger,
+        "_mark_orphaned_run_interrupted",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    result = recover_orphaned_evolution_runs(db_path=db_path)
+
+    assert result == {"interrupted_count": 0, "items": []}
+    conn = sqlite3.connect(str(db_path))
+    try:
+        assert conn.execute(
+            "SELECT status FROM evolution_run WHERE run_id=?", (run["run_id"],)
+        ).fetchone()[0] == "running"
+    finally:
+        conn.close()
+
+
+def test_evolution_owner_identity_fails_closed_across_machines():
+    owner = evolution_ledger.evolution_owner_identity()
+    foreign_machine = dict(owner, machine_id="different-machine")
+    assert evolution_ledger._owner_is_alive(foreign_machine) is None
+
+    rebooted_machine = dict(owner, host_boot_id="different-boot")
+    assert evolution_ledger._owner_is_alive(rebooted_machine) is False
+
+
+def test_evolution_owner_identity_refreshes_after_fork(monkeypatch):
+    original_identity = evolution_ledger.evolution_owner_identity()
+    original_pid = original_identity["pid"]
+    monkeypatch.setattr(evolution_ledger.os, "getpid", lambda: original_pid + 1000)
+    monkeypatch.setattr(evolution_ledger, "_proc_start_ticks", lambda _pid: 4242)
+    try:
+        refreshed = evolution_ledger.evolution_owner_identity()
+        assert refreshed["pid"] == original_pid + 1000
+        assert refreshed["proc_start_ticks"] == 4242
+        assert refreshed["boot_id"] != ""
+    finally:
+        evolution_ledger._OWNER_IDENTITY.clear()
+        evolution_ledger._OWNER_IDENTITY.update(original_identity)
 
 
 def test_start_evolution_run_does_not_return_snapshot_run_id(tmp_path, monkeypatch):
