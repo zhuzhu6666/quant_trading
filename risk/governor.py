@@ -209,10 +209,45 @@ class RiskGovernor:
             return GovernorVerdict(False, "consecutive_losses",
                                    f"{state.consecutive_losses} >= {cfg['max_consecutive_losses']}")
 
-        # 日亏损超限
+        # 日亏损超限 → 亏损阶梯仲裁（risk/loss_streak.py 是唯一计算者）。
+        # 触发后锁到当前时段结束；下一经纪商时段进入试探期（预算内豁免日限，
+        # 信号门槛上调）；试探单亏损或预算耗尽则锁到经纪商日切。
         if state.daily_loss_pct >= cfg["max_daily_loss_pct"]:
-            return GovernorVerdict(False, "daily_loss_limit",
-                                   f"daily loss {state.daily_loss_pct:.1f}% >= {cfg['max_daily_loss_pct']:.0f}%")
+            ladder_facts = dict(state.extra.get("loss_streak_ladder") or {})
+            if ladder_facts:
+                from risk.loss_streak import LadderFacts, evaluate_ladder
+
+                verdict = evaluate_ladder(
+                    LadderFacts(
+                        now_ts=float(ladder_facts.get("now_ts") or 0.0),
+                        tripped_at=float(ladder_facts.get("tripped_at") or 0.0),
+                        next_session_open_ts=float(
+                            ladder_facts.get("next_session_open_ts") or 0.0
+                        ),
+                        broker_day_end_ts=float(
+                            ladder_facts.get("broker_day_end_ts") or 0.0
+                        ),
+                        probation_pnl=float(ladder_facts.get("probation_pnl") or 0.0),
+                        probation_trade_count=int(
+                            ladder_facts.get("probation_trade_count") or 0
+                        ),
+                        review_statement_ready=bool(
+                            ladder_facts.get("review_statement_ready", False)
+                        ),
+                        consecutive_tripped_days=int(
+                            ladder_facts.get("consecutive_tripped_days") or 1
+                        ),
+                    )
+                )
+                if not verdict.allowed:
+                    return GovernorVerdict(False, f"loss_streak_{verdict.reason}",
+                                           verdict.state)
+                # Probation grants a bounded exception to the daily gate.
+                state.extra["entry_threshold_addon"] = verdict.threshold_addon
+            else:
+                # No ladder facts injected: legacy fail-closed behaviour.
+                return GovernorVerdict(False, "daily_loss_limit",
+                                       f"daily loss {state.daily_loss_pct:.1f}% >= {cfg['max_daily_loss_pct']:.0f}%")
 
         # 日交易笔数超限
         if cfg["max_daily_trades"] > 0 and state.daily_trades >= cfg["max_daily_trades"]:

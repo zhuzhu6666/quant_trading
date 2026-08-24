@@ -122,6 +122,7 @@ def apply_context_policy_to_gate(
     gate: Any,
     cfg: Any,
     context_policy: dict[str, Any],
+    loss_streak_addon: float = 0.0,
 ) -> None:
     setattr(composite, "context_policy", dict(context_policy or {}))
     base_threshold = float(getattr(cfg, "factor_signal_threshold", 0.3) or 0.3)
@@ -129,7 +130,22 @@ def apply_context_policy_to_gate(
         threshold_delta = float((context_policy or {}).get("signal_threshold_delta") or 0.0)
     except (TypeError, ValueError):
         threshold_delta = 0.0
-    gate._threshold = max(0.0, min(1.0, base_threshold + threshold_delta))
+    try:
+        addon = max(0.0, min(0.30, float(loss_streak_addon or 0.0)))
+    except (TypeError, ValueError):
+        addon = 0.0
+    if addon > 0.0:
+        # Loss-streak probation tightens entries; surface it in the policy
+        # payload so reviews can see WHY the bar was higher.
+        context_policy = dict(context_policy or {})
+        context_policy["loss_streak_addon"] = addon
+        context_policy["reason"] = ";".join(
+            part
+            for part in (str(context_policy.get("reason") or ""), "loss_streak_probation")
+            if part
+        )
+        setattr(composite, "context_policy", context_policy)
+    gate._threshold = max(0.0, min(1.0, base_threshold + threshold_delta + addon))
 
 
 def run_live_decision_pipeline(
@@ -179,11 +195,36 @@ def run_live_decision_pipeline(
             cfg=cfg,
             evaluator=context_policy_evaluator,
         )
+        loss_streak_addon = 0.0
+        try:
+            from backend.services.live_service import _loss_streak_ladder_facts as _ladder_facts
+
+            ladder = _ladder_facts()
+        except Exception:
+            ladder = {}
+        if ladder:
+            from risk.loss_streak import LadderFacts, evaluate_ladder
+
+            verdict = evaluate_ladder(
+                LadderFacts(
+                    now_ts=float(ladder.get("now_ts") or 0.0),
+                    tripped_at=float(ladder.get("tripped_at") or 0.0),
+                    next_session_open_ts=float(ladder.get("next_session_open_ts") or 0.0),
+                    broker_day_end_ts=float(ladder.get("broker_day_end_ts") or 0.0),
+                    probation_pnl=float(ladder.get("probation_pnl") or 0.0),
+                    probation_trade_count=int(ladder.get("probation_trade_count") or 0),
+                    review_statement_ready=bool(ladder.get("review_statement_ready", False)),
+                    consecutive_tripped_days=int(ladder.get("consecutive_tripped_days") or 1),
+                )
+            )
+            if verdict.allowed:
+                loss_streak_addon = float(verdict.threshold_addon or 0.0)
         apply_context_policy_to_gate(
             composite=composite,
             gate=gate,
             cfg=cfg,
             context_policy=context_policy,
+            loss_streak_addon=loss_streak_addon,
         )
     except Exception:
         context_policy = {}

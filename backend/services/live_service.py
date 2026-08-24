@@ -894,6 +894,7 @@ def _build_open_trade_risk_context(
         event_sizing_context=event_sizing_context,
         event_filter_context=event_filter_context,
         decision_quality_context=decision_quality_context, decision_ts=decision_ts,
+        loss_streak_ladder_facts=_loss_streak_ladder_facts,
     )
 
 
@@ -3918,9 +3919,11 @@ def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> di
     if tripped:
         updates["circuit_breaker"] = True
         updates["circuit_reason"] = reason
+        _maybe_update_loss_streak_book(tripped=True, reason=reason)
     elif not enforced:
         updates["circuit_breaker"] = False
         updates["circuit_reason"] = ""
+        _maybe_update_loss_streak_book(tripped=False)
     _live_state_update(**updates)
     if updates:
         _persist_session_state()
@@ -3935,6 +3938,153 @@ def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> di
         "start_balance": start_balance,
         "risk_limits": limits.to_dict(),
     }
+
+
+# ── Loss-streak probation ladder (risk/loss_streak.py owns the math) ──
+
+def _loss_streak_ladder_facts() -> dict[str, Any]:
+    """Assemble the observed facts the ladder needs, from live state.
+
+    Session timestamps come from the broker schedule projection already
+    published by market_session (single session authority); the review
+    statement flag is written by the learning loop's forced review step.
+    """
+    book = dict(_live_state_get("loss_streak_book", {}, clone=True) or {})
+    if not book:
+        return {}
+    session = _live_state_get("market_session", {}, clone=True) or {}
+    now_ts = time.time()
+    seconds_to_open = session.get("seconds_to_open")
+    seconds_to_close = session.get("seconds_to_close")
+    is_open = bool(session.get("is_open", False))
+    next_open = (
+        now_ts + float(seconds_to_open)
+        if seconds_to_open is not None and float(seconds_to_open) >= 0.0
+        else 0.0
+    )
+    day_end = (
+        now_ts + float(seconds_to_close)
+        if seconds_to_close is not None and float(seconds_to_close) >= 0.0
+        else 0.0
+    )
+    # When the market is open the current session end IS the day-end anchor.
+    if is_open and day_end <= 0.0:
+        day_end = next_open
+    return {
+        "now_ts": now_ts,
+        "tripped_at": float(book.get("tripped_at") or 0.0),
+        "next_session_open_ts": next_open if not is_open else 0.0,
+        "broker_day_end_ts": day_end,
+        "probation_pnl": float(book.get("probation_pnl", 0.0) or 0.0),
+        "probation_trade_count": int(book.get("probation_trade_count", 0) or 0),
+        "review_statement_ready": bool(
+            _loss_streak_review_ready(book, now_ts=now_ts)
+        ),
+        "consecutive_tripped_days": int(
+            book.get("consecutive_tripped_days", 1) or 1
+        ),
+    }
+
+
+def _loss_streak_review_ready(book: dict[str, Any], *, now_ts: float) -> bool:
+    """Statement is ready when the learning loop produced one for this trip
+    date, or when the statement grace window (90 min) has elapsed — the lock
+    must never depend on a downstream process staying healthy (fallback to
+    the legacy next-session unlock)."""
+    if bool(book.get("review_statement_ready", False)):
+        return True
+    tripped_at = float(book.get("tripped_at") or 0.0)
+    if tripped_at <= 0.0:
+        return False
+    trip_date = str(book.get("trip_date") or "")
+    try:
+        from backend.services.loss_streak_review import (
+            load_loss_review_statement,
+            statement_grace_seconds,
+        )
+
+        if now_ts - tripped_at >= statement_grace_seconds():
+            return True
+        statement = load_loss_review_statement(
+            trip_date=trip_date, kv_reader=_runtime_kv_get
+        )
+        return statement is not None
+    except Exception:
+        # Review pipeline unavailable -> do not hold the lock hostage.
+        grace = 5400.0
+        return now_ts - tripped_at >= grace
+
+
+def _maybe_update_loss_streak_book(*, tripped: bool, reason: str = "") -> None:
+    """Track the daily-loss trip and reset the ladder on broker-day rollover."""
+    book = dict(_live_state_get("loss_streak_book", {}, clone=True) or {})
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if tripped:
+        if not book or str(book.get("trip_date") or "") != today:
+            prev_streak = int(book.get("consecutive_tripped_days", 0) or 0)
+            yesterday = datetime.fromtimestamp(
+                time.time() - 86400.0, timezone.utc
+            ).strftime("%Y-%m-%d")
+            streak = prev_streak + 1 if str(
+                book.get("last_trip_date") or ""
+            ) == yesterday else 1
+            book = {
+                "schema_version": "loss_streak_book.v1",
+                "trip_date": today,
+                "tripped_at": time.time(),
+                "reason": str(reason or ""),
+                "last_trip_date": today,
+                "consecutive_tripped_days": streak,
+                "probation_pnl": 0.0,
+                "probation_trade_count": 0,
+                "review_statement_ready": False,
+            }
+            _live_state_update(loss_streak_book=book)
+            logger.info(
+                "[loss_streak] daily limit tripped: streak=%s reason=%s",
+                streak,
+                reason,
+            )
+    elif book and str(book.get("trip_date") or "") != today:
+        # Broker day rolled over without a new trip: clear the ladder so a
+        # fresh day starts unconditionally clean (legacy behaviour).
+        _live_state_update(loss_streak_book={})
+
+
+def _record_probation_trade_outcome(pnl: float, *, position_id: int = 0) -> None:
+    """Book one closed position into the probation ledger when it is armed."""
+    with _LIVE_STATE_LOCK:
+        book = dict(_live_state.get("loss_streak_book", {}) or {})
+        if not book:
+            return
+        book["probation_pnl"] = float(
+            book.get("probation_pnl", 0.0) or 0.0
+        ) + float(pnl or 0.0)
+        if position_id:
+            ids = list(book.get("probation_position_ids", []) or [])
+            ids.append(int(position_id))
+            book["probation_position_ids"] = ids[-50:]
+        else:
+            book["probation_trade_count"] = int(
+                book.get("probation_trade_count", 0) or 0
+            ) + 1
+        _live_state["loss_streak_book"] = book
+
+
+def _mark_loss_review_statement_ready(statement: dict[str, Any]) -> None:
+    """Learning loop hook: record the forced loss-review statement."""
+    with _LIVE_STATE_LOCK:
+        book = dict(_live_state.get("loss_streak_book", {}) or {})
+        if not book:
+            return
+        book["review_statement_ready"] = True
+        book["review_statement"] = {
+            "action": str(statement.get("action") or "unknown"),
+            "summary": str(statement.get("summary") or "")[:500],
+            "produced_at": time.time(),
+        }
+        _live_state["loss_streak_book"] = book
+
 
 
 def _record_session_trade(
@@ -3998,6 +4148,20 @@ def _record_session_trade(
             session_observed_at=observed_at,
             session_recorded_position_ids=sorted(recorded_ids)[-1000:],
         )
+        # Probation ledger: only counts while a loss-streak book is armed.
+        if _live_state.get("loss_streak_book"):
+            book = dict(_live_state["loss_streak_book"])
+            book["probation_pnl"] = float(
+                book.get("probation_pnl", 0.0) or 0.0
+            ) + float(total_pnl or 0.0)
+            book["probation_trade_count"] = int(
+                book.get("probation_trade_count", 0) or 0
+            ) + 1
+            if pid > 0:
+                ids = list(book.get("probation_position_ids", []) or [])
+                ids.append(int(pid))
+                book["probation_position_ids"] = ids[-50:]
+            _live_state["loss_streak_book"] = book
     _notify_live_state_change()
     _persist_session_state()
     return {

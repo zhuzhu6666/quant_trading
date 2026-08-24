@@ -7,6 +7,7 @@ import math
 import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -5995,6 +5996,146 @@ def maybe_auto_unfreeze_learning_repair(*, db_path: str | Path = STATE_DB) -> di
     return {"ok": True, "status": "auto_unfrozen", "checks": checks, "mutation": mutation, "release": release}
 
 
+def _produce_loss_streak_review_statement(db_path: str | Path = STATE_DB) -> dict[str, Any]:
+    """Forced loss-review statement for the probation ladder.
+
+    Reads the backend's armed loss-streak book from runtime_kv; when the
+    daily limit tripped today, derives an explicit tighten/no_change
+    statement from today's trade PnLs + experience failure tags and writes
+    it back for the backend ladder to consume.  Pure best-effort: any
+    failure returns a skipped marker and the ladder falls back to its grace
+    window instead of staying locked.
+    """
+    try:
+        from backend.services.loss_streak_review import (
+            build_loss_review_statement,
+            persist_loss_review_statement,
+        )
+
+        conn = _connect(db_path, read_only=True)
+        try:
+            row = conn.execute(
+                "SELECT value_json FROM runtime_kv WHERE key=?", ("loss_streak_book",)
+            ).fetchone()
+        finally:
+            conn.close()
+        raw = row[0] if row else None
+        import json as _json
+
+        book = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+        if not isinstance(book, dict) or not book:
+            return {"schema_version": "loss_streak_review.v1", "status": "skipped", "reason": "no_book"}
+        trip_date = str(book.get("trip_date") or "")
+        if not trip_date:
+            return {"schema_version": "loss_streak_review.v1", "status": "skipped", "reason": "no_trip"}
+        if str(book.get("review_for_date") or "") == trip_date:
+            return {"schema_version": "loss_streak_review.v1", "status": "skipped", "reason": "already_produced"}
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if trip_date != today:
+            # Only force reviews for the current risk day.
+            return {"schema_version": "loss_streak_review.v1", "status": "skipped", "reason": "stale_trip"}
+
+        # Today's realized trade PnLs from the session-state cache.
+        conn = _connect(db_path, read_only=True)
+        try:
+            row = conn.execute(
+                "SELECT value_json FROM runtime_kv WHERE key=?",
+                (f"live.session_state.{today}",),
+            ).fetchone()
+        finally:
+            conn.close()
+        raw_state = row[0] if row else None
+        state = _json.loads(raw_state) if isinstance(raw_state, str) else (raw_state or {})
+        trade_pnls = [
+            float(p)
+            for p in (state.get("session_trade_pnls") or [])
+            if isinstance(p, (int, float))
+        ] if isinstance(state, dict) else []
+
+        # Failure tags from today's experience memories (shared root cause).
+        weak_entry_count = 0
+        total_losers = sum(1 for p in trade_pnls if p < 0)
+        try:
+            conn = _connect(db_path, read_only=True)
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT outcome_label, failure_tags_json
+                    FROM experience_memory
+                    WHERE created_at >= ?
+                    """,
+                    (
+                        datetime.fromtimestamp(
+                            time.time() - 86400.0, timezone.utc
+                        ).timestamp(),
+                    ),
+                ).fetchall()
+            finally:
+                conn.close()
+            for r in rows:
+                tags_raw = r["failure_tags_json"] if not isinstance(r, dict) else r.get("failure_tags_json")
+                try:
+                    tags = set(_json.loads(tags_raw or "[]"))
+                except Exception:
+                    tags = set()
+                if "weak_entry_loss" in tags:
+                    weak_entry_count += 1
+        except Exception:
+            pass
+
+        statement = build_loss_review_statement(
+            trip_date=trip_date,
+            trade_pnls=trade_pnls,
+            failure_tags=[],
+            weak_entry_loss_count=weak_entry_count,
+            total_loss_count=max(total_losers, 0),
+        )
+        statement["trip_date"] = trip_date
+
+        written = persist_loss_review_statement(
+            statement,
+            connection_factory=lambda: _connect(db_path),
+            state_execute=lambda conn, sql, params=None, commit=False: conn.execute(sql, params or ()) if params else conn.execute(sql),
+        )
+        if written:
+            # Mark the book so the statement is produced once per trip.
+            try:
+                mark_conn = _connect(db_path)
+                try:
+                    book["review_for_date"] = trip_date
+                    mark_conn.execute(
+                        """
+                        INSERT INTO runtime_kv(key, value_json, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET
+                            value_json=excluded.value_json,
+                            updated_at=excluded.updated_at
+                        """,
+                        (
+                            "loss_streak_book",
+                            _json.dumps(book, ensure_ascii=False, default=str),
+                            time.time(),
+                        ),
+                    )
+                    mark_conn.commit()
+                finally:
+                    mark_conn.close()
+            except Exception:
+                pass
+        return {
+            "schema_version": "loss_streak_review.v1",
+            "status": "written" if written else "write_failed",
+            "action": statement.get("action"),
+        }
+    except Exception as exc:
+        return {
+            "schema_version": "loss_streak_review.v1",
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}"[:200],
+        }
+
+
 def run_autonomous_learning_cycle(
     *,
     db_path: str | Path = STATE_DB,
@@ -6107,6 +6248,10 @@ def run_autonomous_learning_cycle(
                 db_path=db_path,
                 limit=max(sample_limit, sample_limit * 4),
             ),
+        ),
+        (
+            "loss_streak_review",
+            lambda: _produce_loss_streak_review_statement(db_path=db_path),
         ),
     )
     for stage_name, operation in stage_operations:

@@ -3092,6 +3092,12 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     )
     monkeypatch.setattr(
         al,
+        "_produce_loss_streak_review_statement",
+        lambda **kwargs: calls.append("loss_streak_review")
+        or {"schema_version": "loss_streak_review.v1", "status": "skipped", "reason": "no_book"},
+    )
+    monkeypatch.setattr(
+        al,
         "apply_demo_autonomy",
         lambda **kwargs: calls.append("demo_apply") or {"enabled": True},
     )
@@ -3108,7 +3114,7 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert result["stages"]["entry_cluster_governance"]["suggestions"] == 1
     assert result["stages"]["event_window_governance"]["suggestions"] == 1
     assert result["stages"]["evidence_contract_repair"]["repaired"] == 1
-    assert len(result["memory_profile"]) == 17
+    assert len(result["memory_profile"]) == 18
     assert "must-not-escape" not in json.dumps(result)
     assert calls[:5] == [
         "counterfactual",
@@ -3122,6 +3128,7 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert calls[7] == "entry_cluster_governance"
     assert calls[8] == "event_window_governance"
     assert calls[9] == "repair_contracts"
+    assert calls[10] == "loss_streak_review"
     assert calls[-1] == "demo_apply"
 
     conn = sqlite3.connect(str(db_path))

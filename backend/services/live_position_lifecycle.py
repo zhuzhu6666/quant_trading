@@ -839,6 +839,7 @@ def build_open_trade_risk_context_payload(
     decision_freshness: dict[str, Any] | None,
     supervisor_reentry_block: dict[str, Any] | None,
     event_filter_context: dict[str, Any] | None = None,
+    loss_streak_ladder: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     risk_limits = RiskLimitSnapshot.from_runtime_config(cfg)
     var_enabled = bool(getattr(cfg, "var_enabled", False))
@@ -919,6 +920,7 @@ def build_open_trade_risk_context_payload(
         "loss_cooldown_after_losses": risk_limits.loss_cooldown_after_losses,
         "loss_cooldown_bars": risk_limits.loss_cooldown_bars,
         "block_on_disk_critical": risk_limits.block_on_disk_critical,
+        "loss_streak_ladder": dict(loss_streak_ladder or {}),
         "temporal_context": temporal_context,
         "supervisor_reentry_block": supervisor_reentry_block or {},
     }

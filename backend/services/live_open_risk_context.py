@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -150,6 +150,7 @@ def build_open_trade_risk_context(
     event_filter_context: dict[str, Any] | None = None,
     decision_quality_context: dict[str, Any] | None = None,
     decision_ts: float | None = None,
+    loss_streak_ladder_facts: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     risk_snapshot = runtime.state_get("risk", {}, clone=True) or {}
     loop_running = bool(runtime.state_get("loop_running", True))
@@ -268,4 +269,7 @@ def build_open_trade_risk_context(
         temporal_context=temporal_context,
         decision_freshness=decision_freshness,
         supervisor_reentry_block=supervisor_reentry_block,
+        loss_streak_ladder=(
+            loss_streak_ladder_facts() if callable(loss_streak_ladder_facts) else {}
+        ),
     )
