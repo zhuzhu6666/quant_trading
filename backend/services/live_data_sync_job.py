@@ -9,6 +9,7 @@ from backend.services.live_data_sync_helpers import (
     BAR_FRESHNESS_THRESHOLDS,
     classify_bar_freshness,
     dataframe_to_store_bars,
+    timeframe_seconds,
 )
 
 
@@ -38,6 +39,32 @@ def _default_data_store_factory():
 
 def _enabled_symbols(cfg) -> list[str]:
     return list(cfg.enabled_symbols) if hasattr(cfg, "enabled_symbols") else ["XAUUSD+"]
+
+
+def _reconcile_live_trendbars(bridge: Any, symbol: str, timeframe: str, bars: list[dict[str, Any]], now_ts: float) -> int:
+    """Feed broker-history rows back into the bridge's live trendbar cache.
+
+    Spot-stream frames can leave a just-closed bar with close==low (observed
+    2026-08-24).  The history rows written to DuckDB here are authoritative,
+    so replaying the fully-closed ones into memory repairs decisions and
+    review context without extra broker requests.
+    """
+    reconciler = getattr(bridge, "reconcile_live_bars", None)
+    if not callable(reconciler):
+        return 0
+    period_seconds = max(1, timeframe_seconds(timeframe))
+    closed_rows = [
+        bar
+        for bar in bars
+        if float(bar.get("time") or 0.0) + period_seconds <= now_ts
+    ]
+    if not closed_rows:
+        return 0
+    try:
+        return int(reconciler(timeframe, closed_rows) or 0)
+    except Exception as exc:
+        logger.debug("[data_sync] {} {} live trendbar reconcile failed: {}", symbol, timeframe, exc)
+        return 0
 
 
 def make_data_sync_job(
@@ -198,6 +225,16 @@ def make_data_sync_job(
                                 bars = dataframe_to_store_bars(df)
                                 data_store_factory().insert_bars(bars, sym, tf)
                                 total_bars += len(bars)
+                                reconciled = _reconcile_live_trendbars(
+                                    bridge, sym, tf, bars, now
+                                )
+                                if reconciled:
+                                    logger.info(
+                                        "[data_sync] {} {} live trendbar reconcile: {} bars corrected",
+                                        sym,
+                                        tf,
+                                        reconciled,
+                                    )
                                 if bars:
                                     observed_bar_ts_by_tf[tf] = float(bars[-1]["time"])
                                 after_ts = float(

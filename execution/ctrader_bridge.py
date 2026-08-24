@@ -1490,6 +1490,59 @@ class CTraderBridge(BaseBrokerBridge):
         frame = frame.set_index("time").sort_index()
         return frame[["open", "high", "low", "close", "volume"]]
 
+    def reconcile_live_bars(self, timeframe: str, rows: list[dict[str, Any]]) -> int:
+        """Overwrite cached live trendbars with broker-history rows.
+
+        Spot-stream trendbar frames carry "close" as the frame-moment price,
+        so a just-closed bar can stay at close==low when no later frame
+        arrives (observed 2026-08-24). GetTrendbars history owns the durable
+        monthly store; replaying those same authoritative rows here repairs
+        the decision/review context with zero extra broker requests.
+        """
+        normalized = str(timeframe or "").upper()
+        if not rows:
+            return 0
+        with self._live_trendbar_lock:
+            bars = self._live_trendbars.setdefault(normalized, {})
+            applied = 0
+            fixed_degenerate_close = 0
+            for row in rows:
+                try:
+                    ts = int(row["time"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                existing = bars.get(ts)
+                if existing is None:
+                    # Only correct bars the online stream already carries;
+                    # never inject history rows it does not have.
+                    continue
+                merged = dict(existing)
+                for field in ("open", "high", "low", "close", "volume"):
+                    value = row.get(field)
+                    if value is not None:
+                        merged[field] = value
+                if merged == existing:
+                    continue
+                try:
+                    was_degenerate = (
+                        abs(float(existing["close"]) - float(existing["low"])) < 1e-9
+                        and float(existing["high"]) > float(existing["low"])
+                    )
+                except (KeyError, TypeError, ValueError):
+                    was_degenerate = False
+                bars[ts] = merged
+                applied += 1
+                if was_degenerate:
+                    fixed_degenerate_close += 1
+            if applied:
+                logger.info(
+                    "live trendbar reconcile: %s applied=%d degenerate_close_fixed=%d",
+                    normalized,
+                    applied,
+                    fixed_degenerate_close,
+                )
+            return applied
+
     def get_spot_price(self) -> float | None:
         """线程安全读最新 spot 价."""
         with self._spot_lock:

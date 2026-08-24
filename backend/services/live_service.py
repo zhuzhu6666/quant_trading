@@ -6285,6 +6285,91 @@ def _closed_decision_bar_frame(
         return df
 
 
+def _clamp_last_closed_bar_close_to_spot(
+    df: "pd.DataFrame | None",
+    *,
+    timeframe: str,
+    now_ts: float,
+    quote_provider: Any = None,
+) -> tuple["pd.DataFrame | None", dict[str, Any]]:
+    """Clamp the just-closed bar's stream close toward the live spot mid.
+
+    Spot-stream trendbar frames report ``close`` as the frame-moment price,
+    so when a bar's final stream update never arrives the cached close
+    freezes wherever the last frame caught the tape (observed close==low on
+    2026-08-24).  Within seconds of the bar close the continuous bid/ask
+    mid is the best in-memory estimate of that bar's true close, so this
+    clamps only the newest closed bar and only while the estimate is fresh
+    and sane.
+    """
+    info: dict[str, Any] = {}
+    if df is None or getattr(df, "empty", False) or len(df) == 0:
+        return df, info
+    if not callable(quote_provider):
+        return df, info
+    freshness = _sync_classify_decision_bar_freshness(
+        latest_ts=_df_latest_epoch(df),
+        timeframe=timeframe,
+        now=now_ts,
+    )
+    expected_ts = float(freshness.get("expected_closed_bar_ts", 0.0) or 0.0)
+    if expected_ts <= 0:
+        return df, info
+    try:
+        last_idx = df.index[-1]
+        last_ts = (
+            float(last_idx.timestamp())
+            if hasattr(last_idx, "timestamp")
+            else float(last_idx)
+        )
+    except Exception:
+        return df, info
+    if abs(last_ts - expected_ts) > 1e-6:
+        # Newest row is not the just-closed bar; nothing to clamp.
+        return df, info
+    try:
+        last_low = float(df["low"].iloc[-1])
+        last_high = float(df["high"].iloc[-1])
+        last_close = float(df["close"].iloc[-1])
+    except Exception:
+        return df, info
+    degenerate = abs(last_close - last_low) < 1e-9 and last_high > last_low
+    if not degenerate:
+        return df, info
+    period_seconds = max(1, _timeframe_seconds(timeframe))
+    try:
+        quote = quote_provider() or {}
+    except Exception:
+        return df, info
+    bid = float(quote.get("bid") or 0.0)
+    ask = float(quote.get("ask") or 0.0)
+    quote_ts = float(quote.get("ts") or 0.0)
+    if bid <= 0.0 or ask <= 0.0 or ask < bid:
+        info["close_clamp_skipped"] = "quote_unusable"
+        return df, info
+    bar_close_time = expected_ts + period_seconds
+    if quote_ts > 0.0 and quote_ts < bar_close_time - 2.0:
+        info["close_clamp_skipped"] = "quote_predates_close"
+        return df, info
+    mid = round((bid + ask) / 2.0, 5)
+    span = max(1e-9, last_high - last_low)
+    tolerance = max(0.5 * span, 10.0 * (last_high + last_low) * 1e-6)
+    if not (last_low - tolerance <= mid <= last_high + tolerance):
+        info["close_clamp_skipped"] = "mid_outside_bar_range"
+        return df, info
+    out = df.copy()
+    out.loc[last_idx, "close"] = mid
+    info.update(
+        {
+            "close_clamp_applied": True,
+            "close_clamp_from": last_close,
+            "close_clamp_price": mid,
+            "close_clamp_bar_ts": last_ts,
+        }
+    )
+    return out, info
+
+
 def _decision_bar_freshness_snapshot(
     df: "pd.DataFrame | None",
     *,
@@ -6320,9 +6405,28 @@ def _ensure_live_decision_bars_fresh(
     # The serial live owner consumes only the bridge's in-memory live
     # trendbar frame.  Historical RPCs and durable DuckDB writes stay outside
     # this boundary so a slow broker history call cannot starve Safety.
-    del bridge
     now_ts = time.time()
     closed_df = _closed_decision_bar_frame(df_new, timeframe=timeframe, now_ts=now_ts)
+    clamp_info: dict[str, Any] = {}
+    try:
+        # Snapshot the spot quote before the bridge reference is dropped; the
+        # clamp itself stays in-memory (no broker/history RPC in this path).
+        quote_snapshot: Any = None
+        if bridge is not None and hasattr(bridge, "get_spot_quote"):
+            try:
+                quote_snapshot = bridge.get_spot_quote()
+            except Exception:
+                quote_snapshot = None
+        del bridge
+        closed_df, clamp_info = _clamp_last_closed_bar_close_to_spot(
+            closed_df,
+            timeframe=timeframe,
+            now_ts=now_ts,
+            quote_provider=(lambda q=quote_snapshot: q) if quote_snapshot else None,
+        )
+    except Exception:
+        logger.debug("[live] decision bar close clamp failed", exc_info=True)
+        clamp_info = {}
     snapshot = _decision_bar_freshness_snapshot(closed_df, timeframe=timeframe, now_ts=now_ts)
     if bool(snapshot.get("fresh", False)):
         snapshot.update(
@@ -6332,6 +6436,7 @@ def _ensure_live_decision_bars_fresh(
                 "source": "ctrader_live_trendbar",
             }
         )
+        snapshot.update(clamp_info)
         _record_decision_bar_freshness(snapshot)
         return closed_df if closed_df is not None and len(closed_df) > 0 else df_new
 
