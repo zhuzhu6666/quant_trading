@@ -55,6 +55,9 @@ from risk.policy_service import RiskPolicyService, RiskVerdict
 logger = logging.getLogger(__name__)
 
 _EVIDENCE_STREAK_KEY = "factor_governance_evidence_streak.v1"
+# Operational chunk size only; it bounds the temporary read projection without
+# changing any governance threshold or eligibility rule.
+_ADMISSION_EVIDENCE_BATCH_SIZE = 200
 
 
 def factor_governance_health_max_age_seconds(
@@ -962,6 +965,13 @@ class FactorGovernanceOrchestrator:
                     continue
                 restore_ids.append(factor_id)
 
+        self._prime_admission_evidence_count_cache(
+            [
+                str(item.get("factor_id") or "")
+                for item in catalog
+                if self._is_dsl_promotion_lifecycle_candidate(item)
+            ]
+        )
         for item in catalog:
             factor_id = str(item.get("factor_id") or "")
             if (
@@ -3459,13 +3469,9 @@ class FactorGovernanceOrchestrator:
             },
         }
 
-    def _factor_admission_evidence_counts(
-        self,
-        factor_id: str,
-    ) -> dict[str, Any]:
-        if factor_id in self._admission_evidence_count_cache:
-            return dict(self._admission_evidence_count_cache[factor_id])
-        unavailable = {
+    @staticmethod
+    def _unavailable_admission_evidence_counts() -> dict[str, Any]:
+        return {
             "decision_observations": None,
             "factor_linked_trade_reviews": None,
             "governance_eligible_mature": None,
@@ -3473,6 +3479,54 @@ class FactorGovernanceOrchestrator:
             "effects_observed": None,
             "status": "unavailable",
         }
+
+    def _prime_admission_evidence_count_cache(
+        self,
+        factor_ids: list[str],
+        *,
+        batch_size: int = _ADMISSION_EVIDENCE_BATCH_SIZE,
+    ) -> None:
+        """Read admission counts in bounded batches for this governance cycle.
+
+        ``factor_evidence_summary`` already returns an independent projection
+        per factor.  The old caller passed one ID at a time, causing the
+        provider to rescan the complete canonical learning history for every
+        candidate.  Keep the projection run-scoped and keyed by factor ID;
+        never persist or reuse it as a cross-cycle governance verdict.
+        """
+        ids = list(dict.fromkeys(str(item) for item in factor_ids if str(item)))
+        if not ids:
+            return
+        unavailable = self._unavailable_admission_evidence_counts()
+        try:
+            from research.features.feature_provider import LearningFeatureProvider
+
+            provider = LearningFeatureProvider(str(self.overlay.db_path))
+        except Exception:
+            for factor_id in ids:
+                self._admission_evidence_count_cache[factor_id] = dict(unavailable)
+            return
+
+        size = max(1, int(batch_size))
+        for start in range(0, len(ids), size):
+            chunk = ids[start: start + size]
+            try:
+                summary = provider.factor_evidence_summary(chunk)
+            except Exception:
+                summary = {}
+            for factor_id in chunk:
+                value = summary.get(factor_id) if isinstance(summary, Mapping) else None
+                self._admission_evidence_count_cache[factor_id] = (
+                    dict(value) if isinstance(value, Mapping) else dict(unavailable)
+                )
+
+    def _factor_admission_evidence_counts(
+        self,
+        factor_id: str,
+    ) -> dict[str, Any]:
+        if factor_id in self._admission_evidence_count_cache:
+            return dict(self._admission_evidence_count_cache[factor_id])
+        unavailable = self._unavailable_admission_evidence_counts()
         try:
             from research.features.feature_provider import LearningFeatureProvider
 

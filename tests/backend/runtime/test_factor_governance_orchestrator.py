@@ -96,6 +96,102 @@ def _mature_clean_counts(_factor_id: str) -> dict:
     }
 
 
+def test_primes_admission_evidence_cache_in_batches(monkeypatch):
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    calls = []
+
+    class _Provider:
+        def __init__(self, _db_path):
+            pass
+
+        def factor_evidence_summary(self, factor_ids):
+            calls.append(list(factor_ids))
+            return {
+                factor_id: _mature_clean_counts(factor_id)
+                for factor_id in factor_ids
+            }
+
+    monkeypatch.setattr(
+        "research.features.feature_provider.LearningFeatureProvider",
+        _Provider,
+    )
+
+    orch._prime_admission_evidence_count_cache(
+        ["factor-0", "factor-1", "factor-2", "factor-3", "factor-4"],
+        batch_size=2,
+    )
+
+    assert calls == [
+        ["factor-0", "factor-1"],
+        ["factor-2", "factor-3"],
+        ["factor-4"],
+    ]
+    assert (
+        orch._factor_admission_evidence_counts("factor-3")[
+            "governance_eligible_mature"
+        ]
+        == 20
+    )
+
+
+def test_expansion_preflight_reuses_batch_admission_evidence(monkeypatch):
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    expression = "ts_mean(close, 5)"
+    factor_id = "shadow_batch_candidate"
+    catalog = [
+        _with_candidate_admission({
+            "factor_id": factor_id,
+            "lifecycle_factor_id": canonical_factor_id(expression),
+            "lifecycle_origin": "shadow",
+            "lifecycle_status": "SHADOW",
+            "lifecycle_expression": expression,
+            "lifecycle_definition_fingerprint": factor_definition_fingerprint(expression),
+            "lifecycle_artifact_hash": hashlib.sha256(expression.encode()).hexdigest(),
+            "source": "shadow",
+            "role": "alpha",
+            "canary": {"stage": "ACTIVE"},
+            "shadow_perf": {
+                "oos_bars": 120,
+                "n_valid": 100,
+                "cumulative_pnl": 1.2,
+                "hit_rate": 0.55,
+                "max_drawdown": 0.01,
+            },
+            "health_status": "HEALTHY",
+            "health_score": 80.0,
+            "health_updated_at": time.time(),
+        })
+    ]
+    primed = []
+
+    def _prime(ids):
+        primed.append(list(ids))
+        orch._admission_evidence_count_cache.update(
+            {item: _mature_clean_counts(item) for item in ids}
+        )
+
+    monkeypatch.setattr(orch, "_prime_admission_evidence_count_cache", _prime)
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(orch, "_posterior_expansion_guard", lambda *_args, **_kwargs: "posterior_ok")
+    monkeypatch.setattr(
+        orch,
+        "_current_market_regime_projection",
+        lambda: {"regime_id": "", "confidence": 0.0},
+    )
+
+    preflight = orch._expansion_preflight(
+        catalog,
+        cfg=rc.shared(),
+        profile=_strict_profile(orch),
+        redundancy_report={"group_count": 0, "groups": []},
+    )
+
+    assert primed == [[factor_id]]
+    assert preflight["reasons"]["shadow_promotion"] == [factor_id]
+
+
 def test_orchestrator_prepares_eligible_shadow_through_lifecycle_service(monkeypatch, tmp_path):
     rc.reset_for_tests()
     orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
