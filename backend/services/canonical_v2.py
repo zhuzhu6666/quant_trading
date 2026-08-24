@@ -29,57 +29,140 @@ CANONICAL_SAMPLE_SCHEMA = "canonical_training_sample.v1"
 # legacy fact tables.
 CANONICAL_SQLITE_DDL = """
 CREATE TABLE IF NOT EXISTS payload_blob (
-    payload_hash TEXT PRIMARY KEY,
-    payload_kind TEXT NOT NULL,
-    schema_version TEXT NOT NULL,
+    payload_hash TEXT PRIMARY KEY CHECK (payload_hash <> ''),
+    payload_kind TEXT NOT NULL CHECK (payload_kind <> ''),
+    schema_version TEXT NOT NULL CHECK (schema_version <> ''),
     canonical_bytes BLOB NOT NULL,
-    codec TEXT NOT NULL DEFAULT 'gzip',
-    raw_sha256 TEXT NOT NULL,
-    raw_bytes INTEGER NOT NULL,
-    compressed_bytes INTEGER NOT NULL,
+    codec TEXT NOT NULL DEFAULT 'gzip' CHECK (codec IN ('identity', 'gzip')),
+    raw_sha256 TEXT NOT NULL CHECK (raw_sha256 <> ''),
+    raw_bytes INTEGER NOT NULL CHECK (raw_bytes >= 0),
+    compressed_bytes INTEGER NOT NULL CHECK (compressed_bytes >= 0),
     created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_canonical_v2_payload_kind_created
+    ON payload_blob(payload_kind, created_at);
 CREATE TABLE IF NOT EXISTS event (
-    event_id TEXT PRIMARY KEY,
-    event_type TEXT NOT NULL,
-    entity_type TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
+    event_id TEXT PRIMARY KEY CHECK (event_id <> ''),
+    event_type TEXT NOT NULL CHECK (event_type IN (
+        'market_observation', 'broker_execution', 'position_transition',
+        'risk_decision', 'factor_observation', 'governance_proposal',
+        'governance_command', 'governance_effect', 'trade_review',
+        'label_observation', 'training_run', 'counterfactual_review',
+        'supervisor_trace', 'broker_deal'
+    )),
+    entity_type TEXT NOT NULL CHECK (entity_type <> ''),
+    entity_id TEXT NOT NULL CHECK (entity_id <> ''),
     observed_at TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
-    producer TEXT NOT NULL,
+    producer TEXT NOT NULL CHECK (producer <> ''),
     producer_version TEXT NOT NULL DEFAULT '',
-    schema_version TEXT NOT NULL,
+    schema_version TEXT NOT NULL CHECK (schema_version <> ''),
     correlation_id TEXT NOT NULL DEFAULT '',
     causation_id TEXT NOT NULL DEFAULT '',
     parent_event_id TEXT,
     idempotency_key TEXT NOT NULL DEFAULT '',
     payload_hash TEXT NOT NULL REFERENCES payload_blob(payload_hash),
-    status TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    status TEXT NOT NULL DEFAULT 'recorded' CHECK (status <> ''),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (parent_event_id) REFERENCES event(event_id)
+        DEFERRABLE INITIALLY DEFERRED
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_canonical_event_idempotency
+CREATE INDEX IF NOT EXISTS idx_canonical_v2_event_entity_time
+    ON event(entity_type, entity_id, observed_at, event_id);
+CREATE INDEX IF NOT EXISTS idx_canonical_v2_event_payload
+    ON event(payload_hash, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_canonical_v2_event_causation
+    ON event(causation_id, recorded_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_canonical_v2_event_idempotency
     ON event(producer, idempotency_key) WHERE idempotency_key <> '';
 CREATE TABLE IF NOT EXISTS event_relation (
     from_event_id TEXT NOT NULL REFERENCES event(event_id),
     to_event_id TEXT NOT NULL REFERENCES event(event_id),
-    relation_type TEXT NOT NULL,
+    relation_type TEXT NOT NULL CHECK (relation_type IN (
+        'caused_by', 'derived_from', 'reviews', 'labels', 'uses_config',
+        'uses_factor_state', 'produced_sample', 'included_in_dataset',
+        'produced_artifact', 'governed_by'
+    )),
     created_at TEXT NOT NULL,
     PRIMARY KEY (from_event_id, to_event_id, relation_type)
 );
+CREATE INDEX IF NOT EXISTS idx_canonical_v2_relation_to
+    ON event_relation(to_event_id, relation_type);
+CREATE TABLE IF NOT EXISTS state_version (
+    state_version_id TEXT PRIMARY KEY CHECK (state_version_id <> ''),
+    entity_type TEXT NOT NULL CHECK (entity_type <> ''),
+    entity_id TEXT NOT NULL CHECK (entity_id <> ''),
+    version INTEGER NOT NULL CHECK (version > 0),
+    valid_from TEXT NOT NULL,
+    valid_to TEXT,
+    source_event_id TEXT NOT NULL REFERENCES event(event_id),
+    payload_hash TEXT NOT NULL REFERENCES payload_blob(payload_hash),
+    created_at TEXT NOT NULL,
+    UNIQUE (entity_type, entity_id, version),
+    CHECK (valid_to IS NULL OR valid_to > valid_from)
+);
+CREATE INDEX IF NOT EXISTS idx_canonical_v2_state_version_entity
+    ON state_version(entity_type, entity_id, version DESC);
+CREATE TABLE IF NOT EXISTS training_sample (
+    sample_id TEXT PRIMARY KEY CHECK (sample_id <> ''),
+    sample_type TEXT NOT NULL CHECK (sample_type <> ''),
+    source_event_ids TEXT NOT NULL CHECK (length(trim(source_event_ids)) > 2),
+    feature_hash TEXT NOT NULL CHECK (feature_hash <> ''),
+    feature_schema_hash TEXT NOT NULL CHECK (feature_schema_hash <> ''),
+    label_hash TEXT NOT NULL CHECK (label_hash <> ''),
+    trace_hash TEXT NOT NULL CHECK (trace_hash <> ''),
+    evidence_contract TEXT NOT NULL DEFAULT '{}',
+    config_version INTEGER NOT NULL DEFAULT 0 CHECK (config_version >= 0),
+    config_hash TEXT NOT NULL DEFAULT '',
+    horizon_minutes INTEGER NOT NULL CHECK (horizon_minutes > 0),
+    target_source TEXT NOT NULL CHECK (target_source <> ''),
+    sample_status TEXT NOT NULL DEFAULT 'candidate'
+        CHECK (sample_status IN ('candidate', 'ready', 'quarantined', 'invalid')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_canonical_v2_training_sample_type_status
+    ON training_sample(sample_type, sample_status, updated_at);
+CREATE TABLE IF NOT EXISTS dataset_manifest (
+    dataset_id TEXT PRIMARY KEY CHECK (dataset_id <> ''),
+    purpose TEXT NOT NULL CHECK (purpose <> ''),
+    training_window TEXT NOT NULL CHECK (training_window <> ''),
+    horizon_minutes INTEGER NOT NULL CHECK (horizon_minutes > 0),
+    query_contract_hash TEXT NOT NULL CHECK (query_contract_hash <> ''),
+    sample_digest TEXT NOT NULL CHECK (sample_digest <> ''),
+    feature_schema_hash TEXT NOT NULL CHECK (feature_schema_hash <> ''),
+    label_contract_hash TEXT NOT NULL CHECK (label_contract_hash <> ''),
+    target_source TEXT NOT NULL CHECK (target_source <> ''),
+    config_hash TEXT NOT NULL DEFAULT '',
+    source_watermark TEXT NOT NULL CHECK (source_watermark <> ''),
+    code_commit TEXT NOT NULL CHECK (code_commit <> ''),
+    artifact_hash TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'created' CHECK (status <> ''),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dataset_manifest_member (
+    dataset_id TEXT NOT NULL REFERENCES dataset_manifest(dataset_id),
+    sample_id TEXT NOT NULL REFERENCES training_sample(sample_id),
+    sample_order INTEGER NOT NULL CHECK (sample_order >= 0),
+    sample_digest TEXT NOT NULL CHECK (sample_digest <> ''),
+    PRIMARY KEY (dataset_id, sample_id),
+    UNIQUE (dataset_id, sample_order)
+);
 CREATE TABLE IF NOT EXISTS projection_run (
-    projection_run_id TEXT PRIMARY KEY,
-    run_kind TEXT NOT NULL,
-    projection_name TEXT NOT NULL,
-    source_watermark TEXT NOT NULL,
-    code_version TEXT NOT NULL,
-    input_digest TEXT NOT NULL,
+    projection_run_id TEXT PRIMARY KEY CHECK (projection_run_id <> ''),
+    run_kind TEXT NOT NULL DEFAULT 'projection' CHECK (run_kind IN ('projection', 'backfill')),
+    projection_name TEXT NOT NULL CHECK (projection_name <> ''),
+    source_watermark TEXT NOT NULL CHECK (source_watermark <> ''),
+    code_version TEXT NOT NULL CHECK (code_version <> ''),
+    input_digest TEXT NOT NULL CHECK (input_digest <> ''),
     output_digest TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL,
     finished_at TEXT,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'completed', 'failed', 'aborted')),
     error_code TEXT NOT NULL DEFAULT ''
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_canonical_projection_identity
+CREATE UNIQUE INDEX IF NOT EXISTS idx_canonical_v2_projection_identity
     ON projection_run(run_kind, projection_name, source_watermark, code_version, input_digest);
 CREATE TABLE IF NOT EXISTS training_sample_row (
     sample_id TEXT PRIMARY KEY,
@@ -99,6 +182,12 @@ CREATE TABLE IF NOT EXISTS training_sample_row (
     governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
     content_fingerprint TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, updated_at REAL NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_tsr_sample_type_status
+    ON training_sample_row(sample_type, label_status, governance_eligible);
+CREATE INDEX IF NOT EXISTS idx_tsr_decision ON training_sample_row(decision_id);
+CREATE INDEX IF NOT EXISTS idx_tsr_fingerprint
+    ON training_sample_row(content_fingerprint, updated_at);
+CREATE INDEX IF NOT EXISTS idx_tsr_event_ts ON training_sample_row(event_ts);
 """
 
 EVENT_TYPES = frozenset(
@@ -135,6 +224,16 @@ RELATION_TYPES = frozenset(
         "governed_by",
     }
 )
+
+# Stable edge direction for the live trade chain.  The child event is always
+# ``from_event_id`` and the already-known parent decision is
+# ``to_event_id``; this is the contract consumed by ``read_trade_chain``.
+TRADE_LINEAGE_RELATION_TYPES = {
+    "review_to_entry_decision": "derived_from",
+    "review_to_exit_decision": "reviews",
+    "order_to_decision": "caused_by",
+    "position_to_decision": "caused_by",
+}
 
 class CanonicalV2Error(RuntimeError):
     """Base class for canonical v2 contract failures."""
@@ -570,6 +669,93 @@ def append_relation(
     return bool(getattr(cursor, "rowcount", 1))
 
 
+def _link_trade_lineage(
+    conn: Any,
+    *,
+    child_event_id: str,
+    parent_event_id: str,
+    relation_key: str,
+    created_at: Any | None = None,
+) -> dict[str, str]:
+    """Link a newly written child to a known decision, or report unlinked.
+
+    This helper deliberately performs no lookup by trade/position/entity.  A
+    caller must supply the exact parent event ID.  The returned status is
+    attached to the writer result so an event that committed without a
+    relation cannot be mistaken for a complete chain.
+    """
+    relation_type = TRADE_LINEAGE_RELATION_TYPES[relation_key]
+    child_id = str(child_event_id or "")
+    parent_id = str(parent_event_id or "")
+    if not parent_id:
+        return {
+            "lineage_status": "unlinked_parent_missing",
+            "lineage_parent_event_id": "",
+            "lineage_relation_type": relation_type,
+        }
+    if not child_id:
+        return {
+            "lineage_status": "unlinked_child_missing",
+            "lineage_parent_event_id": parent_id,
+            "lineage_relation_type": relation_type,
+        }
+    # Verify both endpoints on this caller-owned connection/transaction.  The
+    # generic append_relation contract remains unchanged; this stricter check
+    # is local to the live trade chain and prevents guessed parent IDs.
+    endpoint_count = conn.execute(
+        _sql(
+            conn,
+            "SELECT COUNT(*) AS n FROM canonical_v2.event "
+            "WHERE event_id IN (?, ?)",
+        ),
+        (child_id, parent_id),
+    ).fetchone()
+    if int(_row_value(endpoint_count, "n", 0, 0) or 0) != 2:
+        return {
+            "lineage_status": "unlinked_parent_event_missing",
+            "lineage_parent_event_id": parent_id,
+            "lineage_relation_type": relation_type,
+        }
+    append_relation(
+        conn,
+        from_event_id=child_id,
+        to_event_id=parent_id,
+        relation_type=relation_type,
+        created_at=created_at,
+    )
+    # ``append_relation`` returns False for an already-existing edge; the
+    # endpoint check above proves that this still represents a linked chain.
+    return {
+        "lineage_status": "linked",
+        "lineage_parent_event_id": parent_id,
+        "lineage_relation_type": relation_type,
+    }
+
+
+def _lineage_existing_status(
+    conn: Any,
+    *,
+    child_event_id: str,
+    parent_event_id: str,
+    relation_key: str,
+) -> dict[str, str]:
+    """Describe an idempotent existing event without mutating its lineage."""
+    relation_type = TRADE_LINEAGE_RELATION_TYPES[relation_key]
+    linked = conn.execute(
+        _sql(
+            conn,
+            "SELECT 1 FROM canonical_v2.event_relation "
+            "WHERE from_event_id=? AND to_event_id=? AND relation_type=? LIMIT 1",
+        ),
+        (str(child_event_id or ""), str(parent_event_id or ""), relation_type),
+    ).fetchone() is not None
+    return {
+        "lineage_status": "linked" if linked else "existing_unmodified",
+        "lineage_parent_event_id": str(parent_event_id or ""),
+        "lineage_relation_type": relation_type,
+    }
+
+
 def _payload_iso(value: Any) -> str | None:
     """Normalize a timestamp to the ISO form used by canonical payloads."""
     if value is None:
@@ -885,6 +1071,23 @@ def record_order_event(
         projection_name="live_increment", source_watermark="live",
         code_version=LIVE_INCREMENT_RUN, input_digest="live",
     )
+    parent_event_id = f"live_decision_{str(decision_id)}" if str(decision_id or "") else ""
+    evt.update(
+        _link_trade_lineage(
+            conn,
+            child_event_id=str(evt["event_id"]),
+            parent_event_id=parent_event_id,
+            relation_key="order_to_decision",
+            created_at=event_ts,
+        )
+        if evt.get("created")
+        else _lineage_existing_status(
+            conn,
+            child_event_id=str(evt["event_id"]),
+            parent_event_id=parent_event_id,
+            relation_key="order_to_decision",
+        )
+    )
     return evt
 
 
@@ -894,6 +1097,7 @@ def record_position_event(
     event_id: str,
     event_type: str,
     event_ts: Any,
+    decision_id: str = "",
     position_id: str = "",
     trade_id: str = "",
     symbol: str = "",
@@ -907,6 +1111,7 @@ def record_position_event(
     """Mirror one live position lifecycle event into canonical (idempotent)."""
     payload: dict[str, Any] = {
         "event_id": str(event_id or ""),
+        "decision_id": str(decision_id or ""),
         "position_id": str(position_id or ""),
         "trade_id": str(trade_id or ""),
         "symbol": str(symbol or ""),
@@ -938,6 +1143,23 @@ def record_position_event(
         conn, projection_run_id=LIVE_INCREMENT_RUN, run_kind="backfill",
         projection_name="live_increment", source_watermark="live",
         code_version=LIVE_INCREMENT_RUN, input_digest="live",
+    )
+    parent_event_id = f"live_decision_{str(decision_id)}" if str(decision_id or "") else ""
+    evt.update(
+        _link_trade_lineage(
+            conn,
+            child_event_id=str(evt["event_id"]),
+            parent_event_id=parent_event_id,
+            relation_key="position_to_decision",
+            created_at=event_ts,
+        )
+        if evt.get("created")
+        else _lineage_existing_status(
+            conn,
+            child_event_id=str(evt["event_id"]),
+            parent_event_id=parent_event_id,
+            relation_key="position_to_decision",
+        )
     )
     return evt
 
@@ -1283,7 +1505,10 @@ def record_review(
     the historical canonical review backfill so
     ``canonical_v2_reader.iter_reviews`` returns live reviews on the same
     ``trade_review`` stream.  This is the mandatory live writer that keeps the
-    posterior/effect arbitration fed after the full data flush (A1).
+    posterior/effect arbitration fed after the full data flush (A1).  Only a
+    newly created event from the live producer receives entry/exit lineage;
+    learning/backfill/revision producers cannot retroactively complete an
+    older trade chain.
     """
     if not review_id:
         raise CanonicalV2Error("canonical trade review requires review_id")
@@ -1334,6 +1559,56 @@ def record_review(
         source_watermark="live",
         code_version=LIVE_INCREMENT_RUN,
         input_digest="live",
+    )
+    parent_event_id = (
+        f"live_decision_{str(entry_decision_id)}"
+        if str(entry_decision_id or "")
+        else ""
+    )
+    evt.update(
+        _link_trade_lineage(
+            conn,
+            child_event_id=str(evt["event_id"]),
+            parent_event_id=parent_event_id,
+            relation_key="review_to_entry_decision",
+            created_at=created_at,
+        )
+        if evt.get("created") and producer == "live_closed_position"
+        else _lineage_existing_status(
+            conn,
+            child_event_id=str(evt["event_id"]),
+            parent_event_id=parent_event_id,
+            relation_key="review_to_entry_decision",
+        )
+    )
+    exit_event_id = (
+        f"live_decision_{str(exit_decision_id)}"
+        if str(exit_decision_id or "")
+        else ""
+    )
+    if evt.get("created") and producer == "live_closed_position":
+        exit_lineage = _link_trade_lineage(
+            conn,
+            child_event_id=str(evt["event_id"]),
+            parent_event_id=exit_event_id,
+            relation_key="review_to_exit_decision",
+            created_at=created_at,
+        )
+    else:
+        exit_lineage = _lineage_existing_status(
+            conn,
+            child_event_id=str(evt["event_id"]),
+            parent_event_id=exit_event_id,
+            relation_key="review_to_exit_decision",
+        )
+    evt.update(
+        {
+            "exit_lineage_status": exit_lineage["lineage_status"],
+            "exit_lineage_parent_event_id": exit_event_id,
+            "exit_lineage_relation_type": TRADE_LINEAGE_RELATION_TYPES[
+                "review_to_exit_decision"
+            ],
+        }
     )
     return evt
 

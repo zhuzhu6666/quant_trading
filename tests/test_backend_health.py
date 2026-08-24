@@ -16,6 +16,13 @@ def test_health_ok_or_degraded():
     assert "server_time" in body
     assert "uptime_seconds" in body
     assert body["uptime_seconds"] >= 0
+    identity = body["release_identity"]
+    assert identity["schema_version"] == "process_release_identity.v1"
+    assert "head" in identity
+    assert "worktree_fingerprint" in identity
+    assert identity["pid"] > 0
+    assert identity["captured_at"] > 0
+    assert "status_porcelain" not in identity
     assert body["_fact"]["contract"] == "system.health.v2"
     assert body["_fact"]["state"] in {"known", "unknown", "error"}
 

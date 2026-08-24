@@ -6,6 +6,7 @@ import pytest
 
 from backend.services import live_service
 from backend.services.live_loop_controller import LiveLoopController
+from backend.services.live_loop_v2 import _build_safety_cycle_contract
 from backend.services.live_safety_plane import LiveSafetyPlane
 from backend.services.live_safety_planner import SafetyPlan, safety_candidate
 
@@ -315,6 +316,191 @@ def test_generation_startup_barrier_requires_all_authoritative_steps(monkeypatch
     recovery_index = bridge.calls.index("execution_recovery")
     assert bridge.calls[recovery_index + 1:]
     assert all(item == "positions" for item in bridge.calls[recovery_index + 1:])
+
+
+def test_generation_startup_barrier_accepts_fresh_safety_with_admission_blocker(monkeypatch):
+    controller = LiveLoopController()
+    generation = controller.begin_start(broker="ctrader", strategy_name="factor_v4")
+    monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", controller)
+    bridge = _SnapshotBridge()
+    positions = bridge.reconcile_positions()
+    account = bridge.reconcile_account()
+    controller.heartbeat(generation.generation_id, "safety")
+    monkeypatch.setattr(
+        live_service,
+        "_factor_pipeline",
+        {"engine": SimpleNamespace(is_warm=True)},
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_restore_session_state_for_day",
+        lambda *_args, **_kwargs: live_service._live_state_update(
+            session_state_status="available"
+        ) or True,
+    )
+    monkeypatch.setattr(live_service, "_bootstrap_position_recovery", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        live_service,
+        "_run_live_safety_cycle",
+        lambda **_kwargs: {
+            "status": "completed",
+            "reconciliation_state": "fresh",
+            "safety_cycle": {
+                "schema_version": "safety_cycle_contract.v1",
+                "status": "complete",
+                "reconciliation_state": "fresh",
+                "cycle_blockers": [],
+                "admission_blockers": ["broker_position_price_unknown"],
+                "failure_reasons": [],
+                "admission_only": True,
+            },
+            "blockers": ["broker_position_price_unknown"],
+        },
+    )
+
+    ready = live_service._attempt_generation_startup_barrier(
+        generation_id=generation.generation_id,
+        bridge=bridge,
+        broker="ctrader",
+        tick=1,
+        log=lambda _message: None,
+        account_reconcile=account,
+        positions_reconcile=positions,
+        safety_result={"reconciliation_state": "fresh", "blockers": []},
+    )
+
+    status = controller.status()
+    assert ready is False
+    assert status["startup_barrier"]["initial_safety_cycle"] is True
+    assert status["ready"] is True
+    assert status["accepting_new_risk"] is False
+    assert "broker_position_price_unknown" in status["blockers"]
+
+
+def test_generation_startup_barrier_rejects_safety_cycle_failure(monkeypatch):
+    controller = LiveLoopController()
+    generation = controller.begin_start(broker="ctrader", strategy_name="factor_v4")
+    monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", controller)
+    bridge = _SnapshotBridge()
+    positions = bridge.reconcile_positions()
+    account = bridge.reconcile_account()
+    monkeypatch.setattr(live_service, "_bootstrap_position_recovery", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        live_service,
+        "_restore_session_state_for_day",
+        lambda *_args, **_kwargs: live_service._live_state_update(
+            session_state_status="available"
+        ) or True,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_factor_pipeline",
+        {"engine": SimpleNamespace(is_warm=True)},
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_run_live_safety_cycle",
+        lambda **_kwargs: {
+            "status": "partial",
+            "reconciliation_state": "fresh",
+            "safety_cycle": {
+                "schema_version": "safety_cycle_contract.v1",
+                "status": "failed",
+                "reconciliation_state": "fresh",
+                "cycle_blockers": ["safety_action_failed"],
+                "admission_blockers": [],
+                "failure_reasons": ["safety_action_failed"],
+                "admission_only": False,
+            },
+            "blockers": ["safety_action_failed"],
+        },
+    )
+
+    ready = live_service._attempt_generation_startup_barrier(
+        generation_id=generation.generation_id,
+        bridge=bridge,
+        broker="ctrader",
+        tick=1,
+        log=lambda _message: None,
+        account_reconcile=account,
+        positions_reconcile=positions,
+        safety_result={"reconciliation_state": "fresh", "blockers": []},
+    )
+
+    status = controller.status()
+    assert ready is False
+    assert status["startup_barrier"]["initial_safety_cycle"] is False
+    assert any("initial_safety_cycle_failed" in item for item in status["blockers"])
+
+
+def test_generation_startup_barrier_rejects_unknown_safety_status_without_blockers(monkeypatch):
+    controller = LiveLoopController()
+    generation = controller.begin_start(broker="ctrader", strategy_name="factor_v4")
+    monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", controller)
+    bridge = _SnapshotBridge()
+    positions = bridge.reconcile_positions()
+    account = bridge.reconcile_account()
+    monkeypatch.setattr(live_service, "_bootstrap_position_recovery", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        live_service,
+        "_restore_session_state_for_day",
+        lambda *_args, **_kwargs: live_service._live_state_update(
+            session_state_status="available"
+        ) or True,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_factor_pipeline",
+        {"engine": SimpleNamespace(is_warm=True)},
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_run_live_safety_cycle",
+        lambda **_kwargs: {
+            "status": "new_future_status",
+            "reconciliation_state": "fresh",
+            "safety_cycle": {
+                "schema_version": "safety_cycle_contract.v1",
+                "status": "failed",
+                "reconciliation_state": "fresh",
+                "cycle_blockers": [],
+                "admission_blockers": [],
+                "failure_reasons": ["status_new_future_status"],
+                "admission_only": False,
+            },
+            "blockers": [],
+        },
+    )
+
+    ready = live_service._attempt_generation_startup_barrier(
+        generation_id=generation.generation_id,
+        bridge=bridge,
+        broker="ctrader",
+        tick=1,
+        log=lambda _message: None,
+        account_reconcile=account,
+        positions_reconcile=positions,
+        safety_result={"reconciliation_state": "fresh", "blockers": []},
+    )
+
+    status = controller.status()
+    assert ready is False
+    assert status["startup_barrier"]["initial_safety_cycle"] is False
+    assert any("status_new_future_status" in item for item in status["blockers"])
+
+
+def test_safety_cycle_contract_unknown_status_fails_closed_without_blockers():
+    contract = _build_safety_cycle_contract(
+        reconciliation_state="fresh",
+        status="new_future_status",
+        blockers=(),
+        completion_statuses={"completed", "off", "shadow"},
+    )
+
+    assert contract["status"] == "failed"
+    assert contract["cycle_blockers"] == []
+    assert contract["admission_blockers"] == []
+    assert contract["failure_reasons"] == ["status_new_future_status"]
 
 
 def test_startup_barrier_fails_closed_when_fresh_account_is_unavailable(monkeypatch):

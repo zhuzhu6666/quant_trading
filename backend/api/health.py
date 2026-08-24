@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.core.db import connect_duckdb
 from backend.core.paths import DB_PATH
+from backend.core.release_identity import process_release_identity
 from backend.services.api_fact_views import health_fact_payload
 
 router = APIRouter(prefix="/api", tags=["health"])
@@ -21,6 +22,7 @@ class HealthResponse(BaseModel):
     ctrader: str
     server_time: str
     uptime_seconds: float
+    release_identity: dict[str, Any]
     fact: dict[str, Any] = Field(alias="_fact")
 
 
@@ -59,6 +61,7 @@ def health() -> HealthResponse:
         "ctrader": ctrader_status,
         "server_time": datetime.now(timezone.utc).isoformat(),
         "uptime_seconds": time.time() - _START_TIME,
+        "release_identity": process_release_identity(),
     })
     return HealthResponse.model_validate(payload)
 

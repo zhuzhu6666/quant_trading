@@ -342,6 +342,12 @@ class TradeReviewer:
                     ),
                     None,
                 )
+                # The caller's default cannot upgrade an absent canonical
+                # entry into full context.  Broker PnL can make the close
+                # itself truthful, but entry metadata remains partial/minimal
+                # and must stay visibly ineligible for high-quality evidence.
+                if context_integrity == "full":
+                    context_integrity = "partial" if (fallback_meta or fallback_order) else "minimal"
             entry_decision_id = str(entry.get("decision_id") or "") if entry else str(
                 fallback_meta.get("entry_decision_id") or fallback_meta.get("parent_decision_id")
                 or (fallback_order.get("decision_id") if fallback_order else "") or ""

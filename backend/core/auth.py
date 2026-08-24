@@ -18,7 +18,8 @@ import uuid
 from typing import Annotated, Any, Final
 
 import jwt
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 
 JWT_ALGORITHM: Final[str] = "HS256"
@@ -30,6 +31,16 @@ RISK_REDUCTION_GRACE_SECONDS: Final[int] = REFRESH_EXPIRY_SECONDS
 
 _JWT_SECRET: str | None = None
 _logger = logging.getLogger(__name__)
+
+# This dependency is deliberately non-raising.  The custom auth functions
+# below retain the existing error contract (including 401 + WWW-Authenticate)
+# while ``Security`` gives FastAPI/OpenAPI a truthful Bearer requirement for
+# endpoints that depend on them.
+_bearer_security = HTTPBearer(
+    auto_error=False,
+    scheme_name="BearerAuth",
+    description="Auth v2 access JWT supplied as Authorization: Bearer <token>.",
+)
 
 _REVOCATION_LOCK = threading.RLock()
 _REVOKED_SESSION_IDS: dict[str, float] = {}
@@ -382,32 +393,37 @@ def decode_risk_reduction_token(
 
 
 def get_current_claims(
-    authorization: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
+    _bearer: HTTPAuthorizationCredentials | None = Security(_bearer_security),
 ) -> dict[str, Any]:
     return decode_access_token(_extract_bearer(authorization))
 
 
 def get_current_user(
-    authorization: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
+    _bearer: HTTPAuthorizationCredentials | None = Security(_bearer_security),
 ) -> str:
     return require_user(authorization)
 
 
 def require_user(
-    authorization: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
+    _bearer: HTTPAuthorizationCredentials | None = Security(_bearer_security),
 ) -> str:
     """Validate ordinary access against the durable Auth v2 session."""
     return str(get_current_claims(authorization)["sub"])
 
 
 def get_risk_reduction_claims(
-    authorization: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
+    _bearer: HTTPAuthorizationCredentials | None = Security(_bearer_security),
 ) -> dict[str, Any]:
     return decode_risk_reduction_token(_extract_bearer(authorization))
 
 
 def require_risk_reduction_user(
-    authorization: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
+    _bearer: HTTPAuthorizationCredentials | None = Security(_bearer_security),
 ) -> str:
     """Authorize only endpoints whose maximum effect is reducing risk."""
 
@@ -415,7 +431,8 @@ def require_risk_reduction_user(
 
 
 def require_recent_step_up(
-    authorization: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
+    _bearer: HTTPAuthorizationCredentials | None = Security(_bearer_security),
 ) -> str:
     """Require recent password auth plus an active server-side session.
 

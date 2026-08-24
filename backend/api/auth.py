@@ -445,7 +445,7 @@ def ws_ticket(
 def me(
     user: Annotated[str, Depends(get_current_user)],
     claims: Annotated[dict[str, Any], Depends(get_current_claims)],
-    authorization: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
 ) -> dict[str, Any]:
     has_token = bool(authorization and authorization.lower().startswith("bearer "))
     return {

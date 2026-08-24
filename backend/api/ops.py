@@ -1473,7 +1473,7 @@ def get_incident_control(_user: RequireUser) -> dict[str, Any]:
 def set_incident_control(
     req: IncidentControlRequest,
     _user: RequireUser,
-    authorization: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
 ) -> dict[str, Any]:
     """Set V15 incident control mode through RiskPolicyService + runtime overlay."""
     service = RuntimeIncidentControlService()

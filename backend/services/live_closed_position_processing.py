@@ -151,7 +151,10 @@ def log_closed_position_ledger(
             real_pnl=real_pnl,
         )
         exit_decision_id = runtime.ledger.log_decision(**payloads["decision"])
-        runtime.ledger.log_position_event(**payloads["position_event"])
+        runtime.ledger.log_position_event(
+            decision_id=exit_decision_id,
+            **payloads["position_event"],
+        )
         return exit_decision_id, context_integrity
     except Exception:
         runtime.exception("[live] ledger close failed for pos {}", pid)

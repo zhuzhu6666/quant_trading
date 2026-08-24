@@ -162,3 +162,21 @@ def test_get_current_user_with_valid():
     from backend.core.auth import get_current_user
     token = create_token("bob")
     assert get_current_user(authorization=f"Bearer {token}") == "bob"
+
+
+def test_openapi_declares_bearer_for_protected_routes_only():
+    """OpenAPI must describe auth without changing the runtime auth contract."""
+    schema = app.openapi()
+
+    assert schema["components"]["securitySchemes"]["BearerAuth"] == {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Auth v2 access JWT supplied as Authorization: Bearer <token>.",
+    }
+    for path in ("/api/auth/me", "/api/auth/me-strict", "/api/auth/step-up", "/api/live/account", "/api/live/start"):
+        operations = schema["paths"][path].values()
+        assert any(operation.get("security") == [{"BearerAuth": []}] for operation in operations)
+
+    for path in ("/api/health", "/api/auth/login", "/api/auth/refresh", "/api/ctrader/callback"):
+        for operation in schema["paths"][path].values():
+            assert "security" not in operation

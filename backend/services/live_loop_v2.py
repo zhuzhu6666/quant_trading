@@ -66,6 +66,92 @@ def _explicit_position_component_state(
     return "known" if states == {"known"} else "unknown"
 
 
+# A fresh Safety cycle can be complete while a component fact still prevents
+# opening additional risk.  Keep this list deliberately small and explicit:
+# any blocker not listed here remains a cycle/authority failure and therefore
+# keeps the startup barrier closed.
+_SAFETY_ADMISSION_ONLY_BLOCKERS = frozenset(
+    {
+        "broker_position_price_unknown",
+        "broker_position_pnl_unknown",
+        "factor_warmup",
+        "initial_safety_cycle",
+        "market_session_blocks_open",
+        "session_circuit_breaker",
+        "safety_not_accepting_new_risk",
+    }
+)
+_SAFETY_CYCLE_COMPLETION_STATUSES = frozenset(
+    {
+        # LiveSafetyPlane.run_cycle emits these statuses for a healthy normal
+        # cadence: full enforce, heartbeat-only, and migration off/shadow.
+        "completed",
+        "heartbeat",
+        "off",
+        "shadow",
+    }
+)
+# ``force_full_cycle`` suppresses heartbeat-only cadence, but the existing
+# rollout modes still return ``off``/``shadow`` for a completed full cycle
+# (LiveSafetyPlane.run_cycle); they are valid completion statuses, unlike an
+# unknown/new status.  Enforce mode returns ``completed``.
+_SAFETY_STARTUP_COMPLETION_STATUSES = frozenset({"completed", "off", "shadow"})
+
+
+def _build_safety_cycle_contract(
+    *,
+    reconciliation_state: Any,
+    status: Any,
+    blockers: Any,
+    completion_statuses: Any = _SAFETY_CYCLE_COMPLETION_STATUSES,
+) -> dict[str, Any]:
+    """Separate completion of Safety facts from new-risk admission.
+
+    ``blockers`` is intentionally not treated as a boolean startup verdict.
+    Only the explicit admission-only set is allowed to coexist with a
+    completed initial cycle.  Unknown blocker names fail closed so adding a
+    new Safety failure cannot accidentally open the startup barrier.
+    """
+
+    normalized_state = str(reconciliation_state or "unknown").strip().lower()
+    normalized_status = str(status or "unknown").strip().lower()
+    allowed_statuses = frozenset(
+        str(item).strip().lower()
+        for item in (completion_statuses or ())
+        if str(item or "").strip()
+    )
+    normalized_blockers = sorted(
+        {
+            str(item).strip()
+            for item in (blockers or ())
+            if str(item or "").strip()
+        }
+    )
+    admission_blockers = sorted(
+        item for item in normalized_blockers
+        if item in _SAFETY_ADMISSION_ONLY_BLOCKERS
+    )
+    cycle_blockers = sorted(
+        item for item in normalized_blockers
+        if item not in _SAFETY_ADMISSION_ONLY_BLOCKERS
+    )
+    failure_reasons: list[str] = []
+    if normalized_state != "fresh":
+        failure_reasons.append(f"reconciliation_{normalized_state}")
+    if normalized_status not in allowed_statuses:
+        failure_reasons.append(f"status_{normalized_status}")
+    failure_reasons.extend(cycle_blockers)
+    return {
+        "schema_version": "safety_cycle_contract.v1",
+        "status": "complete" if not failure_reasons else "failed",
+        "reconciliation_state": normalized_state,
+        "cycle_blockers": cycle_blockers,
+        "admission_blockers": admission_blockers,
+        "failure_reasons": sorted(set(failure_reasons)),
+        "admission_only": bool(admission_blockers) and not bool(failure_reasons),
+    }
+
+
 @dataclass(frozen=True)
 class LiveSafetyCycleRuntime:
     get_safety_plane: Callable[[str], Any]
@@ -402,6 +488,18 @@ def run_live_safety_cycle(
             # Observation evidence cannot rewrite a completed broker action.
             # Missing evidence simply prevents the later enforce gate.
             logger.error("[live] safety shadow observation unavailable: %s", exc)
+    payload["safety_cycle"] = _build_safety_cycle_contract(
+        reconciliation_state=payload.get("reconciliation_state"),
+        status=payload.get("status"),
+        blockers=payload.get("blockers"),
+        completion_statuses=(
+            _SAFETY_STARTUP_COMPLETION_STATUSES
+            if force_full_cycle
+            else _SAFETY_CYCLE_COMPLETION_STATUSES
+        ),
+    )
+    if payload["safety_cycle"]["status"] != "complete":
+        payload["accepting_new_risk"] = False
     runtime.update_live_state(
         safety_plane=payload,
         accepting_new_risk=bool(payload.get("accepting_new_risk", False)),
@@ -588,11 +686,36 @@ def attempt_generation_startup_barrier(
             reconcile_result=positions_reconcile,
             force_full_cycle=True,
         )
-        if str(safety_result.get("reconciliation_state") or "") != "fresh":
+        safety_contract = dict(safety_result.get("safety_cycle") or {})
+        if not safety_contract:
+            raise RuntimeError("initial_safety_contract_unavailable")
+        if str(safety_contract.get("reconciliation_state") or "") != "fresh":
             raise RuntimeError("initial_safety_reconcile_unavailable")
-        if safety_result.get("blockers"):
-            raise RuntimeError("initial_safety_blocked")
+        if str(safety_contract.get("status") or "") != "complete":
+            reasons = ",".join(
+                str(item)
+                for item in (safety_contract.get("failure_reasons") or ())
+            ) or "unknown"
+            raise RuntimeError(f"initial_safety_cycle_failed:{reasons}")
         _complete_barrier_step(runtime, generation_id, "initial_safety_cycle")
+        admission_blockers = tuple(
+            str(item)
+            for item in (safety_contract.get("admission_blockers") or ())
+            if str(item or "").strip()
+        )
+        if admission_blockers:
+            # The cycle is complete, but this generation must remain
+            # admission-blocked until the normal same-owner runtime gate
+            # publishes a fresh blocker set.  Do not report a transient
+            # ready/accepting edge between these two facts.
+            runtime.controller.update_runtime_health(
+                generation_id,
+                blockers=admission_blockers,
+            )
+            runtime.update_live_state(
+                accepting_new_risk=False,
+                startup_safety_admission_blockers=list(admission_blockers),
+            )
 
         engine = runtime.factor_pipeline.get("engine")
         if engine is None or not bool(getattr(engine, "is_warm", False)):

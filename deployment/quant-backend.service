@@ -1,0 +1,24 @@
+[Unit]
+Description=Quant Trading Backend (fail-closed API and live control plane)
+After=network-online.target postgresql.service
+Wants=network-online.target postgresql.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/quant_trading
+EnvironmentFile=/home/ubuntu/quant_trading/.env
+Environment=PATH=/home/ubuntu/quant_trading/.venv/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/ubuntu/quant_trading
+ExecStart=/home/ubuntu/quant_trading/.venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8000 --log-level info
+Restart=on-failure
+RestartSec=30s
+TimeoutStopSec=180s
+KillMode=control-group
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

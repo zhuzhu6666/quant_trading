@@ -7,8 +7,16 @@ import pytest
 
 from alpha.reflection.reviewer import TradeReviewer
 from backend.core.db import connect_sqlite
-from backend.services.canonical_v2 import record_decision_event, record_order_event
-from backend.services.canonical_v2_reader import iter_review_rows, review_row
+from backend.services.canonical_v2 import (
+    record_decision_event,
+    record_order_event,
+    record_position_event,
+)
+from backend.services.canonical_v2_reader import (
+    iter_review_rows,
+    read_trade_chain,
+    review_row,
+)
 
 
 def _review(db_path: str, review_id: str) -> dict:
@@ -50,8 +58,101 @@ def test_trade_reviewer_uses_broker_close_ts_for_created_at(tmp_path):
     assert payload["close_ts"] == close_ts
     assert payload["real_pnl"]["deal_id"] == 323453066
     assert payload["signal_score"] is None
+    assert payload["context_integrity"] == "minimal"
     assert payload["attribution_integrity"] == "missing"
     assert "signal_score_missing" in payload["failure_taxonomy"]["evidence_gaps"]
+
+
+def test_live_reviewer_writes_truthful_canonical_chain_with_entry_and_exit(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    reviewer = TradeReviewer(db_path)
+    conn = connect_sqlite(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        record_decision_event(
+            conn,
+            decision_id="entry-chain-1",
+            event_type="open",
+            symbol="XAUUSD+",
+            timeframe="M1",
+            decision_ts=100.0,
+            trade_id="trade-chain-1",
+            position_id="position-chain-1",
+            action_score=0.8,
+        )
+        record_decision_event(
+            conn,
+            decision_id="exit-chain-1",
+            event_type="close",
+            symbol="XAUUSD+",
+            timeframe="M1",
+            decision_ts=110.0,
+            trade_id="trade-chain-1",
+            position_id="position-chain-1",
+        )
+        record_order_event(
+            conn,
+            event_id="order-chain-1",
+            event_type="filled",
+            event_ts=101.0,
+            decision_id="entry-chain-1",
+            trade_id="trade-chain-1",
+            volume=1.0,
+        )
+        record_position_event(
+            conn,
+            event_id="position-chain-1",
+            event_type="opened",
+            event_ts=102.0,
+            decision_id="entry-chain-1",
+            position_id="position-chain-1",
+            trade_id="trade-chain-1",
+            net_volume=1.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = reviewer.review_closed_trade(
+        position_id="position-chain-1",
+        pnl=-1.25,
+        close_price=3388.12,
+        close_ts=120.0,
+        real_pnl={
+            "deal_id": 12345,
+            "net": -1.25,
+            "exec_price": 3388.12,
+            "price_quality": "broker_reported",
+            "exec_timestamp": 120.0,
+        },
+        close_reason="broker_close",
+        exit_decision_id="exit-chain-1",
+    )
+
+    assert result["accepted"] is True
+    conn = connect_sqlite(db_path, read_only=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        chain = read_trade_chain(conn, result["review_id"])
+        assert chain is not None
+        assert chain["decision"]["event_id"] == "live_decision_entry-chain-1"
+        assert {row["event_id"] for row in chain["orders"]} == {
+            "live_ordevt_order-chain-1"
+        }
+        assert {row["event_id"] for row in chain["positions"]} == {
+            "live_posevt_position-chain-1"
+        }
+        relations = conn.execute(
+            "SELECT relation_type, to_event_id FROM event_relation "
+            "WHERE from_event_id=? ORDER BY relation_type",
+            (f"live_review_{result['review_id']}",),
+        ).fetchall()
+        assert [(row["relation_type"], row["to_event_id"]) for row in relations] == [
+            ("derived_from", "live_decision_entry-chain-1"),
+            ("reviews", "live_decision_exit-chain-1"),
+        ]
+    finally:
+        conn.close()
 
 
 def test_trade_reviewer_rejects_unknown_execution_price(tmp_path):

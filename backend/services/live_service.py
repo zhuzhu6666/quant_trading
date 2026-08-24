@@ -2610,7 +2610,10 @@ def _ensure_open_ledger_for_recovered_close(
 
     try:
         decision_id = _LEDGER.log_decision(**payloads["decision_payload"])
-        _LEDGER.log_position_event(**payloads["position_event_payload"])
+        _LEDGER.log_position_event(
+            decision_id=decision_id,
+            **payloads["position_event_payload"],
+        )
         recovery_state_payload = dict(payloads["recovery_state_payload"])
         recovery_state_payload["entry_decision_id"] = decision_id
         recovery_state_meta = dict(payloads["recovery_state_meta"])
@@ -7608,6 +7611,60 @@ def _run_loop_body_active(
     )
 
 
+def _set_alpha_runtime_status(
+    *,
+    status: str,
+    tick: int,
+    reason: str = "",
+) -> None:
+    """Publish the generation-local alpha admission result.
+
+    Safety remains the protection owner.  This status only prevents the
+    failed alpha tick/generation from being presented as healthy; the next
+    fresh Safety boundary may admit a retry, and a successful pipeline clears
+    the transient blocker.
+    """
+
+    normalized_status = "failed" if str(status or "").lower() == "failed" else "healthy"
+    now_ts = time.time()
+    payload = {
+        "schema_version": "alpha_runtime.v1",
+        "status": normalized_status,
+        "admission": "blocked" if normalized_status == "failed" else "allowed",
+        "tick": int(tick or 0),
+        "reason": str(reason or ""),
+        "observed_at": now_ts,
+    }
+    generation = _LIVE_LOOP_CONTROLLER.current()
+    if generation is None:
+        _live_state_update(
+            alpha_runtime=payload,
+            alpha_failed=normalized_status == "failed",
+            accepting_new_risk=False,
+        )
+        return
+    blockers = set(getattr(generation, "runtime_blockers", ()) or ())
+    if normalized_status == "failed":
+        blockers.add("alpha_failed")
+    else:
+        blockers.discard("alpha_failed")
+    try:
+        accepting = _LIVE_LOOP_CONTROLLER.update_runtime_health(
+            generation.generation_id,
+            blockers=tuple(sorted(blockers)),
+        )
+    except RuntimeError:
+        # The generation may have started draining while the alpha callback
+        # unwound.  Safety/stop ownership remains authoritative in that case.
+        logger.debug("[live] alpha status update lost generation ownership")
+        accepting = False
+    _live_state_update(
+        alpha_runtime=payload,
+        alpha_failed=normalized_status == "failed",
+        accepting_new_risk=bool(accepting) if normalized_status == "healthy" else False,
+    )
+
+
 @record_timed("live.process_tick")
 def _process_tick(
     bridge,
@@ -7625,13 +7682,20 @@ def _process_tick(
     global _factor_pipeline
     if _factor_pipeline is not None:
         try:
-            return _process_tick_factor_pipeline(
+            result = _process_tick_factor_pipeline(
                 bridge, _factor_pipeline, df_new, last_bar, broker, tick, log,
                 stop_requested=stop_requested,
                 protection_already_run=protection_already_run,
             )
+            _set_alpha_runtime_status(status="healthy", tick=tick)
+            return result
         except Exception as e:
             log(f"tick {tick}: factor pipeline error: {e}")
+            _set_alpha_runtime_status(
+                status="failed",
+                tick=tick,
+                reason=f"{type(e).__name__}: {e}",
+            )
 
     # 保底: 无管道时只记 tick 不操作
     log(f"tick {tick}: no factor pipeline active, skipping")
@@ -7934,7 +7998,10 @@ def _log_filled_open_ledger(
             decision_id=lineage_decision_id,
             **ledger_payloads["filled_order_payload"],
         )
-        _LEDGER.log_position_event(**ledger_payloads["position_event_payload"])
+        _LEDGER.log_position_event(
+            decision_id=lineage_decision_id,
+            **ledger_payloads["position_event_payload"],
+        )
         return lineage_decision_id
     except Exception as ledger_err:
         logger.debug("[live] ledger open persist failed for pos %s: %s", pid, ledger_err)
@@ -8446,6 +8513,7 @@ def _log_amended_open_ledger(
             **open_ledger_payloads["filled_order"],
         )
         _LEDGER.log_position_event(
+            decision_id=lineage_decision_id,
             **open_ledger_payloads["position_event"],
         )
         return lineage_decision_id

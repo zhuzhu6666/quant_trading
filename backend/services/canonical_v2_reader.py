@@ -10,7 +10,8 @@ Functions:
     resolve_event(conn, kind, primary_key) -> event row or None
     read_review / read_decision / read_order_event / read_position_event
         (by canonical entity key) -> {"source","event_id","entity_*","payload"}
-    iter_reviews(conn, limit) -> records in observed order
+    read_review_event(conn, event_id) -> one immutable historical review revision
+    iter_reviews(conn, limit) -> latest record per review id in observed order
     iter_decisions(conn, limit=0) -> bounded decision records
     read_trade_chain(conn, review_id) -> review + entry decision + order/position
         events reachable from canonical relations (derived_from / caused_by)
@@ -39,6 +40,16 @@ EVENT_ID_PREFIX = {
 }
 
 _ROW = tuple[int, str, str, str]
+
+_REVIEW_EVENT_COLUMNS = (
+    "event_id",
+    "entity_id",
+    "payload_hash",
+    "observed_at",
+    "candidate_count",
+)
+_REVIEW_RESOLVER = "canonical_review_latest.v1"
+_REVIEW_ORDER = "event.observed_at,event.event_id"
 
 
 def _canonical_ready(conn: Any) -> bool:
@@ -93,7 +104,19 @@ def _event_row(conn: Any, event_id: str) -> dict[str, Any] | None:
         ),
         (str(event_id or ""),),
     ).fetchone()
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    return _dict_row(
+        row,
+        (
+            "event_id",
+            "event_type",
+            "entity_type",
+            "entity_id",
+            "payload_hash",
+            "observed_at",
+        ),
+    )
 
 
 def resolve_event(conn: Any, kind: str, primary_key: str) -> dict[str, Any] | None:
@@ -117,8 +140,228 @@ def _read_fact(conn: Any, kind: str, primary_key: str) -> dict[str, Any] | None:
     }
 
 
+def _read_fact_event(conn: Any, kind: str, event_id: str) -> dict[str, Any] | None:
+    """Read one immutable event by its exact event id.
+
+    This is intentionally separate from logical-key resolution: a learning
+    review revision must remain addressable even when the default read path
+    selects a newer revision for the same review id.
+    """
+    event = _event_row(conn, event_id)
+    if event is None or event.get("event_type") != EVENT_TYPE[kind]:
+        return None
+    try:
+        payload = read_payload(conn, str(event.get("payload_hash") or ""))
+    except Exception:
+        return None
+    return {
+        "source": "canonical",
+        "kind": kind,
+        "event_id": event["event_id"],
+        "event_type": event["event_type"],
+        "entity_type": event["entity_type"],
+        "entity_id": event["entity_id"],
+        "observed_at": event["observed_at"],
+        "payload": payload,
+    }
+
+
+def read_review_event(conn: Any, event_id: str) -> dict[str, Any] | None:
+    """Read a historical review revision by its immutable event id."""
+    return _read_fact_event(conn, "review", event_id)
+
+
+def _review_event_rows(
+    conn: Any,
+    review_id: str | None = None,
+    *,
+    latest_only: bool = True,
+    limit: int = 0,
+) -> list[dict[str, Any]]:
+    """Read review event metadata with latest selection in SQL.
+
+    The default path returns one row per logical review using the same
+    ``(observed_at, event_id)`` ordering as the resolver.  ``latest_only=False``
+    is reserved for metadata-only lineage fallback; it never restores old
+    payload blobs.
+    """
+    if not _canonical_ready(conn):
+        return []
+    clauses = ["e.event_type='trade_review'"]
+    params: list[Any] = []
+    if review_id is not None:
+        clauses.append("e.entity_id=?")
+        params.append(str(review_id))
+    ranked = (
+        "WITH ranked_reviews AS ("
+        "SELECT e.event_id, e.entity_id, e.payload_hash, e.observed_at, "
+        "COUNT(*) OVER (PARTITION BY e.entity_id) AS candidate_count, "
+        "ROW_NUMBER() OVER (PARTITION BY e.entity_id "
+        "ORDER BY e.observed_at DESC, e.event_id DESC) AS review_rank "
+        "FROM canonical_v2.event e WHERE "
+        + " AND ".join(clauses)
+        + ") SELECT event_id, entity_id, payload_hash, observed_at, candidate_count "
+        "FROM ranked_reviews "
+    )
+    if latest_only:
+        ranked += "WHERE review_rank=1 "
+    ranked += "ORDER BY observed_at ASC, event_id ASC"
+    if limit and int(limit) > 0:
+        ranked += " LIMIT ?"
+        params.append(int(limit))
+    rows = conn.execute(
+        _sql(
+            conn,
+            ranked,
+        ),
+        tuple(params),
+    ).fetchall()
+    return [item for item in (_dict_row(row, _REVIEW_EVENT_COLUMNS) for row in rows) if item]
+
+
+def _review_event_sort_key(event: Mapping[str, Any]) -> tuple[float, str]:
+    # No explicit ``revision`` field exists in either the live writer or the
+    # learning revision writer.  Both set canonical event.observed_at to the
+    # review's observation/revision timestamp, so it is the authority; event
+    # id is the deterministic tie-breaker for same-time revisions.
+    return (observed_epoch(event.get("observed_at")), str(event.get("event_id") or ""))
+
+
+def _review_resolution_from_rows(
+    conn: Any,
+    review_id: str,
+    rows: Iterable[Mapping[str, Any]],
+) -> tuple[dict[str, Any] | None, Mapping[str, Any] | None, dict[str, Any]]:
+    candidates = sorted(
+        (dict(row) for row in rows if str(row.get("entity_id") or "") == str(review_id)),
+        key=_review_event_sort_key,
+    )
+    candidate_count = max(
+        (int(row.get("candidate_count") or 0) for row in candidates),
+        default=len(candidates),
+    )
+    evidence: dict[str, Any] = {
+        "resolver": _REVIEW_RESOLVER,
+        "order": _REVIEW_ORDER,
+        "revision_source": "event.observed_at",
+        "tie_breaker": "event.event_id",
+        "review_id": str(review_id),
+        "candidate_count": candidate_count,
+        "invalid_candidates": [],
+        "selected_event_id": "",
+        "selected_observed_at": None,
+        "status": "missing" if not candidates else "unresolved",
+    }
+    if not candidates:
+        evidence["reason"] = "review_not_found"
+        return None, None, evidence
+
+    # The newest candidate is authoritative even when malformed.  Falling
+    # back to an older payload would silently resurrect stale review facts.
+    selected = candidates[-1]
+    payload: Any = None
+    try:
+        payload = read_payload(conn, str(selected.get("payload_hash") or ""))
+    except Exception as exc:
+        evidence["invalid_candidates"].append(
+            {
+                "event_id": str(selected.get("event_id") or ""),
+                "reason": "payload_unreadable",
+                "error_type": type(exc).__name__,
+            }
+        )
+        evidence["selected_event_id"] = str(selected.get("event_id") or "")
+        evidence["selected_observed_at"] = selected.get("observed_at")
+        evidence["status"] = "fail_closed"
+        evidence["reason"] = "latest_revision_payload_unreadable"
+        return None, None, evidence
+    if not isinstance(payload, Mapping):
+        evidence["invalid_candidates"].append(
+            {
+                "event_id": str(selected.get("event_id") or ""),
+                "reason": "payload_not_object",
+            }
+        )
+        evidence["selected_event_id"] = str(selected.get("event_id") or "")
+        evidence["selected_observed_at"] = selected.get("observed_at")
+        evidence["status"] = "fail_closed"
+        evidence["reason"] = "latest_revision_payload_not_object"
+        return None, None, evidence
+    payload_review_id = str(payload.get("review_id") or "")
+    # The current writers include review_id in every payload.  A few older
+    # SQLite fixtures used a descriptive entity id (``review-r1``) while the
+    # payload retained ``r1``; preserve that read-only compatibility only for
+    # the deterministic live event id. Learning revisions must match exactly.
+    live_fixture_alias = (
+        str(selected.get("event_id") or "").startswith("live_review_")
+        and bool(payload_review_id)
+        and str(review_id).endswith(f"-{payload_review_id}")
+    )
+    if not payload_review_id or (
+        payload_review_id != str(review_id) and not live_fixture_alias
+    ):
+        evidence["invalid_candidates"].append(
+            {
+                "event_id": str(selected.get("event_id") or ""),
+                "reason": "payload_review_id_mismatch",
+                "payload_review_id": payload_review_id,
+            }
+        )
+        evidence["selected_event_id"] = str(selected.get("event_id") or "")
+        evidence["selected_observed_at"] = selected.get("observed_at")
+        evidence["status"] = "fail_closed"
+        evidence["reason"] = "latest_revision_identity_mismatch"
+        return None, None, evidence
+
+    evidence["selected_event_id"] = str(selected.get("event_id") or "")
+    evidence["selected_observed_at"] = selected.get("observed_at")
+    evidence["status"] = "selected"
+    evidence["reason"] = "latest_observed_at_then_event_id"
+    return dict(selected), payload, evidence
+
+
+def review_resolution_evidence(conn: Any, review_id: str) -> dict[str, Any]:
+    """Expose deterministic latest-review selection evidence without mutation."""
+    _, _, evidence = _review_resolution_from_rows(
+        conn,
+        str(review_id or ""),
+        _review_event_rows(conn, review_id, latest_only=True),
+    )
+    return evidence
+
+
+def resolve_latest_review(conn: Any, review_id: str) -> dict[str, Any] | None:
+    """Resolve the latest review event, without hiding immutable revisions."""
+    event, _, _ = _review_resolution_from_rows(
+        conn,
+        str(review_id or ""),
+        _review_event_rows(conn, review_id, latest_only=True),
+    )
+    return event
+
+
 def read_review(conn: Any, review_id: str) -> dict[str, Any] | None:
-    return _read_fact(conn, "review", review_id)
+    review_id = str(review_id or "")
+    event, payload, evidence = _review_resolution_from_rows(
+        conn,
+        review_id,
+        _review_event_rows(conn, review_id, latest_only=True),
+    )
+    if event is None:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    return {
+        "source": "canonical",
+        "kind": "review",
+        "event_id": event["event_id"],
+        "event_type": "trade_review",
+        "entity_type": "review",
+        "entity_id": event["entity_id"],
+        "observed_at": event["observed_at"],
+        "payload": dict(payload),
+        "resolution": evidence,
+    }
 
 
 def read_decision(conn: Any, decision_id: str) -> dict[str, Any] | None:
@@ -134,29 +377,28 @@ def read_position_event(conn: Any, event_id: str) -> dict[str, Any] | None:
 
 
 def iter_reviews(conn: Any, limit: int = 200) -> list[dict[str, Any]]:
-    if not _canonical_ready(conn):
-        return []
-    query = (
-        "SELECT e.event_id, e.entity_id, e.payload_hash FROM canonical_v2.event e "
-        "WHERE e.event_type='trade_review' ORDER BY e.observed_at ASC, e.event_id ASC"
-    )
-    if limit and int(limit) > 0:
-        query = _sql(conn, query + " LIMIT ?")
-        rows = conn.execute(query, (int(limit),)).fetchall()
-    else:
-        query = _sql(conn, query)
-        rows = conn.execute(query).fetchall()
+    rows = _review_event_rows(conn, latest_only=True, limit=limit)
     out: list[dict[str, Any]] = []
     for row in rows:
-        payload = read_payload(conn, str(row["payload_hash"]))
+        review_id = str(row.get("entity_id") or "")
+        event, payload, evidence = _review_resolution_from_rows(conn, review_id, [row])
+        if event is None:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
         out.append(
             {
-                "review_id": str(row["entity_id"] or ""),
-                "event_id": str(row["event_id"] or ""),
+                "review_id": review_id,
+                "event_id": str(event.get("event_id") or ""),
                 "source": "canonical",
-                "payload": payload,
+                "payload": dict(payload),
+                "observed_at": event.get("observed_at"),
+                "resolution": evidence,
             }
         )
+    out.sort(key=lambda item: (observed_epoch(item.get("observed_at")), str(item.get("event_id") or "")))
+    if limit and int(limit) > 0:
+        return out[: int(limit)]
     return out
 
 
@@ -278,14 +520,27 @@ def read_trade_chain(conn: Any, review_id: str) -> dict[str, Any] | None:
     if not review.get("event_id"):
         return chain
     decision_event_id: str | None = None
-    derived = conn.execute(
-        _sql(
-            conn,
-            "SELECT to_event_id FROM canonical_v2.event_relation "
-            "WHERE from_event_id=? AND relation_type='derived_from'",
-        ),
-        (review["event_id"],),
-    ).fetchall()
+    # Learning revisions intentionally carry a new immutable event id but do
+    # not rewrite lineage.  Prefer a relation on the selected revision, then
+    # deterministically inspect older revisions for the original chain.
+    review_event_ids = [str(review["event_id"])]
+    for event in reversed(_review_event_rows(conn, review_id, latest_only=False)):
+        event_id = str(event.get("event_id") or "")
+        if event_id and event_id not in review_event_ids:
+            review_event_ids.append(event_id)
+    derived: list[Any] = []
+    for review_event_id in review_event_ids:
+        derived = conn.execute(
+            _sql(
+                conn,
+                "SELECT to_event_id FROM canonical_v2.event_relation "
+                "WHERE from_event_id=? AND relation_type='derived_from' "
+                "ORDER BY to_event_id ASC",
+            ),
+            (review_event_id,),
+        ).fetchall()
+        if derived:
+            break
     if derived:
         decision_event_id = str(derived[0]["to_event_id"] or "")
         chain["decision"] = _related_payload(conn, decision_event_id, "risk_decision")
@@ -338,6 +593,10 @@ def _review_to_row(record: Mapping[str, Any]) -> dict[str, Any]:
     payload = record.get("payload") if isinstance(record, Mapping) else None
     row = dict(payload) if isinstance(payload, dict) else {}
     row["review_id"] = str(row.get("review_id") or record.get("review_id") or "")
+    row["canonical_event_id"] = str(record.get("event_id") or "")
+    row["canonical_observed_at"] = record.get("observed_at")
+    if isinstance(record.get("resolution"), Mapping):
+        row["canonical_resolution"] = dict(record["resolution"])
     if "created_at" in row:
         row["created_at"] = _epoch_seconds(row["created_at"])
     if isinstance(row.get("failure_tags"), list):
@@ -427,7 +686,10 @@ def iter_review_rows_desc(conn: Any, limit: int = 100) -> list[dict[str, Any]]:
     """
     rows = iter_review_rows(conn, limit=0)
     rows.sort(
-        key=lambda r: (float(r.get("created_at") or 0.0), str(r.get("review_id") or "")),
+        key=lambda r: (
+            observed_epoch(r.get("canonical_observed_at")),
+            str(r.get("canonical_event_id") or ""),
+        ),
         reverse=True,
     )
     if limit and int(limit) > 0:

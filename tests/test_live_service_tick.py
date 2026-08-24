@@ -912,6 +912,61 @@ def test_process_tick_dry_run_does_not_call_amend(monkeypatch):
     bridge.market_sell.assert_not_called()
 
 
+def test_process_tick_marks_alpha_failure_and_recovers_on_success(monkeypatch):
+    generation = _admitted_generation()
+    live_service._factor_pipeline = {"engine": SimpleNamespace(is_warm=True)}
+
+    monkeypatch.setattr(
+        live_service,
+        "_process_tick_factor_pipeline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("factor failed")
+        ),
+    )
+    live_service._process_tick(
+        MagicMock(),
+        None,
+        _make_df(),
+        _make_df().iloc[-1],
+        "ctrader",
+        tick=7,
+        log=lambda _message: None,
+    )
+
+    failed = live_service._live_state_get("alpha_runtime", {}, clone=True)
+    status = live_service._LIVE_LOOP_CONTROLLER.status()
+    assert failed["schema_version"] == "alpha_runtime.v1"
+    assert failed["status"] == "failed"
+    assert failed["admission"] == "blocked"
+    assert live_service._live_state_get("alpha_failed") is True
+    assert status["phase"] == "degraded"
+    assert status["accepting_new_risk"] is False
+    assert "alpha_failed" in status["blockers"]
+
+    monkeypatch.setattr(
+        live_service,
+        "_process_tick_factor_pipeline",
+        lambda *_args, **_kwargs: None,
+    )
+    live_service._process_tick(
+        MagicMock(),
+        None,
+        _make_df(),
+        _make_df().iloc[-1],
+        "ctrader",
+        tick=8,
+        log=lambda _message: None,
+    )
+
+    recovered = live_service._live_state_get("alpha_runtime", {}, clone=True)
+    status = live_service._LIVE_LOOP_CONTROLLER.status()
+    assert recovered["status"] == "healthy"
+    assert recovered["admission"] == "allowed"
+    assert live_service._live_state_get("alpha_failed") is False
+    assert status["phase"] == "running"
+    assert status["accepting_new_risk"] is True
+
+
 def test_process_tick_duplicate_decision_bar_skips_open_decision(monkeypatch):
     """Same closed decision bar should not be fed into the signal/open path twice."""
     bridge = _fake_bridge()

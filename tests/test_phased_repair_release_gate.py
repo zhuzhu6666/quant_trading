@@ -6,8 +6,10 @@ import pytest
 
 from backend.core.static_feature_flags import static_feature_flags_fingerprint
 from backend.services.phased_repair_release_gate import (
+    collect_release_preflight,
     evaluate_phased_release_preflight,
 )
+from backend.core.release_identity import collect_release_identity
 
 
 def _facts() -> dict:
@@ -81,6 +83,169 @@ def _set_flags(facts: dict, patch: dict) -> None:
     worker_projection["fingerprint"] = static_feature_flags_fingerprint(
         worker_projection["values"]
     )
+
+
+def _release_runner(root: str, *, dirty: str = "", restart: str = "on-failure", cwd: str | None = None):
+    def runner(command, **_kwargs):
+        command = tuple(command)
+        if command[:3] == ("git", "rev-parse", "--show-toplevel"):
+            return {"returncode": 0, "stdout": root}
+        if command[:3] == ("git", "rev-parse", "HEAD"):
+            return {"returncode": 0, "stdout": "abc123"}
+        if command[:2] == ("git", "status"):
+            return {"returncode": 0, "stdout": dirty}
+        if command[:3] == ("git", "ls-files", "-z"):
+            return {"returncode": 0, "stdout": ""}
+        if command[:2] == ("systemctl", "show"):
+            return {
+                "returncode": 0,
+                "stdout": "\n".join(
+                    (
+                        "ActiveState=active",
+                        "SubState=running",
+                        "MainPID=42",
+                        "ExecMainStartTimestamp=Mon 2026-08-24 10:00:00 CST",
+                        f"Restart={restart}",
+                        "DropInPaths=/etc/systemd/system/quant-backend.service.d/override.conf",
+                    )
+                ),
+            }
+        if command[:2] == ("readlink", "-f"):
+            return {"returncode": 0, "stdout": cwd or root}
+        raise AssertionError(f"unexpected command: {command}")
+
+    return runner
+
+
+def _release_health(_url: str, identity: dict | None = None):
+    public_identity = dict(identity or {})
+    if public_identity:
+        public_identity.setdefault("pid", 42)
+        public_identity.setdefault("captured_at", 900.0)
+    return {
+        "status_code": 200,
+        "payload": {
+            "status": "ok",
+            "db": "connected",
+            "ctrader": "unknown",
+            "uptime_seconds": 120.0,
+            "release_identity": public_identity,
+        },
+    }
+
+
+def test_release_preflight_separates_clean_repo_from_loaded_backend(tmp_path):
+    root = str(tmp_path)
+    runner = _release_runner(root)
+    identity = collect_release_identity(root, runner=runner)
+    result = collect_release_preflight(
+        repo_root=root,
+        runner=runner,
+        health_reader=lambda url: _release_health(url, identity),
+        schema_status_reader=lambda: {"ok": True, "current_version": 32},
+        now=lambda: 1000.0,
+    )
+
+    assert result["ok"] is True
+    assert result["repo_ready"]["ok"] is True
+    assert result["repo_ready"]["head"] == "abc123"
+    assert result["production_loaded"]["ok"] is True
+    assert result["production_loaded"]["main_pid"] == 42
+    assert result["production_loaded"]["health_started_at"] == 880.0
+    assert result["production_loaded"]["drop_in_paths"]
+    assert result["trade_authorization"]["authorized"] is False
+
+
+def test_release_preflight_keeps_loaded_process_separate_from_dirty_repo(tmp_path):
+    root = str(tmp_path)
+    runner = _release_runner(root, dirty=" M backend/app.py\n")
+    identity = collect_release_identity(root, runner=runner)
+    result = collect_release_preflight(
+        repo_root=root,
+        runner=runner,
+        health_reader=lambda url: _release_health(url, identity),
+        schema_status_reader=lambda: {"ok": True},
+    )
+
+    assert result["ok"] is False
+    assert result["repo_ready"]["ok"] is False
+    assert result["production_loaded"]["ok"] is True
+    assert "repo_worktree_dirty" in result["blockers"]
+
+
+def test_release_preflight_blocks_restart_no_code_mismatch_health_and_schema(tmp_path):
+    root = str(tmp_path)
+    runner = _release_runner(root, restart="no", cwd="/srv/old_quant_trading")
+    identity = collect_release_identity(root, runner=runner)
+    result = collect_release_preflight(
+        repo_root=root,
+        runner=runner,
+        health_reader=lambda _url: {
+            **_release_health(_url, identity),
+            "payload": {"status": "degraded", "uptime_seconds": 10, "release_identity": identity},
+        },
+        schema_status_reader=lambda: {"ok": False, "current_version": 31},
+    )
+
+    assert result["ok"] is False
+    assert "systemd_restart_policy_no" in result["blockers"]
+    assert "backend_code_path_unconfirmed" in result["blockers"]
+    assert "api_health_unavailable_or_degraded" in result["blockers"]
+    assert "schema_status_unavailable_or_mismatched" in result["blockers"]
+    assert result["production_loaded"]["ok"] is False
+
+
+def test_release_preflight_blocks_old_health_without_frozen_identity(tmp_path):
+    root = str(tmp_path)
+    runner = _release_runner(root)
+    result = collect_release_preflight(
+        repo_root=root,
+        runner=runner,
+        health_reader=lambda _url: {
+            "status_code": 200,
+            "payload": {"status": "ok", "uptime_seconds": 10},
+        },
+        schema_status_reader=lambda: {"ok": True},
+    )
+
+    assert result["ok"] is False
+    assert "backend_release_identity_missing" in result["blockers"]
+    assert result["production_loaded"]["ok"] is False
+
+
+def test_release_preflight_blocks_frozen_identity_mismatch(tmp_path):
+    root = str(tmp_path)
+    runner = _release_runner(root)
+    identity = collect_release_identity(root, runner=runner)
+    stale_identity = {**identity, "head": "stale-head"}
+    result = collect_release_preflight(
+        repo_root=root,
+        runner=runner,
+        health_reader=lambda url: _release_health(url, stale_identity),
+        schema_status_reader=lambda: {"ok": True},
+    )
+
+    assert result["ok"] is False
+    assert "backend_release_identity_head_mismatch" in result["blockers"]
+    assert result["production_loaded"]["release_identity_match"] is False
+
+
+def test_release_preflight_blocks_health_from_another_pid(tmp_path):
+    root = str(tmp_path)
+    runner = _release_runner(root)
+    identity = collect_release_identity(root, runner=runner)
+    result = collect_release_preflight(
+        repo_root=root,
+        runner=runner,
+        health_reader=lambda url: _release_health(
+            url, {**identity, "pid": 99}
+        ),
+        schema_status_reader=lambda: {"ok": True},
+    )
+
+    assert result["ok"] is False
+    assert "backend_release_identity_pid_mismatch" in result["blockers"]
+    assert result["production_loaded"]["release_identity_pid_match"] is False
 
 
 def test_supervisor_enforce_preflight_passes_with_canonical_authority():

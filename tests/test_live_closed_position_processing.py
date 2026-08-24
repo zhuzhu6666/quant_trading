@@ -162,7 +162,7 @@ def test_ledger_repair_refreshes_context_and_persists_both_records():
     assert exit_id == "exit-7"
     assert integrity == "full"
     assert ledger.decisions == [{"event_type": "close"}]
-    assert ledger.events == [{"event_type": "closed"}]
+    assert ledger.events == [{"decision_id": "exit-7", "event_type": "closed"}]
 
 
 def test_rejected_learning_review_never_builds_or_suggests_experience():

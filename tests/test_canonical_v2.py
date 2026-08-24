@@ -11,6 +11,7 @@ from backend.services.canonical_v2 import (
     CanonicalV2Error,
     append_event,
     append_relation,
+    ensure_sqlite_schema,
     finish_projection_run,
     put_dataset_manifest,
     put_dataset_members,
@@ -18,6 +19,9 @@ from backend.services.canonical_v2 import (
     put_state_version,
     put_training_sample,
     read_payload,
+    record_decision_event,
+    record_order_event,
+    record_position_event,
     record_factor_lifecycle_event,
     record_review,
     start_projection_run,
@@ -27,6 +31,79 @@ from backend.services.canonical_v2 import (
 def _canonical_sqlite() -> sqlite3.Connection:
     from tests.canonical_fixture import make_canonical_sqlite
     return make_canonical_sqlite()
+
+
+def test_sqlite_fixture_uses_production_canonical_ddl() -> None:
+    """The shared fixture must execute the production DDL object itself."""
+
+    from backend.services.canonical_v2 import CANONICAL_SQLITE_DDL
+    from tests import canonical_fixture
+
+    assert canonical_fixture.CANONICAL_V2_BARE_DDL is CANONICAL_SQLITE_DDL
+    conn = canonical_fixture.make_canonical_sqlite()
+    try:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert {
+            "payload_blob",
+            "event",
+            "event_relation",
+            "state_version",
+            "training_sample",
+            "dataset_manifest",
+            "dataset_manifest_member",
+            "projection_run",
+            "training_sample_row",
+        } <= tables
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO event (event_id, event_type, entity_type, entity_id, "
+                "observed_at, recorded_at, producer, schema_version, payload_hash, "
+                "status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "bad",
+                    "retired_event",
+                    "entity",
+                    "id",
+                    "now",
+                    "now",
+                    "test",
+                    "v1",
+                    "missing",
+                    "recorded",
+                    "now",
+                ),
+            )
+    finally:
+        conn.close()
+
+
+def test_ensure_sqlite_schema_supports_all_canonical_writer_tables() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys=ON")
+    ensure_sqlite_schema(conn)
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert {
+        "payload_blob",
+        "event",
+        "event_relation",
+        "state_version",
+        "training_sample",
+        "dataset_manifest",
+        "dataset_manifest_member",
+        "projection_run",
+        "training_sample_row",
+    } <= tables
+    conn.close()
 
 
 def test_payload_is_content_addressed_and_restorable() -> None:
@@ -861,6 +938,232 @@ def test_record_review_mirrors_live_review_idempotently_and_readable() -> None:
         assert payload["failure_tags"] == ["execution_timing"]
         assert payload["review"]["primary_responsibility"] == "execution_timing"
         assert payload["pnl"] == -4.2
+    finally:
+        conn.close()
+
+
+def _append_review_revision_for_reader_test(
+    conn: sqlite3.Connection,
+    *,
+    review_id: str,
+    event_id: str,
+    observed_at: float,
+    payload: object,
+) -> None:
+    ref = put_payload(
+        conn,
+        payload,
+        payload_kind="trade_review",
+        schema_version="canonical_payload.v1",
+    )
+    append_event(
+        conn,
+        event_id=event_id,
+        event_type="trade_review",
+        entity_type="review",
+        entity_id=review_id,
+        payload_hash=ref.payload_hash,
+        producer="reader-revision-test",
+        idempotency_key=event_id,
+        observed_at=observed_at,
+    )
+
+
+def test_reader_latest_review_prefers_learning_revision_and_keeps_history() -> None:
+    from backend.services.canonical_v2_reader import read_review, read_review_event, iter_reviews
+
+    conn = _canonical_sqlite()
+    try:
+        initial = record_review(
+            conn,
+            review_id="revision-r1",
+            trade_id="trade-r1",
+            position_id="position-r1",
+            outcome_label="initial",
+            created_at=100.0,
+        )
+        _append_review_revision_for_reader_test(
+            conn,
+            review_id="revision-r1",
+            event_id="learning_review_revision-r1_digest",
+            observed_at=200.0,
+            payload={
+                "review_id": "revision-r1",
+                "created_at": 100.0,
+                "updated_at": 200.0,
+                "outcome_label": "repaired",
+            },
+        )
+
+        latest = read_review(conn, "revision-r1")
+        assert latest is not None
+        assert latest["event_id"] == "learning_review_revision-r1_digest"
+        assert latest["payload"]["outcome_label"] == "repaired"
+        assert latest["resolution"]["reason"] == "latest_observed_at_then_event_id"
+        assert read_review_event(conn, initial["event_id"])["payload"]["outcome_label"] == "initial"
+        assert [item["event_id"] for item in iter_reviews(conn, limit=0)] == [
+            "learning_review_revision-r1_digest"
+        ]
+    finally:
+        conn.close()
+
+
+def test_reader_latest_review_same_observed_at_uses_event_id_tie_breaker() -> None:
+    from backend.services.canonical_v2_reader import read_review, review_resolution_evidence
+
+    conn = _canonical_sqlite()
+    try:
+        _append_review_revision_for_reader_test(
+            conn,
+            review_id="tie-r1",
+            event_id="live_review_tie-r1",
+            observed_at=100.0,
+            payload={"review_id": "tie-r1", "outcome_label": "initial"},
+        )
+        for event_id, label in (
+            ("learning_review_tie-r1_a", "a"),
+            ("learning_review_tie-r1_z", "z"),
+        ):
+            _append_review_revision_for_reader_test(
+                conn,
+                review_id="tie-r1",
+                event_id=event_id,
+                observed_at=200.0,
+                payload={"review_id": "tie-r1", "outcome_label": label},
+            )
+
+        latest = read_review(conn, "tie-r1")
+        assert latest is not None
+        assert latest["event_id"] == "learning_review_tie-r1_z"
+        evidence = review_resolution_evidence(conn, "tie-r1")
+        assert evidence["order"] == "event.observed_at,event.event_id"
+        assert evidence["revision_source"] == "event.observed_at"
+        assert evidence["tie_breaker"] == "event.event_id"
+        assert evidence["selected_event_id"] == "learning_review_tie-r1_z"
+    finally:
+        conn.close()
+
+
+def test_reader_latest_review_without_revision_reports_single_candidate() -> None:
+    from backend.services.canonical_v2_reader import read_review, review_resolution_evidence
+
+    conn = _canonical_sqlite()
+    try:
+        _append_review_revision_for_reader_test(
+            conn,
+            review_id="single-r1",
+            event_id="live_review_single-r1",
+            observed_at=100.0,
+            payload={"review_id": "single-r1", "outcome_label": "initial"},
+        )
+        assert read_review(conn, "single-r1")["payload"]["outcome_label"] == "initial"
+        evidence = review_resolution_evidence(conn, "single-r1")
+        assert evidence["candidate_count"] == 1
+        assert evidence["status"] == "selected"
+    finally:
+        conn.close()
+
+
+def test_reader_bad_latest_revision_fails_closed_and_exposes_evidence() -> None:
+    from backend.services.canonical_v2_reader import read_review, read_review_event, review_resolution_evidence
+
+    conn = _canonical_sqlite()
+    try:
+        _append_review_revision_for_reader_test(
+            conn,
+            review_id="bad-r1",
+            event_id="live_review_bad-r1",
+            observed_at=100.0,
+            payload={"review_id": "bad-r1", "outcome_label": "initial"},
+        )
+        _append_review_revision_for_reader_test(
+            conn,
+            review_id="bad-r1",
+            event_id="learning_review_bad-r1_broken",
+            observed_at=200.0,
+            payload={"review_id": "different-id", "outcome_label": "bad"},
+        )
+
+        assert read_review(conn, "bad-r1") is None
+        evidence = review_resolution_evidence(conn, "bad-r1")
+        assert evidence["status"] == "fail_closed"
+        assert evidence["selected_event_id"] == "learning_review_bad-r1_broken"
+        assert evidence["reason"] == "latest_revision_identity_mismatch"
+        assert read_review_event(conn, "live_review_bad-r1")["payload"]["outcome_label"] == "initial"
+    finally:
+        conn.close()
+
+
+def test_live_trade_writers_build_readable_trade_chain_in_one_transaction() -> None:
+    """New live facts link only through the exact decision ID supplied by the caller."""
+    from backend.services.canonical_v2_reader import read_trade_chain
+
+    conn = _canonical_sqlite()
+    try:
+        decision = record_decision_event(
+            conn,
+            decision_id="decision-chain-1",
+            event_type="open",
+            symbol="XAUUSD+",
+            timeframe="M1",
+            decision_ts=1_728_500_000.0,
+        )
+        order = record_order_event(
+            conn,
+            event_id="order-chain-1",
+            event_type="filled",
+            event_ts=1_728_500_001.0,
+            decision_id="decision-chain-1",
+            trade_id="trade-chain-1",
+        )
+        position = record_position_event(
+            conn,
+            event_id="position-chain-1",
+            event_type="opened",
+            event_ts=1_728_500_002.0,
+            decision_id="decision-chain-1",
+            position_id="position-chain-1",
+            trade_id="trade-chain-1",
+        )
+        review = record_review(
+            conn,
+            review_id="review-chain-1",
+            trade_id="trade-chain-1",
+            position_id="position-chain-1",
+            entry_decision_id="decision-chain-1",
+            created_at=1_728_500_003.0,
+        )
+
+        assert order["lineage_status"] == "linked"
+        assert position["lineage_status"] == "linked"
+        assert review["lineage_status"] == "linked"
+        assert conn.execute("SELECT COUNT(*) FROM event_relation").fetchone()[0] == 3
+
+        chain = read_trade_chain(conn, "review-chain-1")
+        assert chain is not None
+        assert chain["decision"]["event_id"] == decision["event_id"]
+        assert {item["event_id"] for item in chain["orders"]} == {order["event_id"]}
+        assert {item["event_id"] for item in chain["positions"]} == {position["event_id"]}
+    finally:
+        conn.close()
+
+
+def test_live_trade_writer_reports_unlinked_without_guessing_parent() -> None:
+    conn = _canonical_sqlite()
+    try:
+        order = record_order_event(
+            conn,
+            event_id="order-unlinked-1",
+            event_type="submitted",
+            event_ts=1_728_500_010.0,
+            decision_id="not-written-anywhere",
+        )
+        assert order["lineage_status"] == "unlinked_parent_event_missing"
+        assert conn.execute("SELECT COUNT(*) FROM event_relation").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM event WHERE event_id=?",
+            (order["event_id"],),
+        ).fetchone()[0] == 1
     finally:
         conn.close()
 

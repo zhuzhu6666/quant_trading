@@ -119,7 +119,10 @@ def replay_recovered_close(
                 action_reason=decision["action_reason"],
                 action_json=decision["action_json"],
             )
-            runtime.ledger.log_position_event(**payloads["position_event"])
+            runtime.ledger.log_position_event(
+                decision_id=exit_decision_id,
+                **payloads["position_event"],
+            )
         except Exception as exc:
             runtime.debug(
                 "[live] replay close ledger failed for pos %s: %s",

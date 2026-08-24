@@ -46,6 +46,13 @@ class EvolutionWorkCoordinator:
             ).fetchone()
             acquired = self._scalar(row)
             if not acquired:
+                # pg_try_advisory_lock() is a SELECT and therefore starts a
+                # transaction on a normal psycopg connection.  End it before
+                # returning so a busy scheduler attempt cannot become an
+                # idle-in-transaction backend.
+                rollback = getattr(conn, "rollback", None)
+                if callable(rollback):
+                    rollback()
                 logger.info(
                     "[evolution_coordinator] skip %s: another autonomous work item is active",
                     job_name,
@@ -56,6 +63,12 @@ class EvolutionWorkCoordinator:
                     "job_name": job_name,
                     "reason": "autonomous_work_lock_held",
                 }
+            # The advisory lock is session-scoped.  Commit only the lock
+            # acquisition transaction, then run the heavy job outside that
+            # transaction.  The job owns its own business transactions.
+            commit = getattr(conn, "commit", None)
+            if callable(commit):
+                commit()
             logger.info("[evolution_coordinator] started %s", job_name)
             return fn()
         except Exception:

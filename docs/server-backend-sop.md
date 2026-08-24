@@ -250,6 +250,16 @@ Environment=QUANT_LEARNING_WORKER_CPU_AFFINITY=2,3
 
 这样 worker 可以吃满 2 个核心，主 backend 仍保留数据同步、健康检查、cTrader 和交易接口。
 
+`deployment/quant-backend.service` 是 backend unit 的仓库 authoritative 配置源。它保持
+`127.0.0.1:8000` 的本机监听、`network-online.target`/PostgreSQL ordering、异常退出才重启
+（`Restart=on-failure`），并以 300 秒内最多 5 次启动限制避免 crash loop；停止阶段给
+backend runtime 的 live-loop drain 和子进程组最多 180 秒（`KillMode=control-group`）。
+代理、数据库和认证等部署值只通过 `/home/ubuntu/quant_trading/.env` 引用，不能写进仓库 unit。
+缺少该文件时启动应失败，保持凭据/运行依赖缺失时的 fail-closed 边界。仓库源不等于生产
+已加载：安装或升级必须由受控运维流程复制到 `/etc/systemd/system/` 后再验证；本 SOP 不
+授权 `daemon-reload`、enable 或 restart。若 `/etc` drop-in 与仓库值冲突，以只读的
+`systemctl cat quant-backend.service` 事实为准，并记录差异后再走变更审批。
+
 当前 worker / backend 分工：
 
 - `quant-backend.service`: API、WebSocket、cTrader 连接、live loop、轻量健康检查、数据同步入口
@@ -258,6 +268,18 @@ Environment=QUANT_LEARNING_WORKER_CPU_AFFINITY=2,3
 - SQLite `data/state.db`: 已删除；不再保留本地冷备，运行态状态只查 PostgreSQL
 
 学习 worker 当前固定使用 `CPUAffinity=2 3`，可以让重训练任务吃满 2 个核心；不要再把高 CPU 学习任务放回 backend 进程。
+
+仓库内的 worker unit 是恢复策略的配置源：`quant-learning-worker.service` 和
+`quant-job-worker.service` 都只在异常退出时由 systemd 重启（`Restart=on-failure`），
+使用 30 秒退避与 300 秒内最多 5 次启动限制，避免 crash loop；同时显式声明
+`TimeoutStopSec=180s`、`KillMode=control-group`。SIGTERM 仍先交给进程自身的停止逻辑：
+learning worker 设置 scheduler stop event 后退出主循环，但其 daemon scheduler 不承诺逐个
+join；job worker 则保持当前 leased handler 和 heartbeat 直到完成或超时。超时后的进程组
+终止由 lease expiry/recovery 处理，不能解释为已完成。unit 的 `After=`/`Wants=` 保证网络和
+PostgreSQL 的启动顺序/拉起请求，但不替代 backend unit 的独立启停。部署后若怀疑 `/etc`
+drop-in 覆盖了这些值，必须只读检查
+`systemctl cat quant-learning-worker.service quant-job-worker.service`，不能以仓库 unit
+文件单独声称生产已加载。
 
 常用检查：
 
@@ -380,7 +402,10 @@ systemctl status quant-backend.service --no-pager
 - bridge 状态是否正确释放
 - 后端是否存在旧 loop 或旧连接未退出
 
-### 退役链路恢复检查
+### 退役链路误恢复检查（异常指纹）
+
+以下检查项来自历史事故复盘，不表示当前支持 L2 链路。L2 depth 订阅、writer
+和独立 collector 已退役；当前代码不应主动恢复它们。
 
 如果现象是：
 
@@ -416,14 +441,16 @@ sudo /home/ubuntu/quant_trading/.venv/bin/py-spy dump --pid $PID
 journalctl _PID=$PID -n 120 --no-pager
 ```
 
-已确认过的真实根因：
+历史事故中的根因指纹（仅用于识别误恢复，不是当前运行事实）：
 
 - `execution/ctrader_bridge.py` depth 事件高频日志
 - depth 事件逐条同步写 `data/l2.duckdb`
 - `/api/learning/*` 导致 `factor_cards.py` / `parameter_templates.py` 重复重算
 - 历史独立 L2 collector 与后端主 bridge 同时占用 cTrader Open API 连接
 
-因此在当前现网配置下，如果日志再出现 `depth events` 或 L2 writer 写入，应视为退役链路被误恢复并立即停止。
+如果当前日志再次出现 `depth events` 或 L2 writer 写入，应先核对进程、systemd
+unit 和代码版本；确认是退役链路后，按变更/事故流程停止误恢复的链路。不要把这些
+历史指纹当作当前后端的正常数据源，也不要据此恢复 L2 collector。
 
 ## 11. 提交前检查
 
