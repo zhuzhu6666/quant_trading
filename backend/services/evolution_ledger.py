@@ -547,7 +547,14 @@ def _try_acquire_coordinator_lock(conn: Any, db_path: str | Path) -> bool | None
             ),
             (_COORDINATOR_LOCK_NAME,),
         ).fetchone()
-        return bool(row[0]) if row is not None else False
+        if row is None:
+            return None
+        if hasattr(row, "keys"):
+            keys = list(row.keys())
+            value = row[keys[0]] if keys else None
+        else:
+            value = row[0] if row else None
+        return None if value is None else bool(value)
     except Exception:
         logger.exception("failed to acquire evolution coordinator advisory lock")
         return None

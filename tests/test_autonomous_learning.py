@@ -913,6 +913,33 @@ def test_recover_orphaned_evolution_runs_fails_closed_when_lock_unavailable(
         conn.close()
 
 
+def test_try_acquire_coordinator_lock_accepts_mapping_and_tuple_rows(monkeypatch):
+    class _Cursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _Connection:
+        def __init__(self, row):
+            self.row = row
+
+        def execute(self, *_args):
+            return _Cursor(self.row)
+
+    monkeypatch.setattr(evolution_ledger, "_use_pg", lambda _db_path: True)
+    for row, expected in (
+        ({"acquired": True}, True),
+        ({"acquired": False}, False),
+        ({"acquired": None}, None),
+        ((True,), True),
+    ):
+        assert evolution_ledger._try_acquire_coordinator_lock(
+            _Connection(row), "runtime"
+        ) is expected
+
+
 def test_recover_orphaned_evolution_runs_does_not_report_cas_miss(
     tmp_path, monkeypatch
 ):
