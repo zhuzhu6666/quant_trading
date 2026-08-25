@@ -8,8 +8,14 @@ learning loop; a 90-min grace window keeps the lock from depending on
 downstream health.
 """
 
+import json
+import sqlite3
+import time
+from datetime import datetime, timezone
+
 import pytest
 
+from backend.core.db_helpers import execute as db_execute
 from risk.loss_streak import (
     LadderFacts,
     evaluate_ladder,
@@ -223,3 +229,99 @@ class TestReviewStatement:
         assert hit and hit["trip_date"] == "2026-08-24"
         assert miss is None
         assert none is None
+
+    def test_persist_statement_adapts_postgres_sql_and_closes_connection(self):
+        from backend.services.loss_streak_review import persist_loss_review_statement
+
+        class FakePostgresConnection:
+            def __init__(self):
+                self.calls = []
+                self.committed = False
+                self.closed = False
+
+            def execute(self, sql, params=None):
+                self.calls.append((sql, params))
+                return self
+
+            def commit(self):
+                self.committed = True
+
+            def close(self):
+                self.closed = True
+
+        FakePostgresConnection.__module__ = "psycopg"
+        conn = FakePostgresConnection()
+
+        written = persist_loss_review_statement(
+            {"trip_date": "2026-08-25", "action": "no_change"},
+            connection_factory=lambda: conn,
+            state_execute=db_execute,
+            now=123.0,
+        )
+
+        assert written is True
+        assert conn.calls[0][0].count("%s") == 3
+        assert "?" not in conn.calls[0][0]
+        assert conn.calls[0][1][0] == "loss_streak_review_statement"
+        assert conn.committed is True
+        assert conn.closed is True
+
+    def test_produce_statement_persists_review_and_marks_book(self, tmp_path):
+        from backend.services.autonomous_learning import _produce_loss_streak_review_statement
+
+        db_path = tmp_path / "loss_streak.sqlite"
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE runtime_kv (
+                    key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE TABLE experience_memory (
+                    outcome_label TEXT,
+                    failure_tags_json TEXT,
+                    created_at REAL
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO runtime_kv(key, value_json, updated_at) VALUES (?, ?, ?)",
+                (
+                    "loss_streak_book",
+                    json.dumps({"trip_date": today}),
+                    1.0,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO runtime_kv(key, value_json, updated_at) VALUES (?, ?, ?)",
+                (
+                    f"live.session_state.{today}",
+                    json.dumps({"session_trade_pnls": [-10.0, -12.0]}),
+                    1.0,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO experience_memory(outcome_label, failure_tags_json, created_at) VALUES (?, ?, ?)",
+                ("loss", json.dumps(["weak_entry_loss"]), time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = _produce_loss_streak_review_statement(db_path)
+
+        assert result["status"] == "written"
+        assert result["action"] == "tighten"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = dict(conn.execute(
+                "SELECT key, value_json FROM runtime_kv WHERE key IN (?, ?)",
+                ("loss_streak_book", "loss_streak_review_statement"),
+            ).fetchall())
+        finally:
+            conn.close()
+        assert json.loads(rows["loss_streak_review_statement"])["action"] == "tighten"
+        assert json.loads(rows["loss_streak_book"])["review_for_date"] == today

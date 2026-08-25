@@ -6014,12 +6014,13 @@ def _produce_loss_streak_review_statement(db_path: str | Path = STATE_DB) -> dic
 
         conn = _connect(db_path, read_only=True)
         try:
-            row = conn.execute(
+            row = _execute(
+                conn,
                 "SELECT value_json FROM runtime_kv WHERE key=?", ("loss_streak_book",)
             ).fetchone()
         finally:
             conn.close()
-        raw = row[0] if row else None
+        raw = _row_value(row, "value_json", 0) if row else None
         import json as _json
 
         book = _json.loads(raw) if isinstance(raw, str) else (raw or {})
@@ -6039,13 +6040,14 @@ def _produce_loss_streak_review_statement(db_path: str | Path = STATE_DB) -> dic
         # Today's realized trade PnLs from the session-state cache.
         conn = _connect(db_path, read_only=True)
         try:
-            row = conn.execute(
+            row = _execute(
+                conn,
                 "SELECT value_json FROM runtime_kv WHERE key=?",
                 (f"live.session_state.{today}",),
             ).fetchone()
         finally:
             conn.close()
-        raw_state = row[0] if row else None
+        raw_state = _row_value(row, "value_json", 0) if row else None
         state = _json.loads(raw_state) if isinstance(raw_state, str) else (raw_state or {})
         trade_pnls = [
             float(p)
@@ -6059,7 +6061,8 @@ def _produce_loss_streak_review_statement(db_path: str | Path = STATE_DB) -> dic
         try:
             conn = _connect(db_path, read_only=True)
             try:
-                rows = conn.execute(
+                rows = _execute(
+                    conn,
                     """
                     SELECT outcome_label, failure_tags_json
                     FROM experience_memory
@@ -6096,7 +6099,7 @@ def _produce_loss_streak_review_statement(db_path: str | Path = STATE_DB) -> dic
         written = persist_loss_review_statement(
             statement,
             connection_factory=lambda: _connect(db_path),
-            state_execute=lambda conn, sql, params=None, commit=False: conn.execute(sql, params or ()) if params else conn.execute(sql),
+            state_execute=_execute,
         )
         if written:
             # Mark the book so the statement is produced once per trip.
@@ -6104,7 +6107,8 @@ def _produce_loss_streak_review_statement(db_path: str | Path = STATE_DB) -> dic
                 mark_conn = _connect(db_path)
                 try:
                     book["review_for_date"] = trip_date
-                    mark_conn.execute(
+                    _execute(
+                        mark_conn,
                         """
                         INSERT INTO runtime_kv(key, value_json, updated_at)
                         VALUES (?, ?, ?)

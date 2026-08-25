@@ -88,6 +88,7 @@ def persist_loss_review_statement(
     now: float | None = None,
 ) -> bool:
     """Write the statement into runtime_kv via the caller's PG connection."""
+    conn = None
     try:
         conn = connection_factory()
         ts = float(now if now is not None else time.time())
@@ -104,11 +105,14 @@ def persist_loss_review_statement(
                 updated_at=excluded.updated_at
             """,
             (KV_KEY, payload_json, ts),
-            commit=True,
         )
+        conn.commit()
         return True
     except Exception:
         return False
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def load_loss_review_statement(
