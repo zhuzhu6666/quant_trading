@@ -769,6 +769,76 @@ def test_parameter_template_recommendations_surface_parameter_suspicion(tmp_path
     assert "suggestion 审批" in item["governance"]["followup_hint"]
 
 
+def test_factor_cards_parameter_responsibility_filter_keeps_only_matching_factors(tmp_path):
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    _seed_factor_card_state(db_path)
+
+    cards = FactorCardService(db_path).list_cards(
+        limit=10,
+        responsibility="parameter",
+    )
+
+    assert [item["factor_id"] for item in cards] == ["rsi_14"]
+    assert cards[0]["evidence_summary"]["last_primary_responsibility"] == "parameter"
+
+
+def test_factor_cards_parameter_responsibility_filter_uses_batch_snapshot_evidence(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    _seed_factor_card_state(db_path)
+
+    import backend.services.factor_cards as factor_cards
+
+    monkeypatch.setattr(
+        factor_cards,
+        "iter_decision_factor_snapshots_by_factor",
+        lambda *_args, **_kwargs: pytest.fail(
+            "parameter responsibility cards must not rescan snapshots per factor"
+        ),
+    )
+
+    cards = FactorCardService(db_path).list_cards(
+        factor_id="rsi_14",
+        limit=1,
+        responsibility="parameter",
+    )
+
+    assert len(cards) == 1
+    assert cards[0]["evidence_summary"]["sample_count"] == 1
+
+
+def test_factor_cards_parameter_responsibility_filter_fails_closed_on_batch_error(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    _seed_factor_card_state(db_path)
+
+    import research.features.feature_provider as feature_provider
+
+    monkeypatch.setattr(
+        feature_provider.LearningFeatureProvider,
+        "factor_evidence_summary",
+        lambda _self, factor_ids: {
+            factor_id: {"status": "unavailable"}
+            for factor_id in factor_ids
+        },
+    )
+
+    cards = FactorCardService(db_path).list_cards(
+        factor_id="rsi_14",
+        limit=1,
+        responsibility="parameter",
+    )
+
+    assert cards == []
+
+
 def test_parameter_template_recommendations_can_surface_offline_validate_path(tmp_path):
     db_path = str(tmp_path / "state.db")
     reset_shared()

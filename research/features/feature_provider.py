@@ -1409,6 +1409,8 @@ class LearningFeatureProvider:
         result = {
             factor_id: {
                 "decision_observations": 0,
+                "shadow_score": 0.0,
+                "avg_contribution_score": 0.0,
                 "factor_linked_trade_reviews": 0,
                 "governance_eligible_mature": 0,
                 "contaminated_or_ineligible": 0,
@@ -1426,7 +1428,14 @@ class LearningFeatureProvider:
                 d_factors: dict[str, list[str]] = defaultdict(list)
                 r_factors: dict[str, list[str]] = defaultdict(list)
                 decision_observations: dict[str, int] = defaultdict(int)
-                for decision in iter_decision_rows(conn, limit=0):
+                recent_snapshot_observations: dict[str, int] = defaultdict(int)
+                shadow_sums: dict[str, float] = defaultdict(float)
+                contribution_sums: dict[str, float] = defaultdict(float)
+                # Keep the card-facing averages on the same recent window as
+                # FactorCardService._EVIDENCE_SNAPSHOT_LIMIT while retaining
+                # the existing all-history decision_observations count.
+                recent_snapshot_limit = 2000
+                for decision in iter_decision_rows(conn, limit=0, reverse=True):
                     decision_id = str(decision.get("decision_id") or "")
                     for snapshot in iter_decision_factor_snapshots(conn, decision_id):
                         factor = str(snapshot.get("factor") or "")
@@ -1434,6 +1443,10 @@ class LearningFeatureProvider:
                             continue
                         d_factors[decision_id].append(factor)
                         decision_observations[factor] += 1
+                        if recent_snapshot_observations[factor] < recent_snapshot_limit:
+                            recent_snapshot_observations[factor] += 1
+                            shadow_sums[factor] += _safe_float(snapshot.get("shadow_score"))
+                            contribution_sums[factor] += _safe_float(snapshot.get("contribution_score"))
 
                 review_links: dict[str, set[str]] = defaultdict(set)
                 for review in iter_review_rows_desc(conn, limit=0):
@@ -1445,7 +1458,19 @@ class LearningFeatureProvider:
                             review_links[factor].add(review_id)
 
                 for factor_id in ids:
-                    result[factor_id]["decision_observations"] = int(decision_observations.get(factor_id, 0))
+                    observations = int(decision_observations.get(factor_id, 0))
+                    recent_observations = int(
+                        recent_snapshot_observations.get(factor_id, 0)
+                    )
+                    result[factor_id]["decision_observations"] = observations
+                    result[factor_id]["shadow_score"] = round(
+                        shadow_sums.get(factor_id, 0.0) / recent_observations,
+                        6,
+                    ) if recent_observations else 0.0
+                    result[factor_id]["avg_contribution_score"] = round(
+                        contribution_sums.get(factor_id, 0.0) / recent_observations,
+                        6,
+                    ) if recent_observations else 0.0
                     result[factor_id]["factor_linked_trade_reviews"] = len(review_links.get(factor_id, set()))
                 for s in sampled_rows:
                     factors: set[str] = set()
@@ -1483,6 +1508,8 @@ class LearningFeatureProvider:
         except Exception:
             for item in result.values():
                 item["decision_observations"] = None
+                item["shadow_score"] = None
+                item["avg_contribution_score"] = None
                 item["factor_linked_trade_reviews"] = None
                 item["governance_eligible_mature"] = None
                 item["contaminated_or_ineligible"] = None

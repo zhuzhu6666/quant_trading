@@ -271,7 +271,11 @@ class ParameterTemplateService:
         if not allow_compute:
             return []
 
-        cards = self.cards.list_cards(limit=max(200, limit * 3), factor_id=factor_id)
+        cards = self.cards.list_cards(
+            limit=max(200, limit * 3),
+            factor_id=factor_id,
+            responsibility="parameter",
+        )
         items: list[dict[str, Any]] = []
         for card in cards:
             recommendation = self._build_recommendation(card)

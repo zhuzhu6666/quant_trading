@@ -479,10 +479,11 @@ class FactorCardService:
         lifecycle_status: str | None = None,
         factor_id: str | None = None,
         factor_family: str | None = None,
+        responsibility: str | None = None,
     ) -> list[dict[str, Any]]:
         cache_key = (
             f"{self.db_path.resolve()}|limit:{int(limit)}|{source or '*'}|{lifecycle_status or '*'}|"
-            f"{factor_id or '*'}|{factor_family or '*'}"
+            f"{factor_id or '*'}|{factor_family or '*'}|{responsibility or '*'}"
         )
         now_ts = time.time()
         with _CARD_CACHE_LOCK:
@@ -527,6 +528,11 @@ class FactorCardService:
                 runtime_projection = {"status": "unavailable", "ok": False}
             if factor_id:
                 ids = [factor_id]
+            elif responsibility:
+                # Responsibility filtering must inspect the complete catalog
+                # before ranking.  Ranking the catalog first could discard a
+                # shadow factor that is the only current parameter suspect.
+                ids = sorted(ids)
             else:
                 candidate_cap = max(_CANDIDATE_MIN_LIMIT, int(limit) * (10 if (source or lifecycle_status or factor_family) else 5))
                 ids = self._rank_candidate_ids(ids, catalog_by_factor, candidate_cap)
@@ -539,13 +545,57 @@ class FactorCardService:
                 ).factor_evidence_summary(ids)
             except Exception:
                 evidence_by_factor = {}
+            review_evidence_by_factor = self._batch_review_evidence(
+                conn,
+                ids,
+            )
+            card_evidence_by_factor: dict[str, dict[str, Any]] = {}
+            for name in ids:
+                merged = dict(evidence_by_factor.get(name) or {})
+                merged.update(review_evidence_by_factor.get(name) or {})
+                card_evidence_by_factor[name] = merged
+            if responsibility:
+                responsibility_key = str(responsibility).strip().lower()
+                if responsibility_key != "parameter":
+                    raise ValueError(
+                        f"unsupported factor card responsibility filter: {responsibility}"
+                    )
+                if not all(
+                    str(card_evidence_by_factor[name].get("status") or "") == "available"
+                    and str(
+                        card_evidence_by_factor[name].get("review_evidence_status") or ""
+                    ) == "available"
+                    for name in ids
+                ):
+                    # Parameter recommendations are governance inputs.  A
+                    # partial batch must not fall back to stale/per-factor
+                    # evidence and produce a recommendation.
+                    return []
+                ids = [
+                    name
+                    for name in ids
+                    if str(
+                        card_evidence_by_factor[name].get(
+                            "last_primary_responsibility"
+                        )
+                        or ""
+                    )
+                    == "parameter"
+                    or "factor_logic_ok_but_param_suspect"
+                    in list(
+                        card_evidence_by_factor[name].get(
+                            "recent_responsibility_labels"
+                        )
+                        or []
+                    )
+                ]
             built = [
                 self._build_card(
                     name,
                     conn=conn,
                     catalog_item=catalog_by_factor.get(name),
                     runtime_projection=runtime_projection,
-                    evidence_counts=evidence_by_factor.get(name),
+                    evidence_counts=card_evidence_by_factor.get(name),
                 )
                 for name in ids
             ]
@@ -646,6 +696,83 @@ class FactorCardService:
             pass
         return sorted(name for name in names if name)
 
+    def _batch_review_evidence(
+        self,
+        conn,
+        factor_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        ids = list(dict.fromkeys(str(item) for item in factor_ids if str(item)))
+        result = {
+            factor_id: {
+                "review_evidence_status": "available",
+                "last_primary_responsibility": "",
+                "recent_responsibility_labels": [],
+                "review_updated_at_ts": 0.0,
+            }
+            for factor_id in ids
+        }
+        if not ids:
+            return result
+        placeholders = ",".join("?" for _ in ids)
+        try:
+            rows = _execute(
+                conn,
+                f"""
+                SELECT factor, review_id, notes
+                FROM factor_contribution_review
+                WHERE factor IN ({placeholders})
+                ORDER BY id DESC
+                """,
+                tuple(ids),
+            ).fetchall()
+            recent_rows: dict[str, list[Any]] = {factor_id: [] for factor_id in ids}
+            review_ids_by_factor: dict[str, list[str]] = {
+                factor_id: [] for factor_id in ids
+            }
+            for row in rows:
+                factor_id = str(row["factor"] or "")
+                if factor_id not in result:
+                    continue
+                if len(recent_rows[factor_id]) < 12:
+                    recent_rows[factor_id].append(row)
+                review_id = str(row["review_id"] or "")
+                if review_id:
+                    review_ids_by_factor[factor_id].append(review_id)
+
+            for factor_id in ids:
+                labels: list[str] = []
+                primary = ""
+                for row in recent_rows[factor_id]:
+                    notes = str(row["notes"] or "")
+                    payload = _loads(notes, {}) if notes.startswith("{") else {}
+                    if not isinstance(payload, dict):
+                        payload = {}
+                    if not primary:
+                        primary = str(payload.get("primary_responsibility") or "")
+                    for label in payload.get("responsibility_labels") or []:
+                        item = str(label or "")
+                        if item and item not in labels:
+                            labels.append(item)
+                updated_at = 0.0
+                for review_id in review_ids_by_factor[factor_id]:
+                    review = review_row(conn, review_id)
+                    if review is not None:
+                        updated_at = max(
+                            updated_at,
+                            float(review.get("created_at") or 0.0),
+                        )
+                result[factor_id].update(
+                    {
+                        "last_primary_responsibility": primary,
+                        "recent_responsibility_labels": labels,
+                        "review_updated_at_ts": updated_at,
+                    }
+                )
+        except Exception:
+            for item in result.values():
+                item["review_evidence_status"] = "unavailable"
+        return result
+
     def _build_card(
         self,
         factor_id: str,
@@ -675,7 +802,12 @@ class FactorCardService:
         parameters = self._infer_parameters(factor_id, description, family)
         formula_version = str(meta.get("formula_version") or self._default_formula_version(source, factor_id))
         parameter_version = str(meta.get("parameter_version") or self._default_parameter_version(source))
-        evidence = self._evidence_summary(factor_id, description, conn=conn)
+        evidence = self._evidence_summary(
+            factor_id,
+            description,
+            conn=conn,
+            batch_summary=evidence_counts,
+        )
         governance = self._governance_state(factor_id, evidence=evidence, conn=conn)
         evidence_counts = self._evidence_counts(
             factor_id,
@@ -903,10 +1035,22 @@ class FactorCardService:
             "status": "unavailable",
         }
 
-    def _evidence_summary(self, factor_id: str, description: str, *, conn=None) -> dict[str, Any]:
+    def _evidence_summary(
+        self,
+        factor_id: str,
+        description: str,
+        *,
+        conn=None,
+        batch_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if conn is None:
             with self._conn() as owned:
-                return self._evidence_summary(factor_id, description, conn=owned)
+                return self._evidence_summary(
+                    factor_id,
+                    description,
+                    conn=owned,
+                    batch_summary=batch_summary,
+                )
         health_row = _execute(
             conn,
             """
@@ -916,60 +1060,92 @@ class FactorCardService:
             """,
             (factor_id,),
         ).fetchone()
-        snapshot_rows = iter_decision_factor_snapshots_by_factor(
-            conn,
-            factor_id,
-            limit=_EVIDENCE_SNAPSHOT_LIMIT,
+        batch = batch_summary if isinstance(batch_summary, dict) else {}
+        batch_available = (
+            str(batch.get("status") or "") == "available"
+            and str(batch.get("review_evidence_status") or "available")
+            == "available"
+            and "decision_observations" in batch
+            and "shadow_score" in batch
+            and "avg_contribution_score" in batch
         )
-        if snapshot_rows:
-            shadow_scores = [float(r.get("shadow_score") or 0) for r in snapshot_rows]
-            contrib_scores = [float(r.get("contribution_score") or 0) for r in snapshot_rows]
+        if batch_available:
             snapshot_row = {
-                "avg_shadow_score": sum(shadow_scores) / len(shadow_scores) if shadow_scores else 0,
-                "avg_contribution_score": sum(contrib_scores) / len(contrib_scores) if contrib_scores else 0,
-                "sample_count": len(snapshot_rows),
+                "avg_shadow_score": float(batch.get("shadow_score") or 0.0),
+                "avg_contribution_score": float(
+                    batch.get("avg_contribution_score") or 0.0
+                ),
+                "sample_count": int(
+                    batch.get("decision_observations") or 0
+                ),
             }
         else:
-            snapshot_row = None
-        review_rows = _execute(
-            conn,
-            """
-            SELECT notes
-            FROM factor_contribution_review
-            WHERE factor=?
-            ORDER BY id DESC
-            LIMIT 12
-            """,
-            (factor_id,),
-        ).fetchall()
-        review_ids = [
-            str(row["review_id"] or "")
-            for row in _execute(
+            snapshot_rows = iter_decision_factor_snapshots_by_factor(
                 conn,
-                "SELECT review_id FROM factor_contribution_review WHERE factor=?",
+                factor_id,
+                limit=_EVIDENCE_SNAPSHOT_LIMIT,
+            )
+            if snapshot_rows:
+                shadow_scores = [float(r.get("shadow_score") or 0) for r in snapshot_rows]
+                contrib_scores = [float(r.get("contribution_score") or 0) for r in snapshot_rows]
+                snapshot_row = {
+                    "avg_shadow_score": sum(shadow_scores) / len(shadow_scores),
+                    "avg_contribution_score": sum(contrib_scores) / len(contrib_scores),
+                    "sample_count": len(snapshot_rows),
+                }
+            else:
+                snapshot_row = None
+        if batch_available:
+            updated_at = float(batch.get("review_updated_at_ts") or 0.0)
+            labels = [
+                str(item or "")
+                for item in list(batch.get("recent_responsibility_labels") or [])
+                if str(item or "")
+            ]
+            last_primary = str(
+                batch.get("last_primary_responsibility") or ""
+            )
+        else:
+            review_rows = _execute(
+                conn,
+                """
+                SELECT notes
+                FROM factor_contribution_review
+                WHERE factor=?
+                ORDER BY id DESC
+                LIMIT 12
+                """,
                 (factor_id,),
             ).fetchall()
-            if str(row["review_id"] or "")
-        ]
-        updated_at = 0.0
-        for review_id in review_ids:
-            review = review_row(conn, review_id)
-            if review is not None:
-                updated_at = max(updated_at, float(review.get("created_at") or 0.0))
-        review_updated_row = {"updated_at": updated_at} if review_ids else None
-        labels: list[str] = []
-        last_primary = ""
-        for row in review_rows:
-            payload = _loads(row["notes"], {}) if str(row["notes"] or "").startswith("{") else {}
-            if not last_primary:
-                last_primary = str(payload.get("primary_responsibility") or "")
-            for label in payload.get("responsibility_labels") or []:
-                item = str(label or "")
-                if item and item not in labels:
-                    labels.append(item)
+            review_ids = [
+                str(row["review_id"] or "")
+                for row in _execute(
+                    conn,
+                    "SELECT review_id FROM factor_contribution_review WHERE factor=?",
+                    (factor_id,),
+                ).fetchall()
+                if str(row["review_id"] or "")
+            ]
+            updated_at = 0.0
+            for review_id in review_ids:
+                review = review_row(conn, review_id)
+                if review is not None:
+                    updated_at = max(updated_at, float(review.get("created_at") or 0.0))
+            labels = []
+            last_primary = ""
+            for row in review_rows:
+                payload = _loads(row["notes"], {}) if str(row["notes"] or "").startswith("{") else {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                if not last_primary:
+                    last_primary = str(payload.get("primary_responsibility") or "")
+                for label in payload.get("responsibility_labels") or []:
+                    item = str(label or "")
+                    if item and item not in labels:
+                        labels.append(item)
         updated_at_ts = max(
             float((health_row["updated_at"] if health_row else 0.0) or 0.0),
-            float((review_updated_row["updated_at"] if review_updated_row else 0.0) or 0.0),
+            float(updated_at or 0.0),
         )
         return {
             "description": description,
