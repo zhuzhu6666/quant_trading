@@ -3851,6 +3851,7 @@ def _reset_session_state_for_new_day() -> None:
         accepting_new_risk=False,
         trade_equity_history=[start_balance] if start_balance > 0.0 else [],
     )
+    _reset_business_alert_armed()  # 新交易日: 业务告警全部重新武装
     _persist_session_state()
 
 
@@ -11925,10 +11926,31 @@ def _run_position_protection_cycle(
 
 # ── 业务告警 ─────────────────────────────────────────────
 
+# 告警边沿状态 (2026-08-25): session_max_drawdown_pct 是当日只涨不降的水位,
+# consec 在持仓未平前也不变, 按 tick % 10 重发会把同一条告警每 5 分钟刷一遍
+# 直到日切。改为边沿触发: 状态恶化跨过阈值那一刻发一次, 回落后重新武装。
+_business_alert_armed: dict[str, bool] = {}
+_BUSINESS_ALERT_ARM_LOCK = threading.Lock()
+
+
+def _reset_business_alert_armed() -> None:
+    """Re-arm all edge-triggered business alerts (new trading day)."""
+    with _BUSINESS_ALERT_ARM_LOCK:
+        _business_alert_armed.clear()
+
+
+def _business_alert_should_send(key: str, active: bool) -> bool:
+    """Edge trigger: True only when ``active`` just turned on since last call."""
+    with _BUSINESS_ALERT_ARM_LOCK:
+        was_active = _business_alert_armed.get(key, False)
+        _business_alert_armed[key] = active
+        return active and not was_active
+
+
 def _check_business_alerts(tick: int, acct: dict, pos: list, log) -> None:
     """每 tick 检查业务告警规则, 通过 Alerter 发送。
 
-    规则:
+    规则 (全部边沿触发, 状态恶化才发一次, 回落重新武装):
       1. 连亏 ≥ 3 笔 → WARNING
       2. 当日回撤 ≥ 3% → WARNING, ≥ 5% → ERROR
       3. 熔断触发 → CRITICAL (已在 circuit 逻辑中触发, 此处仅补发)
@@ -11937,28 +11959,54 @@ def _check_business_alerts(tick: int, acct: dict, pos: list, log) -> None:
         from monitor.alerter import Alerter
         _alerter = Alerter({"log_file": "logs/alerts.log", "min_level": "WARNING"})
 
-        # 规则 1: 连亏
+        # 规则 1: 连亏 — 边沿触发且按笔数升级: 进入连亏状态发一次,
+        # 连亏加深(3→4→5)每档再发一次; 回落到 <3 后重新武装。
         consec = int(_live_state_get("session_consecutive_loss", 0))
-        if consec >= 3 and tick % 10 == 0:  # 每 10 tick 发一次, 避免刷屏
-            _alerter.send("WARNING", f"⚠️ 连续亏损 {consec} 笔",
-                          f"Tick: {tick}\nConsecutive Loss: {consec}\n"
-                          f"Session PnL: ${_live_state_get('session_pnl', 0):.2f}")
+        if consec >= 3:
+            with _BUSINESS_ALERT_ARM_LOCK:
+                _last_notified = _business_alert_armed.get(
+                    "consecutive_loss_value"
+                )
+                _business_alert_armed["consecutive_loss_value"] = consec
+            if _last_notified != consec:
+                _alerter.send("WARNING", f"⚠️ 连续亏损 {consec} 笔",
+                              f"Tick: {tick}\nConsecutive Loss: {consec}\n"
+                              f"Session PnL: ${_live_state_get('session_pnl', 0):.2f}")
+                log(f"[alerts] consecutive-loss warning sent: streak={consec}")
+        else:
+            with _BUSINESS_ALERT_ARM_LOCK:
+                _business_alert_armed.pop("consecutive_loss_value", None)
 
-        # 规则 2: 当日回撤
+        # 规则 2: 当日回撤 — 水位只涨不降, 按水位抬升分级:
+        #   首次越过 5% → ERROR; 已在 ERROR 区间内继续抬高不重发;
+        #   回落到 <3% 后重新武装。
         dd_pct = float(_live_state_get("session_max_drawdown_pct", 0))
         balance = float(acct.get("balance", 0))
-        if dd_pct >= 5.0 and tick % 10 == 0:
-            _alerter.send("ERROR", f"🔴 当日回撤 {dd_pct:.1f}%",
-                          f"Tick: {tick}\nDrawdown: {dd_pct:.1f}%\n"
-                          f"Balance: ${balance:.2f}\n"
-                          f"Session PnL: ${_live_state_get('session_pnl', 0):.2f}")
-        elif dd_pct >= 3.0 and tick % 10 == 0:
+        if dd_pct >= 5.0:
+            # 水位进入 ERROR 区: 发一次升级告警, 并解除 WARNING 武装
+            # (水位当日不回落, 此分支后不会再发)
+            if _business_alert_should_send("dd_error", True):
+                _alerter.send("ERROR", f"🔴 当日回撤 {dd_pct:.1f}%",
+                              f"Tick: {tick}\nDrawdown: {dd_pct:.1f}%\n"
+                              f"Balance: ${balance:.2f}\n"
+                              f"Session PnL: ${_live_state_get('session_pnl', 0):.2f}")
+                log(f"[alerts] drawdown ERROR sent: dd={dd_pct:.1f}%")
+            _business_alert_should_send("dd_warn", False)
+        elif 3.0 <= dd_pct < 5.0 and _business_alert_should_send("dd_warn", True):
             _alerter.send("WARNING", f"⚠️ 当日回撤 {dd_pct:.1f}%",
                           f"Tick: {tick}\nDrawdown: {dd_pct:.1f}%\n"
                           f"Balance: ${balance:.2f}")
+            log(f"[alerts] drawdown WARNING sent: dd={dd_pct:.1f}%")
+        elif dd_pct < 3.0:
+            # 回落到安全区, 重新武装两条回撤告警
+            _business_alert_should_send("dd_error", False)
+            _business_alert_should_send("dd_warn", False)
 
         # 规则 3: 熔断确认
-        if _live_state_get("circuit_breaker") and tick % 10 == 0:
+        if _business_alert_should_send(
+            "circuit_breaker",
+            bool(_live_state_get("circuit_breaker")),
+        ):
             reason = _live_state_get("circuit_reason", "unknown")
             _alerter.send("CRITICAL", "🔴 熔断触发",
                           f"Tick: {tick}\nReason: {reason}\n"
