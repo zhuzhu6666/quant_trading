@@ -831,6 +831,9 @@ class ParameterTemplateService:
         note: str = "",
         allow_offline_deep: bool = False,
         v16_command_id: str = "",
+        v16_candidate_id: str = "",
+        v16_posterior_fingerprint: str = "",
+        v16_evidence_fingerprint: str = "",
     ) -> dict[str, Any]:
         from backend.services.governance_control_plans import governance_coordinator_mode
 
@@ -848,6 +851,9 @@ class ParameterTemplateService:
                 note=note,
                 allow_offline_deep=allow_offline_deep,
                 v16_command_id=v16_command_id,
+                v16_candidate_id=v16_candidate_id,
+                v16_posterior_fingerprint=v16_posterior_fingerprint,
+                v16_evidence_fingerprint=v16_evidence_fingerprint,
             )
         return self._activate_template_coordinated(
             factor_id=factor_id,
@@ -857,6 +863,9 @@ class ParameterTemplateService:
             note=note,
             allow_offline_deep=allow_offline_deep,
             v16_command_id=v16_command_id,
+            v16_candidate_id=v16_candidate_id,
+            v16_posterior_fingerprint=v16_posterior_fingerprint,
+            v16_evidence_fingerprint=v16_evidence_fingerprint,
         )
 
     def rollback_template_application(
@@ -1139,6 +1148,9 @@ class ParameterTemplateService:
         note: str = "",
         allow_offline_deep: bool = False,
         v16_command_id: str = "",
+        v16_candidate_id: str = "",
+        v16_posterior_fingerprint: str = "",
+        v16_evidence_fingerprint: str = "",
     ) -> dict[str, Any]:
         from backend.services.governance_control_plans import (
             ParameterTemplateActivationPlan,
@@ -1312,6 +1324,9 @@ class ParameterTemplateService:
                 f"{factor_id}:{regime_key or 'default'}:{old_template_id}:{template_id}"
             ),
             v16_command_id=v16_command_id,
+            v16_candidate_id=v16_candidate_id,
+            v16_posterior_fingerprint=v16_posterior_fingerprint,
+            evidence_fingerprint=v16_evidence_fingerprint,
         )
 
         def upsert(
@@ -1576,6 +1591,9 @@ class ParameterTemplateService:
         note: str = "",
         allow_offline_deep: bool = False,
         v16_command_id: str = "",
+        v16_candidate_id: str = "",
+        v16_posterior_fingerprint: str = "",
+        v16_evidence_fingerprint: str = "",
     ) -> dict[str, Any]:
         target = self.get_template(template_id=template_id)
         if not target:
@@ -1628,6 +1646,9 @@ class ParameterTemplateService:
                 scope_key="online_light",
                 action="switch_parameter_template",
                 command_id=v16_command_id,
+                candidate_id=v16_candidate_id,
+                posterior_fingerprint=v16_posterior_fingerprint,
+                evidence_fingerprint=v16_evidence_fingerprint,
             )
             if not v16_authority.get("allowed"):
                 return {

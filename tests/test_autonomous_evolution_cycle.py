@@ -621,6 +621,22 @@ def test_v16_actionable_predicate_skips_stale_head_and_claimed_command(
                 ("candidate-fresh", now - 10.0, now - 10.0),
             ],
         )
+        # 2026-08-26 合同收紧: V16 delegate 命令要求候选已有 bridge_ready 且
+        # 新于候选 updated_at 的评审, 否则命令按 candidate_not_active 取消。
+        # 本测试聚焦时效生命周期 (stale 过期 / claimed 不可认领), 夹具补齐
+        # 合格评审行以满足该前置合同。
+        conn.executemany(
+            """
+            INSERT INTO brain_governance_candidate_review
+            (review_id, candidate_id, review_status, bridge_ready,
+             evidence_fingerprint, created_at)
+            VALUES (?, ?, 'approved', 1, 'fixture-review-fp', ?)
+            """,
+            [
+                ("review-stale", "candidate-stale", now - 110.0),
+                ("review-fresh", "candidate-fresh", now - 5.0),
+            ],
+        )
         conn.executemany(
             """
             INSERT INTO v16_brain_command

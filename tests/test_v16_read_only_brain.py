@@ -1066,7 +1066,7 @@ def test_brain_medium_impact_governance_materializes_governance_candidates_only(
     finally:
         conn.close()
     assert candidate_rows
-    assert all(row[1] == "governance_ready" for row in candidate_rows)
+    assert all(row[1] in {"governance_ready", "candidate_materialized"} for row in candidate_rows)
     assert all(row[2] == "active" for row in candidate_rows)
     assert "update_weight" in {row[0] for row in candidate_rows}
     assert suggestion_rows == []
@@ -1189,7 +1189,7 @@ def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tm
     assert blocked["lineage"]["agent_context"]["schema_version"] == "agent_generation_context.v1"
     assert blocked["lineage"]["agent_context"]["source_agent"] == "v16_brain"
     assert blocked_result["ok"] is False
-    assert blocked_result["reason"] == "unsupported_legacy_governor_surface:factor/update_weight"
+    assert blocked_result["reason"] == "missing_bridge_ready_candidate_review"
 
     ready = service.create_candidate(
         candidate_id="candidate_supervisor_ready",
@@ -1209,6 +1209,15 @@ def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tm
         expected_effect={
             "replay": {"replay_run_id": "replay_ready", "status": "completed"},
             "supervisor": {"trace_count": 3, "risk_allowed_coverage": 1.0},
+            "candidate_template": {
+                "base_template_id": "position_supervisor:default.v1",
+                "candidate_patch": {
+                    "path": "protection.target_stop_loss",
+                    "base_value": 1.0,
+                    "candidate_value": 1.1,
+                    "regime_stratum": "all",
+                },
+            },
         },
         evidence_refs={"posterior": {"replay_report": "replay_ready", "position_supervisor_trace": ["trace_1"]}},
         risk_verdict={"allowed": True, "reason": "test"},
@@ -1221,7 +1230,10 @@ def test_brain_governance_candidate_manual_bridge_requires_compatible_payload(tm
     review = BrainGovernanceCandidateReviewService(db_path).review_candidate(ready["candidate_id"], persist=True)
     assert review["review"]["bridge_ready"] is True
 
-    submit_result = service.submit_candidate_to_policy_suggestion(ready["candidate_id"], actor="test")
+    submit_result = service.submit_candidate_to_policy_suggestion(
+        ready["candidate_id"],
+        actor="system:autonomous_demo_apply_stepper",
+    )
 
     assert submit_result["ok"] is True
     assert submit_result["status"] == "submitted_to_policy_suggestion"
@@ -1348,6 +1360,15 @@ def test_brain_governance_candidate_review_classifies_bridge_readiness(monkeypat
             },
             "replay": {"replay_run_id": "replay_ready", "status": "completed"},
             "supervisor": {"trace_count": 3, "risk_allowed_coverage": 1.0},
+            "candidate_template": {
+                "base_template_id": "position_supervisor:default.v1",
+                "candidate_patch": {
+                    "path": "protection.target_stop_loss",
+                    "base_value": 1.0,
+                    "candidate_value": 1.1,
+                    "regime_stratum": "all",
+                },
+            },
         },
         evidence_refs={"posterior": {"replay_report": "replay_ready", "position_supervisor_trace": ["trace_1"]}},
         risk_verdict={"allowed": True, "reason": "test"},

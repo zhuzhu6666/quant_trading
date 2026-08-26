@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, is_state_db_path, state_table_columns, state_table_exists
-from backend.services.agent_authority import AgentAuthorityRegistryService
+from backend.services.agent_authority import (
+    AgentAuthorityRegistryService,
+    policy_suggestion_requested_writes,
+)
 from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 
@@ -298,6 +301,17 @@ class BrainGovernanceCandidateService:
             status=status,
             impact_level=max_impact,
         )
+        if not bool(authority_verdict.get("allowed")):
+            return {
+                "ok": False,
+                "schema_version": "brain_governance_candidate.v1",
+                "status": "authority_denied",
+                "reason": "source_agent_not_allowed_to_create_candidate",
+                "candidate_id": str(candidate_id or ""),
+                "source_agent": str(source_agent or ""),
+                "authority_verdict": authority_verdict,
+                "boundary": self.boundary(),
+            }
         lineage_payload = dict(lineage or {})
         lineage_payload.setdefault("authority_verdict", authority_verdict)
         lineage_payload.setdefault("agent_context", agent_context)
@@ -770,6 +784,16 @@ class BrainGovernanceCandidateService:
         if not bool(risk_verdict.get("allowed")):
             return self._blocked_submit(candidate, "risk_policy_not_allowed")
         candidate_review = self._latest_bridge_ready_review(candidate_id)
+        if (
+            not candidate_review.get("bridge_ready")
+            or not str(candidate_review.get("evidence_fingerprint") or "")
+            or _safe_float(candidate_review.get("created_at")) < _safe_float(candidate.get("updated_at"))
+        ):
+            return self._blocked_submit(
+                candidate,
+                "missing_bridge_ready_candidate_review",
+                payload={"latest_review": candidate_review, "candidate_review_required_before_submit": True},
+            )
         automatic_demo = self._automatic_demo_bridge_enabled()
 
         payload = self._policy_suggestion_payload(
@@ -780,12 +804,28 @@ class BrainGovernanceCandidateService:
         )
         if not payload.get("ok"):
             return self._blocked_submit(candidate, str(payload.get("reason") or "not_governor_compatible"), payload=payload)
-        if not candidate_review.get("bridge_ready"):
+
+        bridge_evidence = dict(payload.get("evidence") or {})
+        requested_writes = policy_suggestion_requested_writes(
+            str(candidate.get("source_agent") or ""),
+            bridge_evidence,
+        )
+        authority_verdict = AgentAuthorityRegistryService().evaluate_scope_write(
+            str(candidate.get("source_agent") or ""),
+            str(payload.get("scope_type") or candidate.get("scope_type") or ""),
+            str(payload.get("action") or candidate.get("action") or ""),
+            requested_writes=requested_writes,
+            status="proposed",
+            impact_level=str(candidate.get("max_impact") or ""),
+        )
+        if not bool(authority_verdict.get("allowed")):
             return self._blocked_submit(
                 candidate,
-                "missing_bridge_ready_candidate_review",
-                payload={"latest_review": candidate_review, "candidate_review_required_before_submit": True},
+                "source_agent_authority_denied",
+                payload={"authority_verdict": authority_verdict},
             )
+        bridge_evidence["authority_verdict"] = authority_verdict
+        payload["evidence"] = bridge_evidence
 
         suggestion_id = str(payload["suggestion_id"])
         eligibility_fingerprint = hashlib.sha256(
@@ -1196,13 +1236,31 @@ class BrainGovernanceCandidateService:
         if scope_type == "supervisor_template" and action == "switch_position_supervisor_template":
             replay_summary = dict(expected_effect.get("replay") or {})
             supervisor_summary = dict(expected_effect.get("supervisor") or {})
+            candidate_template = dict(
+                expected_effect.get("candidate_template")
+                or mapped.get("candidate_template")
+                or {}
+            )
+            candidate_patch = dict(candidate_template.get("candidate_patch") or {})
+            if not (
+                str(candidate_template.get("base_template_id") or "")
+                and str(candidate_patch.get("path") or "")
+                and str(candidate_patch.get("regime_stratum") or "")
+                and "base_value" in candidate_patch
+                and "candidate_value" in candidate_patch
+            ):
+                return {"ok": False, "reason": "missing_single_control_candidate_contract"}
             target_template_id = str(mapped.get("target_template_id") or scope_key or "position_supervisor:conservative.v1")
             if not replay_summary.get("replay_run_id") or _safe_float(supervisor_summary.get("trace_count")) <= 0:
                 return {"ok": False, "reason": "missing_replay_or_supervisor_evidence"}
             evidence = {
                 **base_evidence,
                 "target_template_id": target_template_id,
-                "candidate_template": {"template_id": target_template_id},
+                "candidate_template_ref": {
+                    "template_id": target_template_id,
+                    "base_template_id": str(candidate_template.get("base_template_id") or ""),
+                    "candidate_patch": candidate_patch,
+                },
                 "replay_summary": replay_summary,
                 "counterfactual_summary": supervisor_summary,
             }
@@ -1266,7 +1324,7 @@ class BrainGovernanceCandidateService:
                 conn,
                 """
                 SELECT review_id, review_status, bridge_ready,
-                       evidence_gaps_json, created_at
+                       evidence_gaps_json, evidence_fingerprint, created_at
                 FROM brain_governance_candidate_review
                 WHERE candidate_id=?
                 ORDER BY created_at DESC
@@ -1282,6 +1340,7 @@ class BrainGovernanceCandidateService:
                 "review_status": str(row["review_status"] or ""),
                 "bridge_ready": bool(row["bridge_ready"]),
                 "evidence_gaps": _loads(row["evidence_gaps_json"], []),
+                "evidence_fingerprint": str(row["evidence_fingerprint"] or ""),
                 "created_at": _safe_float(row["created_at"]),
             }
         finally:

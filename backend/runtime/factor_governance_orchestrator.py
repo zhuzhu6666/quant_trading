@@ -153,6 +153,28 @@ def factor_batch_manifest_verdict(
     expansion_preflight: dict[str, Any],
 ) -> dict[str, Any]:
     """Ensure a factor run consumes the exact V16-issued batch manifest."""
+    candidate_refs = [
+        item
+        for item in list((expansion_preflight or {}).get("candidate_refs") or [])
+        if isinstance(item, dict)
+    ]
+    candidate_count = int((expansion_preflight or {}).get("candidate_count") or 0)
+    if (
+        not candidate_refs
+        or len(candidate_refs) != 1
+        or any(
+            not bool(item.get("execution_ready"))
+            or list(item.get("blocker_codes") or [])
+            for item in candidate_refs
+        )
+    ):
+        return {
+            "allowed": False,
+            "status": "factor_candidate_contract_not_ready",
+            "reason": "candidate_refs_must_be_single_frozen_execution_ready_candidate",
+            "candidate_count": candidate_count,
+            "candidate_ref_count": len(candidate_refs),
+        }
     evidence = dict(authority.get("evidence") or {})
     manifest = dict(evidence.get("batch_manifest") or {})
     expected_fingerprint = hashlib.sha256(
@@ -813,6 +835,8 @@ class FactorGovernanceOrchestrator:
                     or 0.65
                 ):
                     continue
+                if not self._activation_projection_ready(item):
+                    continue
                 posterior = self._posterior_expansion_guard(
                     factor_id,
                     cfg=cfg,
@@ -991,6 +1015,49 @@ class FactorGovernanceOrchestrator:
                 posterior_degraded_ids.append(factor_id)
             promotion_ids.append(factor_id)
 
+        candidate_actions: dict[str, str] = {}
+        for factor_id in activation_ids:
+            candidate_actions.setdefault(str(factor_id), "promote_factor")
+        for factor_id in active_zero_weight_ids + restore_ids:
+            candidate_actions.setdefault(str(factor_id), "restore_factor_live")
+        for factor_id in promotion_ids:
+            candidate_actions.setdefault(str(factor_id), "promote_factor")
+        catalog_by_id = {
+            str(item.get("factor_id") or ""): item
+            for item in catalog
+            if str(item.get("factor_id") or "")
+        }
+        candidate_refs: list[dict[str, Any]] = []
+        for factor_id, candidate_action in sorted(candidate_actions.items()):
+            item = catalog_by_id.get(factor_id, {})
+            projection = dict(item.get("loaded_projection") or {})
+            evidence_refs = {
+                "lifecycle_factor_id": str(item.get("lifecycle_factor_id") or ""),
+                "lifecycle_mutation_id": str(item.get("lifecycle_mutation_id") or ""),
+                "lifecycle_generation": int(item.get("lifecycle_generation") or 0),
+                "lifecycle_artifact_hash": str(item.get("lifecycle_artifact_hash") or ""),
+                "runtime_admission": str(item.get("runtime_admission") or ""),
+                "projection_id": str(projection.get("projection_id") or ""),
+                "projection_generation": int(projection.get("generation") or 0),
+                "projection_artifact_hash": str(projection.get("artifact_hash") or ""),
+            }
+            candidate_refs.append({
+                "candidate_id": factor_id,
+                "target_agent": "factor_governance",
+                "scope_type": "factor_weight",
+                "scope_key": factor_id,
+                "action": candidate_action,
+                "execution_ready": True,
+                "governance_eligible": True,
+                "bridge_ready": True,
+                "blocker_codes": [],
+                "evidence_refs": evidence_refs,
+                "evidence_fingerprint": hashlib.sha256(
+                    _dumps(evidence_refs).encode("utf-8")
+                ).hexdigest(),
+                "command_version": "factor_governance_candidate.v1",
+            })
+
         reasons = {
             "builtin_activation": activation_ids,
             "active_zero_weight_restore": active_zero_weight_ids,
@@ -1018,11 +1085,33 @@ class FactorGovernanceOrchestrator:
             ),
             "posterior_blocked_ids": posterior_blocked_ids,
             "posterior_degraded_ids": posterior_degraded_ids,
+            "candidate_refs": candidate_refs,
             "directional_portfolio_guard": FactorWeightChangeService._directional_guard(
                 factor_configs=self._portfolio_configs(cfg),
                 weights=weights,
             ),
         }
+
+    @staticmethod
+    def _activation_projection_ready(item: Mapping[str, Any]) -> bool:
+        """Require a fresh live projection before activating a prepared factor."""
+        stage = str(item.get("lifecycle_status") or "").upper()
+        if stage != FactorLifecycleStage.PROMOTION_PREPARED.value:
+            return True
+        if str(item.get("runtime_admission") or "").lower() != "projection_acknowledged":
+            return False
+        projection = item.get("loaded_projection") or {}
+        if not bool(projection.get("loaded")):
+            return False
+        lifecycle_generation = int(item.get("lifecycle_generation") or 0)
+        projection_generation = int(projection.get("generation") or 0)
+        if lifecycle_generation and projection_generation and lifecycle_generation != projection_generation:
+            return False
+        lifecycle_artifact = str(item.get("lifecycle_artifact_hash") or "")
+        projection_artifact = str(projection.get("artifact_hash") or "")
+        if lifecycle_artifact and projection_artifact and lifecycle_artifact != projection_artifact:
+            return False
+        return True
 
     def _factor_has_pending_effect(self, factor_id: str) -> bool:
         if not factor_id:
@@ -2662,6 +2751,8 @@ class FactorGovernanceOrchestrator:
                 or health_age < -5.0
                 or health_age > profile.health_max_age_seconds
             ):
+                continue
+            if not self._activation_projection_ready(item):
                 continue
             model_evidence = self._model_governance_evidence(item, cfg)
             model_samples = int(model_evidence.get("sample_count") or 0)

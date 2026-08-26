@@ -112,6 +112,7 @@ class V16CommandGate:
         scope_key: str = "",
         action: str = "",
         command_id: str = "",
+        candidate_id: str = "",
         max_age_seconds: float | None = None,
         risk_reduction: bool = False,
     ) -> dict[str, Any]:
@@ -184,6 +185,8 @@ class V16CommandGate:
             for row in rows:
                 item = {key: row[key] for key in row.keys()} if hasattr(row, "keys") else dict(row)
                 if requested_id and str(item.get("command_id") or "") != requested_id:
+                    continue
+                if candidate_id and str(item.get("candidate_id") or "") != str(candidate_id):
                     continue
                 if not cls.is_actionable(
                     item,
@@ -804,7 +807,7 @@ class V16CommandGate:
             return True
         candidate = execute(
             conn,
-            """SELECT status, submitted_suggestion_id
+            """SELECT status, submitted_suggestion_id, updated_at
                FROM brain_governance_candidate
                WHERE candidate_id=?
                LIMIT 1""",
@@ -817,8 +820,34 @@ class V16CommandGate:
         status = str(candidate["status"] or "")
         suggestion_id = str(candidate["submitted_suggestion_id"] or "")
         if status in CANDIDATE_REVIEWABLE_STATUSES and not suggestion_id:
-            return True
+            return False
         if status not in CANDIDATE_EXECUTION_PENDING_STATUSES and status != "applied":
+            return False
+        if not state_table_exists(conn, "brain_governance_candidate_review"):
+            return False
+        review_columns = set(state_table_columns(conn, "brain_governance_candidate_review"))
+        if not {"bridge_ready", "created_at", "evidence_fingerprint"}.issubset(review_columns):
+            return False
+        review = execute(
+            conn,
+            """SELECT bridge_ready, evidence_fingerprint, created_at
+               FROM brain_governance_candidate_review
+               WHERE candidate_id=?
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            (candidate_id,),
+        ).fetchone()
+        if not review or not bool(review["bridge_ready"]):
+            return False
+        if safe_float(review["created_at"]) < safe_float(candidate["updated_at"]):
+            return False
+        command_evidence = loads(row.get("evidence_json"), {})
+        candidate_review_ref = dict(command_evidence.get("candidate_review") or {})
+        if (
+            not candidate_review_ref
+            or str(candidate_review_ref.get("evidence_fingerprint") or "")
+            != str(review["evidence_fingerprint"] or "")
+        ):
             return False
         if not suggestion_id or not state_table_exists(conn, "policy_suggestion"):
             return False
@@ -860,7 +889,16 @@ class V16CommandGate:
             return False
         command_key = str(row.get("scope_key") or "")
         requested_key = str(scope_key or "")
-        return not command_key or command_key in cls.BROAD_SCOPE_KEYS or not requested_key or command_key == requested_key
+        if not command_key or command_key in cls.BROAD_SCOPE_KEYS or not requested_key:
+            return True
+        scope_aliases = {
+            "online_light:default": "online_light",
+            "online_light": "online_light",
+        }
+        return scope_aliases.get(command_key, command_key) == scope_aliases.get(
+            requested_key,
+            requested_key,
+        )
 
     @classmethod
     def _action_matches(cls, row: dict[str, Any], action: str) -> bool:

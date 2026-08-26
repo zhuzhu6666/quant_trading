@@ -586,8 +586,7 @@ class BrainGovernanceCandidateReviewService:
             "chain_health_status": (briefing.get("chain_health") or {}).get("status", ""),
         }
 
-    @staticmethod
-    def _evidence_gaps(candidate: dict[str, Any], *, now: float) -> list[str]:
+    def _evidence_gaps(self, candidate: dict[str, Any], *, now: float) -> list[str]:
         gaps: list[str] = []
         if str(candidate.get("status") or "") != "active":
             gaps.append("candidate_not_active")
@@ -602,7 +601,36 @@ class BrainGovernanceCandidateReviewService:
             gaps.append("risk_policy_not_allowed")
         expected = dict(candidate.get("expected_effect") or {})
         source_presence = dict(expected.get("source_presence") or {})
+        supervisor_bootstrap = False
+        if (
+            str(candidate.get("scope_type") or "") == "supervisor_template"
+            and str(candidate.get("action") or "") == "switch_position_supervisor_template"
+        ):
+            mapped = dict((candidate.get("lineage") or {}).get("mapped_action") or {})
+            target_template_id = str(
+                mapped.get("target_template_id")
+                or candidate.get("scope_key")
+                or "position_supervisor"
+            )
+            try:
+                from backend.services.learning_application_store import LearningApplicationStore
+
+                supervisor_bootstrap = (
+                    LearningApplicationStore(self.db_path).latest_effect(
+                        scope_key=target_template_id,
+                        scope_type="position_supervisor_template",
+                    )
+                    is None
+                )
+            except Exception:
+                supervisor_bootstrap = False
         for source, present in sorted(source_presence.items()):
+            if (
+                not present
+                and source == "learning_application_effect"
+                and supervisor_bootstrap
+            ):
+                continue
             if not present:
                 gaps.append(f"missing_{source}")
         action = str(candidate.get("action") or "")

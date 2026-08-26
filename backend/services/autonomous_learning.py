@@ -4839,6 +4839,7 @@ def _approve_demo_policy_suggestions(
 
 def _apply_approved_factor_suggestions_for_demo(*, experiment_id: str, limit: int = 1) -> dict[str, Any]:
     from alpha.decision_policy import DecisionPolicy
+    from backend.services.agent_authority import AgentAuthorityRegistryService
     from backend.services.factor_weight_change import FactorWeightChangeService
     from config.runtime_config import DEMO_AUTONOMY_MODES, shared as runtime_config
     from research.learning.governor import RuleEvolutionGovernor
@@ -4894,6 +4895,26 @@ def _apply_approved_factor_suggestions_for_demo(*, experiment_id: str, limit: in
                     "factor": factor,
                     "status": "superseded_stale_runtime_target",
                     "reason": "factor_absent_from_current_runtime_weights",
+                }
+            )
+            continue
+        source_agent = str(evidence.get("source_agent") or "")
+        authority_verdict = AgentAuthorityRegistryService().evaluate_scope_write(
+            source_agent,
+            "factor",
+            action,
+            requested_writes=[],
+            status="approved",
+            impact_level="medium",
+        )
+        if not source_agent or not bool(authority_verdict.get("allowed")):
+            items.append(
+                {
+                    "suggestion_id": suggestion_id,
+                    "factor": factor,
+                    "status": "skipped_source_authority",
+                    "source_agent": source_agent,
+                    "authority_verdict": authority_verdict,
                 }
             )
             continue
@@ -5021,6 +5042,7 @@ def _auto_apply_parameter_template_suggestions(
     limit: int = 100,
 ) -> dict[str, Any]:
     from backend.services.parameter_templates import ParameterTemplateService
+    from backend.services.v16_command_gate import V16CommandGate
 
     service = ParameterTemplateService(str(db_path))
     conn = _connect(db_path, read_only=True)
@@ -5047,6 +5069,7 @@ def _auto_apply_parameter_template_suggestions(
         evidence = _loads(row["evidence_json"], {})
         target_template_id = str(evidence.get("target_template_id") or "")
         factor_id = str(evidence.get("factor_id") or "")
+        candidate_id = str(evidence.get("candidate_id") or "")
         regime_key = str(evidence.get("regime_key") or "")
         boundary = evidence.get("boundary") or {}
         if not target_template_id or not factor_id:
@@ -5059,12 +5082,31 @@ def _auto_apply_parameter_template_suggestions(
         if str(current.get("template_id") or "") == target_template_id:
             skipped.append({"suggestion_id": suggestion_id, "reason": "already_active"})
             continue
+        v16_authority = V16CommandGate.authorize(
+            db_path,
+            target_agent="autonomous_learning",
+            scope_type="parameter_template",
+            scope_key="online_light",
+            action="switch_parameter_template",
+            candidate_id=candidate_id,
+        )
+        if not v16_authority.get("allowed"):
+            skipped.append({
+                "suggestion_id": suggestion_id,
+                "reason": str(v16_authority.get("status") or "v16_command_required"),
+                "v16_authority": v16_authority,
+            })
+            continue
         result = service.activate_template(
             factor_id=factor_id,
             template_id=target_template_id,
             regime_key=regime_key,
             suggestion_id=suggestion_id,
             note=f"demo_autonomous apply experiment {experiment_id}",
+            v16_command_id=str(v16_authority.get("command_id") or ""),
+            v16_candidate_id=str(v16_authority.get("candidate_id") or candidate_id),
+            v16_posterior_fingerprint=str(v16_authority.get("posterior_fingerprint") or ""),
+            v16_evidence_fingerprint=str(v16_authority.get("evidence_fingerprint") or ""),
         )
         if result.get("blocked"):
             skipped.append({"suggestion_id": suggestion_id, "reason": "risk_blocked", "result": result})

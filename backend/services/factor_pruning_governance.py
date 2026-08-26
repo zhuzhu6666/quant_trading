@@ -42,6 +42,55 @@ class FactorPruningGovernanceService:
             "bridge_ready": False,
         }
 
+    def supersede_inactive_demo_suggestions(self, active_factors: set[str]) -> int:
+        """Close model pruning suggestions whose factor left the live score."""
+        from config.runtime_config import DEMO_AUTONOMY_MODES
+
+        changed = 0
+        conn = _connect(self.db_path)
+        try:
+            rows = _execute(
+                conn,
+                """
+                SELECT suggestion_id, scope_key, evidence_json
+                FROM policy_suggestion
+                WHERE scope_type='factor'
+                  AND action='downweight'
+                  AND status IN ('proposed', 'approved')
+                """,
+            ).fetchall()
+            now = time.time()
+            for row in rows:
+                evidence = _loads(row["evidence_json"], {})
+                bridge = evidence.get("bridge") if isinstance(evidence, dict) else {}
+                if not (
+                    isinstance(evidence, dict)
+                    and evidence.get("model_type") == "factor_governance_lightgbm"
+                    and isinstance(bridge, dict)
+                    and bridge.get("automatic_demo") is True
+                    and (
+                        bridge.get("demo_nursery") is True
+                        or str(bridge.get("autonomy_mode") or "").strip().lower()
+                        in DEMO_AUTONOMY_MODES
+                    )
+                ):
+                    continue
+                if str(row["scope_key"] or "") in active_factors:
+                    continue
+                _execute(
+                    conn,
+                    """UPDATE policy_suggestion
+                       SET status='superseded', reviewed_at=?,
+                           review_note='superseded: factor is no longer active in runtime score'
+                       WHERE suggestion_id=?""",
+                    (now, str(row["suggestion_id"] or "")),
+                )
+                changed += 1
+            conn.commit()
+            return changed
+        finally:
+            conn.close()
+
     def materialize_latest(
         self,
         *,

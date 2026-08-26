@@ -331,6 +331,62 @@ class V16BrainOrchestratorService:
         finally:
             conn.close()
 
+    def _candidate_review_ref(self, candidate_id: str) -> dict[str, Any]:
+        """Read only the review identity needed for a V16 handoff.
+
+        The command must reference an already bridged candidate.  Keep this
+        projection deliberately narrow: the evidence payload remains in its
+        canonical tables and is not copied into the command decision layer.
+        """
+        candidate_id = str(candidate_id or "")
+        if not candidate_id:
+            return {}
+        conn = connect(self.db_path, read_only=True)
+        try:
+            if not (
+                state_table_exists(conn, "brain_governance_candidate")
+                and state_table_exists(conn, "brain_governance_candidate_review")
+            ):
+                return {"candidate_id": candidate_id, "bridge_ready": False}
+            candidate_row = execute(
+                conn,
+                """SELECT submitted_suggestion_id, updated_at
+                   FROM brain_governance_candidate
+                   WHERE candidate_id=?
+                   LIMIT 1""",
+                (candidate_id,),
+            ).fetchone()
+            if not candidate_row:
+                return {"candidate_id": candidate_id, "bridge_ready": False}
+            review_row = execute(
+                conn,
+                """SELECT review_id, bridge_ready, evidence_fingerprint, created_at
+                   FROM brain_governance_candidate_review
+                   WHERE candidate_id=?
+                   ORDER BY created_at DESC
+                   LIMIT 1""",
+                (candidate_id,),
+            ).fetchone()
+            if not review_row:
+                return {"candidate_id": candidate_id, "bridge_ready": False}
+            review_created_at = safe_float(review_row["created_at"])
+            candidate_updated_at = safe_float(candidate_row["updated_at"])
+            bridge_ready = bool(
+                review_row["bridge_ready"]
+                and str(candidate_row["submitted_suggestion_id"] or "")
+                and review_created_at >= candidate_updated_at
+            )
+            return {
+                "candidate_id": candidate_id,
+                "review_id": str(review_row["review_id"] or ""),
+                "bridge_ready": bridge_ready,
+                "evidence_fingerprint": str(review_row["evidence_fingerprint"] or ""),
+                "review_created_at": review_created_at,
+                "candidate_updated_at": candidate_updated_at,
+            }
+        finally:
+            conn.close()
+
     def _cancel_non_actionable_commands(
         self,
         *,
@@ -359,6 +415,19 @@ class V16BrainOrchestratorService:
                 set(state_table_columns(conn, "policy_suggestion"))
                 if state_table_exists(conn, "policy_suggestion")
                 else set()
+            )
+            review_readiness_gate = (
+                """
+                NOT EXISTS (
+                    SELECT 1
+                    FROM brain_governance_candidate_review AS current_review
+                    WHERE current_review.candidate_id=candidate.candidate_id
+                      AND current_review.bridge_ready=1
+                      AND current_review.created_at>=candidate.updated_at
+                )
+                """
+                if state_table_exists(conn, "brain_governance_candidate_review")
+                else "1=1"
             )
             if {
                 "status",
@@ -409,6 +478,7 @@ class V16BrainOrchestratorService:
                       WHERE candidate.candidate_id=v16_brain_command.candidate_id
                         AND (
                             candidate.status NOT IN ('{actionable_statuses}')
+                            OR {review_readiness_gate}
                             OR (
                                 candidate.status IN ('bridge_pending', 'awaiting_execution', 'submitted')
                                 AND NOT (
@@ -472,13 +542,23 @@ class V16BrainOrchestratorService:
         }
         conn = connect(self.db_path)
         try:
-            if not state_table_exists(conn, "brain_governance_candidate"):
+            if not (
+                state_table_exists(conn, "brain_governance_candidate")
+                and state_table_exists(conn, "brain_governance_candidate_review")
+            ):
                 return []
             rows = execute(
                 conn,
                 """SELECT candidate_id, lineage_json
                    FROM brain_governance_candidate
-                   WHERE source_agent='v16_brain' AND status='active'""",
+                   WHERE source_agent='v16_brain' AND status='active'
+                     AND EXISTS (
+                         SELECT 1
+                         FROM brain_governance_candidate_review AS current_review
+                         WHERE current_review.candidate_id=brain_governance_candidate.candidate_id
+                           AND current_review.bridge_ready=1
+                           AND current_review.created_at>=brain_governance_candidate.updated_at
+                     )""",
             ).fetchall()
             superseded: list[str] = []
             now = time.time()
@@ -741,6 +821,11 @@ class V16BrainOrchestratorService:
         preflight = dict(gate.get("expansion_preflight") or {})
         snapshot_id = str(gate.get("snapshot_id") or "")
         candidate_count = int(preflight.get("candidate_count") or 0)
+        candidate_refs = [
+            dict(item)
+            for item in list(preflight.get("candidate_refs") or [])
+            if isinstance(item, dict)
+        ]
         qualified = (
             bool(snapshot_id)
             and bool(preflight.get("required"))
@@ -752,6 +837,34 @@ class V16BrainOrchestratorService:
                 "status": "factor_expansion_evidence_not_ready",
                 "snapshot_id": snapshot_id,
                 "candidate_count": candidate_count,
+                "boundary": self.boundary(),
+            }
+
+        if (
+            len(candidate_refs) != candidate_count
+            or any(
+                not bool(item.get("execution_ready"))
+                or list(item.get("blocker_codes") or [])
+                for item in candidate_refs
+            )
+        ):
+            return {
+                "ok": False,
+                "status": "factor_candidate_contract_not_ready",
+                "reason": "candidate_refs_must_be_frozen_and_execution_ready",
+                "snapshot_id": snapshot_id,
+                "candidate_count": candidate_count,
+                "candidate_ref_count": len(candidate_refs),
+                "boundary": self.boundary(),
+            }
+        if len(candidate_refs) != 1:
+            return {
+                "ok": False,
+                "status": "factor_candidate_contract_not_ready",
+                "reason": "candidate_scoped_command_required",
+                "snapshot_id": snapshot_id,
+                "candidate_count": candidate_count,
+                "candidate_ref_count": len(candidate_refs),
                 "boundary": self.boundary(),
             }
 
@@ -789,7 +902,7 @@ class V16BrainOrchestratorService:
             "snapshot_id": snapshot_id,
             "plan_id": "",
             "eval_id": "",
-            "candidate_id": f"factorpreflight_{evidence_fingerprint[:16]}",
+            "candidate_id": str(candidate_refs[0].get("candidate_id") or ""),
             "target_agent": "factor_governance",
             "scope_type": "factor_weight",
             "scope_key": "alpha_weight_policy",
@@ -995,6 +1108,7 @@ class V16BrainOrchestratorService:
             correction_contract.get("policy_decision_id") or ""
         )
         candidate_id = str(governance.get("candidate_id") or "")
+        candidate_review = self._candidate_review_ref(candidate_id)
         # 'candidate_already_materialized' is the idempotent re-run of a
         # materialization: the candidate exists and the delegation must stay
         # live, otherwise a second cycle would downgrade an existing delegate
@@ -1004,10 +1118,17 @@ class V16BrainOrchestratorService:
             if candidate_id
             and governance.get("status")
             in {"candidate_materialized", "candidate_already_materialized"}
+            and bool(candidate_review.get("bridge_ready"))
             else "observe"
         )
         action = str(governance.get("governance_action") or evaluation.get("action_type") or "observe")
-        status = "delegated_to_specialist" if decision == "delegate" else str(governance.get("status") or evaluation.get("comparison_verdict") or "observing")
+        status = (
+            "delegated_to_specialist"
+            if decision == "delegate"
+            else "candidate_review_required"
+            if candidate_id
+            else str(governance.get("status") or evaluation.get("comparison_verdict") or "observing")
+        )
         posterior_fingerprint = str(posterior.get("fingerprint") or "")
         command_scope_type = str(governance.get("scope_type") or evaluation.get("scope_type") or "")
         command_scope_key = str(governance.get("scope_key") or scope.get("scope_key") or "")
@@ -1037,6 +1158,9 @@ class V16BrainOrchestratorService:
             "scope_type": governance.get("scope_type") or evaluation.get("scope_type"),
             "scope_key": governance.get("scope_key") or scope.get("scope_key"),
             "action": action,
+            "candidate_review_fingerprint": str(
+                candidate_review.get("evidence_fingerprint") or ""
+            ),
             "parent_policy_decision_id": parent_policy_decision_id,
         }).encode("utf-8")).hexdigest()
         identity = "|".join(
@@ -1075,6 +1199,7 @@ class V16BrainOrchestratorService:
                 "governance": {
                     "status": governance.get("status", ""),
                     "candidate_id": candidate_id,
+                    "candidate_review": candidate_review,
                 },
             },
             "delegation": {
@@ -1187,7 +1312,7 @@ class V16BrainOrchestratorService:
                       (
                           command.failure_reason='authority_expired'
                           AND candidate.status='active'
-                          AND COALESCE(candidate.submitted_suggestion_id, '')=''
+                          AND COALESCE(candidate.submitted_suggestion_id, '')<>''
                           AND EXISTS (
                               SELECT 1
                               FROM brain_governance_candidate_review AS expired_review
@@ -1256,6 +1381,33 @@ class V16BrainOrchestratorService:
                        WHERE command_id=?""",
                     (command_id,),
                 ).fetchone()
+                if str(item.get("decision") or "") == "delegate":
+                    no_progress = execute(
+                        conn,
+                        """SELECT command_id
+                           FROM v16_brain_command
+                           WHERE decision='delegate'
+                             AND candidate_id=?
+                             AND posterior_fingerprint=?
+                             AND evidence_fingerprint=?
+                             AND claim_status='cancelled'
+                             AND COALESCE(apply_count, 0)=0
+                             AND failure_reason IN (
+                                 'specialist_no_action',
+                                 'factor_governance_cycle_no_committed_action',
+                                 'blocked_by_evidence',
+                                 'v16_command_required'
+                             )
+                           ORDER BY updated_at DESC
+                           LIMIT 1""",
+                        (
+                            str(item.get("candidate_id") or ""),
+                            str(item.get("posterior_fingerprint") or ""),
+                            str(item.get("evidence_fingerprint") or ""),
+                        ),
+                    ).fetchone()
+                    if no_progress:
+                        continue
                 existing_is_reissuable = bool(
                     existing
                     and (

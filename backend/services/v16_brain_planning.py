@@ -1041,6 +1041,44 @@ class BrainMediumImpactGovernanceService:
         parent_policy_decision_id = str(
             correction_contract.get("policy_decision_id") or ""
         )
+        if str(mapped.get("scope_type") or "") == "context_policy":
+            return {
+                "governance_id": f"brain_p4_gov_{uuid.uuid4().hex[:16]}",
+                "schema_version": "brain_medium_impact_governance.v1",
+                "plan_id": str(evaluation.get("plan_id") or ""),
+                "eval_id": str(evaluation.get("eval_id") or ""),
+                "governance_action": "observe",
+                "scope_type": "context_policy",
+                "scope_key": "threshold_and_sizing",
+                "status": "unsupported_governance_surface",
+                "candidate_id": "",
+                "suggestion_id": "",
+                "evidence_score": safe_float(evaluation.get("coverage_score")),
+                "critic_verdict": str(plan.get("critic_verdict") or ""),
+                "comparison_verdict": str(evaluation.get("comparison_verdict") or ""),
+                "risk_verdict": {
+                    "allowed": False,
+                    "status": "unsupported_governance_surface",
+                    "reason": "context_policy_runtime_writer_missing",
+                },
+                "decision_policy": {
+                    "schema_version": "decision_policy_preview.v1",
+                    "required": False,
+                    "action": "observe",
+                    "applied": False,
+                    "reason": "context_policy_runtime_writer_missing",
+                },
+                "rollback_plan": self._rollback_plan(mapped),
+                "posterior_refs": {
+                    **dict(evaluation.get("evidence_refs") or {}),
+                    "correction_contract": correction_contract,
+                    "parent_policy_decision_id": parent_policy_decision_id,
+                },
+                "autonomy_guard": autonomy_guard,
+                "boundary": self.boundary(),
+                "created_at": now,
+                "updated_at": time.time(),
+            }
         selected_scope = str(arbitration.get("selected_scope") or "")
         scope_causal = {
             "factor_weight": "factor",
@@ -1190,12 +1228,21 @@ class BrainMediumImpactGovernanceService:
                     "created_at": now,
                     "updated_at": time.time(),
                 }
+            candidate_proposal_stage = "governance_ready"
+            if (
+                mapped.get("scope_type") == "parameter_template"
+                and (
+                    not str(mapped.get("target_template_id") or "")
+                    or str(mapped.get("recommended_scope") or "") != "online_light"
+                )
+            ):
+                candidate_proposal_stage = "candidate_materialized"
             candidate = candidate_service.create_candidate(
                 candidate_id=candidate_id_deterministic,
                 source_agent="v16_brain", source_kind="brain_medium_impact_governance",
                 source_ref_type=("v16_posterior_arbitration" if arbitration.get("fingerprint") else "brain_action_plan_eval"),
                 source_ref_id=str(arbitration.get("fingerprint") or evaluation.get("eval_id") or ""),
-                proposal_stage="governance_ready", capability_scope="medium_impact_governance",
+                proposal_stage=candidate_proposal_stage, capability_scope="medium_impact_governance",
                 scope_type=mapped["scope_type"], scope_key=mapped["scope_key"],
                 action=mapped["policy_action"],
                 confidence=max(0.1, min(0.95, evidence_score)), evidence_score=evidence_score,
@@ -1280,9 +1327,9 @@ class BrainMediumImpactGovernanceService:
     def _map_action(*, evaluation: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
         scope = str(evaluation.get("scope_type") or (plan.get("scope") or {}).get("scope_type") or "")
         if scope == "parameter_template":
-            return {"scope_type": "parameter_template", "scope_key": "online_light:default",
+            return {"scope_type": "parameter_template", "scope_key": "online_light",
                     "policy_action": "switch_parameter_template", "risk_action": "switch_parameter_template",
-                    "target_template_id": ""}
+                    "target_template_id": "", "recommended_scope": "online_light"}
         if scope == "context_policy":
             return {"scope_type": "context_policy", "scope_key": "threshold_and_sizing",
                     "policy_action": "enable_context_policy", "risk_action": "enable_context_policy",

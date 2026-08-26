@@ -48,6 +48,8 @@ class _TypedControlPlan:
     evidence_fingerprint: str = ""
     v16_command_id: str = ""
     v16_claim_token: str = ""
+    v16_candidate_id: str = ""
+    v16_posterior_fingerprint: str = ""
 
     def execute(
         self,

@@ -430,7 +430,7 @@ def test_v16_delegates_only_concrete_factor_expansion_preflight(tmp_path):
         },
         persist=False,
     )
-    delegated = service.delegate_factor_governance_cycle(
+    missing_refs = service.delegate_factor_governance_cycle(
         {
             "snapshot_id": "brain-1",
             "health_cycle_id": "factor_health:1",
@@ -442,13 +442,37 @@ def test_v16_delegates_only_concrete_factor_expansion_preflight(tmp_path):
         },
         persist=False,
     )
+    delegated = service.delegate_factor_governance_cycle(
+        {
+            "snapshot_id": "brain-1",
+            "health_cycle_id": "factor_health:1",
+            "expansion_preflight": {
+                "required": True,
+                "candidate_count": 1,
+                "reasons": {"shadow_promotion": ["shadow-alpha"]},
+                "candidate_refs": [
+                    {
+                        "candidate_id": "shadow-alpha",
+                        "scope_type": "factor_weight",
+                        "scope_key": "shadow-alpha",
+                        "action": "promote_factor",
+                        "execution_ready": True,
+                        "blocker_codes": [],
+                    }
+                ],
+            },
+        },
+        persist=False,
+    )
 
     assert missing["status"] == "factor_expansion_evidence_not_ready"
+    assert missing_refs["status"] == "factor_candidate_contract_not_ready"
     assert delegated["status"] == "delegated"
     command = delegated["command"]
     assert command["decision"] == "delegate"
     assert command["target_agent"] == "factor_governance"
     assert command["action"] == "factor_governance_cycle"
+    assert command["candidate_id"] == "shadow-alpha"
     assert command["evidence"]["expansion_preflight"]["candidate_count"] == 1
     assert command["evidence"]["batch_manifest"]["fixed_after_issue"] is True
     assert command["delegation"]["authorization_granularity"] == "run_batch_fixed_manifest"
@@ -462,6 +486,16 @@ def test_factor_batch_manifest_must_match_current_preflight():
         "required": True,
         "candidate_count": 1,
         "reasons": {"shadow_promotion": ["shadow-alpha"]},
+        "candidate_refs": [
+            {
+                "candidate_id": "shadow-alpha",
+                "scope_type": "factor_weight",
+                "scope_key": "shadow-alpha",
+                "action": "promote_factor",
+                "execution_ready": True,
+                "blocker_codes": [],
+            }
+        ],
     }
     delegated = V16BrainOrchestratorService().delegate_factor_governance_cycle(
         {
@@ -475,6 +509,11 @@ def test_factor_batch_manifest_must_match_current_preflight():
     assert factor_batch_manifest_verdict(authority, preflight)["allowed"] is True
     mismatch = {**preflight, "candidate_count": 2}
     assert factor_batch_manifest_verdict(authority, mismatch)["status"] == "factor_batch_manifest_mismatch"
+    missing_refs = {key: value for key, value in preflight.items() if key != "candidate_refs"}
+    assert factor_batch_manifest_verdict(
+        authority,
+        missing_refs,
+    )["status"] == "factor_candidate_contract_not_ready"
 
 
 def test_factor_governance_cycle_authorizes_shadow_enrollment_step():
