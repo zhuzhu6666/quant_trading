@@ -15,7 +15,7 @@
 - **A 类结构修复（已完成）**：A1 trade_review 实时写入器 ✅ / A2 label 单一口径 ✅ / A3 posterior 触发放宽 ✅ / A4 win 单正反馈 ✅ / A5 effect 归因链代码就绪 ✅ / A6 supervisor_trace 成熟链 ✅。
 - **缺陷批 D1–D13（2026-08-22 已部署生效，详见 planning/audit-defects-2026-08-21.md）**：D11 factor_health 表合同错位（学习链总断点）、D12 jobs 主键、D7 测试污染生产 JSONL、D1 幽灵 canary 毕业、D3/D6 权重噪声与诊断字段、D13 关键写失败静默。全量回归 2775 passed 后受控重启，重启后 60 分钟 0 ERROR；factor_health 健康报告首次落库成功（64 行，40 余天来首次）。学习链断点已解除。
 - **闭环证据现状（2026-08-26 只读复核）**：S7.6 终验标准已达成——D 批部署后新开仓位产出 26 笔 `integrity=full / train_weight=1.0 / governance_eligible=1` 平仓样本（首笔 284662038，2026-08-24；最新 284962512，2026-08-25），`open → protection → close → deal sync → review → sample` 全链条稳定产出干净样本。历史 8 笔回放降级样本（train_weight=0）按硬边界保留审计用途；supervisor trace 样本 partial/0.0 按合同排除训练。
-- **Git 基线**：截至 2026-08-22 收敛成果已提交并推送至 origin/main（最新 ef989d7）；2026-08-25/26 新增两批工作区改动（告警边沿触发批 + 治理合同收紧批 B，共 18 文件）已完成收敛与针对性回归（156 passed），**待用户授权 commit/push 与受控重启加载**。
+- **Git 基线**：2026-08-26 已提交并推送告警边沿触发批（5a4e4db）与治理合同收紧批 B（cfc126e）及文档批（b69ec07）至 origin/main。**生产服务尚未重启加载**（用户决定暂不重启；当日新开仓位 285005705 带仓运行），运行态仍执行 8/22 D 批代码，重启加载顺延至下一空仓窗口。
 - **代码收敛（S2/S3 完成）**：db_helpers 公共层（33 文件）+ 四域清扫（9 空壳 + EvolutionKernel + 零调用转发 + consume 包装器）+ A1–A6 / B1–B5 结构修复；历史全量回归记录保留在对应 rollout 文档，当前发布以本批新鲜针对性/全量验证为准。
 - legacy 事实迁移的旧表述（P1/P2/P4/P5、1,702 处、schema version 20）已被"全库清空重建"取代，仅历史参考。
 - 前端（miniprogram_v2 / web_frontend）在 Windows 本地维护；服务器后端-only sparse checkout，只提供 API 与 `/ws/state`。

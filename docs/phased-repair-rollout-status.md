@@ -351,9 +351,9 @@ Deleted paths: `research/factor_governance_lightgbm.py::_supersede_inactive_demo
 
 Targeted verification: 治理+告警+因子+参数模板领域针对性回归 **156 passed**（2026-08-26 实测：test_governance_contract_convergence / test_live_service_business_alerts / test_v16_brain_orchestrator / test_v16_read_only_brain / test_factor_governance_orchestrator / test_factor_governance_recovery / test_autonomous_evolution_cycle / test_factor_pruning_governance / test_agent_coordination_fixes / test_governance_control_plans）。
 
-Unresolved live evidence: 批次 B/A 尚未 commit/push、未受控重启加载——运行态仍跑 8/22 D 批代码；加载后需观察 V16 delegate 链在真实评审流下的放行率（fail-closed 收紧后 candidate_review_required 取消属设计态）。
+Unresolved live evidence: 批次 B/A 已 commit/push（5a4e4db 告警批、cfc126e 治理批、b69ec07 文档批，2026-08-26），但用户决定**暂不重启**——当日新开仓位 285005705 带仓运行中，运行态仍执行 8/22 D 批代码；重启加载顺延至下一空仓窗口，加载后需观察 V16 delegate 链在真实评审流下的放行率（fail-closed 收紧后 candidate_review_required 取消属设计态）。
 
-Next batch: 用户授权后 commit/push 两批改动 → 受控重启加载 → 观察 V16 命令链与告警边沿行为。
+Next batch: 下一空仓窗口受控重启加载批次 A/B → 观察 V16 命令链与告警边沿行为。
 
 ## 4. 仍需真实运行证明
 

@@ -94,7 +94,7 @@
 - **（2026-08-26 新增）两批工作区改动待提交**：
   - **批次 A — 业务告警边沿触发修复（2026-08-25）**：`live_service.py` 业务告警从 `tick % 10` 周期重发改边沿触发（状态恶化发一次、回落重新武装、日切全部重新武装；连亏按笔数 3→4→5 分档升级）。新测试 `tests/test_live_service_business_alerts.py`。背景：回撤水位当日只涨不降，旧逻辑每约 5 分钟刷屏同一条告警直到日切。
   - **批次 B — 治理链路 fail-closed 合同收紧（2026-08-25 晚—08-26 凌晨）**：16 文件 +733/-88。要点：①候选创建/提交前必须过 AgentAuthorityRegistry scope 写权限检查（advisory 源 fail-closed、不落库）；②V16 认领 delegate 命令要求候选有 bridge_ready 且新于候选 updated_at 的评审，命令证据须携带匹配的 review fingerprint；③因子预检批要求恰好一个冻结且 execution_ready 的候选引用（单控制候选合同），orchestrator 侧同步校验并新增 `_activation_projection_ready` 投影就绪门；④context_policy 判定为 unsupported governance surface（runtime writer 缺失时只观察不落候选）；⑤demo 自动应用参数模板必须先过 V16CommandGate.authorize 并转发 v16 身份四元组；⑥`supersede_inactive_demo_suggestions` 从 research 层迁入 `FactorPruningGovernanceService`（唯一 owner 归位，净删 research 侧实现）；⑦specialist no-action 后同指纹命令不再重发。测试：新增 `tests/test_governance_contract_convergence.py`（8 项合同测试）；夹具补齐评审行的 `test_autonomous_evolution_cycle` 回归已修。
-  - 验证状态：治理+告警+因子+参数模板领域针对性回归 **156 passed**（2026-08-26 实测）。待用户授权 commit/push 与受控重启加载。
+  - 验证状态：治理+告警+因子+参数模板领域针对性回归 **156 passed**（2026-08-26 实测）。已 commit/push（5a4e4db / cfc126e / b69ec07）；用户决定**暂不重启**（285005705 带仓运行），重启加载顺延至下一空仓窗口。
 
 ## 8. 相关文档路由
 
