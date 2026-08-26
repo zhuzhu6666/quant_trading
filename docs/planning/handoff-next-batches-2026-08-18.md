@@ -1,6 +1,6 @@
 # Handoff / Next-Batches TODO（项目接续总览）
 
-> Status: active handoff — 2026-08-18（**2026-08-22 刷新**：缺陷批 D1–D13 部署完成、cTrader token 已续期、全部改动已 commit+push；最新状态先读 docs/README.md「当前结论」，本文件待办项仍有效）
+> Status: active handoff — 2026-08-18（**2026-08-26 复核**：S7.6 首个部署后新仓位干净样本达成、治理合同收紧批 B 在工作区待提交；最新状态先读 docs/README.md「当前结论」，本文件待办项仍有效）
 > 用途：给**新会话**的唯一"剩余待办"入口；动手前必须先以只读方式复核真实状态，再执行。
 > 已验证基线（2026-08-18 收敛批交付后实测）：全量回归 **2813 passed / 12 skipped**；
 > 剩余 3 项 `test_state_store_schema_guard` 失败为 S 阶段既有债务（见 §P4）。
@@ -31,7 +31,8 @@
 - [x] **受控重启双服务加载当前工作区代码（完成 2026-08-19 19:51，用户授权）**：quant-backend / quant-learning-worker 均已加载最新工作区代码（P2 清扫 / P4 schema-guard / learning_application 收敛 / 0019 索引全部随重启生效）。验：backend 启动 0 模块/导入错误、cTrader App→Account→fully authenticated、background connect OK、symbol schedule 加载；worker 数据库初始化、RuntimeConfig 加载、调度器启动、nursery 注册正常；首次 utility 周期 evolution_hourly `executed successfully`；**重启后 missing-index 报错 0 次**（0019 修复在运行态生效）；三服务均 active。
 - [ ] **S7.5 观察**：重启后 60 分钟启动日志持续观察、live loop 安全态（当前手动停止、fail-closed）、cron 多轮完成。
 - [ ] **S7.6 进化闭环首验（核心）**：等**第一笔真实平仓** → canonical `trade_review` 实时事件（A1 写入器）→ sample 进入 → posterior/effect 链（A5）→ **闭环第一次自然闭合**。README 首页更新必须以该真实证据为准。
-  - 进展（2026-08-22 只读复核）：链路已首次走通——`284485647` 平仓样本于 8/21 worker 重启重算后 integrity=full / train_weight=1.0 / governance_eligible=1，证明"开仓→保护→平仓→同步→复盘→合格样本"全链条可产出干净样本；但该仓属 D11 修复部署前开仓，S7.6 终验标准 = 部署后新开仓位平仓时样本直接 full/1.0（无回放降级）。当前挂单 284602893 为旧仓不计入；周一开盘后第一笔新平仓为判定点。历史 8 笔回放降级样本（train_weight=0）按硬边界保留审计用途。
+  - ✅ **达成（2026-08-26 只读复核）**：D 批部署后新开仓位已产出 **26 笔** `integrity=full / train_weight=1.0 / governance_eligible=1` 平仓样本（首笔 284662038，2026-08-24；最新 284962512，2026-08-25），全链条在真实运行中稳定产出干净样本，S7.6 终验标准达成。转入常态观察。
+  - 历史 8 笔回放降级样本（train_weight=0）按硬边界保留审计用途；supervisor trace 样本为 partial/0.0（label=excluded_never_executed），按合同排除训练、保留审计。
 - 备注：旧卡死 run `evorun_552d20cc1bd84204`（position_supervisor_trace_maturation）会在下次 evolution run 启动时被 `expire_stale_evolution_runs` 自动 expire；下个周期 trace maturation 应能正常落库闭合。
 
 ## 3. 待办 P2 — S3 遗留清扫（代码批，可开工，默认下一批）
@@ -90,6 +91,10 @@
 ## 7. 当前未提交改动
 
 - ~~工作区 186 文件 uncommitted diff~~ **（2026-08-22 已过时）**：全部改动已随 2026-08-20/21/22 各批提交并推送至 origin/main（最新 ef989d7 缺陷批 D1–D13），本地与远端一致，无未提交内容。历史记录见 Git log。
+- **（2026-08-26 新增）两批工作区改动待提交**：
+  - **批次 A — 业务告警边沿触发修复（2026-08-25）**：`live_service.py` 业务告警从 `tick % 10` 周期重发改边沿触发（状态恶化发一次、回落重新武装、日切全部重新武装；连亏按笔数 3→4→5 分档升级）。新测试 `tests/test_live_service_business_alerts.py`。背景：回撤水位当日只涨不降，旧逻辑每约 5 分钟刷屏同一条告警直到日切。
+  - **批次 B — 治理链路 fail-closed 合同收紧（2026-08-25 晚—08-26 凌晨）**：16 文件 +733/-88。要点：①候选创建/提交前必须过 AgentAuthorityRegistry scope 写权限检查（advisory 源 fail-closed、不落库）；②V16 认领 delegate 命令要求候选有 bridge_ready 且新于候选 updated_at 的评审，命令证据须携带匹配的 review fingerprint；③因子预检批要求恰好一个冻结且 execution_ready 的候选引用（单控制候选合同），orchestrator 侧同步校验并新增 `_activation_projection_ready` 投影就绪门；④context_policy 判定为 unsupported governance surface（runtime writer 缺失时只观察不落候选）；⑤demo 自动应用参数模板必须先过 V16CommandGate.authorize 并转发 v16 身份四元组；⑥`supersede_inactive_demo_suggestions` 从 research 层迁入 `FactorPruningGovernanceService`（唯一 owner 归位，净删 research 侧实现）；⑦specialist no-action 后同指纹命令不再重发。测试：新增 `tests/test_governance_contract_convergence.py`（8 项合同测试）；夹具补齐评审行的 `test_autonomous_evolution_cycle` 回归已修。
+  - 验证状态：治理+告警+因子+参数模板领域针对性回归 **156 passed**（2026-08-26 实测）。待用户授权 commit/push 与受控重启加载。
 
 ## 8. 相关文档路由
 

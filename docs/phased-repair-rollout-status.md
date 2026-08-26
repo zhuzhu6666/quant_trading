@@ -339,9 +339,27 @@ Runtime verification: 双 mutation 均 committed/current，后端零重启热加
 
 Remaining: 周一开盘后观察 observe 因子 n_obs 增长与 horizon_ic 质量；GP 因子走完 PROBATION→治理激活→canary ACTIVE 全链路需下个 evolution cycle 验证。
 
+### 2026-08-26 S7.6 达成确认 + 治理合同收紧批 B（工作区待提交）
+
+Batch: 只读复核确认 S7.6 终验标准达成；治理链路 fail-closed 合同收紧批（16 文件 +733/-88）与业务告警边沿触发批在工作区完成收敛、针对性回归全绿，**未提交、未重启加载**。
+
+S7.6 runtime verification（只读，2026-08-26）: D 批部署后新开仓位已产出 **26 笔** `integrity=full / train_weight=1.0 / governance_eligible=1` 平仓样本（首笔 284662038 2026-08-24，最新 284962512 2026-08-25）；双服务 active、journalctl 24h 无 ERROR；当前空仓。skip/rejected 决策样本按合同双轨落库（risk_policy full/1.0 eligible、posterior full/0.35 非 eligible）；supervisor trace 样本 partial/0.0（excluded_never_executed）排除训练、保留审计。历史结论"周一开盘后第一笔新平仓为判定点"已由真实数据满足。
+
+批次 B canonical authority: 候选创建/提交唯一门 = AgentAuthorityRegistry scope 写权限（advisory 源 fail-closed 不落库）；V16 delegate 认领唯一门 = bridge_ready 且新于候选 updated_at 的评审 + 命令证据携带匹配 review fingerprint；因子预检批 = 恰好一个冻结 execution_ready 候选引用（单控制候选合同）；context_policy = unsupported governance surface（无 runtime writer 时只观察）；demo 参数模板自动应用必须先过 V16CommandGate.authorize 并转发 v16 身份四元组；specialist no-action 后同指纹命令不重发。
+
+Deleted paths: `research/factor_governance_lightgbm.py::_supersede_inactive_demo_suggestions` 净删，逻辑迁入 `FactorPruningGovernanceService.supersede_inactive_demo_suggestions`（唯一 owner 归位）。测试夹具回归修复：`test_autonomous_evolution_cycle` 补齐合格评审行以满足新合同（非放松生产代码）。
+
+Targeted verification: 治理+告警+因子+参数模板领域针对性回归 **156 passed**（2026-08-26 实测：test_governance_contract_convergence / test_live_service_business_alerts / test_v16_brain_orchestrator / test_v16_read_only_brain / test_factor_governance_orchestrator / test_factor_governance_recovery / test_autonomous_evolution_cycle / test_factor_pruning_governance / test_agent_coordination_fixes / test_governance_control_plans）。
+
+Unresolved live evidence: 批次 B/A 尚未 commit/push、未受控重启加载——运行态仍跑 8/22 D 批代码；加载后需观察 V16 delegate 链在真实评审流下的放行率（fail-closed 收紧后 candidate_review_required 取消属设计态）。
+
+Next batch: 用户授权后 commit/push 两批改动 → 受控重启加载 → 观察 V16 命令链与告警边沿行为。
+
 ## 4. 仍需真实运行证明
 
 以下证据不能由单测、历史快照或 readiness 替代：
+
+- ~~`open -> protection -> close -> deal sync -> review -> sample` 完整生命周期~~ ✅ **已满足（2026-08-26）**：部署后新仓位 26 笔 full/1.0 样本，转入常态观察；
 
 - post-repair 新 broker deal 的价格/金额合同；
 - restart 后 deal replay 与 position identity 恢复；
