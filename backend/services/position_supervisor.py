@@ -629,6 +629,26 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
             trigger_tags.append("thesis_broken_unconfirmed")
             summary_reason = "thesis_break_unconfirmed"
             severity = "warn"
+        # Profit-protection tighten during transition (2026-08-26): while a
+        # transition is being confirmed the position keeps its original
+        # risk boundary, but a still-profitable position whose MFE has
+        # meaningfully given back may lock in part of the gain.  This only
+        # tightens (the SL math never loosens) and never closes or reduces;
+        # it gives the counterfactual stream real executed actions to learn
+        # from without expanding exit authority.
+        if (
+            supervisor_posture == "transition_confirming"
+            and price_known
+            and pnl_known
+            and current_pnl > 0
+            and path_metrics_known
+            and profit_protection_window_ready
+            and giveback_ratio >= giveback_tighten_threshold
+        ):
+            action = "tighten"
+            summary_reason = "transition_profit_protection_tighten"
+            severity = "warn"
+            trigger_tags.append("transition_profit_protection")
     elif price_known and pnl_known and current_pnl > 0 and take_profit_progress >= near_tp_progress_threshold and near_tp_action == "protect":
         trigger_tags.append("near_take_profit")
         action = "tighten"

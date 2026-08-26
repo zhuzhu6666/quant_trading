@@ -30,6 +30,12 @@ def normalize_path_state(raw: dict[str, Any] | None) -> dict[str, Any]:
         "current_regime": _safe_str(state.get("current_regime")),
         "thesis_status": _safe_str(state.get("thesis_status")) or "intact",
         "regime_shift": _safe_str(state.get("regime_shift")) or "none",
+        # Consecutive observations with thesis_status broken.  This is the
+        # producer for the supervisor's persistent_price_path evidence
+        # family; it resets whenever the path recovers to intact.
+        "thesis_broken_confirmations": max(
+            0, int(_safe_float(state.get("thesis_broken_confirmations")))
+        ),
     }
 
 
@@ -103,6 +109,17 @@ def update_position_path_metrics(
     else:
         thesis_status = "intact"
 
+    # Consecutive-broken counter: increments while the path keeps judging
+    # the entry thesis broken and resets on any recovery observation.  This
+    # gives the supervisor's persistent_price_path evidence family a real
+    # producer (previously it was read but never written).
+    if thesis_status == "broken":
+        thesis_broken_confirmations = state["thesis_broken_confirmations"] + 1
+    elif thesis_status == "intact":
+        thesis_broken_confirmations = 0
+    else:
+        thesis_broken_confirmations = state["thesis_broken_confirmations"]
+
     next_state = {
         "mfe": round(mfe, 6),
         "mae": round(mae, 6),
@@ -113,6 +130,7 @@ def update_position_path_metrics(
         "current_regime": current_regime,
         "thesis_status": thesis_status,
         "regime_shift": regime_shift,
+        "thesis_broken_confirmations": thesis_broken_confirmations,
     }
     metrics = {
         "mfe": round(mfe, 6),
@@ -125,5 +143,6 @@ def update_position_path_metrics(
         "time_decay_score": round(time_decay_score, 6),
         "thesis_status": thesis_status,
         "regime_shift": regime_shift,
+        "thesis_broken_confirmations": thesis_broken_confirmations,
     }
     return next_state, metrics

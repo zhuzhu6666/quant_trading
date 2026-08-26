@@ -353,7 +353,21 @@ Targeted verification: 治理+告警+因子+参数模板领域针对性回归 **
 
 Unresolved live evidence: 批次 B/A 已 commit/push（5a4e4db 告警批、cfc126e 治理批、b69ec07 文档批，2026-08-26），但用户决定**暂不重启**——当日新开仓位 285005705 带仓运行中，运行态仍执行 8/22 D 批代码；重启加载顺延至下一空仓窗口，加载后需观察 V16 delegate 链在真实评审流下的放行率（fail-closed 收紧后 candidate_review_required 取消属设计态）。
 
-Next batch: 下一空仓窗口受控重启加载批次 A/B → 观察 V16 命令链与告警边沿行为。
+Next batch: ~~下一空仓窗口受控重启加载批次 A/B~~ → 已于 2026-08-26 14:27 空仓窗口重启加载（含批次 A/B 与监督确认链修复），观察 V16 命令链、告警边沿与监督 tighten 行为。
+
+### 2026-08-26 持仓监督失效确认链修复（四断线补齐）
+
+Batch: 复盘发现监督器"诊断正确但从未动手"，深挖确认四根结构性断线并补齐生产者。影响面清单见 planning/supervisor-confirmation-chain-fix-plan.md。
+
+Canonical authority: entry_regime 开仓盖章 = `_persist_pending_entry_protection_plan` + `_current_regime_hint()`；signal_reversal = `build_position_supervisor_context_payload` 比较 last_composite.direction 与持仓方向；thesis_broken_confirmations = path-metrics 状态机逐观测递增/intact 归零；transition_confirming 姿态盈利单 tighten 解锁 = evaluate_position_supervisor 动作仲裁内新增分支（profit_protection_window_ready + giveback≥阈值，summary_reason=transition_profit_protection_tighten）。
+
+Deleted paths: 无旧实现删除（纯补齐缺失生产者）；不新增表/线程/调度器/阈值/RuntimeConfig 键。
+
+Targeted verification: 新增 tests/test_supervisor_confirmation_chain.py 11 passed；监督域+治理域回归 229 passed 零退化（test_trade_reviewer / test_live_supervision_path_metrics / test_live_position_lifecycle / test_learning_backfill / test_position_supervisor_templates / test_governance_contract_convergence / test_autonomous_evolution_cycle / test_v16_brain_orchestrator）。
+
+Runtime verification: 待重启加载后验收——首笔新持仓 recovery_meta.entry_regime 非空、首个 transition_profit_protection_tighten 执行 trace、首个 counterfactual 落库。
+
+Unresolved live evidence: 需 ≥10 笔带监督动作的真实仓位产出首批反事实样本后，治理模板更新链才完整转起来。
 
 ## 4. 仍需真实运行证明
 

@@ -9807,6 +9807,10 @@ def _persist_pending_entry_protection_plan(
     execution_intent_id: str = "",
 ) -> None:
     try:
+        # Stamp the decision-time regime so position_path metrics can later
+        # detect regime_shift (entry != current).  Without this snapshot the
+        # supervisor's regime-shift evidence family is structurally dead.
+        entry_regime = _current_regime_hint()
         _upsert_recovery_position_state(
             {
                 "position_id": position_id,
@@ -9828,6 +9832,7 @@ def _persist_pending_entry_protection_plan(
                 "entry_protection_plan": entry_protection_plan,
                 "entry_decision_id": str(entry_decision_id or ""),
                 "execution_intent_id": str(execution_intent_id or ""),
+                "entry_regime": str(entry_regime or ""),
             },
         )
     except Exception as _protection_plan_err:

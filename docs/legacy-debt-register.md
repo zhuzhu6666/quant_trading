@@ -22,6 +22,15 @@
 - 处理边界：旧事实数据已按用户授权清理，不保留兼容查询/写入路径；canonical 事件与审计记录不删除。临时迁移 dump 不再保留。
 - 剩余：仍需一次真实 Demo `tighten/reduce/close -> broker lifecycle -> fresh reconcile -> trace -> counterfactual -> maturity` 证明 supervisor 动作闭环；这不影响旧路径退役状态。
 
+### position supervisor 失效确认链四断线（2026-08-26 修复）
+
+- 状态：`resolved`（代码修复完成、测试绿，待重启加载与真实运行证据）。
+- 问题事实：2026-08-26 复盘最近 10 笔仓位发现监督器"诊断正确但从未动手"。深挖确认四根结构性断线：① `signal_reversal` 只有读取方无生产者；② 开仓路径从不写 `entry_regime` → `regime_shift` 恒 none（29/29 笔实证）；③ 时间衰减证据需 timeout_ratio≥0.8 而实际持仓时长使其数学不可达；④ `thesis_broken_confirmations` 无递增者恒为 0。叠加 transition_confirming 姿态禁用主动动作，反事实链恒空，治理模板更新死循环。
+- canonical：三个生产者全部落在既有模块——entry_regime 由 `_persist_pending_entry_protection_plan` 盖章（live_service.py）、signal_reversal 由监督器上下文构建处产生（live_position_lifecycle.py build_position_supervisor_context_payload）、thesis_broken_confirmations 由 path-metrics 状态机递增（position_metrics.py）。tighten 解锁在 evaluate_position_supervisor 动作仲裁内，仅限盈利单 + profit_protection_window_ready + giveback≥阈值。
+- 已删除：无旧实现可删；删除的是"`signal_reversal`/`regime_shift`/`persistent_price_path` 是有效证据"的隐性假象。
+- 验证：新增 tests/test_supervisor_confirmation_chain.py 11 项；监督域+治理域回归 229 passed 零退化。
+- 剩余：重启加载后需 ≥10 笔带监督动作的真实仓位才能产出首批 counterfactual，届时本条 §23 的闭环证明才完整。
+
 
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
 

@@ -2138,6 +2138,17 @@ def build_position_supervisor_context_payload(
     context_state = raw_market_context.get("context_state")
     if not isinstance(context_state, dict):
         context_state = {}
+    # Signal-reversal producer (2026-08-26): compare the latest committed
+    # factor-composite direction with the position's own direction.  The
+    # supervisor previously read this flag without any writer, so the
+    # signal_reversal evidence family could never fire.
+    entry_direction = int(position.get("direction", 0) or 0)
+    composite_direction = int(raw_market_context.get("direction", 0) or 0)
+    signal_reversal = bool(
+        entry_direction != 0
+        and composite_direction != 0
+        and composite_direction != entry_direction
+    )
     resolved_regime = resolve_market_regime(raw_market_context)
     regime_id = str(
         resolved_regime.get("regime_id")
@@ -2193,6 +2204,8 @@ def build_position_supervisor_context_payload(
         **position_metrics,
         "holding_timeout_ratio": holding_timeout_ratio,
         "holding_timeout_exceeded": bool(holding_timeout_exceeded),
+        # Producer for the supervisor's signal_reversal evidence family.
+        "signal_reversal": signal_reversal,
         "market_open_holding_seconds": round(market_open_holding, 3)
         if market_budget
         else None,
