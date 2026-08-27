@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
+# pi-lens-ignore: reportMissingImports
 import pytest
 
 from execution import ctrader_bridge as ctrader_module
@@ -201,6 +202,28 @@ def test_ctrader_order_result_is_frozen_and_enforces_outcome_success_invariant()
         CTraderOrderResult(success=False, outcome="accepted")
 
 
+def test_response_evidence_preserves_broker_execution_price():
+    evidence = CTraderBridge._response_evidence(
+        SimpleNamespace(
+            errorCode="",
+            description="",
+            position=SimpleNamespace(positionId=9001, price=4590.87),
+            order=SimpleNamespace(orderId=8001, clientOrderId="client-1"),
+            deal=SimpleNamespace(
+                dealId=7001,
+                positionId=9001,
+                orderId=8001,
+                executionPrice=4590.87,
+            ),
+        )
+    )
+
+    assert evidence["execution_price"] == pytest.approx(4590.87)
+    assert evidence["raw_execution_price"] == pytest.approx(4590.87)
+    assert evidence["price_quality"] == "broker_reported"
+    assert evidence["position_entry_price"] == pytest.approx(4590.87)
+
+
 def test_market_order_persists_prepared_and_submitting_before_rpc_and_confirms_unique_diff(monkeypatch):
     store = _IntentStore()
     bridge = _bridge(store=store)
@@ -238,6 +261,55 @@ def test_market_order_persists_prepared_and_submitting_before_rpc_and_confirms_u
         "unresolved_count", "prepared", "submitting", "rpc", "completed",
     ]
     assert store.completed[0]["outcome"] == "confirmed"
+
+
+def test_market_order_returns_correlated_broker_deal_execution_price(monkeypatch):
+    store = _IntentStore()
+    bridge = _bridge(store=store)
+    position = PositionInfo(
+        position_id=9001,
+        symbol_id=41,
+        symbol="XAUUSD",
+        direction=1,
+        volume=100,
+        entry_price=4590.87,
+    )
+    deal = {
+        "deal_id": 7001,
+        "order_id": 8001,
+        "position_id": 9001,
+        "symbol_id": 41,
+        "volume": 100,
+        "filled_volume": 100,
+        "execution_price": 4590.87,
+        "price_quality": "broker_reported",
+        "trade_side": "buy",
+        "close_detail": {},
+    }
+    reconciles = iter([_reconcile("pre"), _reconcile("post", [position])])
+    deals = iter([[], [deal]])
+    monkeypatch.setattr(bridge, "reconcile_positions", lambda **_kwargs: next(reconciles))
+
+    def get_deals(**_kwargs):
+        bridge._last_deals_fetch_ok = True
+        return next(deals)
+
+    monkeypatch.setattr(bridge, "get_deals", get_deals)
+    monkeypatch.setattr(
+        bridge,
+        "_send",
+        lambda *_args, **_kwargs: ProtoOAExecutionEvent(
+            position_id=9001,
+            order_id=8001,
+        ),
+    )
+
+    result = bridge.market_buy("XAUUSD", 100)
+
+    assert result.outcome == "confirmed"
+    assert result.price == pytest.approx(4590.87)
+    resolution = store.completed[0]["broker_response"]["resolution"]
+    assert resolution["fill_price"] == pytest.approx(4590.87)
 
 
 def test_timeout_does_not_guess_existing_same_direction_position(monkeypatch):

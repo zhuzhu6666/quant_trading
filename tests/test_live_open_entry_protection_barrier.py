@@ -72,6 +72,76 @@ def test_confirmed_open_latches_before_fallible_position_refresh(monkeypatch):
     assert live_service._live_state_get("accepting_new_risk") is False
 
 
+def test_missing_result_price_uses_fresh_broker_entry(monkeypatch):
+    monkeypatch.setattr(
+        live_service,
+        "_tick_resolve_order_fill_price",
+        lambda *_args, **_kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_tick_resolve_order_position_id",
+        lambda *_args, **_kwargs: 501,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_tick_resolve_open_protection_prices",
+        lambda **_kwargs: {
+            "reference_price": 4001.25,
+            "sl_price": 3999.25,
+            "tp_price": 4005.25,
+        },
+    )
+    persisted = []
+    attached = []
+    monkeypatch.setattr(
+        live_service,
+        "_persist_pending_entry_protection_plan",
+        lambda **kwargs: persisted.append(kwargs),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_attach_open_trade_protection",
+        lambda **kwargs: attached.append(kwargs),
+    )
+
+    class _Bridge:
+        symbol = "XAUUSD+"
+
+        def reconcile_positions(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                status="fresh",
+                positions=[SimpleNamespace(position_id=501, entry_price=4001.25)],
+            )
+
+    live_service._handle_open_trade_order_success(
+        result=SimpleNamespace(success=True, outcome="confirmed", position_id=501, price=0.0),
+        bridge=_Bridge(),
+        attr_engine=None,
+        broker="ctrader",
+        cfg=SimpleNamespace(),
+        bar={"time": 1.0},
+        tick=12,
+        account={},
+        positions=[],
+        composite=SimpleNamespace(direction=1),
+        gate_result=SimpleNamespace(),
+        candidate=SimpleNamespace(
+            direction_name="LONG",
+            volume=100.0,
+            base_volume=100.0,
+            sl_dist=2.0,
+            tp_dist=4.0,
+            digits=2,
+        ),
+        current_price=4000.0,
+        log=lambda _message: None,
+    )
+
+    assert persisted[0]["fill_price"] == 4001.25
+    assert attached[0]["fill_price"] == 4001.25
+
+
 def test_submit_contains_confirmed_open_post_fill_exception(monkeypatch):
     result = SimpleNamespace(
         success=True,

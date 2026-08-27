@@ -1,0 +1,38 @@
+{
+  "include": [
+    "*.py",
+    "alpha",
+    "backend",
+    "cli",
+    "config",
+    "core",
+    "data",
+    "db",
+    "execution",
+    "monitor",
+    "research",
+    "risk",
+    "runtime",
+    "scripts",
+    "strategy",
+    "tests"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    ".pytest_cache",
+    "logs",
+    "run_artifacts",
+    "tick_vault_data"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["."]
+    }
+  ]
+}

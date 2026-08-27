@@ -10869,6 +10869,15 @@ def _handle_open_trade_order_success(
         position_open_price=_position_open_price,
         protection_prices=_protection_prices_from_reference,
     )
+    protection_reference_price = float(
+        protection_prices.get("reference_price") or 0.0
+    )
+    if protection_reference_price <= 0.0:
+        raise RuntimeError("broker_entry_price_unavailable_for_protection")
+    if fill_price <= 0.0:
+        # A confirmed open without a result price can still use the fresh
+        # broker position entry; never fall back to the signal/current mark.
+        fill_price = protection_reference_price
     sl_price = float(protection_prices["sl_price"])
     tp_price = float(protection_prices["tp_price"])
     entry_protection_plan = _entry_protection_plan_payload(

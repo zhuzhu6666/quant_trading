@@ -485,7 +485,7 @@ def test_open_order_preflight_preserves_percent_fallback_without_atr():
 
 
 def test_order_success_helpers_require_broker_confirmed_position_id():
-    assert resolve_order_fill_price(SimpleNamespace(price=0.0), current_price=3333.0) == 3333.0
+    assert resolve_order_fill_price(SimpleNamespace(price=0.0), current_price=3333.0) == 0.0
     assert resolve_order_fill_price(SimpleNamespace(price=3334.5), current_price=3333.0) == 3334.5
     assert resolve_order_position_id(SimpleNamespace(position_id=99), positions_before=[]) == 99
     assert resolve_order_position_id(

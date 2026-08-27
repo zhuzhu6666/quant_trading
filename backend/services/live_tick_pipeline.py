@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+import math
 import time
 from typing import Any
 
@@ -401,7 +402,11 @@ def guard_current_price_with_spot_quote(
 
 
 def resolve_order_fill_price(result: Any, *, current_price: float) -> float:
-    return float(getattr(result, "price", current_price) or current_price)
+    try:
+        price = float(getattr(result, "price", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return price if math.isfinite(price) and price > 0.0 else 0.0
 
 
 def _position_id_from_payload(position: Any) -> int:
@@ -439,7 +444,7 @@ def resolve_open_protection_prices(
     position_open_price: Callable[[Any], float],
     protection_prices: Callable[[int, float, float, float, int], tuple[float, float]],
 ) -> dict[str, Any]:
-    reference_price = float(fill_price or current_price or 0.0)
+    reference_price = float(fill_price or 0.0)
     if reference_price > 0:
         sl_price, tp_price = protection_prices(
             int(direction or 0),

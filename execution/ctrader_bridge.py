@@ -2388,6 +2388,7 @@ class CTraderBridge(BaseBrokerBridge):
                 "symbol_id": int(pos.symbol_id or 0),
                 "direction": int(pos.direction or 0),
                 "volume": float(pos.volume or 0.0),
+                "entry_price": float(pos.entry_price or 0.0),
                 "open_timestamp": float(pos.open_timestamp or 0.0),
                 "stop_loss": float(pos.sl or 0.0),
                 "take_profit": float(pos.tp or 0.0),
@@ -2485,6 +2486,12 @@ class CTraderBridge(BaseBrokerBridge):
         position = safe_attr(resp, "position")
         order = safe_attr(resp, "order")
         deal = safe_attr(resp, "deal")
+        execution_price, price_quality = _classify_broker_deal_price(
+            safe_attr(deal, "executionPrice", 0.0),
+        )
+        position_entry_price = _parse_broker_raw_price(
+            safe_attr(position, "price", 0.0),
+        )
         evidence = {
             "response_type": type(resp).__name__,
             "error_code": safe_text(safe_attr(resp, "errorCode", "")),
@@ -2501,6 +2508,17 @@ class CTraderBridge(BaseBrokerBridge):
             "deal_id": safe_int(safe_attr(deal, "dealId", 0)),
             "client_order_id": safe_text(safe_attr(order, "clientOrderId", "")),
         }
+        if execution_price > 0.0:
+            evidence.update(
+                {
+                    "execution_price": execution_price,
+                    "raw_execution_price": execution_price,
+                    "price_contract": "ctrader.deal.execution_price.raw.v1",
+                    "price_quality": price_quality,
+                }
+            )
+        if position_entry_price > 0.0:
+            evidence["position_entry_price"] = position_entry_price
         if parse_errors:
             evidence["parse_errors"] = sorted(set(parse_errors))
         return evidence
@@ -2543,6 +2561,7 @@ class CTraderBridge(BaseBrokerBridge):
         correlated_position_ids: set[int] = set()
         order_candidates: set[int] = set()
         correlated_order_ids: set[int] = set()
+        deal_fill_prices: dict[int, list[tuple[float, float]]] = {}
 
         def add_position(raw: Any, source: str, *, correlated: bool = False) -> None:
             try:
@@ -2617,16 +2636,65 @@ class CTraderBridge(BaseBrokerBridge):
                 continue
             if response_order_id > 0 and deal_order_id > 0 and deal_order_id != response_order_id:
                 continue
+            deal_position_id = int(deal.get("position_id") or 0)
             add_position(
-                deal.get("position_id"),
+                deal_position_id,
                 "correlated_new_deal" if deal_order_id in correlated_order_ids else "new_deal",
                 correlated=deal_order_id in correlated_order_ids,
             )
+            execution_price = _parse_broker_raw_price(deal.get("execution_price"))
+            price_quality = str(deal.get("price_quality") or "").strip().lower()
+            if deal_position_id > 0 and execution_price > 0.0 and price_quality in {
+                "broker_reported",
+                "broker_reconciled",
+            }:
+                try:
+                    fill_volume = float(
+                        deal.get("filled_volume") or deal.get("volume") or 0.0
+                    )
+                except (TypeError, ValueError):
+                    fill_volume = 0.0
+                deal_fill_prices.setdefault(deal_position_id, []).append(
+                    (execution_price, max(fill_volume, 0.0))
+                )
             if deal_order_id > 0:
                 order_candidates.add(deal_order_id)
 
         candidate_ids = sorted(correlated_position_ids or position_candidates)
         evidence = {str(pid): sorted(sources) for pid, sources in position_candidates.items()}
+        fill_price = 0.0
+        if len(candidate_ids) == 1:
+            candidate_id = candidate_ids[0]
+            fills = deal_fill_prices.get(candidate_id, [])
+            if fills:
+                total_volume = sum(volume for _, volume in fills)
+                if total_volume > 0.0:
+                    fill_price = sum(price * volume for price, volume in fills) / total_volume
+                elif len({price for price, _ in fills}) == 1:
+                    fill_price = fills[0][0]
+            if fill_price <= 0.0 and response_pid == candidate_id:
+                fill_price = _parse_broker_raw_price(response.get("execution_price"))
+            if fill_price <= 0.0:
+                post_position = post_positions.get(str(candidate_id), {})
+                post_entry = _parse_broker_raw_price(post_position.get("entry_price"))
+                if post_entry > 0.0:
+                    previous = pre_positions.get(str(candidate_id))
+                    if previous is None:
+                        fill_price = post_entry
+                    else:
+                        try:
+                            post_volume = float(post_position.get("volume") or 0.0)
+                            pre_volume = float(previous.get("volume") or 0.0)
+                            pre_entry = _parse_broker_raw_price(previous.get("entry_price"))
+                            delta_volume = post_volume - pre_volume
+                            if delta_volume > 0.0 and pre_entry > 0.0:
+                                derived_price = (
+                                    post_entry * post_volume - pre_entry * pre_volume
+                                ) / delta_volume
+                                if math.isfinite(derived_price) and derived_price > 0.0:
+                                    fill_price = derived_price
+                        except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+                            fill_price = 0.0
         if len(candidate_ids) != 1:
             return {
                 "outcome": "unknown",
@@ -2637,6 +2705,7 @@ class CTraderBridge(BaseBrokerBridge):
                 "correlated_position_ids": sorted(correlated_position_ids),
                 "correlated_order_ids": sorted(correlated_order_ids),
                 "evidence": evidence,
+                "fill_price": 0.0,
                 "reason": "no_unique_position_match" if not candidate_ids else "multiple_position_matches",
             }
         return {
@@ -2648,6 +2717,7 @@ class CTraderBridge(BaseBrokerBridge):
             "correlated_position_ids": sorted(correlated_position_ids),
             "correlated_order_ids": sorted(correlated_order_ids),
             "evidence": evidence,
+            "fill_price": float(fill_price or 0.0),
             "reason": (
                 "unique_correlated_broker_match"
                 if correlated_position_ids
@@ -3236,6 +3306,11 @@ class CTraderBridge(BaseBrokerBridge):
             order_id=int(resolution.get("order_id") or 0),
             error_code="" if outcome == "confirmed" else "SEND_OUTCOME_UNKNOWN",
             comment=str(resolution.get("reason") or outcome),
+            price=float(
+                resolution.get("fill_price")
+                or response.get("execution_price")
+                or 0.0
+            ),
             intent_id=intent_id,
             execution_intent_status="persisted",
             client_order_id=client_order_id, client_msg_id=client_msg_id,
