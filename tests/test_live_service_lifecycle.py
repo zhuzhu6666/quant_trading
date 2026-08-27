@@ -1296,7 +1296,13 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
     monkeypatch.setattr(
         live_service,
         "_open_learning_context_payload",
-        lambda **kwargs: {"learning": "ctx", "sizing_trace": kwargs.get("sizing_trace") or {}},
+        lambda **kwargs: {
+            "learning": "ctx",
+            "sizing_trace": kwargs.get("sizing_trace") or {},
+            "position_supervisor_binding": kwargs.get(
+                "position_supervisor_binding"
+            ),
+        },
     )
     monkeypatch.setattr(
         live_service,
@@ -1310,6 +1316,10 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
     )
 
     logs: list[str] = []
+    supervisor_binding = {
+        "schema_version": "position_supervisor_binding.v1",
+        "template_id": "position_supervisor:default.v1",
+    }
     live_service._record_amended_open_success_context(
         attr_engine=_Attr(),
         bridge=SimpleNamespace(),
@@ -1335,9 +1345,14 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
         market_session={"status": "open"},
         event_sizing_context={"multiplier": 1.2},
         sizing_trace={"source": "event"},
-        entry_protection_plan={"schema_version": "entry_protection_plan.v1", "status": "pending"},
+        entry_protection_plan={
+            "schema_version": "entry_protection_plan.v1",
+            "status": "pending",
+            "supervisor_binding": supervisor_binding,
+        },
         direction_name="LONG",
         log=logs.append,
+        position_supervisor_binding=supervisor_binding,
     )
 
     assert calls["track"][0][1] == {"sl": 3998.0, "tp": 4028.0}
@@ -1353,6 +1368,62 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
     assert calls["upserts"][0][0]["entry_decision_id"] == "dec_open_amended"
     assert calls["upserts"][0][1]["meta"]["entry_protection_plan"]["status"] == "applied"
     assert calls["upserts"][0][1]["meta"]["entry_protection_plan"]["applied_stop_loss"] == 3998.0
+    assert calls["upserts"][0][1]["meta"]["entry_protection_plan"]["supervisor_binding"] == supervisor_binding
+    assert calls["upserts"][0][1]["meta"]["position_supervisor_binding"] == supervisor_binding
+
+
+def test_position_supervisor_context_does_not_duplicate_template_arguments(monkeypatch):
+    template = {
+        "template_id": "position_supervisor:default.v1",
+        "template_version": "default.v1",
+    }
+    policy = {"binding_state": "bound"}
+    captured = {}
+    monkeypatch.setattr(
+        live_service,
+        "_build_close_position_risk_context",
+        lambda **_kwargs: {"holding_seconds": 60.0},
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_position_path_metrics_for_position",
+        lambda *_args, **_kwargs: {"state": "known"},
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_load_recovery_row_for_risk_reduction",
+        lambda *_args, **_kwargs: {"recovery_meta": {}},
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_position_supervisor_policy_for_position",
+        lambda **_kwargs: (template, policy),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_lookup_entry_decision_for_risk_reduction",
+        lambda *_args, **_kwargs: "entry-1",
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_tracked_total_api_volume",
+        lambda _positions: 100.0,
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_lifecycle_build_position_supervisor_context_payload",
+        lambda **kwargs: captured.update(kwargs) or kwargs,
+    )
+
+    live_service._build_position_supervisor_context(
+        {"position_id": 285354691, "symbol": "XAUUSD+", "direction": -1},
+        cfg=SimpleNamespace(risk_max_holding_bars=12),
+        acct={"equity": 500.0},
+        positions=[{"position_id": 285354691}],
+    )
+
+    assert captured["position_supervisor_template"] == template
+    assert captured["position_supervisor_policy"] == policy
 
 
 def test_delegate_timeout_supervisor_close_logs_timeout_trace(monkeypatch):

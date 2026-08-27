@@ -34,6 +34,9 @@ from backend.services.canonical_v2_reader import (
     iter_review_rows,
     review_row,
 )
+from backend.services.position_supervisor_templates import (
+    resolve_position_supervisor_binding_lineage,
+)
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.supervisor_payload_contract import (
     compact_supervisor_mapping as _compact_supervisor_mapping,
@@ -76,11 +79,46 @@ def _review_payload_from_row(
     return payload if isinstance(payload, dict) else {}
 
 
+def _position_supervisor_binding_reference(*sources: Any) -> dict[str, str]:
+    lineage = resolve_position_supervisor_binding_lineage(*sources)
+    binding = lineage.get("binding") if isinstance(lineage.get("binding"), dict) else {}
+    return {
+        "status": str(lineage.get("state") or "unknown"),
+        "reason": str(lineage.get("reason") or "binding_missing"),
+        "template_id": str(binding.get("template_id") or ""),
+        "template_version": str(binding.get("template_version") or ""),
+        "template_hash": str(binding.get("template_hash") or ""),
+        "binding_source": str(binding.get("binding_source") or ""),
+    }
+
+
+def _memory_similarity_projection(value: Any) -> Any:
+    """Remove lineage-only fields from semantic memory matching input."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): _memory_similarity_projection(item)
+            for key, item in value.items()
+            if not str(key).startswith("position_supervisor_binding")
+        }
+    if isinstance(value, list):
+        return [_memory_similarity_projection(item) for item in value]
+    return value
+
+
 _MEMORY_PERSISTED_MAX_KEYS = 64
 _MEMORY_PERSISTED_MAX_LIST_ITEMS = 32
 _MEMORY_PERSISTED_MAX_STRING = 512
 _MEMORY_PERSISTED_NESTED_KEYS = frozenset(
-    {"context", "decision_context", "evidence", "lesson", "posterior_reconciliation", "review"}
+    {
+        "context",
+        "decision_context",
+        "evidence",
+        "lesson",
+        "posterior_reconciliation",
+        "review",
+        "position_supervisor_binding",
+    }
 )
 _UNSUPPORTED_PERSISTED_VALUE = object()
 
@@ -301,6 +339,17 @@ def _review_fact_projection(
             inferred,
             nested_keys=frozenset({"evidence", "recommended_controls", "execution", "risk_state"}),
         )
+    binding_ref = _position_supervisor_binding_reference(raw)
+    projected.update(
+        {
+            "position_supervisor_binding_status": binding_ref["status"],
+            "position_supervisor_binding_reason": binding_ref["reason"],
+            "position_supervisor_binding_template_id": binding_ref["template_id"],
+            "position_supervisor_binding_template_version": binding_ref["template_version"],
+            "position_supervisor_binding_template_hash": binding_ref["template_hash"],
+            "position_supervisor_binding_source": binding_ref["binding_source"],
+        }
+    )
     return projected
 
 
@@ -1624,6 +1673,17 @@ class BrainMemoryService:
             # source payload into the brain/readiness projection.
             context_projection.pop("review_json", None)
             context_projection.pop("review", None)
+            binding_ref = _position_supervisor_binding_reference(
+                source_review,
+                context_projection,
+            )
+            binding = (
+                context_projection.get("position_supervisor_binding")
+                if isinstance(context_projection.get("position_supervisor_binding"), dict)
+                else source_review.get("position_supervisor_binding")
+                if isinstance(source_review.get("position_supervisor_binding"), dict)
+                else {}
+            )
             lesson = context_projection.get("lesson")
             if not isinstance(lesson, dict):
                 lesson = {}
@@ -1649,6 +1709,13 @@ class BrainMemoryService:
                             "outcome_label": outcome_label, "reward_score": reward,
                             "failure_tags": tags, "recommended_action": row["recommended_action"],
                             "lesson": lesson, "decision_context": context_projection,
+                            "position_supervisor_binding_status": binding_ref["status"],
+                            "position_supervisor_binding_reason": binding_ref["reason"],
+                            "position_supervisor_binding_template_id": binding_ref["template_id"],
+                            "position_supervisor_binding_template_version": binding_ref["template_version"],
+                            "position_supervisor_binding_template_hash": binding_ref["template_hash"],
+                            "position_supervisor_binding_source": binding_ref["binding_source"],
+                            "position_supervisor_binding": binding,
                             "review": _review_fact_projection(
                                 source_review,
                                 review_id=row["source_review_id"],
@@ -1690,6 +1757,12 @@ class BrainMemoryService:
             )
             summary = " ".join(str(part or "") for part in [row["outcome_label"],
                 row["summary_text"], " ".join(str(t) for t in tags)]).strip()
+            binding_ref = _position_supervisor_binding_reference(review)
+            binding = (
+                review.get("position_supervisor_binding")
+                if isinstance(review.get("position_supervisor_binding"), dict)
+                else {}
+            )
             items.append(self._item(
                 source_table="canonical_v2.trade_review", source_id=str(row["review_id"] or ""),
                 memory_type="negative" if polarity == "negative" else "episodic",
@@ -1698,6 +1771,13 @@ class BrainMemoryService:
                             "trade_id": row["trade_id"], "position_id": row["position_id"],
                             "entry_decision_id": row["entry_decision_id"], "pnl": pnl,
                             "outcome_label": outcome_label, "failure_tags": tags,
+                            "position_supervisor_binding_status": binding_ref["status"],
+                            "position_supervisor_binding_reason": binding_ref["reason"],
+                            "position_supervisor_binding_template_id": binding_ref["template_id"],
+                            "position_supervisor_binding_template_version": binding_ref["template_version"],
+                            "position_supervisor_binding_template_hash": binding_ref["template_hash"],
+                            "position_supervisor_binding_source": binding_ref["binding_source"],
+                            "position_supervisor_binding": binding,
                             "review": _review_fact_projection(
                                 review,
                                 review_id=row["review_id"],
@@ -1754,6 +1834,20 @@ class BrainMemoryService:
             label = str(row.get("label") or "")
             confidence = safe_float(row.get("confidence"))
             mapped = _SUPERVISOR_COUNTERFACTUAL_ACTIONS.get(label)
+            binding_ref = _position_supervisor_binding_reference(
+                _review_payload_from_row(
+                    conn,
+                    row,
+                    source_id_key="source_review_id",
+                    inline_key="source_review_json",
+                ),
+                evidence,
+            )
+            binding = (
+                evidence.get("position_supervisor_binding")
+                if isinstance(evidence.get("position_supervisor_binding"), dict)
+                else {}
+            )
             summary = " ".join(
                 str(part or "")
                 for part in [
@@ -1777,6 +1871,13 @@ class BrainMemoryService:
                 "horizons": horizons,
                 "evidence": evidence,
                 "causal_scope": "supervisor",
+                "position_supervisor_binding_status": binding_ref["status"],
+                "position_supervisor_binding_reason": binding_ref["reason"],
+                "position_supervisor_binding_template_id": binding_ref["template_id"],
+                "position_supervisor_binding_template_version": binding_ref["template_version"],
+                "position_supervisor_binding_template_hash": binding_ref["template_hash"],
+                "position_supervisor_binding_source": binding_ref["binding_source"],
+                "position_supervisor_binding": binding,
                 "posterior_verdict": mapped[0] if mapped else "inconclusive",
                 "recommended_action": mapped[1] if mapped else "hold",
             }
@@ -1902,7 +2003,14 @@ class BrainMemoryService:
               text_summary: str, structured: dict[str, Any], evidence_score: float,
               polarity: str, created_at: float, terms: set[str],
               symbol: str = "", timeframe: str = "", regime: str = "") -> dict[str, Any]:
-        similarity = self._similarity(" ".join([text_summary, dumps(structured), regime]), terms)
+        similarity = self._similarity(
+            " ".join([
+                text_summary,
+                dumps(_memory_similarity_projection(structured)),
+                regime,
+            ]),
+            terms,
+        )
         return {
             "memory_id": _memory_id(source_table, source_id),
             "schema_version": "brain_memory_item.v1",

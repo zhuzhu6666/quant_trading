@@ -68,8 +68,9 @@ def replay_recovered_close(
         return False
 
     # Why did this position close?  Reconciliation only knows that it is gone.
-    # A fill matching our durable broker-side stop-loss proves a natural
-    # broker stop-out; everything else stays conservatively labelled.
+    # A durable supervisor-close reason is authoritative for a direct action;
+    # a fill matching our broker-side protection is the next-best natural
+    # lifecycle proof; everything else stays conservatively labelled.
     reason_resolution = classify_close_reason_from_recovery(
         replayed=True,
         real_pnl=real_pnl,
@@ -77,6 +78,11 @@ def replay_recovered_close(
         fallback_reason="restart_replay",
     )
 
+    resolved_close_reason = str(reason_resolution.get("close_reason") or "restart_replay")
+    resolved_close_reason_source = str(
+        reason_resolution.get("close_reason_source")
+        or ("external_broker_close" if resolved_close_reason == "broker_close" else "restart_replay")
+    )
     payloads = runtime.build_payloads(
         position_id=position_id,
         position_state=position_state,
@@ -85,6 +91,9 @@ def replay_recovered_close(
         now_ts=runtime.now(),
         context_integrity_default=runtime.partial_context,
         sl_hit_evidence=reason_resolution.get("sl_hit_evidence"),
+        resolved_close_reason=resolved_close_reason,
+        close_reason_source=resolved_close_reason_source,
+        recovery_observation_reason="position_missing_after_recovery_reconcile",
         attr_engine=runtime.attr_engine,
     )
     total_pnl = float(payloads["total_pnl"])
@@ -95,7 +104,7 @@ def replay_recovered_close(
     # state only and must commit before its original pre-fetch cursor is freed.
     runtime.mark_recovery_closed(
         position_id,
-        close_reason="restart_replay",
+        close_reason=resolved_close_reason,
         close_pnl=total_pnl,
         closed_at=close_ts,
         meta=payloads["recovery_meta"],
@@ -148,6 +157,10 @@ def replay_recovered_close(
                 exit_decision_id=exit_decision_id,
                 real_pnl=review_payload["real_pnl"],
                 close_reason=review_payload["close_reason"],
+                close_reason_source=str(review_payload.get("close_reason_source") or ""),
+                inferred_close_supervisor=dict(
+                    reason_resolution.get("supervisor_close_evidence") or {}
+                ),
                 context_integrity=review_payload["context_integrity"],
                 attribution_integrity=str(
                     review_payload.get("attribution_integrity")
@@ -257,6 +270,12 @@ def retire_broker_missing_position(
             )
         return False
 
+    reason_resolution = classify_close_reason_from_recovery(
+        replayed=True,
+        real_pnl=real_pnl,
+        position_state=position_state,
+        fallback_reason="restart_replay",
+    )
     if not runtime.replay_close(
         broker=broker,
         position_id=pid,
@@ -267,9 +286,13 @@ def retire_broker_missing_position(
         return False
 
     now = runtime.now()
+    trade_close_reason = str(reason_resolution.get("close_reason") or "restart_replay")
+    trade_close_reason_source = str(
+        reason_resolution.get("close_reason_source") or "restart_replay"
+    )
     runtime.mark_recovery_closed(
         pid,
-        close_reason="broker_position_not_found",
+        close_reason=trade_close_reason,
         close_pnl=float(
             (real_pnl or {}).get(
                 "net",
@@ -284,6 +307,9 @@ def retire_broker_missing_position(
             "broker_position_not_found": True,
             "failure_reason": reason,
             "retired_at": now,
+            "recovery_observation_reason": "broker_position_not_found",
+            "trade_close_reason": trade_close_reason,
+            "trade_close_reason_source": trade_close_reason_source,
         },
     )
     runtime.remove_live_position_state(pid)

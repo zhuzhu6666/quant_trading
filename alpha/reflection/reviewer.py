@@ -25,6 +25,9 @@ from backend.services.canonical_v2_reader import (
 )
 from backend.services.failure_taxonomy import build_failure_taxonomy
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
+from backend.services.position_supervisor_templates import (
+    resolve_position_supervisor_binding_lineage,
+)
 from backend.services.review_contract import (
     build_entry_timing_context,
     build_execution_quality_evidence,
@@ -590,6 +593,19 @@ class TradeReviewer:
                 recovery_meta = json.loads(recovery["recovery_meta_json"])
             except Exception:
                 recovery_meta = {}
+        binding_lineage = resolve_position_supervisor_binding_lineage(
+            entry_action,
+            recovery_meta,
+            fallback_meta,
+            inferred_close_supervisor,
+        )
+        supervisor_binding = dict(binding_lineage.get("binding") or {})
+        supervisor_binding_state = str(
+            binding_lineage.get("state") or "unknown"
+        )
+        supervisor_binding_reason = str(
+            binding_lineage.get("reason") or "binding_missing"
+        )
         path_state = normalize_path_state((recovery_meta or {}).get("position_path"))
         current_regime = str((recovery_meta or {}).get("current_regime") or "")
         next_state, path_metrics = update_position_path_metrics(
@@ -699,6 +715,8 @@ class TradeReviewer:
             "signal_score": entry_score,
             "action_score": entry_score,
             "entry_action": entry_action if isinstance(entry_action, dict) else {},
+            "position_supervisor_binding_status": supervisor_binding_state,
+            "position_supervisor_binding_reason": supervisor_binding_reason,
             "factor_training_lineage": factor_training_lineage,
             "entry_risk_state": entry_risk_state if isinstance(entry_risk_state, dict) else {},
             "direction": _safe_int((entry_action or {}).get("direction") if isinstance(entry_action, dict) else 0),
@@ -787,6 +805,20 @@ class TradeReviewer:
             "regime_fit": round(regime_fit_score, 4),
             "execution_quality": round(execution_quality, 4),
         }
+        if supervisor_binding:
+            review_json["position_supervisor_binding"] = supervisor_binding
+            review_json["position_supervisor_binding_template_id"] = str(
+                supervisor_binding.get("template_id") or ""
+            )
+            review_json["position_supervisor_binding_template_version"] = str(
+                supervisor_binding.get("template_version") or ""
+            )
+            review_json["position_supervisor_binding_template_hash"] = str(
+                supervisor_binding.get("template_hash") or ""
+            )
+            review_json["position_supervisor_binding_source"] = str(
+                supervisor_binding.get("binding_source") or ""
+            )
         review_json = normalize_trade_review_contract(
             review_json,
             entry_quality=entry_quality,

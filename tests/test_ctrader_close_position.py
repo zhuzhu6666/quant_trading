@@ -168,10 +168,17 @@ def test_get_deals_keeps_price_raw_and_scales_only_money(monkeypatch):
         detail.balance = int(1_000 * multiplier)
         detail.closedVolume = response.deal[index].filledVolume
         detail.moneyDigits = 2 if index == 0 else 4
-    monkeypatch.setattr(bridge, "_send", lambda req, timeout=None: response)
+    sent = []
+
+    def _send(req, timeout=None):
+        sent.append(req)
+        return response
+
+    monkeypatch.setattr(bridge, "_send", _send)
 
     deals = bridge.get_deals()
 
+    assert sent[0].toTimestamp > 0
     assert [deal["execution_price"] for deal in deals] == [4048.25, 4048.25]
     assert [deal["commission"] for deal in deals] == [-1.25, -0.0125]
     assert [deal["close_detail"]["entry_price"] for deal in deals] == [4050.5, 4050.5]

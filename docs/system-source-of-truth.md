@@ -1,7 +1,7 @@
 # System Source Of Truth
 
 > Status: active
-> Last verified: 2026-08-21
+> Last verified: 2026-08-27
 > Scope: authoritative sources for runtime state, configuration, governance, data, and frontend contracts.
 
 本文回答一个问题：当文档、注释、接口、数据库和历史理解冲突时，到底以哪里为准。
@@ -31,6 +31,27 @@
 release preflight 和前端只能复用该结果，不得通过再次读取原始输入形成第二个裁决。
 新增聚合对象只有在能够立即替换并删除多个现有终局判断时才允许；不得为了“统一”
 再建立第四套门控或写入口。
+
+### 1.2 仓位监督与系统记忆边界
+
+- `PositionSupervisor` 的普通 `tighten/reduce/close` 继续采用唯一链路：
+  `supervisor verdict -> RiskPolicy -> broker -> lifecycle -> fresh reconcile -> trace`。
+  `governed_execute` 是当前 active live 语义；历史 observation 和 learning-shadow 不得回到 broker。
+- 新仓位在成交前由 live backend 选择一次监督模板，并把规范化完整快照、版本、hash 和来源保存到
+  `entry_protection_plan.supervisor_binding`，随 `recovery_position_state.recovery_meta_json` 恢复。
+  已绑定仓位的普通软策略只读自己的快照；全局 `RuntimeConfig.position_supervisor_template_id` 只做
+  新仓位默认基线和旧仓位 `legacy_global_fallback`。缺失、篡改或来源不明时保持
+  `unknown/hold`，不伪造历史绑定；硬安全收紧仍由当前 Safety/RiskPolicy 独立执行。
+- `runtime_kv[position_supervisor_selection.v1]` 是唯一记忆到 live 的选择投影，由既有 learning worker
+  的 `position_supervisor_governance` 阶段生成，live backend 只在成交前或稳定已收盘 bar 边界读取；普通
+  tick 不重新查询记忆。已有仓位切换受 Demo、known facts、无未决执行/对账、连续稳定 bar、冷却期和
+  单仓次数限制，且只更新该仓位 binding，不修改全局模板。
+- 仓位治理的“系统记忆”按层区分：canonical trace/counterfactual 是事实，监督训练样本是资格化学习记录，
+  `experience_memory` 是可重建的交易 lesson，`brain_memory`/`posterior_arbitration` 是有界检索和后验索引。
+  后两者只提供 memory/critic/context，不能直接授权 live 动作；真正改变模板必须经过 policy suggestion、
+  V16、RiskPolicy、Coordinator、application/effect 和可回滚配置投影。
+- 事实缺失、来源不明或记忆完整性异常时保持 `unknown/warming_up/stale/error`，不得用默认值补齐，
+  也不得把单条记忆或单次反事实直接升级为全局策略结论。
 
 ## 2. 配置事实源
 
@@ -63,6 +84,11 @@ release preflight 和前端只能复用该结果，不得通过再次读取原�
 | Safety heartbeat | `LiveLoopController` / Safety plane | 只表示 Safety 阶段完成并继续独立 fail-closed；不替代 account/positions freshness，也不使公共 loop fact 忽略较旧的完整 tick。串行 Safety 阶段可额外发布仅供 watchdog 识别“正在执行而非卡死”的 progress 标记；progress 不能解除 20 秒完成心跳或最终开仓对账门 |
 
 串行 broker RPC、风险保护和风险指标计算都计入 tick 周期。5 秒是目标周期，不是额外 sleep；若工作已经超过目标周期，下一轮立即开始，不再追加等待。20 秒 freshness 到期时必须显示 `stale` 并阻断新增风险，不能把阈值调大来掩盖后端停滞。
+
+仓位监督选择的 `off` 只是无合格证据时的安全启动基线，不需要人工把它改成
+`demo_execute`。learning worker 在投影达到资格后会自动通过既有 V16、RiskPolicy 和
+Coordinator 进入有界 Demo；`live_execute` 仍不准入。这里保留的是执行安全边界，不是新增
+人工审批闸门。
 
 判断原则：
 
@@ -167,7 +193,9 @@ release preflight 和前端只能复用该结果，不得通过再次读取原�
 | 日内风险恢复 | canonical broker_deal events + 不超过 20 秒的 fresh broker open position IDs + `backend.services.session_restore.resolve_session_restore` | `runtime_kv[live.session.*]` 只是兼容缓存；恢复始终先按 position 聚合 close deals，并排除 broker 仍开放的 position（含 partial-close 后仍开放的 position），再由独立纯决策边界重算 PnL、交易数、连亏、drawdown 和 circuit，并显式选择 `available/degraded_cache/unavailable`。只有 autonomy mode 为 `demo_autonomous`/`demo_nursery` 且 broker 配置独立确认 cTrader Demo 时，session circuit 才是 observation-only：`session_circuit_observation` 保留触发原因，`circuit_breaker=false`，不阻断 alpha；真实账户、非 Demo 模式或 broker 配置不可确认时继续 fail-closed 强制熔断。`live_service` 只采集 account/deal/cache 输入和发布结果。`session_observed_at` 必须与 account/positions 观测时间独立；权威查询或余额基线失败时只保留 `degraded_cache/unavailable` 与最后数值，不得归零或开放新增风险 |
 | 后端进程退出 | `BackendRuntimeLifecycle` + `stop_loop_for_process_shutdown()` + `live.loop.last_shutdown` | 进程退出保留 persisted desired loop state，同步等待当前 tick drain；`completed/timed_out/not_running` 写结构化 shutdown 结果，超时以 `recovery_required=true` 审计，不平仓、不主动断开 cTrader；手工 `/api/live/stop` 仍负责显式关闭 desired state |
 | 信号门槛 | `ExecutionGate` + context policy effect | gate 前应用有效阈值；live 的 factor gate 不启动冷却，避免尚未通过最终准入的信号制造等待。实际开仓频率、同向聚集和亏损冷却只由 RiskPolicy/entry-cluster 裁决 |
-| 仓位监督 | `PositionSupervisor` / `position-supervisor-contract.md` + `backend.services.live_supervision_actions` + `backend.services.live_supervision_runtime` + `recovery_position_state.recovery_meta.position_path` | fresh broker position reconcile 是 live 持仓路径 `MFE/MAE/time_in_profit` 的唯一累计写入边界，canonical position/lifecycle events、API 和 Web 只读投影；active template 只接受 `governed_execute`。`tighten/reduce/close` 都必须先经过 broker 可执行性/no-op、supervisor verdict 和 RiskPolicy，再由同一 supervisor executor 触达 broker，并由 fresh reconcile 证明 applied；风险拒绝、未知回执、执行失败或不完整投影不得伪装为 applied。真实 `executed/applied` trace 才可进入 supervisor maturity；历史 observation/superseded trace terminalize 为 `excluded/train_weight=0`，仅供 audit/explainability。`restart_replay/manual_close` 等污染仍可按用途进入低权重 outcome learning，但禁止 supervisor counterfactual 和 governance mutation；`legacy_awe_trailing` 仅历史审计。风险页必须分别展示政策裁决与 broker 执行事实。
+| 仓位监督 | `PositionSupervisor` / `position-supervisor-contract.md` + `backend.services.live_supervision_actions` + `backend.services.live_supervision_runtime` + `recovery_position_state.recovery_meta.position_path` | fresh broker position reconcile 是 live 持仓路径 `MFE/MAE/time_in_profit` 的唯一累计写入边界，canonical position/lifecycle events、API 和 Web 只读投影；active template 只接受 `governed_execute`。新仓位绑定 `position_supervisor_binding.v1`，旧仓位明确使用 `legacy_global_fallback`；绑定 hash 不一致或来源未知时软策略 `unknown/hold`，硬风险仍可收口。记忆选择只消费 learning worker 写入的 `runtime_kv[position_supervisor_selection.v1]`，只在成交前或稳定边界读取。`tighten/reduce/close` 都必须先经过 broker 可执行性/no-op、supervisor verdict 和 RiskPolicy，再由同一 supervisor executor 触达 broker，并由 fresh reconcile 证明 applied；风险拒绝、未知回执、执行失败或不完整投影不得伪装为 applied。真实 `executed/applied` trace 才可进入 supervisor maturity；历史 observation/superseded trace terminalize 为 `excluded/train_weight=0`，仅供 audit/explainability。`restart_replay/manual_close` 等污染仍可按用途进入低权重 outcome learning，但禁止 supervisor counterfactual 和 governance mutation；`legacy_awe_trailing` 仅历史审计。风险页必须分别展示政策裁决与 broker 执行事实。
+| 仓位监督选择投影 | `runtime_kv[position_supervisor_selection.v1]` + `backend.services.position_supervisor_governance` + 既有 `autonomous_learning` worker | 唯一 memory-to-live 投影；只接受当前 Coordinator mutation、完整干净成熟 `causal_scope=supervisor` 反事实、同模板 hash、有效 application/effect 和 canary 门槛。`proposed/approved/brain_memory/inconclusive` 不能直接授权。默认 `position_supervisor_auto_selection_mode=off`；`shadow` 只写投影/审计，`demo_execute` 才允许在有界 Demo 的稳定边界切换，`live_execute` 当前不准入。投影过期、缺失或冲突统一 `no_change`，不触达 broker。
+| 恢复关闭语义 | `backend.services.review_contract.classify_close_reason_from_recovery` + `backend.services.live_recovery_close` + `recovery_position_state.recovery_meta` | broker 仓位消失是恢复观测，不等于真实交易关闭原因。持久化的 supervisor close reason 优先，保护单与权威成交匹配次之，无法证明才保留 `restart_replay`；`broker_position_not_found` 只保留为退休观测状态，实际交易原因写入已有 recovery metadata 和 close review。 |
 | 持仓超时口径 | `backend.services.market_session.market_open_seconds_between` + `backend.services.live_position_lifecycle.build_holding_timeout_market_budget` | `holding_timeout` 的可执行判定使用统一市场时段权威的开市累计时长：优先使用 cTrader `ProtoOASymbol.schedule`/`scheduleTimeZone` 及其 broker 返回的 `holiday` 窗口，broker schedule 不可用时才使用 `config/instruments.yaml` fallback；日内休市、临时节假日和周末均不计入 timeout 预算，且预算记录 `schedule_source`。墙钟超限但开市时长未超限时监督器只落一条 `execution_deferred/market_closed_pending` trace（每小时心跳一次）并推迟到开盘后首个 tick 平仓，不在停市期逐 tick 重试被 MARKET_CLOSED 确定性拒绝的 close。确定性市场关闭拒绝（`MARKET_CLOSED/TRADING_MARKET_CLOSED/OFF_QUOTES/NO_QUOTES` 等）通过 `MARKET_CLOSED_DEFER_*` recovery-meta 键按仓位记录抑制窗口；SL/TP 保护单不受影响。该口径只影响 timeout 触发时机，不改变 `supervisor -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 执行链与 fail-closed 语义。2026-08-23 周末死循环事故保留原始 canonical 事件作为 append-only 审计事实；脚本 `scripts/cleanup_market_closed_retry_storm_20260823.py` 仅提供只读预览，永久拒绝物理删除，后续应由独立治理的 suppression projection 处理训练/展示排除。 |
 | 动态仓位 | `RiskLimitSnapshot` + `risk_kelly_sizing` + `backend.services.live_risk_sizing` + live sizing trace | Kelly、event sizing、context policy 统一生成 `position_sizing_trace.v1`，Safety、Readiness 和前端只读结果。Demo 中 Kelly≤0 可持续使用 broker 最小量探索，不受样本数限制；Kelly>0 但计算量低于最小量时也复用同一 demo 探索路径。两者都必须有有效入场价和保护止损、全部既有门控通过，且最小量实际止损风险不超过现有 `kelly_risk_per_trade_pct` 对应的 equity 风险预算；缺止损、价格无效、无法计算、超过该预算或 volume cap 即拒绝。非 demo 保持 0 volume/blocked。trace 明确记录 Kelly 目标量、探索资格、实际止损风险和拒绝 reason code |
 | 事件缩放 | `execution/event_sizing.py` + `data/events.duckdb` | 事件窗口风控输入 |

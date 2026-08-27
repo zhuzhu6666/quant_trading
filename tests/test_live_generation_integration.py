@@ -826,6 +826,47 @@ def test_loop_status_exposes_generation_phase_heartbeats_and_blockers(monkeypatc
     assert status["safety_shadow_gate"] == {"status": "observing", "ok": False}
 
 
+def test_status_builds_loop_readiness_and_market_from_one_live_snapshot(monkeypatch):
+    snapshot = {
+        "market_session": {"status": "open_confirmed", "can_open_positions": True},
+        "spot_quote": {"symbol": "XAUUSD", "mid": 3400.0},
+    }
+    snapshot_reads = []
+    loop_snapshot = {"running": True, "accepting_new_risk": True}
+    readiness_snapshot = {"ok": True}
+    calls = []
+
+    def _read_snapshot():
+        snapshot_reads.append(True)
+        return snapshot
+
+    def _loop_status(*, _state_snapshot=None):
+        calls.append(("loop", _state_snapshot))
+        return loop_snapshot
+
+    def _readiness(broker="ctrader", *, _state_snapshot=None, _loop_snapshot=None):
+        calls.append(("readiness", broker, _state_snapshot, _loop_snapshot))
+        return readiness_snapshot
+
+    monkeypatch.setattr(live_service, "_probe_ctrader", lambda: ("connected", None))
+    monkeypatch.setattr(live_service, "get_latest_price", lambda: None)
+    monkeypatch.setattr(live_service, "_live_state_snapshot", _read_snapshot)
+    monkeypatch.setattr(live_service, "loop_status", _loop_status)
+    monkeypatch.setattr(live_service, "get_live_readiness", _readiness)
+
+    status = live_service.get_status()
+
+    assert len(snapshot_reads) == 1
+    assert calls == [
+        ("loop", snapshot),
+        ("readiness", "ctrader", snapshot, loop_snapshot),
+    ]
+    assert status["market_session"] is snapshot["market_session"]
+    assert status["spot_quote"] is snapshot["spot_quote"]
+    assert status["loop"] is loop_snapshot
+    assert status["readiness"] is readiness_snapshot
+
+
 @pytest.mark.parametrize(
     ("state_patch", "latched", "expected_blocker"),
     [

@@ -162,6 +162,11 @@ def _sanitize_patch(patch: dict[str, Any]) -> dict[str, Any]:
             or key == "live_autonomy_unlocked"
             or key == "live_autonomy_unlock_id"
             or key == "position_supervisor_template_id"
+            or key == "position_supervisor_auto_selection_mode"
+            or key == "position_supervisor_switch_min_stable_bars"
+            or key == "position_supervisor_switch_cooldown_bars"
+            or key == "position_supervisor_max_switches_per_position"
+            or key == "position_supervisor_selection_max_age_seconds"
             or key == "risk_cvar_threshold_pct"
             or key == "kelly_risk_per_trade_pct"
             or key == "kelly_fraction"
@@ -371,7 +376,31 @@ class RuntimeConfigOverlayService:
             finally:
                 conn.close()
             item = dict(row) if row is not None else {}
-            config_hash = _governance_config_hash(effective_config.to_dict())
+            current_config_payload = effective_config.to_dict()
+            config_hash = _governance_config_hash(current_config_payload)
+            legacy_config_hash = _governance_config_hash(
+                runtime_config.legacy_runtime_config_hash_payload(
+                    current_config_payload
+                )
+            )
+            legacy_fields = runtime_config.RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS
+            legacy_fields_are_default = all(
+                current_config_payload.get(key)
+                == runtime_config.RUNTIME_CONFIG_LEGACY_HASH_DEFAULTS[key]
+                for key in legacy_fields
+            )
+            legacy_hash_compatible = (
+                not (set(overlay) & set(legacy_fields))
+                and legacy_fields_are_default
+                and str(item.get("target_config_hash") or "")
+                == legacy_config_hash
+                and str(item.get("committed_config_hash") or "")
+                == legacy_config_hash
+            )
+            current_hash_bound = (
+                str(item.get("target_config_hash") or "") == config_hash
+                and str(item.get("committed_config_hash") or "") == config_hash
+            )
             checks = {
                 "intent_found": bool(item),
                 "committed": str(item.get("status") or "") == "committed",
@@ -379,12 +408,15 @@ class RuntimeConfigOverlayService:
                     str(item.get("projection_status") or "") == "current"
                 ),
                 "target_hash_bound": (
-                    str(item.get("target_config_hash") or "") == config_hash
+                    current_hash_bound or legacy_hash_compatible
                 ),
                 "committed_hash_bound": (
-                    str(item.get("committed_config_hash") or "") == config_hash
+                    current_hash_bound or legacy_hash_compatible
                 ),
                 "domain_hash_bound": bool(str(item.get("domain_hash") or "")),
+                "hash_compatibility_safe": (
+                    current_hash_bound or legacy_hash_compatible
+                ),
             }
             ok = all(checks.values())
             return {
@@ -392,6 +424,14 @@ class RuntimeConfigOverlayService:
                 "ok": ok,
                 "authority": "committed_mutation",
                 "config_hash": config_hash,
+                "legacy_config_hash": legacy_config_hash,
+                "hash_compatibility": (
+                    "current"
+                    if current_hash_bound
+                    else "legacy_additive_fields"
+                    if legacy_hash_compatible
+                    else "none"
+                ),
                 "checks": checks,
                 "reason": "committed_mutation_verified" if ok else "committed_mutation_unverified",
             }

@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-08-21
+> Last verified: 2026-08-27
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -20,16 +20,40 @@
 - canonical：不可变决策、订单/持仓生命周期、review、监督 trace、counterfactual 和训练样本分别由 `canonical_v2` 事件/样本 writer 与 reader 唯一负责；生产 Python 已无旧事实表 SQL、旧样本表 DDL 或旧监督执行 writer。
 - 已确认运行事实：`runtime.state_schema_migration` 已应用 v29/v30；`runtime.broker_execution_intent` 存在且当前无未决 intent；旧 `runtime` 事实表不存在。backend/learning worker 已重启并加载 `live_safety_plane_v2_mode=enforce`，cTrader fresh account/positions reconcile 成功，空仓且 `unknown_execution_count=0`。
 - 处理边界：旧事实数据已按用户授权清理，不保留兼容查询/写入路径；canonical 事件与审计记录不删除。临时迁移 dump 不再保留。
-- 剩余：仍需一次真实 Demo `tighten/reduce/close -> broker lifecycle -> fresh reconcile -> trace -> counterfactual -> maturity` 证明 supervisor 动作闭环；这不影响旧路径退役状态。
+- 剩余：首批真实 supervisor close 已完成 lifecycle、trace、counterfactual 和 maturity 的部分闭环，但仍需达到治理验收样本量并覆盖 `tighten/reduce`；这不影响旧路径退役状态。
 
 ### position supervisor 失效确认链四断线（2026-08-26 修复）
 
-- 状态：`resolved`（代码修复完成、测试绿，待重启加载与真实运行证据）。
+- 状态：`resolved`（代码修复、测试、重启加载和首批真实运行证据已完成；治理扩权仍未完成）。
 - 问题事实：2026-08-26 复盘最近 10 笔仓位发现监督器"诊断正确但从未动手"。深挖确认四根结构性断线：① `signal_reversal` 只有读取方无生产者；② 开仓路径从不写 `entry_regime` → `regime_shift` 恒 none（29/29 笔实证）；③ 时间衰减证据需 timeout_ratio≥0.8 而实际持仓时长使其数学不可达；④ `thesis_broken_confirmations` 无递增者恒为 0。叠加 transition_confirming 姿态禁用主动动作，反事实链恒空，治理模板更新死循环。
 - canonical：三个生产者全部落在既有模块——entry_regime 由 `_persist_pending_entry_protection_plan` 盖章（live_service.py）、signal_reversal 由监督器上下文构建处产生（live_position_lifecycle.py build_position_supervisor_context_payload）、thesis_broken_confirmations 由 path-metrics 状态机递增（position_metrics.py）。tighten 解锁在 evaluate_position_supervisor 动作仲裁内，仅限盈利单 + profit_protection_window_ready + giveback≥阈值。
 - 已删除：无旧实现可删；删除的是"`signal_reversal`/`regime_shift`/`persistent_price_path` 是有效证据"的隐性假象。
 - 验证：新增 tests/test_supervisor_confirmation_chain.py 11 项；监督域+治理域回归 229 passed 零退化。
-- 剩余：重启加载后需 ≥10 笔带监督动作的真实仓位才能产出首批 counterfactual，届时本条 §23 的闭环证明才完整。
+- 运行证据：当前已有 15 条逻辑 supervisor trace，其中 8 条 `executed/applied`、5 条 deferred、2 条 failed；已有 5 条 full/matured supervisor trace，仍不能把失败或污染样本计入治理。
+- 剩余：仍需 ≥10 笔合格真实仓位、更多 `tighten/reduce` 覆盖和连续效果观察，才能完成模板治理闭环。
+
+### 单仓 supervisor template 开仓绑定（代码与重启验收已完成，真实生命周期证据待收口）
+
+- 状态：`migrating`
+- canonical：`position_supervisor_binding.v1` 由 live open path 在成交前绑定，保存于现有
+  `entry_protection_plan.supervisor_binding` 和 `recovery_position_state.recovery_meta_json`；监督计算仍由
+  `PositionSupervisor` 唯一负责，风险裁决仍由 `RiskPolicyService` 负责。
+- 当前：新仓位保存完整规范化 template snapshot、version、hash、source、selection key 和 evidence refs；
+  重启/恢复会校验 hash。旧仓位只标记 `legacy_global_fallback`，损坏或未知 binding 进入
+  `unknown/hold`，硬风险仍可收口。全局 `position_supervisor_template_id` 只作为新仓位基线，不改写已绑定仓位。
+  2026-08-27 双服务受控重启后，backend/worker 均 `active/running` 且 `NRestarts=0`，既有 learning
+  周期真实发布 `position_supervisor_selection.v1`；当前状态 `insufficient_evidence`、候选 `0`、自动模式
+  `off`，本次选择链没有发生 broker mutation。
+- 退出：完成至少一次真实 open/restart/recovery/close lineage 验证，并证明所有新 supervisor trace 都能
+  回溯 binding；不得新增第二个 supervisor writer、表或调度器。
+
+### supervisor 经验已进入记忆索引，但自动模板准入仍未达标
+
+- 状态：`migrating`
+- canonical：原始事实由 `canonical_v2.supervisor_trace/counterfactual_review` 承载，学习资格由 `canonical_v2.training_sample_row` 承载，经验检索使用 `experience_memory`，V16 检索/后验使用 `brain_memory` 和 `posterior_arbitration`。
+- 当前：已看到 5 条 full/matured 且 supervisor-governance eligible 的监督 trace、2 条 eligible counterfactual，以及 supervisor counterfactual 和 posterior 进入 `brain_memory`；重启后的 learning worker 已真实发布 `position_supervisor_selection.v1`，但当前状态为 `insufficient_evidence`、候选 `0`、自动模式仍为 `off`，且 `policy_suggestion`、`learning_application_log/effect` 尚无可供自动选择的完整 supervisor template application/effect。自动开启代码已加载，记忆仍只能供检索和审查。
+- 自动开启：`off` 仅是无证据时的安全基线；证据投影达到资格后，由 learning worker 自动经 V16、RiskPolicy 和 Coordinator 切入有界 Demo，不需要人工再改一个模式开关。单条 brain memory、提案或未成熟后验仍不能直接授权。
+- 退出：真实监督动作、fresh reconcile、反事实成熟化、候选 review、V16/Coordinator application、effect observation 和 rollback 连续可追溯；selection projection 新鲜且可解释；任何单条记忆不得直接改模板或放大交易权限。
 
 
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
@@ -143,7 +167,7 @@
 - 状态：`resolved`（2026-08-21 收口）
 - canonical：`LiveLoopController` 是唯一 live loop generation/heartbeat owner；Safety 以 `live_safety_plane_v2_mode=enforce` 运行，监督动作只有 `supervisor -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 一条执行链。独立 legacy preview、双 candidate compare/fallback 和 Demo observation gate 已删除。
 - 当前：旧 loop globals、并发 refresh 入口、legacy startup history pull 和旧 safety 尾部执行已删除；active `legacy_awe_trailing` candidate 在实时执行边界拒绝，旧 trace/close attribution/parity replay 仅诊断读取。重启后 PID 15764 的 backend 与 PID 7828 的 learning worker（本次 backend 二次重载后 worker PID 保持不变）均正常，cTrader 认证、空仓 fresh reconcile 和 `unknown_execution_count=0` 已验证。健康监控也已改为复用带 broker schedule 的同一 live market-session authority。
-- 剩余：只剩一次真实 Demo 持仓生命周期，用于证明 broker lifecycle、trace、counterfactual 和 maturity 的正向证据；这不构成兼容执行路径。
+- 剩余：首批真实 Demo 持仓生命周期已有正向证据，但仍需治理样本量、`tighten/reduce` 覆盖和模板 effect observation；这不构成兼容执行路径。
 
 ### live_service 领域重力
 
@@ -174,7 +198,7 @@
 
 - 状态：`migrating`
 - canonical：持仓模板的自动切换只从 V16 candidate bridge 进入，`V16CommandGate.claim` 与 `PositionSupervisorGovernanceMutationService` 的 Coordinator transaction 共同完成单次授权和 finalize。
-- 当前：历史/显式旧 worker 写入的 non-V16 `position_supervisor_template` advisory 仍可留作审计记录；它们已不再拥有 approve/apply 或 candidate conflict 权力，并将在既有 demo review/apply 路径中 terminalize。`supervisor_learning_scheduler` 只运行反事实证据，不自动 materialize 旧 advisory；显式 materialize API 仅作为 legacy audit 入口保留。新生成候选只能针对一个 control 和一个 regime stratum，完整快照必须能由 evidence 中的单 scalar patch 证明。V16 candidate bridge 已统一为 `active -> bridge_pending -> awaiting_execution -> applied/superseded/rejected`，bridge 事务同时绑定 candidate、suggestion 和 command predicate；`keep/no_change` 或当前模板目标不会进入候选 lane。
+- 当前：历史/显式旧 worker 写入的 non-V16 `position_supervisor_template` advisory 仍可留作审计记录；它们已不再拥有 approve/apply 或 candidate conflict 权力，并将在既有 demo review/apply 路径中 terminalize。`supervisor_learning_scheduler` 只运行反事实证据，不自动 materialize 旧 advisory；显式 materialize API 仅作为 legacy audit 入口保留。新生成候选只能针对一个 control 和一个 regime stratum，完整快照必须能由 evidence 中的单 scalar patch 证明。V16 candidate bridge 已统一为 `active -> bridge_pending -> awaiting_execution -> applied/superseded/rejected`，bridge 事务同时绑定 candidate、suggestion 和 command predicate；`keep/no_change` 或当前模板目标不会进入候选 lane。live selection 另外只消费 learning-owned `position_supervisor_selection.v1`，不把 projection 变成新的 mutation writer。
 - 剩余：已应用 suggestion 仍需经过 effect observation 与既有 maturity counting，不能据此解锁自治；历史/显式旧 advisory 仍需按既有 review/apply 路径 terminalize，遗留 `submitted` 行需要通过 service-backed reconciliation 迁移到显式 pending/terminal 状态，禁止 SQL 直接恢复 active。`legacy_awe_trailing` 的 active planner、candidate writer、executor 和 live fallback 已删除/退役；旧 trace、close attribution 与 parity replay 仅保留诊断读取，不能替代 broker lifecycle 证据。
 - 退出：历史 active advisory 全部 terminalize，连续真实 demo cycle 证明 V16 bridge、claim、Coordinator finalize 和 effect observation 连通后，删除旧 advisory 生成路径。AWE 执行分支的退出条件已满足；不得通过 SQL 改写历史 review、补 command 或补成熟样本提前满足其他治理退出条件。
 

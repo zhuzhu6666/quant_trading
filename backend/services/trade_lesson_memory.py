@@ -16,6 +16,9 @@ from backend.core.db import (
 )
 from backend.core.state_store import validate_runtime_state_schema
 from backend.services.canonical_v2_reader import canonical_ready, iter_review_rows
+from backend.services.position_supervisor_templates import (
+    resolve_position_supervisor_binding_lineage,
+)
 
 
 APPEND_SOURCE = "trade_lesson_memory.v1"
@@ -181,6 +184,12 @@ def _recommended_action(outcome_label: str, failure_tags: list[Any], pnl: float)
 def build_trade_lesson(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
     review_id = str(_row_get(row, "review_id", "") or "")
     review = _review_payload(conn, row) if conn is not None else _loads(_row_get(row, "review_json", "{}"), {})
+    binding_lineage = resolve_position_supervisor_binding_lineage(review)
+    supervisor_binding = dict(binding_lineage.get("binding") or {})
+    supervisor_binding_state = str(binding_lineage.get("state") or "unknown")
+    supervisor_binding_reason = str(
+        binding_lineage.get("reason") or "binding_missing"
+    )
     failure_tags = _loads(_row_get(row, "failure_tags_json", "[]"), [])
     if not isinstance(failure_tags, list):
         failure_tags = []
@@ -235,6 +244,8 @@ def build_trade_lesson(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
         "allowed_uses": allowed_uses,
         "confidence": confidence,
         "recommended_action": recommended_action,
+        "position_supervisor_binding_status": supervisor_binding_state,
+        "position_supervisor_binding_reason": supervisor_binding_reason,
         "lesson": {
             "recommended_action": recommended_action,
             "summary": reusable_lesson,
@@ -242,6 +253,20 @@ def build_trade_lesson(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
             "confidence": confidence,
         },
     }
+    if supervisor_binding:
+        context["position_supervisor_binding"] = supervisor_binding
+        context["position_supervisor_binding_template_id"] = str(
+            supervisor_binding.get("template_id") or ""
+        )
+        context["position_supervisor_binding_template_version"] = str(
+            supervisor_binding.get("template_version") or ""
+        )
+        context["position_supervisor_binding_template_hash"] = str(
+            supervisor_binding.get("template_hash") or ""
+        )
+        context["position_supervisor_binding_source"] = str(
+            supervisor_binding.get("binding_source") or ""
+        )
     setup_hash = hashlib.sha1(
         _dumps(
             {
@@ -268,6 +293,9 @@ def build_trade_lesson(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
         "artifact_version": ARTIFACT_VERSION,
         "evolution_run_id": "",
         "created_at": _safe_float(_row_get(row, "created_at", 0.0), time.time()),
+        "position_supervisor_binding": supervisor_binding,
+        "position_supervisor_binding_status": supervisor_binding_state,
+        "position_supervisor_binding_reason": supervisor_binding_reason,
     }
 
 

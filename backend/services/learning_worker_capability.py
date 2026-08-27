@@ -377,6 +377,7 @@ def mutation_result_state(result: Any) -> str:
         "skipped_busy",
         "waiting_v16_command",
         "mutation_circuit_open",
+        "completed_with_blockers",
     }
     if status in neutral_statuses or status.startswith(("blocked_", "skipped_", "waiting_")):
         return "neutral"

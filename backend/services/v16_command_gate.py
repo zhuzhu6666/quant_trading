@@ -30,7 +30,15 @@ from backend.services.brain_governance_candidates import (
 class V16CommandGate:
     """Resolve a current V16 delegation before a system-owned mutation."""
 
-    BROAD_SCOPE_KEYS = {"", "*", "alpha_weight_policy", "online_light", "threshold_and_sizing", "position_supervisor"}
+    BROAD_SCOPE_KEYS = {
+        "",
+        "*",
+        "alpha_weight_policy",
+        "online_light",
+        "threshold_and_sizing",
+        "position_supervisor",
+        "position_supervisor_selection",
+    }
     ACTION_ALIASES = {
         "update_weight": {"update_weight", "downweight", "boost_small", "boost"},
         "downweight": {"update_weight", "downweight"},
@@ -52,6 +60,9 @@ class V16CommandGate:
         "switch_position_supervisor_template": {
             "switch_position_supervisor_template",
             "apply_switch",
+        },
+        "switch_position_supervisor_selection_mode": {
+            "switch_position_supervisor_selection_mode",
         },
     }
 
@@ -884,6 +895,11 @@ class V16CommandGate:
             "parameter_template": {"parameter_template", "context_policy"},
             "context_policy": {"context_policy", "parameter_template"},
             "supervisor_template": {"supervisor_template", "position_supervisor_template"},
+            "supervisor_selection": {
+                "supervisor_selection",
+                "supervisor_template",
+                "position_supervisor_template",
+            },
         }
         if command_scope not in aliases.get(requested_scope, {requested_scope}):
             return False

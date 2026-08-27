@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Snapshot: 2026-08-20
+> Snapshot: 2026-08-27
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -15,14 +15,38 @@
 | S1 账本修复 | complete | 无 |
 | S2 公共层+四域清扫 | complete | 无 |
 | S3 代码单轨+结构修复 | complete | A1–A6 / B1–B5 全部完成 |
-| S4 全量验证 | complete | 2815 passed / 12 skipped |
+| S4 全量验证 | complete | 2926 passed / 12 skipped（2026-08-27 最终回归） |
 | S5 清库物理 | complete | 10.8GB → 9.7MB，canonical_v2 9 表空 + runtime 6 表空结构 |
 | S6 容量阀 P6 | pending | event 分区、保留窗口、归档、容量监控 |
-| S7 启动验证+进化闭环首验 | in_progress | 双服务冷启动 ✅；**evolution_decision 决策写入路径已收敛修复（8 列单轨，PG 落库已实测打通）**；**learning_application_effect/log 域全代码已收敛到精简 schema（唯一 store，2813 测试通过，3 项 factor-governance 目标测试恢复绿）**；持仓监督 active template 已收敛为 `governed_execute` 单轨，首次真实 broker lifecycle/learning 闭环仍待运行证据 |
+| S7 启动验证+进化闭环首验 | in_progress | 双服务冷启动 ✅；**evolution_decision 决策写入路径已收敛修复（8 列单轨，PG 落库已实测打通）**；**learning_application_effect/log 域全代码已收敛到精简 schema（唯一 store，2813 测试通过，3 项 factor-governance 目标测试恢复绿）**；持仓监督 active template 已收敛为 `governed_execute` 单轨，单仓 binding、selection projection 和稳定边界切换已完成代码实现并通过本次双服务重启验收，但默认仍 `off`，尚未满足治理样本量、`tighten/reduce` 覆盖和 supervisor template effect 闭环 |
 
 ## 2. 最近一次运行核对
 
-2026-08-11 部署与运行核对结果：
+### 2026-08-27 当前运行核对结果
+
+- 本次受控重启后 `quant-backend.service` PID `901316`、`quant-learning-worker.service` PID `901526` 均为 `active/running`，两者 `NRestarts=0`；backend 启动时间为 `19:01:01`，worker 为 `19:01:10`（Asia/Shanghai）。
+- `/api/health` 核对为 `status=ok`，DB 与 cTrader connected，release identity 与 backend PID 一致；health 只证明连通和进程存活，不授予开仓权限。
+- learning worker 成功恢复既有 RuntimeConfig overlay；新增选择字段保持安全默认值，`position_supervisor_auto_selection_mode=off`。自动开启代码已加载，但投影没有合格候选，因此本次选择链未发生 broker mutation。
+- 重启前已发布的 `runtime_kv[position_supervisor_selection.v1]` 当前仍为 `insufficient_evidence`、候选数 `0`、source watermark `0.0`；这证明投影能持久化，但不证明已有合格模板。worker 下一次 autonomous-learning 周期会按新逻辑自动重试。
+- cTrader 在启动后完成认证，live loop 恢复并在 `19:03:00` 的 system health 周期回到 `healthy score=1.00`；恢复日志确认重新挂接 1 笔真实 Demo 持仓，未发现 902/903 这类三位数 cTrader 仓位，也未产生新的 broker mutation。
+- 全量回归最终为 `2926 passed, 12 skipped`；针对性 binding/selection/overlay 测试和编译、diff 检查均通过。
+- readiness 仍按 `no_new_risk`/事实可用性 fail-closed；任何后续判断必须继续区分 health、readiness、Safety 和 RiskPolicy。
+
+### 2026-08-27 单仓监督治理升级（代码实现，已完成重启与投影验收）
+
+- `position_supervisor_binding.v1` 已接入开仓成交、recovery 持久化、重启恢复和监督上下文；完整模板快照使用规范化 JSON hash。旧仓位明确为 `legacy_global_fallback`，binding 缺失/篡改/来源未知不会伪造历史信息，软策略保持 `unknown/hold`，硬风险继续收口。
+- 既有 learning worker 周期新增 `runtime_kv[position_supervisor_selection.v1]` 投影；选择只接受当前 Coordinator mutation、完整干净成熟的 `causal_scope=supervisor` 证据、模板 hash 和有效 application/effect。普通 tick 不重新查询记忆。
+- 已实现 `off | shadow | demo_execute | live_execute` typed 配置边界；`off` 只是证据不足时的安全启动基线。learning worker 在选择投影达到资格后自动通过既有 V16、RiskPolicy 和 Coordinator 进入有界 Demo，不需要人工改模式；`live_execute` 当前不准入。已有仓位只有在连续收盘 bar、known facts、无未决 intent/reconcile、无优先硬风险、投影新鲜、冷却期和次数限制均满足时才可单仓切换；切换写 trace 并保留旧 binding，不修改全局 RuntimeConfig。
+- trace、counterfactual、training sample、experience memory、brain memory 和 effect 已补齐 binding 引用；历史样本不回填，也不参与新模板自动准入。
+- 运行验收已确认双服务实际进程、overlay 重启恢复、projection 新鲜度和 `off` 模式下无 broker mutation；当前仍因证据不足保持基线，证据达到资格后将由 worker 自动切入 Demo，不需要人工开启；真实 open/close 全链路和治理扩权继续按单独退出条件观察。
+
+### 2026-08-27 自动开启语义补充
+
+- “全自动”指合格证据出现后由现有 learning worker 自动发起治理切换；不是让单条记忆直接改模板，也不是绕过 V16、RiskPolicy、Coordinator、Safety 或 broker reconcile。
+- 当前实时投影仍为 `insufficient_evidence`、候选 `0`、模式 `off`，所以本次不会自动开启，也不会产生 broker mutation。
+- 自动开启的目标只允许有界 Demo；`live_execute` 仍被代码拒绝，硬风险边界不因监督模板改变。
+
+### 历史核对（2026-08-11）
 
 - 2026-08-11 智能自主进化代码批次已部署：`quant-backend.service`（PID 3236037→重启后新 PID）、`quant-learning-worker.service` 均 active；`/api/health` 为 `db=connected`；learning worker 启动日志确认 `RuntimeConfig autonomous overlay restored`，overlay authority 恢复。
 - 风险默认 profile 按 operator 指示放宽并已生效（`RuntimeConfig` 有效值）：单笔 Kelly 止损风险 `5.0%`、日亏损 `10%`、最大回撤 `16%`、普通及 Demo 每日开仓 `30`；`risk_cvar_threshold_pct` 保持 overlay `2.5`。settings.yaml/runtime_config.py 静态基值同步，`docs/system-source-of-truth.md` 风险 profile 描述已更新。
@@ -293,7 +317,7 @@ Lineage/timing: review repair 优先读取 canonical position-decision index 和
 
 Targeted verification: 监督/风险/生命周期/学习/readiness 针对性回归持续通过；本批新增严格 broker component truth、loop ownership 和旧 preview 净删测试。未用测试伪造 broker applied 事实；运行态重启、readiness、日志和 cTrader fresh reconcile 已验证，真实 supervisor broker lifecycle 仍待有仓位时证明。
 
-Remaining: 仍需在 Demo 运行态验证一次真实 `tighten/reduce/close -> broker lifecycle -> fresh reconcile -> trace -> counterfactual -> maturity`；单测和 readiness 不替代该证据。历史 `284253609` 可在 service-backed backfill 后用于低权重 outcome learning，但不得作为 supervisor counterfactual 或治理证据。
+Remaining: 已有真实 supervisor close 的正向 lifecycle/反事实/成熟证据，但仍需 ≥10 笔合格仓位、`tighten/reduce` 覆盖和连续 effect observation；单测和 readiness 不替代该证据。历史 `284253609` 可在 service-backed backfill 后用于低权重 outcome learning，但不得作为 supervisor counterfactual 或治理证据。
 
 ### 2026-08-21 canonical-v2 follow-up：运行态迁移与旧事实清理完成
 
@@ -365,9 +389,9 @@ Deleted paths: 无旧实现删除（纯补齐缺失生产者）；不新增表/�
 
 Targeted verification: 新增 tests/test_supervisor_confirmation_chain.py 11 passed；监督域+治理域回归 229 passed 零退化（test_trade_reviewer / test_live_supervision_path_metrics / test_live_position_lifecycle / test_learning_backfill / test_position_supervisor_templates / test_governance_contract_convergence / test_autonomous_evolution_cycle / test_v16_brain_orchestrator）。
 
-Runtime verification: 待重启加载后验收——首笔新持仓 recovery_meta.entry_regime 非空、首个 transition_profit_protection_tighten 执行 trace、首个 counterfactual 落库。
+Runtime verification: 2026-08-27 已核验重启加载；首批新持仓已产生非空 `recovery_meta.entry_regime`、`executed/applied` supervisor trace 和 counterfactual/maturity 记录。
 
-Unresolved live evidence: 需 ≥10 笔带监督动作的真实仓位产出首批反事实样本后，治理模板更新链才完整转起来。
+Unresolved live evidence: 目前仍只有少量 `close` 样本，需 ≥10 笔合格真实仓位并覆盖 `tighten/reduce`，再完成 supervisor template candidate/application/effect/rollback 的连续闭环；记忆索引本身不能替代该证据。
 
 ## 4. 仍需真实运行证明
 

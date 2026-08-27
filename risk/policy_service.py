@@ -37,6 +37,7 @@ INCIDENT_CONTROLLED_ACTIONS = {
     "activate_entry_quality_control",
     "rollback_factor_action",
     "switch_position_supervisor_template",
+    "switch_position_supervisor_selection_mode",
     "promote_factor",
     "register_factor",
     "start_shadow_model",
@@ -54,6 +55,7 @@ LIVE_AUTONOMY_EXPANSION_ACTIONS = {
     "enable_context_policy",
     "activate_entry_quality_control",
     "switch_position_supervisor_template",
+    "switch_position_supervisor_selection_mode",
     "promote_factor",
     "register_factor",
     "start_canary_model",
@@ -144,6 +146,8 @@ class RiskPolicyService:
             return self._evaluate_governor_action(action, context, "allow_factor_rollback")
         if action == "switch_position_supervisor_template":
             return self._evaluate_position_supervisor_template_switch(context)
+        if action == "switch_position_supervisor_selection_mode":
+            return self._evaluate_position_supervisor_selection_mode(context)
         if action == "promote_factor":
             return self._evaluate_governor_action(action, context, "allow_promotion")
         if action == "register_factor":
@@ -1427,6 +1431,132 @@ class RiskPolicyService:
                 "target_template_id": target_template_id,
                 "previous_template_id": context.get("previous_template_id", ""),
                 "suggestion_id": context.get("suggestion_id", ""),
+            },
+        )
+
+    def _evaluate_position_supervisor_selection_mode(
+        self,
+        context: dict[str, Any],
+    ) -> RiskVerdict:
+        """Authorize only the bounded-Demo automatic selection mode.
+
+        This changes which already-governed per-position template may be
+        selected; it does not change sizing or the hard-risk execution path.
+        The selection projection remains the evidence authority, while V16
+        and the Coordinator authorize the runtime mutation itself.
+        """
+
+        current = str(context.get("current_mode") or "off").strip().lower()
+        target = str(context.get("target_mode") or "").strip().lower()
+        if target == "shadow":
+            return RiskVerdict(
+                allowed=True,
+                reason="shadow_selection_mode",
+                required_mode="shadow",
+                audit_payload={
+                    "action": "switch_position_supervisor_selection_mode",
+                    "source": "risk_policy",
+                    "current_mode": current,
+                    "target_mode": target,
+                    "broker_mutation_allowed": False,
+                },
+            )
+        if target != "demo_execute":
+            return RiskVerdict(
+                allowed=False,
+                reason="selection_mode_target_not_bounded_demo",
+                severity="error",
+                required_mode="bounded_demo",
+                audit_payload={
+                    "action": "switch_position_supervisor_selection_mode",
+                    "source": "risk_policy",
+                    "current_mode": current,
+                    "target_mode": target,
+                },
+            )
+        if current not in {"off", "shadow"}:
+            return RiskVerdict(
+                allowed=False,
+                reason="selection_mode_previous_not_auto_promotable",
+                severity="error",
+                required_mode="bounded_demo",
+                audit_payload={
+                    "action": "switch_position_supervisor_selection_mode",
+                    "source": "risk_policy",
+                    "current_mode": current,
+                    "target_mode": target,
+                },
+            )
+        if not bool(context.get("bounded_demo_mode")):
+            return RiskVerdict(
+                allowed=False,
+                reason="bounded_demo_required",
+                severity="error",
+                required_mode="bounded_demo",
+                audit_payload={
+                    "action": "switch_position_supervisor_selection_mode",
+                    "source": "risk_policy",
+                    "current_mode": current,
+                    "target_mode": target,
+                },
+            )
+        projection = context.get("selection_projection")
+        projection = projection if isinstance(projection, dict) else {}
+        policy = projection.get("evidence_policy")
+        policy = policy if isinstance(policy, dict) else {}
+        policy_ok = (
+            str(projection.get("status") or "") == "ready"
+            and int(projection.get("candidate_count") or 0) > 0
+            and str(policy.get("causal_scope") or "") == "supervisor"
+            and bool(policy.get("requires_clean_mature_counterfactual"))
+            and bool(policy.get("requires_template_hash_binding"))
+            and bool(policy.get("requires_current_coordinator_mutation"))
+            and bool(policy.get("requires_positive_application_effect"))
+        )
+        if not policy_ok:
+            return RiskVerdict(
+                allowed=False,
+                reason="selection_projection_evidence_not_ready",
+                severity="error",
+                required_mode="bounded_demo",
+                audit_payload={
+                    "action": "switch_position_supervisor_selection_mode",
+                    "source": "risk_policy",
+                    "projection_status": projection.get("status"),
+                    "candidate_count": projection.get("candidate_count"),
+                    "evidence_policy": policy,
+                },
+            )
+        v16_command_id = str(context.get("v16_command_id") or "").strip()
+        if not v16_command_id:
+            return RiskVerdict(
+                allowed=False,
+                reason="selection_mode_requires_v16_command",
+                severity="error",
+                required_mode="bounded_demo",
+                audit_payload={
+                    "action": "switch_position_supervisor_selection_mode",
+                    "source": "risk_policy",
+                    "current_mode": current,
+                    "target_mode": target,
+                },
+            )
+        return RiskVerdict(
+            allowed=True,
+            reason="selection_projection_ready_auto_enable",
+            required_mode="bounded_demo",
+            audit_payload={
+                "action": "switch_position_supervisor_selection_mode",
+                "source": "risk_policy",
+                "current_mode": current,
+                "target_mode": target,
+                "v16_command_id": v16_command_id,
+                "candidate_count": int(projection.get("candidate_count") or 0),
+                "selection_fingerprint": str(
+                    projection.get("selection_fingerprint") or ""
+                ),
+                "hard_risk_unchanged": True,
+                "broker_actions_still_require_risk_policy": True,
             },
         )
 

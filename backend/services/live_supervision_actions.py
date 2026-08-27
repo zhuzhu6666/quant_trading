@@ -726,6 +726,7 @@ def execute_supervisor_close_action(
                     reconcile_result,
                     position_id=pid,
                     position_should_be_gone=True,
+                    prior_volume=broker_volume,
                 )
                 if publish_fresh_positions is not None and reconcile_ok:
                     try:

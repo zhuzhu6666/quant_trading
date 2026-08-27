@@ -58,6 +58,7 @@ def build_open_learning_context(
     sizing_trace: dict[str, Any] | None = None,
     risk_verdict: Any = None,
     market_session: dict[str, Any] | None = None,
+    position_supervisor_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now_ts = float(runtime.now())
     direction = int(getattr(composite, "direction", 0) or 0)
@@ -130,6 +131,7 @@ def build_open_learning_context(
         ),
         decision_freshness=decision_freshness,
         entry_timing_context=entry_timing_context,
+        position_supervisor_binding=position_supervisor_binding,
     )
 
 

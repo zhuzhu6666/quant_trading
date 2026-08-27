@@ -164,6 +164,31 @@ def test_fill_far_from_sl_keeps_restart_replay(_intent_store):
     assert evidence.get("intent_id") == "int-1"
 
 
+def test_durable_supervisor_close_reason_beats_restart_replay(_intent_store):
+    _set_intent(_intent_store, sl=4597.27, tp=4561.60)
+
+    resolution = classify_close_reason_from_recovery(
+        replayed=True,
+        real_pnl={
+            "net": -4.10,
+            "exec_price": 4588.0,
+            "price_quality": "broker_reported",
+        },
+        position_state={
+            "position_id": "285092006",
+            "direction": 1,
+            "recovery_meta": {
+                "pending_close_reason": "thesis_broken",
+                "last_supervisor_applied_action": "close",
+            },
+        },
+    )
+
+    assert resolution["close_reason"] == "thesis_broken"
+    assert resolution["close_reason_source"] == "supervisor_direct_close"
+    assert resolution["supervisor_close_evidence"]["source"] == "pending_close_reason"
+
+
 def test_missing_intent_or_untrusted_price_stays_conservative(_intent_store):
     # No amend intent on file → no upgrade, even with a plausible fill.
     _set_intent(_intent_store, sl=0.0)

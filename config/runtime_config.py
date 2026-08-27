@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import os
 import threading
 import time
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 DEMO_AUTONOMY_MODES = frozenset({"demo_autonomous", "demo_nursery"})
 VALID_RUNTIME_INCIDENT_MODES = frozenset(
     {"normal", "shadow_only", "no_new_risk", "only_close", "frozen"}
+)
+VALID_POSITION_SUPERVISOR_AUTO_SELECTION_MODES = frozenset(
+    {"off", "shadow", "demo_execute", "live_execute"}
 )
 OPERATOR_BOUNDED_DEMO_CONTROL_KEYS = frozenset(
     {
@@ -321,6 +325,13 @@ class RuntimeConfig:
     risk_enable_gvz_gate: bool = False
     risk_gvz_drop_pct: float = -2.0
     position_supervisor_template_id: str = "position_supervisor:default.v1"
+    # Memory-driven supervisor selection is deliberately disabled until the
+    # projection, canary and Demo acceptance gates are proven.
+    position_supervisor_auto_selection_mode: str = "off"
+    position_supervisor_switch_min_stable_bars: int = 2
+    position_supervisor_switch_cooldown_bars: int = 3
+    position_supervisor_max_switches_per_position: int = 2
+    position_supervisor_selection_max_age_seconds: float = 900.0
     autonomy_mode: str = "demo_autonomous"
     autonomy_demo_auto_apply: bool = True
     live_autonomy_unlocked: bool = False
@@ -717,6 +728,56 @@ class RuntimeConfig:
                     f"{incident_mode!r}; expected one of {sorted(VALID_RUNTIME_INCIDENT_MODES)}"
                 )
             known["runtime_incident_mode"] = incident_mode
+        if "position_supervisor_auto_selection_mode" in known:
+            selection_mode = str(
+                known["position_supervisor_auto_selection_mode"] or ""
+            ).strip().lower()
+            if selection_mode not in VALID_POSITION_SUPERVISOR_AUTO_SELECTION_MODES:
+                raise ValueError(
+                    "invalid_position_supervisor_auto_selection_mode: "
+                    f"{selection_mode!r}; expected one of "
+                    f"{sorted(VALID_POSITION_SUPERVISOR_AUTO_SELECTION_MODES)}"
+                )
+            known["position_supervisor_auto_selection_mode"] = selection_mode
+        for key, minimum in (
+            ("position_supervisor_switch_min_stable_bars", 1),
+            ("position_supervisor_switch_cooldown_bars", 0),
+            ("position_supervisor_max_switches_per_position", 0),
+        ):
+            if key not in known:
+                continue
+            value = known[key]
+            if isinstance(value, bool):
+                raise ValueError(f"invalid_{key}: boolean_not_allowed")
+            try:
+                numeric = float(value)
+                if not math.isfinite(numeric) or not numeric.is_integer():
+                    raise ValueError
+                integer = int(numeric)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid_{key}: {value!r}") from exc
+            if integer < minimum:
+                raise ValueError(f"invalid_{key}: {value!r}")
+            known[key] = integer
+        if "position_supervisor_selection_max_age_seconds" in known:
+            value = known["position_supervisor_selection_max_age_seconds"]
+            if isinstance(value, bool):
+                raise ValueError(
+                    "invalid_position_supervisor_selection_max_age_seconds: boolean_not_allowed"
+                )
+            try:
+                age = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "invalid_position_supervisor_selection_max_age_seconds: "
+                    f"{value!r}"
+                ) from exc
+            if not math.isfinite(age) or age < 1.0:
+                raise ValueError(
+                    "invalid_position_supervisor_selection_max_age_seconds: "
+                    f"{value!r}"
+                )
+            known["position_supervisor_selection_max_age_seconds"] = age
         known["extra"] = extra
         try:
             return cls(**known)
@@ -758,6 +819,27 @@ RUNTIME_CONFIG_HASH_COMPAT_FIELDS = frozenset(
     {"factor_governance_model_min_factor_samples"}
 )
 
+# These fields were added after already-committed runtime overlay mutations
+# existed in production.  An old mutation may be accepted only when the new
+# fields are still at their safe defaults and are absent from the persisted
+# overlay; a later mutation must bind the complete current config hash.
+RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS = frozenset(
+    {
+        "position_supervisor_auto_selection_mode",
+        "position_supervisor_switch_min_stable_bars",
+        "position_supervisor_switch_cooldown_bars",
+        "position_supervisor_max_switches_per_position",
+        "position_supervisor_selection_max_age_seconds",
+    }
+)
+RUNTIME_CONFIG_LEGACY_HASH_DEFAULTS = {
+    "position_supervisor_auto_selection_mode": "off",
+    "position_supervisor_switch_min_stable_bars": 2,
+    "position_supervisor_switch_cooldown_bars": 3,
+    "position_supervisor_max_switches_per_position": 2,
+    "position_supervisor_selection_max_age_seconds": 900.0,
+}
+
 
 def canonical_runtime_config_payload(value: Any) -> Dict[str, Any]:
     """Return the stable config payload used by runtime-config hash bindings.
@@ -798,6 +880,15 @@ def canonical_runtime_config_payload(value: Any) -> Dict[str, Any]:
 
     if "extra" in payload or extra:
         payload["extra"] = extra
+    return payload
+
+
+def legacy_runtime_config_hash_payload(value: Any) -> Dict[str, Any]:
+    """Project a config as it looked before supervisor selection was added."""
+
+    payload = canonical_runtime_config_payload(value)
+    for key in RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS:
+        payload.pop(key, None)
     return payload
 
 

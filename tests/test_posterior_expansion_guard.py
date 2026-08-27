@@ -129,6 +129,12 @@ def _catalog_item(factor_id: str, **overrides) -> dict:
         "health_score": 80.0,
         "health_n_obs": 2000,
         "health_updated_at": now,
+        "runtime_admission": "projection_acknowledged",
+        "loaded_projection": {
+            "loaded": True,
+            "generation": 2,
+            "artifact_hash": "",
+        },
     }
     item.update(overrides)
     return item

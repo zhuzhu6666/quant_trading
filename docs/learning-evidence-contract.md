@@ -1,7 +1,7 @@
 # Learning Evidence Contract
 
 > Status: active
-> Last verified: 2026-08-10
+> Last verified: 2026-08-27
 > Scope: evidence semantics for learning samples, model training, governance, and autonomous replay/audit.
 
 目标：让规则系统产生的数据、训练样本、模型产出都具备同一种可解释、可追溯、可被机器识别的证据语义。
@@ -31,6 +31,19 @@
 - `governance_eligibility_version`
 - `governance_eligibility_fingerprint`
 - `governance_ineligible_reason`
+
+监督样本还必须保留单仓绑定 lineage（如果来源是新仓位）：
+
+- `causal_scope=supervisor`；
+- `position_supervisor_binding` 中完整保存 `position_supervisor_binding.v1`，并可校验
+  `template_id / template_version / template_hash / template_snapshot / binding_source`；
+- 顶层和 `features/verdict/trace` 可保留相同的标量引用，便于查询，但不能用标量引用冒充完整快照；
+- `selection_event_id`、application/effect、counterfactual/trace 引用必须指向同一条 lineage；
+- binding 缺失、损坏、hash 不一致、来源未知或 review/trace 冲突时，样本只能 audit/explainability，
+  不得进入 supervisor template 自动准入。
+
+旧仓位和历史样本不补造开仓模板信息；它们可以继续用于历史诊断或原有低权重 outcome learning，
+但不能作为新模板自动选择的证据。
 
 证据合同的唯一计算路径：样本物化与
 `repair_evidence_contracts()` 共用同一 canonical normalization/evaluator。repair 只能复用样本
@@ -186,6 +199,21 @@ readiness 状态语义：
 - `supervisor_execution_trace` 是 `autonomous_learning_sample.sample_type`，不是独立表；只有真实 `stage=executed AND outcome=applied` trace 才进入 supervisor maturity；观察、superseded、risk_rejected、execution_failed 和非真实 trace 统一 `label_status=excluded`、`train_weight=0`
 - `evidence_contract.consumer_eligibility` 按消费者隔离：`outcome_learning` 可在污染结果仍有权威 broker PnL/成交事实时低权重学习；`supervisor_counterfactual` 必须有同一 `decision_id` 的真实 supervisor trace、完整 broker lifecycle/fresh reconcile 且无硬污染；`governance_mutation` 仍要求完整、成熟、唯一 lineage、无污染证据
 - supervisor trace 只有满足对应 consumer eligibility 后，才能进入 outcome learning、counterfactual 或治理训练；污染标签不再把整条仓位结果一刀切作废，但也不能跨用途升级证据
+- 没有 counterfactual 的已执行 trace 可以作为有界 observational 样本成熟，但必须同时保留
+  `observed_action`、`action_semantics=observed_action_without_counterfactual`、`counterfactual_status=unproven`
+  和 `recommended_action_provisional=true`；其中的 `recommended_action=hold` 不能被解释为已验证的后验结论。
+
+监督经验的记忆状态必须单独表达：
+
+- canonical `supervisor_trace` / `counterfactual_review` 是原始动作和后验事实；
+- `supervisor_execution_trace` / `supervisor_trajectory` 是按消费者资格筛选的学习样本；
+- `experience_memory` 和 `brain_memory` 是可检索的经验/后验投影，不是 live supervisor 的直接输入授权；
+- 只有成熟、完整、无污染且绑定同一 decision/lifecycle 的证据，才可进入
+  `governance_mutation`；模板是否实际改变，仍以 `policy_suggestion`、application/effect、V16
+  finalize 和 committed RuntimeConfig 为准。
+
+因此，“已进入记忆”只能说明系统以后可以检索该经验，不能说明系统已经验证了动作、已经改变了
+仓位监督策略，或已经获得直接执行权限。
 
 ## Open Outcome Samples
 

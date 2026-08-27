@@ -5,6 +5,7 @@ from typing import Any
 from backend.services.position_supervisor_templates import (
     DEFAULT_TEMPLATE_ID,
     normalize_position_supervisor_template,
+    position_supervisor_template_hash,
 )
 
 
@@ -869,6 +870,25 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "tp_extension_candidate": bool(can_extend_tp),
         "near_take_profit_action": near_tp_action,
     }
+    binding_policy = position_context.get("position_supervisor_policy")
+    if isinstance(binding_policy, dict):
+        binding = binding_policy.get("binding")
+        if isinstance(binding, dict):
+            evidence["position_supervisor_binding"] = dict(binding)
+        evidence["position_supervisor_binding_state"] = str(
+            binding_policy.get("binding_state") or "unknown"
+        )
+        evidence["binding_source"] = str(
+            binding_policy.get("binding_source") or ""
+        )
+        evidence["supervisor_template_hash"] = str(
+            binding_policy.get("template_hash")
+            or position_supervisor_template_hash(template)
+            or ""
+        )
+        evidence["selection_event_id"] = str(
+            binding_policy.get("selection_event_id") or ""
+        )
     min_delta = _safe_float(sl_policy.get("min_stop_tighten_points"), 0.01)
     protection_candidates: list[dict[str, Any]] = []
     target_sl = _safe_float(recommended_controls.get("target_stop_loss"))

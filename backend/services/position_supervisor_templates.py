@@ -1,18 +1,302 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
+import time
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from backend.core.db_helpers import conn_is_pg as _conn_is_pg, pg_sql as _sql
 
 
 SCHEMA_VERSION = "position_supervisor_template.v1"
+POSITION_SUPERVISOR_BINDING_SCHEMA_VERSION = "position_supervisor_binding.v1"
 DEFAULT_TEMPLATE_ID = "position_supervisor:default.v1"
 CONSERVATIVE_TEMPLATE_ID = "position_supervisor:conservative.v1"
 PROFIT_PROTECTION_TEMPLATE_ID = "position_supervisor:profit_protection.v1"
+POSITION_SUPERVISOR_BINDING_SOURCES = frozenset(
+    {
+        "static_baseline",
+        "governed_global_baseline",
+        "governed_selection_projection",
+    }
+)
+
+
+def position_supervisor_template_hash(template: dict[str, Any] | str | None) -> str:
+    """Return the hash of the complete, normalized supervisor template.
+
+    A binding is only useful if the exact controls used by a position can be
+    reconstructed after a restart.  Hashing the normalized snapshot also
+    makes key ordering and harmless input formatting irrelevant.
+    """
+
+    normalized = normalize_position_supervisor_template(template)
+    payload = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def normalize_position_supervisor_selection_key(
+    selection_key: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Keep the position/template selection boundary deterministic."""
+
+    value = dict(selection_key or {})
+    return {
+        "symbol": str(value.get("symbol") or ""),
+        "timeframe": str(value.get("timeframe") or ""),
+        "entry_regime": str(value.get("entry_regime") or ""),
+        "current_regime": str(value.get("current_regime") or ""),
+    }
+
+
+def build_position_supervisor_binding(
+    template: dict[str, Any] | str | None,
+    *,
+    binding_source: str = "static_baseline",
+    selection_status: str = "bound",
+    selection_key: Mapping[str, Any] | None = None,
+    bound_at: float | None = None,
+    posterior_fingerprint: str = "",
+    evidence_refs: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the immutable-at-entry supervisor strategy snapshot."""
+
+    snapshot = normalize_position_supervisor_template(template)
+    return {
+        "schema_version": POSITION_SUPERVISOR_BINDING_SCHEMA_VERSION,
+        "template_id": str(snapshot.get("template_id") or ""),
+        "template_version": str(snapshot.get("template_version") or ""),
+        "template_hash": position_supervisor_template_hash(snapshot),
+        "template_snapshot": snapshot,
+        "binding_source": str(binding_source or "static_baseline"),
+        "selection_status": str(selection_status or "bound"),
+        "selection_key": normalize_position_supervisor_selection_key(selection_key),
+        "bound_at": float(time.time() if bound_at is None else bound_at or 0.0),
+        "posterior_fingerprint": str(posterior_fingerprint or ""),
+        "evidence_refs": dict(evidence_refs or {}),
+    }
+
+
+def build_legacy_position_supervisor_binding(
+    template_id: str = "",
+    *,
+    selection_key: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Represent an old position without inventing an entry-time snapshot."""
+
+    return {
+        "schema_version": POSITION_SUPERVISOR_BINDING_SCHEMA_VERSION,
+        "template_id": str(template_id or ""),
+        "template_version": "",
+        "template_hash": "",
+        "template_snapshot": {},
+        "binding_source": "legacy_global_fallback",
+        "selection_status": "legacy_global_fallback",
+        "selection_key": normalize_position_supervisor_selection_key(selection_key),
+        "bound_at": 0.0,
+        "posterior_fingerprint": "",
+        "evidence_refs": {"reason": "position_has_no_supervisor_snapshot"},
+    }
+
+
+def verify_position_supervisor_binding(
+    binding: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Verify a persisted binding without silently replacing it.
+
+    ``legacy_global_fallback`` is an explicit historical state, not a valid
+    immutable binding.  It is returned as ``state=legacy`` so callers can use
+    the configured baseline while keeping automatic switching disabled.
+    """
+
+    value = dict(binding or {})
+    source = str(value.get("binding_source") or "").strip()
+    if source == "legacy_global_fallback" or str(
+        value.get("selection_status") or ""
+    ).strip() == "legacy_global_fallback":
+        return {
+            "valid": False,
+            "state": "legacy",
+            "reason": "legacy_global_fallback",
+            "binding": value,
+        }
+    if not value:
+        return {
+            "valid": False,
+            "state": "unknown",
+            "reason": "binding_missing",
+            "binding": {},
+        }
+    if str(value.get("schema_version") or "") != POSITION_SUPERVISOR_BINDING_SCHEMA_VERSION:
+        return {
+            "valid": False,
+            "state": "invalid",
+            "reason": "binding_schema_version_invalid",
+            "binding": value,
+        }
+    snapshot = value.get("template_snapshot")
+    if not isinstance(snapshot, Mapping):
+        return {
+            "valid": False,
+            "state": "invalid",
+            "reason": "binding_snapshot_missing",
+            "binding": value,
+        }
+    normalized = normalize_position_supervisor_template(dict(snapshot))
+    expected_id = str(normalized.get("template_id") or "")
+    expected_version = str(normalized.get("template_version") or "")
+    if not expected_id or not expected_version:
+        return {
+            "valid": False,
+            "state": "invalid",
+            "reason": "binding_snapshot_identity_missing",
+            "binding": value,
+        }
+    if str(value.get("template_id") or "") != expected_id:
+        return {
+            "valid": False,
+            "state": "invalid",
+            "reason": "binding_template_id_mismatch",
+            "binding": value,
+        }
+    if str(value.get("template_version") or "") != expected_version:
+        return {
+            "valid": False,
+            "state": "invalid",
+            "reason": "binding_template_version_mismatch",
+            "binding": value,
+        }
+    expected_hash = position_supervisor_template_hash(normalized)
+    if str(value.get("template_hash") or "") != expected_hash:
+        return {
+            "valid": False,
+            "state": "invalid",
+            "reason": "binding_template_hash_mismatch",
+            "binding": value,
+        }
+    if not source:
+        return {
+            "valid": False,
+            "state": "invalid",
+            "reason": "binding_source_missing",
+            "binding": value,
+        }
+    if source not in POSITION_SUPERVISOR_BINDING_SOURCES:
+        return {
+            "valid": False,
+            "state": "invalid",
+            "reason": "binding_source_unknown",
+            "binding": value,
+        }
+    if str(value.get("selection_status") or "") != "bound":
+        return {
+            "valid": False,
+            "state": "invalid",
+            "reason": "binding_selection_status_invalid",
+            "binding": value,
+        }
+    return {
+        "valid": True,
+        "state": "bound",
+        "reason": "binding_verified",
+        "binding": value,
+        "template": normalized,
+    }
+
+
+def _binding_candidates(value: Any) -> list[dict[str, Any]]:
+    """Extract explicit binding objects without treating arbitrary metadata as one."""
+
+    if not isinstance(value, Mapping):
+        return []
+    candidates: list[dict[str, Any]] = []
+    if str(value.get("schema_version") or "") == POSITION_SUPERVISOR_BINDING_SCHEMA_VERSION:
+        candidates.append(dict(value))
+    for key in (
+        "position_supervisor_binding",
+        "supervisor_binding",
+        "entry_protection_plan",
+        "binding",
+    ):
+        nested = value.get(key)
+        if isinstance(nested, Mapping):
+            candidates.extend(_binding_candidates(nested))
+    return candidates
+
+
+def resolve_position_supervisor_binding_lineage(*sources: Any) -> dict[str, Any]:
+    """Resolve one unambiguous binding from review/recovery/trace payloads.
+
+    The helper deliberately does not manufacture a binding.  A compact trace
+    reference can therefore coexist with a full review binding; the full
+    object wins only when its identity is internally verified.
+    """
+
+    candidates: list[dict[str, Any]] = []
+    for source in sources:
+        candidates.extend(_binding_candidates(source))
+    if not candidates:
+        return {
+            "valid": False,
+            "state": "unknown",
+            "reason": "binding_missing",
+            "binding": {},
+        }
+
+    valid: list[dict[str, Any]] = []
+    first_failure: dict[str, Any] | None = None
+    for candidate in candidates:
+        checked = verify_position_supervisor_binding(candidate)
+        if checked.get("valid"):
+            valid.append(dict(checked.get("binding") or candidate))
+        elif first_failure is None:
+            first_failure = checked
+    if valid:
+        identities = {
+            (
+                str(item.get("template_id") or ""),
+                str(item.get("template_version") or ""),
+                str(item.get("template_hash") or ""),
+            )
+            for item in valid
+        }
+        if len(identities) > 1:
+            return {
+                "valid": False,
+                "state": "conflict",
+                "reason": "binding_identity_conflict",
+                "binding": valid[0],
+                "candidates": valid,
+            }
+        return {
+            "valid": True,
+            "state": "bound",
+            "reason": "binding_verified",
+            "binding": valid[0],
+            "candidates": valid,
+        }
+    if first_failure and first_failure.get("state") == "legacy":
+        return {
+            "valid": False,
+            "state": "legacy",
+            "reason": "legacy_global_fallback",
+            "binding": dict(first_failure.get("binding") or {}),
+        }
+    return {
+        "valid": False,
+        "state": str((first_failure or {}).get("state") or "invalid"),
+        "reason": str((first_failure or {}).get("reason") or "binding_unverified"),
+        "binding": dict((first_failure or {}).get("binding") or {}),
+    }
 
 
 _TEMPLATES: dict[str, dict[str, Any]] = {

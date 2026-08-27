@@ -248,8 +248,38 @@ class AutonomousEvolutionNurseryRunner:
             readiness=final_readiness,
             include_chain_health=False,
         )
-        errored = any(not bool(item.get("ok")) and str(item.get("action")) != "record_release_evidence" for item in actions)
-        status = "completed_with_errors" if errored else "completed"
+        blocked = False
+        errored = False
+        for item in actions:
+            if bool(item.get("ok")) or str(item.get("action")) == "record_release_evidence":
+                continue
+            action_status = str(item.get("status") or "").strip().lower()
+            if action_status.startswith(("blocked_", "waiting_", "skipped_")) or action_status in {
+                "blocked",
+                "bridge_reconciliation_required",
+                "execution_pending",
+                "missing_candidate",
+                "missing_candidates",
+                "no_new_evidence",
+                "waiting_v16_command",
+                "waiting_for_candidate_evidence",
+                "waiting_for_system_decision",
+                "no_new_samples",
+                "no_candidates",
+                "superseded",
+                "system_not_selected_by_v16",
+                "system_waiting_for_evidence",
+            }:
+                blocked = True
+            else:
+                errored = True
+        status = (
+            "completed_with_errors"
+            if errored
+            else "completed_with_blockers"
+            if blocked
+            else "completed"
+        )
         if effective_apply_when_ready and not bool(repaired_cycle.get("stable_demo_nursery_ready")):
             status = "repaired_waiting_for_ready"
         return self._result(

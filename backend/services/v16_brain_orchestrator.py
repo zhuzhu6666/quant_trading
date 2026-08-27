@@ -641,7 +641,14 @@ class V16BrainOrchestratorService:
                     default=0.0,
                 )
                 latest_cf_updated = max(
-                    (safe_float(row["updated_at"]) for row in valid_rows),
+                    (
+                        safe_float(
+                            row.get("updated_at")
+                            or row.get("created_at")
+                            or row.get("observed_at")
+                        )
+                        for row in valid_rows
+                    ),
                     default=0.0,
                 )
             latest_brain_snapshot = 0.0
@@ -803,6 +810,163 @@ class V16BrainOrchestratorService:
             ensure_v16_brain_command_table(self.db_path)
             self._persist_commands([command])
         return {"ok": True, "status": "delegated", "command": command, "boundary": self.boundary()}
+
+    def delegate_supervisor_selection_mode(
+        self,
+        projection: dict[str, Any] | None,
+        *,
+        current_mode: str = "off",
+        target_mode: str = "demo_execute",
+        persist: bool = True,
+    ) -> dict[str, Any]:
+        """Issue the automatic Demo-mode handoff once selection evidence is ready.
+
+        The learning worker owns evidence production, but it must not authorize
+        its own runtime mutation.  This method keeps the authorization record
+        in the V16 command ledger; the downstream supervisor service still
+        claims the single-use command and commits through Coordinator.
+        """
+
+        value = dict(projection or {})
+        previous = str(current_mode or "off").strip().lower()
+        target = str(target_mode or "").strip().lower()
+        if target == "live_execute":
+            return {
+                "ok": False,
+                "status": "selection_mode_not_admitted",
+                "reason": "live_execute_not_admitted_by_current_rollout",
+                "boundary": self.boundary(),
+            }
+        if target != "demo_execute":
+            return {
+                "ok": False,
+                "status": "selection_mode_target_invalid",
+                "reason": f"automatic_target_must_be_demo_execute:{target}",
+                "boundary": self.boundary(),
+            }
+        if previous == target:
+            return {
+                "ok": True,
+                "status": "already_enabled",
+                "current_mode": previous,
+                "target_mode": target,
+                "boundary": self.boundary(),
+            }
+        if previous not in {"off", "shadow"}:
+            return {
+                "ok": False,
+                "status": "selection_mode_previous_invalid",
+                "reason": f"automatic_previous_mode_not_supported:{previous}",
+                "boundary": self.boundary(),
+            }
+        candidates = [
+            dict(item)
+            for item in list(value.get("candidates") or [])
+            if isinstance(item, dict)
+        ]
+        if str(value.get("status") or "") != "ready" or not candidates:
+            return {
+                "ok": True,
+                "status": "waiting_for_selection_evidence",
+                "candidate_count": len(candidates),
+                "projection_status": str(value.get("status") or "unknown"),
+                "boundary": self.boundary(),
+            }
+
+        # Publication timestamps are intentionally excluded from the command
+        # identity.  Re-publishing the same evidence must update one command,
+        # not create a new authorization every learning cycle.
+        candidate_refs = [
+            {
+                "template_id": str(item.get("template_id") or ""),
+                "template_version": str(item.get("template_version") or ""),
+                "template_hash": str(item.get("template_hash") or ""),
+                "selection_key": dict(item.get("selection_key") or {}),
+                "effect_score": item.get("effect_score"),
+                "observed_trade_count": int(item.get("observed_trade_count") or 0),
+                "mature_trade_count": int(item.get("mature_trade_count") or 0),
+                "application_id": str(item.get("application_id") or ""),
+                "effect_id": str(item.get("effect_id") or ""),
+                "posterior_fingerprint": str(item.get("posterior_fingerprint") or ""),
+                "selection_event_id": str(item.get("selection_event_id") or ""),
+            }
+            for item in candidates
+        ]
+        candidate_refs.sort(
+            key=lambda item: (
+                str(item.get("template_id") or ""),
+                str(item.get("template_hash") or ""),
+                str(item.get("application_id") or ""),
+            )
+        )
+        stable_evidence = {
+            "schema_version": "v16_position_supervisor_selection_evidence.v1",
+            "current_mode": previous,
+            "target_mode": target,
+            "source_watermark": str(value.get("source_watermark") or "0.0"),
+            "candidate_refs": candidate_refs,
+            "evidence_policy": dict(value.get("evidence_policy") or {}),
+        }
+        evidence_fingerprint = hashlib.sha256(
+            dumps(stable_evidence).encode("utf-8")
+        ).hexdigest()
+        candidate_id = f"psel_mode_{evidence_fingerprint[:20]}"
+        command_id = "v16cmd_" + hashlib.sha1(
+            ("supervisor-selection-mode|" + evidence_fingerprint).encode("utf-8")
+        ).hexdigest()[:20]
+        now = time.time()
+        evidence = {
+            **stable_evidence,
+            "selection_projection_key": "position_supervisor_selection.v1",
+            "projection_status": str(value.get("status") or ""),
+            "selection_fingerprint": str(value.get("selection_fingerprint") or ""),
+            "candidate_count": len(candidate_refs),
+        }
+        command = {
+            "command_id": command_id,
+            "schema_version": "v16_brain_command.v1",
+            "snapshot_id": "",
+            "plan_id": "",
+            "eval_id": "",
+            "candidate_id": candidate_id,
+            "target_agent": "position_supervisor_governance",
+            "scope_type": "supervisor_selection",
+            "scope_key": "position_supervisor_selection",
+            "action": "switch_position_supervisor_selection_mode",
+            "decision": "delegate",
+            "status": "delegated_to_specialist",
+            "evidence": evidence,
+            "delegation": {
+                "target_agent": "position_supervisor_governance",
+                "delegated_by": "v16_brain",
+                "specialist_must_use": [
+                    "RiskPolicyService",
+                    "RuntimeConfigMutationService",
+                    "GovernanceMutationCoordinator",
+                ],
+                "specialist_must_not": [
+                    "submit_order",
+                    "bypass_risk_policy",
+                    "expand_hard_risk_limits",
+                ],
+            },
+            "posterior_fingerprint": "",
+            "evidence_fingerprint": evidence_fingerprint,
+            "max_apply_count": 1,
+            "authority_issued_at": now,
+            "created_at": now,
+            "updated_at": now,
+            "boundary": self.boundary(),
+        }
+        if persist:
+            ensure_v16_brain_command_table(self.db_path)
+            self._persist_commands([command])
+        return {
+            "ok": True,
+            "status": "delegated",
+            "command": command,
+            "boundary": self.boundary(),
+        }
 
     def delegate_factor_governance_cycle(
         self,

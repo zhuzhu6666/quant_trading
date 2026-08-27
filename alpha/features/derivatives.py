@@ -53,7 +53,9 @@ class FeatureDeriver:
         Returns:
             衍生特征 DataFrame, index 与 df 对齐
         """
-        features = pd.DataFrame(index=df.index)
+        # Collect columns first. Repeated DataFrame insertion creates a highly
+        # fragmented frame once the factor universe grows into the hundreds.
+        features: dict[str, np.ndarray] = {}
         n = len(df)
 
         close = df["close"].values.astype(float)
@@ -74,29 +76,28 @@ class FeatureDeriver:
         # 价格位置: (close - low) / (high - low)
         hl_range = high - low
         hl_range[hl_range < 1e-8] = np.nan
-        features["close_position"] = (close - low) / hl_range
+        features["close_position"] = _safe_div(close - low, hl_range)
 
         # gap: open - prev_close
         prev_close = np.roll(close, 1)
         prev_close[0] = np.nan
         features["gap"] = open_ - prev_close
-        features["gap_pct"] = (open_ - prev_close) / np.abs(prev_close)
+        features["gap_pct"] = _safe_div(open_ - prev_close, np.abs(prev_close))
 
         # ═══════════════════════════════════════════════════
         # 2. 滚动统计 (价格)
         # ═══════════════════════════════════════════════════
         for w in WINDOWS:
             roll_close = pd.Series(close).rolling(w)
-            features[f"close_zscore_{w}"] = (
-                (close - roll_close.mean().values) / roll_close.std().values
-            )
+            roll_mean = roll_close.mean().values
+            roll_std = roll_close.std().values
+            features[f"close_zscore_{w}"] = _safe_div(close - roll_mean, roll_std)
             features[f"close_skew_{w}"] = roll_close.skew().values
             features[f"close_kurt_{w}"] = roll_close.kurt().values
             features[f"close_rank_{w}"] = _rolling_rank(close, w)
-            features[f"high_low_ratio_{w}"] = (
-                pd.Series(high).rolling(w).max().values /
-                pd.Series(low).rolling(w).min().values
-            )
+            high_max = pd.Series(high).rolling(w).max().values
+            low_min = pd.Series(low).rolling(w).min().values
+            features[f"high_low_ratio_{w}"] = _safe_div(high_max, low_min)
 
         # ═══════════════════════════════════════════════════
         # 3. 成交量变换
@@ -119,10 +120,11 @@ class FeatureDeriver:
             features[f"volatility_{w}"] = _safe_div(ret_std, close)
             features[f"vol_change_{w}"] = _safe_pct(ret_std, 1)
             # Parkinson 波动率估计
+            high_max = pd.Series(high).rolling(w).max().values
+            low_min = pd.Series(low).rolling(w).min().values
+            log_range = _safe_log_ratio(high_max, low_min)
             parkinson = np.sqrt(
-                (1.0 / (4.0 * np.log(2))) *
-                (np.log(pd.Series(high).rolling(w).max().values /
-                        pd.Series(low).rolling(w).min().values)) ** 2
+                (1.0 / (4.0 * np.log(2))) * log_range ** 2
             )
             features[f"parkinson_vol_{w}"] = parkinson
 
@@ -132,12 +134,18 @@ class FeatureDeriver:
         body = close - open_
         candle_range = high - low
         candle_range[candle_range < 1e-8] = np.nan
-        features["body_ratio"] = np.abs(body) / candle_range
-        features["upper_shadow"] = (high - np.maximum(close, open_)) / candle_range
-        features["lower_shadow"] = (np.minimum(close, open_) - low) / candle_range
+        features["body_ratio"] = _safe_div(np.abs(body), candle_range)
+        features["upper_shadow"] = _safe_div(
+            high - np.maximum(close, open_), candle_range
+        )
+        features["lower_shadow"] = _safe_div(
+            np.minimum(close, open_) - low, candle_range
+        )
 
         # Doji: body < 10% of range
-        features["is_doji"] = (np.abs(body) / candle_range < 0.1).astype(float)
+        features["is_doji"] = (
+            _safe_div(np.abs(body), candle_range) < 0.1
+        ).astype(float)
 
         # ═══════════════════════════════════════════════════
         # 6. 现有因子的衍生 (log/diff/pct/zscore)
@@ -152,9 +160,9 @@ class FeatureDeriver:
                 features[f"{name}_diff"] = _safe_diff(arr)
                 # zscore (20 bars)
                 s = pd.Series(arr)
-                features[f"{name}_z20"] = (
-                    (arr - s.rolling(20).mean().values) /
-                    s.rolling(20).std().values
+                features[f"{name}_z20"] = _safe_div(
+                    arr - s.rolling(20).mean().values,
+                    s.rolling(20).std().values,
                 )
                 # pct_change
                 features[f"{name}_pct"] = _safe_pct(arr, 1)
@@ -167,22 +175,28 @@ class FeatureDeriver:
         if self.include_fft:
             _add_fft_features(features, close)
 
-        return features
+        return pd.DataFrame(features, index=df.index)
 
 
 # ── 辅助函数 ──────────────────────────────────────────────
 
 def _safe_log_return(arr: np.ndarray, lag: int) -> np.ndarray:
     result = np.full(len(arr), np.nan)
-    result[lag:] = np.log(arr[lag:] / arr[:-lag])
+    result[lag:] = _safe_log_ratio(arr[lag:], arr[:-lag])
     return result
 
 
 def _safe_pct(arr: np.ndarray, lag: int) -> np.ndarray:
     result = np.full(len(arr), np.nan)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        result[lag:] = arr[lag:] / arr[:-lag] - 1.0
+    result[lag:] = _safe_div(arr[lag:], arr[:-lag]) - 1.0
     return result
+
+
+def _safe_log_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    """Return log(numerator / denominator), leaving invalid ratios unknown."""
+    ratio = _safe_div(numerator, denominator)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(ratio > 0.0, np.log(ratio), np.nan)
 
 
 def _safe_diff(arr: np.ndarray) -> np.ndarray:
@@ -205,7 +219,7 @@ def _rolling_rank(arr: np.ndarray, window: int) -> np.ndarray:
     return result
 
 
-def _add_wavelet_features(features: pd.DataFrame, close: np.ndarray):
+def _add_wavelet_features(features: dict[str, np.ndarray], close: np.ndarray):
     """添加小波变换特征 (需 pywt 包)。"""
     try:
         import pywt  # noqa: F401
@@ -225,7 +239,7 @@ def _add_wavelet_features(features: pd.DataFrame, close: np.ndarray):
     features["wavelet_detail"] = detail_up
 
 
-def _add_fft_features(features: pd.DataFrame, close: np.ndarray):
+def _add_fft_features(features: dict[str, np.ndarray], close: np.ndarray):
     """添加 FFT 频率特征。"""
     clean = close[~np.isnan(close)]
     if len(clean) < 10:

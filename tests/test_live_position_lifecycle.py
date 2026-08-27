@@ -1665,6 +1665,32 @@ def test_build_replayed_close_payloads_falls_back_to_recovery_state():
     assert payload["review"]["real_pnl"] is None
 
 
+def test_build_replayed_close_payloads_keeps_direct_close_reason_and_source():
+    payload = build_replayed_close_payloads(
+        position_id=303,
+        position_state={"symbol": "XAUUSD+", "close_pnl": -4.1},
+        real_pnl={
+            "net": -4.1,
+            "exec_price": 4588.0,
+            "exec_timestamp": 500.0,
+            "price_quality": "broker_reported",
+        },
+        strategy_name="factor_v4",
+        now_ts=600.0,
+        context_integrity_default="partial",
+        resolved_close_reason="thesis_broken",
+        close_reason_source="supervisor_direct_close",
+        recovery_observation_reason="position_missing_after_recovery_reconcile",
+    )
+
+    assert payload["decision"]["action_reason"] == "thesis_broken"
+    assert payload["decision"]["action_json"]["close_reason"] == "thesis_broken"
+    assert payload["decision"]["action_json"]["close_reason_source"] == "supervisor_direct_close"
+    assert payload["recovery_meta"]["recovery_observation_reason"] == (
+        "position_missing_after_recovery_reconcile"
+    )
+
+
 def test_classify_close_source_defaults_broker_close_to_external_source():
     result = classify_close_source_from_evidence(close_reason="broker_close", evidence={})
 

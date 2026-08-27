@@ -98,6 +98,14 @@ class PositionSupervisorTemplatePlan(_TypedControlPlan):
 
 
 @dataclass(frozen=True)
+class PositionSupervisorSelectionModePlan(_TypedControlPlan):
+    """Typed gate for the memory-driven per-position selection mode."""
+
+    previous_mode: str = "off"
+    target_mode: str = "off"
+
+
+@dataclass(frozen=True)
 class ModelPolicyActivationPlan(_TypedControlPlan):
     model_type: str = ""
     target_stage: str = ""

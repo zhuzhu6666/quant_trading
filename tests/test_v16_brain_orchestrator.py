@@ -8,7 +8,10 @@ from backend.services.canonical_v2 import (
     record_review,
     record_supervisor_trace_event,
 )
-from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+from backend.services.v16_brain_orchestrator import (
+    V16BrainOrchestratorService,
+    ensure_v16_brain_command_table,
+)
 from backend.services.brain_governance_candidate_review import (
     ensure_brain_governance_candidate_review_table,
 )
@@ -69,7 +72,12 @@ def _readiness() -> dict:
     }
 
 
-def _seed_posterior_facts(db_path, now: float) -> None:
+def _seed_posterior_facts(
+    db_path,
+    now: float,
+    *,
+    include_counterfactual_updated_at: bool = True,
+) -> None:
     conn = make_canonical_sqlite(db_path)
     try:
         conn.executescript(STATE_DB_DDL)
@@ -137,35 +145,53 @@ def _seed_posterior_facts(db_path, now: float) -> None:
                 "created_at": now - 15.0,
             },
         )
+        counterfactual_payload = {
+            "counterfactual_id": "cf-v16",
+            "review_id": "review-v16",
+            "trade_id": "trade-v16",
+            "position_id": "position-v16",
+            "close_ts": now - 15.0,
+            "close_reason": "stop",
+            "supervisor_event_type": "tighten",
+            "supervisor_reason": "tighten happened too early",
+            "label": "premature_tighten",
+            "confidence": 0.80,
+            "horizons": [{"horizon_minutes": 30, "future_pnl": 9.7}],
+            "evidence": {
+                "tags": ["future_bars_complete"],
+                "maturity": {"governance_eligible": True},
+            },
+            "created_at": now - 5.0,
+        }
+        if include_counterfactual_updated_at:
+            counterfactual_payload["updated_at"] = now - 5.0
         record_counterfactual_event(
             conn,
             counterfactual_id="cf-v16",
             review_id="review-v16",
             trace_id="trace-v16",
             event_ts=now - 15.0,
-            payload={
-                "counterfactual_id": "cf-v16",
-                "review_id": "review-v16",
-                "trade_id": "trade-v16",
-                "position_id": "position-v16",
-                "close_ts": now - 15.0,
-                "close_reason": "stop",
-                "supervisor_event_type": "tighten",
-                "supervisor_reason": "tighten happened too early",
-                "label": "premature_tighten",
-                "confidence": 0.80,
-                "horizons": [{"horizon_minutes": 30, "future_pnl": 9.7}],
-                "evidence": {
-                    "tags": ["future_bars_complete"],
-                    "maturity": {"governance_eligible": True},
-                },
-                "created_at": now - 5.0,
-                "updated_at": now - 5.0,
-            },
+            payload=counterfactual_payload,
         )
         conn.commit()
     finally:
         conn.close()
+
+
+def test_v16_status_uses_canonical_time_without_payload_updated_at(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    _seed_posterior_facts(
+        db_path,
+        now,
+        include_counterfactual_updated_at=False,
+    )
+    ensure_v16_brain_command_table(db_path)
+
+    status = V16BrainOrchestratorService(db_path).status()
+
+    assert status["status"] == "posterior_not_dispatched"
+    assert status["latest_counterfactual_updated_at"] > 0.0
 
 
 def test_posterior_arbitration_separates_entry_and_supervisor_causality():

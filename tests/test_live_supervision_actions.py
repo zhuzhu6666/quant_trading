@@ -638,13 +638,13 @@ def test_execute_supervisor_close_action_success_remembers_reason_and_verdict():
     }
 
     class _Bridge:
-        def close_position(self, pid):
-            calls["close_call"] = pid
+        def close_position(self, pid, volume=None):
+            calls["close_call"] = (pid, volume)
             return SimpleNamespace(success=True)
 
     execute_supervisor_close_action(
         bridge=_Bridge(),
-        position={"position_id": 7, "current_price": 4010.0},
+        position={"position_id": 7, "volume": 100.0, "current_price": 4010.0},
         verdict={"summary_reason": "thesis_broken"},
         risk_action="close_position",
         risk_verdict={"allowed": True, "reason": "ok"},
@@ -661,13 +661,21 @@ def test_execute_supervisor_close_action_success_remembers_reason_and_verdict():
         remember_close_verdict=lambda *args: calls["close_verdict"].append(args),
         result_is_position_not_found=lambda _result: False,
         retire_broker_missing_position=lambda *args, **kwargs: calls["retired"].append((args, kwargs)),
+        reconcile_positions=lambda _bridge: SimpleNamespace(
+            status="fresh",
+            observed_at=time.time(),
+            positions=(),
+        ),
     )
 
-    assert calls["close_call"] == 7
+    assert calls["close_call"] == (7, 100.0)
     assert calls["close_reason"] == [(7, "thesis_broken")]
     assert calls["close_verdict"][0][1].to_dict() == {"allowed": True, "reason": "ok"}
     assert calls["state"][0][1]["action_applied"] == "close"
     assert calls["traces"][0]["execution_reason"] == "close_position_success"
+    assert calls["traces"][0]["execution"]["position_volume_before"] == 100.0
+    assert calls["traces"][0]["execution"]["position_volume_after"] == 0.0
+    assert calls["traces"][0]["execution"]["reconcile_confirmed"] is True
     assert calls["logs"] == ["tick 9: supervisor close sent pos=7 reason=thesis_broken"]
 
 

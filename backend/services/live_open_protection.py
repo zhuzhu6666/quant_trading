@@ -84,6 +84,9 @@ def _failure_context(
         "execution_intent_id": str(
             getattr(candidate, "execution_intent_id", "") or ""
         ),
+        "position_supervisor_binding": dict(
+            getattr(candidate, "position_supervisor_binding", {}) or {}
+        ),
     }
 
 

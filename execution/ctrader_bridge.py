@@ -41,6 +41,7 @@ from execution.ctrader_ssl_patch import _patch_ctrader_ssl_endpoint
 
 try:
     from ctrader_open_api import Client, Protobuf, TcpProtocol
+    from twisted.application.internet import ClientService as _TwistedClientService
     from ctrader_open_api.messages import (
         OpenApiCommonMessages_pb2 as CommonMsg,
         OpenApiMessages_pb2 as TradeMsg,
@@ -54,6 +55,19 @@ try:
     HAS_CTRADER = True
 except ImportError:  # 包未装
     HAS_CTRADER = False
+    _TwistedClientService = None
+    _CTraderTcpProtocol = None
+
+
+if HAS_CTRADER:
+    class _CTraderTcpProtocol(TcpProtocol):
+        """Deliver one disconnect notification per TCP protocol instance."""
+
+        def connectionLost(self, reason):
+            if getattr(self, "_ctrader_connection_lost", False):
+                return
+            self._ctrader_connection_lost = True
+            return super().connectionLost(reason)
 
 
 # ── 公共结果类型 ──────────────────────────────────────────
@@ -538,6 +552,22 @@ class CTraderBridge(BaseBrokerBridge):
         if not _ready.wait(timeout=5.0):
             raise RuntimeError("Reactor failed to start within 5s")
 
+    def _stop_client_service(self, client) -> None:
+        try:
+            # The SDK override skips stopService once _disconnected() has
+            # set isConnected=False.  Call Twisted's base implementation
+            # so the reconnect state machine reaches its terminal state.
+            stopped = _TwistedClientService.stopService(client)
+            add_errback = getattr(stopped, "addErrback", None)
+            if callable(add_errback):
+                add_errback(
+                    lambda failure: logger.debug(
+                        "cTrader client stop failed: %s", failure
+                    )
+                )
+        except Exception as exc:
+            logger.debug("cTrader client stop failed: %s", exc)
+
     def _teardown_client(self) -> None:
         """Stop the current SDK client and drop the reference.
 
@@ -549,11 +579,15 @@ class CTraderBridge(BaseBrokerBridge):
         self._client = None
         if client is None:
             return
+
+        def _stop() -> None:
+            self._stop_client_service(client)
+
         try:
             if self._reactor is not None and self._reactor_thread is not None and threading.current_thread() != self._reactor_thread:
-                self._reactor.callFromThread(client.stopService)
+                self._reactor.callFromThread(_stop)
             else:
-                client.stopService()
+                _stop()
         except Exception:
             pass
 
@@ -599,7 +633,7 @@ class CTraderBridge(BaseBrokerBridge):
                 try:
                     if self._client:
                         self._teardown_client()
-                    client = Client(self.host, self.port, TcpProtocol)
+                    client = Client(self.host, self.port, _CTraderTcpProtocol)
                     self._client = client
                 except Exception as e:
                     logger.error(f"Client create failed: {e}")
@@ -622,7 +656,15 @@ class CTraderBridge(BaseBrokerBridge):
                     if _is_stale():
                         logger.debug("skip stale cTrader connect callback attempt=%s", attempt_id)
                         try:
-                            client.stopService()
+                            # Client._connected runs from protocol.connectionMade,
+                            # before ClientService advances its own state machine.
+                            # Stop on the next reactor turn so cancellation cannot
+                            # race the endpoint's connected Deferred.
+                            self._reactor.callLater(
+                                0,
+                                self._stop_client_service,
+                                client,
+                            )
                         except Exception:
                             pass
                         return
@@ -816,7 +858,7 @@ class CTraderBridge(BaseBrokerBridge):
             timeout = max(self.request_timeout_sec * 4 + 5, 30.0)
 
             def _on_connect_timeout():
-                if self._conn_ready.is_set():
+                if attempt_id != self._connect_attempt_id or self._conn_ready.is_set():
                     return
                 logger.error("cTrader connect/auth timeout after %.1fs", timeout)
                 self._teardown_client()
@@ -856,12 +898,16 @@ class CTraderBridge(BaseBrokerBridge):
         logger.debug("cTrader Twisted: connected callback fired")
 
     def _on_disconnected(self, client, reason):
-        if client is not None and self._client is not None and client is not self._client:
+        current = self._client
+        if client is not None and current is not None and client is not current:
             logger.debug("ignore stale cTrader disconnect callback")
+            return
+        if client is not None and current is None:
+            logger.debug("ignore duplicate cTrader disconnect callback")
             return
         logger.warning(f"cTrader Twisted: disconnected ({reason})")
         self._stop_heartbeat()
-        self._client = None
+        self._teardown_client()
         self._mark_disconnected()
 
     # ── 熔断 / 退避 ─────────────────────────────────────
@@ -4000,7 +4046,8 @@ class CTraderBridge(BaseBrokerBridge):
 
         Args:
             from_ts: 起始时间戳 (秒, 0=不限).
-            to_ts:   结束时间戳 (秒, 0=不限).
+            to_ts:   结束时间戳 (秒, 0=当前时刻). cTrader 要求请求带有
+                     toTimestamp，因此不会发送“无限结束时间”的空字段。
             max_rows: 最大返回条数 (默认 100).
 
         Returns:
@@ -4015,8 +4062,10 @@ class CTraderBridge(BaseBrokerBridge):
             req.ctidTraderAccountId = self.account_id
             if from_ts > 0:
                 req.fromTimestamp = int(from_ts * 1000)  # ms
-            if to_ts > 0:
-                req.toTimestamp = int(to_ts * 1000)
+            # cTrader requires toTimestamp on ProtoOADealListReq.  Most
+            # callers only provide from_ts; use the current broker-query
+            # boundary instead of emitting an invalid request.
+            req.toTimestamp = int((to_ts if to_ts > 0 else time.time()) * 1000)
             if max_rows > 0:
                 req.maxRows = max_rows
             resp = self._send(req, timeout=15.0)

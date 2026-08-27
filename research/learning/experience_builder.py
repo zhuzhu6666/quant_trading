@@ -20,6 +20,9 @@ from backend.services.trade_lesson_memory import (
     upsert_trade_lesson_memory,
 )
 from backend.services.live_position_lifecycle import _compact_supervisor_mapping
+from backend.services.position_supervisor_templates import (
+    resolve_position_supervisor_binding_lineage,
+)
 from backend.services.review_contract import NON_FACTOR_RESPONSIBILITIES
 
 
@@ -76,6 +79,18 @@ class ExperienceBuilder:
 
     def build_from_review(self, review: dict, *, conn: Any | None = None) -> dict:
         review_json = review.get("review_json", {}) or {}
+        binding_lineage = resolve_position_supervisor_binding_lineage(
+            review,
+            review_json,
+            review_json.get("entry_action") if isinstance(review_json, dict) else {},
+        )
+        supervisor_binding = dict(binding_lineage.get("binding") or {})
+        supervisor_binding_state = str(
+            binding_lineage.get("state") or "unknown"
+        )
+        supervisor_binding_reason = str(
+            binding_lineage.get("reason") or "binding_missing"
+        )
         failure_tags = list(review.get("failure_tags", []) or [])
         outcome_label = str(review.get("outcome_label", "") or "")
         close_reason = str(review_json.get("close_reason", "") or "")
@@ -252,8 +267,24 @@ class ExperienceBuilder:
             },
             "context_integrity": context_integrity,
             "attribution_integrity": attribution_integrity,
+            "position_supervisor_binding_status": supervisor_binding_state,
+            "position_supervisor_binding_reason": supervisor_binding_reason,
             "summary_text": review.get("summary_text", ""),
         }
+        if supervisor_binding:
+            context["position_supervisor_binding"] = supervisor_binding
+            context["position_supervisor_binding_template_id"] = str(
+                supervisor_binding.get("template_id") or ""
+            )
+            context["position_supervisor_binding_template_version"] = str(
+                supervisor_binding.get("template_version") or ""
+            )
+            context["position_supervisor_binding_template_hash"] = str(
+                supervisor_binding.get("template_hash") or ""
+            )
+            context["position_supervisor_binding_source"] = str(
+                supervisor_binding.get("binding_source") or ""
+            )
         source_table = "canonical_v2.trade_review"
         source_id = str(review.get("review_id") or review_json.get("review_id") or review.get("trade_id") or "")
         append_source = "trade_lesson_memory.v1"
@@ -308,4 +339,7 @@ class ExperienceBuilder:
             "recommended_action": recommended_action,
             "evidence_strength": float(evidence_strength),
             "decision_context_json": context,
+            "position_supervisor_binding": supervisor_binding,
+            "position_supervisor_binding_status": supervisor_binding_state,
+            "position_supervisor_binding_reason": supervisor_binding_reason,
         }

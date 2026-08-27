@@ -56,6 +56,9 @@ from backend.services.review_contract import (
     review_has_system_contamination,
 )
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.position_supervisor_templates import (
+    resolve_position_supervisor_binding_lineage,
+)
 from research.features.evidence_contract import build_evidence_contract
 from backend.services.supervisor_payload_contract import (
     compact_supervisor_mapping as _compact_supervisor_mapping,
@@ -107,6 +110,38 @@ OPEN_QUALITY_CONTEXT_FIELDS = (
 
 def _dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _position_supervisor_binding_metadata(*sources: Any) -> dict[str, Any]:
+    lineage = resolve_position_supervisor_binding_lineage(*sources)
+    binding = lineage.get("binding") if isinstance(lineage.get("binding"), dict) else {}
+    return {
+        "binding": dict(binding),
+        "status": str(lineage.get("state") or "unknown"),
+        "reason": str(lineage.get("reason") or "binding_missing"),
+        "template_id": str(binding.get("template_id") or ""),
+        "template_version": str(binding.get("template_version") or ""),
+        "template_hash": str(binding.get("template_hash") or ""),
+        "binding_source": str(binding.get("binding_source") or ""),
+    }
+
+
+def _trace_binding_metadata(source_review: Any, row: Any) -> dict[str, Any]:
+    metadata = _position_supervisor_binding_metadata(source_review)
+    if metadata["status"] != "bound":
+        return metadata
+    trace_identity = {
+        "template_id": str(_row_value(row, "template_id", "") or ""),
+        "template_version": str(_row_value(row, "template_version", "") or ""),
+        "template_hash": str(_row_value(row, "template_hash", "") or ""),
+    }
+    if not all(trace_identity.values()):
+        metadata["status"] = "unknown"
+        metadata["reason"] = "trace_binding_reference_missing"
+    elif any(trace_identity[key] != metadata[key] for key in trace_identity):
+        metadata["status"] = "conflict"
+        metadata["reason"] = "trace_binding_identity_mismatch"
+    return metadata
 
 
 def _process_memory_snapshot() -> dict[str, Any]:
@@ -910,6 +945,256 @@ def _demo_autonomy_mutation_enabled() -> bool:
         return False
 
 
+def _auto_enable_position_supervisor_selection(
+    *,
+    db_path: str | Path,
+    projection: Mapping[str, Any] | None,
+    mutation_allowed: bool,
+    run_id: str,
+) -> dict[str, Any]:
+    """Automatically arm bounded Demo supervisor selection when evidence is ready.
+
+    Evidence production remains automatic, while the actual runtime change is
+    still committed through V16, RiskPolicy and the Coordinator.  There is no
+    operator approval step here; an unavailable dependency leaves the mode at
+    its current value and is retried by the next learning cycle.
+    """
+
+    from config import runtime_config as runtime_config_module
+
+    cfg = runtime_config_module.shared()
+    current_mode = str(
+        getattr(cfg, "position_supervisor_auto_selection_mode", "off") or "off"
+    ).strip().lower()
+    result: dict[str, Any] = {
+        "schema_version": "position_supervisor_auto_enable.v1",
+        "enabled": False,
+        "broker_mutation_allowed": False,
+        "previous_mode": current_mode,
+        "target_mode": "demo_execute",
+    }
+    if current_mode == "demo_execute":
+        return {
+            **result,
+            "enabled": True,
+            "status": "already_enabled",
+            "mode": current_mode,
+        }
+    if current_mode not in {"off", "shadow"}:
+        return {
+            **result,
+            "status": "selection_mode_not_auto_promotable",
+            "reason": f"unsupported_previous_mode:{current_mode}",
+        }
+
+    value = dict(projection or {})
+    candidates = [
+        item for item in list(value.get("candidates") or []) if isinstance(item, Mapping)
+    ]
+    if str(value.get("status") or "") != "ready" or not candidates:
+        return {
+            **result,
+            "status": "waiting_for_selection_evidence",
+            "projection_status": str(value.get("status") or "unknown"),
+            "candidate_count": len(candidates),
+        }
+    freshness = dict(value.get("freshness") or {})
+    published_at = 0.0
+    try:
+        published_at = float(value.get("published_at") or 0.0)
+    except (TypeError, ValueError):
+        published_at = 0.0
+    try:
+        max_age = max(
+            1.0,
+            float(
+                getattr(
+                    cfg,
+                    "position_supervisor_selection_max_age_seconds",
+                    900.0,
+                )
+                or 900.0
+            ),
+        )
+    except (TypeError, ValueError):
+        max_age = 900.0
+    age = max(0.0, time.time() - published_at) if published_at > 0.0 else float("inf")
+    if freshness.get("status") not in {"fresh", ""} or age > max_age:
+        return {
+            **result,
+            "status": "selection_projection_stale",
+            "age_seconds": age,
+            "max_age_seconds": max_age,
+        }
+
+    evidence_policy = dict(value.get("evidence_policy") or {})
+    required_policy = {
+        "causal_scope": "supervisor",
+        "requires_clean_mature_counterfactual": True,
+        "requires_template_hash_binding": True,
+        "requires_current_coordinator_mutation": True,
+        "requires_positive_application_effect": True,
+    }
+    if any(evidence_policy.get(key) != expected for key, expected in required_policy.items()):
+        return {
+            **result,
+            "status": "selection_evidence_contract_incomplete",
+            "evidence_policy": evidence_policy,
+        }
+    if not runtime_config_module.bounded_demo_mode_active(cfg):
+        return {
+            **result,
+            "status": "bounded_demo_required",
+            "reason": "automatic_selection_only_runs_in_bounded_demo",
+        }
+    if not mutation_allowed:
+        return {
+            **result,
+            "status": "mutation_capability_unavailable",
+            "reason": "learning_worker_mutation_capability_unavailable",
+        }
+
+    from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+    from backend.services.v16_command_gate import V16CommandGate
+
+    delegation = V16BrainOrchestratorService(db_path).delegate_supervisor_selection_mode(
+        value,
+        current_mode=current_mode,
+        target_mode="demo_execute",
+        persist=True,
+    )
+    if not delegation.get("ok"):
+        return {
+            **result,
+            "status": str(delegation.get("status") or "v16_delegation_failed"),
+            "reason": str(delegation.get("reason") or ""),
+        }
+    command = dict(delegation.get("command") or {})
+    command_id = str(command.get("command_id") or "")
+    candidate_id = str(command.get("candidate_id") or "")
+    evidence_fingerprint = str(command.get("evidence_fingerprint") or "")
+    if not command_id or not evidence_fingerprint:
+        return {
+            **result,
+            "status": "v16_delegation_incomplete",
+            "reason": "selection_mode_command_missing_identity",
+        }
+    compact_projection = {
+        "schema_version": str(value.get("schema_version") or ""),
+        "status": str(value.get("status") or ""),
+        "candidate_count": len(candidates),
+        "source_watermark": str(value.get("source_watermark") or "0.0"),
+        "selection_fingerprint": str(value.get("selection_fingerprint") or ""),
+        "evidence_policy": evidence_policy,
+    }
+    risk_context = {
+        "current_mode": current_mode,
+        "target_mode": "demo_execute",
+        "selection_projection": compact_projection,
+        "bounded_demo_mode": True,
+        "v16_command_id": command_id,
+        "autonomy_mode": str(getattr(cfg, "autonomy_mode", "") or ""),
+    }
+    from risk.policy_service import RiskPolicyService
+
+    risk_verdict = RiskPolicyService.shared().evaluate(
+        "switch_position_supervisor_selection_mode",
+        risk_context,
+    )
+    risk_payload = (
+        risk_verdict.to_dict()
+        if hasattr(risk_verdict, "to_dict")
+        else dict(risk_verdict or {})
+    )
+    if not bool(risk_payload.get("allowed")):
+        return {
+            **result,
+            "status": "risk_policy_blocked",
+            "reason": str(risk_payload.get("reason") or "risk_policy_blocked"),
+            "risk_verdict": risk_payload,
+            "v16_command_id": command_id,
+        }
+
+    claim = V16CommandGate.claim(
+        db_path,
+        target_agent="position_supervisor_governance",
+        scope_type="supervisor_selection",
+        scope_key="position_supervisor_selection",
+        action="switch_position_supervisor_selection_mode",
+        candidate_id=candidate_id,
+        evidence_fingerprint=evidence_fingerprint,
+        claim_ttl_seconds=120.0,
+        risk_reduction=False,
+    )
+    if not claim.get("allowed"):
+        return {
+            **result,
+            "status": "waiting_v16_command",
+            "reason": str(claim.get("reason") or claim.get("status") or "v16_command_required"),
+            "v16_command_id": command_id,
+            "v16_claim": claim,
+        }
+
+    from backend.services.position_supervisor_governance import (
+        PositionSupervisorGovernanceMutationService,
+    )
+
+    governed = PositionSupervisorGovernanceMutationService(db_path).switch_selection_mode(
+        previous_mode=current_mode,
+        target_mode="demo_execute",
+        actor="system:autonomous_learning",
+        source="position_supervisor_selection_auto_enable",
+        run_id=run_id or f"position_supervisor_auto_enable_{int(time.time())}",
+        reason="selection_projection_ready_auto_enable",
+        evidence={
+            "selection_projection": compact_projection,
+            "v16_command": {
+                "command_id": command_id,
+                "candidate_id": candidate_id,
+                "evidence_fingerprint": evidence_fingerprint,
+            },
+        },
+        risk_verdict=risk_payload,
+        v16_command_id=str(claim.get("command_id") or command_id),
+        v16_claim_token=str(claim.get("claim_token") or ""),
+        v16_candidate_id=candidate_id,
+        v16_posterior_fingerprint=str(claim.get("posterior_fingerprint") or ""),
+        evidence_fingerprint=evidence_fingerprint,
+    )
+    if not governed.get("committed"):
+        try:
+            V16CommandGate.release(
+                db_path,
+                command_id=str(claim.get("command_id") or command_id),
+                claim_token=str(claim.get("claim_token") or ""),
+                reason="supervisor_selection_mode_mutation_blocked",
+            )
+        except Exception:
+            pass
+        return {
+            **result,
+            "status": str(governed.get("status") or "selection_mode_mutation_blocked"),
+            "reason": str(
+                governed.get("reason")
+                or (governed.get("mutation") or {}).get("reason")
+                or "selection_mode_mutation_blocked"
+            ),
+            "risk_verdict": risk_payload,
+            "v16_command_id": command_id,
+            "mutation": governed.get("mutation") or {},
+        }
+    return {
+        **result,
+        "enabled": True,
+        "status": "auto_enabled",
+        "mode": "demo_execute",
+        "risk_verdict": risk_payload,
+        "v16_command_id": command_id,
+        "v16_candidate_id": candidate_id,
+        "mutation_id": str(governed.get("mutation_id") or ""),
+    }
+
+
 def _new_experiment_id(prefix: str = "demoauto") -> str:
     return f"{prefix}_{int(time.time())}_{hashlib.sha1(str(time.time()).encode('utf-8')).hexdigest()[:8]}"
 
@@ -1210,6 +1495,10 @@ def _sample_from_decision(
         else (_loads(outcome_review["review_json"], {}) if review_backed_sample else {})
     )
     outcome_contamination = _review_system_contamination(outcome_review_json)
+    binding_metadata = _position_supervisor_binding_metadata(
+        outcome_review_json,
+        action_json,
+    )
     label = {
         "event_type": str(row["event_type"] or ""),
         "action_reason": str(row["action_reason"] or ""),
@@ -1299,6 +1588,14 @@ def _sample_from_decision(
         ),
         "train_weight": train_weight,
         "causal_level": "intervention_observed",
+        "causal_scope": "supervisor" if sample_type == "supervisor_trajectory" else "",
+        "position_supervisor_binding": binding_metadata["binding"],
+        "position_supervisor_binding_status": binding_metadata["status"],
+        "position_supervisor_binding_reason": binding_metadata["reason"],
+        "position_supervisor_binding_template_id": binding_metadata["template_id"],
+        "position_supervisor_binding_template_version": binding_metadata["template_version"],
+        "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+        "position_supervisor_binding_source": binding_metadata["binding_source"],
         "features": {
             "portfolio_state": portfolio,
             "risk_state": risk_state,
@@ -1319,6 +1616,13 @@ def _sample_from_decision(
             "decision_quality_context": action_json.get("decision_quality_context") or {},
             "market_session": action_json.get("market_session") or {},
             "open_context_quality": action_json.get("open_context_quality") or {},
+            "position_supervisor_binding": binding_metadata["binding"],
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "verdict": {
             "risk_verdict": risk_verdict,
@@ -1328,11 +1632,17 @@ def _sample_from_decision(
                 if review_backed_sample
                 else ""
             ),
-            "system_contamination": (
+                "system_contamination": (
                 outcome_contamination
                 if review_backed_sample
                 else {"schema_version": "learning_system_contamination.v1", "contaminated": False}
             ),
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "label": label,
         "trace": {
@@ -1344,6 +1654,12 @@ def _sample_from_decision(
                 if review_backed_sample
                 else ""
             ),
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
     }
 
@@ -1366,6 +1682,7 @@ def _sample_from_review(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
         outcome_review,
         "outcome_learning",
     )
+    binding_metadata = _position_supervisor_binding_metadata(review)
     return {
         "sample_type": "trade_review_outcome",
         "source_table": SOURCE_TRADE_REVIEW,
@@ -1383,6 +1700,14 @@ def _sample_from_review(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
         "integrity": integrity,
         "train_weight": train_weight,
         "causal_level": "intervention_observed",
+        "causal_scope": "supervisor" if binding_metadata["status"] == "bound" else "",
+        "position_supervisor_binding": binding_metadata["binding"],
+        "position_supervisor_binding_status": binding_metadata["status"],
+        "position_supervisor_binding_reason": binding_metadata["reason"],
+        "position_supervisor_binding_template_id": binding_metadata["template_id"],
+        "position_supervisor_binding_template_version": binding_metadata["template_version"],
+        "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+        "position_supervisor_binding_source": binding_metadata["binding_source"],
         "features": {
             "entry_quality": float(row["entry_quality"] or 0.0),
             "hold_quality": float(row["hold_quality"] or 0.0),
@@ -1395,11 +1720,24 @@ def _sample_from_review(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
             "entry_timing_context": review.get("entry_timing_context") or {},
             "decision_freshness_context": review.get("decision_freshness_context") or {},
             "system_issue_context": review.get("system_issue_context") or {},
+            "position_supervisor_binding": binding_metadata["binding"],
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "verdict": {
             "close_reason_source": review.get("close_reason_source") or "",
             "inferred_close_supervisor": review.get("inferred_close_supervisor") or {},
             "system_contamination": contamination,
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "label": {
             "outcome_label": str(row["outcome_label"] or ""),
@@ -1417,6 +1755,12 @@ def _sample_from_review(row: Any, *, conn: Any | None = None) -> dict[str, Any]:
             "entry_decision_id": str(row["entry_decision_id"] or ""),
             "exit_decision_id": str(row["exit_decision_id"] or ""),
             "position_id": str(row["position_id"] or ""),
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "consumer_eligibility": {
             "outcome_learning": outcome_eligibility,
@@ -1429,16 +1773,21 @@ def _sample_from_counterfactual(row: Any, *, conn: Any | None = None) -> dict[st
     confidence = float(row["confidence"] or 0.0)
     evidence = _loads(row["evidence_json"], {})
     source_review_id = str(_row_value(row, "source_review_id", "") or "")
-    if source_review_id:
-        source_contamination = _review_system_contamination(
-            _review_payload_value(
-                conn,
-                row,
-                inline_key="source_review_json",
-            )
-            if conn is not None
-            else _loads(_row_value(row, "source_review_json", ""), {})
+    source_review_payload = (
+        _review_payload_value(
+            conn,
+            row,
+            inline_key="source_review_json",
         )
+        if conn is not None
+        else _loads(_row_value(row, "source_review_json", ""), {})
+    )
+    binding_metadata = _position_supervisor_binding_metadata(
+        source_review_payload,
+        evidence,
+    )
+    if source_review_id:
+        source_contamination = _review_system_contamination(source_review_payload)
     else:
         source_contamination = {
             "schema_version": "learning_system_contamination.v1",
@@ -1472,6 +1821,14 @@ def _sample_from_counterfactual(row: Any, *, conn: Any | None = None) -> dict[st
         "integrity": "full" if label_status == "matured" and not contaminated else "partial",
         "train_weight": 0.0 if contaminated else max(0.0, min(1.0, confidence)),
         "causal_level": "counterfactual",
+        "causal_scope": "supervisor",
+        "position_supervisor_binding": binding_metadata["binding"],
+        "position_supervisor_binding_status": binding_metadata["status"],
+        "position_supervisor_binding_reason": binding_metadata["reason"],
+        "position_supervisor_binding_template_id": binding_metadata["template_id"],
+        "position_supervisor_binding_template_version": binding_metadata["template_version"],
+        "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+        "position_supervisor_binding_source": binding_metadata["binding_source"],
         "features": {
             "close_reason": str(row["close_reason"] or ""),
             "supervisor_event_type": str(row["supervisor_event_type"] or ""),
@@ -1479,11 +1836,25 @@ def _sample_from_counterfactual(row: Any, *, conn: Any | None = None) -> dict[st
             "horizons": _loads(row["horizons_json"], []),
             "evidence": evidence,
             "maturity": maturity,
+            "causal_scope": "supervisor",
+            "position_supervisor_binding": binding_metadata["binding"],
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "verdict": {
             "counterfactual_label": label,
             "confidence": confidence,
             "system_contamination": source_contamination,
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "label": {
             "label": label,
@@ -1493,6 +1864,12 @@ def _sample_from_counterfactual(row: Any, *, conn: Any | None = None) -> dict[st
             "counterfactual_id": str(row["counterfactual_id"] or ""),
             "review_id": str(row["review_id"] or ""),
             "position_id": str(row["position_id"] or ""),
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
     }
 
@@ -1526,6 +1903,7 @@ def _sample_from_entry_supervisor_feedback(
     context_integrity = str(review.get("context_integrity") or "full")
     attribution_integrity = str(review.get("attribution_integrity") or "full")
     contamination = _review_system_contamination(review)
+    binding_metadata = _position_supervisor_binding_metadata(review)
     thesis_broken = bool(
         thesis_status == "broken"
         or reason == "thesis_broken"
@@ -1572,6 +1950,14 @@ def _sample_from_entry_supervisor_feedback(
         "integrity": sample_integrity,
         "train_weight": round(max(0.0, min(1.0, train_weight)), 6),
         "causal_level": "post_trade_feedback",
+        "causal_scope": "supervisor" if binding_metadata["status"] == "bound" else "",
+        "position_supervisor_binding": binding_metadata["binding"],
+        "position_supervisor_binding_status": binding_metadata["status"],
+        "position_supervisor_binding_reason": binding_metadata["reason"],
+        "position_supervisor_binding_template_id": binding_metadata["template_id"],
+        "position_supervisor_binding_template_version": binding_metadata["template_version"],
+        "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+        "position_supervisor_binding_source": binding_metadata["binding_source"],
         "features": {
             "feedback_target": "entry_agent",
             "entry_score": review.get("entry_score"),
@@ -1596,6 +1982,13 @@ def _sample_from_entry_supervisor_feedback(
                 "raw": inferred,
             },
             "system_contamination": contamination,
+            "position_supervisor_binding": binding_metadata["binding"],
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "verdict": {
             "feedback_target": "entry_agent",
@@ -1604,6 +1997,12 @@ def _sample_from_entry_supervisor_feedback(
             "thesis_broken": thesis_broken,
             "recommended_action": recommended_action,
             "system_contamination": contamination,
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "label": {
             "label": label,
@@ -1615,6 +2014,12 @@ def _sample_from_entry_supervisor_feedback(
             "entry_decision_id": str(row["entry_decision_id"] or review.get("entry_decision_id") or ""),
             "exit_decision_id": str(row["exit_decision_id"] or review.get("exit_decision_id") or ""),
             "position_id": str(row["position_id"] or review.get("position_id") or ""),
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
     }
 
@@ -1631,16 +2036,17 @@ def _sample_from_supervisor_trace(
     execution = _loads(_row_value(row, "execution_json", "{}"), {})
     review_row = source_review_row if source_review_row is not None else row
     source_review_id = str(_row_value(review_row, "source_review_id", "") or "")
-    if source_review_id:
-        source_contamination = _review_system_contamination(
-            _review_payload_value(
-                conn,
-                review_row,
-                inline_key="source_review_json",
-            )
-            if conn is not None
-            else _loads(_row_value(review_row, "source_review_json", ""), {})
+    source_review_payload = (
+        _review_payload_value(
+            conn,
+            review_row,
+            inline_key="source_review_json",
         )
+        if conn is not None
+        else _loads(_row_value(review_row, "source_review_json", ""), {})
+    )
+    if source_review_id:
+        source_contamination = _review_system_contamination(source_review_payload)
     else:
         source_contamination = {
             "schema_version": "learning_system_contamination.v1",
@@ -1662,6 +2068,7 @@ def _sample_from_supervisor_trace(
         train_weight = 0.45
     if real_execution and outcome == "hold":
         train_weight = 0.25
+    binding_metadata = _trace_binding_metadata(source_review_payload, row)
     label = outcome or execution_status or str(_row_value(row, "action", "") or "")
     if not real_execution:
         label = "excluded_never_executed_supervisor_action"
@@ -1684,9 +2091,22 @@ def _sample_from_supervisor_trace(
         ),
         "label_status": label_status,
         "executable_governance_allowed": bool(real_execution and not contaminated),
+        "selection_eligible": bool(
+            real_execution
+            and not contaminated
+            and binding_metadata["status"] == "bound"
+        ),
         "integrity": "full" if verdict and not contaminated else "partial",
         "train_weight": 0.0 if contaminated else train_weight,
         "causal_level": "intervention_observed",
+        "causal_scope": "supervisor",
+        "position_supervisor_binding": binding_metadata["binding"],
+        "position_supervisor_binding_status": binding_metadata["status"],
+        "position_supervisor_binding_reason": binding_metadata["reason"],
+        "position_supervisor_binding_template_id": binding_metadata["template_id"],
+        "position_supervisor_binding_template_version": binding_metadata["template_version"],
+        "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+        "position_supervisor_binding_source": binding_metadata["binding_source"],
         "features": {
             "context": context,
             "verdict": verdict,
@@ -1709,6 +2129,14 @@ def _sample_from_supervisor_trace(
             "exclusion_reason": (
                 "never_executed_supervisor_action" if not real_execution else ""
             ),
+            "causal_scope": "supervisor",
+            "position_supervisor_binding": binding_metadata["binding"],
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "verdict": {
             "supervisor_action": str(_row_value(row, "action", "") or ""),
@@ -1716,6 +2144,13 @@ def _sample_from_supervisor_trace(
             "risk_allowed": bool(_row_value(row, "risk_allowed", False)),
             "execution_status": execution_status,
             "is_real_execution": real_execution,
+            "causal_scope": "supervisor",
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "label": {
             "label": label,
@@ -1731,6 +2166,12 @@ def _sample_from_supervisor_trace(
             "position_id": str(_row_value(row, "position_id", "") or ""),
             "trade_id": str(_row_value(row, "trade_id", "") or ""),
             "source_review_id": source_review_id,
+            "position_supervisor_binding_status": binding_metadata["status"],
+            "position_supervisor_binding_reason": binding_metadata["reason"],
+            "position_supervisor_binding_template_id": binding_metadata["template_id"],
+            "position_supervisor_binding_template_version": binding_metadata["template_version"],
+            "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
+            "position_supervisor_binding_source": binding_metadata["binding_source"],
         },
         "consumer_eligibility": {
             "supervisor_counterfactual": {
@@ -1908,6 +2349,13 @@ def _matured_sample_from_supervisor_trace(
         trace_confidence = 0.0
     if cf_row is None and trace_confidence > 0:
         confidence = trace_confidence
+    action_semantics = (
+        "counterfactual_recommendation"
+        if cf_row is not None
+        else "observed_action_without_counterfactual"
+    )
+    counterfactual_status = "available" if cf_row is not None else "unproven"
+    observed_action = str(_row_value(row, "action", "") or "")
     base.update(
         {
             "label_status": label_status,
@@ -1919,6 +2367,10 @@ def _matured_sample_from_supervisor_trace(
                 "recommended_action": recommended_action,
                 "counterfactual_label": cf_label,
                 "counterfactual_confidence": confidence,
+                "observed_action": observed_action,
+                "action_semantics": action_semantics,
+                "counterfactual_status": counterfactual_status,
+                "recommended_action_provisional": cf_row is None,
                 "protection_labels": protection_labels,
                 "source": SOURCE_SUPERVISOR_COUNTERFACTUAL if cf_row is not None else "trace_observation",
             },
@@ -1927,6 +2379,10 @@ def _matured_sample_from_supervisor_trace(
                 "learning_label": unified_label,
                 "recommended_action": recommended_action,
                 "counterfactual_label": cf_label,
+                "observed_action": observed_action,
+                "action_semantics": action_semantics,
+                "counterfactual_status": counterfactual_status,
+                "recommended_action_provisional": cf_row is None,
                 "protection_labels": protection_labels,
             },
             "trace": {
@@ -6381,6 +6837,49 @@ def run_autonomous_learning_cycle(
                     )
                 ),
             })
+        ),
+        memory_profile,
+    )
+    selection_projection_result: dict[str, Any] = {}
+
+    def _publish_position_supervisor_selection() -> dict[str, Any]:
+        try:
+            from backend.services.position_supervisor_governance import (
+                publish_position_supervisor_selection_projection,
+            )
+
+            published = publish_position_supervisor_selection_projection(db_path=db_path)
+            selection_projection_result.clear()
+            selection_projection_result.update(dict(published or {}))
+            return published
+        except Exception as exc:
+            failed = {
+                "schema_version": "position_supervisor_selection.v1",
+                "status": "unavailable",
+                "ok": False,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "broker_mutation_allowed": False,
+            }
+            selection_projection_result.clear()
+            selection_projection_result.update(failed)
+            return failed
+
+    # The learning worker is the only producer of the memory-to-live
+    # selection projection.  Publishing it after effect reconciliation makes
+    # the next live cycle see only the current governed evidence, while the
+    # live loop remains a read-only consumer.
+    stages["position_supervisor_selection_projection"] = _run_compact_learning_stage(
+        "position_supervisor_selection_projection",
+        _publish_position_supervisor_selection,
+        memory_profile,
+    )
+    stages["position_supervisor_auto_enable"] = _run_compact_learning_stage(
+        "position_supervisor_auto_enable",
+        lambda: _auto_enable_position_supervisor_selection(
+            db_path=db_path,
+            projection=selection_projection_result,
+            mutation_allowed=mutation_allowed,
+            run_id=f"position_supervisor_auto_enable_{int(started_at * 1000)}",
         ),
         memory_profile,
     )

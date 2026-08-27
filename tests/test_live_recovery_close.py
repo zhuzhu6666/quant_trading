@@ -118,6 +118,72 @@ def test_replay_unknown_price_skips_audit_and_learning_but_commits_recovery():
     assert order == ["recovery", "release"]
 
 
+def test_replay_preserves_durable_supervisor_close_reason():
+    marks = []
+
+    replay_recovered_close(
+        broker="ctrader",
+        position_id=10,
+        position_state={
+            "position_id": 10,
+            "recovery_meta": {"pending_close_reason": "thesis_broken"},
+        },
+        real_pnl={
+            "net": -4.0,
+            "exec_price": 4125.0,
+            "price_quality": "broker_reported",
+        },
+        strategy_name="factor_v4",
+        runtime=_replay_runtime(
+            build_payloads=lambda **kwargs: {
+                "total_pnl": -4.0,
+                "close_ts": 100.0,
+                "recovery_meta": {
+                    "close_reason": kwargs["resolved_close_reason"],
+                    "close_reason_source": kwargs["close_reason_source"],
+                },
+                "decision": {
+                    "event_type": "close",
+                    "symbol": "XAUUSD+",
+                    "timeframe": "",
+                    "trade_id": "10",
+                    "position_id": "10",
+                    "decision_ts": 100.0,
+                    "portfolio_state": {},
+                    "action_score": -4.0,
+                    "action_reason": "restart_replay_close",
+                    "action_json": {},
+                },
+                "position_event": {
+                    "position_id": "10",
+                    "trade_id": "10",
+                    "symbol": "XAUUSD+",
+                    "event_type": "closed",
+                    "avg_price": 4125.0,
+                    "realized_pnl": -4.0,
+                    "details": {},
+                    "event_ts": 100.0,
+                },
+                "review": {
+                    "position_id": "10",
+                    "pnl": -4.0,
+                    "close_price": 4125.0,
+                    "close_ts": 100.0,
+                    "contributions": {},
+                    "attribution_integrity": "missing",
+                    "real_pnl": {"net": -4.0},
+                    "close_reason": "thesis_broken",
+                    "close_reason_source": "supervisor_direct_close",
+                    "context_integrity": "partial",
+                },
+            },
+            mark_recovery_closed=lambda *_args, **kwargs: marks.append(kwargs),
+        ),
+    )
+
+    assert marks[0]["close_reason"] == "thesis_broken"
+
+
 class _Connection:
     def __init__(self):
         self.closed = False
@@ -242,7 +308,10 @@ def test_retirement_replays_then_marks_and_removes_missing_position():
     ]
     assert order[0] == "replay"
     assert order[1][0] == "mark"
-    assert order[1][1]["close_reason"] == "broker_position_not_found"
+    assert order[1][1]["close_reason"] == "restart_replay"
+    assert order[1][1]["meta"]["recovery_observation_reason"] == (
+        "broker_position_not_found"
+    )
     assert order[1][1]["close_pnl"] == pytest.approx(6.5)
     assert order[2] == ("remove", 14)
     assert messages == [

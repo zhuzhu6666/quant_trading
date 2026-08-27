@@ -1,10 +1,13 @@
 # Position Supervisor Contract
 
-> Last updated: 2026-08-10
+> Last updated: 2026-08-27
 > Phase: C-H
-> Status: adaptive posture implemented, Demo discretionary execution observation-only
+> Status: governed supervisor execution active; per-position binding and selection projection implemented; evidence-qualified auto-selection wired (current projection remains `off` for insufficient evidence); historical/learning observation-only; model influence shadow/disabled
 
-本文定义并固化 `position_supervisor` 的运行 contract。Phase C 的持仓监督主链已经落地；后续修改应保持本文的权力边界、证据结构和治理入口不变。
+本文定义并固化 `position_supervisor` 的运行 contract。当前 Demo 与未来实盘共用
+`governed_execute` 监督执行边界；`observation_only` 只适用于历史审计和 learning-shadow。
+后续修改应保持本文的权力边界、证据结构和治理入口不变。当前尚无已应用的 supervisor
+template mutation/effect，不能把已有监督记忆误认为模板已经自动改进。
 
 ---
 
@@ -423,6 +426,13 @@ supervisor 结论进入 `canonical_v2.event`，`entity_type=risk_decision`，建
 - `effective_action`: 经证据门和 broker 可执行性规划后的最终动作；
 - `recommended_action`: 保留原始建议，不能被误读为 broker 已执行。
 
+平仓后的学习样本还必须区分动作事实和后验建议：
+
+- `observed_action`: 实际发生的 supervisor 动作；
+- `action_semantics=counterfactual_recommendation`: 有成熟反事实证据时，`recommended_action` 才表示后验建议；
+- `action_semantics=observed_action_without_counterfactual`: 没有反事实证据时，`recommended_action` 只是安全的临时占位，不是“原动作应该改成 hold”的结论；
+- `counterfactual_status=available/unproven`、`recommended_action_provisional=true/false`：明确证据是否已经证明建议。
+
 标准 `stage / outcome` 口径：
 
 - `evaluated / hold`
@@ -534,6 +544,14 @@ candidate observation 与 legacy trace 只用于审计/弱监督；前者必须�
 
 `attribution_integrity=missing` 的样本只能作为退出质量 / supervisor 学习证据，不应直接触发强因子降权。
 
+恢复回放必须把两个含义分开：
+
+- `recovery_observation_reason=position_missing_after_recovery_reconcile` 或
+  `broker_position_not_found` 只表示恢复时观察到 broker 仓位消失；
+- `close_reason` / `close_reason_source` 表示真实交易关闭原因。若有持久化的 supervisor close reason，优先使用
+  `supervisor_direct_close`；否则只有保护单与权威成交匹配时才使用 `broker_close`；无法证明时保留
+  `restart_replay`。不得用恢复观测原因覆盖交易原因。
+
 ---
 
 ## 8. supervisor 模板治理
@@ -544,7 +562,7 @@ candidate observation 与 legacy trace 只用于审计/弱监督；前者必须�
 - `position_supervisor:conservative.v1`
 - `position_supervisor:profit_protection.v1`
 
-治理流程：
+全局模板治理流程（只改变默认基线，不改写已经绑定的仓位）：
 
 ```text
 supervisor review / counterfactual
@@ -556,6 +574,18 @@ supervisor review / counterfactual
   -> runtime_config_overlay / runtime_config_snapshot
   -> learning_application_log / learning_application_effect
 ```
+
+记忆驱动的单仓选择流程独立于全局模板 mutation：
+
+```text
+canonical trace/counterfactual + experience/brain/posterior
+  -> position_supervisor_governance
+  -> runtime_kv[position_supervisor_selection.v1]
+  -> 开仓成交前绑定，或稳定 regime 边界上的单仓切换
+```
+
+`position_supervisor_selection.v1` 只有现有 learning worker 的治理阶段可以生成和写入；live
+backend 只读。普通 tick 不重新查询记忆，也不重新选择模板。
 
 约束：
 
@@ -576,6 +606,92 @@ supervisor review / counterfactual
 generation context、V16 bridge 或上述证据时只能 observation/superseded。approved suggestion
 不等于 applied，实际生效仍以 application log、effect log、`applied_mutation_id` 和 V16
 finalize 为准；普通 learning candidate 不能自动打开 `governed_execute`。
+
+### 8.1 单仓策略绑定
+
+模板是全局默认基线，不再是存量仓位唯一的实时策略来源。开仓选择一次、成交后绑定，绑定
+存放在现有 `entry_protection_plan.supervisor_binding`，并随
+`recovery_position_state.recovery_meta_json` 恢复，不新增表、服务或调度器。
+
+绑定必须是 `position_supervisor_binding.v1`，至少包含：
+
+```json
+{
+  "template_id": "position_supervisor:default.v1",
+  "template_version": "default.v1",
+  "template_hash": "sha256(normalized_template)",
+  "template_snapshot": {},
+  "binding_source": "static_baseline | governed_global_baseline | governed_selection_projection",
+  "selection_status": "bound",
+  "selection_key": {"symbol": "", "timeframe": "", "entry_regime": "", "current_regime": ""},
+  "bound_at": 0,
+  "posterior_fingerprint": "",
+  "evidence_refs": {}
+}
+```
+
+`template_snapshot` 是完整规范化模板；hash 使用规范化 JSON 计算。重启、恢复和每次监督评估
+都要重新校验 ID、版本、快照和 hash：
+
+- 缺失快照的旧仓位明确标为 `legacy_global_fallback`，不能补造历史绑定；
+- 快照损坏、hash 不一致或来源不明时软策略进入 `unknown/hold`，硬风险收口仍继续；
+- 全局模板变化只影响新仓位的默认基线，不改写已绑定仓位；
+- 普通 `hold/tighten/reduce/close` 使用绑定快照，但最终动作仍必须通过 Safety/RiskPolicy。
+
+### 8.2 受控选择与边界切换
+
+`runtime_kv[position_supervisor_selection.v1]` 是唯一的记忆到 live 的选择投影。候选必须同时
+满足当前 Coordinator mutation、完整干净成熟反事实、`causal_scope=supervisor`、同一模板
+ID/version/hash、有效 application/effect 和既有 canary 门槛；`proposed`、`approved`、单独的
+`brain_memory` 或 `inconclusive` 后验不能进入 live。没有合格候选、证据冲突或效果相同都返回
+`no_change`，使用默认基线而不伪装成记忆判断。
+
+当前配置字段及默认值为：
+
+```text
+position_supervisor_auto_selection_mode = off
+position_supervisor_switch_min_stable_bars = 2
+position_supervisor_switch_cooldown_bars = 3
+position_supervisor_max_switches_per_position = 2
+position_supervisor_selection_max_age_seconds = 900
+```
+
+允许的模式为 `off | shadow | demo_execute | live_execute`。`off` 只是没有合格证据时的安全
+启动基线，不是等待人工打开的开关：learning worker 发现投影达到资格后，会自动通过既有
+V16、RiskPolicy 和 Coordinator 切到有界 Demo。当前 `live_execute` 不准入；不再额外增加
+人工审批闸门或第二套开关。
+
+新仓位只在成交前读取一次选择结果。已有仓位只有在以下条件同时满足时才允许切换：状态变化、
+连续达到配置的已收盘 bar 数、无未完成 broker intent/reconcile、价格/PnL/路径/市场上下文
+均 known、无硬风险或优先风险收口、投影新鲜且匹配、未超过单仓次数且不在冷却期。切换只更新
+该仓位 binding，保留旧 binding、写一条 `policy_switch` trace，下一次监督评估才使用新模板；
+不修改全局 RuntimeConfig，也不触达 broker。
+
+### 8.3 监督 trace 与后验引用
+
+绑定存在时，每条新 trace 必须能回答：使用哪个模板、来自哪里、当时状态是什么、建议动作与
+最终动作分别是什么、RiskPolicy 是否批准、broker 是否确认、reconcile 是否新鲜，以及是否为
+no-op/cooldown/失败/superseded。至少保留 `template_id/template_version/template_hash`、
+`binding_source`、`selection_event_id`、`current_regime`、`supervisor_posture`、
+`requested_action/effective_action/applied_action`、`risk_policy_result`、
+`broker_execution_result`、`reconcile_result` 和 `no_change_reason`。
+
+平仓后的 counterfactual、training sample、`experience_memory`、`brain_memory` 和 effect 只能
+携带同一绑定引用继续后验；旧数据不补造模板信息，也不能参与新模板自动准入。
+
+### 8.4 监督经验与系统记忆
+
+“进入记忆”分为四个层次，不能互相冒充：
+
+1. canonical `supervisor_trace` / `counterfactual_review`：原始动作和后验事实；
+2. `supervisor_execution_trace` / `supervisor_trajectory`：带证据资格的学习样本；
+3. `experience_memory`：交易 lesson 投影，主要用于经验检索，不等于监督模板变更；
+4. `brain_memory` / `posterior_arbitration`：有界、可重建的检索和最终后验索引，只能提供
+   memory/critic/context，不能直接授权 live 动作。
+
+只有完整、成熟、无污染且通过对应消费者资格的证据，才能进入 supervisor governance；
+真正改变模板仍必须经过 policy suggestion、V16、RiskPolicy、Coordinator、application/effect
+和可回滚的配置投影。记忆存在不等于策略已生效。
 
 ---
 
@@ -603,6 +719,8 @@ finalize 为准；普通 learning candidate 不能自动打开 `governed_execute
 - 与 `RiskPolicyService` 的边界清楚
 - ledger / trace 写入要求清楚
 - review / learning 能回答“谁平的、该不该平、系统是否学到了”
+- 每个存量仓位的策略来源、模板版本和快照 hash 清楚，模板切换不会无意改写存量仓位
+- 记忆事实、学习资格、治理应用和 live 生效状态可以分别核验
 - 模板切换必须有自治审计、可回滚配置快照和风控裁决
 
 ---
@@ -611,7 +729,12 @@ finalize 为准；普通 learning candidate 不能自动打开 `governed_execute
 
 后续扩展优先顺序建议为：
 
-1. 增加真实 `tighten / reduce / timeout` 样本覆盖
-2. 提升 canonical `counterfactual_review` event 的标签置信度
-3. 增加受控 rollback / gray-release 展示
-4. `time_decay_score / thesis_status / regime_shift`
+1. 为每个新仓位绑定可恢复的监督策略快照
+2. 增加真实 `tighten / reduce / timeout` 样本覆盖
+3. 提升 canonical `counterfactual_review` event 的标签置信度并闭合 application/effect
+4. 增加受控 rollback / gray-release 展示
+5. `time_decay_score / thesis_status / regime_shift`
+
+后续快速反应应优先依赖当前事实、状态和证据等级，而不是继续堆叠不可解释的
+`if/else` 阈值。事实缺失时保持 `unknown/hold`；经验只能通过有边界的后验治理改变
+参数，不能直接改写执行权力。

@@ -2013,6 +2013,48 @@ def test_materialization_does_not_downgrade_matured_supervisor_trace(tmp_path):
     assert json.loads(row[2])["model_ready"] is True
 
 
+def test_supervisor_observation_labels_do_not_overstate_hold_recommendation():
+    row = {
+        "trace_id": "trace-observed",
+        "decision_id": "decision-observed",
+        "trade_id": "trade-observed",
+        "position_id": "position-observed",
+        "symbol": "XAUUSD+",
+        "timeframe": "M5",
+        "event_ts": 100.0,
+        "action": "close",
+        "summary_reason": "thesis_broken",
+        "confidence": 0.8,
+        "stage": "executed",
+        "outcome": "applied",
+        "execution_status": "applied",
+        "execution_json": json.dumps(
+            {
+                "is_real_execution": True,
+                "broker_action_confirmed": True,
+                "reconcile_confirmed": True,
+            }
+        ),
+        "verdict_json": json.dumps({"action": "close"}),
+        "context_json": "{}",
+        "risk_verdict_json": "{}",
+    }
+
+    sample = al._matured_sample_from_supervisor_trace(
+        row,
+        None,
+        run_context={},
+    )
+
+    assert sample["label"]["recommended_action"] == "hold"
+    assert sample["label"]["observed_action"] == "close"
+    assert sample["label"]["action_semantics"] == (
+        "observed_action_without_counterfactual"
+    )
+    assert sample["label"]["counterfactual_status"] == "unproven"
+    assert sample["label"]["recommended_action_provisional"] is True
+
+
 def test_position_supervisor_trace_backfill_reports_missing_execution_trace(tmp_path):
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)
@@ -3114,7 +3156,11 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert result["stages"]["entry_cluster_governance"]["suggestions"] == 1
     assert result["stages"]["event_window_governance"]["suggestions"] == 1
     assert result["stages"]["evidence_contract_repair"]["repaired"] == 1
-    assert len(result["memory_profile"]) == 18
+    assert "position_supervisor_selection_projection" in result["stages"]
+    assert len(result["memory_profile"]) == 20
+    assert result["stages"]["position_supervisor_auto_enable"]["status"] == (
+        "waiting_for_selection_evidence"
+    )
     assert "must-not-escape" not in json.dumps(result)
     assert calls[:5] == [
         "counterfactual",
@@ -3172,6 +3218,101 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert "demo_apply" not in calls
     assert result["governance"]["review_pending"]["status"] == "mutation_circuit_open"
     assert result["demo_autonomy"]["status"] == "mutation_circuit_open"
+
+
+def test_auto_enable_position_supervisor_selection_uses_governed_handoff(
+    monkeypatch,
+    tmp_path,
+):
+    cfg = type(
+        "Cfg",
+        (),
+        {
+            "position_supervisor_auto_selection_mode": "off",
+            "position_supervisor_selection_max_age_seconds": 900.0,
+            "autonomy_mode": "demo_autonomous",
+        },
+    )()
+    monkeypatch.setattr(rc, "shared", lambda: cfg)
+    monkeypatch.setattr(rc, "bounded_demo_mode_active", lambda _cfg: True)
+
+    class _V16:
+        def __init__(self, db_path):
+            self.db_path = db_path
+
+        def delegate_supervisor_selection_mode(self, *args, **kwargs):
+            return {
+                "ok": True,
+                "status": "delegated",
+                "command": {
+                    "command_id": "v16-selection-1",
+                    "candidate_id": "psel-mode-1",
+                    "evidence_fingerprint": "selection-evidence-1",
+                },
+            }
+
+    monkeypatch.setattr(
+        "backend.services.v16_brain_orchestrator.V16BrainOrchestratorService",
+        _V16,
+    )
+    monkeypatch.setattr(
+        V16CommandGate,
+        "claim",
+        lambda *args, **kwargs: {
+            "allowed": True,
+            "command_id": "v16-selection-1",
+            "claim_token": "claim-1",
+            "posterior_fingerprint": "",
+        },
+    )
+
+    class _Mutation:
+        def __init__(self, db_path):
+            self.db_path = db_path
+
+        def switch_selection_mode(self, **kwargs):
+            assert kwargs["target_mode"] == "demo_execute"
+            assert kwargs["v16_command_id"] == "v16-selection-1"
+            assert kwargs["v16_claim_token"] == "claim-1"
+            return {
+                "committed": True,
+                "status": "committed",
+                "mutation_id": "mutation-1",
+            }
+
+    monkeypatch.setattr(
+        "backend.services.position_supervisor_governance.PositionSupervisorGovernanceMutationService",
+        _Mutation,
+    )
+
+    projection = {
+        "schema_version": "position_supervisor_selection.v1",
+        "status": "ready",
+        "published_at": time.time(),
+        "source_watermark": "123.0",
+        "selection_fingerprint": "published-1",
+        "candidate_count": 1,
+        "freshness": {"status": "fresh"},
+        "evidence_policy": {
+            "causal_scope": "supervisor",
+            "requires_clean_mature_counterfactual": True,
+            "requires_template_hash_binding": True,
+            "requires_current_coordinator_mutation": True,
+            "requires_positive_application_effect": True,
+        },
+        "candidates": [{"template_id": "position_supervisor:candidate.v1"}],
+    }
+
+    result = al._auto_enable_position_supervisor_selection(
+        db_path=tmp_path / "state.db",
+        projection=projection,
+        mutation_allowed=True,
+        run_id="auto-run-1",
+    )
+
+    assert result["enabled"] is True
+    assert result["status"] == "auto_enabled"
+    assert result["mode"] == "demo_execute"
 
 
 def test_process_memory_snapshot_missing_proc_is_non_blocking(monkeypatch):

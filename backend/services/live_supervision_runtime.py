@@ -71,6 +71,51 @@ def _is_hard_verdict(verdict: dict[str, Any]) -> bool:
     )
 
 
+def _enforce_unverified_binding_hold(
+    verdict: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep hard-risk actions available while blocking unverifiable discretion."""
+
+    policy = context.get("position_supervisor_policy")
+    if not isinstance(policy, dict):
+        return verdict
+    binding_state = str(policy.get("binding_state") or "").strip().lower()
+    if binding_state not in {"invalid", "unknown"} or _is_hard_verdict(verdict):
+        return verdict
+    original_requested = str(
+        verdict.get("requested_action") or verdict.get("action") or "hold"
+    )
+    evidence = dict(verdict.get("evidence") or {})
+    tags = list(evidence.get("trigger_tags") or [])
+    if "binding_unverified" not in tags:
+        tags.append("binding_unverified")
+    evidence.update(
+        {
+            "position_supervisor_binding_state": binding_state,
+            "binding_fail_closed": True,
+            "binding_fail_closed_reason": str(
+                policy.get("binding_reason") or "binding_unverified"
+            ),
+            "position_supervisor_requested_action": original_requested,
+            "trigger_tags": tags,
+        }
+    )
+    verdict.update(
+        {
+            "action": "hold",
+            "recommended_action": "hold",
+            "effective_action": "hold",
+            "summary_reason": "position_supervisor_binding_unverified",
+            "recommended_controls": {},
+            "protection_candidates": [],
+            "requires_risk_verdict": False,
+            "evidence": evidence,
+        }
+    )
+    return verdict
+
+
 @dataclass(frozen=True)
 class PositionSupervisorEvaluationRuntime:
     build_context: Any
@@ -86,6 +131,7 @@ class PositionSupervisorEvaluationRuntime:
     loop_strategy_name: str
     default_context_integrity: str
     record_aux_failure: Any
+    after_persist: Any = None
 
 
 @dataclass(frozen=True)
@@ -318,6 +364,7 @@ def evaluate_position_supervisor_for_position(
             "applied": False,
             "reason": f"model_influence_unavailable:{type(exc).__name__}",
         }
+    verdict = _enforce_unverified_binding_hold(verdict, context)
     if persist:
         position_id = int(
             position.get("position_id") or position.get("ticket") or 0
@@ -345,6 +392,8 @@ def evaluate_position_supervisor_for_position(
                 action="position_supervisor_evaluation",
                 error=exc,
             )
+        if runtime.after_persist is not None:
+            verdict = runtime.after_persist(context=context, verdict=verdict)
     return verdict
 
 

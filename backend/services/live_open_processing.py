@@ -33,6 +33,7 @@ class FilledOpenRequest:
     bridge: Any = None
     parent_decision_id: str = ""
     execution_intent_id: str = ""
+    position_supervisor_binding: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,10 @@ def _learning_context_kwargs(
     }
     if include_sizing_trace:
         kwargs["sizing_trace"] = request.sizing_trace or {}
+    if request.position_supervisor_binding:
+        kwargs["position_supervisor_binding"] = dict(
+            request.position_supervisor_binding
+        )
     return kwargs
 
 
@@ -155,6 +160,7 @@ def record_filled_position_open_context(
             execution_intent_id=request.execution_intent_id,
             trade_attribution_payload=trade_attribution_payload,
             learning_context=recovery_learning_context,
+            position_supervisor_binding=request.position_supervisor_binding,
         )
     except Exception as exc:
         runtime.debug(
@@ -198,6 +204,7 @@ class AmendedOpenSuccessRequest:
     fill_received_at: float | None = None
     parent_decision_id: str = ""
     execution_intent_id: str = ""
+    position_supervisor_binding: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +274,15 @@ def record_amended_open_success_context(
             sizing_trace=request.sizing_trace,
             risk_verdict=request.risk_verdict,
             market_session=request.market_session,
+            position_supervisor_binding=(
+                request.position_supervisor_binding
+                or dict(
+                    (request.entry_protection_plan or {}).get(
+                        "supervisor_binding"
+                    )
+                    or {}
+                )
+            ),
         )
         entry_decision_id = runtime.log_ledger(
             cfg=request.cfg,
@@ -353,6 +369,7 @@ class AmendFailureRequest:
     log: Callable[[str], Any] | None = None
     parent_decision_id: str = ""
     execution_intent_id: str = ""
+    position_supervisor_binding: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -428,6 +445,7 @@ def record_amend_failure_after_fill(
             bridge=request.bridge,
             parent_decision_id=request.parent_decision_id,
             execution_intent_id=request.execution_intent_id,
+            position_supervisor_binding=request.position_supervisor_binding,
         )
     )
     runtime.update_plan_status(

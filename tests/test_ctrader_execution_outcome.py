@@ -104,6 +104,54 @@ def _bridge(*, store=None):
     return bridge
 
 
+def test_disconnect_ignores_stale_and_duplicate_callbacks(monkeypatch):
+    bridge = _bridge()
+    current = object()
+    bridge._client = current
+    teardown_calls = []
+    mark_calls = []
+
+    def _teardown():
+        teardown_calls.append(True)
+        bridge._client = None
+
+    monkeypatch.setattr(bridge, "_teardown_client", _teardown)
+    monkeypatch.setattr(bridge, "_stop_heartbeat", lambda: None)
+    monkeypatch.setattr(bridge, "_mark_disconnected", lambda: mark_calls.append(True))
+
+    bridge._on_disconnected(object(), "stale")
+    assert bridge._client is current
+    bridge._on_disconnected(current, "closed")
+    bridge._on_disconnected(current, "duplicate")
+
+    assert teardown_calls == [True]
+    assert mark_calls == [True]
+
+
+def test_teardown_uses_twisted_base_stop_service_after_sdk_disconnect(monkeypatch):
+    bridge = _bridge()
+    calls = []
+
+    class _Client:
+        def stopService(self):
+            raise AssertionError("SDK guarded stopService must not be used")
+
+    client = _Client()
+    bridge._client = client
+
+    class _TwistedBase:
+        @staticmethod
+        def stopService(value):
+            calls.append(value)
+
+    monkeypatch.setattr(ctrader_module, "_TwistedClientService", _TwistedBase)
+
+    bridge._teardown_client()
+
+    assert bridge._client is None
+    assert calls == [client]
+
+
 def _reconcile(reconcile_id: str, positions=()):
     return PositionReconcileResult(
         reconcile_id=reconcile_id,

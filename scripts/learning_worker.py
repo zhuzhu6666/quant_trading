@@ -260,6 +260,15 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
                     "repaired": (result.get("repaired_cycle") or {}).get("status"),
                     "final": (result.get("final_cycle") or {}).get("status"),
                     "actions": [item.get("action") for item in result.get("actions") or []],
+                    "action_statuses": [
+                        {
+                            "action": item.get("action"),
+                            "ok": item.get("ok"),
+                            "status": item.get("status"),
+                            "error": item.get("error", ""),
+                        }
+                        for item in result.get("actions") or []
+                    ],
                 },
             )
 

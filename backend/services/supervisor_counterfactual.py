@@ -29,6 +29,9 @@ from backend.services.review_contract import (
     review_consumer_eligibility,
     trusted_broker_close_price,
 )
+from backend.services.position_supervisor_templates import (
+    resolve_position_supervisor_binding_lineage,
+)
 from backend.services.canonical_v2 import (
     ensure_sqlite_schema as ensure_canonical_sqlite_schema,
     record_counterfactual_event,
@@ -546,6 +549,30 @@ def evaluate_counterfactuals(
             if opened_row is not None:
                 opened = _loads(opened_row.get("details_json"), {})
                 opened["event_ts"] = _safe_float(opened_row.get("event_ts"))
+            binding_lineage = resolve_position_supervisor_binding_lineage(
+                review,
+                opened,
+            )
+            supervisor_binding = dict(binding_lineage.get("binding") or {})
+            binding_state = str(binding_lineage.get("state") or "unknown")
+            binding_reason = str(
+                binding_lineage.get("reason") or "binding_missing"
+            )
+            if binding_lineage.get("valid"):
+                trace_identity = {
+                    "template_id": str(real_trace.get("template_id") or ""),
+                    "template_version": str(real_trace.get("template_version") or ""),
+                    "template_hash": str(real_trace.get("template_hash") or ""),
+                }
+                if not all(trace_identity.values()):
+                    binding_state = "unknown"
+                    binding_reason = "trace_binding_reference_missing"
+                elif any(
+                    trace_identity[key] != str(supervisor_binding.get(key) or "")
+                    for key in trace_identity
+                ):
+                    binding_state = "conflict"
+                    binding_reason = "trace_binding_identity_mismatch"
             if _conn_is_pg(conn):
                 conn.commit()
             direction = int(opened.get("direction") or _direction_from_review(review) or 1)
@@ -582,6 +609,9 @@ def evaluate_counterfactuals(
                     "symbol": str(review.get("symbol") or "XAUUSD+"),
                     "timeframe": str(review.get("counterfactual_timeframe") or "M1"),
                     "trade_timeframe": str(review.get("timeframe") or "M5"),
+                    "position_supervisor_binding": supervisor_binding,
+                    "position_supervisor_binding_status": binding_state,
+                    "position_supervisor_binding_reason": binding_reason,
                 }
             )
             if len(candidates) >= bounded_limit:
@@ -608,6 +638,9 @@ def evaluate_counterfactuals(
             symbol = candidate["symbol"]
             timeframe = candidate["timeframe"]
             trade_timeframe = candidate["trade_timeframe"]
+            supervisor_binding = dict(candidate.get("position_supervisor_binding") or {})
+            binding_state = str(candidate.get("position_supervisor_binding_status") or "unknown")
+            binding_reason = str(candidate.get("position_supervisor_binding_reason") or "binding_missing")
             bars = _slice_future_bars(bar_cache, symbol, timeframe, close_ts, max_horizon)
             if bars is None and _future_loader_is_patched():
                 bars = _load_future_bars(symbol, timeframe, close_ts, max_horizon)
@@ -647,8 +680,15 @@ def evaluate_counterfactuals(
                 else "partially_matured" if max_matured > 0
                 else "pending"
             )
+            binding_eligible = bool(
+                binding_state == "bound"
+                and supervisor_binding.get("template_id")
+                and supervisor_binding.get("template_version")
+                and supervisor_binding.get("template_hash")
+            )
             evidence = {
                 "schema_version": "supervisor_counterfactual.v2",
+                "causal_scope": "supervisor",
                 "direction": direction,
                 "entry_price": entry_price,
                 "close_price": close_price,
@@ -672,6 +712,21 @@ def evaluate_counterfactuals(
                 "trade_timeframe": trade_timeframe,
                 "session": str(review.get("session") or review.get("market_session") or "unknown"),
                 "regime": str(review.get("regime_id") or review.get("regime") or "unknown"),
+                "position_supervisor_binding_status": binding_state,
+                "position_supervisor_binding_reason": binding_reason,
+                "position_supervisor_binding_template_id": str(
+                    supervisor_binding.get("template_id") or ""
+                ),
+                "position_supervisor_binding_template_version": str(
+                    supervisor_binding.get("template_version") or ""
+                ),
+                "position_supervisor_binding_template_hash": str(
+                    supervisor_binding.get("template_hash") or ""
+                ),
+                "position_supervisor_binding_source": str(
+                    supervisor_binding.get("binding_source") or ""
+                ),
+                "binding_eligible": binding_eligible,
                 "maturity": {
                     "status": maturity_status,
                     "matured_horizons_minutes": matured_minutes,
@@ -680,6 +735,8 @@ def evaluate_counterfactuals(
                     "governance_eligible": maturity_status in {"governance_ready", "fully_matured"},
                 },
             }
+            if supervisor_binding:
+                evidence["position_supervisor_binding"] = supervisor_binding
             counterfactual_id = "scf_" + hashlib.sha1(
                 f"{row['review_id']}:{position_id}:{close_ts}".encode("utf-8")
             ).hexdigest()[:16]
@@ -698,7 +755,15 @@ def evaluate_counterfactuals(
                 "evidence": evidence,
                 "maturity_status": maturity_status,
                 "governance_eligible": evidence["maturity"]["governance_eligible"],
+                "selection_eligible": bool(
+                    evidence["maturity"]["governance_eligible"] and binding_eligible
+                ),
+                "causal_scope": "supervisor",
+                "position_supervisor_binding_status": binding_state,
+                "position_supervisor_binding_reason": binding_reason,
             }
+            if supervisor_binding:
+                item["position_supervisor_binding"] = supervisor_binding
             items.append(item)
             if maturity_status in {"governance_ready", "fully_matured"}:
                 diagnostics["matured"] += 1

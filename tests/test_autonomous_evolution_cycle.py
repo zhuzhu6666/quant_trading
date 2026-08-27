@@ -430,6 +430,37 @@ def test_autonomous_evolution_runner_consumes_one_recommended_step(tmp_path, mon
     ]
 
 
+def test_autonomous_evolution_runner_reports_policy_block_as_blocker(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    _create_core_tables(db_path, include_replay=True, include_effect=True)
+    _create_candidate_review(db_path)
+    monkeypatch.setattr(
+        AutonomousEvolutionCycleService,
+        "_chain_health",
+        lambda self: {"ok": True, "status": "ok", "schema_version": "agent_chain_health.v1"},
+    )
+    monkeypatch.setattr(AutonomousEvolutionNurseryRunner, "_build_readiness", lambda self: _readiness())
+    monkeypatch.setattr(
+        AutonomousEvolutionNurseryRunner,
+        "_consume_recommended_step",
+        lambda self, **_kwargs: {
+            "ok": False,
+            "status": "blocked_v16_command_required",
+        },
+    )
+
+    result = AutonomousEvolutionNurseryRunner(db_path).run_once(
+        refresh_proposals=False,
+        create_release_evidence=False,
+        consume_recommended_step=True,
+    )
+
+    assert result["status"] == "completed_with_blockers"
+    assert result["ok"] is True
+    assert result["actions"][0]["status"] == "blocked_v16_command_required"
+
+
 def test_autonomous_evolution_runner_explicit_full_cycle_runs_after_recommended_step(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     ensure_proposal_registry_table(db_path)

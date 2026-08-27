@@ -88,6 +88,57 @@ class RecoveryPositionStore:
         finally:
             conn.close()
 
+    def replace_meta(
+        self,
+        position_id: int,
+        meta: Mapping[str, Any],
+        *,
+        expected_meta: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Replace the complete metadata object with an optional compare-and-set."""
+
+        if int(position_id or 0) <= 0:
+            return False
+        position_key = str(int(position_id))
+        conn = self.runtime.get_write_connection()
+        try:
+            row = self.runtime.execute(
+                conn,
+                "SELECT recovery_meta_json FROM recovery_position_state WHERE position_id=?",
+                (position_key,),
+            ).fetchone()
+            if row is None:
+                return False
+            raw = row["recovery_meta_json"] or "{}"
+            try:
+                current = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                current = {}
+            if not isinstance(current, dict):
+                current = {}
+            if expected_meta is not None and current != dict(expected_meta):
+                return False
+            result = self.runtime.execute(
+                conn,
+                """
+                UPDATE recovery_position_state
+                SET recovery_meta_json=?
+                WHERE position_id=? AND recovery_meta_json=?
+                """,
+                (
+                    json.dumps(dict(meta), ensure_ascii=False, default=str),
+                    position_key,
+                    raw,
+                ),
+            )
+            if int(getattr(result, "rowcount", 0) or 0) != 1:
+                conn.rollback()
+                return False
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
     def upsert(
         self,
         raw_position: Any,

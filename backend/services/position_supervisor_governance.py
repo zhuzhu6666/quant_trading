@@ -17,8 +17,9 @@ from backend.core.db import (
     get_state_pg_conn,
     is_state_db_path,
     state_table_columns,
+    state_table_exists,
 )
-from backend.core.db_helpers import execute as _execute
+from backend.core.db_helpers import execute as _execute, pg_sql as _sql
 from backend.services.brain_governance_candidates import sync_candidate_suggestion_lifecycle
 from backend.services.canonical_v2 import record_supervisor_trace_event
 from backend.services.canonical_v2_reader import (
@@ -40,13 +41,18 @@ from backend.services.position_supervisor_templates import (
     CONSERVATIVE_TEMPLATE_ID,
     DEFAULT_TEMPLATE_ID,
     PROFIT_PROTECTION_TEMPLATE_ID,
+    build_position_supervisor_binding,
     get_position_supervisor_template,
     list_position_supervisor_templates,
+    position_supervisor_template_hash,
+    verify_position_supervisor_binding,
 )
 from backend.services.review_contract import review_has_system_contamination
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY = "position_supervisor_selection.v1"
+POSITION_SUPERVISOR_SELECTION_SCHEMA_VERSION = "position_supervisor_selection.v1"
 
 
 def _use_pg(db_path: str | Path = STATE_DB) -> bool:
@@ -119,6 +125,816 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _projection_load_json(value: Any, default: Any) -> Any:
+    if isinstance(value, (dict, list, tuple)):
+        return value
+    try:
+        parsed = json.loads(str(value or ""))
+    except Exception:
+        return default
+    return parsed if isinstance(parsed, type(default)) else default
+
+
+def _position_supervisor_binding_from_payload(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Find a binding reference in a canonical evidence/trace payload."""
+
+    payload = dict(value or {})
+    for key in (
+        "position_supervisor_binding",
+        "supervisor_binding",
+        "binding",
+    ):
+        nested = payload.get(key)
+        if isinstance(nested, Mapping):
+            return dict(nested)
+    # Canonical readers flatten the trace's top-level fields.  Preserve that
+    # shape as a reference without pretending it is a full binding snapshot.
+    if any(
+        str(payload.get(key) or "")
+        for key in ("template_id", "template_hash", "template_version")
+    ):
+        return {
+            "template_id": str(payload.get("template_id") or ""),
+            "template_version": str(payload.get("template_version") or ""),
+            "template_hash": str(
+                payload.get("template_hash")
+                or payload.get("supervisor_template_hash")
+                or ""
+            ),
+        }
+    return {}
+
+
+def _candidate_evidence_refs(
+    *,
+    app: Mapping[str, Any],
+    effect: Mapping[str, Any],
+    candidate_template: Mapping[str, Any],
+    mature_counterfactual_ids: list[str],
+    mature_trace_ids: list[str],
+) -> dict[str, Any]:
+    evidence = app.get("evidence") if isinstance(app.get("evidence"), Mapping) else {}
+    effect_decision = (
+        effect.get("decision") if isinstance(effect.get("decision"), Mapping) else {}
+    )
+    refs: dict[str, Any] = {
+        "counterfactual_ids": list(dict.fromkeys(mature_counterfactual_ids))[:200],
+        "trace_ids": list(dict.fromkeys(mature_trace_ids))[:200],
+        "application_id": str(app.get("application_id") or ""),
+        "effect_id": str(effect.get("effect_id") or ""),
+    }
+    for source in (effect_decision, evidence, candidate_template):
+        if not isinstance(source, Mapping):
+            continue
+        if not refs.get("posterior_fingerprint"):
+            refs["posterior_fingerprint"] = str(
+                source.get("posterior_fingerprint")
+                or source.get("v16_posterior_fingerprint")
+                or ""
+            )
+        if not refs.get("selection_key") and isinstance(
+            source.get("selection_key"), Mapping
+        ):
+            refs["selection_key"] = dict(source.get("selection_key") or {})
+    return refs
+
+
+def _governance_mutation_is_current(
+    conn: Any,
+    *,
+    mutation_id: str,
+) -> tuple[bool, str]:
+    mutation_id = str(mutation_id or "")
+    required = {
+        "mutation_id",
+        "status",
+        "projection_status",
+        "scope_type",
+        "committed_config_hash",
+        "domain_hash",
+    }
+    if (
+        not mutation_id
+        or not state_table_exists(conn, "governance_mutation_intent")
+        or not required <= state_table_columns(conn, "governance_mutation_intent")
+    ):
+        return False, "governance_mutation_unavailable"
+    row = _execute(
+        conn,
+        """SELECT mutation_id, status, projection_status, scope_type,
+                          committed_config_hash, domain_hash
+                   FROM governance_mutation_intent
+                  WHERE mutation_id=?
+                    AND status='committed'
+                    AND projection_status='current'
+                    AND scope_type='supervisor_template'
+                    AND committed_config_hash<>''
+                    AND domain_hash<>''
+                  LIMIT 1""",
+        (mutation_id,),
+    ).fetchone()
+    if row is None:
+        return False, "governance_mutation_not_current"
+    return True, "governance_mutation_current"
+
+
+def _supervisor_candidate_observation_evidence(
+    conn: Any,
+    *,
+    application: Mapping[str, Any],
+    effect: Mapping[str, Any],
+    template_id: str,
+    template_version: str,
+    template_hash: str,
+    canary_required: int,
+) -> dict[str, Any]:
+    """Return the complete clean CF/trace cohort for one governed template."""
+
+    created_at = _safe_float(application.get("created_at"))
+    review_map = {
+        str(item.get("review_id") or ""): item
+        for item in iter_review_rows(conn, limit=0)
+        if str(item.get("review_id") or "")
+    }
+    traces_by_position: dict[str, list[dict[str, Any]]] = {}
+    for raw_trace in iter_supervisor_trace_rows(conn, limit=0, reverse=True):
+        trace = dict(raw_trace)
+        if str(trace.get("template_id") or "") != template_id:
+            continue
+        if str(trace.get("template_version") or "") != str(template_version or ""):
+            continue
+        if not str(trace.get("binding_source") or ""):
+            continue
+        trace_hash = str(
+            trace.get("template_hash")
+            or trace.get("supervisor_template_hash")
+            or _position_supervisor_binding_from_payload(
+                trace.get("evidence") if isinstance(trace.get("evidence"), Mapping) else {}
+            ).get("template_hash")
+            or ""
+        )
+        if trace_hash != template_hash:
+            continue
+        if str(trace.get("trace_integrity") or "") in {
+            "failed",
+            "unknown",
+            "unavailable",
+        }:
+            continue
+        position_id = str(trace.get("position_id") or "")
+        if position_id:
+            traces_by_position.setdefault(position_id, []).append(trace)
+
+    mature_positions: set[str] = set()
+    counterfactual_ids: list[str] = []
+    trace_ids: list[str] = []
+    rejected: list[str] = []
+    for raw_cf in iter_counterfactual_rows(conn, limit=0, reverse=True):
+        cf = dict(raw_cf)
+        if _safe_float(cf.get("close_ts")) < created_at:
+            continue
+        review_id = str(cf.get("review_id") or "")
+        review = review_map.get(review_id)
+        if review is None or review_has_system_contamination(
+            review.get("review_json") or {}
+        ):
+            continue
+        evidence = cf.get("evidence")
+        if not isinstance(evidence, Mapping):
+            evidence = _projection_load_json(cf.get("evidence_json"), {})
+        evidence = dict(evidence or {})
+        maturity = dict(evidence.get("maturity") or {})
+        if not bool(maturity.get("governance_eligible")):
+            continue
+        if bool(evidence.get("evidence_invalidated")):
+            continue
+        if str(
+            evidence.get("causal_scope")
+            or cf.get("causal_scope")
+            or ""
+        ).strip().lower() != "supervisor":
+            continue
+        position_id = str(cf.get("position_id") or "")
+        if not position_id or position_id in mature_positions:
+            continue
+        binding = evidence.get("position_supervisor_binding")
+        binding_check = verify_position_supervisor_binding(binding)
+        if not binding_check.get("valid"):
+            rejected.append(
+                f"binding_{binding_check.get('reason') or 'missing_or_invalid'}"
+            )
+            continue
+        binding = dict(binding_check.get("binding") or binding or {})
+        if (
+            str(binding.get("template_id") or "") != template_id
+            or str(binding.get("template_version") or "") != str(template_version or "")
+            or str(binding.get("template_hash") or "") != template_hash
+        ):
+            rejected.append("binding_reference_missing_or_mismatched")
+            continue
+        matching_traces = traces_by_position.get(position_id) or []
+        if not matching_traces:
+            rejected.append("supervisor_trace_missing")
+            continue
+        mature_positions.add(position_id)
+        counterfactual_ids.append(str(cf.get("counterfactual_id") or ""))
+        trace_ids.append(
+            str(
+                matching_traces[0].get("trace_id")
+                or matching_traces[0].get("entity_id")
+                or ""
+            )
+        )
+
+    observed_trade_count = int(effect.get("observed_trade_count") or 0)
+    required_count = max(1, int(canary_required or 1))
+    return {
+        "ready": len(mature_positions) >= required_count
+        and observed_trade_count >= required_count,
+        "mature_trade_count": len(mature_positions),
+        "observed_trade_count": observed_trade_count,
+        "required_trade_count": required_count,
+        "counterfactual_ids": counterfactual_ids,
+        "trace_ids": trace_ids,
+        "rejected_reason_counts": {
+            reason: rejected.count(reason) for reason in sorted(set(rejected))
+        },
+    }
+
+
+def _position_supervisor_candidate_from_application(
+    conn: Any,
+    *,
+    application: Mapping[str, Any],
+    effect: Mapping[str, Any] | None,
+    db_path: str | Path,
+    canary_required: int,
+) -> tuple[dict[str, Any] | None, str]:
+    """Validate one application/effect pair for live selection."""
+
+    app = dict(application or {})
+    target_id = str(app.get("scope_key") or app.get("target_template_id") or "")
+    if not target_id or target_id == DEFAULT_TEMPLATE_ID:
+        return None, "default_is_baseline"
+    if str(app.get("action") or "") != "switch_position_supervisor_template":
+        return None, "application_action_invalid"
+    if str(app.get("status") or "") not in {
+        "applied",
+        "observing",
+        "reinforced",
+        "mixed",
+    }:
+        return None, "application_not_active"
+    mutation_id = str(app.get("mutation_id") or "")
+    details = dict(app)
+    if str(details.get("commit_boundary") or "") != "governance_mutation_coordinator":
+        return None, "application_not_coordinator_committed"
+    current, mutation_reason = _governance_mutation_is_current(
+        conn,
+        mutation_id=mutation_id,
+    )
+    if not current:
+        return None, mutation_reason
+    if not effect:
+        return None, "application_effect_missing"
+    eff = dict(effect)
+    if str(eff.get("application_id") or "") != str(app.get("application_id") or ""):
+        return None, "application_effect_mismatch"
+    if str(eff.get("mutation_id") or "") != mutation_id:
+        return None, "effect_mutation_mismatch"
+    if str(eff.get("status") or "") not in {
+        "observing",
+        "reinforced",
+        "mixed",
+    }:
+        return None, "effect_not_current"
+    decision = dict(eff.get("decision") or {})
+    if bool(decision.get("inconclusive")) or str(
+        decision.get("result") or decision.get("outcome") or ""
+    ).lower() in {"inconclusive", "conflict", "unknown"}:
+        return None, "effect_inconclusive"
+    delta = eff.get("delta_avg_reward")
+    if delta is None:
+        return None, "effect_delta_missing"
+    delta_value = _safe_float(delta)
+    if delta_value <= 0.0:
+        return None, "effect_not_positive"
+
+    template = get_position_supervisor_template(target_id, db_path=db_path)
+    if str(template.get("template_id") or "") != target_id:
+        return None, "template_snapshot_unavailable"
+    template_hash = position_supervisor_template_hash(template)
+    raw_evidence = app.get("evidence")
+    evidence = (
+        dict(raw_evidence)
+        if isinstance(raw_evidence, Mapping)
+        else dict(_projection_load_json(raw_evidence, {}) or {})
+    )
+    candidate_snapshot = (
+        evidence.get("candidate_template")
+        or evidence.get("template_snapshot")
+        or template
+    )
+    if not isinstance(candidate_snapshot, Mapping):
+        return None, "template_snapshot_missing"
+    candidate_hash = position_supervisor_template_hash(dict(candidate_snapshot))
+    if candidate_hash != template_hash:
+        return None, "template_snapshot_hash_mismatch"
+    if str(candidate_snapshot.get("template_id") or "") != target_id:
+        return None, "template_snapshot_identity_mismatch"
+    contract = _single_control_candidate_contract(candidate_snapshot)
+    if str(target_id).startswith("position_supervisor:auto_") and not contract.get("ok"):
+        return None, "single_control_candidate_contract_missing"
+
+    observation = _supervisor_candidate_observation_evidence(
+        conn,
+        application=app,
+        effect=eff,
+        template_id=target_id,
+        template_version=str(template.get("template_version") or ""),
+        template_hash=template_hash,
+        canary_required=canary_required,
+    )
+    if not observation.get("ready"):
+        return None, "supervisor_evidence_not_mature"
+    refs = _candidate_evidence_refs(
+        app=app,
+        effect=eff,
+        candidate_template=candidate_snapshot,
+        mature_counterfactual_ids=list(observation.get("counterfactual_ids") or []),
+        mature_trace_ids=list(observation.get("trace_ids") or []),
+    )
+    posterior_fingerprint = str(refs.get("posterior_fingerprint") or "")
+    if not posterior_fingerprint:
+        posterior_fingerprint = hashlib.sha256(
+            _json(
+                {
+                    "application_id": app.get("application_id"),
+                    "effect_id": eff.get("effect_id"),
+                    "counterfactual_ids": refs["counterfactual_ids"],
+                    "trace_ids": refs["trace_ids"],
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+    selection_key = dict(refs.get("selection_key") or {})
+    patch = dict(candidate_snapshot.get("candidate_patch") or {})
+    regime_stratum = str(
+        patch.get("regime_stratum")
+        or (candidate_snapshot.get("generation_context") or {}).get("regime_stratum")
+        or "*"
+    )
+    selection_key = {
+        "symbol": str(selection_key.get("symbol") or "*"),
+        "timeframe": str(selection_key.get("timeframe") or "*"),
+        "entry_regime": str(selection_key.get("entry_regime") or "*"),
+        "current_regime": str(selection_key.get("current_regime") or regime_stratum),
+    }
+    selection_event_id = "psel_" + hashlib.sha256(
+        _json(
+            {
+                "template_id": target_id,
+                "template_hash": template_hash,
+                "application_id": app.get("application_id"),
+                "effect_id": eff.get("effect_id"),
+                "selection_key": selection_key,
+            }
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    return {
+        "template_id": target_id,
+        "template_version": str(template.get("template_version") or ""),
+        "template_hash": template_hash,
+        "template_snapshot": template,
+        "selection_key": selection_key,
+        "effect_score": delta_value,
+        "observed_trade_count": int(eff.get("observed_trade_count") or 0),
+        "mature_trade_count": int(observation.get("mature_trade_count") or 0),
+        "application_id": str(app.get("application_id") or ""),
+        "effect_id": str(eff.get("effect_id") or ""),
+        "mutation_id": mutation_id,
+        "suggestion_id": str(app.get("suggestion_id") or ""),
+        "posterior_fingerprint": posterior_fingerprint,
+        "evidence_refs": refs,
+        "selection_event_id": selection_event_id,
+        "governance_status": "current_effect_positive",
+    }, "eligible"
+
+
+def build_position_supervisor_selection_projection(
+    *,
+    db_path: str | Path = STATE_DB,
+    cfg: Any | None = None,
+    now_ts: float | None = None,
+    conn: Any | None = None,
+) -> dict[str, Any]:
+    """Compile the sole memory-to-live supervisor selection projection."""
+
+    now = float(time.time() if now_ts is None else now_ts)
+    owns_conn = conn is None
+    if conn is None:
+        conn = _connect(db_path, read_only=True)
+    try:
+        if cfg is None:
+            from config.runtime_config import shared as runtime_config
+
+            cfg = runtime_config()
+        baseline_template_id = str(
+            getattr(cfg, "position_supervisor_template_id", "")
+            or DEFAULT_TEMPLATE_ID
+        )
+        default_template = get_position_supervisor_template(
+            baseline_template_id,
+            db_path=db_path,
+        )
+        default_binding = build_position_supervisor_binding(
+            default_template,
+            binding_source=(
+                "static_baseline"
+                if baseline_template_id == DEFAULT_TEMPLATE_ID
+                else "governed_global_baseline"
+            ),
+            selection_status="bound",
+            evidence_refs={
+                "reason": "no_eligible_governed_template",
+                "baseline_template_id": baseline_template_id,
+            },
+        )
+        canary_required = max(
+            1,
+            int(getattr(cfg, "supervisor_canary_mature_trade_count", 50) or 50),
+        )
+        candidates: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        watermark = 0.0
+        applications: list[dict[str, Any]] = []
+        try:
+            store = LearningApplicationStore(db_path)
+            effects: dict[str, dict[str, Any]] = {}
+            for item in store.iter_effects(
+                scope_type="position_supervisor_template"
+            ):
+                application_id = str(item.get("application_id") or "")
+                watermark = max(
+                    watermark,
+                    _safe_float(item.get("updated_at")),
+                    _safe_float(item.get("created_at")),
+                )
+                if application_id and application_id not in effects:
+                    # iter_effects is newest-first; never let an old effect
+                    # overwrite the current observation for the same app.
+                    effects[application_id] = dict(item)
+            for item in store.iter_applications(
+                scope_type="position_supervisor_template"
+            ):
+                applications.append(dict(item))
+                watermark = max(
+                    watermark,
+                    _safe_float(item.get("updated_at")),
+                    _safe_float(item.get("created_at")),
+                )
+                if len(applications) >= 100:
+                    break
+        except Exception as exc:
+            # A learning-cycle projection must remain a valid, explicit
+            # no-selection snapshot when optional application/effect tables are
+            # unavailable.  It must never turn a read failure into a live
+            # template choice.
+            rejected.append(
+                {
+                    "application_id": "",
+                    "template_id": "",
+                    "reason": f"application_store_unavailable:{type(exc).__name__}",
+                }
+            )
+            effects = {}
+        for app in applications:
+            effect = effects.get(str(app.get("application_id") or ""))
+            if effect:
+                watermark = max(
+                    watermark,
+                    _safe_float(effect.get("updated_at")),
+                    _safe_float(effect.get("created_at")),
+                )
+            candidate, reason = _position_supervisor_candidate_from_application(
+                conn,
+                application=app,
+                effect=effect,
+                db_path=db_path,
+                canary_required=canary_required,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+            elif reason != "default_is_baseline":
+                rejected.append(
+                    {
+                        "application_id": str(app.get("application_id") or ""),
+                        "template_id": str(
+                            app.get("scope_key") or app.get("target_template_id") or ""
+                        ),
+                        "reason": reason,
+                    }
+                )
+
+        candidates.sort(
+            key=lambda item: (
+                -_safe_float(item.get("effect_score")),
+                -int(item.get("mature_trade_count") or 0),
+                str(item.get("template_id") or ""),
+            )
+        )
+        state_candidates: dict[str, list[dict[str, Any]]] = {}
+        for candidate in candidates:
+            key = "|".join(
+                str(candidate.get("selection_key", {}).get(name) or "*")
+                for name in ("symbol", "timeframe", "entry_regime", "current_regime")
+            )
+            state_candidates.setdefault(key, []).append(candidate)
+        status = "ready" if candidates else "insufficient_evidence"
+        payload: dict[str, Any] = {
+            "schema_version": POSITION_SUPERVISOR_SELECTION_SCHEMA_VERSION,
+            "status": status,
+            "source": "position_supervisor_governance",
+            "producer": "learning_worker",
+            "published_at": now,
+            "source_watermark": str(watermark or 0.0),
+            "source_watermark_ts": watermark,
+            "freshness": {
+                "status": "fresh",
+                "published_at": now,
+                "max_age_seconds": float(
+                    getattr(cfg, "position_supervisor_selection_max_age_seconds", 900.0)
+                    or 900.0
+                ),
+            },
+            "default_binding": default_binding,
+            "candidates": candidates,
+            "candidates_by_state": state_candidates,
+            "candidate_count": len(candidates),
+            "rejected_candidates": rejected[:100],
+            "selection_policy": {
+                "deterministic": True,
+                "positive_effect_only": True,
+                "tie_behavior": "no_change",
+                "conflict_behavior": "no_change",
+                "proposals_are_not_live_authority": True,
+            },
+            "evidence_policy": {
+                "canary_required_trade_count": canary_required,
+                "causal_scope": "supervisor",
+                "requires_clean_mature_counterfactual": True,
+                "requires_template_hash_binding": True,
+                "requires_current_coordinator_mutation": True,
+                "requires_positive_application_effect": True,
+            },
+        }
+        payload["selection_fingerprint"] = hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        return payload
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def publish_position_supervisor_selection_projection(
+    *,
+    db_path: str | Path = STATE_DB,
+    cfg: Any | None = None,
+    now_ts: float | None = None,
+) -> dict[str, Any]:
+    """Publish the compiled selection projection into the existing runtime_kv."""
+
+    now = float(time.time() if now_ts is None else now_ts)
+    try:
+        projection = build_position_supervisor_selection_projection(
+            db_path=db_path,
+            cfg=cfg,
+            now_ts=now,
+        )
+        conn = _connect(db_path)
+        try:
+            declaration = """
+                CREATE TABLE IF NOT EXISTS runtime_kv (
+                    key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at REAL NOT NULL DEFAULT 0.0
+                )
+            """
+            if _use_pg(db_path):
+                from backend.core.state_store import validate_runtime_state_schema
+
+                validate_runtime_state_schema(conn, declaration)
+            else:
+                conn.execute(declaration)
+            conn.execute(
+                _sql(
+                    conn,
+                    """INSERT INTO runtime_kv (key, value_json, updated_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(key) DO UPDATE SET
+                           value_json=excluded.value_json,
+                           updated_at=excluded.updated_at""",
+                ),
+                (
+                    POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY,
+                    json.dumps(projection, ensure_ascii=False),
+                    now,
+                ),
+            )
+            conn.commit()
+            return {**projection, "ok": True, "status": projection.get("status")}
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "unavailable",
+            "schema_version": POSITION_SUPERVISOR_SELECTION_SCHEMA_VERSION,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def latest_position_supervisor_selection_projection(
+    *,
+    db_path: str | Path = STATE_DB,
+    max_age_seconds: float = 900.0,
+) -> dict[str, Any]:
+    """Read the learning-owned projection and apply its freshness boundary."""
+
+    conn = None
+    try:
+        conn = _connect(db_path, read_only=True)
+        row = _execute(
+            conn,
+            "SELECT value_json, updated_at FROM runtime_kv WHERE key=?",
+            (POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY,),
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "status": "missing"}
+        payload = _projection_load_json(row["value_json"], {})
+        if not isinstance(payload, dict):
+            return {"ok": False, "status": "invalid"}
+        updated_at = _safe_float(row["updated_at"] or payload.get("published_at"))
+        age = max(0.0, time.time() - updated_at)
+        fresh = age <= max(1.0, float(max_age_seconds or 900.0))
+        return {
+            **payload,
+            "ok": bool(fresh),
+            "status": "fresh" if fresh else "stale",
+            "age_seconds": age,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "unavailable",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _selection_state_matches(
+    candidate_key: Mapping[str, Any],
+    requested_key: Mapping[str, Any],
+) -> bool:
+    for name in ("symbol", "timeframe", "entry_regime", "current_regime"):
+        candidate_value = str(candidate_key.get(name) or "*")
+        requested_value = str(requested_key.get(name) or "")
+        if candidate_value not in {"", "*"} and candidate_value != requested_value:
+            return False
+    return True
+
+
+def select_position_supervisor_binding(
+    projection: Mapping[str, Any] | None,
+    *,
+    symbol: str,
+    timeframe: str,
+    entry_regime: str,
+    current_regime: str,
+    current_binding: Mapping[str, Any] | None = None,
+    now_ts: float | None = None,
+    max_age_seconds: float = 900.0,
+) -> dict[str, Any]:
+    """Deterministically select one eligible binding, or preserve/no-change."""
+
+    now = float(time.time() if now_ts is None else now_ts)
+    value = dict(projection or {})
+    current_check = verify_position_supervisor_binding(current_binding)
+    current = dict(current_check.get("binding") or {}) if current_binding else {}
+    default_binding = dict(value.get("default_binding") or {})
+    if not default_binding:
+        default_binding = build_position_supervisor_binding(
+            DEFAULT_TEMPLATE_ID,
+            binding_source="static_baseline",
+            evidence_refs={"reason": "projection_default_missing"},
+        )
+    published_at = _safe_float(value.get("published_at"))
+    age = max(0.0, now - published_at) if published_at else float("inf")
+    if not value or not bool(value.get("ok", True)) or age > max(1.0, float(max_age_seconds or 900.0)):
+        return {
+            "ok": False,
+            "changed": False,
+            "reason": "selection_projection_stale_or_unavailable",
+            "binding": current or default_binding,
+            "age_seconds": age,
+        }
+    requested_key = {
+        "symbol": str(symbol or ""),
+        "timeframe": str(timeframe or ""),
+        "entry_regime": str(entry_regime or ""),
+        "current_regime": str(current_regime or ""),
+    }
+    matching = [
+        dict(item)
+        for item in list(value.get("candidates") or [])
+        if isinstance(item, Mapping)
+        and _selection_state_matches(
+            dict(item.get("selection_key") or {}),
+            requested_key,
+        )
+    ]
+    if not matching:
+        return {
+            "ok": True,
+            "changed": False,
+            "reason": "no_eligible_template_for_state",
+            "binding": current or default_binding,
+            "selection_key": requested_key,
+        }
+    matching.sort(
+        key=lambda item: (
+            -_safe_float(item.get("effect_score")),
+            -int(item.get("mature_trade_count") or 0),
+            str(item.get("template_id") or ""),
+        )
+    )
+    top_score = _safe_float(matching[0].get("effect_score"))
+    tied = [
+        item
+        for item in matching
+        if abs(_safe_float(item.get("effect_score")) - top_score) <= 1e-12
+    ]
+    tied_ids = {str(item.get("template_id") or "") for item in tied}
+    if len(tied_ids) > 1:
+        return {
+            "ok": True,
+            "changed": False,
+            "reason": "effect_tie_or_conflict_no_change",
+            "binding": current or default_binding,
+            "selection_key": requested_key,
+            "candidates": tied,
+        }
+    selected = matching[0]
+    selected_binding = build_position_supervisor_binding(
+        dict(selected.get("template_snapshot") or {}),
+        binding_source="governed_selection_projection",
+        selection_status="bound",
+        selection_key=requested_key,
+        posterior_fingerprint=str(selected.get("posterior_fingerprint") or ""),
+        evidence_refs={
+            **dict(selected.get("evidence_refs") or {}),
+            "application_id": str(selected.get("application_id") or ""),
+            "effect_id": str(selected.get("effect_id") or ""),
+            "selection_event_id": str(selected.get("selection_event_id") or ""),
+        },
+    )
+    selected_binding["evidence_refs"]["selection_event_id"] = str(
+        selected.get("selection_event_id") or ""
+    )
+    selected_check = verify_position_supervisor_binding(selected_binding)
+    if not selected_check.get("valid"):
+        return {
+            "ok": False,
+            "changed": False,
+            "reason": "selected_binding_verification_failed",
+            "binding": current or default_binding,
+            "selection_key": requested_key,
+        }
+    current_same = bool(
+        current_check.get("valid")
+        and str(current.get("template_hash") or "")
+        == str(selected_binding.get("template_hash") or "")
+    )
+    return {
+        "ok": True,
+        "changed": not current_same,
+        "reason": "selected_highest_positive_effect" if not current_same else "current_template_remains_best",
+        "binding": current if current_same else selected_binding,
+        "selected_binding": selected_binding,
+        "selection_key": requested_key,
+        "selection_event_id": str(selected.get("selection_event_id") or ""),
+        "posterior_fingerprint": str(selected.get("posterior_fingerprint") or ""),
+    }
 
 
 def list_position_supervisor_canary_candidates(
@@ -1792,6 +2608,190 @@ class PositionSupervisorGovernanceMutationService:
             "suggestion_id": suggestion_id,
             "previous_template_id": previous_template_id,
             "target_template_id": target_template_id,
+            "mutation": mutation,
+            "mutation_id": str(mutation.get("mutation_id") or ""),
+        }
+
+    def switch_selection_mode(
+        self,
+        *,
+        previous_mode: str = "",
+        target_mode: str,
+        actor: str,
+        source: str,
+        run_id: str,
+        reason: str,
+        evidence: Mapping[str, Any] | None = None,
+        risk_verdict: Mapping[str, Any] | None = None,
+        v16_command_id: str = "",
+        v16_claim_token: str = "",
+        v16_candidate_id: str = "",
+        v16_posterior_fingerprint: str = "",
+        evidence_fingerprint: str = "",
+    ) -> dict[str, Any]:
+        """Change selection mode through the existing typed/coordinator gate."""
+
+        from config import runtime_config as runtime_config_module
+        from config.runtime_config import (
+            VALID_POSITION_SUPERVISOR_AUTO_SELECTION_MODES,
+        )
+        from backend.services.governance_control_plans import (
+            PositionSupervisorSelectionModePlan,
+        )
+
+        target = str(target_mode or "").strip().lower()
+        if target not in VALID_POSITION_SUPERVISOR_AUTO_SELECTION_MODES:
+            return {
+                "ok": False,
+                "committed": False,
+                "status": "invalid_selection_mode",
+                "reason": f"unsupported_selection_mode:{target}",
+            }
+        if target == "live_execute":
+            return {
+                "ok": False,
+                "committed": False,
+                "status": "selection_mode_not_admitted",
+                "reason": "live_execute_not_admitted_by_current_rollout",
+            }
+
+        observed = str(
+            getattr(
+                runtime_config_module.shared(),
+                "position_supervisor_auto_selection_mode",
+                "off",
+            )
+            or "off"
+        ).strip().lower()
+        previous = str(previous_mode or observed).strip().lower()
+        if previous not in VALID_POSITION_SUPERVISOR_AUTO_SELECTION_MODES:
+            return {
+                "ok": False,
+                "committed": False,
+                "status": "invalid_previous_selection_mode",
+                "reason": f"unsupported_previous_selection_mode:{previous}",
+            }
+        if observed != previous:
+            return {
+                "ok": False,
+                "committed": False,
+                "status": "selection_mode_compare_failed",
+                "reason": "selection_mode_changed_before_commit",
+                "observed_mode": observed,
+                "previous_mode": previous,
+            }
+        if previous == target:
+            return {
+                "ok": True,
+                "committed": False,
+                "status": "no_change",
+                "reason": "selection_mode_already_current",
+                "previous_mode": previous,
+                "target_mode": target,
+            }
+        if target == "demo_execute" and not runtime_config_module.bounded_demo_mode_active(
+            runtime_config_module.shared()
+        ):
+            return {
+                "ok": False,
+                "committed": False,
+                "status": "bounded_demo_required",
+                "reason": "demo_execute_requires_demo_broker_and_demo_autonomy",
+                "previous_mode": previous,
+                "target_mode": target,
+            }
+
+        from risk.policy_service import RiskPolicyService
+
+        raw_evidence = dict(evidence or {})
+        selection_projection = raw_evidence.get("selection_projection")
+        if not isinstance(selection_projection, Mapping):
+            selection_projection = {}
+        risk_context = {
+            "current_mode": previous,
+            "target_mode": target,
+            "selection_projection": dict(selection_projection),
+            "bounded_demo_mode": bool(
+                runtime_config_module.bounded_demo_mode_active(
+                    runtime_config_module.shared()
+                )
+            ),
+            "v16_command_id": str(v16_command_id or ""),
+            "autonomy_mode": str(
+                getattr(runtime_config_module.shared(), "autonomy_mode", "") or ""
+            ),
+        }
+        evaluated_risk = RiskPolicyService.shared().evaluate(
+            "switch_position_supervisor_selection_mode",
+            risk_context,
+        )
+        evaluated_risk_payload = (
+            evaluated_risk.to_dict()
+            if hasattr(evaluated_risk, "to_dict")
+            else dict(evaluated_risk or {})
+        )
+        if not bool(evaluated_risk_payload.get("allowed")):
+            return {
+                "ok": False,
+                "committed": False,
+                "status": "risk_policy_blocked",
+                "reason": str(
+                    evaluated_risk_payload.get("reason")
+                    or "risk_policy_blocked"
+                ),
+                "previous_mode": previous,
+                "target_mode": target,
+                "risk_verdict": evaluated_risk_payload,
+            }
+
+        details = {
+            "schema_version": "position_supervisor_selection_mode.v1",
+            "previous_mode": previous,
+            "target_mode": target,
+            "risk_verdict": evaluated_risk_payload,
+            "caller_risk_verdict": dict(risk_verdict or {}),
+            "evidence": raw_evidence,
+        }
+        plan = PositionSupervisorSelectionModePlan(
+            patch={"position_supervisor_auto_selection_mode": target},
+            source=source,
+            actor=actor,
+            action="switch_position_supervisor_selection_mode",
+            run_id=run_id,
+            reason=reason,
+            scope_type="supervisor_selection",
+            scope_key="position_supervisor_selection",
+            target_agent="position_supervisor_governance",
+            evidence_refs=details,
+            rollback={"position_supervisor_auto_selection_mode": previous},
+            idempotency_key=(
+                f"position-supervisor-selection-mode:v1:{run_id}:"
+                f"{previous}:{target}"
+            ),
+            v16_command_id=v16_command_id,
+            v16_claim_token=v16_claim_token,
+            v16_candidate_id=v16_candidate_id,
+            v16_posterior_fingerprint=v16_posterior_fingerprint,
+            evidence_fingerprint=evidence_fingerprint,
+            previous_mode=previous,
+            target_mode=target,
+        )
+        try:
+            mutation = plan.execute(self.db_path)
+        except Exception as exc:
+            mutation = {
+                "ok": False,
+                "status": "selection_mode_mutation_failed",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        committed = self._committed(mutation)
+        return {
+            "ok": committed,
+            "committed": committed,
+            "status": str(mutation.get("status") or ("committed" if committed else "failed")),
+            "previous_mode": previous,
+            "target_mode": target,
+            "risk_verdict": evaluated_risk_payload,
             "mutation": mutation,
             "mutation_id": str(mutation.get("mutation_id") or ""),
         }

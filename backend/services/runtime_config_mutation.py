@@ -503,6 +503,8 @@ class RuntimeConfigMutationService:
             return "governance_expansion_control"
         if "model" in value:
             return "model_stage"
+        if "supervisor_selection" in value or "selection_mode" in value:
+            return "supervisor_selection"
         if "supervisor" in value:
             return "supervisor_template"
         if "parameter" in value or "template" in value:
@@ -524,6 +526,8 @@ class RuntimeConfigMutationService:
             return "alpha_weight_policy"
         if scope_type == "supervisor_template":
             return "position_supervisor"
+        if scope_type == "supervisor_selection":
+            return "position_supervisor_selection"
         if scope_type in {"parameter_template", "context_policy"}:
             return "threshold_and_sizing"
         if scope_type == "model_stage":
@@ -545,6 +549,11 @@ class RuntimeConfigMutationService:
             "factor_portfolio_weights",
             "factor_signal_config",
             "position_supervisor_template_id",
+            "position_supervisor_auto_selection_mode",
+            "position_supervisor_switch_min_stable_bars",
+            "position_supervisor_switch_cooldown_bars",
+            "position_supervisor_max_switches_per_position",
+            "position_supervisor_selection_max_age_seconds",
             "active_parameter_templates",
             "context_policy",
             "demo_model_influence_enabled",
@@ -568,6 +577,8 @@ class RuntimeConfigMutationService:
             "context_policy",
             "switch_parameter",
             "switch_position",
+            "supervisor_selection",
+            "selection_mode",
             "model_influence",
             "incident_control",
             "live_autonomy",
@@ -595,6 +606,10 @@ class RuntimeConfigMutationService:
             return "resume_governance_expansion"
         if "parameter" in normalized:
             return "switch_parameter_template"
+        if "supervisor" in normalized and (
+            "selection" in normalized or "mode" in normalized
+        ):
+            return "switch_position_supervisor_selection_mode"
         if "supervisor" in normalized and "rollback" not in normalized:
             return "switch_position_supervisor_template"
         if "model" in normalized and any(token in normalized for token in ("demot", "quarant", "rollback", "disable")):

@@ -12,6 +12,7 @@ from backend.services.governance_mutation_coordinator import (
 from backend.services.runtime_config_overlay import (
     RuntimeConfigOverlayAuthorityError,
     RuntimeConfigOverlayService,
+    _governance_config_hash,
 )
 from config import runtime_config
 from config.runtime_config import RuntimeConfig
@@ -130,6 +131,53 @@ def test_committed_authority_accepts_promoted_runtime_field_compatibility_hash(
 
     assert restored["restored"] is True
     assert restored["config"].factor_governance_model_min_factor_samples == 37
+    assert restored["authority"]["checks"]["target_hash_bound"] is True
+    assert restored["authority"]["checks"]["committed_hash_bound"] is True
+
+
+def test_committed_authority_accepts_legacy_hash_before_selection_fields(
+    tmp_path, monkeypatch
+):
+    _set_mode(monkeypatch, "dual_record")
+    db_path = tmp_path / "state.db"
+    base = RuntimeConfig()
+    runtime_config.register_overlay_base(base, db_path)
+    result = GovernanceMutationCoordinator(db_path).execute(
+        GovernanceMutationPlan(
+            patch={"governance_expansion_paused": True},
+            source="pre_selection_schema",
+            actor="operator:test",
+            action="pause_governance_expansion",
+            control_surface="operator_governance_pause",
+            scope_type="operator_governance_pause",
+            scope_key="global",
+            run_id="pre_selection_schema",
+        )
+    )
+    assert result["ok"] is True
+
+    legacy_payload = runtime_config.legacy_runtime_config_hash_payload(
+        runtime_config.config_from_overlay(
+            RuntimeConfigOverlayService(db_path).latest()["overlay"], db_path
+        ).to_dict()
+    )
+    legacy_hash = _governance_config_hash(legacy_payload)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE governance_mutation_intent "
+            "SET target_config_hash=?, committed_config_hash=? WHERE mutation_id=?",
+            (legacy_hash, legacy_hash, result["mutation_id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    restored = RuntimeConfigOverlayService(db_path).restore_on_startup(base)
+
+    assert restored["restored"] is True
+    assert restored["config"].position_supervisor_auto_selection_mode == "off"
+    assert restored["authority"]["hash_compatibility"] == "legacy_additive_fields"
     assert restored["authority"]["checks"]["target_hash_bound"] is True
     assert restored["authority"]["checks"]["committed_hash_bound"] is True
 

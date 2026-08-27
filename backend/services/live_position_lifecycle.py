@@ -764,6 +764,7 @@ def build_open_learning_context_payload(
     market_session: dict[str, Any] | None,
     decision_freshness: dict[str, Any] | None = None,
     entry_timing_context: dict[str, Any] | None = None,
+    position_supervisor_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     portfolio_exposure = build_portfolio_exposure_context(
         entry_cluster=entry_cluster,
@@ -804,6 +805,8 @@ def build_open_learning_context_payload(
         "decision_freshness": dict(decision_freshness or {}),
         "entry_timing_context": dict(entry_timing_context or {}),
     }
+    if position_supervisor_binding:
+        payload["position_supervisor_binding"] = dict(position_supervisor_binding)
     capture_quality = validate_open_learning_context(payload, require_fill=True)
     if capture_quality["ready"]:
         payload["open_context_quality"] = capture_quality
@@ -1660,6 +1663,9 @@ def build_replayed_close_payloads(
     now_ts: float,
     context_integrity_default: str,
     sl_hit_evidence: dict[str, Any] | None = None,
+    resolved_close_reason: str | None = None,
+    close_reason_source: str = "",
+    recovery_observation_reason: str = "",
     attr_engine: Any = None,
 ) -> dict[str, Any]:
     state = position_state or {}
@@ -1673,7 +1679,10 @@ def build_replayed_close_payloads(
     # is the strategy's natural lifecycle (broker stop-out).  The evidence
     # dict cites the durable intent/deal IDs; it never duplicates payloads.
     evidence = dict(sl_hit_evidence or {})
-    close_reason = "broker_close" if evidence.get("matched") else "restart_replay"
+    close_reason = str(
+        resolved_close_reason
+        or ("broker_close" if evidence.get("matched") else "restart_replay")
+    )
     # Attribution: prefer the live engine context, then the durable open
     # snapshot already stored in this row's recovery metadata.  Both are
     # references to existing data — the snapshot is passed back through the
@@ -1691,18 +1700,24 @@ def build_replayed_close_payloads(
         "replayed_at": float(now_ts or 0.0),
         "strategy_name": str(strategy_name or ""),
         **({"sl_hit_evidence": evidence} if evidence else {}),
+        **({"close_reason": close_reason} if resolved_close_reason else {}),
+        **({"close_reason_source": str(close_reason_source)} if close_reason_source else {}),
+        **({"recovery_observation_reason": str(recovery_observation_reason)} if recovery_observation_reason else {}),
     }
     action_json = {
         "position_id": int(position_id),
         "replayed": True,
         "close_reason": close_reason,
         "real_pnl": pnl_payload,
+        **({"close_reason_source": str(close_reason_source)} if close_reason_source else {}),
     }
     event_details = {
         "replayed": True,
         "close_reason": close_reason,
         "real_pnl": pnl_payload,
+        **({"close_reason_source": str(close_reason_source)} if close_reason_source else {}),
     }
+    action_reason = "restart_replay_close" if close_reason == "restart_replay" else close_reason
     return {
         "position_id": int(position_id),
         "symbol": symbol,
@@ -1720,7 +1735,7 @@ def build_replayed_close_payloads(
             "decision_ts": close_ts,
             "portfolio_state": {},
             "action_score": total_pnl,
-            "action_reason": "restart_replay_close",
+            "action_reason": action_reason,
             "action_json": action_json,
         },
         "position_event": {
@@ -1742,6 +1757,7 @@ def build_replayed_close_payloads(
             "attribution_integrity": attribution_integrity,
             "real_pnl": real_pnl,
             "close_reason": close_reason,
+            **({"close_reason_source": str(close_reason_source)} if close_reason_source else {}),
             "context_integrity": context_integrity,
         },
     }
@@ -2079,8 +2095,10 @@ def build_position_supervisor_context_inputs(
     supervisor_state: dict[str, Any] | None = None,
     total_api_volume: float = 0.0,
     loop_running: bool = True,
+    position_supervisor_template: dict[str, Any] | None = None,
+    position_supervisor_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "position": position,
         "entry_decision_id": str(entry_decision_id or ""),
         "risk_snapshot": risk_snapshot or {},
@@ -2093,6 +2111,11 @@ def build_position_supervisor_context_inputs(
         "template_id": str(getattr(cfg, "position_supervisor_template_id", "") or ""),
         "loop_running": bool(loop_running),
     }
+    if position_supervisor_template is not None:
+        result["position_supervisor_template"] = dict(position_supervisor_template)
+    if position_supervisor_policy is not None:
+        result["position_supervisor_policy"] = dict(position_supervisor_policy)
+    return result
 
 
 def build_position_supervisor_context_payload(
@@ -2110,6 +2133,8 @@ def build_position_supervisor_context_payload(
     account: dict[str, Any] | None,
     template_id: str,
     loop_running: bool,
+    position_supervisor_template: dict[str, Any] | None = None,
+    position_supervisor_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current_price = float(position.get("current_price", position.get("price_current", 0.0)) or 0.0)
     stop_loss = float(position.get("sl", 0.0) or 0.0)
@@ -2225,8 +2250,12 @@ def build_position_supervisor_context_payload(
             nested_keys=frozenset({"latest_supervisor", "latest_protection"}),
         ),
     }
-    return {
-        "position_supervisor_template": str(template_id or ""),
+    payload = {
+        "position_supervisor_template": (
+            dict(position_supervisor_template)
+            if position_supervisor_template is not None
+            else str(template_id or "")
+        ),
         "position": {
             "position_id": position.get("position_id") or position.get("ticket"),
             "trade_id": str(position.get("position_id") or position.get("ticket") or ""),
@@ -2289,6 +2318,9 @@ def build_position_supervisor_context_payload(
             "account": account or {},
         },
     }
+    if position_supervisor_policy is not None:
+        payload["position_supervisor_policy"] = dict(position_supervisor_policy)
+    return payload
 
 
 def build_position_path_metrics_result(
@@ -2809,7 +2841,47 @@ def build_supervisor_trace_ledger_payload(
             "recommended_action": requested_action,
         }
     )
-    return {
+    evidence = dict(verdict.get("evidence") or {})
+    binding_policy = verdict.get("position_supervisor_policy")
+    if not isinstance(binding_policy, Mapping):
+        binding_policy = evidence.get("position_supervisor_policy")
+    if not isinstance(binding_policy, Mapping):
+        binding_policy = {}
+    binding = evidence.get("position_supervisor_binding")
+    if not isinstance(binding, Mapping):
+        binding = binding_policy.get("binding")
+    if not isinstance(binding, Mapping):
+        binding = {}
+    template_hash = str(
+        binding.get("template_hash")
+        or binding_policy.get("template_hash")
+        or evidence.get("supervisor_template_hash")
+        or ""
+    )
+    binding_source = str(
+        binding.get("binding_source")
+        or binding_policy.get("binding_source")
+        or ""
+    )
+    selection_event_id = str(
+        binding.get("evidence_refs", {}).get("selection_event_id")
+        if isinstance(binding.get("evidence_refs"), Mapping)
+        else ""
+    ) or str(binding_policy.get("selection_event_id") or "")
+    binding_selection_key = binding.get("selection_key")
+    if not isinstance(binding_selection_key, Mapping):
+        binding_selection_key = {}
+    trace_current_regime = str(
+        evidence.get("current_regime")
+        or binding_selection_key.get("current_regime")
+        or ""
+    )
+    trace_no_change_reason = ""
+    if str(outcome or "") in {"skipped", "hold", "superseded"}:
+        trace_no_change_reason = str(
+            execution_payload.get("no_change_reason") or execution_reason or ""
+        )
+    trace_payload = {
         "position_id": pid,
         "decision_id": str(decision_id or ""),
         "trade_id": pid,
@@ -2858,6 +2930,44 @@ def build_supervisor_trace_ledger_payload(
             nested_keys=frozenset({"evidence", "controls"}),
         ),
     }
+    # New binding-aware traces expose the immutable template identity and the
+    # three execution outcomes without changing the legacy trace shape when a
+    # position has no binding metadata.
+    if template_hash or binding_source or selection_event_id or binding_policy:
+        trace_payload.update(
+            {
+                "template_hash": template_hash,
+                "binding_source": binding_source,
+                "selection_event_id": selection_event_id,
+                "current_regime": trace_current_regime,
+                "supervisor_posture": str(
+                    evidence.get("supervisor_posture") or ""
+                ),
+                "requested_action": requested_action,
+                "effective_action": effective_action,
+                "applied_action": str(
+                    execution_payload.get("applied_action")
+                    or (effective_action if is_real_execution else "")
+                ),
+                "risk_policy_result": risk_payload,
+                "broker_execution_result": dict(
+                    execution_payload.get("broker_execution_result") or {}
+                ),
+                "reconcile_result": dict(
+                    execution_payload.get("reconcile_result") or {}
+                ),
+                "policy_switch_status": str(
+                    execution_payload.get("policy_switch_status") or ""
+                ),
+                "no_change_reason": trace_no_change_reason,
+            }
+        )
+        if binding:
+            trace_payload["binding"] = _compact_supervisor_mapping(
+                dict(binding),
+                nested_keys=frozenset({"template_snapshot", "evidence_refs"}),
+            )
+    return trace_payload
 
 
 def build_supervisor_action_fingerprint(
@@ -3156,8 +3266,9 @@ def build_entry_protection_plan_payload(
     status: str = "pending",
     source: str = "factor_v4_open",
     error: str = "",
+    supervisor_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "schema_version": str(schema_version or ""),
         "position_id": int(position_id),
         "source": str(source or "factor_v4_open"),
@@ -3177,6 +3288,9 @@ def build_entry_protection_plan_payload(
         "config_version": int(config_version or 0),
         "config_hash": str(config_hash or ""),
     }
+    if supervisor_binding:
+        payload["supervisor_binding"] = dict(supervisor_binding)
+    return payload
 
 
 def update_entry_protection_plan_payload(

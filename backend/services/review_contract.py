@@ -164,6 +164,43 @@ def broker_stop_hit_evidence(
     }
 
 
+def _supervisor_close_evidence_from_recovery(
+    position_state: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return an explicit supervisor-close fact retained across recovery.
+
+    A vanished broker position is not, by itself, a reason.  The live close
+    path does however persist the requested close reason before the process
+    can lose the position, so recovery can use that durable fact without
+    guessing from PnL or price.  ``latest_supervisor.action`` alone is not
+    enough: it may only be an observation that was never applied.
+    """
+
+    state = position_state if isinstance(position_state, Mapping) else {}
+    meta = state.get("recovery_meta")
+    meta = meta if isinstance(meta, Mapping) else {}
+    pending_reason = str(meta.get("pending_close_reason") or "").strip()
+    applied_action = str(meta.get("last_supervisor_applied_action") or "").strip().lower()
+    applied_reason = str(meta.get("last_supervisor_reason") or "").strip()
+    if pending_reason:
+        return {
+            "matched": True,
+            "method": "durable_supervisor_close_reason",
+            "schema_version": "supervisor_close_recovery_evidence.v1",
+            "close_reason": pending_reason,
+            "source": "pending_close_reason",
+        }
+    if applied_action in {"close", "close_position"} and applied_reason:
+        return {
+            "matched": True,
+            "method": "durable_supervisor_close_reason",
+            "schema_version": "supervisor_close_recovery_evidence.v1",
+            "close_reason": applied_reason,
+            "source": "last_supervisor_applied_action",
+        }
+    return None
+
+
 def classify_close_reason_from_recovery(
     *,
     replayed: bool,
@@ -174,9 +211,11 @@ def classify_close_reason_from_recovery(
     """Resolve the close reason for a recovery-replayed close.
 
     The replay path observes closes by reconciliation ("position vanished"),
-    which alone says nothing about *why* it closed.  When the durable amend
-    intent plus the authoritative deal prove the fill matched our broker-side
-    stop-loss, the strategy's natural lifecycle holds and the review must say
+    which alone says nothing about *why* it closed.  An explicit durable
+    supervisor-close reason takes precedence because it records the action
+    that caused the close.  Otherwise, when the durable amend intent plus the
+    authoritative deal prove the fill matched our broker-side stop-loss, the
+    strategy's natural lifecycle holds and the review must say
     ``broker_close`` — otherwise keep the conservative replay label.
     """
 
@@ -185,6 +224,14 @@ def classify_close_reason_from_recovery(
     )
     if not replayed:
         return {"close_reason": base, "sl_hit_evidence": None}
+    supervisor_evidence = _supervisor_close_evidence_from_recovery(position_state)
+    if supervisor_evidence:
+        return {
+            "close_reason": str(supervisor_evidence["close_reason"]),
+            "close_reason_source": "supervisor_direct_close",
+            "supervisor_close_evidence": supervisor_evidence,
+            "sl_hit_evidence": None,
+        }
     evidence = broker_stop_hit_evidence(real_pnl=real_pnl, position_state=position_state)
     if evidence.get("matched"):
         return {"close_reason": "broker_close", "sl_hit_evidence": evidence}

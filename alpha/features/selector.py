@@ -225,8 +225,15 @@ def run_feature_selection(
     register_pca_factors(compressor)
 
     # 将 PCA 分量加入特征池
-    for i in range(compressor.n_components):
-        derived[f"pca_{i}"] = pca_transformed[:, i]
+    pca_columns = {
+        f"pca_{i}": pca_transformed[:, i]
+        for i in range(compressor.n_components)
+    }
+    if pca_columns:
+        derived = pd.concat(
+            [derived, pd.DataFrame(pca_columns, index=derived.index)],
+            axis=1,
+        )
 
     # 3. 筛选
     selector = FeatureSelector()
