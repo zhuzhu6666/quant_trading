@@ -260,6 +260,22 @@ def _sample_integrity_level(value: Any) -> str:
 def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
     ensure_evolution_ledger_tables(db_path)
     if _use_pg(db_path):
+        # PG business tables are owned by migrations + _ensure_pg_business_tables;
+        # validate evolution_events catalog entry fail-closed instead of silent no-op.
+        from backend.core.state_store import validate_runtime_state_schema
+
+        conn = get_state_pg_conn()
+        try:
+            validate_runtime_state_schema(
+                conn,
+                "CREATE TABLE IF NOT EXISTS evolution_events (id SERIAL PRIMARY KEY, timestamp DOUBLE PRECISION NOT NULL, event_type TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}')",
+            )
+        finally:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            conn.close()
         return
     conn = connect_sqlite(db_path)
     try:

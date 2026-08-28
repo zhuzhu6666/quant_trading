@@ -1,7 +1,7 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-08-26 (S7.6 首个部署后新仓位干净样本已产出；治理合同收紧批 B 在工作区待提交；双服务 active、24h 无 ERROR)
+> Last verified: 2026-08-28 (S7.6 已 46 笔干净样本连续产出；单仓 binding 三链打通；cTrader/unknown 已只读复核通过；双服务 active 11h/12h、market open、risk known)
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读对应合同。
@@ -14,8 +14,8 @@
 - **运行态迁移门（已完成，运行时风险门仍独立生效）**：service-backed cleanup 已清理旧 runtime 事实，普通监督执行使用 `governed_execute -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 单轨链。当前若 readiness 阻断，只能来自实时 market/session、Safety、incident 或 broker 事实，不代表迁移回退或兼容路径仍在。
 - **A 类结构修复（已完成）**：A1 trade_review 实时写入器 ✅ / A2 label 单一口径 ✅ / A3 posterior 触发放宽 ✅ / A4 win 单正反馈 ✅ / A5 effect 归因链代码就绪 ✅ / A6 supervisor_trace 成熟链 ✅。
 - **缺陷批 D1–D13（2026-08-22 已部署生效，详见 planning/audit-defects-2026-08-21.md）**：D11 factor_health 表合同错位（学习链总断点）、D12 jobs 主键、D7 测试污染生产 JSONL、D1 幽灵 canary 毕业、D3/D6 权重噪声与诊断字段、D13 关键写失败静默。全量回归 2775 passed 后受控重启，重启后 60 分钟 0 ERROR；factor_health 健康报告首次落库成功（64 行，40 余天来首次）。学习链断点已解除。
-- **闭环证据现状（2026-08-26 只读复核）**：S7.6 终验标准已达成——D 批部署后新开仓位产出 26 笔 `integrity=full / train_weight=1.0 / governance_eligible=1` 平仓样本（首笔 284662038，2026-08-24；最新 284962512，2026-08-25），`open → protection → close → deal sync → review → sample` 全链条稳定产出干净样本。历史 8 笔回放降级样本（train_weight=0）按硬边界保留审计用途；supervisor trace 样本 partial/0.0 按合同排除训练。
-- **Git 基线**：2026-08-26 已提交并推送告警边沿触发批（5a4e4db）与治理合同收紧批 B（cfc126e）及文档批（b69ec07）至 origin/main。**生产服务尚未重启加载**（用户决定暂不重启；当日新开仓位 285005705 带仓运行），运行态仍执行 8/22 D 批代码，重启加载顺延至下一空仓窗口。
+- **闭环证据现状（2026-08-28 只读复核）**：S7.6 终验标准已达成并持续——D 批后 `trade_review_outcome full/1.0 46 笔`（`2026-08-21 18:28 → 2026-08-28 03:00`，近 4 天 8-11/天，`broker_execution 127`/`position_transition 125`/`trade_review 99`），`open → protection → close → deal sync → review → sample` 全链条稳定产出；`cTrader 价格合同`与 `broker unknown 0` 已只读复核通过。`supervisor_execution_trace` 仅 `governance_eligible matured 5/10`，`position_supervisor_selection.v1 insufficient_evidence/0候选/off`，仍需 `tighten/reduce` 覆盖与 effect 观察才能自动 Demo。历史 8 笔回放降级样本（train_weight=0）保留审计；supervisor trace partial/0.0 排除训练。
+- **Git 基线**：2026-08-26 已提交并推送告警边沿触发批（5a4e4db）与治理合同收紧批 B（cfc126e）及文档批（b69ec07）至 origin/main。**生产服务 2026-08-28 01:37 已重建**（`quant-backend 56728 / learning-worker 2330`），当前为 `98e6466` 基线；B 批业务告警/治理收紧代码已在工作区验证（`test_governance_contract_convergence 8` + `test_live_service_business_alerts 5`），待下一空仓窗口重启加载。
 - **代码收敛（S2/S3 完成）**：db_helpers 公共层（33 文件）+ 四域清扫（9 空壳 + EvolutionKernel + 零调用转发 + consume 包装器）+ A1–A6 / B1–B5 结构修复；历史全量回归记录保留在对应 rollout 文档，当前发布以本批新鲜针对性/全量验证为准。
 - legacy 事实迁移的旧表述（P1/P2/P4/P5、1,702 处、schema version 20）已被"全库清空重建"取代，仅历史参考。
 - 前端（miniprogram_v2 / web_frontend）在 Windows 本地维护；服务器后端-only sparse checkout，只提供 API 与 `/ws/state`。
@@ -61,8 +61,8 @@ learning worker
 
 ## 3. 当前主线
 
-1. 继续收集 P1 的 post-repair 新成交、重启 replay 和 `open -> protection -> close -> deal sync -> review -> sample` 完整生命周期证据。**S7.6 首个部署后新仓位判定点已达成（2026-08-26 只读复核）**：D 批部署后新开仓位已产出 26 笔 `integrity=full / train_weight=1.0 / governance_eligible=1` 平仓样本（首笔 284662038，2026-08-24；最新 284962512，2026-08-25），`open → protection → close → deal sync → review → sample` 全链条在真实运行中稳定产出干净样本。后续转入常态观察：干净样本产率、skip/rejected 样本（full/1.0 与 full/0.35 双轨）与 supervisor trace 样本（partial/0.0，label=excluded_never_executed）按既有合同继续积累。
-2. 继续观察 Safety shadow，满足既有 24 小时空仓或完整 lifecycle 门槛后，才可单独讨论 Safety 发布门。
+1. 继续收集 `open → protection → close → deal sync → review → sample` 完整生命周期证据。**S7.6 已达成并持续（2026-08-28 只读复核 46 笔）**：`full/1.0 46`（`2026-08-21 18:28 → 08-28 03:00`，近 4 天 8-11/天），`broker_execution 127/position_transition 125/trade_review 99`，干净样本产率与 skip/rejected 双轨（full/1.0 与 full/0.35）及 supervisor trace（partial/0.0 excluded）按合同继续积累；**cTrader 价格与 unknown 已复核通过**。
+2. `Safety enforce` 已持续生效（`live generation 172b7fd3… / heartbeat 5.4s / market open`），有仓 `285427255` 验证 `governed_execute` 闭环；仍需 `≥10 笔 matured` 监督样本与 `tighten/reduce` 覆盖完成模板治理闭环后再讨论后续发布门。
 3. 对 `legacy-debt-register.md` 中仍处于 `migrating`、`quarantined` 或 `regressed` 的路径逐条收集退出证据，同批删除旧 authority、旧重算、旧字段回退或无意义 wrapper；所有过渡态/双记录模式须登记退役条件与期限，不允许无限期双轨。
 4. 不扩展新的 V16 调度层，不新增 Brain、PosteriorService、FactorCardV2、表、线程、调度器或平行生产 writer；治理底盘已领先策略内容，工程精力优先投向 alpha 研究与真实闭环数据积累，暂停新增基础设施。
 5. 按前端重构文档继续完成真实接口和个人本机桌面验收；公网浏览器静态入口已退出并验证根路径 404，

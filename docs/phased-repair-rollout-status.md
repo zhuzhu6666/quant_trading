@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Snapshot: 2026-08-27
+> Snapshot: 2026-08-28
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -17,12 +17,20 @@
 | S3 代码单轨+结构修复 | complete | A1–A6 / B1–B5 全部完成 |
 | S4 全量验证 | complete | 2926 passed / 12 skipped（2026-08-27 最终回归） |
 | S5 清库物理 | complete | 10.8GB → 9.7MB，canonical_v2 9 表空 + runtime 6 表空结构 |
-| S6 容量阀 P6 | pending | event 分区、保留窗口、归档、容量监控 |
-| S7 启动验证+进化闭环首验 | in_progress | 双服务冷启动 ✅；**evolution_decision 决策写入路径已收敛修复（8 列单轨，PG 落库已实测打通）**；**learning_application_effect/log 域全代码已收敛到精简 schema（唯一 store，2813 测试通过，3 项 factor-governance 目标测试恢复绿）**；持仓监督 active template 已收敛为 `governed_execute` 单轨，单仓 binding、selection projection 和稳定边界切换已完成代码实现并通过本次双服务重启验收，但默认仍 `off`，尚未满足治理样本量、`tighten/reduce` 覆盖和 supervisor template effect 闭环 |
+| S6 容量阀 P6 | pending | event 分区、保留窗口、归档、容量监控（evolution_story.jsonl 50605 行/140M 待轮转方案） |
+| S7 启动验证+进化闭环首验 | in_progress | 双服务冷启动 ✅；**evolution_decision 8 列单轨 & learning_application 精简 schema 已收敛**；**S7.6 核心闭环已达成**：D 批后 `trade_review_outcome full/1.0 46 笔`（2026-08-21→08-28，近 4 天 8-11/天）`open→protection→close→deal sync→review→sample` 稳定产出，`broker_execution 127`/`position_transition 125`/`trade_review 99`；**cTrader 价格合同与 broker unknown fail-closed 已只读复核通过**，剩余仅 attestation 绑定；持仓监督 `governed_execute` 单轨+单仓 binding 已打通（`285427255` 绑定与三证据链验证），但 `supervisor_execution_trace governance_eligible matured 5/10` 未达自动 Demo 阈值，`position_supervisor_selection.v1 insufficient_evidence/0 候选/off`，`tighten/reduce` 覆盖与 effect observation 仍待积累 |
 
 ## 2. 最近一次运行核对
 
-### 2026-08-27 当前运行核对结果
+### 2026-08-28 只读复核结果（未重启，仅 DB/运行时投影）
+
+- 双服务 `quant-backend.service PID 56728` / `quant-learning-worker.service PID 2330` 均 `active/running`，`NRestarts=0`；运行 11h/12h，`system_health overall=healthy score=1.0`，`market_session open_confirmed can_open_positions true`，`risk_metrics known cvar 1.55%`，`live.loop generation 172b7fd3... running` 接受新风险，当前持仓 `285427255` 有仓且 `unknown_execution_count=0`。
+- `canonical_v2.training_sample_row 10294`：`trade_review_outcome 67（full/1.0 46 连续 2026-08-21→08-28，近 4 天 8-11/天）`，`supervisor_execution_trace 9369（eligible matured 5/10）`，`shadow_open_decision 468`；`canonical_v2.event supervisor_trace 15 / counterfactual 33 / broker_execution 127`；`runtime.broker_execution_intent confirmed 132（近 3 天 84，unknown 0）`。
+- `runtime_kv` 新鲜：`backend_readiness_snapshot.v1 05:14` `ready_for_live_execution/alpha true, autonomous_mutation false`，`runtime_factor_selection.v1 6 voters/4 groups/138 HEALTHY`，`position_supervisor_selection.v1 insufficient_evidence/0候选/fresh`，`risk_metrics_snapshot.v2 499 samples`，`evolution_cycle_watermark.v1 2026-08-28T04:25 M5`。
+- `recovery_position_state 61` 最新 `285427255` 已验证 `entry_regime trend=weak|vol=low / signal_reversal / thesis_broken_confirmations 136 / selection_key` 三生产者打通，`entry_protection_plan.supervisor_binding hash cdfe2bf...` 完整；`learning_application_log 21 (observing 9)` / `brain_memory 160 / experience 62`。
+- `governance_mutation_intent 1305 (committed 1142 / aborted 163 v16_claim 155)`，`policy_suggestion 947 (applied 39 / superseded 625)`，`factor_lifecycle SHADOW 1113 / PROMOTION_PREPARED 4 / ACTIVE 0`，`canary_state ACTIVE 0`。
+
+### 2026-08-27 受控重启核对（历史）
 
 - 本次受控重启后 `quant-backend.service` PID `901316`、`quant-learning-worker.service` PID `901526` 均为 `active/running`，两者 `NRestarts=0`；backend 启动时间为 `19:01:01`，worker 为 `19:01:10`（Asia/Shanghai）。
 - `/api/health` 核对为 `status=ok`，DB 与 cTrader connected，release identity 与 backend PID 一致；health 只证明连通和进程存活，不授予开仓权限。

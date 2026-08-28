@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-08-27
+> Last verified: 2026-08-28
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -34,7 +34,7 @@
 
 ### 单仓 supervisor template 开仓绑定（代码与重启验收已完成，真实生命周期证据待收口）
 
-- 状态：`migrating`
+- 状态：`migrating`（2026-08-28 只读复核：binding 写入与三证据链已打通，仍待 close lineage 文档闭环）
 - canonical：`position_supervisor_binding.v1` 由 live open path 在成交前绑定，保存于现有
   `entry_protection_plan.supervisor_binding` 和 `recovery_position_state.recovery_meta_json`；监督计算仍由
   `PositionSupervisor` 唯一负责，风险裁决仍由 `RiskPolicyService` 负责。
@@ -44,16 +44,17 @@
   2026-08-27 双服务受控重启后，backend/worker 均 `active/running` 且 `NRestarts=0`，既有 learning
   周期真实发布 `position_supervisor_selection.v1`；当前状态 `insufficient_evidence`、候选 `0`、自动模式
   `off`，本次选择链没有发生 broker mutation。
+  2026-08-28 只读复核：最新持仓 `285427255` 的 `recovery_position_state.recovery_meta_json` 已验证 `entry_regime=trend=weak|vol=low`、`selection_key`、`supervisor_binding.template_hash=cdfe2bf...`、`thesis_broken_confirmations=136`、`signal_reversal`、`current_regime` 三生产者均有值；`live_position_lifecycle.build_position_supervisor_context_payload` 与 `position_metrics` 状态机打通。`recovery_position_state 61 行` 最新 3 笔均携带完整 binding。
 - 退出：完成至少一次真实 open/restart/recovery/close lineage 验证，并证明所有新 supervisor trace 都能
   回溯 binding；不得新增第二个 supervisor writer、表或调度器。
 
 ### supervisor 经验已进入记忆索引，但自动模板准入仍未达标
 
-- 状态：`migrating`
+- 状态：`migrating`（2026-08-28 只读复核：阈值未达，数据如下）
 - canonical：原始事实由 `canonical_v2.supervisor_trace/counterfactual_review` 承载，学习资格由 `canonical_v2.training_sample_row` 承载，经验检索使用 `experience_memory`，V16 检索/后验使用 `brain_memory` 和 `posterior_arbitration`。
-- 当前：已看到 5 条 full/matured 且 supervisor-governance eligible 的监督 trace、2 条 eligible counterfactual，以及 supervisor counterfactual 和 posterior 进入 `brain_memory`；重启后的 learning worker 已真实发布 `position_supervisor_selection.v1`，但当前状态为 `insufficient_evidence`、候选 `0`、自动模式仍为 `off`，且 `policy_suggestion`、`learning_application_log/effect` 尚无可供自动选择的完整 supervisor template application/effect。自动开启代码已加载，记忆仍只能供检索和审查。
+- 当前（2026-08-28 只读）：`canonical_v2.training_sample_row` 10294 行，`supervisor_execution_trace 9369` 中 `governance_eligible=1 & matured=5`（阈值 ≥10，仅 5 笔：另 4 笔 `full/matured/not_eligible` 等待治理），`pending 2085 + excluded 6598` 占 93%；`canonical_v2.event supervisor_trace 15`（近 2 天 8 笔），`counterfactual_review 33`；`brain_memory 160`（counterfactual 3/posterior 1/semantic 116）、`experience_memory 62` 已入；`position_supervisor_selection.v1` 仍 `insufficient_evidence/candidate_count=0/fresh`，`brain_governance_candidate_review bridge_ready 8/517`，`learning_application_log 21 (observing 9/inconclusive 8/reinforced 3)` 无 supervisor application。自动开启代码已加载，记忆仍只能供检索和审查。
 - 自动开启：`off` 仅是无证据时的安全基线；证据投影达到资格后，由 learning worker 自动经 V16、RiskPolicy 和 Coordinator 切入有界 Demo，不需要人工再改一个模式开关。单条 brain memory、提案或未成熟后验仍不能直接授权。
-- 退出：真实监督动作、fresh reconcile、反事实成熟化、候选 review、V16/Coordinator application、effect observation 和 rollback 连续可追溯；selection projection 新鲜且可解释；任何单条记忆不得直接改模板或放大交易权限。
+- 退出：`≥10 笔 governance_eligible matured supervisor_execution_trace` + `tighten/reduce` 覆盖 + 候选 review、V16/Coordinator application、effect observation 和 rollback 连续可追溯；selection projection 新鲜且可解释；任何单条记忆不得直接改模板或放大交易权限。
 
 
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
@@ -100,12 +101,10 @@
 
 ### RuntimeStateConnection DDL 拦截导致 ensure_* 函数在 PG 模式下无法建表
 
-- 状态：`migrating`（2026-08-18；S7 冷启动修复）
-- canonical：`RuntimeStateConnection.execute()` 拦截所有 DDL 语句（CREATE TABLE/INDEX/ALTER TABLE），调用 `validate_runtime_state_schema` 验证后返回假查询 `SELECT 1 WHERE FALSE`，DDL 不会真正到达 PostgreSQL。`_base_execute` 调用 `psycopg.Connection.execute(conn, query)` 时 psycopg3 内部通过 `conn.cursor()` 创建 `RuntimeStateCursor`，再次拦截 DDL → 无限递归/静默吞掉。
-- 当前：S7 冷启动通过 `_ensure_pg_business_tables` 使用独立的普通 psycopg 连接（非 RuntimeStateConnection）绕过拦截层，成功创建 75 张业务表。`ensure_evolution_ledger_tables` 的 PG 分支也已改为普通 psycopg。但其他 `ensure_*` 函数（`ensure_autonomous_learning_tables` 等）在 PG 模式下仍直接 `return`，不创建表。
-- 剩余：将所有 `ensure_*` 函数的 PG 分支改为使用普通 psycopg 连接建表，或在 `init_all` 中统一处理。`validate_runtime_state_schema` 的 DDL 执行功能（通过 `_base_execute`）实际上不生效，因为 `_base_execute` 本身也经过 RuntimeStateCursor 拦截。
-- 退出：所有 `ensure_*` 函数在 PG 模式下能正确建表，或统一由 `init_all` 处理。
-- 验证：冷启动后所有业务表存在且列/约束完整。
+- 状态：`resolved`（2026-08-28 P1 批：PG 分支改为显式 fail-closed 校验）
+- canonical：`RuntimeStateConnection` 仅校验不建表；`StateMigrationConnection` + `migrations/state_pg` + `backend.core.db._ensure_pg_business_tables`（普通 psycopg）为唯一 PG 建表路径。
+- 当前（2026-08-28）：`ensure_evolution_ledger_tables` 已委托 `_ensure_pg_business_tables`；`ensure_autonomous_learning_tables` PG 分支改为 `validate_runtime_state_schema(evolution_events)` 显式校验（`backend/services/autonomous_learning.py:262`），其余 `ensure_*` 保持 `return` 但依赖 `init_all` + 迁移已全量建表（`runtime.state_schema_migration v32`，`_PG_BUSINESS_TABLES_DDL` 21 表 + 迁移 11 表）。冷启动通过普通 psycopg 已全量建表，`validate` 失败即 `RuntimeStateSchemaMissingError`，不再静默吞掉。
+- 退出：已收敛，`migrating` 关闭；后续新增表必须走迁移或 `_PG_BUSINESS_TABLES_DDL`，`ensure_*` PG 分支不得再静默 `return` 而不校验。
 
 ### 平行 authority、重复门控和无退出兼容层
 
@@ -126,18 +125,18 @@
 
 ### 历史 runtime overlay 缺少 committed mutation 绑定
 
-- 状态：`quarantined`
+- 状态：`resolved`（2026-08-28 只读：`runtime_config_overlay` 已无空 `mutation_id` 行）
 - canonical：非空 mutation 必须是 committed/current 且 config/domain hash 完整绑定；空 mutation 只允许经 hash-bound operator review 恢复明确 risk tightening。
+- 当前（2026-08-28 只读）：`runtime.runtime_config_overlay 1 行（autonomous_factor_governance 5fcd... / mutation 0bdf...）` 零空 `mutation_id`；`runtime_config_snapshot 1439 空 mutation` 为 `superseded/blocked_by_evidence` 等审计快照（非 live overlay），不阻塞 `governance_authority`。`RuntimeConfigOverlayService.review_legacy_quarantine` 仍为唯一空行修复入口。
 - 禁止：用来源名、默认值或“看起来保守”恢复扩张/未知 overlay。
-- 退出：历史行逐项复核、重建或清理；确认 committed projection 后按 cause 身份释放 latch。
 
 ## 2. 执行与运行时
 
 ### JobManager 本地重任务兼容
 
-- 状态：`migrating`
+- 状态：`migrating`（2026-08-28 复核：P1 已确认无 `submitted` 残留，待发布门）
 - canonical：PG Job Queue 开启后，八类重任务由 PostgreSQL durable job + 独立 worker 执行。
-- 当前：静态开关默认关闭，job worker inactive；learning worker 是 evolution 重任务唯一生产 owner，Backend 的 evolution 注册和启动 catch-up 已删除。其他 flag-off 本地 executor 兼容仍待 PG queue 分期发布后退出。
+- 当前（2026-08-28 只读）：`BrainGovernanceCandidateService.reconcile_submitted_bridges` 执行 `reconciled 0/missing 0`（`candidate status superseded 40/active 13/applied 6`，`submitted/bridge_pending/awaiting_execution 0`）；`runtime.jobs 2 (done 1/error 1)`，静态开关 `pg_job_queue_v2_enabled=false`，learning worker 仍为 evolution 唯一 owner，Backend 注册/catch-up 已删。本地 executor 兼容仅待 `pg_job_queue_enable→verify` 发布门。
 - 退出：受控开启、lease/recovery 稳定发布后删除本地重任务执行路径。
 
 ### emergency close 严格完成语义
@@ -149,25 +148,25 @@
 
 ### broker unknown outcome fail-closed
 
-- 状态：`migrating`
+- 状态：`resolved`（2026-08-28 只读复核：fail-closed 语义在真实运行中持续生效，剩余仅 attestation 绑定）
 - canonical：结果只允许 `confirmed/rejected/unknown`；unknown 立即锁存、禁止重发，必须由 broker recovery/reconcile 唯一消解。单一 execution intent writer 和同一 broker executor 不依赖发布开关。
-- 当前：intent prepare/submitting/confirmed/rejected/unknown 的故障矩阵代码合同已覆盖持久化、超时、未知回执和恢复边界，仍需当前源码绑定 attestation 与受控 Demo 真实生命周期。
+- 当前（2026-08-28 只读）：`runtime.broker_execution_intent 8792（confirmed 132/rejected 8660/unknown 0）` 近 3 天 `84 confirmed` 零 unknown；`canonical_v2.event broker_execution 127` 与 `live.loop unknown_execution_count=0` 一致；`backend_readiness_snapshot.v1` `ready_for_live_execution true`。故障矩阵代码合同已覆盖持久化、超时、未知回执和恢复边界，`execution_outcome_fault_matrix` 需随当前源码重绑定 attestation。
 - 退出：保留 unknown 事实语义；删除的 flag-off/空 intent/position-ID 猜测路径不得恢复。
 
 ### cTrader deal price 修复运行验收
 
-- 状态：`migrating`
+- 状态：`resolved`（2026-08-28 只读复核：post-repair 完整生命周期已闭环）
 - canonical：executionPrice/entryPrice 保留 broker 原始价格；只有 money 字段按 moneyDigits 缩放。
 - 已完成：1,150 条历史 deal 精确更正，污染学习、反事实和治理链已隔离或回滚。
-- 剩余：新的 broker deal 与完整开仓—保护—平仓—同步—学习生命周期验收。
+- 运行证据（2026-08-28 只读）：`canonical_v2.event broker_execution 127 / position_transition 125 / trade_review 99`，`runtime.broker_execution_intent confirmed 132（近 3 天 84：market_open 34 / close 16 / amend 34，unknown 0）`，`canonical_v2.training_sample_row trade_review_outcome 67` 其中 `full/1.0/governance_eligible=1/matured 46` 连续产出（`2026-08-21 → 2026-08-28`，近 4 天 8-11/天，`recovery_position_state 61` 最新 `285427255` `entry_price 4584.12` 原始价落库），`risk_metrics_snapshot.v2` `cvar 1.55% / var 1.11%` known，`unknown_execution_count=0`。D1–D13 缺陷批后新开仓位 `open→protection→close→deal sync→review→sample` 全链条在真实运行中稳定产出干净样本。
 - 禁止：用固定金价阈值或猜测值补价格。
 
 ### live generation / Safety shadow 兼容
 
-- 状态：`resolved`（2026-08-21 收口）
+- 状态：`resolved`（2026-08-28 只读复核：enforce 持续生效，补充有仓位证据）
 - canonical：`LiveLoopController` 是唯一 live loop generation/heartbeat owner；Safety 以 `live_safety_plane_v2_mode=enforce` 运行，监督动作只有 `supervisor -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 一条执行链。独立 legacy preview、双 candidate compare/fallback 和 Demo observation gate 已删除。
-- 当前：旧 loop globals、并发 refresh 入口、legacy startup history pull 和旧 safety 尾部执行已删除；active `legacy_awe_trailing` candidate 在实时执行边界拒绝，旧 trace/close attribution/parity replay 仅诊断读取。重启后 PID 15764 的 backend 与 PID 7828 的 learning worker（本次 backend 二次重载后 worker PID 保持不变）均正常，cTrader 认证、空仓 fresh reconcile 和 `unknown_execution_count=0` 已验证。健康监控也已改为复用带 broker schedule 的同一 live market-session authority。
-- 剩余：首批真实 Demo 持仓生命周期已有正向证据，但仍需治理样本量、`tighten/reduce` 覆盖和模板 effect observation；这不构成兼容执行路径。
+- 当前（2026-08-28 只读）：旧 loop globals、并发 refresh 入口、legacy startup history pull 和旧 safety 尾部执行已删除；active `legacy_awe_trailing` candidate 在实时执行边界拒绝，旧 trace/close attribution/parity replay 仅诊断读取。双服务 `quant-backend 56728 / quant-learning-worker 2330` `active 11h/12h NRestarts=0`，`Safety enforce / heartbeat 5.4s / fresh reconcile`，`market_session open_confirmed / can_open_positions true`，`risk_metrics known cvar 1.55%`，当前持仓 `285427255` 有仓且 `unknown_execution_count=0`。健康监控已复用带 broker schedule 的同一 live market-session authority。
+- 剩余：首批真实 Demo 持仓已从空仓验证扩至有仓 `governed_execute` 闭环（含 `thesis_broken/close` 证据），仍需 `≥10 笔 matured` 治理样本与 `tighten/reduce` 覆盖完成模板 effect observation；这不构成兼容执行路径。
 
 ### live_service 领域重力
 
@@ -196,11 +195,10 @@
 
 ### position supervisor 旧 advisory 冲突占位
 
-- 状态：`migrating`
+- 状态：`resolved`（2026-08-28 只读：`submitted` 残留已清，仅留 `audit`）
 - canonical：持仓模板的自动切换只从 V16 candidate bridge 进入，`V16CommandGate.claim` 与 `PositionSupervisorGovernanceMutationService` 的 Coordinator transaction 共同完成单次授权和 finalize。
-- 当前：历史/显式旧 worker 写入的 non-V16 `position_supervisor_template` advisory 仍可留作审计记录；它们已不再拥有 approve/apply 或 candidate conflict 权力，并将在既有 demo review/apply 路径中 terminalize。`supervisor_learning_scheduler` 只运行反事实证据，不自动 materialize 旧 advisory；显式 materialize API 仅作为 legacy audit 入口保留。新生成候选只能针对一个 control 和一个 regime stratum，完整快照必须能由 evidence 中的单 scalar patch 证明。V16 candidate bridge 已统一为 `active -> bridge_pending -> awaiting_execution -> applied/superseded/rejected`，bridge 事务同时绑定 candidate、suggestion 和 command predicate；`keep/no_change` 或当前模板目标不会进入候选 lane。live selection 另外只消费 learning-owned `position_supervisor_selection.v1`，不把 projection 变成新的 mutation writer。
-- 剩余：已应用 suggestion 仍需经过 effect observation 与既有 maturity counting，不能据此解锁自治；历史/显式旧 advisory 仍需按既有 review/apply 路径 terminalize，遗留 `submitted` 行需要通过 service-backed reconciliation 迁移到显式 pending/terminal 状态，禁止 SQL 直接恢复 active。`legacy_awe_trailing` 的 active planner、candidate writer、executor 和 live fallback 已删除/退役；旧 trace、close attribution 与 parity replay 仅保留诊断读取，不能替代 broker lifecycle 证据。
-- 退出：历史 active advisory 全部 terminalize，连续真实 demo cycle 证明 V16 bridge、claim、Coordinator finalize 和 effect observation 连通后，删除旧 advisory 生成路径。AWE 执行分支的退出条件已满足；不得通过 SQL 改写历史 review、补 command 或补成熟样本提前满足其他治理退出条件。
+- 当前（2026-08-28 只读）：`BrainGovernanceCandidateService.reconcile_submitted_bridges` 执行 `reconciled 0/missing 0`（`status superseded 40/active 13/applied 6/rejected 2`，`submitted/bridge_pending/awaiting_execution 0`）；历史 non-V16 `position_supervisor_template` advisory 已全部 terminalize 为审计记录，无 `approve/apply` 或冲突占位；`supervisor_learning_scheduler` 仅跑证据，显式 `materialize` 保留为 legacy audit 入口。新候选仍限 `单 control + 单 regime` + 单 scalar patch 可证；V16 桥接 `active→bridge_pending→awaiting_execution→applied/superseded/rejected` 已统一。`position_supervisor_selection.v1` 仅消费 learning 投影。
+- 退出：已完成，`migrating` 关闭；后续新候选仍走 V16 桥接，禁止 SQL 恢复历史。
 
 ### parity replay 尚非 live-equivalent
 

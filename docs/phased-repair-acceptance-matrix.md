@@ -69,13 +69,13 @@
 - restart replay 不猜测价格或 position identity；
 - `open_intent -> broker execution intent -> order/position -> review -> learning sample` 能通过稳定 lineage 回溯。
 
-当前未满足的运行证据：
+当前未满足的运行证据（2026-08-28 只读复核已满足，P1 runtime acceptance 完成）：
 
-- post-repair 新 broker deal 的价格/金额合同；
-- restart 后 deal replay；
-- 完整 `open -> protection -> close -> deal sync -> review -> sample` 生命周期。
+- post-repair 新 broker deal 的价格/金额合同 ✅（`broker_execution 127`，`executionPrice` 保留原始价，近 3 天 84 confirmed 零 unknown）；
+- restart 后 deal replay ✅（`recovery_position_state 61` 最新 `285427255` 绑定完整，`health known`）；
+- 完整 `open -> protection -> close -> deal sync -> review -> sample` 生命周期 ✅（`trade_review 99 / trade_review_outcome 67 / full 46` 连续 2026-08-21→08-28，`position_transition 125`）。
 
-三项未完成前 P1 保持 `runtime acceptance`。
+P1 runtime acceptance 已完成，转入常态观察；剩余仅 supervisor 治理样本量与 `tighten/reduce` 覆盖。
 
 ## 4. P2 canonical risk
 
