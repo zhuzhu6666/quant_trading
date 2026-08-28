@@ -326,23 +326,7 @@ class ModelInfluenceGovernanceService:
             },
             idempotency_key=f"model-demote:{model_type}:{previous_stage}:{reason}",
         )
-        if governance_coordinator_mode() == "off":
-            # One-release compatibility path.  dual/enforce must derive the
-            # tightening classification from before/after and cannot consume
-            # this historical caller assertion.
-            from backend.services.runtime_config_mutation import RuntimeConfigMutationService
-
-            mutation = RuntimeConfigMutationService(self.db_path).apply_patch(
-                dict(plan.patch),
-                source=plan.source,
-                run_id=plan.run_id,
-                actor=plan.actor,
-                action=plan.action,
-                reason=plan.reason,
-                risk_reduction=True,
-            )
-        else:
-            mutation = plan.execute(self.db_path)
+        mutation = plan.execute(self.db_path)
         return {"ok": bool(mutation.get("ok")), "status": mutation.get("status"), "mutation": mutation}
 
     def reconcile_active_models(self) -> dict[str, Any]:

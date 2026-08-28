@@ -843,18 +843,12 @@ class ParameterTemplateService:
                 f"template factor mismatch: {template_id} is not for {factor_id}"
             )
         if governance_coordinator_mode() == "off":
-            return self._activate_template_legacy(
-                factor_id=factor_id,
-                template_id=template_id,
-                regime_key=regime_key,
-                suggestion_id=suggestion_id,
-                note=note,
-                allow_offline_deep=allow_offline_deep,
-                v16_command_id=v16_command_id,
-                v16_candidate_id=v16_candidate_id,
-                v16_posterior_fingerprint=v16_posterior_fingerprint,
-                v16_evidence_fingerprint=v16_evidence_fingerprint,
-            )
+            return {
+                "ok": False,
+                "blocked": True,
+                "status": "governance_coordinator_off_unsupported",
+                "reason": "off_mode_removed_enforce_is_required",
+            }
         return self._activate_template_coordinated(
             factor_id=factor_id,
             template_id=template_id,
@@ -2258,7 +2252,7 @@ class ParameterTemplateService:
         if not row or str(row["status"] or "") != "approved":
             return False
         if governance_coordinator_mode() == "off":
-            return True
+            return False
         return bool(
             row["governance_eligible"]
             and str(row["governance_eligibility_version"] or "")
