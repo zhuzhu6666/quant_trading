@@ -188,10 +188,10 @@
 
 ### 治理 mutation 跨账本提交兼容
 
-- 状态：`migrating`
+- 状态：`migrating`（2026-08-28 14:14 空窗已切 `enforce`，带仓后 code 删除顺延）
 - canonical：`GovernanceMutationCoordinator` 在同一 PG 事务内 reserve、重验 before、写 intent/领域事实、finalize；commit 后才发布 RuntimeConfig。
-- 当前：mode 为 dual-record；旧 off 兼容与旧 ledger 投影仍在。只读 release preflight 已按 `error_stage=v16_claim` 与真实 transaction/recovery failure 分类 aborted intent，不改变状态机或应用证据要求。
-- 退出：稳定 enforce 发布后删除旧 consume/direct overlay/Registry mutation 兼容。
+- 当前（2026-08-28 只读）：静态开关 `governance_mutation_coordinator_v2_mode enforce` 已双服务加载（`backend 891039 / worker 891040 fingerprint f2b877...`），`release_runtime production_loaded true repo clean`，`pg_job_queue_enable` 预检 `static ok` 但被 `latch active (285431515)` + `ready_for_autonomous_mutation false` 阻断（有仓预期）。旧 `off` 兼容分支仍在（`parameter_templates:845/2260`, `model_influence:329`, `runtime_config_mutation:213`, `factor_governance:2548`），需下一空窗删除。
+- 退出：稳定 enforce 观察后删除旧 `off` 的 `consume/direct overlay/Registry` 写入兼容（保留隔离测试覆盖）。
 
 ### position supervisor 旧 advisory 冲突占位
 

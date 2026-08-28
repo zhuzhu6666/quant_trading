@@ -18,7 +18,7 @@
 | S4 全量验证 | complete | 2926 passed / 12 skipped（2026-08-27 最终回归） |
 | S5 清库物理 | complete | 10.8GB → 9.7MB，canonical_v2 9 表空 + runtime 6 表空结构 |
 | S6 容量阀 P6 | pending | event 分区、保留窗口、归档、容量监控（evolution_story.jsonl 50605 行/140M 待轮转方案） |
-| S7 启动验证+进化闭环首验 | in_progress | 双服务冷启动 ✅；**evolution_decision 8 列单轨 & learning_application 精简 schema 已收敛**；**S7.6 核心闭环已达成**：D 批后 `trade_review_outcome full/1.0 46 笔`（2026-08-21→08-28，近 4 天 8-11/天）`open→protection→close→deal sync→review→sample` 稳定产出，`broker_execution 127`/`position_transition 125`/`trade_review 99`；**cTrader 价格合同与 broker unknown fail-closed 已只读复核通过**，剩余仅 attestation 绑定；持仓监督 `governed_execute` 单轨+单仓 binding 已打通（`285427255` 绑定与三证据链验证），但 `supervisor_execution_trace governance_eligible matured 5/10` 未达自动 Demo 阈值，`position_supervisor_selection.v1 insufficient_evidence/0 候选/off`，`tighten/reduce` 覆盖与 effect observation 仍待积累 |
+| S7 启动验证+进化闭环首验 | in_progress | 双服务冷启动 ✅；**evolution_decision 8 列单轨 & learning_application 精简 schema 已收敛**；**S7.6 核心闭环已达成**（`trade_review_outcome full/1.0 46` `2026-08-21→08-28` 8-11/天, `broker 127/position 125/review 99`）；**cTrader/unknown 已通过**；持仓监督 `governed_execute` 单轨+单仓 binding 已打通（`285427255`），但 `supervisor_execution_trace 5/10` 未达 `off→Demo` 阈值，`selection insufficient_evidence` 待积累；**治理已切 `enforce`（2026-08-28 14:14 空窗，双服务 891039/891040 loaded），`off` 代码删除顺延至下一空窗** |
 
 ## 2. 最近一次运行核对
 
