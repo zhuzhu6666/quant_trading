@@ -666,9 +666,9 @@ class RuntimeConfig:
     var_window: int = 500                        # 滚动窗口
     var_alpha: float = 0.95                      # 置信水平
     var_method: str = "historical"               # parametric | historical | monte_carlo
-    var_cvar_threshold: float = 0.02             # CVaR > 2% equity → 熔断
+    var_cvar_threshold: float = 0.025            # CVaR > 2.5% equity → 熔断
     risk_var_threshold_pct: float = 2.0          # VaR > 2% equity → 阻断新开仓
-    risk_cvar_threshold_pct: float = 2.0         # CVaR > 2% equity → 阻断新开仓
+    risk_cvar_threshold_pct: float = 2.5         # CVaR > 2.5% equity → 阻断新开仓
 
     # --- 5.2 Kelly 动态仓位 ---
     kelly_enabled: bool = True                   # 是否启用 Kelly 仓位

@@ -1,7 +1,7 @@
 # 前端操作台产品合同
 
 > Status: active
-> Last verified: 2026-08-13
+> Last verified: 2026-08-28 (reviewed, no semantic change from 08-13; server API/WSS-only, Windows本地 renderer 已落地)
 > Scope: Tauri/React 操作台的信息架构、工作区、动作和视觉语义。
 
 本文只定义本地 Tauri 桌面端和小程序如何组织、消费事实。Fact envelope、freshness、认证和后端
@@ -245,7 +245,7 @@ Integrated Architecture Topology | Selected Architecture Node
 
 - 在同一张拓扑图中查看实时执行主干、市场/外部数据、智能学习反馈、治理后验、服务运维和客户端消费之间的职责与传输关系；
 - 点击架构节点查看输入、输出、事实来源、最近观测时间和 reason_code；
-- 查看 cTrader、serial live loop、因子/信号、Safety/RiskPolicy、执行对账、state_v1 和桌面消费之间的职责关系；
+- 查看 cTrader、serial live loop、因子/信号、Safety/RiskPolicy、执行对账、PostgreSQL `runtime`/`canonical_v2` 和桌面消费之间的职责关系；
 - 点击节点查看来源、最近观测时间、reason_code 和当前只读状态；
 - 查看学习证据、治理 Coordinator 和 committed projection 如何回流到下一轮 live loop。
 

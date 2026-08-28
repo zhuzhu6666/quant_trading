@@ -1,10 +1,9 @@
 # Handoff / Next-Batches TODO（项目接续总览）
 
-> Status: active handoff — 2026-08-18（**2026-08-28 复核**：S7.6 46 笔干净样本连续产出，单仓 binding 三链打通，cTrader/unknown 已通过，supervisor 治理样本 5/10 待积累，治理 B 批待下一空窗加载；最新先读 docs/README.md）
-> 用途：给**新会话**的唯一"剩余待办"入口；动手前必须先以只读方式复核真实状态，再执行。
-> 已验证基线（2026-08-18 收敛批交付后实测）：全量回归 **2813 passed / 12 skipped**；
-> 剩余 3 项 `test_state_store_schema_guard` 失败为 S 阶段既有债务（见 §P4）。
-> 最新基线：2026-08-22 缺陷批后全量回归 **2775 passed / 12 skipped**（数量差异来自 D7 测试隔离与净删，无回退）。
+> Status: active handoff — 2026-08-28 (HEAD f2eb9c9; 治理 enforce 已加载, off 直连已删)
+> 2026-08-28 复核：S7.6 46 笔 full/1.0 (2026-08-21→28) + broker 127/position 125/review 99 闭环; cTrader/unknown 0; supervisor 5/10 matured 待积累; `f2eb9c9` 后生产即 HEAD, 无待重启 B 批; 最新先读 `docs/README.md`。
+> 用途：给**新会话**的唯一“剩余待办”入口；动手前必须先以只读方式复核真实状态，再执行。
+> 已验证基线：2026-08-22 缺陷批后 **2775 passed / 12 skipped**；2026-08-19 P4 后 **2782 passed / 12 skipped / 0 failed**（schema_guard 已修复）；当前 HEAD 需以最新针对性测试为准，全量仅在发布门跑。
 
 ---
 
@@ -29,7 +28,7 @@
 ## 2. 待办 P1 — 运行验证 & 进化闭环（需真实运行 / 用户操作为主）
 
 - [x] **受控重启双服务加载当前工作区代码（完成 2026-08-19 19:51，用户授权）**：quant-backend / quant-learning-worker 均已加载最新工作区代码（P2 清扫 / P4 schema-guard / learning_application 收敛 / 0019 索引全部随重启生效）。验：backend 启动 0 模块/导入错误、cTrader App→Account→fully authenticated、background connect OK、symbol schedule 加载；worker 数据库初始化、RuntimeConfig 加载、调度器启动、nursery 注册正常；首次 utility 周期 evolution_hourly `executed successfully`；**重启后 missing-index 报错 0 次**（0019 修复在运行态生效）；三服务均 active。
-- [x] **S7.5 观察（2026-08-28 只读复核已完成）**：`quant-backend 56728 / learning-worker 2330 active 11h/12h`，`system_health healthy`，`live loop enforce running`，`market open`，`risk known`，近 12h 零 ERROR/WARN。
+- [x] **S7.5 观察（2026-08-28 14:14 只读复核已完成）**：`quant-backend 891039 / quant-learning-worker 891040 active`，`system_health healthy`，`live loop enforce running`，`market open`，`risk known`；`governance enforce` 已加载，`off` 直连已删。
 - [x] **S7.6 进化闭环首验（✅ 达成并持续 2026-08-28）**：`trade_review 99 / broker_execution 127 / position_transition 125`，`trade_review_outcome full/1.0 46 笔`（`2026-08-21 18:28 → 08-28 03:00`，近 4 天 8-11/天，最新 `285419894 2026-08-28 03:00`），`open→protection→close→deal sync→review→sample` 全链条稳定产出；`cTrader 价格/unknown` 已只读复核通过。历史 8 笔回放降级样本（train_weight=0）与 supervisor trace partial/0.0 按合同保留审计。转入常态观察。
 - [ ] **S7.6+ 监督治理闭环**：`supervisor_execution_trace eligible matured 5/10`，`position_supervisor_selection.v1 insufficient_evidence/0候选/off`，`brain_memory 160/experience 62` 已入但未达 `≥10 笔` 阈值，仍需 `tighten/reduce` 覆盖与 V16→Coordinator→effect 连续验证才能自动切 Demo。
 - 备注：旧卡死 run `evorun_552d20cc1bd84204`（position_supervisor_trace_maturation）会在下次 evolution run 启动时被 `expire_stale_evolution_runs` 自动 expire；下个周期 trace maturation 应能正常落库闭合。
@@ -97,11 +96,11 @@
 
 ## 8. 相关文档路由
 
-- `docs/README.md` — 项目入口/阶段/主线
-- `docs/phased-repair-rollout-status.md` — 当前状态索引 + 批次记录（learning_application 批与 **2026-08-19 P2·S3 遗留清扫批**均在此 §3）
-- `docs/planning/final-execution-checklist.md` — 停机重建蓝本（S3 复核明细、S7.4b 收敛记录）
-- `docs/legacy-debt-register.md` — 债务（learning_application 已 resolved；schema-guard 新增）
-- `docs/system-source-of-truth.md` — 事实源（learning_application_log/effect 精简契约 + 唯一 store 已写）
+- `docs/README.md` — 项目入口/阶段/主线（HEAD f2eb9c9）
+- `docs/phased-repair-rollout-status.md` — 当前状态索引 + 批次记录
+- `docs/legacy-debt-register.md` — 债务（治理 enforce 已 resolved；剩余 migrating 需持续收口）
+- `docs/system-source-of-truth.md` — 事实源（治理 enforce 已切，off 路径已删）
 - `docs/change-impact-checklist.md` — 影响面
-- `docs/planning/handoff-next-batches-2026-08-18.md` — 项目接续总览（本文件即是该 handoff 的唯一待办入口）
-- `docs/planning/audit-defects-2026-08-21.md` — **全项目缺陷审计（D1–D10，未修复待处理）**：幽灵 ACTIVE/applied 账本矛盾、测试写生产事件流、双头配置等，处理前先读此文件
+- `docs/planning/handoff-next-batches-2026-08-18.md` — 项目接续总览（本文件即是唯一待办入口）
+- `docs/planning/production-autonomy-repair-optimization-plan.md` — 唯一生产计划
+- 历史专项文档（`final-execution-checklist` / `architecture-audit` / `audit-defects` / `handoff-2026-08-18-rebuild`）已归档 Git 历史，不再作为活动路由

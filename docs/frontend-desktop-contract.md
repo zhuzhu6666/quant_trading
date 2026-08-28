@@ -1,7 +1,7 @@
 # 前端桌面合同
 
 > Status: active
-> Last verified: 2026-08-13
+> Last verified: 2026-08-28 (reviewed, no semantic change from 08-13; server API/WSS-only, Windows本地 renderer 已落地)
 > Scope: Tauri 2、Windows 本地运行、认证、缓存、离线和本地诊断。
 
 本文定义桌面壳的安全和运行边界。后端仍是唯一事实源和执行权威；本文不授权

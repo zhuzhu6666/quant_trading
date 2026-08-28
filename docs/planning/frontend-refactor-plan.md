@@ -1,7 +1,7 @@
 # 前端重构实施计划
 
 > Status: active
-> Last verified: 2026-08-13
+> Last verified: 2026-08-28 (reviewed, scoped companion of production plan; server sparseCheckout 已收口)
 > Scope: web_frontend 原地重构为 Tauri 桌面优先的量化操作台。
 > Owner: 前端工程
 

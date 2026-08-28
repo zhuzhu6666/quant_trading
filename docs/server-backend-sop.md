@@ -1,7 +1,7 @@
 # Server Backend SOP
 
 > Status: active
-> Last verified: 2026-08-14
+> Last verified: 2026-08-28 (reviewed, sparseCheckout/Caddy API/WSS-only 已于 08-14 收口; f2eb9c9 enforce 已加载)
 > Scope: Linux backend/API/WSS startup, logs, PostgreSQL, cTrader, restart, and runtime acceptance.
 
 这份文档只服务一个目标：

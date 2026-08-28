@@ -1,7 +1,7 @@
 # Learning Evidence Contract
 
 > Status: active
-> Last verified: 2026-08-27
+> Last verified: 2026-08-28 (reviewed, governance_eligible/fingerprint 合同未变)
 > Scope: evidence semantics for learning samples, model training, governance, and autonomous replay/audit.
 
 目标：让规则系统产生的数据、训练样本、模型产出都具备同一种可解释、可追溯、可被机器识别的证据语义。

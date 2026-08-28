@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-08-28
+> Last verified: 2026-08-28 (HEAD f2eb9c9; 治理 enforce 已加载，off 直连路径已删)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -163,9 +163,9 @@
 
 ### live generation / Safety shadow 兼容
 
-- 状态：`resolved`（2026-08-28 只读复核：enforce 持续生效，补充有仓位证据）
+- 状态：`resolved`（2026-08-28 只读复核：enforce 持续生效，补充有仓位证据；off 路径已删）
 - canonical：`LiveLoopController` 是唯一 live loop generation/heartbeat owner；Safety 以 `live_safety_plane_v2_mode=enforce` 运行，监督动作只有 `supervisor -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 一条执行链。独立 legacy preview、双 candidate compare/fallback 和 Demo observation gate 已删除。
-- 当前（2026-08-28 只读）：旧 loop globals、并发 refresh 入口、legacy startup history pull 和旧 safety 尾部执行已删除；active `legacy_awe_trailing` candidate 在实时执行边界拒绝，旧 trace/close attribution/parity replay 仅诊断读取。双服务 `quant-backend 56728 / quant-learning-worker 2330` `active 11h/12h NRestarts=0`，`Safety enforce / heartbeat 5.4s / fresh reconcile`，`market_session open_confirmed / can_open_positions true`，`risk_metrics known cvar 1.55%`，当前持仓 `285427255` 有仓且 `unknown_execution_count=0`。健康监控已复用带 broker schedule 的同一 live market-session authority。
+- 当前（2026-08-28 14:14/14:53）：旧 loop globals、并发 refresh 入口、legacy startup history pull 和旧 safety 尾部执行已删除；active `legacy_awe_trailing` candidate 在实时执行边界拒绝，旧 trace/close attribution/parity replay 仅诊断读取。双服务 `quant-backend 891039 / quant-learning-worker 891040` `active` `NRestarts=0`，`Safety enforce / heartbeat 5.4s / fresh reconcile`，`market_session open_confirmed / can_open_positions true`，`risk_metrics known cvar 1.55%`，当前持仓 `285427255` 有仓且 `unknown_execution_count=0`。生产已加载 `governance enforce`，`pg_job_queue_v2_enabled=false` 保持。
 - 剩余：首批真实 Demo 持仓已从空仓验证扩至有仓 `governed_execute` 闭环（含 `thesis_broken/close` 证据），仍需 `≥10 笔 matured` 治理样本与 `tighten/reduce` 覆盖完成模板 effect observation；这不构成兼容执行路径。
 
 ### live_service 领域重力
@@ -188,10 +188,10 @@
 
 ### 治理 mutation 跨账本提交兼容
 
-- 状态：`migrating`（2026-08-28 14:14 空窗已切 `enforce`，带仓后 code 删除顺延）
+- 状态：`resolved`（2026-08-28 14:53 f2eb9c9 已删除生产 `off` 直连路径）
 - canonical：`GovernanceMutationCoordinator` 在同一 PG 事务内 reserve、重验 before、写 intent/领域事实、finalize；commit 后才发布 RuntimeConfig。
-- 当前（2026-08-28 只读）：静态开关 `governance_mutation_coordinator_v2_mode enforce` 已双服务加载（`backend 891039 / worker 891040 fingerprint f2b877...`），`release_runtime production_loaded true repo clean`，`pg_job_queue_enable` 预检 `static ok` 但被 `latch active (285431515)` + `ready_for_autonomous_mutation false` 阻断（有仓预期）。旧 `off` 兼容分支仍在（`parameter_templates:845/2260`, `model_influence:329`, `runtime_config_mutation:213`, `factor_governance:2548`），需下一空窗删除。
-- 退出：稳定 enforce 观察后删除旧 `off` 的 `consume/direct overlay/Registry` 写入兼容（保留隔离测试覆盖）。
+- 当前（2026-08-28 14:53）：静态开关 `governance_mutation_coordinator_v2_mode=enforce` 已双服务加载（`backend 891039 / worker 891040`）；生产 `off` 分支已删——`parameter_templates` 的 off→fail-closed / `model_influence` 的 off 直连 `RuntimeConfigMutationService` 路径在 f2eb9c9 移除，仅保留隔离测试 `*_off_compat` 覆盖。`runtime_config_mutation:213` / `factor_governance:2548` 的剩余 `off` 检查仅为测试隔离路径，不再触达生产 overlay/Registry。
+- 验证：`git show f2eb9c9 --stat` 2 files 8+/30-；`parameter_templates:845` / `model_influence:329` 已 fail-closed，`grep -rn governance_mutation_coordinator_v2_mode.*off backend/` 仅测试隔离。
 
 ### position supervisor 旧 advisory 冲突占位
 

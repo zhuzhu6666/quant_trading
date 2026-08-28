@@ -56,7 +56,7 @@ class RiskLimitSnapshot:
     loss_cooldown_bars: int = 3
     block_on_disk_critical: bool = True
     var_threshold_pct: float = 2.0
-    cvar_threshold_pct: float = 2.0
+    cvar_threshold_pct: float = 2.5
     circuit_breaker_bypass: bool = False
 
     @classmethod
@@ -68,7 +68,7 @@ class RiskLimitSnapshot:
                 cfg = runtime_config()
             except Exception:
                 cfg = None
-        legacy_var_threshold = getattr(cfg, "var_cvar_threshold", 0.02) if cfg is not None else 0.02
+        legacy_var_threshold = getattr(cfg, "var_cvar_threshold", 0.025) if cfg is not None else 0.025
         max_daily_trades, source = _daily_trade_limit_from_config(cfg)
         return cls(
             source=source,
@@ -81,7 +81,7 @@ class RiskLimitSnapshot:
             loss_cooldown_bars=_safe_int(getattr(cfg, "risk_loss_cooldown_bars", 3), 3),
             block_on_disk_critical=bool(getattr(cfg, "risk_block_on_disk_critical", True)),
             var_threshold_pct=_pct_value(getattr(cfg, "risk_var_threshold_pct", legacy_var_threshold), 2.0),
-            cvar_threshold_pct=_pct_value(getattr(cfg, "risk_cvar_threshold_pct", legacy_var_threshold), 2.0),
+            cvar_threshold_pct=_pct_value(getattr(cfg, "risk_cvar_threshold_pct", legacy_var_threshold), 2.5),
             circuit_breaker_bypass=bool(getattr(cfg, "risk_circuit_breaker_bypass", False)),
         )
 

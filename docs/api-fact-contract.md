@@ -1,7 +1,7 @@
 # API Fact Contract
 
 > Status: active
-> Last verified: 2026-08-13
+> Last verified: 2026-08-28 (reviewed, no semantic change from 08-13; fact.v1 envelope unchanged)
 > Scope: additive `fact.v1` provenance and freshness contract for public API and WebSocket read models.
 
 本文只定义“这个值来自哪里、观测于何时、现在是否可信”，不改变各端点原有业务字段。运行与治理权力边界仍以 `system-source-of-truth.md` 为准。

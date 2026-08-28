@@ -1,7 +1,7 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-08-28 (S7.6 已 46 笔干净样本连续产出；单仓 binding 三链打通；cTrader/unknown 已只读复核通过；双服务 active 11h/12h、market open、risk known)
+> Last verified: 2026-08-28 (HEAD f2eb9c9; S7.6 46 笔干净样本持续; 单仓 binding 三链打通; cTrader/unknown 已复核; 治理 enforce 891039/891040 14:14 flat 已加载; off 直连路径已删)
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读对应合同。
@@ -9,13 +9,13 @@
 ## 1. 当前结论
 
 - 开发基线为 `main`；发布流程会从该基线创建临时发布分支。
-- **当前姿态（2026-08-22）**：生产运行态统一使用 PostgreSQL `runtime`，不可变事实与学习样本统一使用 `canonical_v2`；migration ledger 已到 v32（0031 factor_health 合同对齐、0032 jobs 主键恢复），旧 runtime 事实表已退役。
+- **当前姿态（2026-08-28 HEAD f2eb9c9）**：生产运行态统一使用 PostgreSQL `runtime`，不可变事实与学习样本统一使用 `canonical_v2`；migration ledger 已到 v32（0031 factor_health 合同对齐、0032 jobs 主键恢复，runtime 32/32 ok），旧 runtime 事实表已退役。
 - **旧库清理（已完成）**：旧 `state_v1`、`public`、`legacy_mapping` 和本地 SQLite `data/state.db` 运行路径均已退役；生产代码不再读取、写入或重建这些路径。
 - **运行态迁移门（已完成，运行时风险门仍独立生效）**：service-backed cleanup 已清理旧 runtime 事实，普通监督执行使用 `governed_execute -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 单轨链。当前若 readiness 阻断，只能来自实时 market/session、Safety、incident 或 broker 事实，不代表迁移回退或兼容路径仍在。
 - **A 类结构修复（已完成）**：A1 trade_review 实时写入器 ✅ / A2 label 单一口径 ✅ / A3 posterior 触发放宽 ✅ / A4 win 单正反馈 ✅ / A5 effect 归因链代码就绪 ✅ / A6 supervisor_trace 成熟链 ✅。
-- **缺陷批 D1–D13（2026-08-22 已部署生效，详见 planning/audit-defects-2026-08-21.md）**：D11 factor_health 表合同错位（学习链总断点）、D12 jobs 主键、D7 测试污染生产 JSONL、D1 幽灵 canary 毕业、D3/D6 权重噪声与诊断字段、D13 关键写失败静默。全量回归 2775 passed 后受控重启，重启后 60 分钟 0 ERROR；factor_health 健康报告首次落库成功（64 行，40 余天来首次）。学习链断点已解除。
+- **缺陷批 D1–D13（2026-08-22 已部署生效，Git 历史 b69ec07/cfc126e）**：D11 factor_health 表合同错位（学习链总断点）、D12 jobs 主键、D7 测试污染生产 JSONL、D1 幽灵 canary 毕业、D3/D6 权重噪声与诊断字段、D13 关键写失败静默。全量回归 2775 passed 后受控重启，重启后 60 分钟 0 ERROR；factor_health 健康报告首次落库成功（64 行，40 余天来首次）。学习链断点已解除。审计明细已归档 Git 历史，不再保留独立审计文档。
 - **闭环证据现状（2026-08-28 只读复核）**：S7.6 终验标准已达成并持续——D 批后 `trade_review_outcome full/1.0 46 笔`（`2026-08-21 18:28 → 2026-08-28 03:00`，近 4 天 8-11/天，`broker_execution 127`/`position_transition 125`/`trade_review 99`），`open → protection → close → deal sync → review → sample` 全链条稳定产出；`cTrader 价格合同`与 `broker unknown 0` 已只读复核通过。`supervisor_execution_trace` 仅 `governance_eligible matured 5/10`，`position_supervisor_selection.v1 insufficient_evidence/0候选/off`，仍需 `tighten/reduce` 覆盖与 effect 观察才能自动 Demo。历史 8 笔回放降级样本（train_weight=0）保留审计；supervisor trace partial/0.0 排除训练。
-- **Git 基线**：2026-08-26 已提交并推送告警边沿触发批（5a4e4db）与治理合同收紧批 B（cfc126e）及文档批（b69ec07）至 origin/main。**生产服务 2026-08-28 01:37 已重建**（`quant-backend 56728 / learning-worker 2330`），当前为 `98e6466` 基线；B 批业务告警/治理收紧代码已在工作区验证（`test_governance_contract_convergence 8` + `test_live_service_business_alerts 5`），待下一空仓窗口重启加载。
+- **Git 基线**：`f2eb9c9` (2026-08-28 14:53 `refactor(governance): remove off-mode direct overlay paths`)。已包含告警边沿批 5a4e4db / 治理收紧批 cfc126e / 文档批 b69ec07 / 监督链修复 24894dc/a737554 / P1+enforce 23c2a3f+0daee55。**生产服务 2026-08-28 14:14 已重建**（`quant-backend 891039 / quant-learning-worker 891040`，`governance_mutation_coordinator_v2_mode=enforce` 已加载，`off` 直连路径已删）；当前 HEAD 即生产基线，无待重启 B 批。
 - **代码收敛（S2/S3 完成）**：db_helpers 公共层（33 文件）+ 四域清扫（9 空壳 + EvolutionKernel + 零调用转发 + consume 包装器）+ A1–A6 / B1–B5 结构修复；历史全量回归记录保留在对应 rollout 文档，当前发布以本批新鲜针对性/全量验证为准。
 - legacy 事实迁移的旧表述（P1/P2/P4/P5、1,702 处、schema version 20）已被"全库清空重建"取代，仅历史参考。
 - 前端（miniprogram_v2 / web_frontend）在 Windows 本地维护；服务器后端-only sparse checkout，只提供 API 与 `/ws/state`。
@@ -105,10 +105,10 @@ learning worker
 ### 当前工程收口
 
 - [planning/production-autonomy-repair-optimization-plan.md](planning/production-autonomy-repair-optimization-plan.md)：唯一活动实施计划；
-- [planning/final-execution-checklist.md](planning/final-execution-checklist.md)：停机重建终极执行清单（canonical 单库 + 架构清扫 + 学习进化结构修复 + 冷启动），当前停机专项蓝本；
-- [planning/architecture-audit-2026-08-18.md](planning/architecture-audit-2026-08-18.md)：全项目架构审计 + 清库重建问题点全清单；
 - [phased-repair-rollout-status.md](phased-repair-rollout-status.md)：当前阶段、运行姿态和未完成证据；
 - [phased-repair-acceptance-matrix.md](phased-repair-acceptance-matrix.md)：可重复验收门和发布证据。
+
+> 历史专项文档（`final-execution-checklist` / `architecture-audit` / `audit-defects` / `handoff-2026-08-18-rebuild` / `supervisor-confirmation-chain-fix-plan`）已于 S5 清库重建与 D 批修复后归档 Git 历史，不再作为活动入口。
 
 ### 前端重构（前端领域活动计划）
 

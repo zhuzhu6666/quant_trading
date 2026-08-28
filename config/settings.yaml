@@ -845,9 +845,9 @@ runtime:
   var_window: 500
   var_alpha: 0.95
   var_method: historical
-  var_cvar_threshold: 0.02
+  var_cvar_threshold: 0.025
   risk_var_threshold_pct: 10.0
-  risk_cvar_threshold_pct: 2.0
+  risk_cvar_threshold_pct: 2.5
   kelly_enabled: true
   kelly_fraction: 0.5
   kelly_max_pct: 0.25

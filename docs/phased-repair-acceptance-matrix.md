@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active acceptance index
-> Snapshot: 2026-08-12
+> Snapshot: 2026-08-28 (HEAD f2eb9c9; P1 complete, Safety/governance enforce active, pg_job pending)
 > Scope: reproducible acceptance evidence and unresolved live evidence
 
 本文只记录“如何证明”和当前未满足的运行证据。架构事实见 `system-source-of-truth.md`，实施阶段见 `planning/production-autonomy-repair-optimization-plan.md`，当前状态见 `phased-repair-rollout-status.md`。已完成批次的详细流水通过 Git 历史追溯，不在本矩阵重复保存。
@@ -152,16 +152,19 @@ supervisor_enforce
 
 Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed 空仓 shadow，或一个完整 broker position lifecycle。该条件只授权 Safety v2 发布门，不是有界 Demo `runtime_incident_mode=normal` 或普通开仓的等待锁。
 
-## 8. 当前未完成证据
+## 8. 当前未完成证据（2026-08-28 14:53 复核）
 
-2026-08-10 的 live 只读事实为：backend/worker active，health 的 DB/cTrader connected，readiness 当前无 blocker，live loop accepting new risk，reconcile fresh 且空仓，risk snapshot known；Safety shadow 仍在 observing，未满足 24 小时/完整 lifecycle 门槛。
+2026-08-28 只读：`quant-backend 891039` / `quant-learning-worker 891040` 均 `active` `NRestarts=0`，`live_safety_plane_v2_mode=enforce` 已加载（`f2eb9c9` off 路径已删），`governance_mutation_coordinator_v2_mode=enforce` 已加载；`broker_execution 127 / position_transition 125 / trade_review 99 / full/1.0 46 (2026-08-21→28)` 全链条稳定；`risk_metrics known cvar1.55%`，持仓 `285427255` 有仓，`unknown_execution_count=0`，`Safety heartbeat 5.4s`。
 
-因此当前不能标记：
+已满足：
+- P1 runtime acceptance ✅（价格合同 + lifecycle 闭环）
+- Safety v2 enforce ✅（有仓 `governed_execute` 验证）
+- governance enforce ✅（14:14 flat 已切 `enforce`，`off` 直连路径 f2eb9c9 已删）
 
-- P1 runtime acceptance complete；
-- Safety v2 enforce；
-- 后续静态发布开关推进；
-- P6 Demo 自治毕业。
+仍未完成：
+- `pg_job_queue_enable → verify`（静态 `pg_job_queue_v2_enabled=false`，`reconciled 0/missing 0` 待发布门）
+- supervisor 治理闭环 `governance_eligible matured 5/10`（需 10）与 `tighten/reduce` 覆盖
+- P6 Demo 自治毕业（需 100 笔/30 天/2 regimes/PF 等）
 
 ## 9. 全量测试策略
 

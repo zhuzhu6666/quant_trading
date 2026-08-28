@@ -1,7 +1,7 @@
 # 生产自治修复与架构收敛总方案
 
-> Status: implementation active — P0 complete, P1 runtime acceptance active, P2/P3/P4 complete
-> Last verified: 2026-08-20
+> Status: implementation active — P0 complete, P1 complete, P2/P3/P4 complete, P5收敛中, P6 runtime observation
+> Last verified: 2026-08-28 (HEAD f2eb9c9; P1 complete 46笔full, 治理 enforce 已加载, off 直连已删)
 > Scope: production correctness repair, authority convergence, legacy deletion, runtime acceptance, and autonomy graduation
 > Source of truth: 本文只定义阶段、流程和退出条件；当前生产事实以 `docs/system-source-of-truth.md`、代码、PostgreSQL 和运行服务为准
 
@@ -17,7 +17,7 @@
 | 阶段 | 状态 | 当前结论 |
 |---|---|---|
 | P0 保护现场 | complete | incident、备份、污染 cohort 和 `no_new_risk` 姿态已建立 |
-| P1 broker 成交事实 | runtime acceptance | 代码和历史修复完成，等待 post-repair 新 broker deal 与完整持仓生命周期 |
+| P1 broker 成交事实 | **complete (2026-08-28)** | `trade_review_outcome full/1.0 46 (2026-08-21→28)` + `broker 127/position 125/review 99` 闭环已验证，价格合同与 unknown0 已复核，转常态观察 |
 | P2 风险指标平面 | complete | live/replay/Policy/readiness/API/Web 已收敛到 canonical snapshot |
 | P3 学习证据与记忆 | complete | current/history memory 单 projection；application/effect active scope 唯一 |
 | P4 V16 因果调度 | complete | causal grouping、单一 actionable/authority、单次 mutation 与三条 lane 已收口 |
@@ -42,7 +42,7 @@
 
 发生冲突时按以下顺序：
 
-1. 当前运行服务、broker 对账、PostgreSQL `state_v1`、`runtime_kv` 和日志。
+1. 当前运行服务、broker 对账、PostgreSQL `runtime`/`canonical_v2`/`runtime_kv` 和日志。
 2. 当前代码调用链和测试合同。
 3. `docs/system-source-of-truth.md` 和稳定 `*-contract.md`。
 4. `docs/legacy-debt-register.md`。
@@ -82,7 +82,7 @@
 
 - 当前 `git diff`；
 - 运行服务和加载代码；
-- PostgreSQL `state_v1`；
+- PostgreSQL `runtime`/`canonical_v2`；
 - `runtime_kv`；
 - 日志；
 - 最近针对性和阶段测试。
@@ -471,11 +471,11 @@ Demo 恢复仍采用已确认 profile：
 
 ### 13.4 发布姿态与未完成运行证据
 
-代码和合同完成不自动授权运行开关。当前必须保持：
+代码和合同完成不自动授权运行开关。当前已保持（2026-08-28 f2eb9c9）：
 
 ```text
 live_safety_plane_v2_mode=enforce
-governance_mutation_coordinator_v2_mode=dual_record
+governance_mutation_coordinator_v2_mode=enforce
 pg_job_queue_v2_enabled=false
 ```
 

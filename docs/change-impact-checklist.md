@@ -1,7 +1,7 @@
 # Change Impact Checklist
 
 > Status: active
-> Last verified: 2026-08-10
+> Last verified: 2026-08-28 (reviewed, no semantic change from 08-10; P1/Safety/governance gates already reflect enforce)
 > Scope: mandatory admission, impact, deletion, verification, and documentation closure for every production change.
 
 本文是后续修复的唯一执行清单。目标不是让每批增加更多保护层，而是确认事实、

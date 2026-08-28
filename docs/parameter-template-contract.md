@@ -1,7 +1,7 @@
 # Parameter Template Contract
 
 > Status: active
-> Last verified: 2026-07-26
+> Last verified: 2026-08-28 (HEAD f2eb9c9; online_light 路径仍走 GovernanceMutationCoordinator enforce, off 直连已删)
 > Scope: parameter template schema, runtime application boundary, autonomous governance entry, and online/offline tuning boundary.
 
 本文定义 `parameter_template.v1`。参数模板已经从只读派生对象进入运行时治理链路；当前主路径是自治建议、风控裁决、overlay/snapshot 写入和后验回滚。人工入口只作为覆盖和审计，不是日常必要步骤。

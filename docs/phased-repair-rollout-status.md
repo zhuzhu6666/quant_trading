@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Snapshot: 2026-08-28
+> Snapshot: 2026-08-28 (HEAD f2eb9c9; 治理 enforce 已加载, off 直连已删)
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -18,13 +18,13 @@
 | S4 全量验证 | complete | 2926 passed / 12 skipped（2026-08-27 最终回归） |
 | S5 清库物理 | complete | 10.8GB → 9.7MB，canonical_v2 9 表空 + runtime 6 表空结构 |
 | S6 容量阀 P6 | pending | event 分区、保留窗口、归档、容量监控（evolution_story.jsonl 50605 行/140M 待轮转方案） |
-| S7 启动验证+进化闭环首验 | in_progress | 双服务冷启动 ✅；**evolution_decision 8 列单轨 & learning_application 精简 schema 已收敛**；**S7.6 核心闭环已达成**（`trade_review_outcome full/1.0 46` `2026-08-21→08-28` 8-11/天, `broker 127/position 125/review 99`）；**cTrader/unknown 已通过**；持仓监督 `governed_execute` 单轨+单仓 binding 已打通（`285427255`），但 `supervisor_execution_trace 5/10` 未达 `off→Demo` 阈值，`selection insufficient_evidence` 待积累；**治理已切 `enforce`（2026-08-28 14:14 空窗，双服务 891039/891040 loaded），`off` 代码删除顺延至下一空窗** |
+| S7 启动验证+进化闭环首验 | in_progress | 双服务冷启动 ✅；**evolution_decision 8 列单轨 & learning_application 精简 schema 已收敛**；**S7.6 核心闭环已达成**（`trade_review_outcome full/1.0 46` `2026-08-21→08-28` 8-11/天, `broker 127/position 125/review 99`）；**cTrader/unknown 已通过**；持仓监督 `governed_execute` 单轨+单仓 binding 已打通（`285427255`），但 `supervisor_execution_trace 5/10` 未达 `off→Demo` 阈值，`selection insufficient_evidence` 待积累；**治理已切 `enforce`（2026-08-28 14:14 空窗 891039/891040 loaded），`off` 直连路径已于 f2eb9c9 删除** |
 
 ## 2. 最近一次运行核对
 
-### 2026-08-28 只读复核结果（未重启，仅 DB/运行时投影）
+### 2026-08-28 只读复核结果（f2eb9c9 已加载，HEAD 即生产）
 
-- 双服务 `quant-backend.service PID 56728` / `quant-learning-worker.service PID 2330` 均 `active/running`，`NRestarts=0`；运行 11h/12h，`system_health overall=healthy score=1.0`，`market_session open_confirmed can_open_positions true`，`risk_metrics known cvar 1.55%`，`live.loop generation 172b7fd3... running` 接受新风险，当前持仓 `285427255` 有仓且 `unknown_execution_count=0`。
+- 双服务 `quant-backend.service PID 891039` / `quant-learning-worker.service PID 891040` 均 `active/running`，`NRestarts=0`；`system_health overall=healthy score=1.0`，`market_session open_confirmed can_open_positions true`，`risk_metrics known cvar 1.55%`，`live.loop generation 172b7fd3... running` 接受新风险，当前持仓 `285427255` 有仓且 `unknown_execution_count=0`；`governance_mutation_coordinator_v2_mode=enforce` 已加载，`off` 直连已删。
 - `canonical_v2.training_sample_row 10294`：`trade_review_outcome 67（full/1.0 46 连续 2026-08-21→08-28，近 4 天 8-11/天）`，`supervisor_execution_trace 9369（eligible matured 5/10）`，`shadow_open_decision 468`；`canonical_v2.event supervisor_trace 15 / counterfactual 33 / broker_execution 127`；`runtime.broker_execution_intent confirmed 132（近 3 天 84，unknown 0）`。
 - `runtime_kv` 新鲜：`backend_readiness_snapshot.v1 05:14` `ready_for_live_execution/alpha true, autonomous_mutation false`，`runtime_factor_selection.v1 6 voters/4 groups/138 HEALTHY`，`position_supervisor_selection.v1 insufficient_evidence/0候选/fresh`，`risk_metrics_snapshot.v2 499 samples`，`evolution_cycle_watermark.v1 2026-08-28T04:25 M5`。
 - `recovery_position_state 61` 最新 `285427255` 已验证 `entry_regime trend=weak|vol=low / signal_reversal / thesis_broken_confirmations 136 / selection_key` 三生产者打通，`entry_protection_plan.supervisor_binding hash cdfe2bf...` 完整；`learning_application_log 21 (observing 9)` / `brain_memory 160 / experience 62`。
@@ -339,7 +339,7 @@ Remaining: 已有真实 supervisor close 的正向 lifecycle/反事实/成熟证
 
 ### 2026-08-22 审计缺陷批 D1–D13（修复 + 部署 + 周末运行验收）
 
-Batch: planning/audit-defects-2026-08-21.md 中 D1/D3/D6/D7/D11/D12/D13 六项修复端到端落地；D11 为学习链总断点真凶。迁移 0031_align_factor_health（factor_health 删死列、主键→factor，db.py 极简 DDL 对齐）+ 0032_restore_jobs_primary_key。
+Batch: 审计缺陷 D1/D3/D6/D7/D11/D12/D13 六项修复端到端落地（原 planning/audit-defects-2026-08-21.md 已归档 Git 历史）；D11 为学习链总断点真凶。迁移 0031_align_factor_health（factor_health 删死列、主键→factor，db.py 极简 DDL 对齐）+ 0032_restore_jobs_primary_key。
 
 Canonical authority: factor_health 唯一写合同 = `ON CONFLICT(factor)` 标准列集；canary PROMOTION→ACTIVE 需 `_has_committed_active_backing` 台账背书；evolution_story 生产路径 pytest 全量改道（core 默认路径 + conftest 单例沙箱双保险）；关键持久化失败经 monitor/persistence_alerts.py 升级告警（1h 同键抑制）。
 
@@ -389,7 +389,7 @@ Next batch: ~~下一空仓窗口受控重启加载批次 A/B~~ → 已于 2026-0
 
 ### 2026-08-26 持仓监督失效确认链修复（四断线补齐）
 
-Batch: 复盘发现监督器"诊断正确但从未动手"，深挖确认四根结构性断线并补齐生产者。影响面清单见 planning/supervisor-confirmation-chain-fix-plan.md。
+Batch: 复盘发现监督器“诊断正确但从未动手”，深挖确认四根结构性断线并补齐生产者。影响面清单原见 planning/supervisor-confirmation-chain-fix-plan.md（已归档 Git 历史，HEAD f2eb9c9 前版本）。
 
 Canonical authority: entry_regime 开仓盖章 = `_persist_pending_entry_protection_plan` + `_current_regime_hint()`；signal_reversal = `build_position_supervisor_context_payload` 比较 last_composite.direction 与持仓方向；thesis_broken_confirmations = path-metrics 状态机逐观测递增/intact 归零；transition_confirming 姿态盈利单 tighten 解锁 = evaluate_position_supervisor 动作仲裁内新增分支（profit_protection_window_ready + giveback≥阈值，summary_reason=transition_profit_protection_tighten）。
 

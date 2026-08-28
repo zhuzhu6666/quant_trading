@@ -1,6 +1,6 @@
 # Position Supervisor Contract
 
-> Last updated: 2026-08-27
+> Last updated: 2026-08-28
 > Phase: C-H
 > Status: governed supervisor execution active; per-position binding and selection projection implemented; evidence-qualified auto-selection wired (current projection remains `off` for insufficient evidence); historical/learning observation-only; model influence shadow/disabled
 

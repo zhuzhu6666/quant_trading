@@ -1,7 +1,7 @@
 # 前端重构验收矩阵
 
 > Status: active acceptance matrix
-> Snapshot: 2026-08-13
+> Snapshot: 2026-08-28 (reviewed, no semantic change from 08-13; server API/WSS-only, Windows本地)
 > Scope: 前端 renderer、个人本地 Tauri 桌面、接口合同和迁移删除门。
 
 本文只记录可重复的前端验收门和证据要求。生产客户端是本地 Tauri 桌面端与小程序；

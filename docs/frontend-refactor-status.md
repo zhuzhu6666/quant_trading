@@ -1,7 +1,7 @@
 # 前端重构当前状态
 
 > Status: active rollout status
-> Last verified: 2026-08-14
+> Last verified: 2026-08-28 (reviewed, D1 renderer/壳完成; sparseCheckout 08-14 已收口)
 > Scope: 只记录前端重构实际进度，不重复产品和架构合同。
 
 ## 1. 当前阶段
