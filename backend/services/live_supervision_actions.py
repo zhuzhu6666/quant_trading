@@ -823,7 +823,11 @@ def execute_supervisor_close_action(
                 decision_id=decision_id,
                 risk_action=risk_action,
                 risk_verdict=risk_verdict,
-                execution_status="applied",
+                execution_status=(
+                    "applied"
+                    if reconcile_proof.get("reconcile_confirmed")
+                    else "applied_but_unverified"
+                ),
                 execution_reason="close_position_success",
                 execution={
                     "broker_action_confirmed": True,

@@ -560,9 +560,14 @@ def evaluate_counterfactuals(
             )
             if binding_lineage.get("valid"):
                 trace_identity = {
-                    "template_id": str(real_trace.get("template_id") or ""),
-                    "template_version": str(real_trace.get("template_version") or ""),
-                    "template_hash": str(real_trace.get("template_hash") or ""),
+                    "template_id": str(real_trace.get("template_id") or real_trace.get("binding", {}).get("template_id") or ""),
+                    "template_version": str(real_trace.get("template_version") or real_trace.get("binding", {}).get("template_version") or ""),
+                    "template_hash": str(
+                        real_trace.get("template_hash")
+                        or real_trace.get("binding", {}).get("template_hash")
+                        or (real_trace.get("execution") or {}).get("template_hash")
+                        or ""
+                    ),
                 }
                 if not all(trace_identity.values()):
                     binding_state = "unknown"

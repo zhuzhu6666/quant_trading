@@ -2841,7 +2841,7 @@ def _log_supervisor_trace(
             )
         )
     except Exception as exc:
-        logger.warning("[live] supervisor trace failed for pos %s: %s", position.get("position_id"), exc)
+        logger.warning("[live] supervisor trace failed for pos %s: %s", position.get("position_id"), exc, exc_info=True)
         return ""
 
 

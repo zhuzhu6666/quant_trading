@@ -807,6 +807,14 @@ def build_open_learning_context_payload(
     }
     if position_supervisor_binding:
         payload["position_supervisor_binding"] = dict(position_supervisor_binding)
+    else:
+        # Explicitly mark missing binding as legacy fallback instead of silently omitting;
+        # parity_replay/offline backfill must not invent a binding.
+        payload["position_supervisor_binding"] = {
+            "schema_version": "position_supervisor_binding.v1",
+            "binding_source": "legacy_global_fallback",
+            "selection_status": "unknown",
+        }
     capture_quality = validate_open_learning_context(payload, require_fill=True)
     if capture_quality["ready"]:
         payload["open_context_quality"] = capture_quality
@@ -2963,10 +2971,16 @@ def build_supervisor_trace_ledger_payload(
             }
         )
         if binding:
-            trace_payload["binding"] = _compact_supervisor_mapping(
+            binding_compact = _compact_supervisor_mapping(
                 dict(binding),
                 nested_keys=frozenset({"template_snapshot", "evidence_refs"}),
             )
+            # Preserve full template_snapshot for governance replay/hash verification;
+            # compact with empty nested_keys would drop thresholds/sl_policy etc.
+            raw_snapshot = binding.get("template_snapshot")
+            if isinstance(raw_snapshot, Mapping) and raw_snapshot:
+                binding_compact["template_snapshot"] = dict(raw_snapshot)
+            trace_payload["binding"] = binding_compact
     return trace_payload
 
 

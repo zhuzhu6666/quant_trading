@@ -233,6 +233,7 @@ class DecisionLedger:
         factor_snapshots: list[dict] | None = None,
         runtime_selection_fingerprint: str = "",
         config_hash: str = "",
+        **extra: Any,
     ) -> str:
         now = time.time()
         decision_id = self.new_id("dec")
@@ -505,6 +506,7 @@ class DecisionLedger:
         status: str = "",
         details: dict | None = None,
         event_ts: float | None = None,
+        **extra: Any,
     ) -> str:
         event_id = self.new_id("ordevt")
         event_ts = float(event_ts or time.time())
@@ -539,6 +541,7 @@ class DecisionLedger:
         realized_pnl: float = 0.0,
         details: dict | None = None,
         event_ts: float | None = None,
+        **extra: Any,
     ) -> str:
         event_id = self.new_id("posevt")
         event_ts = float(event_ts or time.time())
@@ -590,6 +593,24 @@ class DecisionLedger:
         config_version: int = 0,
         config_hash: str = "",
         evolution_run_id: str = "",
+        # Binding-aware trace fields (optional, from position_supervisor_binding.v1)
+        template_hash: str = "",
+        binding_source: str = "",
+        selection_event_id: str = "",
+        current_regime: str = "",
+        supervisor_posture: str = "",
+        requested_action: str = "",
+        effective_action: str = "",
+        applied_action: str = "",
+        risk_policy_result: dict | None = None,
+        broker_execution_result: dict | None = None,
+        reconcile_result: dict | None = None,
+        reconcile_observed_at: float | None = None,
+        reconcile_status: str = "",
+        reconcile_fresh: bool | None = None,
+        reconcile_confirmed: bool | None = None,
+        no_change_reason: str = "",
+        **extra: Any,
     ) -> str:
         trace_id = self.new_id("psvtrace")
         now = time.time()
@@ -657,6 +678,42 @@ class DecisionLedger:
             "evolution_run_id": str(evolution_run_id or ""),
             "created_at": now,
         }
+        # Merge binding-aware optional fields if provided (forward compatible, ignored when empty)
+        if template_hash:
+            trace_payload["template_hash"] = str(template_hash)
+        if binding_source:
+            trace_payload["binding_source"] = str(binding_source)
+        if selection_event_id:
+            trace_payload["selection_event_id"] = str(selection_event_id)
+        if current_regime:
+            trace_payload["current_regime"] = str(current_regime)
+        if supervisor_posture:
+            trace_payload["supervisor_posture"] = str(supervisor_posture)
+        if requested_action:
+            trace_payload["requested_action"] = str(requested_action)
+        if effective_action:
+            trace_payload["effective_action"] = str(effective_action)
+        if applied_action:
+            trace_payload["applied_action"] = str(applied_action)
+        if no_change_reason:
+            trace_payload["no_change_reason"] = str(no_change_reason)
+        if risk_policy_result is not None:
+            trace_payload["risk_policy_result"] = risk_policy_result
+        if broker_execution_result is not None:
+            trace_payload["broker_execution_result"] = broker_execution_result
+        if reconcile_result is not None:
+            trace_payload["reconcile_result"] = reconcile_result
+        if reconcile_observed_at is not None:
+            trace_payload["reconcile_observed_at"] = float(reconcile_observed_at)
+        if reconcile_status:
+            trace_payload["reconcile_status"] = str(reconcile_status)
+        if reconcile_fresh is not None:
+            trace_payload["reconcile_fresh"] = bool(reconcile_fresh)
+        if reconcile_confirmed is not None:
+            trace_payload["reconcile_confirmed"] = bool(reconcile_confirmed)
+        for k, v in (extra or {}).items():
+            if k not in trace_payload:
+                trace_payload[k] = v
         with self._conn() as conn:
             canonical_trace_payload = {
                 **trace_payload,
