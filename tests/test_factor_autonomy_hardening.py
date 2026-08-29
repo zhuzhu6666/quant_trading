@@ -513,6 +513,7 @@ def test_learning_worker_factor_health_catchup_reuses_governance_freshness(
 
     calls = []
     monkeypatch.setattr(worker, "_factor_health_catchup_thread", None)
+    monkeypatch.setattr(worker, "_closed_market_source_watermark_current", lambda: False)
     monkeypatch.setattr(worker, "_latest_factor_health_age_seconds", lambda: 301.0)
     monkeypatch.setattr(
         governance,
@@ -529,6 +530,27 @@ def test_learning_worker_factor_health_catchup_reuses_governance_freshness(
     worker._factor_health_catchup_thread.join(timeout=2.0)
 
     assert calls == ["factor_health_startup_catchup"]
+
+
+def test_learning_worker_factor_health_catchup_skips_closed_market_without_new_facts(
+    monkeypatch,
+):
+    import scripts.learning_worker as worker
+
+    calls = []
+    monkeypatch.setattr(worker, "_factor_health_catchup_thread", None)
+    monkeypatch.setattr(worker, "_closed_market_source_watermark_current", lambda: True)
+    monkeypatch.setattr(worker, "_latest_factor_health_age_seconds", lambda: None)
+    monkeypatch.setattr(
+        worker,
+        "_coordinated_mutation_job",
+        lambda name, _fn: lambda: calls.append(name) or {"status": "ok"},
+    )
+
+    assert worker._schedule_factor_health_catchup(delay_sec=0.0) is True
+    worker._factor_health_catchup_thread.join(timeout=2.0)
+
+    assert calls == []
 
 
 def test_learning_worker_nursery_uses_bounded_demo_step_without_full_learning_cycle(

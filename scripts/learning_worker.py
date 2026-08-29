@@ -355,6 +355,37 @@ def _latest_factor_health_age_seconds() -> float | None:
         conn.close()
 
 
+def _closed_market_source_watermark_current() -> bool:
+    """Avoid replaying stale factor health when the market has no new facts.
+
+    The startup catch-up exists to recover a genuinely stale health report
+    after new evidence arrives.  A closed market with an unchanged canonical
+    fact watermark has no new input to evaluate, so running the full
+    evolution/governance pipeline here only repeats work that the normal
+    scheduled owner can perform when evidence advances.
+    """
+    try:
+        from backend.runtime.evolution_orchestrator import (
+            _confirmed_closed_market_session,
+        )
+        from backend.services.learning_cycle_watermark import (
+            LearningCycleWatermarkService,
+        )
+
+        if not _confirmed_closed_market_session():
+            return False
+        gate = LearningCycleWatermarkService().evaluate()
+        return bool(gate.get("ok")) and not bool(gate.get("should_run"))
+    except Exception as exc:  # noqa: BLE001
+        # Unknown market/fact state must not suppress recovery.  The existing
+        # fail-closed coordinator and governance gates remain authoritative.
+        logger.debug(
+            "[learning_worker] closed-market source watermark check unavailable: {}",
+            exc,
+        )
+        return False
+
+
 def _schedule_factor_health_catchup(
     *,
     delay_sec: float = 180.0,
@@ -374,6 +405,12 @@ def _schedule_factor_health_catchup(
         if _factor_health_catchup_stop.wait(max(0.0, delay_sec)):
             return
         try:
+            if _closed_market_source_watermark_current():
+                logger.info(
+                    "[learning_worker] factor health catch-up skipped: "
+                    "market closed and source watermark current"
+                )
+                return
             from backend.runtime.factor_governance_orchestrator import (
                 factor_governance_health_max_age_seconds,
             )
