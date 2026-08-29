@@ -127,7 +127,7 @@
 
 - 状态：`resolved`（2026-08-28 只读：`runtime_config_overlay` 已无空 `mutation_id` 行）
 - canonical：非空 mutation 必须是 committed/current 且 config/domain hash 完整绑定；空 mutation 只允许经 hash-bound operator review 恢复明确 risk tightening。
-- 当前（2026-08-29 清理后）：`runtime.runtime_config_overlay 1 行（autonomous_factor_governance / committed mutation）` 零空 `mutation_id`；`runtime_config_snapshot 2,113 行`（其中 1,284 条带 mutation、829 条空 mutation，版本 8~3,445）只保留每段 hash 的末行及所有被引用审计事实，均非 live overlay，不阻塞 `governance_authority`。清理后的停盘误触发 catch-up 又产生了 9 条有真实 mutation 的 shadow 因子快照，属于治理/生命周期事实而非垃圾，已保留。`RuntimeConfigOverlayService.review_legacy_quarantine` 仍为唯一空行修复入口。
+- 当前（2026-08-29 清理后）：`runtime.runtime_config_overlay 1 行（autonomous_factor_governance / committed mutation）` 零空 `mutation_id`；`runtime_config_snapshot 2,076 行`（其中 1,284 条带 mutation、792 条空 mutation，版本 8~3,445）只保留每段 hash 的末行及所有被引用审计事实，均非 live overlay，不阻塞 `governance_authority`。清理后的停盘误触发 catch-up 又产生了 9 条有真实 mutation 的 shadow 因子快照，属于治理/生命周期事实而非垃圾，已保留。`RuntimeConfigOverlayService.review_legacy_quarantine` 仍为唯一空行修复入口。
 - 禁止：用来源名、默认值或“看起来保守”恢复扩张/未知 overlay。
 
 ### 配置镜像膨胀与停盘重复学习（2026-08-29）
@@ -146,7 +146,7 @@
 - 启动投影收敛：`FactorLifecycleService` 的 committed Registry 恢复和运行中已提交因子加载均以
   `log_event=False` 只重建进程内投影，不再把每次后端重启误写成新的 `factor_observation`；真实生命周期提交仍保留事件。
   已产生的历史恢复事件属于 canonical 不可变审计事实，未做无证据删除。
-- 验证：payload 孤儿查询为 0；当前 snapshot 2,113 行、最新版本 3,445；runtime 配置载荷 1,288 行且每条 hash 唯一；
+- 验证：payload 孤儿查询为 0；当前 snapshot 2,076 行、最新版本 3,445；runtime 配置载荷 1,288 行且每条 hash 唯一；
   PostgreSQL 清理并 vacuum 后约 906MB，随后一次实际 shadow catch-up 追加事实后约 910MB。当前有 4 条 approved
   因子治理建议和 4 条 `PROMOTION_PREPARED`，故不能把治理 backlog 误报为空闲；停盘期间没有 broker/position/risk/trade
   新事实，误触发 catch-up 产生的 9 条生命周期/治理事实已按审计要求保留。
