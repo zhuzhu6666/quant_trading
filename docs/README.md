@@ -1,7 +1,7 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-08-29 (代码基线 9099150; 数据清理、停盘学习短路和 Registry 恢复投影已验证; cTrader/unknown 已复核; 治理与学习服务已重启)
+> Last verified: 2026-08-29 (代码基线 0f1e8f0; 数据清理、停盘学习短路和 Registry 恢复投影已验证; 启动补偿在无新事实时短路; cTrader/unknown 已复核; 治理与学习服务已重启)
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读对应合同。
@@ -9,7 +9,7 @@
 ## 1. 当前结论
 
 - 开发基线为 `main`；发布流程会从该基线创建临时发布分支。
-- **当前姿态（2026-08-29，代码基线 9099150）**：生产运行态统一使用 PostgreSQL `runtime`，不可变事实与学习样本统一使用 `canonical_v2`；migration ledger 已到 v32（0031 factor_health 合同对齐、0032 jobs 主键恢复，runtime 32/32 ok），旧 runtime 事实表已退役。
+- **当前姿态（2026-08-29，代码基线 0f1e8f0）**：生产运行态统一使用 PostgreSQL `runtime`，不可变事实与学习样本统一使用 `canonical_v2`；migration ledger 已到 v32（0031 factor_health 合同对齐、0032 jobs 主键恢复，runtime 32/32 ok），旧 runtime 事实表已退役。
 - **旧库清理（已完成）**：旧 `state_v1`、`public`、`legacy_mapping` 和本地 SQLite `data/state.db` 运行路径均已退役；生产代码不再读取、写入或重建这些路径。
 - **运行态迁移门（已完成，运行时风险门仍独立生效）**：service-backed cleanup 已清理旧 runtime 事实，普通监督执行使用 `governed_execute -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 单轨链。当前若 readiness 阻断，只能来自实时 market/session、Safety、incident 或 broker 事实，不代表迁移回退或兼容路径仍在。
 - **A 类结构修复（已完成）**：A1 trade_review 实时写入器 ✅ / A2 label 单一口径 ✅ / A3 posterior 触发放宽 ✅ / A4 win 单正反馈 ✅ / A5 effect 归因链代码就绪 ✅ / A6 supervisor_trace 成熟链 ✅。
