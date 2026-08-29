@@ -309,6 +309,40 @@ def _evolution_input_watermark(
     return payload
 
 
+def _evolution_input_unchanged(
+    current: dict[str, Any],
+    previous: dict[str, Any],
+) -> bool:
+    """Compare market input without treating code/config drift as new bars."""
+    if str(previous.get("read_status") or "") != "known":
+        return False
+
+    current_input = str(current.get("input_fingerprint") or "")
+    previous_input = str(previous.get("input_fingerprint") or "")
+    if current_input and previous_input:
+        return current_input == previous_input
+
+    # Keep compatibility with early v1 rows that only stored the aggregate
+    # watermark fingerprint.  A matching aggregate remains valid evidence.
+    current_watermark = str(current.get("watermark_fingerprint") or "")
+    previous_watermark = str(previous.get("watermark_fingerprint") or "")
+    if current_watermark and previous_watermark:
+        return current_watermark == previous_watermark
+
+    # Last-resort compatibility for rows without either fingerprint.  A
+    # changed bar is new input and must not be skipped.
+    current_symbol = str(current.get("symbol") or "")
+    current_timeframe = str(current.get("timeframe") or "")
+    current_last_bar = str(current.get("last_closed_bar") or "")
+    return bool(
+        current_symbol
+        and current_symbol == str(previous.get("symbol") or "")
+        and current_timeframe == str(previous.get("timeframe") or "")
+        and current_last_bar
+        and current_last_bar == str(previous.get("last_closed_bar") or "")
+    )
+
+
 def _load_evolution_cycle_watermark() -> dict[str, Any]:
     conn = None
     try:
@@ -578,9 +612,7 @@ def scheduled_evolution_cycle(
         )
         same_input = bool(
             watermark_owner
-            and previous_watermark.get("read_status") == "known"
-            and str(previous_watermark.get("watermark_fingerprint") or "")
-            == str(input_watermark["watermark_fingerprint"])
+            and _evolution_input_unchanged(input_watermark, previous_watermark)
         )
         report.evolution_watermark = {
             **input_watermark,

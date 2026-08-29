@@ -223,6 +223,61 @@ def test_same_input_on_confirmed_closed_market_skips_maintenance(monkeypatch):
     assert counters == {}
 
 
+def test_config_or_code_drift_without_new_bar_skips_closed_market(monkeypatch):
+    monkeypatch.setenv("QUANT_PROCESS_ROLE", "learning_worker")
+    counters: dict[str, int] = {}
+    _isolate_cycle(monkeypatch, counters)
+    monkeypatch.setattr(
+        evolution,
+        "_evolution_input_watermark",
+        lambda *_args, **_kwargs: {
+            "watermark_fingerprint": "new-config-bound-watermark",
+            "input_fingerprint": "same-bars",
+            "config_hash": "new-config",
+            "code_version": "new-code",
+            "symbol": "XAUUSD+",
+            "timeframe": "M5",
+            "last_closed_bar": "2026-08-28T20:55:00",
+        },
+    )
+    monkeypatch.setattr(
+        evolution,
+        "_load_evolution_cycle_watermark",
+        lambda: {
+            "read_status": "known",
+            "watermark_fingerprint": "old-config-bound-watermark",
+            "input_fingerprint": "same-bars",
+            "config_hash": "old-config",
+            "code_version": "old-code",
+            "symbol": "XAUUSD+",
+            "timeframe": "M5",
+            "last_closed_bar": "2026-08-28T20:55:00",
+        },
+    )
+    monkeypatch.setattr(
+        evolution,
+        "_confirmed_closed_market_session",
+        lambda: {
+            "status": "closed_confirmed",
+            "can_open_positions": False,
+            "projection_age_seconds": 1.0,
+        },
+    )
+    monkeypatch.setattr(
+        evolution,
+        "_canary_registration_backpressure",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("closed market with unchanged bars must stay idle")
+        ),
+    )
+
+    result = evolution.scheduled_evolution_cycle()
+
+    assert result.gp_status == "skipped_market_closed"
+    assert result.gp_skip_reason == "market_closed_no_new_input"
+    assert counters == {}
+
+
 def test_canary_budget_backpressure_stops_registration_not_maintenance(
     monkeypatch,
 ):
