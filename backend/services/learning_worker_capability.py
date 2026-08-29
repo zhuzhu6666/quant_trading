@@ -12,7 +12,6 @@ and publishes that operational fact through ``runtime_kv``.
 from __future__ import annotations
 
 import copy
-import json
 import os
 import threading
 import time
@@ -26,10 +25,6 @@ from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_stat
 
 STATUS_KEY = "learning_worker.capability.v2"
 MUTATION_FAILURE_THRESHOLD = 3
-
-
-def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 class LearningWorkerCapability:
@@ -329,16 +324,15 @@ class LearningWorkerCapability:
             else connect_sqlite(self.db_path)
         )
         try:
-            sql = """
-                INSERT INTO runtime_kv (key, value_json, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value_json=excluded.value_json,
-                    updated_at=excluded.updated_at
-            """
-            if is_state_db_path(self.db_path):
-                sql = sql.replace("?", "%s")
-            conn.execute(sql, (STATUS_KEY, _json(payload), float(payload["updated_at"])))
+            from backend.services.runtime_kv_store import set_on_conn
+
+            set_on_conn(
+                conn,
+                STATUS_KEY,
+                payload,
+                updated_at=float(payload["updated_at"]),
+                ensure=False,
+            )
             conn.commit()
         except Exception:
             try:

@@ -14,6 +14,7 @@ from backend.services.agent_authority import (
 )
 from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
+from backend.services.policy_suggestion_identity import deterministic_policy_suggestion_id
 
 
 BRIDGE_READY_STAGES = {"governance_ready", "applyable"}
@@ -1266,7 +1267,16 @@ class BrainGovernanceCandidateService:
             }
             return {
                 "ok": True,
-                "suggestion_id": f"brain_bridge_{uuid.uuid4().hex[:16]}",
+                "suggestion_id": deterministic_policy_suggestion_id(
+                    writer="v16_brain_bridge",
+                    scope_type="position_supervisor_template",
+                    scope_key=target_template_id,
+                    action="switch_position_supervisor_template",
+                    evidence=evidence,
+                    status="proposed",
+                    qualification_fingerprint=str((candidate_review or {}).get("evidence_fingerprint") or ""),
+                    prefix="brain_bridge",
+                ),
                 "scope_type": "position_supervisor_template",
                 "scope_key": target_template_id,
                 "action": "switch_position_supervisor_template",
@@ -1289,7 +1299,16 @@ class BrainGovernanceCandidateService:
             }
             return {
                 "ok": True,
-                "suggestion_id": f"brain_bridge_{uuid.uuid4().hex[:16]}",
+                "suggestion_id": deterministic_policy_suggestion_id(
+                    writer="v16_brain_bridge",
+                    scope_type="parameter_template",
+                    scope_key=scope_key,
+                    action="switch_parameter_template",
+                    evidence=evidence,
+                    status="proposed",
+                    qualification_fingerprint=str((candidate_review or {}).get("evidence_fingerprint") or ""),
+                    prefix="brain_bridge",
+                ),
                 "scope_type": "parameter_template",
                 "scope_key": scope_key,
                 "action": "switch_parameter_template",
@@ -1299,9 +1318,19 @@ class BrainGovernanceCandidateService:
             }
 
         if scope_type == "factor" and action in {"downweight", "boost_small"}:
+            evidence = base_evidence
             return {
                 "ok": True,
-                "suggestion_id": f"brain_bridge_{uuid.uuid4().hex[:16]}",
+                "suggestion_id": deterministic_policy_suggestion_id(
+                    writer="v16_brain_bridge",
+                    scope_type=scope_type,
+                    scope_key=scope_key,
+                    action=action,
+                    evidence=evidence,
+                    status="proposed",
+                    qualification_fingerprint=str((candidate_review or {}).get("evidence_fingerprint") or ""),
+                    prefix="brain_bridge",
+                ),
                 "scope_type": scope_type,
                 "scope_key": scope_key,
                 "action": action,

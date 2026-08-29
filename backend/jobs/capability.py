@@ -1,7 +1,6 @@
 """Durable process capability projection for the persistent job worker."""
 from __future__ import annotations
 
-import json
 import os
 import threading
 import time
@@ -90,19 +89,9 @@ class PersistentJobWorkerCapability:
                 else connect_sqlite(self.db_path)
             )
             try:
-                sql = """
-                    INSERT INTO runtime_kv (key, value_json, updated_at)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET
-                        value_json=excluded.value_json,
-                        updated_at=excluded.updated_at
-                """
-                if is_state_db_path(self.db_path):
-                    sql = sql.replace("?", "%s")
-                conn.execute(
-                    sql,
-                    (STATUS_KEY, json.dumps(payload, sort_keys=True), now),
-                )
+                from backend.services.runtime_kv_store import set_on_conn
+
+                set_on_conn(conn, STATUS_KEY, payload, updated_at=now, ensure=False)
                 conn.commit()
             except Exception:
                 try:

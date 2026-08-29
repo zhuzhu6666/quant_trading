@@ -7,6 +7,52 @@ from config import runtime_config
 from config.runtime_config import RuntimeConfig
 
 
+def test_shadow_perf_catalog_read_uses_one_batch_query(monkeypatch):
+    class FakeConnection:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, sql, params=()):
+            self.queries.append((sql, tuple(params)))
+            return self
+
+        def fetchall(self):
+            return [
+                {
+                    "factor": "shadow_a",
+                    "source": "shadow",
+                    "symbol": "XAUUSD+",
+                    "timeframe": "M5",
+                    "oos_bars": 12,
+                    "cumulative_pnl": 0.25,
+                    "hit_rate": 0.5,
+                    "max_drawdown": 0.1,
+                    "last_signal": 0.2,
+                    "metrics_json": '{"n_valid": 11, "n_active": 10}',
+                }
+            ]
+
+        def close(self):
+            return None
+
+    conn = FakeConnection()
+    monkeypatch.setattr(
+        factor_catalog,
+        "_connect_state",
+        lambda _db_path, *, read_only=False: conn,
+    )
+
+    result = factor_catalog._shadow_perf_by_factor(
+        ["shadow_a", "shadow_b", "shadow_a"],
+        factor_catalog.STATE_DB,
+    )
+
+    assert list(result) == ["shadow_a"]
+    assert result["shadow_a"]["n_valid"] == 11
+    assert len(conn.queries) == 1
+    assert conn.queries[0][1] == ("shadow_a", "shadow_b")
+
+
 def test_factor_catalog_uses_runtime_selection_snapshot_roles_and_weights(
     tmp_path,
     monkeypatch,

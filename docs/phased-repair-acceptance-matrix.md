@@ -184,6 +184,7 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 | evolution watermark、积压背压、单 owner/cron | `tests/test_evolution_cycle_watermark_v1.py`、`tests/test_live_scheduler_jobs.py`、`tests/test_factor_autonomy_hardening.py` |
 | blocked/no-change 不制造 snapshot | `tests/test_evolution_config_snapshot_idempotency.py` |
 | Candidate Card 方向、lineage、成熟证据和 effect 门 | `tests/test_factor_cards_api.py`、`tests/alpha/test_factor_score_evaluator.py` |
+| 因子治理批量读取、无 mutation 不重建目录、V16 固定候选 | `tests/test_factor_catalog_governance.py`、`tests/test_canonical_v2.py`、`tests/test_factor_cards_api.py`、`tests/backend/runtime/test_factor_governance_orchestrator.py` |
 | legacy ACTIVE 排除与同 generation 退回 | `tests/alpha/test_runtime_factor_selection.py`、`tests/test_factor_lifecycle_service.py` |
 | effect 成熟前不可扩权 | `tests/test_factor_weight_change_service.py` |
 | 新 decision factor lineage 绑定或显式 missing | `tests/test_decision_factor_lineage.py`；schema migration `0013` |

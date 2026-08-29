@@ -56,9 +56,11 @@ from backend.services.review_contract import (
     review_has_system_contamination,
 )
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.policy_suggestion_identity import deterministic_policy_suggestion_id
 from backend.services.position_supervisor_templates import (
     resolve_position_supervisor_binding_lineage,
 )
+from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 from research.features.evidence_contract import build_evidence_contract
 from backend.services.supervisor_payload_contract import (
     compact_supervisor_mapping as _compact_supervisor_mapping,
@@ -3099,14 +3101,20 @@ def materialize_entry_cluster_governance_suggestions(
                   AND scope_key=?
                   AND action=?
                   AND status IN ('proposed', 'approved', 'applied')
+                  AND governance_eligibility_version=?
+                  AND governance_eligibility_fingerprint=?
                 LIMIT 1
                 """,
-                (bucket, action),
+                (
+                    bucket,
+                    action,
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    str(metrics["eligibility_fingerprint"]),
+                ),
             ).fetchone()
             if existing:
                 skipped += 1
                 continue
-            suggestion_id = "psg_entry_cluster_" + hashlib.sha1(f"{bucket}:{action}".encode("utf-8")).hexdigest()[:16]
             confidence = min(0.92, 0.45 + 0.06 * effective_sample_count + 0.20 * bad_rate)
             evidence = {
                 "schema_version": "entry_cluster_governance_evidence.v1",
@@ -3129,6 +3137,16 @@ def materialize_entry_cluster_governance_suggestions(
                 status="proposed",
                 impact_level="medium",
                 db_path=db_path,
+            )
+            suggestion_id = deterministic_policy_suggestion_id(
+                writer="autonomous_learning",
+                scope_type="entry_cluster",
+                scope_key=bucket,
+                action=action,
+                evidence=evidence,
+                status="proposed",
+                qualification_fingerprint=str(metrics["eligibility_fingerprint"]),
+                prefix="psg_entry_cluster",
             )
             _execute(
                 conn,
@@ -3325,14 +3343,20 @@ def materialize_event_window_governance_suggestions(
                   AND scope_key=?
                   AND action=?
                   AND status IN ('proposed', 'approved', 'applied')
+                  AND governance_eligibility_version=?
+                  AND governance_eligibility_fingerprint=?
                 LIMIT 1
                 """,
-                (bucket, action),
+                (
+                    bucket,
+                    action,
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    str(metrics["eligibility_fingerprint"]),
+                ),
             ).fetchone()
             if existing:
                 skipped += 1
                 continue
-            suggestion_id = "psg_event_window_" + hashlib.sha1(f"{bucket}:{action}".encode("utf-8")).hexdigest()[:16]
             confidence = min(0.92, 0.45 + 0.06 * effective_sample_count + 0.20 * bad_rate)
             event_window = dict(items[0].get("event_window") or {})
             evidence = {
@@ -3357,6 +3381,16 @@ def materialize_event_window_governance_suggestions(
                 status="proposed",
                 impact_level="medium",
                 db_path=db_path,
+            )
+            suggestion_id = deterministic_policy_suggestion_id(
+                writer="autonomous_learning",
+                scope_type="event_window",
+                scope_key=bucket,
+                action=action,
+                evidence=evidence,
+                status="proposed",
+                qualification_fingerprint=str(metrics["eligibility_fingerprint"]),
+                prefix="psg_event_window",
             )
             _execute(
                 conn,
@@ -3684,9 +3718,6 @@ def materialize_entry_quality_governance_suggestions(
                     eligibility_fingerprint,
                 ),
             )
-            suggestion_id = "psg_entry_quality_" + hashlib.sha1(
-                f"{scope_key}:{action}:{eligibility_fingerprint}".encode("utf-8")
-            ).hexdigest()[:16]
             confidence = min(0.94, 0.48 + 0.05 * effective_sample_count + 0.20 * bad_rate)
             evidence = {
                 "schema_version": (
@@ -3737,6 +3768,16 @@ def materialize_entry_quality_governance_suggestions(
                 status="proposed",
                 impact_level="medium",
                 db_path=db_path,
+            )
+            suggestion_id = deterministic_policy_suggestion_id(
+                writer="autonomous_learning",
+                scope_type="entry_quality",
+                scope_key=scope_key,
+                action=action,
+                evidence=evidence,
+                status="proposed",
+                qualification_fingerprint=eligibility_fingerprint,
+                prefix="psg_entry_quality",
             )
             _execute(
                 conn,
@@ -6621,20 +6662,12 @@ def _produce_loss_streak_review_statement(db_path: str | Path = STATE_DB) -> dic
                 mark_conn = _connect(db_path)
                 try:
                     book["review_for_date"] = trip_date
-                    _execute(
+                    set_runtime_kv_on_conn(
                         mark_conn,
-                        """
-                        INSERT INTO runtime_kv(key, value_json, updated_at)
-                        VALUES (?, ?, ?)
-                        ON CONFLICT(key) DO UPDATE SET
-                            value_json=excluded.value_json,
-                            updated_at=excluded.updated_at
-                        """,
-                        (
-                            "loss_streak_book",
-                            _json.dumps(book, ensure_ascii=False, default=str),
-                            time.time(),
-                        ),
+                        "loss_streak_book",
+                        book,
+                        updated_at=time.time(),
+                        ensure=False,
                     )
                     mark_conn.commit()
                 finally:
@@ -6944,17 +6977,40 @@ def run_watermark_gated_autonomous_learning_cycle(
 ) -> dict[str, Any]:
     """Run one fixed-schedule cycle only when source facts advanced."""
 
-    from backend.services.learning_cycle_watermark import (
-        LearningCycleWatermarkService,
+    from backend.services.learning_workload_gate import (
+        RUN_NEW_FACTS,
+        RUN_PENDING_GOVERNANCE,
+        RUN_UNKNOWN,
+        SKIP_CLOSED_NO_NEW_FACTS,
+        evaluate_learning_workload,
     )
 
-    watermark_service = LearningCycleWatermarkService(db_path=db_path)
-    gate = watermark_service.evaluate()
-    if not gate.get("should_run"):
+    workload_gate = evaluate_learning_workload(db_path)
+    gate = dict(workload_gate.get("watermark") or {})
+    workload_status = str(workload_gate.get("status") or "")
+    if workload_status == RUN_UNKNOWN and not is_state_db_path(db_path):
+        # Offline SQLite fixtures do not have the live market projection; keep
+        # their established fact-watermark semantics without weakening the
+        # production PostgreSQL unknown-state behavior.
+        from backend.services.learning_cycle_watermark import LearningCycleWatermarkService
+
+        gate = LearningCycleWatermarkService(db_path=db_path).evaluate()
+        workload_status = RUN_NEW_FACTS if gate.get("should_run") else SKIP_CLOSED_NO_NEW_FACTS
+    if workload_status in {
+        SKIP_CLOSED_NO_NEW_FACTS,
+        RUN_PENDING_GOVERNANCE,
+    }:
         return {
             "ok": True,
-            "status": "skipped_no_new_facts",
+            "status": (
+                "skipped_no_new_facts"
+                if workload_status == SKIP_CLOSED_NO_NEW_FACTS
+                else workload_status or "run_unknown"
+            ),
+            "workload_status": workload_status,
+            "reason": workload_gate.get("reason_code"),
             "watermark": gate,
+            "workload_gate": workload_gate,
         }
     result = run_autonomous_learning_cycle(
         db_path=db_path,
@@ -6963,12 +7019,16 @@ def run_watermark_gated_autonomous_learning_cycle(
         submit_offline_deep=submit_offline_deep,
         mutation_capability=mutation_capability,
     )
-    watermark_service.mark_completed(gate["current"])
+    if workload_status in {RUN_NEW_FACTS, RUN_UNKNOWN} and gate.get("ok") and gate.get("current"):
+        from backend.services.learning_cycle_watermark import LearningCycleWatermarkService
+
+        LearningCycleWatermarkService(db_path=db_path).mark_completed(gate["current"])
     return {
         **dict(result or {}),
         "ok": True,
         "status": str((result or {}).get("status") or "completed"),
         "watermark": gate,
+        "workload_gate": workload_gate,
     }
 
 
@@ -7012,8 +7072,14 @@ def schedule_autonomous_learning(
                         else True
                     ),
                 )
-                if result.get("status") == "skipped_no_new_facts":
-                    logger.info("[autonomous_learning] scheduled run skipped: no new source facts")
+                if result.get("status") in {
+                    "skip_closed_no_new_facts",
+                    "run_pending_governance",
+                }:
+                    logger.info(
+                        "[autonomous_learning] scheduled run skipped: %s",
+                        result.get("status"),
+                    )
                 else:
                     logger.info("[autonomous_learning] scheduled run completed: {}", _log_summary(result))
             except Exception as exc:

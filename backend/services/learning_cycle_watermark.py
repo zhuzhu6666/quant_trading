@@ -12,6 +12,7 @@ from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_stat
 from backend.core.state_store import validate_runtime_state_schema
 from backend.services.canonical_v2 import CANONICAL_EVENT_SCHEMA
 from backend.services.fact_envelope import observed_epoch
+from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 
 
 WATERMARK_KEY = "autonomous_learning.fact_watermark.v1"
@@ -288,12 +289,12 @@ class LearningCycleWatermarkService:
                 validate_runtime_state_schema(conn, declaration)
             else:
                 conn.execute(declaration)
-            conn.execute(
-                self._sql("""
-                    INSERT INTO runtime_kv (key, value_json, updated_at) VALUES (?, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at
-                """),
-                (WATERMARK_KEY, json.dumps(watermark, sort_keys=True, default=str), now),
+            set_runtime_kv_on_conn(
+                conn,
+                WATERMARK_KEY,
+                watermark,
+                updated_at=now,
+                ensure=False,
             )
             conn.commit()
         except Exception:

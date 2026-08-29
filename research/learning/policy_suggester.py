@@ -4,7 +4,6 @@ import hashlib
 import json
 import sqlite3
 import time
-import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -15,6 +14,7 @@ from backend.services.governance_eligibility import (
     evaluate_governance_eligibility,
 )
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.policy_suggestion_identity import deterministic_policy_suggestion_id
 
 
 class PolicySuggester:
@@ -50,10 +50,6 @@ class PolicySuggester:
         with self._conn() as conn:
             if not self._use_pg():
                 conn.executescript(STATE_DB_DDL)
-
-    @staticmethod
-    def _new_id(prefix: str) -> str:
-        return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
     @staticmethod
     def _experience_eligibility(experience: dict) -> GovernanceEligibility:
@@ -272,61 +268,38 @@ class PolicySuggester:
                 impact_level="medium",
                 db_path=self.db_path,
             )
-            existing = conn.execute(
+            suggestion_id = deterministic_policy_suggestion_id(
+                writer="policy_suggester",
+                scope_type="factor",
+                scope_key=primary_factor,
+                action=action,
+                evidence=payload,
+                status="proposed",
+                qualification_fingerprint=eligibility_fingerprint,
+                prefix="psg_factor",
+            )
+            conn.execute(
                 f"""
-                SELECT suggestion_id
-                FROM policy_suggestion
-                WHERE scope_type='factor' AND scope_key={p} AND action={p} AND status='proposed'
-                ORDER BY created_at DESC
-                LIMIT 1
+                INSERT INTO policy_suggestion
+                (suggestion_id, scope_type, scope_key, action, confidence, reason,
+                 evidence_json, status, governance_eligible,
+                 governance_eligibility_version, governance_eligibility_fingerprint,
+                 governance_ineligible_reason, created_at)
+                VALUES ({p}, 'factor', {p}, {p}, {p}, {p}, {p}, 'proposed', 1, {p}, {p}, '', {p})
+                ON CONFLICT(suggestion_id) DO NOTHING
                 """,
-                (primary_factor, action),
-            ).fetchone()
-            if existing:
-                suggestion_id = str(existing["suggestion_id"])
-                conn.execute(
-                    f"""
-                    UPDATE policy_suggestion
-                    SET confidence={p}, reason={p}, evidence_json={p}, created_at={p},
-                        governance_eligible=1,
-                        governance_eligibility_version={p},
-                        governance_eligibility_fingerprint={p},
-                        governance_ineligible_reason=''
-                    WHERE suggestion_id={p}
-                    """,
-                    (
-                        round(confidence, 6),
-                        reason,
-                        json.dumps(payload, ensure_ascii=False, default=str),
-                        now,
-                        GOVERNANCE_ELIGIBILITY_VERSION,
-                        eligibility_fingerprint,
-                        suggestion_id,
-                    ),
-                )
-            else:
-                suggestion_id = self._new_id("psg")
-                conn.execute(
-                    f"""
-                    INSERT INTO policy_suggestion
-                    (suggestion_id, scope_type, scope_key, action, confidence, reason,
-                     evidence_json, status, governance_eligible,
-                     governance_eligibility_version, governance_eligibility_fingerprint,
-                     governance_ineligible_reason, created_at)
-                    VALUES ({p}, 'factor', {p}, {p}, {p}, {p}, {p}, 'proposed', 1, {p}, {p}, '', {p})
-                    """,
-                    (
-                        suggestion_id,
-                        primary_factor,
-                        action,
-                        round(confidence, 6),
-                        reason,
-                        json.dumps(payload, ensure_ascii=False, default=str),
-                        GOVERNANCE_ELIGIBILITY_VERSION,
-                        eligibility_fingerprint,
-                        now,
-                    ),
-                )
+                (
+                    suggestion_id,
+                    primary_factor,
+                    action,
+                    round(confidence, 6),
+                    reason,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    eligibility_fingerprint,
+                    now,
+                ),
+            )
 
         return {
             "suggestion_id": suggestion_id,

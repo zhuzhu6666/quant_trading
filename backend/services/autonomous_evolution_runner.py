@@ -91,6 +91,85 @@ class AutonomousEvolutionNurseryRunner:
         run_id = f"nursery_cycle_{int(started_at)}"
         actions: list[dict[str, Any]] = []
 
+        from backend.services.learning_workload_gate import (
+            RUN_PENDING_GOVERNANCE,
+            SKIP_CLOSED_NO_NEW_FACTS,
+            evaluate_learning_workload,
+        )
+
+        workload_gate = evaluate_learning_workload(self.db_path)
+        workload_status = str(workload_gate.get("status") or "")
+        if workload_status == SKIP_CLOSED_NO_NEW_FACTS:
+            skipped_cycle = {
+                "schema_version": "autonomous_evolution_cycle.v1",
+                "status": SKIP_CLOSED_NO_NEW_FACTS,
+                "autonomy_mode": "",
+                "blockers": [],
+                "next_actions": [],
+            }
+            return self._result(
+                run_id=run_id,
+                started_at=started_at,
+                initial_cycle=skipped_cycle,
+                repaired_cycle=skipped_cycle,
+                final_cycle=skipped_cycle,
+                actions=[
+                    {
+                        "action": "learning_workload_gate",
+                        "ok": True,
+                        "status": SKIP_CLOSED_NO_NEW_FACTS,
+                        "reason": workload_gate.get("reason_code"),
+                    }
+                ],
+                status=SKIP_CLOSED_NO_NEW_FACTS,
+                workload_gate=workload_gate,
+            )
+
+        # A closed market with pending governance only needs the existing
+        # Coordinator/owner reconciliation path.  Do not spend the cycle on
+        # replay, proposal refresh or a full research/evolution pass.
+        pending_governance_only = workload_status == RUN_PENDING_GOVERNANCE
+        if pending_governance_only:
+            actions.append(
+                {
+                    "action": "learning_workload_gate",
+                    "ok": True,
+                    "status": RUN_PENDING_GOVERNANCE,
+                    "reason": workload_gate.get("reason_code"),
+                }
+            )
+            # V16 orchestration, candidate review/bridge, readiness rebuilds,
+            # and the recommended apply step are research/materialization
+            # work.  A closed market with an already-pending governance item
+            # only needs the existing Coordinator/effect reconciliation owner.
+            if reconcile_effects:
+                actions.append(
+                    self._record(
+                        "reconcile_application_effects",
+                        lambda: self._reconcile_effects(limit=effect_limit),
+                    )
+                )
+            pending_cycle = {
+                "schema_version": "autonomous_evolution_cycle.v1",
+                "status": RUN_PENDING_GOVERNANCE,
+                "autonomy_mode": "",
+                "blockers": [],
+                "next_actions": [],
+            }
+            pending_status = "completed_with_errors" if any(
+                item.get("ok") is False for item in actions
+            ) else RUN_PENDING_GOVERNANCE
+            return self._result(
+                run_id=run_id,
+                started_at=started_at,
+                initial_cycle=pending_cycle,
+                repaired_cycle=pending_cycle,
+                final_cycle=pending_cycle,
+                actions=actions,
+                status=pending_status,
+                workload_gate=workload_gate,
+            )
+
         initial_readiness = readiness or self._build_readiness()
         initial_cycle = AutonomousEvolutionCycleService(self.db_path).status(
             readiness=initial_readiness,
@@ -117,6 +196,7 @@ class AutonomousEvolutionNurseryRunner:
                 final_cycle=initial_cycle,
                 actions=actions,
                 status="skipped_outside_demo_nursery",
+                workload_gate=workload_gate,
             )
 
         automatic_demo = bool(automatic_demo) and str(initial_cycle.get("autonomy_mode") or "") in {
@@ -291,6 +371,7 @@ class AutonomousEvolutionNurseryRunner:
             actions=actions,
             status=status,
             release_run=release_run,
+            workload_gate=workload_gate,
         )
 
     def _result(
@@ -304,6 +385,7 @@ class AutonomousEvolutionNurseryRunner:
         actions: list[dict[str, Any]],
         status: str,
         release_run: dict[str, Any] | None = None,
+        workload_gate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "ok": status not in {"completed_with_errors"},
@@ -317,6 +399,7 @@ class AutonomousEvolutionNurseryRunner:
             "final_cycle": self._cycle_summary(final_cycle),
             "actions": actions,
             "release_run": release_run or {},
+            "workload_gate": workload_gate or {},
             "boundary": self.boundary(),
         }
 

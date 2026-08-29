@@ -62,6 +62,9 @@ _CATALOG_VOLATILE_FIELDS = {
 # factor_health / canary_state tables on read (they are display-only
 # freshness stamps; consumers recompute freshness against now()).
 _CATALOG_PAYLOAD_REF = "__catalog_payload_ref__"
+_CATALOG_VOLATILE_PROJECTION_FIELDS = frozenset(
+    {"heartbeat_at", "loaded_at", "updated_at", "published_at"}
+)
 
 
 def _strip_volatile_nested(item: dict[str, Any]) -> dict[str, Any]:
@@ -77,6 +80,17 @@ def _strip_volatile_nested(item: dict[str, Any]) -> dict[str, Any]:
             stripped["canary"] = canary
         else:
             stripped.pop("canary", None)
+    projection = stripped.get("loaded_projection")
+    if isinstance(projection, dict):
+        projection = {
+            key: value
+            for key, value in projection.items()
+            if key not in _CATALOG_VOLATILE_PROJECTION_FIELDS
+        }
+        if projection:
+            stripped["loaded_projection"] = projection
+        else:
+            stripped.pop("loaded_projection", None)
     return stripped
 
 
@@ -181,7 +195,8 @@ def _hydrate_volatile_fields(
 
     health = _health_by_factor(db_path)
     canary = _canary_by_factor(db_path)
-    if not health and not canary:
+    projections = _runtime_projection_by_factor_name(db_path)
+    if not health and not canary and not projections:
         return catalog
     result: list[dict[str, Any]] = []
     for item in catalog:
@@ -198,6 +213,14 @@ def _hydrate_volatile_fields(
             canary_dict = dict(updated.get("canary") or {})
             canary_dict["updated_at"] = float(c.get("updated_at") or 0.0)
             updated["canary"] = canary_dict
+        projection = projections.get(name)
+        if isinstance(projection, dict):
+            projection_dict = dict(updated.get("loaded_projection") or {})
+            for field in _CATALOG_VOLATILE_PROJECTION_FIELDS:
+                if field in projection:
+                    projection_dict[field] = projection[field]
+            if projection_dict:
+                updated["loaded_projection"] = projection_dict
         result.append(updated)
     return result
 
@@ -662,6 +685,77 @@ def _shadow_perf(name: str) -> dict[str, Any]:
         return {}
 
 
+def _shadow_perf_by_factor(
+    names: list[str] | set[str] | tuple[str, ...],
+    db_path: str | Path = STATE_DB,
+) -> dict[str, dict[str, Any]]:
+    """Load shadow performance for all factors with one state-store query.
+
+    ``build_factor_catalog`` is called on every governance tick.  The old
+    implementation opened a PostgreSQL connection once per shadow factor,
+    turning a catalog read into an N+1 query and adding roughly one network
+    round trip per factor.  Keep the old loader for offline SQLite fixtures,
+    while the production state store uses a single bounded ``IN`` query.
+    """
+
+    factor_names = list(dict.fromkeys(str(name) for name in names if str(name)))
+    if not factor_names:
+        return {}
+    if not is_state_db_path(db_path):
+        return {name: _shadow_perf(name) for name in factor_names}
+
+    try:
+        conn = _connect_state(db_path, read_only=True)
+        try:
+            placeholders = ", ".join("?" for _ in factor_names)
+            rows = conn.execute(
+                _p(
+                    db_path,
+                    f"""
+                    SELECT factor, source, symbol, timeframe, oos_bars,
+                           cumulative_pnl, hit_rate, max_drawdown,
+                           last_signal, metrics_json
+                    FROM shadow_factor_perf
+                    WHERE factor IN ({placeholders})
+                    """,
+                ),
+                tuple(factor_names),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            factor = str(row["factor"] or "")
+            if not factor:
+                continue
+            metrics = _loads(row["metrics_json"], {})
+            if not isinstance(metrics, dict):
+                metrics = {}
+            result[factor] = {
+                "factor": factor,
+                "source": str(row["source"] or metrics.get("source") or "shadow"),
+                "symbol": str(row["symbol"] or metrics.get("symbol") or ""),
+                "timeframe": str(row["timeframe"] or metrics.get("timeframe") or ""),
+                "oos_bars": int(row["oos_bars"] or 0),
+                "cumulative_pnl": float(row["cumulative_pnl"] or 0.0),
+                "hit_rate": float(row["hit_rate"] or 0.0),
+                "max_drawdown": float(row["max_drawdown"] or 0.0),
+                "last_signal": float(row["last_signal"] or 0.0),
+                "n_valid": int(metrics.get("n_valid", row["oos_bars"] or 0) or 0),
+                "n_active": int(metrics.get("n_active", row["oos_bars"] or 0) or 0),
+                "evidence_hash": str(metrics.get("evidence_hash") or ""),
+                "dataset_hash": str(metrics.get("dataset_hash") or ""),
+                "evidence_start_at": str(metrics.get("evidence_start_at") or ""),
+                "evidence_end_at": str(metrics.get("evidence_end_at") or ""),
+                "input_bars": int(metrics.get("input_bars") or 0),
+                "new_evidence_bars": int(metrics.get("new_evidence_bars") or 0),
+            }
+        return result
+    except Exception:
+        return {}
+
+
 def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]:
     cfg = runtime_config()
     signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
@@ -741,6 +835,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
         | set(health)
         | set(lifecycle)
     )
+    shadow_perf = _shadow_perf_by_factor(names, db_path)
 
     items: list[dict[str, Any]] = []
     now = time.time()
@@ -904,7 +999,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "health_updated_at": float(h.get("updated_at") or 0.0),
             "canary": canary.get(name, {}),
             "loaded_projection": runtime_projections.get(name, {}),
-            "shadow_perf": _shadow_perf(name) if source in {"shadow", "discovered"} else {},
+            "shadow_perf": shadow_perf.get(name, {}) if source in {"shadow", "discovered"} else {},
             "factor_governance_shadow": fg_shadow,
             "model_weakness_score": float(fg_shadow.get("weakness_score") or fg_shadow.get("avg_weakness_score") or 0.0),
             "model_positive_score": float(fg_shadow.get("positive_score") or fg_shadow.get("avg_positive_score") or 0.0),
@@ -968,17 +1063,44 @@ def persist_factor_catalog_snapshot(
             """),
             (snapshot_id, str(run_id or ""), catalog_hash, _dumps(storage_payload), str(source or ""), now),
         )
-        # Retention: keep only newest 20 snapshots per hash is handled by dedup;
-        # cap total rows to newest 50 to prevent unbounded growth (was 85→unbounded).
-        conn.execute(
-            _p(db_path, """
-            DELETE FROM factor_catalog_snapshot
-            WHERE snapshot_id NOT IN (
-                SELECT snapshot_id FROM factor_catalog_snapshot
-                ORDER BY created_at DESC LIMIT 50
+        # Keep the newest 50 occurrences, but also retain one full payload for
+        # every hash still referenced by those occurrences.  A plain
+        # ``ORDER BY ... LIMIT 50`` purge can delete the only full payload
+        # behind a reference row, making the latest catalog unreadable after
+        # enough no-op cycles.
+        rows = conn.execute(
+            _p(
+                db_path,
+                """SELECT snapshot_id, catalog_hash, catalog_json
+                   FROM factor_catalog_snapshot
+                   ORDER BY created_at DESC, snapshot_id DESC""",
             )
-            """),
-        )
+        ).fetchall()
+        keep_ids = {str(row["snapshot_id"] or "") for row in rows[:50]}
+        recent_hashes = {
+            str(row["catalog_hash"] or "")
+            for row in rows[:50]
+            if str(row["catalog_hash"] or "")
+        }
+        for row in rows:
+            catalog_hash_row = str(row["catalog_hash"] or "")
+            if catalog_hash_row not in recent_hashes:
+                continue
+            raw_json = str(row["catalog_json"] or "")
+            if raw_json.lstrip().startswith("["):
+                keep_ids.add(str(row["snapshot_id"] or ""))
+                recent_hashes.discard(catalog_hash_row)
+                if not recent_hashes:
+                    break
+        if keep_ids:
+            placeholders = ", ".join("?" for _ in keep_ids)
+            conn.execute(
+                _p(
+                    db_path,
+                    f"DELETE FROM factor_catalog_snapshot WHERE snapshot_id NOT IN ({placeholders})",
+                ),
+                tuple(sorted(keep_ids)),
+            )
         conn.commit()
     finally:
         conn.close()

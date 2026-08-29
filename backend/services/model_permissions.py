@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
 from backend.core.db_helpers import conn_is_pg as _conn_is_pg, pg_sql as _sql
+from backend.core.db_helpers import dump_json as _dump_json
 from backend.core.state_store import (
     is_state_schema_write_sql,
     validate_runtime_state_schema,
@@ -37,6 +39,97 @@ REQUIRED_TRUE_CAPABILITIES = {
     "advisory_only",
     "shadow_only",
 }
+
+_AUDIT_CONTEXT_VOLATILE_KEYS = {
+    "run_id",
+    "trace_id",
+    "request_id",
+    "correlation_id",
+    "timestamp",
+    "created_at",
+    "updated_at",
+    "operation",
+}
+
+
+def _stable_value(value: Any) -> Any:
+    """Return a JSON-safe semantic value for permission identity hashing."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): _stable_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in _AUDIT_CONTEXT_VOLATILE_KEYS
+        }
+    if isinstance(value, (list, tuple, set)):
+        values = [_stable_value(item) for item in value]
+        # Violations/capabilities are sets semantically; sorting their JSON
+        # forms prevents call-site ordering from creating a new audit row.
+        return sorted(values, key=lambda item: _dump_json(item))
+    return value
+
+
+def artifact_permission_identity(
+    artifact: dict[str, Any],
+    *,
+    artifact_path: str | Path | None = None,
+) -> str:
+    """Return a stable identity that changes when an artifact is replaced.
+
+    Artifact metadata normally contains a content hash.  For older artifacts
+    without one, the metadata/model file path, size and nanosecond mtime form a
+    cheap replacement identity; this avoids hashing a model file on every hot
+    scoring call while still invalidating the cache on replacement.
+    """
+
+    metadata: dict[str, Any] = {
+        "model_type": str(artifact.get("model_type") or ""),
+        "model_version": str(artifact.get("model_version") or ""),
+        "feature_schema_version": str(artifact.get("feature_schema_version") or ""),
+        "artifact_sha256": str(artifact.get("artifact_sha256") or ""),
+        "model_file_sha256": str(
+            artifact.get("model_file_sha256")
+            or artifact.get("model_sha256")
+            or ""
+        ),
+    }
+    paths = {
+        "artifact": artifact_path or artifact.get("artifact_path") or "",
+        "model_file": artifact.get("model_file") or "",
+    }
+    for label, raw_path in paths.items():
+        text = str(raw_path or "").strip()
+        if not text:
+            continue
+        path = Path(text).expanduser()
+        try:
+            stat = path.stat()
+            metadata[label] = {
+                "path": str(path.resolve()),
+                "size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+            }
+        except OSError:
+            metadata[label] = {"path": str(path)}
+    return hashlib.sha256(_dump_json(metadata).encode("utf-8")).hexdigest()
+
+
+def _permission_audit_id(
+    evaluation: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+) -> str:
+    del context
+    payload = {
+        "model_type": str(evaluation.get("model_type") or ""),
+        "artifact_identity": str(evaluation.get("artifact_identity") or ""),
+        "status": str(evaluation.get("status") or ""),
+        "reason": str(evaluation.get("reason") or ""),
+        "capabilities": _stable_value(evaluation.get("capabilities") or {}),
+        "violations": _stable_value(evaluation.get("violations") or []),
+    }
+    digest = hashlib.sha256(_dump_json(payload).encode("utf-8")).hexdigest()
+    return f"mpa:{digest}"
 
 
 def _use_pg(db_path: str | Path = STATE_DB) -> bool:
@@ -158,6 +251,10 @@ def evaluate_model_permissions(
         "status": "allowed" if ok else "blocked",
         "model_type": str(model_type or artifact.get("model_type") or ""),
         "artifact_path": str(artifact_path or artifact.get("artifact_path") or ""),
+        "artifact_identity": artifact_permission_identity(
+            artifact,
+            artifact_path=artifact_path,
+        ),
         "capabilities": capabilities,
         "violations": violations,
         "reason": "advisory_shadow_only" if ok else "model_permission_violation",
@@ -179,16 +276,33 @@ def audit_model_permissions(
 ) -> dict[str, Any]:
     ensure_model_permission_audit_table(db_path)
     now = time.time()
-    audit_id = f"mpa:{evaluation.get('model_type') or 'model'}:{int(now * 1000)}"
+    audit_context = dict(context or {})
+    # Keep the artifact identity in the existing context column so cleanup
+    # can distinguish a replacement model file at the same path.  It is
+    # semantic permission evidence, not a per-score occurrence field.
+    audit_context.setdefault(
+        "artifact_identity",
+        str(evaluation.get("artifact_identity") or ""),
+    )
+    audit_id = _permission_audit_id(evaluation, context=audit_context)
     conn = _connect(db_path)
     try:
-        _execute(
+        if _conn_is_pg(conn):
+            # The deterministic id is the idempotency boundary.  The
+            # explicit lock keeps two concurrent scoring callers from both
+            # passing the NOT EXISTS check even on legacy installations where
+            # audit_id was not declared as a unique constraint.
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (audit_id,))
+        cursor = _execute(
             conn,
             """
             INSERT INTO model_permission_audit
             (audit_id, model_type, artifact_path, status, reason, capabilities_json,
              violations_json, context_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM model_permission_audit WHERE audit_id=?
+            )
             """,
             (
                 audit_id,
@@ -198,14 +312,21 @@ def audit_model_permissions(
                 str(evaluation.get("reason") or ""),
                 json.dumps(evaluation.get("capabilities") or {}, ensure_ascii=False, sort_keys=True),
                 json.dumps(evaluation.get("violations") or [], ensure_ascii=False, sort_keys=True),
-                json.dumps(context or {}, ensure_ascii=False, sort_keys=True, default=str),
+                json.dumps(audit_context, ensure_ascii=False, sort_keys=True, default=str),
                 now,
+                audit_id,
             ),
         )
         conn.commit()
+        inserted = int(getattr(cursor, "rowcount", 1) or 0) > 0
     finally:
         conn.close()
-    return {**evaluation, "audit_id": audit_id, "audited_at": now}
+    return {
+        **evaluation,
+        "audit_id": audit_id,
+        "audited_at": now,
+        "audit_reused": not inserted,
+    }
 
 
 def validate_model_artifact(

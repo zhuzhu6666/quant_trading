@@ -19,7 +19,10 @@ from backend.services.factor_cards import (
 )
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.learning_application_store import LearningApplicationStore
-from backend.services.parameter_templates import ParameterTemplateService
+from backend.services.parameter_templates import (
+    ParameterTemplateService,
+    clear_parameter_template_recommendation_cache,
+)
 from backend.services.parameter_template_validation import (
     ParameterTemplateValidationService,
     run_parameter_template_offline_validation,
@@ -386,6 +389,25 @@ def test_candidate_card_complete_prepared_evidence_is_activation_eligible():
     assert evidence["eligible_for_activation"] is True
     assert evidence["activation_blocker_codes"] == []
     assert evidence["validation"]["bar_oos"]["research_only"] is True
+
+
+def test_candidate_card_uses_supplied_health_freshness_contract(monkeypatch):
+    now = time.time()
+
+    def fail_if_config_is_refreshed():
+        raise AssertionError("admission projection refreshed runtime config")
+
+    monkeypatch.setattr(rc, "shared", fail_if_config_is_refreshed)
+    evidence = build_factor_admission_evidence(
+        factor_id="candidate",
+        catalog_item=_complete_candidate_catalog(now),
+        evidence_counts=_complete_evidence_counts(),
+        governance={},
+        now_ts=now,
+        health_max_age_seconds=900.0,
+    )
+
+    assert evidence["governance"]["health"]["fresh"] is True
 
 
 def test_candidate_card_active_canary_waits_for_mature_positive_real_effect():
@@ -905,6 +927,71 @@ def test_factor_cards_parameter_responsibility_filter_fails_closed_on_batch_erro
     assert cards == []
 
 
+def test_factor_evidence_summary_uses_embedded_decision_snapshots_once(
+    monkeypatch,
+    tmp_path,
+):
+    """The summary projection must not issue one payload query per decision."""
+    import research.features.feature_provider as feature_provider
+
+    provider = feature_provider.LearningFeatureProvider(str(tmp_path / "state.db"))
+
+    class _ConnContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(provider, "_conn", lambda **_kwargs: _ConnContext())
+    monkeypatch.setattr(feature_provider, "canonical_ready", lambda _conn: True)
+    monkeypatch.setattr(
+        feature_provider,
+        "iter_training_sample_rows",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        feature_provider,
+        "iter_decision_rows",
+        lambda *_args, **_kwargs: iter(
+            [
+                {
+                    "decision_id": "decision-1",
+                    "factor_snapshots": [
+                        {
+                            "factor": "rsi_14",
+                            "shadow_score": 0.2,
+                            "contribution_score": 0.1,
+                        }
+                    ],
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        feature_provider,
+        "iter_decision_factor_snapshots",
+        lambda *_args, **_kwargs: pytest.fail(
+            "embedded decision snapshots should be reused"
+        ),
+    )
+    monkeypatch.setattr(feature_provider, "iter_review_rows_desc", lambda *_args, **_kwargs: [])
+
+    class _Store:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def iter_effects(self, **_kwargs):
+            return iter(())
+
+    monkeypatch.setattr(feature_provider, "LearningApplicationStore", _Store)
+
+    result = provider.factor_evidence_summary(["rsi_14"])
+
+    assert result["rsi_14"]["decision_observations"] == 1
+    assert result["rsi_14"]["shadow_score"] == 0.2
+
+
 def test_parameter_template_recommendations_can_surface_offline_validate_path(tmp_path):
     db_path = str(tmp_path / "state.db")
     reset_shared()
@@ -924,6 +1011,44 @@ def test_parameter_template_recommendations_can_surface_offline_validate_path(tm
     assert items[0]["boundary"]["recommended_scope"] == "offline_deep"
     assert items[0]["recommended_action"] == "offline_validate"
     assert "parameter_delta_too_large" in items[0]["boundary"]["reasons"]
+
+
+def test_parameter_template_recommendations_reuse_parameter_card_for_templates(
+    tmp_path,
+    monkeypatch,
+):
+    """One recommendation pass must not rescan canonical evidence per template."""
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    _seed_factor_card_state(db_path)
+    service = ParameterTemplateService(db_path)
+    card = {
+        "factor_id": "rsi_14",
+        "factor_family": "momentum_oscillator",
+        "formula_version": "registry_builtin.v1",
+        "parameter_version": "default.v1",
+        "parameters": {"length": 14},
+        "expected_regimes": ["range"],
+        "weak_regimes": ["strong_trend"],
+        "expected_holding_profile": {"style": "short_swing"},
+        "evidence_summary": {
+            "last_primary_responsibility": "parameter",
+            "recent_responsibility_labels": ["factor_logic_ok_but_param_suspect"],
+        },
+    }
+    calls = []
+
+    def _cards(**kwargs):
+        calls.append(kwargs)
+        return [card]
+
+    monkeypatch.setattr(service.cards, "list_cards", _cards)
+    clear_parameter_template_recommendation_cache(db_path)
+
+    items = service.list_recommendations(limit=10)
+
+    assert len(items) == 1
+    assert len(calls) == 1
 
 
 def test_parameter_template_switch_suggestion_carries_factor_card_parameter_evidence(tmp_path):

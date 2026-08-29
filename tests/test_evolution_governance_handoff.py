@@ -129,3 +129,40 @@ def test_closed_no_input_skips_governance_when_no_work_is_pending(monkeypatch):
 
     assert result.factor_v16_handoff["reason"] == "market_closed_no_new_input"
     assert result.factor_governance_handoff["status"] == "skipped"
+
+
+def test_closed_pending_governance_defers_heavy_handoff(monkeypatch):
+    report = evolution.EvolutionReport()
+    report.gp_skip_reason = "market_closed_pending_governance"
+    calls = []
+    import backend.services.learning_workload_gate as workload
+
+    monkeypatch.setattr(workload, "evaluate_learning_workload", lambda: {
+        "status": "run_pending_governance",
+        "reason_code": "closed_market_pending:approved_policy_suggestion",
+    })
+    monkeypatch.setattr(
+        evolution,
+        "scheduled_evolution_cycle",
+        lambda: calls.append("evolution") or report,
+    )
+
+    import backend.runtime.factor_governance_orchestrator as governance
+    import backend.services.v16_brain_orchestrator as v16
+
+    monkeypatch.setattr(
+        v16.V16BrainOrchestratorService,
+        "run_once",
+        lambda *_args, **_kwargs: calls.append("v16") or {},
+    )
+    monkeypatch.setattr(
+        governance.FactorGovernanceOrchestrator,
+        "shared",
+        classmethod(lambda _cls: calls.append("governance") or None),
+    )
+
+    result = evolution.scheduled_evolution_with_governance_handoff()
+
+    assert calls == ["evolution"]
+    assert result.factor_v16_handoff["reason"] == "market_closed_pending_governance"
+    assert result.factor_governance_handoff["owner"] == "AutonomousEvolutionNurseryRunner"

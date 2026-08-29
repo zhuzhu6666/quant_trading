@@ -36,7 +36,9 @@ from backend.services.learning_application_store import (
     store_for_conn,
 )
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.policy_suggestion_identity import deterministic_policy_suggestion_id
 from backend.services.position_supervisor import evaluate_position_supervisor
+from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 from backend.services.position_supervisor_templates import (
     CONSERVATIVE_TEMPLATE_ID,
     DEFAULT_TEMPLATE_ID,
@@ -734,20 +736,12 @@ def publish_position_supervisor_selection_projection(
                 validate_runtime_state_schema(conn, declaration)
             else:
                 conn.execute(declaration)
-            conn.execute(
-                _sql(
-                    conn,
-                    """INSERT INTO runtime_kv (key, value_json, updated_at)
-                       VALUES (?, ?, ?)
-                       ON CONFLICT(key) DO UPDATE SET
-                           value_json=excluded.value_json,
-                           updated_at=excluded.updated_at""",
-                ),
-                (
-                    POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY,
-                    json.dumps(projection, ensure_ascii=False),
-                    now,
-                ),
+            set_runtime_kv_on_conn(
+                conn,
+                POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY,
+                projection,
+                updated_at=now,
+                ensure=False,
             )
             conn.commit()
             return {**projection, "ok": True, "status": projection.get("status")}
@@ -2106,9 +2100,6 @@ def build_position_supervisor_advisories(
                         candidate_template.get("generation_context") or {}
                     ),
                 }
-        suggestion_id = "psv_" + hashlib.sha1(
-            f"{day}:{action}:{target_template_id}:{reason}".encode("utf-8")
-        ).hexdigest()[:16]
         evidence = {
             **evidence,
             "replay_summary": replay_summary,
@@ -2119,7 +2110,6 @@ def build_position_supervisor_advisories(
                 {
                     "schema_version": GOVERNANCE_ELIGIBILITY_VERSION,
                     "evidence_class": "position_supervisor_advisory",
-                    "suggestion_id": suggestion_id,
                     "scope_type": "position_supervisor_template",
                     "scope_key": target_template_id,
                     "action": action,
@@ -2127,6 +2117,16 @@ def build_position_supervisor_advisories(
                 }
             ).encode("utf-8")
         ).hexdigest()
+        suggestion_id = deterministic_policy_suggestion_id(
+            writer="position_supervisor_governance",
+            scope_type="position_supervisor_template",
+            scope_key=target_template_id,
+            action=action,
+            evidence=evidence,
+            status="proposed",
+            qualification_fingerprint=eligibility_fingerprint,
+            prefix="psv",
+        )
         evidence["governance_eligibility"] = {
             "governance_eligible": True,
             "governance_eligibility_version": GOVERNANCE_ELIGIBILITY_VERSION,
@@ -2380,40 +2380,7 @@ def build_position_supervisor_advisories(
                      governance_eligibility_version, governance_eligibility_fingerprint,
                      governance_ineligible_reason, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)
-                    ON CONFLICT(suggestion_id) DO UPDATE SET
-                        scope_type=excluded.scope_type,
-                        scope_key=excluded.scope_key,
-                        action=excluded.action,
-                        confidence=excluded.confidence,
-                        reason=excluded.reason,
-                        evidence_json=excluded.evidence_json,
-                        governance_eligible=excluded.governance_eligible,
-                        governance_eligibility_version=excluded.governance_eligibility_version,
-                        governance_eligibility_fingerprint=excluded.governance_eligibility_fingerprint,
-                        governance_ineligible_reason=CASE
-                            WHEN policy_suggestion.status='rejected'
-                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
-                            THEN ''
-                            ELSE policy_suggestion.governance_ineligible_reason
-                        END,
-                        status=CASE
-                            WHEN policy_suggestion.status='rejected'
-                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
-                            THEN 'proposed'
-                            ELSE policy_suggestion.status
-                        END,
-                        reviewed_at=CASE
-                            WHEN policy_suggestion.status='rejected'
-                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
-                            THEN 0.0
-                            ELSE policy_suggestion.reviewed_at
-                        END,
-                        review_note=CASE
-                            WHEN policy_suggestion.status='rejected'
-                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
-                            THEN ''
-                            ELSE policy_suggestion.review_note
-                        END
+                    ON CONFLICT(suggestion_id) DO NOTHING
                     """,
                     (
                         item["suggestion_id"],
@@ -2428,6 +2395,35 @@ def build_position_supervisor_advisories(
                         item["governance_eligibility_fingerprint"],
                         item["governance_ineligible_reason"],
                         now_ts,
+                    ),
+                )
+                # Re-opening a suggestion rejected solely because an older
+                # eligibility contract was malformed is a real state
+                # transition.  Keep that exceptional repair explicit; an
+                # ordinary same-semantic retry remains a pure no-op and does
+                # not rewrite the evidence JSON or its TOAST value.
+                _execute(
+                    conn,
+                    """
+                    UPDATE policy_suggestion
+                    SET confidence=?, reason=?, evidence_json=?,
+                        governance_eligible=?,
+                        governance_eligibility_version=?,
+                        governance_eligibility_fingerprint=?,
+                        governance_ineligible_reason='', status='proposed',
+                        reviewed_at=0.0, review_note=''
+                    WHERE suggestion_id=?
+                      AND status='rejected'
+                      AND governance_ineligible_reason='eligibility_contract_invalid'
+                    """,
+                    (
+                        float(item["confidence"]),
+                        item["reason"],
+                        json.dumps(item["evidence"], ensure_ascii=False),
+                        int(item["governance_eligible"]),
+                        item["governance_eligibility_version"],
+                        item["governance_eligibility_fingerprint"],
+                        item["suggestion_id"],
                     ),
                 )
             conn.commit()

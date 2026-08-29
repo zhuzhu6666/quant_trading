@@ -32,6 +32,7 @@ from backend.core.db import get_state_pg_conn
 from backend.core.state_store import RuntimeStateSchemaError, validate_runtime_state_schema
 
 from backend.services.autonomous_learning import _autonomy_mode
+from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 
 
 _EVOLUTION_WATERMARK_KEY = "evolution_cycle_watermark.v1"
@@ -470,19 +471,12 @@ def _persist_evolution_cycle_watermark(
             )
             """,
         )
-        conn.execute(
-            """
-            INSERT INTO runtime_kv (key, value_json, updated_at)
-            VALUES (%s, %s, %s)
-            ON CONFLICT(key) DO UPDATE SET
-                value_json=excluded.value_json,
-                updated_at=excluded.updated_at
-            """,
-            (
-                _EVOLUTION_WATERMARK_KEY,
-                _json.dumps(payload, ensure_ascii=False, sort_keys=True),
-                completed_at,
-            ),
+        set_runtime_kv_on_conn(
+            conn,
+            _EVOLUTION_WATERMARK_KEY,
+            payload,
+            updated_at=completed_at,
+            ensure=False,
         )
         conn.commit()
         return {**payload, "write_status": "completed"}
@@ -559,6 +553,32 @@ def scheduled_evolution_cycle(
     t0 = _time.time()
 
     try:
+        from backend.services.learning_workload_gate import (
+            RUN_PENDING_GOVERNANCE,
+            SKIP_CLOSED_NO_NEW_FACTS,
+            evaluate_learning_workload,
+        )
+
+        workload_gate = evaluate_learning_workload()
+        workload_status = str(workload_gate.get("status") or "")
+        if workload_status in {SKIP_CLOSED_NO_NEW_FACTS, RUN_PENDING_GOVERNANCE}:
+            report.evolution_watermark = dict(workload_gate.get("watermark") or {})
+            report.gp_status = "skipped_market_closed"
+            report.gp_skip_reason = (
+                "market_closed_no_new_input"
+                if workload_status == SKIP_CLOSED_NO_NEW_FACTS
+                else "market_closed_pending_governance"
+            )
+            report.canary_backpressure = {
+                "ok": True,
+                "status": "pending_governance" if workload_status == RUN_PENDING_GOVERNANCE else "idle",
+                "can_register": False,
+                "reason_code": report.gp_skip_reason,
+            }
+            cb("idle_skip", 40, report.gp_skip_reason)
+            report.duration_sec = _time.time() - t0
+            return report
+
         _emit_evolution_story("cycle_start", {})
         cb("start", 0, "evolution cycle starting")
 
@@ -812,7 +832,45 @@ def scheduled_evolution_cycle(
 def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
     """Run health -> V16 decision -> specialist governance in one evidence cycle."""
 
+    from backend.services.learning_workload_gate import (
+        RUN_PENDING_GOVERNANCE,
+        SKIP_CLOSED_NO_NEW_FACTS,
+        evaluate_learning_workload,
+    )
+
+    workload_gate = evaluate_learning_workload()
+    if str(workload_gate.get("status") or "") == SKIP_CLOSED_NO_NEW_FACTS:
+        report = EvolutionReport()
+        report.gp_status = "skipped_market_closed"
+        report.gp_skip_reason = "market_closed_no_new_input"
+        report.evolution_watermark = dict(workload_gate.get("watermark") or {})
+        report.factor_v16_handoff = {
+            "status": "skipped",
+            "health_cycle_id": "",
+            "reason": "market_closed_no_new_input",
+        }
+        report.factor_governance_handoff = dict(report.factor_v16_handoff)
+        return report
+
     report = scheduled_evolution_cycle()
+    if report.gp_skip_reason == "market_closed_pending_governance":
+        # Pending governance is owned by the bounded Coordinator/effect
+        # reconciliation path. Do not fall through to the normal handoff:
+        # it would rebuild factor health, dispatch V16, and run the full
+        # factor-governance catalog scan while the market is closed.
+        report.factor_v16_handoff = {
+            "status": "skipped",
+            "health_cycle_id": "",
+            "reason": "market_closed_pending_governance",
+        }
+        report.factor_governance_handoff = {
+            "status": "deferred",
+            "health_cycle_id": "",
+            "reason": "market_closed_pending_governance",
+            "owner": "AutonomousEvolutionNurseryRunner",
+        }
+        return report
+
     if (
         report.gp_skip_reason == "market_closed_no_new_input"
         and not _has_pending_factor_governance_work()

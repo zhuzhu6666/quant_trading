@@ -13,7 +13,6 @@ import logging
 import math
 import sqlite3
 import time
-import uuid
 from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
@@ -44,8 +43,8 @@ from backend.services.learning_experiment_admission import (
     LearningExperimentAdmissionService,
     STRUCTURAL_AUDIT_ACTIONS,
 )
-from backend.services.mutation_audit import record_api_mutation
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.policy_suggestion_identity import deterministic_policy_suggestion_id
 from backend.services.runtime_config_mutation import RuntimeConfigMutationService
 from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
 from config import runtime_config
@@ -55,9 +54,201 @@ from risk.policy_service import RiskPolicyService, RiskVerdict
 logger = logging.getLogger(__name__)
 
 _EVIDENCE_STREAK_KEY = "factor_governance_evidence_streak.v1"
-# Operational chunk size only; it bounds the temporary read projection without
-# changing any governance threshold or eligibility rule.
-_ADMISSION_EVIDENCE_BATCH_SIZE = 200
+
+# Only these audit outcomes mean that the effective catalog may have changed.
+# Blocked, delegated and superseded observations must not make every later
+# governance stage rebuild the expensive catalog projection.
+_CATALOG_MUTATION_STATUSES = frozenset(
+    {
+        "applied",
+        "promotion_prepared",
+        "shadow_registered",
+        "projection_degraded",
+        "rolled_back",
+        "demoted_to_shadow",
+        "retired",
+    }
+)
+
+_AUDIT_OCCURRENCE_KEYS = frozenset(
+    {
+        "run_id",
+        "decision_id",
+        "trace_id",
+        "request_id",
+        "correlation_id",
+        "created_at",
+        "updated_at",
+        "timestamp",
+        "started_at",
+        "finished_at",
+        "generated_at",
+        "published_at",
+        "heartbeat_at",
+        "loaded_at",
+        "catalog_ts",
+        "write_timestamp",
+        "observed_at",
+        "cycle_ts",
+    }
+)
+
+
+def _audit_semantic_value(value: Any) -> Any:
+    """Strip only per-run occurrence metadata before coalescing observations."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _audit_semantic_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in _AUDIT_OCCURRENCE_KEYS
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_audit_semantic_value(item) for item in value]
+    return value
+
+
+class _GovernanceCycleAuditWriter:
+    """Run-scoped audit seam that keeps observations and facts distinct.
+
+    Coordinator-owned mutation/effect facts remain one row per authoritative
+    transition.  Repeated non-mutating observations with the same semantic
+    evidence are represented by the first decision in this run; this avoids
+    N identical ledger/policy writes without changing governance authority.
+    """
+
+    def __init__(self, run: Mapping[str, Any], cfg: RuntimeConfig | None = None):
+        self.run_id = str(run.get("run_id") or "")
+        self.cfg = cfg
+        # ``start_evolution_run`` already persisted and returned the
+        # authoritative config snapshot.  Reuse it instead of creating a
+        # second runtime_config_snapshot row for the audit writer.  Direct
+        # diagnostic callers may provide only a run id; those callers lazily
+        # create one snapshot on first use.
+        self._snapshot: dict[str, Any] | None = (
+            dict(run)
+            if run.get("config_version") or run.get("config_hash")
+            else None
+        )
+        self._seen: dict[str, str] = {}
+
+    def snapshot(self) -> dict[str, Any]:
+        if self._snapshot is None:
+            from backend.services.evolution_ledger import persist_runtime_config_snapshot
+
+            self._snapshot = persist_runtime_config_snapshot(
+                self.cfg or runtime_config.shared(),
+                source="factor_governance:cycle",
+                run_id=self.run_id,
+            )
+        return dict(self._snapshot)
+
+    @staticmethod
+    def _authoritative(
+        status: str,
+        result: Mapping[str, Any] | None,
+    ) -> bool:
+        if str(status or "") in _CATALOG_MUTATION_STATUSES:
+            return True
+        payload = result or {}
+        return any(
+            bool(payload.get(key))
+            for key in (
+                "mutation_id",
+                "applied_mutation_id",
+                "application_id",
+                "effect_id",
+            )
+        )
+
+    def decision(
+        self,
+        *,
+        factor_id: str,
+        action: str,
+        status: str,
+        evidence: Mapping[str, Any],
+        risk_verdict: Mapping[str, Any],
+        before: Mapping[str, Any] | None,
+        after: Mapping[str, Any] | None,
+        rollback: Mapping[str, Any] | None,
+        result: Mapping[str, Any] | None,
+        config_snapshot: Mapping[str, Any],
+    ) -> tuple[str, bool]:
+        from backend.services.evolution_ledger import record_evolution_decision
+
+        semantic = _audit_semantic_value(
+            {
+                "factor_id": factor_id,
+                "action": action,
+                "status": status,
+                "evidence": evidence,
+                "risk_verdict": risk_verdict,
+                "before": before or {},
+                "after": after or {},
+                "rollback": rollback or {},
+                "result": result or {},
+            }
+        )
+        key = hashlib.sha256(_dumps(semantic).encode("utf-8")).hexdigest()
+        if not self._authoritative(status, result) and key in self._seen:
+            return self._seen[key], True
+        decision_id = record_evolution_decision(
+            run_id=self.run_id,
+            decision_type="factor_governance_autonomous",
+            scope_type="factor",
+            scope_key=factor_id,
+            action=action,
+            status=status,
+            evidence=dict(evidence),
+            risk_verdict=dict(risk_verdict),
+            before=dict(before or {}),
+            after=dict(after or {}),
+            result=dict(result or {}),
+            rollback=dict(rollback or {}),
+            config_version=int(config_snapshot.get("config_version") or 0),
+            config_hash=str(config_snapshot.get("config_hash") or ""),
+        )
+        self._seen[key] = decision_id
+        return decision_id, False
+
+
+def _catalog_refresh_required(actions: list[dict[str, Any]]) -> bool:
+    return any(
+        str(item.get("status") or "") in _CATALOG_MUTATION_STATUSES
+        for item in actions
+    )
+
+
+def _redundancy_signal_patch(
+    report: Mapping[str, Any] | None,
+    signal_cfg: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Return only redundancy metadata that differs from RuntimeConfig."""
+    current = dict(signal_cfg or {})
+    patch: dict[str, dict[str, Any]] = {}
+    for group in list((report or {}).get("groups") or []):
+        if not isinstance(group, Mapping):
+            continue
+        group_id = str(group.get("group_id") or "")
+        leader = str(group.get("leader") or "")
+        if not group_id or not leader:
+            continue
+        for member in list(group.get("members") or []):
+            factor_id = str(member or "")
+            if not factor_id:
+                continue
+            entry = dict(current.get(factor_id) or {})
+            if (
+                str(entry.get("redundancy_group") or "") == group_id
+                and str(entry.get("redundancy_leader") or "") == leader
+            ):
+                continue
+            entry["redundancy_group"] = group_id
+            entry["redundancy_leader"] = leader
+            patch[factor_id] = entry
+
+    return patch
 
 
 def factor_governance_health_max_age_seconds(
@@ -220,6 +411,7 @@ class FactorGovernanceOrchestrator:
         self.risk_policy = risk_policy or RiskPolicyService.shared()
         self.overlay = RuntimeConfigOverlayService()
         self._admission_evidence_count_cache: dict[str, dict[str, Any]] = {}
+        self._active_audit_writer: _GovernanceCycleAuditWriter | None = None
 
     @classmethod
     def shared(cls) -> "FactorGovernanceOrchestrator":
@@ -254,6 +446,7 @@ class FactorGovernanceOrchestrator:
             config=cfg,
             summary={"version": "factor_governance.v3"},
         )
+        self._active_audit_writer = _GovernanceCycleAuditWriter(run, cfg)
         actions: list[dict[str, Any]] = []
         status = "completed"
         try:
@@ -266,40 +459,44 @@ class FactorGovernanceOrchestrator:
                     shadow_refresh.get("error"),
                 )
             catalog = build_factor_catalog()
-            actions.extend(self._rollback_failed_actions(run))
+            rollback_actions = self._rollback_failed_actions(run)
+            actions.extend(rollback_actions)
             catalog_snapshot = persist_factor_catalog_snapshot(
                 catalog,
                 run_id=str(run.get("run_id") or ""),
                 source="factor_governance_cycle",
             )
-            actions.extend(self._rollback_canary_regressions(catalog, run))
-            if actions:
+            canary_actions = self._rollback_canary_regressions(catalog, run)
+            actions.extend(canary_actions)
+            if _catalog_refresh_required([*rollback_actions, *canary_actions]):
                 catalog = build_factor_catalog()
-            actions.extend(
-                self._demote_invalid_candidate_evidence(
-                    catalog,
-                    run,
-                    cfg=cfg,
-                )
+            demotion_actions = self._demote_invalid_candidate_evidence(
+                catalog,
+                run,
+                cfg=cfg,
             )
-            if actions:
+            actions.extend(demotion_actions)
+            if _catalog_refresh_required(demotion_actions):
                 catalog = build_factor_catalog()
             # Tightening is always evaluated before any expansion posture or
             # V16 authorization gate. A freeze/missing delegate may stop
             # promotion, restore and template expansion, but must never defer
             # downweight, quarantine or terminal retirement.
-            actions.extend(
-                self._downweight_weak_alpha(catalog, run, cfg=cfg, profile=profile)
+            downweight_actions = self._downweight_weak_alpha(
+                catalog, run, cfg=cfg, profile=profile
             )
-            if actions:
+            actions.extend(downweight_actions)
+            if _catalog_refresh_required(downweight_actions):
                 catalog = build_factor_catalog()
-            actions.extend(
-                self._disable_weak_live_alpha(catalog, run, cfg=cfg, profile=profile)
+            disable_actions = self._disable_weak_live_alpha(
+                catalog, run, cfg=cfg, profile=profile
             )
-            if actions:
+            actions.extend(disable_actions)
+            if _catalog_refresh_required(disable_actions):
                 catalog = build_factor_catalog()
-            actions.extend(self._retire_quarantined_discovered(catalog, run))
-            if actions:
+            retire_actions = self._retire_quarantined_discovered(catalog, run)
+            actions.extend(retire_actions)
+            if _catalog_refresh_required(retire_actions):
                 catalog = build_factor_catalog()
             posture = self._autonomy_posture()
             expansion_frozen = runtime_config.autonomy_expansion_freeze_applies(cfg)
@@ -433,10 +630,26 @@ class FactorGovernanceOrchestrator:
                         summary=summary,
                     )
                     return summary
+            v16_candidate_id = str(v16_authority.get("candidate_id") or "")
+            # A V16 command is a fixed one-candidate manifest.  Do not let a
+            # later fallback stage spend that authority on a different factor
+            # when the originally selected candidate is unavailable or already
+            # became a no-op.
+            authorized_catalog = (
+                catalog
+                if not v16_candidate_id
+                else []
+                if v16_candidate_id == "redundancy"
+                else [
+                    item
+                    for item in catalog
+                    if str(item.get("factor_id") or "") == v16_candidate_id
+                ]
+            )
             # Expansion is single-mutation and ordered by the shortest safe
             # recovery path before longer lifecycle promotion work.
             expansion_actions = self._restore_active_zero_weight_alpha(
-                catalog,
+                authorized_catalog,
                 run,
                 v16_authority=v16_authority,
                 cfg=cfg,
@@ -446,11 +659,11 @@ class FactorGovernanceOrchestrator:
             expansion_committed = self._expansion_command_consumed(
                 expansion_actions
             )
-            if expansion_actions:
+            if _catalog_refresh_required(expansion_actions):
                 catalog = build_factor_catalog()
             if not expansion_committed:
                 expansion_actions = self._restore_quarantined_builtin_alpha(
-                    catalog,
+                    authorized_catalog,
                     run,
                     v16_authority=v16_authority,
                     cfg=cfg,
@@ -460,11 +673,11 @@ class FactorGovernanceOrchestrator:
                 expansion_committed = self._expansion_command_consumed(
                     expansion_actions
                 )
-                if expansion_actions:
+                if _catalog_refresh_required(expansion_actions):
                     catalog = build_factor_catalog()
             if not expansion_committed:
                 expansion_actions = self._activate_healthy_builtin_shadow(
-                    catalog,
+                    authorized_catalog,
                     run,
                     v16_authority=v16_authority,
                     cfg=cfg,
@@ -474,23 +687,27 @@ class FactorGovernanceOrchestrator:
                 expansion_committed = self._expansion_command_consumed(
                     expansion_actions
                 )
-                if expansion_actions:
+                if _catalog_refresh_required(expansion_actions):
                     catalog = build_factor_catalog()
             if not expansion_committed:
-                expansion_actions = self._apply_redundancy_report(
-                    catalog,
-                    redundancy_report,
-                    run,
+                expansion_actions = (
+                    self._apply_redundancy_report(
+                        catalog,
+                        redundancy_report,
+                        run,
+                    )
+                    if not v16_candidate_id or v16_candidate_id == "redundancy"
+                    else []
                 )
                 actions.extend(expansion_actions)
                 expansion_committed = self._expansion_command_consumed(
                     expansion_actions
                 )
-                if expansion_actions:
+                if _catalog_refresh_required(expansion_actions):
                     catalog = build_factor_catalog()
             if not expansion_committed:
                 expansion_actions = self._promote_shadow_candidates(
-                    catalog,
+                    authorized_catalog,
                     run,
                     v16_authority=v16_authority,
                 )
@@ -498,6 +715,8 @@ class FactorGovernanceOrchestrator:
                 expansion_committed = self._expansion_command_consumed(
                     expansion_actions
                 )
+                if _catalog_refresh_required(expansion_actions):
+                    catalog = build_factor_catalog()
             if v16_delegation and not expansion_committed:
                 from backend.services.v16_brain_orchestrator import (
                     V16BrainOrchestratorService,
@@ -510,7 +729,6 @@ class FactorGovernanceOrchestrator:
                     command_id=str(command.get("command_id") or ""),
                     reason="factor_governance_cycle_no_committed_action",
                 )
-            catalog = build_factor_catalog()
             summary = {
                 "status": "completed_with_errors" if any(
                     str(item.get("status") or "") in {"failed", "error", "mutation_failed"}
@@ -540,6 +758,8 @@ class FactorGovernanceOrchestrator:
                 summary={"status": status, "error": str(exc), "actions": actions},
             )
             return {"status": status, "error": str(exc), "actions": actions}
+        finally:
+            self._active_audit_writer = None
 
     # ── Action selection ────────────────────────────────────────────
 
@@ -1022,6 +1242,7 @@ class FactorGovernanceOrchestrator:
             candidate_actions.setdefault(str(factor_id), "restore_factor_live")
         for factor_id in promotion_ids:
             candidate_actions.setdefault(str(factor_id), "promote_factor")
+        redundancy_patch = _redundancy_signal_patch(redundancy_report, signal_cfg)
         catalog_by_id = {
             str(item.get("factor_id") or ""): item
             for item in catalog
@@ -1057,6 +1278,39 @@ class FactorGovernanceOrchestrator:
                 ).hexdigest(),
                 "command_version": "factor_governance_candidate.v1",
             })
+        if redundancy_patch:
+            evidence_refs = {
+                "groups": [
+                    dict(group)
+                    for group in list(redundancy_report.get("groups") or [])
+                    if isinstance(group, Mapping)
+                ],
+                "patch_fingerprint": hashlib.sha256(
+                    _dumps(redundancy_patch).encode("utf-8")
+                ).hexdigest(),
+            }
+            candidate_refs.append({
+                "candidate_id": "redundancy",
+                "target_agent": "factor_governance",
+                "scope_type": "factor_weight",
+                "scope_key": "alpha_weight_policy",
+                "action": "update_redundancy_groups",
+                "execution_ready": True,
+                "governance_eligible": True,
+                "bridge_ready": True,
+                "blocker_codes": [],
+                "evidence_refs": evidence_refs,
+                "evidence_fingerprint": hashlib.sha256(
+                    _dumps(evidence_refs).encode("utf-8")
+                ).hexdigest(),
+                "command_version": "factor_governance_candidate.v1",
+            })
+        candidate_refs.sort(
+            key=lambda item: (
+                str(item.get("candidate_id") or ""),
+                str(item.get("action") or ""),
+            )
+        )
 
         reasons = {
             "builtin_activation": activation_ids,
@@ -1066,23 +1320,12 @@ class FactorGovernanceOrchestrator:
             "redundancy_groups": int(
                 redundancy_report.get("group_count") or 0
             ),
+            "redundancy_mutation": bool(redundancy_patch),
         }
         return {
-            "required": bool(
-                activation_ids
-                or active_zero_weight_ids
-                or restore_ids
-                or promotion_ids
-                or reasons["redundancy_groups"]
-            ),
+            "required": bool(candidate_refs),
             "reasons": reasons,
-            "candidate_count": (
-                len(activation_ids)
-                + len(active_zero_weight_ids)
-                + len(restore_ids)
-                + len(promotion_ids)
-                + int(reasons["redundancy_groups"])
-            ),
+            "candidate_count": len(candidate_refs),
             "posterior_blocked_ids": posterior_blocked_ids,
             "posterior_degraded_ids": posterior_degraded_ids,
             "candidate_refs": candidate_refs,
@@ -1287,21 +1530,14 @@ class FactorGovernanceOrchestrator:
                 "factors": factors,
                 "updated_at": now,
             }
-            conn.execute(
-                _p(
-                    """INSERT INTO runtime_kv (key, value_json, updated_at)
-                       VALUES (?, ?, ?)
-                       ON CONFLICT(key) DO UPDATE SET
-                         value_json=excluded.value_json,
-                         updated_at=excluded.updated_at"""
-                )
-                if production_state
-                else """INSERT INTO runtime_kv (key, value_json, updated_at)
-                        VALUES (?, ?, ?)
-                        ON CONFLICT(key) DO UPDATE SET
-                          value_json=excluded.value_json,
-                          updated_at=excluded.updated_at""",
-                (_EVIDENCE_STREAK_KEY, _dumps(payload), now),
+            from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
+
+            set_runtime_kv_on_conn(
+                conn,
+                _EVIDENCE_STREAK_KEY,
+                payload,
+                updated_at=now,
+                ensure=False,
             )
             conn.commit()
             return factors
@@ -1700,16 +1936,9 @@ class FactorGovernanceOrchestrator:
             return []
         before_cfg = runtime_config.shared().to_dict()
         signal_cfg = dict(runtime_config.shared().factor_signal_config or {})
-        signal_patch: dict[str, dict[str, Any]] = {}
-        for group in groups:
-            group_id = str(group.get("group_id") or "")
-            leader = str(group.get("leader") or "")
-            for member in group.get("members") or []:
-                entry = dict(signal_cfg.get(member, {}) or {})
-                entry["redundancy_group"] = group_id
-                entry["redundancy_leader"] = leader
-                signal_cfg[member] = entry
-                signal_patch[member] = entry
+        signal_patch = _redundancy_signal_patch(report, signal_cfg)
+        if not signal_patch:
+            return []
         result = self._apply_runtime_patch(
             {"factor_signal_config": signal_patch},
             source="factor_governance_redundancy",
@@ -3515,6 +3744,7 @@ class FactorGovernanceOrchestrator:
             catalog_item=item,
             evidence_counts=self._factor_admission_evidence_counts(factor_id),
             governance={},
+            health_max_age_seconds=health_max_age_seconds,
         )
         stage = str(item.get("lifecycle_status") or "").upper()
         eligibility_field = (
@@ -3574,16 +3804,14 @@ class FactorGovernanceOrchestrator:
     def _prime_admission_evidence_count_cache(
         self,
         factor_ids: list[str],
-        *,
-        batch_size: int = _ADMISSION_EVIDENCE_BATCH_SIZE,
     ) -> None:
-        """Read admission counts in bounded batches for this governance cycle.
+        """Read admission counts in one projection for this governance cycle.
 
         ``factor_evidence_summary`` already returns an independent projection
-        per factor.  The old caller passed one ID at a time, causing the
-        provider to rescan the complete canonical learning history for every
-        candidate.  Keep the projection run-scoped and keyed by factor ID;
-        never persist or reuse it as a cross-cycle governance verdict.
+        per factor.  Calling it in chunks caused the provider to rescan the
+        complete canonical learning history once per chunk.  Keep the result
+        run-scoped and keyed by factor ID; never persist or reuse it as a
+        cross-cycle governance verdict.
         """
         ids = list(dict.fromkeys(str(item) for item in factor_ids if str(item)))
         if not ids:
@@ -3598,18 +3826,15 @@ class FactorGovernanceOrchestrator:
                 self._admission_evidence_count_cache[factor_id] = dict(unavailable)
             return
 
-        size = max(1, int(batch_size))
-        for start in range(0, len(ids), size):
-            chunk = ids[start: start + size]
-            try:
-                summary = provider.factor_evidence_summary(chunk)
-            except Exception:
-                summary = {}
-            for factor_id in chunk:
-                value = summary.get(factor_id) if isinstance(summary, Mapping) else None
-                self._admission_evidence_count_cache[factor_id] = (
-                    dict(value) if isinstance(value, Mapping) else dict(unavailable)
-                )
+        try:
+            summary = provider.factor_evidence_summary(ids)
+        except Exception:
+            summary = {}
+        for factor_id in ids:
+            value = summary.get(factor_id) if isinstance(summary, Mapping) else None
+            self._admission_evidence_count_cache[factor_id] = (
+                dict(value) if isinstance(value, Mapping) else dict(unavailable)
+            )
 
     def _factor_admission_evidence_counts(
         self,
@@ -3966,33 +4191,39 @@ class FactorGovernanceOrchestrator:
         rollback: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        from backend.services.evolution_ledger import persist_runtime_config_snapshot, record_evolution_decision
-
-        snapshot = persist_runtime_config_snapshot(
-            runtime_config.shared(),
-            source=f"factor_governance:{action}:{status}",
-            run_id=str(run.get("run_id") or ""),
-        )
+        writer = self._active_audit_writer
+        if writer is None or writer.run_id != str(run.get("run_id") or ""):
+            writer = _GovernanceCycleAuditWriter(run, runtime_config.shared())
+            # Direct callers (including replay/diagnostic paths) still get the
+            # same run-scoped writer; the normal cycle clears it in ``finally``.
+            self._active_audit_writer = writer
         factor_id = str(item.get("factor_id") or "")
         before_scoped = self._scope_audit_config(before, factor_id)
         after_scoped = self._scope_audit_config(after, factor_id)
         rollback_scoped = self._scope_audit_config(rollback, factor_id)
-        decision_id = record_evolution_decision(
-            run_id=str(run.get("run_id") or ""),
-            decision_type="factor_governance_autonomous",
-            scope_type="factor",
-            scope_key=factor_id,
+        snapshot = writer.snapshot()
+        decision_id, audit_reused = writer.decision(
+            factor_id=factor_id,
             action=action,
             status=status,
             evidence=evidence,
             risk_verdict=verdict.to_dict(),
             before=before_scoped,
             after=after_scoped,
-            result=result or {},
             rollback=rollback_scoped,
-            config_version=int(snapshot.get("config_version") or 0),
-            config_hash=str(snapshot.get("config_hash") or ""),
+            result=result or {},
+            config_snapshot=snapshot,
         )
+        if audit_reused:
+            return {
+                "factor_id": factor_id,
+                "action": action,
+                "status": status,
+                "decision_id": decision_id,
+                "suggestion_id": "",
+                "audit_reused": True,
+                "risk": verdict.to_dict(),
+            }
         suggestion_id = self._record_policy_suggestion(factor_id, action, status, evidence, decision_id)
         self._record_learning_application(
             factor_id,
@@ -4004,31 +4235,13 @@ class FactorGovernanceOrchestrator:
             result,
             decision_id=decision_id,
         )
-        record_api_mutation(
-            user="system:factor_governance",
-            endpoint="backend.runtime.factor_governance_orchestrator",
-            run_id=str(run.get("run_id") or ""),
-            action=action,
-            status=status,
-            before=before_scoped,
-            after=after_scoped,
-            # The API row is a projection of the canonical decision. The
-            # audit helper retains request fingerprints and the canonical row
-            # retains the exact result JSON.
-            result={"decision_id": decision_id},
-            reason=_dumps(evidence),
-            required_confirm="autonomous-risk-policy",
-            confirm_ok=verdict.allowed,
-            source_agent="factor_governance",
-            decision_type="autonomous_mutation",
-            canonical_event_id=decision_id,
-        )
         return {
             "factor_id": factor_id,
             "action": action,
             "status": status,
             "decision_id": decision_id,
             "suggestion_id": suggestion_id,
+            "audit_reused": False,
             "risk": verdict.to_dict(),
         }
 
@@ -4060,7 +4273,6 @@ class FactorGovernanceOrchestrator:
             # old audit helper would otherwise create a second post-commit
             # `policy_suggestion` with no atomic applied_mutation_id binding.
             return ""
-        suggestion_id = f"fgv3_{uuid.uuid4().hex[:16]}"
         now = time.time()
         evidence_payload = {
             "source_agent": "factor_governance",
@@ -4088,6 +4300,16 @@ class FactorGovernanceOrchestrator:
             status=status,
             impact_level="medium",
         )
+        suggestion_id = deterministic_policy_suggestion_id(
+            writer="factor_governance",
+            scope_type="factor",
+            scope_key=factor_id,
+            action=action,
+            evidence=evidence_payload,
+            status=status,
+            qualification_fingerprint="",
+            prefix="fgv4",
+        )
         conn = get_state_pg_conn()
         try:
             conn.execute(
@@ -4096,6 +4318,7 @@ class FactorGovernanceOrchestrator:
                 (suggestion_id, scope_type, scope_key, action, confidence, reason,
                  evidence_json, status, reviewed_at, review_note, created_at)
                 VALUES (?, 'factor', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(suggestion_id) DO NOTHING
                 """),
                 (
                     suggestion_id,

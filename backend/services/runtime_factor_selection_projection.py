@@ -15,6 +15,7 @@ from alpha.portfolio_compositor import resolve_factor_role
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.core.state_store import validate_runtime_state_schema
 from backend.services.factor_blend_health import FactorBlendHealthService
+from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 
 
 PROJECTION_KEY = "runtime_factor_selection.v1"
@@ -261,11 +262,13 @@ class RuntimeFactorSelectionProjectionService:
                         "effective_sample_count": 0.0,
                     }
                 )
-            conn.execute(self._sql("""
-                INSERT INTO runtime_kv (key, value_json, updated_at) VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,
-                    updated_at=excluded.updated_at
-            """), (PROJECTION_KEY, json.dumps(payload, ensure_ascii=False), now))
+            set_runtime_kv_on_conn(
+                conn,
+                PROJECTION_KEY,
+                payload,
+                updated_at=now,
+                ensure=False,
+            )
             conn.commit()
             return {**payload, "ok": True}
         finally:

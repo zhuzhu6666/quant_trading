@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
 from backend.core.state_store import validate_runtime_state_schema
+from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 
 
 SNAPSHOT_KEY = "backend_readiness_snapshot.v1"
@@ -220,15 +221,12 @@ class BackendReadinessSnapshotService:
         conn = self._conn()
         try:
             self._ensure(conn)
-            conn.execute(
-                self._sql("""
-                    INSERT INTO runtime_kv (key, value_json, updated_at)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET
-                        value_json=excluded.value_json,
-                        updated_at=excluded.updated_at
-                """),
-                (SNAPSHOT_KEY, json.dumps(payload, ensure_ascii=False, default=str), now),
+            set_runtime_kv_on_conn(
+                conn,
+                SNAPSHOT_KEY,
+                payload,
+                updated_at=now,
+                ensure=False,
             )
             conn.commit()
         except Exception:

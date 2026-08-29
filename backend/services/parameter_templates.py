@@ -22,6 +22,7 @@ from backend.core.db import (
 )
 from backend.services.factor_cards import FactorCardService
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.policy_suggestion_identity import deterministic_policy_suggestion_id
 from research.learning.governor import RuleEvolutionGovernor
 from risk.policy_service import RiskPolicyService
 
@@ -172,6 +173,10 @@ class ParameterTemplateService:
         self.db_path = Path(db_path or str(STATE_DB))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.cards = FactorCardService(str(self.db_path), ensure_schema=ensure_schema)
+        # A recommendation pass is one read snapshot. Keep the derived
+        # template projection on this service so assessing the selected target
+        # does not ask FactorCardService to rescan canonical evidence again.
+        self._template_cache: dict[tuple[str, str, bool], list[dict[str, Any]]] = {}
         if ensure_schema:
             self._ensure_schema()
 
@@ -202,10 +207,18 @@ class ParameterTemplateService:
         regime: str | None = None,
         limit: int = 200,
         include_derived: bool = True,
+        card: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        cache_key = (str(factor_id or ""), str(regime or ""), bool(include_derived))
+        cached = self._template_cache.get(cache_key)
+        if cached is not None:
+            return deepcopy(cached[:limit])
         persisted = self._list_persisted(factor_id=factor_id, regime=regime)
         items = {(item["template_id"]): item for item in persisted}
-        cards = self.cards.list_cards(limit=500, factor_id=factor_id)
+        cards = [card] if isinstance(card, dict) else self.cards.list_cards(
+            limit=500,
+            factor_id=factor_id,
+        )
         for card in cards:
             manual = self._manual_templates_for_card(card)
             generated = manual or (self._build_templates(card) if include_derived else [])
@@ -226,6 +239,7 @@ class ParameterTemplateService:
                 str(item.get("regime_key") or ""),
             )
         )
+        self._template_cache[cache_key] = deepcopy(result)
         return result[:limit]
 
     def list_active_templates(self, *, factor_id: str | None = None) -> list[dict[str, Any]]:
@@ -546,6 +560,7 @@ class ParameterTemplateService:
         activate: bool = False,
     ) -> dict[str, Any]:
         item = self._normalize_template(template, source=source)
+        self._template_cache.clear()
         now = time.time()
         with self._conn() as conn:
             _execute(
@@ -623,7 +638,6 @@ class ParameterTemplateService:
         factor_card = self.cards.list_cards(factor_id=factor_id, limit=1)
         card = factor_card[0] if factor_card else {}
         evidence_summary = dict((card.get("evidence_summary") or {})) if card else {}
-        suggestion_id = self._new_id("psg")
         payload = {
             "factor_id": factor_id,
             "regime_key": regime_key,
@@ -662,6 +676,16 @@ class ParameterTemplateService:
             if boundary.get("recommended_scope") == "online_light"
             else f"{factor_id} requires offline_deep before switching to {target['template_version']}"
         )
+        suggestion_id = deterministic_policy_suggestion_id(
+            writer="parameter_templates",
+            scope_type="parameter_template",
+            scope_key=f"{factor_id}:{regime_key or 'default'}",
+            action="switch_parameter_template",
+            evidence=payload,
+            status="proposed",
+            qualification_fingerprint=str(boundary.get("qualification_fingerprint") or ""),
+            prefix="psg_parameter_template",
+        )
         with self._conn() as conn:
             _execute(
                 conn,
@@ -670,6 +694,7 @@ class ParameterTemplateService:
                 (suggestion_id, scope_type, scope_key, action, confidence, reason,
                  evidence_json, status, created_at)
                 VALUES (?, 'parameter_template', ?, 'switch_parameter_template', ?, ?, ?, 'proposed', ?)
+                ON CONFLICT(suggestion_id) DO NOTHING
                 """,
                 (
                     suggestion_id,
@@ -733,7 +758,7 @@ class ParameterTemplateService:
 
         current = self.get_active_template(factor_id=factor_id, regime_key="") or {}
         current_template_id = str(current.get("template_id") or "")
-        templates = self.list_templates(factor_id=factor_id, limit=50)
+        templates = self.list_templates(factor_id=factor_id, limit=50, card=card)
         if not templates:
             return None
 
@@ -1120,6 +1145,8 @@ class ParameterTemplateService:
             with self._conn() as conn:
                 writer(conn, str(mutation.get("mutation_id") or ""), None)
                 conn.commit()
+        if committed:
+            self._template_cache.clear()
         return {
             "ok": committed,
             "blocked": not committed,
@@ -1606,6 +1633,7 @@ class ParameterTemplateService:
                 "experiment_admission": experiment_admission,
                 "boundary": boundary,
             }
+        self._template_cache.clear()
         clear_parameter_template_recommendation_cache(self.db_path)
         return {
             "ok": True,

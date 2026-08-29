@@ -34,6 +34,28 @@ _TRAINING_TERMINAL_STATUSES = {
 def run_feature_engineering_job() -> dict[str, Any]:
     """Derive/select research features and register PCA candidates."""
     try:
+        from backend.services.learning_workload_gate import (
+            RUN_PENDING_GOVERNANCE,
+            SKIP_CLOSED_NO_NEW_FACTS,
+            evaluate_learning_workload,
+        )
+
+        workload_gate = evaluate_learning_workload()
+        if str(workload_gate.get("status") or "") in {
+            SKIP_CLOSED_NO_NEW_FACTS,
+            RUN_PENDING_GOVERNANCE,
+        }:
+            logger.info(
+                "[fe] skipped: learning workload gate=%s",
+                workload_gate.get("reason_code"),
+            )
+            return {
+                "ok": True,
+                "skipped": True,
+                "status": str(workload_gate.get("status") or SKIP_CLOSED_NO_NEW_FACTS),
+                "reason": workload_gate.get("reason_code"),
+                "workload_gate": workload_gate,
+            }
         import numpy as np
 
         from alpha.features.selector import run_feature_selection
@@ -709,6 +731,29 @@ def run_offmarket_position_quality_job(
     job_name = "offmarket_position_quality_lightgbm"
     started_at = time.time()
     db_path = Path(db_path or state_db.STATE_DB)
+    from backend.services.learning_workload_gate import (
+        RUN_PENDING_GOVERNANCE,
+        SKIP_CLOSED_NO_NEW_FACTS,
+        evaluate_learning_workload,
+    )
+
+    workload_gate = evaluate_learning_workload(db_path)
+    if str(workload_gate.get("status") or "") in {
+        SKIP_CLOSED_NO_NEW_FACTS,
+        RUN_PENDING_GOVERNANCE,
+    }:
+        logger.info(
+            "[offmarket_high_load] %s skipped: learning workload gate=%s",
+            job_name,
+            workload_gate.get("reason_code"),
+        )
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": workload_gate.get("reason_code"),
+            "status": str(workload_gate.get("status") or SKIP_CLOSED_NO_NEW_FACTS),
+            "workload_gate": workload_gate,
+        }
     if session is None:
         projection = RuntimeHealthProjectionService(db_path).latest(max_age_seconds=300.0)
         session = dict(projection.get("market_session") or {}) if projection.get("ok") else {}

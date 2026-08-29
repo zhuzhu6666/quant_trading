@@ -31,6 +31,67 @@ def test_model_permission_allows_shadow_advisory_artifact(tmp_path):
     assert audits["items"][0]["status"] == "allowed"
 
 
+def test_model_permission_audit_reuses_same_semantic_result(tmp_path):
+    db_path = tmp_path / "state.db"
+    artifact = {
+        "model_type": "demo_model",
+        "model_version": "v1",
+        "capabilities": {
+            "live_trading": False,
+            "advisory_only": True,
+            "shadow_only": True,
+            "can_place_orders": False,
+        },
+    }
+
+    first = validate_model_artifact(
+        artifact,
+        model_type="demo_model",
+        db_path=db_path,
+        context={"operation": "first_score", "run_id": "run-a"},
+    )
+    second = validate_model_artifact(
+        artifact,
+        model_type="demo_model",
+        db_path=db_path,
+        context={"operation": "second_score", "run_id": "run-b"},
+    )
+
+    assert first["audit_id"] == second["audit_id"]
+    assert second["audit_reused"] is True
+    assert list_model_permission_audits(db_path=db_path)["count"] == 1
+
+
+def test_model_permission_audit_changes_when_artifact_file_is_replaced(tmp_path):
+    db_path = tmp_path / "state.db"
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "model_type": "demo_model",
+                "model_version": "v1",
+                "capabilities": {"advisory_only": True, "shadow_only": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    first = validate_model_artifact(artifact_path, model_type="demo_model", db_path=db_path)
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "model_type": "demo_model",
+                "model_version": "v2",
+                "capabilities": {"advisory_only": True, "shadow_only": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    second = validate_model_artifact(artifact_path, model_type="demo_model", db_path=db_path)
+
+    assert first["audit_id"] != second["audit_id"]
+    assert list_model_permission_audits(db_path=db_path)["count"] == 2
+
+
 def test_model_permission_blocks_live_or_mutating_artifact(tmp_path):
     db_path = tmp_path / "state.db"
     artifact = {

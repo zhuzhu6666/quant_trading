@@ -22,7 +22,10 @@ from backend.core.state_store import (
     validate_runtime_state_schema,
 )
 from backend.services.agent_authority import AgentAuthorityRegistryService
-from backend.services.model_permissions import validate_model_artifact
+from backend.services.model_permissions import (
+    artifact_permission_identity,
+    validate_model_artifact,
+)
 from backend.services.review_contract import (
     SYSTEM_CONTAMINATION_LABELS,
     review_execution_evidence_is_trainable,
@@ -355,6 +358,7 @@ class PositionQualityLightGBMService:
         self.db_path = Path(db_path)
         self.artifact_dir = Path(artifact_dir) if artifact_dir else DATA_DIR / "model_artifacts" / MODEL_TYPE
         self._inference_bundle_cache: tuple[str, int, dict[str, Any], Any] | None = None
+        self._permission_cache: tuple[str, dict[str, Any]] | None = None
         self.last_data_quality: dict[str, Any] = {}
         self._last_training_queries: list[tuple[str, str, tuple[Any, ...]]] = []
 
@@ -381,6 +385,39 @@ class PositionQualityLightGBMService:
         if not self._use_pg():
             conn.row_factory = __import__("sqlite3").Row
         return conn
+
+    def _validated_permission(
+        self,
+        artifact: dict[str, Any],
+        *,
+        artifact_path: str | Path,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate and audit one artifact once per stable artifact identity.
+
+        Position scoring is called from the live supervision loop.  Permission
+        is a property of the artifact and its contract, not of each score, so
+        repeating the audit write on every tick only creates WAL/TOAST churn.
+        The identity includes artifact/model-file stat information and the
+        semantic scoring mode; replacing either invalidates the cache.
+        """
+
+        identity = artifact_permission_identity(artifact, artifact_path=artifact_path)
+        # Permission is a property of the artifact contract, not of the
+        # caller's scoring operation or display mode.  Sharing one cache entry
+        # across advisory/score paths avoids a second audit read/write for the
+        # same immutable artifact.
+        cache_key = identity
+        if self._permission_cache and self._permission_cache[0] == cache_key:
+            return {**self._permission_cache[1], "audit_reused": True}
+        permission = validate_model_artifact(
+            artifact,
+            model_type=MODEL_TYPE,
+            db_path=self.db_path,
+            context=context,
+        )
+        self._permission_cache = (cache_key, dict(permission))
+        return permission
 
     def _ensure_audit_table(self) -> None:
         conn = self._conn()
@@ -1437,8 +1474,9 @@ class PositionQualityLightGBMService:
             bundle = None
         if str(artifact.get("feature_schema_version") or "") != FEATURE_SCHEMA_VERSION:
             return {"ok": False, "error": "artifact_feature_schema_not_pit_v2"}
-        permission = validate_model_artifact(
-            artifact, model_type=MODEL_TYPE, db_path=self.db_path,
+        permission = self._validated_permission(
+            artifact,
+            artifact_path=path,
             context={"mode": "advisory", "operation": "position_quality_demo_advisory"},
         )
         if not permission.get("ok"):
@@ -1502,10 +1540,9 @@ class PositionQualityLightGBMService:
         if not path.exists():
             return {"ok": False, "error": "artifact_missing", "artifact_path": str(path)}
         artifact = json.loads(path.read_text(encoding="utf-8"))
-        permission = validate_model_artifact(
+        permission = self._validated_permission(
             artifact,
-            model_type=MODEL_TYPE,
-            db_path=self.db_path,
+            artifact_path=path,
             context={"mode": mode, "operation": "position_quality_score_samples"},
         )
         if not permission.get("ok"):

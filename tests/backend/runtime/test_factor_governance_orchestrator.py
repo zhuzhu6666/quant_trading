@@ -96,7 +96,7 @@ def _mature_clean_counts(_factor_id: str) -> dict:
     }
 
 
-def test_primes_admission_evidence_cache_in_batches(monkeypatch):
+def test_primes_admission_evidence_cache_with_one_run_projection(monkeypatch):
     rc.reset_for_tests()
     orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
     calls = []
@@ -117,16 +117,10 @@ def test_primes_admission_evidence_cache_in_batches(monkeypatch):
         _Provider,
     )
 
-    orch._prime_admission_evidence_count_cache(
-        ["factor-0", "factor-1", "factor-2", "factor-3", "factor-4"],
-        batch_size=2,
-    )
+    factor_ids = [f"factor-{idx}" for idx in range(401)]
+    orch._prime_admission_evidence_count_cache(factor_ids)
 
-    assert calls == [
-        ["factor-0", "factor-1"],
-        ["factor-2", "factor-3"],
-        ["factor-4"],
-    ]
+    assert calls == [factor_ids]
     assert (
         orch._factor_admission_evidence_counts("factor-3")[
             "governance_eligible_mature"
@@ -579,6 +573,48 @@ def test_run_cycle_executes_tightening_before_expansion_freeze(monkeypatch):
     ]
 
 
+def test_run_cycle_does_not_rebuild_catalog_for_non_mutating_prior_action(monkeypatch):
+    """A prior audit item must not make every later stage rebuild the catalog."""
+    import backend.services.evolution_ledger as evolution_ledger
+
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(
+        evolution_ledger,
+        "start_evolution_run",
+        lambda **_kwargs: {"run_id": "catalog-refresh-local-actions"},
+    )
+    monkeypatch.setattr(evolution_ledger, "finish_evolution_run", lambda *_args, **_kwargs: None)
+    build_calls = []
+
+    def _build_catalog():
+        build_calls.append(1)
+        return []
+
+    monkeypatch.setattr(governance_module, "build_factor_catalog", _build_catalog)
+    monkeypatch.setattr(
+        governance_module,
+        "persist_factor_catalog_snapshot",
+        lambda *_args, **_kwargs: {"snapshot_id": "snapshot-refresh"},
+    )
+    monkeypatch.setattr(
+        orch,
+        "_rollback_failed_actions",
+        lambda *_args: [{"action": "rollback_factor_action", "status": "superseded"}],
+    )
+    monkeypatch.setattr(orch, "_rollback_canary_regressions", lambda *_args: [])
+    monkeypatch.setattr(orch, "_demote_invalid_candidate_evidence", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(orch, "_downweight_weak_alpha", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(orch, "_disable_weak_live_alpha", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(orch, "_retire_quarantined_discovered", lambda *_args: [])
+    monkeypatch.setattr(orch, "_autonomy_posture", lambda: "frozen")
+
+    result = orch.run_cycle(trigger_source="pytest")
+
+    assert result["status"] == "observation_only"
+    assert len(build_calls) == 1
+
+
 def test_run_cycle_does_not_claim_v16_without_expansion_work(monkeypatch):
     import backend.services.evolution_ledger as evolution_ledger
     import backend.services.v16_command_gate as v16_gate
@@ -681,6 +717,80 @@ def test_expansion_preflight_finds_fresh_builtin_activation(monkeypatch):
 
     assert result["required"] is True
     assert result["reasons"]["builtin_activation"] == ["fresh_shadow"]
+
+
+def test_expansion_preflight_freezes_one_concrete_redundancy_mutation():
+    """Redundancy groups are one config mutation, not one V16 candidate per group."""
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    report = {
+        "group_count": 1,
+        "groups": [
+            {
+                "group_id": "redundancy:auto:rsi_14",
+                "leader": "rsi_14",
+                "members": ["rsi_14", "stoch_k"],
+                "correlations": {"rsi_14:stoch_k": 0.95},
+                "sample_count": 500,
+            }
+        ],
+    }
+
+    result = orch._expansion_preflight(
+        [],
+        cfg=rc.shared(),
+        profile=_strict_profile(orch),
+        redundancy_report=report,
+    )
+
+    assert result["required"] is True
+    assert result["candidate_count"] == 1
+    candidate = result["candidate_refs"][0]
+    assert candidate["candidate_id"] == "redundancy"
+    assert candidate["action"] == "update_redundancy_groups"
+    assert candidate["scope_key"] == "alpha_weight_policy"
+    assert candidate["execution_ready"] is True
+    assert candidate["evidence_refs"]["groups"] == report["groups"]
+    assert candidate["evidence_refs"]["patch_fingerprint"]
+
+
+def test_redundancy_preflight_satisfies_v16_fixed_manifest_contract(tmp_path):
+    """A redundancy-only change must be executable by the strict V16 gate."""
+    from backend.runtime.factor_governance_orchestrator import factor_batch_manifest_verdict
+    from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    preflight = orch._expansion_preflight(
+        [],
+        cfg=rc.shared(),
+        profile=_strict_profile(orch),
+        redundancy_report={
+            "group_count": 1,
+            "groups": [
+                {
+                    "group_id": "redundancy:auto:rsi_14",
+                    "leader": "rsi_14",
+                    "members": ["rsi_14", "stoch_k"],
+                }
+            ],
+        },
+    )
+    delegated = V16BrainOrchestratorService(db_path=tmp_path / "state.db").delegate_factor_governance_cycle(
+        {
+            "snapshot_id": "catalog-1",
+            "health_cycle_id": "health-1",
+            "expansion_preflight": preflight,
+        },
+        persist=False,
+    )
+
+    assert delegated["status"] == "delegated"
+    assert delegated["command"]["candidate_id"] == "redundancy"
+    assert factor_batch_manifest_verdict(
+        {"evidence": delegated["command"]["evidence"]},
+        preflight,
+    )["allowed"] is True
 
 
 def test_orchestrator_requires_active_canary_before_shadow_promotion():

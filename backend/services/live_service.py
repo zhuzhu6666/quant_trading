@@ -3182,18 +3182,14 @@ def _runtime_kv_get(key: str, default=None):
 
 
 def _runtime_kv_write_on_conn(conn, key: str, value, updated_at: float | None = None) -> None:
-    ts = float(updated_at or time.time())
-    value_json = json.dumps(value, ensure_ascii=False, default=str)
-    _state_execute(
+    from backend.services.runtime_kv_store import set_on_conn
+
+    set_on_conn(
         conn,
-        """
-        INSERT INTO runtime_kv(key, value_json, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(key) DO UPDATE SET
-            value_json=excluded.value_json,
-            updated_at=excluded.updated_at
-        """,
-        (key, value_json, ts),
+        key,
+        value,
+        updated_at=updated_at,
+        ensure=False,
     )
 def _drain_runtime_kv_pending(conn, limit: int = 100) -> int:
     if not _RUNTIME_KV_PENDING_PATH.exists():

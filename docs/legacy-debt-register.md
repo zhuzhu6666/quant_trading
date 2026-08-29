@@ -203,6 +203,24 @@
 
 ## 3. 治理、研究与客户端
 
+### 因子治理重复重算与固定候选错配（2026-08-30）
+
+- 状态：`monitoring`（代码修复、v33 迁移、停写清理和重启验收完成；持续观察真实 V16/Coordinator/effect 周期）
+- canonical：因子目录仍由 `build_factor_catalog` 唯一生成；Canonical 决策快照仍是冗余分析和学习证据的只读事实；V16 仍以单候选、固定 manifest 委派扩张 mutation。
+- 已确认根因：`run_cycle` 用累计 action 触发后续目录重建；shadow 绩效、决策快照、review payload 和 admission evidence 存在 N+1/重复全量扫描；冗余 group 数被当作候选数但没有具体候选，导致 V16 固定候选合同无法执行。
+- 已修复：按阶段 action 只在真实 mutation 后刷新目录；shadow 绩效和冗余快照改为批量读取；学习/卡片复用已解码的 Canonical payload；review freshness 一次聚合；参数模板在同一卡片快照内复用；冗余报告生成一个具体配置 mutation candidate，并限制执行只能消费该 V16 candidate；无变化时不生成 mutation 或重复目录重建。
+- 验证：历史实测治理轮次约 `697.3s`；本次只读复测目录约 `0.5–3.4s`、冗余约 `2.6s`、因子卡片约 `5.8s`、参数推荐约 `7.0s`；受影响测试 `179 passed`，全量 `2966 passed, 11 skipped`。
+- 真实复测：手动写入型 run `manual_perf_dcb5122c200b` 总耗时 `142.091s`，治理 run `132.040s`，因无当前 V16 command 正常 `blocked_by_v16_command` 且无 mutation；随后正式 `evolution_hourly` 日志 `138.6s`、治理 run `130.787s`。这相对历史 `697.3s` 已显著下降，但仍高于只读探针，剩余主要是逐 action 审计/投影写入耗时，不能宣称已完成性能收口。
+- 测试垃圾清理：仅删除上述唯一 run 的 20 条 suggestion、1 条 catalog snapshot、40 条 runtime decision、20 个独占 API mutation payload 和 1 条 run；Canonical V2 40 条不可变事件保留，未删除任何有用事实或仍被引用的 payload。
+- 剩余：发布后仍需以正式版本 PID/日志和真实 V16 claim/finalize、Coordinator projection/effect 证据完成治理验收。不因性能修复删除 Canonical 事实、治理账本或仍有引用的历史记录。
+
+### PostgreSQL 重复写入与写放大（2026-08-30）
+
+- 状态：`monitoring`；`factor_runtime_projection` 已用 v33 将 `projection_id` 固定为主键，保留进程身份唯一约束；`RuntimeKVStore`、确定性 policy/model audit identity、治理周期合并和停盘 workload gate 已接入生产写入路径。
+- 清理结果：权限审计旧重复累计删除 `97889+3+1` 条，保留 `2` 条当前语义结果；policy `1824` 组、因子目录 `50` 组、runtime config payload 孤儿 `0`、projection 失效 coordinator `0`；canonical_v2 未触碰。
+- 运行证据：停盘且 watermark 无新事实时当前仅有 pending governance，四类重型任务均在约 `0.10s` 内返回；readiness/selection 两个大 JSON 的相同语义写入只更新行级时间，不重写 value body。
+- 后续：保留至少 24 小时的表大小、WAL、TOAST、写入次数和调度周期证据；若 pending governance 清空，再确认状态稳定落到 `skip_closed_no_new_facts`。
+
 ### 因子扩张后验降级应用未完成
 
 - 状态：`active`
