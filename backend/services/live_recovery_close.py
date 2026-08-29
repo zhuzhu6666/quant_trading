@@ -246,6 +246,13 @@ def retire_broker_missing_position(
                 required_closed_volume_delta_by_position={
                     pid: float(position_state.get("volume") or 0.0)
                 },
+                baseline_close_cursor_by_position={
+                    pid: {
+                        "baseline_cursor_available": True,
+                        "baseline_deal_ids": [],
+                        "baseline_closed_volume": 0.0,
+                    }
+                },
             ).get(pid)
         finally:
             conn.close()

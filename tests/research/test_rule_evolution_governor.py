@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from types import SimpleNamespace
+
+import pytest
 
 from backend.services.canonical_v2 import (
     ensure_sqlite_schema,
@@ -12,6 +15,38 @@ from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.learning_application_store import LearningApplicationStore
 from research.learning.governor import RuleEvolutionGovernor
+
+
+@pytest.fixture(autouse=True)
+def _parameter_template_coordinator_mode(monkeypatch):
+    """Exercise the post-f2eb9c9 governed activation path in these tests."""
+    import backend.core.static_feature_flags as static_feature_flags
+
+    monkeypatch.setattr(
+        static_feature_flags,
+        "shared_static_feature_flags",
+        lambda: SimpleNamespace(
+            governance_mutation_coordinator_v2_mode="dual_record",
+        ),
+    )
+
+
+def _approve_parameter_template_suggestion(db_path: str, suggestion_id: str) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE policy_suggestion
+            SET status='approved', governance_eligible=1,
+                governance_eligibility_version=?,
+                governance_eligibility_fingerprint=?
+            WHERE suggestion_id=?
+            """,
+            (GOVERNANCE_ELIGIBILITY_VERSION, "pytest-eligibility", suggestion_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _connect(path: str) -> sqlite3.Connection:
@@ -961,6 +996,7 @@ def test_reconcile_parameter_template_effects_rolls_back_active_template(tmp_pat
         note="proposed switch",
     )
     gov.set_status(switch["suggestion_id"], "approved", "approved for test")
+    _approve_parameter_template_suggestion(db_path, switch["suggestion_id"])
     applied = svc.activate_template(
         factor_id="rsi_14",
         regime_key="range",

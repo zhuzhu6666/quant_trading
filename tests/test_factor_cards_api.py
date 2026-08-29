@@ -3,6 +3,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -16,6 +17,7 @@ from backend.services.factor_cards import (
     FactorCardService,
     build_factor_admission_evidence,
 )
+from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.parameter_template_validation import (
@@ -26,6 +28,39 @@ from backend.services.research_evidence import ResearchEvidenceRejected
 from config import runtime_config as rc
 from research.learning.governor import RuleEvolutionGovernor
 from tests.canonical_fixture import seed_canonical_sqlite_file
+
+
+@pytest.fixture(autouse=True)
+def _parameter_template_coordinator_mode(monkeypatch):
+    """Run template application tests against the post-f2eb9c9 contract."""
+    import backend.core.static_feature_flags as static_feature_flags
+
+    monkeypatch.setattr(
+        static_feature_flags,
+        "shared_static_feature_flags",
+        lambda: SimpleNamespace(
+            governance_mutation_coordinator_v2_mode="dual_record",
+        ),
+    )
+
+
+def _approve_parameter_template_suggestion(db_path: str, suggestion_id: str) -> None:
+    """Mark a hand-approved fixture suggestion as eligible for coordinator tests."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE policy_suggestion
+            SET status='approved', governance_eligible=1,
+                governance_eligibility_version=?,
+                governance_eligibility_fingerprint=?
+            WHERE suggestion_id=?
+            """,
+            (GOVERNANCE_ELIGIBILITY_VERSION, "pytest-eligibility", suggestion_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _patch_local_learning_state(monkeypatch, db_path):
@@ -451,6 +486,7 @@ def test_parameter_template_activation_syncs_runtime_signal_config(tmp_path):
         note="runtime sync approve",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     applied = service.activate_template(
         factor_id="rsi_14",
         template_id=item["template_id"],
@@ -465,6 +501,35 @@ def test_parameter_template_activation_syncs_runtime_signal_config(tmp_path):
     assert cfg.factor_signal_config["rsi_14"]["parameter_template_version"] == "runtime_range.v1"
     assert cfg.factor_signal_config["rsi_14"]["parameter_overrides"]["length"] == 10
     assert cfg.extra["active_parameter_templates"]["rsi_14:range"]["template_id"] == item["template_id"]
+
+
+def test_coordinated_activation_materializes_generated_template(tmp_path, monkeypatch):
+    """Generated library templates must be materialized before coordinator update."""
+    import backend.core.static_feature_flags as static_feature_flags
+
+    monkeypatch.setattr(
+        static_feature_flags,
+        "shared_static_feature_flags",
+        lambda: SimpleNamespace(governance_mutation_coordinator_v2_mode="dual_record"),
+    )
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    rc.reset_for_tests()
+    _seed_factor_card_state(db_path)
+
+    service = ParameterTemplateService(db_path)
+    result = service.activate_template(
+        factor_id="rsi_14",
+        template_id="rsi_14:default.v1:default",
+        regime_key="",
+        note="materialize generated default",
+    )
+
+    assert result["ok"] is True
+    assert service.get_active_template(factor_id="rsi_14", regime_key="")["template_id"] == (
+        "rsi_14:default.v1:default"
+    )
+    assert service._list_persisted(template_id="rsi_14:default.v1:default")
 
 
 def test_runtime_tunable_derived_template_activation_syncs_keltner_runtime_config(tmp_path):
@@ -497,6 +562,7 @@ def test_runtime_tunable_derived_template_activation_syncs_keltner_runtime_confi
         note="keltner runtime sync approve",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     applied = service.activate_template(
         factor_id="keltner_width",
         template_id=item["template_id"],
@@ -1016,6 +1082,7 @@ def test_parameter_template_service_persists_activation_and_switch_log(tmp_path)
         note="approve switch",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     result = service.activate_template(
         factor_id="rsi_14",
         template_id=item["template_id"],
@@ -1075,6 +1142,7 @@ def test_learning_parameter_template_management_endpoints_work_end_to_end(tmp_pa
         ),
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["item"]["suggestion_id"], "approved", "ok")
+    _approve_parameter_template_suggestion(db_path, suggestion["item"]["suggestion_id"])
     applied = learning_api.apply_parameter_template_switch(
         None,
         learning_api.ParameterTemplateApplySwitchRequest(
@@ -1238,6 +1306,7 @@ def test_runtime_tunable_ema_slope_template_is_online_light_and_syncs_runtime_co
         note="ema slope approve",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     applied = service.activate_template(
         factor_id="ema_slope",
         template_id=template["template_id"],
@@ -1328,6 +1397,7 @@ def test_runtime_tunable_bb_width_template_is_online_light_and_syncs_runtime_con
         note="bb approve",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     applied = service.activate_template(
         factor_id="bb_width",
         template_id=template["template_id"],
@@ -1414,6 +1484,7 @@ def test_runtime_tunable_vol_ma_ratio_template_is_online_light_and_syncs_runtime
         note="vol ma approve",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     applied = service.activate_template(
         factor_id="vol_ma_ratio",
         template_id=template["template_id"],
@@ -1458,6 +1529,7 @@ def test_parameter_template_switch_suggestion_carries_boundary_and_blocks_offlin
         note="should require offline validation",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "approve guarded switch")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     blocked = service.activate_template(
         factor_id="bb_width",
         template_id=offline_template["template_id"],

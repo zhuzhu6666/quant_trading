@@ -526,6 +526,8 @@ schema 写入只能由显式 migration 执行：
 ./.venv/bin/python scripts/state_schema_migrate.py --apply
 ```
 
+`--apply` 同时覆盖两种合法入口：完全空的 `runtime` schema 会先加载仓库内唯一 clean-install baseline，再执行全部版本迁移；已有 ledger 的库只执行未应用版本。非空但没有完整旧基线/ledger 的残缺库会直接失败，禁止由后端启动或业务 `ensure_*` 猜测建表。
+
 ### PostgreSQL 灾备（Windows 主动拉取）
 
 当前唯一合同在 `deployment/windows-backup/README.md`：Windows 电脑在线时，经由仅允许 `dump`、备份回执和恢复演练回执的 forced-command SSH key 拉取 `quant_audit` 的完整逻辑快照。服务器不保存备份文件，不启用 `archive_mode`、S3、pgBackRest repository 或 timer；不得把安装了客户端工具或受限 SSH 入口误报为已有可恢复备份。

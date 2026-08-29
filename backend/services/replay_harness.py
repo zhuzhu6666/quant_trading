@@ -5,7 +5,6 @@ import json
 import time
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from backend.core.db import (
@@ -37,6 +36,7 @@ from backend.services.review_contract import review_has_system_contamination
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_REPLAY_ARTIFACT_DIR = PROJECT_ROOT / "data" / "replay_reports"
+GOVERNANCE_REPLAY_SCOPE_KIND = "bar_replay_evidence"
 
 
 def _dumps(value: Any) -> str:
@@ -631,28 +631,49 @@ class ReplayHarnessService:
             "items": items,
         }
 
-    def latest_report(self) -> dict[str, Any]:
+    def latest_report(self, *, scope_kind: str = "") -> dict[str, Any]:
         conn = _connect(self.db_path, read_only=True)
         try:
             if not state_table_exists(conn, "replay_report"):
                 return {"ok": False, "status": "missing_table"}
+            where_clause = ""
+            params: tuple[Any, ...] = ()
+            requested_kind = str(scope_kind or "").strip()
+            if requested_kind:
+                where_clause = (
+                    "WHERE CAST(scope_json AS JSONB) ->> 'kind' = ?"
+                    if _conn_is_pg(conn)
+                    else "WHERE json_extract(scope_json, '$.kind') = ?"
+                )
+                params = (requested_kind,)
             row = _execute(
                 conn,
-                """
+                f"""
                 SELECT *
                 FROM replay_report
+                {where_clause}
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
+                params,
             ).fetchone()
             if not row:
-                return {"ok": False, "status": "missing_report"}
+                return {
+                    "ok": False,
+                    "status": "missing_report",
+                    "scope_kind": requested_kind,
+                }
             return self._row_to_report(dict(row))
         finally:
             conn.close()
 
-    def status(self, *, stale_after_sec: float = 86400.0) -> dict[str, Any]:
-        latest = self.latest_report()
+    def status(
+        self,
+        *,
+        stale_after_sec: float = 86400.0,
+        scope_kind: str = GOVERNANCE_REPLAY_SCOPE_KIND,
+    ) -> dict[str, Any]:
+        latest = self.latest_report(scope_kind=scope_kind)
         if not latest.get("replay_run_id"):
             return {
                 "ok": False,
@@ -661,10 +682,46 @@ class ReplayHarnessService:
                 "latest_report": latest,
                 "stale": True,
                 "stale_after_seconds": stale_after_sec,
+                "scope_kind": str(scope_kind or ""),
+                "blockers": ["replay_report_missing"],
+                "bindings": {},
             }
         age = max(0.0, time.time() - _safe_float(latest.get("created_at")))
         stale = age > stale_after_sec
-        ok = not stale and not latest.get("replay_error") and str(latest.get("evidence_grade") or "") not in {"missing", "failed"}
+        snapshot = current_runtime_config_snapshot(
+            db_path=self.db_path,
+            create_if_missing=False,
+        )
+        expected_config_hash = str(snapshot.get("config_hash") or "")
+        replay_config_hash = str(latest.get("runtime_config_hash") or "")
+        expected_code_version = _code_version()
+        replay_code_version = str(latest.get("code_version") or "")
+        input_dataset_hash = str(latest.get("input_dataset_hash") or "")
+        artifact_hash = str(latest.get("artifact_hash") or "")
+        blockers: list[str] = []
+        if stale:
+            blockers.append("replay_stale")
+        if str(latest.get("status") or "") != "completed":
+            blockers.append("replay_not_completed")
+        if latest.get("replay_error"):
+            blockers.append("replay_error")
+        if str(latest.get("evidence_grade") or "") not in {"A", "B"}:
+            blockers.append("replay_evidence_grade_not_admissible")
+        if not expected_config_hash:
+            blockers.append("runtime_config_hash_unavailable")
+        elif replay_config_hash != expected_config_hash:
+            blockers.append("runtime_config_hash_mismatch")
+        if not input_dataset_hash:
+            blockers.append("input_dataset_hash_missing")
+        if not artifact_hash:
+            blockers.append("artifact_hash_missing")
+        if not replay_code_version:
+            blockers.append("code_version_missing")
+        elif not expected_code_version or expected_code_version == "unknown":
+            blockers.append("code_version_unavailable")
+        elif replay_code_version != expected_code_version:
+            blockers.append("code_version_mismatch")
+        ok = not blockers
         return {
             "ok": ok,
             "status": "fresh" if ok else "stale" if stale else "degraded",
@@ -673,6 +730,24 @@ class ReplayHarnessService:
             "age_seconds": round(age, 3),
             "stale": stale,
             "stale_after_seconds": stale_after_sec,
+            "scope_kind": str(scope_kind or ""),
+            "blockers": blockers,
+            "bindings": {
+                "runtime_config_hash": replay_config_hash,
+                "expected_runtime_config_hash": expected_config_hash,
+                "runtime_config_hash_matches": bool(
+                    expected_config_hash and replay_config_hash == expected_config_hash
+                ),
+                "input_dataset_hash": input_dataset_hash,
+                "artifact_hash": artifact_hash,
+                "code_version": replay_code_version,
+                "expected_code_version": expected_code_version,
+                "code_version_matches": bool(
+                    expected_code_version
+                    and expected_code_version != "unknown"
+                    and replay_code_version == expected_code_version
+                ),
+            },
         }
 
     _DECISION_EVENT_TYPES = ("open", "skip", "order_failed")
@@ -2029,6 +2104,26 @@ class ReplayHarnessService:
                 issues.append("missing_composite_score")
             if live_gate and str(live_gate.get("reason") or "").startswith("cooldown_"):
                 issues.append("cooldown_state_not_replayable_v1")
+            recorded_gate_config = (
+                action.get("execution_gate_config")
+                if isinstance(action.get("execution_gate_config"), dict)
+                else {}
+            )
+            if not recorded_gate_config:
+                issues.append("missing_recorded_execution_gate_config")
+            elif (
+                recorded_gate_config.get("schema_version")
+                != "execution_gate_replay_config.v1"
+                or not {
+                    "signal_threshold",
+                    "cooldown_bars",
+                    "event_filter_authority",
+                    "risk_enable_nfp_skip",
+                    "risk_enable_gvz_gate",
+                    "risk_gvz_drop_pct",
+                }.issubset(recorded_gate_config)
+            ):
+                issues.append("invalid_recorded_execution_gate_config")
             if issues:
                 input_gaps += 1
                 if len(gaps) < 50:
@@ -2038,10 +2133,9 @@ class ReplayHarnessService:
             try:
                 attempted += 1
                 composite = self._composite_for_recompute(row, action)
-                gate_config = self._execution_gate_config_for_recompute(action)
                 from alpha.execution_gate import ExecutionGate
 
-                gate = ExecutionGate(gate_config)
+                gate = ExecutionGate(dict(recorded_gate_config))
                 recomputed = gate.filter(composite, factor_values, bar)
                 live_sig = _gate_signature(live_gate)
                 replay_sig = (bool(getattr(recomputed, "passed", False)), str(getattr(recomputed, "reason", "")))
@@ -2315,23 +2409,6 @@ class ReplayHarnessService:
             effective_alpha_factor_count=_safe_int(action.get("effective_alpha_factor_count")),
         )
 
-    @staticmethod
-    def _execution_gate_config_for_recompute(action: dict[str, Any]) -> dict[str, Any]:
-        try:
-            from backend.services.live_loop_shell import execution_gate_config
-            from config.runtime_config import shared as runtime_config
-
-            config = execution_gate_config(runtime_config())
-        except Exception:
-            config = {"signal_threshold": 0.3, "cooldown_bars": 3}
-        context_policy = action.get("context_policy") if isinstance(action.get("context_policy"), dict) else {}
-        try:
-            delta = float(context_policy.get("signal_threshold_delta") or 0.0)
-            config["signal_threshold"] = max(0.0, min(1.0, float(config.get("signal_threshold", 0.3) or 0.3) + delta))
-        except Exception:
-            pass
-        return config
-
     def _risk_policy_context_for_recompute(
         self,
         row: dict[str, Any],
@@ -2371,28 +2448,62 @@ class ReplayHarnessService:
             or action.get("fill_price")
             or 0.0
         )
-        try:
-            from config.runtime_config import shared as runtime_config
-
-            cfg = runtime_config()
-        except Exception:
-            cfg = SimpleNamespace(
-                var_enabled=False,
-                var_cvar_threshold=0.02,
-                max_position_count=3,
-                max_position_api_volume=1000.0,
-                pyramid_enabled=True,
-                risk_loss_cooldown_after_losses=0,
-                risk_loss_cooldown_bars=0,
-                risk_block_on_disk_critical=True,
-                runtime_incident_mode="normal",
-            )
-        incident_mode = (
-            audit.get("runtime_incident_mode")
-            or risk_state.get("runtime_incident_mode")
-            or getattr(cfg, "runtime_incident_mode", "normal")
-            or "normal"
+        recorded_inputs = (
+            action.get("risk_replay_inputs")
+            if isinstance(action.get("risk_replay_inputs"), dict)
+            else {}
         )
+        if not recorded_inputs:
+            gaps.append("missing_recorded_risk_replay_inputs")
+        recorded_risk_limits = (
+            recorded_inputs.get("risk_limits")
+            if isinstance(recorded_inputs.get("risk_limits"), dict)
+            else {}
+        )
+        recorded_var_config = (
+            recorded_inputs.get("var")
+            if isinstance(recorded_inputs.get("var"), dict)
+            else {}
+        )
+        required_risk_input_keys = {
+            "max_position_count",
+            "max_position_api_volume",
+            "pyramid_enabled",
+            "loss_cooldown_after_losses",
+            "loss_cooldown_bars",
+            "block_on_disk_critical",
+            "runtime_incident_mode",
+            "autonomy_mode",
+            "live_autonomy_unlocked",
+            "live_autonomy_unlock_id",
+        }
+        required_risk_limit_keys = {
+            "schema_version",
+            "source",
+            "max_drawdown_pct",
+            "max_consecutive_losses",
+            "max_daily_loss_pct",
+            "max_daily_trades",
+            "data_lag_max_seconds",
+            "loss_cooldown_after_losses",
+            "loss_cooldown_bars",
+            "block_on_disk_critical",
+            "var_threshold_pct",
+            "cvar_threshold_pct",
+            "circuit_breaker_bypass",
+        }
+        if recorded_inputs and (
+            recorded_inputs.get("schema_version")
+            != "open_trade_risk_replay_inputs.v1"
+            or not required_risk_input_keys.issubset(recorded_inputs)
+            or recorded_risk_limits.get("schema_version")
+            != "risk_limit_snapshot.v1"
+            or not required_risk_limit_keys.issubset(recorded_risk_limits)
+            or not {"enabled", "threshold_pct", "cvar_threshold_pct"}.issubset(
+                recorded_var_config
+            )
+        ):
+            gaps.append("invalid_recorded_risk_replay_inputs")
         recorded_var = (
             audit.get("candidate_forward_var")
             if isinstance(audit.get("candidate_forward_var"), dict)
@@ -2407,7 +2518,7 @@ class ReplayHarnessService:
         if isinstance(recorded_shadow_var, dict):
             replay_risk_state["var_shadow_99"] = recorded_shadow_var
         var_replayable = bool(recorded_var.get("status"))
-        if bool(getattr(cfg, "var_enabled", False)) and not var_replayable:
+        if bool(recorded_var_config.get("enabled", False)) and not var_replayable:
             gaps.append("missing_recorded_risk_metrics_snapshot")
         context = {
             "trade": {
@@ -2429,37 +2540,35 @@ class ReplayHarnessService:
                 "circuit_breaker": bool(portfolio.get("circuit_breaker", False)),
             },
             "risk_snapshot": replay_risk_state,
-            "var": {
-                "enabled": (
-                    bool(getattr(cfg, "var_enabled", False))
-                    and var_replayable
-                ),
-                "threshold_pct": float(getattr(cfg, "var_cvar_threshold", 0.02) or 0.02) * 100.0,
-            },
+            "risk_limits": dict(recorded_risk_limits),
+            "var": dict(recorded_var_config),
             "open_position_count": _safe_int(portfolio.get("n_positions"), _safe_int(audit_state.get("open_position_count"))),
-            "max_position_count": int(getattr(cfg, "max_position_count", 3) or 0),
+            "max_position_count": _safe_int(recorded_inputs.get("max_position_count")),
             "total_api_volume": _safe_float(portfolio_exposure.get("total_api_volume_before"), _safe_float(audit_state.get("total_api_volume"))),
             "requested_api_volume": _safe_float(requested_volume),
-            "max_position_api_volume": float(getattr(cfg, "max_position_api_volume", 1000.0) or 0.0),
+            "max_position_api_volume": _safe_float(recorded_inputs.get("max_position_api_volume")),
             "event_sizing": event_context or {"enabled": False, "multiplier": 1.0},
             "event_window_learning_policy": {},
             "entry_quality_gate": {},
             "entry_cluster": entry_cluster,
             "entry_cluster_learning_policy": {},
             "same_direction_cooldown_seconds": 0.0,
-            "pyramid_enabled": bool(getattr(cfg, "pyramid_enabled", True)),
+            "pyramid_enabled": bool(recorded_inputs.get("pyramid_enabled", False)),
             "max_abs_entry_score": _safe_float(audit.get("max_abs_entry_score")),
             "signal_score": _safe_float(action.get("score"), _safe_float(row.get("action_score"))),
             "loop_running": bool(audit_state.get("loop_running", True)),
             "bridge_connected": bool(audit_state.get("bridge_connected", True)),
             "data_lag_seconds": _safe_float(data_quality.get("data_lag_seconds"), _safe_float(audit_state.get("data_lag_seconds"))),
             "runtime_health": audit_state.get("runtime_health") if isinstance(audit_state.get("runtime_health"), dict) else {},
-            "loss_cooldown_after_losses": int(getattr(cfg, "risk_loss_cooldown_after_losses", 0) or 0),
-            "loss_cooldown_bars": int(getattr(cfg, "risk_loss_cooldown_bars", 0) or 0),
-            "block_on_disk_critical": bool(getattr(cfg, "risk_block_on_disk_critical", True)),
+            "loss_cooldown_after_losses": _safe_int(recorded_inputs.get("loss_cooldown_after_losses")),
+            "loss_cooldown_bars": _safe_int(recorded_inputs.get("loss_cooldown_bars")),
+            "block_on_disk_critical": bool(recorded_inputs.get("block_on_disk_critical", False)),
             "temporal_context": temporal_context,
             "supervisor_reentry_block": {},
-            "runtime_incident_mode": str(incident_mode),
+            "runtime_incident_mode": str(recorded_inputs.get("runtime_incident_mode") or ""),
+            "autonomy_mode": str(recorded_inputs.get("autonomy_mode") or ""),
+            "live_autonomy_unlocked": bool(recorded_inputs.get("live_autonomy_unlocked", False)),
+            "live_autonomy_unlock_id": str(recorded_inputs.get("live_autonomy_unlock_id") or ""),
             "_input_gaps": gaps,
         }
         return context

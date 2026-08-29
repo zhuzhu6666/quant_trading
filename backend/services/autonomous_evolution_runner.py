@@ -365,8 +365,8 @@ class AutonomousEvolutionNurseryRunner:
         from config.runtime_config import shared as runtime_config
 
         cfg = runtime_config()
-        replay = self._replay_status(ReplayHarnessService(self.db_path).latest_report())
-        release = self._release_status(ReleaseControlService(self.db_path).latest_release())
+        replay = ReplayHarnessService(self.db_path).status()
+        release = ReleaseControlService(self.db_path).status()
         health = AutonomyHealthService(self.db_path).latest_snapshot()
         return {
             "schema_version": "autonomous_evolution_runner_light_readiness.v1",
@@ -392,39 +392,6 @@ class AutonomousEvolutionNurseryRunner:
                     "proposal_registry_review_only": True,
                 }
             },
-        }
-
-    @staticmethod
-    def _replay_status(report: dict[str, Any]) -> dict[str, Any]:
-        created_at = float(report.get("created_at") or 0.0)
-        age = max(0.0, time.time() - created_at) if created_at > 0 else 0.0
-        if not report.get("replay_run_id"):
-            status = "missing"
-        elif report.get("replay_error"):
-            status = "error"
-        elif age > 24 * 3600:
-            status = "stale"
-        else:
-            status = "fresh"
-        return {
-            "schema_version": "replay_latest_status.v1",
-            "status": status,
-            "replay_run_id": str(report.get("replay_run_id") or ""),
-            "created_at": created_at,
-            "age_seconds": age,
-        }
-
-    @staticmethod
-    def _release_status(release: dict[str, Any]) -> dict[str, Any]:
-        if not release.get("run_id"):
-            status = "missing"
-        else:
-            status = str(release.get("status") or "unknown")
-        return {
-            "schema_version": "release_latest_status.v1",
-            "status": status,
-            "run_id": str(release.get("run_id") or ""),
-            "created_at": float(release.get("created_at") or 0.0),
         }
 
     def _lock_path(self) -> Path:
@@ -461,13 +428,13 @@ class AutonomousEvolutionNurseryRunner:
     def _run_bar_replay(self, *, lookback_days: float, limit: int) -> dict[str, Any]:
         from backend.services.replay_harness import ReplayHarnessService
 
-        report = ReplayHarnessService(self.db_path).run_bar_replay_freshness(
+        report = ReplayHarnessService(self.db_path).run_bar_replay_evidence(
             lookback_days=max(0.0, min(float(lookback_days), 30.0)),
             limit=max(1, min(int(limit), 1000)),
         )
         return {
             "ok": not bool(report.get("replay_error")),
-            "schema_version": "autonomous_evolution_runner_replay_freshness.v1",
+            "schema_version": "autonomous_evolution_runner_replay_evidence.v1",
             "status": "completed" if not report.get("replay_error") else "failed",
             "report": report,
         }

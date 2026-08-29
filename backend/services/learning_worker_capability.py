@@ -46,6 +46,8 @@ class LearningWorkerCapability:
         self._now = now
         self._lock = threading.RLock()
         started_at = float(now())
+        from backend.core.release_identity import release_identity_contract
+
         from backend.core.static_feature_flags import (
             shared_static_feature_flags,
             static_feature_flags_fingerprint,
@@ -59,6 +61,7 @@ class LearningWorkerCapability:
             "boot_status": "starting",
             "started_at": started_at,
             "updated_at": started_at,
+            "release_identity": release_identity_contract(),
             "process_static_feature_flags": {
                 "schema_version": "static_feature_flags.v1",
                 "values": process_flags,

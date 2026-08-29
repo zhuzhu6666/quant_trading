@@ -50,7 +50,6 @@ from backend.services.research_evidence import (
     has_research_trust_metadata,
     require_executable_research_evidence,
 )
-from research.learning.governor import RuleEvolutionGovernor
 
 
 def _use_pg(db_path: str | Path) -> bool:
@@ -772,22 +771,15 @@ class ParameterTemplateValidationService:
                 )
         active_before = template_service.get_active_template(factor_id=factor_id, regime_key=regime_key)
         old_template_id = str((active_before or {}).get("template_id") or "")
-        suggestion = template_service.create_switch_suggestion(
-            factor_id=factor_id,
-            template_id=template_id,
-            regime_key=regime_key,
-            note=f"release_candidate:{candidate_id}",
-        )
-        RuleEvolutionGovernor(str(self.db_path)).set_status(
-            suggestion["suggestion_id"],
-            "approved",
-            f"approved by release candidate {candidate_id}",
-        )
+        # The reviewed release-candidate row is the approval authority for an
+        # offline-deep gray release.  Do not manufacture a second policy
+        # suggestion and mark it approved without the governance-eligibility
+        # contract; that orphan approval is rejected by the coordinated
+        # activation path in enforce mode.
         release_result = template_service.activate_template(
             factor_id=factor_id,
             template_id=template_id,
             regime_key=regime_key,
-            suggestion_id=suggestion["suggestion_id"],
             note=note or f"deploy release candidate {candidate_id}",
             allow_offline_deep=True,
         )
@@ -807,7 +799,7 @@ class ParameterTemplateValidationService:
             "old_template_id": old_template_id,
             "new_template_id": template_id,
             "switch_id": release_result.get("switch_id", ""),
-            "suggestion_id": suggestion["suggestion_id"],
+            "suggestion_id": str(release_result.get("suggestion_id") or ""),
         }
         self._update_release_candidate(
             candidate_id=candidate_id,

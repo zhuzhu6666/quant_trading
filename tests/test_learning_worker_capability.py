@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 
@@ -391,6 +392,7 @@ def test_learning_worker_projection_exposes_boot_and_hashes(tmp_path) -> None:
     assert status["boot_id"] == "boot-projection"
     assert status["config_hash_match"] is True
     assert status["overlay_hash_match"] is True
+    assert status["release_identity_match"] is True
     assert status["mutation_capability"]["available"] is True
     process_flags = status["process_static_feature_flags"]
     assert process_flags["schema_version"] == "static_feature_flags.v1"
@@ -410,6 +412,46 @@ def test_learning_worker_projection_exposes_boot_and_hashes(tmp_path) -> None:
     assert divergent["ok"] is False
     assert divergent["mutation_capability"]["available"] is False
     assert divergent["mutation_capability"]["status"] == "config_hash_diverged"
+
+
+def test_learning_worker_projection_rejects_release_identity_drift(tmp_path) -> None:
+    from backend.core.release_identity import process_release_identity
+    from backend.services.backend_readiness import BackendReadinessService
+    from backend.services.learning_worker_capability import STATUS_KEY
+
+    db_path = _capability_db(tmp_path)
+    cap = LearningWorkerCapability(db_path=db_path, boot_id="boot-release-drift")
+    cap.mark_ready(config_hash="cfg-a", overlay_hash="ovl-a", recovery_status="complete")
+    cap.publish()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value_json FROM runtime_kv WHERE key=?",
+            (STATUS_KEY,),
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["release_identity"] = {
+            **process_release_identity(),
+            "head": "old-worker-head",
+        }
+        conn.execute(
+            "UPDATE runtime_kv SET value_json=? WHERE key=?",
+            (json.dumps(payload, sort_keys=True), STATUS_KEY),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    status = BackendReadinessService(db_path=db_path)._learning_worker_capability_status(
+        runtime_snapshot={"config_hash": "cfg-a"},
+        runtime_overlay={"overlay_hash": "ovl-a"},
+    )
+
+    assert status["ok"] is False
+    assert status["release_identity_match"] is False
+    assert status["mutation_capability"]["available"] is False
+    assert status["mutation_capability"]["status"] == "release_identity_diverged"
 
 
 def test_learning_worker_projection_becomes_stale_after_75_seconds(tmp_path) -> None:

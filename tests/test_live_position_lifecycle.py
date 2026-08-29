@@ -757,12 +757,37 @@ def test_build_open_trade_risk_context_payload_uses_safe_defaults():
 
 
 def test_build_filled_open_ledger_payloads_preserves_live_shape():
-    composite = SimpleNamespace(direction=1)
+    composite = SimpleNamespace(
+        direction=1,
+        context_policy={
+            "signal_threshold_delta": 0.04,
+            "loss_streak_addon": 0.06,
+        },
+    )
     gate_result = SimpleNamespace(allowed=True)
     risk_verdict = SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"})
 
     payloads = build_filled_open_ledger_payloads(
-        cfg=SimpleNamespace(timeframe="M5"),
+        cfg=SimpleNamespace(
+            timeframe="M5",
+            factor_signal_threshold=0.42,
+            risk_enable_nfp_skip=True,
+            risk_enable_gvz_gate=False,
+            risk_gvz_drop_pct=-2.5,
+            risk_var_threshold_pct=10.0,
+            risk_cvar_threshold_pct=2.5,
+            var_enabled=True,
+            max_position_count=4,
+            max_position_api_volume=800.0,
+            pyramid_enabled=False,
+            risk_loss_cooldown_after_losses=3,
+            risk_loss_cooldown_bars=5,
+            risk_block_on_disk_critical=False,
+            runtime_incident_mode="normal",
+            autonomy_mode="demo_autonomous",
+            live_autonomy_unlocked=False,
+            live_autonomy_unlock_id="",
+        ),
         bar={"time": 1234.5},
         tick=9,
         pid=268,
@@ -813,6 +838,48 @@ def test_build_filled_open_ledger_payloads_preserves_live_shape():
         "sizing_trace": {"source": "test"},
         "entry_cluster": {"count": 1},
         "risk_verdict": {"allowed": True, "reason": "ok"},
+        "execution_gate_config": {
+            "schema_version": "execution_gate_replay_config.v1",
+            "signal_threshold": 0.52,
+            "cooldown_bars": 0,
+            "event_filter_authority": "risk_policy",
+            "risk_enable_nfp_skip": True,
+            "risk_enable_gvz_gate": False,
+            "risk_gvz_drop_pct": -2.5,
+        },
+        "risk_replay_inputs": {
+            "schema_version": "open_trade_risk_replay_inputs.v1",
+            "risk_limits": {
+                "schema_version": "risk_limit_snapshot.v1",
+                "source": "runtime_config",
+                "max_drawdown_pct": 8.0,
+                "max_consecutive_losses": 8,
+                "max_daily_loss_pct": 2.0,
+                "max_daily_trades": 10,
+                "data_lag_max_seconds": 3600.0,
+                "loss_cooldown_after_losses": 3,
+                "loss_cooldown_bars": 5,
+                "block_on_disk_critical": False,
+                "var_threshold_pct": 10.0,
+                "cvar_threshold_pct": 2.5,
+                "circuit_breaker_bypass": False,
+            },
+            "var": {
+                "enabled": True,
+                "threshold_pct": 10.0,
+                "cvar_threshold_pct": 2.5,
+            },
+            "max_position_count": 4,
+            "max_position_api_volume": 800.0,
+            "pyramid_enabled": False,
+            "loss_cooldown_after_losses": 3,
+            "loss_cooldown_bars": 5,
+            "block_on_disk_critical": False,
+            "runtime_incident_mode": "normal",
+            "autonomy_mode": "demo_autonomous",
+            "live_autonomy_unlocked": False,
+            "live_autonomy_unlock_id": "",
+        },
     }
     assert payloads["submitted_order_payload"] == {
         "event_type": "submitted",

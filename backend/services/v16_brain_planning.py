@@ -481,16 +481,18 @@ class BrainActionPlanEvaluatorService:
                 "read_only": True, "affects_trading": False}
 
     def _load_evidence(self, *, limit: int) -> dict[str, Any]:
+        from backend.services.replay_harness import (
+            GOVERNANCE_REPLAY_SCOPE_KIND,
+            ReplayHarnessService,
+        )
+
+        replay = ReplayHarnessService(self.db_path).latest_report(
+            scope_kind=GOVERNANCE_REPLAY_SCOPE_KIND,
+        )
         conn = connect(self.db_path, read_only=True)
         source_gaps: list[str] = []
         try:
-            replay = {}
-            if state_table_exists(conn, "replay_report"):
-                row = execute(conn, """SELECT replay_run_id, decision_count, matched_live_count,
-                    mismatch_count, metric_summary_json, replay_error, evidence_grade,
-                    artifact_hash, status, created_at FROM replay_report ORDER BY created_at DESC LIMIT 1""").fetchone()
-                replay = dict(row) if row else {}
-            else:
+            if not replay.get("replay_run_id"):
                 source_gaps.append("missing_replay_report")
             trade_reviews = iter_review_rows_desc(conn, limit=limit)
             trade_reviews = [

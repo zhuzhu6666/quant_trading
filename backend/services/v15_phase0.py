@@ -55,7 +55,11 @@ class V15Phase0CompletionService:
             and isinstance(latest_release, dict)
             and str(latest_release.get("status") or "") != "error"
         )
-        release_evidence_ok = bool(latest_release.get("run_id"))
+        release_evidence_ok = (
+            release.get("ok") is True
+            and bool(latest_release.get("run_id"))
+            and str(latest_release.get("status") or "") == "completed"
+        )
         gates = [
             _gate(
                 "readiness_contract",

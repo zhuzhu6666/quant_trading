@@ -95,16 +95,16 @@
   （用 `except RuntimeStateSchemaMissingError: pass` 吞掉缺表/缺列/索引不匹配）在 S 阶段漂移出
   契约（纯目录校验 + fail-closed）。修复：删除 DDL 执行循环（迁移 CLI 是唯一 schema writer），
   删除两处吞错 `except...pass`（缺对象一律 fail-closed 抛 `RuntimeStateSchemaMissingError`）。
-- 影响：仅为校验层对齐契约（生产建表本就走 `scripts/state_schema_migrate.py --apply` /
-  `_ensure_pg_business_tables` 普通 psycopg，不受影响；PG 运行期若缺对象将显式报错而非静默）。
+- 影响：当批先恢复了校验层 fail-closed；2026-08-29 后续收敛又删除了普通 psycopg
+  `_ensure_pg_business_tables` 旁路，所有 PG DDL 统一只走 `scripts/state_schema_migrate.py --apply`。
 - 验证：`test_state_store_schema_guard.py` 21 passed（含原 3 失败）+ state_store 相邻集 98 passed/1 skipped + 全量回归见批次记录。
 
 ### RuntimeStateConnection DDL 拦截导致 ensure_* 函数在 PG 模式下无法建表
 
 - 状态：`resolved`（2026-08-28 P1 批：PG 分支改为显式 fail-closed 校验）
-- canonical：`RuntimeStateConnection` 仅校验不建表；`StateMigrationConnection` + `migrations/state_pg` + `backend.core.db._ensure_pg_business_tables`（普通 psycopg）为唯一 PG 建表路径。
-- 当前（2026-08-28）：`ensure_evolution_ledger_tables` 已委托 `_ensure_pg_business_tables`；`ensure_autonomous_learning_tables` PG 分支改为 `validate_runtime_state_schema(evolution_events)` 显式校验（`backend/services/autonomous_learning.py:262`），其余 `ensure_*` 保持 `return` 但依赖 `init_all` + 迁移已全量建表（`runtime.state_schema_migration v32`，`_PG_BUSINESS_TABLES_DDL` 21 表 + 迁移 11 表）。冷启动通过普通 psycopg 已全量建表，`validate` 失败即 `RuntimeStateSchemaMissingError`，不再静默吞掉。
-- 退出：已收敛，`migrating` 关闭；后续新增表必须走迁移或 `_PG_BUSINESS_TABLES_DDL`，`ensure_*` PG 分支不得再静默 `return` 而不校验。
+- canonical：`RuntimeStateConnection` 与业务 `ensure_*` 只校验不建表；`StateMigrationConnection` + `migrations/state_pg` + `scripts/state_schema_migrate.py --apply` 是唯一 PG schema writer。
+- 当前（2026-08-29）：运行期 `_ensure_pg_business_tables`、`_PG_BUSINESS_TABLES_DDL` 及启动调用已删除；`ensure_evolution_ledger_tables` 只读校验 migration ledger，其他已迁移 ensure 路径继续做 catalog validation。空库初始化已进入同一 migration runner 的 `bootstrap_legacy_baseline.sql`，CI 不再维护第二份 Python baseline。
+- 退出：已收敛，`resolved`；后续新增/修改表只能新增 versioned migration，业务 ensure 不得写 PG schema。
 
 ### 平行 authority、重复门控和无退出兼容层
 
@@ -191,6 +191,7 @@
 - 状态：`resolved`（2026-08-28 14:53 f2eb9c9 已删除生产 `off` 直连路径）
 - canonical：`GovernanceMutationCoordinator` 在同一 PG 事务内 reserve、重验 before、写 intent/领域事实、finalize；commit 后才发布 RuntimeConfig。
 - 当前（2026-08-28 14:53）：静态开关 `governance_mutation_coordinator_v2_mode=enforce` 已双服务加载（`backend 891039 / worker 891040`）；生产 `off` 分支已删——`parameter_templates` 的 off→fail-closed / `model_influence` 的 off 直连 `RuntimeConfigMutationService` 路径在 f2eb9c9 移除，仅保留隔离测试 `*_off_compat` 覆盖。`runtime_config_mutation:213` / `factor_governance:2548` 的剩余 `off` 检查仅为测试隔离路径，不再触达生产 overlay/Registry。
+- 补充收敛：Coordinator 应用会在同一事务内物化生成模板的 registry target；offline release candidate 复用已审核 candidate 作为审批事实，不再创建缺少 eligibility 的伪 approved suggestion。
 - 验证：`git show f2eb9c9 --stat` 2 files 8+/30-；`parameter_templates:845` / `model_influence:329` 已 fail-closed，`grep -rn governance_mutation_coordinator_v2_mode.*off backend/` 仅测试隔离。
 
 ### position supervisor 旧 advisory 冲突占位

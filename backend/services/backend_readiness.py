@@ -1261,7 +1261,10 @@ class BackendReadinessService:
         runtime_snapshot: dict[str, Any],
         runtime_overlay: dict[str, Any],
     ) -> dict[str, Any]:
+        from backend.core.release_identity import release_identity_contract
         from backend.services.learning_worker_capability import STATUS_KEY
+
+        backend_release_identity = release_identity_contract()
 
         try:
             payload = self._runtime_kv_get(STATUS_KEY, {}) or {}
@@ -1271,6 +1274,9 @@ class BackendReadinessService:
                 "ok": False,
                 "state": "error",
                 "boot_status": "unknown",
+                "release_identity": {},
+                "backend_release_identity": backend_release_identity,
+                "release_identity_match": False,
                 "mutation_capability": {"available": False, "status": "unknown"},
                 "error": f"{type(exc).__name__}: {exc}",
             }
@@ -1280,6 +1286,9 @@ class BackendReadinessService:
                 "ok": False,
                 "state": "unknown",
                 "boot_status": "unknown",
+                "release_identity": {},
+                "backend_release_identity": backend_release_identity,
+                "release_identity_match": False,
                 "observation_capability": {"available": False, "status": "unknown"},
                 "research_capability": {"available": False, "status": "unknown"},
                 "mutation_capability": {"available": False, "status": "unknown"},
@@ -1295,6 +1304,14 @@ class BackendReadinessService:
         backend_config_hash = str(runtime_snapshot.get("config_hash") or "")
         worker_overlay_hash = str(payload.get("overlay_hash") or "")
         backend_overlay_hash = str(runtime_overlay.get("overlay_hash") or "")
+        worker_release_identity = payload.get("release_identity")
+        if not isinstance(worker_release_identity, dict):
+            worker_release_identity = {}
+        release_identity_match = bool(
+            backend_release_identity.get("ok") is True
+            and worker_release_identity.get("ok") is True
+            and worker_release_identity == backend_release_identity
+        )
         config_hash_match = bool(
             worker_config_hash
             and backend_config_hash
@@ -1314,6 +1331,7 @@ class BackendReadinessService:
             and fresh
             and config_hash_match
             and overlay_hash_match
+            and release_identity_match
         )
         mutation["available"] = bool(raw_mutation_available and operational)
         if raw_mutation_available and not operational:
@@ -1323,6 +1341,8 @@ class BackendReadinessService:
                 if not fresh
                 else "config_hash_diverged"
                 if not config_hash_match
+                else "release_identity_diverged"
+                if not release_identity_match
                 else "overlay_hash_diverged"
             )
         return {
@@ -1341,6 +1361,9 @@ class BackendReadinessService:
             "overlay_hash": worker_overlay_hash,
             "backend_overlay_hash": backend_overlay_hash,
             "overlay_hash_match": overlay_hash_match,
+            "release_identity": worker_release_identity,
+            "backend_release_identity": backend_release_identity,
+            "release_identity_match": release_identity_match,
             "hash_match": bool(config_hash_match and overlay_hash_match),
             "observation_capability": observation,
             "research_capability": research,
@@ -1582,12 +1605,7 @@ class BackendReadinessService:
         try:
             from backend.services.release_control import ReleaseControlService
 
-            latest = ReleaseControlService(self.db_path).latest_release()
-            return {
-                "schema_version": "release_readiness.v1",
-                "ok": bool(latest.get("run_id")),
-                "latest_release": latest,
-            }
+            return ReleaseControlService(self.db_path).status()
         except Exception as exc:
             return {
                 "schema_version": "release_readiness.v1",

@@ -644,9 +644,6 @@ def test_verified_parity_evidence_allows_parameter_review_and_deploy(tmp_path, m
         def get_active_template(self, *, factor_id, regime_key):
             return {"template_id": "template:old"}
 
-        def create_switch_suggestion(self, **_kwargs):
-            return {"suggestion_id": "suggestion_verified"}
-
         def activate_template(self, **kwargs):
             return {
                 "ok": True,
@@ -655,18 +652,7 @@ def test_verified_parity_evidence_allows_parameter_review_and_deploy(tmp_path, m
                 "new_template_id": kwargs["template_id"],
             }
 
-    class FakeGovernor:
-        def __init__(self, _db_path):
-            pass
-
-        def set_status(self, *_args, **_kwargs):
-            return None
-
     monkeypatch.setattr(service, "_template_service", lambda: FakeTemplateService())
-    monkeypatch.setattr(
-        "backend.services.parameter_template_validation.RuleEvolutionGovernor",
-        FakeGovernor,
-    )
     deployed = service.deploy_release_candidate(candidate_id=candidate["candidate_id"])
     assert deployed["ok"] is True
     assert deployed["candidate"]["status"] == "deployed"

@@ -1082,6 +1082,119 @@ def test_factor_pipeline_initializes_signal_decision_id_for_flat_signal(monkeypa
     assert pipeline["last_signal_decision_id"] == ""
 
 
+def test_factor_pipeline_final_close_sync_uses_empty_baseline(monkeypatch):
+    """A new decision bar must use the final-close cursor contract too.
+
+    If the broker close deal was persisted before the position disappearance
+    was observed, ``sync_close_deals_batch`` must compare against an explicit
+    empty baseline.  Omitting it makes the sync helper treat the already
+    stored deal as its own baseline and can leave the close pending forever.
+    """
+    import execution.deal_sync as deal_sync_module
+
+    composite = SimpleNamespace(direction=0, score=0.0)
+    gate_result = SimpleNamespace(passed=False, reason="flat")
+    sync_calls: list[dict] = []
+
+    class _Conn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        live_service,
+        "_factor_state_resolve_bar_progress",
+        lambda *_args: SimpleNamespace(already_processed=False, last_processed_ts=0.0),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_decision_run_live_decision_pipeline",
+        lambda **_kwargs: SimpleNamespace(ready=True, reason=""),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_factor_state_commit_ready_decision",
+        lambda **_kwargs: SimpleNamespace(
+            factor_values={"atr_ratio": 0.0},
+            signals={},
+            composite=composite,
+            gate_result=gate_result,
+        ),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_tick_normalize_live_positions_payload",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(live_service, "_tick_collect_position_ids", lambda _positions: set())
+    monkeypatch.setattr(live_service, "_active_pending_open_attach_ids", lambda _ids: [])
+    monkeypatch.setattr(
+        live_service,
+        "_active_recovery_position_ids_for_close_detection",
+        lambda _broker: set(),
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_tick_resolve_closed_position_ids",
+        lambda **_kwargs: ({42}, set(), False),
+    )
+    monkeypatch.setattr(live_service, "_restore_attribution_for_positions", lambda *_args: 0)
+    monkeypatch.setattr(live_service, "_LEDGER", None)
+    monkeypatch.setattr(live_service, "_get_state_pg_conn", lambda: _Conn())
+    monkeypatch.setattr(
+        live_service,
+        "_recovery_last_seen_by_position",
+        lambda _ids: {42: 100.0},
+    )
+    monkeypatch.setattr(
+        live_service,
+        "_recovery_remaining_volume_by_position",
+        lambda _ids: {42: 100.0},
+    )
+
+    def _sync(*_args, **kwargs):
+        sync_calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(deal_sync_module, "sync_close_deals_batch", _sync)
+    monkeypatch.setattr(live_service, "_handle_closed_positions_after_tick", lambda **_kwargs: None)
+    monkeypatch.setattr(live_service, "_should_send_orders", lambda _broker: False)
+    monkeypatch.setattr(live_service, "_run_open_trade_pipeline", lambda **_kwargs: gate_result)
+    monkeypatch.setattr(live_service, "_remember_or_clear_pending_open_retry", lambda **_kwargs: None)
+    monkeypatch.setattr(live_service, "_check_business_alerts", lambda *_args: None)
+    monkeypatch.setattr(live_service, "_publish_latest_price", lambda *_args, **_kwargs: None)
+
+    live_service._live_state["account"] = {"balance": 10000.0, "equity": 10000.0}
+    live_service._live_state["positions"] = []
+    live_service._live_state["positions_updated_at"] = time.time()
+    live_service._prev_position_ids = {42}
+    pipeline = {
+        "engine": object(),
+        "normalizer": object(),
+        "compositor": object(),
+        "gate": object(),
+        "attribution": None,
+    }
+    df_new = _make_df()
+
+    live_service._process_tick_factor_pipeline(
+        bridge=object(),
+        pipeline=pipeline,
+        df_new=df_new,
+        last_bar=df_new.iloc[-1],
+        broker="ctrader",
+        tick=1,
+        log=lambda _message: None,
+    )
+
+    assert sync_calls[0]["baseline_close_cursor_by_position"] == {
+        42: {
+            "baseline_cursor_available": True,
+            "baseline_deal_ids": [],
+            "baseline_closed_volume": 0.0,
+        }
+    }
+
+
 def test_should_send_orders_respects_system_mode(monkeypatch, tmp_path):
     path = tmp_path / "settings.yaml"
     path.write_text("system:\n  mode: backtest\nctrader:\n  send_orders: true\n", encoding="utf-8")

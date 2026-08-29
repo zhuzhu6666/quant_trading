@@ -345,6 +345,7 @@ from backend.services.live_position_lifecycle import (
     build_holding_timeout_verdict_payload as _lifecycle_build_holding_timeout_verdict_payload,
     build_market_micro_context_payload as _lifecycle_build_market_micro_context_payload,
     build_open_learning_context_payload as _lifecycle_build_open_learning_context_payload,
+    build_open_decision_replay_payload as _lifecycle_build_open_decision_replay_payload,
     validate_open_learning_context as _lifecycle_validate_open_learning_context,
     build_open_trade_risk_context_payload as _lifecycle_build_open_trade_risk_context_payload,
     build_position_path_metrics_update as _lifecycle_build_position_path_metrics_update,
@@ -4380,6 +4381,50 @@ def _recovery_remaining_volume_by_position(
 ) -> dict[int, float]:
     """Return the last fresh broker-open volume for close completeness proof."""
     return _recovery_position_store().remaining_volume_by_position(position_ids)
+
+
+def _sync_closed_position_deals_for_tick(
+    bridge: Any,
+    closed_pids: set[int],
+    *,
+    observed_close_cursor_out: dict[int, dict[str, Any]],
+) -> dict[int, dict]:
+    """Fetch authoritative deals for positions that disappeared this tick.
+
+    A broker position disappearing is a final-close observation, not a
+    partial-close retry.  The cursor baseline therefore has to be an explicit
+    empty cursor for every position.  Keeping this contract in one helper
+    prevents the duplicate-bar and new-bar paths from drifting apart.
+    """
+    if not closed_pids or bridge is None:
+        return {}
+
+    from execution.deal_sync import sync_close_deals_batch
+
+    conn = _get_state_pg_conn()
+    try:
+        return sync_close_deals_batch(
+            bridge,
+            conn,
+            closed_pids,
+            min_exec_timestamp_by_position=(
+                _recovery_last_seen_by_position(closed_pids)
+            ),
+            required_closed_volume_delta_by_position=(
+                _recovery_remaining_volume_by_position(closed_pids)
+            ),
+            baseline_close_cursor_by_position={
+                int(pid): {
+                    "baseline_cursor_available": True,
+                    "baseline_deal_ids": [],
+                    "baseline_closed_volume": 0.0,
+                }
+                for pid in closed_pids
+            },
+            observed_close_cursor_out=observed_close_cursor_out,
+        )
+    finally:
+        conn.close()
 
 
 def _mark_recovery_position_closed(
@@ -10325,6 +10370,11 @@ def _record_open_trade_admission_blocked(
         "blockers": list(blockers),
         "action_reason": str(block_reason or "open_admission_blocked"),
         "execution_intent_created": False,
+        **_lifecycle_build_open_decision_replay_payload(
+            cfg=cfg,
+            composite=composite,
+            include_risk=False,
+        ),
     }
     try:
         payload = _tick_build_skip_ledger_payload(
@@ -10509,6 +10559,11 @@ def _prepare_open_trade_intent(
             audit_payload.get("open_learning_context_quality") or {}
         ),
         "execution_intent_created": False,
+        **_lifecycle_build_open_decision_replay_payload(
+            cfg=cfg,
+            composite=composite,
+            include_risk=True,
+        ),
     }
     if candidate.position_supervisor_binding:
         action_json["position_supervisor_binding"] = dict(
@@ -11491,37 +11546,11 @@ def _process_tick_existing_decision_bar(
     close_deal_cursors: dict[int, dict[str, Any]] = {}
     if closed_pids and bridge is not None:
         try:
-            from execution.deal_sync import sync_close_deals_batch
-
-            _sconn = _get_state_pg_conn()
-            try:
-                # tick 路径检测到的 closed_pids 语义 = broker 仓位已消失
-                # (final close)。必须传空 baseline:若缺省, sync_close_deals_batch
-                # 会把"当前库里已有的 close deal"当作 baseline(observed_baseline),
-                # 导致 observed_ids - baseline_ids 恒为空集、delta_proven 永远
-                # False —— 平仓成交已入库但永远无法确认的死锁。
-                real_pnls = sync_close_deals_batch(
-                    bridge,
-                    _sconn,
-                    closed_pids,
-                    min_exec_timestamp_by_position=(
-                        _recovery_last_seen_by_position(closed_pids)
-                    ),
-                    required_closed_volume_delta_by_position=(
-                        _recovery_remaining_volume_by_position(closed_pids)
-                    ),
-                    baseline_close_cursor_by_position={
-                        int(pid): {
-                            "baseline_cursor_available": True,
-                            "baseline_deal_ids": [],
-                            "baseline_closed_volume": 0.0,
-                        }
-                        for pid in closed_pids
-                    },
-                    observed_close_cursor_out=close_deal_cursors,
-                )
-            finally:
-                _sconn.close()
+            real_pnls = _sync_closed_position_deals_for_tick(
+                bridge,
+                closed_pids,
+                observed_close_cursor_out=close_deal_cursors,
+            )
         except Exception as _ds_err:
             log(f"tick {tick}: deal_sync error: {_ds_err}")
 
@@ -11702,6 +11731,11 @@ def _process_tick_factor_pipeline(
                     "runtime_binding": runtime_binding,
                     "factor_set_version": factor_set_version,
                     "policy_version": policy_version,
+                    **_lifecycle_build_open_decision_replay_payload(
+                        cfg=cfg,
+                        composite=composite,
+                        include_risk=False,
+                    ),
                 },
             )
             pipeline["last_signal_decision_id"] = str(signal_decision_id or "")
@@ -11735,23 +11769,11 @@ def _process_tick_factor_pipeline(
     _close_deal_cursors: dict[int, dict[str, Any]] = {}
     if closed_pids and bridge is not None:
         try:
-            from execution.deal_sync import sync_close_deals_batch
-            _sconn = _get_state_pg_conn()
-            try:
-                _real_pnls = sync_close_deals_batch(
-                    bridge,
-                    _sconn,
-                    closed_pids,
-                    min_exec_timestamp_by_position=(
-                        _recovery_last_seen_by_position(closed_pids)
-                    ),
-                    required_closed_volume_delta_by_position=(
-                        _recovery_remaining_volume_by_position(closed_pids)
-                    ),
-                    observed_close_cursor_out=_close_deal_cursors,
-                )
-            finally:
-                _sconn.close()
+            _real_pnls = _sync_closed_position_deals_for_tick(
+                bridge,
+                closed_pids,
+                observed_close_cursor_out=_close_deal_cursors,
+            )
         except Exception as _ds_err:
             log(f"tick {tick}: deal_sync error: {_ds_err}")
 

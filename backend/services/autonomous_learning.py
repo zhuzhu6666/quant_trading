@@ -260,8 +260,8 @@ def _sample_integrity_level(value: Any) -> str:
 def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
     ensure_evolution_ledger_tables(db_path)
     if _use_pg(db_path):
-        # PG business tables are owned by migrations + _ensure_pg_business_tables;
-        # validate evolution_events catalog entry fail-closed instead of silent no-op.
+        # PostgreSQL objects are owned only by the explicit migration runner;
+        # validate evolution_events fail-closed instead of mutating the catalog.
         from backend.core.state_store import validate_runtime_state_schema
 
         conn = get_state_pg_conn()

@@ -231,7 +231,7 @@ def build_warmup_feed(df: Any, *, timeframe: str, min_warmup: int, warmup_limit:
 
 def execution_gate_config(cfg: Any) -> dict[str, Any]:
     return {
-        "signal_threshold": cfg.factor_signal_threshold,
+        "signal_threshold": getattr(cfg, "factor_signal_threshold", 0.3),
         # Final admission belongs to RiskPolicy/entry-cluster.  The factor gate
         # runs earlier, so starting a wait here also penalizes rejected orders.
         "cooldown_bars": 0,

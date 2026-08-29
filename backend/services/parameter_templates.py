@@ -1348,6 +1348,57 @@ class ParameterTemplateService:
                 "mutation_id": mutation_id,
                 "commit_boundary": "governance_mutation_coordinator",
             }
+            # The library contains derived/manual templates that are exposed
+            # by ``get_template`` without a registry row.  Materialize that
+            # target inside the same coordinator transaction before switching
+            # the registry active flag; otherwise a valid recommendation can
+            # always abort with ``parameter_template_registry_target_missing``.
+            _execute(
+                conn,
+                """
+                INSERT INTO parameter_template_registry
+                (template_id, factor_id, regime_key, template_version,
+                 template_role, factor_family, formula_version,
+                 base_parameter_version, parameters_json,
+                 applicable_regimes_json, avoid_regimes_json,
+                 holding_profile_hint_json, evidence_json, source, active,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                ON CONFLICT(template_id) DO UPDATE SET
+                    factor_id=excluded.factor_id,
+                    regime_key=excluded.regime_key,
+                    template_version=excluded.template_version,
+                    template_role=excluded.template_role,
+                    factor_family=excluded.factor_family,
+                    formula_version=excluded.formula_version,
+                    base_parameter_version=excluded.base_parameter_version,
+                    parameters_json=excluded.parameters_json,
+                    applicable_regimes_json=excluded.applicable_regimes_json,
+                    avoid_regimes_json=excluded.avoid_regimes_json,
+                    holding_profile_hint_json=excluded.holding_profile_hint_json,
+                    evidence_json=excluded.evidence_json,
+                    source=excluded.source,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    str(target.get("template_id") or template_id),
+                    str(target.get("factor_id") or factor_id),
+                    str(target.get("regime_key") or regime_key),
+                    str(target.get("template_version") or ""),
+                    str(target.get("template_role") or "default"),
+                    str(target.get("factor_family") or ""),
+                    str(target.get("formula_version") or ""),
+                    str(target.get("base_parameter_version") or "default.v1"),
+                    json.dumps(target.get("parameters") or {}, ensure_ascii=False, default=str),
+                    json.dumps(target.get("applicable_regimes") or [], ensure_ascii=False, default=str),
+                    json.dumps(target.get("avoid_regimes") or [], ensure_ascii=False, default=str),
+                    json.dumps(target.get("holding_profile_hint") or {}, ensure_ascii=False, default=str),
+                    json.dumps(target.get("evidence") or {}, ensure_ascii=False, default=str),
+                    str(target.get("source") or "derived"),
+                    now,
+                    now,
+                ),
+            )
             registry_update = _execute(
                 conn,
                 """UPDATE parameter_template_registry

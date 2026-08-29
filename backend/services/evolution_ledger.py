@@ -178,11 +178,13 @@ def _as_dict(config: Any) -> dict[str, Any]:
 
 def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
     if _use_pg(db_path):
-        # PostgreSQL bootstrap/DDL lives in the central db helper (which owns
-        # the plain-psycopg DDL bypass); route through it, not raw psycopg here.
-        from backend.core.db import _ensure_pg_business_tables
+        from backend.core.state_schema_migrations import require_state_schema_version
 
-        _ensure_pg_business_tables()
+        conn = get_state_pg_conn(read_only=True)
+        try:
+            require_state_schema_version(conn)
+        finally:
+            conn.close()
         return
     conn = connect_sqlite(db_path)
     try:
