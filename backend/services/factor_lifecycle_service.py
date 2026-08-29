@@ -896,7 +896,11 @@ class FactorLifecycleService:
                     # committed lifecycle fact is the only authority for
                     # loading that callable; keep it shadow-only until the
                     # live proof below succeeds.
-                    self._project_registry(state)
+                    # Loading a committed definition into this process is a
+                    # projection recovery, not a new lifecycle mutation.  The
+                    # durable lifecycle fact was already written by the
+                    # coordinator that committed the state.
+                    self._project_registry(state, log_event=False)
                 meta = self.adapter.get_meta(name)
                 expected_source = SOURCE_BUILTIN if origin == SOURCE_BUILTIN else (
                     SOURCE_DISCOVERED
@@ -1146,7 +1150,10 @@ class FactorLifecycleService:
             state = _row_dict(row)
             mutation_id = str(state.get("mutation_id") or "")
             try:
-                self._project_registry(state)
+                # Bootstrap must rebuild process-local Registry state without
+                # appending a duplicate canonical ``register`` fact for every
+                # committed factor on each backend restart.
+                self._project_registry(state, log_event=False)
                 stage = str(state.get("lifecycle_stage") or "")
                 self._record_projection_result(
                     state,
@@ -1910,7 +1917,12 @@ class FactorLifecycleService:
                 pass
             raise
 
-    def _project_registry(self, state: Mapping[str, Any]) -> None:
+    def _project_registry(
+        self,
+        state: Mapping[str, Any],
+        *,
+        log_event: bool = True,
+    ) -> None:
         name = str(state.get("factor_name") or "")
         stage = str(state.get("lifecycle_stage") or "")
         origin = str(state.get("origin") or "dsl").strip().lower()
@@ -1955,6 +1967,7 @@ class FactorLifecycleService:
             source = self._ensure_committed_definition_loaded(
                 state,
                 allowed_sources=allowed_sources,
+                log_event=log_event,
             )
             if stage in {
                 FactorLifecycleStage.SHADOW.value,
@@ -1990,6 +2003,7 @@ class FactorLifecycleService:
         state: Mapping[str, Any],
         *,
         allowed_sources: set[str],
+        log_event: bool = True,
     ) -> str:
         """Load and validate one committed DSL definition as a shadow."""
         name = str(state.get("factor_name") or "")
@@ -2041,6 +2055,7 @@ class FactorLifecycleService:
             func=fn,
             source=SOURCE_SHADOW,
             description=expression,
+            log_event=log_event,
         ):
             raise FactorLifecycleError("registry_shadow_projection_failed")
         return SOURCE_SHADOW
