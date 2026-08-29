@@ -132,7 +132,7 @@
 
 ### 配置镜像膨胀与停盘重复学习（2026-08-29）
 
-- 状态：`resolved`（代码提交 343c224；受控重启后按最终回放证据收口）。
+- 状态：`resolved`（代码提交 343c224；受控重启和最终回放证据已收口）。
 - canonical：有效配置载荷唯一保留在 `runtime.runtime_config_payload`，快照由
   `runtime.runtime_config_snapshot` 负责版本/回滚；canonical 事件、状态、训练样本和治理账本继续保留原始事实。
 - 已删除：`canonical_v2.payload_blob` 中无任何 `event/state_version` 引用、且代码无读取者的
@@ -143,8 +143,8 @@
 - 代码收敛：相同有效配置 hash 复用最新 snapshot，不再新增版本；移除无读取者的 canonical 配置镜像写入；
   evolution 只把行情输入指纹视为新输入，配置/代码指纹漂移不再制造新学习周期；在新输入未出现且市场已确认收盘时跳过
   GP/Canary/退休/IC/权重维护，supervisor 学习复用既有事实水位并跳过历史反事实扫描。存在已批准治理建议时仍保留治理 owner 的处理机会。
-- 验证：payload 孤儿查询为 0；当前 snapshot 2,113 行、最新版本 3,445；runtime 配置载荷 1,279 行且无变化；
-  PostgreSQL 清理并 vacuum 后约 906MB，随后一次实际 shadow catch-up 追加事实后约 909MB。当前有 4 条 approved
+- 验证：payload 孤儿查询为 0；当前 snapshot 2,113 行、最新版本 3,445；runtime 配置载荷 1,288 行且每条 hash 唯一；
+  PostgreSQL 清理并 vacuum 后约 906MB，随后一次实际 shadow catch-up 追加事实后约 910MB。当前有 4 条 approved
   因子治理建议和 4 条 `PROMOTION_PREPARED`，故不能把治理 backlog 误报为空闲；停盘期间没有 broker/position/risk/trade
   新事实，误触发 catch-up 产生的 9 条生命周期/治理事实已按审计要求保留。
 
