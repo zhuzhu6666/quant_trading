@@ -126,7 +126,7 @@ def test_runtime_config_overlay_refuses_pytest_write_to_production_store(monkeyp
         )
 
 
-def test_startup_restore_applies_overlay_and_writes_snapshot(tmp_path):
+def test_startup_restore_applies_overlay_and_reuses_snapshot(tmp_path):
     rc.reset_for_tests()
     db_path = tmp_path / "state.db"
     from backend.services.governance_mutation_coordinator import (
@@ -165,7 +165,7 @@ def test_startup_restore_applies_overlay_and_writes_snapshot(tmp_path):
         ).fetchone()
     finally:
         conn.close()
-    assert row == ("test_worker_startup", "startup_run")
+    assert row == ("factor_governance_update_weight", "run_overlay")
 
 
 def test_runtime_config_shared_can_refresh_overlay_written_by_another_process(tmp_path):

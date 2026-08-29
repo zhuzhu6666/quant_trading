@@ -29,6 +29,18 @@ def test_timer_scheduler_cron_fallback_preserves_frequency(cron_expr, expected):
 
 
 def test_supervisor_learning_cycle_keeps_advisories_observation_only(monkeypatch):
+    class _Watermark:
+        def __init__(self, *, db_path):
+            self.db_path = db_path
+
+        def evaluate(self):
+            return {"should_run": True, "status": "new_facts"}
+
+    monkeypatch.setattr(
+        supervisor_learning_scheduler,
+        "LearningCycleWatermarkService",
+        _Watermark,
+    )
     monkeypatch.setattr(
         supervisor_learning_scheduler,
         "evaluate_counterfactuals",
@@ -42,6 +54,33 @@ def test_supervisor_learning_cycle_keeps_advisories_observation_only(monkeypatch
     assert result["counterfactual_count"] == 3
     assert result["advisory_days"] == []
     assert result["advisory_count"] == 0
+
+
+def test_supervisor_learning_cycle_skips_without_new_canonical_facts(monkeypatch):
+    class _Watermark:
+        def __init__(self, *, db_path):
+            self.db_path = db_path
+
+        def evaluate(self):
+            return {"should_run": False, "status": "no_new_facts"}
+
+    monkeypatch.setattr(
+        supervisor_learning_scheduler,
+        "LearningCycleWatermarkService",
+        _Watermark,
+    )
+    monkeypatch.setattr(
+        supervisor_learning_scheduler,
+        "evaluate_counterfactuals",
+        lambda **_: (_ for _ in ()).throw(
+            AssertionError("no-new-fact supervisor cycle must not scan reviews")
+        ),
+    )
+
+    result = supervisor_learning_scheduler.run_supervisor_learning_cycle()
+
+    assert result["status"] == "skipped_no_new_facts"
+    assert result["counterfactual_count"] == 0
 
 
 def test_learning_backfill_stop_cancels_delayed_run(monkeypatch):

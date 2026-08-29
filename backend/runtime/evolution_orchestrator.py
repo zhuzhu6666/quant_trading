@@ -340,6 +340,81 @@ def _load_evolution_cycle_watermark() -> dict[str, Any]:
             conn.close()
 
 
+def _confirmed_closed_market_session() -> dict[str, Any]:
+    """Return the live session projection only when it is fresh and closed.
+
+    This is a workload gate, not a trading decision.  Unknown or stale
+    session state must keep the research path running rather than silently
+    suppressing work.
+    """
+    try:
+        from backend.services.runtime_health_projection import (
+            RuntimeHealthProjectionService,
+        )
+
+        projection = RuntimeHealthProjectionService().latest(max_age_seconds=180.0)
+        session = projection.get("market_session") or {}
+        if not bool(projection.get("ok")) or not isinstance(session, dict):
+            return {}
+        if str(session.get("status") or "") != "closed_confirmed":
+            return {}
+        if session.get("can_open_positions") is not False:
+            return {}
+        return {
+            "status": "closed_confirmed",
+            "can_open_positions": False,
+            "projection_age_seconds": float(projection.get("age_seconds") or 0.0),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[Evolve] closed-session workload gate unavailable: %s", exc)
+        return {}
+
+
+def _has_pending_factor_governance_work() -> bool:
+    """Keep governance running when an existing actionable item is pending."""
+    conn = None
+    try:
+        conn = _state_conn(read_only=True)
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM policy_suggestion
+            WHERE status='approved' AND COALESCE(governance_eligible, 0)=1
+            LIMIT 1
+            """
+        ).fetchone()
+        if row:
+            return True
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM factor_lifecycle_state
+            WHERE COALESCE(lifecycle_stage, stage)='PROMOTION_PREPARED'
+            LIMIT 1
+            """
+        ).fetchone()
+        if row:
+            return True
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM governance_mutation_intent
+            WHERE status IN ('reserved', 'prepared')
+            LIMIT 1
+            """
+        ).fetchone()
+        return bool(row)
+    except Exception as exc:  # noqa: BLE001
+        # If the pending-work projection cannot be read, do not suppress
+        # governance.  The existing fail-closed mutation gates still decide
+        # whether any action is allowed.
+        logger.debug("[Evolve] pending governance check unavailable: %s", exc)
+        return True
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _persist_evolution_cycle_watermark(
     watermark: dict[str, Any],
 ) -> dict[str, Any]:
@@ -516,6 +591,24 @@ def scheduled_evolution_cycle(
             "write_enabled": watermark_owner,
             "same_input": same_input,
         }
+        closed_session = _confirmed_closed_market_session()
+        if same_input and closed_session:
+            report.evolution_watermark = {
+                **report.evolution_watermark,
+                "market_session": closed_session,
+            }
+            report.gp_status = "skipped_market_closed"
+            report.gp_skip_reason = "market_closed_no_new_input"
+            report.canary_backpressure = {
+                "ok": True,
+                "status": "idle",
+                "can_register": False,
+                "reason_code": "market_closed_no_new_input",
+            }
+            cb("idle_skip", 40, "evolution skipped: market closed and input unchanged")
+            _emit_evolution_story("cycle_skipped", report.to_dict())
+            report.duration_sec = _time.time() - t0
+            return report
         report.canary_backpressure = _canary_registration_backpressure()
         can_run_gp = bool(
             gp_pop > 0
@@ -688,6 +781,21 @@ def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
     """Run health -> V16 decision -> specialist governance in one evidence cycle."""
 
     report = scheduled_evolution_cycle()
+    if (
+        report.gp_skip_reason == "market_closed_no_new_input"
+        and not _has_pending_factor_governance_work()
+    ):
+        report.factor_v16_handoff = {
+            "status": "skipped",
+            "health_cycle_id": "",
+            "reason": "market_closed_no_new_input",
+        }
+        report.factor_governance_handoff = {
+            "status": "skipped",
+            "health_cycle_id": "",
+            "reason": "market_closed_no_new_input",
+        }
+        return report
     v16_result: dict[str, Any] = {}
     if report.factor_health_persisted:
         try:

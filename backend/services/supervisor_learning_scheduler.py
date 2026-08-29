@@ -6,6 +6,7 @@ from pathlib import Path
 from loguru import logger
 
 from backend.core.db import STATE_DB
+from backend.services.learning_cycle_watermark import LearningCycleWatermarkService
 from backend.services.supervisor_counterfactual import evaluate_counterfactuals
 
 _scheduler_thread: threading.Thread | None = None
@@ -25,6 +26,21 @@ def run_supervisor_learning_cycle(
     governance mutation must come from the existing V16 candidate bridge and
     Coordinator chain.
     """
+    watermark = LearningCycleWatermarkService(db_path=db_path).evaluate()
+    if not bool(watermark.get("should_run")):
+        # Counterfactual materialization is immutable/idempotent, but scanning
+        # every historical review every 30 minutes still burns CPU and opens
+        # a write transaction on a market-closed day.  The canonical fact
+        # watermark is the existing learning authority; do not invent a
+        # second scheduler-specific cursor.
+        return {
+            "schema_version": "supervisor_learning_cycle.v1",
+            "status": "skipped_no_new_facts",
+            "counterfactual_count": 0,
+            "advisory_days": [],
+            "advisory_count": 0,
+            "watermark": watermark,
+        }
     counterfactual = evaluate_counterfactuals(
         db_path=db_path,
         limit=limit,
@@ -40,6 +56,7 @@ def run_supervisor_learning_cycle(
         "counterfactual_count": int(counterfactual.get("count") or 0),
         "advisory_days": [],
         "advisory_count": 0,
+        "watermark": watermark,
     }
 
 

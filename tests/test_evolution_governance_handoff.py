@@ -117,3 +117,15 @@ def test_health_handoff_skips_when_persistence_failed(monkeypatch):
     }
     assert calls == [("evolution_health_unavailable", None)]
     assert result.factor_governance_handoff["status"] == "waiting_v16_command"
+
+
+def test_closed_no_input_skips_governance_when_no_work_is_pending(monkeypatch):
+    report = evolution.EvolutionReport()
+    report.gp_skip_reason = "market_closed_no_new_input"
+    monkeypatch.setattr(evolution, "scheduled_evolution_cycle", lambda: report)
+    monkeypatch.setattr(evolution, "_has_pending_factor_governance_work", lambda: False)
+
+    result = evolution.scheduled_evolution_with_governance_handoff()
+
+    assert result.factor_v16_handoff["reason"] == "market_closed_no_new_input"
+    assert result.factor_governance_handoff["status"] == "skipped"

@@ -121,6 +121,7 @@ def test_same_evolution_input_runs_gp_once_but_maintenance_every_cycle(
     counters: dict[str, int] = {}
     watermark: dict = {}
     _isolate_cycle(monkeypatch, counters)
+    monkeypatch.setattr(evolution, "_confirmed_closed_market_session", lambda: {})
     monkeypatch.setattr(
         evolution,
         "_canary_registration_backpressure",
@@ -175,6 +176,51 @@ def test_same_evolution_input_runs_gp_once_but_maintenance_every_cycle(
     assert counters["canary"] == 2
     assert counters["retirement"] == 2
     assert counters["weights"] == 2
+
+
+def test_same_input_on_confirmed_closed_market_skips_maintenance(monkeypatch):
+    monkeypatch.setenv("QUANT_PROCESS_ROLE", "learning_worker")
+    counters: dict[str, int] = {}
+    watermark = {
+        "watermark_fingerprint": "same",
+        "read_status": "known",
+    }
+    _isolate_cycle(monkeypatch, counters)
+    monkeypatch.setattr(
+        evolution,
+        "_evolution_input_watermark",
+        lambda *_args, **_kwargs: {
+            "watermark_fingerprint": "same",
+            "last_closed_bar": "bar",
+        },
+    )
+    monkeypatch.setattr(
+        evolution,
+        "_load_evolution_cycle_watermark",
+        lambda: dict(watermark),
+    )
+    monkeypatch.setattr(
+        evolution,
+        "_confirmed_closed_market_session",
+        lambda: {
+            "status": "closed_confirmed",
+            "can_open_positions": False,
+            "projection_age_seconds": 1.0,
+        },
+    )
+    monkeypatch.setattr(
+        evolution,
+        "_canary_registration_backpressure",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("idle evolution must not query canary maintenance")
+        ),
+    )
+
+    result = evolution.scheduled_evolution_cycle()
+
+    assert result.gp_status == "skipped_market_closed"
+    assert result.gp_skip_reason == "market_closed_no_new_input"
+    assert counters == {}
 
 
 def test_canary_budget_backpressure_stops_registration_not_maintenance(

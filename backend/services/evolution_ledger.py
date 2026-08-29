@@ -341,6 +341,14 @@ def persist_runtime_config_snapshot(
     active_conn = conn or _connect(db_path)
     try:
         ensure_state_payload_schema(db_path, active_conn)
+        # Serialize the mutation-id and latest-hash checks with the insert so
+        # concurrent backend/learning-worker startup cannot create duplicate
+        # versions (or race a mutation-id retry).
+        if _use_pg(db_path):
+            active_conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                ("runtime_config_snapshot_persist",),
+            )
         if mutation_id:
             mutation_row = active_conn.execute(
                 _p(
@@ -372,10 +380,73 @@ def persist_runtime_config_snapshot(
                     "requested_source": str(source or ""),
                     "requested_run_id": str(run_id or ""),
                 }
-        # Identical payloads are deliberately still separate snapshot
-        # occurrences.  Only an explicit mutation_id is idempotent; event
-        # metadata such as source/run_id/created_at must not disappear merely
-        # because the effective config did not change.
+        # A snapshot is a version of the effective configuration, not a log
+        # line for every caller.  The event/evolution ledgers retain the
+        # caller-specific audit occurrence; the snapshot table only advances
+        # when the effective hash changes.
+        latest_row = active_conn.execute(
+            _p(
+                db_path,
+                """SELECT config_version, config_hash, source, run_id,
+                          mutation_id, payload_hash, created_at
+                   FROM runtime_config_snapshot
+                   ORDER BY config_version DESC
+                   LIMIT 1""",
+            )
+        ).fetchone()
+        if latest_row:
+            latest_hash = str(
+                latest_row["config_hash"]
+                if hasattr(latest_row, "keys")
+                else latest_row[1]
+                or ""
+            )
+            if latest_hash == config_hash:
+                return {
+                    "config_version": int(
+                        latest_row["config_version"]
+                        if hasattr(latest_row, "keys")
+                        else latest_row[0]
+                        or 0
+                    ),
+                    "config_hash": config_hash,
+                    "payload_hash": str(
+                        latest_row["payload_hash"]
+                        if hasattr(latest_row, "keys")
+                        else latest_row[5]
+                        or payload_hash_value
+                    ),
+                    "source": str(
+                        latest_row["source"]
+                        if hasattr(latest_row, "keys")
+                        else latest_row[2]
+                        or ""
+                    ),
+                    "run_id": str(
+                        latest_row["run_id"]
+                        if hasattr(latest_row, "keys")
+                        else latest_row[3]
+                        or ""
+                    ),
+                    "mutation_id": str(
+                        latest_row["mutation_id"]
+                        if hasattr(latest_row, "keys")
+                        else latest_row[4]
+                        or ""
+                    ),
+                    "created_at": float(
+                        latest_row["created_at"]
+                        if hasattr(latest_row, "keys")
+                        else latest_row[6]
+                        or 0.0
+                    ),
+                    "reused": True,
+                    "requested_source": str(source or ""),
+                    "requested_run_id": str(run_id or ""),
+                }
+        # Identical caller occurrences are represented by their
+        # evolution/mutation ledger rows; this table advances only for an
+        # effective configuration change.
         put_runtime_config_payload(
             active_conn,
             payload_hash_value,
@@ -393,37 +464,6 @@ def persist_runtime_config_snapshot(
         )
         row = cur.fetchone()
         config_version = row["config_version"] if hasattr(row, "keys") and "config_version" in row.keys() else (row[0] if row else 0)
-        # ── canonical 增量镜像（配置载荷池；内容寻址、幂等、fail-open）──
-        try:
-            from backend.services.canonical_v2 import put_payload
-            import json as _json_mod
-
-            try:
-                config_obj = _json_mod.loads(payload_json)
-            except Exception:
-                config_obj = {"config_json": str(payload_json)[:100000]}
-            put_payload(
-                active_conn,
-                {
-                    "config_version": int(config_version or 0),
-                    "config_hash": str(config_hash or ""),
-                    "source": str(source or ""),
-                    "run_id": str(run_id or ""),
-                    "mutation_id": str(mutation_id or ""),
-                    "created_at": now,
-                    "legacy_payload_hash": str(payload_hash_value or ""),
-                    "config": config_obj,
-                },
-                payload_kind="runtime_config_version",
-                schema_version="canonical_payload.v1",
-                created_at=now,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[evolution] canonical config mirror failed config_hash=%s: %s",
-                config_hash,
-                exc,
-            )
         if owned_conn:
             active_conn.commit()
         return {
