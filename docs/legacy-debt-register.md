@@ -139,6 +139,7 @@
   `runtime_config_version` 镜像 3,428 行（原始 1,558,384,837 bytes），以及 6 条已核实的孤立测试载荷
   （1 条 `evolution_decision`、5 条 `supervisor_trace`，原始 36,837 bytes）；另删
   `runtime_config_snapshot` 中 1,324 条连续同 hash、空 mutation、无业务引用的重复行。
+  终验又删 37 条同 hash、空 mutation、无任何运行/训练/审计引用的旧重复行（快照共删 1,361 条）。
   每段重复只保留末行，带引用、非空 mutation 和最新版本均未删；没有删除训练样本或审计事件。
 - 代码收敛：相同有效配置 hash 复用最新 snapshot，不再新增版本；移除无读取者的 canonical 配置镜像写入；
   evolution 只把行情输入指纹视为新输入，配置/代码指纹漂移不再制造新学习周期；在新输入未出现且市场已确认收盘时跳过
