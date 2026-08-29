@@ -229,7 +229,7 @@ Coordinator 进入有界 Demo；`live_execute` 仍不准入。这里保留的是
 
 ## 5. 学习与自治事实源
 
-`canonical_v2` 的 event、payload 和 lineage 是 append-only 审计事实。异常重复、污染或市场关闭重试不得通过物理删除 canonical rows 处理；只能通过保留原始事实并追加受治理的 suppression/eligibility projection，分别影响训练、展示或治理使用范围。`scripts/cleanup_market_closed_retry_storm_20260823.py` 永久只读，任何 `--apply` 参数都会被拒绝。
+`canonical_v2` 的 event、payload 和 lineage 是 append-only 审计事实。异常重复、污染或市场关闭重试不得通过物理删除 event、state、lineage、训练样本或治理事实处理；只能通过保留原始事实并追加受治理的 suppression/eligibility projection，分别影响训练、展示或治理使用范围。唯一例外是已经退役、没有任何 event/state 引用、且代码没有读取者的孤立 `payload_blob` 镜像：它不是审计事实，可在逐行引用核对后直接删除。`scripts/cleanup_market_closed_retry_storm_20260823.py` 永久只读，任何 `--apply` 参数都会被拒绝。
 
 | 事项 | 权威来源 | 说明 |
 |---|---|---|

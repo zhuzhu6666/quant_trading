@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-08-28 (HEAD f2eb9c9; 治理 enforce 已加载，off 直连路径已删)
+> Last verified: 2026-08-29 (数据库清理及学习调度修复；代码基线 7a28c83)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -127,8 +127,25 @@
 
 - 状态：`resolved`（2026-08-28 只读：`runtime_config_overlay` 已无空 `mutation_id` 行）
 - canonical：非空 mutation 必须是 committed/current 且 config/domain hash 完整绑定；空 mutation 只允许经 hash-bound operator review 恢复明确 risk tightening。
-- 当前（2026-08-28 只读）：`runtime.runtime_config_overlay 1 行（autonomous_factor_governance 5fcd... / mutation 0bdf...）` 零空 `mutation_id`；`runtime_config_snapshot 1439 空 mutation` 为 `superseded/blocked_by_evidence` 等审计快照（非 live overlay），不阻塞 `governance_authority`。`RuntimeConfigOverlayService.review_legacy_quarantine` 仍为唯一空行修复入口。
+- 当前（2026-08-29 清理后）：`runtime.runtime_config_overlay 1 行（autonomous_factor_governance / committed mutation）` 零空 `mutation_id`；`runtime_config_snapshot 2,104 行`（其中 1,275 条带 mutation、829 条空 mutation）只保留每段 hash 的末行及所有被引用审计事实，均非 live overlay，不阻塞 `governance_authority`。`RuntimeConfigOverlayService.review_legacy_quarantine` 仍为唯一空行修复入口。
 - 禁止：用来源名、默认值或“看起来保守”恢复扩张/未知 overlay。
+
+### 配置镜像膨胀与停盘重复学习（2026-08-29）
+
+- 状态：`resolved`（代码已加载，数据库垃圾已清理）。
+- canonical：有效配置载荷唯一保留在 `runtime.runtime_config_payload`，快照由
+  `runtime.runtime_config_snapshot` 负责版本/回滚；canonical 事件、状态、训练样本和治理账本继续保留原始事实。
+- 已删除：`canonical_v2.payload_blob` 中无任何 `event/state_version` 引用、且代码无读取者的
+  `runtime_config_version` 镜像 3,428 行（原始 1,558,384,837 bytes），以及 6 条已核实的孤立测试载荷
+  （1 条 `evolution_decision`、5 条 `supervisor_trace`，原始 36,837 bytes）；另删
+  `runtime_config_snapshot` 中 1,324 条连续同 hash、空 mutation、无业务引用的重复行。
+  每段重复只保留末行，带引用、非空 mutation 和最新版本均未删；没有删除训练样本或审计事件。
+- 代码收敛：相同有效配置 hash 复用最新 snapshot，不再新增版本；移除无读取者的 canonical 配置镜像写入；
+  evolution 在新事实未出现且市场已确认收盘时跳过 GP/Canary/退休/IC/权重维护，supervisor 学习复用既有事实水位
+  跳过历史反事实扫描。存在已批准治理建议时仍保留治理 owner 的处理机会。
+- 验证：payload 孤儿查询为 0；snapshot 2,104 行、最新版本 3,436；runtime 配置载荷 1,279 行且无变化；
+  PostgreSQL 约 1.15GB → 906MB。当前仍有 4 条 approved 因子治理建议和 3,259 条待成熟样本，故不能把治理 backlog
+  误报为空闲；停盘期间没有 broker/position/risk/trade 新事实。
 
 ## 2. 执行与运行时
 
