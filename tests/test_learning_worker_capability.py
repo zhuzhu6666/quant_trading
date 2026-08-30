@@ -26,6 +26,43 @@ def _capability_db(tmp_path):
     return db_path
 
 
+def test_refresh_runtime_hashes_rejects_committed_snapshot_drift(
+    monkeypatch, tmp_path
+) -> None:
+    import backend.services.evolution_ledger as evolution_ledger
+    import backend.services.runtime_config_overlay as overlay_module
+
+    cap = LearningWorkerCapability(
+        db_path=_capability_db(tmp_path),
+        boot_id="boot-config-drift",
+    )
+    cap.mark_ready(
+        config_hash="active-config-hash",
+        overlay_hash="active-overlay-hash",
+        recovery_status="complete",
+    )
+    monkeypatch.setattr(
+        evolution_ledger,
+        "current_runtime_config_snapshot",
+        lambda **_kwargs: {"config_hash": "stale-snapshot-hash"},
+    )
+
+    class _Overlay:
+        def __init__(self, _db_path):
+            pass
+
+        def status(self):
+            return {"ok": True, "overlay_hash": "active-overlay-hash"}
+
+    monkeypatch.setattr(overlay_module, "RuntimeConfigOverlayService", _Overlay)
+
+    with pytest.raises(RuntimeError, match="config_hash"):
+        cap.refresh_runtime_hashes()
+
+    assert cap.snapshot()["config_hash"] == "active-config-hash"
+
+
+
 def test_three_mutation_failures_open_only_mutation_circuit(tmp_path) -> None:
     cap = LearningWorkerCapability(db_path=_capability_db(tmp_path), boot_id="boot-test")
     cap.mark_ready(config_hash="cfg", overlay_hash="ovl", recovery_status="complete")

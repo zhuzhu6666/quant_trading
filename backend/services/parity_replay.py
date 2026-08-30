@@ -38,6 +38,7 @@ from backend.services.research_evidence import (
     PARITY_REPLAY_ENGINE,
     PARITY_REPLAY_EVIDENCE_CLASS,
 )
+from config.runtime_config import runtime_config_hash
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -110,25 +111,6 @@ def _canonical_json(value: Any) -> str:
 
 def _sha256_json(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
-
-
-def _runtime_config_hash(value: Any) -> str:
-    """Match ``evolution_ledger._stable_hash`` byte-for-byte.
-
-    Runtime snapshots predate the replay contract and use json.dumps' default
-    separators.  Binding the same payload with the replay canonicalizer would
-    create a permanent false mismatch despite identical configuration.
-    """
-
-    from config.runtime_config import canonical_runtime_config_payload
-
-    raw = json.dumps(
-        canonical_runtime_config_payload(value),
-        ensure_ascii=False,
-        sort_keys=True,
-        default=str,
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _sha256_files(paths: tuple[str, ...]) -> str:
@@ -1334,7 +1316,7 @@ class ParityReplayRunner:
             if hasattr(self.config, "to_dict")
             else dict(self.config) if isinstance(self.config, Mapping) else {}
         )
-        config_hash = _runtime_config_hash(config_payload)
+        config_hash = runtime_config_hash(config_payload)
         data_hash = _sha256_json(_data_records(frame)) if not frame.empty else _sha256_json([])
         code_hash = _sha256_files(_CODE_BINDING_PATHS)
         missing_code_paths = _missing_code_binding_paths(_CODE_BINDING_PATHS)
@@ -2869,7 +2851,7 @@ class ParityReplayService:
         changed: list[str] = []
         if str(before.get("code_hash") or "") != after_code_hash:
             changed.append("code_changed_during_replay")
-        if str(before.get("config_hash") or "") != _runtime_config_hash(current_config_payload):
+        if str(before.get("config_hash") or "") != runtime_config_hash(current_config_payload):
             changed.append("config_changed_during_replay")
         artifact_manifest = dict(payload.get("artifact_manifest") or {})
         selected_ids = list(artifact_manifest.get("selected_factor_ids") or [])

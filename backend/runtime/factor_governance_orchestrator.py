@@ -21,7 +21,13 @@ from typing import Any, Mapping
 from alpha.decision_policy import DecisionPolicy
 from alpha.portfolio_compositor import resolve_factor_role
 from alpha.registry_adapter import RegistryAdapter
-from backend.core.db import connect_sqlite, get_state_pg_conn, is_state_db_path, state_table_exists
+from backend.core.db import (
+    STATE_DB,
+    connect_sqlite,
+    get_state_pg_conn,
+    is_state_db_path,
+    state_table_exists,
+)
 from backend.core.db_helpers import load_json as _loads
 from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
@@ -117,9 +123,16 @@ class _GovernanceCycleAuditWriter:
     N identical ledger/policy writes without changing governance authority.
     """
 
-    def __init__(self, run: Mapping[str, Any], cfg: RuntimeConfig | None = None):
+    def __init__(
+        self,
+        run: Mapping[str, Any],
+        cfg: RuntimeConfig | None = None,
+        *,
+        db_path: str | Path = STATE_DB,
+    ):
         self.run_id = str(run.get("run_id") or "")
         self.cfg = cfg
+        self.db_path = db_path
         # ``start_evolution_run`` already persisted and returned the
         # authoritative config snapshot.  Reuse it instead of creating a
         # second runtime_config_snapshot row for the audit writer.  Direct
@@ -140,6 +153,7 @@ class _GovernanceCycleAuditWriter:
                 self.cfg or runtime_config.shared(),
                 source="factor_governance:cycle",
                 run_id=self.run_id,
+                db_path=self.db_path,
             )
         return dict(self._snapshot)
 
@@ -208,6 +222,7 @@ class _GovernanceCycleAuditWriter:
             rollback=dict(rollback or {}),
             config_version=int(config_snapshot.get("config_version") or 0),
             config_hash=str(config_snapshot.get("config_hash") or ""),
+            db_path=self.db_path,
         )
         self._seen[key] = decision_id
         return decision_id, False
@@ -444,9 +459,14 @@ class FactorGovernanceOrchestrator:
             run_type="factor_governance_autonomous",
             trigger_source=trigger_source,
             config=cfg,
+            db_path=self.overlay.db_path,
             summary={"version": "factor_governance.v3"},
         )
-        self._active_audit_writer = _GovernanceCycleAuditWriter(run, cfg)
+        self._active_audit_writer = _GovernanceCycleAuditWriter(
+            run,
+            cfg,
+            db_path=self.overlay.db_path,
+        )
         actions: list[dict[str, Any]] = []
         status = "completed"
         try:
@@ -458,18 +478,19 @@ class FactorGovernanceOrchestrator:
                     shadow_refresh.get("count"),
                     shadow_refresh.get("error"),
                 )
-            catalog = build_factor_catalog()
+            catalog = build_factor_catalog(self.overlay.db_path)
             rollback_actions = self._rollback_failed_actions(run)
             actions.extend(rollback_actions)
             catalog_snapshot = persist_factor_catalog_snapshot(
                 catalog,
                 run_id=str(run.get("run_id") or ""),
                 source="factor_governance_cycle",
+                db_path=self.overlay.db_path,
             )
             canary_actions = self._rollback_canary_regressions(catalog, run)
             actions.extend(canary_actions)
             if _catalog_refresh_required([*rollback_actions, *canary_actions]):
-                catalog = build_factor_catalog()
+                catalog = build_factor_catalog(self.overlay.db_path)
             demotion_actions = self._demote_invalid_candidate_evidence(
                 catalog,
                 run,
@@ -477,7 +498,7 @@ class FactorGovernanceOrchestrator:
             )
             actions.extend(demotion_actions)
             if _catalog_refresh_required(demotion_actions):
-                catalog = build_factor_catalog()
+                catalog = build_factor_catalog(self.overlay.db_path)
             # Tightening is always evaluated before any expansion posture or
             # V16 authorization gate. A freeze/missing delegate may stop
             # promotion, restore and template expansion, but must never defer
@@ -487,17 +508,17 @@ class FactorGovernanceOrchestrator:
             )
             actions.extend(downweight_actions)
             if _catalog_refresh_required(downweight_actions):
-                catalog = build_factor_catalog()
+                catalog = build_factor_catalog(self.overlay.db_path)
             disable_actions = self._disable_weak_live_alpha(
                 catalog, run, cfg=cfg, profile=profile
             )
             actions.extend(disable_actions)
             if _catalog_refresh_required(disable_actions):
-                catalog = build_factor_catalog()
+                catalog = build_factor_catalog(self.overlay.db_path)
             retire_actions = self._retire_quarantined_discovered(catalog, run)
             actions.extend(retire_actions)
             if _catalog_refresh_required(retire_actions):
-                catalog = build_factor_catalog()
+                catalog = build_factor_catalog(self.overlay.db_path)
             posture = self._autonomy_posture()
             expansion_frozen = runtime_config.autonomy_expansion_freeze_applies(cfg)
             if posture in {"shadow_only", "frozen"} or expansion_frozen:
@@ -509,7 +530,12 @@ class FactorGovernanceOrchestrator:
                     "catalog_snapshot": catalog_snapshot,
                     "redundancy_report": {},
                 }
-                finish_evolution_run(run["run_id"], status=status, summary=summary)
+                finish_evolution_run(
+                    run["run_id"],
+                    status=status,
+                    summary=summary,
+                    db_path=self.overlay.db_path,
+                )
                 return summary
             cfg = runtime_config.shared()
             redundancy_report = RedundancyDetector().build_report(
@@ -546,6 +572,7 @@ class FactorGovernanceOrchestrator:
                     run["run_id"],
                     status=status,
                     summary=summary,
+                    db_path=self.overlay.db_path,
                 )
                 return summary
             v16_authority: dict[str, Any] = {}
@@ -602,6 +629,7 @@ class FactorGovernanceOrchestrator:
                         run["run_id"],
                         status="blocked_by_v16_command",
                         summary=summary,
+                        db_path=self.overlay.db_path,
                     )
                     return summary
                 v16_manifest_verdict = factor_batch_manifest_verdict(
@@ -628,6 +656,7 @@ class FactorGovernanceOrchestrator:
                         run["run_id"],
                         status="blocked_by_v16_command",
                         summary=summary,
+                        db_path=self.overlay.db_path,
                     )
                     return summary
             v16_candidate_id = str(v16_authority.get("candidate_id") or "")
@@ -660,7 +689,7 @@ class FactorGovernanceOrchestrator:
                 expansion_actions
             )
             if _catalog_refresh_required(expansion_actions):
-                catalog = build_factor_catalog()
+                catalog = build_factor_catalog(self.overlay.db_path)
             if not expansion_committed:
                 expansion_actions = self._restore_quarantined_builtin_alpha(
                     authorized_catalog,
@@ -674,7 +703,7 @@ class FactorGovernanceOrchestrator:
                     expansion_actions
                 )
                 if _catalog_refresh_required(expansion_actions):
-                    catalog = build_factor_catalog()
+                    catalog = build_factor_catalog(self.overlay.db_path)
             if not expansion_committed:
                 expansion_actions = self._activate_healthy_builtin_shadow(
                     authorized_catalog,
@@ -688,7 +717,7 @@ class FactorGovernanceOrchestrator:
                     expansion_actions
                 )
                 if _catalog_refresh_required(expansion_actions):
-                    catalog = build_factor_catalog()
+                    catalog = build_factor_catalog(self.overlay.db_path)
             if not expansion_committed:
                 expansion_actions = (
                     self._apply_redundancy_report(
@@ -704,7 +733,7 @@ class FactorGovernanceOrchestrator:
                     expansion_actions
                 )
                 if _catalog_refresh_required(expansion_actions):
-                    catalog = build_factor_catalog()
+                    catalog = build_factor_catalog(self.overlay.db_path)
             if not expansion_committed:
                 expansion_actions = self._promote_shadow_candidates(
                     authorized_catalog,
@@ -716,7 +745,7 @@ class FactorGovernanceOrchestrator:
                     expansion_actions
                 )
                 if _catalog_refresh_required(expansion_actions):
-                    catalog = build_factor_catalog()
+                    catalog = build_factor_catalog(self.overlay.db_path)
             if v16_delegation and not expansion_committed:
                 from backend.services.v16_brain_orchestrator import (
                     V16BrainOrchestratorService,
@@ -747,6 +776,7 @@ class FactorGovernanceOrchestrator:
                 run["run_id"],
                 status="completed_with_errors" if summary["status"] == "completed_with_errors" else status,
                 summary=summary,
+                db_path=self.overlay.db_path,
             )
             return summary
         except Exception as exc:
@@ -756,6 +786,7 @@ class FactorGovernanceOrchestrator:
                 run["run_id"],
                 status=status,
                 summary={"status": status, "error": str(exc), "actions": actions},
+                db_path=self.overlay.db_path,
             )
             return {"status": status, "error": str(exc), "actions": actions}
         finally:
@@ -4193,7 +4224,11 @@ class FactorGovernanceOrchestrator:
     ) -> dict[str, Any]:
         writer = self._active_audit_writer
         if writer is None or writer.run_id != str(run.get("run_id") or ""):
-            writer = _GovernanceCycleAuditWriter(run, runtime_config.shared())
+            writer = _GovernanceCycleAuditWriter(
+                run,
+                runtime_config.shared(),
+                db_path=self.overlay.db_path,
+            )
             # Direct callers (including replay/diagnostic paths) still get the
             # same run-scoped writer; the normal cycle clears it in ``finally``.
             self._active_audit_writer = writer

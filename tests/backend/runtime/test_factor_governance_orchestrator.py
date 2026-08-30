@@ -436,6 +436,7 @@ def test_v16_delegates_only_concrete_factor_expansion_preflight(tmp_path):
         },
         persist=False,
     )
+
     delegated = service.delegate_factor_governance_cycle(
         {
             "snapshot_id": "brain-1",
@@ -470,6 +471,56 @@ def test_v16_delegates_only_concrete_factor_expansion_preflight(tmp_path):
     assert command["evidence"]["expansion_preflight"]["candidate_count"] == 1
     assert command["evidence"]["batch_manifest"]["fixed_after_issue"] is True
     assert command["delegation"]["authorization_granularity"] == "run_batch_fixed_manifest"
+
+
+def test_audit_action_uses_overlay_db_for_snapshot_and_decision(
+    monkeypatch, tmp_path
+):
+    import backend.services.evolution_ledger as evolution_ledger
+
+    rc.reset_for_tests()
+    local_db = tmp_path / "state.db"
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(local_db)
+    snapshot_calls = []
+    decision_calls = []
+
+    def _persist_snapshot(_config, **kwargs):
+        snapshot_calls.append(kwargs)
+        return {"config_version": 1, "config_hash": "config-hash"}
+
+    def _record_decision(**kwargs):
+        decision_calls.append(kwargs)
+        return "decision-id"
+
+    monkeypatch.setattr(
+        evolution_ledger,
+        "persist_runtime_config_snapshot",
+        _persist_snapshot,
+    )
+    monkeypatch.setattr(
+        evolution_ledger,
+        "record_evolution_decision",
+        _record_decision,
+    )
+    monkeypatch.setattr(orch, "_record_policy_suggestion", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        orch,
+        "_record_learning_application",
+        lambda *args, **kwargs: None,
+    )
+
+    orch._audit_action(
+        {"run_id": "local-run"},
+        {"factor_id": "factor"},
+        "update_weight",
+        "blocked_by_risk",
+        {},
+        _AllowRisk().evaluate("update_weight", {}),
+    )
+
+    assert snapshot_calls[0]["db_path"] == local_db
+    assert decision_calls[0]["db_path"] == local_db
 
 
 def test_factor_batch_manifest_must_match_current_preflight():
@@ -531,7 +582,9 @@ def test_run_cycle_executes_tightening_before_expansion_freeze(monkeypatch):
         lambda **_kwargs: {"run_id": "tightening-before-freeze"},
     )
     monkeypatch.setattr(evolution_ledger, "finish_evolution_run", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(governance_module, "build_factor_catalog", lambda: list(catalog))
+    monkeypatch.setattr(
+        governance_module, "build_factor_catalog", lambda *_args, **_kwargs: list(catalog)
+    )
     monkeypatch.setattr(
         governance_module,
         "persist_factor_catalog_snapshot",
@@ -587,7 +640,7 @@ def test_run_cycle_does_not_rebuild_catalog_for_non_mutating_prior_action(monkey
     monkeypatch.setattr(evolution_ledger, "finish_evolution_run", lambda *_args, **_kwargs: None)
     build_calls = []
 
-    def _build_catalog():
+    def _build_catalog(*_args, **_kwargs):
         build_calls.append(1)
         return []
 
@@ -632,7 +685,9 @@ def test_run_cycle_does_not_claim_v16_without_expansion_work(monkeypatch):
         "finish_evolution_run",
         lambda *args, **kwargs: finished.append((args, kwargs)),
     )
-    monkeypatch.setattr(governance_module, "build_factor_catalog", lambda: [])
+    monkeypatch.setattr(
+        governance_module, "build_factor_catalog", lambda *_args, **_kwargs: []
+    )
     monkeypatch.setattr(
         governance_module,
         "persist_factor_catalog_snapshot",

@@ -233,18 +233,7 @@ def _evolution_input_watermark(
     from config import runtime_config
 
     cfg = runtime_config.shared()
-    config_payload = runtime_config.canonical_runtime_config_payload(
-        cfg.to_dict()
-    )
-    config_hash = hashlib.sha256(
-        _json.dumps(
-            config_payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
+    config_hash = runtime_config.runtime_config_hash(cfg)
     digest = hashlib.sha256()
     digest.update(
         _json.dumps(

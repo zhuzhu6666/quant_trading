@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import logging
 import math
 import os
@@ -881,6 +883,20 @@ def canonical_runtime_config_payload(value: Any) -> Dict[str, Any]:
     if "extra" in payload or extra:
         payload["extra"] = extra
     return payload
+
+
+def runtime_config_hash(value: Any) -> str:
+    """Return the stable hash for the canonical runtime config payload."""
+
+    payload = canonical_runtime_config_payload(value)
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def legacy_runtime_config_hash_payload(value: Any) -> Dict[str, Any]:

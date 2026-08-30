@@ -43,7 +43,7 @@ from backend.services.runtime_config_overlay import (
     _sanitize_patch,
 )
 from config import runtime_config
-from config.runtime_config import RuntimeConfig, canonical_runtime_config_payload
+from config.runtime_config import RuntimeConfig, runtime_config_hash
 
 
 INTENT_STATUSES = frozenset(
@@ -65,7 +65,7 @@ def _hash(value: Any) -> str:
 def _runtime_config_hash(value: Any) -> str:
     """Hash the shared canonical runtime-config representation."""
 
-    return _hash(canonical_runtime_config_payload(value))
+    return runtime_config_hash(value)
 
 
 def _p(db_path: str | Path, sql: str) -> str:

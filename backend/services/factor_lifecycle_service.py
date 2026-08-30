@@ -49,7 +49,7 @@ from backend.services.learning_experiment_admission import (
     ACTIVE_EFFECT_STATUSES,
 )
 from config import runtime_config
-from config.runtime_config import RuntimeConfig, canonical_runtime_config_payload
+from config.runtime_config import RuntimeConfig, runtime_config_hash
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -1611,7 +1611,7 @@ class FactorLifecycleService:
                 int(snapshot_item.get("config_version") or 0),
                 str(
                     snapshot_item.get("config_hash")
-                    or _hash(canonical_runtime_config_payload(effective_config))
+                    or runtime_config_hash(effective_config)
                 ),
                 _json(evidence),
                 _json(metadata),

@@ -256,21 +256,30 @@ class LearningWorkerCapability:
             return copy.deepcopy(self._state)
 
     def refresh_runtime_hashes(self) -> dict[str, Any]:
-        """Refresh worker-side config projections from committed PG facts."""
+        """Refresh worker-side config projections from the active config."""
         from backend.services.evolution_ledger import current_runtime_config_snapshot
         from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
+        from config import runtime_config
 
+        active_config = runtime_config.shared()
+        active_hash = runtime_config.runtime_config_hash(active_config)
         snapshot = current_runtime_config_snapshot(
             db_path=self.db_path,
             create_if_missing=False,
         )
-        overlay = RuntimeConfigOverlayService(self.db_path).status()
-        if not str(snapshot.get("config_hash") or ""):
+        snapshot_hash = str(snapshot.get("config_hash") or "")
+        if not snapshot_hash:
             raise RuntimeError("learning_worker_runtime_config_snapshot_missing")
+        if snapshot_hash != active_hash:
+            raise RuntimeError(
+                "learning_worker_runtime_config_hash_mismatch:"
+                f"active={active_hash}:snapshot={snapshot_hash}"
+            )
+        overlay = RuntimeConfigOverlayService(self.db_path).status()
         if overlay.get("ok") is not True and str(overlay.get("status") or "") != "missing":
             raise RuntimeError(f"learning_worker_runtime_overlay_unavailable:{overlay}")
         return self.update_runtime_hashes(
-            config_hash=str(snapshot.get("config_hash") or ""),
+            config_hash=active_hash,
             overlay_hash=str(overlay.get("overlay_hash") or ""),
         )
 

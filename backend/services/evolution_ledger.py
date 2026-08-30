@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -130,19 +129,6 @@ from backend.core.db_helpers import load_json as _loads
 def _dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True, default=str)
 
-
-def _stable_hash(value: Any) -> str:
-    # Keep the config hash contract identical to the governance coordinator:
-    # whitespace is serialization detail, while the logical JSON content is
-    # the authority binding.
-    payload = json.dumps(
-        value if value is not None else {},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _new_id(prefix: str) -> str:
@@ -330,10 +316,12 @@ def persist_runtime_config_snapshot(
     """
     if conn is None:
         ensure_evolution_ledger_tables(db_path)
-    from config.runtime_config import canonical_runtime_config_payload
-
+    from config.runtime_config import (
+        canonical_runtime_config_payload,
+        runtime_config_hash,
+    )
     payload = canonical_runtime_config_payload(_as_dict(config))
-    config_hash = _stable_hash(payload)
+    config_hash = runtime_config_hash(payload)
     payload_json = _dumps(payload)
     payload_hash_value = payload_hash(payload_json, namespace="runtime_config_payload.v1")
     now = float(created_at if created_at is not None else time.time())
