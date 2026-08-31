@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
+from backend.core.hash import canonical_hash
 from backend.services.state_payloads import stable_json
 
 
@@ -334,11 +335,6 @@ def _same_value(field: str, left: Any, right: Any) -> bool:
     )
 
 
-def _hash_payload(payload_kind: str, schema_version: str, raw_bytes: bytes) -> str:
-    prefix = (
-        f"{CANONICAL_PAYLOAD_SCHEMA}\x00{payload_kind}\x00{schema_version}\x00"
-    ).encode("utf-8")
-    return hashlib.sha256(prefix + raw_bytes).hexdigest()
 
 
 def canonical_payload(value: Any, *, payload_kind: str, schema_version: str) -> tuple[PayloadRef, bytes]:
@@ -354,7 +350,7 @@ def canonical_payload(value: Any, *, payload_kind: str, schema_version: str) -> 
     raw_sha256 = hashlib.sha256(raw_bytes).hexdigest()
     return (
         PayloadRef(
-            payload_hash=_hash_payload(str(payload_kind), str(schema_version), raw_bytes),
+            payload_hash=hashlib.sha256((f"{CANONICAL_PAYLOAD_SCHEMA}" + chr(0) + str(payload_kind) + chr(0) + str(schema_version) + chr(0)).encode("utf-8") + raw_bytes).hexdigest(),
             payload_kind=str(payload_kind),
             schema_version=str(schema_version),
             raw_sha256=raw_sha256,
@@ -450,11 +446,7 @@ def read_payload(conn: Any, payload_hash: str) -> Any:
     raw_sha256 = hashlib.sha256(raw).hexdigest()
     if raw_sha256 != str(fields["raw_sha256"] or ""):
         raise CanonicalV2Error("canonical_v2 raw SHA-256 mismatch")
-    expected_hash = _hash_payload(
-        str(fields["payload_kind"] or ""),
-        str(fields["schema_version"] or ""),
-        raw,
-    )
+    expected_hash = hashlib.sha256((CANONICAL_PAYLOAD_SCHEMA + chr(0) + str(fields["payload_kind"] or "") + chr(0) + str(fields["schema_version"] or "") + chr(0)).encode("utf-8") + raw).hexdigest()
     if expected_hash != str(payload_hash or ""):
         raise CanonicalV2Error("canonical_v2 payload hash mismatch")
     try:

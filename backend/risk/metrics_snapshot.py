@@ -1,7 +1,7 @@
 """Canonical risk snapshot and frozen forward-risk projection."""
 from __future__ import annotations
 
-import hashlib
+from backend.core.hash import canonical_hash
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -19,15 +19,6 @@ FORWARD_VAR_INPUT_SCHEMA = "forward_var_input.v1"
 _INTERNAL_FORWARD_VAR_INPUT = "_forward_var_input"
 
 
-def _fingerprint(payload: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode()
-    ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -170,7 +161,7 @@ def freeze_closed_bar_returns(
         source_window_end=source_end,
         sample_count=len(returns),
         returns=returns,
-        input_fingerprint=_fingerprint(fingerprint_input),
+        input_fingerprint=canonical_hash(fingerprint_input),
     )
 
 
@@ -390,7 +381,7 @@ def calculate_forward_var(
                 8,
             ),
             "forward_net_notional_usd": round(forward_net_notional, 8),
-            "input_fingerprint": _fingerprint(
+            "input_fingerprint": canonical_hash(
                 {
                     "frozen_input": frozen_input.input_fingerprint,
                     "positions": list(positions),
@@ -582,7 +573,7 @@ def build_risk_metrics_snapshot(
         kelly_fraction_bounded=bounded_kelly,
         stress_loss_pct=stress.get("stress_loss_pct"),
         concentration_pct=concentration.get("concentration_pct"),
-        input_fingerprint=_fingerprint(fingerprint_input),
+        input_fingerprint=canonical_hash(fingerprint_input),
         account_reconcile_id=str(account_reconcile_id or ""),
         positions_reconcile_id=str(positions_reconcile_id or ""),
         blockers=tuple(blockers),

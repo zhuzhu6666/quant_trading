@@ -9,7 +9,7 @@ only for isolated tests and offline fixtures.
 """
 from __future__ import annotations
 
-import hashlib
+from backend.core.hash import canonical_hash
 import inspect
 import json
 import os
@@ -36,7 +36,7 @@ from backend.core.db import (
     is_state_db_path,
     state_table_exists,
 )
-from backend.services.factor_identity import (
+from alpha.factor_identity import (
     canonical_factor_id,
     factor_definition_fingerprint,
 )
@@ -137,12 +137,8 @@ class FactorLifecycleMutation:
     direct_builtin_activation: bool = False
 
 
-def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def _hash(value: Any) -> str:
-    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
 def _p(db_path: str | Path, sql: str) -> str:
@@ -167,14 +163,10 @@ def _loads(value: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _artifact_hash(value: str, *, fallback: str = "") -> str:
-    normalized = str(value or fallback or "").strip().lower()
-    if not _SHA256_RE.fullmatch(normalized):
-        raise FactorLifecycleError("stable_artifact_hash_required")
-    return normalized
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
-
-def _builtin_artifact_hash(name: str) -> str:
+def _builtin_hash(name: str) -> str:
     """Bind a native factor lifecycle to its executable implementation."""
 
     func = factor_registry.get(str(name or ""))
@@ -199,7 +191,7 @@ def _builtin_artifact_hash(name: str) -> str:
         "qualname": str(getattr(func, "__qualname__", "")),
         "source": source,
     }
-    return _hash(payload)
+    return canonical_hash(payload)
 
 
 class FactorLifecycleService:
@@ -760,12 +752,12 @@ class FactorLifecycleService:
                 raise FactorLifecycleError("factor_lifecycle_state_missing")
             if int(generation) != int(state.get("generation") or 0):
                 raise FactorLifecycleError("projection_generation_mismatch")
-            if _artifact_hash(artifact_hash) != str(state.get("artifact_hash") or ""):
+            if str(artifact_hash or "").strip().lower() != str(state.get("artifact_hash") or ""):
                 raise FactorLifecycleError("projection_artifact_mismatch")
             if str(mutation_id or "") != str(state.get("mutation_id") or ""):
                 raise FactorLifecycleError("projection_mutation_mismatch")
             now = float(observed_at or time.time())
-            projection_id = _hash(
+            projection_id = canonical_hash(
                 {
                     "factor_id": factor_id,
                     "process_role": role,
@@ -912,7 +904,7 @@ class FactorLifecycleService:
                 if name not in factor_registry:
                     raise FactorLifecycleError("prepared_factor_not_in_registry")
                 if origin == SOURCE_BUILTIN:
-                    if _builtin_artifact_hash(name) != definition.artifact_hash:
+                    if _builtin_hash(name) != definition.artifact_hash:
                         raise FactorLifecycleError("registry_factor_artifact_mismatch")
                 else:
                     registry_expression = str(meta.get("description") or "").strip()
@@ -928,7 +920,7 @@ class FactorLifecycleService:
                         raise FactorLifecycleError("registry_factor_identity_mismatch")
                     registry_artifact = str(meta.get("artifact_hash") or "").strip().lower()
                     if registry_artifact:
-                        if _artifact_hash(registry_artifact) != definition.artifact_hash:
+                        if str(registry_artifact or "").strip().lower() != definition.artifact_hash:
                             raise FactorLifecycleError(
                                 "registry_factor_artifact_mismatch"
                             )
@@ -1289,7 +1281,7 @@ class FactorLifecycleService:
         *,
         current: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        mutation_identity = str(mutation.idempotency_key or _hash({
+        mutation_identity = str(mutation.idempotency_key or canonical_hash({
             "factor_id": mutation.definition.factor_id,
             "target_stage": mutation.target_stage.value,
             "actor": mutation.actor,
@@ -1687,7 +1679,7 @@ class FactorLifecycleService:
 
         admission = dict(mutation.evidence_refs.get("admission_evidence") or {})
         validation = dict(admission.get("validation") or {})
-        application_id = "lapp_" + _hash(
+        application_id = "lapp_" + canonical_hash(
             {
                 "schema_version": "factor_activation_canary_application.v1",
                 "factor_id": mutation.definition.factor_id,
@@ -1741,7 +1733,7 @@ class FactorLifecycleService:
             "status": "observing",
             "bar_oos_is_research_only": True,
             "activation_weight": float(mutation.weight or 0.0),
-            "admission_evidence_fingerprint": _hash(admission),
+            "admission_evidence_fingerprint": canonical_hash(admission),
             "evidence_quality": {
                 "bounded_attribution_allowed": False,
                 "reason": "real_application_effect_not_mature",
@@ -2041,7 +2033,7 @@ class FactorLifecycleService:
             if registry_factor_id != definition.factor_id:
                 raise FactorLifecycleError("runtime_factor_identity_mismatch")
             registry_artifact = str(meta.get("artifact_hash") or "").strip().lower()
-            if registry_artifact and _artifact_hash(registry_artifact) != definition.artifact_hash:
+            if registry_artifact and str(registry_artifact or "").strip().lower() != definition.artifact_hash:
                 raise FactorLifecycleError("runtime_factor_artifact_mismatch")
             return source
 
@@ -2069,7 +2061,7 @@ class FactorLifecycleService:
         error_message: str,
     ) -> None:
         now = time.time()
-        projection_id = _hash(
+        projection_id = canonical_hash(
             {
                 "factor_id": state.get("factor_id"),
                 "process_role": "governance_coordinator",
@@ -2285,11 +2277,9 @@ class FactorLifecycleService:
         if not clean_expression:
             raise FactorLifecycleError("canonical_dsl_expression_required")
         if origin == SOURCE_BUILTIN:
-            stable_artifact = _artifact_hash(
-                artifact_hash,
-                fallback=str(meta.get("artifact_hash") or _builtin_artifact_hash(clean_name)),
+            stable_artifact = str((artifact_hash) or (str(meta.get("artifact_hash") or "").strip().lower() or _builtin_hash(clean_name)),
             )
-            fingerprint = _hash(
+            fingerprint = canonical_hash(
                 {
                     "schema_version": "builtin_factor_identity.v1",
                     "name": clean_name,
@@ -2299,9 +2289,7 @@ class FactorLifecycleService:
             factor_id = f"builtin:{fingerprint}"
         else:
             fingerprint = factor_definition_fingerprint(clean_expression)
-            stable_artifact = _artifact_hash(
-                artifact_hash,
-                fallback=str(meta.get("artifact_hash") or fingerprint),
+            stable_artifact = str((artifact_hash) or (str(meta.get("artifact_hash") or "").strip().lower() or fingerprint),
             )
             factor_id = canonical_factor_id(clean_expression)
         return FactorDefinition(
