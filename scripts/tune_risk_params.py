@@ -31,8 +31,8 @@ def _run_single_paper_pass(
     """
     cb = progress_cb or (lambda *_: None)
     # Lazy import to keep module load cheap
-    from execution.paper_engine import PaperEngine
-    from data.store import DataStore
+    from execution.paper_execution import PaperEngine
+    from data.duckdb_store import DuckDBDataStore as DataStore
 
     store = DataStore("data/ctrader_data.duckdb")
     df = store.load_bars("XAUUSD+", "M15")
