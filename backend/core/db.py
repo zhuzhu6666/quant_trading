@@ -20,6 +20,7 @@ from typing import Final, Iterator
 
 import duckdb
 
+from backend.core.env import get_env
 from backend.core.state_store import STATE_SCHEMA, connect_state_store
 from backend.core.state_schema_migrations import require_state_schema_version
 
@@ -66,42 +67,17 @@ _KNOWN_SQLITE_PATHS: Final[set[Path]] = {
     LEGACY_ANALYTICS_DB.resolve(),
 }
 
-
-def _env_value(name: str, default: str = "") -> str:
-    value = os.environ.get(name)
-    if value is not None:
-        return value
-    env_path = _PROJECT_ROOT / ".env"
-    if not env_path.exists():
-        return default
-    try:
-        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#") or "=" not in raw:
-                continue
-            key, val = raw.split("=", 1)
-            if key.strip() == name:
-                return val.strip().strip('"').strip("'")
-    except Exception:
-        return default
-    return default
-
-
 def state_backend() -> str:
-    return _env_value("QUANT_STATE_BACKEND", "postgres").strip().lower() or "postgres"
-
+    return get_env("QUANT_STATE_BACKEND", "postgres").strip().lower() or "postgres"
 
 def state_pg_dsn() -> str:
-    return _env_value("QUANT_STATE_PG_DSN") or _env_value("QUANT_AUDIT_PG_DSN")
-
+    return get_env("QUANT_STATE_PG_DSN") or get_env("QUANT_AUDIT_PG_DSN")
 
 def state_pg_enabled() -> bool:
     return state_backend() == "postgres" and bool(state_pg_dsn())
 
-
 def is_state_db_path(db_path: str | Path) -> bool:
     return _normalize_db_path(db_path).resolve() == STATE_DB.resolve()
-
 
 # ═══════════════════════════════════════════
 # SQLite 连接管理 (线程安全, WAL 模式)
@@ -117,21 +93,17 @@ def _init_sqlite_db(db_path: Path, ddl: str) -> None:
     conn.commit()
     conn.close()
 
-
 def _normalize_db_path(db_path: str | Path) -> Path:
     path = Path(db_path).expanduser()
     return path.resolve() if path.is_absolute() else path
-
 
 def is_duckdb_path(db_path: str | Path) -> bool:
     path = _normalize_db_path(db_path)
     return path.suffix.lower() in _DUCKDB_EXTS or path.resolve() in _KNOWN_DUCKDB_PATHS
 
-
 def is_sqlite_path(db_path: str | Path) -> bool:
     path = _normalize_db_path(db_path)
     return path.suffix.lower() in _SQLITE_EXTS or path.resolve() in _KNOWN_SQLITE_PATHS
-
 
 def _configure_sqlite_connection(conn: sqlite3.Connection, *, read_only: bool = False) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=30000")
@@ -147,7 +119,6 @@ def _configure_sqlite_connection(conn: sqlite3.Connection, *, read_only: bool = 
             pass
     return conn
 
-
 def connect_sqlite(db_path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
     """Open a SQLite connection and reject DuckDB files early."""
     path = _normalize_db_path(db_path)
@@ -161,7 +132,6 @@ def connect_sqlite(db_path: str | Path, *, read_only: bool = False) -> sqlite3.C
     conn = sqlite3.connect(str(path), timeout=30.0)
     return _configure_sqlite_connection(conn, read_only=False)
 
-
 def connect_duckdb(db_path: str | Path, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
     """Open a DuckDB connection and reject SQLite files early."""
     path = _normalize_db_path(db_path)
@@ -172,7 +142,6 @@ def connect_duckdb(db_path: str | Path, *, read_only: bool = False) -> duckdb.Du
     path.parent.mkdir(parents=True, exist_ok=True)
     return duckdb.connect(str(path), read_only=read_only)
 
-
 _DUCKDB_LOCK_MARKERS: Final[tuple[str, ...]] = (
     "Could not set lock",
     "Conflicting lock is held",
@@ -180,12 +149,10 @@ _DUCKDB_LOCK_MARKERS: Final[tuple[str, ...]] = (
     "different configuration",
 )
 
-
 def is_duckdb_lock_error(exc: Exception | str) -> bool:
     """Return True for DuckDB single-writer/read-lock conflicts."""
     msg = str(exc)
     return any(marker in msg for marker in _DUCKDB_LOCK_MARKERS)
-
 
 @contextmanager
 def duckdb_readonly_connection(
@@ -224,7 +191,6 @@ def duckdb_readonly_connection(
         if tmp_dir is not None:
             tmp_dir.cleanup()
 
-
 BAR_TABLE_DDL: Final[str] = """
 CREATE TABLE IF NOT EXISTS bars (
     symbol VARCHAR NOT NULL,
@@ -236,7 +202,6 @@ CREATE TABLE IF NOT EXISTS bars (
     UNIQUE(symbol, timeframe, time)
 )
 """
-
 
 def ensure_bars_table(conn: duckdb.DuckDBPyConnection) -> None:
     """Create/upgrade the standard bars table in an opened DuckDB connection."""
@@ -250,17 +215,14 @@ def ensure_bars_table(conn: duckdb.DuckDBPyConnection) -> None:
         "ON bars(symbol, timeframe, time)"
     )
 
-
 def bars_month_key(ts: float | int | None = None) -> str:
     """Return YYYY_MM month key using UTC market timestamps."""
     value = time.time() if ts is None else float(ts)
     return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y_%m")
 
-
 def bars_monthly_path(ts: float | int | None = None) -> Path:
     """Return monthly K-line DuckDB path for a UTC epoch timestamp."""
     return DUCKDB_BARS_MONTHLY_DIR / f"bars_{bars_month_key(ts)}.duckdb"
-
 
 def bars_monthly_read_paths(
     *, newest_first: bool = False, fallback: Path | None = None
@@ -271,7 +233,6 @@ def bars_monthly_read_paths(
         reverse=newest_first,
     )
     return paths or [fallback or DUCKDB_BARS]
-
 
 def refresh_current_bars_link(ts: float | int | None = None) -> Path:
     """Point data/bars.duckdb at the current month database and return target."""
@@ -299,7 +260,6 @@ def refresh_current_bars_link(ts: float | int | None = None) -> Path:
         pass
     return target
 
-
 def ensure_sqlite_columns(db_path: str | Path, table: str, columns: dict[str, str]) -> None:
     """Best-effort SQLite column migrations for long-lived local files."""
     conn = connect_sqlite(db_path)
@@ -314,7 +274,6 @@ def ensure_sqlite_columns(db_path: str | Path, table: str, columns: dict[str, st
         conn.commit()
     finally:
         conn.close()
-
 
 def state_table_exists(conn, table: str) -> bool:
     """Return whether a runtime state table exists on SQLite or PostgreSQL."""
@@ -335,7 +294,6 @@ def state_table_exists(conn, table: str) -> bool:
     ).fetchone()
     return row is not None
 
-
 def state_table_columns(conn, table: str) -> set[str]:
     """Return runtime state table columns without exposing engine-specific metadata SQL."""
     if conn.__class__.__module__.split(".", 1)[0] == "psycopg":
@@ -352,7 +310,6 @@ def state_table_columns(conn, table: str) -> set[str]:
             ).fetchall()
         }
     return {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
-
 
 # ═══════════════════════════════════════════
 # state.db 完整 DDL
@@ -1208,7 +1165,6 @@ CREATE INDEX IF NOT EXISTS idx_ctrader_deals_pos ON ctrader_deals(position_id);
 CREATE INDEX IF NOT EXISTS idx_ctrader_deals_ts  ON ctrader_deals(exec_timestamp);
 """
 
-
 def init_state_db() -> None:
     """Validate the PostgreSQL schema gate without writing schema or data.
 
@@ -1223,13 +1179,11 @@ def init_state_db() -> None:
     finally:
         conn.close()
 
-
 def get_state_pg_conn(*, read_only: bool = False):
     """Return a direct psycopg connection to the PostgreSQL state schema."""
     if not state_pg_enabled():
         raise RuntimeError("PostgreSQL state backend is not enabled")
     return connect_state_store(state_pg_dsn(), read_only=read_only, schema=STATE_SCHEMA)
-
 
 def get_state_conn(*, read_only: bool = False):
     """Compatibility alias for the runtime state connection helper.
@@ -1243,7 +1197,6 @@ def get_state_conn(*, read_only: bool = False):
         conn.row_factory = sqlite3.Row
         return conn
     return get_state_pg_conn(read_only=read_only)
-
 
 # ═══════════════════════════════════════════
 # experiments.db DDL
@@ -1385,7 +1338,6 @@ _EXPERIMENTS_REQUIRED_INDEXES: Final[frozenset[str]] = frozenset({
     "idx_model_inference_candidate",
 })
 
-
 def validate_experiments_db_schema(
     db_path: str | Path = EXPERIMENTS_DB,
 ) -> None:
@@ -1446,7 +1398,6 @@ def validate_experiments_db_schema(
             )
     finally:
         conn.close()
-
 
 def init_experiments_db(db_path: str | Path = EXPERIMENTS_DB) -> None:
     """Explicit offline compatibility migration for ``experiments.db``.
@@ -1521,7 +1472,6 @@ def init_experiments_db(db_path: str | Path = EXPERIMENTS_DB) -> None:
     finally:
         conn.close()
 
-
 def prepare_experiments_store(db_path: str | Path = EXPERIMENTS_DB) -> None:
     """Validate production; migrate only an explicitly isolated SQLite path.
 
@@ -1535,7 +1485,6 @@ def prepare_experiments_store(db_path: str | Path = EXPERIMENTS_DB) -> None:
         validate_experiments_db_schema(path)
         return
     init_experiments_db(path)
-
 
 # ═══════════════════════════════════════════
 # 启动初始化

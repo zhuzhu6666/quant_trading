@@ -10,7 +10,7 @@ fail closed without a recent password authentication and active session.
 from __future__ import annotations
 
 import logging
-import os as _os
+from backend.core.env import get_env, truthy_env
 import secrets
 import threading
 import time
@@ -20,7 +20,6 @@ from typing import Annotated, Any, Final
 import jwt
 from fastapi import Depends, Header, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
 
 JWT_ALGORITHM: Final[str] = "HS256"
 JWT_EXPIRY_SECONDS: Final[int] = 24 * 60 * 60
@@ -48,47 +47,37 @@ _REVOKED_FAMILY_IDS: dict[str, float] = {}
 _WS_TICKET_LOCK = threading.RLock()
 _WS_TICKETS: dict[str, dict[str, Any]] = {}
 
-
 class AuthConfigError(RuntimeError):
     """Raised when required authentication environment is missing or unsafe."""
 
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = (_os.environ.get(name) or ("1" if default else "0")).strip().lower()
-    return raw in {"1", "true", "yes", "on"}
-
-
-def _required_env(name: str) -> str:
-    value = (_os.environ.get(name) or "").strip()
+def _need_env(name: str) -> str:
+    value = (get_env(name) or "").strip()
     if not value:
         raise AuthConfigError(f"{name} is required")
     return value
-
 
 def _get_jwt_secret() -> str:
     """Load JWT secret from QUANT_JWT_SECRET, failing closed if absent."""
     global _JWT_SECRET
     if _JWT_SECRET is None:
-        _JWT_SECRET = _required_env("QUANT_JWT_SECRET")
+        _JWT_SECRET = _need_env("QUANT_JWT_SECRET")
     return _JWT_SECRET
-
 
 def validate_auth_config() -> None:
     """Validate required Auth v2 environment and explicit legacy switches."""
     _get_jwt_secret()
-    _required_env("QUANT_AUTH_USER")
-    password_hash = _required_env("QUANT_PASSWORD_HASH")
+    _need_env("QUANT_AUTH_USER")
+    password_hash = _need_env("QUANT_PASSWORD_HASH")
     if password_hash.startswith("$argon2id$"):
         return
     is_legacy_sha256 = len(password_hash) == 64 and all(c in "0123456789abcdefABCDEF" for c in password_hash)
-    if is_legacy_sha256 and _env_flag("QUANT_AUTH_ALLOW_LEGACY_SHA256"):
+    if is_legacy_sha256 and truthy_env("QUANT_AUTH_ALLOW_LEGACY_SHA256"):
         return
     if is_legacy_sha256:
         raise AuthConfigError(
             "legacy SHA-256 password hash requires QUANT_AUTH_ALLOW_LEGACY_SHA256=1 during migration"
         )
     raise AuthConfigError("QUANT_PASSWORD_HASH must be an Argon2id encoded hash")
-
 
 def create_access_token(
     user: str,
@@ -119,11 +108,9 @@ def create_access_token(
     }
     return jwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
-
 def create_token(user: str) -> str:
     """Compatibility helper used by internal callers and tests."""
     return create_access_token(user)
-
 
 def _auth_http_error(code: str, message: str, *, status_code: int = 401) -> HTTPException:
     headers = {"WWW-Authenticate": "Bearer"} if status_code == 401 else None
@@ -132,7 +119,6 @@ def _auth_http_error(code: str, message: str, *, status_code: int = 401) -> HTTP
         detail={"error": code, "msg": message},
         headers=headers,
     )
-
 
 def _extract_bearer(authorization: str | None) -> str:
     if not authorization:
@@ -144,7 +130,6 @@ def _extract_bearer(authorization: str | None) -> str:
         raise _auth_http_error("invalid_authorization", "Bearer token is empty")
     return token
 
-
 def _cleanup_revocations(now: float) -> None:
     for session_id, expires_at in list(_REVOKED_SESSION_IDS.items()):
         if expires_at <= now:
@@ -152,7 +137,6 @@ def _cleanup_revocations(now: float) -> None:
     for family_id, expires_at in list(_REVOKED_FAMILY_IDS.items()):
         if expires_at <= now:
             _REVOKED_FAMILY_IDS.pop(family_id, None)
-
 
 def _raise_if_revoked(
     session_id: str,
@@ -198,7 +182,6 @@ def _raise_if_revoked(
     if revoked:
         raise _auth_http_error("session_revoked", "access session has been revoked")
 
-
 def revoke_access_session_locally(
     session_id: str,
     *,
@@ -219,7 +202,6 @@ def revoke_access_session_locally(
                 _REVOKED_SESSION_IDS[str(value)] = effective_expires_at
         if family_id:
             _REVOKED_FAMILY_IDS[str(family_id)] = effective_expires_at
-
 
 def revoke_access_session_durably(
     session_id: str,
@@ -249,7 +231,6 @@ def revoke_access_session_durably(
         reason=reason,
     )
 
-
 def _require_persistent_session(
     session_id: str,
     *,
@@ -270,7 +251,6 @@ def _require_persistent_session(
         ) from exc
     if not active:
         raise _auth_http_error("session_revoked", "access session is not active")
-
 
 def decode_access_token(
     token: str,
@@ -294,7 +274,7 @@ def decode_access_token(
     if not isinstance(subject, str) or not subject.strip():
         raise _auth_http_error("invalid_token", "JWT subject is missing")
     token_type = payload.get("typ")
-    legacy_allowed = _env_flag("QUANT_AUTH_ALLOW_LEGACY_ACCESS_TOKEN") if allow_legacy is None else bool(allow_legacy)
+    legacy_allowed = truthy_env("QUANT_AUTH_ALLOW_LEGACY_ACCESS_TOKEN") if allow_legacy is None else bool(allow_legacy)
     if token_type != "access":
         if token_type or not legacy_allowed:
             raise _auth_http_error("invalid_token_type", "an Auth v2 access token is required")
@@ -313,7 +293,6 @@ def decode_access_token(
     if validate_session:
         _require_persistent_session(session_id, subject=str(subject))
     return dict(payload)
-
 
 def decode_risk_reduction_token(
     token: str,
@@ -352,7 +331,7 @@ def decode_risk_reduction_token(
         raise _auth_http_error("invalid_token", str(exc)[:200]) from exc
 
     subject = str(payload.get("sub") or "").strip()
-    if not subject or subject != _required_env("QUANT_AUTH_USER"):
+    if not subject or subject != _need_env("QUANT_AUTH_USER"):
         raise _auth_http_error("invalid_token", "JWT subject is not the configured operator")
     if payload.get("typ") != "access" or int(payload.get("ver") or 0) != 2:
         raise _auth_http_error(
@@ -391,20 +370,17 @@ def decode_risk_reduction_token(
     result["risk_reduction_only"] = True
     return result
 
-
 def get_current_claims(
     authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
     _bearer: HTTPAuthorizationCredentials | None = Security(_bearer_security),
 ) -> dict[str, Any]:
     return decode_access_token(_extract_bearer(authorization))
 
-
 def get_current_user(
     authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
     _bearer: HTTPAuthorizationCredentials | None = Security(_bearer_security),
 ) -> str:
     return require_user(authorization)
-
 
 def require_user(
     authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
@@ -413,13 +389,11 @@ def require_user(
     """Validate ordinary access against the durable Auth v2 session."""
     return str(get_current_claims(authorization)["sub"])
 
-
 def get_risk_reduction_claims(
     authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
     _bearer: HTTPAuthorizationCredentials | None = Security(_bearer_security),
 ) -> dict[str, Any]:
     return decode_risk_reduction_token(_extract_bearer(authorization))
-
 
 def require_risk_reduction_user(
     authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
@@ -428,7 +402,6 @@ def require_risk_reduction_user(
     """Authorize only endpoints whose maximum effect is reducing risk."""
 
     return str(get_risk_reduction_claims(authorization)["sub"])
-
 
 def require_recent_step_up(
     authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
@@ -453,7 +426,7 @@ def require_recent_step_up(
         )
     session_id = str(claims.get("sid") or "")
     if not session_id:
-        if _env_flag("QUANT_AUTH_ALLOW_STATELESS_STEP_UP"):
+        if truthy_env("QUANT_AUTH_ALLOW_STATELESS_STEP_UP"):
             return str(claims["sub"])
         raise _auth_http_error("step_up_session_required", "an active Auth v2 session is required", status_code=403)
     try:
@@ -470,7 +443,6 @@ def require_recent_step_up(
     if not active:
         raise _auth_http_error("step_up_session_inactive", "Auth v2 session is not active", status_code=403)
     return str(claims["sub"])
-
 
 def create_ws_ticket(
     *,
@@ -495,7 +467,6 @@ def create_ws_ticket(
         }
     return ticket, expires_at
 
-
 def consume_ws_ticket(ticket: str, *, now: float | None = None) -> dict[str, Any]:
     """Consume a WebSocket ticket exactly once."""
     checked_at = float(time.time() if now is None else now)
@@ -518,7 +489,6 @@ def consume_ws_ticket(ticket: str, *, now: float | None = None) -> dict[str, Any
         )
     return dict(record)
 
-
 def reset_auth_state_for_tests() -> None:
     """Clear process-local revocations and tickets in isolated tests."""
     with _REVOCATION_LOCK:
@@ -527,11 +497,9 @@ def reset_auth_state_for_tests() -> None:
     with _WS_TICKET_LOCK:
         _WS_TICKETS.clear()
 
-
 RequireUser = Annotated[str, Depends(require_user)]
 RequireRecentStepUp = Annotated[str, Depends(require_recent_step_up)]
 RequireRiskReductionUser = Annotated[str, Depends(require_risk_reduction_user)]
-
 
 def __getattr__(name: str):
     """Backward compatibility for lazy ``JWT_SECRET`` imports."""

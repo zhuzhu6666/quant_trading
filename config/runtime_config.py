@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from backend.core.env import get_env, truthy_env
 from backend.runtime.runtime_state import RuntimeState
 
 logger = logging.getLogger(__name__)
@@ -65,13 +66,11 @@ CLASSIC_DIRECTIONAL_FACTOR_WEIGHTS = {
     "rsi_14": 1.0,
 }
 
-
 def resolve_bounded_demo_mode(cfg: Any, broker_cfg: Any) -> bool:
     """Purely resolve bounded Demo semantics from caller-owned snapshots."""
 
     mode = str(getattr(cfg, "autonomy_mode", "") or "manual").strip().lower()
     return mode in DEMO_AUTONOMY_MODES and bool(getattr(broker_cfg, "is_demo", False))
-
 
 def bounded_demo_mode_active(cfg: Any | None = None) -> bool:
     """Return whether bounded Demo execution semantics are actually active.
@@ -100,7 +99,6 @@ def bounded_demo_mode_active(cfg: Any | None = None) -> bool:
         return False
     return resolve_bounded_demo_mode(current, broker_cfg)
 
-
 def effective_factor_governance_cron(cfg: Any | None = None) -> str:
     """Resolve the canonical heavy governance owner schedule.
 
@@ -122,7 +120,6 @@ def effective_factor_governance_cron(cfg: Any | None = None) -> str:
     }:
         return "23,53 * * * *"
     return configured
-
 
 def operator_bounded_demo_control_exempt(
     *,
@@ -157,7 +154,6 @@ def operator_bounded_demo_control_exempt(
             return False
         return 0.0 < cvar_limit <= var_limit
     return "risk_cvar_threshold_pct" not in keys
-
 
 def operator_classic_builtin_factor_activation_exempt(
     *,
@@ -209,7 +205,6 @@ def operator_classic_builtin_factor_activation_exempt(
                 return False
     return True
 
-
 def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
     """Return whether the expansion freeze is effective for this runtime.
 
@@ -223,7 +218,6 @@ def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
     bounded_demo = bounded_demo_mode_active(current)
     return bool(getattr(current, "autonomy_expansion_frozen", True)) and not bounded_demo
 
-
 def governance_expansion_is_paused(cfg: Any | None = None) -> bool:
     """Return the all-mode operator kill-switch state.
 
@@ -233,7 +227,6 @@ def governance_expansion_is_paused(cfg: Any | None = None) -> bool:
     """
     current = cfg if cfg is not None else shared()
     return bool(getattr(current, "governance_expansion_paused", False))
-
 
 @dataclass
 class RuntimeConfig:
@@ -813,7 +806,6 @@ class RuntimeConfig:
         d = self.to_dict()
         return {"runtime": d}
 
-
 # These fields were historically stored below ``extra``.  Keep one narrow,
 # shared serialization rule for hashes and durable snapshots while allowing
 # the typed RuntimeConfig surface to remain the current runtime API.
@@ -841,7 +833,6 @@ RUNTIME_CONFIG_LEGACY_HASH_DEFAULTS = {
     "position_supervisor_max_switches_per_position": 2,
     "position_supervisor_selection_max_age_seconds": 900.0,
 }
-
 
 def canonical_runtime_config_payload(value: Any) -> Dict[str, Any]:
     """Return the stable config payload used by runtime-config hash bindings.
@@ -884,7 +875,6 @@ def canonical_runtime_config_payload(value: Any) -> Dict[str, Any]:
         payload["extra"] = extra
     return payload
 
-
 def runtime_config_hash(value: Any) -> str:
     """Return the stable hash for the canonical runtime config payload."""
 
@@ -898,7 +888,6 @@ def runtime_config_hash(value: Any) -> str:
     )
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
-
 def legacy_runtime_config_hash_payload(value: Any) -> Dict[str, Any]:
     """Project a config as it looked before supervisor selection was added."""
 
@@ -906,7 +895,6 @@ def legacy_runtime_config_hash_payload(value: Any) -> Dict[str, Any]:
     for key in RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS:
         payload.pop(key, None)
     return payload
-
 
 # ----- 单例管理 -----
 class _RuntimeConfigHolder:
@@ -980,7 +968,6 @@ class _RuntimeConfigHolder:
             self._version = 0
             self._subscribers.clear()
 
-
 _holder: _RuntimeConfigHolder = _RuntimeConfigHolder()
 _holder_lock = threading.Lock()
 _overlay_refresh_lock = threading.Lock()
@@ -989,19 +976,12 @@ _overlay_last_check_ts = 0.0
 _overlay_last_hash_by_db: Dict[str, str] = {}
 _overlay_base_config_by_db: Dict[str, Dict[str, Any]] = {}
 
-
-def _truthy_env(name: str, default: str = "1") -> bool:
-    value = str(os.getenv(name, default) or "").strip().lower()
-    return value not in {"0", "false", "no", "off", "disabled"}
-
-
 def _overlay_refresh_enabled() -> bool:
-    if not _truthy_env("QUANT_RUNTIME_CONFIG_AUTO_OVERLAY_REFRESH", "1"):
+    if not truthy_env("QUANT_RUNTIME_CONFIG_AUTO_OVERLAY_REFRESH", "1"):
         return False
-    if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("PYTEST_VERSION"):
-        return str(os.getenv("QUANT_RUNTIME_CONFIG_AUTO_OVERLAY_REFRESH", "")).strip() == "1"
+    if get_env("PYTEST_CURRENT_TEST") or get_env("PYTEST_VERSION"):
+        return str(get_env("QUANT_RUNTIME_CONFIG_AUTO_OVERLAY_REFRESH", "") or "").strip() == "1"
     return True
-
 
 def _deep_merge_runtime_config(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
     result = copy.deepcopy(base)
@@ -1012,7 +992,6 @@ def _deep_merge_runtime_config(base: Dict[str, Any], overlay: Dict[str, Any]) ->
             result[key] = copy.deepcopy(value)
     return result
 
-
 def _overlay_db_key(db_path: str | Path | None = None) -> str:
     if db_path is None:
         try:
@@ -1022,7 +1001,6 @@ def _overlay_db_key(db_path: str | Path | None = None) -> str:
         except Exception:  # noqa: BLE001
             return "__default__"
     return str(Path(db_path).expanduser())
-
 
 def register_overlay_base(
     config: RuntimeConfig | Dict[str, Any],
@@ -1042,7 +1020,6 @@ def register_overlay_base(
     with _overlay_refresh_lock:
         if replace_existing or key not in _overlay_base_config_by_db:
             _overlay_base_config_by_db[key] = copy.deepcopy(payload)
-
 
 def overlay_base_config(db_path: str | Path | None = None) -> Dict[str, Any]:
     key = _overlay_db_key(db_path)
@@ -1078,14 +1055,12 @@ def overlay_base_config(db_path: str | Path | None = None) -> Dict[str, Any]:
     register_overlay_base(fallback, db_path, replace_existing=False)
     return copy.deepcopy(fallback)
 
-
 def config_from_overlay(
     overlay: Dict[str, Any],
     db_path: str | Path | None = None,
 ) -> RuntimeConfig:
     merged = _deep_merge_runtime_config(overlay_base_config(db_path), dict(overlay or {}))
     return RuntimeConfig.from_dict(merged)
-
 
 def release_recovered_overlay_authority_latches(
     restored: Dict[str, Any],
@@ -1147,7 +1122,6 @@ def release_recovered_overlay_authority_latches(
         )
         return False
 
-
 def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = False) -> bool:
     """Refresh the in-process RuntimeConfig from the persisted DB overlay.
 
@@ -1161,7 +1135,7 @@ def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = Fal
     if not force and not _overlay_refresh_enabled():
         return False
     now = time.time()
-    interval = float(os.getenv("QUANT_RUNTIME_CONFIG_OVERLAY_REFRESH_INTERVAL_SEC", "5") or 5)
+    interval = float(get_env("QUANT_RUNTIME_CONFIG_OVERLAY_REFRESH_INTERVAL_SEC", "5") or 5)
     if not force and now - _overlay_last_check_ts < max(0.5, interval):
         return False
     if _overlay_refreshing:
@@ -1241,7 +1215,6 @@ def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = Fal
         with _overlay_refresh_lock:
             _overlay_refreshing = False
 
-
 def shared_holder() -> _RuntimeConfigHolder:
     global _holder
     with _holder_lock:
@@ -1249,12 +1222,10 @@ def shared_holder() -> _RuntimeConfigHolder:
             _holder = _RuntimeConfigHolder()
     return _holder
 
-
 def shared() -> RuntimeConfig:
     """对外 API:拿到当前 RuntimeConfig 快照。"""
     refresh_from_overlay()
     return shared_holder().get()
-
 
 def replace(new_cfg: RuntimeConfig) -> int:
     """对外 API:原子替换 RuntimeConfig,广播给所有订阅者。"""
@@ -1267,7 +1238,6 @@ def replace(new_cfg: RuntimeConfig) -> int:
         logger.debug("RuntimeState not initialized yet", exc_info=True)
     return new_version
 
-
 def patch(patch_dict: Dict[str, Any]) -> int:
     """Atomically patch RuntimeConfig and keep RuntimeState in lockstep."""
     holder = shared_holder()
@@ -1278,14 +1248,11 @@ def patch(patch_dict: Dict[str, Any]) -> int:
         logger.debug("RuntimeState not initialized yet", exc_info=True)
     return new_version
 
-
 def subscribe(cb: Callable[[RuntimeConfig, int], None]) -> None:
     shared_holder().subscribe(cb)
 
-
 def version() -> int:
     return shared_holder().version()
-
 
 def reset_for_tests() -> None:
     """仅供测试使用。"""
