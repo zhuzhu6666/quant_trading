@@ -174,7 +174,7 @@ def run_discovery(
     report_path = CHARTS_DIR / "discover_report.json"
 
     cb("loading", 15, "loading bars from db")
-    from data.store import DataStore
+    from data.duckdb_store import DuckDBDataStore as DataStore
     store = DataStore("data/ctrader_data.duckdb")
     df = store.load_bars("XAUUSD+", "M15")
     if len(df) > n_bars:

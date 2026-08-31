@@ -137,7 +137,7 @@ class SyncHealth:
         else:
             logger.debug("[SyncHealth] healthy: fresh=%s", self.is_fresh())
         try:
-            from data.store import DataStore
+            from data.duckdb_store import DuckDBDataStore as DataStore
             store = DataStore("data/ctrader_data.duckdb")
             now = time.time()
             thresholds = {"M5": 900, "M15": 1800, "M30": 3600, "H1": 7200, "D1": 172800}

@@ -60,7 +60,7 @@ def run_feature_engineering_job() -> dict[str, Any]:
 
         from alpha.features.selector import run_feature_selection
         from alpha.registry import factor_registry
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
         from monitor.evolution_story.report import EvolutionStory
 
         df = DataStore().load_bars("XAUUSD+", "M5", limit=20000)

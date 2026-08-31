@@ -17,7 +17,7 @@ from alpha.registry_adapter import (
     SOURCE_SHADOW,
 )
 from alpha.streaming_factor_engine import StreamingFactorEngine
-from backend.services.factor_identity import factor_definition_fingerprint
+from alpha.factor_identity import factor_definition_fingerprint
 from backend.services.factor_lifecycle_service import (
     ALLOWED_TRANSITIONS,
     FactorLifecycleService,

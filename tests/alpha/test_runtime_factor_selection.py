@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from alpha.registry import factor_registry
 from alpha.registry_adapter import RegistryAdapter
 from alpha.runtime_factor_selection import active_discovered_factor_ids, select_runtime_factors
-from backend.services.factor_identity import canonical_factor_id, factor_definition_fingerprint
+from alpha.factor_identity import canonical_factor_id, factor_definition_fingerprint
 
 
 def _active_discovered_config(expression: str) -> dict:

@@ -10,8 +10,8 @@ Conventions:
   * All tables have a ``run_id`` so multiple backtests / paper runs
     can be compared side-by-side.
   * ``bar_ts`` is a unix epoch in seconds (UTC), matching
-    ``data.store.DataStore`` so the two DBs can be joined cheaply.
+    ``data.duckdb_store.DuckDBDataStore`` so the two DBs can be joined cheaply.
 """
 
 from .schema import SCHEMA, TABLE_NAMES  # noqa: F401
-from .store import AnalyticsStore  # noqa: F401
+# AnalyticsStore 已移除(2026-08: 死表 strategy_perf 无调用)，历史实现见 git log db/store.py

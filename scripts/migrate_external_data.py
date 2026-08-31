@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.core.db import DUCKDB_BARS_LEGACY, DUCKDB_EXTERNAL, connect_duckdb
-from data.store import DataStore
+from data.duckdb_store import DuckDBDataStore as DataStore
 
 EXTERNAL_TABLES = (
     "cot_gold",

@@ -70,7 +70,7 @@ async def _do_one_sync(state: RuntimeState, health) -> None:
     try:
         from data.live_sync.ctrader_puller import CTraderPuller
         from config.runtime_config import shared as rcc
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
 
         cfg = rcc()
         symbol = list(cfg.enabled_symbols)[0] if hasattr(cfg, 'enabled_symbols') and cfg.enabled_symbols else "XAUUSD+"

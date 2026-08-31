@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.core.auth import RequireUser
 from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC, attach_fact
 from backend.services.live_service import _get_live_bars
-from data.store import DataStore
+from data.duckdb_store import DuckDBDataStore as DataStore
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 

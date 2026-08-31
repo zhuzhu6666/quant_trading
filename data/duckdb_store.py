@@ -62,6 +62,10 @@ class DuckDBDataStore:
         with self.__class__._lock:
             if self._initialized:
                 return
+            # 兼容旧 .db 路径自动重定向（原 data/store.py 逻辑）
+            _p = Path(db_path)
+            if _p.suffix == ".db":
+                db_path = str(_p.with_suffix(".duckdb"))
             self.db_path = Path(db_path)
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self._monthly_bars = self.db_path.name in {
@@ -468,3 +472,6 @@ class DuckDBDataStore:
                 latest = value if latest is None else max(latest, value)
         return latest
 
+
+# 兼容旧 DataStore 导入路径 → 保留别名，仅胶水
+DataStore = DuckDBDataStore

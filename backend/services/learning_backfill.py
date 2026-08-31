@@ -201,7 +201,7 @@ def _infer_path_metrics_from_bars(
     if entry_ts <= 0 or close_ts <= entry_ts or entry_price <= 0 or close_price <= 0:
         return result
     try:
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
 
         bars = DataStore().load_bars(
             symbol or "XAUUSD+",

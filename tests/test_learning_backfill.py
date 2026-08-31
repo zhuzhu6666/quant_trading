@@ -132,7 +132,7 @@ def test_learning_backfill_enriches_path_metrics_from_bars(monkeypatch, tmp_path
         return db
 
     monkeypatch.setattr(learning_backfill, "get_state_conn", _get_conn)
-    import data.store as data_store
+    import data.duckdb_store as data_store
 
     monkeypatch.setattr(data_store, "DataStore", lambda *args, **kwargs: _FakeStore())
 

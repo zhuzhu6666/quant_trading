@@ -33,7 +33,7 @@ from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
 from backend.services.factor_cards import build_factor_admission_evidence
 from backend.services.factor_blend_health import FactorBlendHealthService
-from backend.services.factor_identity import (
+from alpha.factor_identity import (
     canonical_factor_id,
     factor_definition_fingerprint,
 )

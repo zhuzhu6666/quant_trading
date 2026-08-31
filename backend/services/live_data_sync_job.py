@@ -32,7 +32,7 @@ def _default_duckdb_runtime():
 
 
 def _default_data_store_factory():
-    from data.store import DataStore
+    from data.duckdb_store import DuckDBDataStore as DataStore
 
     return DataStore()
 

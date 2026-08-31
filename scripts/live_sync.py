@@ -51,7 +51,7 @@ def run_sync_once(
     # CTraderPuller 替代原 MT5 orchestrator
     try:
         from data.live_sync.ctrader_puller import CTraderPuller
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
         from config.runtime_config import shared as rcc
         cfg = rcc()
         symbol = list(cfg.enabled_symbols)[0] if hasattr(cfg, 'enabled_symbols') and cfg.enabled_symbols else "XAUUSD+"

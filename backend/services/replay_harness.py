@@ -859,7 +859,7 @@ class ReplayHarnessService:
         warmup_bars: int,
         post_bars: int,
     ) -> list[dict[str, Any]]:
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
 
         tf_sec = _timeframe_seconds(timeframe)
         start_ts = float(decision_ts) - float(tf_sec * (max(1, int(warmup_bars)) + 2))

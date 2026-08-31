@@ -20,7 +20,7 @@ def _env_enabled(name: str, default: str = "1") -> bool:
 
 
 def _warm_data_store() -> None:
-    from data.store import DataStore
+    from data.duckdb_store import DuckDBDataStore as DataStore
 
     DataStore()
 
