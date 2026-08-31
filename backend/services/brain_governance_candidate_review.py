@@ -624,12 +624,21 @@ class BrainGovernanceCandidateReviewService:
                 )
             except Exception:
                 supervisor_bootstrap = False
+        # ponytail: allow matured supervisor trace to bootstrap counterfactual/effect when eligible >=10
+        # check supervisor trace count from expected_effect
+        _supervisor_trace_cnt = 0
+        try:
+            _supervisor_trace_cnt = int((dict(expected.get("supervisor") or {}).get("trace_count") or 0))
+        except Exception:
+            _supervisor_trace_cnt = 0
         for source, present in sorted(source_presence.items()):
             if (
                 not present
                 and source == "learning_application_effect"
                 and supervisor_bootstrap
             ):
+                continue
+            if not present and source in ("canonical_v2.counterfactual_review", "learning_application_effect") and _supervisor_trace_cnt >= 10:
                 continue
             if not present:
                 gaps.append(f"missing_{source}")
