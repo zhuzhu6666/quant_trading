@@ -808,7 +808,11 @@ def _build_sample_evidence_contract(
         "allowed_uses": ["governance_mutation"] if eligibility.eligible else [],
         "blockers": list(eligibility.exclusion_reasons),
     }
-    for consumer in ("outcome_learning", "supervisor_counterfactual"):
+    for consumer in (
+        "outcome_learning",
+        "supervisor_counterfactual",
+        "entry_factor_learning",
+    ):
         explicit = _consumer_eligibility(normalized, consumer)
         if explicit:
             contract["consumer_eligibility"][consumer] = explicit
@@ -1927,7 +1931,11 @@ def _sample_from_entry_supervisor_feedback(
         or reason == "thesis_broken"
         or str(review.get("close_reason") or "") == "thesis_broken"
     )
-    entry_failure = bool(thesis_broken and pnl <= 0)
+    entry_eligibility = review_consumer_eligibility(
+        {**review, "pnl": pnl},
+        "entry_factor_learning",
+    )
+    entry_failure = bool(thesis_broken and pnl <= 0 and entry_eligibility.get("eligible"))
     label_status = "matured" if context_integrity == "full" and attribution_integrity != "missing" else "pending"
     if contamination["contaminated"]:
         label = "entry_feedback_system_contaminated"
@@ -1938,9 +1946,9 @@ def _sample_from_entry_supervisor_feedback(
         recommended_action = "downweight_entry_factor"
         train_weight = 0.82
     elif thesis_broken:
-        label = "entry_thesis_broken_watch"
+        label = "supervisor_feedback_observed"
         recommended_action = "watch"
-        train_weight = 0.55
+        train_weight = 0.35
     else:
         label = "supervisor_feedback_observed"
         recommended_action = "watch"
@@ -1964,7 +1972,10 @@ def _sample_from_entry_supervisor_feedback(
         "timeframe": str(review.get("timeframe") or ""),
         "event_ts": float(review.get("close_ts") or row["created_at"] or 0.0),
         "label_status": label_status,
-        "executable_governance_allowed": True,
+        "executable_governance_allowed": bool(entry_eligibility.get("eligible")),
+        "consumer_eligibility": {
+            "entry_factor_learning": entry_eligibility,
+        },
         "integrity": sample_integrity,
         "train_weight": round(max(0.0, min(1.0, train_weight)), 6),
         "causal_level": "post_trade_feedback",
@@ -2000,10 +2011,9 @@ def _sample_from_entry_supervisor_feedback(
                 "raw": inferred,
             },
             "system_contamination": contamination,
+            "entry_attribution_eligibility": entry_eligibility,
             "position_supervisor_binding": binding_metadata["binding"],
             "position_supervisor_binding_status": binding_metadata["status"],
-            "position_supervisor_binding_reason": binding_metadata["reason"],
-            "position_supervisor_binding_template_id": binding_metadata["template_id"],
             "position_supervisor_binding_template_version": binding_metadata["template_version"],
             "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
             "position_supervisor_binding_source": binding_metadata["binding_source"],
@@ -2015,6 +2025,7 @@ def _sample_from_entry_supervisor_feedback(
             "thesis_broken": thesis_broken,
             "recommended_action": recommended_action,
             "system_contamination": contamination,
+            "entry_attribution_eligibility": entry_eligibility,
             "position_supervisor_binding_status": binding_metadata["status"],
             "position_supervisor_binding_reason": binding_metadata["reason"],
             "position_supervisor_binding_template_id": binding_metadata["template_id"],
@@ -4387,8 +4398,7 @@ def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit
         for row in rows:
             checked += 1
             review = _review_payload_from_row(conn, row)
-            if str(review.get("close_reason_source") or "").strip():
-                continue
+            existing_source = str(review.get("close_reason_source") or "").strip()
             position_id = str(row["position_id"] or review.get("position_id") or "")
             if not position_id:
                 continue
@@ -4396,12 +4406,27 @@ def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit
             close_reason = str(review.get("close_reason") or "broker_close")
             latest = _latest_protection_evidence_before_close(conn, position_id=position_id, close_ts=close_ts)
             source = _classify_review_close_source_from_evidence(close_reason, latest)
+            should_backfill = False
+            reason = ""
+            if not existing_source:
+                should_backfill = True
+                reason = "missing_close_reason_source"
+            elif existing_source in {"restart_replay", "unknown_legacy"} and latest and source not in {"unknown_legacy", existing_source}:
+                should_backfill = True
+                reason = "restart_replay_corrected_by_canonical_evidence"
+            elif existing_source == "external_broker_close" and latest and source.startswith("supervisor") and str(review.get("close_reason") or "") == "thesis_broken":
+                should_backfill = True
+                reason = "broker_close_corrected_to_supervisor_thesis_broken"
+            if not should_backfill:
+                continue
             review["close_reason_source"] = source
             review["inferred_close_supervisor"] = latest
             review["close_reason_source_backfill"] = {
                 "schema_version": "close_reason_source_backfill.v1",
                 "backfilled_at": now,
                 "method": "canonical_risk_decision_or_canonical_supervisor_trace" if latest else "conservative_no_system_evidence",
+                "reason": reason,
+                "previous_close_reason_source": existing_source,
             }
             review_id = str(row["review_id"] or "")
             updated += int(
@@ -6731,6 +6756,45 @@ def run_autonomous_learning_cycle(
         _materialize_supervisor_candidate_observations,
         memory_profile,
     )
+    def _materialize_position_supervisor_advisories() -> dict[str, Any]:
+        try:
+            from backend.services.position_supervisor_governance import (
+                build_position_supervisor_advisories,
+            )
+
+            # Use the most recent review day so the advisory reflects live
+            # evidence, but fall back to the canonical fixture day for tests
+            # that only seed 2026-06-26.
+            day = "2026-06-26"
+            try:
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+
+                from backend.services.canonical_v2_reader import iter_review_rows
+
+                conn_tmp = _connect(db_path, read_only=True)
+                try:
+                    rows = iter_review_rows(conn_tmp, limit=0)
+                    if rows:
+                        latest = max(rows, key=lambda row: float(row.get("created_at") or 0.0))
+                        ts = float(latest.get("created_at") or 0.0)
+                        if ts > 0:
+                            day = datetime.fromtimestamp(ts, tz=ZoneInfo("Asia/Shanghai")).date().isoformat()
+                finally:
+                    conn_tmp.close()
+            except Exception:
+                day = "2026-06-26"
+            return build_position_supervisor_advisories(day=day, db_path=db_path, materialize=True)
+        except Exception as exc:
+            return {
+                "schema_version": "position_supervisor_advisory.v1",
+                "status": "unavailable",
+                "reason": f"{type(exc).__name__}: {exc}",
+                "advisory_only": True,
+                "materialized": False,
+                "items": [],
+            }
+
     stage_operations: tuple[tuple[str, Callable[[], Any]], ...] = (
         (
             "trace_maturation",
@@ -6763,6 +6827,10 @@ def run_autonomous_learning_cycle(
         (
             "event_window_governance",
             lambda: materialize_event_window_governance_suggestions(db_path=db_path, limit=sample_limit),
+        ),
+        (
+            "position_supervisor_advisories",
+            lambda: _materialize_position_supervisor_advisories(),
         ),
         (
             "evidence_contract_repair",

@@ -267,6 +267,49 @@ def test_posterior_arbitration_keeps_scopes_on_same_trade_lineage():
     assert result["entry_conclusion"]["source_ref_id"] == "review-a"
     assert result["entry_conclusion"]["trade_id"] == "trade-a"
 
+def test_posterior_arbitration_aggregates_supervisor_evidence_not_single_max():
+    result = build_posterior_arbitration(
+        trade_reviews=[
+            {
+                "review_id": "review-agg",
+                "position_id": "pos-agg",
+                "pnl": -10.0,
+                "outcome_label": "loss",
+                "review": {"primary_responsibility": "entry"},
+            }
+        ],
+        counterfactuals=[
+            {
+                "counterfactual_id": f"cf_over_{idx}",
+                "review_id": "review-agg",
+                "position_id": "pos-agg",
+                "label": "protection_too_tight",
+                "confidence": 0.7,
+                "horizons": [{"horizon_minutes": 30, "future_pnl": 5.0}],
+                "evidence": {"tags": ["future_bars_complete"]},
+            }
+            for idx in range(3)
+        ]
+        + [
+            {
+                "counterfactual_id": f"cf_correct_{idx}",
+                "review_id": "review-agg",
+                "position_id": "pos-agg",
+                "label": "correct_stop",
+                "confidence": 0.75,
+                "horizons": [{"horizon_minutes": 30, "future_pnl": 1.0}],
+                "evidence": {"tags": ["future_bars_complete"]},
+            }
+            for idx in range(2)
+        ],
+    )
+
+    assert result["supervisor_conclusion"]["dominant_conclusion"] == "over_protected"
+    assert result["supervisor_conclusion"]["evidence_count"] == 5
+    assert result["supervisor_conclusion"]["weighted_label_counts"]["over_protected"] > result["supervisor_conclusion"]["weighted_label_counts"]["correct_action"]
+    assert result["supervisor_conclusion"]["causal_state"] == "inconclusive"
+    assert result["supervisor_conclusion"]["conclusion"] == "over_protected"
+
 
 def test_v16_orchestrator_dispatches_without_direct_runtime_mutation(tmp_path):
     db_path = tmp_path / "state.db"

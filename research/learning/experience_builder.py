@@ -23,7 +23,10 @@ from backend.services.live_position_lifecycle import _compact_supervisor_mapping
 from backend.services.position_supervisor_templates import (
     resolve_position_supervisor_binding_lineage,
 )
-from backend.services.review_contract import NON_FACTOR_RESPONSIBILITIES
+from backend.services.review_contract import (
+    NON_FACTOR_RESPONSIBILITIES,
+    review_consumer_eligibility,
+)
 
 
 class ExperienceBuilder:
@@ -121,6 +124,13 @@ class ExperienceBuilder:
             or supervisor_event_type.startswith("supervisor_")
             or supervisor_action in {"tighten", "reduce", "close"}
         )
+        entry_attribution_eligibility = review_consumer_eligibility(
+            review_json,
+            "entry_factor_learning",
+        )
+        entry_attribution_eligible = bool(
+            entry_attribution_eligibility.get("eligible")
+        )
         if context_integrity != "full" and "partial_context" not in failure_tags:
             failure_tags.append("partial_context")
         if attribution_integrity == "missing" and "attribution_missing" not in failure_tags:
@@ -129,7 +139,11 @@ class ExperienceBuilder:
             failure_tags.append("manual_intervention")
         if close_reason == "restart_replay" and "restart_replay" not in failure_tags:
             failure_tags.append("restart_replay")
-        if has_supervisor_feedback and "supervisor_entry_feedback" not in failure_tags:
+        if (
+            has_supervisor_feedback
+            and entry_attribution_eligible
+            and "supervisor_entry_feedback" not in failure_tags
+        ):
             failure_tags.append("supervisor_entry_feedback")
         supervisor_thesis_broken = bool(
             has_supervisor_feedback
@@ -182,7 +196,7 @@ class ExperienceBuilder:
             reward_score = min(1.0, pnl / max(abs(pnl), 50.0))
         elif pnl < 0:
             reward_score = -min(1.0, abs(pnl) / max(abs(pnl), 50.0))
-        if supervisor_thesis_broken and pnl <= 0:
+        if supervisor_thesis_broken and entry_attribution_eligible and pnl <= 0:
             reward_score = min(reward_score, -0.35)
         elif has_supervisor_feedback and pnl <= 0:
             reward_score = min(reward_score, -0.12)
@@ -202,6 +216,7 @@ class ExperienceBuilder:
 
         supervisor_entry_failure = bool(
             supervisor_thesis_broken
+            and entry_attribution_eligible
             and pnl <= 0
             and context_integrity == "full"
             and attribution_integrity != "missing"
@@ -258,6 +273,7 @@ class ExperienceBuilder:
             "close_reason_source": close_reason_source,
             "supervisor_feedback": {
                 "has_feedback": has_supervisor_feedback,
+                "entry_attribution_eligibility": entry_attribution_eligibility,
                 "entry_failure": supervisor_entry_failure,
                 "event_type": supervisor_event_type,
                 "action": supervisor_action,

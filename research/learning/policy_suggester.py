@@ -124,13 +124,15 @@ class PolicySuggester:
 
         reward = float(experience.get("reward_score", 0.0) or 0.0)
         outcome_label = str(experience.get("outcome_label", "") or "")
-        failure_tags = list(experience.get("failure_tags", []) or [])
-        recommended_action = str(experience.get("recommended_action", "") or "")
-        supervisor_entry_failure = bool(
-            "supervisor_thesis_broken" in failure_tags
-            and "supervisor_entry_feedback" in failure_tags
-            and recommended_action == "downweight"
+        decision_context = experience.get("decision_context_json")
+        decision_context = (
+            decision_context if isinstance(decision_context, dict) else {}
         )
+        supervisor_feedback = decision_context.get("supervisor_feedback")
+        supervisor_feedback = (
+            supervisor_feedback if isinstance(supervisor_feedback, dict) else {}
+        )
+        supervisor_entry_failure = bool(supervisor_feedback.get("entry_failure"))
         eligibility = self._experience_eligibility(experience)
         now = time.time()
         with self._conn() as conn:
