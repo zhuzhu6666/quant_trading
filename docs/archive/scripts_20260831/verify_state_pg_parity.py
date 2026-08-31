@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-"""Read-only live integrity check for the runtime/canonical authority boundary.
-canonical_v2 is the immutable fact source and runtime is the mutable
-operational source.  They are intentionally not row-for-row mirrors.  This
-command checks both catalogs plus canonical payload/relation integrity within
-the requested observation window; it never reads a deleted source or creates
-a fallback comparison path.
+"""Read-only integrity check for the PostgreSQL runtime and canonical stores.
+
+The old SQLite-versus-state-table comparison is retired.  ``runtime`` owns
+mutable operational state, while ``canonical_v2`` owns immutable events,
+relations, payloads, and learning facts.  They are different authority
+domains, so this command checks their catalogs and invariants instead of
+pretending that one is a row-for-row mirror of the other.
 """
+
 from __future__ import annotations
+
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 from typing import Any
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
+
 from backend.core.db import get_state_pg_conn  # noqa: E402
 from backend.core.state_store import STATE_SCHEMA  # noqa: E402
+
+
 CANONICAL_SCHEMA = "canonical_v2"
 BASE_RUNTIME_TABLES = (
     "runtime_kv",
@@ -201,10 +207,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--since-epoch",
         type=float,
-        default=time.time() - 6 * 3600,
-        help="Count canonical events observed after this epoch (default: six hours).",
+        default=None,
+        help="Limit canonical event counts to observed_at after this epoch.",
     )
     args = parser.parse_args(argv)
+
     conn = get_state_pg_conn(read_only=True)
     try:
         report = build_report(
@@ -214,9 +221,10 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         conn.rollback()
         conn.close()
-    report["schema_version"] = "canonical_v2_live_fact_check.v1"
-    report["mode"] = "read_only"
+
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if report["ok"] else 2
+    return 0 if report["ok"] else 1
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
