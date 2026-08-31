@@ -38,6 +38,7 @@ from backend.ledger.service import DecisionLedger
 from alpha.reflection.reviewer import TradeReviewer
 from research.learning.experience_builder import ExperienceBuilder
 from research.learning.policy_suggester import PolicySuggester
+from backend.core.retry import retry, stop_after_attempt, wait_exponential, wait_fixed, retry_if_exception_type, TransientError
 from risk.policy_service import INCIDENT_MODE_RANK, RiskPolicyService, RiskVerdict
 from risk.runtime_policy import RiskLimitSnapshot
 from backend.services.incident_controls import RuntimeIncidentControlService
@@ -7112,81 +7113,74 @@ def stop_loop(
     )
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception_type(Exception),
+    reraise=False,
+    before_sleep=lambda a, e, d: logger.warning(f"_warmup_from_local_db attempt {a}/3 failed: {e}, retrying in {d:.1f}s"),
+)
 def _warmup_from_local_db(symbol: str = "XAUUSD+", timeframe: str = "M15", n_bars: int = 200) -> "pd.DataFrame | None":
-    """从本地 DuckDB 直接拉历史 bar 预热 strategy 指标。
-
-    直接连接 DuckDB 执行 SELECT, 绕开 DataStore 单例/并发写入冲突。
-    实时 tick 走 broker spot event, 这里只保证 strategy 暖机有数据。
-    """
-    import time as _time
     from backend.core.db import (
         bars_monthly_read_paths,
         duckdb_readonly_connection,
     )
-
     db_paths = bars_monthly_read_paths(newest_first=True)
     target_bars = int(n_bars)
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            remaining = target_bars
-            frames = []
-            for db_path in db_paths:
-                if remaining <= 0:
-                    break
-                with duckdb_readonly_connection(
-                    str(db_path), snapshot_first=True
-                ) as conn:
-                    frame = conn.execute(
-                        "SELECT time, open, high, low, close, volume "
-                        "FROM bars WHERE symbol=? AND timeframe=? "
-                        "ORDER BY time DESC LIMIT ?",
-                        [symbol, timeframe, remaining],
-                    ).df()
-                if frame is not None and len(frame) > 0:
-                    frames.append(frame)
-                    remaining -= len(frame)
-
-            if not frames:
-                logger.warning(f"DuckDB has no bars for {symbol} {timeframe}")
-                return None
-            df = pd.concat(frames, ignore_index=True)
-            df = (
-                df.drop_duplicates(subset=["time"], keep="first")
-                .sort_values("time")
-                .tail(target_bars)
-            )
-            # time 是 epoch 秒, 转 datetime index
-            df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-            df = df.set_index("time").sort_index()
-            return df[["open", "high", "low", "close", "volume"]]
-        except Exception as e:
-            if attempt < max_retries - 1:
-                delay = 1.0 * (2 ** attempt)
-                logger.warning(f"_warmup_from_local_db attempt {attempt+1}/{max_retries} failed: {e}, retrying in {delay}s")
-                _time.sleep(delay)
-            else:
-                logger.warning(f"_warmup_from_local_db failed after {max_retries} attempts: {e}")
-                return None
+    remaining = target_bars
+    frames = []
+    for db_path in db_paths:
+        if remaining <= 0:
+            break
+        with duckdb_readonly_connection(
+            str(db_path), snapshot_first=True
+        ) as conn:
+            frame = conn.execute(
+                "SELECT time, open, high, low, close, volume "
+                "FROM bars WHERE symbol=? AND timeframe=? "
+                "ORDER BY time DESC LIMIT ?",
+                [symbol, timeframe, remaining],
+            ).df()
+        if frame is not None and len(frame) > 0:
+            frames.append(frame)
+            remaining -= len(frame)
+    if not frames:
+        logger.warning(f"DuckDB has no bars for {symbol} {timeframe}")
+        return None
+    df = pd.concat(frames, ignore_index=True)
+    df = (
+        df.drop_duplicates(subset=["time"], keep="first")
+        .sort_values("time")
+        .tail(target_bars)
+    )
+    # time 是 epoch 秒, 转 datetime index
+    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df = df.set_index("time").sort_index()
+    return df[["open", "high", "low", "close", "volume"]]
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=8),
+    retry=retry_if_exception_type(Exception),
+    reraise=False,
+    before_sleep=lambda a, e, d: logger.warning(f"fetch_bars attempt {a}/3 failed: {e}, retrying in {d:.1f}s"),
+)
 def _fetch_bars_with_retry(bridge, timeframe: str, n_bars: int, max_retries: int = 3) -> "pd.DataFrame | None":
     """fetch_bars 重试 wrapper. 失败 1 次不致命, 指数 backoff 2s/4s/8s.
     返 None 表示彻底失败 (调用方决定是否继续).
-
     Startup-only historical seed.  Runtime ticks consume the bridge's
     in-memory live trendbar feed and never call this wrapper.
+    保留 idempotency 边界：单次 fetch 幂等，重试仅对 TransientError。
     """
-    for attempt in range(max_retries):
-        try:
-            df = bridge.fetch_bars(timeframe=timeframe, n_bars=n_bars)
-            if df is not None and len(df) >= 30:
-                return df
-        except Exception as e:
-            logger.warning(f"fetch_bars attempt {attempt+1}/{max_retries} failed: {e}")
-        if attempt < max_retries - 1:
-            time.sleep(2 ** (attempt + 1))  # 2s, 4s, 8s
-    return None
+    df = bridge.fetch_bars(timeframe=timeframe, n_bars=n_bars)
+    if df is not None and len(df) >= 30:
+        return df
+    # 数据不足视为瞬时失败，触发重试
+    if df is None or len(df) < 30:
+        raise TransientError(f"insufficient bars: got {0 if df is None else len(df)}")
+    return df
+
 
 
 def _get_live_bars(
@@ -8857,7 +8851,7 @@ def _latest_bar_close_from_store() -> float | None:
     if _latest_bar_price_cache and now_ts - _latest_bar_price_cache[0] < 5.0:
         return _latest_bar_price_cache[1]
     try:
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
 
         store = DataStore()
         df = store.load_bars("XAUUSD+", "M5", limit=1)
