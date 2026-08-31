@@ -28,7 +28,6 @@ from backend.services.stability import measure
 from backend.services.parameter_templates import ParameterTemplateService
 from backend.services.parameter_template_validation import (
     ParameterTemplateValidationService,
-    run_parameter_template_offline_validation,
 )
 from backend.services.position_supervisor_governance import (
     PositionSupervisorGovernanceMutationService,
@@ -2873,8 +2872,7 @@ def materialize_parameter_template_recommendation(
                 }
             )
             mgr = get_job_manager()
-            fn = lambda cb: run_parameter_template_offline_validation(params, cb)
-            js = mgr.submit("parameter_template_validation", params, fn)
+            js = mgr.submit("parameter_template_validation", params)
             result = {
                 "ok": True,
                 "mode": "offline_validate",
@@ -3016,8 +3014,7 @@ def submit_parameter_template_offline_validation(
     params = req.model_dump()
     params["recommended_scope"] = boundary.get("recommended_scope")
     params["boundary_reasons"] = list(boundary.get("reasons") or [])
-    fn = lambda cb: run_parameter_template_offline_validation(params, cb)
-    js = mgr.submit("parameter_template_validation", params, fn)
+    js = mgr.submit("parameter_template_validation", params)
     return {
         "ok": True,
         "job_id": js.id,

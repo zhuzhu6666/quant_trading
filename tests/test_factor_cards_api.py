@@ -1144,10 +1144,9 @@ def test_parameter_template_recommendation_can_materialize_offline_validation_jo
         status = "queued"
 
     class FakeJobManager:
-        def submit(self, kind, params, fn):
+        def submit(self, kind, params):
             captured["kind"] = kind
             captured["params"] = params
-            captured["callable"] = fn
             return FakeJob()
 
     monkeypatch.setattr(learning_api, "get_job_manager", lambda: FakeJobManager())
@@ -1781,10 +1780,9 @@ def test_parameter_template_offline_validation_endpoint_submits_job(tmp_path, mo
         status = "queued"
 
     class FakeJobManager:
-        def submit(self, kind, params, fn):
+        def submit(self, kind, params):
             captured["kind"] = kind
             captured["params"] = params
-            captured["callable"] = fn
             return FakeJob()
 
     service = BoundParameterTemplateService()

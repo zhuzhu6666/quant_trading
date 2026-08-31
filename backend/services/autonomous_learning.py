@@ -5056,7 +5056,6 @@ def materialize_parameter_template_recommendations(
 ) -> dict[str, Any]:
     ensure_autonomous_learning_tables(db_path)
     from backend.jobs import get_job_manager
-    from backend.services.parameter_template_validation import run_parameter_template_offline_validation
     from backend.services.parameter_templates import ParameterTemplateService
 
     service = ParameterTemplateService(str(db_path))
@@ -5099,35 +5098,7 @@ def materialize_parameter_template_recommendations(
                             "approval_path": recommendation.get("approval_path", ""),
                         },
                     }
-                    fn = lambda cb, _params=params: run_parameter_template_offline_validation(_params, cb)
-                    js = get_job_manager().submit("parameter_template_validation", params, fn)
-                    from backend.core.static_feature_flags import (
-                        shared_static_feature_flags,
-                    )
-
-                    if not shared_static_feature_flags().pg_job_queue_v2_enabled:
-                        # Compatibility jobs still need the historical query
-                        # projection.  The durable queue already committed its
-                        # row atomically in submit(); rewriting it here could
-                        # race a worker claim and turn running back to pending.
-                        _execute(
-                            conn,
-                            """
-                            INSERT INTO jobs
-                            (id, kind, status, params_json, result_json, progress, error, created_at, updated_at)
-                            VALUES (?, 'parameter_template_validation', 'pending', ?, '{}', 0.0, '', ?, ?)
-                            ON CONFLICT(id) DO UPDATE SET
-                                kind=excluded.kind,
-                                status=excluded.status,
-                                params_json=excluded.params_json,
-                                result_json=excluded.result_json,
-                                progress=excluded.progress,
-                                error=excluded.error,
-                                created_at=excluded.created_at,
-                                updated_at=excluded.updated_at
-                            """,
-                            (js.id, _dumps(params), time.time(), time.time()),
-                        )
+                    js = get_job_manager().submit("parameter_template_validation", params)
                     counts["offline_jobs"] += 1
                     items.append({"recommendation_id": recommendation_id, "mode": "offline_validate", "job_id": js.id})
                 else:

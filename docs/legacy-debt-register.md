@@ -159,10 +159,10 @@
 
 ### JobManager 本地重任务兼容
 
-- 状态：`migrating`（2026-08-28 复核：P1 已确认无 `submitted` 残留，待发布门）
-- canonical：PG Job Queue 开启后，八类重任务由 PostgreSQL durable job + 独立 worker 执行。
-- 当前（2026-08-28 只读）：`BrainGovernanceCandidateService.reconcile_submitted_bridges` 执行 `reconciled 0/missing 0`（`candidate status superseded 40/active 13/applied 6`，`submitted/bridge_pending/awaiting_execution 0`）；`runtime.jobs 2 (done 1/error 1)`，静态开关 `pg_job_queue_v2_enabled=false`，learning worker 仍为 evolution 唯一 owner，Backend 注册/catch-up 已删。本地 executor 兼容仅待 `pg_job_queue_enable→verify` 发布门。
-- 退出：受控开启、lease/recovery 稳定发布后删除本地重任务执行路径。
+- 状态：`resolved`（2026-08-31 已完成受控开启、真实消费和兼容路径删除）
+- canonical：八类重任务由 PostgreSQL durable job + `quant-job-worker.service` 独立 worker 执行；`JobManager` 只投递、查询和取消。
+- 当前（2026-08-31 只读）：`pg_job_queue_v2_enabled=true`；`quant-job-worker.service` 为 `enabled/active`；`factor_health` smoke job `82d25fe9013e4d32b65d923b2c8ba29c` 已由 worker 消费完成（`attempt_count=1`、无 error）；lease/recovery 相关 18 项测试通过；旧本地 executor、JSONL fallback、API closure 和后台 daemon thread 已删除。
+- 退出：已完成；后续只允许经 PG Job Queue + 独立 worker 执行，不恢复本地兼容双轨。
 
 ### emergency close 严格完成语义
 

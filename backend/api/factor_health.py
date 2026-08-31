@@ -8,7 +8,6 @@ from pydantic import BaseModel
 
 from backend.core.paths import CHARTS_DIR
 from backend.jobs import get_job_manager
-from backend.services.factor_health_service import run_factor_health
 
 router = APIRouter(prefix="/api/factor-health", tags=["factor-health"])
 
@@ -27,8 +26,7 @@ class RunRequest(BaseModel):
 def run(_user: RequireUser, req: RunRequest)-> dict:
     mgr = get_job_manager()
     params = req.model_dump()
-    fn = lambda cb: run_factor_health(params, cb)
-    js = mgr.submit("factor_health", params, fn)
+    js = mgr.submit("factor_health", params)
     return {"job_id": js.id, "status": js.status}
 
 

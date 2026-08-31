@@ -2081,7 +2081,6 @@ class FactorGovernanceOrchestrator:
     def _submit_offline_template_validation(self, rec: dict[str, Any]) -> dict[str, Any]:
         try:
             from backend.jobs.manager import get_job_manager
-            from backend.services.parameter_template_validation import run_parameter_template_offline_validation
 
             params = {
                 "factor_id": str(rec.get("factor_id") or ""),
@@ -2091,8 +2090,7 @@ class FactorGovernanceOrchestrator:
                     "recommendation_id": str(rec.get("recommendation_id") or ""),
                 },
             }
-            fn = lambda cb, _params=params: run_parameter_template_offline_validation(_params, cb)
-            job = get_job_manager().submit("parameter_template_validation", params, fn)
+            job = get_job_manager().submit("parameter_template_validation", params)
             return {"job_id": getattr(job, "job_id", "") or getattr(job, "id", ""), "params": params}
         except Exception as exc:
             return {"blocked": True, "reason": f"offline_validation_submit_failed:{exc}"}

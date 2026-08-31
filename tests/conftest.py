@@ -103,14 +103,3 @@ def _isolate_evolution_story(tmp_path_factory):
             EvolutionStory._instance = previous_instance
         # 子进程兜底: 显式清掉 pytest 标记也无济于事的场景由
         # core._default_story_path() 的环境检测覆盖, 这里无需恢复文件系统。
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _shutdown_background_job_loops():
-    yield
-    try:
-        from backend.jobs import shutdown_job_managers_for_tests
-
-        shutdown_job_managers_for_tests()
-    except Exception:
-        pass

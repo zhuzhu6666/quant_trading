@@ -5,7 +5,6 @@ Usage:
   uvicorn backend.app:app      # direct
 """
 
-import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -15,7 +14,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api import ALL_ROUTERS
 from backend.core.logging import setup_logging
-from backend.jobs import get_job_manager
 from backend.services.backend_runtime_lifecycle import BackendRuntimeLifecycle
 from backend.ws.endpoints import router as ws_router
 from monitor.metrics import install_into_runtime_state
@@ -226,7 +224,6 @@ async def lifespan(app: FastAPI):
         _runtime_config.replace(rc)
     _lg.info("[lifespan] RuntimeConfig loaded from config/settings.yaml and state overlay")
 
-    get_job_manager().bind_loop(asyncio.get_running_loop())
 
     runtime_lifecycle = BackendRuntimeLifecycle()
     runtime_lifecycle.start(_lg)

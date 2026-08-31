@@ -347,7 +347,6 @@ def test_stop_preserves_order_and_each_failure_is_independent():
         stop_supervisor_learning=_fail(events, "stop_supervisor", "supervisor stop failed"),
         stop_autonomous_learning=_fail(events, "stop_autonomous", "autonomous stop failed"),
         stop_live_scheduler=_fail(events, "stop_live_scheduler", "scheduler stop failed"),
-        stop_job_manager=_fail(events, "stop_job_manager", "job manager stop failed"),
         stop_db_health=_fail(events, "stop_db_health", "db health stop failed"),
         stop_backend_readiness=_fail(
             events,
@@ -364,7 +363,6 @@ def test_stop_preserves_order_and_each_failure_is_independent():
         "stop_supervisor",
         "stop_autonomous",
         "stop_live_scheduler",
-        "stop_job_manager",
         "stop_db_health",
         "stop_backend_readiness",
     ]
@@ -379,8 +377,6 @@ def test_stop_preserves_order_and_each_failure_is_independent():
         ("warning", "[lifespan] autonomous learning stop failed: autonomous stop failed"),
         ("call", "stop_live_scheduler", (), {}),
         ("warning", "[lifespan] InProcessScheduler stop failed: scheduler stop failed"),
-        ("call", "stop_job_manager", (), {"timeout_sec": 30.0}),
-        ("warning", "[lifespan] local JobManager executor stop failed: job manager stop failed"),
         ("call", "stop_db_health", (), {"timeout_sec": 30.0}),
         ("warning", "[lifespan] db-health refresh stop failed: db health stop failed"),
         ("call", "stop_backend_readiness", (), {"timeout_sec": 30.0}),
@@ -403,11 +399,6 @@ def test_stop_runs_live_loop_first_and_logs_completed_status():
         stop_supervisor_learning=_record(events, "stop_supervisor"),
         stop_autonomous_learning=_record(events, "stop_autonomous"),
         stop_live_scheduler=_record(events, "stop_live_scheduler"),
-        stop_job_manager=_record(
-            events,
-            "stop_job_manager",
-            {"ok": True, "status": "completed"},
-        ),
         stop_db_health=_record(
             events,
             "stop_db_health",
@@ -428,7 +419,6 @@ def test_stop_runs_live_loop_first_and_logs_completed_status():
         "stop_supervisor",
         "stop_autonomous",
         "stop_live_scheduler",
-        "stop_job_manager",
         "stop_db_health",
         "stop_backend_readiness",
     ]
@@ -450,11 +440,6 @@ def test_stop_timeout_warns_and_does_not_block_remaining_stops():
         stop_supervisor_learning=_record(events, "stop_supervisor"),
         stop_autonomous_learning=_record(events, "stop_autonomous"),
         stop_live_scheduler=_record(events, "stop_live_scheduler"),
-        stop_job_manager=_record(
-            events,
-            "stop_job_manager",
-            {"ok": True, "status": "idle"},
-        ),
         stop_db_health=_record(
             events,
             "stop_db_health",
@@ -475,7 +460,6 @@ def test_stop_timeout_warns_and_does_not_block_remaining_stops():
         "stop_supervisor",
         "stop_autonomous",
         "stop_live_scheduler",
-        "stop_job_manager",
         "stop_db_health",
         "stop_backend_readiness",
     ]
@@ -547,14 +531,10 @@ async def test_backend_lifespan_stops_runtime_when_context_exits_with_error(monk
         def stop(self, _logger):
             events.append("stop")
 
-    class _JobManager:
-        def bind_loop(self, _loop):
-            events.append("bind_loop")
 
     monkeypatch.setattr(app_module, "setup_logging", lambda: None)
     monkeypatch.setattr(app_module, "_init_observability", lambda: None)
     monkeypatch.setattr(app_module, "BackendRuntimeLifecycle", _Lifecycle)
-    monkeypatch.setattr(app_module, "get_job_manager", lambda: _JobManager())
     monkeypatch.setattr(startup_status_module, "clear_startup_issues", lambda: None)
     monkeypatch.setattr(startup_status_module, "record_startup_issue", lambda *args, **kwargs: None)
     monkeypatch.setattr(auth_module, "validate_auth_config", lambda: None)
@@ -575,4 +555,4 @@ async def test_backend_lifespan_stops_runtime_when_context_exits_with_error(monk
             assert events[-1] == "start"
             raise RuntimeError("lifespan body failed")
 
-    assert events == ["bind_loop", "start", "stop"]
+    assert events == ["start", "stop"]

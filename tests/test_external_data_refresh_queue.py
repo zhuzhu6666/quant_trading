@@ -11,23 +11,11 @@ def test_external_refresh_uses_persistent_queue_without_daemon_thread(monkeypatc
     submitted = []
 
     class Manager:
-        def submit(self, kind, params, fn):
-            submitted.append((kind, dict(params), fn))
+        def submit(self, kind, params):
+            submitted.append((kind, dict(params)))
             return JobState(id="durable-refresh-1", kind=kind, status="queued", params=params)
-
-    monkeypatch.setattr(
-        external_data,
-        "shared_static_feature_flags",
-        lambda: SimpleNamespace(pg_job_queue_v2_enabled=True),
-    )
     monkeypatch.setattr(external_data, "get_job_manager", lambda: Manager())
-    monkeypatch.setattr(
-        external_data,
-        "Thread",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("durable dispatch must not create an API daemon thread")
-        ),
-    )
+
 
     result = external_data.trigger_refresh(
         "operator",

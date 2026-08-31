@@ -8,7 +8,7 @@ features:
   # be changed by autonomous governance or the generic config API.
   live_safety_plane_v2_mode: enforce
   governance_mutation_coordinator_v2_mode: enforce
-  pg_job_queue_v2_enabled: false
+  pg_job_queue_v2_enabled: true
 ctrader:
   client_id_env: CTRADER_CLIENT_ID
   client_secret_env: CTRADER_CLIENT_SECRET
