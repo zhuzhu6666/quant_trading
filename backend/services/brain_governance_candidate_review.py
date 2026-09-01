@@ -638,7 +638,7 @@ class BrainGovernanceCandidateReviewService:
                 and supervisor_bootstrap
             ):
                 continue
-            if not present and source in ("canonical_v2.counterfactual_review", "learning_application_effect") and _supervisor_trace_cnt >= 10:
+            if not present and source in ("canonical_v2.counterfactual_review", "supervisor_counterfactual_review", "learning_application_effect") and _supervisor_trace_cnt >= 10:
                 continue
             if not present:
                 gaps.append(f"missing_{source}")
