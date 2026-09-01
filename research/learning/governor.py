@@ -371,6 +371,38 @@ class RuleEvolutionGovernor:
         return parsed if isinstance(parsed, dict) else {}
 
     @staticmethod
+    def _v16_downweight_evidence_ready(evidence: dict, *, confidence: float) -> bool:
+        """Accept a V16 brain downweight whose candidate carries a bound
+        factor target from canonical contribution reviews.  The candidate
+        already passed bridge review (source_presence, risk verdict,
+        fingerprint); the governor only verifies an executable factor target.
+        """
+        if str(evidence.get("source_agent") or "") != "v16_brain":
+            return False
+        expected = evidence.get("expected_effect") or {}
+        if not isinstance(expected, dict):
+            return False
+        factor_id = str(expected.get("factor_id") or "")
+        try:
+            target = float(expected.get("suggested_target_weight") or 0.0)
+            current = float(expected.get("current_weight") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if not factor_id or not (0.0 < target <= current):
+            return False
+        # The bridge envelope nests the review under bridge.candidate_review;
+        # accept both shapes.
+        bridge = evidence.get("bridge") if isinstance(evidence.get("bridge"), dict) else {}
+        review = (
+            evidence.get("candidate_review")
+            or bridge.get("candidate_review")
+            or {}
+        )
+        if not isinstance(review, dict) or not bool(review.get("bridge_ready")):
+            return False
+        return float(confidence) >= 0.30
+
+    @staticmethod
     def _factor_pruning_evidence_ready(evidence: dict, *, confidence: float) -> bool:
         if str(evidence.get("source_agent") or "") != "factor_pruning_governance":
             return False
@@ -618,11 +650,12 @@ class RuleEvolutionGovernor:
                         if (
                             self._factor_pruning_evidence_ready(evidence, confidence=confidence)
                             or self._factor_model_evidence_ready(evidence, confidence=confidence)
+                            or self._v16_downweight_evidence_ready(evidence, confidence=confidence)
                         ):
                             status = "approved"
                             note = (
-                                "approved by governor: factor model evidence bridged through demo nursery"
-                                if self._factor_model_evidence_ready(evidence, confidence=confidence)
+                                "approved by governor: V16 posterior factor downweight"
+                                if self._v16_downweight_evidence_ready(evidence, confidence=confidence)
                                 else "approved by governor: factor pruning governance evidence present"
                             )
                     if status == "proposed":

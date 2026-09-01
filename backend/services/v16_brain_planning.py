@@ -1037,6 +1037,15 @@ class BrainMediumImpactGovernanceService:
     ) -> dict[str, Any]:
         plan = self._load_plan(str(evaluation.get("plan_id") or ""))
         mapped = self._map_action(evaluation=evaluation, plan=plan)
+        if mapped.get("scope_type") == "factor" and not str(mapped.get("factor_id") or ""):
+            # The posterior correction contract carries no governed factor
+            # dimension (deliberately non-executable).  Bind the entry-domain
+            # conclusion to the worst-contributing factor from the canonical
+            # contribution reviews so the downweight candidate has an
+            # executable target.
+            binding = self._factor_contribution_binding()
+            if binding:
+                mapped = {**mapped, **binding}
         comparison = dict(evaluation.get("comparison") or {})
         arbitration = dict(comparison.get("posterior_arbitration") or {})
         correction_contract = dict(arbitration.get("correction_contract") or {})
@@ -1248,6 +1257,25 @@ class BrainMediumImpactGovernanceService:
                 )
             ):
                 candidate_proposal_stage = "candidate_materialized"
+            candidate_expected_effect = comparison
+            if (
+                mapped.get("scope_type") == "factor"
+                and mapped.get("target_weight") is not None
+                and str(mapped.get("factor_id") or "")
+            ):
+                candidate_expected_effect = {
+                    **comparison,
+                    "factor_id": mapped.get("factor_id", ""),
+                    "current_weight": mapped.get("current_weight"),
+                    "suggested_target_weight": mapped.get("target_weight"),
+                    "target_weight": mapped.get("target_weight"),
+                    "reasons": [
+                        {
+                            "code": "v16_posterior_factor_contribution",
+                            "detail": "entry-domain posterior bound to worst net factor contribution",
+                        }
+                    ],
+                }
             candidate = candidate_service.create_candidate(
                 candidate_id=candidate_id_deterministic,
                 source_agent="v16_brain", source_kind="brain_medium_impact_governance",
@@ -1258,7 +1286,7 @@ class BrainMediumImpactGovernanceService:
                 action=mapped["policy_action"],
                 confidence=max(0.1, min(0.95, evidence_score)), evidence_score=evidence_score,
                 risk_class="medium", max_impact="medium_impact",
-                expected_effect=comparison,
+                expected_effect=candidate_expected_effect,
                 evidence_refs={
                     "plan_id": evaluation.get("plan_id", ""),
                     "eval_id": evaluation.get("eval_id", ""),
@@ -1433,6 +1461,62 @@ class BrainMediumImpactGovernanceService:
             "risk_action": "update_weight",
             "target_template_id": "",
         }
+
+    def _factor_contribution_binding(self) -> dict[str, Any]:
+        """Bind a factor action to the worst net-contributing factor."""
+        try:
+            conn = connect(self.db_path, read_only=True)
+            try:
+                if not state_table_exists(conn, "factor_contribution_review"):
+                    return {}
+                rows = execute(
+                    conn,
+                    """SELECT factor, AVG(net_contribution) AS avg_net, COUNT(*) AS n
+                       FROM factor_contribution_review
+                       GROUP BY factor
+                       ORDER BY avg_net ASC, n DESC""",
+                ).fetchall()
+            finally:
+                conn.close()
+            if not rows:
+                return {}
+            from config.runtime_config import shared as runtime_config
+            weights = dict(
+                getattr(runtime_config(), "factor_portfolio_weights", {}) or {}
+            )
+            # Rank by downside impact (avg net contribution x current weight)
+            # so the downweight targets a factor whose reduction actually
+            # moves the portfolio; an already-zero or tiny-weight factor is a
+            # no-op for the governed execution path.
+            best: tuple[float, str, float] | None = None
+            for row in rows:
+                factor_id = str(row["factor"] or "")
+                if not factor_id:
+                    continue
+                current = float(weights.get(factor_id) or 0.0)
+                if current <= 0.0:
+                    continue
+                try:
+                    impact = float(row["avg_net"]) * current
+                except (TypeError, ValueError):
+                    continue
+                if best is None or impact < best[0]:
+                    best = (impact, factor_id, current)
+            if best is None:
+                return {}
+            _, factor_id, current = best
+            target = round(current * 0.89, 6)
+            return {
+                "factor_id": factor_id,
+                "target_weight": target,
+                "current_weight": current,
+                "causal_state": "confirmed",
+                "executable_allowed": True,
+                "selection_fingerprint": f"factor_contribution_review:{factor_id}",
+                "artifact_hash": "",
+            }
+        except Exception:
+            return {}
 
     @staticmethod
     def _decision_policy_preview(mapped: dict[str, Any]) -> dict[str, Any]:

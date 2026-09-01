@@ -5387,10 +5387,16 @@ def _apply_approved_factor_suggestions_for_demo(*, experiment_id: str, limit: in
     governor = RuleEvolutionGovernor()
     for row in rows:
         suggestion_id = str(row["suggestion_id"] or "")
-        factor = str(row["scope_key"] or "")
-        action = str(row["action"] or "")
         evidence = _loads(row["evidence_json"], {})
         expected = dict(evidence.get("expected_effect") or {})
+        # V16 brain candidates carry the bound factor under
+        # expected_effect.factor_id while scope_key stays the policy surface
+        # (alpha_weight_policy); prefer the explicit binding.
+        factor = str(
+            (expected.get("factor_id") if expected.get("factor_id") is not None else "")
+            or row["scope_key"] or ""
+        )
+        action = str(row["action"] or "")
         if action == "downweight" and factor not in current_weights:
             note = (
                 "superseded before apply: factor is absent from the current "
