@@ -345,7 +345,7 @@ class RuntimeConfig:
     model_influence_config: Dict[str, Any] = field(default_factory=dict)
     supervisor_counterfactual_governance_horizon_minutes: int = 60
     supervisor_counterfactual_full_horizon_minutes: int = 120
-    supervisor_canary_mature_trade_count: int = 50
+    supervisor_canary_mature_trade_count: int = 30
     learning_effect_inconclusive_after_days: int = 7
     nursery_exploration_per_reason_daily_limit: int = 5
     nursery_exploration_global_daily_limit: int = 15
