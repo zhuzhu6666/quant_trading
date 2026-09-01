@@ -16,13 +16,10 @@ if str(PROJECT_ROOT) not in sys.path:
 os.environ.setdefault("PYTHONPATH", str(PROJECT_ROOT))
 os.environ.setdefault("QUANT_JWT_SECRET", "test-jwt-secret-2026-do-not-use-in-prod")
 os.environ.setdefault("QUANT_AUTH_USER", "test_user")
-os.environ.setdefault("QUANT_PASSWORD_HASH", hashlib.sha256("test_pass_123".encode()).hexdigest())
-os.environ.setdefault("QUANT_AUTH_ALLOW_LEGACY_SHA256", "1")
-os.environ.setdefault("QUANT_AUTH_ALLOW_LEGACY_ACCESS_TOKEN", "1")
+os.environ.setdefault("QUANT_PASSWORD_HASH", "$argon2id$v=19$m=65536,t=3,p=4$t0JQgZ/oFmjgr3eDUmkPeQ$ApsE7RuwK9h8kw4Qeeipekzt+XHALgKjEyW2VlaMgF8")
 os.environ.setdefault("QUANT_AUTH_ALLOW_STATELESS_STEP_UP", "1")
 os.environ.setdefault("QUANT_AUTH_SESSION_STORE", "memory")
 os.environ.setdefault("QUANT_AUTH_INSECURE_COOKIE", "1")
-os.environ.setdefault("QUANT_AUTH_ALLOW_URL_JWT", "1")
 # Release-time feature flags are production deployment state, not test
 # defaults.  Keep the broad compatibility suite deterministic; v2 tests
 # explicitly override the relevant accessor/environment for their scenario.

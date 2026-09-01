@@ -70,13 +70,6 @@ def validate_auth_config() -> None:
     password_hash = _need_env("QUANT_PASSWORD_HASH")
     if password_hash.startswith("$argon2id$"):
         return
-    is_legacy_sha256 = len(password_hash) == 64 and all(c in "0123456789abcdefABCDEF" for c in password_hash)
-    if is_legacy_sha256 and truthy_env("QUANT_AUTH_ALLOW_LEGACY_SHA256"):
-        return
-    if is_legacy_sha256:
-        raise AuthConfigError(
-            "legacy SHA-256 password hash requires QUANT_AUTH_ALLOW_LEGACY_SHA256=1 during migration"
-        )
     raise AuthConfigError("QUANT_PASSWORD_HASH must be an Argon2id encoded hash")
 
 def create_access_token(
