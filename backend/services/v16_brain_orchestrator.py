@@ -9,6 +9,7 @@ and governor services.
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 import uuid
 from pathlib import Path
@@ -147,6 +148,16 @@ def cancel_expired_v16_commands(
         persist=True,
         max_age_seconds=max_age_seconds,
     )
+
+
+# A bridge-ready candidate without a delegate command is a normal pipeline
+# intermediate state: the command is issued on the same cycle that reads the
+# review.  Only supersede candidates whose bridge-ready review is older than
+# this grace window (cfe: reconcile previously killed candidates in the same
+# cycle the command was generated, starving the delegation pipeline).
+_STALE_CANDIDATE_GRACE_SECONDS = float(
+    os.getenv("QUANT_V16_STALE_CANDIDATE_GRACE_SECONDS", "3600")
+)
 
 
 class V16BrainOrchestratorService:
@@ -350,7 +361,7 @@ class V16BrainOrchestratorService:
                 return {"candidate_id": candidate_id, "bridge_ready": False}
             candidate_row = execute(
                 conn,
-                """SELECT submitted_suggestion_id, updated_at
+                """SELECT submitted_suggestion_id, created_at
                    FROM brain_governance_candidate
                    WHERE candidate_id=?
                    LIMIT 1""",
@@ -370,11 +381,19 @@ class V16BrainOrchestratorService:
             if not review_row:
                 return {"candidate_id": candidate_id, "bridge_ready": False}
             review_created_at = safe_float(review_row["created_at"])
-            candidate_updated_at = safe_float(candidate_row["updated_at"])
+            candidate_created_at = safe_float(candidate_row["created_at"])
+            # A delegate command is issued on the reviewed candidate; the
+            # suggestion bridge/submit happens AFTER the command exists
+            # (autonomous_demo_apply_stepper / demo nursery bridge).  Requiring
+            # submitted_suggestion_id here deadlocks the pipeline: submit waits
+            # for a delegate command while delegate waits for submit.
+            # The review freshness check compares against candidate created_at
+            # (not updated_at): proposal-stage progression refreshes
+            # updated_at on every materialize and would otherwise permanently
+            # invalidate the review fingerprint dedupe.
             bridge_ready = bool(
                 review_row["bridge_ready"]
-                and str(candidate_row["submitted_suggestion_id"] or "")
-                and review_created_at >= candidate_updated_at
+                and review_created_at >= candidate_created_at
             )
             return {
                 "candidate_id": candidate_id,
@@ -382,7 +401,7 @@ class V16BrainOrchestratorService:
                 "bridge_ready": bridge_ready,
                 "evidence_fingerprint": str(review_row["evidence_fingerprint"] or ""),
                 "review_created_at": review_created_at,
-                "candidate_updated_at": candidate_updated_at,
+                "candidate_created_at": candidate_created_at,
             }
         finally:
             conn.close()
@@ -547,6 +566,8 @@ class V16BrainOrchestratorService:
                 and state_table_exists(conn, "brain_governance_candidate_review")
             ):
                 return []
+            now = time.time()
+            grace_until = now - _STALE_CANDIDATE_GRACE_SECONDS
             rows = execute(
                 conn,
                 """SELECT candidate_id, lineage_json
@@ -558,7 +579,9 @@ class V16BrainOrchestratorService:
                          WHERE current_review.candidate_id=brain_governance_candidate.candidate_id
                            AND current_review.bridge_ready=1
                            AND current_review.created_at>=brain_governance_candidate.updated_at
+                           AND current_review.created_at<=?
                      )""",
+                (grace_until,),
             ).fetchall()
             superseded: list[str] = []
             now = time.time()

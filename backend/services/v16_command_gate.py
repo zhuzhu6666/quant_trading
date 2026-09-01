@@ -818,7 +818,7 @@ class V16CommandGate:
             return True
         candidate = execute(
             conn,
-            """SELECT status, submitted_suggestion_id, updated_at
+            """SELECT status, submitted_suggestion_id, created_at
                FROM brain_governance_candidate
                WHERE candidate_id=?
                LIMIT 1""",
@@ -850,10 +850,21 @@ class V16CommandGate:
         ).fetchone()
         if not review or not bool(review["bridge_ready"]):
             return False
-        if safe_float(review["created_at"]) < safe_float(candidate["updated_at"]):
+        # Freshness is anchored to candidate created_at: proposal-stage
+        # progression (materialize/submit) refreshes updated_at on every
+        # lifecycle step and would otherwise invalidate a still-valid
+        # evidence review, deadlocking claim.
+        if safe_float(review["created_at"]) < safe_float(candidate["created_at"]):
             return False
         command_evidence = loads(row.get("evidence_json"), {})
-        candidate_review_ref = dict(command_evidence.get("candidate_review") or {})
+        # The orchestrator nests candidate_review under evidence.governance;
+        # read both shapes so the fingerprint re-check at claim time binds to
+        # the review the command was issued against.
+        candidate_review_ref = dict(
+            command_evidence.get("candidate_review")
+            or (command_evidence.get("governance") or {}).get("candidate_review")
+            or {}
+        )
         if (
             not candidate_review_ref
             or str(candidate_review_ref.get("evidence_fingerprint") or "")

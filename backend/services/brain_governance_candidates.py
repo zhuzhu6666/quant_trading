@@ -10,6 +10,7 @@ from typing import Any
 from backend.core.db import STATE_DB, is_state_db_path, state_table_columns, state_table_exists
 from backend.services.agent_authority import (
     AgentAuthorityRegistryService,
+    control_surface,
     policy_suggestion_requested_writes,
 )
 from backend.services._brain_helpers import connect as _connect, dumps as _dumps, execute as _execute, loads as _loads, safe_float as _safe_float
@@ -788,7 +789,7 @@ class BrainGovernanceCandidateService:
         if (
             not candidate_review.get("bridge_ready")
             or not str(candidate_review.get("evidence_fingerprint") or "")
-            or _safe_float(candidate_review.get("created_at")) < _safe_float(candidate.get("updated_at"))
+            or _safe_float(candidate_review.get("created_at")) < _safe_float(candidate.get("created_at"))
         ):
             return self._blocked_submit(
                 candidate,
@@ -1037,6 +1038,40 @@ class BrainGovernanceCandidateService:
     def _insert_candidate(self, item: dict[str, Any]) -> None:
         conn = _connect(self.db_path)
         try:
+            # A new candidate supersedes older active candidates on the same
+            # control surface so a surface never accumulates concurrent
+            # active candidates (which would fail bridge conflict review and
+            # starve the V16 delegation pipeline).
+            surface = control_surface(
+                str(item.get("scope_type") or ""),
+                str(item.get("action") or ""),
+            )
+            now = time.time()
+            active_rows = _execute(
+                conn,
+                """SELECT candidate_id, scope_type, action
+                   FROM brain_governance_candidate
+                   WHERE status='active'""",
+            ).fetchall()
+            stale_ids = [
+                str(row["candidate_id"] or "")
+                for row in active_rows
+                if str(row["candidate_id"] or "") != str(item.get("candidate_id") or "")
+                and control_surface(
+                    str(row["scope_type"] or ""),
+                    str(row["action"] or ""),
+                )
+                == surface
+            ]
+            if stale_ids:
+                marks = ", ".join("?" * len(stale_ids))
+                _execute(
+                    conn,
+                    f"""UPDATE brain_governance_candidate
+                        SET status='superseded', proposal_stage='superseded_by_newer_candidate', updated_at=?
+                        WHERE candidate_id IN ({marks}) AND status='active'""",
+                    (now, *stale_ids),
+                )
             _execute(
                 conn,
                 """

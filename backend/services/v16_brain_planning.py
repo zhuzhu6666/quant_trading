@@ -1081,14 +1081,23 @@ class BrainMediumImpactGovernanceService:
                 "created_at": now,
                 "updated_at": time.time(),
             }
-        selected_scope = str(arbitration.get("selected_scope") or "")
+        # Posterior conclusions dispatch per causal domain: the entry
+        # conclusion gates entry-domain actions (parameter templates and
+        # factor weights -- factor weight is the entry-quality lever), the
+        # supervisor conclusion gates supervisor actions.  A conclusion in
+        # either domain no longer starves the other (previously
+        # selected_scope was a single winner and factor_weight expected a
+        # "factor" scope the arbitrator never produces).
+        entry_scope = str((arbitration.get("entry_conclusion") or {}).get("causal_scope") or "")
+        supervisor_scope = str((arbitration.get("supervisor_conclusion") or {}).get("causal_scope") or "")
+        posterior_scopes = {scope for scope in (entry_scope, supervisor_scope) if scope}
         scope_causal = {
-            "factor_weight": "factor",
+            "factor_weight": "entry",
             "parameter_template": "entry",
             "context_policy": "entry",
             "supervisor_template": "supervisor",
         }.get(str(evaluation.get("scope_type") or ""), "")
-        if selected_scope and scope_causal and selected_scope != scope_causal:
+        if scope_causal and posterior_scopes and scope_causal not in posterior_scopes:
             return {
                 "governance_id": f"brain_p4_gov_{uuid.uuid4().hex[:16]}",
                 "schema_version": "brain_medium_impact_governance.v1",
@@ -1378,6 +1387,27 @@ class BrainMediumImpactGovernanceService:
             or {}
         )
         expected_effect = dict(factor_dimension.get("expected_effect") or {})
+        target_weight = (
+            factor_binding.get("target_weight")
+            or factor_dimension.get("target_weight")
+            or expected_effect.get("target_weight")
+        )
+        current_weight = (
+            factor_binding.get("current_weight")
+            or factor_dimension.get("current_weight")
+        )
+        # Governor bridge surfaces only know downweight/boost_small; map the
+        # weight direction so factor candidates stay bridgeable.
+        factor_action = "downweight"
+        try:
+            if (
+                target_weight is not None
+                and current_weight is not None
+                and float(target_weight) >= float(current_weight)
+            ):
+                factor_action = "boost_small"
+        except (TypeError, ValueError):
+            factor_action = "downweight"
         return {
             "scope_type": "factor",
             "scope_key": factor_id or "alpha_weight_policy",
@@ -1393,21 +1423,20 @@ class BrainMediumImpactGovernanceService:
             or selected.get("evidence_refs")
             or factor_dimension.get("evidence_refs")
             or {},
-            "target_weight": factor_binding.get("target_weight")
-            or factor_dimension.get("target_weight")
-            or expected_effect.get("target_weight"),
-            "current_weight": factor_binding.get("current_weight")
-            or factor_dimension.get("current_weight"),
+            "target_weight": target_weight,
+            "current_weight": current_weight,
             "causal_state": factor_dimension.get("causal_state"),
             "executable_allowed": bool(factor_dimension.get("executable_allowed")),
-            "policy_action": "update_weight",
+            "policy_action": factor_action,
+            # RiskPolicyService knows update_weight (not downweight); the
+            # bridge surface knows downweight/boost_small (not update_weight).
             "risk_action": "update_weight",
             "target_template_id": "",
         }
 
     @staticmethod
     def _decision_policy_preview(mapped: dict[str, Any]) -> dict[str, Any]:
-        if mapped["policy_action"] != "update_weight":
+        if mapped["policy_action"] not in {"update_weight", "boost_small"}:
             return {"schema_version": "decision_policy_preview.v1", "required": False}
         factor_id = str(mapped.get("factor_id") or "").strip()
         if not factor_id:
