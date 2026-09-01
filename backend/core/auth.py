@@ -274,14 +274,8 @@ def decode_access_token(
     if not isinstance(subject, str) or not subject.strip():
         raise _auth_http_error("invalid_token", "JWT subject is missing")
     token_type = payload.get("typ")
-    legacy_allowed = truthy_env("QUANT_AUTH_ALLOW_LEGACY_ACCESS_TOKEN") if allow_legacy is None else bool(allow_legacy)
     if token_type != "access":
-        if token_type or not legacy_allowed:
-            raise _auth_http_error("invalid_token_type", "an Auth v2 access token is required")
-        payload = dict(payload)
-        payload["legacy"] = True
-        payload.setdefault("auth_time", payload.get("iat", 0))
-        payload.setdefault("sid", "")
+        raise _auth_http_error("invalid_token_type", "an Auth v2 access token is required")
 
     session_id = str(payload.get("sid") or "")
     family_id = str(payload.get("fid") or "")
