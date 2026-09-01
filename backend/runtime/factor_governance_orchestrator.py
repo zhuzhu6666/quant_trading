@@ -1097,6 +1097,7 @@ class FactorGovernanceOrchestrator:
                     continue
                 if posterior == "posterior_degraded":
                     posterior_degraded_ids.append(factor_id)
+                    continue  # ponytail: degraded fail-closed until limited-weight path lands
                 activation_ids.append(factor_id)
 
         from backend.services.governance_control_plans import (
@@ -1164,6 +1165,7 @@ class FactorGovernanceOrchestrator:
                     continue
                 if posterior == "posterior_degraded":
                     posterior_degraded_ids.append(factor_id)
+                    continue  # ponytail: degraded fail-closed until limited-weight path lands
                 regime_verdict = self._regime_suitable_for_restore(
                     current_regime_id=current_regime_id,
                     regime_fit_score=self._shadow_regime_fit_score(item),
@@ -1231,6 +1233,7 @@ class FactorGovernanceOrchestrator:
                     continue
                 if posterior == "posterior_degraded":
                     posterior_degraded_ids.append(factor_id)
+                    continue  # ponytail: degraded fail-closed until limited-weight path lands
                 regime_verdict = self._regime_suitable_for_restore(
                     current_regime_id=current_regime_id,
                     regime_fit_score=self._shadow_regime_fit_score(item),
@@ -1264,6 +1267,7 @@ class FactorGovernanceOrchestrator:
                 continue
             if posterior == "posterior_degraded":
                 posterior_degraded_ids.append(factor_id)
+                continue  # ponytail: degraded fail-closed until limited-weight path lands
             promotion_ids.append(factor_id)
 
         candidate_actions: dict[str, str] = {}
