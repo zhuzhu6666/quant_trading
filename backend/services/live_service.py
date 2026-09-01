@@ -3854,6 +3854,10 @@ def _pending_session_close_causes() -> dict[int, dict[str, Any]]:
             position_id = int(item.get("cause_id") or 0)
         except (TypeError, ValueError):
             continue
+        # FIX 2026-09-01: filter synthetic/test positions (902/903) that have leaked into durable latch
+        # Real cTrader positions are >100k; synthetic IDs <1000 must not block recovery bootstrap
+        if position_id < 1000:
+            continue
         if position_id > 0:
             metadata = item.get("metadata")
             result[position_id] = {

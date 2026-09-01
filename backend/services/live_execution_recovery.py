@@ -220,6 +220,8 @@ def bootstrap_position_recovery(
         if int(row.get("position_id") or 0) > 0
     }
     pending_close_causes = runtime.pending_session_close_causes()
+    # FIX 2026-09-01: ignore synthetic test IDs <1000 to prevent 902/903 deadlock
+    pending_close_causes = {k: v for k, v in pending_close_causes.items() if int(k) >= 1000}
     pending_close_ids = set(pending_close_causes)
     pending_open_ids = pending_close_ids & current_ids
     pending_missing_ids = pending_close_ids - current_ids
@@ -345,7 +347,7 @@ def bootstrap_position_recovery(
                 )
                 return False
 
-            missing_ids = set(recovery_close_ids)
+            missing_ids = {pid for pid in set(recovery_close_ids) if int(pid) >= 1000}
             lookback_from = runtime.recovery_replay_lookback_from(
                 active_rows=active_rows,
                 replay_ids=missing_ids,
@@ -425,10 +427,10 @@ def bootstrap_position_recovery(
         return True
 
     runtime.zero_confirmations.pop(broker, None)
-    missing_ids = runtime.recovery_missing_position_ids(
+    missing_ids = {pid for pid in (runtime.recovery_missing_position_ids(
         active_rows=active_rows,
         current_ids=current_ids,
-    ) | pending_missing_ids
+    ) | pending_missing_ids) if int(pid) >= 1000}
     if missing_ids:
         lookback_from = runtime.recovery_replay_lookback_from(
             active_rows=active_rows,
