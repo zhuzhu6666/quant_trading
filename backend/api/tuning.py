@@ -4,7 +4,6 @@ from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
 from backend.jobs import get_job_manager
-from backend.services.tuning_service import run_tuning
 
 router = APIRouter(prefix="/api/tuning", tags=["tuning"])
 
@@ -19,8 +18,7 @@ class TuningRequest(BaseModel):
 def run(_user: RequireUser, req: TuningRequest)-> dict:
     mgr = get_job_manager()
     params = req.model_dump()
-    fn = lambda cb: run_tuning(params, cb)
-    js = mgr.submit("tuning", params, fn)
+    js = mgr.submit("tuning", params)
     return {"job_id": js.id, "status": js.status}
 
 

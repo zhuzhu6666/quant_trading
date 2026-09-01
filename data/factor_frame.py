@@ -14,7 +14,7 @@ from typing import Any
 import pandas as pd
 
 from data.external_loader import ExternalDataLoader
-from data.store import DataStore
+from data.duckdb_store import DuckDBDataStore as DataStore
 
 logger = logging.getLogger(__name__)
 

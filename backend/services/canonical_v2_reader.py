@@ -219,6 +219,46 @@ def _review_event_rows(
     return [item for item in (_dict_row(row, _REVIEW_EVENT_COLUMNS) for row in rows) if item]
 
 
+def latest_review_observed_at_by_id(
+    conn: Any,
+    review_ids: Iterable[str],
+) -> dict[str, float]:
+    """Return latest canonical observation time for each requested review.
+
+    Consumers that only need freshness metadata must not resolve each review
+    through ``review_row``: that path decodes one canonical payload per ID.
+    This projection reads the authoritative event timestamps in one query and
+    leaves payload resolution to callers that actually need review content.
+    """
+
+    ids = list(dict.fromkeys(str(item) for item in review_ids if str(item)))
+    if not ids or not _canonical_ready(conn):
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            _sql(
+                conn,
+                f"""
+                SELECT entity_id, MAX(observed_at) AS observed_at
+                FROM canonical_v2.event
+                WHERE event_type='trade_review'
+                  AND entity_id IN ({placeholders})
+                GROUP BY entity_id
+                """,
+            ),
+            tuple(ids),
+        ).fetchall()
+    except Exception:
+        return {}
+    return {
+        str(row["entity_id"]): observed_epoch(row["observed_at"])
+        for row in rows
+        if str(row["entity_id"] or "")
+        and observed_epoch(row["observed_at"]) > 0.0
+    }
+
+
 def _review_event_sort_key(event: Mapping[str, Any]) -> tuple[float, str]:
     # No explicit ``revision`` field exists in either the live writer or the
     # learning revision writer.  Both set canonical event.observed_at to the
@@ -1288,6 +1328,55 @@ def iter_decision_factor_snapshots_by_factor(
         return result[: int(limit)] if limit and int(limit) > 0 else result
     except Exception:
         return []
+
+
+def iter_decision_factor_snapshots_by_factors(
+    conn: Any,
+    factors: Iterable[str],
+    *,
+    limit: int = 100,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return recent factor snapshots for several factors in one payload scan.
+
+    The single-factor reader is useful for an isolated card, but running it
+    once per live factor re-reads the same decision payloads. Redundancy
+    analysis needs the same recent window for every factor, so share one event
+    query and decode each payload only once.
+    """
+
+    ids = list(dict.fromkeys(str(item) for item in factors if str(item)))
+    result = {factor: [] for factor in ids}
+    if not ids or not _canonical_ready(conn):
+        return result
+    try:
+        limit_clause = f" LIMIT {max(1, int(limit)) * 5}" if limit and int(limit) > 0 else ""
+        rows = conn.execute(
+            _sql(
+                conn,
+                "SELECT e.payload_hash"
+                " FROM canonical_v2.event e"
+                " WHERE e.event_type = 'risk_decision'"
+                " ORDER BY e.created_at DESC"
+                + limit_clause,
+            ),
+        ).fetchall()
+        for event_row in rows:
+            payload_hash = (
+                event_row["payload_hash"]
+                if isinstance(event_row, Mapping)
+                else event_row[0]
+            )
+            for snapshot in _parse_factor_snapshots(read_payload(conn, str(payload_hash))):
+                factor = str(snapshot.get("factor") or "")
+                if factor in result and (
+                    not limit or len(result[factor]) < int(limit)
+                ):
+                    result[factor].append(snapshot)
+        if limit and int(limit) > 0:
+            return {factor: values[: int(limit)] for factor, values in result.items()}
+        return result
+    except Exception:
+        return result
 
 
 def count_decision_factor_snapshots(conn: Any, decision_id: str) -> int:

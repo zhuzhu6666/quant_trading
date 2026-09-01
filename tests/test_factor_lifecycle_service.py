@@ -17,7 +17,7 @@ from alpha.registry_adapter import (
     SOURCE_SHADOW,
 )
 from alpha.streaming_factor_engine import StreamingFactorEngine
-from backend.services.factor_identity import factor_definition_fingerprint
+from alpha.factor_identity import factor_definition_fingerprint
 from backend.services.factor_lifecycle_service import (
     ALLOWED_TRANSITIONS,
     FactorLifecycleService,
@@ -45,6 +45,7 @@ class FakeAdapter:
         }
         self.promote_calls = 0
         self.register_calls = 0
+        self.register_log_events: list[bool] = []
         self.unregister_calls = 0
         self.fail_promote = False
 
@@ -60,6 +61,7 @@ class FakeAdapter:
         **_kwargs,
     ) -> bool:
         self.register_calls += 1
+        self.register_log_events.append(bool(_kwargs.get("log_event", True)))
         factor_registry._factors[name] = func
         self.meta[name] = {
             "source": source,
@@ -722,6 +724,7 @@ def test_backend_bootstrap_rebuilds_active_registry_from_committed_state_only(
     assert result["ok"] is True
     assert result["attempted_count"] == 1
     assert adapter.register_calls == register_before + 1
+    assert adapter.register_log_events[-1] is False
     assert adapter.promote_calls == promote_before + 1
     assert adapter.get_meta(name)["source"] == SOURCE_DISCOVERED
     assert name in factor_registry
@@ -770,7 +773,7 @@ def test_backend_bootstrap_prioritizes_prepared_over_recent_shadow_volume(
     monkeypatch.setattr(
         service,
         "_project_registry",
-        lambda state: projected.append(str(state["factor_name"])),
+        lambda state, **_kwargs: projected.append(str(state["factor_name"])),
     )
     monkeypatch.setattr(service, "_record_projection_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(service, "_set_runtime_admission", lambda *args, **kwargs: None)

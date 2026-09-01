@@ -370,7 +370,7 @@ def test_step_up_legacy_sha256_requires_explicit_compatibility(monkeypatch):
         "QUANT_PASSWORD_HASH",
         hashlib.sha256(b"correct horse").hexdigest(),
     )
-    monkeypatch.delenv("QUANT_AUTH_ALLOW_LEGACY_SHA256", raising=False)
+    monkeypatch.setenv("QUANT_AUTH_ALLOW_LEGACY_SHA256", "0")
     with pytest.raises(HTTPException) as disabled:
         auth_api.step_up(
             req=auth_api.StepUpRequest(password="correct horse"),
@@ -380,12 +380,13 @@ def test_step_up_legacy_sha256_requires_explicit_compatibility(monkeypatch):
     assert disabled.value.detail["error"] == "auth_not_configured"
 
     monkeypatch.setenv("QUANT_AUTH_ALLOW_LEGACY_SHA256", "1")
-    response = auth_api.step_up(
+    with pytest.raises(HTTPException) as still_disabled:
+        auth_api.step_up(
         req=auth_api.StepUpRequest(password="correct horse"),
         request=_step_up_request(),
         claims=claims,
     )
-    assert response.password_rehash_required is True
+    assert still_disabled.value.detail["error"] == "auth_not_configured"
 
 
 def test_expired_access_retains_only_local_risk_reduction_authority():
@@ -503,12 +504,13 @@ def test_expired_access_can_emergency_when_pg_audit_is_unavailable(monkeypatch, 
 def test_legacy_sha256_needs_explicit_switch(monkeypatch):
     encoded = hashlib.sha256(b"correct horse").hexdigest()
     monkeypatch.setenv("QUANT_PASSWORD_HASH", encoded)
-    monkeypatch.delenv("QUANT_AUTH_ALLOW_LEGACY_SHA256", raising=False)
+    monkeypatch.setenv("QUANT_AUTH_ALLOW_LEGACY_SHA256", "0")
     with pytest.raises(auth_core.AuthConfigError):
         auth_core.validate_auth_config()
 
     monkeypatch.setenv("QUANT_AUTH_ALLOW_LEGACY_SHA256", "1")
-    auth_core.validate_auth_config()
+    with pytest.raises(auth_core.AuthConfigError):
+        auth_core.validate_auth_config()
 
 
 def test_refresh_service_detects_direct_replay_and_revokes_family():

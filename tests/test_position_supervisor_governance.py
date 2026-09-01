@@ -5,6 +5,7 @@ from backend.services.canonical_v2 import (
     record_counterfactual_event,
     record_position_event,
     record_review,
+    record_supervisor_trace_event,
 )
 from backend.services.canonical_v2_reader import (
     iter_counterfactual_rows,
@@ -114,6 +115,91 @@ def _create_db(path):
     conn.commit()
     conn.close()
 
+def test_replay_uses_canonical_supervisor_trace_evidence(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    conn = make_canonical_sqlite(db_path)
+    try:
+        record_supervisor_trace_event(
+            conn,
+            trace_id="trace_replay_evidence",
+            decision_id="dec_replay_evidence",
+            event_ts=1782439200.0,
+            payload={
+                "trace_id": "trace_replay_evidence",
+                "decision_id": "dec_replay_evidence",
+                "position_id": "1001",
+                "trade_id": "1001",
+                "symbol": "XAUUSD+",
+                "timeframe": "M5",
+                "event_ts": 1782439200.0,
+                "action": "close",
+                "summary_reason": "thesis_broken",
+                "confidence": 0.88,
+                "template_id": DEFAULT_TEMPLATE_ID,
+                "template_version": "default.v1",
+                "stage": "executed",
+                "outcome": "applied",
+                "execution_status": "applied",
+                "trace_integrity": "full",
+                "context": {
+                    "position": {
+                        "position_id": "1001",
+                        "direction": -1,
+                        "entry_price": 3000.0,
+                        "current_price": 2999.0,
+                        "volume": 100.0,
+                        "sl": 2980.0,
+                        "tp": 3040.0,
+                        "unrealized_pnl": -1.0,
+                        "current_price_state": "known",
+                        "pnl_state": "known",
+                        "position_path_metrics_state": "known",
+                    },
+                    "risk": {
+                        "holding_efficiency": 0.10,
+                        "thesis_status": "broken",
+                        "regime_shift": "confirmed",
+                        "signal_reversal": True,
+                        "thesis_broken_confirmations": 2,
+                        "mfe": 0.0,
+                        "mae": 1.4,
+                        "giveback_ratio": 0.0,
+                        "profit_capture_ratio": 0.0,
+                    },
+                    "temporal_context": {
+                        "holding_seconds": 600.0,
+                        "completed_bars_after_entry": 2,
+                        "closed_bar_key": "bars:2",
+                    },
+                    "market": {"regime_id": "confirmed"},
+                },
+                "verdict": {
+                    "action": "close",
+                    "summary_reason": "thesis_broken",
+                    "evidence": {
+                        "signal_reversal": True,
+                        "regime_shift": "confirmed",
+                        "thesis_break_confirmed": True,
+                    },
+                },
+                "risk_verdict": {"allowed": True},
+                "execution": {
+                    "is_real_execution": True,
+                    "broker_action_confirmed": True,
+                    "reconcile_confirmed": True,
+                },
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = replay_position_supervisor_templates(day="2026-06-26", db_path=db_path)
+
+    sample = result["samples"][0]
+    assert sample["template_actions"][DEFAULT_TEMPLATE_ID]["action"] == "close"
+
 
 def test_replay_position_supervisor_templates_compares_default_and_candidate(tmp_path):
     db_path = tmp_path / "state.db"
@@ -126,6 +212,8 @@ def test_replay_position_supervisor_templates_compares_default_and_candidate(tmp
     assert summaries[DEFAULT_TEMPLATE_ID]["actions"]["close"] == 0
     assert summaries[CONSERVATIVE_TEMPLATE_ID]["actions"]["close"] == 0
     assert result["comparison"]["small_loss_closes_reduced"] == 0
+    assert result["comparable_sample_count"] == 0
+    assert result["samples"][0]["template_actions"][DEFAULT_TEMPLATE_ID]["comparable"] is False
 
 
 def test_replay_and_advisory_filter_contamination_before_effective_limit(tmp_path):

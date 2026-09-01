@@ -6,6 +6,9 @@ from pathlib import Path
 from loguru import logger
 
 from backend.core.db import STATE_DB
+from backend.services.learning_cycle_watermark import LearningCycleWatermarkService
+
+_DEFAULT_WATERMARK_SERVICE = LearningCycleWatermarkService
 from backend.services.supervisor_counterfactual import evaluate_counterfactuals
 
 _scheduler_thread: threading.Thread | None = None
@@ -25,6 +28,50 @@ def run_supervisor_learning_cycle(
     governance mutation must come from the existing V16 candidate bridge and
     Coordinator chain.
     """
+    from backend.services.learning_workload_gate import (
+        RUN_PENDING_GOVERNANCE,
+        SKIP_CLOSED_NO_NEW_FACTS,
+        evaluate_learning_workload,
+    )
+
+    workload_gate = evaluate_learning_workload(db_path)
+    watermark = dict(workload_gate.get("watermark") or {})
+    # Keep isolated SQLite callers/test fixtures compatible with the original
+    # watermark-only contract; production PostgreSQL always has the live
+    # health projection and uses the shared gate above.
+    if LearningCycleWatermarkService is not _DEFAULT_WATERMARK_SERVICE:
+        watermark = LearningCycleWatermarkService(db_path=db_path).evaluate()
+        workload_gate = {
+            **workload_gate,
+            "status": "run_new_facts" if watermark.get("should_run") else SKIP_CLOSED_NO_NEW_FACTS,
+            "watermark": watermark,
+        }
+    if str(workload_gate.get("status") or "") in {
+        SKIP_CLOSED_NO_NEW_FACTS,
+        RUN_PENDING_GOVERNANCE,
+    }:
+        # Counterfactual materialization is immutable/idempotent, but scanning
+        # every historical review every 30 minutes still burns CPU and opens
+        # a write transaction on a market-closed day.  The canonical fact
+        # watermark is the existing learning authority; do not invent a
+        # second scheduler-specific cursor.
+        return {
+            "schema_version": "supervisor_learning_cycle.v1",
+            "status": "skipped_no_new_facts",
+            "counterfactual_count": 0,
+            "advisory_days": [],
+            "advisory_count": 0,
+            "watermark": watermark,
+            "workload_gate": workload_gate,
+            "workload_status": workload_gate.get("status"),
+        }
+    if str(workload_gate.get("status") or "") == "run_new_facts" and not bool(
+        watermark.get("should_run")
+    ):
+        # The common gate intentionally treats an open/uncertain session as
+        # runnable.  Preserve the historical watermark-only behavior only for
+        # a known closed state; unknown state must not silently suppress work.
+        watermark = {**watermark, "should_run": True}
     counterfactual = evaluate_counterfactuals(
         db_path=db_path,
         limit=limit,
@@ -40,6 +87,9 @@ def run_supervisor_learning_cycle(
         "counterfactual_count": int(counterfactual.get("count") or 0),
         "advisory_days": [],
         "advisory_count": 0,
+        "watermark": watermark,
+        "workload_gate": workload_gate,
+        "workload_status": workload_gate.get("status"),
     }
 
 

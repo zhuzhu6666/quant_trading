@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Snapshot: 2026-08-28 (runtime evidence baseline f2eb9c9; 治理 enforce 已加载, off 直连已删；当前本地 Git HEAD 为 1740f9cb，未在本批重查运行态)
+> Snapshot: 2026-08-30 (PostgreSQL 写放大收敛批次；提交后以 Git HEAD 与 health release identity 复核，治理 enforce 已加载, off 直连已删)
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -22,7 +22,25 @@
 
 ## 2. 最近一次运行核对
 
-### 2026-08-28 只读复核结果（runtime snapshot f2eb9c9；不是当前本地 Git HEAD）
+### 2026-08-30 因子治理耗时修复（工作区已重启并完成真实耗时复测，待发布）
+
+- 工作区已修复治理循环的累计 action 触发目录重算、shadow/Canonical 读取 N+1、参数模板重复卡片扫描，以及冗余 group 缺少具体 V16 candidate 的问题。
+- 只读复测：目录 `1302` 项约 `0.5–3.4s`，冗余分析 `2.6s`，参数推荐 `18` 项约 `7.0s`；全量回归 `2966 passed, 11 skipped`。
+- 当前工作区已加载：`quant-learning-worker.service` PID `3865948`、`quant-backend.service` PID `3866336`，健康接口和 cTrader 认证/对账已恢复。
+- 写入型手动验证 run `manual_perf_dcb5122c200b` 总耗时 `142.091s`，其中 `factor_governance_autonomous` 为 `132.040s`，最终因缺少当前 V16 command `blocked_by_v16_command`；没有 mutation intent、V16 command、learning application 或 RuntimeConfig overlay，未改变交易或运行配置。随后 02:23 的正式 `evolution_hourly` 日志完成 `138.6s`，对应 governance run `130.787s`，证明修复已加载且耗时从历史 `697.3s` 显著下降，但实际治理仍明显高于 2–7 秒的只读函数探针，剩余瓶颈在逐 action 的审计/投影写入链。
+- 手动验证产生的临时 runtime 记录已按唯一 run_id 清理：20 条 policy suggestion、1 条 factor catalog snapshot、40 条 evolution decision（含 20 条 API projection）、20 个无其他引用的 mutation payload 和 1 条 evolution run；Canonical V2 的 40 条不可变审计事件保留。工作区改动尚未提交或推送；正式发布后仍需按 PID、日志、V16/Coordinator/effect 证据补验。
+
+### 2026-08-30 PostgreSQL 重复写入收敛（v33，代码已验证并完成停写清理）
+
+- 0033 已在停写窗口显式应用并通过 `scripts/state_schema_migrate.py --check`：当前版本 `33/33`；`factor_runtime_projection.projection_id` 为主键，`(factor_id, process_role, process_id, boot_id)` 仍是唯一 upsert 身份。
+- 最终运行核对：`factor_runtime_projection` `1282` 行、`1282` 个 projection/身份、失效 coordinator `0`；`model_permission_audit` `2` 行/`2` 个语义组；`policy_suggestion` `1824` 行/`1824` 个语义组；因子目录 `50` 行/`50` 个完整不同 hash；`runtime_config_payload` `1288` 行、孤儿 `0`。清理工具明确报告 `canonical_v2 delete=0`。
+- 生产写入已收敛：`RuntimeKVStore` 只在语义内容变化时重写 JSON；模型权限审计、policy suggestion 和治理周期审计使用确定性身份/运行级合并；因子目录引用保留完整 payload，保留窗口不会删除引用目标；停盘无新事实时 evolution、nursery、feature engineering、supervisor 和 off-market 任务走共享 workload gate。
+- 最终受控重启后 backend/learning worker 均 `active`，`/api/health` 返回 DB/cTrader `connected`，日志无新的 traceback/exception/conflict/duplicate/pkey；worker 已恢复 RuntimeConfig overlay、治理恢复、调度器和 cTrader 认证。
+- 实时 workload gate 为 `run_pending_governance`（`closed_confirmed`、watermark `no_new_facts`、存在未应用 approved suggestion），所以只保留治理协调：evolution handoff `0.193s`、watermark cycle `0.097s`、feature engineering `0.097s`、off-market `0.099s`，均未启动重型研究流程。待 pending governance 消化后，同一门控会落到 `skip_closed_no_new_facts`。
+- 大字段 no-op 复核：readiness `205260` bytes、factor selection `231612` bytes 两次写入均返回 `changed=false/heartbeat_only=true`，JSON `md5` 与长度保持不变；只更新行级 `updated_at`。
+- 清理累计删除了权限审计旧重复（首轮 `97889`、后续 `3`、最终残留 `1`），当前仅保留 `2` 个有效语义结果；`VACUUM (ANALYZE)` 已执行。未删除 canonical 事实、训练样本、payload 或 mutation/effect。
+
+### 2026-08-28 只读复核结果（f2eb9c9 已加载，HEAD 即生产）
 
 - 双服务 `quant-backend.service PID 891039` / `quant-learning-worker.service PID 891040` 均 `active/running`，`NRestarts=0`；`system_health overall=healthy score=1.0`，`market_session open_confirmed can_open_positions true`，`risk_metrics known cvar 1.55%`，`live.loop generation 172b7fd3... running` 接受新风险，当前持仓 `285427255` 有仓且 `unknown_execution_count=0`；`governance_mutation_coordinator_v2_mode=enforce` 已加载，`off` 直连已删。
 - `canonical_v2.training_sample_row 10294`：`trade_review_outcome 67（full/1.0 46 连续 2026-08-21→08-28，近 4 天 8-11/天）`，`supervisor_execution_trace 9369（eligible matured 5/10）`，`shadow_open_decision 468`；`canonical_v2.event supervisor_trace 15 / counterfactual 33 / broker_execution 127`；`runtime.broker_execution_intent confirmed 132（近 3 天 84，unknown 0）`。

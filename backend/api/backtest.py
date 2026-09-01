@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 
 from backend.core.auth import RequireUser
 from backend.jobs import get_job_manager
-from backend.services.backtest_service import run_backtest
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -45,7 +44,7 @@ def run(_user: RequireUser, req: BacktestRequest) -> dict[str, Any]:
             detail={"error": "backtest_already_running", "job_id": active[0].id},
         )
     params = req.model_dump()
-    job = mgr.submit("backtest", params, lambda cb: run_backtest(params, cb))
+    job = mgr.submit("backtest", params)
     return {"job_id": job.id, "status": job.status, "engine": "live_parity_replay_v1"}
 
 

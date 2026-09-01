@@ -233,7 +233,6 @@ class DecisionLedger:
         factor_snapshots: list[dict] | None = None,
         runtime_selection_fingerprint: str = "",
         config_hash: str = "",
-        **extra: Any,
     ) -> str:
         now = time.time()
         decision_id = self.new_id("dec")
@@ -506,7 +505,6 @@ class DecisionLedger:
         status: str = "",
         details: dict | None = None,
         event_ts: float | None = None,
-        **extra: Any,
     ) -> str:
         event_id = self.new_id("ordevt")
         event_ts = float(event_ts or time.time())
@@ -541,7 +539,6 @@ class DecisionLedger:
         realized_pnl: float = 0.0,
         details: dict | None = None,
         event_ts: float | None = None,
-        **extra: Any,
     ) -> str:
         event_id = self.new_id("posevt")
         event_ts = float(event_ts or time.time())
@@ -610,7 +607,8 @@ class DecisionLedger:
         reconcile_fresh: bool | None = None,
         reconcile_confirmed: bool | None = None,
         no_change_reason: str = "",
-        **extra: Any,
+        policy_switch_status: str = "",
+        binding: dict | None = None,
     ) -> str:
         trace_id = self.new_id("psvtrace")
         now = time.time()
@@ -697,6 +695,10 @@ class DecisionLedger:
             trace_payload["applied_action"] = str(applied_action)
         if no_change_reason:
             trace_payload["no_change_reason"] = str(no_change_reason)
+        if policy_switch_status:
+            trace_payload["policy_switch_status"] = str(policy_switch_status)
+        if binding is not None:
+            trace_payload["binding"] = binding
         if risk_policy_result is not None:
             trace_payload["risk_policy_result"] = risk_policy_result
         if broker_execution_result is not None:
@@ -711,9 +713,6 @@ class DecisionLedger:
             trace_payload["reconcile_fresh"] = bool(reconcile_fresh)
         if reconcile_confirmed is not None:
             trace_payload["reconcile_confirmed"] = bool(reconcile_confirmed)
-        for k, v in (extra or {}).items():
-            if k not in trace_payload:
-                trace_payload[k] = v
         with self._conn() as conn:
             canonical_trace_payload = {
                 **trace_payload,

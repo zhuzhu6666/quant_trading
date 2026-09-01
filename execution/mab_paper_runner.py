@@ -30,10 +30,10 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)  # B1 fix: MABPaperRunner.__init__ line 193 用 logger.warning 之前没 import, rc=1 崩
 
-from data.store import DataStore
+from data.duckdb_store import DuckDBDataStore as DataStore
 from strategy.base import BaseStrategy, Signal
 from strategy.mab_router import MABRouter, classify_regime, REGIMES
-from execution.paper_trader import PaperTrader, PaperReport
+from execution.paper_execution import PaperTrader, PaperReport
 from execution._sharpe import sharpe_ratio_log_nw  # OPT-2 (audit 2026-06-06)
 
 
@@ -220,8 +220,8 @@ class MABPaperRunner:
 
     def _on_trade_close(self, trade) -> None:
         """每笔 trade close 的统一回调 — 把自学习层全接进来"""
-        # trade 是 paper_engine.PaperTrade, 含 direction/pnl/strategy_hint
-        # 注意: paper_engine 当前不记录 strategy 归属, 这里用 trade_records 推断
+        # trade 是 paper_execution.PaperTrade, 含 direction/pnl/strategy_hint
+        # 注意: paper_execution 当前不记录 strategy 归属, 这里用 trade_records 推断
         # (见 run() 主循环里我们手动记录的 (idx, strategy_name) 配对)
         record = self._trade_records[-1] if self._trade_records else None
         if record is None:
@@ -488,7 +488,7 @@ class MABPaperRunner:
 
         # Sharpe (OPT-2 audit 2026-06-06: log returns + Newey-West HAC)
         # ──────────────────────────────────────────────────
-        # 跟 paper_trader._finalize 同一公式, 集中放在 execution/_sharpe.py
+        # 跟 paper_execution._finalize 同一公式, 集中放在 execution/_sharpe.py
         # 旧: simple returns + iid 假设 → Sharpe 虚高 20-50%
         # 新: log returns + Newey-West HAC std → 真风险调整后收益
         tf = self.paper.strategy.timeframe

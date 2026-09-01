@@ -13,8 +13,6 @@ from alpha.portfolio_compositor import resolve_factor_role
 from alpha.runtime_factor_selection import select_runtime_factors
 from backend.core.db import (
     STATE_DB,
-    connect_sqlite,
-    get_state_pg_conn,
     is_state_db_path,
     state_table_columns,
 )
@@ -24,6 +22,7 @@ from backend.services.experience_prior import ExperiencePriorService
 from backend.services.factor_blend_health import FactorBlendHealthService
 from backend.services.learning_application_state import LearningApplicationStateService
 from backend.services.learning_experiment_admission import LearningExperimentAdmissionService
+from backend.services.replay_harness import ReplayHarnessService
 
 
 RiskCheck = Callable[[dict[str, Any]], Any]
@@ -126,26 +125,28 @@ class FactorWeightChangeService:
         )
         if max_delta < 0.10:
             return {"required": False, "allowed": True, "max_delta": max_delta}
-        conn = get_state_pg_conn(read_only=True) if is_state_db_path(self.db_path) else connect_sqlite(self.db_path, read_only=True)
         try:
-            row = conn.execute(
-                "SELECT replay_run_id, evidence_grade, status, replay_error, created_at "
-                "FROM replay_report ORDER BY created_at DESC LIMIT 1"
-            ).fetchone()
+            replay_readiness = ReplayHarnessService(self.db_path).status()
         except Exception as exc:
-            row = None
+            replay_readiness = {
+                "ok": False,
+                "status": "error",
+                "blockers": ["replay_status_unavailable"],
+            }
             error = f"{type(exc).__name__}: {exc}"
         else:
             error = ""
-        finally:
-            conn.close()
-        payload = dict(row) if row is not None else {}
+        payload = dict(replay_readiness.get("latest_report") or {})
         grade = str(payload.get("evidence_grade") or "")
-        allowed = bool(payload) and str(payload.get("status") or "") == "completed" and not payload.get("replay_error") and grade in {"A", "B"}
         return {
-            "required": True, "allowed": allowed, "max_delta": max_delta,
+            "required": True,
+            "allowed": replay_readiness.get("ok") is True,
+            "max_delta": max_delta,
             "replay_run_id": str(payload.get("replay_run_id") or ""),
-            "evidence_grade": grade, "error": error,
+            "evidence_grade": grade,
+            "status": str(replay_readiness.get("status") or ""),
+            "blockers": list(replay_readiness.get("blockers") or []),
+            "error": error,
         }
 
     @staticmethod

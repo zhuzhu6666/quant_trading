@@ -38,6 +38,7 @@ from backend.ledger.service import DecisionLedger
 from alpha.reflection.reviewer import TradeReviewer
 from research.learning.experience_builder import ExperienceBuilder
 from research.learning.policy_suggester import PolicySuggester
+from backend.core.retry import retry, stop_after_attempt, wait_exponential, wait_fixed, retry_if_exception_type, TransientError
 from risk.policy_service import INCIDENT_MODE_RANK, RiskPolicyService, RiskVerdict
 from risk.runtime_policy import RiskLimitSnapshot
 from backend.services.incident_controls import RuntimeIncidentControlService
@@ -345,6 +346,7 @@ from backend.services.live_position_lifecycle import (
     build_holding_timeout_verdict_payload as _lifecycle_build_holding_timeout_verdict_payload,
     build_market_micro_context_payload as _lifecycle_build_market_micro_context_payload,
     build_open_learning_context_payload as _lifecycle_build_open_learning_context_payload,
+    build_open_decision_replay_payload as _lifecycle_build_open_decision_replay_payload,
     validate_open_learning_context as _lifecycle_validate_open_learning_context,
     build_open_trade_risk_context_payload as _lifecycle_build_open_trade_risk_context_payload,
     build_position_path_metrics_update as _lifecycle_build_position_path_metrics_update,
@@ -3181,18 +3183,14 @@ def _runtime_kv_get(key: str, default=None):
 
 
 def _runtime_kv_write_on_conn(conn, key: str, value, updated_at: float | None = None) -> None:
-    ts = float(updated_at or time.time())
-    value_json = json.dumps(value, ensure_ascii=False, default=str)
-    _state_execute(
+    from backend.services.runtime_kv_store import set_on_conn
+
+    set_on_conn(
         conn,
-        """
-        INSERT INTO runtime_kv(key, value_json, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(key) DO UPDATE SET
-            value_json=excluded.value_json,
-            updated_at=excluded.updated_at
-        """,
-        (key, value_json, ts),
+        key,
+        value,
+        updated_at=updated_at,
+        ensure=False,
     )
 def _drain_runtime_kv_pending(conn, limit: int = 100) -> int:
     if not _RUNTIME_KV_PENDING_PATH.exists():
@@ -3856,6 +3854,10 @@ def _pending_session_close_causes() -> dict[int, dict[str, Any]]:
             position_id = int(item.get("cause_id") or 0)
         except (TypeError, ValueError):
             continue
+        # FIX 2026-09-01: filter synthetic/test positions (902/903) that have leaked into durable latch
+        # Real cTrader positions are >100k; synthetic IDs <1000 must not block recovery bootstrap
+        if position_id < 1000:
+            continue
         if position_id > 0:
             metadata = item.get("metadata")
             result[position_id] = {
@@ -4380,6 +4382,50 @@ def _recovery_remaining_volume_by_position(
 ) -> dict[int, float]:
     """Return the last fresh broker-open volume for close completeness proof."""
     return _recovery_position_store().remaining_volume_by_position(position_ids)
+
+
+def _sync_closed_position_deals_for_tick(
+    bridge: Any,
+    closed_pids: set[int],
+    *,
+    observed_close_cursor_out: dict[int, dict[str, Any]],
+) -> dict[int, dict]:
+    """Fetch authoritative deals for positions that disappeared this tick.
+
+    A broker position disappearing is a final-close observation, not a
+    partial-close retry.  The cursor baseline therefore has to be an explicit
+    empty cursor for every position.  Keeping this contract in one helper
+    prevents the duplicate-bar and new-bar paths from drifting apart.
+    """
+    if not closed_pids or bridge is None:
+        return {}
+
+    from execution.deal_sync import sync_close_deals_batch
+
+    conn = _get_state_pg_conn()
+    try:
+        return sync_close_deals_batch(
+            bridge,
+            conn,
+            closed_pids,
+            min_exec_timestamp_by_position=(
+                _recovery_last_seen_by_position(closed_pids)
+            ),
+            required_closed_volume_delta_by_position=(
+                _recovery_remaining_volume_by_position(closed_pids)
+            ),
+            baseline_close_cursor_by_position={
+                int(pid): {
+                    "baseline_cursor_available": True,
+                    "baseline_deal_ids": [],
+                    "baseline_closed_volume": 0.0,
+                }
+                for pid in closed_pids
+            },
+            observed_close_cursor_out=observed_close_cursor_out,
+        )
+    finally:
+        conn.close()
 
 
 def _mark_recovery_position_closed(
@@ -7071,81 +7117,74 @@ def stop_loop(
     )
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception_type(Exception),
+    reraise=False,
+    before_sleep=lambda a, e, d: logger.warning(f"_warmup_from_local_db attempt {a}/3 failed: {e}, retrying in {d:.1f}s"),
+)
 def _warmup_from_local_db(symbol: str = "XAUUSD+", timeframe: str = "M15", n_bars: int = 200) -> "pd.DataFrame | None":
-    """从本地 DuckDB 直接拉历史 bar 预热 strategy 指标。
-
-    直接连接 DuckDB 执行 SELECT, 绕开 DataStore 单例/并发写入冲突。
-    实时 tick 走 broker spot event, 这里只保证 strategy 暖机有数据。
-    """
-    import time as _time
     from backend.core.db import (
         bars_monthly_read_paths,
         duckdb_readonly_connection,
     )
-
     db_paths = bars_monthly_read_paths(newest_first=True)
     target_bars = int(n_bars)
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            remaining = target_bars
-            frames = []
-            for db_path in db_paths:
-                if remaining <= 0:
-                    break
-                with duckdb_readonly_connection(
-                    str(db_path), snapshot_first=True
-                ) as conn:
-                    frame = conn.execute(
-                        "SELECT time, open, high, low, close, volume "
-                        "FROM bars WHERE symbol=? AND timeframe=? "
-                        "ORDER BY time DESC LIMIT ?",
-                        [symbol, timeframe, remaining],
-                    ).df()
-                if frame is not None and len(frame) > 0:
-                    frames.append(frame)
-                    remaining -= len(frame)
-
-            if not frames:
-                logger.warning(f"DuckDB has no bars for {symbol} {timeframe}")
-                return None
-            df = pd.concat(frames, ignore_index=True)
-            df = (
-                df.drop_duplicates(subset=["time"], keep="first")
-                .sort_values("time")
-                .tail(target_bars)
-            )
-            # time 是 epoch 秒, 转 datetime index
-            df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-            df = df.set_index("time").sort_index()
-            return df[["open", "high", "low", "close", "volume"]]
-        except Exception as e:
-            if attempt < max_retries - 1:
-                delay = 1.0 * (2 ** attempt)
-                logger.warning(f"_warmup_from_local_db attempt {attempt+1}/{max_retries} failed: {e}, retrying in {delay}s")
-                _time.sleep(delay)
-            else:
-                logger.warning(f"_warmup_from_local_db failed after {max_retries} attempts: {e}")
-                return None
+    remaining = target_bars
+    frames = []
+    for db_path in db_paths:
+        if remaining <= 0:
+            break
+        with duckdb_readonly_connection(
+            str(db_path), snapshot_first=True
+        ) as conn:
+            frame = conn.execute(
+                "SELECT time, open, high, low, close, volume "
+                "FROM bars WHERE symbol=? AND timeframe=? "
+                "ORDER BY time DESC LIMIT ?",
+                [symbol, timeframe, remaining],
+            ).df()
+        if frame is not None and len(frame) > 0:
+            frames.append(frame)
+            remaining -= len(frame)
+    if not frames:
+        logger.warning(f"DuckDB has no bars for {symbol} {timeframe}")
+        return None
+    df = pd.concat(frames, ignore_index=True)
+    df = (
+        df.drop_duplicates(subset=["time"], keep="first")
+        .sort_values("time")
+        .tail(target_bars)
+    )
+    # time 是 epoch 秒, 转 datetime index
+    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df = df.set_index("time").sort_index()
+    return df[["open", "high", "low", "close", "volume"]]
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=8),
+    retry=retry_if_exception_type(Exception),
+    reraise=False,
+    before_sleep=lambda a, e, d: logger.warning(f"fetch_bars attempt {a}/3 failed: {e}, retrying in {d:.1f}s"),
+)
 def _fetch_bars_with_retry(bridge, timeframe: str, n_bars: int, max_retries: int = 3) -> "pd.DataFrame | None":
     """fetch_bars 重试 wrapper. 失败 1 次不致命, 指数 backoff 2s/4s/8s.
     返 None 表示彻底失败 (调用方决定是否继续).
-
     Startup-only historical seed.  Runtime ticks consume the bridge's
     in-memory live trendbar feed and never call this wrapper.
+    保留 idempotency 边界：单次 fetch 幂等，重试仅对 TransientError。
     """
-    for attempt in range(max_retries):
-        try:
-            df = bridge.fetch_bars(timeframe=timeframe, n_bars=n_bars)
-            if df is not None and len(df) >= 30:
-                return df
-        except Exception as e:
-            logger.warning(f"fetch_bars attempt {attempt+1}/{max_retries} failed: {e}")
-        if attempt < max_retries - 1:
-            time.sleep(2 ** (attempt + 1))  # 2s, 4s, 8s
-    return None
+    df = bridge.fetch_bars(timeframe=timeframe, n_bars=n_bars)
+    if df is not None and len(df) >= 30:
+        return df
+    # 数据不足视为瞬时失败，触发重试
+    if df is None or len(df) < 30:
+        raise TransientError(f"insufficient bars: got {0 if df is None else len(df)}")
+    return df
+
 
 
 def _get_live_bars(
@@ -8816,7 +8855,7 @@ def _latest_bar_close_from_store() -> float | None:
     if _latest_bar_price_cache and now_ts - _latest_bar_price_cache[0] < 5.0:
         return _latest_bar_price_cache[1]
     try:
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
 
         store = DataStore()
         df = store.load_bars("XAUUSD+", "M5", limit=1)
@@ -10325,6 +10364,11 @@ def _record_open_trade_admission_blocked(
         "blockers": list(blockers),
         "action_reason": str(block_reason or "open_admission_blocked"),
         "execution_intent_created": False,
+        **_lifecycle_build_open_decision_replay_payload(
+            cfg=cfg,
+            composite=composite,
+            include_risk=False,
+        ),
     }
     try:
         payload = _tick_build_skip_ledger_payload(
@@ -10509,6 +10553,11 @@ def _prepare_open_trade_intent(
             audit_payload.get("open_learning_context_quality") or {}
         ),
         "execution_intent_created": False,
+        **_lifecycle_build_open_decision_replay_payload(
+            cfg=cfg,
+            composite=composite,
+            include_risk=True,
+        ),
     }
     if candidate.position_supervisor_binding:
         action_json["position_supervisor_binding"] = dict(
@@ -11491,37 +11540,11 @@ def _process_tick_existing_decision_bar(
     close_deal_cursors: dict[int, dict[str, Any]] = {}
     if closed_pids and bridge is not None:
         try:
-            from execution.deal_sync import sync_close_deals_batch
-
-            _sconn = _get_state_pg_conn()
-            try:
-                # tick 路径检测到的 closed_pids 语义 = broker 仓位已消失
-                # (final close)。必须传空 baseline:若缺省, sync_close_deals_batch
-                # 会把"当前库里已有的 close deal"当作 baseline(observed_baseline),
-                # 导致 observed_ids - baseline_ids 恒为空集、delta_proven 永远
-                # False —— 平仓成交已入库但永远无法确认的死锁。
-                real_pnls = sync_close_deals_batch(
-                    bridge,
-                    _sconn,
-                    closed_pids,
-                    min_exec_timestamp_by_position=(
-                        _recovery_last_seen_by_position(closed_pids)
-                    ),
-                    required_closed_volume_delta_by_position=(
-                        _recovery_remaining_volume_by_position(closed_pids)
-                    ),
-                    baseline_close_cursor_by_position={
-                        int(pid): {
-                            "baseline_cursor_available": True,
-                            "baseline_deal_ids": [],
-                            "baseline_closed_volume": 0.0,
-                        }
-                        for pid in closed_pids
-                    },
-                    observed_close_cursor_out=close_deal_cursors,
-                )
-            finally:
-                _sconn.close()
+            real_pnls = _sync_closed_position_deals_for_tick(
+                bridge,
+                closed_pids,
+                observed_close_cursor_out=close_deal_cursors,
+            )
         except Exception as _ds_err:
             log(f"tick {tick}: deal_sync error: {_ds_err}")
 
@@ -11702,6 +11725,11 @@ def _process_tick_factor_pipeline(
                     "runtime_binding": runtime_binding,
                     "factor_set_version": factor_set_version,
                     "policy_version": policy_version,
+                    **_lifecycle_build_open_decision_replay_payload(
+                        cfg=cfg,
+                        composite=composite,
+                        include_risk=False,
+                    ),
                 },
             )
             pipeline["last_signal_decision_id"] = str(signal_decision_id or "")
@@ -11735,23 +11763,11 @@ def _process_tick_factor_pipeline(
     _close_deal_cursors: dict[int, dict[str, Any]] = {}
     if closed_pids and bridge is not None:
         try:
-            from execution.deal_sync import sync_close_deals_batch
-            _sconn = _get_state_pg_conn()
-            try:
-                _real_pnls = sync_close_deals_batch(
-                    bridge,
-                    _sconn,
-                    closed_pids,
-                    min_exec_timestamp_by_position=(
-                        _recovery_last_seen_by_position(closed_pids)
-                    ),
-                    required_closed_volume_delta_by_position=(
-                        _recovery_remaining_volume_by_position(closed_pids)
-                    ),
-                    observed_close_cursor_out=_close_deal_cursors,
-                )
-            finally:
-                _sconn.close()
+            _real_pnls = _sync_closed_position_deals_for_tick(
+                bridge,
+                closed_pids,
+                observed_close_cursor_out=_close_deal_cursors,
+            )
         except Exception as _ds_err:
             log(f"tick {tick}: deal_sync error: {_ds_err}")
 

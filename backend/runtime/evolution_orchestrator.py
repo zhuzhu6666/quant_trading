@@ -32,6 +32,7 @@ from backend.core.db import get_state_pg_conn
 from backend.core.state_store import RuntimeStateSchemaError, validate_runtime_state_schema
 
 from backend.services.autonomous_learning import _autonomy_mode
+from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 
 
 _EVOLUTION_WATERMARK_KEY = "evolution_cycle_watermark.v1"
@@ -232,18 +233,7 @@ def _evolution_input_watermark(
     from config import runtime_config
 
     cfg = runtime_config.shared()
-    config_payload = runtime_config.canonical_runtime_config_payload(
-        cfg.to_dict()
-    )
-    config_hash = hashlib.sha256(
-        _json.dumps(
-            config_payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
+    config_hash = runtime_config.runtime_config_hash(cfg)
     digest = hashlib.sha256()
     digest.update(
         _json.dumps(
@@ -309,6 +299,40 @@ def _evolution_input_watermark(
     return payload
 
 
+def _evolution_input_unchanged(
+    current: dict[str, Any],
+    previous: dict[str, Any],
+) -> bool:
+    """Compare market input without treating code/config drift as new bars."""
+    if str(previous.get("read_status") or "") != "known":
+        return False
+
+    current_input = str(current.get("input_fingerprint") or "")
+    previous_input = str(previous.get("input_fingerprint") or "")
+    if current_input and previous_input:
+        return current_input == previous_input
+
+    # Keep compatibility with early v1 rows that only stored the aggregate
+    # watermark fingerprint.  A matching aggregate remains valid evidence.
+    current_watermark = str(current.get("watermark_fingerprint") or "")
+    previous_watermark = str(previous.get("watermark_fingerprint") or "")
+    if current_watermark and previous_watermark:
+        return current_watermark == previous_watermark
+
+    # Last-resort compatibility for rows without either fingerprint.  A
+    # changed bar is new input and must not be skipped.
+    current_symbol = str(current.get("symbol") or "")
+    current_timeframe = str(current.get("timeframe") or "")
+    current_last_bar = str(current.get("last_closed_bar") or "")
+    return bool(
+        current_symbol
+        and current_symbol == str(previous.get("symbol") or "")
+        and current_timeframe == str(previous.get("timeframe") or "")
+        and current_last_bar
+        and current_last_bar == str(previous.get("last_closed_bar") or "")
+    )
+
+
 def _load_evolution_cycle_watermark() -> dict[str, Any]:
     conn = None
     try:
@@ -340,6 +364,81 @@ def _load_evolution_cycle_watermark() -> dict[str, Any]:
             conn.close()
 
 
+def _confirmed_closed_market_session() -> dict[str, Any]:
+    """Return the live session projection only when it is fresh and closed.
+
+    This is a workload gate, not a trading decision.  Unknown or stale
+    session state must keep the research path running rather than silently
+    suppressing work.
+    """
+    try:
+        from backend.services.runtime_health_projection import (
+            RuntimeHealthProjectionService,
+        )
+
+        projection = RuntimeHealthProjectionService().latest(max_age_seconds=180.0)
+        session = projection.get("market_session") or {}
+        if not bool(projection.get("ok")) or not isinstance(session, dict):
+            return {}
+        if str(session.get("status") or "") != "closed_confirmed":
+            return {}
+        if session.get("can_open_positions") is not False:
+            return {}
+        return {
+            "status": "closed_confirmed",
+            "can_open_positions": False,
+            "projection_age_seconds": float(projection.get("age_seconds") or 0.0),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[Evolve] closed-session workload gate unavailable: %s", exc)
+        return {}
+
+
+def _has_pending_factor_governance_work() -> bool:
+    """Keep governance running when an existing actionable item is pending."""
+    conn = None
+    try:
+        conn = _state_conn(read_only=True)
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM policy_suggestion
+            WHERE status='approved' AND COALESCE(governance_eligible, 0)=1
+            LIMIT 1
+            """
+        ).fetchone()
+        if row:
+            return True
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM factor_lifecycle_state
+            WHERE COALESCE(lifecycle_stage, stage)='PROMOTION_PREPARED'
+            LIMIT 1
+            """
+        ).fetchone()
+        if row:
+            return True
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM governance_mutation_intent
+            WHERE status IN ('reserved', 'prepared')
+            LIMIT 1
+            """
+        ).fetchone()
+        return bool(row)
+    except Exception as exc:  # noqa: BLE001
+        # If the pending-work projection cannot be read, do not suppress
+        # governance.  The existing fail-closed mutation gates still decide
+        # whether any action is allowed.
+        logger.debug("[Evolve] pending governance check unavailable: %s", exc)
+        return True
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _persist_evolution_cycle_watermark(
     watermark: dict[str, Any],
 ) -> dict[str, Any]:
@@ -361,19 +460,12 @@ def _persist_evolution_cycle_watermark(
             )
             """,
         )
-        conn.execute(
-            """
-            INSERT INTO runtime_kv (key, value_json, updated_at)
-            VALUES (%s, %s, %s)
-            ON CONFLICT(key) DO UPDATE SET
-                value_json=excluded.value_json,
-                updated_at=excluded.updated_at
-            """,
-            (
-                _EVOLUTION_WATERMARK_KEY,
-                _json.dumps(payload, ensure_ascii=False, sort_keys=True),
-                completed_at,
-            ),
+        set_runtime_kv_on_conn(
+            conn,
+            _EVOLUTION_WATERMARK_KEY,
+            payload,
+            updated_at=completed_at,
+            ensure=False,
         )
         conn.commit()
         return {**payload, "write_status": "completed"}
@@ -450,6 +542,32 @@ def scheduled_evolution_cycle(
     t0 = _time.time()
 
     try:
+        from backend.services.learning_workload_gate import (
+            RUN_PENDING_GOVERNANCE,
+            SKIP_CLOSED_NO_NEW_FACTS,
+            evaluate_learning_workload,
+        )
+
+        workload_gate = evaluate_learning_workload()
+        workload_status = str(workload_gate.get("status") or "")
+        if workload_status in {SKIP_CLOSED_NO_NEW_FACTS, RUN_PENDING_GOVERNANCE}:
+            report.evolution_watermark = dict(workload_gate.get("watermark") or {})
+            report.gp_status = "skipped_market_closed"
+            report.gp_skip_reason = (
+                "market_closed_no_new_input"
+                if workload_status == SKIP_CLOSED_NO_NEW_FACTS
+                else "market_closed_pending_governance"
+            )
+            report.canary_backpressure = {
+                "ok": True,
+                "status": "pending_governance" if workload_status == RUN_PENDING_GOVERNANCE else "idle",
+                "can_register": False,
+                "reason_code": report.gp_skip_reason,
+            }
+            cb("idle_skip", 40, report.gp_skip_reason)
+            report.duration_sec = _time.time() - t0
+            return report
+
         _emit_evolution_story("cycle_start", {})
         cb("start", 0, "evolution cycle starting")
 
@@ -503,9 +621,7 @@ def scheduled_evolution_cycle(
         )
         same_input = bool(
             watermark_owner
-            and previous_watermark.get("read_status") == "known"
-            and str(previous_watermark.get("watermark_fingerprint") or "")
-            == str(input_watermark["watermark_fingerprint"])
+            and _evolution_input_unchanged(input_watermark, previous_watermark)
         )
         report.evolution_watermark = {
             **input_watermark,
@@ -516,6 +632,24 @@ def scheduled_evolution_cycle(
             "write_enabled": watermark_owner,
             "same_input": same_input,
         }
+        closed_session = _confirmed_closed_market_session()
+        if same_input and closed_session:
+            report.evolution_watermark = {
+                **report.evolution_watermark,
+                "market_session": closed_session,
+            }
+            report.gp_status = "skipped_market_closed"
+            report.gp_skip_reason = "market_closed_no_new_input"
+            report.canary_backpressure = {
+                "ok": True,
+                "status": "idle",
+                "can_register": False,
+                "reason_code": "market_closed_no_new_input",
+            }
+            cb("idle_skip", 40, "evolution skipped: market closed and input unchanged")
+            _emit_evolution_story("cycle_skipped", report.to_dict())
+            report.duration_sec = _time.time() - t0
+            return report
         report.canary_backpressure = _canary_registration_backpressure()
         can_run_gp = bool(
             gp_pop > 0
@@ -687,7 +821,60 @@ def scheduled_evolution_cycle(
 def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
     """Run health -> V16 decision -> specialist governance in one evidence cycle."""
 
+    from backend.services.learning_workload_gate import (
+        RUN_PENDING_GOVERNANCE,
+        SKIP_CLOSED_NO_NEW_FACTS,
+        evaluate_learning_workload,
+    )
+
+    workload_gate = evaluate_learning_workload()
+    if str(workload_gate.get("status") or "") == SKIP_CLOSED_NO_NEW_FACTS:
+        report = EvolutionReport()
+        report.gp_status = "skipped_market_closed"
+        report.gp_skip_reason = "market_closed_no_new_input"
+        report.evolution_watermark = dict(workload_gate.get("watermark") or {})
+        report.factor_v16_handoff = {
+            "status": "skipped",
+            "health_cycle_id": "",
+            "reason": "market_closed_no_new_input",
+        }
+        report.factor_governance_handoff = dict(report.factor_v16_handoff)
+        return report
+
     report = scheduled_evolution_cycle()
+    if report.gp_skip_reason == "market_closed_pending_governance":
+        # Pending governance is owned by the bounded Coordinator/effect
+        # reconciliation path. Do not fall through to the normal handoff:
+        # it would rebuild factor health, dispatch V16, and run the full
+        # factor-governance catalog scan while the market is closed.
+        report.factor_v16_handoff = {
+            "status": "skipped",
+            "health_cycle_id": "",
+            "reason": "market_closed_pending_governance",
+        }
+        report.factor_governance_handoff = {
+            "status": "deferred",
+            "health_cycle_id": "",
+            "reason": "market_closed_pending_governance",
+            "owner": "AutonomousEvolutionNurseryRunner",
+        }
+        return report
+
+    if (
+        report.gp_skip_reason == "market_closed_no_new_input"
+        and not _has_pending_factor_governance_work()
+    ):
+        report.factor_v16_handoff = {
+            "status": "skipped",
+            "health_cycle_id": "",
+            "reason": "market_closed_no_new_input",
+        }
+        report.factor_governance_handoff = {
+            "status": "skipped",
+            "health_cycle_id": "",
+            "reason": "market_closed_no_new_input",
+        }
+        return report
     v16_result: dict[str, Any] = {}
     if report.factor_health_persisted:
         try:

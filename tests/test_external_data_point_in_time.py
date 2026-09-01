@@ -271,7 +271,7 @@ def test_fred_without_key_is_skip_not_failure(monkeypatch):
 
     finishes = []
     monkeypatch.delenv("QUANT_FRED_API_KEY", raising=False)
-    monkeypatch.setattr(refresh, "_env_value", lambda name: "")
+    monkeypatch.setattr(refresh, "get_env", lambda name, default=None: "")
     monkeypatch.setattr(refresh, "start_refresh_audit", lambda source: "fred_test")
     monkeypatch.setattr(refresh, "finish_refresh_audit", lambda run_id, **kwargs: finishes.append(kwargs))
     monkeypatch.setattr(refresh, "_get_store", lambda: object())

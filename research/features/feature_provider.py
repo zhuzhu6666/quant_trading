@@ -1437,7 +1437,14 @@ class LearningFeatureProvider:
                 recent_snapshot_limit = 2000
                 for decision in iter_decision_rows(conn, limit=0, reverse=True):
                     decision_id = str(decision.get("decision_id") or "")
-                    for snapshot in iter_decision_factor_snapshots(conn, decision_id):
+                    # ``iter_decision_rows`` already restores the immutable
+                    # payload. Reuse its embedded snapshots instead of
+                    # looking up and decoding the same payload once more for
+                    # every decision.
+                    snapshots = decision.get("factor_snapshots") or []
+                    for snapshot in snapshots:
+                        if not isinstance(snapshot, dict):
+                            continue
                         factor = str(snapshot.get("factor") or "")
                         if factor not in result:
                             continue

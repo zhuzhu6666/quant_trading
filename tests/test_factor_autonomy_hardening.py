@@ -126,7 +126,7 @@ def test_runtime_config_overlay_refuses_pytest_write_to_production_store(monkeyp
         )
 
 
-def test_startup_restore_applies_overlay_and_writes_snapshot(tmp_path):
+def test_startup_restore_applies_overlay_and_reuses_snapshot(tmp_path):
     rc.reset_for_tests()
     db_path = tmp_path / "state.db"
     from backend.services.governance_mutation_coordinator import (
@@ -165,7 +165,7 @@ def test_startup_restore_applies_overlay_and_writes_snapshot(tmp_path):
         ).fetchone()
     finally:
         conn.close()
-    assert row == ("test_worker_startup", "startup_run")
+    assert row == ("factor_governance_update_weight", "run_overlay")
 
 
 def test_runtime_config_shared_can_refresh_overlay_written_by_another_process(tmp_path):
@@ -513,6 +513,7 @@ def test_learning_worker_factor_health_catchup_reuses_governance_freshness(
 
     calls = []
     monkeypatch.setattr(worker, "_factor_health_catchup_thread", None)
+    monkeypatch.setattr(worker, "_closed_market_source_watermark_current", lambda: False)
     monkeypatch.setattr(worker, "_latest_factor_health_age_seconds", lambda: 301.0)
     monkeypatch.setattr(
         governance,
@@ -529,6 +530,27 @@ def test_learning_worker_factor_health_catchup_reuses_governance_freshness(
     worker._factor_health_catchup_thread.join(timeout=2.0)
 
     assert calls == ["factor_health_startup_catchup"]
+
+
+def test_learning_worker_factor_health_catchup_skips_closed_market_without_new_facts(
+    monkeypatch,
+):
+    import scripts.learning_worker as worker
+
+    calls = []
+    monkeypatch.setattr(worker, "_factor_health_catchup_thread", None)
+    monkeypatch.setattr(worker, "_closed_market_source_watermark_current", lambda: True)
+    monkeypatch.setattr(worker, "_latest_factor_health_age_seconds", lambda: None)
+    monkeypatch.setattr(
+        worker,
+        "_coordinated_mutation_job",
+        lambda name, _fn: lambda: calls.append(name) or {"status": "ok"},
+    )
+
+    assert worker._schedule_factor_health_catchup(delay_sec=0.0) is True
+    worker._factor_health_catchup_thread.join(timeout=2.0)
+
+    assert calls == []
 
 
 def test_learning_worker_nursery_uses_bounded_demo_step_without_full_learning_cycle(

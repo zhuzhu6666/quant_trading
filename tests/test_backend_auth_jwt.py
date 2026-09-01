@@ -54,8 +54,13 @@ def test_login_returns_jwt():
 
 def test_login_requires_auth_environment(monkeypatch):
     import backend.core.auth as auth_core
+    import backend.core.env as env_mod
+    import backend.api.auth as api_auth
 
     monkeypatch.delenv("QUANT_JWT_SECRET", raising=False)
+    monkeypatch.setattr(env_mod, "get_env", lambda k, d=None: "")
+    monkeypatch.setattr(auth_core, "get_env", lambda k, d=None: "")
+    monkeypatch.setattr(api_auth, "get_env", lambda k, d=None: "")
     auth_core._JWT_SECRET = None
     r = client.post("/api/auth/login", json={"username": "zhu", "password": _PW})
 
@@ -64,7 +69,14 @@ def test_login_requires_auth_environment(monkeypatch):
 
 
 def test_login_requires_password_hash(monkeypatch):
+    import backend.core.env as env_mod
+    import backend.core.auth as auth_core
+    import backend.api.auth as api_auth
+
     monkeypatch.delenv("QUANT_PASSWORD_HASH", raising=False)
+    monkeypatch.setattr(env_mod, "get_env", lambda k, d=None: "")
+    monkeypatch.setattr(auth_core, "get_env", lambda k, d=None: "")
+    monkeypatch.setattr(api_auth, "get_env", lambda k, d=None: "")
     r = client.post("/api/auth/login", json={"username": "zhu", "password": _PW})
 
     assert r.status_code == 500

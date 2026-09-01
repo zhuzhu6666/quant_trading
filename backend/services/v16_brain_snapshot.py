@@ -469,14 +469,67 @@ def build_posterior_arbitration(
             weak_supervisor_items.append(item_data)
         else:
             supervisor_items.append(item_data)
-    # Prefer strong evidence; fall back to weak if nothing stronger exists
-    if supervisor_items:
-        supervisor = max(supervisor_items, key=lambda item: item["evidence_score"])
-    elif weak_supervisor_items:
-        supervisor = max(weak_supervisor_items, key=lambda item: item["evidence_score"])
-    else:
-        supervisor = {}
-
+    all_supervisor_items = supervisor_items + weak_supervisor_items
+    supervisor = {}
+    if all_supervisor_items:
+        weighted_counts: dict[str, float] = {}
+        weighted_action: dict[str, float] = {}
+        conclusion_to_action: dict[str, str] = {}
+        for item in all_supervisor_items:
+            conclusion = str(item.get("conclusion") or "")
+            action = str(item.get("recommended_action") or "")
+            score = float(item.get("evidence_score") or 0.0)
+            weighted_counts[conclusion] = weighted_counts.get(conclusion, 0.0) + score
+            weighted_action[action] = weighted_action.get(action, 0.0) + score
+            if conclusion and action:
+                conclusion_to_action[conclusion] = action
+        dominant_conclusion = max(weighted_counts, key=lambda key: weighted_counts[key]) if weighted_counts else ""
+        dominant_weight = float(weighted_counts.get(dominant_conclusion, 0.0))
+        weighted_total = sum(weighted_counts.values())
+        sorted_weights = sorted(weighted_counts.values(), reverse=True)
+        second_weight = float(sorted_weights[1]) if len(sorted_weights) > 1 else 0.0
+        margin = round(dominant_weight - second_weight, 6)
+        # Evidence is inconclusive when the dominant signal is narrow or
+        # the total weighted evidence is still sparse.  Keep the aggregated
+        # signal but mark it inconclusive so governors do not trigger live
+        # template changes without a canary/application.
+        causal_state = "strong"
+        if weighted_total < 1.5 or dominant_weight < 0.8 or margin < 0.8:
+            # Single strong item (e.g. 0.8) with no competitor has margin
+            # == dominant_weight (0.8) which meets the threshold, so it
+            # remains strong.  A 3-vs-2 split (≈2.1 vs 1.4) has margin 0.7
+            # and stays inconclusive.
+            if not (len(all_supervisor_items) == 1 and dominant_weight >= 0.8):
+                causal_state = "inconclusive"
+        # Pick the strongest item among the dominant conclusion for source
+        # lineage; the aggregated view still carries the weighted totals.
+        dominant_items = [item for item in all_supervisor_items if str(item.get("conclusion") or "") == dominant_conclusion]
+        representative = max(dominant_items, key=lambda item: float(item.get("evidence_score") or 0.0)) if dominant_items else max(all_supervisor_items, key=lambda item: float(item.get("evidence_score") or 0.0))
+        supervisor = {
+            "causal_scope": "supervisor",
+            "conclusion": dominant_conclusion,
+            "recommended_action": str(representative.get("recommended_action") or conclusion_to_action.get(dominant_conclusion) or ""),
+            "counterfactual_label": str(representative.get("counterfactual_label") or ""),
+            "confidence": float(representative.get("confidence") or 0.0),
+            "evidence_score": round(dominant_weight, 6),
+            "weighted_total": round(weighted_total, 6),
+            "weighted_label_counts": {key: round(value, 6) for key, value in weighted_counts.items()},
+            "weighted_action_counts": {key: round(value, 6) for key, value in weighted_action.items()},
+            "dominant_conclusion": dominant_conclusion,
+            "dominant_weight": round(dominant_weight, 6),
+            "margin": margin,
+            "causal_state": causal_state,
+            "evidence_count": len(all_supervisor_items),
+            "strong_count": len(supervisor_items),
+            "weak_count": len(weak_supervisor_items),
+            "source_ref_type": str(representative.get("source_ref_type") or ""),
+            "source_ref_id": str(representative.get("source_ref_id") or ""),
+            "position_id": str(representative.get("position_id") or ""),
+            "review_id": str(representative.get("review_id") or ""),
+            "trade_id": str(representative.get("trade_id") or ""),
+            "evidence_tags": list(representative.get("evidence_tags") or []),
+            "weak_posterior": bool(causal_state == "inconclusive" and dominant_weight < 1.2),
+        }
     entry = {}
     related_reviews = reviews
     if supervisor:

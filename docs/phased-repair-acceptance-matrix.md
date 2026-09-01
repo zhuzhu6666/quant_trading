@@ -152,17 +152,17 @@ supervisor_enforce
 
 Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed 空仓 shadow，或一个完整 broker position lifecycle。该条件只授权 Safety v2 发布门，不是有界 Demo `runtime_incident_mode=normal` 或普通开仓的等待锁。
 
-## 8. 当前未完成证据（2026-08-28 14:53 复核）
+## 8. 当前未完成证据（2026-08-31 13:42 复核）
 
-2026-08-28 只读：`quant-backend 891039` / `quant-learning-worker 891040` 均 `active` `NRestarts=0`，`live_safety_plane_v2_mode=enforce` 已加载（`f2eb9c9` off 路径已删），`governance_mutation_coordinator_v2_mode=enforce` 已加载；`broker_execution 127 / position_transition 125 / trade_review 99 / full/1.0 46 (2026-08-21→28)` 全链条稳定；`risk_metrics known cvar1.55%`，持仓 `285427255` 有仓，`unknown_execution_count=0`，`Safety heartbeat 5.4s`。
+2026-08-31 只读：`quant-backend`、`quant-learning-worker`、`quant-job-worker` 均 `active`，三项静态 flags 均加载 `live_safety_plane_v2_mode=enforce`、`governance_mutation_coordinator_v2_mode=enforce`、`pg_job_queue_v2_enabled=true`；worker capability 的八类 handler 与 30 秒心跳门通过；schema current/minimum version 均为 33；`factor_health` smoke job 已完成且无 error。本批未执行人工 broker mutation；受控重启期间由既有 live auto-resume 完成恢复并产生当前持仓，执行意图当前无未决项。
 
 已满足：
 - P1 runtime acceptance ✅（价格合同 + lifecycle 闭环）
 - Safety v2 enforce ✅（有仓 `governed_execute` 验证）
-- governance enforce ✅（14:14 flat 已切 `enforce`，`off` 直连路径 f2eb9c9 已删）
+- governance enforce ✅（`off` 直连路径已删）
+- `pg_job_queue_enable → verify` ✅（PG durable queue、enabled/active worker、真实消费和 lease/recovery 测试）
 
 仍未完成：
-- `pg_job_queue_enable → verify`（静态 `pg_job_queue_v2_enabled=false`，`reconciled 0/missing 0` 待发布门）
 - supervisor 治理闭环 `governance_eligible matured 5/10`（需 10）与 `tighten/reduce` 覆盖
 - P6 Demo 自治毕业（需 100 笔/30 天/2 regimes/PF 等）
 
@@ -184,6 +184,7 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 | evolution watermark、积压背压、单 owner/cron | `tests/test_evolution_cycle_watermark_v1.py`、`tests/test_live_scheduler_jobs.py`、`tests/test_factor_autonomy_hardening.py` |
 | blocked/no-change 不制造 snapshot | `tests/test_evolution_config_snapshot_idempotency.py` |
 | Candidate Card 方向、lineage、成熟证据和 effect 门 | `tests/test_factor_cards_api.py`、`tests/alpha/test_factor_score_evaluator.py` |
+| 因子治理批量读取、无 mutation 不重建目录、V16 固定候选 | `tests/test_factor_catalog_governance.py`、`tests/test_canonical_v2.py`、`tests/test_factor_cards_api.py`、`tests/backend/runtime/test_factor_governance_orchestrator.py` |
 | legacy ACTIVE 排除与同 generation 退回 | `tests/alpha/test_runtime_factor_selection.py`、`tests/test_factor_lifecycle_service.py` |
 | effect 成熟前不可扩权 | `tests/test_factor_weight_change_service.py` |
 | 新 decision factor lineage 绑定或显式 missing | `tests/test_decision_factor_lineage.py`；schema migration `0013` |

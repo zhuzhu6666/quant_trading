@@ -269,8 +269,8 @@ def test_promoted_runtime_field_rehydrates_legacy_extra_and_keeps_snapshot_hash(
         db_path=tmp_path / "state.db",
     )
     assert second["config_hash"] == first["config_hash"]
-    assert second["config_version"] == first["config_version"] + 1
-    assert second["reused"] is False
+    assert second["config_version"] == first["config_version"]
+    assert second["reused"] is True
 
 
 def test_promoted_runtime_field_conflict_fails_closed() -> None:
@@ -290,7 +290,7 @@ def test_invalid_incident_mode_is_rejected_while_loading() -> None:
         rc.RuntimeConfig.from_yaml({"runtime": {"runtime_incident_mode": "unsafe_typo"}})
 
 
-def test_runtime_config_snapshot_hash_stable_and_preserves_identical_occurrences(tmp_path) -> None:
+def test_runtime_config_snapshot_hash_stable_and_dedupes_identical_occurrences(tmp_path) -> None:
     db_path = tmp_path / "state.db"
     cfg = rc.RuntimeConfig(shadow_vote_weight=0.33)
 
@@ -298,13 +298,13 @@ def test_runtime_config_snapshot_hash_stable_and_preserves_identical_occurrences
     second = persist_runtime_config_snapshot(cfg, source="test", db_path=db_path)
 
     assert first["config_hash"] == second["config_hash"]
-    assert second["config_version"] == first["config_version"] + 1
-    assert second["reused"] is False
+    assert second["config_version"] == first["config_version"]
+    assert second["reused"] is True
 
     third = persist_runtime_config_snapshot(cfg, source="different_event", db_path=db_path)
-    assert third["config_version"] == second["config_version"] + 1
-    assert third["reused"] is False
-    assert third["source"] == "different_event"
+    assert third["config_version"] == second["config_version"]
+    assert third["reused"] is True
+    assert third["source"] == "test"
 
     changed = rc.RuntimeConfig(shadow_vote_weight=0.34)
     fourth = persist_runtime_config_snapshot(

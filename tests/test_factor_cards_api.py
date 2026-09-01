@@ -3,6 +3,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -16,8 +17,12 @@ from backend.services.factor_cards import (
     FactorCardService,
     build_factor_admission_evidence,
 )
+from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.learning_application_store import LearningApplicationStore
-from backend.services.parameter_templates import ParameterTemplateService
+from backend.services.parameter_templates import (
+    ParameterTemplateService,
+    clear_parameter_template_recommendation_cache,
+)
 from backend.services.parameter_template_validation import (
     ParameterTemplateValidationService,
     run_parameter_template_offline_validation,
@@ -26,6 +31,39 @@ from backend.services.research_evidence import ResearchEvidenceRejected
 from config import runtime_config as rc
 from research.learning.governor import RuleEvolutionGovernor
 from tests.canonical_fixture import seed_canonical_sqlite_file
+
+
+@pytest.fixture(autouse=True)
+def _parameter_template_coordinator_mode(monkeypatch):
+    """Run template application tests against the post-f2eb9c9 contract."""
+    import backend.core.static_feature_flags as static_feature_flags
+
+    monkeypatch.setattr(
+        static_feature_flags,
+        "shared_static_feature_flags",
+        lambda: SimpleNamespace(
+            governance_mutation_coordinator_v2_mode="dual_record",
+        ),
+    )
+
+
+def _approve_parameter_template_suggestion(db_path: str, suggestion_id: str) -> None:
+    """Mark a hand-approved fixture suggestion as eligible for coordinator tests."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE policy_suggestion
+            SET status='approved', governance_eligible=1,
+                governance_eligibility_version=?,
+                governance_eligibility_fingerprint=?
+            WHERE suggestion_id=?
+            """,
+            (GOVERNANCE_ELIGIBILITY_VERSION, "pytest-eligibility", suggestion_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _patch_local_learning_state(monkeypatch, db_path):
@@ -353,6 +391,25 @@ def test_candidate_card_complete_prepared_evidence_is_activation_eligible():
     assert evidence["validation"]["bar_oos"]["research_only"] is True
 
 
+def test_candidate_card_uses_supplied_health_freshness_contract(monkeypatch):
+    now = time.time()
+
+    def fail_if_config_is_refreshed():
+        raise AssertionError("admission projection refreshed runtime config")
+
+    monkeypatch.setattr(rc, "shared", fail_if_config_is_refreshed)
+    evidence = build_factor_admission_evidence(
+        factor_id="candidate",
+        catalog_item=_complete_candidate_catalog(now),
+        evidence_counts=_complete_evidence_counts(),
+        governance={},
+        now_ts=now,
+        health_max_age_seconds=900.0,
+    )
+
+    assert evidence["governance"]["health"]["fresh"] is True
+
+
 def test_candidate_card_active_canary_waits_for_mature_positive_real_effect():
     now = time.time()
     catalog = _complete_candidate_catalog(now)
@@ -451,6 +508,7 @@ def test_parameter_template_activation_syncs_runtime_signal_config(tmp_path):
         note="runtime sync approve",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     applied = service.activate_template(
         factor_id="rsi_14",
         template_id=item["template_id"],
@@ -465,6 +523,35 @@ def test_parameter_template_activation_syncs_runtime_signal_config(tmp_path):
     assert cfg.factor_signal_config["rsi_14"]["parameter_template_version"] == "runtime_range.v1"
     assert cfg.factor_signal_config["rsi_14"]["parameter_overrides"]["length"] == 10
     assert cfg.extra["active_parameter_templates"]["rsi_14:range"]["template_id"] == item["template_id"]
+
+
+def test_coordinated_activation_materializes_generated_template(tmp_path, monkeypatch):
+    """Generated library templates must be materialized before coordinator update."""
+    import backend.core.static_feature_flags as static_feature_flags
+
+    monkeypatch.setattr(
+        static_feature_flags,
+        "shared_static_feature_flags",
+        lambda: SimpleNamespace(governance_mutation_coordinator_v2_mode="dual_record"),
+    )
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    rc.reset_for_tests()
+    _seed_factor_card_state(db_path)
+
+    service = ParameterTemplateService(db_path)
+    result = service.activate_template(
+        factor_id="rsi_14",
+        template_id="rsi_14:default.v1:default",
+        regime_key="",
+        note="materialize generated default",
+    )
+
+    assert result["ok"] is True
+    assert service.get_active_template(factor_id="rsi_14", regime_key="")["template_id"] == (
+        "rsi_14:default.v1:default"
+    )
+    assert service._list_persisted(template_id="rsi_14:default.v1:default")
 
 
 def test_runtime_tunable_derived_template_activation_syncs_keltner_runtime_config(tmp_path):
@@ -497,6 +584,7 @@ def test_runtime_tunable_derived_template_activation_syncs_keltner_runtime_confi
         note="keltner runtime sync approve",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     applied = service.activate_template(
         factor_id="keltner_width",
         template_id=item["template_id"],
@@ -839,6 +927,71 @@ def test_factor_cards_parameter_responsibility_filter_fails_closed_on_batch_erro
     assert cards == []
 
 
+def test_factor_evidence_summary_uses_embedded_decision_snapshots_once(
+    monkeypatch,
+    tmp_path,
+):
+    """The summary projection must not issue one payload query per decision."""
+    import research.features.feature_provider as feature_provider
+
+    provider = feature_provider.LearningFeatureProvider(str(tmp_path / "state.db"))
+
+    class _ConnContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(provider, "_conn", lambda **_kwargs: _ConnContext())
+    monkeypatch.setattr(feature_provider, "canonical_ready", lambda _conn: True)
+    monkeypatch.setattr(
+        feature_provider,
+        "iter_training_sample_rows",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        feature_provider,
+        "iter_decision_rows",
+        lambda *_args, **_kwargs: iter(
+            [
+                {
+                    "decision_id": "decision-1",
+                    "factor_snapshots": [
+                        {
+                            "factor": "rsi_14",
+                            "shadow_score": 0.2,
+                            "contribution_score": 0.1,
+                        }
+                    ],
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        feature_provider,
+        "iter_decision_factor_snapshots",
+        lambda *_args, **_kwargs: pytest.fail(
+            "embedded decision snapshots should be reused"
+        ),
+    )
+    monkeypatch.setattr(feature_provider, "iter_review_rows_desc", lambda *_args, **_kwargs: [])
+
+    class _Store:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def iter_effects(self, **_kwargs):
+            return iter(())
+
+    monkeypatch.setattr(feature_provider, "LearningApplicationStore", _Store)
+
+    result = provider.factor_evidence_summary(["rsi_14"])
+
+    assert result["rsi_14"]["decision_observations"] == 1
+    assert result["rsi_14"]["shadow_score"] == 0.2
+
+
 def test_parameter_template_recommendations_can_surface_offline_validate_path(tmp_path):
     db_path = str(tmp_path / "state.db")
     reset_shared()
@@ -858,6 +1011,44 @@ def test_parameter_template_recommendations_can_surface_offline_validate_path(tm
     assert items[0]["boundary"]["recommended_scope"] == "offline_deep"
     assert items[0]["recommended_action"] == "offline_validate"
     assert "parameter_delta_too_large" in items[0]["boundary"]["reasons"]
+
+
+def test_parameter_template_recommendations_reuse_parameter_card_for_templates(
+    tmp_path,
+    monkeypatch,
+):
+    """One recommendation pass must not rescan canonical evidence per template."""
+    db_path = str(tmp_path / "state.db")
+    reset_shared()
+    _seed_factor_card_state(db_path)
+    service = ParameterTemplateService(db_path)
+    card = {
+        "factor_id": "rsi_14",
+        "factor_family": "momentum_oscillator",
+        "formula_version": "registry_builtin.v1",
+        "parameter_version": "default.v1",
+        "parameters": {"length": 14},
+        "expected_regimes": ["range"],
+        "weak_regimes": ["strong_trend"],
+        "expected_holding_profile": {"style": "short_swing"},
+        "evidence_summary": {
+            "last_primary_responsibility": "parameter",
+            "recent_responsibility_labels": ["factor_logic_ok_but_param_suspect"],
+        },
+    }
+    calls = []
+
+    def _cards(**kwargs):
+        calls.append(kwargs)
+        return [card]
+
+    monkeypatch.setattr(service.cards, "list_cards", _cards)
+    clear_parameter_template_recommendation_cache(db_path)
+
+    items = service.list_recommendations(limit=10)
+
+    assert len(items) == 1
+    assert len(calls) == 1
 
 
 def test_parameter_template_switch_suggestion_carries_factor_card_parameter_evidence(tmp_path):
@@ -953,10 +1144,9 @@ def test_parameter_template_recommendation_can_materialize_offline_validation_jo
         status = "queued"
 
     class FakeJobManager:
-        def submit(self, kind, params, fn):
+        def submit(self, kind, params):
             captured["kind"] = kind
             captured["params"] = params
-            captured["callable"] = fn
             return FakeJob()
 
     monkeypatch.setattr(learning_api, "get_job_manager", lambda: FakeJobManager())
@@ -1016,6 +1206,7 @@ def test_parameter_template_service_persists_activation_and_switch_log(tmp_path)
         note="approve switch",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     result = service.activate_template(
         factor_id="rsi_14",
         template_id=item["template_id"],
@@ -1075,6 +1266,7 @@ def test_learning_parameter_template_management_endpoints_work_end_to_end(tmp_pa
         ),
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["item"]["suggestion_id"], "approved", "ok")
+    _approve_parameter_template_suggestion(db_path, suggestion["item"]["suggestion_id"])
     applied = learning_api.apply_parameter_template_switch(
         None,
         learning_api.ParameterTemplateApplySwitchRequest(
@@ -1238,6 +1430,7 @@ def test_runtime_tunable_ema_slope_template_is_online_light_and_syncs_runtime_co
         note="ema slope approve",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     applied = service.activate_template(
         factor_id="ema_slope",
         template_id=template["template_id"],
@@ -1328,6 +1521,7 @@ def test_runtime_tunable_bb_width_template_is_online_light_and_syncs_runtime_con
         note="bb approve",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     applied = service.activate_template(
         factor_id="bb_width",
         template_id=template["template_id"],
@@ -1414,6 +1608,7 @@ def test_runtime_tunable_vol_ma_ratio_template_is_online_light_and_syncs_runtime
         note="vol ma approve",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "manual approve")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     applied = service.activate_template(
         factor_id="vol_ma_ratio",
         template_id=template["template_id"],
@@ -1458,6 +1653,7 @@ def test_parameter_template_switch_suggestion_carries_boundary_and_blocks_offlin
         note="should require offline validation",
     )
     RuleEvolutionGovernor(db_path).set_status(suggestion["suggestion_id"], "approved", "approve guarded switch")
+    _approve_parameter_template_suggestion(db_path, suggestion["suggestion_id"])
     blocked = service.activate_template(
         factor_id="bb_width",
         template_id=offline_template["template_id"],
@@ -1584,10 +1780,9 @@ def test_parameter_template_offline_validation_endpoint_submits_job(tmp_path, mo
         status = "queued"
 
     class FakeJobManager:
-        def submit(self, kind, params, fn):
+        def submit(self, kind, params):
             captured["kind"] = kind
             captured["params"] = params
-            captured["callable"] = fn
             return FakeJob()
 
     service = BoundParameterTemplateService()

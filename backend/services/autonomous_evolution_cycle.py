@@ -437,9 +437,9 @@ class AutonomousEvolutionCycleService:
             blockers.append({"component": "autonomy_health", "status": posture, "reason": "posture_blocks_guarded_apply"})
         if not bool(evidence.get("ok")):
             blockers.append({"component": "evidence", "status": evidence.get("status"), "reason": "core_or_replay_evidence_not_ready"})
-        if str(replay.get("status") or "") in {"missing", "stale", "error"}:
+        if replay.get("ok") is not True or str(replay.get("status") or "") != "fresh":
             blockers.append({"component": "replay", "status": replay.get("status"), "reason": "replay_freshness_required"})
-        if str(release.get("status") or "") in {"missing", "error"}:
+        if release.get("ok") is not True or str(release.get("status") or "") != "completed":
             blockers.append({"component": "release", "status": release.get("status"), "reason": "release_run_required_for_governed_apply"})
         if int(proposal_status.get("high_unresolved_conflict_count") or 0) > 0:
             blockers.append({"component": "proposal_registry", "status": "conflict", "reason": "high_unresolved_conflicts"})

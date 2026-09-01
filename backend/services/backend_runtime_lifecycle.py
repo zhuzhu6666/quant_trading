@@ -20,7 +20,7 @@ def _env_enabled(name: str, default: str = "1") -> bool:
 
 
 def _warm_data_store() -> None:
-    from data.store import DataStore
+    from data.duckdb_store import DuckDBDataStore as DataStore
 
     DataStore()
 
@@ -169,10 +169,6 @@ def _stop_live_scheduler() -> None:
     stop_live_scheduler()
 
 
-def _stop_job_manager(*, timeout_sec: float) -> dict[str, Any]:
-    from backend.jobs import get_job_manager
-
-    return get_job_manager().shutdown(timeout=timeout_sec)
 
 
 def _stop_backend_readiness(*, timeout_sec: float) -> dict[str, Any]:
@@ -205,7 +201,6 @@ class BackendRuntimeLifecycleCallbacks:
         _stop_live_loop_for_process_shutdown
     )
     stop_live_scheduler: Callable[[], Any] = _stop_live_scheduler
-    stop_job_manager: Callable[..., dict[str, Any]] = _stop_job_manager
     stop_db_health: Callable[..., dict[str, Any]] = _stop_db_health
     stop_backend_readiness: Callable[..., dict[str, Any]] = _stop_backend_readiness
 
@@ -349,15 +344,6 @@ class BackendRuntimeLifecycle:
         except Exception as exc:
             logger.warning(f"[lifespan] InProcessScheduler stop failed: {exc}")
 
-        try:
-            jobs = callbacks.stop_job_manager(timeout_sec=30.0)
-            if jobs.get("status") not in {"idle", ""}:
-                logger.info(
-                    "[lifespan] local JobManager executor shutdown "
-                    f"status={jobs.get('status')}"
-                )
-        except Exception as exc:
-            logger.warning(f"[lifespan] local JobManager executor stop failed: {exc}")
 
         try:
             db_health = callbacks.stop_db_health(timeout_sec=30.0)

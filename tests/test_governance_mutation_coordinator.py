@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.services.factor_identity import (
+from alpha.factor_identity import (
     canonical_factor_ast_json,
     canonical_factor_id,
     factor_definition_fingerprint,

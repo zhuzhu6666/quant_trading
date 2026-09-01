@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 import hashlib
+from backend.core.hash import canonical_hash
 import json
 import math
 from pathlib import Path
@@ -38,6 +39,7 @@ from backend.services.research_evidence import (
     PARITY_REPLAY_ENGINE,
     PARITY_REPLAY_EVIDENCE_CLASS,
 )
+from config.runtime_config import runtime_config_hash
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -95,40 +97,6 @@ def _json_default(value: Any) -> Any:
         except Exception:
             pass
     return str(value)
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-        default=_json_default,
-    )
-
-
-def _sha256_json(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
-
-
-def _runtime_config_hash(value: Any) -> str:
-    """Match ``evolution_ledger._stable_hash`` byte-for-byte.
-
-    Runtime snapshots predate the replay contract and use json.dumps' default
-    separators.  Binding the same payload with the replay canonicalizer would
-    create a permanent false mismatch despite identical configuration.
-    """
-
-    from config.runtime_config import canonical_runtime_config_payload
-
-    raw = json.dumps(
-        canonical_runtime_config_payload(value),
-        ensure_ascii=False,
-        sort_keys=True,
-        default=str,
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _sha256_files(paths: tuple[str, ...]) -> str:
@@ -827,7 +795,7 @@ def _runtime_selection_manifest(decision_provider: Any) -> dict[str, Any]:
     return {
         "selected_factor_ids": list(getattr(selection, "selected_factor_ids", []) or []),
         "excluded_factor_count": len(excluded_factor_ids),
-        "excluded_factor_ids_hash": _sha256_json(sorted(str(item) for item in excluded_factor_ids)),
+        "excluded_factor_ids_hash": canonical_hash(sorted(str(item) for item in excluded_factor_ids)),
         "reason_counts": reason_counts,
         "historical_projection_verified": False,
     }
@@ -1334,8 +1302,8 @@ class ParityReplayRunner:
             if hasattr(self.config, "to_dict")
             else dict(self.config) if isinstance(self.config, Mapping) else {}
         )
-        config_hash = _runtime_config_hash(config_payload)
-        data_hash = _sha256_json(_data_records(frame)) if not frame.empty else _sha256_json([])
+        config_hash = runtime_config_hash(config_payload)
+        data_hash = canonical_hash(_data_records(frame)) if not frame.empty else canonical_hash([])
         code_hash = _sha256_files(_CODE_BINDING_PATHS)
         missing_code_paths = _missing_code_binding_paths(_CODE_BINDING_PATHS)
         if missing_code_paths:
@@ -1408,14 +1376,14 @@ class ParityReplayRunner:
             "config_snapshot_version": int(self.config_snapshot.get("config_version") or 0),
             "code_hash": code_hash,
         }
-        artifact_hash = _sha256_json(artifact_manifest)
+        artifact_hash = canonical_hash(artifact_manifest)
         bindings = {
             "config_hash": config_hash,
             "data_hash": data_hash,
             "code_hash": code_hash,
             "artifact_hash": artifact_hash,
         }
-        bindings["binding_hash"] = _sha256_json(bindings)
+        bindings["binding_hash"] = canonical_hash(bindings)
 
         binding_mismatches = [
             name
@@ -2869,7 +2837,7 @@ class ParityReplayService:
         changed: list[str] = []
         if str(before.get("code_hash") or "") != after_code_hash:
             changed.append("code_changed_during_replay")
-        if str(before.get("config_hash") or "") != _runtime_config_hash(current_config_payload):
+        if str(before.get("config_hash") or "") != runtime_config_hash(current_config_payload):
             changed.append("config_changed_during_replay")
         artifact_manifest = dict(payload.get("artifact_manifest") or {})
         selected_ids = list(artifact_manifest.get("selected_factor_ids") or [])
@@ -2902,7 +2870,7 @@ class ParityReplayService:
         payload = dict(report)
         payload["artifact_path"] = ""
         payload["report_artifact_hash"] = ""
-        artifact_hash = _sha256_json(payload)
+        artifact_hash = canonical_hash(payload)
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         path = self.artifact_dir / f"{payload.get('replay_run_id')}.json"
         payload["artifact_path"] = str(path)
@@ -2945,7 +2913,7 @@ def load_parity_learning_samples(
             expected_hash = str(hashed.get("report_artifact_hash") or "")
             hashed["artifact_path"] = ""
             hashed["report_artifact_hash"] = ""
-            if not expected_hash or _sha256_json(hashed) != expected_hash:
+            if not expected_hash or canonical_hash(hashed) != expected_hash:
                 continue
             for raw in list(bundle.get(key) or []):
                 if not isinstance(raw, Mapping):

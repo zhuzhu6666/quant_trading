@@ -92,20 +92,9 @@ def persist_loss_review_statement(
     try:
         conn = connection_factory()
         ts = float(now if now is not None else time.time())
-        import json
+        from backend.services.runtime_kv_store import set_on_conn
 
-        payload_json = json.dumps(statement, ensure_ascii=False, default=str)
-        state_execute(
-            conn,
-            """
-            INSERT INTO runtime_kv(key, value_json, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET
-                value_json=excluded.value_json,
-                updated_at=excluded.updated_at
-            """,
-            (KV_KEY, payload_json, ts),
-        )
+        set_on_conn(conn, KV_KEY, statement, updated_at=ts, ensure=False)
         conn.commit()
         return True
     except Exception:

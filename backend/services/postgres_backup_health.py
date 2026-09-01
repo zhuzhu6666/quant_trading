@@ -14,6 +14,7 @@ from typing import Any
 
 from backend.core.db import STATE_DB, state_table_exists
 from backend.services._brain_helpers import connect, execute, loads, safe_float
+from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 
 
 BACKUP_HEALTH_KEY = "postgres_backup_health.v1"
@@ -58,16 +59,12 @@ class PostgresBackupHealthService:
             if "restore_drill" not in candidate and isinstance(existing, dict):
                 candidate["restore_drill"] = existing.get("restore_drill")
             payload = self._sanitize(candidate, now=now)
-            execute(
+            set_runtime_kv_on_conn(
                 conn,
-                """
-                INSERT INTO runtime_kv (key, value_json, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value_json=excluded.value_json,
-                    updated_at=excluded.updated_at
-                """,
-                (BACKUP_HEALTH_KEY, json.dumps(payload, ensure_ascii=False, sort_keys=True), now),
+                BACKUP_HEALTH_KEY,
+                payload,
+                updated_at=now,
+                ensure=False,
             )
             conn.commit()
         except Exception:

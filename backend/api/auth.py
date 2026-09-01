@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
-import os
+from backend.core.env import get_env, truthy_env
 import threading
 import time
 from collections import defaultdict, deque
@@ -39,7 +39,6 @@ from backend.services.auth_sessions import (
     step_up_refresh_session,
 )
 
-
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
 
@@ -48,29 +47,17 @@ _LOGIN_ATTEMPTS_LOCK = threading.Lock()
 _PASSWORD_HASHER = PasswordHasher()
 _REFRESH_COOKIE = "quant_refresh"
 
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    return (os.environ.get(name) or ("1" if default else "0")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def _get_valid_user() -> str:
-    value = (os.environ.get("QUANT_AUTH_USER") or "").strip()
+    value = (get_env("QUANT_AUTH_USER") or "").strip()
     if not value:
         raise AuthConfigError("QUANT_AUTH_USER is required")
     return value
 
-
 def _get_password_hash() -> str:
-    value = (os.environ.get("QUANT_PASSWORD_HASH") or "").strip()
+    value = (get_env("QUANT_PASSWORD_HASH") or "").strip()
     if not value:
         raise AuthConfigError("QUANT_PASSWORD_HASH is required")
     return value
-
 
 def _verify_password_with_metadata(password: str) -> tuple[bool, bool]:
     """Return ``(valid, legacy_sha256)`` without silent SHA downgrade."""
@@ -80,31 +67,26 @@ def _verify_password_with_metadata(password: str) -> tuple[bool, bool]:
             return bool(_PASSWORD_HASHER.verify(encoded, password)), False
         except (VerifyMismatchError, VerificationError, InvalidHashError):
             return False, False
-    if not _env_flag("QUANT_AUTH_ALLOW_LEGACY_SHA256"):
+    if not truthy_env("QUANT_AUTH_ALLOW_LEGACY_SHA256"):
         return False, False
     supplied = hashlib.sha256(password.encode("utf-8")).hexdigest()
     return hmac.compare_digest(supplied, encoded), True
-
 
 def _verify_password(password: str) -> bool:
     """Backward-compatible boolean verifier used by older unit callers."""
     return _verify_password_with_metadata(password)[0]
 
-
 def _env_int(name: str, default: int) -> int:
     try:
-        return int(os.environ.get(name) or str(default))
+        return int(get_env(name) or str(default))
     except (TypeError, ValueError):
         return default
-
 
 def _login_rate_limit_window() -> int:
     return max(10, _env_int("QUANT_LOGIN_RATE_WINDOW_SECONDS", 60))
 
-
 def _login_rate_limit_max_attempts() -> int:
     return max(3, _env_int("QUANT_LOGIN_RATE_MAX_ATTEMPTS", 10))
-
 
 def _client_ip(request: Request) -> str:
     forwarded_for = request.headers.get("x-forwarded-for", "")
@@ -113,10 +95,8 @@ def _client_ip(request: Request) -> str:
         ip = request.client.host
     return ip or "unknown"
 
-
 def _client_key(request: Request) -> str:
     return _client_ip(request)
-
 
 def _client_metadata(request: Request) -> dict[str, str]:
     return {
@@ -124,7 +104,6 @@ def _client_metadata(request: Request) -> dict[str, str]:
         "ip_address": _client_ip(request),
         "user_agent": request.headers.get("user-agent", "")[:500],
     }
-
 
 def _enforce_login_rate_limit(request: Request) -> None:
     now = time.time()
@@ -141,12 +120,10 @@ def _enforce_login_rate_limit(request: Request) -> None:
             )
         attempts.append(now)
 
-
 def _clear_login_rate_limit(request: Request) -> None:
     key = _client_key(request)
     with _LOGIN_ATTEMPTS_LOCK:
         _LOGIN_ATTEMPTS.pop(key, None)
-
 
 def _set_refresh_cookie(response: Response, token: str) -> None:
     response.set_cookie(
@@ -154,15 +131,13 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
         value=token,
         max_age=REFRESH_EXPIRY_SECONDS,
         httponly=True,
-        secure=not _env_flag("QUANT_AUTH_INSECURE_COOKIE"),
+        secure=not truthy_env("QUANT_AUTH_INSECURE_COOKIE"),
         samesite="strict",
         path="/api/auth",
     )
 
-
 def _clear_refresh_cookie(response: Response) -> None:
     response.delete_cookie(key=_REFRESH_COOKIE, path="/api/auth")
-
 
 def _session_http_error(exc: RefreshSessionError) -> HTTPException:
     return HTTPException(
@@ -170,23 +145,18 @@ def _session_http_error(exc: RefreshSessionError) -> HTTPException:
         detail={"error": exc.code, "msg": str(exc)},
     )
 
-
 class LoginRequest(BaseModel):
     username: str
     password: str
 
-
 class RefreshRequest(BaseModel):
     refresh_token: str = ""
-
 
 class LogoutRequest(BaseModel):
     refresh_token: str = ""
 
-
 class StepUpRequest(BaseModel):
     password: str
-
 
 class LoginResponse(BaseModel):
     user: str
@@ -198,7 +168,6 @@ class LoginResponse(BaseModel):
     refresh_expires_in: int = REFRESH_EXPIRY_SECONDS
     password_rehash_required: bool = False
 
-
 class StepUpResponse(BaseModel):
     user: str
     token: str
@@ -208,7 +177,6 @@ class StepUpResponse(BaseModel):
     session_id: str
     auth_time: int
     password_rehash_required: bool = False
-
 
 def _response_for_grant(grant: RefreshGrant, *, password_rehash_required: bool = False) -> LoginResponse:
     access_token = create_access_token(
@@ -224,7 +192,6 @@ def _response_for_grant(grant: RefreshGrant, *, password_rehash_required: bool =
         refresh_token=grant.refresh_token,
         password_rehash_required=bool(password_rehash_required),
     )
-
 
 @router.post("/login", response_model=LoginResponse)
 def login(req: LoginRequest, request: Request, response: Response) -> LoginResponse:
@@ -253,7 +220,6 @@ def login(req: LoginRequest, request: Request, response: Response) -> LoginRespo
     _set_refresh_cookie(response, grant.refresh_token)
     return _response_for_grant(grant, password_rehash_required=legacy_password)
 
-
 @router.post("/refresh", response_model=LoginResponse)
 def refresh(
     req: RefreshRequest,
@@ -280,7 +246,6 @@ def refresh(
         ) from exc
     _set_refresh_cookie(response, grant.refresh_token)
     return _response_for_grant(grant)
-
 
 @router.post("/step-up", response_model=StepUpResponse)
 def step_up(
@@ -357,7 +322,6 @@ def step_up(
         password_rehash_required=legacy_password,
     )
 
-
 @router.post("/logout")
 def logout(
     req: LogoutRequest,
@@ -424,7 +388,6 @@ def logout(
         _clear_refresh_cookie(response)
     return {"ok": True, "revoked": bool(revoked), "session_id": session_id}
 
-
 @router.post("/ws-ticket")
 def ws_ticket(
     claims: Annotated[dict[str, Any], Depends(get_current_claims)],
@@ -440,7 +403,6 @@ def ws_ticket(
         "expires_at": expires_at,
     }
 
-
 @router.get("/me")
 def me(
     user: Annotated[str, Depends(get_current_user)],
@@ -454,7 +416,6 @@ def me(
         "session_id": str(claims.get("sid") or ""),
         "auth_time": int(claims.get("auth_time") or 0),
     }
-
 
 @router.get("/me-strict")
 def me_strict(user: Annotated[str, Depends(require_user)]) -> dict[str, Any]:

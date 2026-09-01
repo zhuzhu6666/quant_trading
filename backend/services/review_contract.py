@@ -876,6 +876,44 @@ def review_consumer_eligibility(
             "train_weight": 0.25 if eligible else 0.0,
             "blockers": blockers,
         }
+    if consumer == "entry_factor_learning":
+        dimensions = _as_dict(review.get("outcome_dimensions"))
+        entry_avoidability = str(
+            dimensions.get("entry_avoidability")
+            or review.get("entry_avoidability")
+            or ""
+        ).strip().lower()
+        taxonomy = _as_dict(review.get("failure_taxonomy"))
+        primary = str(
+            review.get("primary_responsibility")
+            or taxonomy.get("primary_responsibility")
+            or ""
+        ).strip().lower()
+        blockers: list[str] = []
+        if entry_avoidability != "avoidable":
+            blockers.append("entry_avoidability_not_established")
+        if str(review.get("context_integrity") or "full").strip().lower() != "full":
+            blockers.append("context_not_full")
+        if str(review.get("attribution_integrity") or "full").strip().lower() != "full":
+            blockers.append("attribution_not_full")
+        if review_has_system_contamination(review):
+            blockers.append("review_system_contaminated")
+        if not primary or primary == "unclear":
+            blockers.append("entry_responsibility_missing")
+        elif primary in NON_FACTOR_RESPONSIBILITIES:
+            blockers.append(f"responsibility_not_factor:{primary}")
+        if primary not in RESPONSIBILITY_DOMAINS:
+            blockers.append(f"responsibility_unknown:{primary}")
+        eligible = not blockers
+        return {
+            "schema_version": "consumer_eligibility.v1",
+            "consumer": consumer,
+            "eligible": eligible,
+            "model_ready": eligible,
+            "allowed_uses": ["entry_factor_learning"] if eligible else [],
+            "train_weight": 1.0 if eligible else 0.0,
+            "blockers": blockers,
+        }
     if consumer == "supervisor_counterfactual":
         system_issue = build_system_issue_context(review)
         blockers = []

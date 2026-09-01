@@ -89,8 +89,8 @@ class AppContext:
 
     @property
     def data_store(self):
-        """DataStore — 从 data.store 懒加载 (自身是单例)."""
-        from data.store import DataStore
+        """DataStore — 从 data.duckdb_store 懒加载 (自身是单例)."""
+        from data.duckdb_store import DuckDBDataStore as DataStore
         return DataStore()
 
     @property

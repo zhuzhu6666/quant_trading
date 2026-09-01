@@ -44,6 +44,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from backend.core.env import get_env
 from backend.core.db import DUCKDB_EVENTS, DUCKDB_EXTERNAL, connect_duckdb, duckdb_readonly_connection
 from data.external_schema import (
     cb_release_at,
@@ -56,7 +57,7 @@ from data.external_schema import (
     reconcile_stale_refresh_audits,
     start_refresh_audit,
 )
-from data.store import DataStore
+from data.duckdb_store import DuckDBDataStore as DataStore
 
 try:
     import fcntl
@@ -89,7 +90,6 @@ FREQ = {
     "etf_daily":   5 * 86400,     # Yahoo 日线, 周末/假日允许延迟
 }
 
-
 @contextmanager
 def _external_refresh_lock():
     """Serialize all external refresh processes, including manual/API runs."""
@@ -112,30 +112,8 @@ def _external_refresh_lock():
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         lock_file.close()
 
-
 def _get_store() -> DataStore:
     return DataStore(DB_PATH)
-
-
-def _env_value(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if value:
-        return value
-    env_path = Path(".env")
-    if not env_path.exists():
-        return ""
-    try:
-        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#") or "=" not in raw:
-                continue
-            key, val = raw.split("=", 1)
-            if key.strip() == name:
-                return val.strip().strip('"').strip("'")
-    except Exception:
-        return ""
-    return ""
-
 
 # ── Status: 查各表最新时间 ──────────────────────────────
 
@@ -156,7 +134,6 @@ def _get_latest_timestamp(
         return None
     return None
 
-
 def _get_latest_release_at(table: str, date_col: str, db_path: str | Path = DB_PATH) -> float | None:
     try:
         with duckdb_readonly_connection(db_path, snapshot_first=True) as con:
@@ -168,7 +145,6 @@ def _get_latest_release_at(table: str, date_col: str, db_path: str | Path = DB_P
     except Exception:
         return None
     return None
-
 
 def _status_table(
     source: str,
@@ -198,7 +174,6 @@ def _status_table(
         "age_days": round((datetime.now() - latest).total_seconds() / 86400, 1) if latest else None,
     }
 
-
 def _status_cot(store: DataStore) -> dict:
     """COT 最新数据日期"""
     latest = _get_latest_timestamp(store, "cot_gold", "report_date")
@@ -221,7 +196,6 @@ def _status_cot(store: DataStore) -> dict:
         "age_days": round((datetime.now() - latest).total_seconds() / 86400, 1) if latest else None,
     }
 
-
 def _status_events(store: DataStore) -> dict:
     """events 表: 查最晚事件日期"""
     latest = _get_latest_timestamp(store, "events", "date", DUCKDB_EVENTS)
@@ -242,7 +216,6 @@ def _status_events(store: DataStore) -> dict:
         "stale": stale,
         "age_days": round((datetime.now() - latest).total_seconds() / 86400, 1) if latest else None,
     }
-
 
 def _status_etf(store: DataStore) -> dict:
     """etf_holdings 最新日期"""
@@ -266,7 +239,6 @@ def _status_etf(store: DataStore) -> dict:
         "age_days": round((datetime.now() - latest).total_seconds() / 86400, 1) if latest else None,
     }
 
-
 def _status_fred(store: DataStore) -> dict:
     latest = _get_latest_timestamp(store, "macro_daily", "date")
     stale = True
@@ -288,10 +260,8 @@ def _status_fred(store: DataStore) -> dict:
         "age_days": round((datetime.now() - latest).total_seconds() / 86400, 1) if latest else None,
     }
 
-
 def _status_cb(store: DataStore | None = None) -> dict:
     return _status_table("cb", "cb_gold", "date", "cb", store)
-
 
 def _status_etf_daily(store: DataStore | None = None) -> dict:
     status = _status_table("etf_daily", "etf_daily", "date", "etf_daily", store)
@@ -314,7 +284,6 @@ def _status_etf_daily(store: DataStore | None = None) -> dict:
     status["stale"] = bool(missing or stale_symbols)
     return status
 
-
 def _latest_etf_daily_timestamp(symbol: str, db_path: str | Path = DB_PATH) -> datetime | None:
     try:
         with duckdb_readonly_connection(db_path, snapshot_first=True) as con:
@@ -322,7 +291,6 @@ def _latest_etf_daily_timestamp(symbol: str, db_path: str | Path = DB_PATH) -> d
             return datetime.fromisoformat(str(row[0])) if row and row[0] else None
     except Exception:
         return None
-
 
 def status_all(store: DataStore | None = None) -> list[dict]:
     return [
@@ -334,7 +302,6 @@ def status_all(store: DataStore | None = None) -> list[dict]:
         _status_etf_daily(store),
     ]
 
-
 # ── Refreshers ──────────────────────────────────────────
 
 def refresh_cot(force: bool = False) -> bool:
@@ -345,7 +312,6 @@ def refresh_cot(force: bool = False) -> bool:
         log.error("COT 刷新失败: %s", exc)
         finish_refresh_audit(run_id, status="failed", error=str(exc)[:500])
         return False
-
 
 def _refresh_cot(force: bool, run_id: str) -> bool:
     """拉取 CFTC COT 黄金持仓 (周度)"""
@@ -424,7 +390,6 @@ def _refresh_cot(force: bool, run_id: str) -> bool:
     finish_refresh_audit(run_id, status="success", rows=n, latest_date=latest_date, latest_release_at=latest_release_at)
     return True
 
-
 def refresh_events(force: bool = False) -> bool:
     """拉取 ForexFactory 经济日历 (日度)"""
     run_id = start_refresh_audit("events")
@@ -471,7 +436,6 @@ def refresh_events(force: bool = False) -> bool:
         finish_refresh_audit(run_id, status="failed", error=str(e)[:500])
         return False
 
-
 def refresh_etf(force: bool = False) -> bool:
     """从 SEC EDGAR 拉 GLD/SLV 持仓 (季度)"""
     run_id = start_refresh_audit("etf")
@@ -507,7 +471,6 @@ def refresh_etf(force: bool = False) -> bool:
         log.error(f"ETF 刷新失败: {e}")
         finish_refresh_audit(run_id, status="failed", error=str(e)[:500])
         return False
-
 
 def _parse_wgc_cb_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Parse the WGC quarterly chart into country and global change rows."""
@@ -562,7 +525,6 @@ def _parse_wgc_cb_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
             previous = current
     return rows
 
-
 def refresh_cb(force: bool = False) -> bool:
     """Fetch quarterly central-bank gold holdings from the WGC dashboard API."""
     run_id = start_refresh_audit("cb")
@@ -614,7 +576,6 @@ def refresh_cb(force: bool = False) -> bool:
         finish_refresh_audit(run_id, status="failed", error=str(exc)[:500])
         return False
 
-
 def _parse_yahoo_chart_payload(payload: dict[str, Any]) -> list[tuple[str, float]]:
     result = ((payload or {}).get("chart") or {}).get("result") or []
     if not result:
@@ -634,7 +595,6 @@ def _parse_yahoo_chart_payload(payload: dict[str, Any]) -> list[tuple[str, float
             continue
         parsed.append((date, close))
     return parsed
-
 
 def refresh_etf_daily(force: bool = False) -> bool:
     """Fetch GLD/SLV/TLT daily closes for price-ratio factors."""
@@ -702,7 +662,6 @@ def refresh_etf_daily(force: bool = False) -> bool:
     finish_refresh_audit(run_id, status=status, rows=total, latest_date=latest_date, latest_release_at=latest_release, error="; ".join(errors)[:500] if errors else None)
     return status == "success"
 
-
 def _latest_series_date(series: str, db_path: str | Path = DB_PATH) -> str | None:
     try:
         with duckdb_readonly_connection(db_path, snapshot_first=True) as con:
@@ -710,7 +669,6 @@ def _latest_series_date(series: str, db_path: str | Path = DB_PATH) -> str | Non
             return str(row[0])[:10] if row and row[0] else None
     except Exception:
         return None
-
 
 def _fred_observations_url(series: str, api_key: str, observation_start: str = "2000-01-01") -> str:
     query = urlencode(
@@ -723,14 +681,13 @@ def _fred_observations_url(series: str, api_key: str, observation_start: str = "
     )
     return f"https://api.stlouisfed.org/fred/series/observations?{query}"
 
-
 def refresh_fred(force: bool = False) -> bool:
     """Refresh FRED macro series into macro_daily.
 
     Missing QUANT_FRED_API_KEY is a clean skip so COT/ETF/events remain usable.
     """
     run_id = start_refresh_audit("fred")
-    api_key = _env_value("QUANT_FRED_API_KEY")
+    api_key = get_env("QUANT_FRED_API_KEY")
     s = _status_fred(_get_store())
     if not api_key:
         log.warning("FRED skipped: QUANT_FRED_API_KEY not configured")
@@ -805,7 +762,6 @@ def refresh_fred(force: bool = False) -> bool:
         finish_refresh_audit(run_id, status="failed", rows=total, latest_date=latest_date, latest_release_at=latest_release, error=str(e)[:500])
         return False
 
-
 # ── 主入口 ──────────────────────────────────────────────
 
 SOURCES = {
@@ -817,7 +773,6 @@ SOURCES = {
     "etf_daily": refresh_etf_daily,
 }
 
-
 def print_status(status_list: list[dict]):
     """打印数据源时效表格"""
     print(f"{'数据源':<20s} {'表':<20s} {'最新日期':<20s} {'过期':<8s} {'说明'}")
@@ -826,7 +781,6 @@ def print_status(status_list: list[dict]):
         stale = "⚠ 过期" if s.get("stale") else "✓ 正常"
         note = s.get("note", f"{s.get('age_days', '?')} 天前" if s.get("age_days") else "")
         print(f"{s.get('table', ''):<20s} {'':<20s} {str(s.get('latest', '?')):<20s} {stale:<8s} {note}")
-
 
 def main():
     p = argparse.ArgumentParser(description="外部数据自动刷新")
@@ -882,7 +836,6 @@ def main():
 
         all_ok = all(v == "✓" for v in results.values())
         return 0 if all_ok else 1
-
 
 if __name__ == "__main__":
     sys.exit(main())

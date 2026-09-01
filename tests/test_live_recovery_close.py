@@ -304,6 +304,13 @@ def test_retirement_replays_then_marks_and_removes_missing_position():
             "max_rows": 200,
             "min_exec_timestamp_by_position": {14: 95.0},
             "required_closed_volume_delta_by_position": {14: 75.0},
+            "baseline_close_cursor_by_position": {
+                14: {
+                    "baseline_cursor_available": True,
+                    "baseline_deal_ids": [],
+                    "baseline_closed_volume": 0.0,
+                }
+            },
         }
     ]
     assert order[0] == "replay"

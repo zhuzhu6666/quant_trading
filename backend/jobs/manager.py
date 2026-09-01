@@ -1,44 +1,15 @@
-"""Compatibility job manager with optional durable PostgreSQL dispatch.
+"""PostgreSQL-backed manager for durable research jobs."""
+from __future__ import annotations
 
-The manager never creates an event-loop thread.  FastAPI explicitly binds its
-owned loop; callers without a loop execute compatibility/light work inline.
-"""
-import asyncio
-import concurrent.futures
-import inspect
-import json
 import threading
-import traceback
-import weakref
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Mapping
 
-from loguru import logger
-
-from backend.jobs.progress import ProgressCB
-from backend.jobs.state import JobState, new_job_id
-
-
-def _state_conn(*, read_only: bool = False):
-    from backend.core.db import get_state_pg_conn
-
-    return get_state_pg_conn(read_only=read_only)
-
-
-def _state_sql(sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s")
+from backend.jobs.state import JobState
 
 
 class JobManager:
-    """Manage local light tasks and durable heavy-job compatibility queries.
+    """Submit and query the canonical PostgreSQL research-job queue."""
 
-    Persisted to data/charts/jobs.jsonl so jobs survive backend restart.
-    """
-
-    PERSIST_PATH = Path("data/charts/jobs.jsonl")
-    MAX_PERSISTED = 200
-    LOCAL_EXECUTOR_MAX_WORKERS = 2
     PERSISTENT_JOB_KINDS = frozenset(
         {
             "backtest",
@@ -51,397 +22,48 @@ class JobManager:
             "parameter_template_validation",
         }
     )
-    _instances: "weakref.WeakSet[JobManager]" = weakref.WeakSet()
 
-    def __init__(
-        self,
-        *,
-        persistent_enabled: bool | None = None,
-        persistent_queue: Any = None,
-        local_executor_factory: Callable[[], concurrent.futures.Executor] | None = None,
-    ) -> None:
-        self._jobs: dict[str, JobState] = {}
-        self._tasks: dict[str, asyncio.Task] = {}
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._lock = threading.Lock()
-        self._shutdown_lock = threading.Lock()
-        self._accepting = True
-        self._local_executor: concurrent.futures.Executor | None = None
-        self._local_executor_factory = local_executor_factory or (
-            lambda: concurrent.futures.ThreadPoolExecutor(
-                max_workers=self.LOCAL_EXECUTOR_MAX_WORKERS,
-                thread_name_prefix="job-manager-local",
-            )
-        )
-        if persistent_enabled is None:
-            from backend.core.static_feature_flags import shared_static_feature_flags
-
-            persistent_enabled = shared_static_feature_flags().pg_job_queue_v2_enabled
-        self._persistent_enabled = bool(persistent_enabled)
+    def __init__(self, *, persistent_queue: Any = None) -> None:
         self._persistent_queue = persistent_queue
-        self._instances.add(self)
-        if not self._persistent_enabled:
-            self._load_persisted()
-
-    @property
-    def has_implicit_loop_thread(self) -> bool:
-        return False
-
-    @property
-    def local_executor_started(self) -> bool:
-        with self._lock:
-            return self._local_executor is not None
-
-    def _executor(self) -> concurrent.futures.Executor:
-        with self._lock:
-            if not self._accepting:
-                raise RuntimeError("job_manager_draining")
-            if self._local_executor is None:
-                self._local_executor = self._local_executor_factory()
-            return self._local_executor
+        self._queue_lock = threading.Lock()
 
     def _queue(self):
         if self._persistent_queue is None:
-            from backend.jobs.pg_queue import PgJobQueue
+            with self._queue_lock:
+                if self._persistent_queue is None:
+                    from backend.jobs.pg_queue import PgJobQueue
 
-            self._persistent_queue = PgJobQueue()
+                    self._persistent_queue = PgJobQueue()
         return self._persistent_queue
 
-    def _load_persisted(self) -> None:
-        """从 PostgreSQL state store 加载持久化 jobs。降级到 JSONL。"""
-        try:
-            conn = _state_conn(read_only=True)
-            try:
-                rows = conn.execute(
-                    _state_sql("SELECT * FROM jobs WHERE status IN ('running','pending') ORDER BY updated_at DESC LIMIT ?"),
-                    (self.MAX_PERSISTED,)
-                ).fetchall()
-                for r in rows:
-                    try:
-                        params = json.loads(r["params_json"]) if r["params_json"] else {}
-                        result = json.loads(r["result_json"]) if r["result_json"] else None
-                        js = JobState(
-                            id=r["id"], kind=r["kind"], status=r["status"],
-                            progress_pct=r["progress"] or 0.0,
-                            started_at=datetime.fromtimestamp(r["created_at"], tz=timezone.utc) if r["created_at"] else datetime.now(timezone.utc),
-                            params=params, result=result, error=r["error"] or "",
-                        )
-                        self._jobs[js.id] = js
-                    except Exception:
-                        continue
-                if self._jobs:
-                    return
-            finally:
-                conn.close()
-        except Exception:
-            pass
-
-        # 降级: JSONL
-        path = self.PERSIST_PATH
-        if not path.exists():
-            return
-        try:
-            lines = path.read_text(encoding="utf-8").strip().splitlines()
-        except Exception:
-            return
-        for line in lines[-self.MAX_PERSISTED:]:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            try:
-                started_at = datetime.fromisoformat(data["started_at"].rstrip("Z")).replace(tzinfo=timezone.utc)
-                finished_at = (
-                    datetime.fromisoformat(data["finished_at"].rstrip("Z")).replace(tzinfo=timezone.utc)
-                    if data.get("finished_at") else None
-                )
-                js = JobState(
-                    id=data["id"],
-                    kind=data["kind"],
-                    status=data["status"],
-                    progress_pct=data.get("progress_pct", 0.0),
-                    current_step=data.get("current_step", ""),
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    params=data.get("params", {}),
-                    result=data.get("result"),
-                    error=data.get("error"),
-                    log_tail=data.get("log_tail", []),
-                )
-                self._jobs[js.id] = js
-            except (KeyError, ValueError, TypeError, AttributeError):
-                logger.warning("skipping malformed persisted job line: %s", line[:120])
-                continue
-
-    def _append_persisted(self, js: JobState, *, status: str | None = None) -> None:
-        """持久化 job 到 PostgreSQL state store + JSONL 备份."""
-        status_value = status or js.status
-        payload = js.to_dict()
-        payload["status"] = status_value
-        # 主存储: PostgreSQL state store
-        try:
-            conn = _state_conn()
-            try:
-                now = js.finished_at.timestamp() if js.finished_at else None
-                created = js.started_at.timestamp() if js.started_at else None
-                conn.execute(
-                    _state_sql("""
-                    INSERT INTO jobs
-                    (id, kind, status, params_json, result_json, progress, error, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        kind=excluded.kind,
-                        status=excluded.status,
-                        params_json=excluded.params_json,
-                        result_json=excluded.result_json,
-                        progress=excluded.progress,
-                        error=excluded.error,
-                        created_at=excluded.created_at,
-                        updated_at=excluded.updated_at
-                    """),
-                    (js.id, js.kind, status_value,
-                     json.dumps(js.params, ensure_ascii=False),
-                     json.dumps(js.result, ensure_ascii=False) if js.result else "{}",
-                     js.progress_pct, js.error or "", created, now)
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        except Exception:
-            pass
-        # 降级: JSONL
-        path = self.PERSIST_PATH
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(str(path), "a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            lines = path.read_text(encoding="utf-8").strip().splitlines()
-            if len(lines) > self.MAX_PERSISTED:
-                path.write_text(
-                    "\n".join(lines[-self.MAX_PERSISTED:]) + "\n",
-                    encoding="utf-8",
-                )
-        except Exception:
-            logger.warning("failed to persist job {}", js.id)
-
-    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Bind the framework-owned loop used for local compatibility work."""
-        with self._lock:
-            self._accepting = True
-            self._loop = loop
-
-    def submit(
-        self,
-        kind: str,
-        params: dict[str, Any],
-        fn: Callable[[ProgressCB], Any],
-    ) -> JobState:
-        """Queue a job. fn signature: (progress_cb) -> result (any JSON-serializable).
-
-        Caller is responsible for binding params into fn (e.g. via a closure)
-        if the service function needs them. params are also stored in JobState
-        for visibility via to_dict().
-
-        Heavy supported kinds enter PostgreSQL when the release-time queue flag
-        is enabled.  Other jobs use the explicitly bound framework loop; a
-        non-framework caller executes the compatibility function inline.
-        """
-        with self._lock:
-            if not self._accepting:
-                raise RuntimeError("job_manager_draining")
-        if self._persistent_enabled and kind in self.PERSISTENT_JOB_KINDS:
-            idempotency_key = str(params.get("_idempotency_key") or "")
-            return self._queue().enqueue(
-                kind,
-                params,
-                idempotency_key=idempotency_key,
-                priority=int(params.get("_priority") or 0),
-                max_attempts=max(1, int(params.get("_max_attempts") or 3)),
-            )
-
-        js = JobState(id=new_job_id(), kind=kind, params=params)
-        self._jobs[js.id] = js
-        # Use the caller loop when available, otherwise hand work to the
-        # explicitly bound framework loop via run_coroutine_threadsafe.
-        try:
-            caller_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            caller_loop = None
-        with self._lock:
-            if self._loop is None and caller_loop is not None:
-                self._loop = caller_loop
-            target_loop = self._loop
-        if caller_loop is not None and caller_loop is target_loop:
-            task = caller_loop.create_task(self._run(js, fn))
-            self._tasks[js.id] = task
-        elif target_loop is not None and target_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self._run(js, fn), target_loop)
-            task = _FutureShim(future)
-            self._tasks[js.id] = task
-        else:
-            self._run_inline(js, fn)
-        return js
-
-    def _run_inline(self, js: JobState, fn: Callable[[ProgressCB], Any]) -> None:
-        """Run a compatibility/light task without creating a loop thread."""
-        if inspect.iscoroutinefunction(fn):
-            asyncio.run(self._run(js, fn))
-            return
-        js.status = "running"
-        terminal_status = "done"
-        try:
-            def cb(step: str, pct: float, msg: str) -> None:
-                js.progress_pct = max(0.0, min(100.0, pct))
-                js.current_step = step
-                js.log_tail = (js.log_tail + [f"[{step} {pct:.0f}%] {msg}"])[-50:]
-
-            result = fn(cb)
-            if inspect.isawaitable(result):
-                result = asyncio.run(result)
-            js.result = result if isinstance(result, dict) else {"value": result}
-            js.progress_pct = 100.0
-        except Exception as exc:
-            terminal_status = "error"
-            js.error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-500:]}"
-            logger.error("job {} ({}) failed inline: {}", js.id, js.kind, exc)
-        finally:
-            js.finished_at = datetime.now(timezone.utc)
-            self._append_persisted(js, status=terminal_status)
-            js.status = terminal_status
-
-    async def _run(self, js: JobState, fn: Callable[[ProgressCB], Any]) -> None:
-        js.status = "running"
-        terminal_status = "done"
-        try:
-            def cb(step: str, pct: float, msg: str) -> None:
-                js.progress_pct = max(0.0, min(100.0, pct))
-                js.current_step = step
-                if len(js.log_tail) >= 50:
-                    js.log_tail = js.log_tail[-49:]
-                js.log_tail.append(f"[{step} {pct:.0f}%] {msg}")
-
-            if inspect.iscoroutinefunction(fn):
-                result = await fn(cb)
-            else:
-                # Sync compatibility work uses an explicitly process-owned,
-                # bounded executor.  Never borrow the framework default
-                # executor: doing so leaves shutdown_default_executor waiting
-                # on threads that the JobManager cannot drain itself.
-                running_loop = asyncio.get_running_loop()
-                result = await running_loop.run_in_executor(self._executor(), fn, cb)
-
-            js.result = result if isinstance(result, dict) else {"value": result}
-            js.progress_pct = 100.0
-        except asyncio.CancelledError:
-            terminal_status = "cancelled"
-            logger.info(f"job {js.id} ({js.kind}) cancelled")
-        except Exception as e:
-            terminal_status = "error"
-            js.error = f"{type(e).__name__}: {e}\n{traceback.format_exc()[-500:]}"
-            logger.error(f"job {js.id} ({js.kind}) failed: {e}")
-        finally:
-            from datetime import datetime
-            js.finished_at = datetime.now(timezone.utc)
-            self._append_persisted(js, status=terminal_status)
-            js.status = terminal_status
-            self._tasks.pop(js.id, None)
+    def submit(self, kind: str, params: Mapping[str, Any]) -> JobState:
+        """Enqueue one supported research job in PostgreSQL."""
+        normalized_kind = str(kind or "").strip()
+        if normalized_kind not in self.PERSISTENT_JOB_KINDS:
+            raise ValueError(f"unsupported_persistent_job_kind:{normalized_kind}")
+        payload = dict(params or {})
+        return self._queue().enqueue(
+            normalized_kind,
+            payload,
+            idempotency_key=str(payload.get("_idempotency_key") or ""),
+            priority=int(payload.get("_priority") or 0),
+            max_attempts=max(1, int(payload.get("_max_attempts") or 3)),
+        )
 
     def get(self, job_id: str) -> JobState | None:
-        local = self._jobs.get(job_id)
-        if local is not None:
-            return local
-        if not self._persistent_enabled:
-            return None
-        try:
-            return self._queue().get(job_id)
-        except Exception:
-            return None
+        return self._queue().get(job_id)
 
-    def list(self, kind: str | None = None, status: str | None = None) -> list[JobState]:
-        merged: dict[str, JobState] = {}
-        if self._persistent_enabled:
-            try:
-                merged.update({job.id: job for job in self._queue().list(kind=kind, status=status)})
-            except Exception:
-                pass
-        for job in self._jobs.values():
-            if kind is not None and job.kind != kind:
-                continue
-            if status is not None and job.status != status:
-                continue
-            merged[job.id] = job
-        return sorted(merged.values(), key=lambda job: job.started_at, reverse=True)
+    def list(
+        self,
+        kind: str | None = None,
+        status: str | None = None,
+    ) -> list[JobState]:
+        return self._queue().list(kind=kind, status=status)
 
     def cancel(self, job_id: str) -> bool:
-        task = self._tasks.get(job_id)
-        if task is not None and not task.done():
-            task.cancel()
-            return True
-        if not self._persistent_enabled:
-            return False
-        try:
-            return bool(self._queue().request_cancel(job_id))
-        except Exception:
-            return False
-
-    def shutdown(self, *, timeout: float = 5.0) -> dict[str, Any]:
-        """Stop admission and synchronously join the owned local executor.
-
-        Durable PG jobs have no executor in the API process.  Legacy/local
-        closures are bounded to short compatibility work and are drained here;
-        repeated or concurrent shutdown calls share this single join boundary.
-        ``timeout`` remains a compatibility argument -- Python's executor API
-        has no safe timed join, so ownership is retained until running work
-        actually returns instead of abandoning a mutating thread.
-        """
-        del timeout
-        with self._shutdown_lock:
-            with self._lock:
-                self._accepting = False
-                tasks = list(self._tasks.values())
-                executor = self._local_executor
-                self._local_executor = None
-                self._loop = None
-            for task in tasks:
-                try:
-                    if not task.done():
-                        task.cancel()
-                except Exception:
-                    pass
-            if executor is not None:
-                executor.shutdown(wait=True, cancel_futures=True)
-            self._tasks.clear()
-            return {
-                "ok": True,
-                "status": "completed" if executor is not None or tasks else "idle",
-                "executor_started": executor is not None,
-                "task_count": len(tasks),
-            }
+        return bool(self._queue().request_cancel(job_id))
 
 
-class _FutureShim:
-    """Adapter so cancel() can target both asyncio.Task and concurrent.futures.Future.
-
-    concurrent.futures.Future (returned by run_coroutine_threadsafe) has
-    .done() and .cancel() that match the asyncio.Task interface used here.
-    """
-
-    __slots__ = ("_f",)
-
-    def __init__(self, f) -> None:
-        self._f = f
-
-    def done(self) -> bool:
-        return self._f.done()
-
-    def cancel(self) -> bool:
-        return self._f.cancel()
-
-
-# Singleton accessor
 _manager: JobManager | None = None
 _manager_lock = threading.Lock()
 
@@ -453,11 +75,3 @@ def get_job_manager() -> JobManager:
             if _manager is None:
                 _manager = JobManager()
     return _manager
-
-
-def shutdown_job_managers_for_tests() -> None:
-    """Cancel local compatibility tasks held by managers in this process."""
-    global _manager
-    for manager in list(JobManager._instances):
-        manager.shutdown()
-    _manager = None

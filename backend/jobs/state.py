@@ -1,4 +1,4 @@
-"""Public job state shared by local compatibility and PostgreSQL queue paths."""
+"""Public job state returned by the PostgreSQL research-job queue."""
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone

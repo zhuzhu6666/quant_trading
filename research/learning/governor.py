@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,7 @@ from backend.services.brain_governance_candidates import sync_candidate_suggesti
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
 from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.policy_suggestion_identity import deterministic_policy_suggestion_id
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.canonical_v2_reader import (
     canonical_ready,
@@ -75,10 +75,6 @@ class RuleEvolutionGovernor:
         with self._conn() as conn:
             if not self._use_pg():
                 conn.executescript(STATE_DB_DDL)
-
-    @staticmethod
-    def _new_id(prefix: str) -> str:
-        return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
     @staticmethod
     def _reward_from_review(item: dict) -> float:
@@ -1590,7 +1586,6 @@ class RuleEvolutionGovernor:
                         )
                         rolled_back += 1
                 elif next_status == "effective" and len(post_reviews) >= observe_trades:
-                    suggestion_id = self._new_id("psg")
                     evidence = {
                         "source_agent": "autonomous_learning",
                         "source_application_id": app["application_id"],
@@ -1619,6 +1614,16 @@ class RuleEvolutionGovernor:
                         impact_level="medium",
                         db_path=self.db_path,
                     )
+                    suggestion_id = deterministic_policy_suggestion_id(
+                        writer="rule_evolution_governor",
+                        scope_type=scope_type,
+                        scope_key=scope_key_for_effect,
+                        action=app["action"],
+                        evidence=evidence,
+                        status="proposed",
+                        qualification_fingerprint="",
+                        prefix="psg_effect",
+                    )
                     self._execute(conn,
                         """
                         INSERT INTO policy_suggestion
@@ -1629,6 +1634,7 @@ class RuleEvolutionGovernor:
                          governance_ineligible_reason, created_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', 0, ?,
                                 0, ?, '', ?, ?)
+                        ON CONFLICT(suggestion_id) DO NOTHING
                         """,
                         (
                             suggestion_id,

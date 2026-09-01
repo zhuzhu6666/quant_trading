@@ -32,6 +32,7 @@ from backend.services.review_contract import (
     review_has_system_contamination,
 )
 from backend.services.trade_lesson_memory import trade_review_payload_from_row
+from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 
 from backend.core.db_helpers import (
     conn_is_pg as _conn_is_pg,
@@ -132,17 +133,12 @@ def _mark_startup_backfill_completed(
     conn = get_state_pg_conn()
     now = time.time()
     try:
-        conn.execute(
-            """INSERT INTO runtime_kv (key, value_json, updated_at)
-               VALUES (%s, %s, %s)
-               ON CONFLICT(key) DO UPDATE SET
-                 value_json=excluded.value_json,
-                 updated_at=excluded.updated_at""",
-            (
-                _STARTUP_WATERMARK_KEY,
-                json.dumps(watermark, sort_keys=True),
-                now,
-            ),
+        set_runtime_kv_on_conn(
+            conn,
+            _STARTUP_WATERMARK_KEY,
+            watermark,
+            updated_at=now,
+            ensure=False,
         )
         conn.commit()
     except Exception:
@@ -205,7 +201,7 @@ def _infer_path_metrics_from_bars(
     if entry_ts <= 0 or close_ts <= entry_ts or entry_price <= 0 or close_price <= 0:
         return result
     try:
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
 
         bars = DataStore().load_bars(
             symbol or "XAUUSD+",

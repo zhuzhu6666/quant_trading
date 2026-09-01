@@ -190,7 +190,7 @@ def refresh_all_factors(symbol: str = "XAUUSD+",
 
     # 1. 加载 bars
     try:
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
         ds = DataStore()
         df = ds.load_bars(symbol, timeframe, limit=n_bars)
     except Exception as e:

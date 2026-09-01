@@ -91,6 +91,85 @@ class AutonomousEvolutionNurseryRunner:
         run_id = f"nursery_cycle_{int(started_at)}"
         actions: list[dict[str, Any]] = []
 
+        from backend.services.learning_workload_gate import (
+            RUN_PENDING_GOVERNANCE,
+            SKIP_CLOSED_NO_NEW_FACTS,
+            evaluate_learning_workload,
+        )
+
+        workload_gate = evaluate_learning_workload(self.db_path)
+        workload_status = str(workload_gate.get("status") or "")
+        if workload_status == SKIP_CLOSED_NO_NEW_FACTS:
+            skipped_cycle = {
+                "schema_version": "autonomous_evolution_cycle.v1",
+                "status": SKIP_CLOSED_NO_NEW_FACTS,
+                "autonomy_mode": "",
+                "blockers": [],
+                "next_actions": [],
+            }
+            return self._result(
+                run_id=run_id,
+                started_at=started_at,
+                initial_cycle=skipped_cycle,
+                repaired_cycle=skipped_cycle,
+                final_cycle=skipped_cycle,
+                actions=[
+                    {
+                        "action": "learning_workload_gate",
+                        "ok": True,
+                        "status": SKIP_CLOSED_NO_NEW_FACTS,
+                        "reason": workload_gate.get("reason_code"),
+                    }
+                ],
+                status=SKIP_CLOSED_NO_NEW_FACTS,
+                workload_gate=workload_gate,
+            )
+
+        # A closed market with pending governance only needs the existing
+        # Coordinator/owner reconciliation path.  Do not spend the cycle on
+        # replay, proposal refresh or a full research/evolution pass.
+        pending_governance_only = workload_status == RUN_PENDING_GOVERNANCE
+        if pending_governance_only:
+            actions.append(
+                {
+                    "action": "learning_workload_gate",
+                    "ok": True,
+                    "status": RUN_PENDING_GOVERNANCE,
+                    "reason": workload_gate.get("reason_code"),
+                }
+            )
+            # V16 orchestration, candidate review/bridge, readiness rebuilds,
+            # and the recommended apply step are research/materialization
+            # work.  A closed market with an already-pending governance item
+            # only needs the existing Coordinator/effect reconciliation owner.
+            if reconcile_effects:
+                actions.append(
+                    self._record(
+                        "reconcile_application_effects",
+                        lambda: self._reconcile_effects(limit=effect_limit),
+                    )
+                )
+            pending_cycle = {
+                "schema_version": "autonomous_evolution_cycle.v1",
+                "status": RUN_PENDING_GOVERNANCE,
+                "autonomy_mode": "",
+                "blockers": [],
+                "next_actions": [],
+            }
+            pending_status = "completed_with_errors" if any(
+                item.get("ok") is False for item in actions
+            ) else RUN_PENDING_GOVERNANCE
+            return self._result(
+                run_id=run_id,
+                started_at=started_at,
+                initial_cycle=pending_cycle,
+                repaired_cycle=pending_cycle,
+                final_cycle=pending_cycle,
+                actions=actions,
+                status=pending_status,
+                workload_gate=workload_gate,
+            )
+
         initial_readiness = readiness or self._build_readiness()
         initial_cycle = AutonomousEvolutionCycleService(self.db_path).status(
             readiness=initial_readiness,
@@ -117,6 +196,7 @@ class AutonomousEvolutionNurseryRunner:
                 final_cycle=initial_cycle,
                 actions=actions,
                 status="skipped_outside_demo_nursery",
+                workload_gate=workload_gate,
             )
 
         automatic_demo = bool(automatic_demo) and str(initial_cycle.get("autonomy_mode") or "") in {
@@ -291,6 +371,7 @@ class AutonomousEvolutionNurseryRunner:
             actions=actions,
             status=status,
             release_run=release_run,
+            workload_gate=workload_gate,
         )
 
     def _result(
@@ -304,6 +385,7 @@ class AutonomousEvolutionNurseryRunner:
         actions: list[dict[str, Any]],
         status: str,
         release_run: dict[str, Any] | None = None,
+        workload_gate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "ok": status not in {"completed_with_errors"},
@@ -317,6 +399,7 @@ class AutonomousEvolutionNurseryRunner:
             "final_cycle": self._cycle_summary(final_cycle),
             "actions": actions,
             "release_run": release_run or {},
+            "workload_gate": workload_gate or {},
             "boundary": self.boundary(),
         }
 
@@ -365,8 +448,8 @@ class AutonomousEvolutionNurseryRunner:
         from config.runtime_config import shared as runtime_config
 
         cfg = runtime_config()
-        replay = self._replay_status(ReplayHarnessService(self.db_path).latest_report())
-        release = self._release_status(ReleaseControlService(self.db_path).latest_release())
+        replay = ReplayHarnessService(self.db_path).status()
+        release = ReleaseControlService(self.db_path).status()
         health = AutonomyHealthService(self.db_path).latest_snapshot()
         return {
             "schema_version": "autonomous_evolution_runner_light_readiness.v1",
@@ -392,39 +475,6 @@ class AutonomousEvolutionNurseryRunner:
                     "proposal_registry_review_only": True,
                 }
             },
-        }
-
-    @staticmethod
-    def _replay_status(report: dict[str, Any]) -> dict[str, Any]:
-        created_at = float(report.get("created_at") or 0.0)
-        age = max(0.0, time.time() - created_at) if created_at > 0 else 0.0
-        if not report.get("replay_run_id"):
-            status = "missing"
-        elif report.get("replay_error"):
-            status = "error"
-        elif age > 24 * 3600:
-            status = "stale"
-        else:
-            status = "fresh"
-        return {
-            "schema_version": "replay_latest_status.v1",
-            "status": status,
-            "replay_run_id": str(report.get("replay_run_id") or ""),
-            "created_at": created_at,
-            "age_seconds": age,
-        }
-
-    @staticmethod
-    def _release_status(release: dict[str, Any]) -> dict[str, Any]:
-        if not release.get("run_id"):
-            status = "missing"
-        else:
-            status = str(release.get("status") or "unknown")
-        return {
-            "schema_version": "release_latest_status.v1",
-            "status": status,
-            "run_id": str(release.get("run_id") or ""),
-            "created_at": float(release.get("created_at") or 0.0),
         }
 
     def _lock_path(self) -> Path:
@@ -461,13 +511,13 @@ class AutonomousEvolutionNurseryRunner:
     def _run_bar_replay(self, *, lookback_days: float, limit: int) -> dict[str, Any]:
         from backend.services.replay_harness import ReplayHarnessService
 
-        report = ReplayHarnessService(self.db_path).run_bar_replay_freshness(
+        report = ReplayHarnessService(self.db_path).run_bar_replay_evidence(
             lookback_days=max(0.0, min(float(lookback_days), 30.0)),
             limit=max(1, min(int(limit), 1000)),
         )
         return {
             "ok": not bool(report.get("replay_error")),
-            "schema_version": "autonomous_evolution_runner_replay_freshness.v1",
+            "schema_version": "autonomous_evolution_runner_replay_evidence.v1",
             "status": "completed" if not report.get("replay_error") else "failed",
             "report": report,
         }

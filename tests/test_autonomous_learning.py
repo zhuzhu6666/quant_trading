@@ -2054,6 +2054,85 @@ def test_supervisor_observation_labels_do_not_overstate_hold_recommendation():
     assert sample["label"]["counterfactual_status"] == "unproven"
     assert sample["label"]["recommended_action_provisional"] is True
 
+def test_supervisor_loss_without_entry_attribution_stays_observation_only(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    _record_review_revision(
+        db_path,
+        "rev1",
+        {
+            "close_reason": "thesis_broken",
+            "close_reason_source": "supervisor_direct_close",
+            "thesis_status_at_exit": "broken",
+            "primary_responsibility": "exit",
+            "outcome_dimensions": {"entry_avoidability": "not_established"},
+            "context_integrity": "full",
+            "attribution_integrity": "full",
+        },
+        revision_tag="supervisor_loss_without_entry_attribution",
+    )
+
+    al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            """
+            SELECT label_json, verdict_json
+            FROM training_sample_row
+            WHERE sample_type='entry_supervisor_feedback' AND source_id='rev1'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    label = json.loads(row[0])
+    verdict = json.loads(row[1])
+    assert label["recommended_action"] == "watch"
+    assert label["label"] == "supervisor_feedback_observed"
+    assert verdict["entry_failure"] is False
+
+
+def test_supervisor_loss_with_explicit_entry_attribution_can_downweight(tmp_path):
+    db_path = tmp_path / "state.db"
+    _create_sample_db(db_path)
+    _record_review_revision(
+        db_path,
+        "rev1",
+        {
+            "close_reason": "thesis_broken",
+            "close_reason_source": "supervisor_direct_close",
+            "thesis_status_at_exit": "broken",
+            "primary_responsibility": "signal_quality",
+            "outcome_dimensions": {"entry_avoidability": "avoidable"},
+            "context_integrity": "full",
+            "attribution_integrity": "full",
+        },
+        revision_tag="supervisor_loss_with_entry_attribution",
+    )
+
+    al.materialize_autonomous_learning_samples(db_path=db_path, limit=20)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            """
+            SELECT label_json, verdict_json
+            FROM training_sample_row
+            WHERE sample_type='entry_supervisor_feedback' AND source_id='rev1'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    label = json.loads(row[0])
+    verdict = json.loads(row[1])
+    assert label["recommended_action"] == "downweight_entry_factor"
+    assert label["label"] == "entry_thesis_broken"
+    assert verdict["entry_failure"] is True
+
 
 def test_position_supervisor_trace_backfill_reports_missing_execution_trace(tmp_path):
     db_path = tmp_path / "state.db"
@@ -3123,6 +3202,10 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
         lambda **kwargs: calls.append("event_window_governance") or {"suggestions": 1},
     )
     monkeypatch.setattr(
+        "backend.services.position_supervisor_governance.build_position_supervisor_advisories",
+        lambda **kwargs: calls.append("position_supervisor_advisories") or {"items": [], "skipped": []},
+    )
+    monkeypatch.setattr(
         al,
         "repair_evidence_contracts",
         lambda **kwargs: calls.append("repair_contracts") or {"repaired": 1},
@@ -3155,9 +3238,10 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert result["stages"]["entry_quality_governance"]["suggestions"] == 1
     assert result["stages"]["entry_cluster_governance"]["suggestions"] == 1
     assert result["stages"]["event_window_governance"]["suggestions"] == 1
+    assert "position_supervisor_advisories" in result["stages"]
     assert result["stages"]["evidence_contract_repair"]["repaired"] == 1
     assert "position_supervisor_selection_projection" in result["stages"]
-    assert len(result["memory_profile"]) == 20
+    assert len(result["memory_profile"]) == 21
     assert result["stages"]["position_supervisor_auto_enable"]["status"] == (
         "waiting_for_selection_evidence"
     )
@@ -3173,10 +3257,10 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert calls[6] == "entry_quality_governance"
     assert calls[7] == "entry_cluster_governance"
     assert calls[8] == "event_window_governance"
-    assert calls[9] == "repair_contracts"
-    assert calls[10] == "loss_streak_review"
+    assert calls[9] == "position_supervisor_advisories"
+    assert calls[10] == "repair_contracts"
+    assert calls[11] == "loss_streak_review"
     assert calls[-1] == "demo_apply"
-
     conn = sqlite3.connect(str(db_path))
     try:
         stored_cycle = json.loads(

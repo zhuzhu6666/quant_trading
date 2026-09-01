@@ -132,6 +132,12 @@ E2 第一版先固定三类模板角色：
 - 所有应用必须写入 `runtime_config_overlay` 和 `runtime_config_snapshot`
 - 后验变差时必须支持基于当时 rollback JSON 的自动回滚
 
+生成的手工库模板在首次应用时，必须在同一个 Coordinator 事务内先物化到
+`parameter_template_registry`，再写 active projection；不能出现“推荐得到但无法应用”
+的悬空模板。`offline_deep` 的灰度发布以已审核且研究证据可执行的
+`parameter_template_release_candidate` 为审批事实，直接复用 typed plan，不再伪造一个
+缺少 governance eligibility 的已批准 `policy_suggestion`。
+
 ---
 
 ## 7. 后续演进

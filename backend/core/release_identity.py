@@ -18,6 +18,20 @@ from typing import Any, Callable, Mapping
 SCHEMA_VERSION = "process_release_identity.v1"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# These fields describe the loaded code, rather than the individual process
+# that collected them.  PID and capture time intentionally stay out of the
+# cross-process comparison contract.
+RELEASE_IDENTITY_MATCH_FIELDS = (
+    "schema_version",
+    "ok",
+    "root",
+    "head",
+    "clean",
+    "worktree_fingerprint",
+    "tracked_and_unignored_file_count",
+    "source",
+)
+
 
 def _result_parts(result: Any) -> tuple[int, str, str]:
     if isinstance(result, Mapping):
@@ -171,3 +185,10 @@ def process_release_identity() -> dict[str, Any]:
         key: _PROCESS_RELEASE_IDENTITY.get(key)
         for key in _PUBLIC_IDENTITY_FIELDS
     }
+
+
+def release_identity_contract(identity: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Return the stable code identity used to compare cooperating processes."""
+
+    source = dict(process_release_identity() if identity is None else identity)
+    return {key: source.get(key) for key in RELEASE_IDENTITY_MATCH_FIELDS}

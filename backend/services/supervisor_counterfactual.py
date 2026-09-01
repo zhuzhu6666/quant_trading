@@ -111,7 +111,7 @@ def _direction_from_review(review: dict[str, Any]) -> int:
 
 def _load_future_bars(symbol: str, timeframe: str, close_ts: float, max_minutes: int):
     try:
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
 
         bars = DataStore().load_bars(
             symbol or "XAUUSD+",
@@ -151,7 +151,7 @@ def _load_future_bar_cache(candidates: list[dict[str, Any]], max_minutes: int) -
     if not candidates:
         return {}
     try:
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
 
         store = DataStore()
     except Exception:

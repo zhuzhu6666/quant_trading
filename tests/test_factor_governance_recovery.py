@@ -6,7 +6,7 @@ import pytest
 
 import backend.runtime.factor_governance_orchestrator as governance_module
 from backend.runtime.factor_governance_orchestrator import FactorGovernanceOrchestrator
-from backend.services.factor_identity import (
+from alpha.factor_identity import (
     canonical_factor_id,
     factor_definition_fingerprint,
 )

@@ -19,8 +19,8 @@ def _readiness(*, replay_status: str = "fresh", release_status: str = "completed
     return {
         "governance": {"autonomy_mode": "demo_nursery"},
         "autonomy_health": {"posture": posture},
-        "replay": {"status": replay_status},
-        "release": {"status": release_status},
+        "replay": {"ok": replay_status == "fresh", "status": replay_status},
+        "release": {"ok": release_status == "completed", "status": release_status},
         "live": {"loop": {"status": "running"}},
         "v16": {
             "control_plane_boundaries": {
@@ -182,6 +182,29 @@ def test_autonomous_evolution_cycle_ready_for_guarded_demo_apply(tmp_path, monke
     assert cycle["human_intervention_required"] is False
 
 
+def test_autonomous_evolution_cycle_blocks_failed_release(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    _create_core_tables(db_path, include_replay=True, include_effect=True)
+    _create_candidate_review(db_path)
+    monkeypatch.setattr(
+        AutonomousEvolutionCycleService,
+        "_chain_health",
+        lambda self: {"ok": True, "status": "ok", "schema_version": "agent_chain_health.v1"},
+    )
+
+    cycle = AutonomousEvolutionCycleService(db_path).status(
+        readiness=_readiness(release_status="failed"),
+    )
+
+    assert cycle["status"] == "needs_attention"
+    assert cycle["stable_demo_nursery_ready"] is False
+    assert any(
+        blocker["component"] == "release" and blocker["status"] == "failed"
+        for blocker in cycle["blockers"]
+    )
+
+
 def test_autonomous_evolution_cycle_treats_routed_stale_proposals_as_work_queue(tmp_path, monkeypatch):
     db_path = tmp_path / "state.db"
     ensure_proposal_registry_table(db_path)
@@ -275,6 +298,60 @@ def test_autonomous_evolution_runner_repairs_then_uses_existing_learning_cycle(t
     ]
     assert result["boundary"]["automatic_full_learning_cycle"] is False
     assert result["boundary"]["full_learning_cycle_requires_explicit_flag"] is True
+
+
+def test_autonomous_evolution_runner_repairs_replay_with_full_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    _create_core_tables(db_path, include_replay=True, include_effect=True)
+    _create_candidate_review(db_path)
+    monkeypatch.setattr(
+        AutonomousEvolutionCycleService,
+        "_chain_health",
+        lambda self: {"ok": True, "status": "ok", "schema_version": "agent_chain_health.v1"},
+    )
+    monkeypatch.setattr(
+        AutonomousEvolutionNurseryRunner,
+        "_build_readiness",
+        lambda self: _readiness(),
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        ReplayHarnessService,
+        "run_bar_replay_evidence",
+        lambda self, **kwargs: calls.append(kwargs)
+        or {
+            "replay_run_id": "full-evidence",
+            "scope": {"kind": "bar_replay_evidence"},
+            "status": "completed",
+            "replay_error": "",
+        },
+    )
+    monkeypatch.setattr(
+        ReplayHarnessService,
+        "run_bar_replay_freshness",
+        lambda self, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("nursery repair must not use freshness as governance evidence")
+        ),
+    )
+
+    result = AutonomousEvolutionNurseryRunner(db_path).run_once(
+        readiness=_readiness(replay_status="stale"),
+        reconcile_effects=False,
+        refresh_proposals=False,
+        review_candidates=False,
+        create_release_evidence=False,
+    )
+
+    replay_action = next(
+        item for item in result["actions"] if item["action"] == "run_bar_replay_evidence"
+    )
+    assert replay_action["ok"] is True
+    assert replay_action["result"]["report"]["scope"]["kind"] == "bar_replay_evidence"
+    assert calls == [{"lookback_days": 7.0, "limit": 80}]
 
 
 def test_autonomous_evolution_runner_defaults_to_small_demo_apply(tmp_path, monkeypatch):
@@ -787,3 +864,84 @@ def test_autonomous_demo_apply_stepper_limits_conflict_resolution(tmp_path, monk
     finally:
         conn.close()
     assert superseded_count == 1
+
+
+def test_autonomous_demo_apply_plan_excludes_applied_rows_from_conflict_work(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr(
+        "backend.services.autonomous_demo_apply_stepper._demo_autonomous_enabled",
+        lambda: True,
+    )
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE policy_suggestion (
+                suggestion_id TEXT PRIMARY KEY,
+                scope_type TEXT,
+                scope_key TEXT,
+                action TEXT,
+                confidence REAL,
+                evidence_json TEXT,
+                status TEXT,
+                reviewed_at REAL,
+                governance_eligible INTEGER NOT NULL DEFAULT 0,
+                governance_eligibility_version TEXT NOT NULL DEFAULT '',
+                governance_eligibility_fingerprint TEXT NOT NULL DEFAULT '',
+                applied_mutation_id TEXT NOT NULL DEFAULT '',
+                created_at REAL
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, evidence_json,
+             status, reviewed_at, governance_eligible,
+             governance_eligibility_version, governance_eligibility_fingerprint,
+             applied_mutation_id, created_at)
+            VALUES (?, 'factor', 'rsi_14', 'downweight', ?, '{}', ?, 0,
+                    1, 'governance_eligibility.v1', 'fp', ?, ?)
+            """,
+            [
+                ("already-applied", 0.9, "applied", "mutation-1", 1.0),
+                ("ready-to-apply", 0.8, "approved", "", 2.0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = AutonomousDemoApplyStepper(db_path).plan()
+    steps = {item["step"]: item for item in plan["steps"]}
+
+    assert steps["resolve_conflicts"]["pending_count"] == 0
+    assert steps["resolve_conflicts"]["recommended"] is False
+    assert steps["sync_factor_weights"]["pending_count"] == 1
+    assert steps["sync_factor_weights"]["recommended"] is True
+
+    conn = connect_sqlite(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_suggestion
+            (suggestion_id, scope_type, scope_key, action, confidence, evidence_json,
+             status, reviewed_at, governance_eligible,
+             governance_eligibility_version, governance_eligibility_fingerprint,
+             applied_mutation_id, created_at)
+            VALUES ('second-ready', 'factor', 'rsi_14', 'downweight', 0.7, '{}',
+                    'approved', 0, 1, 'governance_eligibility.v1', 'fp', '', 3.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conflicted_plan = AutonomousDemoApplyStepper(db_path).plan()
+    conflicted_steps = {item["step"]: item for item in conflicted_plan["steps"]}
+
+    assert conflicted_steps["resolve_conflicts"]["pending_count"] == 1
+    assert conflicted_steps["resolve_conflicts"]["recommended"] is True

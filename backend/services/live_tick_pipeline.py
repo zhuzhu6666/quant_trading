@@ -7,6 +7,9 @@ import math
 import time
 from typing import Any
 
+from backend.services.live_position_lifecycle import (
+    build_open_decision_replay_payload,
+)
 from backend.services.review_contract import build_execution_quality_event_details
 
 
@@ -523,6 +526,11 @@ def build_skip_ledger_payload(
         "market_session": dict(market_session or {}),
         "event_sizing": dict(event_sizing_context or {}),
         **dict(learning_context or {}),
+        **build_open_decision_replay_payload(
+            cfg=cfg,
+            composite=composite,
+            include_risk=bool(risk_payload),
+        ),
     }
     # A pre-candidate admission blocker is not a RiskPolicy verdict.  Keep
     # the existing ledger shape for evaluated risk decisions, while making an
@@ -580,6 +588,11 @@ def build_open_ledger_payloads(
     pid_str = str(int(pid))
     direction = int(getattr(composite, "direction", 0) or 0)
     risk_payload = risk_verdict.to_dict() if hasattr(risk_verdict, "to_dict") else dict(risk_verdict or {})
+    replay_payload = build_open_decision_replay_payload(
+        cfg=cfg,
+        composite=composite,
+        include_risk=True,
+    )
     return {
         "decision": {
             "event_type": "open",
@@ -611,6 +624,7 @@ def build_open_ledger_payloads(
                 "tick": int(tick or 0),
                 "risk_verdict": risk_payload,
                 **dict(learning_context or {}),
+                **replay_payload,
             },
         },
         "submitted_order": {

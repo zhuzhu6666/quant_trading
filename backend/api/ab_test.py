@@ -4,7 +4,6 @@ from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
 from backend.jobs import get_job_manager
-from backend.services.ab_service import run_ab
 
 router = APIRouter(prefix="/api/ab", tags=["ab"])
 
@@ -19,8 +18,7 @@ class ABRequest(BaseModel):
 def run(_user: RequireUser, req: ABRequest)-> dict:
     mgr = get_job_manager()
     params = req.model_dump()
-    fn = lambda cb: run_ab(params, cb)
-    js = mgr.submit("ab_test", params, fn)
+    js = mgr.submit("ab_test", params)
     return {"job_id": js.id, "status": js.status}
 
 

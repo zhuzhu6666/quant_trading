@@ -601,7 +601,7 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-    from data.store import DataStore
+    from data.duckdb_store import DuckDBDataStore as DataStore
     store = DataStore("data/ctrader_data.duckdb")
     bars = store.load_bars("XAUUSD+", "M15")
     print(f"Loaded {len(bars)} bars, range: {bars.index[0]} → {bars.index[-1]}")

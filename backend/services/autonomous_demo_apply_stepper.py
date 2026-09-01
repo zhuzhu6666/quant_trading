@@ -706,23 +706,8 @@ class AutonomousDemoApplyStepper:
 
         conn = _connect(self.db_path)
         try:
-            rows = _execute(
-                conn,
-                """
-                SELECT suggestion_id, scope_type, scope_key, action, confidence,
-                       evidence_json, status, reviewed_at, created_at,
-                       governance_eligible, governance_eligibility_version,
-                       governance_eligibility_fingerprint, applied_mutation_id
-                FROM policy_suggestion
-                WHERE status IN ('proposed', 'approved')
-                  AND governance_eligible=1
-                  AND governance_eligibility_version=?
-                  AND COALESCE(governance_eligibility_fingerprint, '') <> ''
-                ORDER BY created_at ASC
-                """,
-                (GOVERNANCE_ELIGIBILITY_VERSION,),
-            ).fetchall()
-            result = GovernanceConflictResolver().resolve([dict(row) for row in rows])
+            rows = self._eligible_conflict_rows(conn)
+            result = GovernanceConflictResolver().resolve(rows)
             superseded = list(result.get("superseded") or [])
             limited = superseded[: max(1, min(int(limit), 100))]
             now = time.time()
@@ -920,24 +905,32 @@ class AutonomousDemoApplyStepper:
         try:
             from research.learning.governance_conflicts import GovernanceConflictResolver
 
-            rows = _execute(
-                conn,
-                """
-                SELECT suggestion_id, scope_type, scope_key, action, confidence,
-                       evidence_json, status, reviewed_at, created_at
-                FROM policy_suggestion
-                WHERE status IN ('proposed', 'approved', 'applied')
-                  AND governance_eligible=1
-                  AND governance_eligibility_version=?
-                  AND COALESCE(governance_eligibility_fingerprint, '') <> ''
-                ORDER BY created_at ASC
-                """,
-                (GOVERNANCE_ELIGIBILITY_VERSION,),
-            ).fetchall()
-            result = GovernanceConflictResolver().resolve([dict(row) for row in rows])
+            result = GovernanceConflictResolver().resolve(
+                self._eligible_conflict_rows(conn)
+            )
             return len(result.get("superseded") or [])
         except Exception:
             return 0
+
+    @staticmethod
+    def _eligible_conflict_rows(conn: Any) -> list[dict[str, Any]]:
+        rows = _execute(
+            conn,
+            """
+            SELECT suggestion_id, scope_type, scope_key, action, confidence,
+                   evidence_json, status, reviewed_at, created_at,
+                   governance_eligible, governance_eligibility_version,
+                   governance_eligibility_fingerprint, applied_mutation_id
+            FROM policy_suggestion
+            WHERE status IN ('proposed', 'approved')
+              AND governance_eligible=1
+              AND governance_eligibility_version=?
+              AND COALESCE(governance_eligibility_fingerprint, '') <> ''
+            ORDER BY created_at ASC
+            """,
+            (GOVERNANCE_ELIGIBILITY_VERSION,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     @staticmethod
     def _table_exists(conn: Any, table: str) -> bool:
@@ -977,7 +970,7 @@ class AutonomousDemoApplyStepper:
                 and int(pending.get(step, 0) or 0) > 0
             )
         if step == "resolve_conflicts":
-            return int(pending.get("governor_review", 0) or 0) > 0 or int(pending.get("resolve_conflicts", 0) or 0) > 1
+            return int(pending.get("governor_review", 0) or 0) > 0 or int(pending.get("resolve_conflicts", 0) or 0) > 0
         return int(pending.get(step, 0) or 0) > 0
 
     @staticmethod

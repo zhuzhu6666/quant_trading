@@ -20,6 +20,7 @@ from typing import Final, Iterator
 
 import duckdb
 
+from backend.core.env import get_env
 from backend.core.state_store import STATE_SCHEMA, connect_state_store
 from backend.core.state_schema_migrations import require_state_schema_version
 
@@ -66,42 +67,17 @@ _KNOWN_SQLITE_PATHS: Final[set[Path]] = {
     LEGACY_ANALYTICS_DB.resolve(),
 }
 
-
-def _env_value(name: str, default: str = "") -> str:
-    value = os.environ.get(name)
-    if value is not None:
-        return value
-    env_path = _PROJECT_ROOT / ".env"
-    if not env_path.exists():
-        return default
-    try:
-        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#") or "=" not in raw:
-                continue
-            key, val = raw.split("=", 1)
-            if key.strip() == name:
-                return val.strip().strip('"').strip("'")
-    except Exception:
-        return default
-    return default
-
-
 def state_backend() -> str:
-    return _env_value("QUANT_STATE_BACKEND", "postgres").strip().lower() or "postgres"
-
+    return get_env("QUANT_STATE_BACKEND", "postgres").strip().lower() or "postgres"
 
 def state_pg_dsn() -> str:
-    return _env_value("QUANT_STATE_PG_DSN") or _env_value("QUANT_AUDIT_PG_DSN")
-
+    return get_env("QUANT_STATE_PG_DSN") or get_env("QUANT_AUDIT_PG_DSN")
 
 def state_pg_enabled() -> bool:
     return state_backend() == "postgres" and bool(state_pg_dsn())
 
-
 def is_state_db_path(db_path: str | Path) -> bool:
     return _normalize_db_path(db_path).resolve() == STATE_DB.resolve()
-
 
 # ═══════════════════════════════════════════
 # SQLite 连接管理 (线程安全, WAL 模式)
@@ -117,21 +93,17 @@ def _init_sqlite_db(db_path: Path, ddl: str) -> None:
     conn.commit()
     conn.close()
 
-
 def _normalize_db_path(db_path: str | Path) -> Path:
     path = Path(db_path).expanduser()
     return path.resolve() if path.is_absolute() else path
-
 
 def is_duckdb_path(db_path: str | Path) -> bool:
     path = _normalize_db_path(db_path)
     return path.suffix.lower() in _DUCKDB_EXTS or path.resolve() in _KNOWN_DUCKDB_PATHS
 
-
 def is_sqlite_path(db_path: str | Path) -> bool:
     path = _normalize_db_path(db_path)
     return path.suffix.lower() in _SQLITE_EXTS or path.resolve() in _KNOWN_SQLITE_PATHS
-
 
 def _configure_sqlite_connection(conn: sqlite3.Connection, *, read_only: bool = False) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=30000")
@@ -147,7 +119,6 @@ def _configure_sqlite_connection(conn: sqlite3.Connection, *, read_only: bool = 
             pass
     return conn
 
-
 def connect_sqlite(db_path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
     """Open a SQLite connection and reject DuckDB files early."""
     path = _normalize_db_path(db_path)
@@ -161,7 +132,6 @@ def connect_sqlite(db_path: str | Path, *, read_only: bool = False) -> sqlite3.C
     conn = sqlite3.connect(str(path), timeout=30.0)
     return _configure_sqlite_connection(conn, read_only=False)
 
-
 def connect_duckdb(db_path: str | Path, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
     """Open a DuckDB connection and reject SQLite files early."""
     path = _normalize_db_path(db_path)
@@ -172,7 +142,6 @@ def connect_duckdb(db_path: str | Path, *, read_only: bool = False) -> duckdb.Du
     path.parent.mkdir(parents=True, exist_ok=True)
     return duckdb.connect(str(path), read_only=read_only)
 
-
 _DUCKDB_LOCK_MARKERS: Final[tuple[str, ...]] = (
     "Could not set lock",
     "Conflicting lock is held",
@@ -180,12 +149,10 @@ _DUCKDB_LOCK_MARKERS: Final[tuple[str, ...]] = (
     "different configuration",
 )
 
-
 def is_duckdb_lock_error(exc: Exception | str) -> bool:
     """Return True for DuckDB single-writer/read-lock conflicts."""
     msg = str(exc)
     return any(marker in msg for marker in _DUCKDB_LOCK_MARKERS)
-
 
 @contextmanager
 def duckdb_readonly_connection(
@@ -224,7 +191,6 @@ def duckdb_readonly_connection(
         if tmp_dir is not None:
             tmp_dir.cleanup()
 
-
 BAR_TABLE_DDL: Final[str] = """
 CREATE TABLE IF NOT EXISTS bars (
     symbol VARCHAR NOT NULL,
@@ -236,7 +202,6 @@ CREATE TABLE IF NOT EXISTS bars (
     UNIQUE(symbol, timeframe, time)
 )
 """
-
 
 def ensure_bars_table(conn: duckdb.DuckDBPyConnection) -> None:
     """Create/upgrade the standard bars table in an opened DuckDB connection."""
@@ -250,17 +215,14 @@ def ensure_bars_table(conn: duckdb.DuckDBPyConnection) -> None:
         "ON bars(symbol, timeframe, time)"
     )
 
-
 def bars_month_key(ts: float | int | None = None) -> str:
     """Return YYYY_MM month key using UTC market timestamps."""
     value = time.time() if ts is None else float(ts)
     return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y_%m")
 
-
 def bars_monthly_path(ts: float | int | None = None) -> Path:
     """Return monthly K-line DuckDB path for a UTC epoch timestamp."""
     return DUCKDB_BARS_MONTHLY_DIR / f"bars_{bars_month_key(ts)}.duckdb"
-
 
 def bars_monthly_read_paths(
     *, newest_first: bool = False, fallback: Path | None = None
@@ -271,7 +233,6 @@ def bars_monthly_read_paths(
         reverse=newest_first,
     )
     return paths or [fallback or DUCKDB_BARS]
-
 
 def refresh_current_bars_link(ts: float | int | None = None) -> Path:
     """Point data/bars.duckdb at the current month database and return target."""
@@ -299,7 +260,6 @@ def refresh_current_bars_link(ts: float | int | None = None) -> Path:
         pass
     return target
 
-
 def ensure_sqlite_columns(db_path: str | Path, table: str, columns: dict[str, str]) -> None:
     """Best-effort SQLite column migrations for long-lived local files."""
     conn = connect_sqlite(db_path)
@@ -314,7 +274,6 @@ def ensure_sqlite_columns(db_path: str | Path, table: str, columns: dict[str, st
         conn.commit()
     finally:
         conn.close()
-
 
 def state_table_exists(conn, table: str) -> bool:
     """Return whether a runtime state table exists on SQLite or PostgreSQL."""
@@ -335,7 +294,6 @@ def state_table_exists(conn, table: str) -> bool:
     ).fetchone()
     return row is not None
 
-
 def state_table_columns(conn, table: str) -> set[str]:
     """Return runtime state table columns without exposing engine-specific metadata SQL."""
     if conn.__class__.__module__.split(".", 1)[0] == "psycopg":
@@ -352,7 +310,6 @@ def state_table_columns(conn, table: str) -> set[str]:
             ).fetchall()
         }
     return {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
-
 
 # ═══════════════════════════════════════════
 # state.db 完整 DDL
@@ -1208,7 +1165,6 @@ CREATE INDEX IF NOT EXISTS idx_ctrader_deals_pos ON ctrader_deals(position_id);
 CREATE INDEX IF NOT EXISTS idx_ctrader_deals_ts  ON ctrader_deals(exec_timestamp);
 """
 
-
 def init_state_db() -> None:
     """Validate the PostgreSQL schema gate without writing schema or data.
 
@@ -1223,13 +1179,11 @@ def init_state_db() -> None:
     finally:
         conn.close()
 
-
 def get_state_pg_conn(*, read_only: bool = False):
     """Return a direct psycopg connection to the PostgreSQL state schema."""
     if not state_pg_enabled():
         raise RuntimeError("PostgreSQL state backend is not enabled")
     return connect_state_store(state_pg_dsn(), read_only=read_only, schema=STATE_SCHEMA)
-
 
 def get_state_conn(*, read_only: bool = False):
     """Compatibility alias for the runtime state connection helper.
@@ -1243,7 +1197,6 @@ def get_state_conn(*, read_only: bool = False):
         conn.row_factory = sqlite3.Row
         return conn
     return get_state_pg_conn(read_only=read_only)
-
 
 # ═══════════════════════════════════════════
 # experiments.db DDL
@@ -1385,7 +1338,6 @@ _EXPERIMENTS_REQUIRED_INDEXES: Final[frozenset[str]] = frozenset({
     "idx_model_inference_candidate",
 })
 
-
 def validate_experiments_db_schema(
     db_path: str | Path = EXPERIMENTS_DB,
 ) -> None:
@@ -1446,7 +1398,6 @@ def validate_experiments_db_schema(
             )
     finally:
         conn.close()
-
 
 def init_experiments_db(db_path: str | Path = EXPERIMENTS_DB) -> None:
     """Explicit offline compatibility migration for ``experiments.db``.
@@ -1521,7 +1472,6 @@ def init_experiments_db(db_path: str | Path = EXPERIMENTS_DB) -> None:
     finally:
         conn.close()
 
-
 def prepare_experiments_store(db_path: str | Path = EXPERIMENTS_DB) -> None:
     """Validate production; migrate only an explicitly isolated SQLite path.
 
@@ -1536,261 +1486,11 @@ def prepare_experiments_store(db_path: str | Path = EXPERIMENTS_DB) -> None:
         return
     init_experiments_db(path)
 
-
 # ═══════════════════════════════════════════
 # 启动初始化
 # ═══════════════════════════════════════════
 _init_lock = threading.Lock()
 _initialized = False
-
-
-def _ensure_pg_business_tables() -> None:
-    """Create missing PostgreSQL business tables after S5 wipe.
-
-    Uses a plain psycopg connection (not RuntimeStateConnection) to bypass
-    the DDL interception layer. All DDL uses CREATE TABLE IF NOT EXISTS.
-    Tables are created in the runtime schema.
-    """
-    if not state_pg_enabled():
-        return
-    import psycopg as _psycopg
-    dsn = state_pg_dsn()
-    conn = _psycopg.connect(dsn)
-    try:
-        conn.execute(f'SET search_path TO "{STATE_SCHEMA}", public')
-        for ddl in _PG_BUSINESS_TABLES_DDL:
-            try:
-                conn.execute(ddl)
-            except Exception:
-                pass  # Table may already exist
-        conn.commit()
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-    finally:
-        conn.close()
-
-
-# DDL for mutable operational tables that must exist at runtime.
-# Immutable business facts are owned by canonical_v2 and are created by the
-# forward-only migration runner, not by process startup.
-_PG_BUSINESS_TABLES_DDL: list[str] = [
-    # --- evolution ledger ---
-    """
-    CREATE TABLE IF NOT EXISTS evolution_run (
-        run_id TEXT PRIMARY KEY,
-        run_type TEXT NOT NULL,
-        trigger_source TEXT DEFAULT '',
-        status TEXT DEFAULT 'running',
-        config_version INTEGER DEFAULT 0,
-        config_hash TEXT DEFAULT '',
-        summary_json TEXT DEFAULT '{}',
-        started_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-        ended_at DOUBLE PRECISION DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS evolution_decision (
-        decision_id TEXT PRIMARY KEY,
-        run_id TEXT DEFAULT '',
-        decision_type TEXT NOT NULL DEFAULT '',
-        decision_json TEXT NOT NULL DEFAULT '{}',
-        payload_hash TEXT NOT NULL DEFAULT '',
-        canonical_event_id TEXT NOT NULL DEFAULT '',
-        projection_type TEXT NOT NULL DEFAULT 'legacy',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS runtime_config_snapshot (
-        config_version INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        config_hash TEXT DEFAULT '', source TEXT DEFAULT '',
-        config_json TEXT NOT NULL DEFAULT '{}', run_id TEXT DEFAULT '',
-        mutation_id TEXT NOT NULL DEFAULT '',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0)
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS runtime_config_overlay (
-        overlay_id TEXT PRIMARY KEY, overlay_json TEXT NOT NULL DEFAULT '{}',
-        overlay_hash TEXT DEFAULT '', source TEXT DEFAULT '',
-        run_id TEXT DEFAULT '', mutation_id TEXT NOT NULL DEFAULT '',
-        legacy_authority_json TEXT NOT NULL DEFAULT '{}',
-        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0)
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS factor_catalog_snapshot (
-        snapshot_id TEXT PRIMARY KEY, run_id TEXT DEFAULT '',
-        catalog_hash TEXT DEFAULT '', catalog_json TEXT NOT NULL DEFAULT '[]',
-        source TEXT DEFAULT '',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0)
-    """,
-    # --- autonomous learning ---
-    """
-    CREATE TABLE IF NOT EXISTS evolution_events (
-        id SERIAL PRIMARY KEY,
-        timestamp DOUBLE PRECISION NOT NULL,
-        event_type TEXT NOT NULL,
-        payload_json TEXT NOT NULL DEFAULT '{}'
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS experience_pattern_stats (
-        id SERIAL PRIMARY KEY,
-        scope TEXT NOT NULL,
-        pattern_key TEXT NOT NULL,
-        raw_count INTEGER DEFAULT 0,
-        raw_avg_reward DOUBLE PRECISION DEFAULT 0.0,
-        effective_count INTEGER DEFAULT 0,
-        effective_avg_reward DOUBLE PRECISION DEFAULT 0.0,
-        weighted_avg_reward DOUBLE PRECISION DEFAULT 0.0,
-        fingerprint TEXT DEFAULT '',
-        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS policy_suggestion (
-        suggestion_id TEXT PRIMARY KEY,
-        source TEXT DEFAULT '',
-        source_agent TEXT DEFAULT '',
-        action TEXT NOT NULL DEFAULT '',
-        scope TEXT DEFAULT '',
-        status TEXT DEFAULT 'proposed',
-        details_json TEXT NOT NULL DEFAULT '{}',
-        applied_mutation_id TEXT DEFAULT '',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-        updated_at DOUBLE PRECISION DEFAULT 0.0
-    )
-    """,
-    # --- learning application ---
-    """
-    CREATE TABLE IF NOT EXISTS learning_application_log (
-        application_id TEXT PRIMARY KEY,
-        run_id TEXT DEFAULT '',
-        source TEXT DEFAULT '',
-        status TEXT DEFAULT 'prepared',
-        details_json TEXT NOT NULL DEFAULT '{}',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-        updated_at DOUBLE PRECISION DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS learning_application_effect (
-        effect_id TEXT PRIMARY KEY,
-        application_id TEXT NOT NULL DEFAULT '',
-        scope TEXT DEFAULT '',
-        effect_json TEXT NOT NULL DEFAULT '{}',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-    # --- factor lifecycle ---
-    """
-    CREATE TABLE IF NOT EXISTS factor_lifecycle_state (
-        factor_id TEXT PRIMARY KEY,
-        stage TEXT NOT NULL DEFAULT 'SHADOW',
-        origin TEXT DEFAULT '',
-        artifact_hash TEXT DEFAULT '',
-        evidence_json TEXT NOT NULL DEFAULT '{}',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-        updated_at DOUBLE PRECISION DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS factor_runtime_projection (
-        factor_id TEXT PRIMARY KEY,
-        projection_json TEXT NOT NULL DEFAULT '{}',
-        loaded_at DOUBLE PRECISION DEFAULT 0.0,
-        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS factor_health (
-        factor TEXT PRIMARY KEY,
-        score DOUBLE PRECISION DEFAULT 50.0,
-        status TEXT DEFAULT 'UNKNOWN',
-        section TEXT DEFAULT 'unknown',
-        rolling_ic DOUBLE PRECISION DEFAULT 0.0,
-        components_json TEXT NOT NULL DEFAULT '{}',
-        n_obs INTEGER DEFAULT 0,
-        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-    # --- brain / V16 ---
-    """
-    CREATE TABLE IF NOT EXISTS brain_governance_candidate (
-        candidate_id TEXT PRIMARY KEY,
-        control_surface TEXT DEFAULT '',
-        target_scope TEXT DEFAULT '',
-        status TEXT DEFAULT 'active',
-        candidate_json TEXT NOT NULL DEFAULT '{}',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-        updated_at DOUBLE PRECISION DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS v16_brain_command (
-        command_id TEXT PRIMARY KEY,
-        target_agent TEXT NOT NULL DEFAULT '',
-        authority_issued_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-        status TEXT DEFAULT 'available',
-        command_json TEXT NOT NULL DEFAULT '{}',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-        updated_at DOUBLE PRECISION DEFAULT 0.0
-    )
-    """,
-    # --- governance ---
-    """
-    CREATE TABLE IF NOT EXISTS governance_mutation_intent (
-        mutation_id TEXT PRIMARY KEY,
-        stage TEXT NOT NULL DEFAULT 'reserved',
-        intent_json TEXT NOT NULL DEFAULT '{}',
-        error_stage TEXT DEFAULT '',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-        updated_at DOUBLE PRECISION DEFAULT 0.0
-    )
-    """,
-    # --- model influence ---
-    """
-    CREATE TABLE IF NOT EXISTS model_influence_decision (
-        decision_id TEXT PRIMARY KEY,
-        model_type TEXT DEFAULT '',
-        model_version TEXT DEFAULT '',
-        influence_json TEXT NOT NULL DEFAULT '{}',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-    # --- release / incident ---
-    """
-    CREATE TABLE IF NOT EXISTS release_run (
-        run_id TEXT PRIMARY KEY,
-        status TEXT DEFAULT 'started',
-        details_json TEXT NOT NULL DEFAULT '{}',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-        updated_at DOUBLE PRECISION DEFAULT 0.0
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS release_approval_event (
-        event_id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL DEFAULT '',
-        actor TEXT DEFAULT '',
-        decision TEXT DEFAULT '',
-        reason TEXT DEFAULT '',
-        created_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-    # --- recovery position ---
-    """
-    CREATE TABLE IF NOT EXISTS recovery_position_state (
-        position_id TEXT PRIMARY KEY,
-        recovery_json TEXT NOT NULL DEFAULT '{}',
-        last_seen_at DOUBLE PRECISION DEFAULT 0.0,
-        updated_at DOUBLE PRECISION NOT NULL DEFAULT 0.0
-    )
-    """,
-]
-
 
 def init_all() -> None:
     """Validate runtime database prerequisites without applying schema DDL."""
@@ -1800,7 +1500,6 @@ def init_all() -> None:
             return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         init_state_db()
-        _ensure_pg_business_tables()
         if EXPERIMENTS_DB.exists():
             validate_experiments_db_schema(EXPERIMENTS_DB)
         _initialized = True

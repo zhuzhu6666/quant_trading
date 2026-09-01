@@ -937,6 +937,81 @@ def build_open_trade_risk_context_payload(
     }
 
 
+def build_open_decision_replay_payload(
+    *,
+    cfg: Any,
+    composite: Any,
+    include_risk: bool,
+) -> dict[str, Any]:
+    """Freeze the config inputs needed to replay this exact decision."""
+    from backend.services.live_loop_shell import execution_gate_config
+
+    gate_config = execution_gate_config(cfg)
+    context_policy = (
+        dict(getattr(composite, "context_policy", {}) or {})
+        if isinstance(getattr(composite, "context_policy", {}), dict)
+        else {}
+    )
+    try:
+        threshold_delta = float(context_policy.get("signal_threshold_delta") or 0.0)
+    except (TypeError, ValueError):
+        threshold_delta = 0.0
+    try:
+        loss_streak_addon = max(
+            0.0,
+            min(0.30, float(context_policy.get("loss_streak_addon") or 0.0)),
+        )
+    except (TypeError, ValueError):
+        loss_streak_addon = 0.0
+    gate_config["signal_threshold"] = max(
+        0.0,
+        min(
+            1.0,
+            float(getattr(cfg, "factor_signal_threshold", 0.3) or 0.3)
+            + threshold_delta
+            + loss_streak_addon,
+        ),
+    )
+    recorded_gate_config = {
+        "schema_version": "execution_gate_replay_config.v1",
+        **gate_config,
+    }
+    payload: dict[str, Any] = {
+        "execution_gate_config": recorded_gate_config,
+    }
+    if not include_risk:
+        return payload
+    risk_limits = RiskLimitSnapshot.from_runtime_config(cfg)
+    payload["risk_replay_inputs"] = {
+        "schema_version": "open_trade_risk_replay_inputs.v1",
+        "risk_limits": risk_limits.to_dict(),
+        "var": {
+            "enabled": bool(getattr(cfg, "var_enabled", False)),
+            "threshold_pct": risk_limits.var_threshold_pct,
+            "cvar_threshold_pct": risk_limits.cvar_threshold_pct,
+        },
+        "max_position_count": int(getattr(cfg, "max_position_count", 3) or 0),
+        "max_position_api_volume": float(
+            getattr(cfg, "max_position_api_volume", 1000.0) or 0.0
+        ),
+        "pyramid_enabled": bool(getattr(cfg, "pyramid_enabled", True)),
+        "loss_cooldown_after_losses": risk_limits.loss_cooldown_after_losses,
+        "loss_cooldown_bars": risk_limits.loss_cooldown_bars,
+        "block_on_disk_critical": risk_limits.block_on_disk_critical,
+        "runtime_incident_mode": str(
+            getattr(cfg, "runtime_incident_mode", "normal") or "normal"
+        ),
+        "autonomy_mode": str(getattr(cfg, "autonomy_mode", "manual") or "manual"),
+        "live_autonomy_unlocked": bool(
+            getattr(cfg, "live_autonomy_unlocked", False)
+        ),
+        "live_autonomy_unlock_id": str(
+            getattr(cfg, "live_autonomy_unlock_id", "") or ""
+        ),
+    }
+    return payload
+
+
 def build_filled_open_ledger_payloads(
     *,
     cfg: Any,
@@ -963,6 +1038,11 @@ def build_filled_open_ledger_payloads(
     pid_str = str(int(pid))
     direction = int(getattr(composite, "direction", 0) or 0)
     risk_payload = risk_verdict.to_dict() if hasattr(risk_verdict, "to_dict") else (risk_verdict or {})
+    replay_payload = build_open_decision_replay_payload(
+        cfg=cfg,
+        composite=composite,
+        include_risk=True,
+    )
     return {
         "composite_decision_payload": {
             "event_type": "open",
@@ -992,6 +1072,7 @@ def build_filled_open_ledger_payloads(
                 "tick": int(tick or 0),
                 **(learning_context or {}),
                 **({"risk_verdict": risk_payload} if risk_verdict is not None else {}),
+                **replay_payload,
             },
         },
         "submitted_order_payload": {

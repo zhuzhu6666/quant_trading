@@ -582,7 +582,7 @@ def test_market_order_block_prefers_market_reason_then_risk_reason():
 def test_skip_ledger_payload_matches_live_contract():
     composite = SimpleNamespace(direction=1)
     gate = SimpleNamespace(passed=False, reason="blocked")
-    cfg = SimpleNamespace(timeframe="M5")
+    cfg = SimpleNamespace(timeframe="M5", factor_signal_threshold=0.3)
     risk = SimpleNamespace(to_dict=lambda: {"allowed": False, "reason": "blocked"})
 
     payload = build_skip_ledger_payload(
@@ -617,7 +617,7 @@ def test_skip_ledger_payload_matches_live_contract():
 def test_open_ledger_and_audit_payloads_match_live_contract():
     composite = SimpleNamespace(direction=-1)
     gate = SimpleNamespace(passed=True, reason="ok")
-    cfg = SimpleNamespace(timeframe="M5")
+    cfg = SimpleNamespace(timeframe="M5", factor_signal_threshold=0.3)
     risk = SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"})
     event_sizing = {"enabled": True, "effective_requested_api_volume": 200.0}
     sizing_trace = {"base_api_volume": 200.0}

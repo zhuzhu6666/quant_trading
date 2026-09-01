@@ -743,7 +743,11 @@ def test_reader_order_position_rows_shape_legacy_row_shapes() -> None:
 def test_reader_iter_rows_shape_epoch_timestamps() -> None:
     """iter_review_rows / iter_decision_rows must apply legacy shaping (epoch
     timestamps, JSON column restoration) on the canonical streaming path."""
-    from backend.services.canonical_v2_reader import iter_decision_rows, iter_review_rows
+    from backend.services.canonical_v2_reader import (
+        iter_decision_rows,
+        iter_review_rows,
+        latest_review_observed_at_by_id,
+    )
 
     conn = _canonical_sqlite()
     start_projection_run(
@@ -779,6 +783,7 @@ def test_reader_iter_rows_shape_epoch_timestamps() -> None:
         entity_id="r-shape-1",
         payload_hash=review_ref.payload_hash,
         producer="iter-shape-test",
+        observed_at=stamp,
     )
     decision_ref = put_payload(
         conn,
@@ -808,11 +813,57 @@ def test_reader_iter_rows_shape_epoch_timestamps() -> None:
     assert abs(review_rows[0]["created_at"] - stamp.timestamp()) < 1e-6
     assert review_rows[0]["failure_tags_json"] == '["lucky_win"]'
     assert review_rows[0]["review_json"] == {"close_reason": "tp_hit"}
+    assert latest_review_observed_at_by_id(conn, ["r-shape-1"])["r-shape-1"] == stamp.timestamp()
 
     decision_rows = list(iter_decision_rows(conn, limit=0))
     assert len(decision_rows) == 1
     assert abs(decision_rows[0]["decision_ts"] - stamp.timestamp()) < 1e-6
     assert decision_rows[0]["action_json"] == '{"skip_stage": ""}'
+
+
+def test_reader_batches_factor_snapshot_payload_scans() -> None:
+    from backend.services.canonical_v2_reader import (
+        iter_decision_factor_snapshots_by_factors,
+    )
+
+    conn = _canonical_sqlite()
+    stamp = datetime(2026, 8, 3, 9, 0, 0, tzinfo=timezone.utc)
+    for index, snapshots in enumerate(
+        [
+            [
+                {"factor": "factor_a", "normalized_value": 1.0},
+                {"factor": "factor_b", "normalized_value": 2.0},
+            ],
+            [{"factor": "factor_a", "normalized_value": 3.0}],
+        ]
+    ):
+        ref = put_payload(
+            conn,
+            {"decision_id": f"batch-{index}", "factor_snapshots": snapshots},
+            payload_kind="risk_decision",
+            schema_version="v1",
+        )
+        append_event(
+            conn,
+            event_type="risk_decision",
+            entity_type="decision",
+            entity_id=f"batch-{index}",
+            payload_hash=ref.payload_hash,
+            producer="batch-factor-reader-test",
+            observed_at=stamp,
+        )
+
+    result = iter_decision_factor_snapshots_by_factors(
+        conn,
+        ["factor_a", "factor_b"],
+        limit=10,
+    )
+
+    assert [item["normalized_value"] for item in result["factor_a"]] == [
+        3.0,
+        1.0,
+    ]
+    assert [item["normalized_value"] for item in result["factor_b"]] == [2.0]
 
 
 def test_reader_iter_decisions_bounded_and_reverse() -> None:

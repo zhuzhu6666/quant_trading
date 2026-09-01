@@ -211,7 +211,7 @@ class CTraderPuller:
             symbol: 品种名
             timeframes: 周期列表, 默认全部
         """
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
         store = DataStore()
         if timeframes is None:
             timeframes = list(TIMEFRAME_MAP)
@@ -238,7 +238,7 @@ class CTraderPuller:
         Returns:
             True 表示迁移完成
         """
-        from data.store import DataStore
+        from data.duckdb_store import DuckDBDataStore as DataStore
         store = DataStore()
         import duckdb
         conn = connect_duckdb(store.db_path)
@@ -266,7 +266,7 @@ class CTraderPuller:
                 logger.error(f"[CTraderPuller] {tf} 回填失败: {result.error}")
                 continue
             # 直接写入 DataStore
-            from data.store import DataStore
+            from data.duckdb_store import DuckDBDataStore as DataStore
             DataStore().insert_bars(result.bars, symbol, tf)
             logger.info(f"[CTraderPuller] {tf} 回填 {result.n_bars} bars ✅")
 

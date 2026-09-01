@@ -810,11 +810,11 @@ def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence
         conn.execute(
             """
             INSERT INTO replay_report
-            (replay_run_id, decision_count, matched_live_count, mismatch_count,
+            (replay_run_id, scope_json, decision_count, matched_live_count, mismatch_count,
              metric_summary_json, evidence_grade, status, created_at)
-            VALUES ('replay_1', 10, 9, 1, '{"coverage": 0.9}', 'B', 'completed', ?)
+            VALUES ('replay_1', ?, 10, 9, 1, '{"coverage": 0.9}', 'B', 'completed', ?)
             """,
-            (now - 40.0,),
+            (json.dumps({"kind": "bar_replay_evidence"}), now - 40.0),
         )
         record_review(
             conn,
@@ -904,11 +904,11 @@ def test_brain_low_impact_executor_runs_replay_job_through_risk_policy(tmp_path)
         conn.execute(
             """
             INSERT INTO replay_report
-            (replay_run_id, decision_count, matched_live_count, mismatch_count,
+            (replay_run_id, scope_json, decision_count, matched_live_count, mismatch_count,
              metric_summary_json, evidence_grade, status, created_at)
-            VALUES ('replay_seed', 1, 1, 0, '{}', 'B', 'completed', ?)
+            VALUES ('replay_seed', ?, 1, 1, 0, '{}', 'B', 'completed', ?)
             """,
-            (now - 40.0,),
+            (json.dumps({"kind": "bar_replay_evidence"}), now - 40.0),
         )
         record_review(
             conn,
@@ -985,11 +985,11 @@ def test_brain_medium_impact_governance_materializes_governance_candidates_only(
         conn.execute(
             """
             INSERT INTO replay_report
-            (replay_run_id, decision_count, matched_live_count, mismatch_count,
+            (replay_run_id, scope_json, decision_count, matched_live_count, mismatch_count,
              metric_summary_json, evidence_grade, status, created_at)
-            VALUES ('replay_p4', 10, 10, 0, '{}', 'A', 'completed', ?)
+            VALUES ('replay_p4', ?, 10, 10, 0, '{}', 'A', 'completed', ?)
             """,
-            (now - 40.0,),
+            (json.dumps({"kind": "bar_replay_evidence"}), now - 40.0),
         )
         record_review(
             conn,

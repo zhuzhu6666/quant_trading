@@ -12,7 +12,6 @@ and publishes that operational fact through ``runtime_kv``.
 from __future__ import annotations
 
 import copy
-import json
 import os
 import threading
 import time
@@ -26,10 +25,6 @@ from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_stat
 
 STATUS_KEY = "learning_worker.capability.v2"
 MUTATION_FAILURE_THRESHOLD = 3
-
-
-def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 class LearningWorkerCapability:
@@ -46,6 +41,8 @@ class LearningWorkerCapability:
         self._now = now
         self._lock = threading.RLock()
         started_at = float(now())
+        from backend.core.release_identity import release_identity_contract
+
         from backend.core.static_feature_flags import (
             shared_static_feature_flags,
             static_feature_flags_fingerprint,
@@ -59,6 +56,7 @@ class LearningWorkerCapability:
             "boot_status": "starting",
             "started_at": started_at,
             "updated_at": started_at,
+            "release_identity": release_identity_contract(),
             "process_static_feature_flags": {
                 "schema_version": "static_feature_flags.v1",
                 "values": process_flags,
@@ -258,21 +256,30 @@ class LearningWorkerCapability:
             return copy.deepcopy(self._state)
 
     def refresh_runtime_hashes(self) -> dict[str, Any]:
-        """Refresh worker-side config projections from committed PG facts."""
+        """Refresh worker-side config projections from the active config."""
         from backend.services.evolution_ledger import current_runtime_config_snapshot
         from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
+        from config import runtime_config
 
+        active_config = runtime_config.shared()
+        active_hash = runtime_config.runtime_config_hash(active_config)
         snapshot = current_runtime_config_snapshot(
             db_path=self.db_path,
             create_if_missing=False,
         )
-        overlay = RuntimeConfigOverlayService(self.db_path).status()
-        if not str(snapshot.get("config_hash") or ""):
+        snapshot_hash = str(snapshot.get("config_hash") or "")
+        if not snapshot_hash:
             raise RuntimeError("learning_worker_runtime_config_snapshot_missing")
+        if snapshot_hash != active_hash:
+            raise RuntimeError(
+                "learning_worker_runtime_config_hash_mismatch:"
+                f"active={active_hash}:snapshot={snapshot_hash}"
+            )
+        overlay = RuntimeConfigOverlayService(self.db_path).status()
         if overlay.get("ok") is not True and str(overlay.get("status") or "") != "missing":
             raise RuntimeError(f"learning_worker_runtime_overlay_unavailable:{overlay}")
         return self.update_runtime_hashes(
-            config_hash=str(snapshot.get("config_hash") or ""),
+            config_hash=active_hash,
             overlay_hash=str(overlay.get("overlay_hash") or ""),
         )
 
@@ -326,16 +333,15 @@ class LearningWorkerCapability:
             else connect_sqlite(self.db_path)
         )
         try:
-            sql = """
-                INSERT INTO runtime_kv (key, value_json, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value_json=excluded.value_json,
-                    updated_at=excluded.updated_at
-            """
-            if is_state_db_path(self.db_path):
-                sql = sql.replace("?", "%s")
-            conn.execute(sql, (STATUS_KEY, _json(payload), float(payload["updated_at"])))
+            from backend.services.runtime_kv_store import set_on_conn
+
+            set_on_conn(
+                conn,
+                STATUS_KEY,
+                payload,
+                updated_at=float(payload["updated_at"]),
+                ensure=False,
+            )
             conn.commit()
         except Exception:
             try:

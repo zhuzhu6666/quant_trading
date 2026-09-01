@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from backend.jobs import get_job_manager
 from backend.services.api_fact_views import sync_status_fact_payload
-from backend.services.sync_service import get_status, run_sync_once
+from backend.services.sync_service import get_status
 from backend.services.mutation_audit import record_api_mutation
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
@@ -30,8 +30,7 @@ def status(_user: RequireUser) -> dict:
 def once(_user: RequireUser, req: OnceRequest) -> dict:
     mgr = get_job_manager()
     params = req.model_dump()
-    fn = lambda cb: run_sync_once(params, cb)
-    js = mgr.submit("sync", params, fn)
+    js = mgr.submit("sync", params)
     result = {"job_id": js.id, "status": js.status}
     record_api_mutation(
         user=_user,

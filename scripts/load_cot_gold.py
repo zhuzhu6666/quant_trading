@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.core.db import DUCKDB_EXTERNAL, connect_duckdb
 from data.external_schema import record_raw_file
-from data.store import DataStore
+from data.duckdb_store import DuckDBDataStore as DataStore
 
 
 # 关 SSL verify, 设 timeout

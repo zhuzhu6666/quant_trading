@@ -60,14 +60,7 @@ def _hash(value: Any) -> str:
 
 
 def _governance_config_hash(value: Any) -> str:
-    payload = json.dumps(
-        runtime_config.canonical_runtime_config_payload(value),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return runtime_config.runtime_config_hash(value)
 
 
 def _loads_object(value: Any) -> dict[str, Any]:

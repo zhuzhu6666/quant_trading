@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
-from backend.services.canonical_v2_reader import iter_decision_factor_snapshots_by_factor
+from backend.services.canonical_v2_reader import iter_decision_factor_snapshots_by_factors
 
 
 def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
@@ -76,12 +76,13 @@ class RedundancyDetector:
         values: dict[str, list[float]] = {name: [] for name in names}
         conn = _connect(self.db_path, read_only=True)
         try:
+            snapshots_by_factor = iter_decision_factor_snapshots_by_factors(
+                conn,
+                names,
+                limit=int(limit_per_factor),
+            )
             for name in names:
-                snapshots = iter_decision_factor_snapshots_by_factor(
-                    conn,
-                    name,
-                    limit=int(limit_per_factor),
-                )
+                snapshots = snapshots_by_factor.get(name, [])
                 series = []
                 for row in snapshots:
                     try:

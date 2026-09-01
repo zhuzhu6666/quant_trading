@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import sqlite3
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -9,7 +11,7 @@ import pytest
 
 from backend.core import db
 from backend.core.state_schema_migrations import (
-    STATE_SCHEMA_BASELINE_TABLES,
+    STATE_SCHEMA_LEGACY_BASELINE_TABLES,
     STATE_SCHEMA_LATEST_VERSION,
     STATE_SCHEMA_MIN_VERSION,
     STATE_SCHEMA_MIGRATION_LOCK_ID,
@@ -18,6 +20,7 @@ from backend.core.state_schema_migrations import (
     StateSchemaVersionError,
     require_state_schema_version,
     run_state_schema_migrations,
+    state_schema_bootstrap_statements,
     state_schema_status,
 )
 
@@ -42,7 +45,9 @@ class _FakePgConn:
         applied: dict[int, dict[str, Any]] | None = None,
         lock_acquired: bool = True,
     ) -> None:
-        self.tables = set(STATE_SCHEMA_BASELINE_TABLES if tables is None else tables)
+        self.tables = set(
+            STATE_SCHEMA_LEGACY_BASELINE_TABLES if tables is None else tables
+        )
         self.applied = dict(applied or {})
         if self.applied:
             self.tables.add("state_schema_migration")
@@ -278,9 +283,14 @@ def test_phase5_runtime_schema_contract_completion_is_additive() -> None:
     assert "idx_experience_memory_source_append" in sql
     assert "ON experience_memory(source_table, source_id, append_source)" in sql
     assert "DROP " not in sql.upper()
-    # 2026-08-18: STATE_SCHEMA_BASELINE_TABLES 已清空（表由代码 ensure_* 重建），
-    # 不再要求 baseline 表集合包含这些运行表；migration 仍保持纯 additive。
-    assert STATE_SCHEMA_BASELINE_TABLES == ()
+    assert {
+        "autonomous_learning_sample",
+        "position_supervisor_trace",
+        "proposal_registry",
+        "brain_state_snapshot",
+        "brain_medium_impact_governance",
+        "experience_memory",
+    } <= set(STATE_SCHEMA_LEGACY_BASELINE_TABLES)
 
 
 def test_phase3_runtime_overlay_authority_migration_supports_minimal_baseline() -> None:
@@ -444,16 +454,53 @@ def test_schema_status_fails_closed_without_ledger() -> None:
         require_state_schema_version(conn)
 
 
-def test_schema_status_with_empty_baseline_has_no_missing_tables() -> None:
-    # STATE_SCHEMA_BASELINE_TABLES 已清空（表由代码 ensure_* 重建，2026-08-18），
-    # missing_baseline_tables 恒为空；ok 由版本门控单独决定。
-    assert STATE_SCHEMA_BASELINE_TABLES == ()
-    conn = _FakePgConn(tables=set(), applied=_applied_v1())
+def test_partial_legacy_baseline_is_not_migratable() -> None:
+    conn = _FakePgConn(tables={"autonomous_learning_sample"})
 
     status = state_schema_status(conn, minimum_version=1)
 
-    assert status["missing_baseline_tables"] == []
-    assert status["ok"] is True
+    assert "runtime_config_snapshot" in status["missing_baseline_tables"]
+    assert status["ok"] is False
+    with pytest.raises(StateSchemaMigrationError, match="incomplete PostgreSQL state baseline"):
+        run_state_schema_migrations(conn)
+
+
+def test_runner_bootstraps_a_truly_empty_schema_before_migrations() -> None:
+    conn = _FakePgConn(tables=set())
+
+    result = run_state_schema_migrations(conn, runner_id="pytest-clean")
+
+    assert result["bootstrap"]["applied"] is True
+    assert result["bootstrap"]["statement_count"] > 0
+    assert result["bootstrap"]["checksum"]
+    assert any(
+        "CREATE TABLE autonomous_learning_sample" in sql
+        for sql, _params in conn.executed
+    )
+    bootstrap_sql = "\n".join(state_schema_bootstrap_statements())
+    for table in STATE_SCHEMA_LEGACY_BASELINE_TABLES:
+        assert (
+            f"CREATE TABLE {table} " in bootstrap_sql
+            or f"CREATE TABLE IF NOT EXISTS {table} " in bootstrap_sql
+        )
+    assert sum(
+        "CREATE TABLE" in sql and "broker_execution_intent" in sql
+        for sql, _params in conn.executed
+    ) == 1
+    assert result["applied_count"] == len(STATE_SCHEMA_MIGRATIONS)
+
+
+def test_clean_bootstrap_defines_each_legacy_table_once() -> None:
+    bootstrap_sql = "\n".join(state_schema_bootstrap_statements())
+    table_names = re.findall(
+        r"(?im)^CREATE TABLE(?: IF NOT EXISTS)?\s+(?:runtime\.)?([a-z_][a-z0-9_]*)",
+        bootstrap_sql,
+    )
+
+    duplicates = sorted(
+        table for table, count in Counter(table_names).items() if count > 1
+    )
+    assert duplicates == []
 
 
 def test_schema_status_fails_closed_on_migration_checksum_mismatch() -> None:

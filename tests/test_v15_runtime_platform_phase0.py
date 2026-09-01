@@ -1,4 +1,5 @@
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -105,6 +106,175 @@ def test_replay_harness_persists_factor_gate_risk_report(tmp_path):
     assert latest["artifact_path"] == report["artifact_path"]
 
 
+def test_bar_replay_uses_recorded_decision_risk_thresholds(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = time.time()
+    recorded_var = {
+        "status": "known",
+        "var_pct": 3.0,
+        "cvar_pct": 4.0,
+    }
+    verdict = {
+        "allowed": False,
+        "reason": "cvar_gate: CVaR=4.0000% > 2.5000%",
+        "audit_payload": {
+            "action": "open_trade",
+            "source": "cvar_gate",
+            "candidate_forward_var": recorded_var,
+            "temporal_context": {
+                "timeframe_seconds": 300,
+                "seconds_since_last_trade": 999999.0,
+                "bars_since_last_trade": 999999.0,
+            },
+            "trade": {
+                "symbol": "XAUUSD+",
+                "direction": 1,
+                "current_price": 2400.0,
+            },
+            "state": {
+                "open_position_count": 0,
+                "total_api_volume": 0.0,
+                "requested_api_volume": 1.0,
+                "loop_running": True,
+                "bridge_connected": True,
+            },
+        },
+    }
+    risk_limits = {
+        "schema_version": "risk_limit_snapshot.v1",
+        "source": "runtime_config",
+        "max_drawdown_pct": 8.0,
+        "max_consecutive_losses": 8,
+        "max_daily_loss_pct": 2.0,
+        "max_daily_trades": 10,
+        "data_lag_max_seconds": 3600.0,
+        "loss_cooldown_after_losses": 2,
+        "loss_cooldown_bars": 3,
+        "block_on_disk_critical": True,
+        "var_threshold_pct": 10.0,
+        "cvar_threshold_pct": 2.5,
+        "circuit_breaker_bypass": False,
+    }
+    conn = make_canonical_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        record_decision_event(
+            conn,
+            decision_id="dec_recorded_risk",
+            event_type="open",
+            symbol="XAUUSD+",
+            timeframe="M5",
+            decision_ts=now - 30.0,
+            action_score=0.8,
+            action_reason="risk_blocked",
+            action={
+                "direction": 1,
+                "score": 0.8,
+                "gate_passed": True,
+                "gate_reason": "passed",
+                "requested_volume": 1.0,
+                "price": 2400.0,
+                "execution_gate_config": {
+                    "schema_version": "execution_gate_replay_config.v1",
+                    "signal_threshold": 0.3,
+                    "cooldown_bars": 0,
+                    "event_filter_authority": "risk_policy",
+                    "risk_enable_nfp_skip": False,
+                    "risk_enable_gvz_gate": False,
+                    "risk_gvz_drop_pct": -2.0,
+                },
+                "risk_replay_inputs": {
+                    "schema_version": "open_trade_risk_replay_inputs.v1",
+                    "risk_limits": risk_limits,
+                    "var": {
+                        "enabled": True,
+                        "threshold_pct": 10.0,
+                        "cvar_threshold_pct": 2.5,
+                    },
+                    "max_position_count": 4,
+                    "max_position_api_volume": 1000.0,
+                    "pyramid_enabled": True,
+                    "loss_cooldown_after_losses": 2,
+                    "loss_cooldown_bars": 3,
+                    "block_on_disk_critical": True,
+                    "runtime_incident_mode": "normal",
+                    "autonomy_mode": "manual",
+                    "live_autonomy_unlocked": False,
+                    "live_autonomy_unlock_id": "",
+                },
+                "risk_verdict": verdict,
+            },
+            risk_state={
+                "snapshot": {
+                    "schema_version": "risk_metrics_snapshot.v2",
+                    "status": "known",
+                },
+                "var": recorded_var,
+                "policy_verdict": verdict,
+            },
+            portfolio_state={
+                "balance": 10000.0,
+                "equity": 10000.0,
+                "start_balance": 10000.0,
+                "n_positions": 0,
+                "session_pnl": 0.0,
+                "session_trades": 0,
+                "consecutive_losses": 0,
+                "drawdown_pct": 0.0,
+                "circuit_breaker": False,
+            },
+            created_at=now,
+            factor_snapshots=[
+                {
+                    "factor": "rsi_14",
+                    "normalized_value": 0.6,
+                    "policy_weight": 0.2,
+                    "contribution_score": 0.12,
+                }
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    service = ReplayHarnessService(
+        db_path,
+        artifact_dir=tmp_path / "replay_artifacts",
+    )
+
+    def _fake_bar_window(**kwargs):
+        decision_ts = kwargs["decision_ts"]
+        return [
+            {
+                "time": decision_ts,
+                "open": 2399.0,
+                "high": 2401.0,
+                "low": 2398.0,
+                "close": 2400.0,
+                "volume": 10.0,
+            }
+        ]
+
+    service._load_bar_window = _fake_bar_window
+    service._enrich_bar_window = lambda bars, **_kwargs: pd.DataFrame(bars)
+
+    report = service.run_bar_replay_evidence(
+        lookback_days=1,
+        limit=10,
+        warmup_bars=1,
+        post_bars=0,
+    )
+
+    gate_metrics = report["metric_summary"]["execution_gate_recompute"]
+    risk_metrics = report["metric_summary"]["risk_policy_recompute"]
+    assert gate_metrics["attempted_count"] == 1
+    assert gate_metrics["agreement_count"] == 1
+    assert risk_metrics["attempted_count"] == 1
+    assert risk_metrics["agreement_count"] == 1
+    assert risk_metrics["disagreement_count"] == 0
+    assert risk_metrics["input_gap_count"] == 0
+
+
 def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
     db_path = tmp_path / "state.db"
     now = time.time()
@@ -153,6 +323,15 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
                 "gate_passed": True,
                 "gate_reason": "passed",
                 "requested_volume": 1.0,
+                "execution_gate_config": {
+                    "schema_version": "execution_gate_replay_config.v1",
+                    "signal_threshold": 0.3,
+                    "cooldown_bars": 0,
+                    "event_filter_authority": "risk_policy",
+                    "risk_enable_nfp_skip": False,
+                    "risk_enable_gvz_gate": False,
+                    "risk_gvz_drop_pct": -2.0,
+                },
                 "risk_verdict": verdict,
             },
             risk_state={"policy_verdict": verdict},
@@ -402,7 +581,7 @@ def test_bar_replay_evidence_records_decision_bar_alignment(tmp_path):
     assert risk_metrics["agreement_count"] == 0
     assert risk_metrics["disagreement_count"] == 0
     assert risk_metrics["input_gap_count"] == 1
-    assert "missing_recorded_risk_metrics_snapshot" in (
+    assert "missing_recorded_risk_replay_inputs" in (
         risk_metrics["input_gap_examples"][0]["issues"]
     )
     assert order_metrics["schema_version"] == "order_lifecycle_replay_metrics.v1"
@@ -839,11 +1018,15 @@ def test_release_control_records_start_and_finish_evidence(tmp_path):
              code_version, decision_count, matched_live_count, mismatch_count,
              metric_summary_json, replay_error, evidence_grade, artifact_path,
              artifact_hash, status, created_at)
-            VALUES ('replay_release', '{}', 'dataset_hash', 'cfg_release',
-                    'test_sha', 1, 1, 0, '{}', '', 'A', '/tmp/replay.json',
+            VALUES ('replay_release', ?, 'dataset_hash', 'cfg_release',
+                    ?, 1, 1, 0, '{}', '', 'A', '/tmp/replay.json',
                     'artifact_hash', 'completed', ?)
             """,
-            (now,),
+            (
+                json.dumps({"schema_version": "replay_scope.v1", "kind": "bar_replay_evidence"}),
+                subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                now,
+            ),
         )
         conn.commit()
     finally:

@@ -289,13 +289,13 @@ class TestCustomTiers:
 
 class TestPaperEngineIntegration:
     def test_engine_accepts_event_sizing(self):
-        from execution.paper_engine import PaperExecutionEngine
+        from execution.paper_execution import PaperExecutionEngine
         es = EventSizing(enabled=False)
         engine = PaperExecutionEngine(event_sizing=es)
         assert engine.event_sizing is es
 
     def test_engine_works_without_event_sizing(self):
-        from execution.paper_engine import PaperExecutionEngine
+        from execution.paper_execution import PaperExecutionEngine
         engine = PaperExecutionEngine()
         assert engine.event_sizing is None
 

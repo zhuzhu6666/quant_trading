@@ -13,7 +13,7 @@ import pytest
 from alpha.streaming_factor_engine import StreamingFactorEngine
 from alpha.registry import factor_registry
 from alpha.registry_adapter import RegistryAdapter
-from backend.services.factor_identity import canonical_factor_id, factor_definition_fingerprint
+from alpha.factor_identity import canonical_factor_id, factor_definition_fingerprint
 
 
 # ── 测试辅助 ──────────────────────────────────────────────

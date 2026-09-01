@@ -1,9 +1,24 @@
 """Canonical lifecycle writers preserve the caller's event timestamp."""
 
+import inspect
 import time
 
 from backend.ledger.service import DecisionLedger
 from backend.services.canonical_v2_reader import iter_order_rows, iter_position_rows
+
+
+def test_fact_writers_do_not_silently_accept_unknown_keywords():
+    for method_name in (
+        "log_decision",
+        "log_order_event",
+        "log_position_event",
+        "log_position_supervisor_trace",
+    ):
+        signature = inspect.signature(getattr(DecisionLedger, method_name))
+        assert not any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        ), method_name
 
 
 def test_log_order_event_writes_the_same_event_ts_to_canonical(tmp_path, monkeypatch):

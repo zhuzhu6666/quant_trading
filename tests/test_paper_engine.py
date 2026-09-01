@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
-from execution.paper_engine import PaperExecutionEngine
+from execution.paper_execution import PaperExecutionEngine
 from strategy.base import Signal
 from core.state import state as global_state
 

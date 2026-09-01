@@ -22,14 +22,74 @@ from backend.core.db_helpers import row_value as _row_value
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_SCHEMA_MIGRATION_DIR: Final[Path] = _PROJECT_ROOT / "migrations" / "state_pg"
+STATE_SCHEMA_BOOTSTRAP_PATH: Final[Path] = (
+    STATE_SCHEMA_MIGRATION_DIR / "bootstrap_legacy_baseline.sql"
+)
 STATE_SCHEMA_MIGRATION_TABLE: Final[str] = "state_schema_migration"
 STATE_SCHEMA_MIGRATION_LOCK_ID: Final[int] = 0x5155414E54534D31  # ASCII: QUANTSM1
 
-# The runtime schema is authoritative.  The explicit runner must never make
-# an empty or partial schema look deployable merely by creating the migration
-# ledger and foundation tables.
-STATE_SCHEMA_BASELINE_TABLES: Final[tuple[str, ...]] = (
-    # 2026-08-18: 空列表（表已全部删除，由代码 ensure_* 函数重建）
+# Migrations 0001-0018 were written against this historical pre-ledger shape.
+# A truly empty schema receives the same checked-in baseline inside the
+# migration transaction.  A non-empty schema without the ledger must already
+# contain every dependency below; partial legacy databases are never guessed
+# into a deployable state.
+STATE_SCHEMA_LEGACY_BASELINE_TABLES: Final[tuple[str, ...]] = (
+    "autonomous_learning_sample",
+    "autonomy_health_snapshot",
+    "autonomy_scope_approval_event",
+    "autonomy_scope_enforcement_event",
+    "brain_action_plan",
+    "brain_action_plan_eval",
+    "brain_governance_candidate",
+    "brain_governance_candidate_review",
+    "brain_live_ready_guardrail",
+    "brain_low_impact_execution",
+    "brain_medium_impact_governance",
+    "brain_memory",
+    "brain_state_snapshot",
+    "ctrader_deals",
+    "decision_factor_snapshot",
+    "decision_ledger",
+    "evolution_decision",
+    "evolution_events",
+    "evolution_run",
+    "experience_memory",
+    "experience_pattern_stats",
+    "experiments",
+    "factor_catalog_snapshot",
+    "factor_contribution_review",
+    "factor_health",
+    "incident_playbook_event",
+    "incident_playbook_run",
+    "jobs",
+    "learning_application_effect",
+    "learning_application_log",
+    "learning_experiment_reservation",
+    "live_autonomy_unlock_event",
+    "model_canary_review",
+    "model_canary_trial",
+    "model_inference_audit",
+    "model_permission_audit",
+    "model_shadow_candidate",
+    "order_lifecycle_event",
+    "parameter_template_active",
+    "parameter_template_registry",
+    "parameter_template_release_candidate",
+    "parameter_template_switch_log",
+    "policy_suggestion",
+    "position_lifecycle_event",
+    "position_supervisor_trace",
+    "proposal_registry",
+    "recovery_position_state",
+    "release_approval_event",
+    "release_run",
+    "replay_report",
+    "runtime_config_overlay",
+    "runtime_config_snapshot",
+    "shadow_factor_perf",
+    "supervisor_counterfactual_review",
+    "trade_outcome_review",
+    "v16_brain_command",
 )
 
 
@@ -127,6 +187,7 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(30, "retire_legacy_fact_tables", "0030_retire_legacy_fact_tables.sql"),
     StateSchemaMigration(31, "align_factor_health", "0031_align_factor_health.sql"),
     StateSchemaMigration(32, "restore_jobs_primary_key", "0032_restore_jobs_primary_key.sql"),
+    StateSchemaMigration(33, "factor_runtime_projection_primary_key", "0033_factor_runtime_projection_primary_key.sql"),
 )
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
 # Runtime code consumes the complete checked-in state contract.  A process
@@ -158,6 +219,49 @@ def _validate_catalog(migrations: Sequence[StateSchemaMigration]) -> None:
     names = [item.name for item in migrations]
     if len(names) != len(set(names)):
         raise StateSchemaMigrationError("state migration names must be unique")
+
+
+def state_schema_bootstrap_statements() -> tuple[str, ...]:
+    """Return the clean-install legacy baseline consumed before migration 1."""
+    try:
+        value = STATE_SCHEMA_BOOTSTRAP_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise StateSchemaMigrationError(
+            f"cannot read state schema bootstrap from {STATE_SCHEMA_BOOTSTRAP_PATH}: {exc}"
+        ) from exc
+    statements = tuple(part.strip() for part in value.split(";") if part.strip())
+    if not statements:
+        raise StateSchemaMigrationError("state schema bootstrap is empty")
+    return statements
+
+
+def _bootstrap_checksum() -> str:
+    try:
+        value = STATE_SCHEMA_BOOTSTRAP_PATH.read_bytes()
+    except OSError as exc:
+        raise StateSchemaMigrationError(
+            f"cannot read state schema bootstrap from {STATE_SCHEMA_BOOTSTRAP_PATH}: {exc}"
+        ) from exc
+    return hashlib.sha256(value).hexdigest()
+
+
+def _fresh_install_statement_is_superseded(
+    migration: StateSchemaMigration,
+    statement: str,
+) -> bool:
+    """Skip the obsolete v1 broker table copy; migration 29 is its sole owner."""
+    if migration.version != 1:
+        return False
+    uncommented = "\n".join(
+        line
+        for line in str(statement or "").splitlines()
+        if not line.lstrip().startswith("--")
+    )
+    normalized = " ".join(uncommented.lower().split())
+    return normalized.startswith("create table broker_execution_intent ") or (
+        normalized.startswith("create index idx_broker_execution_intent_")
+        and " on broker_execution_intent" in normalized
+    )
 
 
 def _schema_table_names(conn: Any) -> set[str]:
@@ -228,7 +332,11 @@ def state_schema_status(
             )
     required_versions = set(range(1, int(minimum_version) + 1))
     missing_required_versions = sorted(required_versions - set(applied))
-    missing_baseline_tables = sorted(set(STATE_SCHEMA_BASELINE_TABLES) - tables)
+    missing_baseline_tables = (
+        sorted(set(STATE_SCHEMA_LEGACY_BASELINE_TABLES) - tables)
+        if tables and STATE_SCHEMA_MIGRATION_TABLE not in tables
+        else []
+    )
     current_version = max(applied, default=0)
     ok = (
         not missing_baseline_tables
@@ -280,14 +388,14 @@ def run_state_schema_migrations(
     """Apply pending additive migrations atomically under an advisory lock."""
     _validate_catalog(migrations)
     before = state_schema_status(conn, minimum_version=0, migrations=migrations)
-    if before["missing_baseline_tables"]:
-        raise StateSchemaMigrationError(
-            "refusing to migrate an incomplete PostgreSQL state baseline: "
-            + ",".join(before["missing_baseline_tables"])
-        )
 
     applied_now: list[dict[str, Any]] = []
     effective_runner_id = str(runner_id or _default_runner_id())
+    bootstrap = {
+        "applied": False,
+        "statement_count": 0,
+        "checksum": "",
+    }
     try:
         conn.execute("SET LOCAL lock_timeout = '5s'")
         conn.execute("SET LOCAL statement_timeout = '120s'")
@@ -299,6 +407,26 @@ def run_state_schema_migrations(
             raise StateSchemaMigrationError(
                 "another state schema migration runner holds the advisory lock"
             )
+        locked_tables = _schema_table_names(conn)
+        clean_install = not locked_tables
+        if locked_tables and STATE_SCHEMA_MIGRATION_TABLE not in locked_tables:
+            missing_legacy = sorted(
+                set(STATE_SCHEMA_LEGACY_BASELINE_TABLES) - locked_tables
+            )
+            if missing_legacy:
+                raise StateSchemaMigrationError(
+                    "refusing to migrate an incomplete PostgreSQL state baseline: "
+                    + ",".join(missing_legacy)
+                )
+        if clean_install:
+            bootstrap_statements = state_schema_bootstrap_statements()
+            for statement in bootstrap_statements:
+                conn.execute(statement)
+            bootstrap = {
+                "applied": True,
+                "statement_count": len(bootstrap_statements),
+                "checksum": _bootstrap_checksum(),
+            }
         conn.execute(_LEDGER_DDL)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_state_schema_migration_applied "
@@ -326,7 +454,18 @@ def run_state_schema_migrations(
                 )
             statements = migration.statements()
             started = time.monotonic()
-            for statement in statements:
+            executed_statements = tuple(
+                statement
+                for statement in statements
+                if not (
+                    clean_install
+                    and _fresh_install_statement_is_superseded(
+                        migration,
+                        statement,
+                    )
+                )
+            )
+            for statement in executed_statements:
                 conn.execute(statement)
             execution_ms = (time.monotonic() - started) * 1000.0
             checksum = migration.checksum()
@@ -342,7 +481,7 @@ def run_state_schema_migrations(
                     migration.version,
                     migration.name,
                     checksum,
-                    len(statements),
+                    len(executed_statements),
                     effective_runner_id,
                     execution_ms,
                     applied_at,
@@ -352,7 +491,7 @@ def run_state_schema_migrations(
                 "version": migration.version,
                 "migration_name": migration.name,
                 "checksum": checksum,
-                "statement_count": len(statements),
+                "statement_count": len(executed_statements),
                 "runner_id": effective_runner_id,
                 "execution_ms": execution_ms,
                 "applied_at": applied_at,
@@ -375,5 +514,6 @@ def run_state_schema_migrations(
         "latest_known_version": max((item.version for item in migrations), default=0),
         "applied_count": len(applied_now),
         "applied": applied_now,
+        "bootstrap": bootstrap,
         "runner_id": effective_runner_id,
     }

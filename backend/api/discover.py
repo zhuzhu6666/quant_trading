@@ -4,7 +4,6 @@ from backend.core.auth import RequireUser
 from pydantic import BaseModel
 
 from backend.jobs import get_job_manager
-from backend.services.discover_service import run_discovery
 
 router = APIRouter(prefix="/api/discover", tags=["discover"])
 
@@ -23,8 +22,7 @@ class DiscoverRequest(BaseModel):
 def start(_user: RequireUser, req: DiscoverRequest)-> dict:
     mgr = get_job_manager()
     params = req.model_dump()
-    fn = lambda cb: run_discovery(params, cb)
-    js = mgr.submit("discover", params, fn)
+    js = mgr.submit("discover", params)
     return {"job_id": js.id, "status": js.status}
 
 

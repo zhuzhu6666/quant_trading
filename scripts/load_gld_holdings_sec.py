@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backend.core.db import DUCKDB_EXTERNAL
 from data.external_schema import etf_release_at, record_raw_file
-from data.store import DataStore
+from data.duckdb_store import DuckDBDataStore as DataStore
 
 FUND_CONFIG = (
     ("GLD", "1222333", Path("data/sec_gld")),

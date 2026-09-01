@@ -7,7 +7,7 @@ from backend.services.evolution_ledger import persist_runtime_config_snapshot
 from config import runtime_config
 
 
-def test_unchanged_runtime_config_preserves_occurrences_and_real_change_writes_once(
+def test_unchanged_runtime_config_reuses_snapshot_and_real_change_writes_once(
     tmp_path,
 ):
     db_path = tmp_path / "evolution.sqlite"
@@ -45,14 +45,14 @@ def test_unchanged_runtime_config_preserves_occurrences_and_real_change_writes_o
         db_path=db_path,
     )
 
-    assert blocked["config_version"] == first["config_version"] + 1
-    assert blocked["reused"] is False
-    assert no_change["config_version"] == blocked["config_version"] + 1
-    assert no_change["reused"] is False
+    assert blocked["config_version"] == first["config_version"]
+    assert blocked["reused"] is True
+    assert no_change["config_version"] == blocked["config_version"]
+    assert no_change["reused"] is True
     assert changed["config_version"] == no_change["config_version"] + 1
     assert changed["reused"] is False
-    assert repeated_change["config_version"] == changed["config_version"] + 1
-    assert repeated_change["reused"] is False
+    assert repeated_change["config_version"] == changed["config_version"]
+    assert repeated_change["reused"] is True
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
@@ -63,8 +63,5 @@ def test_unchanged_runtime_config_preserves_occurrences_and_real_change_writes_o
         runtime_config.reset_for_tests()
     assert rows == [
         (first["config_version"], "initial"),
-        (blocked["config_version"], "blocked_by_evidence"),
-        (no_change["config_version"], "no_change"),
         (changed["config_version"], "governed_change"),
-        (repeated_change["config_version"], "duplicate_candidate"),
     ]

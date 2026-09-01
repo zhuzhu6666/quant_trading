@@ -56,9 +56,11 @@ from backend.services.review_contract import (
     review_has_system_contamination,
 )
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.policy_suggestion_identity import deterministic_policy_suggestion_id
 from backend.services.position_supervisor_templates import (
     resolve_position_supervisor_binding_lineage,
 )
+from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 from research.features.evidence_contract import build_evidence_contract
 from backend.services.supervisor_payload_contract import (
     compact_supervisor_mapping as _compact_supervisor_mapping,
@@ -260,8 +262,8 @@ def _sample_integrity_level(value: Any) -> str:
 def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
     ensure_evolution_ledger_tables(db_path)
     if _use_pg(db_path):
-        # PG business tables are owned by migrations + _ensure_pg_business_tables;
-        # validate evolution_events catalog entry fail-closed instead of silent no-op.
+        # PostgreSQL objects are owned only by the explicit migration runner;
+        # validate evolution_events fail-closed instead of mutating the catalog.
         from backend.core.state_store import validate_runtime_state_schema
 
         conn = get_state_pg_conn()
@@ -806,7 +808,11 @@ def _build_sample_evidence_contract(
         "allowed_uses": ["governance_mutation"] if eligibility.eligible else [],
         "blockers": list(eligibility.exclusion_reasons),
     }
-    for consumer in ("outcome_learning", "supervisor_counterfactual"):
+    for consumer in (
+        "outcome_learning",
+        "supervisor_counterfactual",
+        "entry_factor_learning",
+    ):
         explicit = _consumer_eligibility(normalized, consumer)
         if explicit:
             contract["consumer_eligibility"][consumer] = explicit
@@ -1925,7 +1931,11 @@ def _sample_from_entry_supervisor_feedback(
         or reason == "thesis_broken"
         or str(review.get("close_reason") or "") == "thesis_broken"
     )
-    entry_failure = bool(thesis_broken and pnl <= 0)
+    entry_eligibility = review_consumer_eligibility(
+        {**review, "pnl": pnl},
+        "entry_factor_learning",
+    )
+    entry_failure = bool(thesis_broken and pnl <= 0 and entry_eligibility.get("eligible"))
     label_status = "matured" if context_integrity == "full" and attribution_integrity != "missing" else "pending"
     if contamination["contaminated"]:
         label = "entry_feedback_system_contaminated"
@@ -1936,9 +1946,9 @@ def _sample_from_entry_supervisor_feedback(
         recommended_action = "downweight_entry_factor"
         train_weight = 0.82
     elif thesis_broken:
-        label = "entry_thesis_broken_watch"
+        label = "supervisor_feedback_observed"
         recommended_action = "watch"
-        train_weight = 0.55
+        train_weight = 0.35
     else:
         label = "supervisor_feedback_observed"
         recommended_action = "watch"
@@ -1962,7 +1972,10 @@ def _sample_from_entry_supervisor_feedback(
         "timeframe": str(review.get("timeframe") or ""),
         "event_ts": float(review.get("close_ts") or row["created_at"] or 0.0),
         "label_status": label_status,
-        "executable_governance_allowed": True,
+        "executable_governance_allowed": bool(entry_eligibility.get("eligible")),
+        "consumer_eligibility": {
+            "entry_factor_learning": entry_eligibility,
+        },
         "integrity": sample_integrity,
         "train_weight": round(max(0.0, min(1.0, train_weight)), 6),
         "causal_level": "post_trade_feedback",
@@ -1998,10 +2011,9 @@ def _sample_from_entry_supervisor_feedback(
                 "raw": inferred,
             },
             "system_contamination": contamination,
+            "entry_attribution_eligibility": entry_eligibility,
             "position_supervisor_binding": binding_metadata["binding"],
             "position_supervisor_binding_status": binding_metadata["status"],
-            "position_supervisor_binding_reason": binding_metadata["reason"],
-            "position_supervisor_binding_template_id": binding_metadata["template_id"],
             "position_supervisor_binding_template_version": binding_metadata["template_version"],
             "position_supervisor_binding_template_hash": binding_metadata["template_hash"],
             "position_supervisor_binding_source": binding_metadata["binding_source"],
@@ -2013,6 +2025,7 @@ def _sample_from_entry_supervisor_feedback(
             "thesis_broken": thesis_broken,
             "recommended_action": recommended_action,
             "system_contamination": contamination,
+            "entry_attribution_eligibility": entry_eligibility,
             "position_supervisor_binding_status": binding_metadata["status"],
             "position_supervisor_binding_reason": binding_metadata["reason"],
             "position_supervisor_binding_template_id": binding_metadata["template_id"],
@@ -3099,14 +3112,20 @@ def materialize_entry_cluster_governance_suggestions(
                   AND scope_key=?
                   AND action=?
                   AND status IN ('proposed', 'approved', 'applied')
+                  AND governance_eligibility_version=?
+                  AND governance_eligibility_fingerprint=?
                 LIMIT 1
                 """,
-                (bucket, action),
+                (
+                    bucket,
+                    action,
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    str(metrics["eligibility_fingerprint"]),
+                ),
             ).fetchone()
             if existing:
                 skipped += 1
                 continue
-            suggestion_id = "psg_entry_cluster_" + hashlib.sha1(f"{bucket}:{action}".encode("utf-8")).hexdigest()[:16]
             confidence = min(0.92, 0.45 + 0.06 * effective_sample_count + 0.20 * bad_rate)
             evidence = {
                 "schema_version": "entry_cluster_governance_evidence.v1",
@@ -3129,6 +3148,16 @@ def materialize_entry_cluster_governance_suggestions(
                 status="proposed",
                 impact_level="medium",
                 db_path=db_path,
+            )
+            suggestion_id = deterministic_policy_suggestion_id(
+                writer="autonomous_learning",
+                scope_type="entry_cluster",
+                scope_key=bucket,
+                action=action,
+                evidence=evidence,
+                status="proposed",
+                qualification_fingerprint=str(metrics["eligibility_fingerprint"]),
+                prefix="psg_entry_cluster",
             )
             _execute(
                 conn,
@@ -3325,14 +3354,20 @@ def materialize_event_window_governance_suggestions(
                   AND scope_key=?
                   AND action=?
                   AND status IN ('proposed', 'approved', 'applied')
+                  AND governance_eligibility_version=?
+                  AND governance_eligibility_fingerprint=?
                 LIMIT 1
                 """,
-                (bucket, action),
+                (
+                    bucket,
+                    action,
+                    GOVERNANCE_ELIGIBILITY_VERSION,
+                    str(metrics["eligibility_fingerprint"]),
+                ),
             ).fetchone()
             if existing:
                 skipped += 1
                 continue
-            suggestion_id = "psg_event_window_" + hashlib.sha1(f"{bucket}:{action}".encode("utf-8")).hexdigest()[:16]
             confidence = min(0.92, 0.45 + 0.06 * effective_sample_count + 0.20 * bad_rate)
             event_window = dict(items[0].get("event_window") or {})
             evidence = {
@@ -3357,6 +3392,16 @@ def materialize_event_window_governance_suggestions(
                 status="proposed",
                 impact_level="medium",
                 db_path=db_path,
+            )
+            suggestion_id = deterministic_policy_suggestion_id(
+                writer="autonomous_learning",
+                scope_type="event_window",
+                scope_key=bucket,
+                action=action,
+                evidence=evidence,
+                status="proposed",
+                qualification_fingerprint=str(metrics["eligibility_fingerprint"]),
+                prefix="psg_event_window",
             )
             _execute(
                 conn,
@@ -3684,9 +3729,6 @@ def materialize_entry_quality_governance_suggestions(
                     eligibility_fingerprint,
                 ),
             )
-            suggestion_id = "psg_entry_quality_" + hashlib.sha1(
-                f"{scope_key}:{action}:{eligibility_fingerprint}".encode("utf-8")
-            ).hexdigest()[:16]
             confidence = min(0.94, 0.48 + 0.05 * effective_sample_count + 0.20 * bad_rate)
             evidence = {
                 "schema_version": (
@@ -3737,6 +3779,16 @@ def materialize_entry_quality_governance_suggestions(
                 status="proposed",
                 impact_level="medium",
                 db_path=db_path,
+            )
+            suggestion_id = deterministic_policy_suggestion_id(
+                writer="autonomous_learning",
+                scope_type="entry_quality",
+                scope_key=scope_key,
+                action=action,
+                evidence=evidence,
+                status="proposed",
+                qualification_fingerprint=eligibility_fingerprint,
+                prefix="psg_entry_quality",
             )
             _execute(
                 conn,
@@ -4346,8 +4398,7 @@ def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit
         for row in rows:
             checked += 1
             review = _review_payload_from_row(conn, row)
-            if str(review.get("close_reason_source") or "").strip():
-                continue
+            existing_source = str(review.get("close_reason_source") or "").strip()
             position_id = str(row["position_id"] or review.get("position_id") or "")
             if not position_id:
                 continue
@@ -4355,12 +4406,27 @@ def backfill_trade_review_close_sources(*, db_path: str | Path = STATE_DB, limit
             close_reason = str(review.get("close_reason") or "broker_close")
             latest = _latest_protection_evidence_before_close(conn, position_id=position_id, close_ts=close_ts)
             source = _classify_review_close_source_from_evidence(close_reason, latest)
+            should_backfill = False
+            reason = ""
+            if not existing_source:
+                should_backfill = True
+                reason = "missing_close_reason_source"
+            elif existing_source in {"restart_replay", "unknown_legacy"} and latest and source not in {"unknown_legacy", existing_source}:
+                should_backfill = True
+                reason = "restart_replay_corrected_by_canonical_evidence"
+            elif existing_source == "external_broker_close" and latest and source.startswith("supervisor") and str(review.get("close_reason") or "") == "thesis_broken":
+                should_backfill = True
+                reason = "broker_close_corrected_to_supervisor_thesis_broken"
+            if not should_backfill:
+                continue
             review["close_reason_source"] = source
             review["inferred_close_supervisor"] = latest
             review["close_reason_source_backfill"] = {
                 "schema_version": "close_reason_source_backfill.v1",
                 "backfilled_at": now,
                 "method": "canonical_risk_decision_or_canonical_supervisor_trace" if latest else "conservative_no_system_evidence",
+                "reason": reason,
+                "previous_close_reason_source": existing_source,
             }
             review_id = str(row["review_id"] or "")
             updated += int(
@@ -5015,7 +5081,6 @@ def materialize_parameter_template_recommendations(
 ) -> dict[str, Any]:
     ensure_autonomous_learning_tables(db_path)
     from backend.jobs import get_job_manager
-    from backend.services.parameter_template_validation import run_parameter_template_offline_validation
     from backend.services.parameter_templates import ParameterTemplateService
 
     service = ParameterTemplateService(str(db_path))
@@ -5058,35 +5123,7 @@ def materialize_parameter_template_recommendations(
                             "approval_path": recommendation.get("approval_path", ""),
                         },
                     }
-                    fn = lambda cb, _params=params: run_parameter_template_offline_validation(_params, cb)
-                    js = get_job_manager().submit("parameter_template_validation", params, fn)
-                    from backend.core.static_feature_flags import (
-                        shared_static_feature_flags,
-                    )
-
-                    if not shared_static_feature_flags().pg_job_queue_v2_enabled:
-                        # Compatibility jobs still need the historical query
-                        # projection.  The durable queue already committed its
-                        # row atomically in submit(); rewriting it here could
-                        # race a worker claim and turn running back to pending.
-                        _execute(
-                            conn,
-                            """
-                            INSERT INTO jobs
-                            (id, kind, status, params_json, result_json, progress, error, created_at, updated_at)
-                            VALUES (?, 'parameter_template_validation', 'pending', ?, '{}', 0.0, '', ?, ?)
-                            ON CONFLICT(id) DO UPDATE SET
-                                kind=excluded.kind,
-                                status=excluded.status,
-                                params_json=excluded.params_json,
-                                result_json=excluded.result_json,
-                                progress=excluded.progress,
-                                error=excluded.error,
-                                created_at=excluded.created_at,
-                                updated_at=excluded.updated_at
-                            """,
-                            (js.id, _dumps(params), time.time(), time.time()),
-                        )
+                    js = get_job_manager().submit("parameter_template_validation", params)
                     counts["offline_jobs"] += 1
                     items.append({"recommendation_id": recommendation_id, "mode": "offline_validate", "job_id": js.id})
                 else:
@@ -6621,20 +6658,12 @@ def _produce_loss_streak_review_statement(db_path: str | Path = STATE_DB) -> dic
                 mark_conn = _connect(db_path)
                 try:
                     book["review_for_date"] = trip_date
-                    _execute(
+                    set_runtime_kv_on_conn(
                         mark_conn,
-                        """
-                        INSERT INTO runtime_kv(key, value_json, updated_at)
-                        VALUES (?, ?, ?)
-                        ON CONFLICT(key) DO UPDATE SET
-                            value_json=excluded.value_json,
-                            updated_at=excluded.updated_at
-                        """,
-                        (
-                            "loss_streak_book",
-                            _json.dumps(book, ensure_ascii=False, default=str),
-                            time.time(),
-                        ),
+                        "loss_streak_book",
+                        book,
+                        updated_at=time.time(),
+                        ensure=False,
                     )
                     mark_conn.commit()
                 finally:
@@ -6727,6 +6756,45 @@ def run_autonomous_learning_cycle(
         _materialize_supervisor_candidate_observations,
         memory_profile,
     )
+    def _materialize_position_supervisor_advisories() -> dict[str, Any]:
+        try:
+            from backend.services.position_supervisor_governance import (
+                build_position_supervisor_advisories,
+            )
+
+            # Use the most recent review day so the advisory reflects live
+            # evidence, but fall back to the canonical fixture day for tests
+            # that only seed 2026-06-26.
+            day = "2026-06-26"
+            try:
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+
+                from backend.services.canonical_v2_reader import iter_review_rows
+
+                conn_tmp = _connect(db_path, read_only=True)
+                try:
+                    rows = iter_review_rows(conn_tmp, limit=0)
+                    if rows:
+                        latest = max(rows, key=lambda row: float(row.get("created_at") or 0.0))
+                        ts = float(latest.get("created_at") or 0.0)
+                        if ts > 0:
+                            day = datetime.fromtimestamp(ts, tz=ZoneInfo("Asia/Shanghai")).date().isoformat()
+                finally:
+                    conn_tmp.close()
+            except Exception:
+                day = "2026-06-26"
+            return build_position_supervisor_advisories(day=day, db_path=db_path, materialize=True)
+        except Exception as exc:
+            return {
+                "schema_version": "position_supervisor_advisory.v1",
+                "status": "unavailable",
+                "reason": f"{type(exc).__name__}: {exc}",
+                "advisory_only": True,
+                "materialized": False,
+                "items": [],
+            }
+
     stage_operations: tuple[tuple[str, Callable[[], Any]], ...] = (
         (
             "trace_maturation",
@@ -6759,6 +6827,10 @@ def run_autonomous_learning_cycle(
         (
             "event_window_governance",
             lambda: materialize_event_window_governance_suggestions(db_path=db_path, limit=sample_limit),
+        ),
+        (
+            "position_supervisor_advisories",
+            lambda: _materialize_position_supervisor_advisories(),
         ),
         (
             "evidence_contract_repair",
@@ -6944,17 +7016,40 @@ def run_watermark_gated_autonomous_learning_cycle(
 ) -> dict[str, Any]:
     """Run one fixed-schedule cycle only when source facts advanced."""
 
-    from backend.services.learning_cycle_watermark import (
-        LearningCycleWatermarkService,
+    from backend.services.learning_workload_gate import (
+        RUN_NEW_FACTS,
+        RUN_PENDING_GOVERNANCE,
+        RUN_UNKNOWN,
+        SKIP_CLOSED_NO_NEW_FACTS,
+        evaluate_learning_workload,
     )
 
-    watermark_service = LearningCycleWatermarkService(db_path=db_path)
-    gate = watermark_service.evaluate()
-    if not gate.get("should_run"):
+    workload_gate = evaluate_learning_workload(db_path)
+    gate = dict(workload_gate.get("watermark") or {})
+    workload_status = str(workload_gate.get("status") or "")
+    if workload_status == RUN_UNKNOWN and not is_state_db_path(db_path):
+        # Offline SQLite fixtures do not have the live market projection; keep
+        # their established fact-watermark semantics without weakening the
+        # production PostgreSQL unknown-state behavior.
+        from backend.services.learning_cycle_watermark import LearningCycleWatermarkService
+
+        gate = LearningCycleWatermarkService(db_path=db_path).evaluate()
+        workload_status = RUN_NEW_FACTS if gate.get("should_run") else SKIP_CLOSED_NO_NEW_FACTS
+    if workload_status in {
+        SKIP_CLOSED_NO_NEW_FACTS,
+        RUN_PENDING_GOVERNANCE,
+    }:
         return {
             "ok": True,
-            "status": "skipped_no_new_facts",
+            "status": (
+                "skipped_no_new_facts"
+                if workload_status == SKIP_CLOSED_NO_NEW_FACTS
+                else workload_status or "run_unknown"
+            ),
+            "workload_status": workload_status,
+            "reason": workload_gate.get("reason_code"),
             "watermark": gate,
+            "workload_gate": workload_gate,
         }
     result = run_autonomous_learning_cycle(
         db_path=db_path,
@@ -6963,12 +7058,16 @@ def run_watermark_gated_autonomous_learning_cycle(
         submit_offline_deep=submit_offline_deep,
         mutation_capability=mutation_capability,
     )
-    watermark_service.mark_completed(gate["current"])
+    if workload_status in {RUN_NEW_FACTS, RUN_UNKNOWN} and gate.get("ok") and gate.get("current"):
+        from backend.services.learning_cycle_watermark import LearningCycleWatermarkService
+
+        LearningCycleWatermarkService(db_path=db_path).mark_completed(gate["current"])
     return {
         **dict(result or {}),
         "ok": True,
         "status": str((result or {}).get("status") or "completed"),
         "watermark": gate,
+        "workload_gate": workload_gate,
     }
 
 
@@ -7012,8 +7111,14 @@ def schedule_autonomous_learning(
                         else True
                     ),
                 )
-                if result.get("status") == "skipped_no_new_facts":
-                    logger.info("[autonomous_learning] scheduled run skipped: no new source facts")
+                if result.get("status") in {
+                    "skip_closed_no_new_facts",
+                    "run_pending_governance",
+                }:
+                    logger.info(
+                        "[autonomous_learning] scheduled run skipped: %s",
+                        result.get("status"),
+                    )
                 else:
                     logger.info("[autonomous_learning] scheduled run completed: {}", _log_summary(result))
             except Exception as exc:

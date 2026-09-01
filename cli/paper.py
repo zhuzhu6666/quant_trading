@@ -36,9 +36,9 @@ def run_paper(args):
     - --use-alerter:       Alerter 告警 (T4)
     - --enable-circuit:    CircuitBreaker (默认 False=baseline, P3 调优 10%)
     """
-    from data.store import DataStore
+    from data.duckdb_store import DuckDBDataStore as DataStore
     from strategy.registry import strategy_registry
-    from execution.paper_trader import PaperTrader
+    from execution.paper_execution import PaperTrader
     from config import load_config, cfg_get
     CFG = load_config()
 

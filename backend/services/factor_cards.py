@@ -21,9 +21,9 @@ from backend.core.db import (
     state_pg_enabled,
 )
 from backend.services.canonical_v2_reader import (
-    iter_decision_factor_snapshots,
     iter_decision_factor_snapshots_by_factor,
     iter_decision_rows,
+    latest_review_observed_at_by_id,
     review_row,
 )
 from backend.core.db_helpers import (
@@ -82,6 +82,7 @@ def build_factor_admission_evidence(
     evidence_counts: dict[str, Any],
     governance: dict[str, Any],
     now_ts: float | None = None,
+    health_max_age_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Build one fail-closed Candidate Card admission projection.
 
@@ -260,15 +261,18 @@ def build_factor_admission_evidence(
 
     health_updated_at = float(catalog_item.get("health_updated_at") or 0.0)
     health_age = now - health_updated_at if health_updated_at > 0.0 else float("inf")
-    try:
-        from config.runtime_config import shared as _runtime_config
+    if health_max_age_seconds is not None:
+        health_max_age = float(health_max_age_seconds)
+    else:
+        try:
+            from config.runtime_config import shared as _runtime_config
 
-        health_max_age = float(
-            getattr(_runtime_config(), "factor_governance_health_max_age_seconds", 900.0)
-            or 900.0
-        )
-    except Exception:
-        health_max_age = 900.0
+            health_max_age = float(
+                getattr(_runtime_config(), "factor_governance_health_max_age_seconds", 900.0)
+                or 900.0
+            )
+        except Exception:
+            health_max_age = 900.0
     health_status = str(catalog_item.get("health_status") or "UNKNOWN").upper()
     health_fresh = bool(-5.0 <= health_age <= health_max_age)
     health_valid = bool(health_fresh and health_status in {"HEALTHY", "WATCH"})
@@ -589,6 +593,19 @@ class FactorCardService:
                         or []
                     )
                 ]
+            try:
+                from config.runtime_config import shared as _runtime_config
+
+                health_max_age_seconds = float(
+                    getattr(
+                        _runtime_config(),
+                        "factor_governance_health_max_age_seconds",
+                        900.0,
+                    )
+                    or 900.0
+                )
+            except Exception:
+                health_max_age_seconds = 900.0
             built = [
                 self._build_card(
                     name,
@@ -596,6 +613,7 @@ class FactorCardService:
                     catalog_item=catalog_by_factor.get(name),
                     runtime_projection=runtime_projection,
                     evidence_counts=card_evidence_by_factor.get(name),
+                    health_max_age_seconds=health_max_age_seconds,
                 )
                 for name in ids
             ]
@@ -663,10 +681,9 @@ class FactorCardService:
         # reader contract rather than reading event/payload internals here.
         try:
             for decision in iter_decision_rows(conn, limit=500, reverse=True):
-                decision_id = str(decision.get("decision_id") or "")
-                if not decision_id:
-                    continue
-                for snapshot in iter_decision_factor_snapshots(conn, decision_id):
+                for snapshot in decision.get("factor_snapshots") or []:
+                    if not isinstance(snapshot, dict):
+                        continue
                     fn = str(snapshot.get("factor") or "")
                     if fn:
                         names.add(fn)
@@ -739,6 +756,14 @@ class FactorCardService:
                 if review_id:
                     review_ids_by_factor[factor_id].append(review_id)
 
+            latest_review_times = latest_review_observed_at_by_id(
+                conn,
+                [
+                    review_id
+                    for review_ids in review_ids_by_factor.values()
+                    for review_id in review_ids
+                ],
+            )
             for factor_id in ids:
                 labels: list[str] = []
                 primary = ""
@@ -753,14 +778,13 @@ class FactorCardService:
                         item = str(label or "")
                         if item and item not in labels:
                             labels.append(item)
-                updated_at = 0.0
-                for review_id in review_ids_by_factor[factor_id]:
-                    review = review_row(conn, review_id)
-                    if review is not None:
-                        updated_at = max(
-                            updated_at,
-                            float(review.get("created_at") or 0.0),
-                        )
+                updated_at = max(
+                    (
+                        latest_review_times.get(review_id, 0.0)
+                        for review_id in review_ids_by_factor[factor_id]
+                    ),
+                    default=0.0,
+                )
                 result[factor_id].update(
                     {
                         "last_primary_responsibility": primary,
@@ -781,6 +805,7 @@ class FactorCardService:
         catalog_item: dict[str, Any] | None = None,
         runtime_projection: dict[str, Any] | None = None,
         evidence_counts: dict[str, Any] | None = None,
+        health_max_age_seconds: float | None = None,
     ) -> dict[str, Any]:
         adapter = RegistryAdapter.shared()
         catalog_item = catalog_item or {}
@@ -831,6 +856,7 @@ class FactorCardService:
             },
             evidence_counts=evidence_counts,
             governance=governance,
+            health_max_age_seconds=health_max_age_seconds,
         )
         direction_contract = dict(admission_evidence["direction"])
         posterior_summary = self._posterior_summary(

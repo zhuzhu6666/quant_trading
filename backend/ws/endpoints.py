@@ -391,11 +391,7 @@ async def ws_state(ws: WebSocket) -> None:
         if protocol_header:
             token = protocol_header.split(",", 1)[0].strip()
             accepted_subprotocol = token
-        allow_url_jwt = (os.environ.get("QUANT_AUTH_ALLOW_URL_JWT") or "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }
-        if not ticket and not token and allow_url_jwt and params is not None:
-            token = params.get("token", "")
+
     except Exception:
         pass
 

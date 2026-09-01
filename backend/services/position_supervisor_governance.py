@@ -36,7 +36,9 @@ from backend.services.learning_application_store import (
     store_for_conn,
 )
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
+from backend.services.policy_suggestion_identity import deterministic_policy_suggestion_id
 from backend.services.position_supervisor import evaluate_position_supervisor
+from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 from backend.services.position_supervisor_templates import (
     CONSERVATIVE_TEMPLATE_ID,
     DEFAULT_TEMPLATE_ID,
@@ -734,20 +736,12 @@ def publish_position_supervisor_selection_projection(
                 validate_runtime_state_schema(conn, declaration)
             else:
                 conn.execute(declaration)
-            conn.execute(
-                _sql(
-                    conn,
-                    """INSERT INTO runtime_kv (key, value_json, updated_at)
-                       VALUES (?, ?, ?)
-                       ON CONFLICT(key) DO UPDATE SET
-                           value_json=excluded.value_json,
-                           updated_at=excluded.updated_at""",
-                ),
-                (
-                    POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY,
-                    json.dumps(projection, ensure_ascii=False),
-                    now,
-                ),
+            set_runtime_kv_on_conn(
+                conn,
+                POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY,
+                projection,
+                updated_at=now,
+                ensure=False,
             )
             conn.commit()
             return {**projection, "ok": True, "status": projection.get("status")}
@@ -1464,6 +1458,73 @@ def _position_prices(conn: sqlite3.Connection, position_id: str) -> dict[str, fl
     }
 
 
+def _trace_payload_dict(trace: Mapping[str, Any] | None, key: str) -> dict[str, Any]:
+    value = (trace or {}).get(key)
+    if isinstance(value, Mapping):
+        return dict(value)
+    parsed = _loads(value, {})
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _latest_replay_supervisor_trace(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    decision_id: str,
+    close_ts: float,
+) -> dict[str, Any] | None:
+    traces: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for kwargs in (
+        {"decision_id": decision_id} if decision_id else {},
+        {"position_id": position_id} if position_id else {},
+    ):
+        if not kwargs:
+            continue
+        for trace in iter_supervisor_trace_rows(
+            conn,
+            limit=0,
+            reverse=True,
+            **kwargs,
+        ):
+            trace_id = str(trace.get("trace_id") or "")
+            if trace_id and trace_id in seen:
+                continue
+            if trace_id:
+                seen.add(trace_id)
+            traces.append(dict(trace))
+    candidates: list[dict[str, Any]] = []
+    for trace in traces:
+        event_ts = _safe_float(trace.get("event_ts") or trace.get("created_at"))
+        if close_ts > 0.0 and event_ts > close_ts + 1e-6:
+            continue
+        execution = _trace_payload_dict(trace, "execution_json")
+        is_real_execution = bool(
+            execution.get("is_real_execution")
+            and (
+                execution.get("broker_action_confirmed")
+                or execution.get("reconcile_confirmed")
+            )
+        )
+        if (
+            not is_real_execution
+            or str(trace.get("stage") or "") != "executed"
+            or str(trace.get("outcome") or "") != "applied"
+            or str(trace.get("execution_status") or "") != "applied"
+        ):
+            continue
+        candidates.append({**trace, "_event_ts": event_ts})
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda trace: (
+            _safe_float(trace.get("_event_ts")),
+            str(trace.get("trace_id") or ""),
+        ),
+    )
+
+
 def _review_to_supervisor_context(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     payload = _review_payload(conn, row)
     real_pnl = payload.get("real_pnl") or {}
@@ -1477,6 +1538,39 @@ def _review_to_supervisor_context(conn: sqlite3.Connection, row: sqlite3.Row) ->
         context_state = payload.get("context_state")
     if not isinstance(context_state, dict):
         context_state = {}
+    position_id = str(row["position_id"] or payload.get("position_id") or "")
+    close_ts = _safe_float(payload.get("close_ts") or row["created_at"])
+    exit_decision_id = str(row["exit_decision_id"] or payload.get("exit_decision_id") or "")
+    supervisor_trace = _latest_replay_supervisor_trace(
+        conn,
+        position_id=position_id,
+        decision_id=exit_decision_id,
+        close_ts=close_ts,
+    )
+    trace_context = _trace_payload_dict(supervisor_trace, "context_json")
+    if not trace_context:
+        trace_context = _trace_payload_dict(supervisor_trace, "context")
+    trace_position = trace_context.get("position")
+    trace_position = dict(trace_position) if isinstance(trace_position, Mapping) else {}
+    trace_risk = trace_context.get("risk")
+    trace_risk = dict(trace_risk) if isinstance(trace_risk, Mapping) else {}
+    trace_temporal = trace_context.get("temporal_context")
+    trace_temporal = (
+        dict(trace_temporal) if isinstance(trace_temporal, Mapping) else {}
+    )
+    trace_market = trace_context.get("market")
+    trace_market = dict(trace_market) if isinstance(trace_market, Mapping) else {}
+    trace_entry_context = trace_context.get("entry_context")
+    trace_entry_context = (
+        dict(trace_entry_context)
+        if isinstance(trace_entry_context, Mapping)
+        else {}
+    )
+    trace_runtime = trace_context.get("runtime")
+    trace_runtime = (
+        dict(trace_runtime) if isinstance(trace_runtime, Mapping) else {}
+    )
+
     market_context = {
         "context_state": dict(context_state),
         "regime_id": str(
@@ -1487,45 +1581,97 @@ def _review_to_supervisor_context(conn: sqlite3.Connection, row: sqlite3.Row) ->
         ),
         "regime_confidence": quality_context.get("regime_confidence"),
     }
-    position_id = str(row["position_id"] or payload.get("position_id") or "")
+    market_context.update(trace_market)
     prices = _position_prices(conn, position_id)
     entry_price = _safe_float(real_pnl.get("entry_price") or payload.get("entry_price"))
     current_price = _safe_float(payload.get("close_price") or real_pnl.get("exec_price"))
+    position = {
+        "position_id": position_id,
+        "direction": _direction_from_review(payload),
+        "entry_price": entry_price,
+        "current_price": current_price,
+        "volume": 100.0,
+        "unrealized_pnl": _safe_float(row["pnl"]),
+        "sl": prices["sl"],
+        "tp": prices["tp"],
+    }
+    risk = {
+        "max_holding_seconds": 0.0,
+        "holding_timeout_ratio": 0.0,
+        "mfe": _safe_float(row["mfe"] if row["mfe"] is not None else payload.get("mfe")),
+        "mae": _safe_float(row["mae"] if row["mae"] is not None else payload.get("mae")),
+        "giveback_ratio": _safe_float(payload.get("giveback_ratio")),
+        "profit_capture_ratio": _safe_float(payload.get("profit_capture_ratio")),
+        "time_in_profit": _safe_float(payload.get("time_in_profit") or payload.get("time_in_profit_seconds")),
+        "holding_efficiency": _safe_float(payload.get("holding_efficiency")),
+        "time_decay_score": _safe_float(payload.get("time_decay_score")),
+        "thesis_status": str(payload.get("thesis_status_at_exit") or payload.get("thesis_status") or "intact"),
+        "regime_shift": str(payload.get("regime_shift_at_exit") or payload.get("regime_shift") or "none"),
+    }
+    temporal = {
+        "decision_ts": close_ts,
+        "holding_seconds": _safe_float(payload.get("holding_seconds")),
+    }
+
+    for target, source in (
+        (position, trace_position),
+        (risk, trace_risk),
+        (temporal, trace_temporal),
+    ):
+        for key, value in source.items():
+            if value not in (None, ""):
+                target[key] = value
+
+    # Numeric supervision requires explicit component facts.  A review-only
+    # projection has values at close but cannot prove that live price/PnL were
+    # known at the supervisor decision time.
+    for key in ("current_price_state", "pnl_state", "position_path_metrics_state"):
+        if key not in position or position.get(key) in (None, ""):
+            position[key] = "known" if supervisor_trace is not None and key in trace_position else "unknown"
+
+    trace_id = str((supervisor_trace or {}).get("trace_id") or "")
+    trace_execution = _trace_payload_dict(supervisor_trace, "execution_json")
+    trace_verdict = _trace_payload_dict(supervisor_trace, "verdict_json")
+    replay_evidence = {
+        "schema_version": "position_supervisor_replay_evidence.v1",
+        "source": "canonical_v2.supervisor_trace" if supervisor_trace else "canonical_v2.trade_review",
+        "trace_id": trace_id,
+        "trace_integrity": str((supervisor_trace or {}).get("trace_integrity") or ""),
+        "observed_action": str((supervisor_trace or {}).get("action") or ""),
+        "observed_reason": str(
+            (supervisor_trace or {}).get("summary_reason")
+            or trace_verdict.get("summary_reason")
+            or ""
+        ),
+        "observed_template_id": str((supervisor_trace or {}).get("template_id") or ""),
+        "is_real_execution": bool(trace_execution.get("is_real_execution")),
+        "broker_action_confirmed": bool(trace_execution.get("broker_action_confirmed")),
+        "reconcile_confirmed": bool(trace_execution.get("reconcile_confirmed")),
+        "required_component_states": {
+            key: str(position.get(key) or "")
+            for key in ("current_price_state", "pnl_state", "position_path_metrics_state")
+        },
+    }
     return {
-        "position": {
-            "position_id": position_id,
-            "direction": _direction_from_review(payload),
-            "entry_price": entry_price,
-            "current_price": current_price,
-            "volume": 100.0,
-            "unrealized_pnl": _safe_float(row["pnl"]),
-            "sl": prices["sl"],
-            "tp": prices["tp"],
-        },
-        "risk": {
-            "max_holding_seconds": 0.0,
-            "holding_timeout_ratio": 0.0,
-            "mfe": _safe_float(row["mfe"] if row["mfe"] is not None else payload.get("mfe")),
-            "mae": _safe_float(row["mae"] if row["mae"] is not None else payload.get("mae")),
-            "giveback_ratio": _safe_float(payload.get("giveback_ratio")),
-            "profit_capture_ratio": _safe_float(payload.get("profit_capture_ratio")),
-            "time_in_profit": _safe_float(payload.get("time_in_profit") or payload.get("time_in_profit_seconds")),
-            "holding_efficiency": _safe_float(payload.get("holding_efficiency")),
-            "time_decay_score": _safe_float(payload.get("time_decay_score")),
-            "thesis_status": str(payload.get("thesis_status_at_exit") or payload.get("thesis_status") or "intact"),
-            "regime_shift": str(payload.get("regime_shift_at_exit") or payload.get("regime_shift") or "none"),
-        },
-        "temporal_context": {
-            "decision_ts": _safe_float(payload.get("close_ts") or row["created_at"]),
-            "holding_seconds": _safe_float(payload.get("holding_seconds")),
-        },
+        "position": position,
+        "risk": risk,
+        "temporal_context": temporal,
         "market": market_context,
         "market_space_context": {
-            "distance_to_sl": abs(current_price - prices["sl"]) if current_price > 0 and prices["sl"] > 0 else 0.0,
-            "distance_to_tp": abs(prices["tp"] - current_price) if current_price > 0 and prices["tp"] > 0 else 0.0,
+            "distance_to_sl": (
+                abs(_safe_float(position.get("current_price")) - prices["sl"])
+                if _safe_float(position.get("current_price")) > 0 and prices["sl"] > 0
+                else 0.0
+            ),
+            "distance_to_tp": (
+                abs(prices["tp"] - _safe_float(position.get("current_price")))
+                if _safe_float(position.get("current_price")) > 0 and prices["tp"] > 0
+                else 0.0
+            ),
         },
-        "entry_context": {},
-        "runtime": {},
+        "entry_context": trace_entry_context,
+        "runtime": trace_runtime,
+        "replay_evidence": replay_evidence,
     }
 
 
@@ -1879,6 +2025,7 @@ def replay_position_supervisor_templates(
                 "avg_confidence": 0.0,
                 "confidence_sum": 0.0,
             }
+        comparable_sample_count = 0
         for row in rows:
             context = _review_to_supervisor_context(conn, row)
             review_payload = _review_payload(conn, row)
@@ -1887,6 +2034,16 @@ def replay_position_supervisor_templates(
             mae = _safe_float(row["mae"] if row["mae"] is not None else review_payload.get("mae"))
             giveback_ratio = _safe_float(review_payload.get("giveback_ratio"))
             profit_capture_ratio = _safe_float(review_payload.get("profit_capture_ratio"))
+            replay_evidence = context.get("replay_evidence") if isinstance(context.get("replay_evidence"), dict) else {}
+            required_states = replay_evidence.get("required_component_states") if isinstance(replay_evidence.get("required_component_states"), dict) else {}
+            comparable = bool(
+                str(replay_evidence.get("source") or "") == "canonical_v2.supervisor_trace"
+                and str(replay_evidence.get("trace_id") or "").strip()
+                and bool(replay_evidence.get("is_real_execution"))
+                and all(str(required_states.get(key) or "").lower() == "known" for key in ("current_price_state", "pnl_state", "position_path_metrics_state"))
+            )
+            if comparable:
+                comparable_sample_count += 1
             if pnl < 0 and mfe > 0:
                 mfe_then_loss_count += 1
                 if giveback_ratio >= 0.75 and profit_capture_ratio <= 0.15:
@@ -1914,15 +2071,19 @@ def replay_position_supervisor_templates(
                 summary = template_summaries[template_id]
                 summary["actions"][action] = int(summary["actions"].get(action, 0)) + 1
                 summary["confidence_sum"] += _safe_float(verdict.get("confidence"))
-                if action == "close" and abs(_safe_float(row["pnl"])) <= small_abs_pnl:
+                # Comparison must not reward missing evidence.  Only
+                # comparable replays may influence template selection.
+                if comparable and action == "close" and abs(_safe_float(row["pnl"])) <= small_abs_pnl:
                     summary["small_loss_close_count"] += 1
-                if action == "close" and str(verdict.get("summary_reason") or "") == "thesis_broken":
+                if comparable and action == "close" and str(verdict.get("summary_reason") or "") == "thesis_broken":
                     summary["thesis_broken_close_count"] += 1
                 sample_actions[template_id] = {
                     "action": action,
                     "summary_reason": str(verdict.get("summary_reason") or ""),
                     "confidence": _safe_float(verdict.get("confidence")),
                     "trigger_tags": list((verdict.get("evidence") or {}).get("trigger_tags") or []),
+                    "comparable": comparable,
+                    "replay_evidence": dict(replay_evidence),
                 }
             samples.append(
                 {
@@ -1936,6 +2097,8 @@ def replay_position_supervisor_templates(
                     "holding_efficiency": _safe_float(review_payload.get("holding_efficiency")),
                     "profit_capture_ratio": profit_capture_ratio,
                     "giveback_ratio": giveback_ratio,
+                    "comparable": comparable,
+                    "replay_evidence": dict(replay_evidence),
                     "template_actions": sample_actions,
                 }
             )
@@ -1951,6 +2114,7 @@ def replay_position_supervisor_templates(
             "day": day,
             "sample_filter": {"abs_pnl_lte": float(small_abs_pnl), "limit": int(limit)},
             "sample_count": len(rows),
+            "comparable_sample_count": int(comparable_sample_count),
             "amend_issues": _amend_issue_count(conn, day=day),
             "templates": list(template_summaries.values()),
             "capture_failure_summary": {
@@ -1966,6 +2130,7 @@ def replay_position_supervisor_templates(
                 "profit_protection_template_id": PROFIT_PROTECTION_TEMPLATE_ID,
                 "small_loss_close_delta": conservative_close - default_close,
                 "small_loss_closes_reduced": max(0, default_close - conservative_close),
+                "comparable_sample_count": int(comparable_sample_count),
             },
             "samples": samples,
         }
@@ -2106,9 +2271,6 @@ def build_position_supervisor_advisories(
                         candidate_template.get("generation_context") or {}
                     ),
                 }
-        suggestion_id = "psv_" + hashlib.sha1(
-            f"{day}:{action}:{target_template_id}:{reason}".encode("utf-8")
-        ).hexdigest()[:16]
         evidence = {
             **evidence,
             "replay_summary": replay_summary,
@@ -2119,7 +2281,6 @@ def build_position_supervisor_advisories(
                 {
                     "schema_version": GOVERNANCE_ELIGIBILITY_VERSION,
                     "evidence_class": "position_supervisor_advisory",
-                    "suggestion_id": suggestion_id,
                     "scope_type": "position_supervisor_template",
                     "scope_key": target_template_id,
                     "action": action,
@@ -2127,6 +2288,16 @@ def build_position_supervisor_advisories(
                 }
             ).encode("utf-8")
         ).hexdigest()
+        suggestion_id = deterministic_policy_suggestion_id(
+            writer="position_supervisor_governance",
+            scope_type="position_supervisor_template",
+            scope_key=target_template_id,
+            action=action,
+            evidence=evidence,
+            status="proposed",
+            qualification_fingerprint=eligibility_fingerprint,
+            prefix="psv",
+        )
         evidence["governance_eligibility"] = {
             "governance_eligible": True,
             "governance_eligibility_version": GOVERNANCE_ELIGIBILITY_VERSION,
@@ -2380,40 +2551,7 @@ def build_position_supervisor_advisories(
                      governance_eligibility_version, governance_eligibility_fingerprint,
                      governance_ineligible_reason, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)
-                    ON CONFLICT(suggestion_id) DO UPDATE SET
-                        scope_type=excluded.scope_type,
-                        scope_key=excluded.scope_key,
-                        action=excluded.action,
-                        confidence=excluded.confidence,
-                        reason=excluded.reason,
-                        evidence_json=excluded.evidence_json,
-                        governance_eligible=excluded.governance_eligible,
-                        governance_eligibility_version=excluded.governance_eligibility_version,
-                        governance_eligibility_fingerprint=excluded.governance_eligibility_fingerprint,
-                        governance_ineligible_reason=CASE
-                            WHEN policy_suggestion.status='rejected'
-                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
-                            THEN ''
-                            ELSE policy_suggestion.governance_ineligible_reason
-                        END,
-                        status=CASE
-                            WHEN policy_suggestion.status='rejected'
-                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
-                            THEN 'proposed'
-                            ELSE policy_suggestion.status
-                        END,
-                        reviewed_at=CASE
-                            WHEN policy_suggestion.status='rejected'
-                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
-                            THEN 0.0
-                            ELSE policy_suggestion.reviewed_at
-                        END,
-                        review_note=CASE
-                            WHEN policy_suggestion.status='rejected'
-                             AND policy_suggestion.governance_ineligible_reason='eligibility_contract_invalid'
-                            THEN ''
-                            ELSE policy_suggestion.review_note
-                        END
+                    ON CONFLICT(suggestion_id) DO NOTHING
                     """,
                     (
                         item["suggestion_id"],
@@ -2428,6 +2566,35 @@ def build_position_supervisor_advisories(
                         item["governance_eligibility_fingerprint"],
                         item["governance_ineligible_reason"],
                         now_ts,
+                    ),
+                )
+                # Re-opening a suggestion rejected solely because an older
+                # eligibility contract was malformed is a real state
+                # transition.  Keep that exceptional repair explicit; an
+                # ordinary same-semantic retry remains a pure no-op and does
+                # not rewrite the evidence JSON or its TOAST value.
+                _execute(
+                    conn,
+                    """
+                    UPDATE policy_suggestion
+                    SET confidence=?, reason=?, evidence_json=?,
+                        governance_eligible=?,
+                        governance_eligibility_version=?,
+                        governance_eligibility_fingerprint=?,
+                        governance_ineligible_reason='', status='proposed',
+                        reviewed_at=0.0, review_note=''
+                    WHERE suggestion_id=?
+                      AND status='rejected'
+                      AND governance_ineligible_reason='eligibility_contract_invalid'
+                    """,
+                    (
+                        float(item["confidence"]),
+                        item["reason"],
+                        json.dumps(item["evidence"], ensure_ascii=False),
+                        int(item["governance_eligible"]),
+                        item["governance_eligibility_version"],
+                        item["governance_eligibility_fingerprint"],
+                        item["suggestion_id"],
                     ),
                 )
             conn.commit()
