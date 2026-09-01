@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertTriangle, Bug, Clock3, FileWarning, Gauge, HardDrive, Pause, Play, RefreshCw, Search, Terminal, Wifi } from "lucide-react";
 import type { FactEnvelope } from "@/api/fact";
-import { getAlerts, getHealth, getLogTail, getRecovery, getSystemLoad } from "@/api/workbench";
+import { getAlerts, getHealth, getLogTail, getRecovery, getSystemLoad } from "@/api/domains/ops";
 import { formatTimestamp } from "@/api/time";
 import { readDesktopDiagnostics } from "@/desktop/bridge";
 import { FactBadge, Panel, SourceLine } from "@/design-system/primitives";

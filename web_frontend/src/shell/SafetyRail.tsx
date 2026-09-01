@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, Gauge, Leaf, PieChart, Radio, ShieldCheck, Sun } from "lucide-react";
+import { Gauge, Leaf, PieChart, Radio, ShieldCheck, Sun } from "lucide-react";
 import { factAgeSeconds, type FactEnvelope } from "@/api/fact";
 import { formatAgeSeconds, formatClock } from "@/api/time";
-import { getHealth, getReadinessView, getRiskSnapshot } from "@/api/workbench";
-import { useLiveState } from "@/hooks/useLiveState";
+import { getHealth, getReadinessView } from "@/api/domains/ops";
+import { getRiskSnapshot } from "@/api/domains/risk";
+import { useLiveState, type LiveConnectionState } from "@/hooks/useLiveState";
 
 function unknownFact(contract: string, reasonCode: string): FactEnvelope {
   return { envelope: "fact.v1", contract, state: "unknown", source: "none", observed_at: null, generated_at: null, stale_after_sec: 0, reason_code: reasonCode, components: {} };
@@ -23,6 +24,19 @@ function readyText(ready: boolean | null | undefined): string {
   return "就绪度未知";
 }
 
+function liveTransportText(connection: LiveConnectionState): string {
+  if (connection === "connected") return "实时通道已连接";
+  if (connection === "connecting") return "实时通道连接中";
+  if (connection === "auth-failed") return "实时认证失败";
+  return "实时通道未连接";
+}
+
+function liveFactText(fact: FactEnvelope): string {
+  if (fact.state === "known") return "业务事实已确认";
+  if (fact.state === "stale") return "业务事实已过期";
+  return "业务事实未确认";
+}
+
 export function SafetyRail({ onRefresh }: { onRefresh: () => void }) {
   const live = useLiveState();
   const queryClient = useQueryClient();
@@ -30,12 +44,11 @@ export function SafetyRail({ onRefresh }: { onRefresh: () => void }) {
   const risk = useQuery({ queryKey: ["workbench", "risk"], queryFn: getRiskSnapshot, staleTime: 30_000, refetchInterval: 30_000, retry: false });
   const health = useQuery({ queryKey: ["ops", "health"], queryFn: getHealth, staleTime: 30_000, refetchInterval: 60_000, retry: false });
   const snapshot = live.snapshot;
+  const liveFact = snapshot?.fact ?? unknownFact("live.state.v2", "live_snapshot_not_loaded");
   const readinessFact = readiness.data?.fact ?? unknownFact("ops.backend-readiness.v2", "readiness_not_loaded");
   const riskFact = risk.data?.fact ?? unknownFact("risk.summary.v2", "risk_not_loaded");
   const healthFact = health.data?.fact ?? unknownFact("system.health.v2", health.error ? "health_request_failed" : "health_not_loaded");
-  const accountFact = snapshot?.account.fact ?? unknownFact("live.account.v2", "live_account_not_loaded");
   const sessionFact = snapshot?.session.fact ?? unknownFact("live.session-risk.v2", "live_session_not_loaded");
-  const marginRate = readable(accountFact) && snapshot?.account.margin !== null && snapshot?.account.equity && snapshot.account.equity !== 0 ? (snapshot.account.margin / snapshot.account.equity) * 100 : null;
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ["workbench"] });
     void queryClient.invalidateQueries({ queryKey: ["ops"] });
@@ -63,14 +76,10 @@ export function SafetyRail({ onRefresh }: { onRefresh: () => void }) {
         <strong className="rail-status-value">回撤：{readable(sessionFact) && snapshot?.session.drawdownPct !== null ? `${snapshot?.session.drawdownPct?.toFixed(2)}%` : "—"}</strong>
         <small>{factTiming(sessionFact)}</small>
       </div>
-      <div className="rail-fact-group reference-status-card reference-margin-status">
-        <span className="rail-label"><Activity size={18} />保证金使用率 <strong>{marginRate === null ? "—" : `${marginRate.toFixed(1)}%`}</strong></span>
-        <span className="rail-progress"><i style={marginRate === null ? undefined : { width: `${Math.max(0, Math.min(100, marginRate))}%` }} /></span>
-      </div>
       <div className="rail-fact-group reference-status-card">
         <span className="rail-label"><Leaf size={18} />系统状态</span>
-        <strong className={`rail-connection ${live.connection === "connected" ? "rail-connected" : "rail-unknown"}`}>{live.connection === "connected" ? "数据与风控同步正常" : "实时状态未连接"}</strong>
-        <small>{factTiming(live.snapshot?.fact ?? unknownFact("live.state.v2", "live_snapshot_not_loaded"))}</small>
+        <strong className={`rail-connection ${live.connection === "connected" ? "rail-connected" : "rail-unknown"}`}>{liveTransportText(live.connection)}</strong>
+        <small>{liveFactText(liveFact)} · {factTiming(liveFact)}</small>
       </div>
     </div>
     <button className="rail-market-open" type="button" onClick={refresh} aria-label="刷新服务端状态">

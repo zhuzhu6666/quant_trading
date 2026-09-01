@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowDownRight, ArrowUpRight, Gauge, ShieldAlert } from "lucide-react";
 import type { FactEnvelope, FactState } from "@/api/fact";
 import { formatObservedTime } from "@/api/time";
-import { getRiskDeskData } from "@/api/workbench";
+import { getRiskDeskData } from "@/api/domains/risk";
 import { FactBadge, MetricValue, Panel, SourceLine } from "@/design-system/primitives";
 import { useLiveState } from "@/hooks/useLiveState";
 import { WorkspaceTitle } from "@/workspaces/WorkspaceBits";
@@ -30,7 +30,7 @@ function Metric({ label, metric, parentState }: { label: string; metric: { statu
 }
 
 export function RiskDeskPage() {
-  const query = useQuery({ queryKey: ["workbench", "risk-desk"], queryFn: getRiskDeskData, staleTime: 15_000, refetchInterval: 20_000, refetchIntervalInBackground: true, retry: false });
+  const query = useQuery({ queryKey: ["workbench", "risk-desk"], queryFn: getRiskDeskData, staleTime: 15_000, refetchInterval: 20_000, retry: false });
   const live = useLiveState();
   const data = query.data;
   const riskFact = data?.fact ?? unknownFact("risk.summary.v2", "risk_not_loaded");
@@ -38,7 +38,6 @@ export function RiskDeskPage() {
   const traceFact = data?.traceFact ?? unknownFact("risk.trade-trace-recent.v2", "trade_trace_not_loaded");
   const positionsFact = live.snapshot?.positions.fact ?? unknownFact("live.positions.v2", "live_positions_not_loaded");
   const accountFact = live.snapshot?.account.fact ?? unknownFact("live.account.v2", "live_account_not_loaded");
-  const loopFact = live.snapshot?.loop.fact ?? unknownFact("live.loop.v2", "live_loop_not_loaded");
   const safetyFact = live.snapshot?.safety ?? unknownFact("live.safety-freshness.v1", "live_safety_not_loaded");
   const riskMetric = { status: "unknown" as const, value: null, unit: "%", reasonCode: "snapshot_missing" };
   const account = live.snapshot?.account;

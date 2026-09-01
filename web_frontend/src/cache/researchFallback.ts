@@ -1,5 +1,5 @@
 import type { FactEnvelope } from "@/api/fact";
-import { decodeMarketBars } from "@/api/workbench";
+import { decodeMarketBars } from "@/api/domains/market";
 import { getResearchCache } from "@/cache/researchCache";
 import type { Bar, MarketBars, ResearchSnapshot } from "@/types/contracts";
 

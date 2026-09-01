@@ -8,7 +8,7 @@ import { buildCommands } from "@/shell/commands";
 import { CommandPalette } from "@/shell/CommandPalette";
 import { SafetyRail } from "@/shell/SafetyRail";
 import { ServerStatusCard } from "@/shell/ServerStatusCard";
-import { getReadinessView } from "@/api/workbench";
+import { getReadinessView } from "@/api/domains/ops";
 import { formatObservedTime } from "@/api/time";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { WorkspaceId } from "@/types/contracts";
@@ -89,7 +89,7 @@ export function WorkbenchShell() {
     return () => observer.disconnect();
   }, []);
 
-  return <div ref={shellRef} className={`workbench cockpit-theme reference-theme ${layout.sidebar_collapsed ? "workbench-sidebar-collapsed" : ""}`}>
+  return <div ref={shellRef} className={`workbench cockpit-theme ${layout.sidebar_collapsed ? "workbench-sidebar-collapsed" : ""}`}>
     <SafetyRail onRefresh={refreshFacts} />
     <a className="skip-link" href="#workbench-main">跳到主要内容</a>
     <aside className={`workbench-sidebar ${mobileNavOpen ? "workbench-sidebar-open" : ""}`} aria-label="工作区导航">

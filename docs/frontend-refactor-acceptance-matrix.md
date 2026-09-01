@@ -1,7 +1,7 @@
 # 前端重构验收矩阵
 
 > Status: active acceptance matrix
-> Snapshot: 2026-08-28 (reviewed, no semantic change from 08-13; server API/WSS-only, Windows本地)
+> Snapshot: 2026-08-29 (local renderer/Fact/recovery repair; server API/WSS-only, Windows本地; runtime未重验)
 > Scope: 前端 renderer、个人本地 Tauri 桌面、接口合同和迁移删除门。
 
 本文只记录可重复的前端验收门和证据要求。生产客户端是本地 Tauri 桌面端与小程序；
@@ -162,7 +162,7 @@ system-source-of-truth.md、legacy-debt-register.md、OpenAPI snapshot 和
 | FE-606 | update signature | 不适用：个人自用不配置公开 updater | 私钥、manifest 或签名不匹配 | N/A（公开分发不在范围） |
 | FE-607 | update success | 不适用：个人自用通过本地重建更新 | 更新后 renderer、API、WS 或缓存 schema 不可用 | N/A（公开 updater 不在范围） |
 | FE-608 | update rollback | 不适用：个人自用回到已知 commit 重建 | 覆盖唯一可用本地构建 | N/A（公开 updater 不在范围） |
-| FE-609 | desktop runtime | high DPI、多显示器、最小化恢复、断网 | 关键状态/危险按钮因缩放或恢复错误产生误导 | 部分通过（发行 executable 首次启动/可访问性树；其余场景未验证） |
+| FE-609 | desktop runtime | high DPI、多显示器、最小化恢复、断网 | 关键状态/危险按钮因缩放或恢复错误产生误导 | 部分通过（源码静态 recovery policy 已覆盖 focus/reconnect；发行 executable 首次启动/可访问性树通过，其余场景未验证） |
 
 ## 10. 旧路径删除和直接切换门
 
@@ -172,7 +172,7 @@ system-source-of-truth.md、legacy-debt-register.md、OpenAPI snapshot 和
 | FE-702 | old page gone | import graph、文件扫描 | OverviewPage、TradingPage、PnlPage、RiskPage、OpsPage 等旧 page 仍被构建引用 | 通过（源码/测试） |
 | FE-703 | old fallback gone | compat/fallback scan | src/lib/compat.ts、recursive pick 或旧字段 fallback 仍服务新工作区 | 部分通过（源码） |
 | FE-704 | old WS fallback gone | source scan + behavior test | HTTP live fallback、页面级 WS 或旧快照 merge 存在 | 部分通过（源码/fixture） |
-| FE-705 | old docs synced | README、legacy debt、status、acceptance diff | 文档声称完成但代码/包/运行证据缺失 | 通过（桌面/小程序 + API/WSS-only 口径和服务器证据已同步） |
+| FE-705 | old docs synced | README、legacy debt、status、acceptance diff | 文档声称完成但代码/包/运行证据缺失 | 通过（本地 renderer/domain/recovery 修复与文档已同步；生产 runtime 仍明确标注为历史证据，未将未验证桌面场景写成通过） |
 | FE-706 | no browser production | Caddy、服务器工作树、artifact、release config review | 服务器仍托管浏览器静态入口或保留前端工作树 | 通过（根路径/旧 asset 404；sparse 工作树无前端；Caddy 仅 API/WSS） |
 
 ## 11. 个人自用收口汇总

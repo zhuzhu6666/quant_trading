@@ -4,7 +4,9 @@ import path from "node:path";
 
 const root = process.cwd();
 const required = [
-  "src/main.tsx", "src/App.tsx", "src/main.css", "src/api/client.ts", "src/api/fact.ts", "src/api/workbench.ts",
+  "src/main.tsx", "src/App.tsx", "src/main.css", "src/api/client.ts", "src/api/fact.ts",
+  "src/api/domains/shared.ts", "src/api/domains/live.ts", "src/api/domains/risk.ts", "src/api/domains/market.ts",
+  "src/api/domains/research.ts", "src/api/domains/governance.ts", "src/api/domains/learning.ts", "src/api/domains/ops.ts",
   "src/auth/tokenStore.ts", "src/cache/researchCache.ts", "src/cache/researchFallback.ts", "src/hooks/useLiveState.ts", "src/hooks/liveStateLogic.ts", "src/hooks/useNetworkStatus.ts", "src/i18n/zh-CN.ts", "src/shell/WorkbenchShell.tsx",
   "src/shell/SafetyRail.tsx", "src/shell/CommandPalette.tsx", "src/pages/TradeOpsPage.tsx", "src/pages/RiskDeskPage.tsx",
   "src/pages/ResearchPage.tsx", "src/pages/GovernancePage.tsx", "src/pages/OpsPage.tsx", "src/pages/LoginPage.tsx",

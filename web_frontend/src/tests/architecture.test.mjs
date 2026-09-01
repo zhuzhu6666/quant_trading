@@ -8,7 +8,7 @@ const app = read("src/App.tsx");
 const shell = read("src/shell/WorkbenchShell.tsx");
 const live = read("src/hooks/useLiveState.ts");
 const client = read("src/api/client.ts");
-const workbenchApi = read("src/api/workbench.ts");
+const workbenchApi = ["shared", "live", "risk", "market", "research", "governance", "learning", "ops"].map((domain) => read(`src/api/domains/${domain}.ts`)).join("\n");
 const cache = read("src/cache/researchCache.ts");
 const layout = read("src/shell/layout.ts");
 const desktopBridge = read("src/desktop/bridge.ts");
@@ -17,6 +17,17 @@ const desktopUpdater = read("src/desktop/updater.ts");
 const tauriCapability = read("src-tauri/capabilities/default.json");
 const tauriCommands = read("src-tauri/src/lib.rs") + read("src-tauri/src/commands.rs") + read("src-tauri/src/secure_store.rs");
 const tauriReleaseConfig = read("src-tauri/tauri.release.conf.json");
+const queryClient = read("src/api/queryClient.ts");
+const querySources = [
+  "src/api/queryClient.ts",
+  "src/pages/TradeOpsPage.tsx",
+  "src/pages/RiskDeskPage.tsx",
+  "src/pages/ResearchPage.tsx",
+  "src/pages/OpsPage.tsx",
+  "src/pages/WorkflowPage.tsx",
+  "src/shell/SafetyRail.tsx",
+  "src/shell/ServerStatusCard.tsx",
+].map(read).join("\n");
 
 for (const route of ["/login", "/trade-ops", "/risk-desk", "/research", "/governance", "/ops", "/workflow"]) assert.match(app, new RegExp(`path=\"${route.replaceAll("/", "\\/")}\"`));
 for (const legacy of ["/overview", "/trading", "/pnl", "/risk", "/learning", "/models", "/v15", "/v16", "/performance", "/autonomy", "/ops/:section", "/governance/:section"]) {
@@ -53,6 +64,9 @@ assert.match(tauriCargo, /keyring\s*=\s*\{[^}]*windows-native/);
 assert.match(desktopUpdater, /downloadAndInstall/);
 assert.match(tauriReleaseConfig, /createUpdaterArtifacts/);
 assert.match(tauriReleaseConfig, /"pubkey":\s*"dW50cnVzdGVk/);
+assert.match(queryClient, /refetchOnWindowFocus:\s*true/);
+assert.match(queryClient, /refetchOnReconnect:\s*true/);
+assert.doesNotMatch(querySources, /refetchIntervalInBackground/);
 assert.doesNotMatch(tauriReleaseConfig, /REPLACE_WITH_RELEASE_PUBLIC_KEY/);
 assert.doesNotMatch(tauriCapability, /shell|sql|fs:default|http:default/);
 assert.doesNotMatch(tauriCommands, /broker|RiskPolicy|PostgreSQL|postgres|market_buy|market_sell|runtime_config/);

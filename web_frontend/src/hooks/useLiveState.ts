@@ -1,8 +1,8 @@
-import { createContext, createElement, ReactNode, useContext, useEffect, useMemo, useSyncExternalStore } from "react";
+import { createContext, createElement, type ReactNode, useContext, useEffect, useSyncExternalStore } from "react";
 import { getWsTicket, getWsUrl } from "@/api/client";
 import { getAccessToken } from "@/auth/tokenStore";
 import { syncServerClockFromPayload } from "@/api/time";
-import { decodeLiveSnapshot } from "@/api/workbench";
+import { decodeLiveSnapshot } from "@/api/domains/live";
 import { isAuthenticationClose, isCompleteLiveSnapshot, reconnectDelay, shouldAcceptSnapshot, snapshotTimestamp } from "@/hooks/liveStateLogic";
 import type { LiveStateSnapshot } from "@/types/contracts";
 
@@ -187,8 +187,7 @@ export function LiveStateProvider({ children, enabled }: { children: ReactNode; 
     () => state,
     () => state,
   );
-  const value = useMemo(() => snapshot, [snapshot]);
-  return createElement(LiveStateContext.Provider, { value }, children);
+  return createElement(LiveStateContext.Provider, { value: snapshot }, children);
 }
 
 export function useLiveState(): LiveStateStore {

@@ -95,6 +95,13 @@ export function formatClock(value: TimeValue, fallback = "时间未知"): string
   return `${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
+/** Render a compact absolute date/time label without falling back to browser time. */
+export function formatShortDateTime(value: TimeValue, fallback = "时间未知"): string {
+  const parts = dateParts(value);
+  if (!parts) return fallback;
+  return `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
 export function formatAgeSeconds(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "年龄未知";
   if (value < -5) return "时钟偏差";

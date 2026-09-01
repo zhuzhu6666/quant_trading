@@ -21,7 +21,8 @@ import {
 } from "lucide-react";
 import type { FactEnvelope, FactState } from "@/api/fact";
 import { epochSeconds, formatObservedTime } from "@/api/time";
-import { getLearningLoopData, getReadinessView } from "@/api/workbench";
+import { getLearningLoopData } from "@/api/domains/learning";
+import { getReadinessView } from "@/api/domains/ops";
 import { Dialog, DialogClose, DialogSurface, DialogTitle, FactBadge, Panel } from "@/design-system/primitives";
 import { useLiveState } from "@/hooks/useLiveState";
 import type {

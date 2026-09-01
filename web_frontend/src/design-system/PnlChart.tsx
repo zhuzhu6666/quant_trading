@@ -1,8 +1,11 @@
 import { LineChart } from "lucide-react";
-import { formatClock, formatTimestamp } from "@/api/time";
+import { formatClock, formatShortDateTime, formatTimestamp } from "@/api/time";
 import type { RealizedPnlPoint } from "@/types/contracts";
 
 export const DEFAULT_INITIAL_CAPITAL = 500;
+
+type PnlAxisMode = "clock" | "date-time";
+type PnlValueLabel = "权益" | "累计盈亏";
 
 type PnlChartProps = {
   points: RealizedPnlPoint[];
@@ -11,6 +14,8 @@ type PnlChartProps = {
   baselineLabel?: string;
   showBaseline?: boolean;
   emptyLabel?: string;
+  axisMode?: PnlAxisMode;
+  valueLabel?: PnlValueLabel;
 };
 
 function money(value: number): string {
@@ -24,6 +29,8 @@ export function PnlChart({
   baselineLabel = "起始",
   showBaseline = false,
   emptyLabel = "暂无已确认盈亏记录",
+  axisMode = "clock",
+  valueLabel = "权益",
 }: PnlChartProps) {
   if (!points.length && !showBaseline) {
     return <div className="chart-empty"><LineChart size={24} /><span>{emptyLabel}</span></div>;
@@ -66,8 +73,10 @@ export function PnlChart({
     .filter((value, index, valuesForLabels) => points.length > 0 && valuesForLabels.indexOf(value) === index);
   const positive = last.value >= startingValue;
   const baselineY = scale(startingValue);
+  const formatAxisLabel = axisMode === "date-time" ? formatShortDateTime : formatClock;
+  const ariaLabel = valueLabel === "权益" ? `${baselineLabel} ${money(startingValue)} 的权益曲线` : `${valueLabel}曲线`;
 
-  return <svg className="pnl-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={`${baselineLabel} ${money(startingValue)} 的已实现盈亏曲线`}>
+  return <svg className="pnl-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={ariaLabel}>
     <g className="chart-grid" aria-hidden="true">
       {gridValues.map((ratio) => {
         const y = plotTop + ratio * plotHeight;
@@ -75,20 +84,19 @@ export function PnlChart({
         return <g key={ratio}><line x1={plotLeft} x2={plotRight} y1={y} y2={y} className="chart-grid-line" /><text x={plotRight - 1} y={y + 4} textAnchor="end" className="chart-axis-label">{money(value)}</text></g>;
       })}
     </g>
-    <line x1={plotLeft} y1={baselineY} x2={plotRight} y2={baselineY} className="pnl-baseline" />
-    <text x={plotLeft + 4} y={baselineY - 6} className="pnl-baseline-label">{baselineLabel} {money(startingValue)}</text>
-    <path d={areaPath} className={`pnl-area ${positive ? "pnl-area-positive" : "pnl-area-negative"}`} />
-    <path d={linePath} className={`pnl-line ${positive ? "pnl-line-positive" : "pnl-line-negative"}`} />
-    <circle cx={first.x} cy={first.y} r="3" className="pnl-point pnl-point-start" />
+    {showBaseline && <line x1={plotLeft} y1={baselineY} x2={plotRight} y2={baselineY} className="pnl-baseline" />}
+    {showBaseline && <text x={plotLeft + 4} y={baselineY - 6} className="pnl-baseline-label">{baselineLabel} {money(startingValue)}</text>}
+    {points.length > 0 && <><path d={areaPath} className={`pnl-area ${positive ? "pnl-area-positive" : "pnl-area-negative"}`} /><path d={linePath} className={`pnl-line ${positive ? "pnl-line-positive" : "pnl-line-negative"}`} /><circle cx={first.x} cy={first.y} r="3" className="pnl-point pnl-point-start" /></>}
     {points.length > 0 && <circle cx={last.x} cy={last.y} r="4" className={`pnl-point ${positive ? "pnl-point-positive" : "pnl-point-negative"}`} />}
     {points.map((point, index) => {
       const coordinate = coordinates[index + 1];
-      return <title key={`${point.ts}-${index}`}>{`${formatTimestamp(point.ts)} · 单笔盈亏 ${money(point.pnl)} · 权益 ${money(coordinate.value)}`}</title>;
+      return <title key={`${point.ts}-${index}`}>{`${formatTimestamp(point.ts)} · 单笔盈亏 ${money(point.pnl)} · ${valueLabel} ${money(coordinate.value)}`}</title>;
     })}
     {timeIndexes.map((index) => {
       const point = points[index];
       const coordinate = coordinates[index + 1];
-      return <text key={`time-${index}`} x={coordinate.x} y={height - 8} textAnchor="middle" className="chart-time-label">{formatClock(point.ts)}</text>;
+      return <text key={`time-${index}`} x={coordinate.x} y={height - 8} textAnchor="middle" className="chart-time-label">{formatAxisLabel(point.ts)}</text>;
     })}
+    {points.length === 0 && <text x={plotRight / 2} y={plotTop + plotHeight / 2} textAnchor="middle" className="chart-empty-label">{emptyLabel}</text>}
   </svg>;
 }

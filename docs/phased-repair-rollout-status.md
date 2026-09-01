@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Snapshot: 2026-08-28 (HEAD f2eb9c9; 治理 enforce 已加载, off 直连已删)
+> Snapshot: 2026-08-28 (runtime evidence baseline f2eb9c9; 治理 enforce 已加载, off 直连已删；当前本地 Git HEAD 为 1740f9cb，未在本批重查运行态)
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -22,7 +22,7 @@
 
 ## 2. 最近一次运行核对
 
-### 2026-08-28 只读复核结果（f2eb9c9 已加载，HEAD 即生产）
+### 2026-08-28 只读复核结果（runtime snapshot f2eb9c9；不是当前本地 Git HEAD）
 
 - 双服务 `quant-backend.service PID 891039` / `quant-learning-worker.service PID 891040` 均 `active/running`，`NRestarts=0`；`system_health overall=healthy score=1.0`，`market_session open_confirmed can_open_positions true`，`risk_metrics known cvar 1.55%`，`live.loop generation 172b7fd3... running` 接受新风险，当前持仓 `285427255` 有仓且 `unknown_execution_count=0`；`governance_mutation_coordinator_v2_mode=enforce` 已加载，`off` 直连已删。
 - `canonical_v2.training_sample_row 10294`：`trade_review_outcome 67（full/1.0 46 连续 2026-08-21→08-28，近 4 天 8-11/天）`，`supervisor_execution_trace 9369（eligible matured 5/10）`，`shadow_open_decision 468`；`canonical_v2.event supervisor_trace 15 / counterfactual 33 / broker_execution 127`；`runtime.broker_execution_intent confirmed 132（近 3 天 84，unknown 0）`。

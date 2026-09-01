@@ -13,7 +13,9 @@ assert.equal(factViewState(readFact({ _fact: envelope("risk.summary.v2", "unknow
 assert.equal(aggregateFactViewState([{ fact: readFact({ _fact: envelope("a") }, "a") }, { fact: readFact({ _fact: envelope("b", "error") }, "b") }]), "error");
 assert.equal(readFact({ _fact: envelope("a", "stale") }, "a").state, "stale");
 
-const factSource = fs.readFileSync(path.join(process.cwd(), "src/api/workbench.ts"), "utf8");
+const factSource = ["shared", "live", "risk", "market", "research", "governance", "learning", "ops"]
+  .map((domain) => fs.readFileSync(path.join(process.cwd(), "src/api/domains", `${domain}.ts`), "utf8"))
+  .join("\n");
 const cacheSource = fs.readFileSync(path.join(process.cwd(), "src/cache/researchCache.ts"), "utf8");
 assert.match(factSource, /decodeLiveSnapshot/);
 assert.match(factSource, /decodeMarketBars/);

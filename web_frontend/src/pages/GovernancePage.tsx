@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ClipboardCheck, GitCommitHorizontal, ShieldCheck } from "lucide-react";
 import type { FactEnvelope } from "@/api/fact";
 import { formatObservedTime } from "@/api/time";
-import { getGovernanceCandidates, getGovernanceProposals, getGovernanceReviews, getReleaseEvidence } from "@/api/workbench";
+import { getGovernanceCandidates, getGovernanceProposals, getGovernanceReviews, getReleaseEvidence } from "@/api/domains/governance";
 import { FactBadge, Panel, SourceLine } from "@/design-system/primitives";
 import type { GovernanceRecord } from "@/types/contracts";
 import { WorkspaceTitle } from "@/workspaces/WorkspaceBits";

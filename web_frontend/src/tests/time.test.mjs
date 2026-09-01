@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { epochSeconds, formatAgeSeconds, formatClock, formatObservedTime, formatTimestamp } from "../api/time.ts";
+import { epochSeconds, formatAgeSeconds, formatClock, formatObservedTime, formatShortDateTime, formatTimestamp } from "../api/time.ts";
 import { factAgeSeconds, readFact } from "../api/fact.ts";
 
 assert.equal(epochSeconds(1_700_000_000_000), 1_700_000_000);
@@ -7,6 +7,9 @@ assert.equal(epochSeconds("1970-01-01T08:00:00+08:00"), 0);
 assert.equal(formatTimestamp(0), "时间未知");
 assert.match(formatTimestamp(1_700_000_000), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 assert.match(formatClock(1_700_000_000), /^\d{2}:\d{2}:\d{2}$/);
+assert.equal(formatShortDateTime(1_700_000_000), "11-15 06:13");
+assert.equal(formatShortDateTime(1_700_000_000_000), "11-15 06:13");
+assert.equal(formatShortDateTime("not-a-timestamp"), "时间未知");
 assert.match(formatObservedTime(1_700_000_000), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} · /);
 assert.equal(formatAgeSeconds(0), "刚刚");
 assert.equal(formatAgeSeconds(12), "12秒前");

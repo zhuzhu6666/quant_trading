@@ -1,6 +1,6 @@
 import { Cpu, HardDrive, MemoryStick, Server } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { getHealth, getSystemLoad } from "@/api/workbench";
+import { getHealth, getSystemLoad } from "@/api/domains/ops";
 import { uiStatus } from "@/i18n/zh-CN";
 import { FactBadge } from "@/design-system/primitives";
 import { formatClock } from "@/api/time";
@@ -60,7 +60,7 @@ function loadDetail(load: SystemLoadView | undefined, error: unknown): string {
 
 export function ServerStatusCard() {
   const health = useQuery({ queryKey: ["ops", "health"], queryFn: getHealth, staleTime: 30_000, refetchInterval: 60_000, retry: false });
-  const load = useQuery({ queryKey: ["ops", "system-load"], queryFn: getSystemLoad, staleTime: 4_000, refetchInterval: 5_000, refetchIntervalInBackground: true, retry: false });
+  const load = useQuery({ queryKey: ["ops", "system-load"], queryFn: getSystemLoad, staleTime: 4_000, refetchInterval: 5_000, retry: false });
   const healthFact = health.data?.fact ?? unavailableFact("system.health.v2", health.error ? "health_request_failed" : "health_not_loaded", health.error ? "error" : "unknown");
   const systemLoad = load.data;
 

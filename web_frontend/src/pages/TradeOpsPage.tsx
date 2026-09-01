@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, CalendarDays, Check, ChevronRight, CircleAlert, CircleDashed, CircleHelp, CircleX, GitBranch, MoreHorizontal, ShieldCheck, SlidersHorizontal } from "lucide-react";
+import { Activity, Check, CircleAlert, CircleDashed, CircleHelp, CircleX, GitBranch, ShieldCheck } from "lucide-react";
 import type { FactEnvelope } from "@/api/fact";
-import { getMarketBars, getRealizedPnlSeries, getRiskPolicyVerdicts, getRiskSnapshot } from "@/api/workbench";
+import { getMarketBars, getRealizedPnlSeries } from "@/api/domains/market";
+import { getRiskPolicyVerdicts, getRiskSnapshot } from "@/api/domains/risk";
 import { MarketChart } from "@/design-system/MarketChart";
+import { DEFAULT_INITIAL_CAPITAL, PnlChart } from "@/design-system/PnlChart";
 import { FactBadge, SourceLine } from "@/design-system/primitives";
 import { useLiveState } from "@/hooks/useLiveState";
 import type { LiveStateSnapshot, Position, RealizedPnlPoint, RealizedPnlScope, RealizedPnlSeries, RiskPolicyVerdict } from "@/types/contracts";
@@ -297,45 +299,18 @@ function AccountTrend({ points, fact }: { points: RealizedPnlPoint[]; fact: Fact
   return <svg className="account-trend-chart" viewBox="0 0 300 70" preserveAspectRatio="none" aria-label="服务端已实现盈亏趋势"><defs><linearGradient id="account-trend-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#86a966" stopOpacity=".38" /><stop offset="1" stopColor="#86a966" stopOpacity=".04" /></linearGradient></defs><path d={area} fill="url(#account-trend-fill)" /><path d={line} fill="none" stroke="#789d58" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }
 
-function PnlVisualChart({ points, fact }: { points: RealizedPnlPoint[]; fact: FactEnvelope }) {
-  const width = 720;
-  const height = 300;
-  const values = points.map((point) => point.cumulative);
-  const hasData = readableFact(fact) && values.length > 0;
-  const min = hasData ? Math.min(0, ...values) : 0;
-  const max = hasData ? Math.max(0, ...values) : 1;
-  const mainCoordinates = chartCoordinates(values, width, height - 36, 12, min, max);
-  const mainPath = mainCoordinates.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
-  const baselinePath = pathFor(values.map(() => 0), width, height - 36, 12, min, max);
-  const axisValues = hasData ? [max, max * .75, max * .5, max * .25, min] : [null, null, null, null, null];
-  const last = mainCoordinates[mainCoordinates.length - 1];
-  const first = mainCoordinates[0];
-  const areaPath = hasData && last && first ? `${mainPath} L ${last.x.toFixed(2)} ${height - 36} L ${first.x.toFixed(2)} ${height - 36} Z` : "";
-  return <svg className="reference-pnl-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label={hasData ? "服务端已实现盈亏曲线" : "盈亏事实待确认"}>
-    <defs><linearGradient id="reference-pnl-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#8bab67" stopOpacity=".52" /><stop offset="1" stopColor="#8bab67" stopOpacity=".04" /></linearGradient></defs>
-    <g className="reference-chart-grid" aria-hidden="true">
-      {[50, 100, 150, 200, 250].map((y) => <line key={y} x1="12" x2="708" y1={y} y2={y} />)}
-      {axisValues.map((value, index) => <text key={`axis-${index}`} x="707" y={54 + index * 48} textAnchor="end">{value === null ? "—" : numberText(value, 2)}</text>)}
-      {["09:30", "10:30", "11:30", "13:30", "14:30", "15:00"].map((label, index) => <text key={label} x={18 + index * 136} y="286">{label}</text>)}
-    </g>
-    {hasData ? <><path className="reference-pnl-area" d={areaPath} /><path className="reference-pnl-line reference-pnl-line-main" d={mainPath} /><path className="reference-pnl-line reference-pnl-line-baseline" d={baselinePath} /></> : <text className="reference-chart-empty" x="360" y="160" textAnchor="middle">盈亏事实待确认，不显示示例曲线</text>}
-  </svg>;
-}
-
 function AccountOverview({ snapshot, accountFact, sessionFact, riskValue, trendPoints, trendFact }: { snapshot: LiveStateSnapshot | null; accountFact: FactEnvelope; sessionFact: FactEnvelope; riskValue: number | null; trendPoints: RealizedPnlPoint[]; trendFact: FactEnvelope }) {
   const account = snapshot?.account;
   const session = snapshot?.session;
   const currency = account?.currency;
-  const marginRate = readableFact(accountFact) && account?.margin !== null && account?.equity && account.equity !== 0 ? (account.margin / account.equity) * 100 : null;
   return <section className="wb-panel reference-panel live-status-panel cockpit-account-panel account-overview-panel">
-    <header className="reference-panel-header"><h2>账户概览</h2><FactBadge compact fact={accountFact} label="账户" /><button type="button">详情 <ChevronRight size={15} /></button></header>
+    <header className="reference-panel-header"><h2>账户概览</h2><FactBadge compact fact={accountFact} label="账户" /></header>
     <div className="account-net-value"><span>净资产（估值） <CircleHelp size={13} /></span><strong>{readableFact(accountFact) ? moneyText(account?.equity, currency) : "—"}</strong><div><b className={session?.pnlToday !== null && (session?.pnlToday ?? 0) >= 0 ? "reference-positive" : "reference-negative"}>{readableFact(sessionFact) ? signedMoney(session?.pnlToday, currency) : "—"}</b><b>{readableFact(sessionFact) ? "本时段" : ""}</b></div><AccountTrend points={trendPoints} fact={trendFact} /></div>
     <dl className="account-summary-list">
       <div><dt>可用资金</dt><dd>{readableFact(accountFact) ? moneyText(account?.freeMargin, currency) : "—"}</dd></div>
       <div><dt>本时段盈亏</dt><dd className={session?.pnlToday !== null && (session?.pnlToday ?? 0) >= 0 ? "reference-positive" : "reference-negative"}>{readableFact(sessionFact) ? signedMoney(session?.pnlToday, currency) : "—"}</dd></div>
       <div><dt>账户余额</dt><dd>{readableFact(accountFact) ? moneyText(account?.balance, currency) : "—"}</dd></div>
       <div><dt>保证金占用</dt><dd>{readableFact(accountFact) ? moneyText(account?.margin, currency) : "—"}</dd></div>
-      <div><dt>保证金使用率（估算）</dt><dd>{marginRate === null ? "—" : `${marginRate.toFixed(1)}%`}</dd></div>
       <div><dt>风险指标 VaR(95%)</dt><dd><span className="reference-risk-pill">{riskValue === null || riskValue === undefined ? "—" : `${numberText(riskValue, 2)}%`}</span></dd></div>
     </dl>
   </section>;
@@ -344,11 +319,16 @@ function AccountOverview({ snapshot, accountFact, sessionFact, riskValue, trendP
 function PnlOverview({ points, data, fact, scope, setScope }: { points: RealizedPnlPoint[]; data: RealizedPnlSeries | undefined; fact: FactEnvelope; scope: RealizedPnlScope; setScope: (scope: RealizedPnlScope) => void }) {
   const currency = data?.currency ?? null;
   const realized = readableFact(fact) ? data?.summary.realizedPnl : null;
+  const isAllScope = scope === "all";
+  const axisMode = scope === "7d" || scope === "30d" || isAllScope ? "date-time" : "clock";
   const rangeOptions: Array<{ value: RealizedPnlScope; label: string }> = [{ value: "today", label: "当日" }, { value: "24h", label: "24时" }, { value: "7d", label: "7日" }, { value: "30d", label: "30日" }, { value: "all", label: "全部" }];
+  const chart = readableFact(fact)
+    ? <PnlChart points={points} initialCapital={isAllScope ? DEFAULT_INITIAL_CAPITAL : 0} baselineLabel="起始权益" showBaseline={isAllScope} axisMode={axisMode} valueLabel={isAllScope ? "权益" : "累计盈亏"} emptyLabel={isAllScope ? "已确认暂无历史平仓记录，显示起始权益基线" : "已确认暂无该范围内平仓记录"} />
+    : <div className="chart-empty"><span>{fact.state === "error" ? "盈亏事实读取失败，不显示猜测曲线" : "盈亏事实待确认，不显示猜测曲线"}</span></div>;
   return <section className="wb-panel reference-panel pnl-panel cockpit-pnl-panel pnl-overview-panel">
     <header className="reference-panel-header"><h2>盈亏曲线 <CircleHelp size={14} /></h2><FactBadge compact fact={fact} label="盈亏" /><span className="reference-unit">单位：{currency ?? "未知"}</span></header>
-    <div className="pnl-legend"><span><i className="legend-main" />累计盈亏 <b>{realized === null || realized === undefined ? "—" : signedMoney(realized, currency)}</b></span><span><i className="legend-baseline" />基准收益 <b>—</b></span><div className="reference-range-tabs">{rangeOptions.map((item) => <button key={item.value} type="button" className={scope === item.value ? "active" : ""} onClick={() => setScope(item.value)}>{item.label}</button>)}<button type="button" aria-label="选择日期"><CalendarDays size={16} /></button></div></div>
-    <PnlVisualChart points={points} fact={fact} />
+    <div className="pnl-legend"><span><i className="legend-main" />累计盈亏 <b>{realized === null || realized === undefined ? "—" : signedMoney(realized, currency)}</b></span><div className="reference-range-tabs">{rangeOptions.map((item) => <button key={item.value} type="button" className={scope === item.value ? "active" : ""} onClick={() => setScope(item.value)}>{item.label}</button>)}</div></div>
+    {chart}
     <div className="reference-panel-source"><span>已实现记录：{readableFact(fact) ? `${data?.summary.trades ?? "—"} 笔` : "未知"}</span><SourceLine fact={fact} /></div>
   </section>;
 }
@@ -361,7 +341,6 @@ function MarketOverview({ snapshot, spotFact, livePrices }: { snapshot: LiveStat
     enabled: activeTab === "K线",
     staleTime: 4_000,
     refetchInterval: 5_000,
-    refetchIntervalInBackground: true,
     retry: false,
   });
   const spot = snapshot?.spot;
@@ -385,14 +364,14 @@ function MarketOverview({ snapshot, spotFact, livePrices }: { snapshot: LiveStat
         ? "等待 cTrader M5 trendbar 推送，不显示月库替代数据"
         : "cTrader M5 K 线暂未确认";
   return <section className="wb-panel reference-panel market-overview-panel">
-    <header className="reference-panel-header market-overview-header"><h2>市场概览</h2><div className="reference-tab-group">{["现货", "K线", "指数", "自选"].map((tab) => <button key={tab} type="button" className={activeTab === tab ? "active" : ""} onClick={() => setActiveTab(tab)}>{tab}</button>)}</div><button type="button" className="reference-more">更多 <ChevronRight size={14} /></button></header>
+    <header className="reference-panel-header market-overview-header"><h2>市场概览</h2><div className="reference-tab-group">{["现货", "K线"].map((tab) => <button key={tab} type="button" className={activeTab === tab ? "active" : ""} onClick={() => setActiveTab(tab)}>{tab}</button>)}</div></header>
     {activeTab === "现货" ? <>
       <div className="market-table-head"><span>名称</span><span>实时价</span><span>点差</span></div>
       <div className="market-table"><div className="market-table-row"><strong>{MARKET_SYMBOL}</strong><Sparkline points={prices} tone={trend === null ? "neutral" : trend >= 0 ? "positive" : "negative"} /><span>{hasSpot ? numberText(spot?.mid, 2) : "—"}</span><b>{spread === null || !Number.isFinite(spread) ? "—" : numberText(spread, 2)}</b></div></div>
-    </> : activeTab === "K线" ? <>
+    </> : <>
       <div className="market-candle-meta"><span>{MARKET_SYMBOL} · 5分钟</span><FactBadge compact fact={liveBarsFact} label="K线" /></div>
       <MarketChart bars={hasLiveBars ? liveBars.data?.bars ?? [] : []} emptyLabel={liveBarsEmptyLabel} />
-    </> : <div className="market-unavailable">当前没有{activeTab}行情接口，不显示示例数据</div>}
+    </>}
     <div className="market-quote-strip"><span>买价　{hasSpot ? numberText(spot?.bid, 2) : "—"}</span><span>卖价　{hasSpot ? numberText(spot?.ask, 2) : "—"}</span><FactBadge compact fact={spotFact} label="现货" /></div>
     <div className="reference-panel-source"><span>{activeTab === "K线" ? "K线流：cTrader M5 Trendbar" : "报价流：cTrader Spot"}</span><SourceLine fact={activeTab === "K线" ? liveBarsFact : spotFact} /></div>
   </section>;
@@ -458,9 +437,9 @@ function HoldingsOverview({ snapshot, positionsFact, accountFact }: { snapshot: 
   const completeFloatingPnl = readablePositions && positions.length > 0 && positions.every((position) => position.unrealizedPnl !== null);
   const floatingPnl = completeFloatingPnl ? positions.reduce((total, position) => total + (position.unrealizedPnl ?? 0), 0) : null;
   return <section className="wb-panel reference-panel positions-panel cockpit-positions-panel holdings-overview-panel">
-    <header className="reference-panel-header holdings-header"><h2>持仓与头寸</h2><FactBadge compact fact={positionsFact} label="仓位" /><div className="reference-tab-group holdings-tabs"><button type="button" className="active">全部</button><button type="button">股票</button><button type="button">ETF</button><button type="button">期货</button><button type="button">债券</button></div><button type="button" className="reference-more">查看全部 <ChevronRight size={14} /></button><SlidersHorizontal size={17} /></header>
-    <div className="holdings-table-wrap"><table className="holdings-table"><thead><tr><th>代码</th><th>名称</th><th>持仓/张</th><th>可用</th><th>均价</th><th>最新价</th><th>盈亏</th><th>盈亏率</th><th>仓位占比</th><th>操作</th></tr></thead><tbody>{readablePositions && positions.length ? positions.map((position) => <tr key={position.id}><td>{position.symbol || "—"}</td><td><strong>{position.symbol || "未知品种"}</strong></td><td>{positionValue(position, "volume")}</td><td>—</td><td>{positionValue(position, "entryPrice")}</td><td>{positionValue(position, "currentPrice")}</td><td className={position.unrealizedPnl !== null && position.unrealizedPnl < 0 ? "reference-negative" : "reference-positive"}>{positionValue(position, "unrealizedPnl")}</td><td>—</td><td>—</td><td><button type="button" className="close-position-button" disabled>平仓</button><button type="button" className="row-more" disabled><MoreHorizontal size={15} /></button></td></tr>) : <tr><td colSpan={10}><div className="holdings-empty"><FactBadge compact fact={positionsFact} label="仓位" /><span>{readablePositions ? "当前无已确认持仓" : "仓位事实未知或读取失败，不显示零仓替代值"}</span></div></td></tr>}</tbody></table></div>
-    <div className="portfolio-summary"><div><span>账户权益</span><strong>{readableFact(accountFact) ? moneyText(snapshot?.account.equity, currency) : "—"}</strong></div><div><span>未实现盈亏</span><strong className={floatingPnl !== null && floatingPnl < 0 ? "reference-negative" : "reference-positive"}>{signedMoney(floatingPnl, currency)}</strong></div><div><span>已确认持仓</span><strong>{readablePositions ? `${positions.length} 条` : "—"}</strong></div><div className="portfolio-donut portfolio-donut-empty" aria-label="资产配置事实未知"><i /><span>配置未知</span></div><ul><li>资产配置接口未提供</li><li>不显示示例比例</li></ul></div>
+    <header className="reference-panel-header holdings-header"><h2>持仓与头寸</h2><FactBadge compact fact={positionsFact} label="仓位" /></header>
+    <div className="holdings-table-wrap"><table className="holdings-table"><thead><tr><th>品种</th><th>持仓</th><th>均价</th><th>最新价</th><th>盈亏</th></tr></thead><tbody>{readablePositions && positions.length ? positions.map((position) => <tr key={position.id}><td><strong>{position.symbol || "未知品种"}</strong></td><td>{positionValue(position, "volume")}</td><td>{positionValue(position, "entryPrice")}</td><td>{positionValue(position, "currentPrice")}</td><td className={position.unrealizedPnl !== null && position.unrealizedPnl < 0 ? "reference-negative" : "reference-positive"}>{positionValue(position, "unrealizedPnl")}</td></tr>) : <tr><td colSpan={5}><div className="holdings-empty"><FactBadge compact fact={positionsFact} label="仓位" /><span>{readablePositions ? "当前无已确认持仓" : "仓位事实未知或读取失败，不显示零仓替代值"}</span></div></td></tr>}</tbody></table></div>
+    <div className="portfolio-summary"><div><span>账户权益</span><strong>{readableFact(accountFact) ? moneyText(snapshot?.account.equity, currency) : "—"}</strong></div><div><span>未实现盈亏</span><strong className={floatingPnl !== null && floatingPnl < 0 ? "reference-negative" : "reference-positive"}>{signedMoney(floatingPnl, currency)}</strong></div><div><span>已确认持仓</span><strong>{readablePositions ? `${positions.length} 条` : "—"}</strong></div></div>
   </section>;
 }
 
@@ -471,7 +450,7 @@ export function TradeOpsPage() {
   const [realizedPnlScope, setRealizedPnlScope] = useState<RealizedPnlScope>("all");
   const realizedPnl = useQuery({ queryKey: ["workbench", "realized-pnl", realizedPnlScope], queryFn: () => getRealizedPnlSeries(realizedPnlScope), staleTime: 30_000, retry: false });
   const riskSummary = useQuery({ queryKey: ["workbench", "risk"], queryFn: getRiskSnapshot, staleTime: 30_000, refetchInterval: 30_000, retry: false });
-  const policyVerdicts = useQuery({ queryKey: ["workbench", "risk-policy-verdicts", "trade-receipt"], queryFn: () => getRiskPolicyVerdicts(20), staleTime: 4_000, refetchInterval: 5_000, refetchIntervalInBackground: true, retry: false });
+  const policyVerdicts = useQuery({ queryKey: ["workbench", "risk-policy-verdicts", "trade-receipt"], queryFn: () => getRiskPolicyVerdicts(20), staleTime: 4_000, refetchInterval: 5_000, retry: false });
   const accountFact = snapshot?.account.fact ?? unavailableFact("live.account.v2", "live_account_not_loaded");
   const sessionFact = snapshot?.session.fact ?? unavailableFact("live.session-risk.v2", "live_session_not_loaded");
   const positionsFact = snapshot?.positions.fact ?? unavailableFact("live.positions.v2", "live_positions_not_loaded");

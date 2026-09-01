@@ -1,7 +1,7 @@
 # 前端重构当前状态
 
 > Status: active rollout status
-> Last verified: 2026-08-28 (reviewed, D1 renderer/壳完成; sparseCheckout 08-14 已收口)
+> Last verified: 2026-08-29 (本地 renderer/Fact/recovery 修复与 npm test/typecheck/lint/build 已验证；Tauri runtime acceptance 未重验; sparseCheckout 08-14 已收口)
 > Scope: 只记录前端重构实际进度，不重复产品和架构合同。
 
 ## 1. 当前阶段
@@ -31,7 +31,8 @@ manifest 和公开 updater 已明确移出本批完成条件。
 - 建立 `WorkspaceId`、`FactViewState`、`ResearchSnapshot`、`DecisionTrace`、
   `ActionIntent`、`MutationResult`、`CacheEntry` 及 endpoint-specific decoder；
 - 将 `/ws/state` 收敛为单例完整 `live.state.v2` 快照来源，使用 ticket、认证失败清空、
-  有界 30 秒 backoff，删除 HTTP live fallback、轮询和旧快照合并；
+  有界 30 秒 backoff，删除 HTTP live fallback、页面级 live 轮询和旧快照合并；常规
+  read-model 查询保留各自刷新间隔，隐藏窗口可暂停且在回到前台或网络重连时自动重验证；
 - 实现 Trade Ops、Risk Desk、Research Lab、Governance、Ops 五个工作区及只读 Workflow 一体化架构拓扑页；拓扑把实时执行主干、市场与外部数据、智能学习反馈、治理后验、服务运维和 API/客户端消费放进同一张图，展示既有 authority 与传输方向，点击节点显示输入、输出、事实来源和观测状态；Research
   接入 bars、replay、bar-decisions/PIT trace、factor、learning 和 IndexedDB 只读缓存；
 - 实现 known/stale/unknown/error 展示语义、unknown 零值防护、服务端 action ticket、
@@ -110,9 +111,25 @@ manifest 和公开 updater 已明确移出本批完成条件。
 
 - 交易运营页原先的 `/api/market/bars` K 线面板已替换为 `/api/live/realized-pnl-series` 盈亏折线图；研究页仍保留 K 线，不混淆两个使用场景。
 - 前端新增 `live.realized-pnl.v2` 专用 decoder，消费后端返回的平仓成交、单笔盈亏和累计盈亏；不使用行情价格推算收益，也不在前端生成交易结果。
-- `全部`范围显示账户权益，权益 = `500.00 + 服务端全历史累计已实现盈亏`；`最近一天/最近一周`只显示所选范围内的累计已实现盈亏，原始 `500.00 USD` 不重复注入周期曲线。该基线只属于图表展示，不修改 broker 账户余额、风险基准或运行时资金配置；未平仓浮动盈亏不纳入本图。
-- `known/stale` 保留服务端历史点，`unknown/error` 不显示猜测曲线；已确认但暂无平仓记录时只显示 500.00 的基线和明确的空记录说明。
+- `全部`范围显示账户权益，权益 = `500.00 + 服务端全历史累计已实现盈亏`；`today / 24h / 7d / 30d` 只显示所选范围内的累计已实现盈亏，原始 `500.00 USD` 不重复注入周期曲线。该基线只属于图表展示，不修改 broker 账户余额、风险基准或运行时资金配置；未平仓浮动盈亏不纳入本图。
+- `today / 24h / 7d / 30d / all` 五个范围均消费服务端返回点；`all` 显示
+  `500.00 + 服务端全历史累计已实现盈亏`，周期范围只显示选定范围的累计盈亏，不重复注入
+  `500.00`。`known/stale` 保留服务端历史点，`unknown/error` 不显示猜测曲线；只有 `all`
+  范围在已确认但暂无平仓记录时显示 500.00 基线和明确的空记录说明，周期范围显示明确的
+  无记录状态且不显示 500.00 基线。
 - 本批不新增后端接口、不合并 API、不改变 Fact freshness 或安全心跳；只替换 Trade Ops renderer 的数据源和图表组件。
+
+### 2026-08-29 本地前端修复批次
+
+- Trade Ops 已将实际渲染路径收敛到共享 `src/design-system/PnlChart.tsx`；`all` 使用显示专用
+  500.00 权益基线，周期范围以 0 为累计盈亏显示起点，7 日、30 日和全部范围的时间轴来自
+  服务端点时间并显示日期+时间。
+- SafetyRail 将 WebSocket 传输状态与 `live.state.v2` Fact 状态分开显示；通道连接本身不再
+  被当作业务同步完成，业务事实仍按 `known/stale/unknown/error` 展示观测年龄。
+- HTTP 查询策略为隐藏/最小化窗口允许暂停后台 interval，窗口重新激活或网络恢复时由 React
+  Query 自动 revalidate；不新增前端计时器、第二轮询调度器或 live HTTP fallback。
+- `src/api/workbench.ts` 单体已由八个 endpoint-specific domain modules 替代；这些 domain 文件
+  不是删除项。Tauri 最小化恢复、高 DPI、断网重连等真实桌面运行验收仍保持未验证，不能由源码测试代替。
 
 ### 2026-08-14 服务器 backend-only 收口
 
@@ -189,8 +206,8 @@ compat helper、旧页面绑定 CSS，以及页面级 live/HTTP fallback。
   `WorkspacePages.tsx`；
 - `src/components/AppShell.tsx`、旧 Action/Card/Dashboard/FactBoundary/Json/Query/Status
   组件；
-- `src/api/domains/*`、旧 query/risk snapshot wrapper、`src/lib/compat.ts`、旧格式化和
-  display helper；
+- `src/api/workbench.ts` 单体、旧 query/risk snapshot wrapper、`src/lib/compat.ts`、旧格式化和
+  display helper；当前 `src/api/domains/*` 为八个保留的 endpoint-specific domain modules；
 - `src/styles/autonomy.css`、`console.css`、`domains.css`、`surface.css` 和仍绑定旧页面
   的 `accessibility.css`；
 - 旧 route alias 没有迁入新 `App.tsx`，未定义路径显示废弃状态而不自动跳转。

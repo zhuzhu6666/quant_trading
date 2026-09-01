@@ -97,12 +97,14 @@ node_modules/
 package-lock.json
 !web_frontend/package-lock.json
 *.tsbuildinfo
+web_frontend/vite-qa.*.log
 
 # Build artifacts
 *.egg-info/
 dist/
 build/
 web_frontend/src-tauri/target/
+web_frontend/src-tauri/target-pnl-fix/
 
 # Canonical_v2 migration run manifests / checkpoints (not source, not committed)
 run_artifacts/
