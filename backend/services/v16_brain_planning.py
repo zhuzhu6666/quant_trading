@@ -1181,14 +1181,38 @@ class BrainMediumImpactGovernanceService:
                 "parent_policy_decision_id": parent_policy_decision_id,
             }
         )
+        risk_evidence = {
+            "brain_eval": evaluation.get("evidence_refs") or {},
+            "comparison": evaluation.get("comparison") or {},
+            "replay_summary": (evaluation.get("comparison") or {}).get("replay") or {},
+            "counterfactual_summary": (comparison.get("counterfactual") or {}) | {
+                "posterior_arbitration": arbitration,
+            },
+        }
+        # Position-supervisor template switches are an adaptive-execution
+        # release: RiskPolicy requires a governed binding (V16 command,
+        # committed mutation, or bridge) before materializing a candidate.
+        # Materialization only *proposes* the candidate -- the real release is
+        # re-checked at apply time when the V16 command exists -- so the demo
+        # nursery bridge context is the correct binding here.  Outside demo
+        # autonomy modes we stay fail-closed (no bridge context).
+        if str(mapped.get("risk_action") or "") == "switch_position_supervisor_template":
+            try:
+                from config.runtime_config import shared as runtime_config
+                autonomy_mode = str(
+                    getattr(runtime_config(), "autonomy_mode", "") or ""
+                ).strip().lower()
+            except Exception:
+                autonomy_mode = ""
+            if autonomy_mode in {"demo_nursery", "demo_autonomous"}:
+                risk_evidence["bridge"] = {
+                    "automatic_demo": True,
+                    "demo_nursery": True,
+                    "bridge_ready": False,
+                }
         risk_verdict = RiskPolicyService.shared().evaluate(mapped["risk_action"], {
             "required_mode": "autonomous_governance", "session": {"drawdown_pct": 0.0},
-            "evidence": {"brain_eval": evaluation.get("evidence_refs") or {},
-                         "comparison": evaluation.get("comparison") or {},
-                         "replay_summary": (evaluation.get("comparison") or {}).get("replay") or {},
-                         "counterfactual_summary": (comparison.get("counterfactual") or {}) | {
-                             "posterior_arbitration": arbitration,
-                         }},
+            "evidence": risk_evidence,
             "suggestion_status": "approved", "target_template_id": mapped.get("target_template_id", ""),
             "autonomous_apply": False,
         }).to_dict()
