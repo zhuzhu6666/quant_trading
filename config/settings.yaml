@@ -164,7 +164,7 @@ runtime:
   governance_expansion_paused: false
   supervisor_counterfactual_governance_horizon_minutes: 60
   supervisor_counterfactual_full_horizon_minutes: 120
-  supervisor_canary_mature_trade_count: 30
+  supervisor_canary_mature_trade_count: 25
   learning_effect_inconclusive_after_days: 7
   nursery_exploration_per_reason_daily_limit: 5
   nursery_exploration_global_daily_limit: 15
