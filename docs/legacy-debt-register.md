@@ -287,9 +287,9 @@
 
 ### legacy auth 路径
 
-- 状态：`migrating`（2026-09-01 已删2/3：`LEGACY_ACCESS_TOKEN`/`URL_JWT` 已删，`SHA-256` 因生产仍为 SHA `1bc3…` 保留）
+- 状态：`resolved`（2026-09-01 已完成：`LEGACY_ACCESS_TOKEN`/`URL_JWT`/`SHA-256` 3开关全删，`.env` 已迁 Argon2id，`validate_auth_config` 仅留 Argon2id）
 - canonical：Argon2id、24 小时 access、旋转 refresh session、单次 WS ticket、扩张 step-up、durable revocation。
-- 剩余：仅 `SHA-256` 显式兼容开关（待 `QUANT_PASSWORD_HASH` 迁 Argon2id 后删）。
+- 剩余：无。
 - 退出：全部客户端迁移后关闭并删除；stop/emergency 的本地可验证风险缩减能力不得受 PG 故障阻断。
 
 ## 4. 明确退役，禁止恢复
