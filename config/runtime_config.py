@@ -334,7 +334,7 @@ class RuntimeConfig:
     demo_learning_max_daily_trades: int = 30
     # Effective only outside demo_nursery/demo_autonomous. Demo keeps governed
     # exploration active while RiskPolicy/V16/effect rollback remain mandatory.
-    autonomy_expansion_frozen: bool = True
+    autonomy_expansion_frozen: bool = False
     # Operator-owned, all-mode expansion kill switch.  Autonomous services may
     # observe it but must never clear or rewrite it through their overlays.
     governance_expansion_paused: bool = False

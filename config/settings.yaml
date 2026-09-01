@@ -158,7 +158,7 @@ runtime:
   position_supervisor_selection_max_age_seconds: 900
   # Fail-closed default for non-demo/live authority. Demo nursery/autonomous
   # keeps governed exploration active through RuntimeConfig mode semantics.
-  autonomy_expansion_frozen: true
+  autonomy_expansion_frozen: false
   # Operator-owned all-mode governance expansion kill switch. Observation,
   # research and explicit risk tightening remain available while paused.
   governance_expansion_paused: false
