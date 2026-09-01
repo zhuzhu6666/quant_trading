@@ -57,6 +57,13 @@
 - 退出：`≥10 笔 governance_eligible matured supervisor_execution_trace` + `tighten/reduce` 覆盖 + 候选 review、V16/Coordinator application、effect observation 和 rollback 连续可追溯；selection projection 新鲜且可解释；任何单条记忆不得直接改模板或放大交易权限。
 
 
+### V16 parameter_template 通道无模板注册（管线通、无货可切）
+- 状态：`active`（2026-09-02 登记：V16 因子通道已打通并落地首笔降权 stoch_k 0.35→0.3115；parameter_template 通道管线完好但无目标模板）
+- canonical：`parameter_template_registry` 为模板唯一注册源；V16 经 `switch_parameter_template`（scope_key=online_light）切换，命令门已支持（`v16_scope_key=online_light`），应用端 `_auto_apply_parameter_template_suggestions` 与 governor 规则（需 `target_template_id` + `recommended_scope=online_light` + confidence≥0.55）已就绪。
+- 当前：`runtime.parameter_template_registry` 与 `runtime.parameter_template_active` 均为 0 行；planner 无 `target_template_id` 可指 → bridge 评审恒 `needs_evidence:missing_target_template_id` → 通道每轮观察空转，不产生候选。非代码故障，是模板数据未启用（同 V16 因子通道的 `0f1521f` 已闭环，本项为后续通道）。
+- 退出：注册 ≥1 套带 regime 适用范围的参数模板（人工或治理产出）后，验证 V16 entry 结论可驱动一次真实模板切换（`parameter_template_switch_log` 落地）。若确定不走模板治理路线，关闭该 surface 的观察（避免空转）并标记 resolved（路线决定）。
+- 验证：`parameter_template_switch_log` 出现新记录且 `parameter_template_active` 非空；或明确标注"不启用模板路线"。
+
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
 
 - 状态：`resolved`（2026-08-18 完成；走退出条件 1，全代码收敛到精简 schema）
