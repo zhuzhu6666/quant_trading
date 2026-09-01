@@ -235,6 +235,11 @@ def _catalog_refresh_required(actions: list[dict[str, Any]]) -> bool:
     )
 
 
+def _maybe_refresh_catalog(catalog: list[dict[str, Any]], actions: list[dict[str, Any]], db_path) -> list[dict[str, Any]]:
+    # ponytail: single conditional rebuild, avoids 9x unconditional builds
+    return build_factor_catalog(db_path) if _catalog_refresh_required(actions) else catalog
+
+
 def _redundancy_signal_patch(
     report: Mapping[str, Any] | None,
     signal_cfg: Mapping[str, Any] | None,
@@ -489,16 +494,14 @@ class FactorGovernanceOrchestrator:
             )
             canary_actions = self._rollback_canary_regressions(catalog, run)
             actions.extend(canary_actions)
-            if _catalog_refresh_required([*rollback_actions, *canary_actions]):
-                catalog = build_factor_catalog(self.overlay.db_path)
+            catalog = _maybe_refresh_catalog(catalog, [*rollback_actions, *canary_actions], self.overlay.db_path)
             demotion_actions = self._demote_invalid_candidate_evidence(
                 catalog,
                 run,
                 cfg=cfg,
             )
             actions.extend(demotion_actions)
-            if _catalog_refresh_required(demotion_actions):
-                catalog = build_factor_catalog(self.overlay.db_path)
+            catalog = _maybe_refresh_catalog(catalog, demotion_actions, self.overlay.db_path)
             # Tightening is always evaluated before any expansion posture or
             # V16 authorization gate. A freeze/missing delegate may stop
             # promotion, restore and template expansion, but must never defer
@@ -507,18 +510,15 @@ class FactorGovernanceOrchestrator:
                 catalog, run, cfg=cfg, profile=profile
             )
             actions.extend(downweight_actions)
-            if _catalog_refresh_required(downweight_actions):
-                catalog = build_factor_catalog(self.overlay.db_path)
+            catalog = _maybe_refresh_catalog(catalog, downweight_actions, self.overlay.db_path)
             disable_actions = self._disable_weak_live_alpha(
                 catalog, run, cfg=cfg, profile=profile
             )
             actions.extend(disable_actions)
-            if _catalog_refresh_required(disable_actions):
-                catalog = build_factor_catalog(self.overlay.db_path)
+            catalog = _maybe_refresh_catalog(catalog, disable_actions, self.overlay.db_path)
             retire_actions = self._retire_quarantined_discovered(catalog, run)
             actions.extend(retire_actions)
-            if _catalog_refresh_required(retire_actions):
-                catalog = build_factor_catalog(self.overlay.db_path)
+            catalog = _maybe_refresh_catalog(catalog, retire_actions, self.overlay.db_path)
             posture = self._autonomy_posture()
             expansion_frozen = runtime_config.autonomy_expansion_freeze_applies(cfg)
             if posture in {"shadow_only", "frozen"} or expansion_frozen:
@@ -688,8 +688,7 @@ class FactorGovernanceOrchestrator:
             expansion_committed = self._expansion_command_consumed(
                 expansion_actions
             )
-            if _catalog_refresh_required(expansion_actions):
-                catalog = build_factor_catalog(self.overlay.db_path)
+            catalog = _maybe_refresh_catalog(catalog, expansion_actions, self.overlay.db_path)
             if not expansion_committed:
                 expansion_actions = self._restore_quarantined_builtin_alpha(
                     authorized_catalog,
@@ -702,8 +701,7 @@ class FactorGovernanceOrchestrator:
                 expansion_committed = self._expansion_command_consumed(
                     expansion_actions
                 )
-                if _catalog_refresh_required(expansion_actions):
-                    catalog = build_factor_catalog(self.overlay.db_path)
+                catalog = _maybe_refresh_catalog(catalog, expansion_actions, self.overlay.db_path)
             if not expansion_committed:
                 expansion_actions = self._activate_healthy_builtin_shadow(
                     authorized_catalog,
@@ -716,8 +714,7 @@ class FactorGovernanceOrchestrator:
                 expansion_committed = self._expansion_command_consumed(
                     expansion_actions
                 )
-                if _catalog_refresh_required(expansion_actions):
-                    catalog = build_factor_catalog(self.overlay.db_path)
+                catalog = _maybe_refresh_catalog(catalog, expansion_actions, self.overlay.db_path)
             if not expansion_committed:
                 expansion_actions = (
                     self._apply_redundancy_report(
@@ -732,8 +729,7 @@ class FactorGovernanceOrchestrator:
                 expansion_committed = self._expansion_command_consumed(
                     expansion_actions
                 )
-                if _catalog_refresh_required(expansion_actions):
-                    catalog = build_factor_catalog(self.overlay.db_path)
+                catalog = _maybe_refresh_catalog(catalog, expansion_actions, self.overlay.db_path)
             if not expansion_committed:
                 expansion_actions = self._promote_shadow_candidates(
                     authorized_catalog,
@@ -744,8 +740,7 @@ class FactorGovernanceOrchestrator:
                 expansion_committed = self._expansion_command_consumed(
                     expansion_actions
                 )
-                if _catalog_refresh_required(expansion_actions):
-                    catalog = build_factor_catalog(self.overlay.db_path)
+                catalog = _maybe_refresh_catalog(catalog, expansion_actions, self.overlay.db_path)
             if v16_delegation and not expansion_committed:
                 from backend.services.v16_brain_orchestrator import (
                     V16BrainOrchestratorService,
