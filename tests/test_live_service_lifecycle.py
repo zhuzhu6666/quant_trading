@@ -2014,7 +2014,7 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                301,
+                100301,
                 "ctrader",
                 "XAUUSD+",
                 1,
@@ -2052,7 +2052,7 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
 
     bridge = _Bridge()
     logs = []
-    live_service._live_state_update(positions=[{"position_id": 301, "volume": 0.0}], positions_updated_at=time.time())
+    live_service._live_state_update(positions=[{"position_id": 100301, "volume": 0.0}], positions_updated_at=time.time())
     _patch_live_state_conn(monkeypatch, _conn)
     monkeypatch.setattr(live_service, "_LEDGER", None)
     sync_calls = 0
@@ -2070,19 +2070,19 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
              close_commission, closed_volume, is_close)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (9301, 301, close_ts, -9.0, 0.0, -1.0, 100, 1),
+            (109301, 100301, close_ts, -9.0, 0.0, -1.0, 100, 1),
         )
         conn.commit()
         return {
-            301: {
+            100301: {
                 "net": -10.0,
                 "gross": -9.0,
                 "swap": 0.0,
                 "commission": -1.0,
                 "exec_timestamp": close_ts,
                 "exec_price": 4050.0,
-                "deal_id": 9301,
-                "deal_ids": [9301],
+                "deal_id": 109301,
+                "deal_ids": [109301],
                 "close_deals_count": 1,
                 "source": "ctrader_deals",
             }
@@ -2109,7 +2109,7 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
 
     conn = _conn()
     try:
-        row = conn.execute("SELECT status, close_reason FROM recovery_position_state WHERE position_id=301").fetchone()
+        row = conn.execute("SELECT status, close_reason FROM recovery_position_state WHERE position_id=100301").fetchone()
     finally:
         conn.close()
 
@@ -2134,7 +2134,7 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
     try:
         resolved_row = conn.execute(
             "SELECT status, close_reason, close_pnl FROM recovery_position_state "
-            "WHERE position_id=301"
+            "WHERE position_id=100301"
         ).fetchone()
     finally:
         conn.close()
@@ -2183,7 +2183,7 @@ def test_recovery_bootstrap_accepts_close_deal_before_last_seen_guard(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                303,
+                100303,
                 "ctrader",
                 "XAUUSD+",
                 -1,
@@ -2205,7 +2205,7 @@ def test_recovery_bootstrap_accepts_close_deal_before_last_seen_guard(
              gross_profit, swap, close_commission, closed_volume, is_close)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (9303, 303, close_ts, 4049.0, -1.0, 0.0, -0.1, 100, 1),
+            (109303, 100303, close_ts, 4049.0, -1.0, 0.0, -0.1, 100, 1),
         )
         conn.commit()
     finally:
@@ -2217,7 +2217,7 @@ def test_recovery_bootstrap_accepts_close_deal_before_last_seen_guard(
         def reconcile_positions(self, *, force=False, allow_cache_fallback=True):
             observed_at = time.time()
             return SimpleNamespace(
-                reconcile_id="recovery-303",
+                reconcile_id="recovery-100303",
                 status="fresh",
                 positions=(),
                 observed_at=observed_at,
@@ -2252,7 +2252,7 @@ def test_recovery_bootstrap_accepts_close_deal_before_last_seen_guard(
     try:
         row = conn.execute(
             "SELECT status, close_reason, close_pnl "
-            "FROM recovery_position_state WHERE position_id=303"
+            "FROM recovery_position_state WHERE position_id=100303"
         ).fetchone()
     finally:
         conn.close()
@@ -2347,17 +2347,17 @@ def test_pending_close_latch_without_recovery_row_is_retried_and_released(
     bridge = _Bridge()
     _patch_live_state_conn(monkeypatch, _conn)
     monkeypatch.setattr(live_service, "_LEDGER", None)
-    live_service._pos_open_prices[777] = 2400.0
-    live_service._pos_open_api_volume[777] = 100.0
+    live_service._pos_open_prices[100777] = 2400.0
+    live_service._pos_open_api_volume[100777] = 100.0
     live_service._defer_close_until_authoritative_deal(
-        777,
+        100777,
         broker="ctrader",
         tick=9,
         reason="pg_was_unavailable_during_initial_close",
     )
 
     def _sync(_bridge, conn, position_ids, **_kwargs):
-        assert position_ids == {777}
+        assert position_ids == {100777}
         close_ts = time.time()
         conn.execute(
             """
@@ -2366,11 +2366,11 @@ def test_pending_close_latch_without_recovery_row_is_retried_and_released(
              close_commission, closed_volume, is_close)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (9777, 777, close_ts, -5.0, 0.0, -1.0, 100.0, 1),
+            (9777, 100777, close_ts, -5.0, 0.0, -1.0, 100.0, 1),
         )
         conn.commit()
         return {
-            777: {
+            100777: {
                 "net": -6.0,
                 "gross": -5.0,
                 "commission": -1.0,
@@ -2437,7 +2437,7 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                778,
+                100778,
                 "ctrader",
                 "XAUUSD+",
                 1,
@@ -2447,7 +2447,7 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
                 now - 2.0,
                 "open",
                 "factor_v4",
-                "open-778",
+                "open-100778",
                 "full",
                 "{}",
             ),
@@ -2466,7 +2466,7 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
                 status="fresh",
                 positions=(
                     {
-                        "position_id": 778,
+                        "position_id": 100778,
                         "symbol": "XAUUSD+",
                         "direction": 1,
                         "entry_price": 2400.0,
@@ -2482,7 +2482,7 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
     bridge = _Bridge()
     _patch_live_state_conn(monkeypatch, _conn)
     live_service._defer_close_until_authoritative_deal(
-        778,
+        100778,
         broker="ctrader",
         tick=10,
         reason="partial_close_deal_fetch_failed",
@@ -2496,7 +2496,7 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
     )
     results = [
         {
-            778: {
+            100778: {
                 "net": -2.0,
                 "exec_timestamp": now - 1.0,
                 "closed_volume": 50.0,
@@ -2507,7 +2507,7 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
             }
         },
         {
-            778: {
+            100778: {
                 "net": -5.0,
                 "exec_timestamp": now + 1.0,
                 "closed_volume": 100.0,
@@ -2543,7 +2543,7 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
         log=logs.append,
     ) is True
     assert live_service.no_new_risk_latched(fail_closed=True) is False
-    assert sync_calls[1]["baseline_close_cursor_by_position"][778] == {
+    assert sync_calls[1]["baseline_close_cursor_by_position"][100778] == {
         "baseline_cursor_available": True,
         "baseline_deal_ids": [1778],
         "baseline_closed_volume": 50.0,
