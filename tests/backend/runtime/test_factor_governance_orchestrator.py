@@ -1960,6 +1960,7 @@ def test_preflight_backoff_defers_recently_blocked_candidates(monkeypatch):
             "factor_id": "dsl_promo",
             "source": "discovered",
             "role": "alpha",
+            "direction": 1,
             "enabled": True,
             "lifecycle_status": "SHADOW",
             "lifecycle_origin": "dsl",
