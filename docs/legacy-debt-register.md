@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-01 (代码层复核：live_service 12840行/9次catalog/posterior_degraded 仅标记；5项假债已关；代码基线 05636ac)
+> Last verified: 2026-09-02 (代码层复核：17项过时测试清零，全量 2979 passed；overlay 部署重启冻结与 worker 崩溃风暴已修复并验证；回撤归因例行上线；supervisor 决策链 3/3 修复；posterior degraded 降级应用落地；代码基线 8fa9ed3a)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -64,11 +64,11 @@
 - 退出：注册 ≥1 套带 regime 适用范围的参数模板（人工或治理产出）后，验证 V16 entry 结论可驱动一次真实模板切换（`parameter_template_switch_log` 落地）。若确定不走模板治理路线，关闭该 surface 的观察（避免空转）并标记 resolved（路线决定）。
 - 验证：`parameter_template_switch_log` 出现新记录且 `parameter_template_active` 非空；或明确标注"不启用模板路线"。
 
-### supervisor 决策链三缺陷复盘（2026-09-02 已修 2/3）
-- 状态：`monitoring`（2026-09-02 复盘 39 仓位后登记）
+### supervisor 决策链三缺陷复盘（2026-09-02 已修 3/3）
+- 状态：`monitoring`（2026-09-02 57690a2f 修复 ③ 后：near_tp 在 trend_hold 内优先处理，default 模板 close 落袋、protect 模板 tighten；测试 20 passed 含 protect 变体；待真实 trend_hold 盈利仓 near-TP 动作与评估事件积累验证）
 - canonical：`position_supervisor` 决策链 + bar 级 `supervisor_evaluation` 事件
-- 当前：① near_tp tighten 分支要求模板 `near_take_profit_action=protect`，default 模板配置 close → 接近止盈永远直接平仓（有意策略，protect 分支留作模板能力，未改）；② trend_hold 回吐只打标签无动作（已修：`trend_hold_giveback_intervention_requested` 标记，default 模板仍不执行，干预需求进评估事件）；③ trend_hold 分支 elif 截胡 near_tp 分支（take_profit_progress>=0.92 时 trend_hold 下 653/658 行不可达——near_tp 处理被吞，**未修**，待策略确认 trend_hold 盈利仓是否应参与 near_tp 处理）
-- 退出：策略确认 trend_hold 盈利仓管理路线后修复 ③；评估事件积累 ≥1 周后验证复盘可用性
+- 当前：① near_tp tighten 分支要求模板 `near_take_profit_action=protect`，default 模板配置 close（有意策略，protect 留作模板能力）；② trend_hold 回吐只打标签无动作——已修：`trend_hold_giveback_intervention_requested` 标记进评估事件；真 reduce 因最小手数不可减，按用户决定关闭（2026-09-02）；③ trend_hold 截胡 near_tp——已修：trend_hold 盈利仓 ≥92% 到止盈时走模板驱动路径（default close / protect tighten），与其它 posture 同语义
+- 退出：评估事件积累 ≥1 周后验证复盘可用性；真实 trend_hold 盈利仓 near-TP 动作样本 ≥10 后从 monitoring 转 resolved
 
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
 
@@ -241,6 +241,13 @@
 - 当前：因子扩张候选已统一经过 posterior preflight；`blocked_by_posterior` 会阻断，样本不足只标记 `posterior_degraded`，查询不确定时 fail-closed。
 - 剩余：`posterior_degraded` 的受限权重/scope 应用路径尚未落地，不能把标记解释为已执行降级治理。
 - 退出：降级应用经过现有 RiskPolicy、V16、Coordinator 和 effect observation 连续真实周期验证后，从本登记册删除。
+
+### 部署重启 overlay hash 绑定冻结与 worker 崩溃风暴（2026-09-02 修复）
+- 状态：`monitoring`（2026-09-02 登记：f9da796a + 47c6e682 已修复并重启演练验证；key-compat fallback 属校验放宽，需真实周期观察后评估收紧）
+- canonical：`runtime_config_overlay` committed-mutation 校验（target/committed_config_hash 绑定当前 base+overlay 全量 hash）；`runtime_config.refresh_from_overlay` 每 5s 全量重试；learning worker 启动 restore 失败必须 fail-closed 存活而非退出。
+- 当前：部署重启（YAML/config 结构变化）会使 register_shadow 提交的 hash 绑定失配 → 全量校验失败 → backend fail-closed 冻结新风险最长 38 分钟（2026-09-02 实测），learning worker 直接退出触发 systemd 重启风暴（17 次尝试、evolution 停机 ~5h）。修复：① learning worker overlay 失败改 fail-closed（quarantined YAML base 继续 observation/research，mutation 由 capability 门控，心跳 30s 重试完整 restore）——重启风暴消除；② `_auto_projection_key_compatible` fallback：对 factor_lifecycle.register_shadow 自动投影，overlay 键 ⊆ base 键且 patch 键 ⊆ overlay 行时接受 committed/current intent（hash_compatibility=auto_projection_key_compat）——冻结从 ~38min 降为秒级；operator/风控 mutation 与死键 overlay 仍严格 fail-closed。重启演练（真实注入失配 hash）验证：fallback 路径 restore 成功、还原后绑定回 current、零 ERROR。
+- 禁止：把 fallback 扩展到 operator/risk 类 mutation；用来源名或"看起来保守"恢复扩张/未知 overlay。
+- 退出：连续 ≥3 次真实部署重启无冻结（启动即 restored）且无 fallback 误放行后，评估是否可收紧（register_shadow 提交时重绑或局部键校验替代全量 hash）；worker fail-closed 路径经 ≥1 次真实 overlay 失配周期验证后转 resolved。
 
 ### 治理 mutation 跨账本提交兼容
 
