@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-03 (治理周期回滚重放一次性裁定落地 a2e7ab0d：runtime_kv 终局标记 + 收紧侧限额提额 retires 1→5 / disables 1→3；2026-09-02 前次复核：17项过时测试清零，全量 2979 passed；supervisor 决策链 3/3 修复；posterior degraded 降级应用落地)
+> Last verified: 2026-09-03 (治理回滚重放一次性裁定落地 a2e7ab0d；收紧侧限额提额 retires 1→5 / disables 1→3 经 settings.yaml 部署 aea270cd；overlay 直写事故已恢复：行绑定回归 committed mutation + operator 释放 direct_mutation 闩锁)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -72,8 +72,7 @@
 
 ### 治理周期回滚重放（2026-09-03 一次性裁定修复）
 
-- 状态：`monitoring`（2026-09-03 代码+测试落地 a2e7ab0d；learning-worker 重启后观察 2-3 个治理周期即 resolved）
-- 问题事实：`_rollback_failed_actions` 对"缺 rollback payload / 缺 factor-scoped patch"两个永久不可回滚的
+- 状态：`monitoring`（2026-09-03 代码+测试落地 a2e7ab0d；learning-worker 重启后观察 2-3 个治理周期即 resolved）- 问题事实：`_rollback_failed_actions` 对"缺 rollback payload / 缺 factor-scoped patch"两个永久不可回滚的
   application 每周期重新入选，只写 superseded 审计、不更新任何状态——近 24h 178 条重放记录，且重放项
   每周期挤占 5 个回滚扫描名额中的约 4 席（pin_bar/engulfing 等），真实可回滚候选被挤出。
 - canonical：一次性裁定标记写 `runtime_kv`（key=`factor_governance.rollback.adjudicated.<application_id>`，
@@ -83,6 +82,24 @@
 - 验证：`tests/backend/runtime/test_factor_governance_orchestrator.py::test_rollback_missing_payload_adjudicated_once`
   （首扫 1 条 superseded 审计 + 裁定标记；二扫零动作；application 状态保持 applied）。
 - 剩余：运行态观察已裁定项不再产出 rollback_factor_action 审计、回滚名额释放。
+
+### runtime overlay 直写事故（2026-09-03 已恢复，登记操作边界）
+
+- 状态：`resolved`（2026-09-03 当日恢复：live loop 停摆约 30 分钟后 healthy；无资金/仓位损失，持仓正常由既有保护路径处理）
+- 事故事实：操作者经 CLI 直接 `RuntimeConfigOverlayService.apply_patch` 写入 2 个 factor_governance_* 限额键。
+  该路径按设计会：① 以空 mutation_id 重写 overlay 行，剥离 committed binding 与 legacy manifest → 重启后
+  `legacy_quarantine_unverified` 隔离；② 触发 `no_new_risk` 闩锁 `governance_authority:runtime_config_overlay_direct_mutation`，
+  该 cause 不在自动释放列表，等待显式 operator review 或 coordinator adoption。live loop 因此 fail-closed 停新开仓，
+  system_health degraded（01:38–02:14）。
+- 恢复路径（可复用 playbook）：① 将 overlay 行内容还原（剔除直写键）并以最后一个 committed register_shadow
+  intent（96f2a822）回填 mutation_id + `_governance_config_hash` 契约 hash → `_authority_report` 返回
+  `committed_mutation_verified`（auto_projection_key_compat）；② operator 释放 direct_mutation 闩锁（附权威恢复证据）；
+  ③ 重启 learning-worker/backend；④ system_health 恢复 healthy。
+- 设计确认（本条保留为操作边界）：factor_governance_* 运行态调参**唯一合法通道是 settings.yaml 仓库默认值 +
+  部署**；overlay 直写对扩张类键没有合法恢复通道（legacy review 仅收 risk_tightening，direct_mutation 闩锁需人工
+  且属设计行为）。`RuntimeKVStore.get()` 为本批新增的读接口，与既有 `set()` 对称。
+- 验证：`_authority_report ok=true`；闩锁 `active=false` 剩余 cause 为空；三服务 active；live loop tick 正常；
+  system_health overall=healthy score=1.00。
 
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
 
