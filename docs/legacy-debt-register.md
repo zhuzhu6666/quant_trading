@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-02 (代码层复核：17项过时测试清零，全量 2979 passed；overlay 部署重启冻结与 worker 崩溃风暴已修复并验证；回撤归因例行上线；supervisor 决策链 3/3 修复；posterior degraded 降级应用落地；代码基线 8fa9ed3a)
+> Last verified: 2026-09-03 (治理周期回滚重放一次性裁定落地 a2e7ab0d：runtime_kv 终局标记 + 收紧侧限额提额 retires 1→5 / disables 1→3；2026-09-02 前次复核：17项过时测试清零，全量 2979 passed；supervisor 决策链 3/3 修复；posterior degraded 降级应用落地)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -69,6 +69,20 @@
 - canonical：`position_supervisor` 决策链 + bar 级 `supervisor_evaluation` 事件
 - 当前：① near_tp tighten 分支要求模板 `near_take_profit_action=protect`，default 模板配置 close（有意策略，protect 留作模板能力）；② trend_hold 回吐只打标签无动作——已修：`trend_hold_giveback_intervention_requested` 标记进评估事件；真 reduce 因最小手数不可减，按用户决定关闭（2026-09-02）；③ trend_hold 截胡 near_tp——已修：trend_hold 盈利仓 ≥92% 到止盈时走模板驱动路径（default close / protect tighten），与其它 posture 同语义
 - 退出：评估事件积累 ≥1 周后验证复盘可用性；真实 trend_hold 盈利仓 near-TP 动作样本 ≥10 后从 monitoring 转 resolved
+
+### 治理周期回滚重放（2026-09-03 一次性裁定修复）
+
+- 状态：`monitoring`（2026-09-03 代码+测试落地 a2e7ab0d；learning-worker 重启后观察 2-3 个治理周期即 resolved）
+- 问题事实：`_rollback_failed_actions` 对"缺 rollback payload / 缺 factor-scoped patch"两个永久不可回滚的
+  application 每周期重新入选，只写 superseded 审计、不更新任何状态——近 24h 178 条重放记录，且重放项
+  每周期挤占 5 个回滚扫描名额中的约 4 席（pin_bar/engulfing 等），真实可回滚候选被挤出。
+- canonical：一次性裁定标记写 `runtime_kv`（key=`factor_governance.rollback.adjudicated.<application_id>`，
+  value 含 reason/decision_id/run_id），扫描入口先查标记再处理；decision payload 不可变，"无法回滚"是终局裁定。
+- 明确不做：不把 application 置 superseded——posterior 扩张闸以非 rolled_back/superseded effect 为唯一后验
+  事实源，负 delta 证据必须保留；risk 拦截是瞬态状态（cooldown/latch 可恢复），保持可重试、不裁定。
+- 验证：`tests/backend/runtime/test_factor_governance_orchestrator.py::test_rollback_missing_payload_adjudicated_once`
+  （首扫 1 条 superseded 审计 + 裁定标记；二扫零动作；application 状态保持 applied）。
+- 剩余：运行态观察已裁定项不再产出 rollback_factor_action 审计、回滚名额释放。
 
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
 
