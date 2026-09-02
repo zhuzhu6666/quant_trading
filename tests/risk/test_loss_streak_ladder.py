@@ -230,17 +230,19 @@ class TestReviewStatement:
         assert miss is None
         assert none is None
 
-    def test_persist_statement_adapts_postgres_sql_and_closes_connection(self):
+    def test_persist_statement_writes_runtime_kv_and_closes_connection(self, monkeypatch):
+        # The statement now persists through runtime_kv (loss_streak_review
+        # converged 2026-09-01); the old direct-SQL write path is gone.
+        from backend.services import runtime_kv_store as kv_store
+        from backend.services.loss_streak_review import KV_KEY
         from backend.services.loss_streak_review import persist_loss_review_statement
 
         class FakePostgresConnection:
             def __init__(self):
-                self.calls = []
                 self.committed = False
                 self.closed = False
 
-            def execute(self, sql, params=None):
-                self.calls.append((sql, params))
+            def execute(self, _sql, _params=None):
                 return self
 
             def commit(self):
@@ -251,6 +253,16 @@ class TestReviewStatement:
 
         FakePostgresConnection.__module__ = "psycopg"
         conn = FakePostgresConnection()
+        written_to = {}
+        monkeypatch.setattr(
+            kv_store,
+            "set_on_conn",
+            lambda target, key, value, updated_at=0.0, ensure=False: (
+                written_to.setdefault(key, value)
+                if target is conn
+                else None
+            ),
+        )
 
         written = persist_loss_review_statement(
             {"trip_date": "2026-08-25", "action": "no_change"},
@@ -260,9 +272,7 @@ class TestReviewStatement:
         )
 
         assert written is True
-        assert conn.calls[0][0].count("%s") == 3
-        assert "?" not in conn.calls[0][0]
-        assert conn.calls[0][1][0] == "loss_streak_review_statement"
+        assert written_to.get(KV_KEY, {}).get("trip_date") == "2026-08-25"
         assert conn.committed is True
         assert conn.closed is True
 
