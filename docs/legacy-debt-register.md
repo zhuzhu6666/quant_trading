@@ -50,7 +50,7 @@
 
 ### supervisor 经验已进入记忆索引，但自动模板准入仍未达标
 
-- 状态：`monitoring`（2026-09-01 代码层复核：阈值已达 28 eligible / 36 matured / trace 100，0f1521f 漏  已由 05636ac 补齐；等下轮 bridge）
+- 状态：`monitoring`（2026-09-02：eligible 38 / matured 47，数量超 10 笔门槛；缺 tighten/reduce 真实执行证据——55 笔 trace 全为 close（thesis_broken/timeout/regime），盈利仓全由 broker TP 单触发；trend_hold 回吐信号缺失已修（5ba55b47 bar 级评估事件后干预需求可见）；准入仍缺真实干预执行，等待受控试点或策略变更）
 - canonical：原始事实由 `canonical_v2.supervisor_trace/counterfactual_review` 承载，学习资格由 `canonical_v2.training_sample_row` 承载，经验检索使用 `experience_memory`，V16 检索/后验使用 `brain_memory` 和 `posterior_arbitration`。
 - 当前（2026-08-28 只读）：`canonical_v2.training_sample_row` 10294 行，`supervisor_execution_trace 9369` 中 `governance_eligible=1 & matured=5`（阈值 ≥10，仅 5 笔：另 4 笔 `full/matured/not_eligible` 等待治理），`pending 2085 + excluded 6598` 占 93%；`canonical_v2.event supervisor_trace 15`（近 2 天 8 笔），`counterfactual_review 33`；`brain_memory 160`（counterfactual 3/posterior 1/semantic 116）、`experience_memory 62` 已入；`position_supervisor_selection.v1` 仍 `insufficient_evidence/candidate_count=0/fresh`，`brain_governance_candidate_review bridge_ready 8/517`，`learning_application_log 21 (observing 9/inconclusive 8/reinforced 3)` 无 supervisor application。自动开启代码已加载，记忆仍只能供检索和审查。
 - 自动开启：`off` 仅是无证据时的安全基线；证据投影达到资格后，由 learning worker 自动经 V16、RiskPolicy 和 Coordinator 切入有界 Demo，不需要人工再改一个模式开关。单条 brain memory、提案或未成熟后验仍不能直接授权。
@@ -63,6 +63,12 @@
 - 当前：`runtime.parameter_template_registry` 与 `runtime.parameter_template_active` 均为 0 行；planner 无 `target_template_id` 可指 → bridge 评审恒 `needs_evidence:missing_target_template_id` → 通道每轮观察空转，不产生候选。非代码故障，是模板数据未启用（同 V16 因子通道的 `0f1521f` 已闭环，本项为后续通道）。
 - 退出：注册 ≥1 套带 regime 适用范围的参数模板（人工或治理产出）后，验证 V16 entry 结论可驱动一次真实模板切换（`parameter_template_switch_log` 落地）。若确定不走模板治理路线，关闭该 surface 的观察（避免空转）并标记 resolved（路线决定）。
 - 验证：`parameter_template_switch_log` 出现新记录且 `parameter_template_active` 非空；或明确标注"不启用模板路线"。
+
+### supervisor 决策链三缺陷复盘（2026-09-02 已修 2/3）
+- 状态：`monitoring`（2026-09-02 复盘 39 仓位后登记）
+- canonical：`position_supervisor` 决策链 + bar 级 `supervisor_evaluation` 事件
+- 当前：① near_tp tighten 分支要求模板 `near_take_profit_action=protect`，default 模板配置 close → 接近止盈永远直接平仓（有意策略，protect 分支留作模板能力，未改）；② trend_hold 回吐只打标签无动作（已修：`trend_hold_giveback_intervention_requested` 标记，default 模板仍不执行，干预需求进评估事件）；③ trend_hold 分支 elif 截胡 near_tp 分支（take_profit_progress>=0.92 时 trend_hold 下 653/658 行不可达——near_tp 处理被吞，**未修**，待策略确认 trend_hold 盈利仓是否应参与 near_tp 处理）
+- 退出：策略确认 trend_hold 盈利仓管理路线后修复 ③；评估事件积累 ≥1 周后验证复盘可用性
 
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
 
