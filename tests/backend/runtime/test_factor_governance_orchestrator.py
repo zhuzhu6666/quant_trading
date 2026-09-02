@@ -1977,6 +1977,8 @@ def test_preflight_backoff_defers_recently_blocked_candidates(monkeypatch):
                 "cumulative_pnl": 0.04,
                 "hit_rate": 0.52,
                 "max_drawdown": 0.02,
+                "evidence_hash": "d" * 64,
+                "dataset_hash": "e" * 64,
             },
         },
     ]
