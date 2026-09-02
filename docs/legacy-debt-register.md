@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-03 (治理回滚重放一次性裁定落地 a2e7ab0d；收紧侧限额提额 retires 1→5 / disables 1→3 经 settings.yaml 部署 aea270cd；overlay 直写事故已恢复：行绑定回归 committed mutation + operator 释放 direct_mutation 闩锁)
+> Last verified: 2026-09-03 (治理三批落地：回滚重放一次性裁定 a2e7ab0d / V16 preflight 单候选委派合同 42fc923e / 背压对齐 canonical 积压 + prepared 租约 + 死路径删除 2d9ebfdb；SHADOW 积压 1838 已在源头节流，排空目标见活跃条目)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -69,6 +69,16 @@
 - canonical：`position_supervisor` 决策链 + bar 级 `supervisor_evaluation` 事件
 - 当前：① near_tp tighten 分支要求模板 `near_take_profit_action=protect`，default 模板配置 close（有意策略，protect 留作模板能力）；② trend_hold 回吐只打标签无动作——已修：`trend_hold_giveback_intervention_requested` 标记进评估事件；真 reduce 因最小手数不可减，按用户决定关闭（2026-09-02）；③ trend_hold 截胡 near_tp——已修：trend_hold 盈利仓 ≥92% 到止盈时走模板驱动路径（default close / protect tighten），与其它 posture 同语义
 - 退出：评估事件积累 ≥1 周后验证复盘可用性；真实 trend_hold 盈利仓 near-TP 动作样本 ≥10 后从 monitoring 转 resolved
+
+### dsl_auto SHADOW 积压 1838（2026-09-03 源头节流已生效，排空待收口）
+
+- 状态：`active`（背压口径已对齐 `factor_lifecycle_state`（2d9ebfdb），生产实测计数 1838、`can_register=false`；GP 注册停止直到积压 < 200）
+- 问题事实：旧背压口径走 registry/canary_state 窄投影长期误报 0，dsl_auto 生成侧持续注册（每周期最多 10 个），
+  积压 1838 且 shadow 晋升门因 OOS PnL 全负实质关闭——队列只进不出。
+- canonical：入册节流唯一口径 = `factor_lifecycle_state` origin `dsl/shadow/discovered` 非终态行数；
+  消化侧 = 治理周期收紧动作（retire ≤5/周期、disable ≤3/周期）+ canary 晋升/退休。
+- 退出条件：`nonterminal_candidate_count < QUANT_CANARY_EVALUATION_LIMIT(200)` 且连续一周 GP 注册可正常进行。
+- 剩余观察：retire 提额后的实际排空速度；若 1838 → <200 耗时不可接受，再评估批量退休通道（需另行确认）。
 
 ### 治理周期回滚重放（2026-09-03 一次性裁定修复）
 
