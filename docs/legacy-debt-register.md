@@ -78,7 +78,9 @@
 - canonical：入册节流唯一口径 = `factor_lifecycle_state` origin `dsl/shadow/discovered` 非终态行数；
   消化侧 = 治理周期收紧动作（retire ≤5/周期、disable ≤3/周期）+ canary 晋升/退休。
 - 退出条件：`nonterminal_candidate_count < QUANT_CANARY_EVALUATION_LIMIT(200)` 且连续一周 GP 注册可正常进行。
-- 剩余观察：retire 提额后的实际排空速度；若 1838 → <200 耗时不可接受，再评估批量退休通道（需另行确认）。
+- 剩余观察：retire 提额后的实际排空速度。已知约束：`_retire_quarantined_discovered` 要求 `0 < health_score < 30`，
+  积压中健康分为 0（UNKNOWN）的因子不满足该条件，只能依赖模型 `weak_for_disable` 判定进入候选——这是排空速度的
+  最大不确定项；若 1838 → <200 耗时不可接受，再评估批量退休通道（需另行确认）。
 
 ### 治理周期回滚重放（2026-09-03 一次性裁定修复）
 
