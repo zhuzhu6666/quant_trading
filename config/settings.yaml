@@ -802,6 +802,7 @@ runtime:
   factor_governance_max_disables_per_cycle: 3
   factor_governance_max_retires_per_cycle: 5
   factor_governance_promotion_prepared_max_age_hours: 168
+  factor_governance_blocked_candidate_backoff_hours: 4
   factor_governance_builtin_activation_enabled: true
   factor_governance_builtin_activation_min_health_score: 70.0
   factor_governance_builtin_activation_min_n_obs: 500
