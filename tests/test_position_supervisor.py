@@ -23,8 +23,7 @@ def test_position_supervisor_derives_completed_bars_when_temporal_value_is_missi
     assert verdict["evidence"]["completed_bars_after_entry"] == 4
     assert verdict["evidence"]["closed_bar_window_ready"] is True
 
-
-def test_position_supervisor_strong_trend_holds_near_take_profit():
+def test_position_supervisor_strong_trend_captures_near_take_profit():
     verdict = evaluate_position_supervisor(
         {
             "position": {
@@ -63,9 +62,59 @@ def test_position_supervisor_strong_trend_holds_near_take_profit():
         }
     )
 
-    assert verdict["action"] == "hold"
-    assert verdict["summary_reason"] == "trend_hold_preserve_profit"
+    # 2026-09-02: near-TP handling now wins inside trend_hold (the posture
+    # branch previously shadowed the near-TP elifs, so a profitable
+    # trend-held position at >=92% of the way to target never acted).
+    assert verdict["action"] == "close"
+    assert verdict["summary_reason"] == "near_take_profit_capture"
+    assert "near_take_profit" in verdict["evidence"]["trigger_tags"]
     assert verdict["evidence"]["supervisor_posture"] == "trend_hold"
+
+
+def test_position_supervisor_strong_trend_profit_protection_tightens_near_take_profit():
+    verdict = evaluate_position_supervisor(
+        {
+            "position": {
+                "position_id": "trend-hold-protect",
+                "direction": 1,
+                "entry_price": 3000.0,
+                "current_price": 3038.5,
+                "volume": 100.0,
+                "unrealized_pnl": 38.5,
+                "current_price_state": "known",
+                "pnl_state": "known",
+                "sl": 2990.0,
+                "tp": 3040.0,
+            },
+            "risk": {
+                "mfe": 40.0,
+                "mae": 1.0,
+                "giveback_ratio": 0.15,
+                "profit_capture_ratio": 0.85,
+                "holding_efficiency": 0.9,
+                "time_decay_score": 0.9,
+                "thesis_status": "intact",
+                "regime_shift": "none",
+            },
+            "market": {
+                "trend_strength_state": "strong",
+                "volatility_state": "high",
+                "regime_source": "context_state.market_dimensions",
+                "regime_id": "trend=strong|volatility=high",
+                "regime_dimensions": {"trend": "strong", "volatility": "high"},
+            },
+            "temporal_context": {
+                "holding_seconds": 900.0,
+                "completed_bars_after_entry": 3,
+            },
+            "position_supervisor_template": PROFIT_PROTECTION_TEMPLATE_ID,
+        }
+    )
+
+    assert verdict["action"] == "tighten"
+    assert verdict["summary_reason"] == "near_take_profit_protect"
+    assert verdict["evidence"]["supervisor_posture"] == "trend_hold"
+
 
 
 def test_position_supervisor_range_capture_allows_mature_giveback_recommendation():

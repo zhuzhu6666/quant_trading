@@ -612,6 +612,26 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
             severity = "warn"
     elif supervisor_posture == "trend_hold":
         if (
+            price_known
+            and pnl_known
+            and current_pnl > 0
+            and take_profit_progress >= near_tp_progress_threshold
+        ):
+            # near-TP wins inside trend_hold: this posture branch previously
+            # shadowed the near-TP capture/protect elifs below (elif chain),
+            # so a profitable trend-held position never acted at >=92% of the
+            # way to its target -- it only tagged preserve_profit.  Route it
+            # through the same template-driven handling as the other
+            # postures: default close; protect template tightens.
+            trigger_tags.append("near_take_profit")
+            if near_tp_action == "protect":
+                action = "tighten"
+                summary_reason = "near_take_profit_protect"
+            else:
+                action = "close"
+                summary_reason = "near_take_profit_capture"
+            severity = "info"
+        elif (
             take_profit_progress >= near_tp_progress_threshold
             or giveback_ratio >= giveback_tighten_threshold
             or timeout_ratio >= timeout_tighten_ratio
