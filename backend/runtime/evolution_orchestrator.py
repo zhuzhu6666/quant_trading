@@ -181,8 +181,6 @@ class EvolutionReport:
         self.canary_promotions: list[str] = []
         self.canary_rollbacks: list[str] = []
         self.canary_stay: list[str] = []
-        self.retire_candidates: list[str] = []
-        self.retire_reason: str = ""
         self.weights_updated: bool = False
         self.lifecycle_executor: str = "factor_governance_autonomous"
         self.lifecycle_actions_applied: bool = False
@@ -208,8 +206,6 @@ class EvolutionReport:
             "canary_promotions": self.canary_promotions,
             "canary_rollbacks": self.canary_rollbacks,
             "canary_stay": self.canary_stay,
-            "retire_candidates": self.retire_candidates,
-            "retire_reason": self.retire_reason,
             "weights_updated": self.weights_updated,
             "lifecycle_executor": self.lifecycle_executor,
             "lifecycle_actions_applied": self.lifecycle_actions_applied,
@@ -485,28 +481,33 @@ def _canary_registration_backpressure() -> dict[str, Any]:
         ),
     )
     try:
-        from alpha.registry_adapter import RegistryAdapter
-        from deployment.canary import TERMINAL_STAGES
+        from backend.services.factor_lifecycle_service import TERMINAL_STAGES
 
-        adapter = RegistryAdapter.shared()
-        states = _load_canary_states()
-        candidate_ids: list[str] = []
-        for name in list(adapter._meta.keys()):
-            meta = adapter.get_meta(name) or {}
-            if str(meta.get("source") or "") not in {"shadow", "discovered"}:
-                continue
-            stage = str(
-                (states.get(name) or {}).get("stage") or "SHADOW"
-            ).upper()
-            if stage not in TERMINAL_STAGES:
-                candidate_ids.append(str(name))
-        candidate_ids = sorted(set(candidate_ids))
-        blocked = len(candidate_ids) >= evaluation_limit
+        terminal_stages = sorted(
+            str(getattr(stage, "value", stage)) for stage in TERMINAL_STAGES
+        )
+        placeholders = ",".join("?" for _ in terminal_stages)
+        conn = _state_conn(read_only=True)
+        try:
+            row = _sql(
+                conn,
+                f"""
+                SELECT count(*) AS c
+                FROM factor_lifecycle_state
+                WHERE origin IN ('shadow', 'discovered')
+                  AND lifecycle_stage NOT IN ({placeholders})
+                """,
+                tuple(terminal_stages),
+            ).fetchone()
+        finally:
+            conn.close()
+        nonterminal_count = int(row["c"] if row is not None else 0)
+        blocked = nonterminal_count >= evaluation_limit
         return {
             "ok": True,
             "status": "backpressured" if blocked else "available",
             "can_register": not blocked,
-            "nonterminal_candidate_count": len(candidate_ids),
+            "nonterminal_candidate_count": nonterminal_count,
             "evaluation_limit": evaluation_limit,
             "reason_code": (
                 "canary_evaluation_backlog_at_budget" if blocked else ""
@@ -745,20 +746,6 @@ def scheduled_evolution_cycle(
         if rollbacks:
             logger.info("[Evolve] canary rollback candidates: %s", rollbacks)
         cb("canary_done", 70, f"promotion candidates {len(promotions)}, rollback candidates {len(rollbacks)}")
-
-        # ── Step 4: 退役检查 ──
-        cb("retirement", 75, "checking factor retirement")
-        retire_info = _check_retirement()
-        report.retire_candidates = retire_info["candidates"]
-        report.retire_reason = retire_info["reason"]
-        if retire_info["candidates"]:
-            logger.info("[Evolve] retirement candidates: %s", retire_info["candidates"])
-            _emit_evolution_story("factor_retirement_candidates", {
-                "candidates": retire_info["candidates"],
-                "reason": retire_info["reason"],
-                "executor": report.lifecycle_executor,
-            })
-        cb("retirement_done", 85, f"retirement candidates {len(retire_info['candidates'])}")
 
         # ── Step 5: IC 刷新 + 因子健康报告 ──
         cb("ic_refresh", 86, "refreshing factor IC tracking")
@@ -1415,22 +1402,6 @@ def _load_canary_ctx_from_log(name: str, score: float) -> "CanaryEvalContext":
         oos_pnl=0.0,
         additional_metrics={"source": "missing_shadow_perf"},
     )
-
-
-def _check_retirement() -> dict[str, Any]:
-    result: dict[str, Any] = {"candidates": [], "reason": ""}
-    try:
-        from alpha.factor_health import retirement_check
-        from alpha.registry_adapter import RegistryAdapter
-        adapter = RegistryAdapter.shared()
-        statuses = adapter.all_statuses()
-        if statuses:
-            rc = retirement_check(statuses)
-            result["candidates"] = [c for c in rc.candidates]
-            result["reason"] = rc.reason
-    except Exception as e:
-        logger.debug("[Evolve] retirement_check: %s", e)
-    return result
 
 
 def _collect_learning_suggestions(

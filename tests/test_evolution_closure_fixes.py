@@ -974,3 +974,50 @@ def test_canary_evaluation_is_bounded_and_rotates_oldest_candidates(monkeypatch)
     assert rollbacks == []
     assert len(stay) == 10
     assert set(saved) == {"factor_11", *(f"factor_{idx:02d}" for idx in range(9))}
+
+
+def test_canary_registration_backpressure_counts_lifecycle_backlog(tmp_path, monkeypatch):
+    """Backpressure must read the canonical lifecycle backlog (non-terminal
+    shadow/discovered rows), not the narrower registry/canary_state view, so
+    the GP registration side actually throttles on the real SHADOW queue."""
+    import sqlite3
+
+    import backend.runtime.evolution_orchestrator as evo
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE factor_lifecycle_state (
+            factor_id TEXT PRIMARY KEY,
+            origin TEXT,
+            lifecycle_stage TEXT
+        );
+        INSERT INTO factor_lifecycle_state VALUES ('f1', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('f2', 'shadow', 'PROMOTION_PREPARED');
+        INSERT INTO factor_lifecycle_state VALUES ('f3', 'builtin', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('f4', 'discovered', 'QUARANTINED');
+        INSERT INTO factor_lifecycle_state VALUES ('f5', 'discovered', 'RETIRED');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    def _state_conn(*, read_only=False):
+        state = sqlite3.connect(str(db_path))
+        state.row_factory = sqlite3.Row
+        return state
+
+    monkeypatch.setattr(evo, "_state_conn", _state_conn)
+    monkeypatch.setenv("QUANT_CANARY_EVALUATION_LIMIT", "2")
+
+    backpressured = evo._canary_registration_backpressure()
+    assert backpressured["ok"] is True
+    assert backpressured["nonterminal_candidate_count"] == 2
+    assert backpressured["can_register"] is False
+    assert backpressured["reason_code"] == "canary_evaluation_backlog_at_budget"
+
+    monkeypatch.setenv("QUANT_CANARY_EVALUATION_LIMIT", "3")
+    available = evo._canary_registration_backpressure()
+    assert available["can_register"] is True
+    assert available["reason_code"] == ""

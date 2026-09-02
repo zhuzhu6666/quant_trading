@@ -592,6 +592,8 @@ class RuntimeConfig:
     factor_governance_max_promotions_per_cycle: int = 1
     factor_governance_max_disables_per_cycle: int = 1
     factor_governance_max_retires_per_cycle: int = 1
+    # PROMOTION_PREPARED 租约：滞留超阈值的 prepared 候选降回 SHADOW 重新取证。
+    factor_governance_promotion_prepared_max_age_hours: int = 168
     # 内置结构候选的 shadow -> live 自动启用边界。
     factor_governance_builtin_activation_enabled: bool = True
     factor_governance_builtin_activation_min_health_score: float = 70.0

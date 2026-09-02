@@ -2293,7 +2293,7 @@ class FactorGovernanceOrchestrator:
                         ),
                         actor="system:factor_governance",
                         reason="autonomous governance promotion preparation",
-                        evidence_refs=evidence,
+                        evidence_refs={**evidence, "prepared_at": time.time()},
                         idempotency_key=f"factor_prepare:{factor_name}:{run.get('run_id', '')}",
                         v16=binding,
                     )
@@ -2468,23 +2468,58 @@ class FactorGovernanceOrchestrator:
         for item in catalog:
             factor_id = str(item.get("factor_id") or "")
             stage = str(item.get("lifecycle_status") or "").upper()
-            if (
-                not factor_id
-                or str(item.get("lifecycle_origin") or "").lower()
-                not in {"dsl", "shadow", "discovered"}
-                or stage
-                not in {
-                    FactorLifecycleStage.PROMOTION_PREPARED.value,
-                    FactorLifecycleStage.ACTIVE.value,
-                }
-            ):
+            lifecycle_origin = str(item.get("lifecycle_origin") or "").lower()
+            if not factor_id or stage not in {
+                FactorLifecycleStage.PROMOTION_PREPARED.value,
+                FactorLifecycleStage.ACTIVE.value,
+            }:
+                continue
+            if stage == FactorLifecycleStage.ACTIVE.value and lifecycle_origin == "builtin":
+                # Builtin ACTIVE alphas are governed by the downweight/disable
+                # paths; the legacy-admission demotion below only speaks dsl.
+                continue
+            if lifecycle_origin not in {"dsl", "shadow", "discovered", "builtin"}:
                 continue
             if stage == FactorLifecycleStage.PROMOTION_PREPARED.value:
-                evidence = self._promotion_evidence(item, cfg)
-                blockers = list(evidence.get("blocker_codes") or [])
-                if evidence.get("eligible") is True:
-                    continue
-                reason_code = "prepared_evidence_invalidated"
+                # Lease: PROMOTION_PREPARED is not a parking state.  A prepared
+                # candidate older than the configured window is demoted back to
+                # SHADOW regardless of evidence freshness so it must re-earn
+                # preparation with current facts (legacy rows without a
+                # stamped prepared_at fall back to the lifecycle row's
+                # updated_at).
+                max_prepared_age_hours = float(
+                    getattr(
+                        cfg,
+                        "factor_governance_promotion_prepared_max_age_hours",
+                        168,
+                    )
+                    or 0
+                )
+                prepared_at = float(
+                    (item.get("lifecycle_evidence") or {}).get("prepared_at")
+                    or item.get("lifecycle_updated_at")
+                    or 0.0
+                )
+                if (
+                    max_prepared_age_hours > 0
+                    and prepared_at > 0
+                    and time.time() - prepared_at
+                    > max_prepared_age_hours * 3600.0
+                ):
+                    blockers = ["prepared_stale"]
+                    evidence = {
+                        "eligible": False,
+                        "blocker_codes": blockers,
+                        "prepared_at": prepared_at,
+                        "prepared_max_age_hours": max_prepared_age_hours,
+                    }
+                    reason_code = "prepared_stale"
+                else:
+                    evidence = self._promotion_evidence(item, cfg)
+                    blockers = list(evidence.get("blocker_codes") or [])
+                    if evidence.get("eligible") is True:
+                        continue
+                    reason_code = "prepared_evidence_invalidated"
             else:
                 persisted = dict(
                     (item.get("lifecycle_evidence") or {}).get(

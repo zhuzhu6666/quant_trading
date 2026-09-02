@@ -1799,3 +1799,66 @@ def test_expansion_preflight_hands_single_highest_priority_candidate(monkeypatch
     assert result["deferred_candidates"] == [
         {"candidate_id": "redundancy", "action": "update_redundancy_groups"}
     ]
+
+
+def test_prepared_lease_demotes_stale_builtin_and_spares_active_builtin(monkeypatch):
+    """PROMOTION_PREPARED must not be a parking state: a prepared candidate
+    older than the lease window is demoted back to SHADOW with prepared_stale
+    even while its evidence reads eligible; builtin ACTIVE alphas stay under
+    the downweight/disable paths and are never touched by this scan."""
+    rc.reset_for_tests()
+    rc.patch({"factor_governance_promotion_prepared_max_age_hours": 168})
+    _init_state_db(tmp_path)
+    db = tmp_path / "state.db"
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(db)
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(
+        orch,
+        "_promotion_evidence",
+        lambda item, cfg: {"eligible": True, "blocker_codes": []},
+    )
+
+    demoted = []
+
+    class _Lifecycle:
+        def __init__(self, _db_path, *, adapter=None, health_stale_after_sec=None):
+            pass
+
+        def demote_to_shadow(self, *, name, reason, **_kwargs):
+            demoted.append((name, reason))
+            return {"ok": True, "lifecycle_stage": "SHADOW"}
+
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _Lifecycle)
+
+    now = time.time()
+    catalog = [
+        {
+            "factor_id": "stale_builtin",
+            "lifecycle_origin": "builtin",
+            "lifecycle_status": "PROMOTION_PREPARED",
+            "lifecycle_updated_at": now - 200 * 3600,
+            "lifecycle_evidence": {},
+        },
+        {
+            "factor_id": "fresh_dsl",
+            "lifecycle_origin": "dsl",
+            "lifecycle_status": "PROMOTION_PREPARED",
+            "lifecycle_updated_at": now,
+            "lifecycle_evidence": {},
+        },
+        {
+            "factor_id": "live_builtin",
+            "lifecycle_origin": "builtin",
+            "lifecycle_status": "ACTIVE",
+            "lifecycle_evidence": {},
+        },
+    ]
+
+    orch._demote_invalid_candidate_evidence(
+        catalog,
+        {"run_id": "lease-run"},
+        cfg=rc.shared(),
+    )
+
+    assert demoted == [("stale_builtin", "prepared_stale")]
