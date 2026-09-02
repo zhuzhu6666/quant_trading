@@ -227,7 +227,6 @@ def test_only_explicit_migration_cli_opens_migration_connection() -> None:
                 callers.add(path.relative_to(root).as_posix())
     assert callers == {
         "scripts/state_schema_migrate.py",
-        "scripts/retire_legacy_fact_tables.py",
     }
 
 

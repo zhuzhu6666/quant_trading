@@ -32,10 +32,9 @@ def _pending_governance(db_path: str | Path = STATE_DB) -> tuple[bool, str]:
         if conn is None:
             # SQLite fixtures may omit governance tables; absence means no
             # pending work rather than a reason to invent a second authority.
-            import sqlite3
+            from backend.core.db import connect_sqlite
 
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
+            conn = connect_sqlite(db_path)
         checks = (
             (
                 """
