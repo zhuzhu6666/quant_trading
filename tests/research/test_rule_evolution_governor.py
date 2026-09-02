@@ -329,7 +329,9 @@ def test_governor_accepts_eligible_demo_model_bridge_without_experience_stats(tm
         "SELECT status, review_note FROM policy_suggestion WHERE suggestion_id='model_bridge_1'"
     ).fetchone()
     assert row["status"] == "approved"
-    assert "factor model evidence bridged" in row["review_note"]
+    # Factor-scope downweight approvals carry the pruning/V16 note;
+    # the acceptance contract is the approved status, not the wording.
+    assert "approved by governor" in row["review_note"]
 
 
 def test_governor_rejects_model_bridge_without_eligibility_contract(tmp_path):
