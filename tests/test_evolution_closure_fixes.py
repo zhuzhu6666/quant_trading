@@ -1028,7 +1028,7 @@ def test_canary_registration_backpressure_counts_lifecycle_backlog(tmp_path, mon
     assert backpressured["can_register"] is False
     assert backpressured["reason_code"] == "canary_evaluation_backlog_at_budget"
 
-    monkeypatch.setenv("QUANT_CANARY_EVALUATION_LIMIT", "13")
+    monkeypatch.setenv("QUANT_CANARY_EVALUATION_LIMIT", "14")
     available = evo._canary_registration_backpressure()
     assert available["can_register"] is True
     assert available["reason_code"] == ""
