@@ -55,6 +55,7 @@ class LiveSupervisionRuntime:
     capture_partial_close_session_cursor: Any
     sync_partial_close_session_fact: Any
     adaptive_duplicate_seen: Any = None
+    log_evaluation: Any = None
 
 
 def _is_hard_verdict(verdict: dict[str, Any]) -> bool:
@@ -512,6 +513,23 @@ def run_position_supervision(
         verdict["requested_action"] = requested_action
         verdict["recommended_action"] = requested_action
         verdict.setdefault("effective_action", action)
+        # Bar-level evaluation ledger: one lean row per position per closed
+        # M5 bar regardless of outcome; action traces remain full-fidelity.
+        if runtime.log_evaluation is not None:
+            try:
+                runtime.log_evaluation(
+                    position_id=position_id,
+                    verdict=verdict,
+                    tick=tick,
+                    decision_ts=cycle_ts,
+                )
+            except Exception as exc:
+                runtime.record_aux_failure(
+                    "supervisor_evaluation_record_failed",
+                    position_id=position_id,
+                    action="position_supervisor",
+                    error=exc,
+                )
         if action == "hold":
             evidence = dict(verdict.get("evidence") or {})
             trigger_key = "|".join(

@@ -620,6 +620,16 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
             trigger_tags.append("trend_hold_preserve_profit")
             summary_reason = "trend_hold_preserve_profit"
             severity = "info"
+            # default 模板保持不干预（action 仍是 hold）；但把"该收紧却没
+            # 收紧"的时刻显式标记，供 bar 级评估事件/治理层复盘与学习。
+            if (
+                price_known
+                and pnl_known
+                and current_pnl > 0
+                and profit_protection_window_ready
+                and giveback_ratio >= giveback_tighten_threshold
+            ):
+                trigger_tags.append("trend_hold_giveback_intervention_requested")
     elif supervisor_posture in {"unknown_observe", "transition_confirming"}:
         trigger_tags.append(supervisor_posture)
         if supervisor_posture == "transition_confirming":

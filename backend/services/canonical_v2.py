@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS event (
         'risk_decision', 'factor_observation', 'governance_proposal',
         'governance_command', 'governance_effect', 'trade_review',
         'label_observation', 'training_run', 'counterfactual_review',
-        'supervisor_trace', 'broker_deal'
+        'supervisor_trace', 'supervisor_evaluation', 'broker_deal'
     )),
     entity_type TEXT NOT NULL CHECK (entity_type <> ''),
     entity_id TEXT NOT NULL CHECK (entity_id <> ''),
@@ -207,6 +207,7 @@ EVENT_TYPES = frozenset(
         # P2 边界 4 域事件化
         "counterfactual_review",
         "supervisor_trace",
+        "supervisor_evaluation",
         "broker_deal",
     }
 )
@@ -852,6 +853,51 @@ def record_supervisor_trace_event(
         payload_kind="supervisor_trace",
         event_id=f"live_supervisor_trace_{str(trace_id)}",
         idempotency_key=str(trace_id),
+        causation_id=(f"live_decision_{decision_id}" if decision_id else ""),
+    )
+    if decision_id and conn.execute(
+        _sql(conn, "SELECT 1 FROM canonical_v2.event WHERE event_id=? LIMIT 1"),
+        (f"live_decision_{str(decision_id)}",),
+    ).fetchone() is not None:
+        append_relation(
+            conn,
+            from_event_id=str(event["event_id"]),
+            to_event_id=f"live_decision_{str(decision_id)}",
+            relation_type="caused_by",
+            created_at=event_ts,
+        )
+    return event
+
+
+def record_supervisor_evaluation_event(
+    conn: Any,
+    *,
+    position_id: str,
+    decision_id: str = "",
+    event_ts: Any,
+    payload: Mapping[str, Any],
+    producer: str = "position_supervisor",
+) -> dict[str, Any]:
+    """Write one bar-level supervisor evaluation as an immutable canonical
+    event.  Payload is deliberately lean (posture/action/reason/progress,
+    no position snapshot); full traces are written separately on action."""
+    normalized_position = str(position_id or "")
+    if not normalized_position:
+        raise CanonicalV2Error("canonical supervisor evaluation requires position_id")
+    bar_key = str((dict(payload) or {}).get("bar_key") or "")
+    if not bar_key:
+        raise CanonicalV2Error("canonical supervisor evaluation requires bar_key")
+    event = record_payload_event(
+        conn,
+        event_type="supervisor_evaluation",
+        entity_type="position_supervisor_evaluation",
+        entity_id=normalized_position,
+        payload=dict(payload),
+        observed_at=event_ts,
+        producer=producer,
+        payload_kind="supervisor_evaluation",
+        event_id=f"live_supervisor_evaluation_{normalized_position}_{bar_key}",
+        idempotency_key=f"{normalized_position}:{bar_key}",
         causation_id=(f"live_decision_{decision_id}" if decision_id else ""),
     )
     if decision_id and conn.execute(

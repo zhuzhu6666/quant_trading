@@ -24,6 +24,7 @@ from backend.services.canonical_v2 import (
     record_decision_event,
     record_order_event,
     record_position_event,
+    record_supervisor_evaluation_event,
     record_supervisor_trace_event,
 )
 from backend.services.supervisor_payload_contract import (
@@ -733,6 +734,57 @@ class DecisionLedger:
                 payload=canonical_trace_payload,
             )
         return trace_id
+
+    def log_position_supervisor_evaluation(
+        self,
+        *,
+        position_id: str,
+        decision_id: str = "",
+        event_ts: float | None = None,
+        verdict: dict | None = None,
+    ) -> str:
+        """Persist one lean bar-level evaluation (no position snapshots)."""
+        verdict = verdict or {}
+        evidence = dict(verdict.get("evidence") or {})
+        bar_key = str(evidence.get("closed_bar_key") or "")
+        if not bar_key:
+            return ""
+        now = float(event_ts if event_ts is not None else time.time())
+        payload = {
+            "schema_version": "supervisor_evaluation.v1",
+            "position_id": str(position_id or ""),
+            "decision_id": str(decision_id or ""),
+            "bar_key": bar_key,
+            "action": str(verdict.get("action") or "hold"),
+            "requested_action": str(verdict.get("requested_action") or "hold"),
+            "effective_action": str(verdict.get("effective_action") or verdict.get("action") or "hold"),
+            "summary_reason": str(verdict.get("summary_reason") or "position_healthy"),
+            "supervisor_posture": str(evidence.get("supervisor_posture") or ""),
+            "thesis_status": str(evidence.get("thesis_status") or ""),
+            "regime_shift": str(evidence.get("regime_shift") or ""),
+            "current_pnl": round(float(evidence.get("current_pnl") or 0.0), 6),
+            "take_profit_progress": round(float(evidence.get("take_profit_progress") or 0.0), 6),
+            "stop_loss_progress": round(float(evidence.get("stop_loss_progress") or 0.0), 6),
+            "distance_to_sl": _safe_float(evidence.get("distance_to_sl")),
+            "distance_to_tp": _safe_float(evidence.get("distance_to_tp")),
+            "trigger_tags": sorted(
+                {str(item) for item in evidence.get("trigger_tags") or [] if str(item)}
+            ),
+            "supervisor_template_id": str(evidence.get("supervisor_template_id") or ""),
+            "supervisor_template_version": str(
+                evidence.get("supervisor_template_version") or ""
+            ),
+            "event_ts": now,
+        }
+        with self._conn() as conn:
+            record_supervisor_evaluation_event(
+                conn,
+                position_id=str(position_id or ""),
+                decision_id=str(decision_id or ""),
+                event_ts=now,
+                payload=payload,
+            )
+        return bar_key
 
     def get_latest_entry_decision(self, position_id: str) -> Any | None:
         """Return the latest canonical open decision for a position."""

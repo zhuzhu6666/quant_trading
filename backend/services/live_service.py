@@ -2847,6 +2847,43 @@ def _log_supervisor_trace(
         return ""
 
 
+_supervisor_evaluation_bars: dict[int, str] = {}
+
+
+def _log_supervisor_evaluation(
+    *,
+    position_id: int,
+    verdict: dict[str, Any],
+    tick: int,
+    decision_ts: float | None = None,
+) -> str:
+    """Bar-deduplicated lean evaluation ledger row (see ledger method)."""
+    if not _LEDGER:
+        return ""
+    try:
+        evidence = dict((verdict or {}).get("evidence") or {})
+        bar_key = str(evidence.get("closed_bar_key") or "")
+        if not bar_key:
+            return ""
+        pid = int(position_id or 0)
+        if _supervisor_evaluation_bars.get(pid) == bar_key:
+            return ""
+        _supervisor_evaluation_bars[pid] = bar_key
+        return _LEDGER.log_position_supervisor_evaluation(
+            position_id=str(pid),
+            event_ts=float(decision_ts if decision_ts is not None else time.time()),
+            verdict=verdict,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[live] supervisor evaluation ledger failed for pos %s: %s",
+            position_id,
+            exc,
+            exc_info=True,
+        )
+        return ""
+
+
 def _delegate_timeout_supervisor_close(
     *,
     position: dict[str, Any],
@@ -2904,6 +2941,7 @@ def _build_position_supervision_runtime(
         ),
         record_aux_failure=_record_risk_reduction_aux_failure,
         log_trace=_log_supervisor_trace,
+        log_evaluation=_log_supervisor_evaluation,
         make_candidate=safety_candidate,
         recently_applied=_supervisor_recently_applied,
         delegate_timeout_close=lambda **kwargs: _delegate_timeout_supervisor_close(
