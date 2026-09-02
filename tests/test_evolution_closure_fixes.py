@@ -1024,7 +1024,7 @@ def test_canary_registration_backpressure_counts_lifecycle_backlog(tmp_path, mon
 
     backpressured = evo._canary_registration_backpressure()
     assert backpressured["ok"] is True
-    assert backpressured["nonterminal_candidate_count"] == 12
+    assert backpressured["nonterminal_candidate_count"] == 13
     assert backpressured["can_register"] is False
     assert backpressured["reason_code"] == "canary_evaluation_backlog_at_budget"
 
