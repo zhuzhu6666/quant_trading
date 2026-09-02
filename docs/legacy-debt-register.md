@@ -72,7 +72,8 @@
 
 ### 治理周期回滚重放（2026-09-03 一次性裁定修复）
 
-- 状态：`monitoring`（2026-09-03 代码+测试落地 a2e7ab0d；learning-worker 重启后观察 2-3 个治理周期即 resolved）- 问题事实：`_rollback_failed_actions` 对"缺 rollback payload / 缺 factor-scoped patch"两个永久不可回滚的
+- 状态：`resolved`（2026-09-03 部署 a2e7ab0d 后连续 2 个治理周期（02:56/03:25）零 rollback_factor_action 重放；裁定标记 2 条稳定，回滚名额已释放）
+- 问题事实：`_rollback_failed_actions` 对"缺 rollback payload / 缺 factor-scoped patch"两个永久不可回滚的
   application 每周期重新入选，只写 superseded 审计、不更新任何状态——近 24h 178 条重放记录，且重放项
   每周期挤占 5 个回滚扫描名额中的约 4 席（pin_bar/engulfing 等），真实可回滚候选被挤出。
 - canonical：一次性裁定标记写 `runtime_kv`（key=`factor_governance.rollback.adjudicated.<application_id>`，
