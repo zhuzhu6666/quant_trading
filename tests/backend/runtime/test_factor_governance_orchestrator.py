@@ -1908,3 +1908,83 @@ def test_promotion_evidence_waives_absent_health_for_canary_ladder_top():
     decaying = orch._promotion_evidence(_item("PROBATION", "DECAYING"), cfg)
     assert "factor_health_decaying" in decaying["blocker_codes"]
     assert decaying["health_evidence_source"] == "factor_health"
+
+
+def test_preflight_backoff_defers_recently_blocked_candidates(monkeypatch):
+    """Single-candidate handoff must not let a permanently failing
+    high-priority candidate starve ready lower-priority ones: a candidate
+    audited blocked recently is deferred below eligible ones."""
+    rc.reset_for_tests()
+    rc.patch(
+        {
+            "factor_signal_config": {
+                "blocked_activation": {
+                    "enabled": True,
+                    "role": "alpha",
+                    "autonomous_activation": True,
+                },
+            },
+            "factor_portfolio_weights": {"blocked_activation": 0.0},
+            "factor_governance_builtin_activation_weight": 0.1,
+        }
+    )
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(
+        orch,
+        "_recently_blocked_expansion_candidates",
+        lambda: {"blocked_activation"},
+    )
+    profile = replace(
+        _strict_profile(orch),
+        builtin_activation_min_health_score=60.0,
+        builtin_activation_min_n_obs=500,
+        health_max_age_seconds=300.0,
+    )
+    now = time.time()
+    catalog = [
+        {
+            "factor_id": "blocked_activation",
+            "source": "builtin",
+            "role": "alpha",
+            "enabled": True,
+            "lifecycle_status": "SHADOW",
+            "lifecycle_origin": "builtin",
+            "health_status": "HEALTHY",
+            "health_score": 80.0,
+            "health_n_obs": 2000,
+            "health_updated_at": now,
+            "factor_governance_shadow": {},
+        },
+        {
+            "factor_id": "dsl_promo",
+            "source": "discovered",
+            "role": "alpha",
+            "enabled": True,
+            "lifecycle_status": "SHADOW",
+            "lifecycle_origin": "dsl",
+            "lifecycle_expression": "rank(close)",
+            "lifecycle_artifact_hash": "a" * 64,
+            "canary": {"stage": "PROBATION"},
+            "shadow_perf": {
+                "oos_bars": 1200,
+                "n_valid": 90,
+                "cumulative_pnl": 0.04,
+                "hit_rate": 0.52,
+                "max_drawdown": 0.02,
+            },
+        },
+    ]
+
+    result = orch._expansion_preflight(
+        catalog,
+        cfg=rc.shared(),
+        profile=profile,
+        redundancy_report={"group_count": 0, "groups": []},
+    )
+
+    assert result["candidate_count"] == 1
+    assert result["candidate_refs"][0]["candidate_id"] == "dsl_promo"
+    assert result["deferred_candidates"] == [
+        {"candidate_id": "blocked_activation", "action": "promote_factor"}
+    ]

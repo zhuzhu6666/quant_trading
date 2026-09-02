@@ -1369,17 +1369,29 @@ class FactorGovernanceOrchestrator:
         # (zero-weight restore > quarantined restore > builtin activation >
         # redundancy > shadow promotion); everything else stays actionable in
         # later cycles and is reported as deferred.
+        #
+        # Candidates whose identical action was audited blocked_by_evidence /
+        # failed recently get a backoff tier so one permanently-failing
+        # high-priority candidate cannot starve the ready lower-priority ones
+        # (observed: builtin activation with a stale lifecycle-internal health
+        # stamp retried every cycle ahead of eligible shadow promotions).
+        recently_blocked = self._recently_blocked_expansion_candidates()
+
         def _candidate_priority(ref: dict[str, Any]) -> tuple[int, str]:
             candidate_id = str(ref.get("candidate_id") or "")
             if str(ref.get("action") or "") == "update_redundancy_groups":
-                return (3, candidate_id)
-            if candidate_id in active_zero_weight_ids:
-                return (0, candidate_id)
-            if candidate_id in restore_ids:
-                return (1, candidate_id)
-            if candidate_id in activation_ids:
-                return (2, candidate_id)
-            return (4, candidate_id)
+                base = 3
+            elif candidate_id in active_zero_weight_ids:
+                base = 0
+            elif candidate_id in restore_ids:
+                base = 1
+            elif candidate_id in activation_ids:
+                base = 2
+            else:
+                base = 4
+            if candidate_id in recently_blocked:
+                base += 10
+            return (base, candidate_id)
 
         ordered_refs = sorted(candidate_refs, key=_candidate_priority)
         deferred_candidates = [
@@ -1414,6 +1426,57 @@ class FactorGovernanceOrchestrator:
                 weights=weights,
             ),
         }
+
+    def _recently_blocked_expansion_candidates(self) -> set[str]:
+        """Candidate ids whose same expansion action was audited blocked in
+        the recent backoff window.  Read from the existing evolution_decision
+        audit (no new state); used to tier down repeatedly failing candidates
+        so they cannot starve ready lower-priority ones."""
+        cfg = runtime_config.shared()
+        window_hours = float(
+            getattr(
+                cfg,
+                "factor_governance_blocked_candidate_backoff_hours",
+                4,
+            )
+            or 0
+        )
+        if window_hours <= 0:
+            return set()
+        cutoff = time.time() - window_hours * 3600.0
+        try:
+            conn = get_state_pg_conn(read_only=True) if is_state_db_path(
+                self.overlay.db_path
+            ) else connect_sqlite(self.overlay.db_path, read_only=True)
+            try:
+                rows = conn.execute(
+                    _p(
+                        """
+                        SELECT DISTINCT decision_json::jsonb->>'scope_key' AS scope_key
+                        FROM evolution_decision
+                        WHERE decision_type = 'factor_governance_autonomous'
+                          AND created_at > ?
+                          AND decision_json::jsonb->>'action' IN
+                              ('promote_factor', 'restore_factor_live')
+                          AND decision_json::jsonb->>'status' IN
+                              ('blocked_by_evidence', 'failed', 'mutation_failed')
+                        """
+                    ),
+                    (cutoff,),
+                ).fetchall()
+            finally:
+                conn.close()
+            return {
+                str(row["scope_key"])
+                for row in rows
+                if row is not None and row["scope_key"]
+            }
+        except Exception as exc:
+            logger.debug(
+                "[factor_governance] blocked-candidate backoff lookup failed: %s",
+                exc,
+            )
+            return set()
 
     @staticmethod
     def _activation_projection_ready(item: Mapping[str, Any]) -> bool:
