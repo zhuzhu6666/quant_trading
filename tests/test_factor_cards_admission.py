@@ -45,7 +45,7 @@ def test_admission_waives_absent_validation_for_canary_ladder_top():
     )
     assert top["eligible_for_preparation"] is True
     assert top["preflight_blocker_codes"] == []
-    assert top["canary"]["evidence_source"] == "canary_ladder"
+    assert top["governance"]["canary"]["evidence_source"] == "canary_ladder"
 
     shadow_stage = build_factor_admission_evidence(
         factor_id="dsl_auto_ladder",
