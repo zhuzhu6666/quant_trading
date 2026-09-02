@@ -489,14 +489,16 @@ def _canary_registration_backpressure() -> dict[str, Any]:
         placeholders = ",".join("?" for _ in terminal_stages)
         conn = _state_conn(read_only=True)
         try:
-            row = _sql(
-                conn,
-                f"""
-                SELECT count(*) AS c
-                FROM factor_lifecycle_state
-                WHERE origin IN ('shadow', 'discovered')
-                  AND lifecycle_stage NOT IN ({placeholders})
-                """,
+            row = conn.execute(
+                _sql(
+                    conn,
+                    f"""
+                    SELECT count(*) AS c
+                    FROM factor_lifecycle_state
+                    WHERE origin IN ('shadow', 'discovered')
+                      AND lifecycle_stage NOT IN ({placeholders})
+                    """,
+                ),
                 tuple(terminal_stages),
             ).fetchone()
         finally:

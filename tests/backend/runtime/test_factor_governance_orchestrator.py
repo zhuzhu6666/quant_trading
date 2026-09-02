@@ -1801,7 +1801,7 @@ def test_expansion_preflight_hands_single_highest_priority_candidate(monkeypatch
     ]
 
 
-def test_prepared_lease_demotes_stale_builtin_and_spares_active_builtin(monkeypatch):
+def test_prepared_lease_demotes_stale_builtin_and_spares_active_builtin(tmp_path, monkeypatch):
     """PROMOTION_PREPARED must not be a parking state: a prepared candidate
     older than the lease window is demoted back to SHADOW with prepared_stale
     even while its evidence reads eligible; builtin ACTIVE alphas stay under
