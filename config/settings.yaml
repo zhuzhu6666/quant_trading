@@ -799,8 +799,8 @@ runtime:
   factor_governance_shadow_max_drawdown: 0.05
   factor_governance_new_factor_weight: 0.3
   factor_governance_max_promotions_per_cycle: 1
-  factor_governance_max_disables_per_cycle: 1
-  factor_governance_max_retires_per_cycle: 1
+  factor_governance_max_disables_per_cycle: 3
+  factor_governance_max_retires_per_cycle: 5
   factor_governance_builtin_activation_enabled: true
   factor_governance_builtin_activation_min_health_score: 70.0
   factor_governance_builtin_activation_min_n_obs: 500
