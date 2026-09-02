@@ -17,6 +17,7 @@ import pytest
 import backend.runtime.factor_governance_orchestrator as governance_module
 from backend.runtime.factor_governance_orchestrator import (
     FactorGovernanceOrchestrator,
+    posterior_degraded_target_weight,
     posterior_expansion_verdict,
 )
 from config import runtime_config as rc
@@ -237,3 +238,22 @@ def test_preflight_keeps_degraded_candidate_but_flags_it(monkeypatch):
     assert preflight["reasons"]["builtin_activation"] == ["f_degraded"]
     assert preflight["posterior_blocked_ids"] == []
     assert preflight["posterior_degraded_ids"] == ["f_degraded"]
+
+
+# ---------------------------------------------------------------------------
+# Reduced-weight re-trial for posterior-degraded activations (2026-09-02)
+# ---------------------------------------------------------------------------
+
+
+def test_posterior_degraded_activation_halves_weight_by_default():
+    assert posterior_degraded_target_weight(0.10) == 0.05
+    assert posterior_degraded_target_weight(0.05) == 0.025
+
+
+def test_posterior_degraded_activation_respects_configured_scale_and_caps():
+    assert posterior_degraded_target_weight(0.10, scale=0.3) == 0.03
+    # cap at the normal activation ceiling
+    assert posterior_degraded_target_weight(0.90, scale=1.0) == 0.50
+    # degenerate inputs stay bounded
+    assert posterior_degraded_target_weight(0.10, scale=0.0) == 0.05
+    assert posterior_degraded_target_weight(-1.0) == 0.0

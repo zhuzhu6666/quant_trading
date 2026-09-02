@@ -333,6 +333,21 @@ def posterior_expansion_verdict(
     return "posterior_ok"
 
 
+def posterior_degraded_target_weight(
+    target_weight: float,
+    *,
+    scale: float = 0.5,
+) -> float:
+    """Reduced re-trial weight for a posterior-degraded factor activation.
+
+    A negative but statistically thin posterior must not re-enter at full
+    weight, but a full block would starve the sample stream that could
+    resolve the verdict.  Half weight keeps the controlled trial running.
+    Clamped to [0, 0.50]; scale to [0.1, 1.0].
+    """
+    return min(0.50, max(0.0, float(target_weight or 0.0)) * max(0.1, float(scale or 0.5)))
+
+
 def _p(sql: str) -> str:
     return sql.replace("?", "%s")
 
@@ -2206,12 +2221,69 @@ class FactorGovernanceOrchestrator:
                             result=result,
                         ))
                         continue
+                    # Unified posterior gate at execution (2026-09-02): a
+                    # factor with a negative measured effect must not
+                    # re-enter at full weight.  Thin evidence -> reduced-weight
+                    # controlled re-trial that keeps sampling; sufficient
+                    # evidence -> blocked (defense in depth: activation
+                    # candidates are filtered upstream, shadow promotions are
+                    # not).  Factors with no apply history are posterior_ok
+                    # and unaffected.
+                    posterior = self._posterior_expansion_guard(
+                        str(item.get("factor_id") or ""),
+                        cfg=cfg,
+                    )
+                    if posterior == "blocked_by_posterior":
+                        result = {
+                            "ok": False,
+                            "status": "blocked_by_posterior",
+                            "lifecycle_stage": stage,
+                        }
+                        status = "blocked_by_evidence"
+                        actions.append(self._audit_action(
+                            run,
+                            item,
+                            "promote_factor",
+                            status,
+                            {
+                                **evidence,
+                                "posterior_status": posterior,
+                                "activation_weight": target_weight,
+                            },
+                            verdict,
+                            before={"lifecycle_stage": stage},
+                            after={"lifecycle_stage": stage},
+                            rollback={"target_stage": FactorLifecycleStage.QUARANTINED.value},
+                            result=result,
+                        ))
+                        continue
+                    if posterior == "posterior_degraded":
+                        target_weight = posterior_degraded_target_weight(
+                            target_weight,
+                            scale=float(
+                                getattr(
+                                    cfg,
+                                    "factor_governance_posterior_degraded_weight_scale",
+                                    0.5,
+                                )
+                                or 0.5
+                            ),
+                        )
                     result = lifecycle.activate(
                         name=factor_name,
                         weight=target_weight,
                         actor="system:factor_governance",
-                        reason="autonomous governance factor activation",
-                        evidence_refs=evidence,
+                        reason=(
+                            "autonomous governance factor activation "
+                            "(posterior degraded, reduced weight)"
+                            if posterior == "posterior_degraded"
+                            else "autonomous governance factor activation"
+                        ),
+                        evidence_refs={
+                            **evidence,
+                            "posterior_status": posterior,
+                            "activation_weight": target_weight,
+                        },
                         idempotency_key=f"factor_activate:{factor_name}:{run.get('run_id', '')}",
                         v16=binding,
                     )
