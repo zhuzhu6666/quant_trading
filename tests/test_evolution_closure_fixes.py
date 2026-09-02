@@ -993,7 +993,7 @@ def test_canary_registration_backpressure_counts_lifecycle_backlog(tmp_path, mon
             origin TEXT,
             lifecycle_stage TEXT
         );
-        INSERT INTO factor_lifecycle_state VALUES ('f1', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('f1', 'dsl', 'SHADOW');
         INSERT INTO factor_lifecycle_state VALUES ('f2', 'shadow', 'PROMOTION_PREPARED');
         INSERT INTO factor_lifecycle_state VALUES ('f3', 'builtin', 'SHADOW');
         INSERT INTO factor_lifecycle_state VALUES ('f4', 'discovered', 'QUARANTINED');

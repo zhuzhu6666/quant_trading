@@ -493,10 +493,10 @@ def _canary_registration_backpressure() -> dict[str, Any]:
                 _sql(
                     conn,
                     f"""
-                    SELECT count(*) AS c
-                    FROM factor_lifecycle_state
-                    WHERE origin IN ('shadow', 'discovered')
-                      AND lifecycle_stage NOT IN ({placeholders})
+                SELECT count(*) AS c
+                FROM factor_lifecycle_state
+                WHERE origin IN ('dsl', 'shadow', 'discovered')
+                  AND lifecycle_stage NOT IN ({placeholders})
                     """,
                 ),
                 tuple(terminal_stages),
