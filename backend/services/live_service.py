@@ -6708,6 +6708,33 @@ def _start_live_scheduler():
     # minutes to avoid decisions from the same evidence window racing.
     sched.add_job("awe_adapt", "8,38 * * * *", _scheduled_awe_adapt)
 
+    # Drawdown attribution: aggregate the trailing trade_review evidence into
+    # an account-level diagnosis so a losing session states its cause instead
+    # of only freezing new risk.  Lives on the backend (owner of session/live
+    # facts); offset from governance/nursery minutes (7,9,12,17,37,39,42,47).
+    def _scheduled_drawdown_attribution() -> None:
+        try:
+            from backend.services.drawdown_attribution import (
+                build_drawdown_attribution,
+                persist_drawdown_attribution,
+            )
+            report = build_drawdown_attribution()
+            persist_drawdown_attribution(report)
+            logger.info(
+                "[drawdown_attribution] window trades={} primary={} pnl=${:.2f}",
+                int(report.get("trade_count") or 0),
+                report.get("primary_responsibility", "?"),
+                float(report.get("total_pnl") or 0.0),
+            )
+        except Exception as exc:
+            logger.warning("[drawdown_attribution] run failed: {}", exc)
+
+    sched.add_job(
+        "drawdown_attribution",
+        "16,46 * * * *",
+        _scheduled_drawdown_attribution,
+    )
+
     # S2.2: EvolutionKernel 已移除（它只注册 system_health，且 run_heavy_jobs=0 时
     # 从不实例化）。system_health 统一在此注册；heavy jobs 由 quant-learning-worker 独占。
     try:
