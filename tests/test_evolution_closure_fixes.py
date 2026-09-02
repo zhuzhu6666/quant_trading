@@ -998,6 +998,17 @@ def test_canary_registration_backpressure_counts_lifecycle_backlog(tmp_path, mon
         INSERT INTO factor_lifecycle_state VALUES ('f3', 'builtin', 'SHADOW');
         INSERT INTO factor_lifecycle_state VALUES ('f4', 'discovered', 'QUARANTINED');
         INSERT INTO factor_lifecycle_state VALUES ('f5', 'discovered', 'RETIRED');
+        INSERT INTO factor_lifecycle_state VALUES ('g1', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('g2', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('g3', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('g4', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('g5', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('g6', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('g7', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('g8', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('g9', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('g10', 'discovered', 'SHADOW');
+        INSERT INTO factor_lifecycle_state VALUES ('g11', 'shadow', 'SHADOW');
         """
     )
     conn.commit()
@@ -1009,15 +1020,15 @@ def test_canary_registration_backpressure_counts_lifecycle_backlog(tmp_path, mon
         return state
 
     monkeypatch.setattr(evo, "_state_conn", _state_conn)
-    monkeypatch.setenv("QUANT_CANARY_EVALUATION_LIMIT", "2")
+    monkeypatch.setenv("QUANT_CANARY_EVALUATION_LIMIT", "10")
 
     backpressured = evo._canary_registration_backpressure()
     assert backpressured["ok"] is True
-    assert backpressured["nonterminal_candidate_count"] == 2
+    assert backpressured["nonterminal_candidate_count"] == 12
     assert backpressured["can_register"] is False
     assert backpressured["reason_code"] == "canary_evaluation_backlog_at_budget"
 
-    monkeypatch.setenv("QUANT_CANARY_EVALUATION_LIMIT", "3")
+    monkeypatch.setenv("QUANT_CANARY_EVALUATION_LIMIT", "13")
     available = evo._canary_registration_backpressure()
     assert available["can_register"] is True
     assert available["reason_code"] == ""
