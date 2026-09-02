@@ -17,7 +17,9 @@ def _ws_token() -> str:
 
 def test_ws_state_sends_snapshot_on_connect():
     token = _ws_token()
-    with client.websocket_connect(f"/ws/state?token={token}") as ws:
+    # URL JWTs require QUANT_AUTH_ALLOW_URL_JWT; the endpoint accepts a
+    # bearer token in the WS subprotocol (2026-09-02 contract).
+    with client.websocket_connect("/ws/state", subprotocols=[token]) as ws:
         msg = ws.receive_text()
         snapshot = json.loads(msg)
         assert "equity" in snapshot
@@ -31,7 +33,9 @@ def test_ws_state_sends_snapshot_on_connect():
 
 def test_ws_state_sends_followup_after_state_change():
     token = _ws_token()
-    with client.websocket_connect(f"/ws/state?token={token}") as ws:
+    # URL JWTs require QUANT_AUTH_ALLOW_URL_JWT; the endpoint accepts a
+    # bearer token in the WS subprotocol (2026-09-02 contract).
+    with client.websocket_connect("/ws/state", subprotocols=[token]) as ws:
         first = json.loads(ws.receive_text())
         get_connection_manager().notify("state")
         second = json.loads(ws.receive_text())

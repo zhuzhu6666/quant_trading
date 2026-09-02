@@ -96,7 +96,7 @@ def test_learning_worker_unit_preserves_fail_closed_process_boundary():
     assert service["CPUAffinity"] == "2 3"
 
 
-def test_job_worker_unit_keeps_queue_disabled_by_default():
+def test_job_worker_unit_keeps_pg_job_queue_enabled():
     service = _unit("quant-job-worker.service")["Service"]
 
     assert service["ExecStart"].endswith(
@@ -105,6 +105,8 @@ def test_job_worker_unit_keeps_queue_disabled_by_default():
         "--kind-limit external_refresh=1 --kind-limit sync=1 "
         "--kind-limit factor_health=1 --kind-limit parameter_template_validation=1"
     )
-    assert "Environment=QUANT_PG_JOB_QUEUE_V2_ENABLED=0" in (
+    # PG job queue v2 was enabled in production on 2026-08-31 (debt register
+    # JobManager item resolved); the unit must keep the queue on.
+    assert "Environment=QUANT_PG_JOB_QUEUE_V2_ENABLED=1" in (
         UNIT_DIR / "quant-job-worker.service"
     ).read_text(encoding="utf-8")

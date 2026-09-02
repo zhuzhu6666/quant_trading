@@ -11,7 +11,16 @@ from backend.core.auth import JWT_ALGORITHM, JWT_EXPIRY_SECONDS, create_token, g
 
 # Set a known password hash for testing
 _PW = "test_pass_123"
-_HASH = hashlib.sha256(_PW.encode()).hexdigest()
+
+
+def _argon2_hash(pw: str) -> str:
+    """Argon2id hash: SHA-256 password hashing was retired (2026-09-01)."""
+    from argon2 import PasswordHasher
+
+    return PasswordHasher().hash(pw)
+
+
+_HASH = _argon2_hash(_PW)
 _TEST_JWT_SECRET = "test-jwt-secret-2026-do-not-use-in-prod"
 
 
@@ -86,7 +95,7 @@ def test_login_requires_password_hash(monkeypatch):
 def test_login_uses_env_overrides(monkeypatch):
     pw = "override_pw"
     monkeypatch.setenv("QUANT_AUTH_USER", "alice")
-    monkeypatch.setenv("QUANT_PASSWORD_HASH", hashlib.sha256(pw.encode()).hexdigest())
+    monkeypatch.setenv("QUANT_PASSWORD_HASH", _argon2_hash(pw))
     r = client.post("/api/auth/login", json={"username": "alice", "password": pw})
     assert r.status_code == 200
     assert r.json()["user"] == "alice"
