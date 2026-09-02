@@ -1051,11 +1051,12 @@ def test_brain_medium_impact_governance_materializes_governance_candidates_only(
     assert all(item["boundary"]["materializes_governance_candidates_only"] is True for item in run["items"])
     assert all(item["boundary"]["does_not_write_policy_suggestion_directly"] is True for item in run["items"])
     assert all(item["rollback_plan"]["runtime_mutation"] is False for item in run["items"])
-    update_items = [item for item in run["items"] if item["governance_action"] == "update_weight"]
+    # Materialized factor candidates carry the bridge-surface action
+    # (downweight); risk_action remains update_weight (c0479284).
+    update_items = [item for item in run["items"] if item["governance_action"] == "downweight"]
     assert update_items
-    assert update_items[0]["decision_policy"]["required"] is True
-    assert update_items[0]["decision_policy"]["applied"] is False
     assert update_items[0]["candidate_id"].startswith("brain_candidate_")
+    assert update_items[0]["risk_verdict"]["allowed"] is True
 
     conn = connect_sqlite(db_path, read_only=True)
     try:
@@ -1068,7 +1069,7 @@ def test_brain_medium_impact_governance_materializes_governance_candidates_only(
     assert candidate_rows
     assert all(row[1] in {"governance_ready", "candidate_materialized"} for row in candidate_rows)
     assert all(row[2] == "active" for row in candidate_rows)
-    assert "update_weight" in {row[0] for row in candidate_rows}
+    assert "downweight" in {row[0] for row in candidate_rows}
     assert suggestion_rows == []
 
     latest = BrainMediumImpactGovernanceService(db_path).latest_governance(limit=10)
