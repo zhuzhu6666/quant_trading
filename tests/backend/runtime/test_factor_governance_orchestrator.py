@@ -1965,6 +1965,7 @@ def test_preflight_backoff_defers_recently_blocked_candidates(monkeypatch):
             "lifecycle_origin": "dsl",
             "lifecycle_expression": "rank(close)",
             "lifecycle_artifact_hash": "a" * 64,
+            "runtime_selection_fingerprint": "f" * 64,
             "canary": {"stage": "PROBATION"},
             "shadow_perf": {
                 "oos_bars": 1200,
