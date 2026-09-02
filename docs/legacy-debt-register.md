@@ -236,7 +236,7 @@
 
 ### 因子扩张后验降级应用未完成
 
-- 状态：`active`（2026-09-01 代码层复核：`posterior_degraded_ids` 仍仅 `append` 未 `apply`，尝试 fail-closed 被测试 `test_preflight_keeps_degraded` 拦回，确认需实现受限权重/scope真降级才能关）
+- 状态：`monitoring`（2026-09-02 398d3126：执行端受限权重降级已落地——posterior_degraded 激活按 factor_governance_posterior_degraded_weight_scale（默认0.5, 上限0.50）打折进入受控再试验, 样本流不断; blocked（样本足）在执行端兜底禁止; 无 apply 历史因子不受影响; 待真实 degraded 激活周期与 effect 观察闭环后 resolved）
 - canonical：`FactorGovernanceOrchestrator._posterior_expansion_guard` + `posterior_expansion_verdict`，复用 `learning_application_effect` 的最新有效 factor effect；V16 delegate 粒度和既有后验阈值不变。
 - 当前：因子扩张候选已统一经过 posterior preflight；`blocked_by_posterior` 会阻断，样本不足只标记 `posterior_degraded`，查询不确定时 fail-closed。
 - 剩余：`posterior_degraded` 的受限权重/scope 应用路径尚未落地，不能把标记解释为已执行降级治理。
