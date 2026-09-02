@@ -147,6 +147,56 @@ class LearningWorkerCapability:
             mutation.update({"available": False, "status": "boot_failed"})
             return copy.deepcopy(self._state)
 
+    def mark_overlay_quarantined(
+        self,
+        *,
+        config_hash: str,
+        error: BaseException | str = "",
+    ) -> dict[str, Any]:
+        """Survive an unverifiable runtime overlay (fail-closed degrade).
+
+        The worker keeps producing observation/research evidence on the
+        quarantined (YAML base) config, but governed mutation stays disabled
+        until a later overlay restore succeeds and ``mark_ready`` re-enters
+        the fully operational state.  The failure-count circuit is untouched:
+        quarantine is an authority fact, not a dependency failure.
+        """
+        with self._lock:
+            self._state.update(
+                {
+                    "boot_status": "ready",
+                    "config_hash": str(config_hash or ""),
+                    "overlay_hash": "",
+                    "recovery_status": "overlay_quarantined",
+                    "overlay_quarantine_error": (
+                        f"{type(error).__name__}: {error}"
+                        if isinstance(error, BaseException)
+                        else str(error or "")
+                    ),
+                    "updated_at": float(self._now()),
+                }
+            )
+            self._state["observation_capability"] = {
+                "available": True,
+                "status": "available",
+            }
+            self._state["research_capability"] = {
+                "available": True,
+                "status": "available",
+            }
+            # Mutation requires a verified overlay projection: unavailable
+            # until recovery, independent of the failure-count circuit.
+            self._state["mutation_capability"].update(
+                {
+                    "available": False,
+                    "status": "overlay_quarantined",
+                    "last_error": str(
+                        self._state.get("overlay_quarantine_error") or ""
+                    ),
+                }
+            )
+            return copy.deepcopy(self._state)
+
     def mutation_allowed(self) -> bool:
         with self._lock:
             mutation = self._state["mutation_capability"]
@@ -154,6 +204,13 @@ class LearningWorkerCapability:
                 self._state.get("boot_status") == "ready"
                 and mutation.get("available")
                 and mutation.get("circuit_state") == "closed"
+            )
+
+    def is_overlay_quarantined(self) -> bool:
+        with self._lock:
+            return (
+                str(self._state.get("recovery_status") or "")
+                == "overlay_quarantined"
             )
 
     def record_mutation_success(self, *, job_name: str) -> dict[str, Any]:

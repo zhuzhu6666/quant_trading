@@ -119,7 +119,40 @@ def test_operator_pause_skips_mutation_without_disabling_observation(tmp_path) -
     assert result["status"] == "observation_only"
     assert result["reason"] == "governance_expansion_paused"
     assert called == []
-    assert cap.snapshot()["observation_capability"]["available"] is True
+
+
+def test_overlay_quarantine_keeps_observation_but_gates_mutation(tmp_path) -> None:
+    cap = LearningWorkerCapability(db_path=_capability_db(tmp_path), boot_id="boot-quarantine")
+    state = cap.mark_overlay_quarantined(
+        config_hash="yaml-base-hash",
+        error=RuntimeError("committed_mutation_unverified"),
+    )
+    assert state["boot_status"] == "ready"
+    assert state["recovery_status"] == "overlay_quarantined"
+    assert state["overlay_hash"] == ""
+    assert state["observation_capability"] == {
+        "available": True,
+        "status": "available",
+    }
+    assert state["research_capability"] == {
+        "available": True,
+        "status": "available",
+    }
+    assert state["mutation_capability"]["available"] is False
+    assert state["mutation_capability"]["status"] == "overlay_quarantined"
+    assert state["mutation_capability"]["circuit_state"] == "closed"
+    assert cap.mutation_allowed() is False
+    assert cap.is_overlay_quarantined() is True
+
+    # A later verified restore re-enters the fully operational state.
+    cap.mark_ready(
+        config_hash="yaml-base-hash",
+        overlay_hash="verified-overlay-hash",
+        recovery_status="complete",
+    )
+    assert cap.mutation_allowed() is True
+    assert cap.is_overlay_quarantined() is False
+    assert cap.snapshot()["mutation_capability"]["available"] is True
 
 
 def test_run_once_with_open_circuit_keeps_observation_but_skips_mutation(

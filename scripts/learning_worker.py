@@ -144,6 +144,9 @@ def _bootstrap_runtime(
         raise
 
     try:
+        from backend.services.runtime_config_overlay import (
+            RuntimeConfigOverlayAuthorityError,
+        )
         restored = restore_runtime_config_on_startup(
             base_cfg,
             snapshot_source="learning_worker_startup",
@@ -158,9 +161,45 @@ def _bootstrap_runtime(
                 "[learning_worker] RuntimeConfig autonomous overlay restored hash={}",
                 overlay.get("overlay_hash", ""),
             )
+    except RuntimeConfigOverlayAuthorityError as exc:
+        # Overlay authority failure is a governance fact-source problem, not
+        # a reason to kill the worker: an exit triggers a systemd restart
+        # storm that froze evolution/learning for hours (2026-09-02).  Mirror
+        # the backend: keep the process alive on the quarantined YAML
+        # projection, let observation/research keep producing evidence, and
+        # gate mutation through the capability until a restore succeeds.
+        from config.runtime_config import runtime_config_hash as _rc_hash
+        from config import runtime_config as _runtime_config
+        quarantined_config = getattr(exc, "quarantined_config", None)
+        if quarantined_config is None:
+            _publish_boot_failure(capability, stage="runtime_overlay", error=exc)
+            logger.error(
+                "[learning_worker] critical runtime overlay boot failure: {}", exc
+            )
+            raise
+        _runtime_config.replace(quarantined_config)
+        capability.mark_overlay_quarantined(
+            config_hash=_rc_hash(quarantined_config),
+            error=exc,
+        )
+        try:
+            capability.publish()
+        except Exception as publish_exc:
+            logger.error(
+                "[learning_worker] failed to publish overlay quarantine: {}",
+                publish_exc,
+            )
+        logger.error(
+            "[learning_worker] runtime overlay unverified; continuing quarantined "
+            "on YAML base config, mutation disabled until overlay recovery: {}",
+            exc,
+        )
+        return capability
     except Exception as exc:
         _publish_boot_failure(capability, stage="runtime_overlay", error=exc)
-        logger.error("[learning_worker] critical runtime overlay boot failure: {}", exc)
+        logger.error(
+            "[learning_worker] critical runtime overlay boot failure: {}", exc
+        )
         raise
 
     snapshot = dict(restored.get("snapshot") or {})
@@ -524,6 +563,67 @@ def _run_once(
     )
 
 
+def _try_overlay_recovery(
+    capability: LearningWorkerCapability,
+) -> None:
+    """Retry the runtime overlay restore while quarantined.
+
+    A later overlay write (register_shadow etc.) or config alignment makes the
+    persisted projection verifiable again.  The retry path mirrors startup:
+    restore + snapshot persist + latch release + ``mark_ready``.  Runs at most
+    once per heartbeat (30s), so a still-failing overlay cannot cause a
+    failure-counter storm.
+    """
+    try:
+        from backend.services.runtime_config_startup import (
+            load_yaml_runtime_config,
+            restore_runtime_config_on_startup,
+        )
+        from config.runtime_config import release_recovered_overlay_authority_latches
+
+        base_cfg, _yaml_cfg = load_yaml_runtime_config()
+        restored = restore_runtime_config_on_startup(
+            base_cfg,
+            snapshot_source="learning_worker_recovery",
+        )
+    except Exception as exc:
+        logger.warning(
+            "[learning_worker] overlay recovery attempt deferred: {}", exc
+        )
+        return
+    overlay = dict(restored.get("overlay") or {})
+    if overlay.get("ok") is not True:
+        logger.warning(
+            "[learning_worker] overlay recovery not verifiable: {}", overlay
+        )
+        return
+    if not release_recovered_overlay_authority_latches(overlay):
+        logger.error(
+            "[learning_worker] overlay restored but authority latch release "
+            "failed; retrying next heartbeat"
+        )
+        return
+    snapshot = dict(restored.get("snapshot") or {})
+    capability.mark_ready(
+        config_hash=str(snapshot.get("config_hash") or ""),
+        overlay_hash=str(overlay.get("overlay_hash") or ""),
+        recovery_status="complete",
+    )
+    try:
+        capability.publish()
+    except Exception as publish_exc:
+        logger.error(
+            "[learning_worker] recovered capability publish failed: {}",
+            publish_exc,
+        )
+    logger.info(
+        "[learning_worker] overlay authority recovered; mutation re-enabled "
+        "config_hash={} overlay_hash={}",
+        str(snapshot.get("config_hash") or "")[:12],
+        str(overlay.get("overlay_hash") or "")[:12],
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run isolated learning/evolution schedulers.")
     parser.add_argument("--run-once", action="store_true", help="Run one supervisor/autonomous/evolution cycle and exit.")
@@ -561,7 +661,13 @@ def main() -> int:
         now = time.monotonic()
         if now - last_heartbeat >= 30.0:
             try:
-                _worker_capability.refresh_and_publish_heartbeat()
+                if _worker_capability.is_overlay_quarantined():
+                    # Quarantine skips the normal heartbeat refresh: snapshot
+                    # drift would count as mutation dependency failures and
+                    # open the circuit, locking out the recovery path.
+                    _try_overlay_recovery(_worker_capability)
+                else:
+                    _worker_capability.refresh_and_publish_heartbeat()
             except Exception as exc:
                 logger.warning("[learning_worker] capability heartbeat publish failed: {}", exc)
             last_heartbeat = now
