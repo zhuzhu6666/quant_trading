@@ -205,6 +205,17 @@ def build_factor_admission_evidence(
 
     shadow = dict(catalog_item.get("shadow_perf") or {})
     canary = dict(catalog_item.get("canary") or {})
+    # A completed canary ladder is the OOS validation package for bar-based
+    # (GP/discovered) candidates: staged, fingerprinted, real-bar evidence
+    # accumulated over 30+ days that these candidates can never replace with
+    # enrollment-time validation artifacts.  At PROBATION/ACTIVE the ladder
+    # substitutes for evidence that is structurally absent for them
+    # (trade-review health, cost test, execution evidence, contamination
+    # status, regime coverage).  Absence is waived; negative evidence
+    # (DECAYING health, a failed cost test, contaminated counts) still blocks.
+    canary_ladder_evidence = (
+        str(canary.get("stage") or "").upper() in {"PROBATION", "ACTIVE"}
+    )
     mature_reviews = evidence_counts.get("governance_eligible_mature")
     try:
         mature_reviews_int = int(mature_reviews) if mature_reviews is not None else 0
@@ -301,7 +312,12 @@ def build_factor_admission_evidence(
             "runtime_admission": str(catalog_item.get("runtime_admission") or "") or None,
             "bound": coordinator_bound,
         },
-        "canary": {"stage": str(canary.get("stage") or "") or None},
+        "canary": {
+            "stage": str(canary.get("stage") or "") or None,
+            "evidence_source": (
+                "canary_ladder" if canary_ladder_evidence else "enrollment_validation"
+            ),
+        },
     }
 
     effect_status = str(governance.get("application_effect_status") or "").lower()
@@ -334,8 +350,17 @@ def build_factor_admission_evidence(
         ("multi_forward_passed", "multi_forward_evidence_missing"),
         ("cost_test_passed", "cost_evidence_missing"),
     ):
-        if not validation[field]:
-            preflight_blockers.append(code)
+        if validation[field]:
+            continue
+        if (
+            field == "cost_test_passed"
+            and canary_ladder_evidence
+            and validation_source.get("cost_test_passed") is None
+        ):
+            # Never cost-tested: the ladder covers it (see above).  An
+            # explicit False means the test ran and failed — still blocks.
+            continue
+        preflight_blockers.append(code)
     if str(canary.get("stage") or "").upper() not in {"ACTIVE", "PROBATION"}:
         # PROBATION is the terminal canary evidence stage.  The final hop to
         # ACTIVE requires committed lifecycle backing (D1 gate), and lifecycle
@@ -345,12 +370,26 @@ def build_factor_admission_evidence(
     if mature_count < _ADMISSION_MIN_MATURE_EVIDENCE:
         preflight_blockers.append("independent_mature_evidence_below_20")
     if not execution_complete:
-        preflight_blockers.append("execution_evidence_incomplete")
+        if canary_ladder_evidence and not validation_source.get(
+            "execution_evidence_complete"
+        ):
+            pass  # absent, never executed: ladder evidence covers it
+        else:
+            preflight_blockers.append("execution_evidence_incomplete")
     if contamination_status != "clean":
-        preflight_blockers.append("contamination_unresolved")
-    if not health_valid:
+        if canary_ladder_evidence and contamination_status == "unknown":
+            pass  # no contamination scan exists: ladder evidence covers it
+        else:
+            preflight_blockers.append("contamination_unresolved")
+    if not health_valid and not (
+        canary_ladder_evidence and health_status == "UNKNOWN"
+    ):
+        # UNKNOWN means the factor was never health-monitored (shadow
+        # candidates produce no trade reviews); the ladder substitutes.
+        # DECAYING, WATCH-below-threshold and stale-fresh rows are real
+        # evidence and still block.
         preflight_blockers.append("factor_health_invalid_or_stale")
-    if not regime_ids:
+    if not regime_ids and not canary_ladder_evidence:
         preflight_blockers.append("regime_coverage_missing")
     preflight_blockers = sorted(set(preflight_blockers))
     activation_blockers = list(preflight_blockers)

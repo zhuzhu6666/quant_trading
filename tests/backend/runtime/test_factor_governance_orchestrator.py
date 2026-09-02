@@ -1862,3 +1862,46 @@ def test_prepared_lease_demotes_stale_builtin_and_spares_active_builtin(tmp_path
     )
 
     assert demoted == [("stale_builtin", "prepared_stale")]
+
+
+def test_promotion_evidence_waives_absent_health_for_canary_ladder_top():
+    """A canary PROBATION candidate was never traded, so it has no
+    factor_health row (UNKNOWN forever).  The completed ladder substitutes for
+    that absent evidence; a SHADOW-stage candidate and a real DECAYING row
+    still block."""
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    cfg = rc.shared()
+
+    def _item(canary_stage, health_status=None):
+        item = {
+            "factor_id": "dsl_auto_abc",
+            "source": "discovered",
+            "role": "alpha",
+            "lifecycle_status": "SHADOW",
+            "canary": {"stage": canary_stage},
+            "shadow_perf": {
+                "oos_bars": 1200,
+                "n_valid": 90,
+                "cumulative_pnl": 0.04,
+                "hit_rate": 0.52,
+                "max_drawdown": 0.02,
+            },
+        }
+        if health_status:
+            item["health_status"] = health_status
+            item["health_score"] = 30.0
+            item["health_updated_at"] = time.time()
+        return item
+
+    probation = orch._promotion_evidence(_item("PROBATION"), cfg)
+    assert "factor_health_unknown" not in probation["blocker_codes"]
+    assert "factor_health_invalid_or_stale" not in probation["blocker_codes"]
+    assert probation["health_evidence_source"] == "canary_ladder"
+
+    shadow_stage = orch._promotion_evidence(_item("SHADOW"), cfg)
+    assert "factor_health_unknown" in shadow_stage["blocker_codes"]
+
+    decaying = orch._promotion_evidence(_item("PROBATION", "DECAYING"), cfg)
+    assert "factor_health_decaying" in decaying["blocker_codes"]
+    assert decaying["health_evidence_source"] == "factor_health"

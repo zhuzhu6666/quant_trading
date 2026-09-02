@@ -3952,6 +3952,11 @@ class FactorGovernanceOrchestrator:
                 )
             )
         )
+        # Shadow candidates produce no trade reviews, so they never acquire a
+        # factor_health row (health_status UNKNOWN forever) — a completed
+        # canary ladder substitutes for that structurally absent evidence.
+        # Real negative rows (DECAYING / stale WATCH) still block.
+        health_waived = canary_stage in {"ACTIVE", "PROBATION"} and health_status == "UNKNOWN"
         legacy_blockers = [
             code
             for code, blocked in (
@@ -3970,23 +3975,27 @@ class FactorGovernanceOrchestrator:
                 ("bar_oos_pnl_non_positive", cumulative_pnl <= 0.0),
                 ("bar_oos_hit_rate_below_minimum", hit_rate < min_hit),
                 ("bar_oos_drawdown_above_maximum", max_drawdown > max_dd),
-                ("factor_health_invalid_or_stale", not health_ok),
-            )
-            if blocked
-        ]
-        legacy_blockers.extend(
-            code
-            for code, blocked in (
-                ("factor_health_unknown", health_status == "UNKNOWN"),
-                ("factor_health_decaying", health_status == "DECAYING"),
-                ("factor_health_stale", not health_fresh),
                 (
-                    "factor_health_watch_below_threshold",
-                    health_status == "WATCH" and health_score < watch,
+                    "factor_health_invalid_or_stale",
+                    not health_ok and not health_waived,
                 ),
             )
             if blocked
-        )
+        ]
+        if not health_waived:
+            legacy_blockers.extend(
+                code
+                for code, blocked in (
+                    ("factor_health_unknown", health_status == "UNKNOWN"),
+                    ("factor_health_decaying", health_status == "DECAYING"),
+                    ("factor_health_stale", not health_fresh),
+                    (
+                        "factor_health_watch_below_threshold",
+                        health_status == "WATCH" and health_score < watch,
+                    ),
+                )
+                if blocked
+            )
         factor_id = str(item.get("factor_id") or "")
         admission = build_factor_admission_evidence(
             factor_id=factor_id,
@@ -4017,6 +4026,9 @@ class FactorGovernanceOrchestrator:
             "eligible": eligible,
             "eligibility_field": eligibility_field,
             "admission_evidence": admission,
+            "health_evidence_source": (
+                "canary_ladder" if health_waived else "factor_health"
+            ),
             "oos_bars": oos_bars,
             "n_valid": n_valid,
             "cumulative_pnl": cumulative_pnl,
