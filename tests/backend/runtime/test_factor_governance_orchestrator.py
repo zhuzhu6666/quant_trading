@@ -1964,8 +1964,12 @@ def test_preflight_backoff_defers_recently_blocked_candidates(monkeypatch):
             "lifecycle_status": "SHADOW",
             "lifecycle_origin": "dsl",
             "lifecycle_expression": "rank(close)",
+            "lifecycle_generation": 1,
             "lifecycle_artifact_hash": "a" * 64,
+            "lifecycle_definition_fingerprint": "b" * 64,
+            "lifecycle_config_hash": "c" * 64,
             "runtime_selection_fingerprint": "f" * 64,
+            "health_rolling_ic": 0.03,
             "canary": {"stage": "PROBATION"},
             "shadow_perf": {
                 "oos_bars": 1200,
