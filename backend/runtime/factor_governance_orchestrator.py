@@ -53,6 +53,7 @@ from backend.services.policy_suggestion_context import attach_policy_suggestion_
 from backend.services.policy_suggestion_identity import deterministic_policy_suggestion_id
 from backend.services.runtime_config_mutation import RuntimeConfigMutationService
 from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
+from backend.services.runtime_kv_store import RuntimeKVStore
 from config import runtime_config
 from config.runtime_config import RuntimeConfig
 from risk.policy_service import RiskPolicyService, RiskVerdict
@@ -60,6 +61,16 @@ from risk.policy_service import RiskPolicyService, RiskVerdict
 logger = logging.getLogger(__name__)
 
 _EVIDENCE_STREAK_KEY = "factor_governance_evidence_streak.v1"
+
+# One-way adjudication markers for rollback candidates that can never be
+# executed (missing decision payload / no factor-scoped rollback config).
+# Decisions and their payloads are immutable, so "cannot roll back" is a
+# terminal verdict; without the marker the same application re-enters the
+# scan every cycle, replays a superseded audit, and crowds out the 5-row
+# rollback budget.  The marker must NOT change the application status: the
+# posterior expansion gate reads non rolled_back/superseded effects as its
+# only posterior fact source, and a negative delta must stay visible there.
+_ROLLBACK_ADJUDICATED_KV_PREFIX = "factor_governance.rollback.adjudicated."
 
 # Only these audit outcomes mean that the effective catalog may have changed.
 # Blocked, delegated and superseded observations must not make every later
@@ -1750,6 +1761,13 @@ class FactorGovernanceOrchestrator:
             rows = _rows[:5]
             for row in rows:
                 factor_id = str(row["scope_key"] or "")
+                application_id = str(row["application_id"] or "")
+                if self._rollback_adjudicated(application_id) is not None:
+                    logger.debug(
+                        "[factor_governance] rollback already adjudicated, skip: %s",
+                        application_id,
+                    )
+                    continue
                 decision_id = self._decision_id_from_application(row)
                 rollback_payload = self._rollback_payload_for_decision(decision_id)
                 rollback_cfg = rollback_payload.get("runtime_config") if isinstance(rollback_payload, dict) else None
@@ -1763,19 +1781,44 @@ class FactorGovernanceOrchestrator:
                 }
                 verdict = self._risk("rollback_factor_action", item, evidence)
                 if not verdict.allowed or not isinstance(rollback_cfg, dict):
+                    if not verdict.allowed:
+                        # Risk state (cooldowns, latches) is transient, so a
+                        # blocked rollback stays retriable — never adjudicate.
+                        actions.append(self._audit_action(
+                            run,
+                            item,
+                            "rollback_factor_action",
+                            "blocked_by_risk",
+                            evidence,
+                            verdict,
+                            result={"reason": "risk_blocked"},
+                        ))
+                        continue
+                    self._adjudicate_rollback_skip(
+                        application_id,
+                        decision_id,
+                        "missing_rollback_config",
+                        str(run.get("run_id") or ""),
+                    )
                     actions.append(self._audit_action(
                         run,
                         item,
                         "rollback_factor_action",
-                        "blocked_by_risk" if not verdict.allowed else "superseded",
+                        "superseded",
                         evidence,
                         verdict,
-                        result={"reason": "risk_blocked" if not verdict.allowed else "missing_rollback_config"},
+                        result={"reason": "missing_rollback_config"},
                     ))
                     continue
                 before_cfg = runtime_config.shared().to_dict()
                 rollback_patch = self._scoped_factor_rollback_patch(factor_id, rollback_cfg, before_cfg)
                 if not rollback_patch:
+                    self._adjudicate_rollback_skip(
+                        application_id,
+                        decision_id,
+                        "missing_factor_scoped_rollback_config",
+                        str(run.get("run_id") or ""),
+                    )
                     actions.append(self._audit_action(
                         run,
                         item,
@@ -1907,6 +1950,53 @@ class FactorGovernanceOrchestrator:
         except Exception as exc:
             logger.debug("[factor_governance] rollback scan skipped: %s", exc)
         return actions
+
+    def _rollback_adjudicated(self, application_id: str) -> dict[str, Any] | None:
+        application_id = str(application_id or "")
+        if not application_id:
+            return None
+        try:
+            marker = RuntimeKVStore(str(self.overlay.db_path)).get(
+                f"{_ROLLBACK_ADJUDICATED_KV_PREFIX}{application_id}"
+            )
+        except Exception as exc:
+            # Fail-open: a failed marker read must not permanently hide a
+            # rollback candidate; the worst case is the pre-fix replay.
+            logger.debug(
+                "[factor_governance] rollback adjudication read failed: %s %s",
+                application_id,
+                exc,
+            )
+            return None
+        return marker if isinstance(marker, dict) else None
+
+    def _adjudicate_rollback_skip(
+        self,
+        application_id: str,
+        decision_id: str,
+        reason: str,
+        run_id: str,
+    ) -> None:
+        application_id = str(application_id or "")
+        if not application_id:
+            return
+        try:
+            RuntimeKVStore(str(self.overlay.db_path)).set(
+                f"{_ROLLBACK_ADJUDICATED_KV_PREFIX}{application_id}",
+                {
+                    "reason": str(reason),
+                    "decision_id": str(decision_id or ""),
+                    "run_id": str(run_id or ""),
+                },
+            )
+        except Exception as exc:
+            # A failed write only means the candidate is re-adjudicated next
+            # cycle; the scan itself must not crash on marker persistence.
+            logger.debug(
+                "[factor_governance] rollback adjudication write failed: %s %s",
+                application_id,
+                exc,
+            )
 
     def _decision_id_from_application(self, row: Any) -> str:
         details = self._loads_dict(row["details_json"])

@@ -1682,3 +1682,50 @@ def test_expansion_preflight_blocks_restore_when_current_regime_weak(monkeypatch
 
     assert "regime_weak_restore_cand" not in preflight["reasons"]["active_zero_weight_restore"]
     assert "regime_weak_restore_cand" not in preflight["reasons"]["builtin_restore"]
+
+
+def test_rollback_missing_payload_adjudicated_once(tmp_path):
+    """A rollback candidate whose decision payload is gone is adjudicated
+    exactly once: the first scan records one superseded audit plus a one-way
+    runtime_kv marker; later scans must not re-enter it (no replayed audit,
+    rollback budget freed) and the application status stays untouched so the
+    negative delta remains visible to the posterior expansion gate."""
+    from backend.services.runtime_kv_store import RuntimeKVStore
+
+    rc.reset_for_tests()
+    _init_state_db(tmp_path)
+    db = tmp_path / "state.db"
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(db)
+    store = LearningApplicationStore(str(db))
+    application_id = store.prepare_application(
+        scope_type="factor",
+        scope_key="pin_bar",
+        action="update_weight",
+        status="applied",
+        run_id="run-1",
+        source="test",
+    )
+    store.write_effect(
+        application_id=application_id,
+        scope_key="pin_bar",
+        scope_type="factor",
+        action="update_weight",
+        status="applied",
+        observed_trade_count=5,
+        delta_avg_reward=-0.5,
+    )
+
+    first = orch._rollback_failed_actions({"run_id": "gov-run-1"})
+    assert [item["status"] for item in first] == ["superseded"]
+
+    marker = RuntimeKVStore(str(db)).get(
+        f"factor_governance.rollback.adjudicated.{application_id}"
+    )
+    assert marker["reason"] == "missing_rollback_config"
+
+    second = orch._rollback_failed_actions({"run_id": "gov-run-2"})
+    assert second == []
+
+    app = store.get_application(application_id)
+    assert app["status"] == "applied"

@@ -269,6 +269,20 @@ class RuntimeKVStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def get(self, key: str, default: Any = None) -> Any:
+        conn = self._conn(read_only=True)
+        try:
+            row = execute(
+                conn,
+                "SELECT value_json FROM runtime_kv WHERE key=?",
+                (str(key or ""),),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return default
+        return load_json(row_value(row, "value_json", 0, "{}"), default)
+
     def set(
         self,
         key: str,
