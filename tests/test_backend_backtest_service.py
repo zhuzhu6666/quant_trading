@@ -23,7 +23,13 @@ REPORT = {
 
 
 def test_post_backtest_returns_parity_job_id():
-    with patch("backend.services.parity_replay.ParityReplayService.run", return_value=REPORT):
+    # The API enqueues through the canonical PG job manager; unit-test the
+    # API contract against a fake manager instead of the shared production
+    # queue (2026-09-02: previously hit the real PG from the test process).
+    manager = MagicMock()
+    manager.list.return_value = []
+    manager.submit.return_value = SimpleNamespace(id="job-parity-1", status="queued")
+    with patch("backend.api.backtest.get_job_manager", return_value=manager):
         response = client.post(
             "/api/backtest/run",
             json={"symbol": "XAUUSD+", "timeframe": "M5", "max_bars": 5000},
@@ -31,8 +37,14 @@ def test_post_backtest_returns_parity_job_id():
     assert response.status_code == 200
     body = response.json()
     assert body["engine"] == "live_parity_replay_v1"
-    assert body["job_id"]
-    assert body["status"] in {"queued", "pending", "running", "done", "error"}
+    assert body["job_id"] == "job-parity-1"
+    assert body["status"] == "queued"
+    manager.submit.assert_called_once()
+    submitted_kind, submitted_params = manager.submit.call_args.args
+    assert submitted_kind == "backtest"
+    assert submitted_params["symbol"] == "XAUUSD+"
+    assert submitted_params["timeframe"] == "M5"
+    assert submitted_params["max_bars"] == 5000
 
 
 def test_backtest_rejects_more_than_twenty_thousand_bars():
@@ -41,11 +53,17 @@ def test_backtest_rejects_more_than_twenty_thousand_bars():
 
 
 def test_get_backtest_job():
-    with patch("backend.services.parity_replay.ParityReplayService.run", return_value=REPORT):
-        job_id = client.post("/api/backtest/run", json={}).json()["job_id"]
-    response = client.get(f"/api/backtest/{job_id}")
+    job = SimpleNamespace(
+        id="job-parity-1",
+        status="queued",
+        to_dict=lambda: {"id": "job-parity-1", "status": "queued", "kind": "backtest"},
+    )
+    manager = MagicMock()
+    manager.get.return_value = job
+    with patch("backend.api.backtest.get_job_manager", return_value=manager):
+        response = client.get("/api/backtest/job-parity-1")
     assert response.status_code == 200
-    assert response.json()["id"] == job_id
+    assert response.json()["id"] == "job-parity-1"
 
 
 def test_get_nonexistent_job_404():

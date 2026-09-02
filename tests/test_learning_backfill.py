@@ -134,7 +134,11 @@ def test_learning_backfill_enriches_path_metrics_from_bars(monkeypatch, tmp_path
     monkeypatch.setattr(learning_backfill, "get_state_conn", _get_conn)
     import data.duckdb_store as data_store
 
-    monkeypatch.setattr(data_store, "DataStore", lambda *args, **kwargs: _FakeStore())
+    # Backfill imports DuckDBDataStore as DataStore (8/31 glue rename);
+    # patching the old class name silently disabled the bars path.
+    monkeypatch.setattr(
+        data_store, "DuckDBDataStore", lambda *args, **kwargs: _FakeStore()
+    )
 
     result = learning_backfill.run_learning_backfill(
         limit=10,
