@@ -358,7 +358,7 @@ class RuntimeConfigOverlayService:
                         """
                         SELECT mutation_id, status, projection_status,
                                target_config_hash, committed_config_hash,
-                               domain_hash
+                               domain_hash, source, patch_json
                         FROM governance_mutation_intent
                         WHERE mutation_id=?
                         LIMIT 1
@@ -394,6 +394,22 @@ class RuntimeConfigOverlayService:
                 str(item.get("target_config_hash") or "") == config_hash
                 and str(item.get("committed_config_hash") or "") == config_hash
             )
+            # Whole-config hash binding drifts whenever the YAML base or the
+            # config hash contract changes between deploys, even when the
+            # overlay's own keys are untouched by that change.  For governed
+            # automatic projections (register_shadow family) whose overlay
+            # keys still exist in the current base and whose patch keys are
+            # contained in the accumulated overlay row, the committed
+            # projection remains the authoritative intent: accept it so a
+            # deploy restart cannot freeze new risk for up to an hour
+            # (2026-09-02 observed a 38-minute freeze).
+            key_compatible = False
+            if not current_hash_bound and not legacy_hash_compatible:
+                key_compatible = self._auto_projection_key_compatible(
+                    item=item,
+                    overlay=overlay,
+                    current_config_payload=current_config_payload,
+                )
             checks = {
                 "intent_found": bool(item),
                 "committed": str(item.get("status") or "") == "committed",
@@ -401,14 +417,20 @@ class RuntimeConfigOverlayService:
                     str(item.get("projection_status") or "") == "current"
                 ),
                 "target_hash_bound": (
-                    current_hash_bound or legacy_hash_compatible
+                    current_hash_bound
+                    or legacy_hash_compatible
+                    or key_compatible
                 ),
                 "committed_hash_bound": (
-                    current_hash_bound or legacy_hash_compatible
+                    current_hash_bound
+                    or legacy_hash_compatible
+                    or key_compatible
                 ),
                 "domain_hash_bound": bool(str(item.get("domain_hash") or "")),
                 "hash_compatibility_safe": (
-                    current_hash_bound or legacy_hash_compatible
+                    current_hash_bound
+                    or legacy_hash_compatible
+                    or key_compatible
                 ),
             }
             ok = all(checks.values())
@@ -423,6 +445,8 @@ class RuntimeConfigOverlayService:
                     if current_hash_bound
                     else "legacy_additive_fields"
                     if legacy_hash_compatible
+                    else "auto_projection_key_compat"
+                    if key_compatible
                     else "none"
                 ),
                 "checks": checks,
@@ -465,6 +489,43 @@ class RuntimeConfigOverlayService:
             "invalid_control_keys": invalid_controls,
             "reason": "legacy_quarantine_verified" if ok else "legacy_quarantine_unverified",
         }
+
+    def _auto_projection_key_compatible(
+        self,
+        *,
+        item: dict[str, Any],
+        overlay: dict[str, Any],
+        current_config_payload: dict[str, Any],
+    ) -> bool:
+        """Key-level fallback for governed automatic shadow projections.
+
+        Strictly narrower than the hash contract and only reachable when the
+        full-config hash binding fails:
+        * intent source must be the autonomous register_shadow projection;
+        * every overlay top-level key must still exist in the current base
+          (no dead/removed config surface); and
+        * every top-level key of the intent's patch must be contained in the
+          accumulated overlay row (the row is this projection's successor,
+          not an unrelated replacement).
+        Operator or risk-reduction mutations never reach this path.
+        """
+        if str(item.get("source") or "") not in {
+            "factor_lifecycle.register_shadow",
+        }:
+            return False
+        overlay_keys = {str(key) for key in overlay}
+        if not overlay_keys:
+            return False
+        if not overlay_keys <= set(str(key) for key in current_config_payload):
+            return False
+        try:
+            patch = json.loads(str(item.get("patch_json") or "{}"))
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(patch, dict) or not patch:
+            return False
+        patch_keys = {str(key) for key in patch}
+        return bool(patch_keys) and patch_keys <= overlay_keys
 
     @staticmethod
     def _quarantined_projection(

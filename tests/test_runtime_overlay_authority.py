@@ -410,3 +410,75 @@ def test_runtime_refresh_retries_transient_projection_and_releases_exact_cause(
     assert released[0]["cause_id"] == "runtime_config_overlay_refresh"
     assert released[0]["reason"] == "runtime_overlay_authority_recovered"
     assert runtime_config.shared_holder().get().governance_expansion_paused is True
+
+
+def test_register_shadow_projection_survives_base_hash_drift_via_key_compat(
+    tmp_path, monkeypatch
+):
+    """A deploy that drifts the whole-config hash must not freeze new risk
+    when the committed automatic shadow projection's keys are untouched:
+    key-compat fallback keeps the projection authoritative until the next
+    register_shadow re-binds hashes."""
+    _set_mode(monkeypatch, "dual_record")
+    db_path = tmp_path / "state.db"
+    base = RuntimeConfig()
+    runtime_config.register_overlay_base(base, db_path)
+    result = GovernanceMutationCoordinator(db_path).execute(
+        GovernanceMutationPlan(
+            patch={"governance_expansion_paused": True},
+            source="factor_lifecycle.register_shadow",
+            actor="operator:test",
+            action="register_shadow_factor",
+            control_surface="factor_lifecycle_shadow",
+            scope_type="factor_lifecycle_shadow",
+            scope_key="global",
+            run_id="shadow_drift_1",
+        )
+    )
+    assert result["ok"] is True
+
+    # Same overlay keys, drifted whole-config hash (simulated settings.yaml /
+    # code change between deploys).  Not legacy-compatible: the drifted field
+    # participates in the legacy payload, so only key-compat can pass.
+    drifted_base = RuntimeConfig(factor_governance_model_min_factor_samples=37)
+
+    restored = RuntimeConfigOverlayService(db_path).restore_on_startup(drifted_base)
+
+    assert restored["restored"] is True
+    assert restored["authority"]["authority"] == "committed_mutation"
+    assert (
+        restored["authority"]["hash_compatibility"]
+        == "auto_projection_key_compat"
+    )
+    assert restored["authority"]["checks"]["target_hash_bound"] is True
+    assert restored["authority"]["checks"]["committed_hash_bound"] is True
+    assert restored["config"].governance_expansion_paused is True
+
+
+def test_register_shadow_key_compat_refuses_foreign_source_and_dead_keys(
+    tmp_path, monkeypatch
+):
+    """Non-register_shadow sources and overlays with keys missing from the
+    current base must NOT pass the key-compat fallback."""
+    _set_mode(monkeypatch, "dual_record")
+    db_path = tmp_path / "state.db"
+    base = RuntimeConfig()
+    runtime_config.register_overlay_base(base, db_path)
+    result = GovernanceMutationCoordinator(db_path).execute(
+        GovernanceMutationPlan(
+            patch={"governance_expansion_paused": True},
+            source="operator_pause",
+            actor="operator:test",
+            action="pause_governance_expansion",
+            control_surface="operator_governance_pause",
+            scope_type="operator_governance_pause",
+            scope_key="global",
+            run_id="foreign_source_drift",
+        )
+    )
+    assert result["ok"] is True
+    drifted_base = RuntimeConfig(factor_governance_model_min_factor_samples=41)
+
+    # Foreign source (operator_pause) must stay strictly hash-bound.
+    with pytest.raises(RuntimeConfigOverlayAuthorityError):
+        RuntimeConfigOverlayService(db_path).restore_on_startup(drifted_base)
