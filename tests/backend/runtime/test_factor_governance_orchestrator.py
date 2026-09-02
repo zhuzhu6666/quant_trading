@@ -1729,3 +1729,73 @@ def test_rollback_missing_payload_adjudicated_once(tmp_path):
 
     app = store.get_application(application_id)
     assert app["status"] == "applied"
+
+
+def test_expansion_preflight_hands_single_highest_priority_candidate(monkeypatch):
+    """The V16 delegate and the batch manifest verdict both require exactly
+    one frozen execution-ready candidate, so the preflight must narrow its
+    handoff to the next action in run_cycle execution order and report the
+    rest as deferred; otherwise the delegate can never issue a command."""
+    rc.reset_for_tests()
+    rc.patch(
+        {
+            "factor_signal_config": {
+                "fresh_shadow": {
+                    "enabled": True,
+                    "role": "alpha",
+                    "autonomous_activation": True,
+                },
+                "stale_member": {"enabled": True, "role": "alpha"},
+            },
+            "factor_portfolio_weights": {"fresh_shadow": 0.0, "stale_member": 0.6},
+            "factor_governance_builtin_activation_weight": 0.1,
+        }
+    )
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    profile = replace(
+        _strict_profile(orch),
+        builtin_activation_min_health_score=60.0,
+        builtin_activation_min_n_obs=500,
+        health_max_age_seconds=300.0,
+    )
+    report = {
+        "group_count": 1,
+        "groups": [
+            {
+                "group_id": "redundancy:auto:stale_member",
+                "leader": "stale_member",
+                "members": ["stale_member", "macd_hist"],
+                "correlations": {"stale_member:macd_hist": 0.95},
+                "sample_count": 500,
+            }
+        ],
+    }
+
+    result = orch._expansion_preflight(
+        [
+            {
+                "factor_id": "fresh_shadow",
+                "source": "builtin",
+                "role": "alpha",
+                "enabled": True,
+                "lifecycle_status": "SHADOW",
+                "health_status": "HEALTHY",
+                "health_score": 80.0,
+                "health_n_obs": 2000,
+                "health_updated_at": time.time(),
+                "factor_governance_shadow": {},
+            }
+        ],
+        cfg=rc.shared(),
+        profile=profile,
+        redundancy_report=report,
+    )
+
+    assert result["required"] is True
+    assert result["candidate_count"] == 1
+    assert result["candidate_refs"][0]["candidate_id"] == "fresh_shadow"
+    assert result["candidate_refs"][0]["action"] == "promote_factor"
+    assert result["deferred_candidates"] == [
+        {"candidate_id": "redundancy", "action": "update_redundancy_groups"}
+    ]

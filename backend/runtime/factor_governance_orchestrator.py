@@ -1362,12 +1362,34 @@ class FactorGovernanceOrchestrator:
                 ).hexdigest(),
                 "command_version": "factor_governance_candidate.v1",
             })
-        candidate_refs.sort(
-            key=lambda item: (
-                str(item.get("candidate_id") or ""),
-                str(item.get("action") or ""),
-            )
-        )
+        # A V16 command is a fixed one-candidate manifest: the delegate and
+        # factor_batch_manifest_verdict both require exactly one frozen,
+        # execution-ready candidate.  The preflight therefore hands over only
+        # the next action in the same single-mutation order run_cycle executes
+        # (zero-weight restore > quarantined restore > builtin activation >
+        # redundancy > shadow promotion); everything else stays actionable in
+        # later cycles and is reported as deferred.
+        def _candidate_priority(ref: dict[str, Any]) -> tuple[int, str]:
+            candidate_id = str(ref.get("candidate_id") or "")
+            if str(ref.get("action") or "") == "update_redundancy_groups":
+                return (3, candidate_id)
+            if candidate_id in active_zero_weight_ids:
+                return (0, candidate_id)
+            if candidate_id in restore_ids:
+                return (1, candidate_id)
+            if candidate_id in activation_ids:
+                return (2, candidate_id)
+            return (4, candidate_id)
+
+        ordered_refs = sorted(candidate_refs, key=_candidate_priority)
+        deferred_candidates = [
+            {
+                "candidate_id": str(ref.get("candidate_id") or ""),
+                "action": str(ref.get("action") or ""),
+            }
+            for ref in ordered_refs[1:]
+        ]
+        candidate_refs = ordered_refs[:1]
 
         reasons = {
             "builtin_activation": activation_ids,
@@ -1385,6 +1407,7 @@ class FactorGovernanceOrchestrator:
             "candidate_count": len(candidate_refs),
             "posterior_blocked_ids": posterior_blocked_ids,
             "posterior_degraded_ids": posterior_degraded_ids,
+            "deferred_candidates": deferred_candidates,
             "candidate_refs": candidate_refs,
             "directional_portfolio_guard": FactorWeightChangeService._directional_guard(
                 factor_configs=self._portfolio_configs(cfg),
