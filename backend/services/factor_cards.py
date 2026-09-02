@@ -353,12 +353,12 @@ def build_factor_admission_evidence(
         if validation[field]:
             continue
         if (
-            field == "cost_test_passed"
-            and canary_ladder_evidence
-            and validation_source.get("cost_test_passed") is None
+            canary_ladder_evidence
+            and validation_source.get(field) is None
         ):
-            # Never cost-tested: the ladder covers it (see above).  An
-            # explicit False means the test ran and failed — still blocks.
+            # Never validated: the ladder is the sequential OOS / point-in-time
+            # evaluation for bar-based candidates (see above).  An explicit
+            # False means the check ran and failed — still blocks.
             continue
         preflight_blockers.append(code)
     if str(canary.get("stage") or "").upper() not in {"ACTIVE", "PROBATION"}:

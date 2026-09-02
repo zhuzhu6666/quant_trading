@@ -870,7 +870,10 @@ def test_orchestrator_requires_active_canary_before_shadow_promotion():
 @pytest.mark.parametrize(
     ("health_status", "health_score", "health_age", "blocker"),
     [
-        ("UNKNOWN", 90.0, 0.0, "factor_health_unknown"),
+        # UNKNOWN is deliberately absent: an UNKNOWN row means the factor was
+        # never health-monitored, and at canary PROBATION/ACTIVE the ladder
+        # substitutes for that absent evidence (see
+        # test_promotion_evidence_waives_absent_health_for_canary_ladder_top).
         ("DECAYING", 90.0, 0.0, "factor_health_decaying"),
         ("HEALTHY", 90.0, 86_400.0, "factor_health_stale"),
         ("WATCH", 39.0, 0.0, "factor_health_watch_below_threshold"),

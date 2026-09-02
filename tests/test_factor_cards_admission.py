@@ -18,6 +18,7 @@ def test_admission_waives_absent_validation_for_canary_ladder_top():
             "lifecycle_artifact_hash": "a" * 64,
             "lifecycle_definition_fingerprint": "b" * 64,
             "lifecycle_config_hash": "c" * 64,
+            "runtime_selection_fingerprint": "f" * 64,
             "canary": {"stage": canary_stage},
             "shadow_perf": {
                 "oos_bars": 1200,
