@@ -761,3 +761,33 @@ def test_domain_only_writer_failure_rolls_back_domain_fact(tmp_path):
         db_path,
         "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='entry_control'",
     )["n"] == 0
+
+
+def test_builtin_demote_patch_with_activation_eligibility_stays_tightening():
+    """A PREPARED->SHADOW demote that newly stamps autonomous_activation is
+    still risk-tightening: eligibility is not authority (no weight, vote, or
+    exposure), so stale-prepared builtin exits never wait on a V16 command."""
+    before = {
+        "factor_signal_config": {
+            "harami": {
+                "lifecycle_status": "PROMOTION_PREPARED",
+                "enabled": True,
+                "committed_mutation_id": "m0",
+            }
+        }
+    }
+    target = {
+        "factor_signal_config": {
+            "harami": {
+                "lifecycle_status": "SHADOW",
+                "enabled": True,
+                "autonomous_activation": True,
+                "committed_mutation_id": "m1",
+            }
+        }
+    }
+
+    classification = classify_governance_risk(before, target)
+
+    assert classification.risk_class == "risk_tightening"
+    assert classification.v16_required is False

@@ -270,6 +270,25 @@ def classify_governance_risk(before: Mapping[str, Any], target: Mapping[str, Any
                 target_enabled = target_entry.get("enabled") is True
                 if not target_enabled and target_stage != "active":
                     continue
+                # A strict lifecycle demotion already voted restrictive via
+                # the lifecycle_status leaf: descriptive churn (mutation id,
+                # fingerprint) must not override it into an expansion.
+                before_entry = (
+                    before.get("factor_signal_config", {}).get(factor_name, {})
+                    if isinstance(before.get("factor_signal_config"), Mapping)
+                    else {}
+                )
+                before_rank = lifecycle_rank.get(
+                    str(
+                        before_entry.get("lifecycle_status")
+                        or before_entry.get("lifecycle_stage")
+                        or ""
+                    ).lower(),
+                    -1,
+                )
+                target_rank = lifecycle_rank.get(target_stage, -1)
+                if before_rank >= 0 and target_rank > before_rank:
+                    continue
         if lower.endswith("runtime_incident_mode"):
             old_rank = incident_rank.get(str(old or "").lower(), -1)
             new_rank = incident_rank.get(str(new or "").lower(), -1)
@@ -315,6 +334,32 @@ def classify_governance_risk(before: Mapping[str, Any], target: Mapping[str, Any
             inactive_bootstrap = old_rank < 0 and new_rank >= lifecycle_rank["shadow"]
             (tightening if inactive_bootstrap or new_rank > old_rank >= 0 else expansion).append(dotted)
             continue
+        if (
+            old is None
+            and new is True
+            and lower.endswith("autonomous_activation")
+        ):
+            # Eligibility for future autonomous activation is not authority:
+            # a parked/demoted factor gains no weight, vote, or exposure from
+            # the flag alone (activation still needs V16 + ack + health).
+            # Neutral while the target stage is non-active.
+            factor_name = (
+                str(path[1])
+                if len(path) >= 3 and path[0] == "factor_signal_config"
+                else ""
+            )
+            target_entry = (
+                target.get("factor_signal_config", {}).get(factor_name, {})
+                if isinstance(target.get("factor_signal_config"), Mapping)
+                else {}
+            )
+            target_stage = str(
+                target_entry.get("lifecycle_status")
+                or target_entry.get("lifecycle_stage")
+                or ""
+            ).lower()
+            if target_stage != "active":
+                continue
         if old is None and isinstance(new, bool):
             restrictive_bool = any(
                 token in lower
