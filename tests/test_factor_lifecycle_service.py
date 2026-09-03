@@ -1169,3 +1169,51 @@ def test_retire_threads_cause_keys_into_metadata(lifecycle):
     metadata = json.loads(state["metadata_json"])
     assert metadata["retire_cause"] == "param_mismatch"
     assert metadata["regime_id"] == "trend"
+
+
+def test_builtin_prepared_demotes_to_shadow_same_generation(tmp_path):
+    """Stale builtin PREPARED exits via same-generation demote (prepared
+    factors cannot vote, so the demote reduces nothing and risks nothing)."""
+    adapter = FakeAdapter("harami", "harami")  # type: ignore[arg-type]
+    adapter.meta["harami"]["source"] = SOURCE_BUILTIN
+    service = FactorLifecycleService(
+        tmp_path / "lifecycle.sqlite",
+        adapter=adapter,  # type: ignore[arg-type]
+        projection_stale_after_sec=75,
+        health_stale_after_sec=180,
+    )
+    prepared = service.prepare_promotion(
+        name="harami", evidence_refs=_candidate_admission_refs()
+    )
+    assert prepared["ok"] is True
+    assert prepared["lifecycle_stage"] == "PROMOTION_PREPARED"
+    generation = service.get_state(factor_name="harami")["generation"]
+
+    demoted = service.demote_to_shadow(name="harami", reason="prepared_stale")
+
+    assert demoted["ok"] is True
+    state = service.get_state(factor_name="harami")
+    assert state["lifecycle_stage"] == "SHADOW"
+    assert state["generation"] == generation
+
+
+def test_builtin_active_demote_stays_excluded(tmp_path):
+    """ACTIVE builtins keep the demotion exclusion (downweight/disable own them)."""
+    adapter = FakeAdapter("harami", "harami")  # type: ignore[arg-type]
+    adapter.meta["harami"]["source"] = SOURCE_BUILTIN
+    service = FactorLifecycleService(
+        tmp_path / "lifecycle.sqlite",
+        adapter=adapter,  # type: ignore[arg-type]
+        projection_stale_after_sec=75,
+        health_stale_after_sec=180,
+    )
+    now = time.time()
+    _prepare_and_ack(service, "harami", now=now)
+    _write_health(service, "harami", now=now)
+    activated = _activate_candidate(service, "harami", weight=0.25, now=now)
+    assert activated["ok"] is True
+
+    demoted = service.demote_to_shadow(name="harami", reason="prepared_stale")
+
+    assert demoted["ok"] is False
+    assert demoted["reason"] == "builtin_factor_demotion_not_supported"

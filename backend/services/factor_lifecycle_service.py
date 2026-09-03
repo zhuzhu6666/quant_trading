@@ -512,7 +512,12 @@ class FactorLifecycleService:
             current = self.get_state(factor_name=name)
             if not current:
                 raise FactorLifecycleError("factor_lifecycle_state_missing")
-            if str(current.get("origin") or "") == SOURCE_BUILTIN:
+            # PREPARED builtins may demote same-generation: prepared factors
+            # cannot vote (prepared_factor_unexpectedly_voting), so the demote
+            # reduces nothing and risks nothing.  ACTIVE builtins stay excluded.
+            if str(current.get("origin") or "") == SOURCE_BUILTIN and str(
+                current.get("lifecycle_stage") or ""
+            ) != FactorLifecycleStage.PROMOTION_PREPARED.value:
                 raise FactorLifecycleError("builtin_factor_demotion_not_supported")
             if current.get("lifecycle_stage") == FactorLifecycleStage.SHADOW.value:
                 return {

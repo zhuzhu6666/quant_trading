@@ -541,6 +541,10 @@ class FactorGovernanceOrchestrator:
             actions.extend(disable_actions)
             if _catalog_refresh_required(disable_actions):
                 catalog = build_factor_catalog(self.overlay.db_path)
+            fast_retire_actions = self._retire_zero_progress_shadow(catalog, run, cfg=cfg)
+            actions.extend(fast_retire_actions)
+            if _catalog_refresh_required(fast_retire_actions):
+                catalog = build_factor_catalog(self.overlay.db_path)
             retire_actions = self._retire_quarantined_discovered(catalog, run)
             actions.extend(retire_actions)
             if _catalog_refresh_required(retire_actions):
@@ -3871,6 +3875,104 @@ class FactorGovernanceOrchestrator:
                 },
             )
         ]
+
+    def _retire_zero_progress_shadow(
+        self, catalog: list[dict[str, Any]], run: dict[str, Any], *, cfg: Any
+    ) -> list[dict[str, Any]]:
+        """Fast lane: retire over-age SHADOW rows with zero fresh evidence.
+
+        Risk-reducing direction only: candidates hold no weight and produced
+        no evidence for longer than the stale-evidence window, so retirement
+        shrinks the review surface instead of expanding risk. Consumes its own
+        budget (`factor_governance_fast_retire_per_cycle`), never the normal
+        retire quota. Builtins excluded (Batch-D restore owns them).
+        """
+        max_actions = int(getattr(cfg, "factor_governance_fast_retire_per_cycle", 10) or 0)
+        if max_actions <= 0:
+            return []
+        max_age_hours = float(
+            getattr(cfg, "factor_governance_stale_evidence_max_age_hours", 336) or 0
+        )
+        if max_age_hours <= 0:
+            return []
+        now = time.time()
+        current_regime_id = str(
+            (self._current_market_regime_projection() or {}).get("regime_id") or ""
+        )
+        candidates = []
+        for item in catalog:
+            if str(item.get("lifecycle_status") or "") != FactorLifecycleStage.SHADOW.value:
+                continue
+            if not str(item.get("lifecycle_factor_id") or ""):
+                continue
+            if str(item.get("lifecycle_origin") or item.get("source") or "") == "builtin":
+                continue
+            canary = item.get("canary") or {}
+            if int(canary.get("fresh_evidence_bars") or 0) != 0:
+                continue
+            seen_at = max(
+                float(canary.get("updated_at") or 0.0),
+                float(item.get("last_action_ts") or 0.0),
+                float(item.get("lifecycle_updated_at") or 0.0),
+            )
+            if seen_at <= 0 or (now - seen_at) <= max_age_hours * 3600.0:
+                continue
+            if str(item.get("health_status") or "UNKNOWN").upper() != "UNKNOWN" and float(
+                item.get("health_score") or 0.0
+            ) > 0:
+                continue
+            if self._factor_has_pending_effect(str(item.get("factor_id") or "")):
+                continue
+            candidates.append((seen_at, item))
+        candidates.sort(key=lambda pair: pair[0])
+        actions: list[dict[str, Any]] = []
+        from alpha.registry_adapter import RegistryAdapter
+
+        adapter = RegistryAdapter.shared()
+        lifecycle = FactorLifecycleService(self.overlay.db_path, adapter=adapter)
+        for _, item in candidates[:max_actions]:
+            factor_name = str(item["factor_id"])
+            meta = adapter.get_meta(factor_name) or {}
+            evidence = {
+                "health_score": float(item.get("health_score") or 0.0),
+                "health_status": item.get("health_status"),
+                "source": item.get("source"),
+                "enabled": item.get("enabled"),
+                "fresh_evidence_bars": 0,
+                "stale_evidence_max_age_hours": max_age_hours,
+                "retire_cause": "dead",
+                "regime_id": current_regime_id,
+            }
+            verdict = self._risk("retire_factor", item, evidence)
+            if not verdict.allowed:
+                actions.append(self._audit_action(run, item, "retire_factor", "blocked_by_risk", evidence, verdict))
+                continue
+            before_cfg = runtime_config.shared().to_dict()
+            result = lifecycle.retire(
+                name=factor_name,
+                expression=str(meta.get("description") or ""),
+                artifact_hash=str(meta.get("artifact_hash") or ""),
+                actor="system:factor_governance",
+                reason="autonomous governance fast-lane retirement of zero-progress shadow",
+                evidence_refs=evidence,
+                idempotency_key=f"factor_retire:{factor_name}:{run.get('run_id', '')}",
+            )
+            actions.append(self._audit_action(
+                run,
+                item,
+                "retire_factor",
+                "applied" if result.get("ok") else "blocked_by_evidence",
+                evidence,
+                verdict,
+                before={"runtime_config": before_cfg, "lifecycle_status": item.get("lifecycle_status")},
+                after={
+                    "lifecycle_status": str(result.get("lifecycle_stage") or ""),
+                    "mutation_id": str(result.get("mutation_id") or ""),
+                },
+                rollback={"runtime_config": before_cfg},
+                result=result,
+            ))
+        return actions
 
     def _retire_quarantined_discovered(self, catalog: list[dict[str, Any]], run: dict[str, Any]) -> list[dict[str, Any]]:
         cfg = runtime_config.shared()

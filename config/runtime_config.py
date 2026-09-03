@@ -592,6 +592,11 @@ class RuntimeConfig:
     factor_governance_max_promotions_per_cycle: int = 1
     factor_governance_max_disables_per_cycle: int = 1
     factor_governance_max_retires_per_cycle: int = 1
+    # Fast-lane sweep budget for zero-progress SHADOW rows (separate from the
+    # normal retire quota; risk-reducing direction only).
+    factor_governance_fast_retire_per_cycle: int = 10
+    # Zero-progress SHADOW rows older than this (hours) are fast-lane retired.
+    factor_governance_stale_evidence_max_age_hours: int = 336
     # PROMOTION_PREPARED 租约：滞留超阈值的 prepared 候选降回 SHADOW 重新取证。
     factor_governance_promotion_prepared_max_age_hours: int = 168
     # 扩张候选退避：最近 blocked 的候选在单候选交接中降级的小时窗口。
