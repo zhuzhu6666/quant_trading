@@ -2031,6 +2031,15 @@ class FactorGovernanceOrchestrator:
         cfg = runtime_config.shared()
         min_trades = int(getattr(cfg, "factor_governance_rollback_min_trades", 3) or 3)
         delta_threshold = float(getattr(cfg, "factor_governance_rollback_delta_threshold", -0.15) or -0.15)
+        # Kill-switch symmetry: the scan budget scales with batch throughput
+        # so a full batch of fresh applications is always covered.
+        batch_max = max(
+            1, int(getattr(cfg, "factor_governance_batch_max_candidates", 5) or 5)
+        )
+        scan_limit = max(
+            int(getattr(cfg, "factor_governance_rollback_scan_limit", 10) or 10),
+            2 * batch_max,
+        )
         try:
             store = LearningApplicationStore(str(self.overlay.db_path))
             _rows: list[dict[str, Any]] = []
@@ -2078,7 +2087,15 @@ class FactorGovernanceOrchestrator:
                     "_effect_updated_at": float(eff.get("updated_at") or 0),
                 })
             _rows.sort(key=lambda r: r["_effect_updated_at"], reverse=True)
-            rows = _rows[:5]
+            # Adjudicated rows must not consume scan budget: already-handled
+            # applications stay visible in the store, so slicing first would
+            # starve unhandled rows behind them on every rescan.
+            rows = [
+                row
+                for row in _rows
+                if self._rollback_adjudicated(str(row["application_id"] or ""))
+                is None
+            ][:scan_limit]
             for row in rows:
                 factor_id = str(row["scope_key"] or "")
                 application_id = str(row["application_id"] or "")

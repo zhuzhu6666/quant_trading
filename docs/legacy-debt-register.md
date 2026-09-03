@@ -119,6 +119,10 @@
   变更打断 07:00 retire intent（dd5469ad）绑定；② 02:18 启动的 backend 在 13:20 重绑成功后仍用旧 base
   反复复闩，13:25 重启后停止。Coordinator 重绑（b 路径）后若闩不消，先查各服务启动时间是否早于最近
   settings 变更。
+  变更。③ 16:26 起 Phase-2 新增 key 使 13:36 intent 失配，`RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS`
+  必须恰等于 latest committed mutation 之后新增的 key（旧豁免一旦被新 mutation 绑定就退出，否则会剥离
+  intent 自带的 key 反而失配；17:25 一次 retire_factor 重新绑定后自愈）。新增 RuntimeConfig key 的提交
+  必须同步维护该集合，否则下次部署复闩。
 
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
 

@@ -415,17 +415,14 @@ def test_autonomous_mutation_cannot_change_static_release_flags(
 
 
 def test_governance_acceleration_keys_stay_legacy_hash_excluded() -> None:
-    """Additive budgets/caps must not break already-committed overlay
-    intents: they stay legacy-excluded exactly at their safe defaults."""
+    """The legacy set must equal exactly the keys added after the latest
+    committed overlay mutation (additive safe defaults, absent from the
+    overlay); older exclusions retire once a newer mutation binds them."""
     expected = {
-        "factor_governance_fast_retire_per_cycle": 10,
-        "factor_governance_stale_evidence_max_age_hours": 336,
-        "factor_governance_batch_max_candidates": 5,
-        "factor_governance_batch_max_total_weight_delta": 0.30,
+        "factor_regime_prior_half_life_days": 30.0,
+        "factor_governance_rollback_scan_limit": 10,
     }
-    assert expected.keys() <= set(
-        rc.RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS
-    )
+    assert set(rc.RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS) == set(expected)
     for key, default in expected.items():
         assert rc.RUNTIME_CONFIG_LEGACY_HASH_DEFAULTS[key] == default
         assert getattr(rc.RuntimeConfig(), key) == default

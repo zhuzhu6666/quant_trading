@@ -200,3 +200,81 @@ def current_regime_projection(db_path) -> dict[str, Any]:
             "source": "unavailable",
             "dimensions": {},
         }
+
+
+def factor_regime_prior(
+    db_path,
+    factor_id: str,
+    regime_id: str,
+    *,
+    half_life_days: float = 30.0,
+) -> dict[str, Any]:
+    """Decayed factor x regime prior from existing memory rows.
+
+    Aggregates `factor_contribution_review` net contributions joined to
+    `experience_memory` regime labels with exponential time decay (no new
+    tables).  Returns `{prior_weight, confidence, n_obs}`; empty when no
+    rows (callers treat as no-prior, never as zero).
+    """
+    fid = str(factor_id or "")
+    rid = str(regime_id or "")
+    if not fid or not rid:
+        return {}
+    try:
+        import time
+
+        from backend.core.db import (
+            connect_sqlite,
+            get_state_pg_conn,
+            is_state_db_path,
+            state_table_exists,
+        )
+
+        production_state = is_state_db_path(db_path)
+        conn = (
+            get_state_pg_conn(read_only=True)
+            if production_state
+            else connect_sqlite(db_path, read_only=True)
+        )
+        try:
+            if not production_state:
+                import sqlite3
+
+                conn.row_factory = sqlite3.Row
+            if not state_table_exists(conn, "factor_contribution_review"):
+                return {}
+            if not state_table_exists(conn, "experience_memory"):
+                return {}
+            sql = """
+                SELECT e.created_at, c.net_contribution, c.confidence
+                FROM factor_contribution_review c
+                JOIN experience_memory e ON e.trade_id = c.trade_id
+                WHERE c.factor = ?
+                  AND c.trade_id <> ''
+                  AND e.trade_id <> ''
+                  AND e.regime_id = ?
+                """
+            if production_state:
+                sql = sql.replace("?", "%s")
+            rows = conn.execute(sql, (fid, rid)).fetchall()
+            now = time.time()
+            half_life = max(1e-9, float(half_life_days or 30.0)) * 86400.0
+            weighted_value = 0.0
+            weight_sum = 0.0
+            for row in rows:
+                age = max(0.0, now - float(row["created_at"] or 0.0))
+                decay = 0.5 ** (age / half_life)
+                confidence = min(1.0, max(0.0, float(row["confidence"] or 0.0)))
+                weighted_value += decay * float(row["net_contribution"] or 0.0) * confidence
+                weight_sum += decay
+            if weight_sum <= 0.0:
+                return {}
+            return {
+                "prior_weight": weighted_value / weight_sum,
+                "confidence": round(min(1.0, weight_sum / 5.0), 4),
+                "n_obs": len(rows),
+            }
+        finally:
+            conn.close()
+    except Exception:
+        return {}

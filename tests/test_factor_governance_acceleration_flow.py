@@ -15,6 +15,18 @@ import backend.runtime.factor_governance_orchestrator as governance_module
 from backend.runtime.factor_governance_orchestrator import FactorGovernanceOrchestrator
 from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
 from config import runtime_config as rc
+from backend.services.learning_application_store import LearningApplicationStore
+
+
+def _init_state_db(tmp_path) -> None:
+    from backend.core.db import STATE_DB_DDL, connect_sqlite
+
+    conn = connect_sqlite(tmp_path / "state.db")
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.commit()
+    finally:
+        conn.close()
 import pytest
 
 
@@ -583,3 +595,114 @@ def test_revival_refuses_current_regime_outside_good_set(tmp_path):
 
     assert result["ok"] is False
     assert result["reason"] == "revival_regime_mismatch"
+
+
+def _seed_prior_rows(db_path, factor, regime, *, n=3, net=0.5, age_days=0.0):
+    import sqlite3
+    import time as _time
+
+    now = _time.time()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS experience_memory "
+            "(experience_id TEXT PRIMARY KEY, trade_id TEXT DEFAULT '', "
+            "regime_id TEXT DEFAULT '', created_at REAL DEFAULT 0.0)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS factor_contribution_review "
+            "(id INTEGER PRIMARY KEY AUTOINCREMENT, review_id TEXT NOT NULL, "
+            "trade_id TEXT DEFAULT '', factor TEXT NOT NULL, "
+            "net_contribution REAL DEFAULT 0.0, confidence REAL DEFAULT 0.0)"
+        )
+        for idx in range(n):
+            trade = f"{factor}-trade-{idx}"
+            conn.execute(
+                "INSERT INTO experience_memory (experience_id, trade_id, regime_id,"
+                " created_at) VALUES (?, ?, ?, ?)",
+                (f"exp-{factor}-{idx}", trade, regime, now - age_days * 86400.0),
+            )
+            conn.execute(
+                "INSERT INTO factor_contribution_review (review_id, trade_id, factor,"
+                " net_contribution, confidence) VALUES (?, ?, ?, ?, ?)",
+                (f"rev-{factor}-{idx}", trade, factor, net, 0.8),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_regime_prior_decays_and_reports_confidence(tmp_path):
+    """Decayed positive memory returns a positive prior with sub-fresh
+    confidence; unknown factor/regime is no-prior ({}), never zero."""
+    from backend.services.market_regime import factor_regime_prior
+
+    db_path = tmp_path / "memory.sqlite"
+    _seed_prior_rows(db_path, "alpha_m", "trend", n=3, net=0.5)
+
+    prior = factor_regime_prior(db_path, "alpha_m", "trend")
+
+    assert prior["n_obs"] == 3
+    assert prior["prior_weight"] > 0
+    assert 0.0 < prior["confidence"] < 1.0
+    assert factor_regime_prior(db_path, "alpha_m", "range") == {}
+    assert factor_regime_prior(db_path, "nope", "trend") == {}
+
+
+def test_revival_carries_prior_into_evidence(tmp_path):
+    """A matching-regime revival with decayed positive memory carries the
+    prior into re-preparation evidence for probation observers."""
+    import json
+    import sqlite3
+
+    service, name = _retired_dsl(tmp_path, "revive_prior",
+                                 cause="regime_mismatch", regime="trend")
+    _seed_prior_rows(service.db_path, name, "trend", n=4, net=0.6)
+    _seed_experience(service.db_path, ["trend"] * 5)
+
+    result = _revive(service, name, key="revive-prior-1")
+
+    assert result["ok"] is True
+    row = sqlite3.connect(service.db_path).execute(
+        "SELECT evidence_json FROM factor_lifecycle_state WHERE factor_name=?",
+        (name,),
+    ).fetchone()
+    evidence = json.loads(row[0])
+    assert evidence["revival_prior"]["n_obs"] == 4
+    assert evidence["revival_prior"]["prior_weight"] > 0
+    assert 0.0 < evidence["revival_prior"]["confidence"] < 1.0
+
+
+def test_rollback_scan_covers_batch_budget(tmp_path):
+    """12 failing applications with batch-sized budget 10 -> first scan
+    takes 10, second scan takes the remaining 2 (kill-switch symmetry)."""
+    rc.reset_for_tests()
+    _init_state_db(tmp_path)
+    db = tmp_path / "state.db"
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(db)
+    store = LearningApplicationStore(str(db))
+    for idx in range(12):
+        application_id = store.prepare_application(
+            scope_type="factor",
+            scope_key=f"batch_factor_{idx:02d}",
+            action="update_weight",
+            status="applied",
+            run_id="run-batch",
+            source="test",
+        )
+        store.write_effect(
+            application_id=application_id,
+            scope_key=f"batch_factor_{idx:02d}",
+            scope_type="factor",
+            action="update_weight",
+            status="applied",
+            observed_trade_count=5,
+            delta_avg_reward=-0.5,
+        )
+
+    first = orch._rollback_failed_actions({"run_id": "gov-batch-1"})
+    second = orch._rollback_failed_actions({"run_id": "gov-batch-2"})
+
+    assert len(first) == 10
+    assert len(second) == 2

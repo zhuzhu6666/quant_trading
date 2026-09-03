@@ -469,6 +469,24 @@ class FactorLifecycleService:
                 raise FactorLifecycleError(
                     "factor_definition_changed_since_retirement"
                 )
+            from backend.services.market_regime import factor_regime_prior
+
+            # Memory buys speed: observers start from the decayed prior
+            # instead of zero.  No gate is skipped (ack, health, V16 and
+            # coordinator still required); empty means no-prior, never zero.
+            revival_prior = factor_regime_prior(
+                self.db_path,
+                name,
+                regime_id,
+                half_life_days=float(
+                    getattr(
+                        runtime_config.shared(),
+                        "factor_regime_prior_half_life_days",
+                        30.0,
+                    )
+                    or 30.0
+                ),
+            )
             definition = self._definition_from_state(current)
             mutation = FactorLifecycleMutation(
                 definition=definition,
@@ -479,6 +497,7 @@ class FactorLifecycleService:
                 evidence_refs={
                     **dict(evidence_refs or {}),
                     "revival_regime_id": regime_id,
+                    "revival_prior": revival_prior,
                     "previous_generation": int(current.get("generation") or 1),
                     "previous_terminal_mutation_id": str(
                         current.get("mutation_id") or ""
