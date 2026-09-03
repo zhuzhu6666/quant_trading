@@ -412,3 +412,20 @@ def test_autonomous_mutation_cannot_change_static_release_flags(
     assert result["ok"] is False
     assert result["status"] == "static_feature_flag_mutation_forbidden"
     assert result["forbidden_keys"] == [flag]
+
+
+def test_governance_acceleration_keys_stay_legacy_hash_excluded() -> None:
+    """Additive budgets/caps must not break already-committed overlay
+    intents: they stay legacy-excluded exactly at their safe defaults."""
+    expected = {
+        "factor_governance_fast_retire_per_cycle": 10,
+        "factor_governance_stale_evidence_max_age_hours": 336,
+        "factor_governance_batch_max_candidates": 5,
+        "factor_governance_batch_max_total_weight_delta": 0.30,
+    }
+    assert expected.keys() <= set(
+        rc.RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS
+    )
+    for key, default in expected.items():
+        assert rc.RUNTIME_CONFIG_LEGACY_HASH_DEFAULTS[key] == default
+        assert getattr(rc.RuntimeConfig(), key) == default

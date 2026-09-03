@@ -431,3 +431,155 @@ def test_gate_reclaims_partial_batch_for_next_item(tmp_path):
     )
     assert done2["allowed"] is True
     assert _claim("alpha_a").get("allowed") is not True
+
+
+class _RevivalAdapter:
+    """Minimal discovered-factor adapter: meta + registry projection hooks."""
+
+    def __init__(self, name, expression):
+        from alpha.registry import factor_registry
+
+        self.meta = {
+            name: {"source": "shadow", "description": expression,
+                   "register_time": __import__("time").time()}
+        }
+        factor_registry._factors[name] = lambda df: df["close"]
+
+    def get_meta(self, name):
+        return dict(self.meta.get(name, {}))
+
+    def register_runtime(self, name, func, source, description="", **_kwargs):
+        from alpha.registry import factor_registry
+
+        factor_registry._factors[name] = func
+        self.meta[name] = {"source": source, "description": description,
+                           "register_time": __import__("time").time()}
+        return True
+
+    def promote(self, name, new_source, reason=""):
+        self.meta[name]["source"] = new_source
+        return True
+
+    def demote(self, name, new_source, reason=""):
+        self.meta[name]["source"] = new_source
+        return True
+
+    def unregister(self, name, reason=""):
+        from alpha.registry import factor_registry
+
+        factor_registry._factors.pop(name, None)
+        self.meta[name]["source"] = "removed"
+        return True
+
+
+def _retired_dsl(tmp_path, fname, *, cause, regime):
+    from backend.services.factor_lifecycle_service import FactorLifecycleService
+
+    expression = "ts_mean(close, 5) + delta(volume, 2)"
+    service = FactorLifecycleService(
+        tmp_path / f"{fname}.sqlite",
+        adapter=_RevivalAdapter(fname, expression),
+        projection_stale_after_sec=75,
+        health_stale_after_sec=180,
+    )
+    registered = service.register_shadow(
+        name=fname,
+        expression=expression,
+        evidence_refs={"candidate_validation": {"direction": 1,
+                                                "signed_ic_mean": 0.03}},
+    )
+    assert registered["ok"] is True
+    retired = service.retire(
+        name=fname,
+        evidence_refs={"retire_cause": cause, "regime_id": regime},
+        idempotency_key=f"retire-{fname}",
+    )
+    assert retired["ok"] is True
+    return service, fname
+
+
+def _seed_experience(db_path, regimes):
+    import sqlite3
+    import time as _time
+
+    now = _time.time()
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS experience_memory "
+            "(regime_id TEXT, created_at REAL, trade_id TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO experience_memory (regime_id, created_at, trade_id)"
+            " VALUES (?, ?, ?)",
+            [(regime, now + idx, f"trade-{idx}") for idx, regime in enumerate(regimes)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _revive(service, name, key="revive-1"):
+    return service.reprepare_retired(
+        name=name,
+        actor="system:factor_governance",
+        reason="regime back in fitting set",
+        evidence_refs={},
+        idempotency_key=key,
+    )
+
+
+def test_revival_reprepares_regime_mismatch_to_new_shadow(tmp_path):
+    """RETIRED cause=regime_mismatch + matching current regime -> new SHADOW
+    generation linked to the terminal mutation, admission blocked."""
+    import json
+
+    service, name = _retired_dsl(tmp_path, "revive_alpha", cause="regime_mismatch",
+                                 regime="trend")
+    _seed_experience(service.db_path, ["trend"] * 5)
+    before = service.get_state(factor_name=name)
+    assert before["lifecycle_stage"] == "RETIRED"
+
+    result = _revive(service, name)
+
+    assert result["ok"] is True
+    assert result["lifecycle_stage"] == "SHADOW"
+    after = service.get_state(factor_name=name)
+    assert after["generation"] == int(before["generation"]) + 1
+    assert after["runtime_admission"] == "blocked"
+    metadata = json.loads(after["metadata_json"])
+    assert metadata["reenrolled_from"]["mutation_id"] == before["mutation_id"]
+    assert metadata["reenrolled_from"]["lifecycle_stage"] == "RETIRED"
+    assert metadata["revival_regime_id"] == "trend"
+
+
+def test_revival_rejects_dead_cause(tmp_path):
+    service, name = _retired_dsl(tmp_path, "revive_dead", cause="dead",
+                                 regime="trend")
+    _seed_experience(service.db_path, ["trend"] * 5)
+
+    result = _revive(service, name)
+
+    assert result["ok"] is False
+    assert result["reason"] == "revival_cause_ineligible"
+
+
+def test_revival_fails_closed_on_unknown_regime(tmp_path):
+    service, name = _retired_dsl(tmp_path, "revive_unknown",
+                                 cause="regime_mismatch", regime="trend")
+
+    result = _revive(service, name)
+
+    assert result["ok"] is False
+    assert result["reason"] == "revival_regime_unknown"
+
+
+def test_revival_refuses_current_regime_outside_good_set(tmp_path):
+    service, name = _retired_dsl(tmp_path, "revive_other",
+                                 cause="regime_mismatch", regime="trend")
+    _seed_experience(service.db_path, ["range"] * 5)
+
+    result = _revive(service, name)
+
+    assert result["ok"] is False
+    assert result["reason"] == "revival_regime_mismatch"

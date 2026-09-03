@@ -4526,66 +4526,12 @@ class FactorGovernanceOrchestrator:
     def _current_market_regime_projection(self) -> dict[str, Any]:
         """Read-only projection of the current market regime (batch B).
 
-        Single fact owner: consumes `experience_memory.regime_id` (the only
-        persisted regime label source) and resolves a low-cardinality regime
-        via market_regime.project_current_market_regime().  No new writer,
-        no new table.  Returns an `unavailable` projection when no data.
+        Thin delegate of the shared market_regime fact owner (same
+        `experience_memory.regime_id` source the revival gate reads).
         """
-        try:
-            from backend.services.market_regime import project_current_market_regime
+        from backend.services.market_regime import current_regime_projection
 
-            db_path = self.overlay.db_path
-            production_state = is_state_db_path(db_path)
-            if not production_state and not Path(db_path).exists():
-                return {
-                    "regime_id": "",
-                    "confidence": 0.0,
-                    "source": "unavailable",
-                    "dimensions": {},
-                }
-            conn = (
-                get_state_pg_conn(read_only=True)
-                if production_state
-                else connect_sqlite(db_path, read_only=True)
-            )
-            if not production_state:
-                conn.row_factory = sqlite3.Row
-            try:
-                if not state_table_exists(conn, "experience_memory"):
-                    return {
-                        "regime_id": "",
-                        "confidence": 0.0,
-                        "source": "unavailable",
-                        "dimensions": {},
-                    }
-                rows = conn.execute(
-                    """
-                    SELECT regime_id, created_at, trade_id
-                    FROM experience_memory
-                    WHERE regime_id IS NOT NULL AND regime_id <> ''
-                    ORDER BY created_at DESC
-                    LIMIT 15
-                    """
-                ).fetchall()
-                experience_rows = [
-                    {
-                        "regime_id": str(row["regime_id"] or ""),
-                        "created_at": float(row["created_at"] or 0.0),
-                        "trade_id": str(row["trade_id"] or ""),
-                    }
-                    for row in rows
-                ]
-                projection = project_current_market_regime(experience_rows)
-                return projection
-            finally:
-                conn.close()
-        except Exception:
-            return {
-                "regime_id": "",
-                "confidence": 0.0,
-                "source": "unavailable",
-                "dimensions": {},
-            }
+        return current_regime_projection(self.overlay.db_path)
 
     @staticmethod
     def _regime_mismatch_verdict(

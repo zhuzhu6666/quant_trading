@@ -837,6 +837,12 @@ RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS = frozenset(
         "position_supervisor_switch_cooldown_bars",
         "position_supervisor_max_switches_per_position",
         "position_supervisor_selection_max_age_seconds",
+        # Factor governance acceleration budgets/caps (Phases 2-3): gate only
+        # new code paths, never reinterpret already-committed mutations.
+        "factor_governance_fast_retire_per_cycle",
+        "factor_governance_stale_evidence_max_age_hours",
+        "factor_governance_batch_max_candidates",
+        "factor_governance_batch_max_total_weight_delta",
     }
 )
 RUNTIME_CONFIG_LEGACY_HASH_DEFAULTS = {
@@ -845,6 +851,10 @@ RUNTIME_CONFIG_LEGACY_HASH_DEFAULTS = {
     "position_supervisor_switch_cooldown_bars": 3,
     "position_supervisor_max_switches_per_position": 2,
     "position_supervisor_selection_max_age_seconds": 900.0,
+    "factor_governance_fast_retire_per_cycle": 10,
+    "factor_governance_stale_evidence_max_age_hours": 336,
+    "factor_governance_batch_max_candidates": 5,
+    "factor_governance_batch_max_total_weight_delta": 0.30,
 }
 
 def canonical_runtime_config_payload(value: Any) -> Dict[str, Any]:
@@ -902,7 +912,7 @@ def runtime_config_hash(value: Any) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 def legacy_runtime_config_hash_payload(value: Any) -> Dict[str, Any]:
-    """Project a config as it looked before supervisor selection was added."""
+    """Project a config as it looked before the legacy-excluded fields existed."""
 
     payload = canonical_runtime_config_payload(value)
     for key in RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS:

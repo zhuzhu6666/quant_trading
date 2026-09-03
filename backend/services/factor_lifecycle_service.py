@@ -413,6 +413,85 @@ class FactorLifecycleService:
         except Exception as exc:
             return self._failure(exc, name=name)
 
+    def reprepare_retired(
+        self,
+        *,
+        name: str,
+        actor: str,
+        reason: str,
+        evidence_refs: Mapping[str, Any] | None,
+        idempotency_key: str,
+        v16: FactorV16Binding | None = None,
+    ) -> dict[str, Any]:
+        """Start a new SHADOW generation from a regime-mismatched RETIRED row.
+
+        Revival, not resurrection: the terminal generation stays terminal; the
+        new generation runs with `runtime_admission='blocked'` and must
+        re-earn `projection_acknowledged` before ACTIVE.  Fail-closed:
+        non-`regime_mismatch` causes are ineligible, an unknown current
+        regime refuses, a regime outside the factor's good-regime set
+        refuses, and a changed definition refuses.
+        """
+        try:
+            current = self.get_state(factor_name=name)
+            if not current:
+                raise FactorLifecycleError("factor_lifecycle_state_missing")
+            if (
+                str(current.get("lifecycle_stage") or "")
+                != FactorLifecycleStage.RETIRED.value
+            ):
+                raise FactorLifecycleError("retired_generation_required")
+            metadata = _loads(current.get("metadata_json"))
+            if str(metadata.get("retire_cause") or "") != "regime_mismatch":
+                raise FactorLifecycleError("revival_cause_ineligible")
+            from backend.services.market_regime import current_regime_projection
+
+            regime_id = str(
+                (current_regime_projection(self.db_path) or {}).get("regime_id")
+                or ""
+            )
+            if not regime_id:
+                raise FactorLifecycleError("revival_regime_unknown")
+            # Good-regime set v0: the regime the factor fitted at retirement.
+            # Phase 5 generalizes this to decayed factor x regime priors.
+            good_regimes = {
+                str(metadata.get("regime_id") or ""),
+            } - {""}
+            if regime_id not in good_regimes:
+                raise FactorLifecycleError("revival_regime_mismatch")
+            meta = self.adapter.get_meta(name) or {}
+            fresh = self._definition(
+                name,
+                str(meta.get("description") or ""),
+                str(meta.get("artifact_hash") or ""),
+            )
+            if not self._same_definition(current, fresh):
+                raise FactorLifecycleError(
+                    "factor_definition_changed_since_retirement"
+                )
+            definition = self._definition_from_state(current)
+            mutation = FactorLifecycleMutation(
+                definition=definition,
+                target_stage=FactorLifecycleStage.SHADOW,
+                actor=actor,
+                reason=reason,
+                source="factor_lifecycle.reprepare_retired",
+                evidence_refs={
+                    **dict(evidence_refs or {}),
+                    "revival_regime_id": regime_id,
+                    "previous_generation": int(current.get("generation") or 1),
+                    "previous_terminal_mutation_id": str(
+                        current.get("mutation_id") or ""
+                    ),
+                },
+                idempotency_key=idempotency_key,
+                v16=v16 or FactorV16Binding(),
+                new_generation=True,
+            )
+            return self._execute(mutation, current=current)
+        except Exception as exc:
+            return self._failure(exc, name=name)
+
     def activate(
         self,
         *,
@@ -1525,12 +1604,22 @@ class FactorLifecycleService:
         if name_conflict:
             raise FactorLifecycleError("factor_name_definition_conflict")
         if mutation.new_generation:
-            if (
-                str(current.get("origin") or "") != SOURCE_BUILTIN
-                or str(current.get("lifecycle_stage") or "")
-                != FactorLifecycleStage.QUARANTINED.value
-                or mutation.target_stage is not FactorLifecycleStage.SHADOW
-            ):
+            reenroll_ok = (
+                str(current.get("origin") or "") == SOURCE_BUILTIN
+                and str(current.get("lifecycle_stage") or "")
+                == FactorLifecycleStage.QUARANTINED.value
+                and mutation.target_stage is FactorLifecycleStage.SHADOW
+            )
+            reprepare_ok = (
+                str(mutation.source or "")
+                == "factor_lifecycle.reprepare_retired"
+                and str(current.get("origin") or "")
+                in (SOURCE_BUILTIN, "dsl")
+                and str(current.get("lifecycle_stage") or "")
+                == FactorLifecycleStage.RETIRED.value
+                and mutation.target_stage is FactorLifecycleStage.SHADOW
+            )
+            if not (reenroll_ok or reprepare_ok):
                 raise FactorLifecycleError("invalid_factor_reenrollment_transition")
         else:
             self._require_transition(current, mutation.target_stage)
@@ -1592,7 +1681,7 @@ class FactorLifecycleService:
                 else "factor_dsl_ast.v1"
             ),
         }
-        for _cause_key in ("retire_cause", "regime_id"):
+        for _cause_key in ("retire_cause", "regime_id", "revival_regime_id"):
             if _cause_key in (mutation.evidence_refs or {}):
                 metadata[_cause_key] = mutation.evidence_refs[_cause_key]
         if mutation.new_generation:
