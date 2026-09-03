@@ -1991,6 +1991,8 @@ def test_preflight_backoff_defers_recently_blocked_candidates(monkeypatch):
         redundancy_report={"group_count": 0, "groups": []},
     )
 
+    print("REASONS:", result["reasons"])
+    print("CANDIDATES:", [(c["candidate_id"], c["action"]) for c in result["candidate_refs"]])
     assert result["candidate_count"] == 1
     assert result["candidate_refs"][0]["candidate_id"] == "dsl_promo"
     assert result["deferred_candidates"] == [
