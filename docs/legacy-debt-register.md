@@ -113,6 +113,12 @@
   且属设计行为）。`RuntimeKVStore.get()` 为本批新增的读接口，与既有 `set()` 对称。
 - 验证：`_authority_report ok=true`；闩锁 `active=false` 剩余 cause 为空；三服务 active；live loop tick 正常；
   system_health overall=healthy score=1.00。
+- 操作边界（2026-09-03 实证追加）：凡动 `config/settings.yaml` 或 `runtime_config` 默认值的部署，
+  必须重启 backend + learning-worker，否则旧进程以启动时刻 base 算哈希，与新提交 intent 的绑定必然失配，
+  `refresh_from_overlay`（5s 节流）每轮重打 `runtime_config_overlay_refresh` 闩。实证：① 07:38 settings
+  变更打断 07:00 retire intent（dd5469ad）绑定；② 02:18 启动的 backend 在 13:20 重绑成功后仍用旧 base
+  反复复闩，13:25 重启后停止。Coordinator 重绑（b 路径）后若闩不消，先查各服务启动时间是否早于最近
+  settings 变更。
 
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
 

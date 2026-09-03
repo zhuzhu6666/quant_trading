@@ -1444,26 +1444,42 @@ class FactorGovernanceOrchestrator:
         if window_hours <= 0:
             return set()
         cutoff = time.time() - window_hours * 3600.0
+        use_pg = is_state_db_path(self.overlay.db_path)
+        if use_pg:
+            sql = _p(
+                """
+                SELECT DISTINCT decision_json::jsonb->>'scope_key' AS scope_key
+                FROM evolution_decision
+                WHERE decision_type = 'factor_governance_autonomous'
+                  AND created_at > ?
+                  AND decision_json::jsonb->>'action' IN
+                      ('promote_factor', 'restore_factor_live')
+                  AND decision_json::jsonb->>'status' IN
+                      ('blocked_by_evidence', 'failed', 'mutation_failed')
+                """
+            )
+        else:
+            # SQLite has no ::jsonb cast or %s placeholders; same predicates
+            # via json_extract so offline/test state DBs get real backoff
+            # instead of silently degrading to an empty set.
+            sql = """
+                SELECT DISTINCT json_extract(decision_json, '$.scope_key') AS scope_key
+                FROM evolution_decision
+                WHERE decision_type = 'factor_governance_autonomous'
+                  AND created_at > ?
+                  AND json_extract(decision_json, '$.action') IN
+                      ('promote_factor', 'restore_factor_live')
+                  AND json_extract(decision_json, '$.status') IN
+                      ('blocked_by_evidence', 'failed', 'mutation_failed')
+                """
         try:
-            conn = get_state_pg_conn(read_only=True) if is_state_db_path(
-                self.overlay.db_path
-            ) else connect_sqlite(self.overlay.db_path, read_only=True)
+            conn = get_state_pg_conn(read_only=True) if use_pg else connect_sqlite(
+                self.overlay.db_path, read_only=True
+            )
+            if not use_pg:
+                conn.row_factory = sqlite3.Row
             try:
-                rows = conn.execute(
-                    _p(
-                        """
-                        SELECT DISTINCT decision_json::jsonb->>'scope_key' AS scope_key
-                        FROM evolution_decision
-                        WHERE decision_type = 'factor_governance_autonomous'
-                          AND created_at > ?
-                          AND decision_json::jsonb->>'action' IN
-                              ('promote_factor', 'restore_factor_live')
-                          AND decision_json::jsonb->>'status' IN
-                              ('blocked_by_evidence', 'failed', 'mutation_failed')
-                        """
-                    ),
-                    (cutoff,),
-                ).fetchall()
+                rows = conn.execute(sql, (cutoff,)).fetchall()
             finally:
                 conn.close()
             return {

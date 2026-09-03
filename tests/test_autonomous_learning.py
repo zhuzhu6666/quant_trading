@@ -3407,3 +3407,85 @@ def test_process_memory_snapshot_missing_proc_is_non_blocking(monkeypatch):
     )
 
     assert al._process_memory_snapshot() == {}
+
+
+def test_demo_factor_apply_skips_blocked_head_for_ready_follower(monkeypatch):
+    """A permanently blocked head item (e.g. an expansion awaiting a V16
+    command) must not starve a ready follower: the run keeps scanning until
+    one applies, still at most one application per run."""
+    calls = []
+
+    class _Rows:
+        def fetchall(self):
+            return [
+                {
+                    "suggestion_id": "ps_boost_head",
+                    "scope_key": "boost_factor",
+                    "action": "boost_small",
+                    "evidence_json": json.dumps(
+                        {"source_agent": "factor_governance", "expected_effect": {"current_weight": 0.1, "suggested_target_weight": 0.105}}
+                    ),
+                },
+                {
+                    "suggestion_id": "ps_cut_next",
+                    "scope_key": "cut_factor",
+                    "action": "downweight",
+                    "evidence_json": json.dumps(
+                        {"source_agent": "factor_governance", "expected_effect": {"current_weight": 0.1, "suggested_target_weight": 0.089}}
+                    ),
+                },
+            ]
+
+    class _Conn:
+        def close(self):
+            pass
+
+    class _Config:
+        autonomy_mode = "demo_autonomous"
+        factor_portfolio_weights = {"boost_factor": 0.1, "cut_factor": 0.1}
+        factor_signal_config = {}
+
+    class _Governor:
+        def set_status(self, suggestion_id, status, note=""):
+            return True
+
+    class _Authority:
+        def evaluate_scope_write(self, *args, **kwargs):
+            return {"allowed": True}
+
+    class _WeightService:
+        def execute(self, **kwargs):
+            factor = next(iter(kwargs.get("awe_patches") or {}))
+            calls.append(factor)
+            if factor == "boost_factor":
+                return {"status": "blocked_by_admission", "applications": {}}
+            return {
+                "status": "applied",
+                "applications": {"cut_factor": {}},
+                "proposed_weights": {"cut_factor": 0.089},
+            }
+
+    monkeypatch.setattr(al, "_connect", lambda *_args, **_kwargs: _Conn())
+    monkeypatch.setattr(al, "_execute", lambda *_args, **_kwargs: _Rows())
+    monkeypatch.setattr(rc, "shared", lambda: _Config())
+    monkeypatch.setattr(
+        "research.learning.governor.RuleEvolutionGovernor",
+        _Governor,
+    )
+    monkeypatch.setattr(
+        "backend.services.agent_authority.AgentAuthorityRegistryService",
+        lambda *args, **kwargs: _Authority(),
+    )
+    monkeypatch.setattr(
+        "backend.services.factor_weight_change.FactorWeightChangeService",
+        lambda *args, **kwargs: _WeightService(),
+    )
+
+    result = al._apply_approved_factor_suggestions_for_demo(experiment_id="exp_skip_head")
+
+    assert calls == ["boost_factor", "cut_factor"]
+    assert result["applied"] is True
+    assert [item["status"] for item in result["items"]] == [
+        "blocked_by_admission",
+        "applied",
+    ]

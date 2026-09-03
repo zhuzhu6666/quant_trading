@@ -1089,3 +1089,64 @@ def test_discovered_factor_without_explicit_weight_never_gets_implicit_default(m
     assert item["weight"] == 0.0
     assert item["explicit_weight"] is False
     assert item["used_in_score"] is False
+
+
+def test_legacy_compact_hash_artifact_still_acknowledges_builtin(tmp_path):
+    """Pre-2026-08-31 preparations bound the compact-separator digest; the
+    ack gate must accept it so the 08-31 hash consolidation does not orphan
+    in-flight builtin promotions (harami et al stuck 9 days)."""
+    from backend.services.factor_lifecycle_service import _compact_hash, _legacy_builtin_hash
+
+    service = FactorLifecycleService(
+        tmp_path / "lifecycle.sqlite",
+        projection_stale_after_sec=75,
+        health_stale_after_sec=180,
+    )
+    prepared = service.prepare_promotion(
+        name="harami", evidence_refs=_candidate_admission_refs()
+    )
+    assert prepared["ok"] is True
+    legacy = _legacy_builtin_hash("harami")
+    assert legacy is not None
+    state = service.get_state(factor_name="harami")
+    assert state["artifact_hash"] != legacy
+    # Pre-cutover rows carry a self-consistent legacy triple
+    # (artifact/fingerprint/factor id all under the old contract).
+    legacy_fp = _compact_hash(
+        {"schema_version": "builtin_factor_identity.v1", "name": "harami", "artifact_hash": legacy}
+    )
+    conn = sqlite3.connect(tmp_path / "lifecycle.sqlite")
+    try:
+        conn.execute(
+            "UPDATE factor_lifecycle_state SET artifact_hash=?, definition_fingerprint=?, factor_id=? WHERE factor_name=?",
+            (legacy, legacy_fp, f"builtin:{legacy_fp}", "harami"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    engine = StreamingFactorEngine(
+        max_buffer=80,
+        factor_runtime_config=runtime_config.shared().factor_signal_config,
+    )
+    engine.warmup_bars(
+        [
+            {
+                "open": 1900.0 + idx,
+                "high": 1901.0 + idx,
+                "low": 1899.0 + idx,
+                "close": 1900.5 + idx,
+                "volume": 100.0 + idx,
+                "time": float(idx + 1),
+                "complete": True,
+            }
+            for idx in range(60)
+        ]
+    )
+
+    result = service.acknowledge_loaded_prepared_factors(
+        engine=engine,
+        boot_id="live-generation-legacy",
+    )
+
+    assert result["acknowledged_count"] == 1
+    assert result["blocked_count"] == 0

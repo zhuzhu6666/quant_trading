@@ -482,3 +482,47 @@ def test_register_shadow_key_compat_refuses_foreign_source_and_dead_keys(
     # Foreign source (operator_pause) must stay strictly hash-bound.
     with pytest.raises(RuntimeConfigOverlayAuthorityError):
         RuntimeConfigOverlayService(db_path).restore_on_startup(drifted_base)
+
+
+def test_refresh_reloads_moved_yaml_base_before_latching(tmp_path, monkeypatch):
+    """A settings/base deploy after boot must not latch every poll: when the
+    on-disk YAML moved, refresh adopts it and retries once instead of
+    latching against the stale boot-time base."""
+    from backend.services import live_safety_state
+
+    _set_mode(monkeypatch, "enforce")
+    db_path = tmp_path / "state.db"
+    base = RuntimeConfig()
+    runtime_config.register_overlay_base(base, db_path)
+    result = GovernanceMutationCoordinator(db_path).execute(
+        GovernanceMutationPlan(
+            patch={"governance_expansion_paused": True},
+            source="operator_pause",
+            actor="operator:test",
+            action="pause_governance_expansion",
+            control_surface="operator_governance_pause",
+            scope_type="operator_governance_pause",
+            scope_key="global",
+            run_id="stale_base_reload",
+        )
+    )
+    assert result["ok"] is True
+    # Stale process: base drifted after the intent committed (simulated
+    # settings.yaml change between deploys).  Foreign source stays strictly
+    # hash-bound, so this alone cannot verify.
+    runtime_config.register_overlay_base(
+        RuntimeConfig(factor_governance_model_min_factor_samples=41), db_path
+    )
+    latched = []
+    monkeypatch.setattr(
+        live_safety_state,
+        "activate_no_new_risk_latch",
+        lambda **kwargs: latched.append(kwargs) or {"active": True},
+    )
+    monkeypatch.setattr(
+        "backend.services.runtime_config_startup.load_yaml_runtime_config",
+        lambda: (RuntimeConfig(), {}),
+    )
+
+    assert runtime_config.refresh_from_overlay(db_path, force=True) is True
+    assert latched == []

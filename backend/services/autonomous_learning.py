@@ -5383,6 +5383,7 @@ def _apply_approved_factor_suggestions_for_demo(*, experiment_id: str, limit: in
     current_weights = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
     items: list[dict[str, Any]] = []
     actionable_attempted = 0
+    applied_this_run = 0
     action_limit = max(1, min(int(limit or 1), 20))
     governor = RuleEvolutionGovernor()
     for row in rows:
@@ -5433,7 +5434,11 @@ def _apply_approved_factor_suggestions_for_demo(*, experiment_id: str, limit: in
                 }
             )
             continue
-        if actionable_attempted >= action_limit:
+        # A permanently blocked head item (e.g. an expansion awaiting a V16
+        # command that never arrives) must not starve ready followers: keep
+        # scanning until one applies or the rows run out.  At most
+        # action_limit applications per run, oldest first.
+        if applied_this_run >= action_limit:
             break
         actionable_attempted += 1
         old_weight = float(current_weights.get(factor) or 0.0)
@@ -5493,6 +5498,7 @@ def _apply_approved_factor_suggestions_for_demo(*, experiment_id: str, limit: in
             }
         )
         if str(result.get("status") or "") == "applied":
+            applied_this_run += 1
             current_weights.update(dict(result.get("proposed_weights") or {}))
     return {
         "attempted": len(items),

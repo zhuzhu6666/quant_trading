@@ -166,9 +166,8 @@ def _loads(value: Any) -> dict[str, Any]:
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
-def _builtin_hash(name: str) -> str:
-    """Bind a native factor lifecycle to its executable implementation."""
-
+def _builtin_artifact_payload(name: str) -> dict:
+    """Payload binding a native factor lifecycle to its implementation."""
     func = factor_registry.get(str(name or ""))
     if func is None:
         raise FactorLifecycleError("builtin_factor_callable_missing")
@@ -184,14 +183,42 @@ def _builtin_hash(name: str) -> str:
                 getattr(code, "co_consts", ()),
             )
         )
-    payload = {
+    return {
         "schema_version": "builtin_factor_artifact.v1",
         "name": str(name),
         "module": str(getattr(func, "__module__", "")),
         "qualname": str(getattr(func, "__qualname__", "")),
         "source": source,
     }
-    return canonical_hash(payload)
+
+
+def _builtin_hash(name: str) -> str:
+    """Bind a native factor lifecycle to its executable implementation."""
+    return canonical_hash(_builtin_artifact_payload(name))
+
+
+def _compact_hash(payload) -> str:
+    """Pre-2026-08-31 digest (compact JSON separators, no spaces)."""
+    import hashlib
+
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _legacy_builtin_hash(name: str) -> str | None:
+    """Pre-2026-08-31 compact-separator digest (transition compat).
+
+    The 08-31 hash consolidation changed JSON separators and orphaned every
+    stored builtin artifact without migrating rows.  Identity and ack gates
+    accept this digest until no pre-cutover preparation rows remain; new
+    preparations always bind the current digest.  Removal condition: zero
+    PROMOTION_PREPARED rows whose artifact predates the cutover.
+    """
+    try:
+        return _compact_hash(_builtin_artifact_payload(name))
+    except Exception:
+        return None
 
 
 class FactorLifecycleService:
@@ -904,7 +931,10 @@ class FactorLifecycleService:
                 if name not in factor_registry:
                     raise FactorLifecycleError("prepared_factor_not_in_registry")
                 if origin == SOURCE_BUILTIN:
-                    if _builtin_hash(name) != definition.artifact_hash:
+                    if (
+                        _builtin_hash(name) != definition.artifact_hash
+                        and _legacy_builtin_hash(name) != definition.artifact_hash
+                    ):
                         raise FactorLifecycleError("registry_factor_artifact_mismatch")
                 else:
                     registry_expression = str(meta.get("description") or "").strip()
@@ -2310,8 +2340,48 @@ class FactorLifecycleService:
             str(state.get("artifact_hash") or ""),
         )
         if not self._same_definition(state, definition):
-            raise FactorLifecycleError("stored_factor_identity_invalid")
+            legacy = self._legacy_builtin_definition(state)
+            if legacy is None:
+                raise FactorLifecycleError("stored_factor_identity_invalid")
+            return legacy
         return definition
+
+    @staticmethod
+    def _legacy_builtin_definition(state: Mapping[str, Any]) -> FactorDefinition | None:
+        """Rebuild a pre-cutover identity triple, or None when inconsistent.
+
+        Internal consistency is still exact: fingerprint and factor id must
+        match the stored artifact under the legacy contract.  Live binding
+        stays at the ack gate, which accepts either digest.
+        """
+        if str(state.get("origin") or "") != SOURCE_BUILTIN:
+            return None
+        name = str(state.get("factor_name") or "")
+        artifact = str(state.get("artifact_hash") or "")
+        try:
+            fingerprint = _compact_hash(
+                {
+                    "schema_version": "builtin_factor_identity.v1",
+                    "name": name,
+                    "artifact_hash": artifact,
+                }
+            )
+        except Exception:
+            return None
+        if (
+            str(state.get("definition_fingerprint") or "") != fingerprint
+            or str(state.get("factor_id") or "") != f"builtin:{fingerprint}"
+        ):
+            return None
+        metadata = _loads(state.get("metadata_json"))
+        return FactorDefinition(
+            name=name,
+            expression=str(metadata.get("expression") or ""),
+            factor_id=str(state.get("factor_id") or ""),
+            definition_fingerprint=fingerprint,
+            artifact_hash=artifact,
+            origin=SOURCE_BUILTIN,
+        )
 
     @staticmethod
     def _same_definition(state: Mapping[str, Any], definition: FactorDefinition) -> bool:

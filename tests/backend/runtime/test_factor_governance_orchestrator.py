@@ -1999,3 +1999,37 @@ def test_preflight_backoff_defers_recently_blocked_candidates(monkeypatch):
     assert result["deferred_candidates"] == [
         {"candidate_id": "blocked_activation", "action": "promote_factor"}
     ]
+
+
+def test_backoff_lookup_reads_real_audit_sql_on_sqlite(tmp_path):
+    """The backoff lookup must run its real SQL on SQLite state DBs: seed
+    via the real audit writer, then call the method unmocked.  A PG-only
+    query (``::jsonb``/``%s``) fails here and silently degrades to no
+    backoff, letting a permanently failing candidate starve ready ones."""
+    from backend.services.evolution_ledger import record_evolution_decision
+
+    rc.reset_for_tests()
+    _init_state_db(tmp_path)
+    local_db = tmp_path / "state.db"
+    record_evolution_decision(
+        run_id="",
+        decision_type="factor_governance_autonomous",
+        scope_type="factor",
+        scope_key="stuck_activation",
+        action="promote_factor",
+        status="blocked_by_evidence",
+        db_path=local_db,
+    )
+    record_evolution_decision(
+        run_id="",
+        decision_type="factor_governance_autonomous",
+        scope_type="factor",
+        scope_key="healthy_promo",
+        action="promote_factor",
+        status="applied",
+        db_path=local_db,
+    )
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(local_db)
+
+    assert orch._recently_blocked_expansion_candidates() == {"stuck_activation"}

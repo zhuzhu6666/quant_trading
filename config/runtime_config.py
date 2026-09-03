@@ -1126,6 +1126,65 @@ def release_recovered_overlay_authority_latches(
         )
         return False
 
+def _apply_overlay_restore(service, base_cfg, db_key, overlay_hash) -> bool:
+    """Run the shared restore success path (replace + latch release)."""
+    restored = service.restore_on_startup(base_cfg)
+    shared_holder().replace(restored["config"])
+    if release_recovered_overlay_authority_latches(restored):
+        _overlay_last_hash_by_db[db_key] = overlay_hash
+    return True
+
+
+def _moved_yaml_base(db_path):
+    """Return the on-disk YAML base when it differs from the registered one.
+
+    None means unchanged or unloadable; the caller keeps the existing
+    fail-closed handling without touching registered state.
+    """
+    try:
+        from backend.services.runtime_config_startup import load_yaml_runtime_config
+
+        fresh_base, _ = load_yaml_runtime_config()
+        fresh = fresh_base.to_dict()
+        return fresh if fresh != overlay_base_config(db_path) else None
+    except Exception:  # noqa: BLE001
+        logger.debug("RuntimeConfig YAML base reload check failed", exc_info=True)
+        return None
+
+
+def _retry_refresh_after_base_reload(db_path) -> bool:
+    """One synchronous restore retry after adopting a moved YAML base.
+
+    The fresh base is registered only when the retry verifies; a failed
+    retry rolls the registration back so a bad read can never poison the
+    boot-time base for later polls.
+    """
+    try:
+        from backend.core.db import STATE_DB
+        from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
+
+        effective = Path(db_path) if db_path is not None else Path(STATE_DB)
+        fresh = _moved_yaml_base(effective)
+        if fresh is None:
+            return False
+        previous = overlay_base_config(effective)
+        register_overlay_base(fresh, effective, replace_existing=True)
+        try:
+            service = RuntimeConfigOverlayService(effective)
+            latest = service.latest()
+            overlay_hash = str(latest.get("overlay_hash") or "")
+            if not latest.get("ok") or not overlay_hash:
+                raise RuntimeError("overlay row not restorable for base reload retry")
+            base = RuntimeConfig.from_dict(overlay_base_config(effective))
+            return _apply_overlay_restore(service, base, str(effective), overlay_hash)
+        except Exception:
+            register_overlay_base(previous, effective, replace_existing=True)
+            return False
+    except Exception:  # noqa: BLE001
+        logger.debug("RuntimeConfig overlay base reload retry failed", exc_info=True)
+        return False
+
+
 def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = False) -> bool:
     """Refresh the in-process RuntimeConfig from the persisted DB overlay.
 
@@ -1166,11 +1225,7 @@ def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = Fal
         if not force and _overlay_last_hash_by_db.get(db_key) == overlay_hash:
             return False
         base = RuntimeConfig.from_dict(overlay_base_config(effective_db_path))
-        restored = service.restore_on_startup(base)
-        shared_holder().replace(restored["config"])
-        if release_recovered_overlay_authority_latches(restored):
-            _overlay_last_hash_by_db[db_key] = overlay_hash
-        return True
+        return _apply_overlay_restore(service, base, db_key, overlay_hash)
     except Exception as exc:  # noqa: BLE001
         try:
             from backend.services.runtime_config_overlay import (
@@ -1178,10 +1233,14 @@ def refresh_from_overlay(db_path: str | Path | None = None, *, force: bool = Fal
             )
 
             if isinstance(exc, RuntimeConfigOverlayAuthorityError):
+                # A settings/base deploy after boot leaves this process
+                # verifying against a stale base on every poll.  Adopt the
+                # moved base and retry once before latching.
+                if _retry_refresh_after_base_reload(db_path):
+                    return True
                 from backend.services.live_safety_state import (
                     activate_no_new_risk_latch,
                 )
-
                 try:
                     activate_no_new_risk_latch(
                         reason="runtime_overlay_refresh_authority_failed",
