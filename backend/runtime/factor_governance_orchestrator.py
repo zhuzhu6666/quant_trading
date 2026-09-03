@@ -391,9 +391,18 @@ def factor_batch_manifest_verdict(
         if isinstance(item, dict)
     ]
     candidate_count = int((expansion_preflight or {}).get("candidate_count") or 0)
+    try:
+        from config.runtime_config import shared as _rc_shared
+
+        batch_max = int(
+            getattr(_rc_shared(), "factor_governance_batch_max_candidates", 5) or 5
+        )
+    except Exception:
+        batch_max = 5
+    batch_max = max(1, batch_max)
     if (
         not candidate_refs
-        or len(candidate_refs) != 1
+        or len(candidate_refs) > batch_max
         or any(
             not bool(item.get("execution_ready"))
             or list(item.get("blocker_codes") or [])
@@ -403,7 +412,7 @@ def factor_batch_manifest_verdict(
         return {
             "allowed": False,
             "status": "factor_candidate_contract_not_ready",
-            "reason": "candidate_refs_must_be_single_frozen_execution_ready_candidate",
+            "reason": "candidate_refs_must_be_frozen_and_execution_ready",
             "candidate_count": candidate_count,
             "candidate_ref_count": len(candidate_refs),
         }
@@ -630,6 +639,14 @@ class FactorGovernanceOrchestrator:
                                     )
                                     or ""
                                 ),
+                                "batch_max_candidates": int(
+                                    getattr(
+                                        cfg,
+                                        "factor_governance_batch_max_candidates",
+                                        5,
+                                    )
+                                    or 5
+                                ),
                                 "expansion_preflight": expansion_preflight,
                             }
                         )
@@ -690,91 +707,122 @@ class FactorGovernanceOrchestrator:
                     )
                     return summary
             v16_candidate_id = str(v16_authority.get("candidate_id") or "")
-            # A V16 command is a fixed one-candidate manifest.  Do not let a
-            # later fallback stage spend that authority on a different factor
-            # when the originally selected candidate is unavailable or already
-            # became a no-op.
-            authorized_catalog = (
-                catalog
-                if not v16_candidate_id
+            # Batch manifest: ordered id list joined by "," (bare id when
+            # N=1).  Only manifest-bound refs execute, in manifest order; a
+            # later stage never spends the authority on a different factor.
+            # Tightening (downweight/disable/retire) already ran before any
+            # expansion, so reductions stay ordered before expansions.
+            manifest_ids = (
+                [part for part in v16_candidate_id.split(",") if part]
+                if v16_candidate_id
                 else []
-                if v16_candidate_id == "redundancy"
-                else [
-                    item
-                    for item in catalog
-                    if str(item.get("factor_id") or "") == v16_candidate_id
-                ]
             )
-            # Expansion is single-mutation and ordered by the shortest safe
-            # recovery path before longer lifecycle promotion work.
-            expansion_actions = self._restore_active_zero_weight_alpha(
-                authorized_catalog,
-                run,
-                v16_authority=v16_authority,
-                cfg=cfg,
-                profile=profile,
+            manifest_by_id = {
+                str(ref.get("candidate_id") or ""): ref
+                for ref in list(
+                    (expansion_preflight or {}).get("candidate_refs") or []
+                )
+                if isinstance(ref, dict) and str(ref.get("candidate_id") or "")
+            }
+            ordered_ids = [cid for cid in manifest_ids if cid in manifest_by_id]
+            batch_guards = (
+                self._batch_manifest_guards(
+                    ordered_ids, manifest_by_id, redundancy_report, cfg
+                )
+                if len(ordered_ids) > 1
+                else {}
             )
-            actions.extend(expansion_actions)
-            expansion_committed = self._expansion_command_consumed(
-                expansion_actions
-            )
-            if _catalog_refresh_required(expansion_actions):
-                catalog = build_factor_catalog(self.overlay.db_path)
-            if not expansion_committed:
-                expansion_actions = self._restore_quarantined_builtin_alpha(
-                    authorized_catalog,
+            expansion_committed = False
+            if not v16_candidate_id:
+                item_actions = self._execute_expansion_stages(
+                    catalog,
+                    catalog,
+                    redundancy_report,
                     run,
-                    v16_authority=v16_authority,
-                    cfg=cfg,
-                    profile=profile,
+                    v16_authority,
+                    cfg,
+                    profile,
                 )
-                actions.extend(expansion_actions)
+                actions.extend(item_actions)
                 expansion_committed = self._expansion_command_consumed(
-                    expansion_actions
+                    item_actions
                 )
-                if _catalog_refresh_required(expansion_actions):
+                if _catalog_refresh_required(item_actions):
                     catalog = build_factor_catalog(self.overlay.db_path)
-            if not expansion_committed:
-                expansion_actions = self._activate_healthy_builtin_shadow(
-                    authorized_catalog,
-                    run,
-                    v16_authority=v16_authority,
-                    cfg=cfg,
-                    profile=profile,
-                )
-                actions.extend(expansion_actions)
-                expansion_committed = self._expansion_command_consumed(
-                    expansion_actions
-                )
-                if _catalog_refresh_required(expansion_actions):
-                    catalog = build_factor_catalog(self.overlay.db_path)
-            if not expansion_committed:
-                expansion_actions = (
-                    self._apply_redundancy_report(
-                        catalog,
-                        redundancy_report,
-                        run,
+            for cid in ordered_ids:
+                guard = batch_guards.get(cid)
+                if guard is not None:
+                    guard_item = next(
+                        (
+                            item
+                            for item in catalog
+                            if str(item.get("factor_id") or "") == cid
+                        ),
+                        {"factor_id": cid, "source": "catalog", "role": "alpha"},
                     )
-                    if not v16_candidate_id or v16_candidate_id == "redundancy"
-                    else []
-                )
-                actions.extend(expansion_actions)
-                expansion_committed = self._expansion_command_consumed(
-                    expansion_actions
-                )
-                if _catalog_refresh_required(expansion_actions):
-                    catalog = build_factor_catalog(self.overlay.db_path)
-            if not expansion_committed:
-                expansion_actions = self._promote_shadow_candidates(
-                    authorized_catalog,
-                    run,
-                    v16_authority=v16_authority,
-                )
-                actions.extend(expansion_actions)
-                expansion_committed = self._expansion_command_consumed(
-                    expansion_actions
-                )
-                if _catalog_refresh_required(expansion_actions):
+                    guard_action = str(
+                        (manifest_by_id.get(cid) or {}).get("action")
+                        or "factor_governance_cycle"
+                    )
+                    guard_evidence = {
+                        **dict(guard.get("evidence") or {}),
+                        "batch_guard_reason": str(guard.get("reason") or ""),
+                    }
+                    guard_verdict = self._risk(
+                        guard_action, guard_item, guard_evidence
+                    )
+                    actions.append(
+                        self._audit_action(
+                            run,
+                            guard_item,
+                            guard_action,
+                            "blocked_by_batch_guard",
+                            guard_evidence,
+                            guard_verdict,
+                        )
+                    )
+                    continue
+                try:
+                    if cid == "redundancy":
+                        item_actions = self._apply_redundancy_report(
+                            catalog,
+                            redundancy_report,
+                            run,
+                        )
+                    else:
+                        single = [
+                            item
+                            for item in catalog
+                            if str(item.get("factor_id") or "") == cid
+                        ]
+                        item_actions = self._execute_expansion_stages(
+                            single,
+                            catalog,
+                            redundancy_report,
+                            run,
+                            v16_authority,
+                            cfg,
+                            profile,
+                        )
+                except Exception as exc:
+                    logger.exception(
+                        "[factor_governance] batch item %s failed", cid
+                    )
+                    item_actions = [
+                        {
+                            "factor_id": cid,
+                            "action": str(
+                                (manifest_by_id.get(cid) or {}).get("action")
+                                or "factor_governance_cycle"
+                            ),
+                            "status": "failed",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    ]
+                actions.extend(item_actions)
+                if self._expansion_command_consumed(item_actions):
+                    expansion_committed = True
+                if _catalog_refresh_required(item_actions):
                     catalog = build_factor_catalog(self.overlay.db_path)
             if v16_delegation and not expansion_committed:
                 from backend.services.v16_brain_orchestrator import (
@@ -821,6 +869,144 @@ class FactorGovernanceOrchestrator:
             return {"status": status, "error": str(exc), "actions": actions}
         finally:
             self._active_audit_writer = None
+
+    def _execute_expansion_stages(
+        self,
+        authorized_catalog: list[dict[str, Any]],
+        catalog: list[dict[str, Any]],
+        redundancy_report: dict[str, Any],
+        run: dict[str, Any],
+        v16_authority: dict[str, Any],
+        cfg: Any,
+        profile: FactorGovernanceProfile,
+    ) -> list[dict[str, Any]]:
+        """Run the ordered expansion stage chain for one manifest item.
+
+        Order is the shortest safe recovery path before longer lifecycle
+        promotion work (zero-weight restore > quarantined restore > builtin
+        activation > redundancy > shadow promotion).  The first committed
+        stage wins; a single item failure surfaces as that item's blocked
+        status and never aborts sibling manifest items (the caller loops).
+        """
+        item_actions: list[dict[str, Any]] = []
+        v16_candidate_id = str((v16_authority or {}).get("candidate_id") or "")
+        expansion_actions = self._restore_active_zero_weight_alpha(
+            authorized_catalog,
+            run,
+            v16_authority=v16_authority,
+            cfg=cfg,
+            profile=profile,
+        )
+        item_actions.extend(expansion_actions)
+        if self._expansion_command_consumed(expansion_actions):
+            return item_actions
+        expansion_actions = self._restore_quarantined_builtin_alpha(
+            authorized_catalog,
+            run,
+            v16_authority=v16_authority,
+            cfg=cfg,
+            profile=profile,
+        )
+        item_actions.extend(expansion_actions)
+        if self._expansion_command_consumed(expansion_actions):
+            return item_actions
+        expansion_actions = self._activate_healthy_builtin_shadow(
+            authorized_catalog,
+            run,
+            v16_authority=v16_authority,
+            cfg=cfg,
+            profile=profile,
+        )
+        item_actions.extend(expansion_actions)
+        if self._expansion_command_consumed(expansion_actions):
+            return item_actions
+        expansion_actions = (
+            self._apply_redundancy_report(
+                catalog,
+                redundancy_report,
+                run,
+            )
+            if not v16_candidate_id or v16_candidate_id == "redundancy"
+            else []
+        )
+        item_actions.extend(expansion_actions)
+        if self._expansion_command_consumed(expansion_actions):
+            return item_actions
+        expansion_actions = self._promote_shadow_candidates(
+            authorized_catalog,
+            run,
+            v16_authority=v16_authority,
+        )
+        item_actions.extend(expansion_actions)
+        return item_actions
+
+    def _batch_manifest_guards(
+        self,
+        ordered_ids: list[str],
+        manifest_by_id: dict[str, dict[str, Any]],
+        redundancy_report: dict[str, Any] | None,
+        cfg: Any,
+    ) -> dict[str, dict[str, Any]]:
+        """Batch-only guards, evaluated before any manifest commit.
+
+        Total absolute planned weight delta must fit
+        `factor_governance_batch_max_total_weight_delta` or the whole batch
+        is refused; correlated pairs (|corr| >= threshold, i.e. same report
+        group) refuse the follower unless it is already leader-grouped
+        (no `_redundancy_signal_patch` diff for it).
+        """
+        guards: dict[str, dict[str, Any]] = {}
+        factor_ids = [cid for cid in ordered_ids if cid != "redundancy"]
+        cap = float(
+            getattr(cfg, "factor_governance_batch_max_total_weight_delta", 0.30)
+            or 0.0
+        )
+        if cap > 0:
+            total = sum(
+                float((manifest_by_id.get(cid) or {}).get("planned_weight_delta") or 0.0)
+                for cid in factor_ids
+            )
+            if total > cap:
+                evidence = {
+                    "total_planned_weight_delta": round(total, 4),
+                    "batch_max_total_weight_delta": cap,
+                }
+                for cid in ordered_ids:
+                    guards[cid] = {
+                        "reason": "batch_total_weight_delta_exceeded",
+                        "evidence": evidence,
+                    }
+                return guards
+        signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
+        patch = _redundancy_signal_patch(redundancy_report, signal_cfg)
+        group_of: dict[str, str] = {}
+        for group in list((redundancy_report or {}).get("groups") or []):
+            if not isinstance(group, Mapping):
+                continue
+            group_id = str(group.get("group_id") or "")
+            if not group_id:
+                continue
+            for member in list(group.get("members") or []):
+                if str(member or ""):
+                    group_of[str(member)] = group_id
+        seen: dict[str, str] = {}
+        for cid in factor_ids:
+            group_id = group_of.get(cid)
+            if not group_id:
+                continue
+            if group_id in seen and cid in patch:
+                guards[cid] = {
+                    "reason": "batch_redundant_pair_refused",
+                    "evidence": {
+                        "refused_with": seen[group_id],
+                        "redundancy_group": group_id,
+                        "redundancy_patch": {cid: patch[cid]},
+                    },
+                }
+            else:
+                seen.setdefault(group_id, cid)
+        return guards
+
 
     # ── Action selection ────────────────────────────────────────────
 
@@ -1366,13 +1552,13 @@ class FactorGovernanceOrchestrator:
                 ).hexdigest(),
                 "command_version": "factor_governance_candidate.v1",
             })
-        # A V16 command is a fixed one-candidate manifest: the delegate and
-        # factor_batch_manifest_verdict both require exactly one frozen,
-        # execution-ready candidate.  The preflight therefore hands over only
-        # the next action in the same single-mutation order run_cycle executes
-        # (zero-weight restore > quarantined restore > builtin activation >
-        # redundancy > shadow promotion); everything else stays actionable in
-        # later cycles and is reported as deferred.
+        # A V16 command is a fixed batch manifest: the delegate and
+        # factor_batch_manifest_verdict bind 1..N frozen, execution-ready
+        # candidates.  The preflight therefore hands over the first N actions
+        # in the same order run_cycle executes (zero-weight restore >
+        # quarantined restore > builtin activation > redundancy > shadow
+        # promotion); everything else stays actionable in later cycles and is
+        # reported as deferred.
         #
         # Candidates whose identical action was audited blocked_by_evidence /
         # failed recently get a backoff tier so one permanently-failing
@@ -1398,14 +1584,42 @@ class FactorGovernanceOrchestrator:
             return (base, candidate_id)
 
         ordered_refs = sorted(candidate_refs, key=_candidate_priority)
+        # Batch manifest: hand over the first N in priority order (backoff
+        # tier unchanged); the rest stay deferred. Each ref carries its
+        # planned absolute weight delta so run_cycle can enforce the batch
+        # total-delta guard before any commit.
+        batch_max = max(
+            1,
+            int(getattr(cfg, "factor_governance_batch_max_candidates", 5) or 5),
+        )
+        planned_target: dict[str, float] = {}
+        for factor_id in activation_ids:
+            planned_target[str(factor_id)] = float(activation_weight)
+        for factor_id in list(active_zero_weight_ids) + list(restore_ids):
+            planned_target.setdefault(str(factor_id), float(profile.min_live_weight))
+        new_factor_weight = float(
+            getattr(cfg, "factor_governance_new_factor_weight", 0.0) or 0.0
+        )
+        for factor_id in promotion_ids:
+            planned_target.setdefault(str(factor_id), new_factor_weight)
+        for ref in ordered_refs:
+            ref_id = str(ref.get("candidate_id") or "")
+            ref["planned_weight_delta"] = (
+                0.0
+                if ref_id == "redundancy" or ref_id not in planned_target
+                else abs(
+                    float(planned_target[ref_id])
+                    - float(weights.get(ref_id, 0.0) or 0.0)
+                )
+            )
         deferred_candidates = [
             {
                 "candidate_id": str(ref.get("candidate_id") or ""),
                 "action": str(ref.get("action") or ""),
             }
-            for ref in ordered_refs[1:]
+            for ref in ordered_refs[batch_max:]
         ]
-        candidate_refs = ordered_refs[:1]
+        candidate_refs = ordered_refs[:batch_max]
 
         reasons = {
             "builtin_activation": activation_ids,

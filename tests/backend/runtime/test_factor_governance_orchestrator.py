@@ -1734,11 +1734,11 @@ def test_rollback_missing_payload_adjudicated_once(tmp_path):
     assert app["status"] == "applied"
 
 
-def test_expansion_preflight_hands_single_highest_priority_candidate(monkeypatch):
-    """The V16 delegate and the batch manifest verdict both require exactly
-    one frozen execution-ready candidate, so the preflight must narrow its
-    handoff to the next action in run_cycle execution order and report the
-    rest as deferred; otherwise the delegate can never issue a command."""
+def test_expansion_preflight_hands_batch_in_priority_order(monkeypatch):
+    """The V16 delegate and the batch manifest verdict bind 1..N frozen
+    execution-ready candidates, so the preflight hands over the first N
+    actions in run_cycle execution order and reports the rest as deferred;
+    otherwise the delegate can never issue a batch command."""
     rc.reset_for_tests()
     rc.patch(
         {
@@ -1796,12 +1796,13 @@ def test_expansion_preflight_hands_single_highest_priority_candidate(monkeypatch
     )
 
     assert result["required"] is True
-    assert result["candidate_count"] == 1
-    assert result["candidate_refs"][0]["candidate_id"] == "fresh_shadow"
-    assert result["candidate_refs"][0]["action"] == "promote_factor"
-    assert result["deferred_candidates"] == [
-        {"candidate_id": "redundancy", "action": "update_redundancy_groups"}
+    assert result["candidate_count"] == 2
+    assert [ref["candidate_id"] for ref in result["candidate_refs"]] == [
+        "fresh_shadow",
+        "redundancy",
     ]
+    assert result["candidate_refs"][0]["action"] == "promote_factor"
+    assert result["deferred_candidates"] == []
 
 
 def test_prepared_lease_demotes_stale_builtin_and_spares_active_builtin(tmp_path, monkeypatch):
@@ -1909,11 +1910,10 @@ def test_promotion_evidence_waives_absent_health_for_canary_ladder_top():
     assert "factor_health_decaying" in decaying["blocker_codes"]
     assert decaying["health_evidence_source"] == "factor_health"
 
-
-def test_preflight_backoff_defers_recently_blocked_candidates(monkeypatch):
-    """Single-candidate handoff must not let a permanently failing
-    high-priority candidate starve ready lower-priority ones: a candidate
-    audited blocked recently is deferred below eligible ones."""
+def test_preflight_backoff_orders_recently_blocked_candidates_last(monkeypatch):
+    """Batch handoff keeps priority order with the backoff tier: a candidate
+    audited blocked recently sorts below eligible ones but still ships in
+    the same manifest instead of starving behind them."""
     rc.reset_for_tests()
     rc.patch(
         {
@@ -1993,12 +1993,12 @@ def test_preflight_backoff_defers_recently_blocked_candidates(monkeypatch):
         profile=profile,
         redundancy_report={"group_count": 0, "groups": []},
     )
-
-    assert result["candidate_count"] == 1
-    assert result["candidate_refs"][0]["candidate_id"] == "dsl_promo"
-    assert result["deferred_candidates"] == [
-        {"candidate_id": "blocked_activation", "action": "promote_factor"}
+    assert result["candidate_count"] == 2
+    assert [ref["candidate_id"] for ref in result["candidate_refs"]] == [
+        "dsl_promo",
+        "blocked_activation",
     ]
+    assert result["deferred_candidates"] == []
 
 
 def test_backoff_lookup_reads_real_audit_sql_on_sqlite(tmp_path):

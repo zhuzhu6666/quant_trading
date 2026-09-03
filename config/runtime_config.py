@@ -597,6 +597,10 @@ class RuntimeConfig:
     factor_governance_fast_retire_per_cycle: int = 10
     # Zero-progress SHADOW rows older than this (hours) are fast-lane retired.
     factor_governance_stale_evidence_max_age_hours: int = 336
+    # Batch delegation manifest: candidates per V16 command (1..N).
+    factor_governance_batch_max_candidates: int = 5
+    # Batch guard: total absolute planned weight delta allowed per batch.
+    factor_governance_batch_max_total_weight_delta: float = 0.30
     # PROMOTION_PREPARED 租约：滞留超阈值的 prepared 候选降回 SHADOW 重新取证。
     factor_governance_promotion_prepared_max_age_hours: int = 168
     # 扩张候选退避：最近 blocked 的候选在单候选交接中降级的小时窗口。

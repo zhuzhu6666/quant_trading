@@ -15,6 +15,14 @@ import backend.runtime.factor_governance_orchestrator as governance_module
 from backend.runtime.factor_governance_orchestrator import FactorGovernanceOrchestrator
 from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
 from config import runtime_config as rc
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_config():
+    rc.reset_for_tests()
+    yield
+    rc.reset_for_tests()
 
 
 class _AllowRisk:
@@ -133,3 +141,293 @@ def test_fast_lane_retires_budget_and_leaves_normal_quota(monkeypatch, tmp_path)
 
     assert normal[0]["status"] == "applied"
     assert retired[-1]["name"] == "weak_discovered"
+
+
+def _batch_ref(candidate_id, action="promote_factor"):
+    return {
+        "candidate_id": candidate_id,
+        "target_agent": "factor_governance",
+        "scope_type": "factor_weight",
+        "scope_key": candidate_id,
+        "action": action,
+        "execution_ready": True,
+        "governance_eligible": True,
+        "bridge_ready": True,
+        "blocker_codes": [],
+    }
+
+
+def _delegate_batch(service, refs, **gate_extra):
+    from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+    assert isinstance(service, V16BrainOrchestratorService)
+    return service.delegate_factor_governance_cycle(
+        {
+            "snapshot_id": "batch-1",
+            "health_cycle_id": "health-1",
+            "expansion_preflight": {
+                "required": True,
+                "candidate_count": len(refs),
+                "reasons": {},
+                "candidate_refs": refs,
+            },
+            **gate_extra,
+        },
+        persist=False,
+    )
+
+
+def test_batch_delegate_joins_ids_and_verdict_binds(tmp_path):
+    """3 refs -> one command with joined candidate_id + max_apply_count 3;
+    verdict binds fingerprint/count; over-cap batches refused."""
+    from backend.runtime.factor_governance_orchestrator import (
+        factor_batch_manifest_verdict,
+    )
+    from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+    rc.reset_for_tests()
+    service = V16BrainOrchestratorService(db_path=tmp_path / "state.db")
+    refs = [_batch_ref("alpha_a"), _batch_ref("alpha_b"), _batch_ref("alpha_c")]
+    delegated = _delegate_batch(service, refs)
+
+    assert delegated["status"] == "delegated"
+    command = delegated["command"]
+    assert command["candidate_id"] == "alpha_a,alpha_b,alpha_c"
+    assert command["max_apply_count"] == 3
+
+    preflight = delegated["command"]["evidence"]["expansion_preflight"]
+    assert factor_batch_manifest_verdict(
+        {"evidence": delegated["command"]["evidence"]}, preflight
+    )["allowed"] is True
+    tampered = {**preflight, "candidate_count": 2}
+    assert (
+        factor_batch_manifest_verdict(
+            {"evidence": delegated["command"]["evidence"]}, tampered
+        )["status"]
+        == "factor_batch_manifest_mismatch"
+    )
+
+    oversized = _delegate_batch(
+        service, [_batch_ref(f"alpha_{idx}") for idx in range(6)]
+    )
+    assert oversized["status"] == "factor_candidate_contract_not_ready"
+    assert oversized["reason"] == "candidate_batch_size_out_of_range"
+
+
+def test_preflight_hands_first_n_and_defers_rest(monkeypatch):
+    """batch_max=2 with 3 promotable -> 2 refs with planned deltas, 1 deferred
+    entry keeping {candidate_id, action} shape."""
+    import hashlib
+    import time as _time
+    from dataclasses import replace
+
+    from alpha.factor_identity import (
+        canonical_factor_id,
+        factor_definition_fingerprint,
+    )
+
+    rc.reset_for_tests()
+    rc.patch({"factor_governance_batch_max_candidates": 2})
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    expression = "ts_mean(close, 5)"
+
+    def _item(factor_id):
+        return {
+            "factor_id": factor_id,
+            "lifecycle_factor_id": canonical_factor_id(expression),
+            "lifecycle_origin": "shadow",
+            "lifecycle_status": "SHADOW",
+            "lifecycle_expression": expression,
+            "lifecycle_definition_fingerprint": factor_definition_fingerprint(
+                expression
+            ),
+            "lifecycle_artifact_hash": hashlib.sha256(expression.encode()).hexdigest(),
+            "source": "shadow",
+            "role": "alpha",
+            "canary": {"stage": "ACTIVE"},
+            "shadow_perf": {
+                "oos_bars": 120,
+                "n_valid": 100,
+                "cumulative_pnl": 1.2,
+                "hit_rate": 0.55,
+                "max_drawdown": 0.01,
+            },
+            "health_status": "HEALTHY",
+            "health_score": 80.0,
+            "health_updated_at": _time.time(),
+            "direction": 1,
+            "normalizer": "zscore",
+            "lifecycle_generation": 1,
+            "lifecycle_config_hash": "c" * 64,
+            "runtime_selection_fingerprint": "s" * 64,
+            "lifecycle_mutation_id": "mutation-shadow",
+            "runtime_admission": "blocked",
+            "lifecycle_evidence": {
+                "candidate_validation": {
+                    "direction": 1,
+                    "signed_ic_mean": 0.03,
+                    "pit_passed": True,
+                    "walk_forward_passed": True,
+                    "multi_forward_passed": True,
+                    "cost_test_passed": True,
+                    "execution_evidence_complete": True,
+                    "contamination_status": "clean",
+                    "regime_ids": ["trend"],
+                },
+            },
+            "loaded_projection": {},
+        }
+
+    catalog = [_item(f"batch_promo_{idx}") for idx in range(3)]
+    monkeypatch.setattr(
+        orch,
+        "_prime_admission_evidence_count_cache",
+        lambda ids: orch._admission_evidence_count_cache.update(
+            {
+                item: {
+                    "governance_eligible_mature": 20,
+                    "contaminated_or_ineligible": 0,
+                    "status": "available",
+                }
+                for item in ids
+            }
+        ),
+    )
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(
+        orch, "_posterior_expansion_guard", lambda *_args, **_kwargs: "posterior_ok"
+    )
+    monkeypatch.setattr(
+        orch,
+        "_current_market_regime_projection",
+        lambda: {"regime_id": "", "confidence": 0.0},
+    )
+    profile = replace(
+        orch._governance_profile(rc.shared()), name="strict_live", balanced_demo=False
+    )
+
+    preflight = orch._expansion_preflight(
+        catalog,
+        cfg=rc.shared(),
+        profile=profile,
+        redundancy_report={"group_count": 0, "groups": []},
+    )
+
+    assert preflight["candidate_count"] == 2
+    assert [ref["candidate_id"] for ref in preflight["candidate_refs"]] == [
+        "batch_promo_0",
+        "batch_promo_1",
+    ]
+    assert all("planned_weight_delta" in ref for ref in preflight["candidate_refs"])
+    assert preflight["deferred_candidates"] == [
+        {"candidate_id": "batch_promo_2", "action": "promote_factor"}
+    ]
+
+
+def test_batch_guards_refuse_over_cap_and_redundant_follower():
+    """Total delta over cap refuses the whole batch; a correlated follower is
+    refused with patch-shaped evidence unless already leader-grouped."""
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    cfg = rc.shared()
+    manifest = {
+        "alpha_a": {"candidate_id": "alpha_a", "planned_weight_delta": 0.20},
+        "alpha_b": {"candidate_id": "alpha_b", "planned_weight_delta": 0.20},
+    }
+
+    over = orch._batch_manifest_guards(
+        ["alpha_a", "alpha_b"], manifest, {"groups": []}, cfg
+    )
+    assert set(over) == {"alpha_a", "alpha_b"}
+    assert over["alpha_a"]["reason"] == "batch_total_weight_delta_exceeded"
+
+    small_manifest = {
+        cid: {"candidate_id": cid, "planned_weight_delta": 0.01}
+        for cid in ("alpha_a", "alpha_b")
+    }
+    report = {
+        "groups": [{"group_id": "g1", "leader": "alpha_a",
+                    "members": ["alpha_a", "alpha_b"]}]
+    }
+    pair = orch._batch_manifest_guards(
+        ["alpha_a", "alpha_b"], small_manifest, report, cfg
+    )
+    assert list(pair) == ["alpha_b"]
+    assert pair["alpha_b"]["reason"] == "batch_redundant_pair_refused"
+    assert pair["alpha_b"]["evidence"]["redundancy_patch"] == {
+        "alpha_b": pair["alpha_b"]["evidence"]["redundancy_patch"]["alpha_b"]
+    }
+
+    grouped_cfg = rc.shared()
+    grouped_cfg.factor_signal_config = {
+        "alpha_a": {"redundancy_group": "g1", "redundancy_leader": "alpha_a"},
+        "alpha_b": {"redundancy_group": "g1", "redundancy_leader": "alpha_a"},
+    }
+    assert (
+        orch._batch_manifest_guards(
+            ["alpha_a", "alpha_b"], small_manifest, report, grouped_cfg
+        )
+        == {}
+    )
+
+
+def test_gate_reclaims_partial_batch_for_next_item(tmp_path):
+    """One 2-apply command serves two per-item claims (a then b) and refuses
+    a third; an off-manifest id never claims."""
+    from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+    from backend.services.v16_command_gate import V16CommandGate
+
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    service = V16BrainOrchestratorService(db_path=db_path)
+    delegated = service.delegate_factor_governance_cycle(
+        {
+            "snapshot_id": "batch-1",
+            "health_cycle_id": "health-1",
+            "expansion_preflight": {
+                "required": True,
+                "candidate_count": 2,
+                "reasons": {},
+                "candidate_refs": [_batch_ref("alpha_a"), _batch_ref("alpha_b")],
+            },
+        },
+        persist=True,
+    )
+    assert delegated["status"] == "delegated"
+    command_id = delegated["command"]["command_id"]
+
+    def _claim(candidate_id):
+        return V16CommandGate.claim(
+            db_path,
+            target_agent="factor_governance",
+            scope_type="factor_weight",
+            scope_key="alpha_weight_policy",
+            action="factor_governance_cycle",
+            command_id=command_id,
+            candidate_id=candidate_id,
+        )
+
+    assert _claim("zzz").get("allowed") is not True
+    first = _claim("alpha_a")
+    assert first["allowed"] is True
+    done = V16CommandGate.finalize(
+        db_path,
+        command_id=command_id,
+        claim_token=first["claim_token"],
+        mutation_id="mut-1",
+        config_hash="cfg-1",
+        domain_hash="dom-1",
+    )
+    assert done["allowed"] is True
+    second = _claim("alpha_b")
+    assert second["allowed"] is True
+    done2 = V16CommandGate.finalize(
+        db_path,
+        command_id=command_id,
+        claim_token=second["claim_token"],
+        mutation_id="mut-2",
+        config_hash="cfg-2",
+        domain_hash="dom-2",
+    )
+    assert done2["allowed"] is True
+    assert _claim("alpha_a").get("allowed") is not True

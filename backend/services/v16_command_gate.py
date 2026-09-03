@@ -86,6 +86,17 @@ class V16CommandGate:
             "risk_reduction_may_use_existing_rollback_path": True,
         }
 
+    @staticmethod
+    def _candidate_matches(row_candidate_id: str, expected: str) -> bool:
+        """Batch-manifest membership for candidate binding.
+
+        A command row may carry the ordered manifest id list joined by ","
+        (single id when N=1). A per-item claim binds when its id is a member.
+        Single-id rows behave exactly as before.
+        """
+        members = [part for part in str(row_candidate_id or "").split(",") if part]
+        return str(expected or "") in members
+
     @classmethod
     def is_actionable(
         cls,
@@ -103,10 +114,16 @@ class V16CommandGate:
                 else cls._max_age_seconds()
             ),
         )
+        # A partially-consumed batch command (finalized with apply_count below
+        # its max) stays actionable so the next manifest item can claim it.
+        # Single-use commands (max_apply_count=1) are unchanged: finalized
+        # implies apply_count=1 and stays non-actionable.
+        claim_status = str(item.get("claim_status") or "available")
+        if claim_status not in {"available", "finalized"}:
+            return False
         authority_issued_at = cls._authority_issued_at(item)
         return bool(
             str(item.get("decision") or "") == "delegate"
-            and str(item.get("claim_status") or "available") == "available"
             and authority_issued_at > 0.0
             and checked_at - authority_issued_at <= age_limit
             and int(item.get("apply_count") or 0)
@@ -197,7 +214,9 @@ class V16CommandGate:
                 item = {key: row[key] for key in row.keys()} if hasattr(row, "keys") else dict(row)
                 if requested_id and str(item.get("command_id") or "") != requested_id:
                     continue
-                if candidate_id and str(item.get("candidate_id") or "") != str(candidate_id):
+                if candidate_id and not cls._candidate_matches(
+                    str(item.get("candidate_id") or ""), str(candidate_id)
+                ):
                     continue
                 if not cls.is_actionable(
                     item,
@@ -355,7 +374,9 @@ class V16CommandGate:
                         "supervisor_template",
                     }:
                         continue
-                if candidate_id and str(item.get("candidate_id") or "") != str(candidate_id):
+                if candidate_id and not cls._candidate_matches(
+                    str(item.get("candidate_id") or ""), str(candidate_id)
+                ):
                     continue
                 if posterior_fingerprint and str(item.get("posterior_fingerprint") or "") != str(posterior_fingerprint):
                     continue
@@ -372,7 +393,7 @@ class V16CommandGate:
                            claim_expires_at=?, claim_attempts=claim_attempts+1,
                            updated_at=?
                        WHERE command_id=? AND decision='delegate'
-                         AND claim_status='available' AND apply_count < max_apply_count
+                         AND claim_status IN ('available', 'finalized') AND apply_count < max_apply_count
                          AND authority_issued_at>=?""",
                     (
                         token,
@@ -539,8 +560,11 @@ class V16CommandGate:
                 "supervisor_template",
             }:
                 return cls._blocked("v16_command_action_mismatch", command_id=command_id)
+        if candidate_id and not cls._candidate_matches(
+            str(item.get("candidate_id") or ""), str(candidate_id)
+        ):
+            return cls._blocked("v16_command_candidate_id_mismatch", command_id=command_id)
         for field, expected in (
-            ("candidate_id", candidate_id),
             ("posterior_fingerprint", posterior_fingerprint),
             ("evidence_fingerprint", evidence_fingerprint),
         ):

@@ -1044,14 +1044,25 @@ class V16BrainOrchestratorService:
                 "candidate_ref_count": len(candidate_refs),
                 "boundary": self.boundary(),
             }
-        if len(candidate_refs) != 1:
+        try:
+            from config.runtime_config import shared as _rc_shared
+
+            batch_max = int(
+                gate.get("batch_max_candidates")
+                or getattr(_rc_shared(), "factor_governance_batch_max_candidates", 5)
+                or 5
+            )
+        except Exception:
+            batch_max = int(gate.get("batch_max_candidates") or 5) or 5
+        if len(candidate_refs) < 1 or len(candidate_refs) > max(1, batch_max):
             return {
                 "ok": False,
                 "status": "factor_candidate_contract_not_ready",
-                "reason": "candidate_scoped_command_required",
+                "reason": "candidate_batch_size_out_of_range",
                 "snapshot_id": snapshot_id,
                 "candidate_count": candidate_count,
                 "candidate_ref_count": len(candidate_refs),
+                "batch_max_candidates": max(1, batch_max),
                 "boundary": self.boundary(),
             }
 
@@ -1088,8 +1099,13 @@ class V16BrainOrchestratorService:
             "schema_version": "v16_brain_command.v1",
             "snapshot_id": snapshot_id,
             "plan_id": "",
-            "eval_id": "",
-            "candidate_id": str(candidate_refs[0].get("candidate_id") or ""),
+            # Batch manifest literal format: ordered manifest ids joined by ",".
+            # Single-candidate commands keep the bare id. The gate binds
+            # per-item claims by manifest membership; the manifest verdict
+            # binds fingerprint + count.
+            "candidate_id": ",".join(
+                str(ref.get("candidate_id") or "") for ref in candidate_refs
+            ),
             "target_agent": "factor_governance",
             "scope_type": "factor_weight",
             "scope_key": "alpha_weight_policy",
@@ -1116,7 +1132,7 @@ class V16BrainOrchestratorService:
                 gate.get("posterior_fingerprint") or ""
             ),
             "evidence_fingerprint": evidence_fingerprint,
-            "max_apply_count": 1,
+            "max_apply_count": len(candidate_refs),
             "authority_issued_at": now,
             "created_at": now,
             "updated_at": now,
