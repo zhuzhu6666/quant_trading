@@ -363,7 +363,8 @@ def classify_governance_risk(before: Mapping[str, Any], target: Mapping[str, Any
         if old is None and isinstance(new, bool):
             restrictive_bool = any(
                 token in lower
-                for token in ("enabled", "unlocked", "send_orders", "allow", "active")
+                for token in ("enabled", "unlocked", "send_orders", "allow", "active",
+                              "activation")
             )
             if restrictive_bool and new is False:
                 tightening.append(dotted)
@@ -373,7 +374,8 @@ def classify_governance_risk(before: Mapping[str, Any], target: Mapping[str, Any
         if isinstance(old, bool) and isinstance(new, bool):
             restrictive_bool = any(
                 token in lower
-                for token in ("enabled", "unlocked", "send_orders", "allow", "active")
+                for token in ("enabled", "unlocked", "send_orders", "allow", "active",
+                              "activation")
             )
             if restrictive_bool:
                 (tightening if old and not new else expansion).append(dotted)

@@ -782,6 +782,7 @@ def test_builtin_demote_patch_with_activation_eligibility_stays_tightening():
                 "lifecycle_status": "SHADOW",
                 "enabled": True,
                 "autonomous_activation": True,
+                "activation_canary": False,
                 "committed_mutation_id": "m1",
             }
         }
