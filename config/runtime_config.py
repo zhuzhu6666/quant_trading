@@ -826,17 +826,15 @@ RUNTIME_CONFIG_HASH_COMPAT_FIELDS = frozenset(
     {"factor_governance_model_min_factor_samples"}
 )
 
-# These fields were added after already-committed runtime overlay mutations
-# existed in production.  An old mutation may be accepted only when the new
-# fields are still at their safe defaults and are absent from the persisted
-# overlay; a later mutation must bind the complete current config hash.
+# These fields were added after the latest committed runtime overlay
+# mutation existed in production (only that mutation's binding is checked).
+# An old mutation may be accepted only when the new fields are still at
+# their safe defaults and are absent from the persisted overlay; a later
+# mutation must bind the complete current config hash.  Older exclusions
+# retire once their keys predate the latest committed mutation: keeping
+# them would strip keys the intent contains and break the comparison.
 RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS = frozenset(
     {
-        "position_supervisor_auto_selection_mode",
-        "position_supervisor_switch_min_stable_bars",
-        "position_supervisor_switch_cooldown_bars",
-        "position_supervisor_max_switches_per_position",
-        "position_supervisor_selection_max_age_seconds",
         # Factor governance acceleration budgets/caps (Phases 2-3): gate only
         # new code paths, never reinterpret already-committed mutations.
         "factor_governance_fast_retire_per_cycle",
@@ -846,11 +844,6 @@ RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS = frozenset(
     }
 )
 RUNTIME_CONFIG_LEGACY_HASH_DEFAULTS = {
-    "position_supervisor_auto_selection_mode": "off",
-    "position_supervisor_switch_min_stable_bars": 2,
-    "position_supervisor_switch_cooldown_bars": 3,
-    "position_supervisor_max_switches_per_position": 2,
-    "position_supervisor_selection_max_age_seconds": 900.0,
     "factor_governance_fast_retire_per_cycle": 10,
     "factor_governance_stale_evidence_max_age_hours": 336,
     "factor_governance_batch_max_candidates": 5,
