@@ -706,3 +706,145 @@ def test_rollback_scan_covers_batch_budget(tmp_path):
 
     assert len(first) == 10
     assert len(second) == 2
+
+
+def test_end_to_end_retire_revive_batch_loop(monkeypatch, tmp_path):
+    """Full acceleration loop on sqlite: register dsl -> normal retire with
+    cause regime_mismatch -> regime flip in experience_memory -> reprepare a
+    new SHADOW generation -> batch manifest of 3 binds with no guard
+    refusals. (PG-only commit covered by the gate reclaim test.)"""
+    import json
+    import sqlite3
+    from alpha.factor_identity import (
+        canonical_factor_id,
+        factor_definition_fingerprint,
+    )
+    from backend.services.factor_lifecycle_service import FactorLifecycleService
+
+    rc.reset_for_tests()
+    _init_state_db(tmp_path)
+    db = tmp_path / "state.db"
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(db)
+
+    expression = "rank(close)"
+    name = "loop_alpha"
+    adapter = _RevivalAdapter(name, expression)
+    service = FactorLifecycleService(
+        db,
+        adapter=adapter,
+        projection_stale_after_sec=75,
+        health_stale_after_sec=180,
+    )
+    registered = service.register_shadow(
+        name=name,
+        expression=expression,
+        evidence_refs={"candidate_validation": {"direction": 1,
+                                                "signed_ic_mean": 0.03}},
+    )
+    assert registered["ok"] is True
+
+    monkeypatch.setattr(
+        "alpha.registry_adapter.RegistryAdapter.shared", classmethod(lambda cls: adapter)
+    )
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(
+        orch,
+        "_current_market_regime_projection",
+        lambda: {"regime_id": "trend", "confidence": 0.8, "source": "test"},
+    )
+    audited = []
+    monkeypatch.setattr(
+        orch,
+        "_audit_action",
+        lambda run, item, action, status, evidence, verdict, **kwargs: audited.append(
+            {"factor_id": item["factor_id"], "action": action, "status": status,
+             "evidence": evidence}
+        ) or audited[-1],
+    )
+    catalog = [
+        {
+            "factor_id": name,
+            "source": "discovered",
+            "enabled": False,
+            "health_score": 10.0,
+            "health_status": "WEAK",
+            "lifecycle_expression": expression,
+            "lifecycle_factor_id": canonical_factor_id(expression),
+            "lifecycle_definition_fingerprint": factor_definition_fingerprint(
+                expression
+            ),
+            "lifecycle_artifact_hash": "b" * 64,
+            "factor_governance_shadow": {
+                "model_type": "factor_governance_lightgbm",
+                "sample_count": 25,
+                "weak_sample_count": 25,
+                "weakness_score": 0.9,
+                "avg_weakness_score": 0.9,
+                "promotion_gate": {"passed": True},
+                "result": {"mutation_eligible": True},
+                "payload": {"features": {"same_regime_positive_rate": 0.9}},
+            },
+        }
+    ]
+
+    retire_actions = orch._retire_quarantined_discovered(
+        catalog, {"run_id": "loop-retire"}
+    )
+    assert retire_actions[0]["status"] == "applied"
+    assert retire_actions[0]["evidence"]["retire_cause"] == "regime_mismatch"
+    assert retire_actions[0]["evidence"]["regime_id"] == "trend"
+    terminal = service.get_state(factor_name=name)
+    assert terminal["lifecycle_stage"] == "RETIRED"
+    assert json.loads(terminal["metadata_json"])["retire_cause"] == "regime_mismatch"
+
+    _seed_experience(db, ["trend"] * 5)
+    revived = service.reprepare_retired(
+        name=name,
+        actor="system:factor_governance",
+        reason="loop regime back",
+        evidence_refs={},
+        idempotency_key="loop-revive-1",
+    )
+    assert revived["ok"] is True
+    assert revived["lifecycle_stage"] == "SHADOW"
+    after = service.get_state(factor_name=name)
+    assert after["generation"] == int(terminal["generation"]) + 1
+
+    from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+    from backend.runtime.factor_governance_orchestrator import (
+        factor_batch_manifest_verdict,
+    )
+
+    delegator = V16BrainOrchestratorService(db_path=db)
+    refs = [
+        {**_batch_ref(name, "promote_factor"), "planned_weight_delta": 0.01},
+        {**_batch_ref("loop_beta", "promote_factor"), "planned_weight_delta": 0.01},
+        {**_batch_ref("loop_gamma", "restore_factor_live"),
+         "planned_weight_delta": 0.02},
+    ]
+    delegated = delegator.delegate_factor_governance_cycle(
+        {
+            "snapshot_id": "loop-1",
+            "health_cycle_id": "health-1",
+            "expansion_preflight": {
+                "required": True,
+                "candidate_count": 3,
+                "reasons": {},
+                "candidate_refs": refs,
+            },
+        },
+        persist=False,
+    )
+    assert delegated["status"] == "delegated"
+    assert delegated["command"]["candidate_id"] == f"{name},loop_beta,loop_gamma"
+    preflight = delegated["command"]["evidence"]["expansion_preflight"]
+    assert factor_batch_manifest_verdict(
+        {"evidence": delegated["command"]["evidence"]}, preflight
+    )["allowed"] is True
+    manifest_by_id = {ref["candidate_id"]: ref for ref in refs}
+    guards = orch._batch_manifest_guards(
+        [name, "loop_beta", "loop_gamma"], manifest_by_id,
+        {"groups": []}, rc.shared(),
+    )
+    assert guards == {}
