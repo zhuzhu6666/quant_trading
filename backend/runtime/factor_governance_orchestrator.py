@@ -3876,6 +3876,8 @@ class FactorGovernanceOrchestrator:
         cfg = runtime_config.shared()
         severe = float(getattr(cfg, "retire_severe_threshold", 30.0) or 30.0)
         max_actions = int(getattr(cfg, "factor_governance_max_retires_per_cycle", 1) or 1)
+        current_regime_id = str((self._current_market_regime_projection() or {}).get("regime_id") or "")
+        regime_fit_ok = float(getattr(cfg, "factor_governance_regime_fit_ok_threshold", 0.5) or 0.5)
         candidates = []
         for item in catalog:
             if item.get("source") != "discovered" or item.get("enabled"):
@@ -3899,6 +3901,8 @@ class FactorGovernanceOrchestrator:
                 "source": item.get("source"),
                 "enabled": item.get("enabled"),
                 "model_governance": model_evidence,
+                "retire_cause": self._retire_cause(item, model_evidence, current_regime_id, regime_fit_ok),
+                "regime_id": current_regime_id,
             }
             verdict = self._risk("retire_factor", item, evidence)
             if not verdict.allowed:
@@ -4308,6 +4312,35 @@ class FactorGovernanceOrchestrator:
             "current_regime_id": current_regime_id,
             "regime_fit_score": round(fit, 4),
         }
+
+    def _retire_cause(
+        self,
+        item: dict[str, Any],
+        model_evidence: dict[str, Any] | None,
+        current_regime_id: str,
+        regime_fit_ok_threshold: float = 0.5,
+    ) -> str:
+        """Locked retire-cause rule: `dead` | `regime_mismatch` | `param_mismatch`.
+
+        `dead` = artifact/contract broken (unverifiable lifecycle identity fails
+        closed: revival needs an exact definition match) or model disable-grade
+        weakness that is global (Batch-C verdict finds no current-regime fit).
+        `regime_mismatch` = Batch-C verdict says weak only outside this regime.
+        Otherwise `param_mismatch`. No new thresholds.
+        """
+        if not self._has_durable_shadow_lifecycle_identity(item):
+            return "dead"
+        mismatch = self._regime_mismatch_verdict(
+            bool((model_evidence or {}).get("weak_for_disable")),
+            current_regime_id=current_regime_id,
+            regime_fit_score=self._shadow_regime_fit_score(item),
+            regime_fit_ok_threshold=regime_fit_ok_threshold,
+        )
+        if bool(mismatch.get("regime_mismatch")):
+            return "regime_mismatch"
+        if bool((model_evidence or {}).get("weak_for_disable")):
+            return "dead"
+        return "param_mismatch"
 
     @staticmethod
     def _shadow_regime_fit_score(item: dict[str, Any]) -> float | None:

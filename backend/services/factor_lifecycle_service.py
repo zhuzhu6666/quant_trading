@@ -1587,6 +1587,9 @@ class FactorLifecycleService:
                 else "factor_dsl_ast.v1"
             ),
         }
+        for _cause_key in ("retire_cause", "regime_id"):
+            if _cause_key in (mutation.evidence_refs or {}):
+                metadata[_cause_key] = mutation.evidence_refs[_cause_key]
         if mutation.new_generation:
             metadata["reenrolled_from"] = {
                 "generation": int(current.get("generation") or 1),

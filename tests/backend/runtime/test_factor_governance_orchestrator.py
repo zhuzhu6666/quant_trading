@@ -2033,3 +2033,112 @@ def test_backoff_lookup_reads_real_audit_sql_on_sqlite(tmp_path):
     orch.overlay = RuntimeConfigOverlayService(local_db)
 
     assert orch._recently_blocked_expansion_candidates() == {"stuck_activation"}
+
+
+def test_retire_cause_rule_dead_mismatch_param(monkeypatch):
+    """Locked cause rule: unverifiable identity -> dead; disable-grade weakness
+    with current-regime fit -> regime_mismatch; global -> dead; else param."""
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    expression = "rank(close)"
+    identified = {
+        "lifecycle_expression": expression,
+        "lifecycle_factor_id": canonical_factor_id(expression),
+        "lifecycle_definition_fingerprint": factor_definition_fingerprint(expression),
+        "lifecycle_artifact_hash": "a" * 64,
+    }
+    assert orch._retire_cause({}, {"weak_for_disable": True}, "trend", 0.5) == "dead"
+    assert (
+        orch._retire_cause(
+            {
+                **identified,
+                "factor_governance_shadow": {
+                    "payload": {"features": {"same_regime_positive_rate": 0.9}}
+                },
+            },
+            {"weak_for_disable": True},
+            "trend",
+            0.5,
+        )
+        == "regime_mismatch"
+    )
+    assert (
+        orch._retire_cause(
+            {
+                **identified,
+                "factor_governance_shadow": {
+                    "payload": {"features": {"same_regime_positive_rate": 0.1}}
+                },
+            },
+            {"weak_for_disable": True},
+            "trend",
+            0.5,
+        )
+        == "dead"
+    )
+    assert orch._retire_cause({**identified}, {}, "trend", 0.5) == "param_mismatch"
+
+
+def test_retire_quarantined_discovered_carries_cause_and_regime(monkeypatch, tmp_path):
+    """Retiring a quarantined dsl factor stamps evidence with retire_cause +
+    regime_id and forwards both to lifecycle.retire evidence_refs."""
+    rc.reset_for_tests()
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+    retired = []
+    audited = []
+
+    class _Adapter:
+        def get_meta(self, name):
+            return {"source": "discovered", "description": "rank(close)"}
+
+    class _Lifecycle:
+        def __init__(self, _db_path, adapter):
+            self.adapter = adapter
+
+        def retire(self, **kwargs):
+            retired.append(kwargs)
+            return {"ok": True, "lifecycle_stage": "RETIRED", "mutation_id": "m-retire-1"}
+
+    monkeypatch.setattr(
+        "alpha.registry_adapter.RegistryAdapter.shared",
+        classmethod(lambda cls: _Adapter()),
+    )
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _Lifecycle)
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(
+        orch,
+        "_current_market_regime_projection",
+        lambda: {"regime_id": "trend", "confidence": 0.8, "source": "test"},
+    )
+    monkeypatch.setattr(
+        orch,
+        "_audit_action",
+        lambda run, item, action, status, evidence, verdict, **kwargs: audited.append(
+            {"factor_id": item["factor_id"], "action": action, "status": status, "evidence": evidence}
+        ) or audited[-1],
+    )
+
+    expression = "rank(close)"
+    catalog = [
+        {
+            "factor_id": "quarantined_dsl_1",
+            "source": "discovered",
+            "enabled": False,
+            "health_score": 10.0,
+            "health_status": "WEAK",
+            "lifecycle_expression": expression,
+            "lifecycle_factor_id": canonical_factor_id(expression),
+            "lifecycle_definition_fingerprint": factor_definition_fingerprint(expression),
+            "lifecycle_artifact_hash": "b" * 64,
+        }
+    ]
+
+    actions = orch._retire_quarantined_discovered(catalog, {"run_id": "test-retire-cause"})
+
+    assert len(retired) == 1
+    assert retired[0]["evidence_refs"]["retire_cause"] == "param_mismatch"
+    assert retired[0]["evidence_refs"]["regime_id"] == "trend"
+    assert audited[0]["evidence"]["retire_cause"] == "param_mismatch"
+    assert audited[0]["evidence"]["regime_id"] == "trend"
+    assert actions[0]["status"] == "applied"

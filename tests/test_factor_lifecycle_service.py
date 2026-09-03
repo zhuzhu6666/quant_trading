@@ -1150,3 +1150,22 @@ def test_legacy_compact_hash_artifact_still_acknowledges_builtin(tmp_path):
 
     assert result["acknowledged_count"] == 1
     assert result["blocked_count"] == 0
+
+
+def test_retire_threads_cause_keys_into_metadata(lifecycle):
+    """Retire evidence carrying retire_cause + regime_id must land in
+    metadata_json (additive keys) with stage RETIRED."""
+    service, _adapter, name, _expression = lifecycle
+    result = service.retire(
+        name=name,
+        evidence_refs={"retire_cause": "param_mismatch", "regime_id": "trend"},
+        idempotency_key="retire-cause-once",
+    )
+
+    assert result["ok"] is True
+    assert result["lifecycle_stage"] == FactorLifecycleStage.RETIRED.value
+    state = service.get_state(factor_name=name)
+    assert state["lifecycle_stage"] == FactorLifecycleStage.RETIRED.value
+    metadata = json.loads(state["metadata_json"])
+    assert metadata["retire_cause"] == "param_mismatch"
+    assert metadata["regime_id"] == "trend"
