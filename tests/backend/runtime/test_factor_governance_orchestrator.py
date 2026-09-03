@@ -1965,9 +1965,12 @@ def test_preflight_backoff_defers_recently_blocked_candidates(monkeypatch):
             "lifecycle_status": "SHADOW",
             "lifecycle_origin": "dsl",
             "lifecycle_expression": "rank(close)",
+            "lifecycle_factor_id": canonical_factor_id("rank(close)"),
             "lifecycle_generation": 1,
             "lifecycle_artifact_hash": "a" * 64,
-            "lifecycle_definition_fingerprint": "b" * 64,
+            "lifecycle_definition_fingerprint": factor_definition_fingerprint(
+                "rank(close)"
+            ),
             "lifecycle_config_hash": "c" * 64,
             "runtime_selection_fingerprint": "f" * 64,
             "health_rolling_ic": 0.03,
@@ -1991,8 +1994,6 @@ def test_preflight_backoff_defers_recently_blocked_candidates(monkeypatch):
         redundancy_report={"group_count": 0, "groups": []},
     )
 
-    print("REASONS:", result["reasons"])
-    print("CANDIDATES:", [(c["candidate_id"], c["action"]) for c in result["candidate_refs"]])
     assert result["candidate_count"] == 1
     assert result["candidate_refs"][0]["candidate_id"] == "dsl_promo"
     assert result["deferred_candidates"] == [
