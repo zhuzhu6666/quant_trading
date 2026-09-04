@@ -11,7 +11,9 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import threading
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
@@ -403,8 +405,44 @@ def put_payload(
     return ref
 
 
+# Blobs are content-addressed and integrity-verified, so the verified raw
+# JSON text keyed by payload_hash is immutable: caching it dedupes the
+# per-call SQL fetch + gzip decompress + SHA-256 re-verify that the
+# agent-context pipeline repeats tens of thousands of times per governance
+# cycle.  Only the raw TEXT is cached; callers still json.loads() their own
+# instance, so nothing mutable is ever shared.
+_PAYLOAD_TEXT_CACHE: "OrderedDict[str, str]" = OrderedDict()
+_PAYLOAD_TEXT_CACHE_LOCK = threading.Lock()
+_PAYLOAD_TEXT_CACHE_MAX = 2048
+
+
+def _payload_text_cache_get(payload_hash: str) -> str | None:
+    with _PAYLOAD_TEXT_CACHE_LOCK:
+        text = _PAYLOAD_TEXT_CACHE.pop(payload_hash, None)
+        if text is not None:
+            _PAYLOAD_TEXT_CACHE[payload_hash] = text
+        return text
+
+
+def _payload_text_cache_put(payload_hash: str, text: str) -> None:
+    with _PAYLOAD_TEXT_CACHE_LOCK:
+        _PAYLOAD_TEXT_CACHE[payload_hash] = text
+        while len(_PAYLOAD_TEXT_CACHE) > _PAYLOAD_TEXT_CACHE_MAX:
+            _PAYLOAD_TEXT_CACHE.popitem(last=False)
+
+
+def _payload_text_cache_clear() -> None:
+    with _PAYLOAD_TEXT_CACHE_LOCK:
+        _PAYLOAD_TEXT_CACHE.clear()
+
+
 def read_payload(conn: Any, payload_hash: str) -> Any:
     """Restore and verify one payload blob."""
+
+    cached_text = _payload_text_cache_get(str(payload_hash or ""))
+    if cached_text is not None:
+        return json.loads(cached_text)
+
 
     row = conn.execute(
         _sql(
@@ -451,9 +489,12 @@ def read_payload(conn: Any, payload_hash: str) -> Any:
     if expected_hash != str(payload_hash or ""):
         raise CanonicalV2Error("canonical_v2 payload hash mismatch")
     try:
-        return json.loads(raw.decode("utf-8"))
+        text = raw.decode("utf-8")
+        payload = json.loads(text)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CanonicalV2Error("canonical_v2 payload is not valid JSON") from exc
+    _payload_text_cache_put(str(payload_hash or ""), text)
+    return payload
 
 
 _EVENT_COLUMNS = (

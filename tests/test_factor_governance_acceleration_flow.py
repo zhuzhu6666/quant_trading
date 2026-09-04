@@ -337,8 +337,11 @@ def test_preflight_hands_first_n_and_defers_rest(monkeypatch):
 
 
 def test_batch_guards_refuse_over_cap_and_redundant_follower():
-    """Total delta over cap refuses the whole batch; a correlated follower is
-    refused with patch-shaped evidence unless already leader-grouped."""
+    """Over-cap manifests are TRIMMED to the weight budget instead of being
+    refused wholesale: the all-or-nothing guard deadlocked expansion whenever
+    >=2 candidates were ready (production: 4 x 0.30 planned deltas vs a 0.30
+    cap refused every promote for 14 straight cycles).  A correlated follower
+    is still refused with patch-shaped evidence unless leader-grouped."""
     rc.reset_for_tests()
     orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
     cfg = rc.shared()
@@ -346,12 +349,28 @@ def test_batch_guards_refuse_over_cap_and_redundant_follower():
         "alpha_a": {"candidate_id": "alpha_a", "planned_weight_delta": 0.20},
         "alpha_b": {"candidate_id": "alpha_b", "planned_weight_delta": 0.20},
     }
-
-    over = orch._batch_manifest_guards(
-        ["alpha_a", "alpha_b"], manifest, {"groups": []}, cfg
+    # The pair guard no longer owns the weight cap; it only handles
+    # redundancy groups now.
+    assert (
+        orch._batch_manifest_guards(
+            ["alpha_a", "alpha_b"], manifest, {"groups": []}, cfg
+        )
+        == {}
     )
-    assert set(over) == {"alpha_a", "alpha_b"}
-    assert over["alpha_a"]["reason"] == "batch_total_weight_delta_exceeded"
+    cap = float(
+        getattr(
+            cfg,
+            "factor_governance_batch_max_total_weight_delta",
+            0.30,
+        )
+        or 0.0
+    )
+    refusals = orch._weight_budget_refusals(
+        ["alpha_a", "alpha_b"], manifest, cap
+    )
+    assert list(refusals) == ["alpha_b"]
+    assert refusals["alpha_b"]["batch_trimmed"] is True
+    assert refusals["alpha_b"]["batch_max_total_weight_delta"] == cap
 
     small_manifest = {
         cid: {"candidate_id": cid, "planned_weight_delta": 0.01}
@@ -848,3 +867,45 @@ def test_end_to_end_retire_revive_batch_loop(monkeypatch, tmp_path):
         {"groups": []}, rc.shared(),
     )
     assert guards == {}
+
+
+def test_weight_budget_trims_production_deadlock_manifest():
+    """Reproduces the production deadlock shape: four promotion candidates at
+    0.30 planned delta each against a 0.30 cap.  The trim admits the first
+    (0.30 == cap passes the strict >) and defers the rest instead of
+    refusing the whole batch forever."""
+    manifest = {
+        f"dsl_{i}": {"candidate_id": f"dsl_{i}", "planned_weight_delta": 0.3}
+        for i in range(4)
+    }
+    refusals = FactorGovernanceOrchestrator._weight_budget_refusals(
+        list(manifest), manifest, 0.30
+    )
+    assert "dsl_0" not in refusals
+    assert set(refusals) == {"dsl_1", "dsl_2", "dsl_3"}
+    assert refusals["dsl_1"]["batch_trimmed"] is True
+
+
+def test_weight_budget_single_item_batch_bypasses_cap():
+    """len<=1 batches bypass batch guards entirely (pre-existing semantics):
+    a lone candidate over the cap is not refused by the partition."""
+    manifest = {"solo": {"candidate_id": "solo", "planned_weight_delta": 0.5}}
+    assert (
+        FactorGovernanceOrchestrator._weight_budget_refusals(
+            ["solo"], manifest, 0.30
+        )
+        == {}
+    )
+
+
+def test_weight_budget_zero_cap_disables_trim():
+    manifest = {
+        "a": {"candidate_id": "a", "planned_weight_delta": 0.9},
+        "b": {"candidate_id": "b", "planned_weight_delta": 0.9},
+    }
+    assert (
+        FactorGovernanceOrchestrator._weight_budget_refusals(
+            ["a", "b"], manifest, 0.0
+        )
+        == {}
+    )

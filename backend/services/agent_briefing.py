@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.core.db import STATE_DB
+from backend.core.ttl_cache import TTLCache
 from backend.services.agent_authority import AgentAuthorityRegistryService
 from backend.services.agent_scorecard import AgentScorecardService
 from backend.services.proposal_registry import ProposalRegistryService
@@ -12,6 +13,13 @@ from backend.services._brain_helpers import connect as _connect, execute as _exe
 from backend.services.canonical_v2_reader import iter_counterfactual_rows, review_row
 from backend.services.review_contract import review_has_system_contamination
 from backend.services.v16_brain_snapshot import BrainMemoryService
+
+
+# The relevant-experience builder re-scans review blobs (and their
+# counterfactuals) on every agent-context call; the governance cycle calls
+# agent_context once per audited action.  A short TTL cache dedupes those
+# identical reads within a cycle without changing freshness materially.
+_EXPERIENCE_CACHE = TTLCache(maxsize=32, ttl_seconds=60.0)
 
 
 class AgentBriefingContextService:
@@ -221,6 +229,16 @@ class AgentBriefingContextService:
     ) -> list[dict[str, Any]]:
         """Return compact, evidence-weighted lessons for generation context."""
         limit = max(1, min(int(limit), 50))
+        cache_key = (
+            "agent_experience.v1",
+            str(self.db_path),
+            str(scope_type),
+            str(scope_key),
+            int(limit),
+        )
+        cached = _EXPERIENCE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         conn = None
         try:
             conn = _connect(self.db_path, read_only=True)
@@ -323,7 +341,9 @@ class AgentBriefingContextService:
                     "posterior_action": str(selected.get("recommended_action") or ""),
                     "posterior_reconciliation": posterior,
                 })
-            return result[:limit]
+            cached_result = result[:limit]
+            _EXPERIENCE_CACHE.put(cache_key, cached_result)
+            return cached_result
         except Exception:
             return []
         finally:

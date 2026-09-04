@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from backend.core.ttl_cache import TTLCache
 from backend.core.db import STATE_DB, state_table_exists
 from backend.core.db_helpers import load_json as _loads
 from backend.services.agent_authority import (
@@ -60,6 +61,15 @@ def _status_inc(bucket: dict[str, int], status: str) -> None:
     bucket[key] = bucket.get(key, 0) + 1
 
 
+# The scorecard and trade-attribution builders scan the full recent-review
+# set (blob gzip/JSON decode per review) on every call; the governance cycle
+# calls them once per audited action (~58x/cycle) for the same data.  A short
+# TTL cache collapses those repeats; staleness is bounded at 60s, which is
+# fine for briefing/audit context (freshness lives in generated_at anyway).
+_SCORECARD_CACHE = TTLCache(maxsize=8, ttl_seconds=60.0)
+_ATTRIBUTIONS_CACHE = TTLCache(maxsize=16, ttl_seconds=60.0)
+
+
 class AgentScorecardService:
     """Read-only scorecard and feedback map for autonomous agents."""
 
@@ -80,6 +90,10 @@ class AgentScorecardService:
 
     def scorecard(self, *, limit: int = 500) -> dict[str, Any]:
         limit = max(1, min(int(limit), 2000))
+        cache_key = ("agent_scorecard.v1", str(self.db_path), int(limit))
+        cached = _SCORECARD_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         agents = self._initial_metrics()
         source_gaps: list[str] = []
         conn = _connect(self.db_path, read_only=True)
@@ -100,7 +114,7 @@ class AgentScorecardService:
             metric.pop("_posterior_not_selected_count", None)
             items.append(metric)
         items.sort(key=lambda item: (item["quality_score"], item["proposal_count"], item["application_count"]), reverse=True)
-        return {
+        result = {
             "ok": True,
             "schema_version": "agent_scorecard.v1",
             "items": items,
@@ -117,9 +131,20 @@ class AgentScorecardService:
             "generated_at": time.time(),
             "boundary": self.boundary(),
         }
+        _SCORECARD_CACHE.put(cache_key, result)
+        return result
 
     def latest_trade_attributions(self, *, limit: int = 50, include_external_links: bool = True) -> dict[str, Any]:
         limit = max(1, min(int(limit), 200))
+        cache_key = (
+            "agent_trade_attribution.v1",
+            str(self.db_path),
+            int(limit),
+            bool(include_external_links),
+        )
+        cached = _ATTRIBUTIONS_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         conn = _connect(self.db_path, read_only=True)
         try:
             if not canonical_ready(conn):
@@ -150,7 +175,7 @@ class AgentScorecardService:
             conn.close()
         linked = [item for item in items if item["participants"]]
         lesson_count = sum(1 for item in items if item.get("lesson"))
-        return {
+        result = {
             "ok": True,
             "schema_version": "agent_trade_attribution.v1",
             "status": "available" if items else "missing_reviews",
@@ -164,6 +189,8 @@ class AgentScorecardService:
             "generated_at": time.time(),
             "boundary": self.boundary(),
         }
+        _ATTRIBUTIONS_CACHE.put(cache_key, result)
+        return result
 
     def chain_health(self, *, limit: int = 300) -> dict[str, Any]:
         authority = self.registry.status(db_path=self.db_path, limit=limit)

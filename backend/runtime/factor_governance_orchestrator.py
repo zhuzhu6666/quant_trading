@@ -732,6 +732,29 @@ class FactorGovernanceOrchestrator:
                 if len(ordered_ids) > 1
                 else {}
             )
+            # Weight-budget trim: admit a greedy subset of the ordered
+            # manifest that fits the batch total-delta cap instead of
+            # refusing the whole batch (all-or-nothing deadlocked expansion
+            # whenever >=2 candidates were ready, e.g. 4 x 0.30 vs a 0.30
+            # cap).  Refused items keep the same audit reason and stay
+            # actionable in later cycles; backoff tiers them so they cannot
+            # starve other ready candidates.
+            for cid, evidence in self._weight_budget_refusals(
+                ordered_ids,
+                manifest_by_id,
+                getattr(
+                    cfg,
+                    "factor_governance_batch_max_total_weight_delta",
+                    0.30,
+                ),
+            ).items():
+                batch_guards.setdefault(
+                    cid,
+                    {
+                        "reason": "batch_total_weight_delta_exceeded",
+                        "evidence": evidence,
+                    },
+                )
             expansion_committed = False
             if not v16_candidate_id:
                 item_actions = self._execute_expansion_stages(
@@ -947,36 +970,16 @@ class FactorGovernanceOrchestrator:
         redundancy_report: dict[str, Any] | None,
         cfg: Any,
     ) -> dict[str, dict[str, Any]]:
-        """Batch-only guards, evaluated before any manifest commit.
+        """Batch-only guards evaluated before any manifest commit.
 
-        Total absolute planned weight delta must fit
-        `factor_governance_batch_max_total_weight_delta` or the whole batch
-        is refused; correlated pairs (|corr| >= threshold, i.e. same report
-        group) refuse the follower unless it is already leader-grouped
-        (no `_redundancy_signal_patch` diff for it).
+        Correlated pairs (|corr| >= threshold, i.e. same report group)
+        refuse the follower unless it is already leader-grouped (no
+        `_redundancy_signal_patch` diff for it).  The batch total weight
+        delta cap is enforced separately by `_weight_budget_refusals`,
+        which trims the manifest instead of refusing it wholesale.
         """
         guards: dict[str, dict[str, Any]] = {}
         factor_ids = [cid for cid in ordered_ids if cid != "redundancy"]
-        cap = float(
-            getattr(cfg, "factor_governance_batch_max_total_weight_delta", 0.30)
-            or 0.0
-        )
-        if cap > 0:
-            total = sum(
-                float((manifest_by_id.get(cid) or {}).get("planned_weight_delta") or 0.0)
-                for cid in factor_ids
-            )
-            if total > cap:
-                evidence = {
-                    "total_planned_weight_delta": round(total, 4),
-                    "batch_max_total_weight_delta": cap,
-                }
-                for cid in ordered_ids:
-                    guards[cid] = {
-                        "reason": "batch_total_weight_delta_exceeded",
-                        "evidence": evidence,
-                    }
-                return guards
         signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
         patch = _redundancy_signal_patch(redundancy_report, signal_cfg)
         group_of: dict[str, str] = {}
@@ -1006,6 +1009,45 @@ class FactorGovernanceOrchestrator:
             else:
                 seen.setdefault(group_id, cid)
         return guards
+
+    @staticmethod
+    def _weight_budget_refusals(
+        ordered_ids: list[str],
+        manifest_by_id: dict[str, dict[str, Any]],
+        cap: Any,
+    ) -> dict[str, dict[str, Any]]:
+        """Greedy weight-budget partition of the ordered manifest.
+
+        Items are admitted in manifest order while the running total of
+        absolute planned weight deltas stays within the cap; items that
+        would push the total over the cap are refused with the same
+        reason code the all-or-nothing guard used, so audit consumers are
+        unchanged.  A single-item batch (len <= 1) bypasses the cap just
+        like the previous guard did.
+        """
+        refusals: dict[str, dict[str, Any]] = {}
+        cap = float(cap or 0.0)
+        if cap <= 0.0 or len(ordered_ids) <= 1:
+            return refusals
+        used = 0.0
+        for cid in ordered_ids:
+            delta = abs(
+                float(
+                    (manifest_by_id.get(cid) or {}).get(
+                        "planned_weight_delta"
+                    )
+                    or 0.0
+                )
+            )
+            if used + delta > cap:
+                refusals[cid] = {
+                    "total_planned_weight_delta": round(used + delta, 6),
+                    "batch_max_total_weight_delta": cap,
+                    "batch_trimmed": True,
+                }
+            else:
+                used += delta
+        return refusals
 
 
     # ── Action selection ────────────────────────────────────────────
@@ -1561,7 +1603,7 @@ class FactorGovernanceOrchestrator:
         # reported as deferred.
         #
         # Candidates whose identical action was audited blocked_by_evidence /
-        # failed recently get a backoff tier so one permanently-failing
+        # failed / blocked_by_batch_guard recently get a backoff tier so one
         # high-priority candidate cannot starve the ready lower-priority ones
         # (observed: builtin activation with a stale lifecycle-internal health
         # stamp retried every cycle ahead of eligible shadow promotions).
@@ -1673,7 +1715,8 @@ class FactorGovernanceOrchestrator:
                   AND decision_json::jsonb->>'action' IN
                       ('promote_factor', 'restore_factor_live')
                   AND decision_json::jsonb->>'status' IN
-                      ('blocked_by_evidence', 'failed', 'mutation_failed')
+                      ('blocked_by_evidence', 'blocked_by_batch_guard',
+                       'failed', 'mutation_failed')
                 """
             )
         else:
@@ -1688,7 +1731,8 @@ class FactorGovernanceOrchestrator:
                   AND json_extract(decision_json, '$.action') IN
                       ('promote_factor', 'restore_factor_live')
                   AND json_extract(decision_json, '$.status') IN
-                      ('blocked_by_evidence', 'failed', 'mutation_failed')
+                      ('blocked_by_evidence', 'blocked_by_batch_guard',
+                       'failed', 'mutation_failed')
                 """
         try:
             conn = get_state_pg_conn(read_only=True) if use_pg else connect_sqlite(

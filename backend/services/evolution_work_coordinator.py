@@ -9,6 +9,7 @@ another decision authority.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -21,8 +22,16 @@ LOCK_NAME = "quant_autonomous_evolution_work"
 
 
 class EvolutionWorkCoordinator:
-    def __init__(self, conn_factory: Callable[..., Any] = get_state_pg_conn):
+    def __init__(
+        self,
+        conn_factory: Callable[..., Any] = get_state_pg_conn,
+        *,
+        lock_wait_s: float | None = None,
+        lock_poll_s: float | None = None,
+    ):
         self._conn_factory = conn_factory
+        self._lock_wait_s = lock_wait_s
+        self._lock_poll_s = lock_poll_s
 
     @staticmethod
     def _scalar(row: Any) -> bool:
@@ -40,29 +49,67 @@ class EvolutionWorkCoordinator:
         started_at = time.time()
         try:
             conn = self._conn_factory()
-            row = conn.execute(
-                "SELECT pg_try_advisory_lock(hashtext(%s))",
-                (LOCK_NAME,),
-            ).fetchone()
-            acquired = self._scalar(row)
-            if not acquired:
+            wait_budget = (
+                self._lock_wait_s
+                if self._lock_wait_s is not None
+                else float(
+                    os.getenv("QUANT_EVOLUTION_WORK_LOCK_WAIT_S", "480") or 0
+                )
+            )
+            poll_s = max(
+                (
+                    self._lock_poll_s
+                    if self._lock_poll_s is not None
+                    else float(
+                        os.getenv(
+                            "QUANT_EVOLUTION_WORK_LOCK_POLL_S", "15"
+                        )
+                        or 15
+                    )
+                ),
+                0.01,
+            )
+            # A busy lock used to drop the tick outright, which starved the
+            # 30-minute jobs behind the ~8-minute nursery cycle (~80% of
+            # ticks ended as skipped_busy).  Wait for the lock within a
+            # bounded budget instead; only give up when the budget runs out.
+            waited = 0.0
+            announced = False
+            while True:
+                row = conn.execute(
+                    "SELECT pg_try_advisory_lock(hashtext(%s))",
+                    (LOCK_NAME,),
+                ).fetchone()
+                if self._scalar(row):
+                    acquired = True
+                    break
                 # pg_try_advisory_lock() is a SELECT and therefore starts a
                 # transaction on a normal psycopg connection.  End it before
-                # returning so a busy scheduler attempt cannot become an
+                # retrying so a busy scheduler attempt cannot become an
                 # idle-in-transaction backend.
                 rollback = getattr(conn, "rollback", None)
                 if callable(rollback):
                     rollback()
-                logger.info(
-                    "[evolution_coordinator] skip %s: another autonomous work item is active",
-                    job_name,
-                )
-                return {
-                    "ok": True,
-                    "status": "skipped_busy",
-                    "job_name": job_name,
-                    "reason": "autonomous_work_lock_held",
-                }
+                if wait_budget <= 0 or waited >= wait_budget:
+                    logger.info(
+                        "[evolution_coordinator] skip %s: another autonomous work item is active",
+                        job_name,
+                    )
+                    return {
+                        "ok": True,
+                        "status": "skipped_busy",
+                        "job_name": job_name,
+                        "reason": "autonomous_work_lock_held",
+                    }
+                if not announced:
+                    logger.info(
+                        "[evolution_coordinator] %s waiting for the autonomous work lock (budget %.0fs)",
+                        job_name,
+                        wait_budget,
+                    )
+                    announced = True
+                time.sleep(poll_s)
+                waited += poll_s
             # The advisory lock is session-scoped.  Commit only the lock
             # acquisition transaction, then run the heavy job outside that
             # transaction.  The job owns its own business transactions.
