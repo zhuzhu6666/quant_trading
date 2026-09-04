@@ -909,3 +909,66 @@ def test_weight_budget_zero_cap_disables_trim():
         )
         == {}
     )
+
+
+def test_gate_claims_manifest_bound_candidate_id(tmp_path):
+    """run_cycle freezes authority.candidate_id to the WHOLE joined manifest,
+    so the mutation claim carries the manifest-shaped id.  Before the fix,
+    _candidate_matches only accepted single-member ids and every N>1 batch
+    manifest could never be claimed: promotes and shadow registrations all
+    aborted with v16_command_unavailable while the delegated authority sat
+    unused (production: promote intent e9bd1cca aborted at v16_claim)."""
+    from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+    from backend.services.v16_command_gate import V16CommandGate
+    rc.reset_for_tests()
+    db_path = tmp_path / "state.db"
+    service = V16BrainOrchestratorService(db_path=db_path)
+
+    def claim(command, candidate_id):
+        return V16CommandGate.claim(
+            db_path,
+            target_agent="factor_governance",
+            scope_type="factor",
+            scope_key="alpha_a",
+            action="promote_factor",
+            command_id=str(command["command_id"]),
+            candidate_id=candidate_id,
+            posterior_fingerprint=str(command.get("posterior_fingerprint") or ""),
+            evidence_fingerprint=str(command.get("evidence_fingerprint") or ""),
+        )
+
+    def _delegate_persisted():
+        return service.delegate_factor_governance_cycle(
+            {
+                "snapshot_id": "batch-claim",
+                "health_cycle_id": "health-claim",
+                "expansion_preflight": {
+                    "required": True,
+                    "candidate_count": 2,
+                    "reasons": {},
+                    "candidate_refs": [
+                        _batch_ref("alpha_a"),
+                        _batch_ref("alpha_b"),
+                    ],
+                },
+            },
+            persist=True,
+        )["command"]
+
+    foreign = claim(_delegate_persisted(), "alpha_z")
+    assert foreign.get("allowed") is not True
+
+    member = claim(_delegate_persisted(), "alpha_b")
+    assert member.get("status") == "v16_command_claimed", member
+    done = V16CommandGate.finalize(
+        db_path,
+        command_id=str(member["command_id"]),
+        claim_token=str(member["claim_token"]),
+        mutation_id="mut-1",
+        config_hash="cfg-1",
+        domain_hash="dom-1",
+    )
+    assert done.get("allowed") is True, done
+
+    manifest_bound = claim(_delegate_persisted(), "alpha_a,alpha_b")
+    assert manifest_bound.get("status") == "v16_command_claimed", manifest_bound

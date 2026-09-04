@@ -91,11 +91,21 @@ class V16CommandGate:
         """Batch-manifest membership for candidate binding.
 
         A command row may carry the ordered manifest id list joined by ","
-        (single id when N=1). A per-item claim binds when its id is a member.
-        Single-id rows behave exactly as before.
+        (single id when N=1). A per-item claim binds when its id is a member;
+        a manifest-bound claim carries the exact same joined list as its
+        binding (run_cycle freezes authority.candidate_id to the whole
+        manifest), so an exact match binds too.  Before this, any N>1
+        manifest could never be claimed: the intent's manifest-shaped
+        candidate_id was compared member-wise and always missed, so every
+        promote/register prepare aborted with v16_command_unavailable while
+        the delegated authority sat unused.
         """
-        members = [part for part in str(row_candidate_id or "").split(",") if part]
-        return str(expected or "") in members
+        row = str(row_candidate_id or "")
+        expected = str(expected or "")
+        if expected == row:
+            return True
+        members = [part for part in row.split(",") if part]
+        return expected in members
 
     @classmethod
     def is_actionable(
