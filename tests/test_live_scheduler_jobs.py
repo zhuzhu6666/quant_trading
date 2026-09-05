@@ -168,7 +168,6 @@ def test_startup_catch_up_jobs_excludes_learning_worker_evolution_owner():
 
     _immediate_heavy, deferred_heavy = startup_catch_up_jobs(run_heavy_jobs=True)
     assert deferred_heavy == [
-        (720.0, "awe_adapt"),
         (1200.0, "feature_eng"),
     ]
 
@@ -240,6 +239,5 @@ def test_start_scheduler_catch_up_includes_heavy_jobs_when_enabled():
     assert sched.ran == [
         "data_sync",
         "events_sync",
-        "awe_adapt",
         "feature_eng",
     ]

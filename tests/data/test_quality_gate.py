@@ -10,7 +10,6 @@ from data.quality_gate import (
     check_anomalous_volume,
     run_quality_gate,
     evolution_guard,
-    awe_guard,
     DataQualityReport,
 )
 
@@ -96,12 +95,3 @@ class TestRunQualityGate:
 
         report = DataQualityReport(passed=False, errors=["stale bars: M5"])
         assert evolution_guard(report) is False
-
-    def test_awe_guard_passes_anomaly(self):
-        """AWE guard ignores non-critical anomalies."""
-        report = DataQualityReport(passed=False, errors=["anomalous spreads: 5"])
-        assert awe_guard(report) is True  # non-critical
-
-    def test_awe_guard_blocks_stale(self):
-        report = DataQualityReport(passed=False, errors=["stale bars: M5"])
-        assert awe_guard(report) is False

@@ -250,7 +250,6 @@ from config.runtime_config import (
 )
 from backend.services.live_loop_shell import (
     acknowledge_prepared_factor_projections as _loop_ack_prepared_factor_projections,
-    adaptive_weight_config as _loop_adaptive_weight_config,
     compare_spot_quote_to_latest_bar as _loop_compare_spot_quote_to_latest_bar,
     apply_factor_pipeline_config_update as _loop_apply_factor_pipeline_config_update,
     bridge_readiness_label as _loop_bridge_readiness_label,
@@ -6382,202 +6381,6 @@ def _stop_live_safety_watchdog() -> None:
     _live_safety_watchdog = None
 
 
-def _scheduled_awe_adapt():
-    """每 30 分钟: AWE 权重自适应 (如果 factor pipeline 和 attribution 可用)。
-
-    从 _factor_pipeline 读取 attribution engine, 触发权重调整。
-    不阻塞, 异常只 log 不抛。
-    """
-    try:
-        # The scheduler is process-owned so health/readiness/data maintenance
-        # survives a stopped or recovering live generation.  AWE, however,
-        # consumes generation-owned in-memory attribution and must never adapt
-        # weights from a dead loop's stale pipeline.
-        if not bool(loop_status().get("running")):
-            logger.debug("[awe_adapt] skip: live loop not running")
-            return
-
-        # 原子快照 — 防止 live loop 重置 _factor_pipeline 时的 TOCTOU
-        fp = _factor_pipeline
-        if fp is None:
-            logger.debug("[awe_adapt] skip: factor pipeline not active")
-            return
-
-        # 进一步检查每个子组件是否可用
-        attr = fp.get("attribution")
-        awe = fp.get("awe")
-        engine_ref = fp.get("engine")
-        if attr is None:
-            logger.debug("[awe_adapt] skip: attribution engine not available")
-            return
-        if awe is None:
-            logger.debug("[awe_adapt] skip: AWE not initialized")
-            return
-
-        from config.runtime_config import shared as _rc
-        cfg = _rc()
-        if autonomy_expansion_freeze_applies(cfg):
-            logger.info("[awe_adapt] skipped: autonomy expansion frozen")
-            return
-
-        # 检查交易笔数门槛
-        all_stats = attr.get_all_factor_stats()
-        total_trades = sum(s.n_trades for s in all_stats.values())
-        if total_trades < cfg.awe_min_trades:
-            logger.debug("[awe_adapt] skip: only {} trades (min {})",
-                         total_trades, cfg.awe_min_trades)
-            return
-
-        # Phase 1: 提取因子历史供 CausalCheck + blend_baseline 使用
-        fv_dict: dict = {}
-        fwd_ret: "np.ndarray | None" = None  # type: ignore[name-defined]
-        engine = fp.get("engine")
-        if engine is not None and hasattr(engine, "export_factor_history"):
-            try:
-                fv_dict, fwd_arr = engine.export_factor_history()
-                fwd_ret = fwd_arr if len(fwd_arr) > 0 else None
-                # Feed ICTracker for AWE IC gate
-                ictracker = fp.get("ic_tracker")
-                if ictracker is not None and fv_dict and fwd_ret is not None:
-                    for fname, fvals in fv_dict.items():
-                        try:
-                            min_len = min(len(fvals), len(fwd_ret))
-                            if min_len >= 2:
-                                ictracker.update(fname, fvals[:min_len], fwd_ret[:min_len])
-                        except Exception as _e:
-                            logger.debug("[awe_adapt] ictracker.update failed for {}: {}: {}", fname, type(_e).__name__, _e)
-            except Exception as _e2:
-                logger.debug("[awe_adapt] export_factor_history failed: {}: {}", type(_e2).__name__, _e2)
-
-        # 如果因子数据充足且 blend baseline 未计算, 触发计算
-        use_blend = bool(awe._blend_baselines)
-        if not use_blend and fv_dict and fwd_ret is not None and len(fwd_ret) > 50:
-            try:
-                from alpha.portfolio_compositor import resolve_factor_role
-
-                alpha_names = {
-                    n for n, sc in (cfg.factor_signal_config or {}).items()
-                    if resolve_factor_role(n, sc if isinstance(sc, dict) else None) == "alpha"
-                }
-                f_names = [
-                    n for n in fv_dict
-                    if n in cfg.factor_portfolio_weights and (not alpha_names or n in alpha_names)
-                ]
-                if len(f_names) >= 3:
-                    factor_mat = _np.column_stack([
-                        fv_dict[n][:len(fwd_ret)] for n in f_names
-                    ])
-                    awe.compute_blend_baseline(factor_mat, fwd_ret[:len(fwd_ret)], f_names)
-                    use_blend = True
-            except Exception as _e2:
-                logger.debug("[awe_adapt] blend_baseline compute failed: {}: {}", type(_e2).__name__, _e2)
-
-        current_weights = dict(cfg.factor_portfolio_weights or {})
-        factor_configs = _merge_portfolio_configs(
-            cfg.factor_signal_config,
-            current_weights,
-            cfg.factor_tactical_alpha,
-            cfg.factor_signal_threshold,
-        )
-        patches = awe.adapt(attr, factor_configs,
-                           use_blend_baseline=use_blend,
-                           factor_values=fv_dict if fv_dict else None,
-                           forward_returns=fwd_ret)
-        if patches:
-            logger.info("[awe_adapt] adapted {} factors: {}",
-                        len(patches),
-                        {k: v["weight"] for k, v in patches.items()})
-            # All producers share the same decision/admission/application boundary.
-            try:
-                from backend.services.factor_weight_change import FactorWeightChangeService
-
-                run_id = f"awe_adapt_{int(time.time())}"
-
-                def _awe_risk_check(plan: dict[str, Any]):
-                    partial = dict(plan.get("proposed_weights") or {})
-                    return RiskPolicyService.shared().evaluate(
-                        "update_weight",
-                        {
-                            "source": "awe_adapt",
-                            "required_mode": "autonomous_governance",
-                            "changed_factors": sorted(partial),
-                            "current_weights": current_weights,
-                            "proposed_weights": partial,
-                        },
-                    )
-
-                result = FactorWeightChangeService().execute(
-                    source="awe_decision_policy_update_weight",
-                    producer="awe_adapt",
-                    run_id=run_id,
-                    actor="system:awe_adapt",
-                    reason="AWE weight patch merged by governed weight service",
-                    awe_patches=patches,
-                    weight_policy_weights=None,
-                    factor_configs=factor_configs,
-                    current_weights=current_weights,
-                    fast=True,
-                    risk_check=_awe_risk_check,
-                )
-                partial = dict(result.get("proposed_weights") or {})
-                status = str(result.get("status") or "")
-                if status == "blocked_by_risk":
-                    logger.info(
-                        "[awe_adapt] RiskPolicy blocked weight update run_id={} reason={}",
-                        run_id,
-                        (result.get("risk_verdict") or {}).get("reason"),
-                    )
-                    return
-                if status == "governance_error":
-                    logger.error(
-                        "[awe_adapt] governed weight update failed run_id={} stage={} error={}: {}",
-                        run_id,
-                        result.get("error_stage") or "unknown",
-                        result.get("error_type") or "Error",
-                        result.get("error") or "unknown",
-                    )
-                    return
-                if status != "applied" or not partial:
-                    admission_summary = {}
-                    for name, item in (result.get("admissions") or {}).items():
-                        item = item if isinstance(item, dict) else {}
-                        active = item.get("active_application") or {}
-                        active = active if isinstance(active, dict) else {}
-                        admission_summary[name] = {
-                            "status": item.get("status") or "",
-                            "reason": item.get("reason") or "",
-                            "active_application_id": active.get("application_id") or "",
-                            "active_application_status": active.get("application_status") or "",
-                            "active_effect_status": active.get("effect_status") or "",
-                        }
-                    logger.info(
-                        "[awe_adapt] weight update not applied run_id={} status={} admission_status={} admissions={}",
-                        run_id,
-                        status or "unknown",
-                        result.get("admission_status") or "",
-                        admission_summary,
-                    )
-                    return
-                logger.info(
-                    "[awe_adapt] weights pushed via governed service (%d changed, %d total)",
-                    len(partial),
-                    len(current_weights),
-                )
-            except Exception as _e2:
-                logger.opt(exception=True).error(
-                    "[awe_adapt] unexpected weight push exception run_id={} error={}: {}",
-                    locals().get("run_id", "unassigned"),
-                    type(_e2).__name__,
-                    _e2,
-                )
-        else:
-            logger.debug("[awe_adapt] no weight changes needed")
-    except Exception as e:
-        logger.warning("[awe_adapt] failed: {}", e)
-
-
-
-
 # ═══════════════════════════════════════════════════════════
 # Phase 3: 特征工程自动化
 # ═══════════════════════════════════════════════════════════
@@ -6663,12 +6466,6 @@ def _start_live_scheduler():
         return
     run_heavy_jobs = _env_enabled("QUANT_BACKEND_HEAVY_JOBS", "0")
 
-    # AWE consumes the live process' in-memory attribution/pipeline state.  It
-    # therefore belongs to the backend even when CPU-heavy research jobs are
-    # delegated to the learning worker.  Offset it from governance/nursery
-    # minutes to avoid decisions from the same evidence window racing.
-    sched.add_job("awe_adapt", "8,38 * * * *", _scheduled_awe_adapt)
-
     # Drawdown attribution: aggregate the trailing trade_review evidence into
     # an account-level diagnosis so a losing session states its cause instead
     # of only freezing new risk.  Lives on the backend (owner of session/live
@@ -6744,7 +6541,6 @@ def _start_live_scheduler():
     )
     _register_backend_readiness_refresh_job(sched, logger=logger)
     if run_heavy_jobs:
-        # awe_adapt 始终由持有 live pipeline 的 backend 注册。
         # Phase 3: 特征工程 (03:05 UTC, 避开 :00 治理和 :02 evolution)
         sched.add_job("feature_eng", "5 3 * * *", _scheduled_feature_engineering)
         # Phase F1.1: 停盘确认窗口 LightGBM 旁路训练 (每小时检查, 非窗口只写 skip 审计)
@@ -8492,10 +8288,8 @@ def _factor_event_sizing_factory():
 
 
 def _factor_initialization_runtime() -> FactorInitializationRuntime:
-    from alpha.adaptive_weight_engine import AdaptiveWeightEngine
     from alpha.attribution_engine import AttributionEngine
     from alpha.execution_gate import ExecutionGate
-    from alpha.ic_tracker import ICTracker
     from alpha.portfolio_compositor import PortfolioCompositor
     from alpha.runtime_factor_selection import select_runtime_factors
     from alpha.signal_normalizer import SignalNormalizer
@@ -8513,8 +8307,6 @@ def _factor_initialization_runtime() -> FactorInitializationRuntime:
         compositor_cls=PortfolioCompositor,
         gate_cls=ExecutionGate,
         attribution_cls=AttributionEngine,
-        adaptive_weight_cls=AdaptiveWeightEngine,
-        ic_tracker_cls=ICTracker,
         selection_factory=select_runtime_factors,
         projection_service_factory=RuntimeFactorSelectionProjectionService,
         event_sizing_factory=_factor_event_sizing_factory,
@@ -8522,7 +8314,6 @@ def _factor_initialization_runtime() -> FactorInitializationRuntime:
         generation_active=_factor_generation_active,
         merge_portfolio_configs=_merge_portfolio_configs,
         execution_gate_config=_loop_execution_gate_config,
-        adaptive_weight_config=_loop_adaptive_weight_config,
         unique_factor_pipelines=_loop_unique_factor_pipelines,
         apply_config_update=_loop_apply_factor_pipeline_config_update,
         acknowledge_projections=_loop_ack_prepared_factor_projections,

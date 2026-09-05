@@ -277,16 +277,6 @@ def _initialization_runtime(
         def __init__(self, config):
             self.config = config
 
-    class AdaptiveWeights:
-        def __init__(self, config, *, ictracker):
-            self.config = config
-            self.ictracker = ictracker
-            self.initialized = False
-
-        def initialize(self, _weights, *, ictracker):
-            assert ictracker is self.ictracker
-            self.initialized = True
-
     class ProjectionService:
         def publish(self, selection):
             projections.append(selection)
@@ -303,8 +293,6 @@ def _initialization_runtime(
         compositor_cls=Compositor,
         gate_cls=Gate,
         attribution_cls=object,
-        adaptive_weight_cls=AdaptiveWeights,
-        ic_tracker_cls=lambda **kwargs: SimpleNamespace(**kwargs),
         selection_factory=lambda config: {"selected": sorted(config)},
         projection_service_factory=ProjectionService,
         event_sizing_factory=lambda: {"enabled": True},
@@ -312,7 +300,6 @@ def _initialization_runtime(
         generation_active=(generation_active or (lambda _generation: True)),
         merge_portfolio_configs=lambda *args: {"merged": args},
         execution_gate_config=lambda _cfg: {"gate": True},
-        adaptive_weight_config=lambda _cfg: {"adaptive": True},
         unique_factor_pipelines=lambda primary, extras: [
             primary,
             *extras.values(),
@@ -354,7 +341,6 @@ def test_factor_initialization_builds_multi_symbol_state_and_hot_reload():
     )
 
     assert result.error == ""
-    assert result.pipeline["awe"].initialized is True
     assert set(result.pipelines) == {"XAUUSD+", "EURUSD"}
     assert result.cross_asset_covariance.window == 50
     assert projections == [{"selected": ["momentum"]}]

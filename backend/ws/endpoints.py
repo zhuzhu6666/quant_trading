@@ -139,7 +139,6 @@ def _read_closed_loop_status(
                 "n_positions": live_state.get("n_positions", 0),
             },
             "attribution": {"status": attr_status, "n_trades_attributed": attr_trades},
-            "adaptive_weight": {"status": "initialized" if live_state.get("awe_adapted_at") else "waiting"},
             "risk": {
                 "status": risk_status,
                 "circuit_breaker": bool(live_state.get("circuit_breaker", False)),
@@ -181,7 +180,6 @@ def _read_state_snapshot() -> dict:
     pipeline = _factor_pipeline or {}
     engine = pipeline.get("engine")
     attribution = pipeline.get("attribution")
-    awe = pipeline.get("awe")
     try:
         send_orders = bool(_should_send_orders(live_broker, log_blocking=False)) if live_running else False
     except Exception:
@@ -212,7 +210,6 @@ def _read_state_snapshot() -> dict:
                 int(getattr(item, "n_trades", 0) or 0)
                 for item in attribution.get_all_factor_stats().values()
             ) if attribution else 0,
-            "awe_conviction": round(float(awe.composite_conviction()), 3) if awe else 0.0,
         },
         "factor_votes": live_state.get("last_factor_votes") or {},
         "last_composite": live_state.get("last_composite") or {},

@@ -64,19 +64,3 @@ def test_process_shutdown_does_not_schedule_loop_auto_resume(monkeypatch):
     live_service._run_loop("ctrader", SimpleNamespace(), generation_id="")
 
     assert events == []
-
-
-def test_awe_adapt_skips_stale_pipeline_when_loop_is_not_running(monkeypatch):
-    stale_attribution = SimpleNamespace(
-        get_all_factor_stats=lambda: (_ for _ in ()).throw(
-            AssertionError("stale attribution must not be consumed")
-        )
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_factor_pipeline",
-        {"attribution": stale_attribution, "awe": object()},
-    )
-    monkeypatch.setattr(live_service, "loop_status", lambda: {"running": False})
-
-    live_service._scheduled_awe_adapt()

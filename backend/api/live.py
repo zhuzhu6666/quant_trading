@@ -247,14 +247,12 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
     pipeline = _factor_pipeline or {}
     engine = pipeline.get("engine")
     attr = pipeline.get("attribution")
-    awe = pipeline.get("awe")
 
     v4_status: dict = {
         "pipeline_active": bool(pipeline),
         "engine_warm": engine.is_warm if engine else False,
         "buffer_size": engine.buffer_size if engine else 0,
         "n_attribution_trades": sum(s.n_trades for s in attr.get_all_factor_stats().values()) if attr else 0,
-        "awe_conviction": round(awe.composite_conviction(), 3) if awe else 0.5,
     }
 
     # 最近信号: 从 live_loop.log 读取 v4 格式

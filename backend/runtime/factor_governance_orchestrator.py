@@ -3071,7 +3071,7 @@ class FactorGovernanceOrchestrator:
         cfg = cfg or runtime_config.shared()
         profile = profile or self._governance_profile(cfg)
         watch = float(getattr(cfg, "factor_health_watch_threshold", 40.0) or 40.0)
-        max_delta = float(getattr(cfg, "awe_max_single_change", 0.15) or 0.15)
+        max_delta = 0.15
         regime_fit_ok = float(
             getattr(cfg, "factor_governance_regime_fit_ok_threshold", 0.5) or 0.5
         )

@@ -1,8 +1,8 @@
 """End-to-end integration test for Factor Takeover v4 pipeline.
 
-Chains all 6 stages with synthetic data to verify data contracts:
+Chains all 5 stages with synthetic data to verify data contracts:
   StreamingFactorEngine → SignalNormalizer → PortfolioCompositor
-    → ExecutionGate → AttributionEngine → AdaptiveWeightEngine
+    → ExecutionGate → AttributionEngine
 
 This catches regressions in intermediate data shapes that unit tests miss.
 """
@@ -18,8 +18,6 @@ from alpha.signal_normalizer import SignalNormalizer
 from alpha.portfolio_compositor import PortfolioCompositor, CompositeSignal
 from alpha.execution_gate import ExecutionGate
 from alpha.attribution_engine import AttributionEngine, TradeAttribution
-from alpha.adaptive_weight_engine import AdaptiveWeightEngine
-from alpha.ic_tracker import ICTracker
 
 # ══════════════════════════════════════════════════════════════════
 # 合成数据
@@ -89,17 +87,6 @@ FACTOR_PORTFOLIO_CONFIG = {
     "macd_hist":      {"weight": 1.0, "tags": ["tech", "momentum"], "enabled": True},
     "obv_slope":      {"weight": 0.7, "tags": ["volume"], "enabled": True},
     "day_of_week":    {"weight": 0.3, "role": "context", "tags": ["calendar"], "enabled": True},
-}
-
-AWE_CONFIG = {
-    "awe_sensitivity": 0.5,
-    "awe_anchor_pull": 0.15,
-    "awe_max_single_change": 0.15,
-    "awe_weight_min": 0.1,
-    "awe_weight_max": 3.0,
-    "awe_min_trades": 10,
-    "awe_ic_floor": 0.02,
-    "awe_health_floor": 40.0,
 }
 
 
@@ -186,8 +173,8 @@ def test_pipeline_data_contracts():
         print(f"[E2E Contracts] Gate BLOCKED: {gate_result.reason}")
 
 
-def test_pipeline_attribution_and_awe():
-    """15 synthetic trades through Attribution → AWE weight adaptation."""
+def test_pipeline_attribution():
+    """15 synthetic trades through the Attribution stage."""
     np.random.seed(42)
     bars = _make_bars(n=140, start_price=4500.0, trend=0.3, vol=2.5)
     _, _, snapshot, signals = _warm_sfe_and_normalizer(bars, FACTOR_SIGNAL_CONFIG)
@@ -242,22 +229,6 @@ def test_pipeline_attribution_and_awe():
             assert math.isfinite(stats.composite_sharpe_score)
     print(f"[E2E AWE] {len(all_stats)} factors with stats after {n_trades} trades")
 
-    # ── Stage 6: AdaptiveWeightEngine ──
-    ictracker = ICTracker(window=500)
-    awe = AdaptiveWeightEngine(AWE_CONFIG, ictracker=ictracker)
-    awe.initialize(FACTOR_PORTFOLIO_CONFIG)
-    patches = awe.adapt(attr, FACTOR_PORTFOLIO_CONFIG)
-
-    assert isinstance(patches, dict)
-    if patches:
-        for name, patch in patches.items():
-            assert "weight" in patch
-            w = patch["weight"]
-            assert 0.0 <= w <= AWE_CONFIG["awe_weight_max"]
-            print(f"[E2E AWE] {name}: {FACTOR_PORTFOLIO_CONFIG[name]['weight']} -> {w} "
-                  f"({patch.get('reason', 'n/a')})")
-    else:
-        print("[E2E AWE] No weight patches (IC gate blocked — ICTracker had no prior rolling_ic)")
 
 
 def test_pipeline_weak_signal_blocked_by_gate():
@@ -278,7 +249,7 @@ def test_pipeline_weak_signal_blocked_by_gate():
 
 
 def test_full_pipeline_no_exceptions():
-    """All 6 stages without any exception for 60 bars."""
+    """All 5 stages without any exception for 60 bars."""
     np.random.seed(42)
     bars = _make_bars(n=140, start_price=4500.0, trend=0.2, vol=2.0)
     _, _, snapshot, signals = _warm_sfe_and_normalizer(bars, FACTOR_SIGNAL_CONFIG)
@@ -314,12 +285,6 @@ def test_full_pipeline_no_exceptions():
         mc = attr.record_close(1, close_price, bars[-1]["time"] + 60)
         assert isinstance(mc, dict)
 
-    # AWE (should not raise)
-    awe = AdaptiveWeightEngine(AWE_CONFIG)
-    awe.initialize(FACTOR_PORTFOLIO_CONFIG)
-    patches = awe.adapt(attr, FACTOR_PORTFOLIO_CONFIG)
-    assert isinstance(patches, dict)
-    print(f"[E2E Full] 6 stages: {len(snapshot)} factors, "
+    print(f"[E2E Full] 5 stages: {len(snapshot)} factors, "
           f"gate={gate_result.passed}, "
-          f"stats={len(attr.get_all_factor_stats())} factors, "
-          f"awe_patches={len(patches)}")
+          f"stats={len(attr.get_all_factor_stats())} factors")

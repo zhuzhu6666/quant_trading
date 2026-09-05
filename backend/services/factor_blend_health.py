@@ -520,7 +520,8 @@ class FactorBlendHealthService:
                         "limit": redundancy_limit,
                     }
                 )
-        tag_limit = _safe_float(getattr(cfg, "awe_max_type_weight_pct", 0.40), 0.40)
+        # single-factor-type cap (was awe_max_type_weight_pct)
+        tag_limit = 0.40
         for item in tag_stats[:3]:
             if active_count >= 5 and float(item.get("pct_abs_weight") or 0.0) > tag_limit:
                 issues.append(

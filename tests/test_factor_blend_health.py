@@ -9,7 +9,6 @@ def _cfg(signal_cfg, weights):
         factor_signal_config=signal_cfg,
         factor_portfolio_weights=weights,
         factor_redundancy_max_group_weight=0.35,
-        awe_max_type_weight_pct=0.40,
     )
 
 

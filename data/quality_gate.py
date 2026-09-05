@@ -192,11 +192,3 @@ def evolution_guard(report: DataQualityReport) -> bool:
     logger.info("[QualityGate] data quality passed")
     return True
 
-
-def awe_guard(report: DataQualityReport) -> bool:
-    """AWE gate: 如果数据质量严重不通过, 返回 False (跳过 AWE)."""
-    critical_errors = [e for e in report.errors if "stale" in e or "missing" in e]
-    if critical_errors:
-        logger.warning("[QualityGate] AWE blocked: %s", "; ".join(critical_errors))
-        return False
-    return True

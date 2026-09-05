@@ -245,7 +245,6 @@ def startup_catch_up_jobs(*, run_heavy_jobs: bool) -> tuple[list[str], list[tupl
     if run_heavy_jobs:
         deferred_jobs.extend(
             [
-                (720.0, "awe_adapt"),
                 (1200.0, "feature_eng"),
             ]
         )

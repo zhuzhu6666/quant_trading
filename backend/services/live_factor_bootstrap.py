@@ -26,8 +26,6 @@ class FactorInitializationRuntime:
     compositor_cls: Any
     gate_cls: Any
     attribution_cls: Any
-    adaptive_weight_cls: Any
-    ic_tracker_cls: Any
     selection_factory: Any
     projection_service_factory: Any
     event_sizing_factory: Any
@@ -35,7 +33,6 @@ class FactorInitializationRuntime:
     generation_active: Any
     merge_portfolio_configs: Any
     execution_gate_config: Any
-    adaptive_weight_config: Any
     unique_factor_pipelines: Any
     apply_config_update: Any
     acknowledge_projections: Any
@@ -91,15 +88,6 @@ def initialize_factor_pipelines(
         )
         gate = runtime.gate_cls(runtime.execution_gate_config(cfg))
         attribution = runtime.attribution_cls()
-        ic_tracker = runtime.ic_tracker_cls(window=5000)
-        adaptive_weights = runtime.adaptive_weight_cls(
-            runtime.adaptive_weight_config(cfg),
-            ictracker=ic_tracker,
-        )
-        adaptive_weights.initialize(
-            cfg.factor_portfolio_weights,
-            ictracker=ic_tracker,
-        )
         event_sizing = _initialize_event_sizing(runtime)
         primary = {
             "engine": engine,
@@ -107,8 +95,6 @@ def initialize_factor_pipelines(
             "compositor": compositor,
             "gate": gate,
             "attribution": attribution,
-            "awe": adaptive_weights,
-            "ic_tracker": ic_tracker,
             "event_sizing": event_sizing,
         }
         holder["pipeline"] = primary
@@ -126,8 +112,6 @@ def initialize_factor_pipelines(
         pipelines = _initialize_extra_symbol_pipelines(
             primary=primary,
             attribution=attribution,
-            adaptive_weights=adaptive_weights,
-            ic_tracker=ic_tracker,
             event_sizing=event_sizing,
             log=log,
             runtime=runtime,
@@ -239,8 +223,6 @@ def _initialize_extra_symbol_pipelines(
     *,
     primary: dict[str, Any],
     attribution: Any,
-    adaptive_weights: Any,
-    ic_tracker: Any,
     event_sizing: Any,
     log: Any,
     runtime: FactorInitializationRuntime,
@@ -255,8 +237,6 @@ def _initialize_extra_symbol_pipelines(
             cfg=cfg,
             shared_components={
                 "attribution": attribution,
-                "awe": adaptive_weights,
-                "ic_tracker": ic_tracker,
                 "event_sizing": event_sizing,
             },
             streaming_engine_cls=runtime.engine_cls,

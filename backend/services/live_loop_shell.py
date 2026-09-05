@@ -242,21 +242,6 @@ def execution_gate_config(cfg: Any) -> dict[str, Any]:
     }
 
 
-def adaptive_weight_config(cfg: Any) -> dict[str, Any]:
-    return {
-        "awe_sensitivity": cfg.awe_sensitivity,
-        "awe_anchor_pull": cfg.awe_anchor_pull,
-        "awe_max_single_change": cfg.awe_max_single_change,
-        "awe_weight_min": cfg.awe_weight_min,
-        "awe_weight_max": cfg.awe_weight_max,
-        "awe_min_trades": cfg.awe_min_trades,
-        "awe_ic_floor": cfg.awe_ic_floor,
-        "awe_health_floor": cfg.awe_health_floor,
-        "awe_disable_min_trades": cfg.awe_disable_min_trades,
-        "awe_max_type_weight_pct": cfg.awe_max_type_weight_pct,
-    }
-
-
 def enabled_symbols_from_config(cfg: Any) -> list[str]:
     symbols = list(cfg.enabled_symbols) if hasattr(cfg, "enabled_symbols") else ["XAUUSD+"]
     return symbols or ["XAUUSD+"]
@@ -330,8 +315,6 @@ def build_extra_symbol_factor_pipelines(
             "compositor": compositor,
             "gate": gate,
             "attribution": shared_components.get("attribution"),
-            "awe": shared_components.get("awe"),
-            "ic_tracker": shared_components.get("ic_tracker"),
             "event_sizing": shared_components.get("event_sizing"),
         }
     return pipelines

@@ -23,7 +23,6 @@ from .gp_classifier import GPClassifier, classify_expr
 from .registry import factor_registry
 from .decision_policy import DecisionPolicy, WeightDecision
 from .shadow_trader import ShadowPerf, evaluate_shadow_factors, load_shadow_perf
-from .adaptive_weight_engine import AdaptiveWeightEngine
 
 __all__ = [
     "ICTracker",
@@ -44,5 +43,4 @@ __all__ = [
     "ShadowPerf",
     "evaluate_shadow_factors",
     "load_shadow_perf",
-    "AdaptiveWeightEngine",
 ]

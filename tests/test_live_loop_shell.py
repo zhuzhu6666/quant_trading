@@ -5,7 +5,6 @@ import pandas as pd
 from backend.services.live_loop_controller import LiveLoopController
 from backend.services.live_loop_shell import (
     acknowledge_prepared_factor_projections,
-    adaptive_weight_config,
     compare_spot_quote_to_latest_bar,
     apply_factor_pipeline_config_update,
     bridge_readiness_label,
@@ -298,16 +297,6 @@ def test_execution_gate_does_not_start_cooldown_before_final_admission():
         risk_enable_nfp_skip=True,
         risk_enable_gvz_gate=False,
         risk_gvz_drop_pct=-1.5,
-        awe_sensitivity=0.1,
-        awe_anchor_pull=0.2,
-        awe_max_single_change=0.3,
-        awe_weight_min=0.01,
-        awe_weight_max=0.5,
-        awe_min_trades=10,
-        awe_ic_floor=0.02,
-        awe_health_floor=0.4,
-        awe_disable_min_trades=3,
-        awe_max_type_weight_pct=0.7,
     )
 
     assert execution_gate_config(cfg) == {
@@ -317,18 +306,6 @@ def test_execution_gate_does_not_start_cooldown_before_final_admission():
         "risk_enable_nfp_skip": True,
         "risk_enable_gvz_gate": False,
         "risk_gvz_drop_pct": -1.5,
-    }
-    assert adaptive_weight_config(cfg) == {
-        "awe_sensitivity": 0.1,
-        "awe_anchor_pull": 0.2,
-        "awe_max_single_change": 0.3,
-        "awe_weight_min": 0.01,
-        "awe_weight_max": 0.5,
-        "awe_min_trades": 10,
-        "awe_ic_floor": 0.02,
-        "awe_health_floor": 0.4,
-        "awe_disable_min_trades": 3,
-        "awe_max_type_weight_pct": 0.7,
     }
 
 
@@ -417,8 +394,6 @@ def test_build_extra_symbol_factor_pipelines_reuses_primary_and_shared_component
     primary = {"engine": "primary"}
     shared = {
         "attribution": object(),
-        "awe": object(),
-        "ic_tracker": object(),
         "event_sizing": object(),
     }
 
@@ -437,8 +412,6 @@ def test_build_extra_symbol_factor_pipelines_reuses_primary_and_shared_component
 
     assert pipelines["XAUUSD+"] is primary
     assert pipelines["EURUSD"]["attribution"] is shared["attribution"]
-    assert pipelines["EURUSD"]["awe"] is shared["awe"]
-    assert pipelines["EURUSD"]["ic_tracker"] is shared["ic_tracker"]
     assert pipelines["EURUSD"]["event_sizing"] is shared["event_sizing"]
     assert calls[0] == ("engine", {"max_buffer": 200, "factor_runtime_config": {"factor": True}})
     assert calls[-1] == (
