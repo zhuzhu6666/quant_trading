@@ -31,7 +31,22 @@ def _bars() -> pd.DataFrame:
 def _isolate_cycle(monkeypatch, counters: dict[str, int]) -> None:
     import alpha.factor_health as factor_health
     import alpha.ic_tracker as ic_tracker
+    import backend.services.learning_workload_gate as workload_gate
     import data.quality_gate as quality_gate
+
+    # The workload gate owns the market-closed idle skip before the cycle
+    # body runs; stub it to "run" so each test drives the branch it targets.
+    # Closed-market tests re-stub _confirmed_closed_market_session below to
+    # exercise the in-cycle idle branch deterministically.
+    monkeypatch.setattr(
+        workload_gate,
+        "evaluate_learning_workload",
+        lambda *args, **kwargs: {
+            "status": workload_gate.RUN_NEW_FACTS,
+            "watermark": {},
+        },
+    )
+    monkeypatch.setattr(evolution, "_confirmed_closed_market_session", lambda: {})
 
     monkeypatch.setattr(
         quality_gate,
@@ -71,15 +86,6 @@ def _isolate_cycle(monkeypatch, counters: dict[str, int]) -> None:
             [],
             [],
         ),
-    )
-    monkeypatch.setattr(
-        evolution,
-        "_check_retirement",
-        lambda: counters.__setitem__(
-            "retirement",
-            counters.get("retirement", 0) + 1,
-        )
-        or {"candidates": [], "reason": ""},
     )
     monkeypatch.setattr(
         evolution,
@@ -174,7 +180,6 @@ def test_same_evolution_input_runs_gp_once_but_maintenance_every_cycle(
     assert counters["watermark_write"] == 1
     assert counters["shadow"] == 2
     assert counters["canary"] == 2
-    assert counters["retirement"] == 2
     assert counters["weights"] == 2
 
 
@@ -322,7 +327,6 @@ def test_canary_budget_backpressure_stops_registration_not_maintenance(
     assert result.gp_registered_shadow == 0
     assert counters["shadow"] == 1
     assert counters["canary"] == 1
-    assert counters["retirement"] == 1
     assert counters["weights"] == 1
 
 
