@@ -1081,8 +1081,6 @@ def _evaluate_open_quality_model_veto(
 
     influence = shared_model_influence_service()
     policy = influence.active_policy("open_quality_lightgbm", cfg)
-    if not policy:
-        return {"passed": True, "reason": "model_open_influence_inactive"}
     if _OPEN_QUALITY_ADVISOR is None:
         from research.open_quality_lightgbm import OpenQualityLightGBMService
 
@@ -1107,7 +1105,7 @@ def _evaluate_open_quality_model_veto(
             )
         },
     }
-    score = _OPEN_QUALITY_ADVISOR.score_open_context({
+    context = {
         "action_score": action["score"],
         "action": action,
         "entry_cluster": entry_cluster,
@@ -1120,8 +1118,40 @@ def _evaluate_open_quality_model_veto(
         "bar_context": _bar_context_snapshot(bar),
         "event_context": event_context,
         "decision_quality_context": decision_quality,
-    }, artifact_path=str(policy.get("artifact_path") or ""))
+    }
     subject_id = f"XAUUSD+:{int(float(bar.get('time') or time.time()))}:{direction}"
+    if not policy:
+        # Live shadow observation: score every risk-passed open attempt with the
+        # latest registered artifact and audit it, so predictions can later be
+        # joined to matured open_target_v2 outcomes by decision bar + direction.
+        # Pure observation: failures must degrade to the old inactive no-op and
+        # never block the open path; veto power still requires an active policy.
+        try:
+            shadow = _OPEN_QUALITY_ADVISOR.score_open_context_shadow(
+                context,
+                subject_id=subject_id,
+                payload_extra={
+                    "subject_id": subject_id,
+                    "bar_time": float(bar.get("time") or 0.0),
+                    "direction": direction,
+                },
+            )
+        except Exception as exc:
+            return {"passed": True, "reason": f"model_open_live_shadow_error:{type(exc).__name__}"}
+        if not shadow.get("ok"):
+            return {
+                "passed": True,
+                "reason": f"model_open_influence_inactive:{shadow.get('error') or 'shadow_unavailable'}",
+            }
+        return {
+            "passed": True,
+            "reason": "model_open_influence_live_shadow",
+            "quality_score": shadow.get("quality_score"),
+            "inference_id": (shadow.get("inference") or {}).get("inference_id"),
+        }
+    score = _OPEN_QUALITY_ADVISOR.score_open_context(
+        context, artifact_path=str(policy.get("artifact_path") or "")
+    )
     return influence.evaluate_open_veto(
         score=score,
         subject_id=subject_id,

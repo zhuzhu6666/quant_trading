@@ -322,3 +322,59 @@ def test_v16_only_delegates_model_promotion_after_gate_passes(tmp_path):
     assert command["scope_type"] == "model_stage"
     assert command["action"] == "promote_model_influence"
     assert command["decision"] == "delegate"
+
+
+def test_open_quality_veto_without_policy_records_live_shadow(monkeypatch):
+    import backend.services.live_service as live_service
+
+    class _StubAdvisor:
+        def __init__(self, explode: bool = False):
+            self.calls = []
+            self._explode = explode
+
+        def score_open_context_shadow(self, context, *, subject_id="", payload_extra=None, mode="live_shadow"):
+            if self._explode:
+                raise RuntimeError("artifact unavailable")
+            self.calls.append({"subject_id": subject_id, "payload_extra": payload_extra})
+            return {
+                "ok": True,
+                "quality_score": 0.41,
+                "inference": {"inference_id": "inf_1"},
+            }
+
+    class _StubInfluence:
+        def active_policy(self, model_type, cfg):
+            return None
+
+    composite = SimpleNamespace(direction=1, score=0.6)
+    kwargs = dict(
+        cfg=SimpleNamespace(),
+        bridge=None,
+        bar={"time": 123.0},
+        composite=composite,
+        positions=[],
+        current_price=4400.0,
+        event_context={},
+        rule_decision={},
+    )
+
+    advisor = _StubAdvisor()
+    monkeypatch.setattr(live_service, "_OPEN_QUALITY_ADVISOR", advisor)
+    monkeypatch.setattr(
+        "backend.services.model_influence.shared_model_influence_service",
+        lambda: _StubInfluence(),
+    )
+    result = live_service._evaluate_open_quality_model_veto(**kwargs)
+    assert result["passed"] is True
+    assert result["reason"] == "model_open_influence_live_shadow"
+    assert result["quality_score"] == 0.41
+    assert result["inference_id"] == "inf_1"
+    assert advisor.calls[0]["subject_id"] == "XAUUSD+:123:1"
+    assert advisor.calls[0]["payload_extra"]["bar_time"] == 123.0
+    assert advisor.calls[0]["payload_extra"]["direction"] == 1
+
+    failing = _StubAdvisor(explode=True)
+    monkeypatch.setattr(live_service, "_OPEN_QUALITY_ADVISOR", failing)
+    failed = live_service._evaluate_open_quality_model_veto(**kwargs)
+    assert failed["passed"] is True
+    assert failed["reason"] == "model_open_live_shadow_error:RuntimeError"

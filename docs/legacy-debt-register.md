@@ -399,6 +399,28 @@
 - 剩余：无。
 - 退出：全部客户端迁移后关闭并删除；stop/emergency 的本地可验证风险缩减能力不得受 PG 故障阻断。
 
+### meta 环收敛期退役清单（2026-09-05 盘点，只列未删）
+
+- 状态：`active`（A3 盘点草案；学习主环切换为开仓证据 meta-labeling 后，以下对象失去存在理由，按批次退役）
+- canonical：本清单为唯一退役对象列表；替代对象为 3–6 个生产信号的最小健康监控 + `open_quality_lightgbm` live shadow 链（本批已接入 `live_service._evaluate_open_quality_model_veto` 无策略分支，mode=`live_shadow`，纯观察 fail-open）。
+- 剩余（按退役顺序）：
+  1. GP/canary 因子工厂宽度机器——`dsl_auto` SHADOW 积压（当前 1,838）排空后，退役 GP 注册、canary 阶梯批量评估、DSL 批量准入路径；
+  2. `backtrader` / `APScheduler` 依赖声明（各仅 1 处引用）——二选一：删除声明或真实启用，不得长期双挂；
+  3. `backend/services/` 中 18 个 <120 行单调用方壳层——内联；
+  4. `live_service.py`（12.6k 行）领域重力——按执行/恢复/投影拆分归主；
+  5. 451 个 reason code 收敛与 72 张 runtime 投影表并表——生产因子收缩后审计面同步收敛。
+- 退出：每批满足"替代已运行 + 针对性测试 + 全量回归绿 + 净删除为正"方可标记 resolved；shadow 写入分支的退出条件为模型 influence veto（demo_canary）稳定运行 ≥100 笔后复核是否保留为 fail-open 兜底。
+- 验证：`run_artifacts/baseline_comparison/`（A2 基线 PASS，2026-09-05）与 `run_artifacts/open_quality_validation/`（holdout AUC 0.40，过拟合实证，enforce 不准入）为本批决策留档。
+
+### open_quality 模型过拟合隔离（2026-09-05 登记）
+
+- 状态：`active`（模型以 shadow-only 运行；enforce 被证据门阻断，属设计内隔离而非故障）
+- 事实：153 条 matured 样本重训实证过拟合——train AUC 0.986 → holdout AUC 0.40（差于随机），正类召回 0.13；holdout 尾段上多数类（全盘接受）0.605 优于模型 0.526 与规则基线 0.421。L1 特征快照（1,332 条路径标签，与执行真相一致率 0.725）：信号强度家族反向/无信号，结构家族（factor_conflict_ratio 0.595、negative_contribution_abs 0.586、n_active_alpha_factors 0.572，真相 AUC）为唯一双标签一致候选；≥8 个特征为零方差或无信号。
+- canonical：live shadow 链（mode=`live_shadow`，纯观察 fail-open）为唯一 active 写入者；veto 权力仍要求 influence policy 过 `ACTIVE_STAGES` + canary 治理，未激活。
+- 剩余：下次重训前把特征砍至 10–12（保留结构家族 + bar 形态 + action_score 家族之一，剔除死特征）；等 1,265 条 pending 样本成熟 + live shadow ≥50 笔 fresh 对账。
+- 退出：重训后 holdout AUC 稳定 ≥0.55–0.6 且 train/holdout 落差收窄、独立样本 ≥300，才进入 enforce 的治理讨论；在此之前任何 enforce/veto 配置变更均视为违规。
+- 验证：`run_artifacts/open_quality_validation/`、`run_artifacts/feature_ic_snapshot/`、`run_artifacts/baseline_comparison/`（同窗口四基线全净亏，系统 +$65/Sharpe 2.40）。
+
 ## 4. 明确退役，禁止恢复
 
 - 旧 PostgreSQL `state_v1` schema 及其数据；生产只使用 `runtime` 与 `canonical_v2`；

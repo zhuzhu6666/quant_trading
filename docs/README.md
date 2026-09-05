@@ -1,7 +1,7 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-08-29 (代码基线 0f1e8f0; 数据清理、停盘学习短路和 Registry 恢复投影已验证; 启动补偿在无新事实时短路; cTrader/unknown 已复核; 治理与学习服务已重启)
+> Last verified: 2026-09-05 (代码基线 6873a564 + meta 环 shadow 批; 开仓质量模型 live shadow 已接入, 基线对照 PASS, 模型 holdout 过拟合未达 enforce)
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读对应合同。
@@ -17,6 +17,7 @@
 - **闭环证据现状（2026-08-28 只读复核）**：S7.6 终验标准已达成并持续——D 批后 `trade_review_outcome full/1.0 46 笔`（`2026-08-21 18:28 → 2026-08-28 03:00`，近 4 天 8-11/天，`broker_execution 127`/`position_transition 125`/`trade_review 99`），`open → protection → close → deal sync → review → sample` 全链条稳定产出；`cTrader 价格合同`与 `broker unknown 0` 已只读复核通过。`supervisor_execution_trace` 仅 `governance_eligible matured 5/10`，`position_supervisor_selection.v1 insufficient_evidence/0候选/off`，仍需 `tighten/reduce` 覆盖与 effect 观察才能自动 Demo。历史 8 笔回放降级样本（train_weight=0）保留审计；supervisor trace partial/0.0 排除训练。
 - **Git 基线**：`f2eb9c9` (2026-08-28 14:53 `refactor(governance): remove off-mode direct overlay paths`)。已包含告警边沿批 5a4e4db / 治理收紧批 cfc126e / 文档批 b69ec07 / 监督链修复 24894dc/a737554 / P1+enforce 23c2a3f+0daee55。**生产服务 2026-08-28 14:14 已重建**（`quant-backend 891039 / quant-learning-worker 891040`，`governance_mutation_coordinator_v2_mode=enforce` 已加载，`off` 直连路径已删）；当前 HEAD 即生产基线，无待重启 B 批。
 - **代码收敛（S2/S3 完成）**：db_helpers 公共层（33 文件）+ 四域清扫（9 空壳 + EvolutionKernel + 零调用转发 + consume 包装器）+ A1–A6 / B1–B5 结构修复；历史全量回归记录保留在对应 rollout 文档，当前发布以本批新鲜针对性/全量验证为准。
+- **meta 环 shadow 批（2026-09-05 部署）**：学习主环向"开仓证据 meta-labeling"切换的第一步——`_evaluate_open_quality_model_veto` 无策略分支新增 live shadow 打分（复用 `open_quality_shadow_audit`，mode=`live_shadow`，纯观察 fail-open，无 veto 权力）。A2 基线对照 PASS（`run_artifacts/baseline_comparison/`：同窗口成本修正后 4 个简单基线全部净亏，系统实际 +$65.07 / 期望 +$0.44 / 日 Sharpe 2.40 / 回撤 -16%）；离线验证（`run_artifacts/open_quality_validation/`）显示现有 153 样本 holdout AUC 0.40、train AUC 0.99，过拟合实证 → **enforce 不准入**，待 live shadow 攒 ≥50 笔 fresh 样本后按 uplift 判定。退役清单已登记 `legacy-debt-register.md`（A3，只列未删）。全量回归 3005 passed 后受控重启。
 - legacy 事实迁移的旧表述（P1/P2/P4/P5、1,702 处、schema version 20）已被"全库清空重建"取代，仅历史参考。
 - 前端（miniprogram_v2 / web_frontend）在 Windows 本地维护；服务器后端-only sparse checkout，只提供 API 与 `/ws/state`。
 

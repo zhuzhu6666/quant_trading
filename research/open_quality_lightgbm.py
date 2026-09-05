@@ -688,6 +688,46 @@ class OpenQualityLightGBMService:
             "artifact_path": str(path),
         }
 
+    def score_open_context_shadow(
+        self,
+        context: dict[str, Any],
+        *,
+        subject_id: str = "",
+        payload_extra: dict[str, Any] | None = None,
+        mode: str = "live_shadow",
+    ) -> dict[str, Any]:
+        """Score a pre-order context and audit it as a live shadow inference.
+
+        Observation only: no veto power, no policy requirement beyond a
+        registered PIT-v2 artifact. Callers must treat a non-ok result as
+        "no shadow row this attempt", never as a quality verdict.
+        """
+        score = self.score_open_context(context)
+        if not score.get("ok"):
+            return score
+        artifact = json.loads(
+            Path(str(score.get("artifact_path") or "")).read_text(encoding="utf-8")
+        )
+        sample = {
+            "sample_id": f"live:{subject_id}" if subject_id else "",
+            "decision_id": "",
+            "trade_id": "",
+            "position_id": "",
+            "features": score.get("features") or {},
+            "label": None,
+            "rule_label": None,
+            "pnl": None,
+            "outcome_label": "",
+        }
+        inference = self._persist_inference(
+            artifact,
+            sample,
+            float(score["quality_score"]),
+            mode=mode,
+            payload_extra=payload_extra,
+        )
+        return {**score, "inference": inference}
+
     def score_samples(
         self,
         *,
@@ -741,7 +781,7 @@ class OpenQualityLightGBMService:
         items = [self._persist_inference(artifact, sample, float(prob), mode=mode) for sample, prob in zip(samples, probs)]
         return {"ok": True, "model_type": MODEL_TYPE, "model_version": str(artifact.get("model_version") or MODEL_VERSION), "artifact_path": str(path), "count": len(items), "items": items, "capabilities": artifact.get("capabilities") or {}}
 
-    def _persist_inference(self, artifact: dict[str, Any], sample: dict[str, Any], quality_score: float, *, mode: str) -> dict[str, Any]:
+    def _persist_inference(self, artifact: dict[str, Any], sample: dict[str, Any], quality_score: float, *, mode: str, payload_extra: dict[str, Any] | None = None) -> dict[str, Any]:
         now = time.time()
         risk_score = max(0.0, min(1.0, 1.0 - float(quality_score)))
         prediction = 1 if quality_score >= 0.5 else 0
@@ -779,6 +819,8 @@ class OpenQualityLightGBMService:
             "source_agent": "lightgbm_shadow_models",
             "authority_verdict": result["authority_verdict"],
         }
+        if payload_extra:
+            payload = {**payload, **payload_extra}
         inference_id = f"{MODEL_TYPE}:{sample['sample_id']}:{int(now * 1000)}"
         conn = self._conn()
         try:

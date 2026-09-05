@@ -190,3 +190,57 @@ def test_open_model_can_use_its_consumer_scope_without_global_factor_grade():
             },
         }
     ) is False
+
+
+def test_score_open_context_shadow_persists_live_shadow_audit(tmp_path, monkeypatch):
+    service = OpenQualityLightGBMService(db_path=tmp_path / "state.db")
+    artifact = {
+        "model_type": MODEL_TYPE,
+        "model_version": "test_v1",
+        "artifact_path": str(tmp_path / "artifact.json"),
+        "capabilities": {},
+        "guardrails": [],
+    }
+    (tmp_path / "artifact.json").write_text(json.dumps(artifact), encoding="utf-8")
+    monkeypatch.setattr(
+        service,
+        "score_open_context",
+        lambda context, **kwargs: {
+            "ok": True,
+            "quality_score": 0.63,
+            "features": {"abs_action_score": 0.72},
+            "model_version": "test_v1",
+            "artifact_path": str(tmp_path / "artifact.json"),
+        },
+    )
+    result = service.score_open_context_shadow(
+        {"action_score": 0.72},
+        subject_id="XAUUSD+:123:1",
+        payload_extra={
+            "subject_id": "XAUUSD+:123:1",
+            "bar_time": 123.0,
+            "direction": 1,
+        },
+    )
+    assert result["ok"] is True
+    assert result["inference"]["prediction"] == 1
+    items = service.list_audits(limit=10)["items"]
+    assert len(items) == 1
+    row = items[0]
+    assert row["mode"] == "live_shadow"
+    assert row["sample_id"] == "live:XAUUSD+:123:1"
+    assert row["payload"]["subject_id"] == "XAUUSD+:123:1"
+    assert row["payload"]["bar_time"] == 123.0
+    assert row["payload"]["direction"] == 1
+
+
+def test_score_open_context_shadow_failure_writes_no_row(tmp_path, monkeypatch):
+    service = OpenQualityLightGBMService(db_path=tmp_path / "state.db")
+    monkeypatch.setattr(
+        service,
+        "score_open_context",
+        lambda context, **kwargs: {"ok": False, "error": "artifact_missing"},
+    )
+    result = service.score_open_context_shadow({"action_score": 0.5})
+    assert result.get("ok") is False
+    assert service.list_audits(limit=10)["items"] == []
