@@ -765,13 +765,12 @@ def test_brain_action_planner_records_shadow_only_action_plans(tmp_path):
     assert run["phase"] == "v16_phase2_shadow_brain"
     assert run["read_only"] is True
     assert run["affects_trading"] is False
-    assert run["plan_count"] == 4
+    assert run["plan_count"] == 3
 
     plans = run["plans"]
     scope_types = {plan["scope"]["scope_type"] for plan in plans}
     assert scope_types == {
         "factor_weight",
-        "parameter_template",
         "context_policy",
         "supervisor_template",
     }
@@ -790,13 +789,13 @@ def test_brain_action_planner_records_shadow_only_action_plans(tmp_path):
     latest = BrainActionPlannerService(db_path).latest_plans(limit=10)
     assert latest["schema_version"] == "brain_action_plan_list.v1"
     assert latest["ok"] is True
-    assert len(latest["plans"]) == 4
+    assert len(latest["plans"]) == 3
     assert latest["plans"][0]["read_only"] is True
 
     status = BrainActionPlannerService(db_path).status(limit=10)
     assert status["schema_version"] == "brain_action_plan_readiness.v1"
     assert status["ok"] is True
-    assert status["plan_count"] == 4
+    assert status["plan_count"] == 3
     assert status["affects_trading"] is False
 
 
@@ -872,7 +871,7 @@ def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence
     assert run["ok"] is True
     assert run["read_only"] is True
     assert run["affects_trading"] is False
-    assert len(run["evals"]) == 4
+    assert len(run["evals"]) == 3
     assert {item["status"] for item in run["evals"]} == {"comparable"}
     assert any(item["comparison_verdict"] == "supportive" for item in run["evals"])
     for item in run["evals"]:
@@ -885,12 +884,12 @@ def test_brain_action_plan_evaluator_compares_shadow_plans_to_posterior_evidence
     latest = BrainActionPlanEvaluatorService(db_path).latest_evals(limit=10)
     assert latest["schema_version"] == "brain_action_plan_eval_list.v1"
     assert latest["ok"] is True
-    assert len(latest["evals"]) == 4
+    assert len(latest["evals"]) == 3
 
     status = BrainActionPlanEvaluatorService(db_path).status(limit=10)
     assert status["schema_version"] == "brain_action_plan_eval_readiness.v1"
     assert status["ok"] is True
-    assert status["eval_count"] == 4
+    assert status["eval_count"] == 3
     assert status["coverage_avg"] >= 0.75
 
 

@@ -82,3 +82,44 @@ def test_learning_effect_evidence_is_not_globally_truncated_before_scope_filter(
         row["application_id"] == "supervisor-effect-old"
         for row in evidence["learning_application_effect"]
     )
+
+def test_parameter_template_scope_is_routed_to_learning_chain(tmp_path):
+    """Route ② (2026-09-05): the parameter_template surface is owned by the
+    autonomous_learning chain.  The planner catalog must not build plans for
+    it, and legacy evaluations must observe without materializing
+    candidates (the planner never carried a target_template_id, so a
+    candidate could never pass the bridge review)."""
+    import backend.services.v16_brain_planning as planning_module
+
+    assert not [
+        action
+        for action in planning_module.BrainActionPlannerService.ACTIONS
+        if action.get("scope_type") == "parameter_template"
+    ]
+
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+    finally:
+        conn.close()
+
+    service = planning_module.BrainMediumImpactGovernanceService(db_path)
+    item = service._materialize_eval(
+        evaluation={
+            "plan_id": "plan-route-2",
+            "eval_id": "eval-route-2",
+            "scope_type": "parameter_template",
+            "coverage_score": 0.5,
+            "comparison": {},
+            "evidence_refs": {},
+        },
+        now=1000.0,
+        autonomy_guard={},
+        persist_candidate=False,
+    )
+    assert item["status"] == "routed_to_learning_chain"
+    assert item["governance_action"] == "observe"
+    assert item["candidate_id"] == ""
+    assert item["suggestion_id"] == ""
+    assert item["risk_verdict"]["reason"] == "parameter_template_owned_by_learning_chain"

@@ -190,10 +190,6 @@ class BrainActionPlannerService:
          "scope_key": "alpha_weight_policy",
          "required_services": ["ReplayHarnessService", "RiskPolicyService", "DecisionPolicy"],
          "candidate_change": "compare candidate downweight/hold in replay before any future write"},
-        {"action_type": "shadow_parameter_template_review", "scope_type": "parameter_template",
-         "scope_key": "online_light",
-         "required_services": ["ReplayHarnessService", "RiskPolicyService", "ParameterTemplateService"],
-         "candidate_change": "compare online_light template candidates in shadow only"},
         {"action_type": "shadow_context_policy_review", "scope_type": "context_policy",
          "scope_key": "threshold_and_sizing",
          "required_services": ["ReplayHarnessService", "RiskPolicyService", "ContextPolicyService"],
@@ -1052,6 +1048,52 @@ class BrainMediumImpactGovernanceService:
         parent_policy_decision_id = str(
             correction_contract.get("policy_decision_id") or ""
         )
+        if str(mapped.get("scope_type") or "") == "parameter_template":
+            # Route ② (2026-09-05): the parameter_template surface is owned
+            # by the autonomous_learning chain (recommendation -> suggestion
+            # -> governor -> activate_template, which materializes the
+            # registry row inside the coordinator transaction).  The planner
+            # catalog no longer builds plans for this scope; legacy plan rows
+            # land here and must observe only -- the planner never carried a
+            # target_template_id, so candidates from this scope could never
+            # pass the bridge review (missing_target_template_id).
+            return {
+                "governance_id": f"brain_p4_gov_{uuid.uuid4().hex[:16]}",
+                "schema_version": "brain_medium_impact_governance.v1",
+                "plan_id": str(evaluation.get("plan_id") or ""),
+                "eval_id": str(evaluation.get("eval_id") or ""),
+                "governance_action": "observe",
+                "scope_type": "parameter_template",
+                "scope_key": "online_light",
+                "status": "routed_to_learning_chain",
+                "candidate_id": "",
+                "suggestion_id": "",
+                "evidence_score": safe_float(evaluation.get("coverage_score")),
+                "critic_verdict": str(plan.get("critic_verdict") or ""),
+                "comparison_verdict": str(evaluation.get("comparison_verdict") or ""),
+                "risk_verdict": {
+                    "allowed": False,
+                    "status": "routed_to_learning_chain",
+                    "reason": "parameter_template_owned_by_learning_chain",
+                },
+                "decision_policy": {
+                    "schema_version": "decision_policy_preview.v1",
+                    "required": False,
+                    "action": "observe",
+                    "applied": False,
+                    "reason": "parameter_template_owned_by_learning_chain",
+                },
+                "rollback_plan": self._rollback_plan(mapped),
+                "posterior_refs": {
+                    **dict(evaluation.get("evidence_refs") or {}),
+                    "correction_contract": correction_contract,
+                    "parent_policy_decision_id": parent_policy_decision_id,
+                },
+                "autonomy_guard": autonomy_guard,
+                "boundary": self.boundary(),
+                "created_at": now,
+                "updated_at": time.time(),
+            }
         if str(mapped.get("scope_type") or "") == "context_policy":
             return {
                 "governance_id": f"brain_p4_gov_{uuid.uuid4().hex[:16]}",
