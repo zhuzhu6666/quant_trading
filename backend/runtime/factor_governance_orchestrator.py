@@ -2973,6 +2973,10 @@ class FactorGovernanceOrchestrator:
         Missing canary state is deliberately ignored so legacy discovered
         factors are not mass-demoted.  A persisted, non-ACTIVE stage is an
         explicit safety signal produced by the evolution evidence loop.
+        Factors whose lifecycle row is already terminal (retired or
+        quarantined) are skipped: the registry canary projection can lag the
+        lifecycle store, and re-attempting quarantine against a terminal row
+        fails the state machine on every cycle.
         """
 
         regression_stages = {
@@ -3006,6 +3010,18 @@ class FactorGovernanceOrchestrator:
                 adapter = RegistryAdapter.shared()
                 meta = adapter.get_meta(factor_id) or {}
                 lifecycle = FactorLifecycleService(self.overlay.db_path, adapter=adapter)
+                state = lifecycle.get_state(factor_name=factor_id)
+                if not state or str(
+                    state.get("lifecycle_stage")
+                    or state.get("stage")
+                    or ""
+                ).upper() in {"RETIRED", "QUARANTINED"}:
+                    # Terminal row: already out of the runtime.  The canary
+                    # projection can lag it; re-attempting quarantine would
+                    # fail the transition guard on every cycle (2026-09-05:
+                    # 81 retired rows x every cycle emitted
+                    # blocked_by_evidence rollback audits).
+                    continue
                 result = lifecycle.quarantine(
                     name=factor_id,
                     expression=str(meta.get("description") or ""),

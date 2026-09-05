@@ -2142,3 +2142,59 @@ def test_retire_quarantined_discovered_carries_cause_and_regime(monkeypatch, tmp
     assert audited[0]["evidence"]["retire_cause"] == "param_mismatch"
     assert audited[0]["evidence"]["regime_id"] == "trend"
     assert actions[0]["status"] == "applied"
+
+def test_rollback_canary_regressions_skips_terminal_lifecycle_rows(monkeypatch, tmp_path):
+    """Retired rows whose canary projection still says SHADOW must not be
+    re-quarantined on every cycle (2026-09-05: 81 retired x SHADOW rows
+    emitted blocked_by_evidence rollback audits on each governance run)."""
+    rc.reset_for_tests()
+    _init_state_db(tmp_path)
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+
+    quarantine_calls: list[str] = []
+
+    class _StubLifecycle:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def get_state(self, *, factor_name):
+            if factor_name == "dsl_terminal":
+                return {"lifecycle_stage": "RETIRED"}
+            return {"lifecycle_stage": "SHADOW"}
+
+        def quarantine(self, *, name, **_kwargs):
+            quarantine_calls.append(name)
+            return {"ok": True, "status": "applied", "lifecycle_stage": "QUARANTINED"}
+
+    class _StubAdapter:
+        @classmethod
+        def shared(cls):
+            return cls
+
+        def get_meta(self, _factor_id):
+            return {"description": "expr", "artifact_hash": "h"}
+
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _StubLifecycle)
+    import alpha.registry_adapter as registry_adapter
+
+    monkeypatch.setattr(registry_adapter.RegistryAdapter, "shared", classmethod(lambda cls: _StubAdapter()))
+
+    run = {"run_id": "canary-skip-terminal"}
+    catalog = [
+        {
+            "factor_id": "dsl_terminal",
+            "source": "discovered",
+            "role": "alpha",
+            "canary": {"stage": "SHADOW"},
+        },
+        {
+            "factor_id": "dsl_live_shadow",
+            "source": "discovered",
+            "role": "alpha",
+            "canary": {"stage": "SHADOW"},
+        },
+    ]
+    actions = orch._rollback_canary_regressions(catalog, run)
+    assert quarantine_calls == ["dsl_live_shadow"]
+    assert [a["status"] for a in actions] == ["applied"]
