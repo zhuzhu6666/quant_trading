@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-03 (治理三批落地：回滚重放一次性裁定 a2e7ab0d / V16 preflight 单候选委派合同 42fc923e / 背压对齐 canonical 积压 + prepared 租约 + 死路径删除 2d9ebfdb；SHADOW 积压 1838 已在源头节流，排空目标见活跃条目)
+> Last verified: 2026-09-05 (canary 回退重发修复 + loguru %-style 直用清理 + watermark 测试隔离 09-03 workload gate；AWE 快环权重自适应已整体移除) (治理三批落地：回滚重放一次性裁定 a2e7ab0d / V16 preflight 单候选委派合同 42fc923e / 背压对齐 canonical 积压 + prepared 租约 + 死路径删除 2d9ebfdb；SHADOW 积压 1838 已在源头节流，排空目标见活跃条目)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -123,6 +123,14 @@
   必须恰等于 latest committed mutation 之后新增的 key（旧豁免一旦被新 mutation 绑定就退出，否则会剥离
   intent 自带的 key 反而失配；17:25 一次 retire_factor 重新绑定后自愈）。新增 RuntimeConfig key 的提交
   必须同步维护该集合，否则下次部署复闩。
+  操作边界（2026-09-05 追加）：**从 RuntimeConfig/settings.yaml 移除字段同样使全量 config hash 失配**
+  （committed intent 绑定 target/committed_config_hash 于整个有效配置载荷；`auto_projection_key_compat`
+  回退只认 overlay 键 ⊆ 当前 base，对 base 侧缩容无豁免）。实证：本次部署移除 16 个 awe_* 字段后重启，
+  backend 立即 `runtime_config_overlay` authority 校验失败并以 `governance_authority` 闩锁新风险。
+  处置：恢复 16 个字段为惰性死键（代码已无读取者），配置合约内真正摘除键必须走治理
+  `put_config`/Coordinator 通道在 mutation 内完成，使 target/committed hash 与移除后的载荷重绑。
+  附带确认：`backend.app._fail_closed_governance_authority` 与 overlay restored 的 loguru 调用曾用
+  %-style 占位符导致真实错误文本被吞，本次已改为 {}-style（全仓 65 处 loguru %-style 直用一并清理）。
 
 ### learning_application_effect / learning_application_log 代码(宽) vs DB(精简) 双轨断开
 
@@ -302,6 +310,23 @@
 - 当前：部署重启（YAML/config 结构变化）会使 register_shadow 提交的 hash 绑定失配 → 全量校验失败 → backend fail-closed 冻结新风险最长 38 分钟（2026-09-02 实测），learning worker 直接退出触发 systemd 重启风暴（17 次尝试、evolution 停机 ~5h）。修复：① learning worker overlay 失败改 fail-closed（quarantined YAML base 继续 observation/research，mutation 由 capability 门控，心跳 30s 重试完整 restore）——重启风暴消除；② `_auto_projection_key_compatible` fallback：对 factor_lifecycle.register_shadow 自动投影，overlay 键 ⊆ base 键且 patch 键 ⊆ overlay 行时接受 committed/current intent（hash_compatibility=auto_projection_key_compat）——冻结从 ~38min 降为秒级；operator/风控 mutation 与死键 overlay 仍严格 fail-closed。重启演练（真实注入失配 hash）验证：fallback 路径 restore 成功、还原后绑定回 current、零 ERROR。
 - 禁止：把 fallback 扩展到 operator/risk 类 mutation；用来源名或"看起来保守"恢复扩张/未知 overlay。
 - 退出：连续 ≥3 次真实部署重启无冻结（启动即 restored）且无 fallback 误放行后，评估是否可收紧（register_shadow 提交时重绑或局部键校验替代全量 hash）；worker fail-closed 路径经 ≥1 次真实 overlay 失配周期验证后转 resolved。
+
+### canary 回退对已退休行的每周期重发（2026-09-05 修复）
+
+- 状态：`resolved`（代码修复 + 专项测试完成；重启加载后首个治理周期零 `rollback_factor_action` 重发即终验）
+- 问题事实：`_rollback_canary_regressions` 把 `regression_stages` 含 `SHADOW` 的 discovered 因子一律视为
+  回退目标，但其中 81 个因子的 `factor_lifecycle_state` 已是 `RETIRED`（retire 快车道批量退出后
+  `canary_state.stage` 仍停留 SHADOW，canary 投影滞后于 lifecycle）。对终态行发起 `quarantine` 被状态机
+  拒绝 → `committed=false` → 每周期每因子一条 `blocked_by_evidence` 审计：09-04 15:00 起 24h 内
+  1743 条（81 因子 x ~21.5 次），且 `_audit_action` 同步写 `policy_suggestion` 与
+  `learning_application`，垃圾写入污染治理扫描的证据表。
+- canonical：`_rollback_canary_regressions` 在发起 quarantine 前读 `lifecycle.get_state`，
+  终态行（RETIRED/QUARANTINED）或缺失行直接跳过——终态即已出运行态，canary 投影滞后不构成新的
+  回退事实；非终态 SHADOW 行为照常尝试（提交成功即排空一个积压，随后自然落入跳过分支）。
+- 退出：已收敛；后续若 canary 投影与 lifecycle 终态再度出现系统性滞后，修复方向是投影对齐而非重试。
+- 验证：`tests/backend/runtime/test_factor_governance_orchestrator.py::
+  test_rollback_canary_regressions_skips_terminal_lifecycle_rows`（终态行零 audit、非终态行照常
+  quarantine）；重启后首个治理周期 `rollback_factor_action` 决策数为 0。
 
 ### 治理 mutation 跨账本提交兼容
 
