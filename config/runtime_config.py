@@ -557,23 +557,6 @@ class RuntimeConfig:
     max_position_api_volume: float = 1000.0    # 单品种最大持仓量(API volume, live 口径)
     max_position_count: int = 3              # 单品种最大同时持仓数
 
-    # --- Adaptive Weight Engine (Phase 5 占位) ---
-    awe_sensitivity: float = 0.5
-    awe_anchor_pull: float = 0.15
-    awe_max_single_change: float = 0.15
-    awe_weight_min: float = 0.1
-    awe_weight_max: float = 3.0
-    awe_min_trades: int = 50                # 最少交易笔数才调权重
-    awe_adapt_interval: int = 50
-    awe_ic_floor: float = 0.02
-    awe_health_floor: float = 40.0
-    awe_disable_min_trades: int = 20
-    awe_causal_threshold: float = -0.3
-    awe_dsr_p_threshold: float = 0.95
-    awe_resurrect_health_threshold: float = 60.0
-    awe_resurrect_dsr_p: float = 0.05
-    awe_resurrect_cooldown_days: int = 7
-    awe_max_type_weight_pct: float = 0.40
     # Scheduled-open sessions can temporarily have no fresh quote during the
     # broker's maintenance break.  Health may tolerate that evidence-bound
     # state for this long, but must fail critical after the grace expires.

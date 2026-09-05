@@ -775,22 +775,6 @@ runtime:
   max_position_volume: 0.5
   max_position_api_volume: 1000.0
   max_position_count: 3
-  awe_sensitivity: 0.5
-  awe_anchor_pull: 0.15
-  awe_max_single_change: 0.15
-  awe_weight_min: 0.1
-  awe_weight_max: 3.0
-  awe_min_trades: 50
-  awe_adapt_interval: 50
-  awe_ic_floor: 0.02
-  awe_health_floor: 40.0
-  awe_disable_min_trades: 20
-  awe_causal_threshold: -0.3
-  awe_dsr_p_threshold: 0.95
-  awe_resurrect_health_threshold: 60.0
-  awe_resurrect_dsr_p: 0.05
-  awe_resurrect_cooldown_days: 7
-  awe_max_type_weight_pct: 0.4
   factor_governance_enabled: true
   factor_governance_cron: '*/15 * * * *'
   factor_governance_shadow_min_oos_bars: 100
