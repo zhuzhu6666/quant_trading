@@ -50,19 +50,19 @@
 
 ### supervisor 经验已进入记忆索引，但自动模板准入仍未达标
 
-- 状态：`monitoring`（2026-09-02：eligible 38 / matured 47，数量超 10 笔门槛；缺 tighten/reduce 真实执行证据——55 笔 trace 全为 close（thesis_broken/timeout/regime），盈利仓全由 broker TP 单触发；trend_hold 回吐信号缺失已修（5ba55b47 bar 级评估事件后干预需求可见）；准入仍缺真实干预执行，等待受控试点或策略变更）
+- 状态：`monitoring`（2026-09-05 复核修正：验收线收紧为 **tighten 覆盖**——reduce 已按 2026-09-02 用户决定永久关闭（最小手数不可减），不得再作为验收项。2026-09-02：eligible 38 / matured 47，数量超 10 笔门槛；缺 tighten 真实执行证据——55 笔 trace 全为 close（thesis_broken/timeout/regime），盈利仓全由 broker TP 单触发；trend_hold 回吐信号缺失已修（5ba55b47 bar 级评估事件后干预需求可见）；准入仍缺真实干预执行，等待受控试点或策略变更。tighten 代码可达性已验证：`range_capture`/`transition_confirming` 姿态下盈利+回吐≥giveback_tighten_threshold 均有真实 tighten 路径；trend_hold 盈利仓按设计只打标不动作）
 - canonical：原始事实由 `canonical_v2.supervisor_trace/counterfactual_review` 承载，学习资格由 `canonical_v2.training_sample_row` 承载，经验检索使用 `experience_memory`，V16 检索/后验使用 `brain_memory` 和 `posterior_arbitration`。
 - 当前（2026-08-28 只读）：`canonical_v2.training_sample_row` 10294 行，`supervisor_execution_trace 9369` 中 `governance_eligible=1 & matured=5`（阈值 ≥10，仅 5 笔：另 4 笔 `full/matured/not_eligible` 等待治理），`pending 2085 + excluded 6598` 占 93%；`canonical_v2.event supervisor_trace 15`（近 2 天 8 笔），`counterfactual_review 33`；`brain_memory 160`（counterfactual 3/posterior 1/semantic 116）、`experience_memory 62` 已入；`position_supervisor_selection.v1` 仍 `insufficient_evidence/candidate_count=0/fresh`，`brain_governance_candidate_review bridge_ready 8/517`，`learning_application_log 21 (observing 9/inconclusive 8/reinforced 3)` 无 supervisor application。自动开启代码已加载，记忆仍只能供检索和审查。
 - 自动开启：`off` 仅是无证据时的安全基线；证据投影达到资格后，由 learning worker 自动经 V16、RiskPolicy 和 Coordinator 切入有界 Demo，不需要人工再改一个模式开关。单条 brain memory、提案或未成熟后验仍不能直接授权。
-- 退出：`≥10 笔 governance_eligible matured supervisor_execution_trace` + `tighten/reduce` 覆盖 + 候选 review、V16/Coordinator application、effect observation 和 rollback 连续可追溯；selection projection 新鲜且可解释；任何单条记忆不得直接改模板或放大交易权限。
+- 退出：`≥10 笔 governance_eligible matured supervisor_execution_trace` + `tighten` 覆盖（reduce 已永久关闭，见上）+ 候选 review、V16/Coordinator application、effect observation 和 rollback 连续可追溯；selection projection 新鲜且可解释；任何单条记忆不得直接改模板或放大交易权限。
 
 
-### V16 parameter_template 通道无模板注册（管线通、无货可切）
-- 状态：`active`（2026-09-02 登记：V16 因子通道已打通并落地首笔降权 stoch_k 0.35→0.3115；parameter_template 通道管线完好但无目标模板）
+### V16 parameter_template 通道（V16 链存在代码死点；learning 链可达）
+- 状态：`active`（2026-09-05 复核修正：**V16 链存在代码级死点，仅注册模板不可达**；autonomous_learning 备用链为活路，等因子卡片 parameter 责任归因。2026-09-02 登记：V16 因子通道已打通并落地首笔降权 stoch_k 0.35→0.3115）
 - canonical：`parameter_template_registry` 为模板唯一注册源；V16 经 `switch_parameter_template`（scope_key=online_light）切换，命令门已支持（`v16_scope_key=online_light`），应用端 `_auto_apply_parameter_template_suggestions` 与 governor 规则（需 `target_template_id` + `recommended_scope=online_light` + confidence≥0.55）已就绪。
-- 当前：`runtime.parameter_template_registry` 与 `runtime.parameter_template_active` 均为 0 行；planner 无 `target_template_id` 可指 → bridge 评审恒 `needs_evidence:missing_target_template_id` → 通道每轮观察空转，不产生候选。非代码故障，是模板数据未启用（同 V16 因子通道的 `0f1521f` 已闭环，本项为后续通道）。
-- 退出：注册 ≥1 套带 regime 适用范围的参数模板（人工或治理产出）后，验证 V16 entry 结论可驱动一次真实模板切换（`parameter_template_switch_log` 落地）。若确定不走模板治理路线，关闭该 surface 的观察（避免空转）并标记 resolved（路线决定）。
-- 验证：`parameter_template_switch_log` 出现新记录且 `parameter_template_active` 非空；或明确标注"不启用模板路线"。
+- 当前：`runtime.parameter_template_registry` 与 `runtime.parameter_template_active` 均为 0 行。**V16 链死点（2026-09-05 实证）**：`v16_brain_planning._map_action` 对 `scope=parameter_template` 硬编码 `target_template_id=""`，而 bridge 评审要求 mapped target 非空（`brain_governance_candidate_review` gap `missing_target_template_id`）——**仅注册模板不能解封该链**，planner 侧必须先填 target 或不再映射该 scope。备用活链：`autonomous_learning._build_recommendation` 从 `_MANUAL_TEMPLATE_LIBRARY`（rsi_14/macd_hist 各 default/conservative/aggressive）选真实 target，switch mutation 在同一 Coordinator 事务内物化 registry 行（`parameter_templates.py` switch 分支），**该链不需要预先注册**，只等因子卡片出现 primary responsibility=parameter（或 `factor_logic_ok_but_param_suspect` 标签）的归因证据。
+- 退出（三选一）：① 修复 V16 链死点（planner 填 target）+ 注册模板后验证一次真实切换；② 路由到 learning 链：V16 不再映射 parameter_template scope，由备用链完成首个切换后本条转 resolved；③ 明确不走模板治理路线，关闭该 surface 的观察并标记 resolved（路线决定）。
+- 验证：`parameter_template_switch_log` 出现新记录且 `parameter_template_active` 非空（任一链均可）；或明确标注"不启用模板路线"。
 
 ### supervisor 决策链三缺陷复盘（2026-09-02 已修 3/3）
 - 状态：`monitoring`（2026-09-02 57690a2f 修复 ③ 后：near_tp 在 trend_hold 内优先处理，default 模板 close 落袋、protect 模板 tighten；测试 20 passed 含 protect 变体；待真实 trend_hold 盈利仓 near-TP 动作与评估事件积累验证）
