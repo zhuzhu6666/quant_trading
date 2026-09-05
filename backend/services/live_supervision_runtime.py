@@ -479,7 +479,7 @@ def run_position_supervision(
                 error=exc,
             )
             runtime.logger.warning(
-                "[live] supervisor evaluation unavailable for pos %s; other safety stages continue: %s",
+                "[live] supervisor evaluation unavailable for pos {}; other safety stages continue: {}",
                 position_id,
                 exc,
             )
@@ -756,7 +756,7 @@ def run_position_supervision(
                 )
             except Exception as exc:
                 runtime.logger.debug(
-                    "[live] supervisor tighten preflight unavailable for pos %s: %s",
+                    "[live] supervisor tighten preflight unavailable for pos {}: {}",
                     position_id,
                     exc,
                 )
@@ -953,7 +953,7 @@ def run_position_supervision(
                 acct=account,
             )
             runtime.logger.debug(
-                "[live] supervisor action %s failed for pos %s: %s",
+                "[live] supervisor action {} failed for pos {}: {}",
                 action,
                 position_id,
                 exc,

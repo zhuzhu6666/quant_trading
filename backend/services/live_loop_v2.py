@@ -207,7 +207,7 @@ def run_live_safety_cycle(
         unknown_count = int(bridge.unresolved_execution_intent_count()) if bridge is not None else 1
         unknown_status_error = False
     except Exception as exc:
-        logger.warning("[live] unresolved execution status unavailable: %s", exc)
+        logger.warning("[live] unresolved execution status unavailable: {}", exc)
         unknown_count = 1
         unknown_status_error = True
 
@@ -487,7 +487,7 @@ def run_live_safety_cycle(
         except Exception as exc:
             # Observation evidence cannot rewrite a completed broker action.
             # Missing evidence simply prevents the later enforce gate.
-            logger.error("[live] safety shadow observation unavailable: %s", exc)
+            logger.error("[live] safety shadow observation unavailable: {}", exc)
     payload["safety_cycle"] = _build_safety_cycle_contract(
         reconciliation_state=payload.get("reconciliation_state"),
         status=payload.get("status"),
@@ -515,7 +515,7 @@ def run_live_safety_cycle(
                 accepting_new_risk=runtime.controller.accepting_new_risk(generation_id)
             )
         except RuntimeError as exc:
-            logger.warning("[live] safety heartbeat ownership mismatch: %s", exc)
+            logger.warning("[live] safety heartbeat ownership mismatch: {}", exc)
     return payload
 
 

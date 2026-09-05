@@ -105,12 +105,12 @@ def _fail_closed_governance_authority(
     except Exception as latch_exc:
         logger.error(
             "[lifespan] governance restore latch persistence failed; "
-            "new risk remains blocked in-process: %s",
+            "new risk remains blocked in-process: {}",
             latch_exc,
         )
     logger.error(
-        "[lifespan] %s failed authority validation; preserving loaded config "
-        "and blocking new risk: %s",
+        "[lifespan] {} failed authority validation; preserving loaded config "
+        "and blocking new risk: {}",
         component,
         error,
     )
@@ -198,7 +198,7 @@ async def lifespan(app: FastAPI):
                     blocking=True,
                 )
             _lg.info(
-                "[lifespan] RuntimeConfig autonomous overlay restored hash=%s",
+                "[lifespan] RuntimeConfig autonomous overlay restored hash={}",
                 overlay_restore.get("overlay_hash", ""),
             )
     except Exception as overlay_exc:

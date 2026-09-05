@@ -165,7 +165,7 @@ def _append_emergency_outbox(
         )
     except Exception as outbox_exc:
         logger.error(
-            "[live] emergency safety outbox append failed event=%s emergency_id=%s error=%s",
+            "[live] emergency safety outbox append failed event={} emergency_id={} error={}",
             event_type,
             emergency_id,
             outbox_exc,
@@ -313,7 +313,7 @@ def run_emergency_close(
             "error": str(exc),
         }
         logger.critical(
-            "[live] emergency latch durability failed; continuing close-only flow emergency_id=%s error=%s",
+            "[live] emergency latch durability failed; continuing close-only flow emergency_id={} error={}",
             emergency_id,
             exc,
         )

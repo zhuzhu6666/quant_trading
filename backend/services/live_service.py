@@ -2276,7 +2276,7 @@ def _restore_attribution_for_positions(attr_engine, positions: list[Any] | None)
         positions,
         load_recovery_row=_load_recovery_position_row,
         debug_log=lambda pid, exc: logger.debug(
-            "[live] attribution restore skipped for pos %s: %s",
+            "[live] attribution restore skipped for pos {}: {}",
             pid,
             exc,
         ),
@@ -2687,7 +2687,7 @@ def _log_supervisor_decision(
             )
         )
     except Exception as exc:
-        logger.warning("[live] supervisor ledger failed for pos %s: %s", position.get("position_id"), exc)
+        logger.warning("[live] supervisor ledger failed for pos {}: {}", position.get("position_id"), exc)
         return ""
 
 
@@ -2801,7 +2801,7 @@ def _log_supervisor_position_event(
             )
         )
     except Exception as exc:
-        logger.debug("[live] supervisor position event %s failed for pos %s: %s", event_type, position.get("position_id"), exc)
+        logger.debug("[live] supervisor position event {} failed for pos {}: {}", event_type, position.get("position_id"), exc)
 
 
 def _log_supervisor_trace(
@@ -2842,7 +2842,11 @@ def _log_supervisor_trace(
             )
         )
     except Exception as exc:
-        logger.warning("[live] supervisor trace failed for pos %s: %s", position.get("position_id"), exc, exc_info=True)
+        logger.opt(exception=True).warning(
+            "[live] supervisor trace failed for pos {}: {}",
+            position.get("position_id"),
+            exc,
+        )
         return ""
 
 
@@ -2874,11 +2878,10 @@ def _log_supervisor_evaluation(
             verdict=verdict,
         )
     except Exception as exc:
-        logger.warning(
-            "[live] supervisor evaluation ledger failed for pos %s: %s",
+        logger.opt(exception=True).warning(
+            "[live] supervisor evaluation ledger failed for pos {}: {}",
             position_id,
             exc,
-            exc_info=True,
         )
         return ""
 
@@ -3469,10 +3472,10 @@ def _ensure_open_ledger_for_recovered_close(
             **payloads["recovery_state_kwargs"],
             meta=recovery_state_meta,
         )
-        logger.info("[live] repaired missing open ledger before close pos=%s decision=%s", position_id, decision_id)
+        logger.info("[live] repaired missing open ledger before close pos={} decision={}", position_id, decision_id)
         return decision_id
     except Exception as exc:
-        logger.debug("[live] open ledger repair before close failed for pos %s: %s", position_id, exc)
+        logger.debug("[live] open ledger repair before close failed for pos {}: {}", position_id, exc)
         return ""
 
 
@@ -3563,7 +3566,7 @@ def _persist_session_state(trade_date: str | None = None) -> None:
         snapshot = _session_state_snapshot(trade_date)
         _runtime_kv_set(_session_state_key(snapshot["trade_date"]), snapshot)
     except Exception as exc:
-        logger.debug("[live] session state persist failed: %s", exc)
+        logger.debug("[live] session state persist failed: {}", exc)
 
 
 def _session_trade_window(trade_date: str, timezone_name: str = "UTC") -> tuple[float, float]:
@@ -3710,13 +3713,13 @@ def _restore_session_state_for_day(
     )
     if decision.get("authoritative_error"):
         logger.warning(
-            "[live] authoritative session projection unavailable for %s: %s",
+            "[live] authoritative session projection unavailable for {}: {}",
             trade_date,
             decision["authoritative_error"],
         )
     if not decision.get("authoritative") and decision.get("restored"):
         logger.warning(
-            "[live] restoring cached session projection for %s because broker close facts are unavailable",
+            "[live] restoring cached session projection for {} because broker close facts are unavailable",
             trade_date,
         )
     _live_state_update(**dict(decision.get("state") or {}))
@@ -4454,7 +4457,7 @@ def _active_recovery_position_ids_for_close_detection(broker: str) -> set[int]:
         )
     except Exception as exc:
         logger.debug(
-            "[live] durable recovery IDs unavailable for close detection: %s",
+            "[live] durable recovery IDs unavailable for close detection: {}",
             exc,
         )
         return set()
@@ -4937,7 +4940,7 @@ def _maybe_update_loss_streak_book(*, tripped: bool, reason: str = "") -> None:
             }
             _live_state_update(loss_streak_book=book)
             logger.info(
-                "[loss_streak] daily limit tripped: streak=%s reason=%s",
+                "[loss_streak] daily limit tripped: streak={} reason={}",
                 streak,
                 reason,
             )
@@ -5131,9 +5134,9 @@ def schedule_auto_resume_loop(delay_sec: float = _AUTO_RESUME_DELAY_SEC) -> bool
                 persist_desired=False,
                 trigger_reason="auto_resume",
             )
-            logger.info("[live] auto-resume attempted: %s", result)
+            logger.info("[live] auto-resume attempted: {}", result)
         except Exception as exc:
-            logger.warning("[live] auto-resume failed: %s", exc)
+            logger.warning("[live] auto-resume failed: {}", exc)
 
     threading.Thread(target=_resume, name="live_loop_auto_resume", daemon=True).start()
     return True
@@ -5171,7 +5174,7 @@ def _make_ctrader_bridge(**overrides):
         from execution._env import load_env
         load_env()
     except Exception as _e:
-        logger.debug("load_env failed (non-critical): %s", _e)
+        logger.debug("load_env failed (non-critical): {}", _e)
     try:
         from execution.ctrader_bridge import CTraderBridge
     except ImportError as e:
@@ -5288,7 +5291,7 @@ def _install_ctrader_live_listener(bridge) -> None:
                 )
                 return
         except Exception as exc:
-            logger.debug("[ctrader] live listener ignored %s: %s", event_type, exc)
+            logger.debug("[ctrader] live listener ignored {}: {}", event_type, exc)
 
     bridge.add_event_listener(_listener)
     setattr(bridge, "_live_service_listener_installed", True)
@@ -5322,7 +5325,7 @@ def _get_ctrader():
         from execution._env import load_env
         load_env()
     except Exception as _e:
-        logger.debug("load_env failed (non-critical): %s", _e)
+        logger.debug("load_env failed (non-critical): {}", _e)
     try:
         from execution.ctrader_bridge import CTraderBridge
     except ImportError as e:
@@ -5462,7 +5465,7 @@ def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str
             source="live_market_session",
         )
     except Exception as projection_exc:
-        logger.debug("[live] runtime health projection publish failed: %s", projection_exc)
+        logger.debug("[live] runtime health projection publish failed: {}", projection_exc)
     return state
 
 
@@ -5532,7 +5535,7 @@ def _ensure_spot_subscription(
             msg = "spot subscription refreshed after broker connection became ready"
         log(msg) if log else logger.info(msg)
     except Exception as exc:
-        logger.debug("[market_session] spot subscription refresh failed: %s", exc)
+        logger.debug("[market_session] spot subscription refresh failed: {}", exc)
 
 
 def _wait_ctrader_ready(bridge, timeout_sec: float = 30.0) -> str | None:
@@ -6085,7 +6088,7 @@ def _persist_safety_fail_closed(
                 error=str(error or ""),
             )
         except Exception as outbox_exc:
-            logger.error("[live] safety fail-closed outbox unavailable: %s", outbox_exc)
+            logger.error("[live] safety fail-closed outbox unavailable: {}", outbox_exc)
     return payload
 
 
@@ -6188,7 +6191,7 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
             )
         except Exception as exc:
             logger.debug(
-                "[live] live-loop latch recovery evidence unavailable: %s",
+                "[live] live-loop latch recovery evidence unavailable: {}",
                 exc,
             )
             live_loop_recovered = False
@@ -7018,7 +7021,7 @@ def _get_live_bars(
     try:
         bridge, error, warming = _get_ctrader()
     except Exception as exc:
-        logger.debug("online trendbar bridge lookup failed: %s", exc)
+        logger.debug("online trendbar bridge lookup failed: {}", exc)
         return None
     if error or warming or bridge is None:
         return None
@@ -7029,7 +7032,7 @@ def _get_live_bars(
         return getter(timeframe=str(timeframe or "M5"), n_bars=int(n_bars or 1))
     except Exception as exc:
         logger.debug(
-            "online trendbar read failed: symbol=%s timeframe=%s error=%s",
+            "online trendbar read failed: symbol={} timeframe={} error={}",
             symbol,
             timeframe,
             exc,
@@ -7371,7 +7374,7 @@ def _publish_fresh_position_reconcile(
     except Exception as exc:
         # Enrichment/audit is advisory; the broker snapshot remains usable by
         # the safety plane when PostgreSQL or learning metadata is unavailable.
-        logger.warning("[live] position snapshot enrichment unavailable: %s", exc)
+        logger.warning("[live] position snapshot enrichment unavailable: {}", exc)
     safe_positions = _safe_container_snapshot(positions)
     if not isinstance(safe_positions, list):
         safe_positions = []
@@ -7456,7 +7459,7 @@ def _publish_fresh_position_reconcile(
                 except Exception as exc:
                     logger.warning(
                         "[live] missing recovery close reconciliation failed "
-                        "for pos %s: %s",
+                        "for pos {}: {}",
                         position_id,
                         exc,
                     )
@@ -7473,7 +7476,7 @@ def _publish_fresh_position_reconcile(
         missing_recovery_ids = []
         conflict_reason = "recovery_position_state_unavailable"
         logger.warning(
-            "[live] cannot validate fresh broker positions against recovery state: %s",
+            "[live] cannot validate fresh broker positions against recovery state: {}",
             exc,
         )
 
@@ -7505,7 +7508,7 @@ def _publish_fresh_position_reconcile(
                 )
             except Exception as exc:
                 logger.error(
-                    "[live] failed to persist position reconcile conflict latch: %s",
+                    "[live] failed to persist position reconcile conflict latch: {}",
                     exc,
                 )
         _live_state_update(
@@ -7529,7 +7532,7 @@ def _publish_fresh_position_reconcile(
             )
         except Exception as exc:
             logger.error(
-                "[live] failed to release resolved position reconcile conflict latch: %s",
+                "[live] failed to release resolved position reconcile conflict latch: {}",
                 exc,
             )
         _live_state_update(no_new_risk_latch=no_new_risk_latch_status(fail_closed=True))
@@ -8203,7 +8206,7 @@ def _run_loop(
         _run_loop_body(broker, stop_flag, generation_id=generation_id)
     except BaseException as exc:
         failed_reason = f"{type(exc).__name__}: {exc}"
-        logger.exception("[live] generation %s failed", generation_id or "unowned")
+        logger.exception("[live] generation {} failed", generation_id or "unowned")
         raise
     finally:
         _live_state_update(accepting_new_risk=False)
@@ -8214,7 +8217,7 @@ def _run_loop(
                     failed_reason=failed_reason,
                 )
             except RuntimeError as exc:
-                logger.error("[live] loop exit ownership mismatch: %s", exc)
+                logger.error("[live] loop exit ownership mismatch: {}", exc)
         # The scheduler is process-owned: readiness, health and data
         # maintenance must remain alive while a generation is stopped or being
         # recovered.  Generation-sensitive jobs guard on loop ownership.
@@ -8228,7 +8231,7 @@ def _run_loop(
                         "auto-resume scheduled"
                     )
             except Exception as exc:
-                logger.error("[live] failed to schedule loop auto-resume: %s", exc)
+                logger.error("[live] failed to schedule loop auto-resume: {}", exc)
 
 
 def _startup_safety_runtime() -> StartupSafetyRuntime:
@@ -8683,7 +8686,7 @@ def _latest_bar_close_from_store() -> float | None:
             _latest_bar_price_cache = (now_ts, price)
             return price
     except Exception as exc:
-        logger.debug("[live] latest bar close fallback failed: %s", exc)
+        logger.debug("[live] latest bar close fallback failed: {}", exc)
     return None
 
 
@@ -8715,7 +8718,7 @@ def get_latest_price() -> float | None:
             _live_state_update(spot_quote=quote)
             return spot
     except Exception as _e2:
-        logger.debug("[live] get_latest_price spot query failed: %s", _e2)
+        logger.debug("[live] get_latest_price spot query failed: {}", _e2)
     fallback = _latest_bar_close_from_store()
     return _publish_latest_price(fallback, source="bar_close") if fallback else _latest_price
 
@@ -8787,7 +8790,7 @@ def _record_filled_open_attribution(
         _pos_open_prices[pid] = current_price
         _pos_open_api_volume[pid] = float(actual_api_volume)
     except Exception as attr_err:
-        logger.debug("[live] attribution open persist failed for pos %s: %s", pid, attr_err)
+        logger.debug("[live] attribution open persist failed for pos {}: {}", pid, attr_err)
     return trade_attribution_payload
 
 
@@ -8893,7 +8896,7 @@ def _log_filled_open_ledger(
         )
         return lineage_decision_id
     except Exception as ledger_err:
-        logger.debug("[live] ledger open persist failed for pos %s: %s", pid, ledger_err)
+        logger.debug("[live] ledger open persist failed for pos {}: {}", pid, ledger_err)
         return ""
 
 
@@ -8957,7 +8960,7 @@ def _upsert_filled_open_recovery(
             meta=recovery_payloads["meta"],
         )
     except Exception as recovery_err:
-        logger.debug("[live] recovery open persist failed for pos %s: %s", pid, recovery_err)
+        logger.debug("[live] recovery open persist failed for pos {}: {}", pid, recovery_err)
 
 
 def _filled_open_processing_runtime() -> FilledOpenRuntime:
@@ -9243,7 +9246,7 @@ def _mark_amended_open_success_local_state(
         )
     except Exception as _plan_update_err:
         logger.debug(
-            "[live] entry protection applied update failed for pos %s: %s",
+            "[live] entry protection applied update failed for pos {}: {}",
             pid,
             _plan_update_err,
         )
@@ -9411,7 +9414,7 @@ def _log_amended_open_ledger(
         )
         return lineage_decision_id
     except Exception as _ledger_err:
-        logger.debug("[live] ledger open failed for pos %s: %s", pid, _ledger_err)
+        logger.debug("[live] ledger open failed for pos {}: {}", pid, _ledger_err)
         return ""
 
 
@@ -9474,7 +9477,7 @@ def _upsert_amended_open_recovery(
             meta=recovery_payloads["meta"],
         )
     except Exception as _recovery_open_err:
-        logger.debug("[live] recovery open persist failed for pos %s: %s", pid, _recovery_open_err)
+        logger.debug("[live] recovery open persist failed for pos {}: {}", pid, _recovery_open_err)
 
 
 def _amended_open_success_processing_runtime() -> AmendedOpenSuccessRuntime:
@@ -10082,7 +10085,7 @@ def _maybe_tighten_incident_for_live_autonomy_budget_breach(risk_verdict: Any, *
         log(f"tick {tick}: live autonomy budget breach incident tighten -> {target_mode} ({result.get('status')})")
         return dict(result or {})
     except Exception as exc:
-        logger.warning("[live] live autonomy budget incident tighten failed: %s", exc)
+        logger.warning("[live] live autonomy budget incident tighten failed: {}", exc)
         return {"ok": False, "status": "incident_tighten_failed", "error": str(exc)[:300]}
 
 
@@ -10148,7 +10151,7 @@ def _record_open_trade_blocked_by_policy(
             )
         )
     except Exception as _ledger_err:
-        logger.debug("[live] ledger risk policy skip failed: %s", _ledger_err)
+        logger.debug("[live] ledger risk policy skip failed: {}", _ledger_err)
     return gate_result
 
 
@@ -10209,7 +10212,7 @@ def _record_open_trade_admission_blocked(
         payload["action_json"].update(action_json)
         decision_id = _LEDGER.log_composite_decision(**payload)
         logger.debug(
-            "[live] open admission blocker audited decision_id=%s stage=%s blockers=%s",
+            "[live] open admission blocker audited decision_id={} stage={} blockers={}",
             decision_id,
             skip_stage,
             list(blockers),
@@ -10218,7 +10221,7 @@ def _record_open_trade_admission_blocked(
         # Admission remains fail-closed when the audit sink is unavailable;
         # the ledger is observability, never permission to submit an order.
         logger.debug(
-            "[live] open admission blocker ledger persist failed: %s",
+            "[live] open admission blocker ledger persist failed: {}",
             ledger_error,
         )
 
@@ -10491,7 +10494,7 @@ def _persist_pending_entry_protection_plan(
         )
     except Exception as _protection_plan_err:
         logger.debug(
-            "[live] entry protection plan persist failed for pos %s: %s",
+            "[live] entry protection plan persist failed for pos {}: {}",
             position_id,
             _protection_plan_err,
         )
@@ -10630,7 +10633,7 @@ def _record_open_trade_order_failure(
             **order_event,
         )
     except Exception as _ledger_err:
-        logger.debug("[live] ledger order failed event failed: %s", _ledger_err)
+        logger.debug("[live] ledger order failed event failed: {}", _ledger_err)
 
 
 def _handle_open_trade_order_success(
@@ -10954,7 +10957,7 @@ def _bar_open_already_recorded(bar_ts: float) -> bool:
                 return True
         return False
     except Exception as exc:
-        logger.warning("[live] bar open dedup check failed: %s", exc)
+        logger.warning("[live] bar open dedup check failed: {}", exc)
         return False
     finally:
         conn.close()
@@ -11334,7 +11337,7 @@ def _process_tick_existing_decision_bar(
         )
         current_price = float(price_guard["current_price"])
         if price_guard["error"] is not None:
-            logger.debug("[live] spot price guard failed for tick %s: %s", tick, price_guard["error"])
+            logger.debug("[live] spot price guard failed for tick {}: {}", tick, price_guard["error"])
 
     current_pids = _tick_collect_position_ids(pos)
     attr_engine = pipeline.get("attribution")
@@ -11551,7 +11554,7 @@ def _process_tick_factor_pipeline(
             )
             pipeline["last_signal_decision_id"] = str(signal_decision_id or "")
         except Exception as _ledger_err:
-            logger.warning("[live] ledger signal failed: %s", _ledger_err)
+            logger.warning("[live] ledger signal failed: {}", _ledger_err)
             pipeline["last_signal_decision_id"] = ""
     else:
         pipeline["last_signal_decision_id"] = ""
@@ -11632,7 +11635,7 @@ def _process_tick_factor_pipeline(
         )
         current_price = float(price_guard["current_price"])
         if price_guard["error"] is not None:
-            logger.debug("[live] spot price guard failed for tick %s: %s", tick, price_guard["error"])
+            logger.debug("[live] spot price guard failed for tick {}: {}", tick, price_guard["error"])
 
     # ── 开仓执行流水线: candidate -> risk verdict -> broker order -> post-fill audit.
     atr_val = factor_values.get("atr_ratio", 0)
@@ -11751,7 +11754,7 @@ def _entry_protection_repair_candidates(
                         applied_tp=current_tp,
                     )
                 except Exception as exc:
-                    logger.debug("[live] entry protection applied-state update failed pos=%s: %s", pid, exc)
+                    logger.debug("[live] entry protection applied-state update failed pos={}: {}", pid, exc)
             continue
         anchor = _runtime_config_anchor()
         candidates.append(
@@ -11875,7 +11878,7 @@ def _mark_entry_protection_plan_after_execution(
             error=error,
         )
     except Exception as exc:
-        logger.debug("[live] entry protection %s update failed pos=%s: %s", status, pid, exc)
+        logger.debug("[live] entry protection {} update failed pos={}: {}", status, pid, exc)
 
 
 def _handle_protection_execution_applied(
@@ -12426,7 +12429,7 @@ def _enforce_holding_timeout(
             tick=tick,
         )
         if not close_verdict.allowed:
-            logger.warning("[live] holding timeout close blocked pos=%s reason=%s", pid, close_verdict.reason)
+            logger.warning("[live] holding timeout close blocked pos={} reason={}", pid, close_verdict.reason)
             _log_supervisor_trace(
                 position=dict(p),
                 verdict=verdict_payload,
@@ -12450,7 +12453,7 @@ def _enforce_holding_timeout(
                 volume=float(_position_api_volume(p) or 0.0),
             )
         except Exception as exc:
-            logger.warning("[live] holding timeout close exception pos=%s: %s", pid, exc)
+            logger.warning("[live] holding timeout close exception pos={}: {}", pid, exc)
             _log_supervisor_trace(
                 position=dict(p),
                 verdict=verdict_payload,
@@ -12658,4 +12661,4 @@ def _check_business_alerts(tick: int, acct: dict, pos: list, log) -> None:
                 log(f"tick {tick}: {summary}")
 
     except Exception as _e:
-        logger.debug("[live] _check_business_alerts failed: %s", _e)
+        logger.debug("[live] _check_business_alerts failed: {}", _e)

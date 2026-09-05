@@ -480,8 +480,9 @@ def test_governance_authority_failure_records_blocker_and_latches_new_risk(
     errors = []
 
     class _ErrorLogger:
+        # app.py logs through loguru, which formats with {} placeholders.
         def error(self, message, *args):
-            errors.append(message % args if args else message)
+            errors.append(message.format(*args) if args else message)
 
     monkeypatch.setattr(
         safety_state_module,

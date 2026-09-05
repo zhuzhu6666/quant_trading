@@ -7128,7 +7128,7 @@ def schedule_autonomous_learning(
                     "run_pending_governance",
                 }:
                     logger.info(
-                        "[autonomous_learning] scheduled run skipped: %s",
+                        "[autonomous_learning] scheduled run skipped: {}",
                         result.get("status"),
                     )
                 else:
