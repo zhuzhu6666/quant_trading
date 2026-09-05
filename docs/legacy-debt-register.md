@@ -58,7 +58,7 @@
 
 
 ### V16 parameter_template 通道（V16 链存在代码死点；learning 链可达）
-- 状态：`active`（2026-09-05 复核修正：**V16 链存在代码级死点，仅注册模板不可达**；autonomous_learning 备用链为活路，等因子卡片 parameter 责任归因。2026-09-02 登记：V16 因子通道已打通并落地首笔降权 stoch_k 0.35→0.3115）
+- 状态：`active`（2026-09-05 路线②已执行：planner 目录移除 `shadow_parameter_template_review`，`_materialize_eval` 对该 scope 只观察不产候选——V16 链死点按路线②退役，learning 链成为唯一 owner；首个真实切换（`parameter_template_switch_log` 非空）后转 resolved。2026-09-05 复核修正：**V16 链存在代码级死点，仅注册模板不可达**；2026-09-02 登记：V16 因子通道已打通并落地首笔降权 stoch_k 0.35→0.3115）
 - canonical：`parameter_template_registry` 为模板唯一注册源；V16 经 `switch_parameter_template`（scope_key=online_light）切换，命令门已支持（`v16_scope_key=online_light`），应用端 `_auto_apply_parameter_template_suggestions` 与 governor 规则（需 `target_template_id` + `recommended_scope=online_light` + confidence≥0.55）已就绪。
 - 当前：`runtime.parameter_template_registry` 与 `runtime.parameter_template_active` 均为 0 行。**V16 链死点（2026-09-05 实证）**：`v16_brain_planning._map_action` 对 `scope=parameter_template` 硬编码 `target_template_id=""`，而 bridge 评审要求 mapped target 非空（`brain_governance_candidate_review` gap `missing_target_template_id`）——**仅注册模板不能解封该链**，planner 侧必须先填 target 或不再映射该 scope。备用活链：`autonomous_learning._build_recommendation` 从 `_MANUAL_TEMPLATE_LIBRARY`（rsi_14/macd_hist 各 default/conservative/aggressive）选真实 target，switch mutation 在同一 Coordinator 事务内物化 registry 行（`parameter_templates.py` switch 分支），**该链不需要预先注册**，只等因子卡片出现 primary responsibility=parameter（或 `factor_logic_ok_but_param_suspect` 标签）的归因证据。
 - 退出（三选一）：① 修复 V16 链死点（planner 填 target）+ 注册模板后验证一次真实切换；② 路由到 learning 链：V16 不再映射 parameter_template scope，由备用链完成首个切换后本条转 resolved；③ 明确不走模板治理路线，关闭该 surface 的观察并标记 resolved（路线决定）。
@@ -76,7 +76,8 @@
 - 问题事实：旧背压口径走 registry/canary_state 窄投影长期误报 0，dsl_auto 生成侧持续注册（每周期最多 10 个），
   积压 1838 且 shadow 晋升门因 OOS PnL 全负实质关闭——队列只进不出。
 - canonical：入册节流唯一口径 = `factor_lifecycle_state` origin `dsl/shadow/discovered` 非终态行数；
-  消化侧 = 治理周期收紧动作（retire ≤5/周期、disable ≤3/周期）+ canary 晋升/退休。
+  消化侧 = 治理周期收紧动作（2026-09-05 提额：retire ≤15/周期、disable ≤9/周期，此前 5/3——
+  09-03~05 实测排空 14-80/天，提额后预期约 3 倍，<200 退出线预计 ~12 天可达）+ canary 晋升/退休。
 - 退出条件：`nonterminal_candidate_count < QUANT_CANARY_EVALUATION_LIMIT(200)` 且连续一周 GP 注册可正常进行。
 - 剩余观察：retire 提额后的实际排空速度。已知约束：`_retire_quarantined_discovered` 要求 `0 < health_score < 30`，
   积压中健康分为 0（UNKNOWN）的因子不满足该条件，只能依赖模型 `weak_for_disable` 判定进入候选——这是排空速度的
@@ -129,6 +130,13 @@
   backend 立即 `runtime_config_overlay` authority 校验失败并以 `governance_authority` 闩锁新风险。
   处置：恢复 16 个字段为惰性死键（代码已无读取者），配置合约内真正摘除键必须走治理
   `put_config`/Coordinator 通道在 mutation 内完成，使 target/committed hash 与移除后的载荷重绑。
+  摘除执行（2026-09-05 周末窗口，commit aea9970b + 0f37a9c7）：数据类字段与 yaml 键一并移除，
+  与治理排空提额（retire 15/disable 9）同一部署窗口以共享单次 latch。程序：部署重启 → startup
+  authority 校验失败（预期，whole-config hash 失配）→ no-new-risk 闩锁（close/reduce/tighten 不受限）
+  → 首个提交 coordinator mutation 的治理周期重绑 committed_config_hash → 5s overlay refresh 解锁。
+  硬性门禁：周一开盘前验证 latch 已清（journal 无 `governance_authority` 活动 cause 且
+  system_health healthy），未清则手动触发一次治理周期。回滚注意：revert 配置提交同样改变
+  payload、同样经历 latch 窗口，非零成本。
   附带确认：`backend.app._fail_closed_governance_authority` 与 overlay restored 的 loguru 调用曾用
   %-style 占位符导致真实错误文本被吞，本次已改为 {}-style（全仓 65 处 loguru %-style 直用一并清理）。
 
