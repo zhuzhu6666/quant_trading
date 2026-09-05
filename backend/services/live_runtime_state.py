@@ -180,6 +180,8 @@ def default_live_state() -> dict[str, Any]:
         # Observation time belongs to the session-risk projection itself.
         # It must never be borrowed from account/position refresh timestamps.
         "session_observed_at": 0.0,
+        "session_pending_close_ids": [],
+        "session_pending_close_observed_at": 0.0,
         "circuit_breaker": False,
         "circuit_reason": "",
         "trade_equity_history": [],

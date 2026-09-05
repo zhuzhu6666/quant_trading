@@ -79,6 +79,10 @@ def handle_closed_positions_after_tick(
                     f"tick {tick}: close pos={pid} deferred until authoritative "
                     "cTrader close deal is available"
                 )
+                # Fail-closed visibility: the session pnl/streak cannot
+                # advance on estimates, but risk must see that a realized
+                # close exists and is waiting for its authoritative deal.
+                runtime.update_live_state(session_pending_close_add=pid)
                 continue
 
             confirmed_close_ids.add(pid)
@@ -268,6 +272,10 @@ def handle_closed_positions_after_tick(
             )
         pending_projection_ids -= recovery_projected_ids
 
+    if recovery_projected_ids:
+        runtime.update_live_state(
+            session_pending_close_remove=sorted(recovery_projected_ids)
+        )
     if not pending_projection_ids:
         return
 

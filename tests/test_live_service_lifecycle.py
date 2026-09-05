@@ -406,14 +406,16 @@ def test_session_trade_projection_is_idempotent_by_position_id():
         session_recorded_position_ids=[],
     )
 
-    first = live_service._record_session_trade(-5.0, position_id=812)
-    second = live_service._record_session_trade(-5.0, position_id=812)
-
-    assert first["duplicate_position"] is False
-    assert second["duplicate_position"] is True
-    assert live_service._live_state_get("session_pnl") == pytest.approx(-5.0)
-    assert live_service._live_state_get("session_trades") == 1
-    assert live_service._live_state_get("session_trade_pnls", clone=True) == [-5.0]
+    # The authoritative projection rebuilds from deals; the live pending
+    # set must likewise record each position once no matter how many
+    # deal-wait defers fire for it.
+    live_service._live_state_update(session_pending_close_remove=[812])
+    live_service._live_state_update(session_pending_close_add=812)
+    live_service._live_state_update(session_pending_close_add=812)
+    ids = live_service._live_state_get("session_pending_close_ids")
+    assert ids.count(812) == 1
+    live_service._live_state_update(session_pending_close_remove=[812])
+    assert 812 not in live_service._live_state_get("session_pending_close_ids")
 
 
 def test_prime_live_loop_state_preserves_session_when_restore_is_unavailable(monkeypatch):

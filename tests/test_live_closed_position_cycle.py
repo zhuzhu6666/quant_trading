@@ -247,3 +247,51 @@ def test_unknown_price_skips_price_audit_and_learning_but_keeps_recovery():
 
     assert downstream == ["cleanup"]
     assert calls["released"]
+
+
+def test_defer_registers_pending_close_for_risk_visibility():
+    calls = _calls()
+    runtime = _runtime(calls)
+    handle_closed_positions_after_tick(
+        closed_pids={7},
+        real_pnls={},
+        attr_engine=object(),
+        bar={},
+        cfg=object(),
+        account={},
+        broker="ctrader",
+        tick=5,
+        log=lambda _message: None,
+        runtime=runtime,
+        broker_open_position_ids=set(),
+        bridge=object(),
+        close_deal_cursors={},
+    )
+    assert calls["deferred"][0][0] == (7,)
+    assert {
+        "session_pending_close_add": 7,
+    } in calls["states"]
+
+
+def test_projection_releases_pending_close_ids():
+    calls = _calls()
+    runtime = _runtime(calls)
+    handle_closed_positions_after_tick(
+        closed_pids={9},
+        real_pnls={9: {"net": 4.5}},
+        attr_engine=object(),
+        bar={},
+        cfg=object(),
+        account={},
+        broker="ctrader",
+        tick=6,
+        log=lambda _message: None,
+        runtime=runtime,
+        broker_open_position_ids=set(),
+        bridge=object(),
+        close_deal_cursors={},
+    )
+    assert calls["deferred"] == []
+    assert {
+        "session_pending_close_remove": [9],
+    } in calls["states"]

@@ -3121,8 +3121,59 @@ def _live_state_set(key: str, value) -> None:
 
 
 def _live_state_update(**kwargs) -> None:
+    pending_add = kwargs.pop("session_pending_close_add", None)
+    pending_remove = kwargs.pop("session_pending_close_remove", None)
+    if pending_add is not None or pending_remove:
+        _track_pending_close_ids(pending_add, pending_remove)
     _runtime_state_update(_live_state, _LIVE_STATE_LOCK, **kwargs)
     _notify_live_state_change()
+
+
+def _track_pending_close_ids(pending_add: Any, pending_remove: Any) -> None:
+    """Track realized closes waiting for their authoritative deal.
+
+    Estimates must never advance the session-risk boundary, but risk
+    surfaces must see pending ids instead of silently operating on stale
+    pnl.  Entries are added on deal-wait defer and released on projection.
+    """
+    try:
+        add_ids: set[int] = set()
+        if pending_add is not None:
+            candidates = (
+                pending_add
+                if isinstance(pending_add, (list, tuple, set, frozenset))
+                else [pending_add]
+            )
+            for item in candidates:
+                try:
+                    pid = int(item or 0)
+                except (TypeError, ValueError):
+                    continue
+                if pid > 0:
+                    add_ids.add(pid)
+        drop_ids: set[int] = set()
+        if pending_remove:
+            for item in pending_remove:
+                try:
+                    pid = int(item or 0)
+                except (TypeError, ValueError):
+                    continue
+                if pid > 0:
+                    drop_ids.add(pid)
+        with _LIVE_STATE_LOCK:
+            current = [
+                int(item)
+                for item in list(_live_state.get("session_pending_close_ids") or [])
+                if int(item or 0) > 0
+            ]
+            merged = [pid for pid in current if pid not in drop_ids]
+            for pid in sorted(add_ids):
+                if pid not in merged:
+                    merged.append(pid)
+            _live_state["session_pending_close_ids"] = sorted(merged)[-50:]
+            _live_state["session_pending_close_observed_at"] = time.time()
+    except Exception:
+        return
 
 
 def _notify_live_state_change() -> None:
@@ -4689,6 +4740,8 @@ def _reset_session_state_for_new_day() -> None:
         session_last_trade_ts=0.0,
         session_state_source="unavailable",
         session_state_status="unavailable",
+        session_pending_close_ids=[],
+        session_pending_close_observed_at=0.0,
         session_risk_blockers=["session_not_restored"],
         session_observed_at=0.0,
         accepting_new_risk=False,
@@ -4928,98 +4981,6 @@ def _mark_loss_review_statement_ready(statement: dict[str, Any]) -> None:
             "produced_at": time.time(),
         }
         _live_state["loss_streak_book"] = book
-
-
-
-def _record_session_trade(
-    total_pnl: float,
-    *,
-    position_id: int = 0,
-) -> dict:
-    with _LIVE_STATE_LOCK:
-        pid = int(position_id or 0)
-        recorded_ids = {
-            int(item)
-            for item in list(
-                _live_state.get("session_recorded_position_ids", []) or []
-            )
-            if int(item or 0) > 0
-        }
-        if pid > 0 and pid in recorded_ids:
-            return {
-                "session_trades": int(_live_state.get("session_trades", 0) or 0),
-                "session_winning": int(_live_state.get("session_winning", 0) or 0),
-                "session_losing": int(_live_state.get("session_losing", 0) or 0),
-                "session_trade_pnls": list(_live_state.get("session_trade_pnls", []) or []),
-                "session_consecutive_loss": int(
-                    _live_state.get("session_consecutive_loss", 0) or 0
-                ),
-                "session_pnl": float(_live_state.get("session_pnl", 0.0) or 0.0),
-                "session_last_trade_ts": float(
-                    _live_state.get("session_last_trade_ts", 0.0) or 0.0
-                ),
-                "session_observed_at": float(
-                    _live_state.get("session_observed_at", 0.0) or 0.0
-                ),
-                "duplicate_position": True,
-                "position_id": pid,
-            }
-        trades = int(_live_state.get("session_trades", 0)) + 1
-        winning = int(_live_state.get("session_winning", 0))
-        losing = int(_live_state.get("session_losing", 0))
-        consecutive_loss = int(_live_state.get("session_consecutive_loss", 0))
-        session_pnl = float(_live_state.get("session_pnl", 0.0)) + float(total_pnl)
-        trade_pnls = list(_live_state.get("session_trade_pnls", []) or [])
-        trade_pnls.append(float(total_pnl))
-        trade_pnls = trade_pnls[-200:]
-        if total_pnl > 0:
-            winning += 1
-            consecutive_loss = 0
-        elif total_pnl < 0:
-            losing += 1
-            consecutive_loss += 1
-        observed_at = time.time()
-        if pid > 0:
-            recorded_ids.add(pid)
-        _live_state.update(
-            session_trades=trades,
-            session_winning=winning,
-            session_losing=losing,
-            session_trade_pnls=trade_pnls,
-            session_consecutive_loss=consecutive_loss,
-            session_pnl=session_pnl,
-            session_last_trade_ts=observed_at,
-            session_observed_at=observed_at,
-            session_recorded_position_ids=sorted(recorded_ids)[-1000:],
-        )
-        # Probation ledger: only counts while a loss-streak book is armed.
-        if _live_state.get("loss_streak_book"):
-            book = dict(_live_state["loss_streak_book"])
-            book["probation_pnl"] = float(
-                book.get("probation_pnl", 0.0) or 0.0
-            ) + float(total_pnl or 0.0)
-            book["probation_trade_count"] = int(
-                book.get("probation_trade_count", 0) or 0
-            ) + 1
-            if pid > 0:
-                ids = list(book.get("probation_position_ids", []) or [])
-                ids.append(int(pid))
-                book["probation_position_ids"] = ids[-50:]
-            _live_state["loss_streak_book"] = book
-    _notify_live_state_change()
-    _persist_session_state()
-    return {
-        "session_trades": trades,
-        "session_winning": winning,
-        "session_losing": losing,
-        "session_trade_pnls": trade_pnls,
-        "session_consecutive_loss": consecutive_loss,
-        "session_pnl": session_pnl,
-        "session_last_trade_ts": float(_live_state.get("session_last_trade_ts", 0.0) or 0.0),
-        "session_observed_at": float(_live_state.get("session_observed_at", 0.0) or 0.0),
-        "duplicate_position": False,
-        "position_id": int(position_id or 0),
-    }
 
 
 def _get_risk_state() -> dict:

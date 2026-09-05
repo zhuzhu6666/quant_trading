@@ -324,3 +324,106 @@ def test_retirement_replays_then_marks_and_removes_missing_position():
     assert messages == [
         "broker missing position retired pos=14: POSITION_NOT_FOUND"
     ]
+
+
+def test_retirement_seeds_caller_supervisor_reason_as_evidence():
+    order = []
+    real_pnl = {
+        "net": -1.77,
+        "exec_timestamp": 150.0,
+        "deal_id": 45,
+        "source": "ctrader_deals",
+    }
+    seen_states = []
+    runtime, _connection = _retirement_runtime(
+        sync_close_deals_batch=lambda *_args, **_kwargs: {15: real_pnl},
+        replay_close=lambda **kwargs: (
+            seen_states.append(kwargs.get("position_state")) or True
+        ),
+        mark_recovery_closed=lambda *_args, **_kwargs: order.append(
+            ("mark", _kwargs)
+        ),
+        remove_live_position_state=lambda position_id: order.append(
+            ("remove", position_id)
+        ),
+    )
+    result = retire_broker_missing_position(
+        SimpleNamespace(),
+        15,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        reason="thesis_broken",
+        runtime=runtime,
+    )
+    assert result is True
+    assert order[0][0] == "mark"
+    assert order[0][1]["close_reason"] == "thesis_broken"
+    assert order[0][1]["meta"]["trade_close_reason_source"] == (
+        "supervisor_direct_close"
+    )
+    assert seen_states[0]["recovery_meta"]["pending_close_reason"] == (
+        "thesis_broken"
+    )
+
+
+def test_retirement_ignores_non_supervisor_caller_reason():
+    order = []
+    real_pnl = {
+        "net": -1.77,
+        "exec_timestamp": 150.0,
+        "deal_id": 46,
+        "source": "ctrader_deals",
+    }
+    runtime, _connection = _retirement_runtime(
+        sync_close_deals_batch=lambda *_args, **_kwargs: {16: real_pnl},
+        replay_close=lambda **_kwargs: True,
+        mark_recovery_closed=lambda *_args, **_kwargs: order.append(
+            ("mark", _kwargs)
+        ),
+        remove_live_position_state=lambda _position_id: None,
+    )
+    result = retire_broker_missing_position(
+        SimpleNamespace(),
+        16,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        reason="POSITION_NOT_FOUND",
+        runtime=runtime,
+    )
+    assert result is True
+    assert order[0][1]["close_reason"] == "restart_replay"
+
+
+def test_retirement_keeps_durable_reason_over_caller_reason():
+    order = []
+    real_pnl = {
+        "net": -1.77,
+        "exec_timestamp": 150.0,
+        "deal_id": 47,
+        "source": "ctrader_deals",
+    }
+    runtime, _connection = _retirement_runtime(
+        load_recovery_position=lambda position_id: {
+            "position_id": position_id,
+            "last_seen_at": 100.0,
+            "volume": 75.0,
+            "close_pnl": 0.0,
+            "recovery_meta": {"pending_close_reason": "regime_shift_detected"},
+        },
+        sync_close_deals_batch=lambda *_args, **_kwargs: {17: real_pnl},
+        replay_close=lambda **_kwargs: True,
+        mark_recovery_closed=lambda *_args, **_kwargs: order.append(
+            ("mark", _kwargs)
+        ),
+        remove_live_position_state=lambda _position_id: None,
+    )
+    result = retire_broker_missing_position(
+        SimpleNamespace(),
+        17,
+        broker="ctrader",
+        strategy_name="factor_v4",
+        reason="thesis_broken",
+        runtime=runtime,
+    )
+    assert result is True
+    assert order[0][1]["close_reason"] == "regime_shift_detected"

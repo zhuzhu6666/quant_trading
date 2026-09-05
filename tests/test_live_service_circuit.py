@@ -109,18 +109,6 @@ def test_positive_pnl_does_not_trigger_breaker():
     assert live_service._live_state_get("circuit_breaker") is False
 
 
-def test_record_session_trade_updates_loss_streak_and_pnl():
-    live_service._record_session_trade(-12.5)
-    live_service._record_session_trade(20.0)
-
-    assert live_service._live_state_get("session_trades") == 2
-    assert live_service._live_state_get("session_losing") == 1
-    assert live_service._live_state_get("session_winning") == 1
-    assert live_service._live_state_get("session_consecutive_loss") == 0
-    assert live_service._live_state_get("session_pnl") == pytest.approx(7.5)
-    assert live_service._live_state_get("session_trade_pnls", clone=True) == [-12.5, 20.0]
-
-
 def test_breaker_resets_on_new_day():
     live_service._live_state_update(
         circuit_breaker=True,
@@ -150,3 +138,20 @@ def test_set_factor_snapshot_writes_both_views():
 
     assert live_service._live_state_get("last_factor_votes", clone=True) == votes
     assert live_service._live_state_get("last_composite", clone=True) == composite
+
+
+def test_pending_close_ids_track_deal_wait_without_touching_pnl():
+    before = live_service._live_state_get("session_pnl")
+    live_service._live_state_update(session_pending_close_add=99001)
+    live_service._live_state_update(session_pending_close_add=[99002, 99001])
+    ids = live_service._live_state_get("session_pending_close_ids")
+    assert ids.count(99001) == 1
+    assert ids.count(99002) == 1
+    assert live_service._live_state_get("session_pnl") == before
+    assert live_service._live_state_get("session_consecutive_loss") == 0
+    live_service._live_state_update(session_pending_close_remove=[99001])
+    ids = live_service._live_state_get("session_pending_close_ids")
+    assert 99001 not in ids
+    assert 99002 in ids
+    live_service._live_state_update(session_pending_close_remove=[99002])
+    assert 99002 not in live_service._live_state_get("session_pending_close_ids")

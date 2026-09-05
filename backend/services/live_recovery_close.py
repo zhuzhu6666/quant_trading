@@ -10,6 +10,61 @@ from backend.services.review_contract import (
     trusted_broker_close_price,
 )
 
+# Supervisor verdict reasons that describe why a close was requested.  When a
+# broker-missing retirement carries one of these (e.g. the supervisor close
+# path hit "position not found" because the position had just vanished), it
+# is strictly more informative than the conservative replay fallback and is
+# seeded as recovery evidence below.  Broker error strings and reconcile
+# markers (e.g. "POSITION_NOT_FOUND") must never enter this set.
+_SUPERVISOR_CLOSE_REASONS = frozenset(
+    {
+        "thesis_broken",
+        "regime_shift_detected",
+        "holding_timeout_exceeded",
+        "near_stop_loss_preemptive_exit",
+        "hard_risk_active",
+        "profit_giveback_after_mfe",
+        "near_take_profit_protect",
+        "near_take_profit_capture",
+        "time_decay_and_low_efficiency",
+        "thesis_weakening",
+    }
+)
+
+
+def _seed_caller_supervisor_evidence(
+    position_state: dict[str, Any],
+    reason: str,
+    now_ts: float,
+) -> dict[str, Any]:
+    """Seed caller-provided supervisor reason as recovery close evidence.
+
+    The durable ``pending_close_reason`` written by the live close path may
+    not have landed (or may predate) the retirement observation.  The caller
+    of a broker-missing retirement already knows why it was closing, so a
+    reason inside the supervisor vocabulary is attached as evidence without
+    clobbering richer durable facts.  Returns the (possibly new) state dict.
+    """
+    candidate = str(reason or "").strip()
+    if candidate not in _SUPERVISOR_CLOSE_REASONS:
+        return position_state
+    state = dict(position_state or {})
+    meta = state.get("recovery_meta")
+    meta = dict(meta) if isinstance(meta, Mapping) else {}
+    if str(meta.get("pending_close_reason") or "").strip():
+        return position_state
+    if str(meta.get("last_supervisor_applied_action") or "").strip().lower() in {
+        "close",
+        "close_position",
+    } and str(meta.get("last_supervisor_reason") or "").strip():
+        return position_state
+    meta["pending_close_reason"] = candidate
+    meta["pending_close_reason_ts"] = float(now_ts or 0.0)
+    meta["pending_close_reason_origin"] = "retire_caller_reason"
+    state["recovery_meta"] = meta
+    return state
+
+
 @dataclass(frozen=True)
 class RecoveredCloseReplayRuntime:
     authoritative_close_pnl: Callable[[dict[str, Any] | None], bool]
@@ -221,6 +276,13 @@ def retire_broker_missing_position(
             "close_pnl": 0.0,
             "context_integrity": runtime.partial_context,
         }
+    # The caller (usually the supervisor close path hitting "position not
+    # found") already knows why it was closing.  Seed that as recovery
+    # evidence so the resolution below does not discard a known supervisor
+    # reason into the conservative replay fallback.  Durable facts win.
+    position_state = _seed_caller_supervisor_evidence(
+        position_state, reason, runtime.now()
+    )
 
     real_pnl = None
     try:

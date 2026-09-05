@@ -545,6 +545,17 @@ def session_stats_endpoint(_user: RequireUser) -> dict:
         "losses": int(_live_state.get("session_losing", 0)),
         "drawdown_pct": float(_live_state.get("session_max_drawdown_pct", 0)),
         "consecutive_loss": int(_live_state.get("session_consecutive_loss", 0)),
+        # Realized closes waiting for their authoritative deal.  Session
+        # pnl/streak advance only on confirmation; these ids explain why
+        # risk may look stale between close execution and deal arrival.
+        "pending_close_ids": [
+            int(item)
+            for item in list(_live_state.get("session_pending_close_ids") or [])
+            if int(item or 0) > 0
+        ],
+        "pending_close_observed_at": float(
+            _live_state.get("session_pending_close_observed_at", 0.0) or 0.0
+        ),
     }
     observation = _fact_runtime_observation()
     return session_fact_payload(
