@@ -12,10 +12,7 @@ class JobManager:
 
     PERSISTENT_JOB_KINDS = frozenset(
         {
-            "backtest",
             "discover",
-            "tuning",
-            "ab_test",
             "external_refresh",
             "sync",
             "factor_health",

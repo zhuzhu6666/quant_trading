@@ -48,7 +48,7 @@ def test_persistent_job_release_preflight_passes_read_only_complete_registry(mon
     conn = _Conn(
         [
             {
-                "kind": "backtest",
+                "kind": "factor_health",
                 "status": "queued",
                 "row_count": 2,
                 "active_lease_count": 0,

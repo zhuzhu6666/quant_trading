@@ -24,7 +24,6 @@ SCRIPT_SPECS = [
     ("discover_factors.py", "scripts.discover_factors", "run_discovery", ["n_candidates", "top_k", "forward_periods", "engine"]),
     ("live_sync.py", "scripts.live_sync", "run_sync_once", ["timeframes", "sync_type"]),
     ("live_sync.py", "scripts.live_sync", "get_status", []),
-    ("tune_risk_params.py", "scripts.tune_risk_params", "run_tuning", ["risk_pct_grid", "cb_pct_grid", "n_bars"]),
 ]
 
 

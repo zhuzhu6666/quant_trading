@@ -52,20 +52,6 @@ def _is_nfp_date(date_str: str) -> bool:
     return False
 
 
-def _get_gvz_change(date_str: str) -> float | None:
-    """获取指定日期 GVZ 变化率。
-
-    从 data/news_cache 读取 GVZ 日度数据，计算当日相对前日变化 %。
-    数据库不可用时返回 None（跳过检查）。
-    """
-    try:
-        from data.news_cache import load_gvz_series, daily_change_pct
-        series = load_gvz_series()
-        return daily_change_pct(series, date_str)
-    except Exception:
-        return None
-
-
 def _event_bucket_is_release_window(value: Any) -> bool | None:
     """Return whether a signed event bucket means the release window is active."""
     if value is None:
@@ -90,14 +76,6 @@ def evaluate_event_risk_filter(
         "strategy_enable_nfp_skip",
         config.get("risk_enable_nfp_skip", False),
     )
-    cfg_enable_gvz = config.get(
-        "strategy_enable_gvz_gate",
-        config.get("risk_enable_gvz_gate", False),
-    )
-    cfg_gvz_threshold = config.get(
-        "strategy_gvz_drop_pct",
-        config.get("risk_gvz_drop_pct", -2.0),
-    )
 
     bar_ts = bar.get("time", 0)
     bar_date = datetime.fromtimestamp(bar_ts, tz=timezone.utc).strftime("%Y-%m-%d")
@@ -112,12 +90,6 @@ def evaluate_event_risk_filter(
             return GateResult(False, "nfp_skip:event_bucket")
         if nfp_bucket is None and _is_nfp_date(bar_date):
             return GateResult(False, "nfp_skip:calendar_fallback")
-
-    # GVZ gate: GVZ 暴跌时不开仓 (波动率异常)
-    if cfg_enable_gvz:
-        gvz_chg = _get_gvz_change(bar_date)
-        if gvz_chg is not None and gvz_chg < cfg_gvz_threshold:
-            return GateResult(False, "gvz_gate")
 
     return GateResult(True, "passed")
 

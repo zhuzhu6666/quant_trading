@@ -317,8 +317,6 @@ class RuntimeConfig:
     risk_max_holding_bars: int = 288
     risk_block_on_disk_critical: bool = True
     risk_enable_nfp_skip: bool = False
-    risk_enable_gvz_gate: bool = False
-    risk_gvz_drop_pct: float = -2.0
     position_supervisor_template_id: str = "position_supervisor:default.v1"
     # Memory-driven supervisor selection is deliberately disabled until the
     # projection, canary and Demo acceptance gates are proven.

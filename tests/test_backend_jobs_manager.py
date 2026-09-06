@@ -20,14 +20,14 @@ def test_submit_enqueues_supported_job_without_api_execution_callback():
     queue = _Queue()
     manager = JobManager(persistent_queue=queue)
     state = manager.submit(
-        "backtest",
+        "discover",
         {"symbol": "XAUUSD+", "_idempotency_key": "request-1", "_max_attempts": 4},
     )
 
     assert state.id == "durable-1"
     assert queue.calls == [
         (
-            "backtest",
+            "discover",
             {"symbol": "XAUUSD+", "_idempotency_key": "request-1", "_max_attempts": 4},
             {"idempotency_key": "request-1", "priority": 0, "max_attempts": 4},
         )

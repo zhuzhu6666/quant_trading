@@ -23,24 +23,9 @@ EXTERNAL_REFRESH_SOURCES = frozenset(
 )
 
 
-def run_backtest_job(params: Mapping[str, Any], progress: ProgressCB) -> Any:
-    from backend.services.backtest_service import run_backtest
-    return run_backtest(dict(params), progress)
-
-
 def run_discover_job(params: Mapping[str, Any], progress: ProgressCB) -> Any:
     from scripts.discover_factors import run_discovery
     return run_discovery(dict(params), progress)
-
-
-def run_tuning_job(params: Mapping[str, Any], progress: ProgressCB) -> Any:
-    from scripts.tune_risk_params import run_tuning
-    return run_tuning(dict(params), progress)
-
-
-def run_ab_test_job(params: Mapping[str, Any], progress: ProgressCB) -> Any:
-    from scripts.p1_e_ab_test import run_ab
-    return run_ab(dict(params), progress)
 
 
 def run_external_refresh_job(params: Mapping[str, Any], progress: ProgressCB) -> Any:
@@ -129,10 +114,7 @@ def run_parameter_template_validation_job(
 
 
 PERSISTENT_JOB_HANDLERS: dict[str, JobHandler] = {
-    "backtest": run_backtest_job,
     "discover": run_discover_job,
-    "tuning": run_tuning_job,
-    "ab_test": run_ab_test_job,
     "external_refresh": run_external_refresh_job,
     "sync": run_sync_job,
     "factor_health": run_factor_health_job,

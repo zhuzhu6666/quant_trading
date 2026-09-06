@@ -141,8 +141,6 @@ runtime:
   risk_max_holding_bars: 288
   risk_block_on_disk_critical: true
   risk_enable_nfp_skip: false
-  risk_enable_gvz_gate: false
-  risk_gvz_drop_pct: -2.0
   position_supervisor_template_id: position_supervisor:default.v1
   autonomy_mode: demo_autonomous
   autonomy_demo_auto_apply: true

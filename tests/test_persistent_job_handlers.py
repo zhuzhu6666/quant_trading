@@ -9,10 +9,7 @@ from backend.jobs.handlers import PERSISTENT_JOB_HANDLERS
 @pytest.mark.parametrize(
     ("kind", "module_name", "function_name"),
     (
-        ("backtest", "backend.services.backtest_service", "run_backtest"),
         ("discover", "scripts.discover_factors", "run_discovery"),
-        ("tuning", "scripts.tune_risk_params", "run_tuning"),
-        ("ab_test", "scripts.p1_e_ab_test", "run_ab"),
         (
             "external_refresh",
             "backend.jobs.handlers",
