@@ -1,5 +1,4 @@
 import json
-import subprocess
 import time
 from pathlib import Path
 
@@ -1024,7 +1023,7 @@ def test_release_control_records_start_and_finish_evidence(tmp_path):
             """,
             (
                 json.dumps({"schema_version": "replay_scope.v1", "kind": "bar_replay_evidence"}),
-                subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                replay_harness_module._code_version(),
                 now,
             ),
         )

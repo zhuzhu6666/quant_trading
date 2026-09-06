@@ -97,13 +97,34 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 
 def _code_version() -> str:
-    head = PROJECT_ROOT / ".git" / "HEAD"
+    """Content binding for replay reports.
+
+    Historical binding used the git HEAD hash, which invalidated every replay
+    report on any commit — including docs-only commits that change no code.
+    Bind to the content of production Python sources instead: real code
+    changes still invalidate the binding (correct), non-code commits and
+    non-Python files no longer do.
+    """
+    roots = ("backend", "risk", "alpha", "execution", "research", "config")
     try:
-        raw = head.read_text(encoding="utf-8").strip()
-        if raw.startswith("ref:"):
-            ref_path = PROJECT_ROOT / ".git" / raw.split(" ", 1)[1].strip()
-            return ref_path.read_text(encoding="utf-8").strip()[:40]
-        return raw[:40]
+        digest = hashlib.sha1()
+        count = 0
+        for root in roots:
+            base = PROJECT_ROOT / root
+            if not base.is_dir():
+                continue
+            for path in sorted(base.rglob("*.py")):
+                try:
+                    digest.update(str(path.relative_to(PROJECT_ROOT)).encode("utf-8"))
+                    digest.update(b"\0")
+                    digest.update(path.read_bytes())
+                    digest.update(b"\0")
+                    count += 1
+                except OSError:
+                    continue
+        if count == 0:
+            return "unknown"
+        return digest.hexdigest()[:40]
     except Exception:
         return "unknown"
 
@@ -220,6 +241,28 @@ def _gate_signature(gate: dict[str, Any]) -> tuple[bool | None, str]:
     if not gate:
         return None, ""
     return bool(gate.get("passed")), str(gate.get("reason") or "")
+
+
+# ExecutionGate.filter can only emit these block reasons (alpha stage).
+# The live ledger `gate_result` is overloaded: after the alpha gate passes, a
+# downstream stage (RiskPolicy cvar, supervisor reentry cooldown, cost edge,
+# model veto, ...) overwrites it with its own block reason via
+# _blocked_open_trade_gate_result. A recorded live block carrying any other
+# reason while the offline alpha gate passes means both stages behaved
+# correctly — it must not count as a replay mismatch.
+_ALPHA_GATE_KNOWN_BLOCK_PREFIXES = (
+    "signal_below_threshold",
+    "cooldown_",
+    "nfp_skip:",
+    "governor:",
+)
+
+
+def _is_alpha_gate_reason(reason: str) -> bool:
+    text = str(reason or "")
+    if text in {"passed", ""}:
+        return True
+    return text.startswith(_ALPHA_GATE_KNOWN_BLOCK_PREFIXES)
 
 
 class ReplayHarnessService:
@@ -2083,6 +2126,7 @@ class ReplayHarnessService:
         attempted = 0
         agreements = 0
         disagreements = 0
+        downstream_blocked = 0
         input_gaps = 0
         errors = 0
         for row in rows:
@@ -2142,6 +2186,18 @@ class ReplayHarnessService:
                 agreed = live_sig == replay_sig
                 if agreed:
                     agreements += 1
+                elif (
+                    not live_sig[0]
+                    and replay_sig[0]
+                    and not _is_alpha_gate_reason(live_sig[1])
+                ):
+                    # Live alpha gate passed and a downstream stage blocked
+                    # (cvar_gate, supervisor cooldown, cost edge, ...); the
+                    # offline alpha recompute agrees with the live alpha
+                    # stage. Correct behavior on both sides, not a mismatch.
+                    downstream_blocked += 1
+                    agreements += 1
+                    agreed = True
                 else:
                     disagreements += 1
                     if len(examples) < 50:
@@ -2159,6 +2215,11 @@ class ReplayHarnessService:
                         "live": {"passed": live_sig[0], "reason": live_sig[1]},
                         "recomputed": {"passed": replay_sig[0], "reason": replay_sig[1]},
                         "agreed": agreed,
+                        "category": (
+                            "downstream_blocked_alpha_passed"
+                            if agreed and not live_sig[0] and replay_sig[0] and not _is_alpha_gate_reason(live_sig[1])
+                            else ("agreed" if agreed else "disagreed")
+                        ),
                     }
                 )
             except Exception as exc:
@@ -2183,6 +2244,7 @@ class ReplayHarnessService:
             "attempted_count": attempted,
             "agreement_count": agreements,
             "disagreement_count": disagreements,
+            "downstream_blocked_alpha_passed_count": downstream_blocked,
             "input_gap_count": input_gaps,
             "error_count": errors,
             "coverage": round(coverage, 6),

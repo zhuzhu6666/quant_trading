@@ -918,11 +918,11 @@ def _event_filter_context_for_risk_policy(
     factor_values: dict[str, Any],
 ) -> dict[str, Any]:
     gate_config = _loop_execution_gate_config(cfg)
+    # NOTE: risk/strategy *_gvz_gate keys are retired (GVZ execution gate
+    # deleted); only NFP skip is evaluated here. Do not re-add gvz branches.
     if not (
         bool(gate_config.get("risk_enable_nfp_skip", False))
         or bool(gate_config.get("strategy_enable_nfp_skip", False))
-        or bool(gate_config.get("risk_enable_gvz_gate", False))
-        or bool(gate_config.get("strategy_enable_gvz_gate", False))
     ):
         return {}
     try:

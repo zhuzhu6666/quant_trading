@@ -187,7 +187,7 @@ class ExecutionGate:
         bar: dict[str, Any],
         factor_values: dict[str, float | None] | None = None,
     ) -> GateResult:
-        """事件闸门: NFP skip / GVZ gate。"""
+        """事件闸门: NFP skip（GVZ 执行门已退役，此处不再评估）。"""
         if str(self._config.get("event_filter_authority") or "").lower() == "risk_policy":
             return GateResult(True, "passed")
         return evaluate_event_risk_filter(self._config, direction, bar, factor_values)

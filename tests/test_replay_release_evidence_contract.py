@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import time
 
 import pytest
@@ -12,6 +11,7 @@ from backend.services.backend_readiness import BackendReadinessService
 from backend.services.autonomous_evolution_runner import AutonomousEvolutionNurseryRunner
 from backend.services.factor_weight_change import FactorWeightChangeService
 from backend.services.release_control import ReleaseControlService
+from backend.services import replay_harness as replay_harness_module
 from backend.services.replay_harness import ReplayHarnessService
 from backend.services.v15_phase0 import V15Phase0CompletionService
 
@@ -31,11 +31,8 @@ class _LargeWeightReductionPolicy:
     fast_decide = decide
 
 
-def _repo_head() -> str:
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"],
-        text=True,
-    ).strip()
+def _current_code_version() -> str:
+    return replay_harness_module._code_version()
 
 
 def _init_state(db_path, *, config_hash: str = "cfg-current") -> None:
@@ -85,7 +82,7 @@ def _insert_replay(
                 json.dumps({"schema_version": "replay_scope.v1", "kind": kind}),
                 dataset_hash,
                 config_hash,
-                _repo_head() if code_version is None else code_version,
+                _current_code_version() if code_version is None else code_version,
                 grade,
                 artifact_hash,
                 status,
