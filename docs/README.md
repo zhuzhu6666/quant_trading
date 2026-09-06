@@ -1,13 +1,14 @@
 # 项目总览与当前状态
 
 > Status: canonical
-> Last verified: 2026-09-05 (代码基线 6873a564 + meta 环 shadow 批; 开仓质量模型 live shadow 已接入, 基线对照 PASS, 模型 holdout 过拟合未达 enforce)
+> Last verified: 2026-09-06 (工作区减法批:回测/paper 引擎入口、灾备/备份链、GVZ 门已删除;审计修复批已落地,全量回归/重启验收见本页当前结论)
 > Scope: 新对话、实施、排障和发布的唯一文档入口。
 
 读完本页即可知道项目当前处于什么阶段、系统怎样运行、哪些事情禁止做。只有准备修改某个领域时，才继续读对应合同。
 
 ## 1. 当前结论
 
+- **减法+修复批（2026-09-06,工作区未提交）**:按用户决定做减法——已删除:回测/模拟盘引擎全部用户入口(`main.py`、`cli/`、`/api/backtest`、`/api/tuning`、`/api/ab`、backtest/tuning/ab_test job、`execution/paper_*`、`risk/pre_trade.py`、`risk/position.py`;`backtest_service`+`parity_replay` 保留为参数模板离线验证内部库)、灾备/备份链(`windows-backup/`、`record_windows_*`、`postgres_backup_health` 及 readiness 投影)、GVZ 执行门(默认关闭且读已退役库,含回测前视缺陷,连同 settings/RuntimeConfig 键一并删除)。同批修复审计确认的缺陷:事件降仓低于最小量不再抬回满仓、恢复/裸仓自动补保护计划(修复候选前置 pass)、平仓 PnL 权威记账接入 probation 台账、盘中触发阶梯锁到时段结束、回撤只计亏损方向、tighten/reduce 在 policy 异常时 fail-closed、incident 读取异常默认 frozen、`record_sample_row` 冲突守卫、retry 不再吞 KeyboardInterrupt、canonical reader 仅对缺表 fail-open、恢复仓不可被复活、审计写突发批量 UPDATE、pending projection 幂等重试即 replay、回滚扫描 debug→error、job 心跳连续失败取消、学习 API 缓存上限、shadow promote/demote 加 X-Confirm、退化因子输入改 NaN(abstain)、shadow 虚拟 PnL 排除非有限值、IC 快照窗口剔除决策 bar、walk-forward 移除 no-op embargo、open-quality holdout 标签如实化。OpenAPI 快照已再生成。
 - 开发基线为 `main`；发布流程会从该基线创建临时发布分支。
 - **当前姿态（2026-08-30，PostgreSQL 写放大收敛批次已验证）**：生产运行态统一使用 PostgreSQL `runtime`，不可变事实与学习样本统一使用 `canonical_v2`；migration ledger 已到 v33（0031 factor_health 合同对齐、0032 jobs 主键恢复、0033 factor runtime projection 主键收敛，runtime 33/33 ok），旧 runtime 事实表已退役。
 - **旧库清理（已完成）**：旧 `state_v1`、`public`、`legacy_mapping` 和本地 SQLite `data/state.db` 运行路径均已退役；生产代码不再读取、写入或重建这些路径。

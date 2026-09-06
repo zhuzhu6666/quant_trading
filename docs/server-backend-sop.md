@@ -528,18 +528,9 @@ schema 写入只能由显式 migration 执行：
 
 `--apply` 同时覆盖两种合法入口：完全空的 `runtime` schema 会先加载仓库内唯一 clean-install baseline，再执行全部版本迁移；已有 ledger 的库只执行未应用版本。非空但没有完整旧基线/ledger 的残缺库会直接失败，禁止由后端启动或业务 `ensure_*` 猜测建表。
 
-### PostgreSQL 灾备（Windows 主动拉取）
+### PostgreSQL 灾备（已按用户决定移除）
 
-当前唯一合同在 `deployment/windows-backup/README.md`：Windows 电脑在线时，经由仅允许 `dump`、备份回执和恢复演练回执的 forced-command SSH key 拉取 `quant_audit` 的完整逻辑快照。服务器不保存备份文件，不启用 `archive_mode`、S3、pgBackRest repository 或 timer；不得把安装了客户端工具或受限 SSH 入口误报为已有可恢复备份。
-
-服务器管理员只安装入口与 Windows 公钥；Windows 拉取后以 `pg_restore --list` 验证文件，并通过回执更新既有 health 投影。只读核对：
-
-```bash
-./.venv/bin/python scripts/state_query.py --sql "SELECT value_json, updated_at FROM runtime_kv WHERE key='postgres_backup_health.v1'"
-sudo -u postgres psql -Atqc "SHOW archive_mode"
-```
-
-恢复只能在隔离 DSN 上执行：`pg_restore` 后运行 `scripts/verify_state_restore.py --confirm-isolated`，它只核对 schema 和记忆完整性，不伪造与在线源的逐行一致性。禁止自动 promote 或切换生产服务；有成功拉取而无成功演练必须保持 `degraded`。
+2026-09-06 起灾备/备份恢复功能整体退役：`deployment/windows-backup/`、`scripts/record_windows_pull_backup.py`、`scripts/record_windows_restore_drill.py`、`backend/services/postgres_backup_health.py` 与 readiness 的 `postgres_backup` 投影均已删除。服务器不保留异机副本，`runtime_kv[postgres_backup_health.v1]` 不再维护；不得恢复备份拉取、恢复演练、备份健康投影或 `verify_state_restore.py` 恢复流程。
 
 cTrader 常用入口：
 

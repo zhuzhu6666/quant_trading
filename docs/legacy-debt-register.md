@@ -1,12 +1,20 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-05 (canary 回退重发修复 + loguru %-style 直用清理 + watermark 测试隔离 09-03 workload gate；AWE 快环权重自适应已整体移除) (治理三批落地：回滚重放一次性裁定 a2e7ab0d / V16 preflight 单候选委派合同 42fc923e / 背压对齐 canonical 积压 + prepared 租约 + 死路径删除 2d9ebfdb；SHADOW 积压 1838 已在源头节流，排空目标见活跃条目)
+> Last verified: 2026-09-06 (减法批:回测/paper 入口、灾备/备份链、GVZ 门删除;审计修复批落地,待受控重启后观察)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
 
 ## 1. 全局收敛
+
+### 减法批删除与遗留观察（2026-09-06）
+
+- 状态：`monitoring`（代码、测试、OpenAPI 快照已同步;待生产受控重启与首轮观察后转 resolved）。
+- 已删除（用户决定"几乎没用过的直接去除,不新增功能"）：回测/模拟盘引擎用户入口（`main.py`、`cli/`、`/api/backtest`、`/api/tuning`、`/api/ab`、`backtest/tuning/ab_test` job kind、`execution/paper_*`、`execution/slippage.py` shim、`risk/pre_trade.py`、`risk/position.py`、`scripts/tune_risk_params.py`、`scripts/p1_e_ab_test.py`）;灾备/备份链（`deployment/windows-backup/`、`scripts/record_windows_*`、`backend/services/postgres_backup_health.py`、readiness `postgres_backup` 投影）;GVZ 执行门（`alpha/execution_gate` GVZ 分支、`data/news_cache` GVZ loader、settings/RuntimeConfig 键）与死代码（`_reset_session_state_for_new_day`、`_reset_business_alert_armed`、`PurgedWalkForward` no-op embargo）。canonical：`backtest_service`+`parity_replay` 保留为 `parameter_template_validation` 内部库（唯一调用方）;迁移链不作为灾备重建合同（用户决定不做灾备）。
+- 同批修复（审计来源）：事件降仓 below-min 不再抬回满仓（`live_tick_pipeline.build_effective_event_sizing_payload`）;裸仓/恢复仓自动补 `entry_protection_plan`（`_entry_protection_repair_candidates` 前置 pass,source=`recovered_no_protection`）;probation 记账接入 `_handle_closed_positions_after_tick`（权威 PnL + 仓位去重）;盘中触发阶梯 `next_session_open_ts=day_end`;回撤只计亏损;`tighten/reduce` policy 异常 fail-closed;incident 读取异常默认 `frozen`;`record_sample_row` 加 `created_at` 守卫;retry 改 `except Exception` 并记录终异常;canonical reader 仅缺表(42P01) fail-open;恢复仓 upsert 禁止 closed→open 复活;审计写突发批量化（单 UPDATE）;committed+pending 幂等重试即 `replay_projection`;回滚扫描 debug→error;job 心跳连续失败 >3 取消;学习 API 缓存 512 上限;shadow promote/demote 补 `X-Confirm`;退化因子输入 NaN 化（abstain）;shadow PnL 排除非有限值;IC 快照剔除决策 bar;open-quality holdout 标签如实化。
+- 剩余观察：① 恢复仓无保护缺口的新 plan 走 preflight 回撤距离（price±2%/3%）,与决策时 ATR 目标有偏差——首轮真实恢复后核对保护是否按期挂上;② 审计写突发根因仅批量化了 UPDATE 半边,`record_evolution_decision` 仍逐条写（evolution_ledger 无批量方法）;③ GP/因子发现同帧选择问题（审计 P1）未在本批修复,enforce 前必须补样本外帧;④ 迁移链与生产 schema 的两处漂移（`supervisor_evaluation` CHECK、`runtime_config_overlay` 列）保留不修——灾备已退役,仅在需要全新重建时成为阻断;⑤ **重启验收发现既有问题（非本批引入,09-05 18:21 起即存在）**:`runtime_config_overlay` 权威验证 `committed_mutation_unverified`（intent `f3e096d0` committed/current 但 overlay hash 绑定失效）→ backend/learning worker 均以 YAML 基线 quarantine 运行、governance mutation 闩锁、`accepting_new_risk=False` 不开新仓;当前无持仓在险（recovery 表全为 closed_replayed）。需独立批次恢复 overlay 权威绑定后才能恢复开新仓与治理突变,不得用清锁/伪造绑定绕过。
+- 退出：重启后 60 分钟 0 新 ERROR;事件降仓阻断在 trace 可见且无回满;出现首次真实恢复仓时保护计划自动挂上;转 resolved。
 
 ### 旧状态 schema 清理（历史记录）
 

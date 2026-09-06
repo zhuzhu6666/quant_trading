@@ -209,7 +209,6 @@ session 只有 `source` 为权威 `ctrader_deals*` 时才可 known；`degraded_c
 | `GET /api/ops/replay/latest` | `ops.replay-latest.v2` | `replay_report.created_at` |
 | `POST /api/ops/replay/run` | `ops.replay-run.v2` | durable replay report ID + 时间 |
 | `POST /api/ops/replay/bar-run` | `ops.replay-bar-run.v2` | durable replay report ID + 时间 |
-| `POST /api/backtest/run` | 无 `fact.v1`；返回持久任务 ID | 唯一 Parity 历史回测入口；任务结果只返回指标、样本计数与工件位置，完整交易/事件/训练样本保存在已校验回放工件 |
 | `POST /api/ops/replay/bar-preview` | `ops.replay-bar-preview.v2` | 明确不持久化，兼容 unknown |
 | `GET /api/ops/replay/bar-decisions` | `ops.replay-bar-decisions.v2` | canonical `risk_decision.decision_ts`；每条开仓选择同时只读投影 `entry_ts`、已确认平仓才有的 `exit_ts`/`holding_seconds`，以及 `exit_decision_id`/`close_reason`；平仓事实按 canonical `trade_review`/`position_transition` events 与 `recovery_position_state` 只读投影；`system_view` 只汇总服务端已有方向、评分、动作理由和后验事实 |
 | `POST /api/ops/incident-playbook/run` | `ops.incident-playbook-run.v2` | durable playbook ID + 时间 |
