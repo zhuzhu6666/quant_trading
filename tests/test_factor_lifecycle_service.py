@@ -1045,7 +1045,7 @@ def test_shadow_route_forwards_additive_definition_and_v16(monkeypatch):
         v16_claim_token="claim-1",
     )
 
-    result = shadow_api.promote_factor({"sub": "alice"}, request)
+    result = shadow_api.promote_factor({"sub": "alice"}, request, x_confirm="governance-change")
 
     assert result["ok"] is True
     assert captured["expression"] == "ts_mean(close, 5)"

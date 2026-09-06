@@ -4743,46 +4743,6 @@ def _bootstrap_position_recovery(
     )
 
 
-def _reset_session_state_for_new_day() -> None:
-    # 从当前 account 中读取实际余额作为熔断器基准
-    acct = _live_state_get("account", {}) or {}
-    start_balance = float(acct.get("balance", 0) or 0)
-    if start_balance <= 0:
-        start_balance = 0.0  # 没有 account 信息时置 0, 熔断器 fallback 不再硬编码 1000
-    _live_state_update(
-        circuit_breaker=False,
-        circuit_reason="",
-        session_circuit_observation={
-            "triggered": False,
-            "reason": "",
-            "enforced": False,
-        },
-        session_pnl=0.0,
-        session_trades=0,
-        session_winning=0,
-        session_losing=0,
-        session_trade_pnls=[],
-        session_realized_pnl_legs=[],
-        session_realized_legs=0,
-        session_recorded_position_ids=[],
-        session_consecutive_loss=0,
-        session_max_drawdown_pct=0.0,
-        session_peak_equity=start_balance,
-        session_start_balance=start_balance,
-        session_last_trade_ts=0.0,
-        session_state_source="unavailable",
-        session_state_status="unavailable",
-        session_pending_close_ids=[],
-        session_pending_close_observed_at=0.0,
-        session_risk_blockers=["session_not_restored"],
-        session_observed_at=0.0,
-        accepting_new_risk=False,
-        trade_equity_history=[start_balance] if start_balance > 0.0 else [],
-    )
-    _reset_business_alert_armed()  # 新交易日: 业务告警全部重新武装
-    _persist_session_state()
-
-
 def _repair_session_start_balance_from_account(*, persist: bool = True) -> float:
     """Fill a startup-time zero baseline once broker balance becomes available."""
     existing = float(_live_state_get("session_start_balance", 0.0) or 0.0)
@@ -4818,7 +4778,8 @@ def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> di
             "start_balance": 0.0,
             "risk_limits": limits.to_dict(),
         }
-    dd_pct = abs(session_pnl) / start_balance * 100 if start_balance > 0 else 0.0
+    # 回撤只统计亏损方向 — 盈利日不得把 abs(PnL) 写成回撤水位。
+    dd_pct = -min(session_pnl, 0.0) / start_balance * 100 if start_balance > 0 else 0.0
     prev_dd = float(_live_state_get("session_max_drawdown_pct", 0.0) or 0.0)
     updates = {"session_max_drawdown_pct": max(prev_dd, dd_pct)}
     consecutive_limit = int(limits.max_consecutive_losses)
@@ -4902,7 +4863,9 @@ def _loss_streak_ladder_facts() -> dict[str, Any]:
     return {
         "now_ts": now_ts,
         "tripped_at": float(book.get("tripped_at") or 0.0),
-        "next_session_open_ts": next_open if not is_open else 0.0,
+        # 盘中触发时锁到当前时段结束(day_end),否则锁到下一时段开盘 —
+        # 置 0 会让 evaluate_ladder 的会话锁在唯一可交易的窗口内失效。
+        "next_session_open_ts": next_open if not is_open else day_end,
         "broker_day_end_ts": day_end,
         "probation_pnl": float(book.get("probation_pnl", 0.0) or 0.0),
         "probation_trade_count": int(book.get("probation_trade_count", 0) or 0),
@@ -4986,11 +4949,13 @@ def _record_probation_trade_outcome(pnl: float, *, position_id: int = 0) -> None
         book = dict(_live_state.get("loss_streak_book", {}) or {})
         if not book:
             return
+        ids = list(book.get("probation_position_ids", []) or [])
+        if position_id and int(position_id) in ids:
+            return  # 同一仓位只记一次 — 会话重建可能重复回调
         book["probation_pnl"] = float(
             book.get("probation_pnl", 0.0) or 0.0
         ) + float(pnl or 0.0)
         if position_id:
-            ids = list(book.get("probation_position_ids", []) or [])
             ids.append(int(position_id))
             book["probation_position_ids"] = ids[-50:]
         else:
@@ -9204,6 +9169,21 @@ def _cleanup_closed_position_after_tick(
     )
 
 
+def _book_probation_outcomes(real_pnls: Any) -> None:
+    """Probation 记账: 只认权威平仓成交 PnL;book 为空(未触发)时内部直接返回。"""
+    for _pid, _pnl_payload in (real_pnls or {}).items():
+        try:
+            if not _authoritative_close_pnl(_pnl_payload):
+                continue
+            _record_probation_trade_outcome(
+                float((_pnl_payload or {}).get("net", 0.0) or 0.0),
+                position_id=int(_pid or 0),
+            )
+        except Exception:
+            # 记账失败不得阻断平仓管线。
+            continue
+
+
 def _handle_closed_positions_after_tick(
     *,
     closed_pids: set[int],
@@ -9219,6 +9199,7 @@ def _handle_closed_positions_after_tick(
     bridge: Any | None = None,
     close_deal_cursors: dict[int, dict[str, Any]] | None = None,
 ) -> None:
+    _book_probation_outcomes(real_pnls)
     _runtime_handle_closed_positions(
         closed_pids=closed_pids,
         real_pnls=real_pnls,
@@ -10523,7 +10504,8 @@ def _persist_pending_entry_protection_plan(
             },
         )
     except Exception as _protection_plan_err:
-        logger.debug(
+        # 计划持久化失败 = 该仓位失去自动修复能力, 必须显性报错而非 debug 吞掉。
+        logger.error(
             "[live] entry protection plan persist failed for pos {}: {}",
             position_id,
             _protection_plan_err,
@@ -11754,7 +11736,42 @@ def _entry_protection_repair_candidates(
         meta = dict((row or {}).get("recovery_meta") or {})
         plan = dict(meta.get("entry_protection_plan") or {})
         if plan.get("schema_version") != _ENTRY_PROTECTION_PLAN_SCHEMA:
-            continue
+            # 恢复仓/计划持久化失败导致的裸仓: 用 preflight 同款回撤距离
+            # (atr 缺失时 price*2%/3%)补一份 plan, 让下方修复机制在冷却
+            # 约束下自动挂保护; 只处理 broker 侧确无 SL 的仓位。
+            if row and _float_payload_value(p, "sl", "stop_loss", "stopLoss") <= 0:
+                direction = int(_direction_from_position(p) or 0)
+                entry_price = float(p.get("open_price") or current_price or 0.0)
+                if direction and entry_price > 0:
+                    sl_dist = entry_price * 0.02
+                    tp_dist = entry_price * 0.03
+                    recovery_plan = _entry_protection_plan_payload(
+                        position_id=pid,
+                        direction=direction,
+                        entry_price=entry_price,
+                        target_stop_loss=(
+                            entry_price - sl_dist if direction > 0 else entry_price + sl_dist
+                        ),
+                        target_take_profit=(
+                            entry_price + tp_dist if direction > 0 else entry_price - tp_dist
+                        ),
+                        requested_volume=float(p.get("volume") or 0.0),
+                        actual_api_volume=float(p.get("volume") or 0.0),
+                        tick=int(tick or 0),
+                        status="pending",
+                        source="recovered_no_protection",
+                    )
+                    try:
+                        _merge_recovery_position_meta(pid, {"entry_protection_plan": recovery_plan})
+                        plan = dict(recovery_plan)
+                    except Exception as exc:
+                        logger.error(
+                            "[live] recovered protection plan persist failed pos={}: {}",
+                            pid,
+                            exc,
+                        )
+            if plan.get("schema_version") != _ENTRY_PROTECTION_PLAN_SCHEMA:
+                continue
         target_sl = float(plan.get("target_stop_loss") or 0.0)
         target_tp = float(plan.get("target_take_profit") or 0.0)
         if target_sl <= 0 and target_tp <= 0:
@@ -12603,12 +12620,6 @@ def _run_position_protection_cycle(
 # 直到日切。改为边沿触发: 状态恶化跨过阈值那一刻发一次, 回落后重新武装。
 _business_alert_armed: dict[str, bool] = {}
 _BUSINESS_ALERT_ARM_LOCK = threading.Lock()
-
-
-def _reset_business_alert_armed() -> None:
-    """Re-arm all edge-triggered business alerts (new trading day)."""
-    with _BUSINESS_ALERT_ARM_LOCK:
-        _business_alert_armed.clear()
 
 
 def _business_alert_should_send(key: str, active: bool) -> bool:

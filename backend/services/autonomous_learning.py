@@ -5203,26 +5203,16 @@ def _approve_demo_policy_suggestions(
     ).fetchall()
     candidate_ids = []
     skipped = []
+    reject_not_whitelisted: list[str] = []
+    supersede_non_v16: list[str] = []
+    reject_missing_evidence: list[str] = []
     now = time.time()
     for row in rows:
         scope_type = str(row["scope_type"] or "")
         action = str(row["action"] or "")
         suggestion_id = str(row["suggestion_id"] or "")
         if scope_type not in allowed_scopes or action not in allowed_actions:
-            _execute(
-                conn,
-                """
-                UPDATE policy_suggestion
-                SET status='rejected', reviewed_at=?, review_note=?
-                WHERE suggestion_id=? AND status='proposed'
-                """,
-                (
-                    now,
-                    "system rejected by demo_autonomous: no autonomous execution rule",
-                    suggestion_id,
-                ),
-            )
-            conn.commit()
+            reject_not_whitelisted.append(suggestion_id)
             record_evolution_decision(
                 run_id=run_id,
                 decision_type="demo_auto_reject",
@@ -5241,20 +5231,7 @@ def _approve_demo_policy_suggestions(
         evidence = _loads(row["evidence_json"], {})
         if scope_type == "position_supervisor_template":
             if not is_v16_candidate_bridge_evidence(evidence):
-                _execute(
-                    conn,
-                    """
-                    UPDATE policy_suggestion
-                    SET status='superseded', reviewed_at=?, review_note=?
-                    WHERE suggestion_id=? AND status='proposed'
-                    """,
-                    (
-                        now,
-                        "superseded: position supervisor advisory is observation-only; V16 candidate bridge is required",
-                        suggestion_id,
-                    ),
-                )
-                conn.commit()
+                supersede_non_v16.append(suggestion_id)
                 record_evolution_decision(
                     run_id=run_id,
                     decision_type="demo_auto_supersede",
@@ -5276,20 +5253,7 @@ def _approve_demo_policy_suggestions(
             has_replay = bool(evidence.get("replay_summary") or evidence.get("replay") or evidence.get("day"))
             has_counterfactual = bool(evidence.get("counterfactual_summary") or evidence.get("counterfactual"))
             if not (has_replay and has_counterfactual):
-                _execute(
-                    conn,
-                    """
-                    UPDATE policy_suggestion
-                    SET status='rejected', reviewed_at=?, review_note=?
-                    WHERE suggestion_id=? AND status='proposed'
-                    """,
-                    (
-                        now,
-                        "system rejected by demo_autonomous: missing supervisor evidence",
-                        suggestion_id,
-                    ),
-                )
-                conn.commit()
+                reject_missing_evidence.append(suggestion_id)
                 record_evolution_decision(
                     run_id=run_id,
                     decision_type="demo_auto_reject",
@@ -5306,6 +5270,37 @@ def _approve_demo_policy_suggestions(
                 skipped.append({"suggestion_id": suggestion_id, "reason": "system_rejected_missing_supervisor_evidence"})
                 continue
         candidate_ids.append(suggestion_id)
+    # Batch the reject/supersede updates into one transaction instead of one
+    # commit per suggestion (DB audit write bursts).
+    for status, review_note, batch_ids in (
+        (
+            "rejected",
+            "system rejected by demo_autonomous: no autonomous execution rule",
+            reject_not_whitelisted,
+        ),
+        (
+            "superseded",
+            "superseded: position supervisor advisory is observation-only; V16 candidate bridge is required",
+            supersede_non_v16,
+        ),
+        (
+            "rejected",
+            "system rejected by demo_autonomous: missing supervisor evidence",
+            reject_missing_evidence,
+        ),
+    ):
+        if not batch_ids:
+            continue
+        placeholders = ",".join("?" for _ in batch_ids)
+        _execute(
+            conn,
+            f"""
+            UPDATE policy_suggestion
+            SET status=?, reviewed_at=?, review_note=?
+            WHERE suggestion_id IN ({placeholders}) AND status='proposed'
+            """,
+            (status, now, review_note, *batch_ids),
+        )
     conn.commit()
 
     review_result = {"approved": 0, "rejected": 0, "unchanged": 0, "superseded": 0}

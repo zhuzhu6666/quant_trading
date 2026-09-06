@@ -1,7 +1,7 @@
 """POST /api/discover (start job) + GET /api/discover/{id} (status)."""
 from fastapi import APIRouter
 from backend.core.auth import RequireUser
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.jobs import get_job_manager
 
@@ -10,12 +10,12 @@ router = APIRouter(prefix="/api/discover", tags=["discover"])
 
 class DiscoverRequest(BaseModel):
     engine: str = "gp"  # "gp" | "random"
-    n_candidates: int = 1000
+    n_candidates: int = Field(default=1000, le=10000)
     top_k: int = 50
     forward_periods: list[int] = [1, 5, 20]
     auto_register: bool = False
-    gp_pop: int = 100
-    gp_gen: int = 20
+    gp_pop: int = Field(default=100, le=10000)
+    gp_gen: int = Field(default=20, le=10000)
 
 
 @router.post("")

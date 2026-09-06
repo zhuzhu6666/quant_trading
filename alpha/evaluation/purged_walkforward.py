@@ -4,9 +4,9 @@ Implements the purged walk-forward (combinatorial purged cross-validation)
 described in *Advances in Financial Machine Learning* (López de Prado, 2018).
 
 This module builds on :class:`EvaluationContext` to produce folds that
-respect both a *purge* region (exclude training data immediately preceding
-the test set) and an *embargo* region (exclude data immediately following
-the test set to prevent forward-looking leakage).
+respect a *purge* region (exclude training data immediately preceding
+the test set).  Purge-only: the configured ``embargo_bars`` is recorded
+for reference but no embargo mask is applied to any fold.
 
 Usage::
 
@@ -39,7 +39,8 @@ class FoldContext:
         train_indices: 1D array of training indices.
         test_indices: 1D array of testing indices.
         fold_id: Zero-based fold number.
-        embargo_size: Number of embargo bars applied (for reference).
+        embargo_size: Configured embargo bars (not applied; purge-only CV,
+            kept for reference).
         purge_size: Number of purge bars applied (for reference).
     """
 
@@ -76,9 +77,9 @@ class PurgedWalkForward:
         Each fold applies:
         1. **Purge**: the last ``purge_bars`` bars of the training set
            (immediately before the test window) are dropped.
-        2. **Embargo**: the first ``embargo_bars`` bars after the test window
-           are also excluded from training (relevant when forecasting
-           overlapping forward returns).
+
+        No embargo is applied: ``embargo_bars`` is recorded for reference
+        only and does not alter any fold (purge-only CV).
 
         The training window expands with each fold: the first fold uses
         ``train_bars`` bars; subsequent folds add ``test_bars`` bars to the
@@ -93,7 +94,7 @@ class PurgedWalkForward:
         Yields
         ------
         FoldContext
-            Each fold with embargo-purged train/test indices.
+            Each fold with purge-only train/test indices.
 
         Raises
         ------
@@ -163,43 +164,11 @@ class PurgedWalkForward:
         train_raw_end = test_start
         train_end = max(0, train_raw_end - purge_bars)
 
-        # --- Embargo: also exclude the first ``embargo_bars`` after the test
-        # window from the training set of *this* fold.
-        # The embargo region is [test_end, test_end + embargo_bars).
-        # Since we already truncated at ``train_end`` (which is <= test_start),
-        # we need to ensure that any indices in the embargo region are not
-        # included.  The existing truncation guarantees indices >= test_start
-        # are not in the training set, so indices in [test_end, ...) are
-        # already excluded.  However, if a later fold's training window
-        # overlaps with this fold's embargo region, that's handled per fold.
-        # For the current fold, the embargo does not further shrink training
-        # because training already ends at test_start - purge_bars, which is
-        # before the test window, hence before any embargo region.
-
-        # However, if purge_bars is 0 and the training window extends into
-        # the embargo region (shouldn't happen with correct parameters), we
-        # must prevent that.  We also apply an additional constraint:
-        # exclude indices in [test_end, test_end + embargo_bars) from the
-        # training index.
-        embargo_region_start = test_end
-        embargo_region_end = min(test_end + embargo_bars, n_total)
-
-        # Build training indices, excluding the embargo region.
-        # We use a simple boolean mask for clarity.
-        train_pool_end = train_end  # already purged
-        all_train_idx = np.arange(0, max(0, train_pool_end), dtype=np.intp)
-
-        if embargo_bars > 0 and embargo_region_start < train_pool_end:
-            # Only apply embargo if it overlaps with the training region.
-            # This is rare but can happen when purge_bars is small and the
-            # test window is small relative to embargo.
-            mask = ~(
-                (all_train_idx >= embargo_region_start)
-                & (all_train_idx < embargo_region_end)
-            )
-            train_idx = all_train_idx[mask]
-        else:
-            train_idx = all_train_idx
+        # Purge-only: the configured embargo region [test_end, test_end +
+        # embargo_bars) always lies after train_end (<= test_start), so no
+        # embargo mask is applied; ``embargo_bars`` is reported for
+        # reference only.
+        train_idx = np.arange(0, max(0, train_end), dtype=np.intp)
 
         test_idx = np.arange(test_start, test_end, dtype=np.intp)
 

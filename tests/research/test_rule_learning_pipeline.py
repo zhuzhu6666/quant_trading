@@ -884,6 +884,7 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
             note="shadow validation completed",
             registry_db_path=api_registry_db,
         ),
+        x_confirm="governance-change",
     )
     assert api_status["ok"] is True
     assert api_status["candidate"]["status"] == "passed"
@@ -953,6 +954,7 @@ def test_learning_statistical_trainer_builds_explainable_offline_artifact(tmp_pa
             max_positive_rate=1.0,
             note="api canary review",
         ),
+        x_confirm="governance-change",
     )
     assert api_canary["ok"] is True
     assert api_canary["decision"] == "canary_ready"
@@ -1544,7 +1546,7 @@ def test_governance_run_returns_risk_verdict(monkeypatch):
 
     monkeypatch.setattr(learning_api, "RuleEvolutionGovernor", _FakeGovernor)
 
-    result = run_governance(None)
+    result = run_governance(None, x_confirm="governance-change")
 
     assert result["weights_synced"] is False
     assert result["risk_verdict"]["allowed"] is True

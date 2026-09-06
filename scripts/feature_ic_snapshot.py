@@ -128,7 +128,10 @@ def _path_label(
     stop = entry - direction * sl_dist
     target = entry + direction * tp_dist
     end_idx = min(len(bars), start_idx + HORIZON_BARS)
-    for i in range(start_idx, end_idx):
+    if end_idx <= start_idx + 1:
+        # No bar strictly after the decision bar: no valid outcome.
+        return None
+    for i in range(start_idx + 1, end_idx):
         _, _, high, low, _ = bars[i]
         if direction == 1:
             hit_sl = low <= stop

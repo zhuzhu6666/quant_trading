@@ -283,7 +283,7 @@ def evaluate_factor(
 
     with np.errstate(divide="ignore", invalid="ignore"):
         fwd_returns = (closes[1:] - closes[:-1]) / closes[:-1]
-    fwd_returns[~np.isfinite(fwd_returns)] = 0.0
+    fwd_returns[~np.isfinite(fwd_returns)] = np.nan
 
     usable_signals = signals[:-1]
     positions = np.where(np.abs(usable_signals) >= threshold, np.sign(usable_signals), 0.0)

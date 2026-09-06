@@ -20,6 +20,7 @@ Functions:
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
@@ -52,12 +53,21 @@ _REVIEW_RESOLVER = "canonical_review_latest.v1"
 _REVIEW_ORDER = "event.observed_at,event.event_id"
 
 
+def _is_missing_schema(exc: BaseException) -> bool:
+    """True only for 'table does not exist' errors (psycopg 42P01 / SQLite)."""
+    if str(getattr(exc, "sqlstate", "") or "").upper() == "42P01":
+        return True
+    return isinstance(exc, sqlite3.OperationalError) and "no such table" in str(exc)
+
+
 def _canonical_ready(conn: Any) -> bool:
     """Return True when the canonical_v2 schema/event table is reachable."""
     try:
         conn.execute(_sql(conn, "SELECT 1 FROM canonical_v2.event LIMIT 1")).fetchone()
         return True
-    except Exception:
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
         return False
 
 
@@ -152,7 +162,9 @@ def _read_fact_event(conn: Any, kind: str, event_id: str) -> dict[str, Any] | No
         return None
     try:
         payload = read_payload(conn, str(event.get("payload_hash") or ""))
-    except Exception:
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
         return None
     return {
         "source": "canonical",
@@ -249,7 +261,9 @@ def latest_review_observed_at_by_id(
             ),
             tuple(ids),
         ).fetchall()
-    except Exception:
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
         return {}
     return {
         str(row["entity_id"]): observed_epoch(row["observed_at"])
@@ -1196,7 +1210,9 @@ def iter_training_sample_rows(
     try:
         rows = conn.execute(_sql(conn, q), tuple(params)).fetchall()
         return [r for r in (_dict_row(x, TRAINING_SAMPLE_COLUMNS) for x in rows) if r]
-    except Exception:
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
         return []
 
 
@@ -1207,7 +1223,9 @@ def get_training_sample_row(conn: Any, sample_id: str) -> dict[str, Any] | None:
             _sql(conn, f"SELECT {', '.join(TRAINING_SAMPLE_COLUMNS)} FROM canonical_v2.training_sample_row WHERE sample_id=? LIMIT 1"),
             (str(sample_id),),
         ).fetchone()
-    except Exception:
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
         return None
     return _dict_row(row, TRAINING_SAMPLE_COLUMNS)
 
@@ -1288,7 +1306,9 @@ def iter_decision_factor_snapshots(
                 reverse=True,
             )
         return snapshots
-    except Exception:
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
         return []
 
 
@@ -1326,7 +1346,9 @@ def iter_decision_factor_snapshots_by_factor(
             if limit > 0 and len(result) >= limit:
                 break
         return result[: int(limit)] if limit and int(limit) > 0 else result
-    except Exception:
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
         return []
 
 
@@ -1375,7 +1397,9 @@ def iter_decision_factor_snapshots_by_factors(
         if limit and int(limit) > 0:
             return {factor: values[: int(limit)] for factor, values in result.items()}
         return result
-    except Exception:
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
         return result
 
 
@@ -1397,7 +1421,9 @@ def count_decision_factor_snapshots(conn: Any, decision_id: str) -> int:
             return 0
         ph = row["payload_hash"] if isinstance(row, Mapping) else row[0]
         return len(_parse_factor_snapshots(read_payload(conn, str(ph))))
-    except Exception:
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
         return 0
 
 
@@ -1426,5 +1452,7 @@ def iter_all_decision_factor_snapshots(
             ph = event_row["payload_hash"] if isinstance(event_row, Mapping) else event_row[1]
             result.extend(_parse_factor_snapshots(read_payload(conn, str(ph))))
         return result
-    except Exception:
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
         return []

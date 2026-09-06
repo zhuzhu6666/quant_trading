@@ -182,7 +182,8 @@ class RiskPolicyService:
 
                 raw = getattr(runtime_config(), "runtime_incident_mode", "normal")
             except Exception:
-                raw = "normal"
+                # A failed config read must fail closed like an invalid value.
+                raw = "frozen"
         mode = str(raw or "normal").strip().lower()
         # Runtime corruption must fail closed.  Config loading rejects invalid
         # values; this branch protects already-constructed/in-memory objects.

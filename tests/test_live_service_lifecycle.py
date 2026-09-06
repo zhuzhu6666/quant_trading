@@ -73,7 +73,17 @@ def _reset_loop_state(monkeypatch, tmp_path):
         loop_shutdown=None,
     )
 
-    live_service._reset_session_state_for_new_day()
+    live_service._live_state_update(
+        circuit_breaker=False,
+        circuit_reason="",
+        session_pnl=0.0,
+        session_trades=0,
+        session_winning=0,
+        session_losing=0,
+        session_consecutive_loss=0,
+        session_max_drawdown_pct=0.0,
+        loss_streak_book={},
+    )
     yield
     live_service._process_shutdown_requested = False
     live_service._pending_close_reasons.clear()
@@ -102,7 +112,17 @@ def _reset_loop_state(monkeypatch, tmp_path):
         accepting_new_risk=False,
         loop_shutdown=None,
     )
-    live_service._reset_session_state_for_new_day()
+    live_service._live_state_update(
+        circuit_breaker=False,
+        circuit_reason="",
+        session_pnl=0.0,
+        session_trades=0,
+        session_winning=0,
+        session_losing=0,
+        session_consecutive_loss=0,
+        session_max_drawdown_pct=0.0,
+        loss_streak_book={},
+    )
 
 
 def test_missing_recovery_row_final_close_resets_stale_baseline():
@@ -419,16 +439,10 @@ def test_session_trade_projection_is_idempotent_by_position_id():
 
 
 def test_prime_live_loop_state_preserves_session_when_restore_is_unavailable(monkeypatch):
-    reset_calls = []
     monkeypatch.setattr(
         live_service,
         "_restore_session_state_for_day",
         lambda trade_date=None, **_kwargs: False,
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_reset_session_state_for_new_day",
-        lambda: reset_calls.append(True),
     )
 
     live_service._live_state_update(
@@ -461,12 +475,9 @@ def test_prime_live_loop_state_preserves_session_when_restore_is_unavailable(mon
     assert live_service._live_state_get("session_max_drawdown_pct") == 4.1
     assert live_service._live_state_get("session_state_status") == "unavailable"
     assert live_service._live_state_get("accepting_new_risk") is False
-    assert reset_calls == []
 
 
 def test_prime_live_loop_state_restores_existing_session_snapshot(monkeypatch):
-    reset_called = False
-
     def _restore(trade_date=None, **_kwargs):
         live_service._live_state_update(
             session_pnl=2.75,
@@ -478,12 +489,7 @@ def test_prime_live_loop_state_restores_existing_session_snapshot(monkeypatch):
         )
         return True
 
-    def _reset():
-        nonlocal reset_called
-        reset_called = True
-
     monkeypatch.setattr(live_service, "_restore_session_state_for_day", _restore)
-    monkeypatch.setattr(live_service, "_reset_session_state_for_new_day", _reset)
     live_service._live_state_update(
         positions=[],
         positions_reconciled=[],
@@ -498,7 +504,6 @@ def test_prime_live_loop_state_restores_existing_session_snapshot(monkeypatch):
         account={"ok": True, "broker": "ctrader", "balance": 1000.0, "equity": 1000.0},
     )
 
-    assert reset_called is False
     assert live_service._live_state_get("loop_running") is True
     assert live_service._live_state_get("session_pnl") == pytest.approx(2.75)
     assert live_service._live_state_get("session_trades") == 29
@@ -1934,7 +1939,6 @@ def test_session_risk_state_persists_and_restores(monkeypatch, tmp_path):
         trade_equity_history=[1000.0, 981.5],
     )
     live_service._persist_session_state("2026-06-29")
-    live_service._reset_session_state_for_new_day()
     live_service._live_state_update(account={"balance": 1000.0})
 
     assert live_service._restore_session_state_for_day(

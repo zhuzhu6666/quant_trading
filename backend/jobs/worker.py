@@ -140,6 +140,7 @@ class PersistentJobWorker:
         future = executor.submit(handler, dict(job.params), progress)
         stopping = False
         heartbeat_retry = False
+        heartbeat_failures = 0
         try:
             while not future.done():
                 wait_sec = (
@@ -165,16 +166,24 @@ class PersistentJobWorker:
                     # A single connection failure must not abandon the handler
                     # thread and silently stop lease renewal.  Retry at a short
                     # cadence; hard process death is still recovered by lease
-                    # expiry in PgJobQueue.
+                    # expiry in PgJobQueue.  A sustained outage means the lease
+                    # cannot be renewed, so cancel the handler exactly like a
+                    # lost claim instead of executing a job that will be
+                    # requeued and double-executed.
                     heartbeat_retry = True
+                    heartbeat_failures += 1
                     logger.warning(
                         "[job_worker] heartbeat failed job={} kind={}; retrying: {}",
                         job.id,
                         job.kind,
                         exc,
                     )
+                    if heartbeat_failures > 3:
+                        claim_lost_event.set()
+                        cancel_event.set()
                     continue
                 heartbeat_retry = False
+                heartbeat_failures = 0
                 self._emit_status("busy", job.id, job.kind)
                 if not heartbeat.get("ok"):
                     claim_lost_event.set()

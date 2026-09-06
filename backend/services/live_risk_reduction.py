@@ -207,7 +207,7 @@ def evaluate_risk_reduction_policy(
     *,
     runtime: RiskReductionRuntime,
 ) -> RiskVerdict:
-    """Continue close/reduce/tighten when policy infrastructure fails."""
+    """Continue close when policy infrastructure fails; block reduce/tighten."""
 
     normalized = str(action or "").strip().lower()
     if normalized not in _RISK_REDUCING_ACTIONS:
@@ -226,10 +226,24 @@ def evaluate_risk_reduction_policy(
             },
             runtime=runtime,
         )
+        if normalized == "close_position":
+            # Fail-open is intended only for close: risk-reducing exits continue.
+            return RiskVerdict(
+                allowed=True,
+                reason="risk_policy_unavailable_risk_reduction_continues",
+                severity="warning",
+                required_mode="risk_reduction_only",
+                audit_payload={
+                    "action": normalized,
+                    "source": "risk_reduction_fail_safe",
+                    "position_id": position_id,
+                    "policy_error": f"{type(exc).__name__}: {exc}",
+                },
+            )
         return RiskVerdict(
-            allowed=True,
-            reason="risk_policy_unavailable_risk_reduction_continues",
-            severity="warning",
+            allowed=False,
+            reason="risk_policy_unavailable_tighten_reduce_blocked",
+            severity="error",
             required_mode="risk_reduction_only",
             audit_payload={
                 "action": normalized,

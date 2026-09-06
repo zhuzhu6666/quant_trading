@@ -166,7 +166,7 @@ def get_bars(
     timeframe: Literal["M5", "M15", "M30", "H1", "H4", "D1"] = "M15",
     from_ts: int | None = Query(None, alias="from"),
     to_ts: int | None = Query(None, alias="to"),
-    limit: int = 5000,
+    limit: int = Query(5000, le=20000),
     source: Literal["monthly", "live"] = "monthly",
 ) -> BarsResponse:
     """Fetch K-line bars. If from/to not given, return last `limit` bars.

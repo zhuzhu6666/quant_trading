@@ -109,6 +109,7 @@ router = APIRouter(prefix="/api/learning", tags=["learning"])
 
 _CANDIDATE_ID_RE = re.compile(r"(ptrc_[0-9a-f]{16})")
 _LEARNING_CACHE_TTL_SEC = 30.0
+_LEARNING_CACHE_MAX_ENTRIES = 512
 _LEARNING_CACHE_LOCK = threading.Lock()
 
 
@@ -135,8 +136,6 @@ def _require_governance_confirm(
     before: dict[str, Any] | None = None,
     result: dict[str, Any] | None = None,
 ) -> None:
-    if user is None and not isinstance(x_confirm, str):
-        return
     if confirm_header_valid(x_confirm, "governance-change"):
         return
     record_api_mutation(
@@ -220,6 +219,8 @@ def _learning_last_good_set(key: str, payload: Any) -> None:
     cloned = deepcopy(payload)
     with _LEARNING_CACHE_LOCK:
         _LEARNING_LAST_GOOD[key] = (time.time(), cloned)
+        while len(_LEARNING_LAST_GOOD) > _LEARNING_CACHE_MAX_ENTRIES:
+            _LEARNING_LAST_GOOD.pop(next(iter(_LEARNING_LAST_GOOD)))
 
 
 def _learning_last_good_get(key: str) -> tuple[float, Any] | None:
@@ -252,6 +253,8 @@ def _learning_compute_lock(key: str) -> threading.Lock:
         if lock is None:
             lock = threading.Lock()
             _LEARNING_COMPUTE_LOCKS[key] = lock
+            while len(_LEARNING_COMPUTE_LOCKS) > _LEARNING_CACHE_MAX_ENTRIES:
+                _LEARNING_COMPUTE_LOCKS.pop(next(iter(_LEARNING_COMPUTE_LOCKS)))
         return lock
 
 

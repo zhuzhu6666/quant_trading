@@ -2329,7 +2329,7 @@ class FactorGovernanceOrchestrator:
                     },
                 ))
         except Exception as exc:
-            logger.debug("[factor_governance] rollback scan skipped: %s", exc)
+            logger.error("[factor_governance] rollback scan skipped: %s", exc)
         return actions
 
     def _rollback_adjudicated(self, application_id: str) -> dict[str, Any] | None:

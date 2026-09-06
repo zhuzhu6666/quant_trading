@@ -1179,16 +1179,10 @@ def test_position_without_stable_broker_identity_blocks_new_risk_without_index_e
 
 
 def test_phase2_session_restore_failure_is_not_reset_to_zero(monkeypatch):
-    reset_calls = []
     monkeypatch.setattr(
         live_service,
         "_restore_session_state_for_day",
         lambda *_args, **_kwargs: False,
-    )
-    monkeypatch.setattr(
-        live_service,
-        "_reset_session_state_for_new_day",
-        lambda: reset_calls.append(True),
     )
     live_service._live_state_update(session_pnl=-9.0, session_trades=3)
 
@@ -1202,7 +1196,6 @@ def test_phase2_session_restore_failure_is_not_reset_to_zero(monkeypatch):
         account_observed=False,
     )
 
-    assert reset_calls == []
     assert live_service._live_state_get("session_pnl") == -9.0
     assert live_service._live_state_get("session_trades") == 3
 

@@ -3057,9 +3057,24 @@ class CTraderBridge(BaseBrokerBridge):
                 min_volume = int(round(float(meta.get("api_min_volume") or 0)))
             except Exception:
                 pass
-        if min_volume <= 0:
-            min_volume = max(1, int(round(volume)))
-        req.volume = int(round(max(volume, min_volume)))
+        if volume <= 0:
+            return CTraderOrderResult(
+                success=False,
+                outcome="rejected",
+                error_code="volume_non_positive",
+                comment=f"market open rejected volume={volume}",
+                volume=volume,
+            )
+        if min_volume > 0 and volume < min_volume:
+            # 低于经纪商最小量必须显式拒绝 — 不得静默抬升下单量。
+            return CTraderOrderResult(
+                success=False,
+                outcome="rejected",
+                error_code="volume_below_broker_min",
+                comment=f"market open rejected volume={volume} < min={min_volume}",
+                volume=volume,
+            )
+        req.volume = int(round(volume))
 
         client_order_id = str(uuid.uuid4())
         client_msg_id = str(uuid.uuid4())

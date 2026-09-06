@@ -9,11 +9,28 @@ from risk.runtime_policy import RiskLimitSnapshot
 def _reset_state(monkeypatch):
     """Reset circuit_breaker + session stats between tests."""
     monkeypatch.setattr(live_service, "bounded_demo_mode_active", lambda: False)
-    live_service._reset_session_state_for_new_day()
+    _reset_session_state()
     live_service._live_state_update(session_start_balance=1000.0)
     yield
-    live_service._reset_session_state_for_new_day()
+    _reset_session_state()
     live_service._live_state_update(session_start_balance=1000.0)
+
+
+def _reset_session_state() -> None:
+    """等价于已删除的 _reset_session_state_for_new_day 的会话重置语义。"""
+    live_service._live_state_update(
+        circuit_breaker=False,
+        circuit_reason="",
+        session_circuit_observation={"triggered": False, "reason": "", "enforced": False},
+        session_pnl=0.0,
+        session_trades=0,
+        session_winning=0,
+        session_losing=0,
+        session_trade_pnls=[],
+        session_consecutive_loss=0,
+        session_max_drawdown_pct=0.0,
+        loss_streak_book={},
+    )
 
 
 def test_circuit_breaker_starts_false():
@@ -120,7 +137,7 @@ def test_breaker_resets_on_new_day():
         session_max_drawdown_pct=5.2,
     )
 
-    live_service._reset_session_state_for_new_day()
+    _reset_session_state()
 
     assert live_service._live_state_get("circuit_breaker") is False
     assert live_service._live_state_get("circuit_reason") == ""

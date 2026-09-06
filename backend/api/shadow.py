@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, HTTPException
 from backend.core.auth import RequireUser
 from pydantic import BaseModel, Field
 
+from backend.api.learning import _require_governance_confirm
 from backend.services.shadow_service import demote, list_shadows, promote
 from backend.services.factor_lifecycle_service import FactorV16Binding
 from backend.services.mutation_audit import record_api_mutation
@@ -55,7 +56,18 @@ def list_(_user: RequireUser)-> dict:
 
 
 @router.post("/promote")
-def promote_factor(_user: RequireUser, req: PromoteRequest)-> dict:
+def promote_factor(
+    _user: RequireUser,
+    req: PromoteRequest,
+    x_confirm: str | None = Header(default=None),
+) -> dict:
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/shadow/promote",
+        action="promote_shadow_factor",
+        x_confirm=x_confirm,
+        result={"name": req.name},
+    )
     result = promote(
         req.name,
         expression=req.expression,
@@ -84,7 +96,18 @@ def promote_factor(_user: RequireUser, req: PromoteRequest)-> dict:
 
 
 @router.post("/demote")
-def demote_factor(_user: RequireUser, req: DemoteRequest)-> dict:
+def demote_factor(
+    _user: RequireUser,
+    req: DemoteRequest,
+    x_confirm: str | None = Header(default=None),
+) -> dict:
+    _require_governance_confirm(
+        user=_user,
+        endpoint="/api/shadow/demote",
+        action="demote_shadow_factor",
+        x_confirm=x_confirm,
+        result={"name": req.name},
+    )
     result = demote(
         req.name,
         target_stage=req.target_stage,

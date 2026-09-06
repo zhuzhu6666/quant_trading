@@ -124,7 +124,7 @@ def test_open_quality_lightgbm_trains_or_reports_dependency(tmp_path, monkeypatc
         assert result["error"] == "dependency_missing"
         return
     assert result["model_type"] == MODEL_TYPE
-    assert result["metrics"]["split"] == "time_ordered_grouped_purged"
+    assert result["metrics"]["split"] == "time_ordered_tail_no_purge"
     assert result["feature_schema_version"] == "pit.v2.open_lineage"
     assert result["metrics"]["holdout"]["rule_accuracy"] is not None
     assert result["metrics"]["holdout"]["majority_baseline_accuracy"] is not None

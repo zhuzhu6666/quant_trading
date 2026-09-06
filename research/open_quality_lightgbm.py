@@ -522,7 +522,7 @@ class OpenQualityLightGBMService:
                 train_prob,
             ),
             "holdout": _metrics(holdout_samples, y_holdout, holdout_prob),
-            "split": "time_ordered_grouped_purged",
+            "split": "time_ordered_tail_no_purge",
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "sample_count": len(samples),
             "replay_sample_count": len(replay_samples),
@@ -565,7 +565,7 @@ class OpenQualityLightGBMService:
             "metrics": metrics,
             "explainability": {
                 "feature_importance": feature_importance,
-                "summary": "Shadow-only open quality model trained from matured open outcome samples with time-ordered holdout and rule/majority baselines.",
+                "summary": "Shadow-only open quality model trained from matured open outcome samples with time-ordered holdout and rule/majority baselines. Caveat: the holdout is a plain time-ordered tail with no purge gap and is also used to select use_augmented (selection bias).",
             },
             "capabilities": {
                 "live_trading": False,

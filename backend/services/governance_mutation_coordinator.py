@@ -534,7 +534,7 @@ class GovernanceMutationCoordinator:
         except Exception as exc:
             return self._failed("reserve_failed", exc)
         if reserved.get("status") == "committed":
-            if str(reserved.get("projection_status") or "") == "degraded":
+            if str(reserved.get("projection_status") or "") in {"pending", "degraded"}:
                 return self.replay_projection(str(reserved.get("mutation_id") or ""))
             return {**reserved, "ok": True, "idempotent": True, "boundary": self.boundary()}
         if reserved.get("status") != "reserved" or not reserved.get("ok"):

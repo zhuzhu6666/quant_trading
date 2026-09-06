@@ -50,6 +50,9 @@ def _check_duckdb(path: Path, required: dict[str, set[str]]) -> list[str]:
         snapshot = tmp_dir / path.name
         try:
             shutil.copy2(path, snapshot)
+            wal_path = path.with_name(path.name + ".wal")
+            if wal_path.exists():
+                shutil.copy2(wal_path, tmp_dir / (path.name + ".wal"))
             con = connect_duckdb(snapshot, read_only=True)
         except Exception as snap_exc:
             return [f"open failed via DuckDB: {snap_exc}"]

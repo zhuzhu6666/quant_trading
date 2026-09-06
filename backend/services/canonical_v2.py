@@ -1509,7 +1509,7 @@ def record_sample_row(
     values = tuple(row.get(column) for column in SAMPLE_ROW_COLUMNS)
     placeholders = ", ".join("%s" if _is_pg(conn) else "?" for _ in SAMPLE_ROW_COLUMNS)
     update_cols = [c for c in SAMPLE_ROW_COLUMNS if c != "sample_id"]
-    conn.execute(
+    cur = conn.execute(
         _sql(
             conn,
             f"""
@@ -1517,11 +1517,12 @@ def record_sample_row(
             VALUES ({placeholders})
             ON CONFLICT(sample_id) DO UPDATE SET
                 {', '.join(f"{c}=excluded.{c}" for c in update_cols)}
+            WHERE EXCLUDED.created_at >= canonical_v2.training_sample_row.created_at
             """,
         ),
         values,
     )
-    return {"sample_id": sample_id, "created": True}
+    return {"sample_id": sample_id, "created": int(getattr(cur, "rowcount", 0)) > 0}
 
 
 def purge_sample_rows_without_source(

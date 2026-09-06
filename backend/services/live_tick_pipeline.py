@@ -9,6 +9,7 @@ from typing import Any
 
 from backend.services.live_position_lifecycle import (
     build_open_decision_replay_payload,
+    timeframe_seconds,
 )
 from backend.services.review_contract import build_execution_quality_event_details
 
@@ -21,18 +22,23 @@ def _normalize_close_source(close_source: Mapping[str, Any] | str | None) -> dic
     return {"close_reason_source": "", "inferred_close_supervisor": {}}
 
 
-def build_factor_bar(last_bar: Any, df_new: Any, timeframe: str) -> dict[str, Any]:
+def build_factor_bar(last_bar: Any, df_new: Any, timeframe: str, *, now_ts: float | None = None) -> dict[str, Any]:
     index = getattr(last_bar, "index", ())
     ts_value = getattr(df_new, "index", [None])[-1]
+    bar_time = float(ts_value.timestamp()) if hasattr(ts_value, "timestamp") else 0.0
+    tf_seconds = float(timeframe_seconds(str(timeframe or "")))
+    # 闭合 bar 合同与 parity 一致: time + tf <= now 才算 complete,
+    # 不再无条件标 True — feed 回退为 forming bar 时不得伪装成闭合 bar。
+    complete = bool(tf_seconds > 0 and bar_time > 0 and bar_time + tf_seconds <= float(now_ts if now_ts is not None else time.time()))
     return {
         "open": float(last_bar["open"]),
         "high": float(last_bar["high"]),
         "low": float(last_bar["low"]),
         "close": float(last_bar["close"]),
         "volume": float(last_bar["volume"]) if "volume" in index else 0.0,
-        "time": float(ts_value.timestamp()) if hasattr(ts_value, "timestamp") else 0.0,
+        "time": bar_time,
         "timeframe": timeframe,
-        "complete": True,
+        "complete": complete,
     }
 
 
@@ -341,8 +347,9 @@ def build_effective_event_sizing_payload(
     trace = dict(sizing_trace or {})
     volume = float(adjusted_volume or 0.0)
     if sizing_block_reason and base_volume > 0:
-        volume = float(base_volume)
-        trace["event_policy_candidate_api_volume"] = volume
+        # 事件降仓被 floor 到经纪商最小量以下时保持阻断(volume=0),
+        # 只在 trace 里记录满仓候选 — 不得把被拒的降仓单静默抬回 base。
+        trace["event_policy_candidate_api_volume"] = float(base_volume)
     context = {
         **dict(event_sizing_context or {}),
         "base_api_volume": float(base_volume or 0.0),

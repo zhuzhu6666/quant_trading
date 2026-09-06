@@ -82,7 +82,7 @@ def factor_bb_width(df):
     std = pd.Series(close).rolling(20).std().values
     bb_top = sma + 2 * std
     bb_bot = sma - 2 * std
-    return np.divide(bb_top - bb_bot, sma, out=np.zeros_like(sma), where=sma != 0)
+    return np.divide(bb_top - bb_bot, sma, out=np.full_like(sma, np.nan), where=sma != 0)
 
 
 @factor_registry.register("di_spread", "ADX方向差 (DI+ - DI-)")
@@ -101,7 +101,7 @@ def factor_stoch_k(df):
     for i in range(13, n):
         h14 = high[i-13:i+1].max()
         l14 = low[i-13:i+1].min()
-        k[i] = (close[i] - l14) / (h14 - l14) * 100 if h14 != l14 else 50
+        k[i] = (close[i] - l14) / (h14 - l14) * 100 if h14 != l14 else np.nan
     return k
 
 
@@ -243,7 +243,7 @@ def factor_keltner_width(df, period: int = 20, multiplier: float = 1.5):
 
     upper = ema + multiplier * atr
     lower = ema - multiplier * atr
-    return np.divide(upper - lower, close, out=np.zeros_like(close), where=close != 0)
+    return np.divide(upper - lower, close, out=np.full_like(close, np.nan), where=close != 0)
 
 
 @factor_registry.register("obv_slope", "OBV 20-bar 斜率 (sign*vol 累计)")
@@ -265,7 +265,7 @@ def factor_obv_slope(df, lookback: int = 20):
     for i in range(lookback, n):
         prev = obv[i - lookback]
         if prev == 0 or np.isnan(prev):
-            out[i] = 0.0
+            out[i] = np.nan
         else:
             out[i] = (obv[i] - prev) / abs(prev)
     return out
@@ -284,7 +284,7 @@ def factor_vol_ma_ratio(df, period: int = 20):
     if n < period:
         return np.full(n, np.nan)
     vol_ma = pd.Series(vol).rolling(period, min_periods=period).mean().values
-    return np.divide(vol, vol_ma, out=np.zeros_like(vol), where=vol_ma != 0) - 1.0
+    return np.divide(vol, vol_ma, out=np.full_like(vol, np.nan), where=vol_ma != 0) - 1.0
 
 
 @factor_registry.register("engulfing", "Engulfing 形态: +1 bullish / -1 bearish / 0 none")
@@ -490,8 +490,8 @@ def factor_donchian_breakout_20(df, period: int = 20):
     true_range = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     true_range[0] = high[0] - low[0]
     scale = pd.Series(true_range).rolling(14, min_periods=5).median().to_numpy()
-    up = np.divide(close - previous_high, scale, out=np.zeros(n), where=np.isfinite(previous_high) & (scale > 0))
-    down = np.divide(close - previous_low, scale, out=np.zeros(n), where=np.isfinite(previous_low) & (scale > 0))
+    up = np.divide(close - previous_high, scale, out=np.full(n, np.nan), where=np.isfinite(previous_high) & (scale > 0))
+    down = np.divide(close - previous_low, scale, out=np.full(n, np.nan), where=np.isfinite(previous_low) & (scale > 0))
     out = np.where(close > previous_high, np.clip(up, 0.0, 1.0), out)
     out = np.where(close < previous_low, np.clip(down, -1.0, 0.0), out)
     out[:period] = np.nan
@@ -1161,7 +1161,7 @@ def factor_gld_tonnes_zscore_60d(df):
     roll = s.rolling(60, min_periods=20)
     mean = roll.mean()
     std = roll.std()
-    z = np.where(std > 1e-9, (s - mean) / std, 0.0)
+    z = np.where(std > 1e-9, (s - mean) / std, np.nan)
     return z
 
 
@@ -1267,7 +1267,7 @@ def factor_cb_china_3m_zscore(df, lookback: int = 60):
     roll = s.rolling(lookback, min_periods=10)
     mean = roll.mean()
     std = roll.std()
-    z = np.where(std > 1e-9, (s - mean) / std, 0.0)
+    z = np.where(std > 1e-9, (s - mean) / std, np.nan)
     return z
 
 

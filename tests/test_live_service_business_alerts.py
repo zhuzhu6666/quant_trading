@@ -12,9 +12,11 @@ from backend.services import live_service
 
 @pytest.fixture(autouse=True)
 def _reset_alert_state():
-    live_service._reset_business_alert_armed()
+    with live_service._BUSINESS_ALERT_ARM_LOCK:
+        live_service._business_alert_armed.clear()
     yield
-    live_service._reset_business_alert_armed()
+    with live_service._BUSINESS_ALERT_ARM_LOCK:
+        live_service._business_alert_armed.clear()
 
 
 class _FakeAlerter:
@@ -121,8 +123,3 @@ def test_circuit_breaker_edge_triggered_once(fake_alerter, monkeypatch):
     assert len(critical) == 1
 
 
-def test_reset_business_alert_armed_clears_edges():
-    live_service._business_alert_should_send("dd_warn", True)
-    live_service._reset_business_alert_armed()
-    # 重置后同一状态应能再次触发 (新交易日语义)
-    assert live_service._business_alert_should_send("dd_warn", True) is True

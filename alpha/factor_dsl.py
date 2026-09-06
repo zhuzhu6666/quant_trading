@@ -425,7 +425,7 @@ class DSLEvaluator:
                 return left * right
             if op == "/":
                 with np.errstate(divide="ignore", invalid="ignore"):
-                    return np.where(right == 0, 0.0, left / right)
+                    return np.where(right == 0, np.nan, left / right)
 
         # 4. 一元算子
         if op in ("sign", "abs", "log", "sqrt", "signed_log"):
@@ -436,7 +436,7 @@ class DSLEvaluator:
                 return np.abs(x)
             if op == "log":
                 with np.errstate(divide="ignore", invalid="ignore"):
-                    return np.where(x <= 0, 0.0, np.log(x))
+                    return np.where(x <= 0, np.nan, np.log(x))
             if op == "sqrt":
                 with np.errstate(invalid="ignore"):
                     return np.sqrt(np.abs(x))
@@ -503,7 +503,7 @@ class DSLEvaluator:
                 mean = s.rolling(n, min_periods=n).mean().values
                 std = s.rolling(n, min_periods=n).std().values
                 with np.errstate(divide="ignore", invalid="ignore"):
-                    return np.where(std < 1e-12, 0.0, (x - mean) / std)
+                    return np.where(std < 1e-12, np.nan, (x - mean) / std)
 
         # 8. ts_corr (x, y, n)
         if op == "ts_corr":

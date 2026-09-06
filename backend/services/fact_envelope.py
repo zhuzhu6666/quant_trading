@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Mapping, MutableMapping
 
 
@@ -62,7 +62,12 @@ def observed_epoch(value: float | str | datetime | None) -> float:
             return float(raw)
         except ValueError:
             try:
-                return float(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    # Naive strings are producer-local ambiguity; pin to UTC
+                    # instead of silently shifting by the host timezone.
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return float(parsed.timestamp())
             except (TypeError, ValueError, OverflowError):
                 return 0.0
     try:

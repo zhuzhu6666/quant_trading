@@ -361,8 +361,10 @@ def test_effective_event_sizing_payload_preserves_policy_candidate_when_below_mi
         event_sizing_context={"enabled": True, "multiplier": 0.2},
     )
 
+    # 低于经纪商最小量的事件降仓必须保持阻断(volume=0),
+    # 满仓候选只进 trace,不再抬回 base。
     assert result == {
-        "volume": 100.0,
+        "volume": 0.0,
         "sizing_trace": {
             "event_raw_api_volume": 20.0,
             "event_policy_candidate_api_volume": 100.0,
@@ -373,7 +375,7 @@ def test_effective_event_sizing_payload_preserves_policy_candidate_when_below_mi
             "base_api_volume": 100.0,
             "raw_api_volume": 20.0,
             "adjusted_api_volume": 0.0,
-            "effective_requested_api_volume": 100.0,
+            "effective_requested_api_volume": 0.0,
             "blocked_reason": "event_sizing_below_min",
         },
     }

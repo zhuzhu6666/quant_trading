@@ -1,27 +1,6 @@
 {
   "components": {
     "schemas": {
-      "ABRequest": {
-        "properties": {
-          "n_bars": {
-            "default": 5000,
-            "title": "N Bars",
-            "type": "integer"
-          },
-          "path_a": {
-            "default": "baseline",
-            "title": "Path A",
-            "type": "string"
-          },
-          "path_b": {
-            "default": "reverse",
-            "title": "Path B",
-            "type": "string"
-          }
-        },
-        "title": "ABRequest",
-        "type": "object"
-      },
       "AuthUrlResponse": {
         "properties": {
           "url": {
@@ -232,94 +211,6 @@
           }
         },
         "title": "AutonomyScopeEnforcementRequest",
-        "type": "object"
-      },
-      "BacktestRequest": {
-        "properties": {
-          "commission_per_lot_round_turn": {
-            "default": 18.0,
-            "minimum": 0.0,
-            "title": "Commission Per Lot Round Turn",
-            "type": "number"
-          },
-          "contract_size": {
-            "default": 100.0,
-            "exclusiveMinimum": 0.0,
-            "title": "Contract Size",
-            "type": "number"
-          },
-          "end": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "End"
-          },
-          "initial_equity": {
-            "default": 10000.0,
-            "exclusiveMinimum": 0.0,
-            "title": "Initial Equity",
-            "type": "number"
-          },
-          "max_bars": {
-            "default": 5000,
-            "maximum": 20000.0,
-            "minimum": 2.0,
-            "title": "Max Bars",
-            "type": "integer"
-          },
-          "slippage_price_each_fill": {
-            "default": 0.035,
-            "minimum": 0.0,
-            "title": "Slippage Price Each Fill",
-            "type": "number"
-          },
-          "start": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Start"
-          },
-          "symbol": {
-            "default": "XAUUSD+",
-            "title": "Symbol",
-            "type": "string"
-          },
-          "timeframe": {
-            "default": "M5",
-            "title": "Timeframe",
-            "type": "string"
-          },
-          "volume_lots": {
-            "default": 0.01,
-            "exclusiveMinimum": 0.0,
-            "title": "Volume Lots",
-            "type": "number"
-          },
-          "warmup_bars": {
-            "default": 150,
-            "maximum": 1000.0,
-            "minimum": 0.0,
-            "title": "Warmup Bars",
-            "type": "integer"
-          }
-        },
-        "title": "BacktestRequest",
         "type": "object"
       },
       "Bar": {
@@ -835,16 +726,19 @@
           },
           "gp_gen": {
             "default": 20,
+            "maximum": 10000.0,
             "title": "Gp Gen",
             "type": "integer"
           },
           "gp_pop": {
             "default": 100,
+            "maximum": 10000.0,
             "title": "Gp Pop",
             "type": "integer"
           },
           "n_candidates": {
             "default": 1000,
+            "maximum": 10000.0,
             "title": "N Candidates",
             "type": "integer"
           },
@@ -3217,43 +3111,6 @@
         "title": "SupervisorCounterfactualRunRequest",
         "type": "object"
       },
-      "TuningRequest": {
-        "properties": {
-          "cb_pct_grid": {
-            "default": [
-              5,
-              10,
-              15,
-              20
-            ],
-            "items": {
-              "type": "number"
-            },
-            "title": "Cb Pct Grid",
-            "type": "array"
-          },
-          "n_bars": {
-            "default": 5000,
-            "title": "N Bars",
-            "type": "integer"
-          },
-          "risk_pct_grid": {
-            "default": [
-              0.5,
-              1.0,
-              1.5,
-              2.0
-            ],
-            "items": {
-              "type": "number"
-            },
-            "title": "Risk Pct Grid",
-            "type": "array"
-          }
-        },
-        "title": "TuningRequest",
-        "type": "object"
-      },
       "ValidationError": {
         "properties": {
           "loc": {
@@ -3345,139 +3202,6 @@
   },
   "openapi": "3.1.0",
   "paths": {
-    "/api/ab": {
-      "get": {
-        "description": "列出 ab_test 类型的 jobs (跟 /api/jobs?kind=ab_test 等价, 单独 endpoint 方便前端直接挂).",
-        "operationId": "list_jobs_api_ab_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response List Jobs Api Ab Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "List Jobs",
-        "tags": [
-          "ab"
-        ]
-      }
-    },
-    "/api/ab/run": {
-      "post": {
-        "operationId": "run_api_ab_run_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ABRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response Run Api Ab Run Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "Run",
-        "tags": [
-          "ab"
-        ]
-      }
-    },
-    "/api/ab/{job_id}": {
-      "get": {
-        "operationId": "get_job_api_ab__job_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "job_id",
-            "required": true,
-            "schema": {
-              "title": "Job Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response Get Job Api Ab  Job Id  Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "Get Job",
-        "tags": [
-          "ab"
-        ]
-      }
-    },
     "/api/auth/login": {
       "post": {
         "operationId": "login_api_auth_login_post",
@@ -3798,344 +3522,6 @@
         "summary": "Ws Ticket",
         "tags": [
           "auth"
-        ]
-      }
-    },
-    "/api/backtest": {
-      "get": {
-        "operationId": "list_jobs_noslash_api_backtest_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "status",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Status"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response List Jobs Noslash Api Backtest Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "List Jobs Noslash",
-        "tags": [
-          "backtest"
-        ]
-      }
-    },
-    "/api/backtest/": {
-      "get": {
-        "operationId": "list_jobs_api_backtest__get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "status",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Status"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response List Jobs Api Backtest  Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "List Jobs",
-        "tags": [
-          "backtest"
-        ]
-      }
-    },
-    "/api/backtest/report/latest": {
-      "get": {
-        "operationId": "get_latest_report_api_backtest_report_latest_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response Get Latest Report Api Backtest Report Latest Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "Get Latest Report",
-        "tags": [
-          "backtest"
-        ]
-      }
-    },
-    "/api/backtest/run": {
-      "post": {
-        "operationId": "run_api_backtest_run_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BacktestRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response Run Api Backtest Run Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "Run",
-        "tags": [
-          "backtest"
-        ]
-      }
-    },
-    "/api/backtest/{job_id}": {
-      "get": {
-        "operationId": "get_job_api_backtest__job_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "job_id",
-            "required": true,
-            "schema": {
-              "title": "Job Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response Get Job Api Backtest  Job Id  Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "Get Job",
-        "tags": [
-          "backtest"
-        ]
-      }
-    },
-    "/api/backtest/{job_id}/cancel": {
-      "post": {
-        "operationId": "cancel_job_api_backtest__job_id__cancel_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "job_id",
-            "required": true,
-            "schema": {
-              "title": "Job Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response Cancel Job Api Backtest  Job Id  Cancel Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "Cancel Job",
-        "tags": [
-          "backtest"
-        ]
-      }
-    },
-    "/api/backtest/{job_id}/report": {
-      "get": {
-        "operationId": "get_job_report_api_backtest__job_id__report_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "job_id",
-            "required": true,
-            "schema": {
-              "title": "Job Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response Get Job Report Api Backtest  Job Id  Report Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "Get Job Report",
-        "tags": [
-          "backtest"
         ]
       }
     },
@@ -10494,6 +9880,7 @@
             "required": false,
             "schema": {
               "default": 5000,
+              "maximum": 20000,
               "title": "Limit",
               "type": "integer"
             }
@@ -14788,6 +14175,24 @@
     "/api/shadow/demote": {
       "post": {
         "operationId": "demote_factor_api_shadow_demote_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-confirm",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Confirm"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -14835,6 +14240,24 @@
     "/api/shadow/promote": {
       "post": {
         "operationId": "promote_factor_api_shadow_promote_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-confirm",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Confirm"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -15198,101 +14621,6 @@
         "summary": "System Load",
         "tags": [
           "system"
-        ]
-      }
-    },
-    "/api/tuning/run": {
-      "post": {
-        "operationId": "run_api_tuning_run_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TuningRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response Run Api Tuning Run Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "Run",
-        "tags": [
-          "tuning"
-        ]
-      }
-    },
-    "/api/tuning/{job_id}": {
-      "get": {
-        "operationId": "get_job_api_tuning__job_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "job_id",
-            "required": true,
-            "schema": {
-              "title": "Job Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "title": "Response Get Job Api Tuning  Job Id  Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ],
-        "summary": "Get Job",
-        "tags": [
-          "tuning"
         ]
       }
     },

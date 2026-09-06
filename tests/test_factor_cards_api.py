@@ -760,6 +760,7 @@ def test_learning_review_suggestion_returns_result_display(tmp_path, monkeypatch
             status="approved",
             note="approve display",
         ),
+        x_confirm="governance-change",
     )
 
     conn = sqlite3.connect(db_path)
@@ -794,6 +795,7 @@ def test_learning_review_suggestion_returns_result_display(tmp_path, monkeypatch
             status="rejected",
             note="reject display",
         ),
+        x_confirm="governance-change",
     )
 
     assert approved["ok"] is True
@@ -820,7 +822,7 @@ def test_learning_governance_run_returns_result_display(tmp_path, monkeypatch):
         lambda action, context=None: {"allowed": True, "reason": "ok"},
     )
 
-    result = learning_api.run_governance(None)
+    result = learning_api.run_governance(None, x_confirm="governance-change")
 
     assert result["auto_actions"] >= 0
     assert result["result_label"]
@@ -1276,6 +1278,7 @@ def test_learning_parameter_template_management_endpoints_work_end_to_end(tmp_pa
             suggestion_id=suggestion["item"]["suggestion_id"],
             note="apply",
         ),
+        x_confirm="governance-change",
     )
     active = learning_api.get_active_parameter_templates(None, factor_id="rsi_14")
     logs = learning_api.get_parameter_template_switch_logs(None, factor_id="rsi_14", limit=10)
@@ -2167,6 +2170,7 @@ def test_parameter_template_release_candidate_api_endpoints_work(tmp_path, monke
             status="approved",
             note="approve api candidate",
         ),
+        x_confirm="governance-change",
     )
     released = learning_api.release_parameter_template_offline_candidate(
         None,
@@ -2174,6 +2178,7 @@ def test_parameter_template_release_candidate_api_endpoints_work(tmp_path, monke
             candidate_id=candidate["candidate_id"],
             note="release api candidate",
         ),
+        x_confirm="governance-change",
     )
     rolled_back = learning_api.rollback_parameter_template_offline_candidate(
         None,
@@ -2181,6 +2186,7 @@ def test_parameter_template_release_candidate_api_endpoints_work(tmp_path, monke
             candidate_id=candidate["candidate_id"],
             note="rollback api candidate",
         ),
+        x_confirm="governance-change",
     )
 
     assert reviewed["ok"] is True
@@ -2664,6 +2670,7 @@ def test_apply_position_supervisor_template_switch_requires_governed_release_bin
                 suggestion_id="psv_test_apply",
                 note="pytest apply",
             ),
+            x_confirm="governance-change",
         )
         assert result["blocked"] is True
         assert result["risk_verdict"]["reason"] == "adaptive_execution_release_not_governed"

@@ -243,6 +243,10 @@ class RecoveryPositionStore:
                         WHEN excluded.status IN ('open', 'recovered') THEN 0.0
                         ELSE recovery_position_state.close_pnl
                     END
+                WHERE NOT (
+                    recovery_position_state.status IN ('closed', 'closed_replayed')
+                    AND excluded.status IN ('open', 'recovered')
+                )
                 """,
                 (
                     position_key,

@@ -1,7 +1,9 @@
 """标准库重试装饰器，兼容 tenacity 调用形态。"""
 from __future__ import annotations
-import time, functools
+import logging, time, functools
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 class TransientError(Exception): pass
 class _Stop:
@@ -44,7 +46,7 @@ def retry(stop=None,wait=None,retry=None,reraise=True,before_sleep=None,sleep=No
             last=None
             for attempt in range(1,attempts+1):
                 try: return fn(*a,**kw)
-                except BaseException as exc:
+                except Exception as exc:
                     last=exc
                     if not _should(exc): raise
                     if attempt>=attempts: break
@@ -54,6 +56,7 @@ def retry(stop=None,wait=None,retry=None,reraise=True,before_sleep=None,sleep=No
                         except: pass
                     if d>0: _sleep(d)
             if reraise and last is not None: raise last
+            logger.warning("retry_exhausted: %s", last)
             return None
         return wrap
     return dec
