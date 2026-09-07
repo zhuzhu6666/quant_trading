@@ -490,7 +490,7 @@ class ParameterTemplateService:
         # Startup restore is a legacy projection path.  In dual/enforce the
         # committed overlay and coordinator recovery are authoritative; a
         # registry-derived rebuild here would be a second commit authority.
-        if restore_only and governance_coordinator_mode() != "off":
+        if restore_only:
             return int(_rc_version())
 
         runtime_cfg = _rc_shared()
@@ -867,13 +867,6 @@ class ParameterTemplateService:
             raise ValueError(
                 f"template factor mismatch: {template_id} is not for {factor_id}"
             )
-        if governance_coordinator_mode() == "off":
-            return {
-                "ok": False,
-                "blocked": True,
-                "status": "governance_coordinator_off_unsupported",
-                "reason": "off_mode_removed_enforce_is_required",
-            }
         return self._activate_template_coordinated(
             factor_id=factor_id,
             template_id=template_id,
@@ -1116,35 +1109,12 @@ class ParameterTemplateService:
                 "mutation_id": mutation_id,
             }
 
-        mode = governance_coordinator_mode()
-        if mode == "off":
-            from backend.services.runtime_config_mutation import RuntimeConfigMutationService
-
-            mutation = RuntimeConfigMutationService(self.db_path).apply_patch(
-                dict(plan.patch),
-                source=plan.source,
-                run_id=plan.run_id,
-                actor=plan.actor,
-                action=plan.action,
-                reason=plan.reason,
-                v16_command_id=v16_command_id,
-                v16_target_agent=plan.target_agent,
-                v16_scope_type=plan.scope_type,
-                v16_scope_key=plan.scope_key,
-                v16_action=plan.action,
-                risk_reduction=True,
-            )
-        else:
-            mutation = plan.execute(self.db_path, transaction_writer=writer)
+        mutation = plan.execute(self.db_path, transaction_writer=writer)
         committed = bool(mutation.get("ok")) or str(mutation.get("status") or "") in {
             "applied",
             "committed",
             "committed_projection_degraded",
         }
-        if committed and mode == "off":
-            with self._conn() as conn:
-                writer(conn, str(mutation.get("mutation_id") or ""), None)
-                conn.commit()
         if committed:
             self._template_cache.clear()
         return {
@@ -2329,8 +2299,6 @@ class ParameterTemplateService:
                 (suggestion_id,),
             ).fetchone()
         if not row or str(row["status"] or "") != "approved":
-            return False
-        if governance_coordinator_mode() == "off":
             return False
         return bool(
             row["governance_eligible"]

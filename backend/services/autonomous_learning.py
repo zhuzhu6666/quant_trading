@@ -3481,7 +3481,7 @@ def materialize_entry_quality_governance_suggestions(
             getattr(cfg, "factor_signal_threshold", 0.30) or 0.30
         )
         balanced_demo = runtime_config_module.bounded_demo_mode_active(cfg)
-        weak_signal_cap = 0.55 if balanced_demo else 0.68
+        weak_signal_cap = 0.45 if balanced_demo else 0.68
         from backend.services.canonical_v2_reader import iter_training_sample_rows
         rows = iter_training_sample_rows(
             conn,

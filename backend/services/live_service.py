@@ -1560,7 +1560,7 @@ def _select_position_supervisor_binding_for_open(
     if mode not in {"shadow", "demo_execute"}:
         static_binding["evidence_refs"]["selection_status"] = "no_change"
         static_binding["evidence_refs"]["selection_reason"] = (
-            "selection_disabled" if mode == "off" else "live_execute_not_enabled"
+            "selection_disabled"
         )
         return static_binding
     if mode == "demo_execute" and not bounded_demo_mode_active(cfg):

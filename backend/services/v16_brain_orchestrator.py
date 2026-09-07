@@ -853,13 +853,6 @@ class V16BrainOrchestratorService:
         value = dict(projection or {})
         previous = str(current_mode or "off").strip().lower()
         target = str(target_mode or "").strip().lower()
-        if target == "live_execute":
-            return {
-                "ok": False,
-                "status": "selection_mode_not_admitted",
-                "reason": "live_execute_not_admitted_by_current_rollout",
-                "boundary": self.boundary(),
-            }
         if target != "demo_execute":
             return {
                 "ok": False,

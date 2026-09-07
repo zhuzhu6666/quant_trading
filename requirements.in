@@ -28,7 +28,6 @@ websockets==12.0
 python-multipart==0.0.32
 APScheduler==3.11.3
 
-backtrader==1.9.78.123
 scipy==1.18.0
 scikit-learn==1.9.0
 lightgbm==4.6.0

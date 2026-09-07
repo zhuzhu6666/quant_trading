@@ -35,7 +35,7 @@ VALID_RUNTIME_INCIDENT_MODES = frozenset(
     {"normal", "shadow_only", "no_new_risk", "only_close", "frozen"}
 )
 VALID_POSITION_SUPERVISOR_AUTO_SELECTION_MODES = frozenset(
-    {"off", "shadow", "demo_execute", "live_execute"}
+    {"off", "shadow", "demo_execute"}
 )
 OPERATOR_BOUNDED_DEMO_CONTROL_KEYS = frozenset(
     {
@@ -343,7 +343,7 @@ class RuntimeConfig:
     model_influence_config: Dict[str, Any] = field(default_factory=dict)
     supervisor_counterfactual_governance_horizon_minutes: int = 60
     supervisor_counterfactual_full_horizon_minutes: int = 120
-    supervisor_canary_mature_trade_count: int = 25
+    supervisor_canary_mature_trade_count: int = 20
     learning_effect_inconclusive_after_days: int = 7
     nursery_exploration_per_reason_daily_limit: int = 5
     nursery_exploration_global_daily_limit: int = 15

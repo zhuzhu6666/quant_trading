@@ -2814,13 +2814,6 @@ class PositionSupervisorGovernanceMutationService:
                 "status": "invalid_selection_mode",
                 "reason": f"unsupported_selection_mode:{target}",
             }
-        if target == "live_execute":
-            return {
-                "ok": False,
-                "committed": False,
-                "status": "selection_mode_not_admitted",
-                "reason": "live_execute_not_admitted_by_current_rollout",
-            }
 
         observed = str(
             getattr(
