@@ -3755,6 +3755,22 @@ class FactorGovernanceOrchestrator:
             before_cfg = runtime_config.shared().to_dict()
             try:
                 authority = dict(v16_authority or {})
+                if not str(authority.get("claim_token") or "") and str(authority.get("command_id") or ""):
+                    try:
+                        from backend.services.v16_command_gate import V16CommandGate
+
+                        claimed = V16CommandGate.claim(
+                            self.overlay.db_path,
+                            target_agent=str(authority.get("target_agent") or "factor_governance"),
+                            scope_type="factor_weight",
+                            scope_key="alpha_weight_policy",
+                            action="factor_governance_cycle",
+                            command_id=str(authority.get("command_id") or ""),
+                        )
+                        if claimed.get("allowed"):
+                            authority = {**authority, **claimed}
+                    except Exception:
+                        pass
                 binding = FactorV16Binding(
                     command_id=str(authority.get("command_id") or ""),
                     claim_token=str(authority.get("claim_token") or ""),
