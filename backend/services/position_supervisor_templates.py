@@ -306,9 +306,9 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
         "template_version": "default.v1",
         "template_role": "baseline",
         "status": "active",
-        "description": "Keep current supervisor behavior unchanged.",
+        "description": "Delay early thesis-broken full exits past normal M5 noise and prefer tighten evidence first.",
         "thresholds": {
-            "min_thesis_break_seconds": 0.0,
+            "min_thesis_break_seconds": 900.0,
             "min_closed_bars_high_vol_or_weak_trend": 1,
             "min_closed_bars_default": 2,
             "hard_risk_bypass": True,

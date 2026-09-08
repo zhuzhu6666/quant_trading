@@ -544,6 +544,12 @@ class FactorGovernanceOrchestrator:
             actions.extend(downweight_actions)
             if _catalog_refresh_required(downweight_actions):
                 catalog = build_factor_catalog(self.overlay.db_path)
+            restore_actions = self._restore_recovered_alpha_weight(
+                catalog, run, cfg=cfg, profile=profile
+            )
+            actions.extend(restore_actions)
+            if _catalog_refresh_required(restore_actions):
+                catalog = build_factor_catalog(self.overlay.db_path)
             disable_actions = self._disable_weak_live_alpha(
                 catalog, run, cfg=cfg, profile=profile
             )
@@ -3244,6 +3250,119 @@ class FactorGovernanceOrchestrator:
                         or ""
                     ),
                 },
+            ))
+        return actions
+
+    def _restore_recovered_alpha_weight(
+        self,
+        catalog: list[dict[str, Any]],
+        run: dict[str, Any],
+        *,
+        cfg: Any | None = None,
+        profile: FactorGovernanceProfile | None = None,
+    ) -> list[dict[str, Any]]:
+        """Recover one step toward the default weight for healthy low-weight alpha.
+
+        Symmetric counterpart of the 15% downweight step: when an alpha factor
+        is HEALTHY/WATCH with fresh evidence, model not weak, no pending
+        effect, and its live weight sits below half of the YAML default, lift
+        it one bounded step back toward the default. Single factor per cycle,
+        highest health score first.
+        """
+        cfg = cfg or runtime_config.shared()
+        profile = profile or self._governance_profile(cfg)
+        max_step = 0.15
+        defaults = dict(getattr(cfg, "factor_portfolio_weights", {}) or {})
+        overlay_weights = dict(getattr(runtime_config.shared(), "factor_portfolio_weights", {}) or {})
+        current_weights = dict(defaults)
+        for k, v in overlay_weights.items():
+            try:
+                current_weights[k] = float(v)
+            except Exception:
+                continue
+        candidates: list[dict[str, Any]] = []
+        for item in catalog:
+            if not item.get("used_in_score") or item.get("role") != "alpha":
+                continue
+            name = str(item["factor_id"])
+            default_w = float(defaults.get(name, 0.0) or 0.0)
+            if default_w <= 0:
+                continue
+            old_w = float(current_weights.get(name, item.get("weight", 0.0)) or 0.0)
+            if old_w >= default_w * 0.5 or old_w <= 0 and default_w <= 0:
+                continue
+            if old_w <= 0:
+                continue
+            status = str(item.get("health_status") or "")
+            score = float(item.get("health_score") or 0.0)
+            if status not in {"HEALTHY", "WATCH"} or score <= 0:
+                continue
+            health_age = 0.0
+            try:
+                health_age = max(0.0, __import__("time").time() - float(item.get("health_updated_at") or 0.0))
+            except Exception:
+                health_age = 0.0
+            if health_age > profile.health_max_age_seconds:
+                continue
+            model_evidence = self._model_governance_evidence(item, cfg)
+            if bool(model_evidence.get("weak_for_downweight")):
+                continue
+            if self._factor_has_pending_effect(name):
+                continue
+            target = min(default_w, old_w * (1.0 + max_step))
+            if target <= old_w:
+                continue
+            candidates.append({**item, "_restore_old": old_w, "_restore_target": target})
+        candidates.sort(key=lambda item: (-float(item.get("health_score") or 0.0), str(item.get("factor_id") or "")))
+        if not candidates:
+            return []
+        item = candidates[0]
+        name = str(item["factor_id"])
+        old_w = float(item["_restore_old"])
+        target = float(item["_restore_target"])
+        factor_configs = self._portfolio_configs(cfg)
+        evidence = {
+            "health_score": float(item.get("health_score") or 0.0),
+            "health_status": str(item.get("health_status") or ""),
+            "old_weight": old_w,
+            "target_weight": target,
+            "default_weight": float(defaults.get(name, 0.0) or 0.0),
+            "max_single_change": max_step,
+            "governance_profile": profile.name,
+        }
+        verdict = self._risk("update_weight", item, evidence)
+        if not verdict.allowed:
+            return [self._audit_action(run, item, "update_weight", "blocked_by_risk", evidence, verdict)]
+        weight_result = FactorWeightChangeService(self.overlay.db_path).execute(
+            source="factor_governance_recovered_restore",
+            producer="factor_governance",
+            run_id=str(run.get("run_id") or ""),
+            actor="system:factor_governance",
+            reason="recovered health governed restore toward default",
+            awe_patches=None,
+            weight_policy_weights={name: target},
+            factor_configs=factor_configs,
+            current_weights=current_weights,
+            fast=True,
+            evidence_by_factor={name: evidence},
+        )
+        decisions = dict(weight_result.get("admitted_decisions") or {})
+        if weight_result.get("status") != "applied" or not decisions:
+            decision = (weight_result.get("decisions") or {}).get(name)
+            return [self._audit_action(
+                run, item, "update_weight", "blocked_by_evidence", evidence, verdict,
+                before={"weight": old_w}, after={"weight": old_w},
+                result={"weight_result": weight_result.get("status")},
+            )]
+        actions: list[dict[str, Any]] = []
+        after_cfg = runtime_config.shared().to_dict()
+        for fname, decision in decisions.items():
+            fitem = next(fitem for fitem in catalog if fitem["factor_id"] == fname)
+            actions.append(self._audit_action(
+                run, fitem, "update_weight", "applied",
+                {**evidence, "decision": decision.to_api()}, verdict,
+                before={"weight": old_w}, after={"weight": target},
+                result={"mutation_id": str((weight_result.get("mutation") or {}).get("mutation_id") or "")},
             ))
         return actions
 

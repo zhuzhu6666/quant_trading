@@ -757,3 +757,37 @@ def test_trade_trace_exposes_position_supervisor_events(monkeypatch, tmp_path):
     assert result["summary"]["latest_supervisor_action"] == "reduce"
     assert result["position_supervisor"]["latest"]["event_type"] == "supervisor_reduce"
     assert result["position_supervisor"]["events"][0]["action"]["supervisor_verdict"]["action"] == "reduce"
+
+
+def test_default_template_buffers_thesis_break_close_into_tighten():
+    base = {
+        "position": {
+            "position_id": "buffer-main", "direction": 1,
+            "entry_price": 3000.0, "current_price": 2997.0,
+            "volume": 100.0, "unrealized_pnl": -3.0,
+            "current_price_state": "known", "pnl_state": "known",
+            "position_path_metrics_state": "known",
+            "sl": 2988.0, "tp": 3020.0,
+        },
+        "risk": {
+            "mfe": 0.0, "mae": 3.0, "holding_efficiency": 0.0,
+            "time_decay_score": 0.2, "thesis_status": "broken",
+            "regime_shift": "none", "thesis_broken_confirmations": 3,
+            "holding_timeout_ratio": 0.1, "giveback_ratio": 0.0,
+            "profit_capture_ratio": 0.0, "time_in_profit": 0.0,
+        },
+        "market": {
+            "regime_id": "trend=normal|volatility=low",
+            "volatility_state": "low", "trend_strength_state": "normal",
+        },
+    }
+
+    early = dict(base)
+    early["temporal_context"] = {"decision_ts": time.time(), "holding_seconds": 310.0, "completed_bars_after_entry": 1}
+    assert evaluate_position_supervisor(early)["action"] == "hold"
+
+    ready = dict(base)
+    ready["temporal_context"] = {"decision_ts": time.time(), "holding_seconds": 950.0, "completed_bars_after_entry": 4}
+    verdict = evaluate_position_supervisor(ready)
+    assert verdict["action"] == "tighten"
+    assert verdict["summary_reason"] == "thesis_broken_pending_buffer"

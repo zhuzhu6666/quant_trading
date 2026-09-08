@@ -599,10 +599,43 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         severity = "warn"
     elif supervisor_posture == "exit_commit":
         if thesis_break_ready and thesis_break_confirmed:
-            trigger_tags.append("thesis_broken")
-            action = "close"
-            summary_reason = "thesis_broken"
-            severity = "error"
+            buffer_min_delta = _safe_float(sl_policy.get("min_stop_tighten_points"), 0.01)
+            buffer_sl = _tightened_sl(
+                direction=direction,
+                entry_price=entry_price,
+                current_price=current_price,
+                current_sl=current_sl,
+                profit_capture_ratio=profit_capture_ratio,
+                sl_policy=sl_policy,
+            )
+            buffer_available = bool(
+                price_known
+                and pnl_known
+                and path_metrics_known
+                and entry_price > 0
+                and current_price > 0
+                and buffer_sl > 0
+                and _target_changed(
+                    current_sl, buffer_sl, direction=direction,
+                    target_kind="stop", min_delta=buffer_min_delta,
+                )
+            )
+            profit_seen = bool(mfe >= capture_mfe_floor)
+            if profit_seen and current_pnl > 0 and buffer_available:
+                trigger_tags.append("thesis_broken_buffered")
+                action = "tighten"
+                summary_reason = "thesis_broken_pending_buffer"
+                severity = "warn"
+            elif buffer_available and not profit_seen:
+                trigger_tags.append("thesis_broken_buffered")
+                action = "tighten"
+                summary_reason = "thesis_broken_pending_buffer"
+                severity = "warn"
+            else:
+                trigger_tags.append("thesis_broken")
+                action = "close"
+                summary_reason = "thesis_broken"
+                severity = "error"
         elif signal_reversal or regime_shift == "confirmed":
             trigger_tags.append("regime_shift_detected")
             action = "close"

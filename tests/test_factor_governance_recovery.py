@@ -1029,3 +1029,44 @@ def test_builtin_shadow_stays_observation_only_below_health_gate():
     )
     assert actions == []
     assert rc.shared().factor_signal_config["htf_trend_alignment"]["lifecycle_status"] == "SHADOW"
+
+
+def test_recovered_alpha_weight_restores_one_bounded_step(monkeypatch):
+    now = time.time()
+    cfg = RuntimeConfig(
+        autonomy_mode="demo_autonomous",
+        factor_signal_config={"ema_slope": {"enabled": True, "role": "alpha", "source": "builtin"}},
+        factor_portfolio_weights={"ema_slope": 0.5},
+    )
+    live_cfg = RuntimeConfig(
+        autonomy_mode="demo_autonomous",
+        factor_signal_config={"ema_slope": {"enabled": True, "role": "alpha", "source": "builtin"}},
+        factor_portfolio_weights={"ema_slope": 0.05},
+    )
+    catalog = [{
+        "factor_id": "ema_slope", "role": "alpha", "used_in_score": True,
+        "enabled": True, "weight": 0.05,
+        "health_status": "WATCH", "health_score": 65.0,
+        "health_n_obs": 2000, "health_updated_at": now,
+    }]
+    orch = FactorGovernanceOrchestrator.__new__(FactorGovernanceOrchestrator)
+    import types
+    orch.overlay = types.SimpleNamespace(db_path=":memory:")
+    orch._model_governance_evidence = lambda item, cfg: {"weak_for_downweight": False}
+    orch._factor_has_pending_effect = lambda name: False
+    from risk.policy_service import RiskVerdict as _RV
+    orch._risk = lambda action, item, evidence: _RV(True, "ok")
+    orch._active_audit_writer = None
+    orch._audit_action = lambda run, item, action, status, evidence, verdict, **kw: {"action": action, "status": status}
+    got = {}
+    class _Svc:
+        def __init__(self, *a, **k): pass
+        def execute(self, **kw):
+            got.update(kw)
+            return {"status": "applied", "admitted_decisions": {"ema_slope": types.SimpleNamespace(to_api=lambda: {"new_weight": 0.0575})},
+                    "mutation": {"mutation_id": "m1"}}
+    monkeypatch.setattr(governance_module, "FactorWeightChangeService", _Svc)
+    monkeypatch.setattr(governance_module.runtime_config, "shared", lambda: live_cfg)
+    actions = orch._restore_recovered_alpha_weight(catalog, {"run_id": "t"}, cfg=cfg)
+    assert got["weight_policy_weights"] == {"ema_slope": pytest.approx(0.0575)}
+    assert len(actions) == 1
