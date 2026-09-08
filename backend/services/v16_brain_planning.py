@@ -657,6 +657,8 @@ class BrainActionPlanEvaluatorService:
         if scope_type == "supervisor_template" and selected_scope == "supervisor":
             if supervisor.get("recommended_action") == "less_tighten" and safe_float(supervisor.get("confidence")) >= 0.6:
                 return "supportive"
+            if supervisor.get("recommended_action") == "keep" and safe_float(supervisor.get("confidence")) >= 0.6:
+                return "supportive"
             if supervisor.get("recommended_action") == "tighten" and safe_float(supervisor.get("confidence")) >= 0.6:
                 return "caution"
         delta = safe_float((comparison.get("learning_effects") or {}).get("avg_delta_reward"))

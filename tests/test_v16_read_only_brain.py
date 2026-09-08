@@ -1855,3 +1855,35 @@ def test_candidate_review_fingerprint_ignores_volatile_audit_timestamps():
     )
 
     assert second == first
+
+
+def test_v16_supervisor_keep_conclusion_is_supportive():
+    verdict = BrainActionPlanEvaluatorService._comparison_verdict(
+        scope_type="supervisor_template",
+        coverage_score=0.9,
+        comparison={
+            "posterior_arbitration": {
+                "selected_scope": "supervisor",
+                "supervisor_conclusion": {"recommended_action": "keep", "confidence": 0.8},
+            },
+            "learning_effects": {},
+            "trade_outcomes": {},
+        },
+    )
+    assert verdict == "supportive"
+
+
+def test_v16_supervisor_keep_low_confidence_falls_through():
+    verdict = BrainActionPlanEvaluatorService._comparison_verdict(
+        scope_type="supervisor_template",
+        coverage_score=0.9,
+        comparison={
+            "posterior_arbitration": {
+                "selected_scope": "supervisor",
+                "supervisor_conclusion": {"recommended_action": "keep", "confidence": 0.5},
+            },
+            "learning_effects": {},
+            "trade_outcomes": {},
+        },
+    )
+    assert verdict == "inconclusive"

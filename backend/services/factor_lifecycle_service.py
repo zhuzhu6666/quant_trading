@@ -363,6 +363,86 @@ class FactorLifecycleService:
         except Exception as exc:
             return self._failure(exc, name=name)
 
+    def register_supervisor_shadow(
+        self,
+        *,
+        template_id: str = "",
+        template_hash: str = "",
+        template_version: str = "",
+        base_template_id: str = "",
+        candidate_patch: Mapping[str, Any] | None = None,
+        actor: str = "system:supervisor_governance",
+        reason: str = "register durable supervisor shadow candidate",
+        evidence_refs: Mapping[str, Any] | None = None,
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        """Persist an observation-only SHADOW fact for a generated supervisor template.
+
+        Supervisor templates live outside the factor alpha namespace: they
+        never score direction and never take weight.  The row only gives the
+        generated template a durable governed identity so canary/promotion
+        machinery can observe it.  Origin supervisor keeps factor
+        backpressure, selection and health queries untouched.
+        """
+        try:
+            clean_id = str(template_id or "").strip()
+            if not clean_id.startswith("position_supervisor:auto_"):
+                return self._failure(
+                    FactorLifecycleError("supervisor_auto_template_required"),
+                    name=clean_id or "supervisor_template",
+                )
+            clean_hash = str(template_hash or "").strip().lower()
+            if not clean_hash:
+                return self._failure(
+                    FactorLifecycleError("supervisor_template_hash_required"),
+                    name=clean_id,
+                )
+            expression = json.dumps(
+                {
+                    "schema_version": "supervisor_shadow_identity.v1",
+                    "template_id": clean_id,
+                    "template_version": str(template_version or ""),
+                    "base_template_id": str(base_template_id or ""),
+                    "candidate_patch": dict(candidate_patch or {}),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            definition = FactorDefinition(
+                name=clean_id,
+                expression=expression,
+                factor_id=clean_id,
+                definition_fingerprint=clean_hash,
+                artifact_hash=clean_hash,
+                origin="supervisor",
+            )
+            current = self.get_state(factor_id=clean_id)
+            if current:
+                if (
+                    str(current.get("lifecycle_stage") or "")
+                    == FactorLifecycleStage.SHADOW.value
+                    and self._same_definition(current, definition)
+                ):
+                    return {
+                        "ok": True,
+                        "status": "already_shadow",
+                        "factor_id": clean_id,
+                        "lifecycle_stage": FactorLifecycleStage.SHADOW.value,
+                    }
+                raise FactorLifecycleError("factor_lifecycle_state_already_exists")
+            mutation = FactorLifecycleMutation(
+                definition=definition,
+                target_stage=FactorLifecycleStage.SHADOW,
+                actor=actor,
+                reason=reason,
+                source="factor_lifecycle.register_supervisor_shadow",
+                evidence_refs=dict(evidence_refs or {}),
+                idempotency_key=idempotency_key,
+            )
+            return self._execute(mutation, current=None)
+        except Exception as exc:
+            return self._failure(exc, name=str(template_id or "supervisor_template"))
+
     def reenroll_quarantined_builtin(
         self,
         *,
@@ -1525,10 +1605,16 @@ class FactorLifecycleService:
             )
             entry = {
                 **existing,
-                "role": str(existing.get("role") or "alpha"),
+                "role": (
+                    "context"
+                    if mutation.definition.origin == "supervisor"
+                    else str(existing.get("role") or "alpha")
+                ),
                 "source": (
                     SOURCE_BUILTIN
                     if mutation.definition.origin == SOURCE_BUILTIN
+                    else "supervisor"
+                    if mutation.definition.origin == "supervisor"
                     else SOURCE_DISCOVERED
                 ),
                 "expression": mutation.definition.expression,
@@ -1536,7 +1622,11 @@ class FactorLifecycleService:
                 "definition_fingerprint": mutation.definition.definition_fingerprint,
                 "artifact_hash": mutation.definition.artifact_hash,
                 "lifecycle_status": target.value,
-                "enabled": target is FactorLifecycleStage.ACTIVE or observation_enabled,
+                "enabled": (
+                    False
+                    if mutation.definition.origin == "supervisor"
+                    else target is FactorLifecycleStage.ACTIVE or observation_enabled
+                ),
                 "committed_mutation_id": str(mutation_id),
             }
             if declared_direction in {-1, 1}:
@@ -2064,6 +2154,11 @@ class FactorLifecycleService:
         name = str(state.get("factor_name") or "")
         stage = str(state.get("lifecycle_stage") or "")
         origin = str(state.get("origin") or "dsl").strip().lower()
+        if origin == "supervisor":
+            # Supervisor templates resolve via the template registry plus
+            # generated-from-state snapshots, never via the factor adapter.
+            # The lifecycle row itself is the durable birth fact.
+            return
         if origin == SOURCE_BUILTIN:
             # Native callables remain code-owned. Lifecycle mutations only
             # govern their RuntimeConfig admission and explicit weight; a

@@ -2601,11 +2601,60 @@ def build_position_supervisor_advisories(
         finally:
             conn.close()
 
+    enrolled: list[dict[str, Any]] = []
+    if materialize and suggestions:
+        # Birth hook: give each generated advisory candidate a durable
+        # SHADOW identity so canary/promotion machinery can observe it.
+        # Deterministic template IDs make repeats no-ops; bounded per run.
+        # Best-effort: enrollment never fails the advisory itself.
+        try:
+            from backend.services.factor_lifecycle_service import (
+                FactorLifecycleService,
+            )
+            from backend.services.position_supervisor_templates import (
+                position_supervisor_template_hash,
+            )
+            lifecycle = FactorLifecycleService(db_path)
+            for item in suggestions[:5]:
+                evidence = item.get("evidence")
+                if not isinstance(evidence, dict):
+                    continue
+                candidate = evidence.get("candidate_template")
+                if not isinstance(candidate, dict):
+                    continue
+                tid = str(candidate.get("template_id") or "")
+                if not tid.startswith("position_supervisor:auto_"):
+                    continue
+                try:
+                    result = lifecycle.register_supervisor_shadow(
+                        template_id=tid,
+                        template_hash=position_supervisor_template_hash(candidate),
+                        template_version=str(candidate.get("template_version") or ""),
+                        base_template_id=str(candidate.get("base_template_id") or ""),
+                        candidate_patch=dict(candidate.get("candidate_patch") or {}),
+                        actor="system:supervisor_governance",
+                        reason="supervisor advisory enrollment",
+                        evidence_refs={"suggestion_id": str(item.get("suggestion_id") or "")},
+                    )
+                except Exception as exc:
+                    result = {"ok": False, "status": "enrollment_failed:" + type(exc).__name__}
+                enrolled.append(
+                    {
+                        "suggestion_id": str(item.get("suggestion_id") or ""),
+                        "template_id": tid,
+                        "ok": bool(result.get("ok")),
+                        "status": str(result.get("status") or ""),
+                    }
+                )
+        except Exception:
+            pass
+
     return {
         "schema_version": "position_supervisor_advisory.v1",
         "day": day,
         "advisory_only": True,
         "materialized": bool(materialize),
+        "enrolled": enrolled,
         "replay_summary": {
             **replay_summary,
             "counterfactual_summary": counterfactual_summary,

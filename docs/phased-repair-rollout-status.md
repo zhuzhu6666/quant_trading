@@ -343,7 +343,7 @@ Lineage/timing: review repair 优先读取 canonical position-decision index 和
 
 Targeted verification: 监督/风险/生命周期/学习/readiness 针对性回归持续通过；本批新增严格 broker component truth、loop ownership 和旧 preview 净删测试。未用测试伪造 broker applied 事实；运行态重启、readiness、日志和 cTrader fresh reconcile 已验证，真实 supervisor broker lifecycle 仍待有仓位时证明。
 
-Remaining: 已有真实 supervisor close 的正向 lifecycle/反事实/成熟证据，但仍需 ≥10 笔合格仓位、`tighten/reduce` 覆盖和连续 effect observation；单测和 readiness 不替代该证据。历史 `284253609` 可在 service-backed backfill 后用于低权重 outcome learning，但不得作为 supervisor counterfactual 或治理证据。
+Remaining: 已有真实 supervisor close 的正向 lifecycle/反事实/成熟证据，但仍需 ≥10 笔合格仓位和连续 effect observation（tighten/reduce 覆盖已退役）；单测和 readiness 不替代该证据。历史 `284253609` 可在 service-backed backfill 后用于低权重 outcome learning，但不得作为 supervisor counterfactual 或治理证据。
 
 ### 2026-08-21 canonical-v2 follow-up：运行态迁移与旧事实清理完成
 
@@ -417,7 +417,7 @@ Targeted verification: 新增 tests/test_supervisor_confirmation_chain.py 11 pas
 
 Runtime verification: 2026-08-27 已核验重启加载；首批新持仓已产生非空 `recovery_meta.entry_regime`、`executed/applied` supervisor trace 和 counterfactual/maturity 记录。
 
-Unresolved live evidence: 目前仍只有少量 `close` 样本，需 ≥10 笔合格真实仓位并覆盖 `tighten/reduce`，再完成 supervisor template candidate/application/effect/rollback 的连续闭环；记忆索引本身不能替代该证据。
+Unresolved live evidence: 目前仍只有少量 `close` 样本，需 ≥10 笔合格真实仓位（close/tighten 均可），再完成 supervisor template candidate/application/effect/rollback 的连续闭环；记忆索引本身不能替代该证据。
 
 ## 4. 仍需真实运行证明
 

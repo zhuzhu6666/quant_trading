@@ -75,7 +75,7 @@
 - restart 后 deal replay ✅（`recovery_position_state 61` 最新 `285427255` 绑定完整，`health known`）；
 - 完整 `open -> protection -> close -> deal sync -> review -> sample` 生命周期 ✅（`trade_review 99 / trade_review_outcome 67 / full 46` 连续 2026-08-21→08-28，`position_transition 125`）。
 
-P1 runtime acceptance 已完成，转入常态观察；剩余仅 supervisor 治理样本量与 `tighten/reduce` 覆盖。
+P1 runtime acceptance 已完成，转入常态观察；剩余仅 supervisor 治理样本量（tighten/reduce 覆盖已退役）。
 
 ## 4. P2 canonical risk
 
@@ -163,7 +163,7 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 - `pg_job_queue_enable → verify` ✅（PG durable queue、enabled/active worker、真实消费和 lease/recovery 测试）
 
 仍未完成：
-- supervisor 治理闭环 `governance_eligible matured 5/10`（需 10）与 `tighten/reduce` 覆盖
+- supervisor 治理闭环 `governance_eligible matured`（需 10 笔真实干预，close/tighten 均可）
 - P6 Demo 自治毕业（需 100 笔/30 天/2 regimes/PF 等）
 
 ## 9. 全量测试策略

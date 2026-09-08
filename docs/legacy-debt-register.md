@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-06 (减法批+审计修复批受控重启完成 22:16;overlay 权威绑定已同日恢复,观察窗运行中)
+> Last verified: 2026-09-08 (09-08 12:54三服务重启后2h+ healthy/NRestarts=0/60min 0新ERROR/readiness blockers空/overlay current;减法批观察窗通过转resolved,supervisor SHADOW出生钩已加载待首候选)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -10,7 +10,8 @@
 
 ### 减法批删除与遗留观察（2026-09-06）
 
-- 状态：`monitoring`（代码、测试、OpenAPI 快照已同步;受控重启已于 2026-09-06 22:16 完成,60 分钟观察窗运行中）。
+- 状态：`resolved`（2026-09-08 只读复核：09-06 22:16与09-07 22:11两次重启观察窗均通过，09-08 12:54重启后2h+ healthy 1.0/NRestarts=0/60min 0新ERROR/readiness blockers空/overlay current/migration v33 ok；退出条件满足）。
+- ①-④转常态跟踪，不阻塞本批：①恢复仓保护preflight偏差待首轮真实恢复核对；②`record_evolution_decision`逐条写待PG写放大批统一收口；③GP同帧选择待enforce前补样本外帧；④迁移链两处漂移保留不修（灾备已退役）。
 - 已删除（用户决定"几乎没用过的直接去除,不新增功能"）：回测/模拟盘引擎用户入口（`main.py`、`cli/`、`/api/backtest`、`/api/tuning`、`/api/ab`、`backtest/tuning/ab_test` job kind、`execution/paper_*`、`execution/slippage.py` shim、`risk/pre_trade.py`、`risk/position.py`、`scripts/tune_risk_params.py`、`scripts/p1_e_ab_test.py`）;灾备/备份链（`deployment/windows-backup/`、`scripts/record_windows_*`、`backend/services/postgres_backup_health.py`、readiness `postgres_backup` 投影）;GVZ 执行门（`alpha/execution_gate` GVZ 分支、`data/news_cache` GVZ loader、settings/RuntimeConfig 键）与死代码（`_reset_session_state_for_new_day`、`_reset_business_alert_armed`、`PurgedWalkForward` no-op embargo）。canonical：`backtest_service`+`parity_replay` 保留为 `parameter_template_validation` 内部库（唯一调用方）;迁移链不作为灾备重建合同（用户决定不做灾备）。
 - 同批修复（审计来源）：事件降仓 below-min 不再抬回满仓（`live_tick_pipeline.build_effective_event_sizing_payload`）;裸仓/恢复仓自动补 `entry_protection_plan`（`_entry_protection_repair_candidates` 前置 pass,source=`recovered_no_protection`）;probation 记账接入 `_handle_closed_positions_after_tick`（权威 PnL + 仓位去重）;盘中触发阶梯 `next_session_open_ts=day_end`;回撤只计亏损;`tighten/reduce` policy 异常 fail-closed;incident 读取异常默认 `frozen`;`record_sample_row` 加 `created_at` 守卫;retry 改 `except Exception` 并记录终异常;canonical reader 仅缺表(42P01) fail-open;恢复仓 upsert 禁止 closed→open 复活;审计写突发批量化（单 UPDATE）;committed+pending 幂等重试即 `replay_projection`;回滚扫描 debug→error;job 心跳连续失败 >3 取消;学习 API 缓存 512 上限;shadow promote/demote 补 `X-Confirm`;退化因子输入 NaN 化（abstain）;shadow PnL 排除非有限值;IC 快照剔除决策 bar;open-quality holdout 标签如实化。
 - 剩余观察：① 恢复仓无保护缺口的新 plan 走 preflight 回撤距离（price±2%/3%）,与决策时 ATR 目标有偏差——首轮真实恢复后核对保护是否按期挂上;② 审计写突发根因仅批量化了 UPDATE 半边,`record_evolution_decision` 仍逐条写（evolution_ledger 无批量方法）;③ GP/因子发现同帧选择问题（审计 P1）未在本批修复,enforce 前必须补样本外帧;④ 迁移链与生产 schema 的两处漂移（`supervisor_evaluation` CHECK、`runtime_config_overlay` 列）保留不修——灾备已退役,仅在需要全新重建时成为阻断。原观察⑤（09-05 起 overlay 权威 `committed_mutation_unverified` 隔离）已于 2026-09-06 22:05 走唯一合法通道解决：Coordinator 同值 mutation `gmut_00f28a63`（`operator.overlay_authority_rebind`,no_change 分类免 V16）将 `committed_config_hash` 重绑到 awe 键移除后的当前载荷（`hash_compatibility=current`,全部 checks true）→ 5s overlay refresh 自动解闩（latch causes 清空、`safety_accepting_new_risk=True`）,learning worker 22:08 心跳自愈重开 mutation,backend 22:16 受控重启后 lifespan 恢复干净（readiness 四维 CLEAN）。重绑前后的死锁教训：worker quarantine 期间 mutation 被禁用,而 `_try_overlay_recovery` 只重验证不重绑——全量 config hash 因 base 缩容失配时无法自治恢复,必须 operator 走 Coordinator 通道。
@@ -18,11 +19,11 @@
 
 ### demo 放量批（只跑demo，2026-09-07 批准落地中）
 
-- 状态：monitoring（CVaR 已热生效，其余改代码暂存待重启）。
+- 状态：`monitoring`（2026-09-08 只读：09-07 22:11与09-08 12:54两次重启均一次成功NRestarts=0，overlay两次重绑后current，system_health healthy 1.0，live tick新鲜pos=0，readiness ready_for_live_execution/ autonomous_mutation true且blockers空；tighten硬门已退役，待selection首现候选）。
 - 已生效：risk_cvar_threshold_pct 2.5->3.5 经 Coordinator 合法通道 gmut_4cdc71001e23426ea1ca74559fc37cd1（demo 豁免，projection current，可逆）。
 - 暂存待重启：cooldown 3->2（risk/strategy/supervisor_reentry，保留loss熔断）、weak cap demo 0.55->0.45、canary 25->20；live_execute 选项及两处死门、parameter_templates off 三处旁路（含直写绕过）、backtrader 声明已删；APScheduler 验明真实启用保留。
 - 未能直达：protect 试点改走 08-11 静态基线先例：settings 切 profit_protection.v1；22:11 受控重启三服务一次成功（NRestarts=0），base 变更致 overlay 短暂隔离符合预期；22:23 经 Coordinator 同值重绑 gmut_f4da3b75（no_change 免 V16，hash 188a02 三处对齐）→ worker 22:25:38 自愈、backend 告警清零；22:28 起 system_health healthy 1.0，活循环新代际正常出 tick，CVaR 3.5 / cooldown 2 / canary 20 / weak-demo 0.45 / protect 模板全部加载。60 分钟观察窗 22:29-23:29 通过：0 新 ERROR、health 全程 healthy 1.0、隔离 0、活循环正常出 tick；22:56 首笔重启后开仓 LONG 286638811（score 0.77，intent 确认）持仓中；tighten 待持仓形成 MFE，protect 模板已加载。
-- 退出：受控重启后 overlay 重绑成功且 60 分钟 0 新 ERROR，首笔 tighten 出现后转 resolved。
+- 退出：受控重启后 overlay 重绑成功且 60 分钟 0 新 ERROR，tighten 硬门已于 2026-09-08 退役，转 resolved 待 selection 首现候选。
 
 ### 旧状态 schema 清理（历史记录）
 
@@ -36,7 +37,7 @@
 - canonical：不可变决策、订单/持仓生命周期、review、监督 trace、counterfactual 和训练样本分别由 `canonical_v2` 事件/样本 writer 与 reader 唯一负责；生产 Python 已无旧事实表 SQL、旧样本表 DDL 或旧监督执行 writer。
 - 已确认运行事实：`runtime.state_schema_migration` 已应用 v29/v30；`runtime.broker_execution_intent` 存在且当前无未决 intent；旧 `runtime` 事实表不存在。backend/learning worker 已重启并加载 `live_safety_plane_v2_mode=enforce`，cTrader fresh account/positions reconcile 成功，空仓且 `unknown_execution_count=0`。
 - 处理边界：旧事实数据已按用户授权清理，不保留兼容查询/写入路径；canonical 事件与审计记录不删除。临时迁移 dump 不再保留。
-- 剩余：首批真实 supervisor close 已完成 lifecycle、trace、counterfactual 和 maturity 的部分闭环，但仍需达到治理验收样本量并覆盖 `tighten/reduce`；这不影响旧路径退役状态。
+- 剩余：首批真实 supervisor close 已完成 lifecycle、trace、counterfactual 和 maturity 的部分闭环，但仍需达到治理验收样本量（tighten/reduce 覆盖要求已退役，见 supervisor 准入条）；这不影响旧路径退役状态。
 
 ### position supervisor 失效确认链四断线（2026-08-26 修复）
 
@@ -46,7 +47,7 @@
 - 已删除：无旧实现可删；删除的是"`signal_reversal`/`regime_shift`/`persistent_price_path` 是有效证据"的隐性假象。
 - 验证：新增 tests/test_supervisor_confirmation_chain.py 11 项；监督域+治理域回归 229 passed 零退化。
 - 运行证据：当前已有 15 条逻辑 supervisor trace，其中 8 条 `executed/applied`、5 条 deferred、2 条 failed；已有 5 条 full/matured supervisor trace，仍不能把失败或污染样本计入治理。
-- 剩余：仍需 ≥10 笔合格真实仓位、更多 `tighten/reduce` 覆盖和连续效果观察，才能完成模板治理闭环。
+- 剩余：仍需 ≥10 笔合格真实仓位和连续效果观察，才能完成模板治理闭环（tighten/reduce 覆盖已退役）。
 
 ### 单仓 supervisor template 开仓绑定（代码与重启验收已完成，真实生命周期证据待收口）
 
@@ -68,9 +69,9 @@
 
 - 状态：`monitoring`（2026-09-05 复核修正：验收线收紧为 **tighten 覆盖**——reduce 已按 2026-09-02 用户决定永久关闭（最小手数不可减），不得再作为验收项。2026-09-02：eligible 38 / matured 47，数量超 10 笔门槛；缺 tighten 真实执行证据——55 笔 trace 全为 close（thesis_broken/timeout/regime），盈利仓全由 broker TP 单触发；trend_hold 回吐信号缺失已修（5ba55b47 bar 级评估事件后干预需求可见）；准入仍缺真实干预执行，等待受控试点或策略变更。tighten 代码可达性已验证：`range_capture`/`transition_confirming` 姿态下盈利+回吐≥giveback_tighten_threshold 均有真实 tighten 路径；trend_hold 盈利仓按设计只打标不动作）
 - canonical：原始事实由 `canonical_v2.supervisor_trace/counterfactual_review` 承载，学习资格由 `canonical_v2.training_sample_row` 承载，经验检索使用 `experience_memory`，V16 检索/后验使用 `brain_memory` 和 `posterior_arbitration`。
-- 当前（2026-08-28 只读）：`canonical_v2.training_sample_row` 10294 行，`supervisor_execution_trace 9369` 中 `governance_eligible=1 & matured=5`（阈值 ≥10，仅 5 笔：另 4 笔 `full/matured/not_eligible` 等待治理），`pending 2085 + excluded 6598` 占 93%；`canonical_v2.event supervisor_trace 15`（近 2 天 8 笔），`counterfactual_review 33`；`brain_memory 160`（counterfactual 3/posterior 1/semantic 116）、`experience_memory 62` 已入；`position_supervisor_selection.v1` 仍 `insufficient_evidence/candidate_count=0/fresh`，`brain_governance_candidate_review bridge_ready 8/517`，`learning_application_log 21 (observing 9/inconclusive 8/reinforced 3)` 无 supervisor application。自动开启代码已加载，记忆仍只能供检索和审查。
+- 当前（2026-09-08 只读）：`training_sample_row 12978`，`supervisor_execution_trace 9458`中`governance_eligible=1 & matured=53`（数量已超10笔门槛；`matured/full 96`，其余`pending 2755 + excluded 6607`）；`trade_review_outcome 224（eligible 1.0共162，08-28为67/46）`；`event supervisor_trace 104/counterfactual 136/broker_execution 440/position_transition 440/trade_review 256`；`brain_memory 294`、`experience_memory 219`；`selection.v1 candidate_count=0`但已有`profit_protection.v1` governed基线绑定（`bound`，此前`insufficient_evidence/off`），`origin=supervisor` lifecycle行0（出生钩已随09-08 12:54重启加载，待首个auto模板）。数量门已过，缺候选review→V16/Coordinator→effect/rollback连续链。
 - 自动开启：`off` 仅是无证据时的安全基线；证据投影达到资格后，由 learning worker 自动经 V16、RiskPolicy 和 Coordinator 切入有界 Demo，不需要人工再改一个模式开关。单条 brain memory、提案或未成熟后验仍不能直接授权。
-- 退出：`≥10 笔 governance_eligible matured supervisor_execution_trace` + `tighten` 覆盖（reduce 已永久关闭，见上）+ 候选 review、V16/Coordinator application、effect observation 和 rollback 连续可追溯；selection projection 新鲜且可解释；任何单条记忆不得直接改模板或放大交易权限。
+- 退出：`≥10 笔 governance_eligible matured supervisor_execution_trace` 真实干预（close/tighten 均可，tighten 硬门 2026-09-08 已退役：executed correct close 经 keep→supportive 计入干预证据）+ 候选 review、V16/Coordinator application、effect observation 和 rollback 连续可追溯；selection projection 新鲜且可解释；任何单条记忆不得直接改模板或放大交易权限。
 
 
 ### V16 parameter_template 通道（V16 链存在代码死点；learning 链可达）
@@ -86,18 +87,18 @@
 - 当前：① near_tp tighten 分支要求模板 `near_take_profit_action=protect`，default 模板配置 close（有意策略，protect 留作模板能力）；② trend_hold 回吐只打标签无动作——已修：`trend_hold_giveback_intervention_requested` 标记进评估事件；真 reduce 因最小手数不可减，按用户决定关闭（2026-09-02）；③ trend_hold 截胡 near_tp——已修：trend_hold 盈利仓 ≥92% 到止盈时走模板驱动路径（default close / protect tighten），与其它 posture 同语义
 - 退出：评估事件积累 ≥1 周后验证复盘可用性；真实 trend_hold 盈利仓 near-TP 动作样本 ≥10 后从 monitoring 转 resolved
 
-### dsl_auto SHADOW 积压 1838（2026-09-03 源头节流已生效，排空待收口）
+### dsl_auto SHADOW 积压 1712（2026-09-08 复核：1838→1712，源头节流持续生效，排空慢待收口）
 
-- 状态：`active`（背压口径已对齐 `factor_lifecycle_state`（2d9ebfdb），生产实测计数 1838、`can_register=false`；GP 注册停止直到积压 < 200）
+- 状态：`active`（2026-09-08 只读：`factor_lifecycle_state` origin dsl/shadow/discovered非终态1712、`can_register=false`；GP注册持续停止直到积压 < 200）
 - 问题事实：旧背压口径走 registry/canary_state 窄投影长期误报 0，dsl_auto 生成侧持续注册（每周期最多 10 个），
-  积压 1838 且 shadow 晋升门因 OOS PnL 全负实质关闭——队列只进不出。
+  积压 1712（09-03为1838）且 shadow 晋升门因 OOS PnL 全负实质关闭——队列只进不出。
 - canonical：入册节流唯一口径 = `factor_lifecycle_state` origin `dsl/shadow/discovered` 非终态行数；
   消化侧 = 治理周期收紧动作（2026-09-05 提额：retire ≤15/周期、disable ≤9/周期，此前 5/3——
   09-03~05 实测排空 14-80/天，提额后预期约 3 倍，<200 退出线预计 ~12 天可达）+ canary 晋升/退休。
 - 退出条件：`nonterminal_candidate_count < QUANT_CANARY_EVALUATION_LIMIT(200)` 且连续一周 GP 注册可正常进行。
-- 剩余观察：retire 提额后的实际排空速度。已知约束：`_retire_quarantined_discovered` 要求 `0 < health_score < 30`，
+- 剩余观察：09-03~08实测约25/天（1838→1712），低于提额后3倍预期；`canary SHADOW 925/CANARY_* 897/QUARANTINED 54`。已知约束：`_retire_quarantined_discovered` 要求 `0 < health_score < 30`，
   积压中健康分为 0（UNKNOWN）的因子不满足该条件，只能依赖模型 `weak_for_disable` 判定进入候选——这是排空速度的
-  最大不确定项；若 1838 → <200 耗时不可接受，再评估批量退休通道（需另行确认）。
+  最大不确定项；若 1712 → <200 耗时不可接受，再评估批量退休通道（需另行确认）。
 
 ### 治理周期回滚重放（2026-09-03 一次性裁定修复）
 
@@ -420,7 +421,7 @@
 - 状态：`active`（A3 盘点草案；学习主环切换为开仓证据 meta-labeling 后，以下对象失去存在理由，按批次退役）
 - canonical：本清单为唯一退役对象列表；替代对象为 3–6 个生产信号的最小健康监控 + `open_quality_lightgbm` live shadow 链（本批已接入 `live_service._evaluate_open_quality_model_veto` 无策略分支，mode=`live_shadow`，纯观察 fail-open）。
 - 剩余（按退役顺序）：
-  1. GP/canary 因子工厂宽度机器——`dsl_auto` SHADOW 积压（当前 1,838）排空后，退役 GP 注册、canary 阶梯批量评估、DSL 批量准入路径；
+  1. GP/canary 因子工厂宽度机器——`dsl_auto` SHADOW 积压（2026-09-08为1712）排空后，退役 GP 注册、canary 阶梯批量评估、DSL 批量准入路径；supervisor出生钩（`register_supervisor_shadow`，origin=supervisor隔离alpha/背压）已随09-08 12:54重启加载但生产0行，待首个auto模板；
   2. `backtrader` / `APScheduler` 依赖声明（各仅 1 处引用）——二选一：删除声明或真实启用，不得长期双挂；
   3. `backend/services/` 中 18 个 <120 行单调用方壳层——内联；
   4. `live_service.py`（12.6k 行）领域重力——按执行/恢复/投影拆分归主；
