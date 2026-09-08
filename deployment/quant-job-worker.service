@@ -10,8 +10,6 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/quant_trading
 Environment=PYTHONUNBUFFERED=1
-# Release-time static flag; keep aligned with config/settings.yaml.
-Environment=QUANT_PG_JOB_QUEUE_V2_ENABLED=1
 ExecStart=/home/ubuntu/quant_trading/.venv/bin/python /home/ubuntu/quant_trading/scripts/job_worker.py --global-limit 2 --kind-limit backtest=1 --kind-limit discover=1 --kind-limit tuning=1 --kind-limit ab_test=1 --kind-limit external_refresh=1 --kind-limit sync=1 --kind-limit factor_health=1 --kind-limit parameter_template_validation=1
 Restart=on-failure
 RestartSec=30

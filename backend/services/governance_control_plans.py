@@ -23,9 +23,9 @@ def governance_coordinator_mode() -> str:
     from backend.core.static_feature_flags import shared_static_feature_flags
 
     mode = str(
-        shared_static_feature_flags().governance_mutation_coordinator_v2_mode or "off"
+        shared_static_feature_flags().governance_mutation_coordinator_v2_mode or "enforce"
     ).strip().lower()
-    if mode not in {"off", "dual_record", "enforce"}:
+    if mode not in {"dual_record", "enforce"}:
         raise ValueError(f"invalid_governance_coordinator_mode:{mode}")
     return mode
 

@@ -31,17 +31,19 @@ def test_expansion_freeze_only_applies_outside_demo_modes() -> None:
     assert rc.bounded_demo_mode_active(
         rc.RuntimeConfig(autonomy_mode="live_candidate")
     ) is False
+    # Single-brake semantics: only the operator pause freezes expansion,
+    # in every mode including demo.
     assert rc.autonomy_expansion_freeze_applies(
-        rc.RuntimeConfig(autonomy_mode="demo_nursery", autonomy_expansion_frozen=True)
-    ) is False
-    assert rc.autonomy_expansion_freeze_applies(
-        rc.RuntimeConfig(autonomy_mode="demo_autonomous", autonomy_expansion_frozen=True)
-    ) is False
-    assert rc.autonomy_expansion_freeze_applies(
-        rc.RuntimeConfig(autonomy_mode="live_candidate", autonomy_expansion_frozen=True)
+        rc.RuntimeConfig(autonomy_mode="demo_nursery", governance_expansion_paused=True)
     ) is True
     assert rc.autonomy_expansion_freeze_applies(
-        rc.RuntimeConfig(autonomy_mode="live_candidate", autonomy_expansion_frozen=False)
+        rc.RuntimeConfig(autonomy_mode="demo_autonomous", governance_expansion_paused=True)
+    ) is True
+    assert rc.autonomy_expansion_freeze_applies(
+        rc.RuntimeConfig(autonomy_mode="live_candidate", governance_expansion_paused=True)
+    ) is True
+    assert rc.autonomy_expansion_freeze_applies(
+        rc.RuntimeConfig(autonomy_mode="live_candidate", governance_expansion_paused=False)
     ) is False
 
 
@@ -50,7 +52,6 @@ def test_global_governance_pause_applies_to_demo_and_defaults_off() -> None:
     assert rc.autonomy_expansion_freeze_applies(
         rc.RuntimeConfig(
             autonomy_mode="demo_autonomous",
-            autonomy_expansion_frozen=False,
             governance_expansion_paused=True,
         )
     ) is True
@@ -66,7 +67,7 @@ def test_demo_mode_cannot_bypass_freeze_on_effective_live_broker(monkeypatch) ->
             rc.RuntimeConfig(autonomy_mode="demo_autonomous")
         ) is False
         assert rc.autonomy_expansion_freeze_applies(
-            rc.RuntimeConfig(autonomy_mode="demo_autonomous", autonomy_expansion_frozen=True)
+            rc.RuntimeConfig(autonomy_mode="demo_autonomous", governance_expansion_paused=True)
         ) is True
     finally:
         reset_broker_connection_config_for_tests()
@@ -414,15 +415,3 @@ def test_autonomous_mutation_cannot_change_static_release_flags(
     assert result["forbidden_keys"] == [flag]
 
 
-def test_governance_acceleration_keys_stay_legacy_hash_excluded() -> None:
-    """The legacy set must equal exactly the keys added after the latest
-    committed overlay mutation (additive safe defaults, absent from the
-    overlay); older exclusions retire once a newer mutation binds them."""
-    expected = {
-        "factor_regime_prior_half_life_days": 30.0,
-        "factor_governance_rollback_scan_limit": 10,
-    }
-    assert set(rc.RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS) == set(expected)
-    for key, default in expected.items():
-        assert rc.RUNTIME_CONFIG_LEGACY_HASH_DEFAULTS[key] == default
-        assert getattr(rc.RuntimeConfig(), key) == default

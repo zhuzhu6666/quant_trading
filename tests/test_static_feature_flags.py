@@ -17,19 +17,11 @@ def test_static_flags_use_environment_precedence():
             "QUANT_LIVE_SAFETY_PLANE_V2_MODE": "shadow",
             "QUANT_CTRADER_EXECUTION_OUTCOME_V2_ENABLED": "true",
             "QUANT_GOVERNANCE_MUTATION_COORDINATOR_V2_MODE": "dual_record",
-            "QUANT_PG_JOB_QUEUE_V2_ENABLED": "1",
         },
     )
 
     assert flags.live_safety_plane_v2_mode == "shadow"
     assert flags.governance_mutation_coordinator_v2_mode == "dual_record"
-    assert flags.pg_job_queue_v2_enabled is True
-
-
-def test_pg_job_queue_defaults_off():
-    flags = StaticFeatureFlags.from_sources({}, {})
-
-    assert flags.pg_job_queue_v2_enabled is False
 
 
 def test_static_feature_flag_projection_is_stable_and_complete():
@@ -39,7 +31,6 @@ def test_static_feature_flag_projection_is_stable_and_complete():
     assert set(values) == {
         "live_safety_plane_v2_mode",
         "governance_mutation_coordinator_v2_mode",
-        "pg_job_queue_v2_enabled",
     }
     assert static_feature_flags_fingerprint(values) == static_feature_flags_fingerprint(
         dict(reversed(list(values.items())))

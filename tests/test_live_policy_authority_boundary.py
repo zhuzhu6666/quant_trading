@@ -120,7 +120,7 @@ def test_frozen_live_supervision_only_evaluates_projected_template(monkeypatch) 
     )
     cfg = SimpleNamespace(
         autonomy_mode="live_candidate",
-        autonomy_expansion_frozen=True,
+        governance_expansion_paused=True,
         timeframe="M5",
     )
     position = {

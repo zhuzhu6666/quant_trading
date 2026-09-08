@@ -28,7 +28,7 @@ def load_live_policy_controls(
 
     Compatibility is intentionally one-way and conservative:
 
-    * ``off``/``dual_record`` may retain already-applied legacy tightening
+    * ``dual_record`` may retain already-applied legacy tightening
       controls as ``legacy_quarantined``; callers whose action set mixes
       tightening and expansion must identify the tightening subset explicitly;
     * ``enforce`` requires ``applied_mutation_id`` to reference a committed
@@ -48,9 +48,9 @@ def load_live_policy_controls(
         except Exception:
             # Invalid release configuration must fail closed.
             return []
-    mode = str(coordinator_mode or "off").strip().lower()
+    mode = str(coordinator_mode or "enforce").strip().lower()
     strict = mode == "enforce"
-    if mode not in {"off", "dual_record", "enforce"}:
+    if mode not in {"dual_record", "enforce"}:
         return []
 
     columns = state_table_columns(conn, "policy_suggestion")

@@ -3264,7 +3264,7 @@ def test_supervisor_tighten_noop_is_deduplicated_before_risk_policy(monkeypatch)
         "tp": 4030.0,
         "volume": 100.0,
     }
-    cfg = SimpleNamespace(timeframe="M5", autonomy_expansion_frozen=False)
+    cfg = SimpleNamespace(timeframe="M5")
 
     for tick in (8, 9):
         assert live_service._run_position_supervision(

@@ -14,7 +14,7 @@ from typing import Any, Mapping
 
 
 SAFETY_PLANE_MODES = frozenset({"off", "shadow", "enforce"})
-GOVERNANCE_COORDINATOR_MODES = frozenset({"off", "dual_record", "enforce"})
+GOVERNANCE_COORDINATOR_MODES = frozenset({"dual_record", "enforce"})
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -28,8 +28,7 @@ def _as_bool(value: Any, default: bool = False) -> bool:
 @dataclass(frozen=True)
 class StaticFeatureFlags:
     live_safety_plane_v2_mode: str = "off"
-    governance_mutation_coordinator_v2_mode: str = "off"
-    pg_job_queue_v2_enabled: bool = False
+    governance_mutation_coordinator_v2_mode: str = "enforce"
 
     @classmethod
     def from_sources(
@@ -55,9 +54,9 @@ class StaticFeatureFlags:
         governance_mode = str(
             env.get(
                 "QUANT_GOVERNANCE_MUTATION_COORDINATOR_V2_MODE",
-                features.get("governance_mutation_coordinator_v2_mode", "off"),
+                features.get("governance_mutation_coordinator_v2_mode", "enforce"),
             )
-            or "off"
+            or "enforce"
         ).strip().lower()
         if governance_mode not in GOVERNANCE_COORDINATOR_MODES:
             raise ValueError(
@@ -67,12 +66,6 @@ class StaticFeatureFlags:
         return cls(
             live_safety_plane_v2_mode=safety_mode,
             governance_mutation_coordinator_v2_mode=governance_mode,
-            pg_job_queue_v2_enabled=_as_bool(
-                env.get(
-                    "QUANT_PG_JOB_QUEUE_V2_ENABLED",
-                    features.get("pg_job_queue_v2_enabled", False),
-                )
-            ),
         )
 
     def to_dict(self) -> dict[str, Any]:

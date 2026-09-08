@@ -425,13 +425,11 @@ class BackendReadinessService:
         )
 
         cfg = runtime_config()
-        configured_expansion_frozen = bool(getattr(cfg, "autonomy_expansion_frozen", True))
         governance_expansion_paused = governance_expansion_is_paused(cfg)
         effective_expansion_frozen = autonomy_expansion_freeze_applies(cfg)
         result: dict[str, Any] = {
             "schema_version": "learning_repair_readiness.v1",
             "expansion_frozen": effective_expansion_frozen,
-            "configured_expansion_frozen": configured_expansion_frozen,
             "governance_expansion_paused": governance_expansion_paused,
             "freeze_applies_to_current_mode": effective_expansion_frozen,
             "blocks_demo_governance": governance_expansion_paused,

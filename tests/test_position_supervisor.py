@@ -156,7 +156,7 @@ def test_position_supervisor_range_capture_allows_mature_giveback_recommendation
         }
     )
 
-    assert verdict["action"] == "reduce"
+    assert verdict["action"] == "close"
     assert verdict["summary_reason"] == "profit_giveback_after_mfe"
     assert verdict["evidence"]["supervisor_posture"] == "range_capture"
 
@@ -225,7 +225,7 @@ def test_position_supervisor_hard_risk_overrides_trend_hold():
     assert verdict["summary_reason"] == "hard_risk_active"
 
 
-def test_position_supervisor_recommends_reduce_after_large_giveback():
+def test_position_supervisor_holds_while_transition_confirming_despite_giveback():
     verdict = evaluate_position_supervisor(
         {
             "position": {

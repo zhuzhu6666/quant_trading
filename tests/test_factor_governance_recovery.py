@@ -254,7 +254,12 @@ def test_quarantine_review_unavailable_keeps_strict_path(monkeypatch):
     assert actions == []
 
 
-def test_coordinator_off_does_not_bypass_with_legacy_quarantine_patch(monkeypatch):
+def test_weak_factor_quarantine_goes_through_lifecycle_without_direct_overlay_write(
+    monkeypatch,
+):
+    """Off mode is retired: weak-factor quarantine always goes through the
+    lifecycle service.  The anti-bypass proof is that no direct overlay
+    write (_apply_runtime_patch) happens on this path."""
     now = time.time()
     rc.replace(RuntimeConfig(
         autonomy_mode="live_candidate",
@@ -295,7 +300,7 @@ def test_coordinator_off_does_not_bypass_with_legacy_quarantine_patch(monkeypatc
         {"run_id": "disable_test"},
     )
 
-    assert actions == [{"status": "blocked_by_evidence"}]
+    assert actions == [{"status": "applied"}]
     assert captured == []
 
 

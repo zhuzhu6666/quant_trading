@@ -320,8 +320,6 @@ def humanize_supervisor_reason(action: str, reason: str, evidence: dict[str, Any
         return "仓位已经接近原始止盈目标，但持仓证据仍然较强，系统建议先收紧保护并按模板决定是否延展止盈。"
     if reason == "near_stop_loss_preemptive_exit":
         return "仓位已经非常接近止损，且持仓证据偏弱，系统建议提前止损离场，不再等到被动打掉。"
-    if action == "reduce":
-        return "系统判断这笔仓位仍有逻辑，但不值得继续满仓承受同样风险，建议先降一部分。"
     if action == "tighten":
         return "系统判断仓位还没到必须退出，但保护应该更紧，不适合继续裸拿。"
     return "系统判断这笔仓位暂时仍可继续持有，没有看到足够强的主动收口信号。"
@@ -701,7 +699,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         and profit_protection_window_ready
     ):
         trigger_tags.append("profit_giveback_after_mfe")
-        action = "reduce"
+        action = "close"
         summary_reason = "profit_giveback_after_mfe"
         severity = "warn"
     elif thesis_status in {"broken", "confirmed_broken"}:
@@ -735,7 +733,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         )
     ):
         trigger_tags.append("time_decay_and_low_efficiency")
-        action = "reduce" if current_pnl > 0 else "close"
+        action = "close"
         summary_reason = "time_decay_and_low_efficiency"
         severity = "warn"
     elif supervisor_posture == "range_capture" and (
@@ -779,8 +777,6 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         confidence = 0.55 + _clamp(holding_efficiency * 0.35 + profit_capture_ratio * 0.1, 0.0, 0.35)
     elif action == "tighten":
         confidence = 0.60 + _clamp(giveback_ratio * 0.2 + max(0.0, timeout_ratio - 0.5) * 0.2, 0.0, 0.25)
-    elif action == "reduce":
-        confidence = 0.70 + _clamp(giveback_ratio * 0.2 + (0.5 - time_decay_score) * 0.25, 0.0, 0.2)
     elif action == "close":
         confidence = 0.82 + _clamp((1.0 - time_decay_score) * 0.15 + (0.15 if thesis_status == "broken" else 0.0), 0.0, 0.15)
     confidence = round(_clamp(confidence), 4)
@@ -810,19 +806,6 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
             )
         recommended_controls["close_reason"] = "supervisor_tighten"
         recommended_controls["protection_mode"] = "dynamic_tpsl" if can_extend_tp else "tightened_stop"
-    elif action == "reduce":
-        recommended_controls["reduce_fraction"] = 0.5
-        recommended_controls["close_reason"] = "supervisor_reduce"
-        recommended_controls["protection_mode"] = "partial_de_risk"
-        if current_pnl > 0:
-            recommended_controls["target_stop_loss"] = _tightened_sl(
-                direction=direction,
-                entry_price=entry_price,
-                current_price=current_price,
-                current_sl=current_sl,
-                profit_capture_ratio=max(profit_capture_ratio, 0.5),
-                sl_policy=sl_policy,
-            )
     elif action == "close":
         recommended_controls["close_reason"] = summary_reason
         recommended_controls["protection_mode"] = "full_exit"

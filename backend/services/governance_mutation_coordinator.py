@@ -302,9 +302,7 @@ def classify_governance_risk(before: Mapping[str, Any], target: Mapping[str, Any
             else:
                 (tightening if new_rank < old_rank else expansion).append(dotted)
             continue
-        if lower.endswith("autonomy_expansion_frozen") or lower.endswith(
-            "governance_expansion_paused"
-        ):
+        if lower.endswith("governance_expansion_paused"):
             if isinstance(old, bool) and isinstance(new, bool):
                 (tightening if new and not old else expansion).append(dotted)
             else:
@@ -1216,6 +1214,7 @@ class GovernanceMutationCoordinator:
                        SET status='committed', projection_status='pending',
                            target_config_version=?, target_config_hash=?,
                            committed_config_version=?, committed_config_hash=?,
+                           committed_overlay_hash=?,
                            committed_at=?, error_stage='', error_type='', error_message='',
                            updated_at=?
                        WHERE mutation_id=? AND status='prepared'""",
@@ -1225,6 +1224,9 @@ class GovernanceMutationCoordinator:
                     str(snapshot["config_hash"]),
                     int(snapshot["config_version"]),
                     str(snapshot["config_hash"]),
+                    # Domain-only mutations do not take overlay ownership;
+                    # the row keeps pointing at the older overlay intent.
+                    str(overlay_hash) if not plan.domain_only else "",
                     now,
                     now,
                     mutation_id,
@@ -1606,6 +1608,7 @@ class GovernanceMutationCoordinator:
                     target_config_hash TEXT NOT NULL DEFAULT '',
                     committed_config_version INTEGER NOT NULL DEFAULT 0,
                     committed_config_hash TEXT NOT NULL DEFAULT '',
+                    committed_overlay_hash TEXT NOT NULL DEFAULT '',
                     domain_hash TEXT NOT NULL DEFAULT '',
                     error_stage TEXT NOT NULL DEFAULT '',
                     error_type TEXT NOT NULL DEFAULT '',

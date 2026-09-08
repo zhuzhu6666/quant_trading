@@ -6451,107 +6451,6 @@ def materialize_portfolio_shadow_trades(
         conn.close()
 
 
-def maybe_auto_unfreeze_learning_repair(*, db_path: str | Path = STATE_DB) -> dict[str, Any]:
-    """Atomically release the repair freeze only after every safety gate passes."""
-    from backend.services.backend_readiness import BackendReadinessService
-    from backend.services.release_control import ReleaseControlService
-    from backend.services.governance_control_plans import AutonomyControlPlan
-    from config.runtime_config import (
-        autonomy_expansion_freeze_applies,
-        shared as runtime_config,
-    )
-
-    cfg = runtime_config()
-    if not autonomy_expansion_freeze_applies(cfg):
-        if bool(getattr(cfg, "autonomy_expansion_frozen", True)):
-            return {
-                "status": "demo_governance_not_frozen",
-                "ok": True,
-                "autonomy_mode": str(getattr(cfg, "autonomy_mode", "") or ""),
-                "configured_freeze_retained_for_non_demo": True,
-            }
-        return {"status": "already_unfrozen", "ok": True}
-    readiness = BackendReadinessService(db_path=db_path).build()
-    repair = dict(readiness.get("learning_repair") or {})
-    replay = dict(readiness.get("replay") or {})
-    drift = dict(readiness.get("config_runtime_drift") or {})
-    execution = dict(readiness.get("execution_semantics") or {})
-    conn = _connect(db_path, read_only=True)
-    try:
-        verification = _execute(
-            conn,
-            "SELECT payload_json, timestamp FROM evolution_events WHERE event_type='learning_closure_verification_passed' ORDER BY timestamp DESC LIMIT 1",
-        ).fetchone()
-        conflict_count = int(_execute(
-            conn,
-            "SELECT COUNT(*) AS n FROM policy_suggestion WHERE scope_type='position_supervisor_template' AND status IN ('approved','applied')",
-        ).fetchone()["n"] or 0)
-    finally:
-        conn.close()
-    checks = {
-        "learning_repair": bool(repair.get("ok")),
-        "replay": bool(replay.get("ok")),
-        "config_drift": not bool(drift.get("drift")) and not bool(drift.get("semantic_drift")),
-        "proposal_conflicts": conflict_count <= 1,
-        "broker_alignment": not bool(execution.get("blocking_components")),
-        "verification": verification is not None,
-    }
-    if not all(checks.values()):
-        return {"ok": False, "status": "freeze_retained", "checks": checks, "learning_repair": repair}
-
-    plan = AutonomyControlPlan(
-        patch={"autonomy_expansion_frozen": False},
-        source="learning_repair_auto_unfreeze",
-        actor="system:learning_repair_release",
-        action="auto_unfreeze_expansionary_autonomy",
-        run_id=f"learning_repair_unfreeze_{int(time.time())}",
-        reason="all learning repair, replay, canary, drift and broker-alignment gates passed",
-        scope_type="autonomy_control",
-        scope_key="autonomy_expansion_frozen",
-        target_agent="governance_control",
-        rollback={"autonomy_expansion_frozen": True},
-        evidence_refs={
-            "checks": checks,
-            "learning_repair": repair,
-            "verification_timestamp": (
-                float(verification["timestamp"] or 0.0) if verification is not None else 0.0
-            ),
-        },
-        current_mode=str(getattr(cfg, "autonomy_mode", "") or "manual"),
-        target_mode=str(getattr(cfg, "autonomy_mode", "") or "manual"),
-    )
-    try:
-        mutation = plan.execute(db_path)
-    except Exception as exc:
-        mutation = {
-            "ok": False,
-            "status": "governance_mutation_unavailable",
-            "reason": f"{type(exc).__name__}: {exc}",
-        }
-    if not mutation.get("ok"):
-        return {"ok": False, "status": "freeze_retained_mutation_failed", "checks": checks, "mutation": mutation}
-    release_service = ReleaseControlService(db_path)
-    release = release_service.start_release(
-        release_class="learning_closure_repair",
-        summary={"checks": checks, "learning_repair": repair, "mutation": mutation},
-        tests=[{"name": "learning_closure_verification", "status": "passed"}],
-        rollback_ref={"runtime_config_snapshot": mutation.get("snapshot") or mutation.get("config_snapshot") or {}},
-        created_by="system:learning_repair_release",
-        readiness=readiness,
-    )
-    release = release_service.finish_release(
-        str(release.get("run_id") or ""),
-        status="completed",
-        summary={"checks": checks, "learning_repair": repair, "mutation": mutation},
-        readiness=readiness,
-    )
-    conn = _connect(db_path)
-    try:
-        _insert_evolution_event(conn, "learning_repair_auto_unfrozen", {"checks": checks, "mutation": mutation, "release": release})
-        conn.commit()
-    finally:
-        conn.close()
-    return {"ok": True, "status": "auto_unfrozen", "checks": checks, "mutation": mutation, "release": release}
 
 
 def _produce_loss_streak_review_statement(db_path: str | Path = STATE_DB) -> dict[str, Any]:
@@ -6978,19 +6877,6 @@ def run_autonomous_learning_cycle(
         ),
         memory_profile,
     )
-    auto_unfreeze = _run_compact_learning_stage(
-        "learning_repair_auto_unfreeze",
-        (
-            (lambda: maybe_auto_unfreeze_learning_repair(db_path=db_path))
-            if mutation_allowed
-            else (lambda: {
-                "ok": False,
-                "status": str(mutation_block["status"]),
-                "reason": str(mutation_block["reason"]),
-            })
-        ),
-        memory_profile,
-    )
     finished_at = time.time()
     payload = {
         "schema_version": "autonomous_learning_cycle.v2",
@@ -7001,7 +6887,6 @@ def run_autonomous_learning_cycle(
         "stages": stages,
         "governance": governance,
         "demo_autonomy": demo_apply,
-        "learning_repair_auto_unfreeze": auto_unfreeze,
         "memory_profile": memory_profile,
     }
     conn = _connect(db_path)

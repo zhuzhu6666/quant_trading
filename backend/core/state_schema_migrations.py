@@ -188,6 +188,7 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(31, "align_factor_health", "0031_align_factor_health.sql"),
     StateSchemaMigration(32, "restore_jobs_primary_key", "0032_restore_jobs_primary_key.sql"),
     StateSchemaMigration(33, "factor_runtime_projection_primary_key", "0033_factor_runtime_projection_primary_key.sql"),
+    StateSchemaMigration(34, "governance_mutation_intent_overlay_hash", "0034_governance_mutation_intent_overlay_hash.sql"),
 )
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
 # Runtime code consumes the complete checked-in state contract.  A process

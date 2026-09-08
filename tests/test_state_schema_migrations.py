@@ -746,3 +746,11 @@ def test_ci_postgres_bootstrap_is_test_only_and_database_name_guarded() -> None:
     assert 'normalized.endswith("_test")' in source
     assert 'normalized.startswith("test_")' in source
     assert "run_state_schema_migrations" in source
+
+
+def test_v34_migration_adds_committed_overlay_hash_to_mutation_intent() -> None:
+    sql = STATE_SCHEMA_MIGRATIONS[-1].sql()
+
+    assert STATE_SCHEMA_MIGRATIONS[-1].version == 34
+    assert "governance_mutation_intent" in sql
+    assert "ADD COLUMN IF NOT EXISTS committed_overlay_hash" in sql

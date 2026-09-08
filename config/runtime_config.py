@@ -208,15 +208,12 @@ def operator_classic_builtin_factor_activation_exempt(
 def autonomy_expansion_freeze_applies(cfg: Any | None = None) -> bool:
     """Return whether the expansion freeze is effective for this runtime.
 
-    Demo accounts are the bounded exploration environment: expansionary
-    governance remains active there even when the global flag is kept set as a
-    fail-closed default for non-demo/live authority surfaces.
+    The legacy ``autonomy_expansion_frozen`` dual gate was retired: the
+    operator-owned ``governance_expansion_paused`` kill switch is the single
+    expansion brake and applies to every mode including demo.
     """
     current = cfg if cfg is not None else shared()
-    if governance_expansion_is_paused(current):
-        return True
-    bounded_demo = bounded_demo_mode_active(current)
-    return bool(getattr(current, "autonomy_expansion_frozen", True)) and not bounded_demo
+    return governance_expansion_is_paused(current)
 
 def governance_expansion_is_paused(cfg: Any | None = None) -> bool:
     """Return the all-mode operator kill-switch state.
@@ -330,14 +327,11 @@ class RuntimeConfig:
     live_autonomy_unlocked: bool = False
     live_autonomy_unlock_id: str = ""
     demo_learning_max_daily_trades: int = 30
-    # Effective only outside demo_nursery/demo_autonomous. Demo keeps governed
-    # exploration active while RiskPolicy/V16/effect rollback remain mandatory.
-    autonomy_expansion_frozen: bool = False
     # Operator-owned, all-mode expansion kill switch.  Autonomous services may
     # observe it but must never clear or rewrite it through their overlays.
     governance_expansion_paused: bool = False
-    # Scoped demo-only envelope for bounded model decision influence.  This is
-    # deliberately separate from ``autonomy_expansion_frozen`` so an operator
+    # Scoped demo-only envelope for bounded model decision influence.  It is
+    # independent of the operator expansion kill switch so an operator
     # can canary one validated model without thawing unrelated governance.
     demo_model_influence_enabled: bool = False
     model_influence_config: Dict[str, Any] = field(default_factory=dict)
@@ -812,26 +806,6 @@ RUNTIME_CONFIG_HASH_COMPAT_FIELDS = frozenset(
     {"factor_governance_model_min_factor_samples"}
 )
 
-# These fields were added after the latest committed runtime overlay
-# mutation existed in production (only that mutation's binding is checked).
-# An old mutation may be accepted only when the new fields are still at
-# their safe defaults and are absent from the persisted overlay; a later
-# mutation must bind the complete current config hash.  The set must equal
-# exactly the keys added after the latest committed mutation: older
-# exclusions retire once a newer mutation binds them, and keeping them
-# would strip keys the intent contains and break the comparison.
-RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS = frozenset(
-    {
-        # Regime prior decay + rollback scan budget (Phase 5): gate only
-        # new code paths, never reinterpret already-committed mutations.
-        "factor_regime_prior_half_life_days",
-        "factor_governance_rollback_scan_limit",
-    }
-)
-RUNTIME_CONFIG_LEGACY_HASH_DEFAULTS = {
-    "factor_regime_prior_half_life_days": 30.0,
-    "factor_governance_rollback_scan_limit": 10,
-}
 
 def canonical_runtime_config_payload(value: Any) -> Dict[str, Any]:
     """Return the stable config payload used by runtime-config hash bindings.
@@ -887,13 +861,6 @@ def runtime_config_hash(value: Any) -> str:
     )
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
-def legacy_runtime_config_hash_payload(value: Any) -> Dict[str, Any]:
-    """Project a config as it looked before the legacy-excluded fields existed."""
-
-    payload = canonical_runtime_config_payload(value)
-    for key in RUNTIME_CONFIG_LEGACY_HASH_EXCLUDED_FIELDS:
-        payload.pop(key, None)
-    return payload
 
 # ----- 单例管理 -----
 class _RuntimeConfigHolder:

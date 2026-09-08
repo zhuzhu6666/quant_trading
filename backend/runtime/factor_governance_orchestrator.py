@@ -1357,11 +1357,6 @@ class FactorGovernanceOrchestrator:
                     posterior_degraded_ids.append(factor_id)
                 activation_ids.append(factor_id)
 
-        from backend.services.governance_control_plans import (
-            governance_coordinator_mode,
-        )
-
-        mode = governance_coordinator_mode()
         restore_enabled = bool(
             getattr(cfg, "factor_governance_auto_restore_enabled", True)
         )
@@ -1430,7 +1425,7 @@ class FactorGovernanceOrchestrator:
                 if not regime_verdict.get("suitable"):
                     continue
                 active_zero_weight_ids.append(factor_id)
-        if restore_enabled and (mode == "off" or profile.balanced_demo):
+        if restore_enabled and profile.balanced_demo:
             for item in catalog:
                 factor_id = str(item.get("factor_id") or "")
                 entry = signal_cfg.get(factor_id)
@@ -1461,7 +1456,7 @@ class FactorGovernanceOrchestrator:
                     < profile.restore_min_health_score
                     or int(item.get("health_n_obs") or 0)
                     < profile.restore_min_n_obs
-                    or (mode != "off" and self._factor_has_pending_effect(factor_id))
+                    or self._factor_has_pending_effect(factor_id)
                 ):
                     continue
                 model = self._model_governance_evidence(item, cfg)
@@ -3441,44 +3436,29 @@ class FactorGovernanceOrchestrator:
                 )
                 continue
             try:
-                from backend.services.governance_control_plans import (
-                    governance_coordinator_mode,
+                # Native and discovered factors share one durable state
+                # machine. Builtin code stays registered, while its
+                # RuntimeConfig admission and weight become terminal.
+                adapter = RegistryAdapter.shared()
+                meta = adapter.get_meta(name) or {}
+                builtin = str(item.get("source") or "") == "builtin"
+                result = FactorLifecycleService(
+                    self.overlay.db_path,
+                    adapter=adapter,
+                ).quarantine(
+                    name=name,
+                    expression=(
+                        name if builtin else str(meta.get("description") or "")
+                    ),
+                    artifact_hash=str(meta.get("artifact_hash") or ""),
+                    actor="system:factor_governance",
+                    reason="weak factor removed from live alpha",
+                    evidence_refs=evidence,
+                    idempotency_key=(
+                        f"factor_weak_quarantine:{name}:"
+                        f"{run.get('run_id', '')}"
+                    ),
                 )
-
-                mode = governance_coordinator_mode()
-                if mode == "off":
-                    # A production governance mutation must not fall back to
-                    # a direct overlay write when the Coordinator is absent.
-                    # Keep the tightening decision auditable and fail closed.
-                    result = {
-                        "ok": False,
-                        "status": "governance_coordinator_required",
-                        "reason": "factor_quarantine_requires_coordinator",
-                    }
-                else:
-                    # Native and discovered factors share one durable state
-                    # machine. Builtin code stays registered, while its
-                    # RuntimeConfig admission and weight become terminal.
-                    adapter = RegistryAdapter.shared()
-                    meta = adapter.get_meta(name) or {}
-                    builtin = str(item.get("source") or "") == "builtin"
-                    result = FactorLifecycleService(
-                        self.overlay.db_path,
-                        adapter=adapter,
-                    ).quarantine(
-                        name=name,
-                        expression=(
-                            name if builtin else str(meta.get("description") or "")
-                        ),
-                        artifact_hash=str(meta.get("artifact_hash") or ""),
-                        actor="system:factor_governance",
-                        reason="weak factor removed from live alpha",
-                        evidence_refs=evidence,
-                        idempotency_key=(
-                            f"factor_weak_quarantine:{name}:"
-                            f"{run.get('run_id', '')}"
-                        ),
-                    )
             except Exception as exc:
                 result = {
                     "ok": False,
@@ -4969,17 +4949,7 @@ class FactorGovernanceOrchestrator:
         evidence: dict[str, Any],
         decision_id: str,
     ) -> str:
-        from backend.services.governance_control_plans import (
-            governance_coordinator_mode,
-        )
-
-        try:
-            coordinator_mode = governance_coordinator_mode()
-        except Exception:
-            # Invalid static authority must never fall through to a legacy
-            # executable suggestion write.
-            return ""
-        if coordinator_mode != "off" and status in {
+        if status in {
             "applied",
             "rolled_back",
             "projection_degraded",
@@ -5065,19 +5035,10 @@ class FactorGovernanceOrchestrator:
         result: dict[str, Any] | None,
         decision_id: str = "",
     ) -> None:
-        from backend.services.governance_control_plans import (
-            governance_coordinator_mode,
-        )
-
-        try:
-            if governance_coordinator_mode() != "off":
-                # In dual/enforce, applications/effects are written only by
-                # the domain transaction owned by the coordinator.  Audit
-                # callbacks must not synthesize a second application after
-                # commit (or after a degraded projection).
-                return
-        except Exception:
-            return
+        # Applications/effects are written only by the domain transaction
+        # owned by the coordinator.  Audit callbacks must not synthesize a
+        # second application after commit (or after a degraded projection).
+        return
         if action in STRUCTURAL_AUDIT_ACTIONS or str((result or {}).get("application_id") or ""):
             return
         before = before or {}

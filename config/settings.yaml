@@ -8,7 +8,6 @@ features:
   # be changed by autonomous governance or the generic config API.
   live_safety_plane_v2_mode: enforce
   governance_mutation_coordinator_v2_mode: enforce
-  pg_job_queue_v2_enabled: true
 ctrader:
   client_id_env: CTRADER_CLIENT_ID
   client_secret_env: CTRADER_CLIENT_SECRET
@@ -154,9 +153,6 @@ runtime:
   position_supervisor_switch_cooldown_bars: 3
   position_supervisor_max_switches_per_position: 2
   position_supervisor_selection_max_age_seconds: 900
-  # Fail-closed default for non-demo/live authority. Demo nursery/autonomous
-  # keeps governed exploration active through RuntimeConfig mode semantics.
-  autonomy_expansion_frozen: false
   # Operator-owned all-mode governance expansion kill switch. Observation,
   # research and explicit risk tightening remain available while paused.
   governance_expansion_paused: false

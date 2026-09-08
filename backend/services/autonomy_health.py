@@ -599,7 +599,11 @@ class AutonomyHealthService:
                     actor=actor,
                     confirm_thaw=False,
                 )
-                status = str(result.get("status") or ("applied" if result.get("ok") else "blocked"))
+                raw_status = str(result.get("status") or ("applied" if result.get("ok") else "blocked"))
+                # The coordinator writer reports committed; the retired
+                # direct writer reported applied.  Both mean the
+                # tightening landed, so the event keeps one vocabulary.
+                status = "applied" if raw_status == "committed" and bool(result.get("ok")) else raw_status
                 risk_verdict = dict(result.get("risk_verdict") or {})
                 mutation = dict(result.get("mutation") or {})
                 applied = bool(result.get("ok")) and status == "applied"

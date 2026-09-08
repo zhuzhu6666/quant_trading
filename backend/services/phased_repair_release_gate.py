@@ -20,22 +20,18 @@ TARGET_EXPECTED_FLAGS = {
     "supervisor_enforce": {
         "live_safety_plane_v2_mode": "enforce",
         "governance_mutation_coordinator_v2_mode": "dual_record",
-        "pg_job_queue_v2_enabled": False,
     },
     "governance_enforce": {
         "live_safety_plane_v2_mode": "enforce",
         "governance_mutation_coordinator_v2_mode": "dual_record",
-        "pg_job_queue_v2_enabled": False,
     },
     "pg_job_queue_enable": {
         "live_safety_plane_v2_mode": "enforce",
         "governance_mutation_coordinator_v2_mode": "enforce",
-        "pg_job_queue_v2_enabled": False,
     },
     "pg_job_queue_verify": {
         "live_safety_plane_v2_mode": "enforce",
         "governance_mutation_coordinator_v2_mode": "enforce",
-        "pg_job_queue_v2_enabled": True,
     },
 }
 
@@ -706,7 +702,6 @@ def collect_phased_release_preflight(
         "governance_mutation_coordinator_v2_mode": (
             static.governance_mutation_coordinator_v2_mode
         ),
-        "pg_job_queue_v2_enabled": static.pg_job_queue_v2_enabled,
     }
     try:
         local_unknown_count: int | None = len(unresolved_broker_outcome_mutations())

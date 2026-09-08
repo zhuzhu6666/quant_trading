@@ -112,9 +112,6 @@ class LiveAutonomyService:
             "autonomy_mode": str(getattr(cfg, "autonomy_mode", "") or "manual"),
             "live_autonomy_unlocked": bool(getattr(cfg, "live_autonomy_unlocked", False)),
             "live_autonomy_unlock_id": str(getattr(cfg, "live_autonomy_unlock_id", "") or ""),
-            "autonomy_expansion_frozen": bool(
-                getattr(cfg, "autonomy_expansion_frozen", True)
-            ),
             "governance_expansion_paused": bool(
                 getattr(cfg, "governance_expansion_paused", False)
             ),

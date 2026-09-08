@@ -800,44 +800,18 @@ class FactorWeightChangeService:
                 **plan,
                 **self._governance_error(stage="coordinator_mode", exc=exc),
             }
-        coordinated = coordinator_mode in {"dual_record", "enforce"}
-        reserved_admissions: dict[str, dict[str, Any]] = {}
         reservation_ids_by_factor: dict[str, str] = {}
         reservation_ids: list[str] = []
-        if coordinated:
-            # The read-only plan is revalidated under the coordinator's scope
-            # and global admission locks.  Nothing durable is written here.
-            batch_admission = {
-                "ok": True,
-                "status": "pending_governance_transaction",
-                "reserved_count": 0,
-                "transaction_owned": True,
-            }
-            admitted_decisions = dict(plan.get("admitted_decisions") or {})
-        else:
-            # Compatibility path for the release flag's off mode.  Its
-            # short-lived prepared rows remain recoverable by
-            # LearningApplicationStateService.recover_prepared().
-            try:
-                batch_admission = self.admission.reserve_batch(
-                    plan.get("admitted_decisions") or {},
-                    action="update_weight",
-                    bypass_for_risk_reduction=bypass_for_risk_reduction,
-                )
-            except Exception as exc:
-                return {**plan, **self._governance_error(stage="admission", exc=exc)}
-            reserved_admissions = dict(batch_admission.get("admissions") or {})
-            admitted_decisions = {
-                name: decision
-                for name, decision in (plan.get("admitted_decisions") or {}).items()
-                if bool((reserved_admissions.get(name) or {}).get("allowed"))
-            }
-            reservation_ids_by_factor = dict(batch_admission.get("reservations") or {})
-            reservation_ids = list(reservation_ids_by_factor.values())
-            plan["admissions"] = {
-                **dict(plan.get("admissions") or {}),
-                **reserved_admissions,
-            }
+        # The read-only plan is revalidated under the coordinator's scope
+        # and global admission locks.  Nothing durable is written here;
+        # admission reservations live inside the governance transaction.
+        batch_admission = {
+            "ok": True,
+            "status": "pending_governance_transaction",
+            "reserved_count": 0,
+            "transaction_owned": True,
+        }
+        admitted_decisions = dict(plan.get("admitted_decisions") or {})
         plan["admitted_decisions"] = admitted_decisions
         plan["proposed_weights"] = DecisionPolicy.to_weights(admitted_decisions)
         plan["batch_admission"] = batch_admission
@@ -918,57 +892,25 @@ class FactorWeightChangeService:
                 "evidence": evidence_by_factor.get(name) or {},
                 "v16_command_id": v16_command_id,
                 "experiment_reservation_id": str(
-                    (reserved_admissions.get(name) or {}).get("reservation_id") or ""
+                    (reservation_ids_by_factor.get(name) or "")
                 ),
             }
             details_by_factor[name] = details
-            if coordinated:
-                identity = {
-                    "schema": "factor_weight_application.v2",
-                    "source": source,
-                    "producer": producer,
-                    "run_id": run_id,
-                    "factor": name,
-                    "old_weight": float(decision.old_weight),
-                    "new_weight": float(decision.new_weight),
-                    "suggestion_ids": suggestion_ids_by_factor[name],
-                    "evidence": evidence_by_factor.get(name) or {},
-                }
-                application_ids[name] = _stable_id("lapp", identity)
-                reservation_ids_by_factor[name] = _stable_id(
-                    "learn_resv", {"application_id": application_ids[name]}
-                )
-            else:
-                try:
-                    application_ids[name] = self.applications.prepare(
-                        scope_key=name,
-                        old_weight=float(decision.old_weight),
-                        new_weight=float(decision.new_weight),
-                        suggestion_ids=suggestion_ids_by_factor[name],
-                        cycle_ts=cycle_ts,
-                        details=details,
-                    )
-                    self.admission.finalize_reservation(
-                        str(reservation_ids_by_factor.get(name) or ""),
-                        application_id=application_ids[name],
-                    )
-                except Exception as exc:
-                    self._release_reservations_safely(reservation_ids)
-                    for application_id in application_ids.values():
-                        self.applications.transition(
-                            application_id,
-                            status="mutation_failed",
-                            details_patch={
-                                "prepare_error": f"{type(exc).__name__}: {exc}"
-                            },
-                        )
-                    return {
-                        **plan,
-                        **self._governance_error(
-                            stage="prepare_application", exc=exc
-                        ),
-                        "applications": application_ids,
-                    }
+            identity = {
+                "schema": "factor_weight_application.v2",
+                "source": source,
+                "producer": producer,
+                "run_id": run_id,
+                "factor": name,
+                "old_weight": float(decision.old_weight),
+                "new_weight": float(decision.new_weight),
+                "suggestion_ids": suggestion_ids_by_factor[name],
+                "evidence": evidence_by_factor.get(name) or {},
+            }
+            application_ids[name] = _stable_id("lapp", identity)
+            reservation_ids_by_factor[name] = _stable_id(
+                "learn_resv", {"application_id": application_ids[name]}
+            )
 
         atomic_outcome: dict[str, Any] = {}
         governance_evidence_refs = {
@@ -1043,32 +985,31 @@ class FactorWeightChangeService:
                 "v16_posterior_fingerprint": v16_posterior_fingerprint,
                 "risk_reduction": bypass_for_risk_reduction,
             }
-            if coordinated:
-                mutation_kwargs.update(
-                    {
-                        "governance_idempotency_key": "factor-weight:v2:"
-                        + _fingerprint(
-                            {
-                                "source": source,
-                                "producer": producer,
-                                "run_id": run_id,
-                                "patch": patch,
-                                "evidence": governance_evidence_refs,
-                            }
-                        ),
-                        "governance_evidence_refs": governance_evidence_refs,
-                        "governance_evidence_fingerprint": (
-                            v16_evidence_fingerprint
-                            or _fingerprint(governance_evidence_refs)
-                        ),
-                        "governance_rollback": {
-                            "factor_portfolio_weights": {
-                                name: float(decision.old_weight)
-                                for name, decision in plan["admitted_decisions"].items()
-                            }
-                        },
-                        "governance_transaction_writer": transaction_writer,
-                    }
+            mutation_kwargs.update(
+                {
+                    "governance_idempotency_key": "factor-weight:v2:"
+                    + _fingerprint(
+                        {
+                            "source": source,
+                            "producer": producer,
+                            "run_id": run_id,
+                            "patch": patch,
+                            "evidence": governance_evidence_refs,
+                        }
+                    ),
+                    "governance_evidence_refs": governance_evidence_refs,
+                    "governance_evidence_fingerprint": (
+                        v16_evidence_fingerprint
+                        or _fingerprint(governance_evidence_refs)
+                    ),
+                    "governance_rollback": {
+                        "factor_portfolio_weights": {
+                            name: float(decision.old_weight)
+                            for name, decision in plan["admitted_decisions"].items()
+                        }
+                    },
+                    "governance_transaction_writer": transaction_writer,
+                }
                 )
             mutation = self._mutation_service().apply_patch(patch, **mutation_kwargs)
             if not self._mutation_committed(mutation):
@@ -1083,17 +1024,8 @@ class FactorWeightChangeService:
                     )
                 )
         except Exception as exc:
-            if not coordinated:
-                for application_id in application_ids.values():
-                    self.applications.transition(
-                        application_id,
-                        status="mutation_failed",
-                        details_patch={
-                            "mutation_error": f"{type(exc).__name__}: {exc}"
-                        },
-                    )
             atomic_batch = dict(atomic_outcome.get("batch_admission") or {})
-            if coordinated and atomic_batch:
+            if atomic_batch:
                 plan["batch_admission"] = atomic_batch
                 plan["admissions"] = {
                     **dict(plan.get("admissions") or {}),
@@ -1114,48 +1046,28 @@ class FactorWeightChangeService:
             return {
                 **plan,
                 **self._governance_error(stage="runtime_mutation", exc=exc),
-                "applications": application_ids if not coordinated else {},
-                "atomic_domain_commit": coordinated,
+                "applications": {},
+                "atomic_domain_commit": True,
             }
 
         transitions: dict[str, dict[str, Any]] = {}
-        if coordinated:
-            committed_domain = dict(mutation.get("domain_result") or atomic_outcome)
-            committed_batch = dict(committed_domain.get("batch_admission") or {})
-            if committed_batch:
-                plan["batch_admission"] = committed_batch
-                plan["admissions"] = {
-                    **dict(plan.get("admissions") or {}),
-                    **dict(committed_batch.get("admissions") or {}),
-                }
-            for name, application_id in application_ids.items():
-                transitions[name] = {
-                    "ok": True,
-                    "status": "applied",
-                    "effect_status": "observing",
-                    "application_id": application_id,
-                    "mutation_id": str(mutation.get("mutation_id") or ""),
-                    "atomic_commit": True,
-                }
-        else:
-            for name, application_id in application_ids.items():
-                try:
-                    transitions[name] = self.applications.transition(
-                        application_id,
-                        status="applied",
-                        details_patch={
-                            "applied_at": time.time(),
-                            "mutation_snapshot": mutation.get("snapshot") or {},
-                            "mutation_status": mutation.get("status") or "applied",
-                        },
-                    )
-                except Exception as exc:
-                    transitions[name] = {
-                        "ok": False,
-                        "status": "recovery_pending",
-                        "error": f"{type(exc).__name__}: {exc}",
-                        "application_id": application_id,
-                    }
+        committed_domain = dict(mutation.get("domain_result") or atomic_outcome)
+        committed_batch = dict(committed_domain.get("batch_admission") or {})
+        if committed_batch:
+            plan["batch_admission"] = committed_batch
+            plan["admissions"] = {
+                **dict(plan.get("admissions") or {}),
+                **dict(committed_batch.get("admissions") or {}),
+            }
+        for name, application_id in application_ids.items():
+            transitions[name] = {
+                "ok": True,
+                "status": "applied",
+                "effect_status": "observing",
+                "application_id": application_id,
+                "mutation_id": str(mutation.get("mutation_id") or ""),
+                "atomic_commit": True,
+            }
         return {
             **plan,
             "status": "applied",
@@ -1163,7 +1075,7 @@ class FactorWeightChangeService:
             "mutation": mutation,
             "applications": application_ids,
             "transitions": transitions,
-            "atomic_domain_commit": coordinated,
+            "atomic_domain_commit": True,
             "projection_ready": bool(mutation.get("ok")),
         }
 

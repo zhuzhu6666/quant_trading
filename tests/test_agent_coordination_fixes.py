@@ -214,11 +214,15 @@ def test_factor_weight_batch_reservation_respects_global_budget(tmp_path, monkey
         risk_check=lambda _plan: {"allowed": True, "reason": "test"},
     )
 
-    assert result["status"] == "applied"
-    assert len(result["applications"]) == 24
+    # Atomic single-writer contract: an over-budget batch is refused whole,
+    # never partially applied.  The budget still binds (24) and the
+    # rolled-back transaction leaves zero reservations behind.
+    assert result["status"] == "blocked_by_admission"
+    assert result["admission_status"] == "partial_batch_not_admitted"
+    assert result["applications"] == {}
+    assert result["atomic_domain_commit"] is True
     assert result["batch_admission"]["global_active_budget"] == 24
-    assert result["batch_admission"]["reserved_count"] == 24
-    assert service.admission.global_active_count() == 24
+    assert service.admission.global_active_count() == 0
 
 
 def test_candidate_review_skips_unchanged_evidence_and_expires_legacy_rows(tmp_path):

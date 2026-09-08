@@ -2371,7 +2371,7 @@ def test_auto_apply_position_supervisor_template_is_blocked_while_expansion_froz
     rc.replace(
         rc.RuntimeConfig(
             autonomy_mode="live_candidate",
-            autonomy_expansion_frozen=True,
+            governance_expansion_paused=True,
         )
     )
     db_path = tmp_path / "state.db"
@@ -2471,7 +2471,6 @@ def test_auto_apply_position_supervisor_template_requires_matching_shadow_trace(
     rc.replace(
         rc.RuntimeConfig(
             autonomy_mode="live_candidate",
-            autonomy_expansion_frozen=False,
             supervisor_canary_mature_trade_count=1,
         )
     )
@@ -2598,7 +2597,6 @@ def test_auto_apply_position_supervisor_template_excludes_unusable_canary_eviden
     rc.replace(
         rc.RuntimeConfig(
             autonomy_mode="live_candidate",
-            autonomy_expansion_frozen=False,
             supervisor_canary_mature_trade_count=1,
         )
     )
@@ -2679,7 +2677,6 @@ def test_demo_auto_applies_supervisor_template_without_mature_canary(tmp_path, m
     rc.replace(
         rc.RuntimeConfig(
             autonomy_mode="demo_nursery",
-            autonomy_expansion_frozen=True,
             supervisor_canary_mature_trade_count=50,
             position_supervisor_template_id="position_supervisor:auto_tpsl.active.v1",
         )
@@ -2751,7 +2748,6 @@ def test_demo_auto_supervisor_template_requires_matching_v16_command(tmp_path):
     rc.replace(
         rc.RuntimeConfig(
             autonomy_mode="demo_nursery",
-            autonomy_expansion_frozen=True,
             supervisor_canary_mature_trade_count=50,
         )
     )
@@ -3241,7 +3237,7 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert "position_supervisor_advisories" in result["stages"]
     assert result["stages"]["evidence_contract_repair"]["repaired"] == 1
     assert "position_supervisor_selection_projection" in result["stages"]
-    assert len(result["memory_profile"]) == 21
+    assert len(result["memory_profile"]) == 20
     assert result["stages"]["position_supervisor_auto_enable"]["status"] == (
         "waiting_for_selection_evidence"
     )

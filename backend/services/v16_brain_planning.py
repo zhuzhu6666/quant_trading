@@ -1317,14 +1317,6 @@ class BrainMediumImpactGovernanceService:
                     "updated_at": time.time(),
                 }
             candidate_proposal_stage = "governance_ready"
-            if (
-                mapped.get("scope_type") == "parameter_template"
-                and (
-                    not str(mapped.get("target_template_id") or "")
-                    or str(mapped.get("recommended_scope") or "") != "online_light"
-                )
-            ):
-                candidate_proposal_stage = "candidate_materialized"
             candidate_expected_effect = comparison
             if (
                 mapped.get("scope_type") == "factor"
@@ -1434,6 +1426,10 @@ class BrainMediumImpactGovernanceService:
     def _map_action(*, evaluation: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
         scope = str(evaluation.get("scope_type") or (plan.get("scope") or {}).get("scope_type") or "")
         if scope == "parameter_template":
+            # Route 2: the autonomous_learning chain owns this surface and the
+            # planner catalog no longer emits the scope.  This arm stays as a
+            # guard: without it such evaluations would fall through to the
+            # factor mapping below and masquerade as downweight candidates.
             return {"scope_type": "parameter_template", "scope_key": "online_light",
                     "policy_action": "switch_parameter_template", "risk_action": "switch_parameter_template",
                     "target_template_id": "", "recommended_scope": "online_light"}

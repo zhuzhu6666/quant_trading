@@ -121,7 +121,7 @@ def test_persistent_job_release_preflight_fails_closed_when_startup_fact_errors(
 def test_persistent_job_worker_capability_requires_fresh_final_process(monkeypatch):
     from backend.jobs.manager import JobManager
 
-    flags = {"pg_job_queue_v2_enabled": True}
+    flags = {"governance_mutation_coordinator_v2_mode": "enforce"}
     process_flags = {
         "schema_version": "static_feature_flags.v1",
         "values": flags,
@@ -158,8 +158,8 @@ def test_persistent_job_worker_capability_requires_fresh_final_process(monkeypat
 def test_persistent_job_worker_capability_fails_closed_for_stale_or_wrong_flags():
     from backend.jobs.manager import JobManager
 
-    expected_flags = {"pg_job_queue_v2_enabled": True}
-    loaded_flags = {"pg_job_queue_v2_enabled": False}
+    expected_flags = {"governance_mutation_coordinator_v2_mode": "enforce"}
+    loaded_flags = {"governance_mutation_coordinator_v2_mode": "dual_record"}
     payload = {
         "schema_version": "persistent_job_worker_capability.v1",
         "worker_id": "worker-a",
@@ -196,7 +196,7 @@ def test_persistent_job_worker_capability_reports_missing_record():
     conn = _Conn([])
 
     result = release_preflight.collect_persistent_job_worker_capability(
-        expected_flags={"pg_job_queue_v2_enabled": True},
+        expected_flags={"governance_mutation_coordinator_v2_mode": "enforce"},
         conn_factory=lambda: conn,
     )
 

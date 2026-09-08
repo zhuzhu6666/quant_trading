@@ -310,7 +310,6 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
 
     rc.replace(
         rc.RuntimeConfig(
-            autonomy_expansion_frozen=True,
             supervisor_canary_mature_trade_count=2,
             supervisor_counterfactual_governance_horizon_minutes=60,
         )
@@ -325,7 +324,6 @@ def test_learning_repair_scopes_maturity_to_current_canary_cohort(tmp_path):
     assert status["checks"]["canary_sample_count"] is True
     assert status["checks"]["canary_session_coverage"] is True
     assert status["checks"]["canary_regime_coverage"] is True
-    assert status["configured_expansion_frozen"] is True
     assert status["expansion_frozen"] is False
     assert status["blocks_demo_governance"] is False
     assert status["immature_counterfactual_count"] == 1
@@ -454,7 +452,6 @@ def test_learning_repair_tracks_active_applied_supervisor_cohort(tmp_path):
 
     rc.replace(
         rc.RuntimeConfig(
-            autonomy_expansion_frozen=True,
             supervisor_canary_mature_trade_count=1,
             supervisor_counterfactual_governance_horizon_minutes=60,
         )

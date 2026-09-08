@@ -96,7 +96,7 @@ def test_learning_worker_unit_preserves_fail_closed_process_boundary():
     assert service["CPUAffinity"] == "2 3"
 
 
-def test_job_worker_unit_keeps_pg_job_queue_enabled():
+def test_job_worker_unit_runs_without_release_flag_gate():
     service = _unit("quant-job-worker.service")["Service"]
 
     assert service["ExecStart"].endswith(
@@ -105,8 +105,8 @@ def test_job_worker_unit_keeps_pg_job_queue_enabled():
         "--kind-limit external_refresh=1 --kind-limit sync=1 "
         "--kind-limit factor_health=1 --kind-limit parameter_template_validation=1"
     )
-    # PG job queue v2 was enabled in production on 2026-08-31 (debt register
-    # JobManager item resolved); the unit must keep the queue on.
-    assert "Environment=QUANT_PG_JOB_QUEUE_V2_ENABLED=1" in (
+    # PG job queue v2 is always on since the static flag was retired: the
+    # unit must not carry a release-flag gate env anymore.
+    assert "QUANT_PG_JOB_QUEUE_V2_ENABLED" not in (
         UNIT_DIR / "quant-job-worker.service"
     ).read_text(encoding="utf-8")

@@ -72,18 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     from backend.core.logging import setup_logging
-    from backend.core.state_schema_migrations import STATE_SCHEMA_MIN_VERSION
-    from backend.core.static_feature_flags import shared_static_feature_flags
 
     setup_logging()
-    flags = shared_static_feature_flags()
-    if not flags.pg_job_queue_v2_enabled:
-        logger.warning(
-            "[job_worker] disabled; set release flag "
-            "QUANT_PG_JOB_QUEUE_V2_ENABLED=1 only after state schema minimum v{} passes",
-            STATE_SCHEMA_MIN_VERSION,
-        )
-        return 0
 
     from backend.jobs.capability import PersistentJobWorkerCapability
     from backend.jobs.handlers import persistent_job_handlers

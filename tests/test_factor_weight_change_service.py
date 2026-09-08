@@ -457,21 +457,20 @@ def test_weight_change_prepares_before_mutation_and_enters_observation(monkeypat
     assert result["status"] == "applied"
     assert len(mutation.calls) == 1
     application_id = result["applications"]["alpha_x"]
+    assert result["transitions"]["alpha_x"]["status"] == "applied"
+    assert result["transitions"]["alpha_x"]["effect_status"] == "observing"
+    assert result["transitions"]["alpha_x"]["atomic_commit"] is True
+    # Single-writer contract: the coordinator transaction owns durable
+    # application/effect rows; this layer only computes deterministic ids.
     conn = connect_sqlite(path, read_only=True)
     try:
         app = conn.execute(
-            "SELECT status, details_json FROM learning_application_log WHERE application_id=?",
-            (application_id,),
-        ).fetchone()
-        effect = conn.execute(
-            "SELECT effect_json FROM learning_application_effect WHERE application_id=?",
+            "SELECT status FROM learning_application_log WHERE application_id=?",
             (application_id,),
         ).fetchone()
     finally:
         conn.close()
-    assert app[0] == "applied"
-    assert json.loads(app[1])["application_state"]["status"] == "applied"
-    assert json.loads(effect[0])["status"] == "observing"
+    assert app is None
 
 
 def test_weight_change_marks_prepared_application_failed_when_mutation_interrupts(monkeypatch, tmp_path):
@@ -484,17 +483,17 @@ def test_weight_change_marks_prepared_application_failed_when_mutation_interrupt
     assert result["error_type"] == "RuntimeError"
     assert result["error"] == "mutation interrupted"
 
+    assert result["applications"] == {}
+    assert result["atomic_domain_commit"] is True
     conn = connect_sqlite(path, read_only=True)
     try:
         app = conn.execute("SELECT status FROM learning_application_log").fetchone()
-        effect = conn.execute("SELECT effect_json FROM learning_application_effect").fetchone()
     finally:
         conn.close()
-    assert app[0] == "mutation_failed"
-    assert effect is not None and json.loads(effect[0])["status"] == "superseded"
+    assert app is None
 
 
-def test_weight_change_releases_reservation_when_risk_check_crashes(monkeypatch, tmp_path):
+def test_weight_change_releases_nothing_outside_transaction_when_risk_check_crashes(monkeypatch, tmp_path):
     _path, service = _service(monkeypatch, tmp_path, _Mutation())
     released = []
     monkeypatch.setattr(service.admission, "release_reservations", lambda ids: released.extend(ids))
@@ -514,22 +513,23 @@ def test_weight_change_releases_reservation_when_risk_check_crashes(monkeypatch,
     assert result["status"] == "governance_error"
     assert result["error_stage"] == "risk"
     assert result["error_type"] == "ConnectionError"
-    assert len(released) == 1
+    assert released == []
 
 
-def test_weight_change_reports_admission_infrastructure_error(monkeypatch, tmp_path):
+def test_weight_change_does_not_consult_legacy_reserve_batch(monkeypatch, tmp_path):
     _path, service = _service(monkeypatch, tmp_path, _Mutation())
+    calls = []
     monkeypatch.setattr(
         service.admission,
         "reserve_batch",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError("postgres unavailable")),
+        lambda *_args, **_kwargs: calls.append(True),
     )
 
     result = _execute(service)
 
-    assert result["status"] == "governance_error"
-    assert result["error_stage"] == "admission"
-    assert result["error_type"] == "ConnectionError"
+    assert calls == []
+    assert result["status"] == "applied"
+    assert result["batch_admission"]["status"] == "pending_governance_transaction"
 
 
 def test_production_system_weight_change_preflights_v16_before_reservation(monkeypatch, tmp_path):

@@ -18,7 +18,6 @@ def _facts() -> dict:
         "flags": {
             "live_safety_plane_v2_mode": "enforce",
             "governance_mutation_coordinator_v2_mode": "dual_record",
-            "pg_job_queue_v2_enabled": False,
         },
         "service_states": {
             "quant-backend.service": "active",
@@ -279,7 +278,6 @@ def test_supervisor_enforce_preflight_passes_with_canonical_authority():
             {
                 "live_safety_plane_v2_mode": "enforce",
                 "governance_mutation_coordinator_v2_mode": "enforce",
-                "pg_job_queue_v2_enabled": True,
             },
         ),
     ],
@@ -426,7 +424,6 @@ def test_pg_job_queue_verify_requires_live_service_and_capability():
         {
             "live_safety_plane_v2_mode": "enforce",
             "governance_mutation_coordinator_v2_mode": "enforce",
-            "pg_job_queue_v2_enabled": True,
         },
     )
     facts["service_states"]["quant-job-worker.service"] = "inactive"

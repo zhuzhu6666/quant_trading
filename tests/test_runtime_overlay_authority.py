@@ -12,7 +12,6 @@ from backend.services.governance_mutation_coordinator import (
 from backend.services.runtime_config_overlay import (
     RuntimeConfigOverlayAuthorityError,
     RuntimeConfigOverlayService,
-    _governance_config_hash,
 )
 from config import runtime_config
 from config.runtime_config import RuntimeConfig
@@ -37,7 +36,7 @@ def _set_mode(monkeypatch, mode: str) -> None:
     )
 
 
-@pytest.mark.parametrize("mode", ["off", "dual_record", "enforce"])
+@pytest.mark.parametrize("mode", ["dual_record", "enforce"])
 def test_blank_legacy_overlay_is_quarantined_without_relaxing_existing_protection(
     tmp_path, monkeypatch, mode
 ):
@@ -75,7 +74,7 @@ def test_blank_legacy_overlay_is_quarantined_without_relaxing_existing_protectio
     assert caught.value.report["quarantine_projection"] == "legacy_behavior_preserved"
 
 
-@pytest.mark.parametrize("mode", ["off", "dual_record", "enforce"])
+@pytest.mark.parametrize("mode", ["dual_record", "enforce"])
 def test_committed_current_hash_bound_overlay_restores_in_every_mode(
     tmp_path, monkeypatch, mode
 ):
@@ -131,13 +130,15 @@ def test_committed_authority_accepts_promoted_runtime_field_compatibility_hash(
 
     assert restored["restored"] is True
     assert restored["config"].factor_governance_model_min_factor_samples == 37
-    assert restored["authority"]["checks"]["target_hash_bound"] is True
-    assert restored["authority"]["checks"]["committed_hash_bound"] is True
+    assert restored["authority"]["checks"]["overlay_content_bound"] is True
+    assert restored["authority"]["hash_compatibility"] == "overlay_content_hash"
 
 
-def test_committed_authority_accepts_legacy_hash_before_selection_fields(
+def test_pre_v34_intent_without_overlay_hash_falls_back_to_full_hash(
     tmp_path, monkeypatch
 ):
+    """Transition coverage: intents committed before v34 carry no overlay
+    content hash; the previous full-config comparison still verifies them."""
     _set_mode(monkeypatch, "dual_record")
     db_path = tmp_path / "state.db"
     base = RuntimeConfig()
@@ -156,18 +157,12 @@ def test_committed_authority_accepts_legacy_hash_before_selection_fields(
     )
     assert result["ok"] is True
 
-    legacy_payload = runtime_config.legacy_runtime_config_hash_payload(
-        runtime_config.config_from_overlay(
-            RuntimeConfigOverlayService(db_path).latest()["overlay"], db_path
-        ).to_dict()
-    )
-    legacy_hash = _governance_config_hash(legacy_payload)
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
             "UPDATE governance_mutation_intent "
-            "SET target_config_hash=?, committed_config_hash=? WHERE mutation_id=?",
-            (legacy_hash, legacy_hash, result["mutation_id"]),
+            "SET committed_overlay_hash='' WHERE mutation_id=?",
+            (result["mutation_id"],),
         )
         conn.commit()
     finally:
@@ -177,12 +172,11 @@ def test_committed_authority_accepts_legacy_hash_before_selection_fields(
 
     assert restored["restored"] is True
     assert restored["config"].position_supervisor_auto_selection_mode == "off"
-    assert restored["authority"]["hash_compatibility"] == "legacy_additive_fields"
-    assert restored["authority"]["checks"]["target_hash_bound"] is True
-    assert restored["authority"]["checks"]["committed_hash_bound"] is True
+    assert restored["authority"]["hash_compatibility"] == "legacy_full_hash"
+    assert restored["authority"]["checks"]["overlay_content_bound"] is True
 
 
-@pytest.mark.parametrize("mode", ["off", "dual_record", "enforce"])
+@pytest.mark.parametrize("mode", ["dual_record", "enforce"])
 def test_dangling_mutation_overlay_retains_only_derived_tightening_controls(
     tmp_path, monkeypatch, mode
 ):
@@ -261,7 +255,7 @@ def test_runtime_refresh_latches_and_keeps_legacy_overlay_read_only(
 ):
     from backend.services import live_safety_state
 
-    _set_mode(monkeypatch, "off")
+    _set_mode(monkeypatch, "dual_record")
     db_path = tmp_path / "state.db"
     service = RuntimeConfigOverlayService(db_path)
     service.apply_patch(
@@ -412,13 +406,12 @@ def test_runtime_refresh_retries_transient_projection_and_releases_exact_cause(
     assert runtime_config.shared_holder().get().governance_expansion_paused is True
 
 
-def test_register_shadow_projection_survives_base_hash_drift_via_key_compat(
+def test_register_shadow_projection_survives_base_drift_via_content_binding(
     tmp_path, monkeypatch
 ):
-    """A deploy that drifts the whole-config hash must not freeze new risk
-    when the committed automatic shadow projection's keys are untouched:
-    key-compat fallback keeps the projection authoritative until the next
-    register_shadow re-binds hashes."""
+    """A deploy that drifts the base config must not freeze new risk when the
+    committed overlay row is untouched: overlay-content binding verifies the
+    row independently of base drift."""
     _set_mode(monkeypatch, "dual_record")
     db_path = tmp_path / "state.db"
     base = RuntimeConfig()
@@ -448,18 +441,19 @@ def test_register_shadow_projection_survives_base_hash_drift_via_key_compat(
     assert restored["authority"]["authority"] == "committed_mutation"
     assert (
         restored["authority"]["hash_compatibility"]
-        == "auto_projection_key_compat"
+        == "overlay_content_hash"
     )
-    assert restored["authority"]["checks"]["target_hash_bound"] is True
-    assert restored["authority"]["checks"]["committed_hash_bound"] is True
+    assert restored["authority"]["checks"]["overlay_content_bound"] is True
     assert restored["config"].governance_expansion_paused is True
 
 
-def test_register_shadow_key_compat_refuses_foreign_source_and_dead_keys(
+def test_untouched_overlay_verifies_regardless_of_source_under_drift(
     tmp_path, monkeypatch
 ):
-    """Non-register_shadow sources and overlays with keys missing from the
-    current base must NOT pass the key-compat fallback."""
+    """Source-gated key-compat is retired with the whole-config binding: an
+    untouched overlay row verifies under base drift no matter which
+    committed source wrote it.  Tampering is covered by
+    test_direct_overlay_write_fails_closed_via_content_binding."""
     _set_mode(monkeypatch, "dual_record")
     db_path = tmp_path / "state.db"
     base = RuntimeConfig()
@@ -479,9 +473,11 @@ def test_register_shadow_key_compat_refuses_foreign_source_and_dead_keys(
     assert result["ok"] is True
     drifted_base = RuntimeConfig(factor_governance_model_min_factor_samples=41)
 
-    # Foreign source (operator_pause) must stay strictly hash-bound.
-    with pytest.raises(RuntimeConfigOverlayAuthorityError):
-        RuntimeConfigOverlayService(db_path).restore_on_startup(drifted_base)
+    restored = RuntimeConfigOverlayService(db_path).restore_on_startup(drifted_base)
+
+    assert restored["restored"] is True
+    assert restored["authority"]["hash_compatibility"] == "overlay_content_hash"
+    assert restored["config"].governance_expansion_paused is True
 
 
 def test_refresh_reloads_moved_yaml_base_before_latching(tmp_path, monkeypatch):
@@ -526,3 +522,63 @@ def test_refresh_reloads_moved_yaml_base_before_latching(tmp_path, monkeypatch):
 
     assert runtime_config.refresh_from_overlay(db_path, force=True) is True
     assert latched == []
+
+
+def test_direct_overlay_write_fails_closed_via_content_binding(
+    tmp_path, monkeypatch
+):
+    """Direct overlay writes still fail closed under content binding: a row
+    whose content no longer matches its stored hash latches, and a row
+    re-pointed at an unknown intent is unverified."""
+    _set_mode(monkeypatch, "dual_record")
+    db_path = tmp_path / "state.db"
+    base = RuntimeConfig()
+    runtime_config.register_overlay_base(base, db_path)
+    result = GovernanceMutationCoordinator(db_path).execute(
+        GovernanceMutationPlan(
+            patch={"governance_expansion_paused": True},
+            source="operator_pause",
+            actor="operator:test",
+            action="pause_governance_expansion",
+            control_surface="operator_governance_pause",
+            scope_type="operator_governance_pause",
+            scope_key="global",
+            run_id="tamper_probe",
+        )
+    )
+    assert result["ok"] is True
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE runtime_config_overlay SET mutation_id='gmut_deadbeef'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(RuntimeConfigOverlayAuthorityError) as caught:
+        RuntimeConfigOverlayService(db_path).restore_on_startup(base)
+    assert caught.value.report["reason"] == "committed_mutation_unverified"
+    assert caught.value.report["checks"]["intent_found"] is False
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT overlay_json FROM runtime_config_overlay"
+        ).fetchone()
+        import json as _json
+
+        overlay = _json.loads(row[0])
+        overlay["runtime_incident_mode"] = "frozen"
+        conn.execute(
+            "UPDATE runtime_config_overlay SET mutation_id=?, overlay_json=?",
+            (result["mutation_id"], _json.dumps(overlay, sort_keys=True)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(RuntimeConfigOverlayAuthorityError) as caught:
+        RuntimeConfigOverlayService(db_path).restore_on_startup(base)
+    assert caught.value.report["reason"] == "overlay_hash_mismatch"
