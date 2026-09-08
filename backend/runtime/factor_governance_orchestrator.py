@@ -1352,6 +1352,8 @@ class FactorGovernanceOrchestrator:
                     continue
                 if not self._activation_projection_ready(item):
                     continue
+                if float(item.get("health_rolling_ic") or 0.0) <= 0.0:
+                    continue
                 posterior = self._posterior_expansion_guard(
                     factor_id,
                     cfg=cfg,
@@ -3705,6 +3707,8 @@ class FactorGovernanceOrchestrator:
                 continue
             if not self._activation_projection_ready(item):
                 continue
+            if float(item.get("health_rolling_ic") or 0.0) <= 0.0:
+                continue
             model_evidence = self._model_governance_evidence(item, cfg)
             model_samples = int(model_evidence.get("sample_count") or 0)
             model_weak_samples = int(model_evidence.get("weak_sample_count") or 0)
@@ -3716,7 +3720,6 @@ class FactorGovernanceOrchestrator:
             candidates.append({**item, "_model_governance": model_evidence})
 
         candidates.sort(key=lambda item: (
-            0 if str(item.get("factor_id") or "") == "morning_evening_star" else 1,
             -float(item.get("health_score") or 0.0),
             -int(item.get("health_n_obs") or 0),
             str(item.get("factor_id") or ""),

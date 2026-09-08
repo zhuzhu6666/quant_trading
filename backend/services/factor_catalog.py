@@ -997,6 +997,7 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
             "health_score": float(h.get("score") or 0.0),
             "health_n_obs": int(h.get("n_obs") or 0),
             "health_updated_at": float(h.get("updated_at") or 0.0),
+            "health_rolling_ic": float(h.get("rolling_ic") or 0.0),
             "canary": canary.get(name, {}),
             "loaded_projection": runtime_projections.get(name, {}),
             "shadow_perf": shadow_perf.get(name, {}) if source in {"shadow", "discovered"} else {},

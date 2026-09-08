@@ -977,6 +977,7 @@ def test_healthy_builtin_shadow_is_activated_with_governed_initial_weight(monkey
             "health_status": "HEALTHY",
             "health_n_obs": 1000,
             "health_updated_at": time.time(),
+            "health_rolling_ic": 0.02,
             "factor_governance_shadow": {},
         }]
     first = orchestrator._activate_healthy_builtin_shadow(
@@ -1070,3 +1071,37 @@ def test_recovered_alpha_weight_restores_one_bounded_step(monkeypatch):
     actions = orch._restore_recovered_alpha_weight(catalog, {"run_id": "t"}, cfg=cfg)
     assert got["weight_policy_weights"] == {"ema_slope": pytest.approx(0.0575)}
     assert len(actions) == 1
+
+
+def test_builtin_activation_blocks_negative_ic(monkeypatch):
+    now = time.time()
+    cfg = RuntimeConfig(
+        autonomy_mode="demo_autonomous",
+        factor_signal_config={"fib_rejection_confirmation": {
+            "enabled": True, "role": "alpha", "source": "builtin",
+            "autonomous_activation": True, "lifecycle_status": "SHADOW"}},
+        factor_portfolio_weights={"fib_rejection_confirmation": 0.0},
+        factor_governance_builtin_activation_enabled=True,
+        factor_governance_builtin_activation_weight=0.05,
+    )
+    catalog = [{
+        "factor_id": "fib_rejection_confirmation", "role": "alpha",
+        "source": "builtin", "lifecycle_origin": "builtin",
+        "enabled": True, "lifecycle_status": "SHADOW", "lifecycle_generation": 2,
+        "health_status": "WATCH", "health_score": 64.58,
+        "health_n_obs": 2000, "health_updated_at": now,
+        "health_rolling_ic": -0.0108,
+        "runtime_admission": "projection_acknowledged",
+        "lifecycle_artifact_hash": "a" * 64,
+        "loaded_projection": {"loaded": True, "status": "loaded",
+                              "generation": 2, "artifact_hash": "a" * 64},
+        "factor_governance_shadow": {},
+    }]
+    orch = FactorGovernanceOrchestrator.__new__(FactorGovernanceOrchestrator)
+    import types
+    orch.overlay = types.SimpleNamespace(db_path=":memory:")
+    orch._model_governance_evidence = lambda item, cfg: {}
+    orch._factor_has_pending_effect = lambda name: False
+    orch._audit_action = lambda run, item, action, status, evidence, verdict, **kw: {"status": status}
+    actions = orch._activate_healthy_builtin_shadow(catalog, {"run_id": "t"}, cfg=cfg)
+    assert actions == []
