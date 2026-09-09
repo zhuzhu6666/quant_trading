@@ -755,6 +755,7 @@ def test_prepared_discovered_gp_candidate_reaches_preflight_and_activation(monke
         "normalizer": "zscore",
         "activation_canary": True,
         "health_rolling_ic": 0.2,
+        "health_recent_ic": 0.02,
         "health_status": "HEALTHY",
         "health_score": 80.0,
         "health_n_obs": 2000,
@@ -978,6 +979,7 @@ def test_healthy_builtin_shadow_is_activated_with_governed_initial_weight(monkey
             "health_n_obs": 1000,
             "health_updated_at": time.time(),
             "health_rolling_ic": 0.02,
+            "health_recent_ic": 0.02,
             "factor_governance_shadow": {},
         }]
     first = orchestrator._activate_healthy_builtin_shadow(
@@ -1091,6 +1093,41 @@ def test_builtin_activation_blocks_negative_ic(monkeypatch):
         "health_status": "WATCH", "health_score": 64.58,
         "health_n_obs": 2000, "health_updated_at": now,
         "health_rolling_ic": -0.0108,
+            "health_recent_ic": -0.01,
+        "runtime_admission": "projection_acknowledged",
+        "lifecycle_artifact_hash": "a" * 64,
+        "loaded_projection": {"loaded": True, "status": "loaded",
+                              "generation": 2, "artifact_hash": "a" * 64},
+        "factor_governance_shadow": {},
+    }]
+    orch = FactorGovernanceOrchestrator.__new__(FactorGovernanceOrchestrator)
+    import types
+    orch.overlay = types.SimpleNamespace(db_path=":memory:")
+    orch._model_governance_evidence = lambda item, cfg: {}
+    orch._factor_has_pending_effect = lambda name: False
+    orch._audit_action = lambda run, item, action, status, evidence, verdict, **kw: {"status": status}
+    actions = orch._activate_healthy_builtin_shadow(catalog, {"run_id": "t"}, cfg=cfg)
+    assert actions == []
+
+
+def test_builtin_activation_blocks_long_short_ic_divergence():
+    now = time.time()
+    cfg = RuntimeConfig(
+        autonomy_mode="demo_autonomous",
+        factor_signal_config={"diverged_factor": {
+            "enabled": True, "role": "alpha", "source": "builtin",
+            "autonomous_activation": True, "lifecycle_status": "SHADOW"}},
+        factor_portfolio_weights={"diverged_factor": 0.0},
+        factor_governance_builtin_activation_enabled=True,
+        factor_governance_builtin_activation_weight=0.05,
+    )
+    catalog = [{
+        "factor_id": "diverged_factor", "role": "alpha",
+        "source": "builtin", "lifecycle_origin": "builtin",
+        "enabled": True, "lifecycle_status": "SHADOW", "lifecycle_generation": 2,
+        "health_status": "WATCH", "health_score": 65.0,
+        "health_n_obs": 2000, "health_updated_at": now,
+        "health_rolling_ic": 0.02, "health_recent_ic": -0.01,
         "runtime_admission": "projection_acknowledged",
         "lifecycle_artifact_hash": "a" * 64,
         "loaded_projection": {"loaded": True, "status": "loaded",

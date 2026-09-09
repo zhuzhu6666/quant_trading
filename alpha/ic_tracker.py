@@ -97,12 +97,28 @@ class ICTracker:
             return 0.0
         return safe_corrcoef(vals[mask], rets[mask], min_samples=10)
 
+    def recent_ic(self, name: str, window: int = 500) -> float:
+        """近期窗口IC：只用最近 window 个观察，捕捉当前市况方向。"""
+        h = self._history.get(name)
+        if not h or len(h) < 30:
+            return 0.0
+        tail = list(h)[-max(30, int(window)):]
+        vals = np.array([v[0] for v in tail], dtype=np.float64)
+        rets = np.array([v[1] for v in tail], dtype=np.float64)
+        mask = ~(np.isnan(vals) | np.isnan(rets) | np.isinf(vals) | np.isinf(rets))
+        if mask.sum() < 10:
+            return 0.0
+        return safe_corrcoef(vals[mask], rets[mask], min_samples=10)
+
     def status(self, name: str) -> dict:
         """因子状态报告"""
         ic = self.rolling_ic(name)
+        recent = self.recent_ic(name)
         return {
             "factor": name,
             "rolling_ic": round(ic, 4),
+            "recent_ic": round(recent, 4),
+            "direction_agree": bool(ic > 0) == bool(recent > 0) and (ic != 0 and recent != 0),
             "n_obs": len(self._history.get(name, [])),
             "active": abs(ic) >= 0.02,
             "decay": "stable" if abs(ic) >= 0.1 else "fading" if abs(ic) >= 0.02 else "dead",

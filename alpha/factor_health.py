@@ -201,7 +201,8 @@ class FactorHealth:
 
         return FactorHealthStatus(
             factor=name, score=round(score, 2), status=status_str,
-            components=components, n_obs=n_obs, rolling_ic=round(ic, 4),
+            components={**components, "recent_ic": round(self.ic_tracker.recent_ic(name), 4)},
+            n_obs=n_obs, rolling_ic=round(ic, 4),
         )
 
     def evaluate_all(self) -> list[FactorHealthStatus]:

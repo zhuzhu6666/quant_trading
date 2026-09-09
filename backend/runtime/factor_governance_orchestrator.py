@@ -1354,6 +1354,8 @@ class FactorGovernanceOrchestrator:
                     continue
                 if float(item.get("health_rolling_ic") or 0.0) <= 0.0:
                     continue
+                if float(item.get("health_recent_ic") or 0.0) <= 0.0:
+                    continue
                 posterior = self._posterior_expansion_guard(
                     factor_id,
                     cfg=cfg,
@@ -3708,6 +3710,8 @@ class FactorGovernanceOrchestrator:
             if not self._activation_projection_ready(item):
                 continue
             if float(item.get("health_rolling_ic") or 0.0) <= 0.0:
+                continue
+            if float(item.get("health_recent_ic") or 0.0) <= 0.0:
                 continue
             model_evidence = self._model_governance_evidence(item, cfg)
             model_samples = int(model_evidence.get("sample_count") or 0)
