@@ -602,6 +602,10 @@ def scheduled_evolution_cycle(
         split_at = min(split_at, len(df) - 100)
         research_df = df.iloc[:split_at].copy()
         shadow_oos_df = df.iloc[split_at:].copy()
+        logger.info(
+            "[Evolve] mem after split: rss=%.1fMB df=%d research=%d oos=%d cols=%d",
+            _current_rss_mb(), len(df), len(research_df), len(shadow_oos_df), df.shape[1],
+        )
         if len(shadow_oos_df) < 100:
             report.error = f"insufficient shadow OOS bars: {len(shadow_oos_df)}"
             report.duration_sec = _time.time() - t0
@@ -748,6 +752,7 @@ def scheduled_evolution_cycle(
         if rollbacks:
             logger.info("[Evolve] canary rollback candidates: %s", rollbacks)
         cb("canary_done", 70, f"promotion candidates {len(promotions)}, rollback candidates {len(rollbacks)}")
+        logger.info("[Evolve] mem after canary: rss=%.1fMB", _current_rss_mb())
 
         # ── Step 5: IC 刷新 + 因子健康报告 ──
         cb("ic_refresh", 86, "refreshing factor IC tracking")
@@ -760,6 +765,7 @@ def scheduled_evolution_cycle(
                 ic_result.get("ic_changed_count", 0),
                 len(ic_result.get("errors", [])),
             )
+            logger.info("[Evolve] mem after ic_refresh: rss=%.1fMB", _current_rss_mb())
         except Exception as e:
             logger.debug("[Evolve] IC refresh skipped: %s", e)
 
@@ -787,6 +793,7 @@ def scheduled_evolution_cycle(
                 report_result.get("watch", 0),
                 report_result.get("decaying", 0),
             )
+            logger.info("[Evolve] mem after health: rss=%.1fMB", _current_rss_mb())
         except Exception as e:
             logger.debug("[Evolve] factor health report skipped: %s", e)
 
@@ -794,6 +801,7 @@ def scheduled_evolution_cycle(
         cb("weights", 88, "recomputing factor weights")
         report.weights_updated = _update_weights(df=df, apply=False)
         cb("weights_done", 95, "weights updated" if report.weights_updated else "weights unchanged")
+        logger.info("[Evolve] mem after weights: rss=%.1fMB", _current_rss_mb())
 
         _emit_evolution_story("cycle_complete", report.to_dict())
 
@@ -965,6 +973,18 @@ def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
 
 
 # ── 子步骤实现 ────────────────────────────────────────────────────────
+
+
+def _current_rss_mb() -> float:
+    """Best-effort current process RSS in MB (Linux /proc, stdlib only)."""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return round(float(line.split()[1]) / 1024.0, 1)
+    except Exception:
+        pass
+    return -1.0
 
 
 def _load_bars(symbol: str, timeframe: str, n_bars: int) -> pd.DataFrame | None:
