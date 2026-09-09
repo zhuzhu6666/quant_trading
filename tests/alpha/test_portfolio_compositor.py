@@ -344,3 +344,27 @@ class TestDefaultGPConfig:
         assert result.context_state["session_state"] == "us"
         assert result.redundancy_groups == {"osc": ["rsi_14", "stoch_k"]}
         assert result.effective_alpha_factor_count == result.n_active_alpha_factors == 2
+
+
+class TestRegimeRouting:
+    def _comp(self):
+        from alpha.portfolio_compositor import PortfolioCompositor
+        return PortfolioCompositor({
+            "di_spread": {"weight": 1.0, "role": "alpha", "tags": ["趋势"]},
+            "rsi_14": {"weight": 1.0, "role": "alpha", "tags": ["均值回归"]},
+        })
+
+    def test_trend_regime_excludes_oscillator(self):
+        c = self._comp()
+        r = c.compose({"di_spread": 1.0, "rsi_14": 1.0}, {"di_spread": 1.0, "rsi_14": 50.0}, regime_efficiency=0.08)
+        assert r.n_active_alpha_factors == 1
+
+    def test_chop_regime_excludes_trend(self):
+        c = self._comp()
+        r = c.compose({"di_spread": 1.0, "rsi_14": 1.0}, {"di_spread": 1.0, "rsi_14": 50.0}, regime_efficiency=0.01)
+        assert r.n_active_alpha_factors == 1
+
+    def test_no_regime_keeps_both(self):
+        c = self._comp()
+        r = c.compose({"di_spread": 1.0, "rsi_14": 1.0}, {"di_spread": 1.0, "rsi_14": 50.0})
+        assert r.n_active_alpha_factors == 2

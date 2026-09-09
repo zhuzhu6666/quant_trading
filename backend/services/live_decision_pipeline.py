@@ -179,11 +179,30 @@ def run_live_decision_pipeline(
     if hasattr(normalizer, "resolve_factor_values"):
         factor_values = normalizer.resolve_factor_values(factor_values)
     signals = dict(normalizer.normalize(factor_values) or {})
-    composite = compositor.compose(
-        signals,
-        factor_values,
-        timestamp=bar.get("time", time.time()),
-    )
+    regime_efficiency = None
+    try:
+        closes = getattr(engine, "_closes", None) or getattr(engine, "closes", None) or []
+        if len(closes) >= 60:
+            import numpy as _np
+            w = _np.asarray(closes[-60:], dtype=float)
+            gross = abs(float(w[-1] - w[0]))
+            net = float(_np.sum(_np.abs(_np.diff(w))))
+            regime_efficiency = gross / net if net > 0 else 0.0
+    except Exception:
+        regime_efficiency = None
+    try:
+        composite = compositor.compose(
+            signals,
+            factor_values,
+            timestamp=bar.get("time", time.time()),
+            regime_efficiency=regime_efficiency,
+        )
+    except TypeError:
+        composite = compositor.compose(
+            signals,
+            factor_values,
+            timestamp=bar.get("time", time.time()),
+        )
     confidence = calibrated_signal_confidence(float(getattr(composite, "score", 0.0) or 0.0))
     setattr(composite, "calibrated_confidence", confidence)
     if isinstance(getattr(composite, "context_state", None), dict):
