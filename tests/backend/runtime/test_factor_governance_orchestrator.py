@@ -1954,6 +1954,8 @@ def test_preflight_backoff_orders_recently_blocked_candidates_last(monkeypatch):
             "health_score": 80.0,
             "health_n_obs": 2000,
             "health_updated_at": now,
+            "health_rolling_ic": 0.03,
+            "health_recent_ic": 0.02,
             "factor_governance_shadow": {},
         },
         {
@@ -1974,6 +1976,7 @@ def test_preflight_backoff_orders_recently_blocked_candidates_last(monkeypatch):
             "lifecycle_config_hash": "c" * 64,
             "runtime_selection_fingerprint": "f" * 64,
             "health_rolling_ic": 0.03,
+            "health_recent_ic": 0.02,
             "canary": {"stage": "PROBATION"},
             "shadow_perf": {
                 "oos_bars": 1200,

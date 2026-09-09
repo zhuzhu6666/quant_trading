@@ -130,6 +130,8 @@ def _catalog_item(factor_id: str, **overrides) -> dict:
         "health_score": 80.0,
         "health_n_obs": 2000,
         "health_updated_at": now,
+        "health_rolling_ic": 0.03,
+        "health_recent_ic": 0.02,
         "runtime_admission": "projection_acknowledged",
         "loaded_projection": {
             "loaded": True,

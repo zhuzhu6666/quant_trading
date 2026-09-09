@@ -1423,3 +1423,79 @@ def factor_cot_extreme_signal(df):
     out[raw < -1.5] = 1.0
     out[np.isnan(raw)] = np.nan
     return out
+
+
+def _swing_points(high: "np.ndarray", low: "np.ndarray", k: int = 3):
+    n = len(high)
+    shi = np.full(n, np.nan)
+    slo = np.full(n, np.nan)
+    for i in range(k, n - k):
+        if high[i] == np.max(high[i - k:i + k + 1]):
+            shi[i] = high[i]
+        if low[i] == np.min(low[i - k:i + k + 1]):
+            slo[i] = low[i]
+    return shi, slo
+
+
+@factor_registry.register("market_structure_bos", "市场结构BOS/CHoCH (分形突破 +1/-1)")
+def factor_market_structure_bos(df, k: int = 3):
+    """收盘突破最近分形摆动点即结构信号，只用已收盘bar，突破需下一根确认方向。"""
+    if not all(col in df.columns for col in ("high", "low", "close")):
+        return np.full(len(df), np.nan)
+    high = np.asarray(df["high"], dtype=float)
+    low = np.asarray(df["low"], dtype=float)
+    close = np.asarray(df["close"], dtype=float)
+    shi, slo = _swing_points(high, low, k=k)
+    raw = np.full(len(df), np.nan)
+    last_hi = np.nan
+    last_lo = np.nan
+    for i in range(len(df)):
+        if np.isfinite(shi[i]):
+            last_hi = shi[i]
+        if np.isfinite(slo[i]):
+            last_lo = slo[i]
+        if i < k + 1:
+            continue
+        if np.isfinite(last_hi) and close[i] > last_hi and close[i - 1] <= last_hi:
+            raw[i] = 1.0
+        elif np.isfinite(last_lo) and close[i] < last_lo and close[i - 1] >= last_lo:
+            raw[i] = -1.0
+        else:
+            raw[i] = 0.0
+    out = np.full(len(df), np.nan)
+    out[0] = 0.0
+    for i in range(1, len(df)):
+        sig = raw[i - 1]
+        if not np.isfinite(sig) or sig == 0.0:
+            out[i] = 0.0
+            continue
+        if sig == 1.0 and close[i] <= close[i - 1]:
+            out[i] = 0.0
+        elif sig == -1.0 and close[i] >= close[i - 1]:
+            out[i] = 0.0
+        else:
+            out[i] = sig
+    return out
+
+
+@factor_registry.register("swing_distance", "摆动点距离 (位置 -1~+1)")
+def factor_swing_distance(df, k: int = 3):
+    """当前价在最近摆动高低区间中的位置，上沿+1、下沿-1。"""
+    if not all(col in df.columns for col in ("high", "low", "close")):
+        return np.full(len(df), np.nan)
+    high = np.asarray(df["high"], dtype=float)
+    low = np.asarray(df["low"], dtype=float)
+    close = np.asarray(df["close"], dtype=float)
+    shi, slo = _swing_points(high, low, k=k)
+    out = np.full(len(df), np.nan)
+    last_hi = np.nan
+    last_lo = np.nan
+    for i in range(len(df)):
+        if np.isfinite(shi[i]):
+            last_hi = shi[i]
+        if np.isfinite(slo[i]):
+            last_lo = slo[i]
+        if not (np.isfinite(last_hi) and np.isfinite(last_lo)) or last_hi <= last_lo:
+            continue
+        out[i] = float(np.clip(2.0 * (close[i] - last_lo) / (last_hi - last_lo) - 1.0, -1.0, 1.0))
+    return out
