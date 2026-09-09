@@ -368,3 +368,20 @@ class TestRegimeRouting:
         c = self._comp()
         r = c.compose({"di_spread": 1.0, "rsi_14": 1.0}, {"di_spread": 1.0, "rsi_14": 50.0})
         assert r.n_active_alpha_factors == 2
+
+
+class TestMomentumRouting:
+    def _comp(self):
+        from alpha.portfolio_compositor import PortfolioCompositor
+        return PortfolioCompositor({
+            "trend_f": {"weight": 1.0, "role": "alpha", "tags": ["趋势"]},
+            "mom_f": {"weight": 1.0, "role": "alpha", "tags": ["动量"]},
+            "osc_f": {"weight": 1.0, "role": "alpha", "tags": ["均值回归"]},
+        })
+
+    def test_mid_efficiency_kicks_momentum_only(self):
+        c = self._comp()
+        sigs = {"trend_f": 1.0, "mom_f": 1.0, "osc_f": 1.0}
+        vals = {"trend_f": 1.0, "mom_f": 1.0, "osc_f": 50.0}
+        r = c.compose(sigs, vals, regime_efficiency=0.03)
+        assert r.n_active_alpha_factors == 2

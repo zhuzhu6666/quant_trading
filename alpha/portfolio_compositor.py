@@ -84,7 +84,8 @@ class PortfolioCompositor:
     # 宏观层标签关键词 — 匹配 tags 中任意一个即归入 Macro Layer
     MACRO_TAGS = {"宏观", "COT", "央行", "持仓", "美元", "利率", "事件", "日历"}
 
-    TREND_TAGS = {"趋势", "动量", "高周期"}
+    TREND_TAGS = {"趋势", "高周期"}
+    MOMENTUM_TAGS = {"动量"}
     OSCILLATOR_TAGS = {"均值回归", "反转", "震荡"}
 
     def __init__(self, config: dict[str, Any]):
@@ -139,12 +140,16 @@ class PortfolioCompositor:
             tags = set(cfg.get("tags", []) or [])
             if regime_efficiency is not None:
                 is_trend = bool(tags & self.TREND_TAGS)
+                is_mom = bool(tags & self.MOMENTUM_TAGS)
                 is_osc = bool(tags & self.OSCILLATOR_TAGS)
                 if regime_efficiency >= 0.05:
-                    if is_osc and not is_trend:
+                    if is_osc and not (is_trend or is_mom):
                         continue
-                elif regime_efficiency < 0.02:
-                    if is_trend and not is_osc:
+                elif regime_efficiency >= 0.02:
+                    if is_mom and not is_trend:
+                        continue
+                else:
+                    if (is_trend or is_mom) and not is_osc:
                         continue
             all_weights[name] = w
             tags = cfg.get("tags", [])

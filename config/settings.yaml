@@ -229,7 +229,7 @@ runtime:
       redundancy_group: oscillator
       tags:
       - 技术
-      - 动量
+      - 均值回归
     adx:
       mode: zscore_tanh
       window: 100
