@@ -293,6 +293,7 @@ runtime:
       enabled: true
       lifecycle_status: ACTIVE
       health_gate_exempt: true
+      direct_activation: true
       source: builtin
       redundancy_group: volume_direction
       tags:

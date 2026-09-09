@@ -56,6 +56,10 @@ CLASSIC_DIRECTIONAL_FACTOR_IDS = (
     "macd_hist",
     "stoch_k",
     "rsi_14",
+    # Genesis-12 full release: price-action + volume classics rejoin the seed set.
+    "engulfing",
+    "pin_bar",
+    "obv_slope",
 )
 CLASSIC_DIRECTIONAL_FACTOR_WEIGHTS = {
     "di_spread": 1.75,
@@ -64,6 +68,9 @@ CLASSIC_DIRECTIONAL_FACTOR_WEIGHTS = {
     "macd_hist": 0.5,
     "stoch_k": 1.0,
     "rsi_14": 1.0,
+    "engulfing": 1.0,
+    "pin_bar": 0.8,
+    "obv_slope": 0.5,
 }
 
 def resolve_bounded_demo_mode(cfg: Any, broker_cfg: Any) -> bool:
@@ -389,7 +396,7 @@ class RuntimeConfig:
         "ema_slope":       {"mode": "zscore_tanh", "window": 50,  "min_samples": 30, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "trend", "tags": ["技术", "趋势"]},
         "supertrend_str":  {"mode": "zscore_tanh", "window": 50,  "min_samples": 30, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "trend", "tags": ["技术", "趋势"]},
         "keltner_width":   {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["技术", "波动率"]},
-        "obv_slope":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "source": "builtin", "redundancy_group": "volume_direction", "tags": ["量价"]},
+        "obv_slope":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "volume_direction", "tags": ["量价"]},
         # Volume / volume-MA 只有强弱，没有天然多空方向；保留为 context，
         # 避免“放量”被组合器误读为看多、“缩量”误读为看空。
         "vol_ma_ratio":    {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["量价", "成交量强度"]},
