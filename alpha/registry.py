@@ -475,7 +475,7 @@ def factor_htf_trend_alignment(df):
 
 
 @factor_registry.register("donchian_breakout_20", "Donchian(20) 突破压力 (-1 ~ +1)")
-def factor_donchian_breakout_20(df, period: int = 20):
+def factor_donchian_breakout_20(df, period: int = 50):
     """Directional breakout pressure, excluding the current bar's range."""
     high = np.asarray(df["high"], dtype=float)
     low = np.asarray(df["low"], dtype=float)
