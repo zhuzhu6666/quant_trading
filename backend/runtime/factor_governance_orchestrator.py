@@ -463,6 +463,32 @@ class FactorGovernanceOrchestrator:
         self._admission_evidence_count_cache: dict[str, dict[str, Any]] = {}
         self._active_audit_writer: _GovernanceCycleAuditWriter | None = None
 
+    @staticmethod
+    def _mem_tag() -> str:
+        rss, hwm = -1.0, -1.0
+        try:
+            with open("/proc/self/status", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("VmRSS:"):
+                        rss = round(float(line.split()[1]) / 1024.0, 1)
+                    elif line.startswith("VmHWM:"):
+                        hwm = round(float(line.split()[1]) / 1024.0, 1)
+        except Exception:
+            pass
+        return f"rss={rss:.1f}MB hwm={hwm:.1f}MB"
+
+    @staticmethod
+    def _current_rss_mb() -> float:
+        """Best-effort current process RSS in MB (Linux /proc, stdlib only)."""
+        try:
+            with open("/proc/self/status", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("VmRSS:"):
+                        return round(float(line.split()[1]) / 1024.0, 1)
+        except Exception:
+            pass
+        return -1.0
+
     @classmethod
     def shared(cls) -> "FactorGovernanceOrchestrator":
         if cls._instance is None:
@@ -514,6 +540,10 @@ class FactorGovernanceOrchestrator:
                     shadow_refresh.get("error"),
                 )
             catalog = build_factor_catalog(self.overlay.db_path)
+            logger.info(
+                "[governance] mem after catalog: %s catalog=%d",
+                self._mem_tag(), len(catalog),
+            )
             rollback_actions = self._rollback_failed_actions(run)
             actions.extend(rollback_actions)
             catalog_snapshot = persist_factor_catalog_snapshot(
@@ -592,6 +622,10 @@ class FactorGovernanceOrchestrator:
                     getattr(cfg, "factor_redundancy_corr_threshold", 0.85)
                     or 0.85
                 ),
+            )
+            logger.info(
+                "[governance] mem after redundancy: %s",
+                self._mem_tag(),
             )
             # Template recommendations are evidence handoffs only. Their
             # specialist owns any mutation and its own V16 authorization.

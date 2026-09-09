@@ -133,3 +133,32 @@ def test_coordinated_job_preserves_scheduler_identity(monkeypatch):
     assert wrapped.__name__ == "coordinated_feature_eng"
     assert wrapped() == 42
     assert calls == ["feature_eng"]
+
+
+def test_coordinator_aborts_lock_wait_when_stop_requested():
+    """SIGTERM path: a job parked in the lock-wait loop aborts promptly
+    instead of pinning a non-daemon thread until the 480s budget runs out
+    (which forced SIGKILL via systemd TimeoutStopSec)."""
+    from backend.services import evolution_work_coordinator as coordinator_module
+
+    conn = _Connection(acquired=False)
+    called = []
+    coordinator = EvolutionWorkCoordinator(
+        conn_factory=lambda: conn, lock_wait_s=480.0, lock_poll_s=0.01
+    )
+    coordinator_module.request_stop()
+    try:
+        result = coordinator.run("supervisor", lambda: called.append(True))
+    finally:
+        coordinator_module._STOP_EVENT.clear()
+
+    assert result["status"] == "skipped_stopping"
+    assert result["reason"] == "stop_requested"
+    assert called == []
+    assert conn.closed is True
+
+
+def test_release_free_memory_is_best_effort():
+    from backend.services.evolution_work_coordinator import release_free_memory
+
+    assert isinstance(release_free_memory(), bool)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -19,6 +20,35 @@ from backend.core.db import get_state_pg_conn
 logger = logging.getLogger(__name__)
 
 LOCK_NAME = "quant_autonomous_evolution_work"
+
+
+# Set by the owning process shutdown path so a scheduler job parked in the
+# lock-wait loop below aborts promptly instead of pinning a non-daemon worker
+# thread until the wait budget (default 480s) runs out and forcing a SIGKILL
+# via systemd TimeoutStopSec. Never set during normal operation.
+_STOP_EVENT = threading.Event()
+
+
+def request_stop() -> None:
+    """Signal lock waiters to abort with a skipped_stopping result."""
+    _STOP_EVENT.set()
+
+
+def release_free_memory() -> bool:
+    """Return glibc-held free pages to the OS (best-effort).
+
+    CPython frees objects on refcount/gc, but glibc may keep the pages in
+    fragmented arenas, so stage-end RSS stays high and swap pressure
+    persists even though nothing references the memory. Call at heavy-job
+    choke points after locals are dropped and gc has run.
+    """
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6")
+        return bool(libc.malloc_trim(0))
+    except Exception:
+        return False
 
 
 class EvolutionWorkCoordinator:
@@ -110,6 +140,17 @@ class EvolutionWorkCoordinator:
                     announced = True
                 time.sleep(poll_s)
                 waited += poll_s
+                if _STOP_EVENT.is_set():
+                    logger.info(
+                        "[evolution_coordinator] stop requested; abort %s lock wait",
+                        job_name,
+                    )
+                    return {
+                        "ok": True,
+                        "status": "skipped_stopping",
+                        "job_name": job_name,
+                        "reason": "stop_requested",
+                    }
             # The advisory lock is session-scoped.  Commit only the lock
             # acquisition transaction, then run the heavy job outside that
             # transaction.  The job owns its own business transactions.

@@ -214,6 +214,9 @@ def _run_compact_learning_stage(
     summary = _compact_learning_cycle_stage(raw_result)
     del raw_result
     gc.collect()
+    from backend.services.evolution_work_coordinator import release_free_memory
+
+    release_free_memory()
     memory_profile.append(
         {
             "stage": name,
@@ -5084,7 +5087,16 @@ def materialize_parameter_template_recommendations(
     from backend.services.parameter_templates import ParameterTemplateService
 
     service = ParameterTemplateService(str(db_path))
-    recommendations = service.list_recommendations(limit=limit)
+    # Autonomous cadence (30min) never hits the 60s process-global TTLs;
+    # bypassing them avoids retaining ~400MB of card copies between cycles.
+    # Cache layers are transparent, so the returned value is unchanged.
+    recommendations = service.list_recommendations(limit=limit, use_cache=False)
+    _rec_mem = _process_memory_snapshot()
+    logger.info(
+        "[autonomous] mem after list_recommendations: rss={:.1f}MB n={}",
+        (_rec_mem.get("rss_kib") or 0) / 1024,
+        len(recommendations),
+    )
     conn = _connect(db_path)
     counts = {"suggested": 0, "offline_jobs": 0, "skipped_existing": 0, "skipped_offmarket": 0, "errors": 0}
     items: list[dict[str, Any]] = []

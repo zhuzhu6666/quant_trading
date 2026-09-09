@@ -533,16 +533,18 @@ class FactorCardService:
         factor_id: str | None = None,
         factor_family: str | None = None,
         responsibility: str | None = None,
+        use_cache: bool = True,
     ) -> list[dict[str, Any]]:
         cache_key = (
             f"{self.db_path.resolve()}|limit:{int(limit)}|{source or '*'}|{lifecycle_status or '*'}|"
             f"{factor_id or '*'}|{factor_family or '*'}|{responsibility or '*'}"
         )
         now_ts = time.time()
-        with _CARD_CACHE_LOCK:
-            cached = _CARD_CACHE.get(cache_key)
-            if cached and cached[0] > now_ts:
-                return deepcopy(cached[1][:limit])
+        if use_cache:
+            with _CARD_CACHE_LOCK:
+                cached = _CARD_CACHE.get(cache_key)
+                if cached and cached[0] > now_ts:
+                    return deepcopy(cached[1][:limit])
 
         with self._conn() as conn:
             ids = self._factor_ids(conn=conn)
@@ -683,8 +685,9 @@ class FactorCardService:
                 str(item.get("factor_id") or ""),
             )
         )
-        with _CARD_CACHE_LOCK:
-            _CARD_CACHE[cache_key] = (now_ts + _CARD_CACHE_TTL_SEC, deepcopy(items))
+        if use_cache:
+            with _CARD_CACHE_LOCK:
+                _CARD_CACHE[cache_key] = (now_ts + _CARD_CACHE_TTL_SEC, deepcopy(items))
         return items[:limit]
 
     @staticmethod

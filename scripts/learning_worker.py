@@ -498,6 +498,12 @@ def _schedule_factor_health_catchup(
 def _stop_schedulers() -> None:
     _factor_health_catchup_stop.set()
     try:
+        from backend.services.evolution_work_coordinator import request_stop
+
+        request_stop()
+    except Exception as exc:
+        logger.warning("[learning_worker] coordinator stop request failed: {}", exc)
+    try:
         from backend.services.learning_backfill import stop_learning_backfill
         from backend.services.supervisor_learning_scheduler import stop_supervisor_learning
         from backend.services.autonomous_learning import stop_autonomous_learning

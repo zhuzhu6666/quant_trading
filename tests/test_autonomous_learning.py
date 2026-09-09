@@ -2324,7 +2324,8 @@ def test_parameter_template_recommendations_auto_materialize_and_dedupe(monkeypa
         def __init__(self, db_path_arg):
             self.db_path_arg = db_path_arg
 
-        def list_recommendations(self, limit=20):
+        def list_recommendations(self, limit=20, use_cache=True):
+            assert use_cache in (True, False)
             return [
                 {
                     "recommendation_id": "rec_online",

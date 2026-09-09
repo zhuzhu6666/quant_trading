@@ -275,13 +275,15 @@ class ParameterTemplateService:
         factor_id: str | None = None,
         limit: int = 50,
         allow_compute: bool = True,
+        use_cache: bool = True,
     ) -> list[dict[str, Any]]:
         cache_key = f"{self.db_path.resolve()}|{factor_id or '*'}"
         now_ts = time.time()
-        with _RECOMMENDATION_CACHE_LOCK:
-            cached = _RECOMMENDATION_CACHE.get(cache_key)
-            if cached and cached[0] > now_ts:
-                return deepcopy(cached[1][:limit])
+        if use_cache:
+            with _RECOMMENDATION_CACHE_LOCK:
+                cached = _RECOMMENDATION_CACHE.get(cache_key)
+                if cached and cached[0] > now_ts:
+                    return deepcopy(cached[1][:limit])
         if not allow_compute:
             return []
 
@@ -289,6 +291,7 @@ class ParameterTemplateService:
             limit=max(200, limit * 3),
             factor_id=factor_id,
             responsibility="parameter",
+            use_cache=use_cache,
         )
         items: list[dict[str, Any]] = []
         for card in cards:
@@ -303,7 +306,8 @@ class ParameterTemplateService:
             )
         )
         with _RECOMMENDATION_CACHE_LOCK:
-            _RECOMMENDATION_CACHE[cache_key] = (now_ts + _RECOMMENDATION_CACHE_TTL_SEC, deepcopy(items))
+            if use_cache:
+                _RECOMMENDATION_CACHE[cache_key] = (now_ts + _RECOMMENDATION_CACHE_TTL_SEC, deepcopy(items))
         return items[:limit]
 
     def get_recommendation(self, recommendation_id: str) -> dict[str, Any] | None:

@@ -600,11 +600,13 @@ def scheduled_evolution_cycle(
         cb("data_loaded", 10, f"loaded {len(df)} bars")
         split_at = max(500, int(len(df) * 0.80))
         split_at = min(split_at, len(df) - 100)
-        research_df = df.iloc[:split_at].copy()
+        # GP input is built lazily inside the can_run_gp branch: the common
+        # blocked_by_backpressure path has zero consumers for research_df,
+        # so avoid a ~6400-row copy living for the whole cycle.
         shadow_oos_df = df.iloc[split_at:].copy()
         logger.info(
-            "[Evolve] mem after split: rss=%.1fMB df=%d research=%d oos=%d cols=%d",
-            _current_rss_mb(), len(df), len(research_df), len(shadow_oos_df), df.shape[1],
+            "[Evolve] mem after split: %s df=%d oos=%d cols=%d research=deferred",
+            _mem_tag(), len(df), len(shadow_oos_df), df.shape[1],
         )
         if len(shadow_oos_df) < 100:
             report.error = f"insufficient shadow OOS bars: {len(shadow_oos_df)}"
@@ -671,7 +673,10 @@ def scheduled_evolution_cycle(
         )
         if can_run_gp:
             cb("gp_search", 15, f"GP search pop={gp_pop} gen={gp_gen}")
+            research_df = df.iloc[:split_at].copy()
             expressions = _run_gp(research_df, pop=gp_pop, gen=gp_gen, top_k=gp_top_k)
+            del research_df
+            logger.info("[Evolve] mem after gp: %s", _mem_tag())
             report.gp_status = "completed"
             report.gp_new_candidates = len(expressions)
             logger.info("[Evolve] GP found %d candidates", len(expressions))
@@ -752,7 +757,7 @@ def scheduled_evolution_cycle(
         if rollbacks:
             logger.info("[Evolve] canary rollback candidates: %s", rollbacks)
         cb("canary_done", 70, f"promotion candidates {len(promotions)}, rollback candidates {len(rollbacks)}")
-        logger.info("[Evolve] mem after canary: rss=%.1fMB", _current_rss_mb())
+        logger.info("[Evolve] mem after canary: %s", _mem_tag())
 
         # ── Step 5: IC 刷新 + 因子健康报告 ──
         cb("ic_refresh", 86, "refreshing factor IC tracking")
@@ -765,7 +770,7 @@ def scheduled_evolution_cycle(
                 ic_result.get("ic_changed_count", 0),
                 len(ic_result.get("errors", [])),
             )
-            logger.info("[Evolve] mem after ic_refresh: rss=%.1fMB", _current_rss_mb())
+            logger.info("[Evolve] mem after ic_refresh: %s", _mem_tag())
         except Exception as e:
             logger.debug("[Evolve] IC refresh skipped: %s", e)
 
@@ -793,7 +798,7 @@ def scheduled_evolution_cycle(
                 report_result.get("watch", 0),
                 report_result.get("decaying", 0),
             )
-            logger.info("[Evolve] mem after health: rss=%.1fMB", _current_rss_mb())
+            logger.info("[Evolve] mem after health: %s", _mem_tag())
         except Exception as e:
             logger.debug("[Evolve] factor health report skipped: %s", e)
 
@@ -801,7 +806,7 @@ def scheduled_evolution_cycle(
         cb("weights", 88, "recomputing factor weights")
         report.weights_updated = _update_weights(df=df, apply=False)
         cb("weights_done", 95, "weights updated" if report.weights_updated else "weights unchanged")
-        logger.info("[Evolve] mem after weights: rss=%.1fMB", _current_rss_mb())
+        logger.info("[Evolve] mem after weights: %s", _mem_tag())
 
         _emit_evolution_story("cycle_complete", report.to_dict())
 
@@ -810,6 +815,9 @@ def scheduled_evolution_cycle(
         report.error = f"unexpected: {e}"
         _emit_evolution_story("cycle_error", {"error": str(e)})
     finally:
+        from backend.services.evolution_work_coordinator import release_free_memory
+
+        release_free_memory()
         report.duration_sec = _time.time() - t0
 
     return report
@@ -882,6 +890,7 @@ def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
                 V16BrainOrchestratorService,
             )
 
+            logger.info("[Evolve] mem before v16handoff: %s", _mem_tag())
             runner = AutonomousEvolutionNurseryRunner()
             v16_result = V16BrainOrchestratorService().run_once(
                 readiness=runner.build_light_readiness(),
@@ -927,6 +936,7 @@ def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
             FactorGovernanceOrchestrator,
         )
 
+        logger.info("[Evolve] mem before governance: %s", _mem_tag())
         started_at = _time.time()
         has_v16_handoff = bool(report.factor_v16_handoff.get("snapshot_id"))
         result = FactorGovernanceOrchestrator.shared().run_cycle(
@@ -977,14 +987,32 @@ def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
 
 def _current_rss_mb() -> float:
     """Best-effort current process RSS in MB (Linux /proc, stdlib only)."""
+    return _mem_rss_hwm_mb()[0]
+
+
+def _mem_rss_hwm_mb() -> tuple[float, float]:
+    """Current RSS and lifetime high-water mark in MB.
+
+    VmHWM only moves up: the delta between two samples attributes transient
+    spikes that are already freed (and invisible to RSS) to the step between
+    them. Pure stdlib, Linux /proc only.
+    """
+    rss = hwm = -1.0
     try:
         with open("/proc/self/status", encoding="utf-8") as handle:
             for line in handle:
                 if line.startswith("VmRSS:"):
-                    return round(float(line.split()[1]) / 1024.0, 1)
+                    rss = round(float(line.split()[1]) / 1024.0, 1)
+                elif line.startswith("VmHWM:"):
+                    hwm = round(float(line.split()[1]) / 1024.0, 1)
     except Exception:
         pass
-    return -1.0
+    return rss, hwm
+
+
+def _mem_tag() -> str:
+    rss, hwm = _mem_rss_hwm_mb()
+    return f"rss={rss:.1f}MB hwm={hwm:.1f}MB"
 
 
 def _load_bars(symbol: str, timeframe: str, n_bars: int) -> pd.DataFrame | None:
