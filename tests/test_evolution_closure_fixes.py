@@ -376,6 +376,7 @@ def test_canary_requires_new_evidence_between_stage_promotions():
     assert director.check_promotion("fresh_alpha", first) == "stay"
     assert director.get_state("fresh_alpha").fresh_evidence_bars == 0
 
+    # C5->C20 needs 6 fresh M5 bars (~1 nursery cycle): 3 is not enough.
     second = CanaryEvalContext(
         oos_bars=110,
         oos_pnl=0.022,
@@ -384,7 +385,7 @@ def test_canary_requires_new_evidence_between_stage_promotions():
             "evidence_hash": "evidence-2",
             "dataset_hash": "dataset-2",
             "evidence_end_at": "2026-07-10T10:50:00Z",
-            "new_evidence_bars": 10,
+            "new_evidence_bars": 3,
         },
     )
     assert director.check_promotion("fresh_alpha", second) == "stay"
@@ -397,7 +398,7 @@ def test_canary_requires_new_evidence_between_stage_promotions():
             "evidence_hash": "evidence-3",
             "dataset_hash": "dataset-3",
             "evidence_end_at": "2026-07-10T11:15:00Z",
-            "new_evidence_bars": 5,
+            "new_evidence_bars": 3,
         },
     )
     assert director.check_promotion("fresh_alpha", third) == "promote"

@@ -4554,7 +4554,7 @@ class FactorGovernanceOrchestrator:
         # factor_health row (health_status UNKNOWN forever) — a completed
         # canary ladder substitutes for that structurally absent evidence.
         # Real negative rows (DECAYING / stale WATCH) still block.
-        health_waived = canary_stage in {"ACTIVE", "PROBATION"} and health_status == "UNKNOWN"
+        health_waived = canary_stage in {"ACTIVE", "PROBATION", "CANARY_50"} and health_status == "UNKNOWN"
         legacy_blockers = [
             code
             for code, blocked in (
@@ -4566,7 +4566,7 @@ class FactorGovernanceOrchestrator:
                 # completed canary evidence.  Intermediate stages stay blocked.
                 (
                     "bar_oos_canary_incomplete",
-                    canary_stage not in {"ACTIVE", "PROBATION"},
+                    canary_stage not in {"ACTIVE", "PROBATION", "CANARY_50"},
                 ),
                 ("bar_oos_below_minimum", oos_bars < min_oos),
                 ("bar_valid_samples_below_minimum", n_valid < min_valid),

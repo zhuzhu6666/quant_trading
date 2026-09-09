@@ -56,6 +56,17 @@ def test_admission_waives_absent_validation_for_canary_ladder_top():
     assert "bar_oos_canary_incomplete" in shadow_stage["preflight_blocker_codes"]
     assert "cost_evidence_missing" in shadow_stage["preflight_blocker_codes"]
 
+    # Genesis-12: CANARY_50 carries the full staged bar-track OOS package and
+    # waives absent validation for preparation, like PROBATION.
+    canary_50 = build_factor_admission_evidence(
+        factor_id="dsl_auto_ladder",
+        catalog_item=_item(canary_stage="CANARY_50"),
+        evidence_counts={},
+        governance={},
+    )
+    assert "bar_oos_canary_incomplete" not in canary_50["preflight_blocker_codes"]
+    assert canary_50["governance"]["canary"]["evidence_source"] == "canary_ladder"
+
     decaying = build_factor_admission_evidence(
         factor_id="dsl_auto_ladder",
         catalog_item=_item(health_status="DECAYING"),

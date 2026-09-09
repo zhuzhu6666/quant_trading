@@ -7,7 +7,10 @@ this same promotion path.  The circular requirement starved the pipeline: 13
 fully-qualified GP factors sat in CANARY_5 with no way to advance.
 
 Contract after fix:
-  - SHADOW / CANARY_5 / CANARY_20 / CANARY_50 -> bar_oos_canary_incomplete
+  - SHADOW / CANARY_5 / CANARY_20 -> bar_oos_canary_incomplete
+  - CANARY_50 -> canary blocker cleared for preparation preflight
+    (genesis-12: 50 staged OOS bars + 0.5% PnL is the bar-track package;
+    activation still terminates at PROBATION)
   - PROBATION / ACTIVE -> canary blocker cleared (other gates unchanged)
 """
 
@@ -79,7 +82,7 @@ def test_probation_canary_satisfies_promotion_evidence(monkeypatch) -> None:
     )
 
 
-@pytest.mark.parametrize("stage", ["SHADOW", "CANARY_5", "CANARY_20", "CANARY_50"])
+@pytest.mark.parametrize("stage", ["SHADOW", "CANARY_5", "CANARY_20"])
 def test_intermediate_canary_stages_still_blocked(stage: str, monkeypatch) -> None:
     rc.reset_for_tests()
     orchestrator = FactorGovernanceOrchestrator()
@@ -88,3 +91,16 @@ def test_intermediate_canary_stages_still_blocked(stage: str, monkeypatch) -> No
 
     evidence = orchestrator._promotion_evidence(item, cfg)
     assert "bar_oos_canary_incomplete" in evidence["blocker_codes"]
+
+
+def test_canary_50_clears_preparation_preflight(monkeypatch) -> None:
+    rc.reset_for_tests()
+    orchestrator = FactorGovernanceOrchestrator()
+    item = _catalog_item("CANARY_50")
+    cfg = _cfg()
+
+    evidence = orchestrator._promotion_evidence(item, cfg)
+    assert "bar_oos_canary_incomplete" not in evidence["blocker_codes"], (
+        "CANARY_50 carries the full staged bar-track OOS package; "
+        "preparation must not wait for PROBATION"
+    )
