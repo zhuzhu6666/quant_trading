@@ -783,6 +783,7 @@ runtime:
   factor_governance_blocked_candidate_backoff_hours: 4
   factor_governance_builtin_activation_enabled: true
   factor_governance_builtin_activation_min_health_score: 70.0
+  factor_governance_demo_builtin_activation_min_health_score: 50.0
   factor_governance_builtin_activation_min_n_obs: 500
   factor_governance_builtin_activation_max_weakness: 0.65
   factor_governance_builtin_activation_weight: 0.05

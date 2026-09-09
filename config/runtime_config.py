@@ -588,6 +588,7 @@ class RuntimeConfig:
     # 内置结构候选的 shadow -> live 自动启用边界。
     factor_governance_builtin_activation_enabled: bool = True
     factor_governance_builtin_activation_min_health_score: float = 70.0
+    factor_governance_demo_builtin_activation_min_health_score: float = 50.0
     factor_governance_builtin_activation_min_n_obs: int = 500
     factor_governance_builtin_activation_max_weakness: float = 0.65
     factor_governance_builtin_activation_weight: float = 0.0
