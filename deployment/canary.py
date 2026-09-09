@@ -56,12 +56,13 @@ STAGE_REQUIREMENTS: dict[str, tuple[int, float]] = {
 # A stage transition must consume evidence that was not already used by the
 # previous transition.  SHADOW may bootstrap from an existing OOS window;
 # later stages require genuinely newer market bars.
+# Fresh bars are M5 (~6/cycle): C20 needs ~1 cycle, C50/PROBATION ~2 cycles.
 STAGE_MIN_FRESH_EVIDENCE: dict[str, int] = {
     CANARY_5: 0,
-    CANARY_20: 15,
-    CANARY_50: 30,
-    PROBATION: 30,
-    ACTIVE: 20,
+    CANARY_20: 6,
+    CANARY_50: 12,
+    PROBATION: 12,
+    ACTIVE: 12,
 }
 
 # 多维晋升过滤

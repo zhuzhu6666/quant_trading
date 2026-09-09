@@ -56,6 +56,10 @@ CLASSIC_DIRECTIONAL_FACTOR_IDS = (
     "macd_hist",
     "stoch_k",
     "rsi_14",
+    # Genesis-12 full release: price-action + volume classics rejoin the seed set.
+    "engulfing",
+    "pin_bar",
+    "obv_slope",
 )
 CLASSIC_DIRECTIONAL_FACTOR_WEIGHTS = {
     "di_spread": 1.75,
@@ -64,6 +68,9 @@ CLASSIC_DIRECTIONAL_FACTOR_WEIGHTS = {
     "macd_hist": 0.5,
     "stoch_k": 1.0,
     "rsi_14": 1.0,
+    "engulfing": 1.0,
+    "pin_bar": 0.8,
+    "obv_slope": 0.5,
 }
 
 def resolve_bounded_demo_mode(cfg: Any, broker_cfg: Any) -> bool:
@@ -389,7 +396,7 @@ class RuntimeConfig:
         "ema_slope":       {"mode": "zscore_tanh", "window": 50,  "min_samples": 30, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "trend", "tags": ["技术", "趋势"]},
         "supertrend_str":  {"mode": "zscore_tanh", "window": 50,  "min_samples": 30, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "trend", "tags": ["技术", "趋势"]},
         "keltner_width":   {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["技术", "波动率"]},
-        "obv_slope":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "source": "builtin", "redundancy_group": "volume_direction", "tags": ["量价"]},
+        "obv_slope":       {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "alpha", "direction": 1, "enabled": True, "lifecycle_status": "ACTIVE", "health_gate_exempt": True, "direct_activation": True, "source": "builtin", "redundancy_group": "volume_direction", "tags": ["量价"]},
         # Volume / volume-MA 只有强弱，没有天然多空方向；保留为 context，
         # 避免“放量”被组合器误读为看多、“缩量”误读为看空。
         "vol_ma_ratio":    {"mode": "zscore_tanh", "window": 100, "min_samples": 50, "role": "context", "tags": ["量价", "成交量强度"]},
@@ -400,10 +407,24 @@ class RuntimeConfig:
                                  "enabled": True, "lifecycle_status": "SHADOW",
                                  "autonomous_activation": True, "role": "alpha", "source": "builtin",
                                  "tags": ["技术", "高周期", "趋势"]},
-        "donchian_breakout_20": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
-                                  "enabled": True, "lifecycle_status": "SHADOW",
-                                  "autonomous_activation": True, "role": "alpha", "source": "builtin",
+                "donchian_breakout_20": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                                  "role": "alpha", "direction": 1,
+                                  "enabled": True, "lifecycle_status": "ACTIVE",
+                                  "health_gate_exempt": True, "direct_activation": True,
+                                  "source": "builtin", "redundancy_group": "structure_breakout",
                                   "tags": ["技术", "突破", "结构"]},
+        "market_structure_bos": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                                  "role": "alpha", "direction": 1,
+                                  "enabled": True, "lifecycle_status": "ACTIVE",
+                                  "health_gate_exempt": True, "direct_activation": True,
+                                  "source": "builtin", "redundancy_group": "structure_breakout",
+                                  "tags": ["技术", "结构", "趋势"]},
+        "swing_distance": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
+                                  "role": "alpha", "direction": -1,
+                                  "enabled": True, "lifecycle_status": "ACTIVE",
+                                  "health_gate_exempt": True, "direct_activation": True,
+                                  "source": "builtin", "redundancy_group": "oscillator",
+                                  "tags": ["技术", "均值回归", "结构"]},
         "range_expansion_20": {"mode": "zscore_tanh", "window": 100, "min_samples": 100,
                                 "enabled": True, "lifecycle_status": "SHADOW",
                                 "autonomous_activation": True, "role": "context", "source": "builtin",
@@ -493,9 +514,11 @@ class RuntimeConfig:
         "engulfing":       1.0,
         "pin_bar":         0.8,
         "inside_bar":      0.0,   # context-only: 当前值没有可靠的多空方向
-        # 新增结构因子初始权重为 0；通过后验健康门槛后由治理服务设置小权重。
+        # 创世菜单：donchian/BOS/swing 已激活给全量权重；其余候选仍为 0 由治理按证据启用。
         "htf_trend_alignment": 0.0,
-        "donchian_breakout_20": 0.0,
+        "donchian_breakout_20": 0.6,
+        "market_structure_bos": 0.8,
+        "swing_distance": 0.6,
         "range_expansion_20": 0.0,
         "price_location_50": 0.0,
         "candle_body_pressure": 0.0,

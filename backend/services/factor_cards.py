@@ -214,7 +214,7 @@ def build_factor_admission_evidence(
     # status, regime coverage).  Absence is waived; negative evidence
     # (DECAYING health, a failed cost test, contaminated counts) still blocks.
     canary_ladder_evidence = (
-        str(canary.get("stage") or "").upper() in {"PROBATION", "ACTIVE"}
+        str(canary.get("stage") or "").upper() in {"PROBATION", "ACTIVE", "CANARY_50"}
     )
     mature_reviews = evidence_counts.get("governance_eligible_mature")
     try:
@@ -370,7 +370,8 @@ def build_factor_admission_evidence(
             # blocking (fail-closed for a real failed check).
             continue
         preflight_blockers.append(code)
-    if str(canary.get("stage") or "").upper() not in {"ACTIVE", "PROBATION"}:
+    # CANARY_50 (50 bars/+0.5%) suffices for preparation preflight (genesis-12).
+    if str(canary.get("stage") or "").upper() not in {"ACTIVE", "PROBATION", "CANARY_50"}:
         # PROBATION is the terminal canary evidence stage.  The final hop to
         # ACTIVE requires committed lifecycle backing (D1 gate), and lifecycle
         # activation is produced by the promotion path that consumes this

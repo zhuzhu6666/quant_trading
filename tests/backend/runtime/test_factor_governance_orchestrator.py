@@ -762,6 +762,8 @@ def test_expansion_preflight_finds_fresh_builtin_activation(monkeypatch):
                 "health_score": 80.0,
                 "health_n_obs": 2000,
                 "health_updated_at": time.time(),
+                "health_rolling_ic": 0.05,
+                "health_recent_ic": 0.04,
                 "factor_governance_shadow": {},
             }
         ],
@@ -1787,6 +1789,8 @@ def test_expansion_preflight_hands_batch_in_priority_order(monkeypatch):
                 "health_score": 80.0,
                 "health_n_obs": 2000,
                 "health_updated_at": time.time(),
+                "health_rolling_ic": 0.05,
+                "health_recent_ic": 0.04,
                 "factor_governance_shadow": {},
             }
         ],

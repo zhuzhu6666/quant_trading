@@ -476,7 +476,7 @@ def _canary_registration_backpressure() -> dict[str, Any]:
     evaluation_limit = max(
         10,
         min(
-            int(os.getenv("QUANT_CANARY_EVALUATION_LIMIT", "200") or 200),
+            int(os.getenv("QUANT_CANARY_EVALUATION_LIMIT", "500") or 500),
             1000,
         ),
     )
@@ -1188,7 +1188,7 @@ def _run_canary_evaluation(
         }
         evaluation_limit = max(
             10,
-            min(int(os.getenv("QUANT_CANARY_EVALUATION_LIMIT", "200") or 200), 1000),
+            min(int(os.getenv("QUANT_CANARY_EVALUATION_LIMIT", "500") or 500), 1000),
         )
         evaluable_candidates = [
             item

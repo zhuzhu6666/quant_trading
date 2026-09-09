@@ -293,6 +293,7 @@ runtime:
       enabled: true
       lifecycle_status: ACTIVE
       health_gate_exempt: true
+      direct_activation: true
       source: builtin
       redundancy_group: volume_direction
       tags:
@@ -337,14 +338,49 @@ runtime:
       mode: zscore_tanh
       window: 100
       min_samples: 100
-      enabled: true
-      lifecycle_status: SHADOW
-      autonomous_activation: true
       role: alpha
+      direction: 1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      direct_activation: true
       source: builtin
+      redundancy_group: structure_breakout
       tags:
       - 技术
       - 突破
+      - 结构
+    market_structure_bos:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 100
+      role: alpha
+      direction: 1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      direct_activation: true
+      source: builtin
+      redundancy_group: structure_breakout
+      tags:
+      - 技术
+      - 结构
+      - 趋势
+    swing_distance:
+      mode: zscore_tanh
+      window: 100
+      min_samples: 100
+      role: alpha
+      direction: -1
+      enabled: true
+      lifecycle_status: ACTIVE
+      health_gate_exempt: true
+      direct_activation: true
+      source: builtin
+      redundancy_group: oscillator
+      tags:
+      - 技术
+      - 均值回归
       - 结构
     range_expansion_20:
       mode: zscore_tanh
@@ -727,7 +763,9 @@ runtime:
     pin_bar: 0.8
     inside_bar: 0.0
     htf_trend_alignment: 0.0
-    donchian_breakout_20: 0.0
+    donchian_breakout_20: 0.6
+    market_structure_bos: 0.8
+    swing_distance: 0.6
     range_expansion_20: 0.0
     price_location_50: 0.0
     candle_body_pressure: 0.0

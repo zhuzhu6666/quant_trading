@@ -1217,3 +1217,59 @@ def test_builtin_active_demote_stays_excluded(tmp_path):
 
     assert demoted["ok"] is False
     assert demoted["reason"] == "builtin_factor_demotion_not_supported"
+
+
+def test_operator_supersede_quarantined_drifted_builtin(tmp_path):
+    """A builtin quarantined under an older implementation cannot reenroll
+    (definition-bound), but an operator may enroll the current implementation
+    as a fresh SHADOW generation with audit trail. Everyone else stays
+    fail-closed on factor_name_definition_conflict."""
+    adapter = FakeAdapter("harami", "harami")  # type: ignore[arg-type]
+    adapter.meta["harami"]["source"] = SOURCE_BUILTIN
+    service = FactorLifecycleService(
+        tmp_path / "lifecycle.sqlite",
+        adapter=adapter,  # type: ignore[arg-type]
+        projection_stale_after_sec=75,
+        health_stale_after_sec=180,
+    )
+    seed = service.register_shadow(
+        name="harami", expression="harami",
+        actor="operator:t0", reason="seed",
+        idempotency_key="seed-harami",
+    )
+    assert seed["ok"] is True
+    quarantined = service.quarantine(
+        name="harami", expression="harami",
+        actor="operator:t0", reason="stale impl",
+        idempotency_key="quar-harami",
+    )
+    assert quarantined["ok"] is True
+
+    drifted = dict(seed)
+    # New implementation => new fingerprint under the same name.
+    blocked_anon = service.register_shadow(
+        name="harami", expression="harami", artifact_hash="drifted-impl",
+        actor="system:factor_research", reason="drifted",
+        idempotency_key="drift-anon",
+        allow_supersede_quarantined=True,
+    )
+    assert blocked_anon["ok"] is False
+    blocked_noflag = service.register_shadow(
+        name="harami", expression="harami", artifact_hash="drifted-impl",
+        actor="operator:t1", reason="drifted",
+        idempotency_key="drift-noflag",
+    )
+    assert blocked_noflag["ok"] is False
+
+    superseded = service.register_shadow(
+        name="harami", expression="harami", artifact_hash="drifted-impl",
+        actor="operator:t1", reason="genesis re-seed",
+        evidence_refs={"genesis": "test"},
+        idempotency_key="drift-op",
+        allow_supersede_quarantined=True,
+    )
+    assert superseded["ok"] is True
+    assert superseded["lifecycle_stage"] == FactorLifecycleStage.SHADOW.value
+    state = service.get_state(factor_name="harami")
+    assert state["lifecycle_stage"] == FactorLifecycleStage.SHADOW.value
+    assert state["factor_id"] != quarantined["factor_id"]

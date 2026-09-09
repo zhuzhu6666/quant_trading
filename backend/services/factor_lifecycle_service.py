@@ -135,6 +135,7 @@ class FactorLifecycleMutation:
     weight: float | None = None
     new_generation: bool = False
     direct_builtin_activation: bool = False
+    supersede_quarantined: bool = False
 
 
 
@@ -324,6 +325,7 @@ class FactorLifecycleService:
         evidence_refs: Mapping[str, Any] | None = None,
         idempotency_key: str = "",
         v16: FactorV16Binding | None = None,
+        allow_supersede_quarantined: bool = False,
     ) -> dict[str, Any]:
         """Persist an observation-only SHADOW fact without live admission."""
         try:
@@ -358,6 +360,7 @@ class FactorLifecycleService:
                 evidence_refs=dict(evidence_refs or {}),
                 idempotency_key=idempotency_key,
                 v16=v16 or FactorV16Binding(),
+                supersede_quarantined=bool(allow_supersede_quarantined),
             )
             return self._execute(mutation, current=None)
         except Exception as exc:
@@ -1684,6 +1687,70 @@ class FactorLifecycleService:
             patch["factor_portfolio_weights"] = {name: 0.0}
         return patch
 
+    def _quarantine_supersede_evidence(
+        self, conn: Any, mutation: FactorLifecycleMutation, *, lock_suffix: str = ""
+    ) -> dict[str, Any] | None:
+        """Operator-only handoff for quarantined-then-drifted builtins.
+
+        Returns audit evidence when a fresh SHADOW generation may supersede a
+        QUARANTINED row of the same name bound to an older implementation;
+        None keeps the fail-closed conflict. The old row is never mutated.
+        """
+        if not bool(getattr(mutation, "supersede_quarantined", False)):
+            return None
+        if not str(mutation.actor or "").startswith("operator:"):
+            return None
+        if mutation.target_stage is not FactorLifecycleStage.SHADOW:
+            return None
+        if str(mutation.definition.origin or "") != SOURCE_BUILTIN:
+            return None
+        prior = _row_dict(
+            conn.execute(
+                _p(
+                    self.db_path,
+                    "SELECT * FROM factor_lifecycle_state "
+                    "WHERE factor_name=? ORDER BY updated_at DESC LIMIT 1"
+                    + lock_suffix,
+                ),
+                (mutation.definition.name,),
+            ).fetchone()
+        )
+        if (
+            str(prior.get("origin") or "") != SOURCE_BUILTIN
+            or str(prior.get("lifecycle_stage") or "")
+            != FactorLifecycleStage.QUARANTINED.value
+            or str(prior.get("factor_id") or "")
+            == str(mutation.definition.factor_id or "")
+        ):
+            return None
+        # Tombstone the old row: history preserved and queryable, the live
+        # name is freed for the fresh SHADOW generation inserted below.
+        tombstone = (
+            f"{mutation.definition.name}.superseded"
+            f".g{int(prior.get('generation') or 0)}"
+        )
+        conn.execute(
+            _p(
+                self.db_path,
+                "UPDATE factor_lifecycle_state SET factor_name=?, updated_at=? "
+                "WHERE factor_name=? AND factor_id=?",
+            ),
+            (
+                tombstone,
+                time.time(),
+                mutation.definition.name,
+                str(prior.get("factor_id") or ""),
+            ),
+        )
+        return {
+            "superseded_quarantined_definition": {
+                "factor_id": str(prior.get("factor_id") or ""),
+                "mutation_id": str(prior.get("mutation_id") or ""),
+                "generation": int(prior.get("generation") or 0),
+                "tombstone_factor_name": tombstone,
+            }
+        }
+
     def _write_lifecycle_state(
         self,
         conn: Any,
@@ -1711,7 +1778,25 @@ class FactorLifecycleService:
             (definition.name, definition.factor_id),
         ).fetchone()
         if name_conflict:
-            raise FactorLifecycleError("factor_name_definition_conflict")
+            supersede_evidence = self._quarantine_supersede_evidence(
+                conn, mutation, lock_suffix=lock_suffix
+            )
+            if supersede_evidence is None:
+                raise FactorLifecycleError("factor_name_definition_conflict")
+            mutation = FactorLifecycleMutation(
+                definition=mutation.definition,
+                target_stage=mutation.target_stage,
+                actor=mutation.actor,
+                reason=mutation.reason,
+                source=mutation.source,
+                evidence_refs={**dict(mutation.evidence_refs or {}), **supersede_evidence},
+                idempotency_key=mutation.idempotency_key,
+                v16=mutation.v16,
+                weight=mutation.weight,
+                new_generation=mutation.new_generation,
+                direct_builtin_activation=mutation.direct_builtin_activation,
+                supersede_quarantined=mutation.supersede_quarantined,
+            )
         if mutation.new_generation:
             reenroll_ok = (
                 str(current.get("origin") or "") == SOURCE_BUILTIN
