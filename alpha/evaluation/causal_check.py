@@ -32,7 +32,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from scipy import stats as scipy_stats
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +124,8 @@ class CausalCheck:
         raw_corr = 0.0
         if n >= 3:
             try:
+                from scipy import stats as scipy_stats
+
                 rc, _ = scipy_stats.pearsonr(vals, rets)
                 raw_corr = float(rc) if not np.isnan(rc) else 0.0
             except (ValueError, ZeroDivisionError):
@@ -220,6 +221,8 @@ class CausalCheck:
 
         # Correlation test: H0: correlation = 0 (no predictive power)
         try:
+            from scipy import stats as scipy_stats
+
             _, pvalue = scipy_stats.pearsonr(residuals, align_rets)
         except ValueError:
             return 1.0
@@ -258,6 +261,8 @@ class CausalCheck:
             if len(a) < 3:
                 return 0.0
             try:
+                from scipy import stats as scipy_stats
+
                 c, _ = scipy_stats.pearsonr(a, b)
                 return float(c) if not np.isnan(c) else 0.0
             except (ValueError, ZeroDivisionError):

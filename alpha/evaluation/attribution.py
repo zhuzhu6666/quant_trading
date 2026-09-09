@@ -32,7 +32,6 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 import numpy as np
-from scipy import stats as scipy_stats
 
 logger = logging.getLogger(__name__)
 

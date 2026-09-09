@@ -63,7 +63,7 @@ def run_feature_engineering_job() -> dict[str, Any]:
         from data.duckdb_store import DuckDBDataStore as DataStore
         from monitor.evolution_story.report import EvolutionStory
 
-        df = DataStore().load_bars("XAUUSD+", "M5", limit=20000)
+        df = DataStore().load_bars("XAUUSD+", "M5", limit=8000)
         if df.empty or len(df) < 1000:
             logger.info("[fe] insufficient bars: %d", len(df))
             return {"ok": False, "status": "insufficient_bars", "bars": len(df)}

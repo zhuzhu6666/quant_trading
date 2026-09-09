@@ -274,9 +274,9 @@ def _register_heavy_jobs(*, include_system_health: bool) -> None:
             getattr(
                 _runtime_shared(),
                 "autonomous_evolution_nursery_cron",
-                "7,17,37,47 * * * *",
+                "17 * * * *",
             )
-            or "7,17,37,47 * * * *"
+            or "17 * * * *"
         )
 
         def _run_nursery_cycle() -> None:

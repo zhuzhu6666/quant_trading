@@ -77,6 +77,7 @@ class AutonomousEvolutionNurseryRunner:
         replay_limit: int = 80,
         review_limit: int = 50,
         effect_limit: int = 50,
+        replay_min_interval_sec: float = 21600.0,
         sample_limit: int = 500,
         recommendation_limit: int = 20,
         suggestion_limit: int = 20,
@@ -206,15 +207,28 @@ class AutonomousEvolutionNurseryRunner:
 
         components = {str(item.get("component") or "") for item in initial_cycle.get("blockers") or []}
         if replay_if_stale and ("evidence" in components or "replay" in components):
-            actions.append(
-                self._record(
-                    "run_bar_replay_evidence",
-                    lambda: self._run_bar_replay(
-                        lookback_days=replay_lookback_days,
-                        limit=replay_limit,
-                    ),
+            replay_gate = self._replay_interval_gate(min_interval_sec=replay_min_interval_sec)
+            if str(replay_gate.get("status") or "") == "due":
+                actions.append(
+                    self._record(
+                        "run_bar_replay_evidence",
+                        lambda: self._run_bar_replay(
+                            lookback_days=replay_lookback_days,
+                            limit=replay_limit,
+                        ),
+                    )
                 )
-            )
+            else:
+                actions.append(
+                    {
+                        "action": "run_bar_replay_evidence",
+                        "ok": True,
+                        "status": "skipped_replay_interval",
+                        "reason": replay_gate.get("reason"),
+                        "age_seconds": replay_gate.get("age_seconds"),
+                        "min_interval_seconds": replay_gate.get("min_interval_seconds"),
+                    }
+                )
 
         if reconcile_effects and "effect_monitor" in components:
             actions.append(
@@ -507,6 +521,45 @@ class AutonomousEvolutionNurseryRunner:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
+
+    def _replay_interval_gate(self, *, min_interval_sec: float) -> dict[str, Any]:
+        """Skip replay when the latest successful report is still fresh.
+
+        The cycle blocker only knows replay is stale/degraded; without a
+        recency gate every nursery tick replays the same 7-day window.
+        """
+        try:
+            interval = max(0.0, float(min_interval_sec or 0.0))
+        except (TypeError, ValueError):
+            interval = 0.0
+        if interval <= 0.0:
+            return {"status": "due", "reason": "interval_disabled"}
+        try:
+            from backend.services.replay_harness import ReplayHarnessService
+
+            latest = ReplayHarnessService(self.db_path).latest_report() or {}
+        except Exception:
+            return {"status": "due", "reason": "report_unreadable"}
+        try:
+            created_at = float(latest.get("created_at") or 0.0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        if created_at <= 0.0 or str(latest.get("status") or "") != "completed" or bool(latest.get("replay_error")):
+            return {"status": "due", "reason": "no_completed_report"}
+        age = max(0.0, time.time() - created_at)
+        if age < interval:
+            return {
+                "status": "skipped",
+                "reason": "replay_interval_not_elapsed",
+                "age_seconds": round(age, 1),
+                "min_interval_seconds": interval,
+            }
+        return {
+            "status": "due",
+            "reason": "replay_interval_elapsed",
+            "age_seconds": round(age, 1),
+            "min_interval_seconds": interval,
+        }
 
     def _run_bar_replay(self, *, lookback_days: float, limit: int) -> dict[str, Any]:
         from backend.services.replay_harness import ReplayHarnessService

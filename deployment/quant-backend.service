@@ -13,6 +13,8 @@ EnvironmentFile=/home/ubuntu/quant_trading/.env
 Environment=PATH=/home/ubuntu/quant_trading/.venv/bin:/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONPATH=/home/ubuntu/quant_trading
+Environment=MALLOC_ARENA_MAX=2
+Environment=MALLOC_TRIM_THRESHOLD_=65536
 ExecStart=/home/ubuntu/quant_trading/.venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8000 --log-level info
 Restart=on-failure
 RestartSec=30s

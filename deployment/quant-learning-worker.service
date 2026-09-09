@@ -11,6 +11,8 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/quant_trading
 Environment=PYTHONUNBUFFERED=1
 Environment=QUANT_LEARNING_WORKER_CPU_AFFINITY=2,3
+Environment=MALLOC_ARENA_MAX=2
+Environment=MALLOC_TRIM_THRESHOLD_=65536
 ExecStart=/home/ubuntu/quant_trading/.venv/bin/python /home/ubuntu/quant_trading/scripts/learning_worker.py
 Restart=on-failure
 RestartSec=30

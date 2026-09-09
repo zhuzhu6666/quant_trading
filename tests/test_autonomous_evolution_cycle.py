@@ -344,6 +344,7 @@ def test_autonomous_evolution_runner_repairs_replay_with_full_evidence(
         refresh_proposals=False,
         review_candidates=False,
         create_release_evidence=False,
+        replay_min_interval_sec=0,
     )
 
     replay_action = next(
@@ -352,6 +353,44 @@ def test_autonomous_evolution_runner_repairs_replay_with_full_evidence(
     assert replay_action["ok"] is True
     assert replay_action["result"]["report"]["scope"]["kind"] == "bar_replay_evidence"
     assert calls == [{"lookback_days": 7.0, "limit": 80}]
+
+
+def test_autonomous_evolution_runner_skips_replay_within_interval(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    ensure_proposal_registry_table(db_path)
+    _create_core_tables(db_path, include_replay=True, include_effect=True)
+    _create_candidate_review(db_path)
+    monkeypatch.setattr(
+        AutonomousEvolutionCycleService,
+        "_chain_health",
+        lambda self: {"ok": True, "status": "ok", "schema_version": "agent_chain_health.v1"},
+    )
+    monkeypatch.setattr(
+        AutonomousEvolutionNurseryRunner,
+        "_build_readiness",
+        lambda self: _readiness(),
+    )
+    monkeypatch.setattr(
+        ReplayHarnessService,
+        "run_bar_replay_evidence",
+        lambda self, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("replay must be skipped within the interval")
+        ),
+    )
+
+    result = AutonomousEvolutionNurseryRunner(db_path).run_once(
+        readiness=_readiness(replay_status="stale"),
+        reconcile_effects=False,
+        refresh_proposals=False,
+        review_candidates=False,
+        create_release_evidence=False,
+    )
+
+    replay_action = next(
+        item for item in result["actions"] if item["action"] == "run_bar_replay_evidence"
+    )
+    assert replay_action["ok"] is True
+    assert replay_action["status"] == "skipped_replay_interval"
 
 
 def test_autonomous_evolution_runner_defaults_to_small_demo_apply(tmp_path, monkeypatch):

@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import numpy as np
-from scipy import stats as scipy_stats
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +186,8 @@ class BootstrapCI:
                 return 0.0
             if float(np.ptp(sig)) < 1e-12 or float(np.ptp(ret)) < 1e-12:
                 return 0.0
+            from scipy import stats as scipy_stats
+
             ic = float(scipy_stats.spearmanr(sig, ret)[0])
             return 0.0 if np.isnan(ic) else ic
 
