@@ -100,6 +100,14 @@
 - 验证：启动暖机优先使用 cTrader 在线历史，月初当月月库为空或 broker history 不可用时再通过 `bars_monthly_read_paths()` 回读最近历史闭合 bar；live bar freshness、风险和 readiness 以 online trendbar frame 为准，月库只作低频副本与离线兜底。
 - 退出：只迁出真实决策/状态机；不为“拆文件”新增 wrapper。稳定发布后删除旧 globals 和 compatibility authority。
 
+### safety latch 账本 3.94GB（写入侧已修，存量待压缩）（2026-09-10 登记）
+
+- 状态：`active`（存量 3.94GB 未压缩；写入侧已收敛，见 `3593fd19`）
+- 事实：`data/safety/no_new_risk_latch.jsonl` 是 append-only 的 no-new-risk latch 事实源（13,556 条 / 3.94GB，2026-09 单月写入 12,694 条 / 4.0GB）。单条约 400KB 的来源是 `config/runtime_config.py` 的 overlay authority 失败分支：`metadata.authority = exc.report`，而 report 里的 `classifications.<key>.tightening_paths` 是全量收紧路径枚举（实测 `factor_signal_config` 一条 407KB）；同一 `cause_id`（`runtime_config_overlay_refresh`）在每次轮询失败时重复 activate，10,611 条记录带该 report。
+- 已排除的旧口径：2026-09-02 的 overlay 修复（`280d4965`/`a00aebe9`/`f9da796a`）只改判定与重试逻辑（base reload + 单次重试），没碰写入内容，所以记录体积与重复写一直在继续；重放侧已在 `ff4e0ecc` 用游标消除（不再每次 append 全量重放 4GB）。
+- 剩余：① 存量压缩（归档 + 重写为可复原当前状态的账本，保留 `latest` 记录与活跃 cause）——属运行态安全事实的不可逆操作，**须操作员口令后另行执行**；② 可选：同一 cause 已活跃时是否跳过重复 activate（目前只降体积，不改语义）。
+- 验证：`wc -l`/`du -h data/safety/no_new_risk_latch.jsonl`；`python -c` 读 `metadata.authority` 体积；新增记录应 < 2KB（`_bounded_latch_metadata`）。
+
 ### live tick safety 阶段耗时远超节奏（2026-09-10 登记）
 
 - 状态：`active`（只读观测：tick 名义节奏 5s，`safety timing` 显示单 tick `total` 常在 5~122s，`safety=` 段是主因；内存/readiness 批次与该耗时无关，修完尖峰后耗时无改善）
