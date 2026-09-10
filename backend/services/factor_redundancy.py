@@ -1,12 +1,15 @@
 """Automatic redundancy grouping for live alpha factors."""
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
-from backend.services.canonical_v2_reader import iter_decision_factor_snapshots_by_factors
+from backend.services.canonical_v2 import _payload_text_cache_clear
+from backend.services.canonical_v2_reader import iter_decision_factor_values_by_factors
+from backend.services.evolution_work_coordinator import release_free_memory
 
 
 def _connect(db_path: str | Path = STATE_DB, *, read_only: bool = False):
@@ -75,6 +78,16 @@ class RedundancyDetector:
                 "sample_count": min(len(arrays[name]) for name in members),
                 "corr_threshold": corr_threshold,
             })
+        # Choke-point release: the scan just touched ~2500 payloads (each
+        # cached as raw text process-globally) and held per-factor arrays
+        # through the O(N^2) loop. Drop all of it before returning; the
+        # report above is fully materialized. Cache miss = transparent
+        # re-fetch, trim = best-effort (same mechanism as the compact
+        # learning stages).
+        del arrays
+        gc.collect()
+        _payload_text_cache_clear()
+        release_free_memory()
         return {
             "schema_version": "factor_redundancy_report.v1",
             "groups": groups,
@@ -84,32 +97,18 @@ class RedundancyDetector:
     def _load_values(self, names: list[str], *, limit_per_factor: int) -> dict[str, list[float]]:
         if not names:
             return {}
-        values: dict[str, list[float]] = {name: [] for name in names}
         conn = _connect(self.db_path, read_only=True)
         try:
-            snapshots_by_factor = iter_decision_factor_snapshots_by_factors(
+            # Newest-first floats from the lean projection; reverse to ASC
+            # exactly like the previous dict-based path did.
+            values_desc = iter_decision_factor_values_by_factors(
                 conn,
                 names,
                 limit=int(limit_per_factor),
             )
-            for name in names:
-                snapshots = snapshots_by_factor.get(name, [])
-                series = []
-                for row in snapshots:
-                    try:
-                        val = float(row["normalized_value"])
-                    except Exception:
-                        continue
-                    if np.isfinite(val):
-                        series.append(val)
-                values[name] = list(reversed(series))
-                # Release decoded snapshot dicts factor-by-factor instead of
-                # holding all 1893x500 dicts through the whole conversion.
-                snapshots_by_factor[name] = []
-            del snapshots_by_factor
+            return {name: list(reversed(values_desc.get(name, []))) for name in names}
         finally:
             conn.close()
-        return values
 
     @staticmethod
     def _corr_arrays(left: Any, right: Any) -> float:

@@ -19,12 +19,14 @@ Functions:
 
 from __future__ import annotations
 
+import gc
 import json
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
-from backend.services.canonical_v2 import _db_time, _sql, read_payload  # noqa: E402
+from backend.services.canonical_v2 import _db_time, _payload_text_cache_clear, _sql, read_payload  # noqa: E402
 from backend.services.fact_envelope import observed_epoch
 
 EVENT_TYPE = {
@@ -1402,6 +1404,83 @@ def iter_decision_factor_snapshots_by_factors(
                         break
                 if filled:
                     break
+        if limit and int(limit) > 0:
+            return {factor: values[: int(limit)] for factor, values in result.items()}
+        return result
+    except Exception as exc:
+        if not _is_missing_schema(exc):
+            raise
+        return result
+
+
+def iter_decision_factor_values_by_factors(
+    conn: Any,
+    factors: Iterable[str],
+    *,
+    limit: int = 100,
+) -> dict[str, list[float]]:
+    """Return recent per-factor normalized values, newest-first, capped per factor.
+
+    Narrow projection of ``iter_decision_factor_snapshots_by_factors`` for
+    redundancy analysis: same event query (newest-first, ``LIMIT*5``), same
+    parse, same per-factor cap and all-filled early-stop. Snapshot dicts are
+    dropped right after extracting the float, so the ~1893x500 dict transient
+    never materializes. The float sequence is identical to mapping the dict
+    variant through ``float(normalized_value)`` + finiteness filtering.
+    """
+
+    ids = list(dict.fromkeys(str(item) for item in factors if str(item)))
+    result = {factor: [] for factor in ids}
+    # Raw snapshot consumption per factor. The dict variant caps raw rows
+    # (including non-finite/missing values) before float filtering, so the
+    # cap accounting here must match exactly to stay output-identical.
+    consumed = {factor: 0 for factor in ids}
+    if not ids or not _canonical_ready(conn):
+        return result
+    try:
+        limit_clause = f" LIMIT {max(1, int(limit)) * 5}" if limit and int(limit) > 0 else ""
+        rows = conn.execute(
+            _sql(
+                conn,
+                "SELECT e.payload_hash"
+                " FROM canonical_v2.event e"
+                " WHERE e.event_type = 'risk_decision'"
+                " ORDER BY e.created_at DESC"
+                + limit_clause,
+            ),
+        ).fetchall()
+        for event_index, event_row in enumerate(rows):
+            payload_hash = (
+                event_row["payload_hash"]
+                if isinstance(event_row, Mapping)
+                else event_row[0]
+            )
+            for snapshot in _parse_factor_snapshots(read_payload(conn, str(payload_hash))):
+                factor = str(snapshot.get("factor") or "")
+                if factor in result and (
+                    not limit or consumed[factor] < int(limit)
+                ):
+                    consumed[factor] += 1
+                    try:
+                        val = float(snapshot.get("normalized_value"))
+                    except Exception:
+                        continue
+                    if math.isfinite(val):
+                        result[factor].append(val)
+            if limit and int(limit) > 0:
+                filled = True
+                for factor in ids:
+                    if consumed[factor] < int(limit):
+                        filled = False
+                        break
+                if filled:
+                    break
+            # Bound the in-scan peak: scan payloads are read once, so the
+            # process-global text cache is pure retention here. Dropped
+            # entries re-fetch transparently on later misses.
+            if (event_index + 1) % 500 == 0:
+                _payload_text_cache_clear()
+                gc.collect()
         if limit and int(limit) > 0:
             return {factor: values[: int(limit)] for factor, values in result.items()}
         return result
