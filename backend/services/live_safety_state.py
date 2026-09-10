@@ -148,6 +148,7 @@ def _invalidate_latch_cache() -> None:
 
 
 _LATCH_METADATA_VALUE_BYTES = 4096
+_LATCH_METADATA_TOTAL_BYTES = 65536
 _LATCH_METADATA_MAX_DEPTH = 6
 
 
@@ -239,7 +240,7 @@ def activate_no_new_risk_latch(
         "reason": str(reason or "safety_condition"),
         "actor": str(actor or "system:safety"),
         "correlation_id": str(correlation_id or ""),
-        "metadata": _bounded_latch_metadata(metadata_payload),
+        "metadata": _final_latch_metadata(metadata_payload),
         "created_at": time.time(),
     }
     global _PERSISTENCE_FAILURE_LATCH
@@ -464,6 +465,23 @@ def _replay_latch_ledger(
     return active, legacy_records, latest
 
 
+def _final_latch_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Bound one ledger metadata payload per value and in total.
+
+    Per-value bounding keeps shape and small fields; the total cap makes the
+    "one append can never carry a multi-hundred-KB evidence blob" guarantee
+    independent of how many small values a caller passes.
+    """
+
+    bounded = _bounded_latch_metadata(metadata)
+    if not isinstance(bounded, dict):
+        return {"value": bounded}
+    encoded = json.dumps(bounded, ensure_ascii=False, sort_keys=True, default=str)
+    if len(encoded) <= _LATCH_METADATA_TOTAL_BYTES:
+        return bounded
+    return _latch_metadata_digest(metadata)
+
+
 def _load_latch_state() -> tuple[
     dict[tuple[str, str], dict[str, Any]],
     bool,
@@ -577,7 +595,7 @@ def release_no_new_risk_latch_cause(
         "reason": str(reason),
         "actor": str(actor),
         "correlation_id": str(correlation_id or ""),
-        "metadata": {"evidence": _bounded_latch_metadata(dict(evidence or {}))},
+        "metadata": {"evidence": _final_latch_metadata(dict(evidence or {}))},
         "created_at": time.time(),
     }
     try:

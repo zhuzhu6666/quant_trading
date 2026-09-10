@@ -323,3 +323,57 @@ def test_risk_policy_audits_cause_specific_incident_release():
         "broker_execution_unknown",
         "incident_control",
     ]
+
+
+def test_latch_metadata_is_bounded_per_value_and_in_total():
+    """A 400KB-class authority report must persist as a small ledger record.
+
+    The 3.94GB ledger grew from one overlay-authority report (407KB of
+    tightening paths) persisted on every failed refresh poll, so the append
+    choke point bounds each metadata value and the payload as a whole.
+    """
+
+    huge = {
+        "reason": "runtime_overlay_authority_invalid",
+        "authority": "committed_mutation",
+        "new_risk_authorized": False,
+        "classifications": {
+            "factor_signal_config": {
+                "risk_class": "tightening",
+                "v16_required": True,
+                "tightening_paths": [f"factor.signal.{i}.weight" for i in range(20000)],
+            }
+        },
+    }
+    activate_no_new_risk_latch(
+        reason="runtime_overlay_refresh_authority_failed",
+        actor="system:runtime_config_refresh",
+        metadata={"error": "x" * 500, "authority": huge},
+        cause="governance_authority",
+        cause_id="runtime_config_overlay_refresh",
+    )
+    line = safety_latch_path().read_text(encoding="utf-8").splitlines()[0]
+    assert len(line) < 4096, f"latch record must stay small, got {len(line)}"
+    record = json.loads(line)
+    authority = record["metadata"]["authority"]
+    # Small fields and shape survive; only the enumerated evidence is digested.
+    assert authority["reason"] == "runtime_overlay_authority_invalid"
+    assert authority["classifications"]["factor_signal_config"]["risk_class"] == "tightening"
+    dropped = authority["classifications"]["factor_signal_config"]["tightening_paths"]
+    assert dropped["truncated"] is True and dropped["bytes"] > 100000 and dropped["sha256"]
+    assert record["metadata"]["error"] == "x" * 500
+    assert _causes() == {"governance_authority"}
+
+    # Repeating the same cause must not turn the ledger into a per-poll dump.
+    before = len(safety_latch_path().read_text(encoding="utf-8"))
+    for _ in range(5):
+        activate_no_new_risk_latch(
+            reason="runtime_overlay_refresh_authority_failed",
+            actor="system:runtime_config_refresh",
+            metadata={"authority": huge},
+            cause="governance_authority",
+            cause_id="runtime_config_overlay_refresh",
+        )
+    after = len(safety_latch_path().read_text(encoding="utf-8"))
+    assert after - before < 5 * 4096
+    assert _causes() == {"governance_authority"}
