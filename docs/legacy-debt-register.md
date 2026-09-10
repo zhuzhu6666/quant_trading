@@ -100,6 +100,16 @@
 - 验证：启动暖机优先使用 cTrader 在线历史，月初当月月库为空或 broker history 不可用时再通过 `bars_monthly_read_paths()` 回读最近历史闭合 bar；live bar freshness、风险和 readiness 以 online trendbar frame 为准，月库只作低频副本与离线兜底。
 - 退出：只迁出真实决策/状态机；不为“拆文件”新增 wrapper。稳定发布后删除旧 globals 和 compatibility authority。
 
+### live tick safety 阶段耗时远超节奏（2026-09-10 登记）
+
+- 状态：`active`（只读观测：tick 名义节奏 5s，`safety timing` 显示单 tick `total` 常在 5~122s，`safety=` 段是主因；内存/readiness 批次与该耗时无关，修完尖峰后耗时无改善）
+- 事实与 owner：三个分段在 `backend/services/live_loop_tick_runtime.py` 串行测量并打印（`positions`=reconcile_positions、`account`=reconcile_alpha_account、`safety`=`runtime.run_safety_cycle`）；owner 仍是 live loop 串行 tick，不新增 authority、不为提速并行化 tick。
+- 影响：循环长期追赶（5s 节奏被打成 1 tick/10~120s），决策与保护延迟随之放大，backend 常驻 CPU 被占；属执行链问题，不是内存问题。
+- 证据：`grep -a "safety timing" logs/live_loop.log`——`19:59:33 tick 146 ... safety=119.69s total=121.71s`、`19:48:50 tick 12887 ... safety=43.06s total=45.07s`、修复前 `19:14:12 tick 113 ... safety=71.32s total=72.67s`。
+- 剩余：先只读归因 safety 段内部（broker RPC 等待 / Safety 计算 / 锁等待），不得先动节奏、加线程或降门控。
+- 退出：连续 60 分钟内 `safety timing` 的 p95 `total` < 5s 且无 `account_blockers`；针对性测试绿。
+- 验证：`grep -a "safety timing" logs/live_loop.log | tail -50`。
+
 ## 3. 治理、研究与客户端
 
 ### 因子治理重复重算与固定候选错配（2026-08-30）
