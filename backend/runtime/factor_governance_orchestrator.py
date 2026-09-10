@@ -636,6 +636,22 @@ class FactorGovernanceOrchestrator:
                 profile=profile,
                 redundancy_report=redundancy_report,
             )
+            try:
+                _red_patch = _redundancy_signal_patch(
+                    redundancy_report,
+                    dict(getattr(cfg, "factor_signal_config", {}) or {}),
+                )
+                _cand_refs = list((expansion_preflight or {}).get("candidate_refs") or [])
+                logger.info(
+                    "[governance] redundancy invariant: groups=%s patch_keys=%s has_candidate=%s required=%s %s",
+                    int((redundancy_report or {}).get("group_count") or 0),
+                    len(_red_patch),
+                    any(str(r.get("candidate_id") or "") == "redundancy" for r in _cand_refs if isinstance(r, dict)),
+                    bool((expansion_preflight or {}).get("required")),
+                    self._mem_tag(),
+                )
+            except Exception:
+                pass
             if not expansion_preflight["required"]:
                 summary = {
                     "status": "idle_no_expansion_action",

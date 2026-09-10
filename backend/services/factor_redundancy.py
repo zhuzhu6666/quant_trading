@@ -37,17 +37,28 @@ class RedundancyDetector:
         ]
         names = [str(item["factor_id"]) for item in alpha]
         values = self._load_values(names, limit_per_factor=limit_per_factor)
+        # Hoist float conversion + std source out of the O(N^2) pair loop.
+        # Content-identical: same float64 values, same tail-min-n corr semantics.
+        arrays: dict[str, Any] = {}
+        for name, series in values.items():
+            if len(series) >= min_samples:
+                arrays[name] = np.asarray(series, dtype=float)
+                # Release the Python-float list early; the ndarray holds the copy.
+                values[name] = []
+        del values
         groups: list[dict[str, Any]] = []
         used: set[str] = set()
         for i, left in enumerate(names):
-            if left in used or len(values.get(left, [])) < min_samples:
+            left_arr = arrays.get(left)
+            if left_arr is None or left in used:
                 continue
             members = [left]
             correlations: dict[str, float] = {}
             for right in names[i + 1:]:
-                if right in used or len(values.get(right, [])) < min_samples:
+                right_arr = arrays.get(right)
+                if right_arr is None or right in used:
                     continue
-                corr = self._corr(values[left], values[right])
+                corr = self._corr_arrays(left_arr, right_arr)
                 if abs(corr) >= corr_threshold:
                     members.append(right)
                     correlations[f"{left}:{right}"] = corr
@@ -61,7 +72,7 @@ class RedundancyDetector:
                 "leader": leader,
                 "members": sorted(members),
                 "correlations": correlations,
-                "sample_count": min(len(values.get(name, [])) for name in members),
+                "sample_count": min(len(arrays[name]) for name in members),
                 "corr_threshold": corr_threshold,
             })
         return {
@@ -92,9 +103,24 @@ class RedundancyDetector:
                     if np.isfinite(val):
                         series.append(val)
                 values[name] = list(reversed(series))
+                # Release decoded snapshot dicts factor-by-factor instead of
+                # holding all 1893x500 dicts through the whole conversion.
+                snapshots_by_factor[name] = []
+            del snapshots_by_factor
         finally:
             conn.close()
         return values
+
+    @staticmethod
+    def _corr_arrays(left: Any, right: Any) -> float:
+        n = min(len(left), len(right))
+        if n < 2:
+            return 0.0
+        a = np.asarray(left[-n:], dtype=float)
+        b = np.asarray(right[-n:], dtype=float)
+        if float(np.std(a)) < 1e-12 or float(np.std(b)) < 1e-12:
+            return 0.0
+        return float(np.corrcoef(a, b)[0, 1])
 
     @staticmethod
     def _corr(left: list[float], right: list[float]) -> float:

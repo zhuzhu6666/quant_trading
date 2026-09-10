@@ -591,59 +591,71 @@ class FactorCardService:
             else:
                 candidate_cap = max(_CANDIDATE_MIN_LIMIT, int(limit) * (10 if (source or lifecycle_status or factor_family) else 5))
                 ids = self._rank_candidate_ids(ids, catalog_by_factor, candidate_cap)
-            evidence_by_factor: dict[str, dict[str, Any]] = {}
-            try:
+            is_parameter_responsibility = bool(responsibility) and str(responsibility).strip().lower() == "parameter"
+            if responsibility and not is_parameter_responsibility:
+                raise ValueError(
+                    f"unsupported factor card responsibility filter: {responsibility}"
+                )
+            if is_parameter_responsibility:
+                # Review-first: `_batch_review_evidence` is an indexed SQL
+                # (12 rows/factor) while `factor_evidence_summary` scans full
+                # canonical history. Responsibility labels come from review
+                # evidence only, so narrow before the heavy call.
                 from research.features.feature_provider import LearningFeatureProvider
 
-                evidence_by_factor = LearningFeatureProvider(
-                    self.db_path
-                ).factor_evidence_summary(ids)
-            except Exception:
-                evidence_by_factor = {}
-            review_evidence_by_factor = self._batch_review_evidence(
-                conn,
-                ids,
-            )
-            card_evidence_by_factor: dict[str, dict[str, Any]] = {}
-            for name in ids:
-                merged = dict(evidence_by_factor.get(name) or {})
-                merged.update(review_evidence_by_factor.get(name) or {})
-                card_evidence_by_factor[name] = merged
-            if responsibility:
-                responsibility_key = str(responsibility).strip().lower()
-                if responsibility_key != "parameter":
-                    raise ValueError(
-                        f"unsupported factor card responsibility filter: {responsibility}"
-                    )
+                review_full = self._batch_review_evidence(conn, ids)
                 if not all(
-                    str(card_evidence_by_factor[name].get("status") or "") == "available"
-                    and str(
-                        card_evidence_by_factor[name].get("review_evidence_status") or ""
-                    ) == "available"
+                    str(review_full.get(name, {}).get("review_evidence_status") or "") == "available"
                     for name in ids
                 ):
-                    # Parameter recommendations are governance inputs.  A
-                    # partial batch must not fall back to stale/per-factor
-                    # evidence and produce a recommendation.
                     return []
-                ids = [
-                    name
-                    for name in ids
-                    if str(
-                        card_evidence_by_factor[name].get(
-                            "last_primary_responsibility"
-                        )
-                        or ""
-                    )
-                    == "parameter"
-                    or "factor_logic_ok_but_param_suspect"
-                    in list(
-                        card_evidence_by_factor[name].get(
-                            "recent_responsibility_labels"
-                        )
-                        or []
+                suspect_ids = [
+                    name for name in ids
+                    if str(review_full.get(name, {}).get("last_primary_responsibility") or "") == "parameter"
+                    or "factor_logic_ok_but_param_suspect" in list(
+                        review_full.get(name, {}).get("recent_responsibility_labels") or []
                     )
                 ]
+                if not suspect_ids:
+                    ids = []
+                    evidence_by_factor = {}
+                    review_evidence_by_factor = review_full
+                    card_evidence_by_factor = {}
+                else:
+                    try:
+                        evidence_by_factor = LearningFeatureProvider(
+                            self.db_path
+                        ).factor_evidence_summary(suspect_ids)
+                    except Exception:
+                        evidence_by_factor = {}
+                    if not all(
+                        str((evidence_by_factor.get(name) or {}).get("status") or "") == "available"
+                        for name in suspect_ids
+                    ):
+                        return []
+                    review_evidence_by_factor = {name: review_full.get(name, {}) for name in suspect_ids}
+                    card_evidence_by_factor = {}
+                    for name in suspect_ids:
+                        merged = dict(evidence_by_factor.get(name) or {})
+                        merged.update(review_evidence_by_factor.get(name) or {})
+                        card_evidence_by_factor[name] = merged
+                    ids = suspect_ids
+            else:
+                evidence_by_factor = {}
+                try:
+                    from research.features.feature_provider import LearningFeatureProvider
+
+                    evidence_by_factor = LearningFeatureProvider(
+                        self.db_path
+                    ).factor_evidence_summary(ids)
+                except Exception:
+                    evidence_by_factor = {}
+                review_evidence_by_factor = self._batch_review_evidence(conn, ids)
+                card_evidence_by_factor = {}
+                for name in ids:
+                    merged = dict(evidence_by_factor.get(name) or {})
+                    merged.update(review_evidence_by_factor.get(name) or {})
+                    card_evidence_by_factor[name] = merged
             try:
                 from config.runtime_config import shared as _runtime_config
 

@@ -1394,6 +1394,14 @@ def iter_decision_factor_snapshots_by_factors(
                     not limit or len(result[factor]) < int(limit)
                 ):
                     result[factor].append(snapshot)
+            if limit and int(limit) > 0:
+                filled = True
+                for values in result.values():
+                    if len(values) < int(limit):
+                        filled = False
+                        break
+                if filled:
+                    break
         if limit and int(limit) > 0:
             return {factor: values[: int(limit)] for factor, values in result.items()}
         return result
