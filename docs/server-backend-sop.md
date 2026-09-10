@@ -7,6 +7,17 @@
 这份文档只服务一个目标：
 把服务器上的后端日常操作标准化，减少临场判断和误操作。
 
+## safety latch 账本压缩（仅在增长时执行）
+
+`data/safety/no_new_risk_latch.jsonl` 是 no-new-risk latch 事实源，append-only，只会增长。需要回收空间时用仓库内工具，**不要手工截断**：
+
+```bash
+.venv/bin/python scripts/compact_safety_latch_ledger.py          # 干跑：报行数/活跃 cause/重写计划
+.venv/bin/python scripts/compact_safety_latch_ledger.py --apply  # 归档 + 重写
+```
+
+工具会把原文件逐字归档到 `data/safety/archive/no_new_risk_latch.<UTC>.jsonl.gz`（**归档是历史 latch 证据，永不删除**），重写成只保留「活跃 cause + 最后一条有效记录」的新账本，并在替换前校验：归档与重写后的折叠状态必须与原账本逐字段一致，否则拒绝执行。写侧已在上游限制单条记录体积（每值 4KB、整条 64KB），正常情况下账本每年增长仅 MB 级，压缩属一次性回收。
+
 ## 1. 适用范围
 
 这份 SOP 适用于：
