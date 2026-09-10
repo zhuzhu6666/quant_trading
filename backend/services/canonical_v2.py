@@ -436,28 +436,9 @@ def _payload_text_cache_clear() -> None:
         _PAYLOAD_TEXT_CACHE.clear()
 
 
-def read_payload(conn: Any, payload_hash: str) -> Any:
-    """Restore and verify one payload blob."""
+def _decode_payload_row(payload_hash: str, row: Any) -> tuple[str, Any]:
+    """Verify and decode one ``payload_blob`` row; returns (text, payload)."""
 
-    cached_text = _payload_text_cache_get(str(payload_hash or ""))
-    if cached_text is not None:
-        return json.loads(cached_text)
-
-
-    row = conn.execute(
-        _sql(
-            conn,
-            """
-            SELECT payload_kind, schema_version, canonical_bytes, codec,
-                   raw_sha256, raw_bytes, compressed_bytes
-            FROM canonical_v2.payload_blob
-            WHERE payload_hash=?
-            """,
-        ),
-        (str(payload_hash or ""),),
-    ).fetchone()
-    if row is None:
-        raise KeyError(f"missing canonical_v2 payload: {payload_hash}")
     fields = _row_dict(
         row,
         (
@@ -493,8 +474,81 @@ def read_payload(conn: Any, payload_hash: str) -> Any:
         payload = json.loads(text)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CanonicalV2Error("canonical_v2 payload is not valid JSON") from exc
-    _payload_text_cache_put(str(payload_hash or ""), text)
+    return text, payload
+
+
+def read_payload(conn: Any, payload_hash: str) -> Any:
+    """Restore and verify one payload blob."""
+
+    key = str(payload_hash or "")
+    cached_text = _payload_text_cache_get(key)
+    if cached_text is not None:
+        return json.loads(cached_text)
+
+
+    row = conn.execute(
+        _sql(
+            conn,
+            """
+            SELECT payload_kind, schema_version, canonical_bytes, codec,
+                   raw_sha256, raw_bytes, compressed_bytes
+            FROM canonical_v2.payload_blob
+            WHERE payload_hash=?
+            """,
+        ),
+        (key,),
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"missing canonical_v2 payload: {key}")
+    text, payload = _decode_payload_row(key, row)
+    _payload_text_cache_put(key, text)
     return payload
+
+
+_PAYLOAD_READ_CHUNK = 400
+
+
+def read_payloads(conn: Any, payload_hashes: Iterable[str]) -> dict[str, Any]:
+    """Restore and verify several payload blobs with one query per chunk.
+
+    ``read_payload`` issues one query per hash, so canonical readers that walk
+    thousands of decisions paid thousands of round trips for the same rows.
+    Hashes without a stored blob stay absent from the result, which keeps each
+    caller's own missing-payload contract intact.
+    """
+
+    payloads: dict[str, Any] = {}
+    missing: list[str] = []
+    for item in payload_hashes:
+        key = str(item or "")
+        if key in payloads or key in missing:
+            continue
+        cached_text = _payload_text_cache_get(key)
+        if cached_text is not None:
+            payloads[key] = json.loads(cached_text)
+        else:
+            missing.append(key)
+    for start in range(0, len(missing), _PAYLOAD_READ_CHUNK):
+        chunk = missing[start : start + _PAYLOAD_READ_CHUNK]
+        placeholders = ", ".join("?" for _ in chunk)
+        rows = conn.execute(
+            _sql(
+                conn,
+                # payload_hash last: _row_dict maps positionally for non-mapping
+                # rows (sqlite3.Row), so the ordered fields must come first.
+                "SELECT payload_kind, schema_version, canonical_bytes, codec, "
+                "raw_sha256, raw_bytes, compressed_bytes, payload_hash "
+                "FROM canonical_v2.payload_blob "
+                f"WHERE payload_hash IN ({placeholders})",
+            ),
+            tuple(chunk),
+        ).fetchall()
+        for row in rows:
+            key = str(_row_value(row, "payload_hash", 7) or "")
+            text, payload = _decode_payload_row(key, row)
+            _payload_text_cache_put(key, text)
+            payloads[key] = payload
+    return payloads
 
 
 _EVENT_COLUMNS = (

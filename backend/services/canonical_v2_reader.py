@@ -26,7 +26,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
-from backend.services.canonical_v2 import _db_time, _payload_text_cache_clear, _sql, read_payload  # noqa: E402
+from backend.services.canonical_v2 import _db_time, _payload_text_cache_clear, _sql, read_payload, read_payloads  # noqa: E402
 from backend.services.fact_envelope import observed_epoch
 
 EVENT_TYPE = {
@@ -496,8 +496,7 @@ def iter_decisions(
             ),
             (*params, int(limit)),
         ).fetchall()
-        for row in rows:
-            yield _decision_record(conn, row)
+        yield from _decision_records(conn, rows)
         return
     last_observed_at: Any = None
     last_event_id: str = ""
@@ -522,19 +521,45 @@ def iter_decisions(
         ).fetchall()
         if not rows:
             break
-        for row in rows:
-            yield _decision_record(conn, row)
+        yield from _decision_records(conn, rows)
         last_observed_at = rows[-1]["observed_at"]
         last_event_id = str(rows[-1]["event_id"] or "")
 
 
-def _decision_record(conn: Any, row: Any) -> dict[str, Any]:
-    return {
-        "decision_id": str(row["entity_id"] or ""),
-        "event_id": str(row["event_id"] or ""),
-        "source": "canonical",
-        "payload": read_payload(conn, str(row["payload_hash"])),
-    }
+_DECISION_PAYLOAD_BATCH = 200
+
+
+def _decision_records(conn: Any, rows: Iterable[Any]) -> Iterator[dict[str, Any]]:
+    """Build decision records with one payload query per chunk of rows.
+
+    Chunked so the decoded payloads alive at once stay bounded: the per-row
+    read kept one payload alive, a whole-window read would hold thousands.
+    """
+
+    chunk: list[Any] = []
+    for row in rows:
+        chunk.append(row)
+        if len(chunk) >= _DECISION_PAYLOAD_BATCH:
+            yield from _decision_chunk(conn, chunk)
+            chunk = []
+    if chunk:
+        yield from _decision_chunk(conn, chunk)
+
+
+def _decision_chunk(conn: Any, rows: list[Any]) -> Iterator[dict[str, Any]]:
+    payloads = read_payloads(
+        conn, (str(row["payload_hash"] or "") for row in rows)
+    )
+    for row in rows:
+        payload_hash = str(row["payload_hash"] or "")
+        if payload_hash not in payloads:
+            raise KeyError(f"missing canonical_v2 payload: {payload_hash}")
+        yield {
+            "decision_id": str(row["entity_id"] or ""),
+            "event_id": str(row["event_id"] or ""),
+            "source": "canonical",
+            "payload": payloads[payload_hash],
+        }
 
 
 def canonical_fact_observation(
