@@ -147,6 +147,59 @@ def _invalidate_latch_cache() -> None:
     _LATCH_CACHE_SIGNATURE = None
 
 
+_LATCH_METADATA_VALUE_BYTES = 4096
+_LATCH_METADATA_MAX_DEPTH = 6
+
+
+def _latch_metadata_digest(value: Any) -> dict[str, Any]:
+    """Bounded stand-in for one oversized metadata value.
+
+    The ledger is authoritative for latch *state*; the evidence payload belongs
+    to the producer's own report.  Keeping size and digest lets an auditor
+    prove which value was dropped without storing it in every record.
+    """
+
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    digest: dict[str, Any] = {
+        "truncated": True,
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        digest["count"] = len(value)
+    elif isinstance(value, Mapping):
+        digest["keys"] = sorted(str(key) for key in value)[:20]
+    return digest
+
+
+def _bounded_latch_metadata(value: Any, *, depth: int = 0) -> Any:
+    """Bound one ledger metadata payload while keeping its shape and keys.
+
+    A failed runtime-config overlay refresh embedded its whole authority report
+    (409KB of tightening paths) and re-activated the same cause on every poll,
+    which wrote ~4GB of near-identical latch records.
+    """
+
+    if isinstance(value, Mapping):
+        if depth >= _LATCH_METADATA_MAX_DEPTH:
+            return _latch_metadata_digest(value)
+        return {
+            str(key): _bounded_latch_metadata(item, depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        original = list(value)
+        bounded = [_bounded_latch_metadata(item, depth=depth + 1) for item in original]
+        encoded = json.dumps(bounded, ensure_ascii=False, sort_keys=True, default=str)
+        if len(encoded) <= _LATCH_METADATA_VALUE_BYTES:
+            return bounded
+        return _latch_metadata_digest(original)
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    if len(encoded) > _LATCH_METADATA_VALUE_BYTES:
+        return _latch_metadata_digest(value)
+    return value
+
+
 def activate_no_new_risk_latch(
     *,
     reason: str,
@@ -186,7 +239,7 @@ def activate_no_new_risk_latch(
         "reason": str(reason or "safety_condition"),
         "actor": str(actor or "system:safety"),
         "correlation_id": str(correlation_id or ""),
-        "metadata": metadata_payload,
+        "metadata": _bounded_latch_metadata(metadata_payload),
         "created_at": time.time(),
     }
     global _PERSISTENCE_FAILURE_LATCH
@@ -524,7 +577,7 @@ def release_no_new_risk_latch_cause(
         "reason": str(reason),
         "actor": str(actor),
         "correlation_id": str(correlation_id or ""),
-        "metadata": {"evidence": dict(evidence or {})},
+        "metadata": {"evidence": _bounded_latch_metadata(dict(evidence or {}))},
         "created_at": time.time(),
     }
     try:
