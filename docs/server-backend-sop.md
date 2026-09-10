@@ -383,10 +383,12 @@ systemctl status quant-backend.service --no-pager
 
 - `factor_governance_*` 等运行态参数的唯一合法通道是 typed governance mutation（`settings.yaml` base + 部署，或经 `GovernanceMutationCoordinator` 提交）；overlay 直写对扩张类键没有合法恢复通道。
 - v34 校验契约（`backend/services/runtime_config_overlay.py`）：启动时用 intent 记录的 `committed_overlay_hash` 比对当前 overlay 行内容，再校验 intent 的 committed/current、projection 和 domain hash。因此：
-  - **base-only 变更（改 `config/settings.yaml`）不再使 committed intent 失配**，不会再因部署引发 no-new-risk 闩锁；base 变更仍需受控重启让进程加载新配置。
+  - **base-only 变更（改 `config/settings.yaml`）不再使 committed intent 失配**（intent 失配路径）；但 base 部署仍会让运行中进程在 overlay refresh 里遇到 stale-base 校验失败，`_retry_refresh_after_base_reload` 重试不成则挂 `governance_authority` 闩并转 read-only quarantine，直到受控重启加载新配置——base 变更仍需受控重启，重启前存在一段挂起窗口。
   - **overlay 行直写仍然 fail-closed**（row-hash mismatch → `governance_authority` 闩锁），这是设计行为。
   - 无 `committed_overlay_hash` 的旧 intent 仍走 v34 前的全量 base+overlay hash 比较（过渡期）；此类 intent 遇 base 变更会失配，需一次 Coordinator mutation 重绑。
 - 配置键增删必须走一次治理 `put_config`/Coordinator mutation 完成，使 target/committed 与改动后的载荷重绑；不要通过删改 base 文件绕过治理。
+- 2026-09-09~09-11 实测（20 次受控重启，含 09-09 genesis-12 base 变更）：base 变更后、受控重启前，运行中的进程会出现 read-only quarantine 并把新风险挂起（journal `overlay retained as read-only quarantine`，latch cause=`governance_authority`/cause_id=`runtime_config_overlay_refresh`），重启后启动即 `overlay restored hash=…`；09-09 20:14 起连续 12 次重启均启动即 restored，无 38 分钟级冻结、无 worker 重启风暴。
+- 可选收紧（当前不做，不阻塞）：把 register_shadow 的 hash 绑定改为提交时重绑或局部键校验，替代启动期全量比较；只有再次出现冻结回归时才评估。
 - 验证命令：`git log -1` 与 `systemctl show -p ActiveEnterTimestamp` 对比确认进程已加载新配置；journal 无活动 `governance_authority` cause 且 `system_health healthy` 才算闩清除。
 
 ## 9. 交易循环排查 SOP
