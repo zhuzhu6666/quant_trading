@@ -1,7 +1,7 @@
 # Documentation Governance
 
 > Status: active
-> Last verified: 2026-08-28 (reviewed, no semantic change from 08-13; history docs archived per §3)
+> Last verified: 2026-09-10（本轮文档收敛批即按本规则执行：删除已完成条目、删除取代的 handoff 文档、不新建归档目录、同一事实只在一处展开）
 > Scope: 文档职责、更新与删除规则。
 
 ## 1. 原则

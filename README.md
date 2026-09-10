@@ -6,17 +6,13 @@
 
 ## 当前状态
 
-截至 2026-08-19 的发布状态快照：
+当前阶段、运行姿态、发布门和未满足证据以 [docs/README.md](docs/README.md) 为唯一入口；服务、PostgreSQL、`runtime_kv`、日志和 broker 的逐时事实必须现查，本 README 不保存状态快照。
 
-- S0–S5 的旧事实库清理、`runtime` 运行态重建和 `canonical_v2` 事实域切换已完成；冷启动与业务表重建（S7.1–S7.3）与代码修复（S7.4）已完成。
-- S7.3 重建遗留的 schema 欠账已全部收敛（迁移 0019–0024）：128 个缺失二级索引补齐、6 张极简表补 63 列、7 张漏建活跃表物归原主、`proposal_registry` 缺列与两处索引契约修复。全量回归 **2782 passed / 12 skipped / 0 failed**，迁移台账 v24 / ok / mismatches 0。
-- 双服务（quant-backend / quant-learning-worker）已受控重启加载最新工作区代码并运行验收通过（cTrader 认证 OK、cron 多轮执行成功、无 missing-index 报错）。
-- **S7.6 进化闭环首验仍待真实交易证据**：需等第一笔真实平仓 → canonical `trade_review` 事件 → sample → posterior/effect 链自然闭合，方能更新 README 首页与验收矩阵。
-- P1 代码与历史污染修复完成，仍处于 `runtime acceptance`：还差真实 post-repair broker deal、重启 replay 和完整持仓生命周期证据。
-- P5 架构收敛持续进行；每个批次删除被替代的 writer、重算、fallback 和无意义 wrapper（最近一批已净删 20 个 backfill/reconcile 脚本、`oms.py`/`algos.py`/`factor_engine.py`/`paper_service.py` 等旧路径）。
-- live loop 当前由 operator 手动停止、无持仓，readiness 保持 `no_new_risk`；Safety v2 仍为 `shadow/observing`；generation / execution outcome / governance enforce / PG job queue 等发布开关未自动推进。
+稳定结论：
 
-详细阶段、运行姿态、批次记录和未满足证据见 [分期修复发布状态](docs/phased-repair-rollout-status.md)；剩余待办清单见 [接续总览](docs/planning/handoff-next-batches-2026-08-18.md)。
+- 运行态统一 PostgreSQL `runtime`，不可变事实与学习样本统一 `canonical_v2`；本地 SQLite `data/state.db` 运行路径已退役。
+- 生产执行单轨为 `governed_execute -> RiskPolicyService -> cTrader -> lifecycle -> fresh reconcile`；readiness、API 和前端只做只读投影，不重算授权事实。
+- 发布流程从 `main` 创建临时发布分支。阶段进度见 [分期修复发布状态](docs/phased-repair-rollout-status.md)，剩余旧债见 [旧债登记](docs/legacy-debt-register.md)，唯一活动实施计划见 [生产自治修复与架构收敛总方案](docs/planning/production-autonomy-repair-optimization-plan.md)。
 
 ## 系统主链
 
@@ -84,8 +80,8 @@ alpha/            因子、组合、选择、健康度与生命周期适配
 research/         学习、证据、评估、回放和治理研究
 config/           YAML 基础配置与 RuntimeConfig 读取边界
 migrations/       PostgreSQL runtime/canonical_v2 的 forward-only migrations
-web_frontend/     React/Vite Web 操作台
-miniprogram_v2/   微信小程序状态界面与本地 uCharts
+web_frontend/     React/Vite 操作台（Windows 本地仓库维护，服务器不拉取、不构建）
+miniprogram_v2/   微信小程序状态界面与本地 uCharts（同上）
 scripts/          worker、状态只读查询、迁移和验收工具
 tests/            后端、风险、执行、治理、学习、前端合同测试
 docs/             当前事实源、合同、SOP、阶段和验收矩阵
@@ -123,20 +119,16 @@ docs/             当前事实源、合同、SOP、阶段和验收矩阵
 后端、数据库和运行态验证以 Linux 服务器 SOP 为准；以下是常用的最小检查示例：
 
 ```bash
-# Python 编译与针对性测试
+# Python 编译与针对性测试（服务器）
 .venv/bin/python -m py_compile backend/app.py backend/services/live_loop_runner.py
-.venv/bin/pytest tests/test_v16_brain_orchestrator.py tests/test_live_service_bar_dedup.py
-
-# Web 合同、类型检查和生产构建
-cd web_frontend
-npm run typecheck
-npm test
-npm run build
-cd ..
+.venv/bin/python -m pytest tests/test_v16_brain_orchestrator.py tests/test_live_service_bar_dedup.py -q
 
 # 文档与变更格式
 git diff --check
 ```
+
+前端（`web_frontend` / `miniprogram_v2`）在 Windows 本地仓库维护，`npm test` / `npm run typecheck` / `npm run build`
+只在开发电脑执行，不在服务器执行；平台行为最终用微信开发者工具或浏览器验证。
 
 涉及 PostgreSQL schema 时，先运行迁移检查；涉及运行态排查时使用只读入口：
 

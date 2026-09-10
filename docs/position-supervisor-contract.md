@@ -1,6 +1,6 @@
 # Position Supervisor Contract
 
-> Last updated: 2026-08-28
+> Last updated: 2026-09-10（引用核对：182 处标识符全部命中代码；修正两处失效口径——auto-selection 模式列表去掉 `live_execute`、删除不存在的 `shadow_recommendation` 字段说明；语义未逐条复核）
 > Phase: C-H
 > Status: governed supervisor execution active; per-position binding and selection projection implemented; evidence-qualified auto-selection wired (current projection remains `off` for insufficient evidence); historical/learning observation-only; model influence shadow/disabled
 
@@ -451,7 +451,7 @@ supervisor 结论进入 `canonical_v2.event`，`entity_type=risk_decision`，建
 
 - `execution_class=applied/shadow/skipped/blocked/failed/observed`
 - `is_real_execution=true` 仅允许出现在 `stage=executed AND outcome=applied`
-- `recommended_action` 保留 supervisor 建议动作；shadow 建议还在 `shadow_recommendation` 中显式保留
+- `recommended_action` 等于 supervisor 请求动作（`requested_action` 的别名）；shadow 场景只由 `execution_class=shadow` 表达，旧 `shadow_recommendation` 字段已不存在（2026-09-10 代码核对：`live_position_lifecycle` 只写 `execution_class` / `is_real_execution` / `requested_action` / `effective_action` / `recommended_action`）
 
 Demo/实盘共用同一监督执行边界：
 
@@ -656,10 +656,9 @@ position_supervisor_max_switches_per_position = 2
 position_supervisor_selection_max_age_seconds = 900
 ```
 
-允许的模式为 `off | shadow | demo_execute | live_execute`。`off` 只是没有合格证据时的安全
+允许的模式为 `off | shadow | demo_execute`（`config/runtime_config.py` 的 `VALID_POSITION_SUPERVISOR_AUTO_SELECTION_MODES`；旧的 `live_execute` 选项及配套死门已于减法批删除，不得恢复）。`off` 只是没有合格证据时的安全
 启动基线，不是等待人工打开的开关：learning worker 发现投影达到资格后，会自动通过既有
-V16、RiskPolicy 和 Coordinator 切到有界 Demo。当前 `live_execute` 不准入；不再额外增加
-人工审批闸门或第二套开关。
+V16、RiskPolicy 和 Coordinator 切到有界 Demo，不再额外增加人工审批闸门或第二套开关。
 
 新仓位只在成交前读取一次选择结果。已有仓位只有在以下条件同时满足时才允许切换：状态变化、
 连续达到配置的已收盘 bar 数、无未完成 broker intent/reconcile、价格/PnL/路径/市场上下文

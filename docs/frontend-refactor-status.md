@@ -2,6 +2,7 @@
 
 > Status: active rollout status
 > Last verified: 2026-08-29 (本地 renderer/Fact/recovery 修复与 npm test/typecheck/lint/build 已验证；Tauri runtime acceptance 未重验; sparseCheckout 08-14 已收口)
+> 2026-09-10 服务器侧复核：本文件引用的前端文件（`index.html`、`*.css`、`openapi.json` 等）不在服务器工作树，服务器只提供 API/WSS（Caddy 其余路径 404），本文件内容未在服务器重验。
 > Scope: 只记录前端重构实际进度，不重复产品和架构合同。
 
 ## 1. 当前阶段

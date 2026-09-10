@@ -1,10 +1,12 @@
 # System Source Of Truth
 
 > Status: active
-> Last verified: 2026-08-28 (HEAD f2eb9c9; governance enforce active; off 直连路径已删)
+> Last verified: 2026-09-10 (状态 schema 引用核对至 v34；其余主体最后复核仍为 2026-08-28 f2eb9c9)
 > Scope: authoritative sources for runtime state, configuration, governance, data, and frontend contracts.
 
 本文回答一个问题：当文档、注释、接口、数据库和历史理解冲突时，到底以哪里为准。
+
+本文件较大（约 170KB），按领域查阅，不要一次读完：§1 总规则与三层权力 / §2 配置与发布开关 / §3 因子 / §4 风控与执行 / §5 学习与自治 / §6 数据 / §7 API 与前端 / §8 闭环 / §9 冲突顺序 / §10 自治约束 / §11 前端边界。引用时请写 `system-source-of-truth.md §N`。
 
 ## 1. 总规则
 
@@ -196,7 +198,7 @@ Coordinator 进入有界 Demo；`live_execute` 仍不准入。这里保留的是
 | 仓位监督 | `PositionSupervisor` / `position-supervisor-contract.md` + `backend.services.live_supervision_actions` + `backend.services.live_supervision_runtime` + `recovery_position_state.recovery_meta.position_path` | fresh broker position reconcile 是 live 持仓路径 `MFE/MAE/time_in_profit` 的唯一累计写入边界，canonical position/lifecycle events、API 和 Web 只读投影；active template 只接受 `governed_execute`。新仓位绑定 `position_supervisor_binding.v1`，旧仓位明确使用 `legacy_global_fallback`；绑定 hash 不一致或来源未知时软策略 `unknown/hold`，硬风险仍可收口。记忆选择只消费 learning worker 写入的 `runtime_kv[position_supervisor_selection.v1]`，只在成交前或稳定边界读取。`tighten/reduce/close` 都必须先经过 broker 可执行性/no-op、supervisor verdict 和 RiskPolicy，再由同一 supervisor executor 触达 broker，并由 fresh reconcile 证明 applied；风险拒绝、未知回执、执行失败或不完整投影不得伪装为 applied。真实 `executed/applied` trace 才可进入 supervisor maturity；历史 observation/superseded trace terminalize 为 `excluded/train_weight=0`，仅供 audit/explainability。`restart_replay/manual_close` 等污染仍可按用途进入低权重 outcome learning，但禁止 supervisor counterfactual 和 governance mutation；`legacy_awe_trailing` 仅历史审计。风险页必须分别展示政策裁决与 broker 执行事实。
 | 仓位监督选择投影 | `runtime_kv[position_supervisor_selection.v1]` + `backend.services.position_supervisor_governance` + 既有 `autonomous_learning` worker | 唯一 memory-to-live 投影；只接受当前 Coordinator mutation、完整干净成熟 `causal_scope=supervisor` 反事实、同模板 hash、有效 application/effect 和 canary 门槛。`proposed/approved/brain_memory/inconclusive` 不能直接授权。默认 `position_supervisor_auto_selection_mode=off`；`shadow` 只写投影/审计，`demo_execute` 才允许在有界 Demo 的稳定边界切换，`live_execute` 当前不准入。投影过期、缺失或冲突统一 `no_change`，不触达 broker。
 | 恢复关闭语义 | `backend.services.review_contract.classify_close_reason_from_recovery` + `backend.services.live_recovery_close` + `recovery_position_state.recovery_meta` | broker 仓位消失是恢复观测，不等于真实交易关闭原因。持久化的 supervisor close reason 优先，保护单与权威成交匹配次之，无法证明才保留 `restart_replay`；`broker_position_not_found` 只保留为退休观测状态，实际交易原因写入已有 recovery metadata 和 close review。 |
-| 持仓超时口径 | `backend.services.market_session.market_open_seconds_between` + `backend.services.live_position_lifecycle.build_holding_timeout_market_budget` | `holding_timeout` 的可执行判定使用统一市场时段权威的开市累计时长：优先使用 cTrader `ProtoOASymbol.schedule`/`scheduleTimeZone` 及其 broker 返回的 `holiday` 窗口，broker schedule 不可用时才使用 `config/instruments.yaml` fallback；日内休市、临时节假日和周末均不计入 timeout 预算，且预算记录 `schedule_source`。墙钟超限但开市时长未超限时监督器只落一条 `execution_deferred/market_closed_pending` trace（每小时心跳一次）并推迟到开盘后首个 tick 平仓，不在停市期逐 tick 重试被 MARKET_CLOSED 确定性拒绝的 close。确定性市场关闭拒绝（`MARKET_CLOSED/TRADING_MARKET_CLOSED/OFF_QUOTES/NO_QUOTES` 等）通过 `MARKET_CLOSED_DEFER_*` recovery-meta 键按仓位记录抑制窗口；SL/TP 保护单不受影响。该口径只影响 timeout 触发时机，不改变 `supervisor -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 执行链与 fail-closed 语义。2026-08-23 周末死循环事故保留原始 canonical 事件作为 append-only 审计事实；脚本 `scripts/cleanup_market_closed_retry_storm_20260823.py` 仅提供只读预览，永久拒绝物理删除，后续应由独立治理的 suppression projection 处理训练/展示排除。 |
+| 持仓超时口径 | `backend.services.market_session.market_open_seconds_between` + `backend.services.live_position_lifecycle.build_holding_timeout_market_budget` | `holding_timeout` 的可执行判定使用统一市场时段权威的开市累计时长：优先使用 cTrader `ProtoOASymbol.schedule`/`scheduleTimeZone` 及其 broker 返回的 `holiday` 窗口，broker schedule 不可用时才使用 `config/instruments.yaml` fallback；日内休市、临时节假日和周末均不计入 timeout 预算，且预算记录 `schedule_source`。墙钟超限但开市时长未超限时监督器只落一条 `execution_deferred/market_closed_pending` trace（每小时心跳一次）并推迟到开盘后首个 tick 平仓，不在停市期逐 tick 重试被 MARKET_CLOSED 确定性拒绝的 close。确定性市场关闭拒绝（`MARKET_CLOSED/TRADING_MARKET_CLOSED/OFF_QUOTES/NO_QUOTES` 等）通过 `MARKET_CLOSED_DEFER_*` recovery-meta 键按仓位记录抑制窗口；SL/TP 保护单不受影响。该口径只影响 timeout 触发时机，不改变 `supervisor -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile` 执行链与 fail-closed 语义。2026-08-23 周末死循环事故保留原始 canonical 事件作为 append-only 审计事实；当时的一次性只读预览脚本已随 2026-09-10 归档清理删除，约束继续有效：不得物理删除重试事件，后续应由独立治理的 suppression projection 处理训练/展示排除。 |
 | 动态仓位 | `RiskLimitSnapshot` + `risk_kelly_sizing` + `backend.services.live_risk_sizing` + live sizing trace | Kelly、event sizing、context policy 统一生成 `position_sizing_trace.v1`，Safety、Readiness 和前端只读结果。Demo 中 Kelly≤0 可持续使用 broker 最小量探索，不受样本数限制；Kelly>0 但计算量低于最小量时也复用同一 demo 探索路径。两者都必须有有效入场价和保护止损、全部既有门控通过，且最小量实际止损风险不超过现有 `kelly_risk_per_trade_pct` 对应的 equity 风险预算；缺止损、价格无效、无法计算、超过该预算或 volume cap 即拒绝。非 demo 保持 0 volume/blocked。trace 明确记录 Kelly 目标量、探索资格、实际止损风险和拒绝 reason code |
 | 事件缩放 | `execution/event_sizing.py` + `data/events.duckdb` | 事件窗口风控输入 |
 
@@ -229,7 +231,7 @@ Coordinator 进入有界 Demo；`live_execute` 仍不准入。这里保留的是
 
 ## 5. 学习与自治事实源
 
-`canonical_v2` 的 event、payload 和 lineage 是 append-only 审计事实。异常重复、污染或市场关闭重试不得通过物理删除 event、state、lineage、训练样本或治理事实处理；只能通过保留原始事实并追加受治理的 suppression/eligibility projection，分别影响训练、展示或治理使用范围。唯一例外是已经退役、没有任何 event/state 引用、且代码没有读取者的孤立 `payload_blob` 镜像：它不是审计事实，可在逐行引用核对后直接删除。`scripts/cleanup_market_closed_retry_storm_20260823.py` 永久只读，任何 `--apply` 参数都会被拒绝。
+`canonical_v2` 的 event、payload 和 lineage 是 append-only 审计事实。异常重复、污染或市场关闭重试不得通过物理删除 event、state、lineage、训练样本或治理事实处理；只能通过保留原始事实并追加受治理的 suppression/eligibility projection，分别影响训练、展示或治理使用范围。唯一例外是已经退役、没有任何 event/state 引用、且代码没有读取者的孤立 `payload_blob` 镜像：它不是审计事实，可在逐行引用核对后直接删除。该约束对任何后续清理工具同样适用：物理删除重试或污染事件一律拒绝，只能追加受治理的 suppression/eligibility projection。
 
 | 事项 | 权威来源 | 说明 |
 |---|---|---|
@@ -376,7 +378,7 @@ Coordinator 进入有界 Demo；`live_execute` 仍不准入。这里保留的是
 | 经济事件 | `data/events.duckdb` | 风控事件缩放读取 |
 | 运行态状态 | PostgreSQL `runtime` schema | 不再使用 `data/state.db` |
 | 状态库运维边界 | `docs/server-backend-sop.md` | PostgreSQL state store、migration、查询和旧 SQLite 禁用边界 |
-| 状态 schema 版本 | PostgreSQL `state_schema_migration` + `backend.core.state_schema_migrations` + `scripts/state_schema_migrate.py` | forward DDL 只由显式 `--apply` 的 migration connection 执行，并在 advisory lock 下与 checksum ledger 同事务提交；真正空的 `runtime` schema 先在同一锁/事务中应用唯一 `bootstrap_legacy_baseline.sql`，再顺序执行 v1→当前版本，已有但残缺且无 ledger 的旧 schema 拒绝猜测修补。当前代码最低版本为 v33（即最新已登记版本）：v29 建立唯一 `runtime.broker_execution_intent`，v30 受保护退役旧 runtime 事实投影，v31 对齐 factor health，v32 恢复 `runtime.jobs` 主键，v33 将 `factor_runtime_projection.projection_id` 固定为主键并保留进程身份唯一约束。普通业务连接和进程启动禁止 CREATE/ALTER/DROP/INDEX，不再保留 `_ensure_pg_business_tables` 旁路；缺对象、缺迁移或低于 v33 时提示先迁移并 fail-closed。SQLite restore 只导入数据，不建 schema；实际台账必须以只读 `scripts/state_schema_migrate.py --check` 为准。 |
+| 状态 schema 版本 | PostgreSQL `state_schema_migration` + `backend.core.state_schema_migrations` + `scripts/state_schema_migrate.py` | forward DDL 只由显式 `--apply` 的 migration connection 执行，并在 advisory lock 下与 checksum ledger 同事务提交；真正空的 `runtime` schema 先在同一锁/事务中应用唯一 `bootstrap_legacy_baseline.sql`，再顺序执行 v1→当前版本，已有但残缺且无 ledger 的旧 schema 拒绝猜测修补。当前代码最低版本为 v34（即最新已登记版本，2026-09-10 只读核对 `--check` 记录 `current 34 / minimum 34 / ok`）：v29 建立唯一 `runtime.broker_execution_intent`，v30 受保护退役旧 runtime 事实投影，v31 对齐 factor health，v32 恢复 `runtime.jobs` 主键，v33 将 `factor_runtime_projection.projection_id` 固定为主键并保留进程身份唯一约束，v34 为 `governance_mutation_intent` 增加 `committed_overlay_hash`，把 overlay authority 绑定到已提交的 overlay 行内容（base-only 漂移不再导致失配，overlay 直写仍 fail-closed，旧 intent 走全量 hash 比较过渡）。普通业务连接和进程启动禁止 CREATE/ALTER/DROP/INDEX，不再保留 `_ensure_pg_business_tables` 旁路；缺对象、缺迁移或低于 v34 时提示先迁移并 fail-closed。SQLite restore 只导入数据，不建 schema；实际台账必须以只读 `scripts/state_schema_migrate.py --check` 为准。 |
 
 判断原则：
 

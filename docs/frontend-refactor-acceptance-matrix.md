@@ -2,6 +2,7 @@
 
 > Status: active acceptance matrix
 > Snapshot: 2026-08-29 (local renderer/Fact/recovery repair; server API/WSS-only, Windows本地; runtime未重验)
+> 2026-09-10 服务器侧复核：服务器 API/WSS-only 与 sparse checkout 边界成立（Caddy 其余路径 404）；矩阵中的 renderer/Tauri 条目在 Windows 本地仓库，服务器无法验收。
 > Scope: 前端 renderer、个人本地 Tauri 桌面、接口合同和迁移删除门。
 
 本文只记录可重复的前端验收门和证据要求。生产客户端是本地 Tauri 桌面端与小程序；

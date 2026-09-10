@@ -1,7 +1,7 @@
 # 前端操作台产品合同
 
 > Status: active
-> Last verified: 2026-08-28 (reviewed, no semantic change from 08-13; server API/WSS-only, Windows本地 renderer 已落地)
+> Last verified: 2026-09-10（服务器侧已复核：被引用的后端接口/事实名全部命中代码，且服务器只提供 API/WSS；renderer 实现与视觉验收在 Windows 本地仓库，服务器无法核对）
 > Scope: Tauri/React 操作台的信息架构、工作区、动作和视觉语义。
 
 本文只定义本地 Tauri 桌面端和小程序如何组织、消费事实。Fact envelope、freshness、认证和后端

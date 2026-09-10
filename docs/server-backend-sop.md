@@ -1,7 +1,7 @@
 # Server Backend SOP
 
 > Status: active
-> Last verified: 2026-08-28 (reviewed, sparseCheckout/Caddy API/WSS-only 已于 08-14 收口; f2eb9c9 enforce 已加载)
+> Last verified: 2026-09-10（删除已失效的 `backfill_ctrader_deals.py` 命令；新增 RuntimeConfig/settings.yaml 操作边界并按 schema v34 校正；服务名/脚本引用已逐个核对存在）
 > Scope: Linux backend/API/WSS startup, logs, PostgreSQL, cTrader, restart, and runtime acceptance.
 
 这份文档只服务一个目标：
@@ -366,6 +366,18 @@ systemctl status quant-backend.service --no-pager
 
 只有在确认服务卡死、正常重启无效时，才考虑更强动作。
 
+### RuntimeConfig / settings.yaml 变更的操作边界
+
+以下边界来自 2026-09-03 至 09-08 的实证，已按 schema v34（`0034_governance_mutation_intent_overlay_hash`，2026-09-08 应用）更新：
+
+- `factor_governance_*` 等运行态参数的唯一合法通道是 typed governance mutation（`settings.yaml` base + 部署，或经 `GovernanceMutationCoordinator` 提交）；overlay 直写对扩张类键没有合法恢复通道。
+- v34 校验契约（`backend/services/runtime_config_overlay.py`）：启动时用 intent 记录的 `committed_overlay_hash` 比对当前 overlay 行内容，再校验 intent 的 committed/current、projection 和 domain hash。因此：
+  - **base-only 变更（改 `config/settings.yaml`）不再使 committed intent 失配**，不会再因部署引发 no-new-risk 闩锁；base 变更仍需受控重启让进程加载新配置。
+  - **overlay 行直写仍然 fail-closed**（row-hash mismatch → `governance_authority` 闩锁），这是设计行为。
+  - 无 `committed_overlay_hash` 的旧 intent 仍走 v34 前的全量 base+overlay hash 比较（过渡期）；此类 intent 遇 base 变更会失配，需一次 Coordinator mutation 重绑。
+- 配置键增删必须走一次治理 `put_config`/Coordinator mutation 完成，使 target/committed 与改动后的载荷重绑；不要通过删改 base 文件绕过治理。
+- 验证命令：`git log -1` 与 `systemctl show -p ActiveEnterTimestamp` 对比确认进程已加载新配置；journal 无活动 `governance_authority` cause 且 `system_health healthy` 才算闩清除。
+
 ## 9. 交易循环排查 SOP
 
 如果问题与交易循环有关，默认检查：
@@ -536,7 +548,6 @@ cTrader 常用入口：
 
 ```bash
 ./.venv/bin/python scripts/validate_ctrader_token.py
-./.venv/bin/python scripts/backfill_ctrader_deals.py
 ```
 
 执行价格保持 broker 原值；commission/gross/swap/balance 等 money 字段才按各自 moneyDigits 转换。unknown broker outcome 禁止猜测成功或重发。

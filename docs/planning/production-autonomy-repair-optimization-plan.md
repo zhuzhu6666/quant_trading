@@ -1,7 +1,7 @@
 # 生产自治修复与架构收敛总方案
 
-> Status: implementation active — P0 complete, P1 complete, P2/P3/P4 complete, P5收敛中, P6 runtime observation
-> Last verified: 2026-08-28 (HEAD f2eb9c9; P1 complete 46笔full, 治理 enforce 已加载, off 直连已删)
+> Status: implementation active — P0 complete, P1 complete, P2/P3/P4 complete, P5收敛中, P6 runtime observation；原 `planning/handoff-next-batches-2026-08-18.md` 的剩余待办已于 2026-09-10 并入本文件（§11 待定决策）后删除
+> Last verified: 2026-09-10（引用核对：本文引用的 authority/脚本/模块全部存在；新增 §11 待定决策 D21（容量阀）；阶段状态与开关以 SSoT 和各状态页为准）
 > Scope: production correctness repair, authority convergence, legacy deletion, runtime acceptance, and autonomy graduation
 > Source of truth: 本文只定义阶段、流程和退出条件；当前生产事实以 `docs/system-source-of-truth.md`、代码、PostgreSQL 和运行服务为准
 
@@ -417,6 +417,12 @@ Demo 恢复仍采用已确认 profile：
 | D18-A | 完整 Demo lifecycle 后才评估 Execution Outcome v2 |
 | D19-A | 非 deal-exact quote 保留审计原值并 quarantine |
 | D20-A | 双重污染 counterfactual 终态失效，只重建干净记录 |
+
+### 待定决策
+
+| ID | 待定项 | 现状与约束 |
+|---|---|---|
+| D21 | 容量阀：归档/分区设计冻结，先观察真实 DB 增量后由用户定案 | 只读观测脚本 `scripts/capacity_observe.py` 写入 `run_artifacts/capacity/observations.tsv`（基线 2026-08-18，观测至 2026-08-26 后暂停）。硬边界：记忆/学习类数据永不归档或删除（脑记忆、经验/先验、learning_application、lesson、后验/仲裁、模型与评测证据）。候选：event 按月 RANGE 分区（需一次生产表迁移，表空时最便宜）、`brain_state_snapshot` 只留最新 + 历史归档、容量接入 `system_health` 看板。退出：活跃集恒定、增长看板可见。 |
 
 ## 12. 完成定义
 

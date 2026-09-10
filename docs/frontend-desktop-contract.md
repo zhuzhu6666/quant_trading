@@ -1,7 +1,7 @@
 # 前端桌面合同
 
 > Status: active
-> Last verified: 2026-08-28 (reviewed, no semantic change from 08-13; server API/WSS-only, Windows本地 renderer 已落地)
+> Last verified: 2026-09-10（服务器侧已复核：Caddy 只代理 `/api/*` 与 `/ws/*` 到 `127.0.0.1:8000`，其余路径 404，服务器确实不托管静态资源；renderer/Tauri 在 Windows 本地仓库，服务器无法核对实现）
 > Scope: Tauri 2、Windows 本地运行、认证、缓存、离线和本地诊断。
 
 本文定义桌面壳的安全和运行边界。后端仍是唯一事实源和执行权威；本文不授权

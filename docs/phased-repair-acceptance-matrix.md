@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active acceptance index
-> Snapshot: 2026-08-28 (HEAD f2eb9c9; P1 complete, Safety/governance enforce active, pg_job pending)
+> Snapshot: 2026-09-10 (Safety/governance enforce active；矩阵仍引用 2026-08 批次的验收证据，最新运行计数以 phased-repair-rollout-status.md 为准)
 > Scope: reproducible acceptance evidence and unresolved live evidence
 
 本文只记录“如何证明”和当前未满足的运行证据。架构事实见 `system-source-of-truth.md`，实施阶段见 `planning/production-autonomy-repair-optimization-plan.md`，当前状态见 `phased-repair-rollout-status.md`。已完成批次的详细流水通过 Git 历史追溯，不在本矩阵重复保存。

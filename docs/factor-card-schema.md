@@ -1,7 +1,7 @@
 # Factor Card Schema
 
 > Status: active
-> Last schema verification: 2026-08-28 (f2eb9c9; factor_card.v1 additive runtime/posterior fields 已对齐)
+> Last schema verification: 2026-09-10（引用核对：61/65 处标识符命中代码，未命中的 4 处均为本合同“可选扩展/首批建议”清单中的提案字段，非已实现 schema；语义未逐条复核）
 > Scope: factor card schema for governance, attribution, frontend display, and Catalog alignment.
 
 本文定义“因子解释卡片”的统一 schema。目标是固定治理、归因、前端展示和 Factor Catalog 共用的字段边界。

@@ -1,7 +1,7 @@
 # 前端重构实施计划
 
 > Status: active
-> Last verified: 2026-08-28 (reviewed, scoped companion of production plan; server sparseCheckout 已收口)
+> Last verified: 2026-09-10（服务器侧已复核：sparse checkout 确实不含前端目录，Caddy 只代理 `/api/*` 与 `/ws/*`；前端实现与验收在 Windows 本地仓库）
 > Scope: web_frontend 原地重构为 Tauri 桌面优先的量化操作台。
 > Owner: 前端工程
 
