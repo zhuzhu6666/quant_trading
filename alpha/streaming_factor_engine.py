@@ -86,6 +86,23 @@ class StreamingFactorEngine:
         # Ensure restored shadow factors do not enter the live voting/calculation path.
         self.refresh_factor_list()
 
+    @property
+    def closes(self) -> list[float]:
+        """Recent bar closes, oldest first.
+
+        Consumed by live_decision_pipeline for regime-efficiency routing
+        (fractal efficiency over the trailing window). Total function:
+        unparseable bars are skipped, never raise, so routing degrades to
+        unrouted instead of breaking the tick.
+        """
+        out: list[float] = []
+        for bar in self._buffer:
+            try:
+                out.append(float((bar or {}).get("close")))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return out
+
     # ── 核心接口 ────────────────────────────────────────
 
     def append_bar(self, bar: dict) -> dict[str, float | None]:

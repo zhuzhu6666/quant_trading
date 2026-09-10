@@ -606,3 +606,38 @@ class TestReset:
         assert engine.buffer_size == 0
         assert engine.is_warm is False
         assert engine.get_snapshot() == {}
+
+
+class TestClosesForRegimeRouting:
+    """closes 属性供给 live_decision_pipeline 的 regime-efficiency 路由。
+
+    回归背景: 路由代码只认 engine._closes/closes, 而引擎此前根本没有
+    该属性, 导致 regime_efficiency 恒为 None、趋势市里纯震荡因子照样投票。
+    """
+
+    def test_closes_empty_before_bars(self):
+        engine = StreamingFactorEngine(factor_ids=TEST_FACTORS)
+        assert engine.closes == []
+
+    def test_closes_returns_window_in_order(self):
+        engine = StreamingFactorEngine(factor_ids=TEST_FACTORS)
+        bars = _make_bars(70)
+        for bar in bars:
+            engine.append_bar(bar)
+        closes = engine.closes
+        assert len(closes) == 70
+        assert closes == [b["close"] for b in bars]
+
+    def test_closes_skips_unparseable_bars(self):
+        engine = StreamingFactorEngine(factor_ids=TEST_FACTORS)
+        bars = _make_bars(5)
+        bars.insert(2, {"close": None, "time": bars[2]["time"] + 1})
+        bars.insert(4, {"close": "nan-value", "time": bars[4]["time"] + 1})
+        for bar in bars:
+            try:
+                engine.append_bar(bar)
+            except Exception:
+                pass
+        closes = engine.closes
+        assert all(isinstance(c, float) for c in closes)
+        assert len(closes) <= 7
