@@ -16,6 +16,7 @@ authoritative for deciding whether a close actually completed.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -208,21 +209,6 @@ def activate_no_new_risk_latch(
     return record
 
 
-def _decoded_latch_events() -> list[dict[str, Any]]:
-    path = safety_latch_path()
-    if not path.exists():
-        return []
-    events: list[dict[str, Any]] = []
-    for raw in path.read_text(encoding="utf-8", errors="strict").splitlines():
-        if not raw.strip():
-            continue
-        payload = json.loads(raw)
-        if not isinstance(payload, dict) or payload.get("schema_version") != _LATCH_SCHEMA_V1:
-            continue
-        events.append(payload)
-    return events
-
-
 def _apply_latch_event(
     active: dict[tuple[str, str], dict[str, Any]],
     payload: Mapping[str, Any],
@@ -271,6 +257,160 @@ def _apply_latch_event(
     return legacy_records
 
 
+_LATCH_REPLAY_SCHEMA = "live_no_new_risk_latch_replay.v1"
+_LATCH_REPLAY_PROBE_BYTES = 64
+
+
+def _latch_replay_checkpoint_path() -> Path:
+    return _state_dir() / "no_new_risk_latch.replay.json"
+
+
+def _ledger_probe(path: Path, *, start: int, length: int) -> str:
+    """Bounded byte fingerprint used to validate a replay checkpoint."""
+
+    if length <= 0:
+        return ""
+    with path.open("rb") as handle:
+        handle.seek(start)
+        return hashlib.sha256(handle.read(length)).hexdigest()
+
+
+def _load_replay_checkpoint(
+    path: Path,
+    stat: os.stat_result,
+) -> tuple[dict[tuple[str, str], dict[str, Any]], bool, dict[str, Any], int] | None:
+    """Return (active, legacy, latest, offset) while the checkpoint still fits."""
+
+    try:
+        data = json.loads(_latch_replay_checkpoint_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("schema") != _LATCH_REPLAY_SCHEMA:
+        return None
+    if str(data.get("path") or "") != str(path.resolve()):
+        return None
+    if int(data.get("inode") or 0) != int(stat.st_ino):
+        return None
+    offset = int(data.get("offset") or 0)
+    if offset <= 0 or offset > int(stat.st_size):
+        return None
+    try:
+        observed_head = _ledger_probe(
+            path, start=0, length=min(offset, _LATCH_REPLAY_PROBE_BYTES)
+        )
+        observed_tail = _ledger_probe(
+            path,
+            start=max(0, offset - _LATCH_REPLAY_PROBE_BYTES),
+            length=min(offset, _LATCH_REPLAY_PROBE_BYTES),
+        )
+    except OSError:
+        return None
+    if observed_head != str(data.get("head_probe") or ""):
+        return None
+    if observed_tail != str(data.get("tail_probe") or ""):
+        return None
+    active: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in data.get("active") or []:
+        if (
+            not isinstance(item, (list, tuple))
+            or len(item) != 3
+            or not isinstance(item[2], dict)
+        ):
+            return None
+        active[(str(item[0]), str(item[1]))] = dict(item[2])
+    latest = data.get("latest")
+    return (
+        active,
+        bool(data.get("legacy")),
+        dict(latest) if isinstance(latest, dict) else {},
+        offset,
+    )
+
+
+def _write_replay_checkpoint(
+    path: Path,
+    active: Mapping[tuple[str, str], Mapping[str, Any]],
+    legacy_records: bool,
+    latest: Mapping[str, Any],
+    offset: int,
+    stat: os.stat_result,
+) -> None:
+    """Persist the replay cursor; a failed write never blocks the latch read."""
+
+    target = _latch_replay_checkpoint_path()
+    temporary = target.with_name(target.name + ".tmp")
+    try:
+        payload = {
+            "schema": _LATCH_REPLAY_SCHEMA,
+            "path": str(path.resolve()),
+            "inode": int(stat.st_ino),
+            "offset": int(offset),
+            "head_probe": _ledger_probe(
+                path, start=0, length=min(offset, _LATCH_REPLAY_PROBE_BYTES)
+            ),
+            "tail_probe": _ledger_probe(
+                path,
+                start=max(0, offset - _LATCH_REPLAY_PROBE_BYTES),
+                length=min(offset, _LATCH_REPLAY_PROBE_BYTES),
+            ),
+            "legacy": bool(legacy_records),
+            "latest": dict(latest),
+            "active": [
+                [cause, cause_id, dict(record)]
+                for (cause, cause_id), record in sorted(active.items())
+            ],
+        }
+        with _WRITE_LOCK:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
+                encoding="utf-8",
+            )
+            os.replace(temporary, target)
+    except OSError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _replay_latch_ledger(
+    path: Path,
+    stat: os.stat_result,
+) -> tuple[dict[tuple[str, str], dict[str, Any]], bool, dict[str, Any]]:
+    """Fold the append-only ledger, resuming after the checkpointed event.
+
+    The ledger stays the only authority: the checkpoint is a replay cursor and
+    is ignored (full replay) whenever path, inode, offset or probes disagree.
+    """
+
+    active: dict[tuple[str, str], dict[str, Any]] = {}
+    legacy_records = False
+    latest: dict[str, Any] = {}
+    checkpoint = _load_replay_checkpoint(path, stat)
+    offset = 0
+    if checkpoint is not None:
+        active, legacy_records, latest, offset = checkpoint
+    resumed_at = offset
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        for raw in handle:
+            offset += len(raw)
+            if not raw.strip():
+                continue
+            payload = json.loads(raw.decode("utf-8"))
+            if (
+                not isinstance(payload, dict)
+                or payload.get("schema_version") != _LATCH_SCHEMA_V1
+            ):
+                continue
+            latest = payload
+            legacy_records = _apply_latch_event(active, payload) or legacy_records
+    if offset and (checkpoint is None or offset != resumed_at):
+        _write_replay_checkpoint(path, active, legacy_records, latest, offset, stat)
+    return active, legacy_records, latest
+
+
 def _load_latch_state() -> tuple[
     dict[tuple[str, str], dict[str, Any]],
     bool,
@@ -281,7 +421,8 @@ def _load_latch_state() -> tuple[
     The safety ledger is intentionally append-only, but it can contain years
     of historical events.  Re-decoding the whole JSONL file for every
     watchdog probe creates avoidable CPU/memory pressure and can delay the
-    very recovery callback that releases a transient freshness cause.
+    very recovery callback that releases a transient freshness cause.  A
+    spent checkpoint keeps the replay proportional to the appended tail.
     """
 
     global _LATCH_CACHE_SIGNATURE, _LATCH_CACHE_ACTIVE
@@ -300,36 +441,15 @@ def _load_latch_state() -> tuple[
                 bool(_LATCH_CACHE_LEGACY),
                 dict(_LATCH_CACHE_LATEST),
             )
-        active: dict[tuple[str, str], dict[str, Any]] = {}
-        legacy_records = False
-        latest: dict[str, Any] = {}
-        with path.open("r", encoding="utf-8", errors="strict") as handle:
-            for raw in handle:
-                if not raw.strip():
-                    continue
-                payload = json.loads(raw)
-                if (
-                    not isinstance(payload, dict)
-                    or payload.get("schema_version") != _LATCH_SCHEMA_V1
-                ):
-                    continue
-                latest = payload
-                legacy_records = _apply_latch_event(active, payload) or legacy_records
+    # Replay outside the lock: the ledger is large and holding the lock would
+    # stall every other safety probe that shares this module.
+    active, legacy_records, latest = _replay_latch_ledger(path, stat)
+    with _WRITE_LOCK:
         _LATCH_CACHE_SIGNATURE = signature
         _LATCH_CACHE_ACTIVE = dict(active)
         _LATCH_CACHE_LEGACY = legacy_records
         _LATCH_CACHE_LATEST = dict(latest)
-        return dict(active), legacy_records, dict(latest)
-
-
-def _replay_latch_causes(
-    events: list[dict[str, Any]],
-) -> tuple[dict[tuple[str, str], dict[str, Any]], bool]:
-    active: dict[tuple[str, str], dict[str, Any]] = {}
-    legacy_records = False
-    for payload in events:
-        legacy_records = _apply_latch_event(active, payload) or legacy_records
-    return active, legacy_records
+    return dict(active), legacy_records, dict(latest)
 
 
 def _cause_summaries(
