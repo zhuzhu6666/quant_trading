@@ -107,6 +107,7 @@
 - 影响：循环长期追赶（5s 节奏被打成 1 tick/10~120s），决策与保护延迟随之放大，backend 常驻 CPU 被占；属执行链问题，不是内存问题。
 - 证据：`grep -a "safety timing" logs/live_loop.log`——`19:59:33 tick 146 ... safety=119.69s total=121.71s`、`19:48:50 tick 12887 ... safety=43.06s total=45.07s`、修复前 `19:14:12 tick 113 ... safety=71.32s total=72.67s`。
 - 剩余：先只读归因 safety 段内部（broker RPC 等待 / Safety 计算 / 锁等待），不得先动节奏、加线程或降门控。
+- 已排除：`live_safety_state` 的 latch 全量重放（4GB 账本、每次 append 后 23~29s，且在模块锁内）已在 `ff4e0ecc` 用重放游标消除（append 后只折尾部 + 重放移出锁）；safety 段剩余耗时继续归因 broker RPC / Safety 计算本身。
 - 退出：连续 60 分钟内 `safety timing` 的 p95 `total` < 5s 且无 `account_blockers`；针对性测试绿。
 - 验证：`grep -a "safety timing" logs/live_loop.log | tail -50`。
 
