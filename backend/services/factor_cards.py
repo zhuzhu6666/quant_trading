@@ -60,6 +60,30 @@ def clear_factor_card_cache(db_path: str | Path | None = None) -> None:
                 _CARD_CACHE.pop(key, None)
 
 
+def _load_governance_application_index(db_path: str | Path) -> dict[str, Any]:
+    """One-pass index of learning applications/effects for card governance state.
+
+    ``latest_application``/``latest_effect``/``iter_effects`` each open their own
+    connection and scan the whole log per factor, so building N cards cost N full
+    scans and 2N connections.  ``list_cards`` loads both streams once and
+    ``_governance_state`` reads this index instead.
+    """
+
+    from backend.services.learning_application_store import (
+        LearningApplicationStore,
+    )
+
+    store = LearningApplicationStore(db_path)
+    applications: dict[tuple[str, str], dict[str, Any]] = {}
+    for app in store.iter_applications():  # newest-first
+        key = (str(app.get("scope_type") or ""), str(app.get("scope_key") or ""))
+        applications.setdefault(key, app)
+    effects_by_scope: dict[str, list[dict[str, Any]]] = {}
+    for effect in store.iter_effects():  # newest-first
+        effects_by_scope.setdefault(str(effect.get("scope") or ""), []).append(effect)
+    return {"applications": applications, "effects": effects_by_scope}
+
+
 def _round(value: Any, digits: int = 6) -> float:
     try:
         return round(float(value), digits)
@@ -682,6 +706,7 @@ class FactorCardService:
                 )
             except Exception:
                 health_max_age_seconds = 900.0
+            governance_index = _load_governance_application_index(self.db_path)
             built = [
                 self._build_card(
                     name,
@@ -690,6 +715,7 @@ class FactorCardService:
                     runtime_projection=runtime_projection,
                     evidence_counts=card_evidence_by_factor.get(name),
                     health_max_age_seconds=health_max_age_seconds,
+                    governance_index=governance_index,
                 )
                 for name in ids
             ]
@@ -883,6 +909,7 @@ class FactorCardService:
         runtime_projection: dict[str, Any] | None = None,
         evidence_counts: dict[str, Any] | None = None,
         health_max_age_seconds: float | None = None,
+        governance_index: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         adapter = RegistryAdapter.shared()
         catalog_item = catalog_item or {}
@@ -910,7 +937,12 @@ class FactorCardService:
             conn=conn,
             batch_summary=evidence_counts,
         )
-        governance = self._governance_state(factor_id, evidence=evidence, conn=conn)
+        governance = self._governance_state(
+            factor_id,
+            evidence=evidence,
+            conn=conn,
+            governance_index=governance_index,
+        )
         evidence_counts = self._evidence_counts(
             factor_id,
             evidence=evidence,
@@ -1262,10 +1294,22 @@ class FactorCardService:
             "updated_at": self._format_ts(updated_at_ts),
         }
 
-    def _governance_state(self, factor_id: str, *, evidence: dict[str, Any] | None = None, conn=None) -> dict[str, Any]:
+    def _governance_state(
+        self,
+        factor_id: str,
+        *,
+        evidence: dict[str, Any] | None = None,
+        conn=None,
+        governance_index: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if conn is None:
             with self._conn() as owned:
-                return self._governance_state(factor_id, evidence=evidence, conn=owned)
+                return self._governance_state(
+                    factor_id,
+                    evidence=evidence,
+                    conn=owned,
+                    governance_index=governance_index,
+                )
         suggestion = _execute(
             conn,
             """
@@ -1277,23 +1321,32 @@ class FactorCardService:
             """,
             (factor_id,),
         ).fetchone()
-        from backend.services.learning_application_store import (
-            LearningApplicationStore,
-        )
-
-        store = LearningApplicationStore(self.db_path)
-        app = store.latest_application(scope_type="factor", scope_key=factor_id)
+        if governance_index is None:
+            governance_index = _load_governance_application_index(self.db_path)
+        applications = governance_index.get("applications") or {}
+        effects_by_scope = governance_index.get("effects") or {}
+        app = applications.get(("factor", factor_id))
+        if app is None:
+            app = applications.get(("factor", str(factor_id)))
+        scope_effects = list(effects_by_scope.get(str(factor_id)) or [])
         if app is not None:
             effect = next(
                 (
                     e
-                    for e in store.iter_effects(scope_key=factor_id)
+                    for e in scope_effects
                     if str(e.get("application_id") or "") == str(app["application_id"] or "")
                 ),
                 None,
             )
         else:
-            effect = store.latest_effect(scope_key=factor_id, scope_type="factor")
+            effect = next(
+                (
+                    e
+                    for e in scope_effects
+                    if str(e.get("scope_type") or "") == "factor"
+                ),
+                None,
+            )
         active_template = _execute(
             conn,
             """
