@@ -4736,7 +4736,17 @@ class FactorGovernanceOrchestrator:
             return
 
         try:
-            summary = provider.factor_evidence_summary(ids)
+            summary = provider.factor_evidence_summary(
+                ids,
+                max_decisions=int(
+                    getattr(
+                        runtime_config.shared(),
+                        "factor_evidence_scan_max_decisions",
+                        3000,
+                    )
+                    or 0
+                ) or None,
+            )
         except Exception:
             summary = {}
         for factor_id in ids:
@@ -4757,7 +4767,17 @@ class FactorGovernanceOrchestrator:
 
             summary = LearningFeatureProvider(
                 str(self.overlay.db_path)
-            ).factor_evidence_summary([factor_id])
+            ).factor_evidence_summary(
+                [factor_id],
+                max_decisions=int(
+                    getattr(
+                        runtime_config.shared(),
+                        "factor_evidence_scan_max_decisions",
+                        3000,
+                    )
+                    or 0
+                ) or None,
+            )
             resolved = dict(summary.get(factor_id) or unavailable)
         except Exception:
             resolved = unavailable

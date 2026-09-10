@@ -623,9 +623,22 @@ class FactorCardService:
                     card_evidence_by_factor = {}
                 else:
                     try:
+                        from config.runtime_config import shared as _rc_shared
+
+                        _evidence_window = int(
+                            getattr(
+                                _rc_shared(),
+                                "factor_evidence_scan_max_decisions",
+                                3000,
+                            )
+                            or 0
+                        ) or None
+                    except Exception:
+                        _evidence_window = None
+                    try:
                         evidence_by_factor = LearningFeatureProvider(
                             self.db_path
-                        ).factor_evidence_summary(suspect_ids)
+                        ).factor_evidence_summary(suspect_ids, max_decisions=_evidence_window)
                     except Exception:
                         evidence_by_factor = {}
                     if not all(

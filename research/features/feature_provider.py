@@ -1393,6 +1393,8 @@ class LearningFeatureProvider:
     def factor_evidence_summary(
         self,
         factor_ids: list[str],
+        *,
+        max_decisions: int | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Summarize persisted factor evidence using the learning contract.
 
@@ -1402,6 +1404,12 @@ class LearningFeatureProvider:
         evidence-contract pipeline (read via the canonical reader); decision
         snapshots remain observations and are never promoted to mature-trade
         evidence.
+
+        ``max_decisions`` bounds the newest-first decision scan (training
+        rows, reviews and effects stay complete).  ``None`` (default) keeps
+        the historical all-history behavior; callers passing a bound accept
+        windowed ``decision_observations``/averages in exchange for bounded
+        decode work.
         """
         ids = list(dict.fromkeys(str(item) for item in factor_ids if str(item)))
         if not ids:
@@ -1432,10 +1440,13 @@ class LearningFeatureProvider:
                 shadow_sums: dict[str, float] = defaultdict(float)
                 contribution_sums: dict[str, float] = defaultdict(float)
                 # Keep the card-facing averages on the same recent window as
-                # FactorCardService._EVIDENCE_SNAPSHOT_LIMIT while retaining
-                # the existing all-history decision_observations count.
+                # FactorCardService._EVIDENCE_SNAPSHOT_LIMIT.  Without a scan
+                # bound this retains the all-history decision_observations
+                # count; with max_decisions the scan (and therefore the
+                # observation count) covers only the newest decisions.
                 recent_snapshot_limit = 2000
-                for decision in iter_decision_rows(conn, limit=0, reverse=True):
+                decision_scan_limit = int(max_decisions) if max_decisions else 0
+                for decision in iter_decision_rows(conn, limit=decision_scan_limit, reverse=True):
                     decision_id = str(decision.get("decision_id") or "")
                     # ``iter_decision_rows`` already restores the immutable
                     # payload. Reuse its embedded snapshots instead of

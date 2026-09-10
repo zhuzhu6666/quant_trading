@@ -105,7 +105,7 @@ def test_primes_admission_evidence_cache_with_one_run_projection(monkeypatch):
         def __init__(self, _db_path):
             pass
 
-        def factor_evidence_summary(self, factor_ids):
+        def factor_evidence_summary(self, factor_ids, max_decisions=None):
             calls.append(list(factor_ids))
             return {
                 factor_id: _mature_clean_counts(factor_id)
