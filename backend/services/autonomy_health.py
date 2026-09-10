@@ -833,10 +833,15 @@ class AutonomyHealthService:
             except Exception:
                 pass
             if state_table_exists(conn, "policy_suggestion"):
+                # Only status='approved' rows are classified from evidence text
+                # (normalize_policy_suggestion_status); every other branch reads
+                # status/action/reason/review_note.  Carrying evidence_json for
+                # all rows pulled 244MB of JSON per readiness refresh.
                 rows = _execute(
                     conn,
                     """
-                    SELECT status, action, reason, review_note, evidence_json
+                    SELECT status, action, reason, review_note,
+                           CASE WHEN status = 'approved' THEN evidence_json ELSE '' END AS evidence_json
                     FROM policy_suggestion
                     """
                 ).fetchall()
