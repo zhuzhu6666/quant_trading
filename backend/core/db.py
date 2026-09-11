@@ -1085,7 +1085,36 @@ def init_state_db() -> None:
         conn.close()
 
 def get_state_pg_conn(*, read_only: bool = False):
-    """Return a direct psycopg connection to the PostgreSQL state schema."""
+    """Return a direct psycopg connection to the PostgreSQL state schema.
+
+    Test isolation escape hatch (second route).  This function reaches
+    PostgreSQL by *DSN* -- it never consults ``is_state_db_path()``, so the
+    predicate guard that protects the path-routed call sites does not apply
+    here.  Measured 2026-09-11: 191 call sites across the code base use this
+    entry point, and a test run wrote ``runtime.recovery_position_state``
+    position_id=904 straight into production through it.
+
+    Under ``QUANT_TEST_STATE_DIR`` we therefore degrade to the sandbox
+    SQLite store instead of raising.  Degrading (rather than raising) is
+    deliberate: 191 call sites include plain readers, and raising would
+    break them all -- that was the mistake made by the first isolation
+    attempt (28 tests failed with "PostgreSQL state backend is not
+    enabled").
+
+    Integration tests that genuinely need PostgreSQL set
+    ``QUANT_ALLOW_PG_TESTS=1``, which bypasses the escape hatch.
+    """
+    if get_env("QUANT_TEST_STATE_DIR") and not get_env("QUANT_ALLOW_PG_TESTS") == "1":
+        # Resolve the sandbox path from the environment directly.  Do NOT use
+        # ``STATE_DB`` here: that constant is only rebound by conftest, so
+        # depending on it would couple this guard to the caller having run
+        # conftest's rebinding step -- a standalone script that merely sets
+        # the env var would hit the connect_sqlite sentinel guard instead.
+        sandbox = Path(get_env("QUANT_TEST_STATE_DIR")) / "state.db"
+        sandbox.parent.mkdir(parents=True, exist_ok=True)
+        conn = connect_sqlite(sandbox, read_only=read_only)
+        conn.row_factory = sqlite3.Row
+        return conn
     if not state_pg_enabled():
         raise RuntimeError("PostgreSQL state backend is not enabled")
     return connect_state_store(state_pg_dsn(), read_only=read_only, schema=STATE_SCHEMA)

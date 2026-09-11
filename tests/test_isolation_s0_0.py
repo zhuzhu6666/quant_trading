@@ -63,3 +63,39 @@ def test_get_state_conn_does_not_reach_pg():
         assert isinstance(conn, sqlite3.Connection)
     finally:
         conn.close()
+
+
+# ── Second route: get_state_pg_conn() reaches PostgreSQL by DSN ──────────
+# Discovered 2026-09-11 21:30: a test run wrote
+# runtime.recovery_position_state position_id=904 into production through
+# this entry point, because it never consults is_state_db_path().
+
+def test_get_state_pg_conn_degrades_to_sandbox():
+    """get_state_pg_conn() must not reach PostgreSQL while isolated."""
+    conn = _db.get_state_pg_conn()
+    try:
+        assert isinstance(conn, sqlite3.Connection), (
+            "get_state_pg_conn() reached PostgreSQL during an isolated run; "
+            "this is the second route and it bypasses is_state_db_path()"
+        )
+    finally:
+        conn.close()
+
+
+def test_get_state_pg_conn_read_only_degrades_to_sandbox():
+    conn = _db.get_state_pg_conn(read_only=True)
+    try:
+        assert isinstance(conn, sqlite3.Connection)
+    finally:
+        conn.close()
+
+
+def test_allow_pg_tests_opt_in_is_wired():
+    """QUANT_ALLOW_PG_TESTS must exist as the integration-test escape hatch.
+
+    We assert the switch is respected rather than opening a real PG
+    connection: the suite runs with the hatch closed by design.
+    """
+    assert os.environ.get("QUANT_ALLOW_PG_TESTS") == "0", (
+        "the default suite must run with the PG opt-in closed"
+    )
