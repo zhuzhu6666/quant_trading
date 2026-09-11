@@ -77,6 +77,13 @@ def state_pg_enabled() -> bool:
     return state_backend() == "postgres" and bool(state_pg_dsn())
 
 def is_state_db_path(db_path: str | Path) -> bool:
+    # Test isolation escape hatch.  ``STATE_DB`` is baked into the default
+    # arguments of ~200 call sites at import time, so rebinding the module
+    # constant later does not reach them.  When QUANT_TEST_STATE_DIR is set
+    # the suite is running against a throwaway store and *no* path may be
+    # treated as the production sentinel.
+    if get_env("QUANT_TEST_STATE_DIR"):
+        return False
     return _normalize_db_path(db_path).resolve() == STATE_DB.resolve()
 
 # ═══════════════════════════════════════════
