@@ -153,3 +153,101 @@ def test_factor_governance_effect_tracker_reconcile_marks_ineffective(tmp_path):
     finally:
         conn.close()
     assert suggestion[0] == "rolled_back"
+
+
+def _effect_row(db_path, *, factor, comparison_basis, delta, observed, app_suffix):
+    store = LearningApplicationStore(db_path)
+    app_id = store.prepare_application(
+        scope_type="factor", scope_key=factor, action="downweight",
+        bias_multiplier=0.82, old_weight=0.01, new_weight=0.0082,
+        suggestion_ids=[f"sug-{app_suffix}"], status="applied",
+        cycle_ts=time.time() - 3600,
+    )
+    store.write_effect(
+        application_id=app_id, scope_key=factor, scope_type="factor",
+        action="downweight", status="ineffective",
+        observed_trade_count=observed, baseline_trade_count=observed,
+        delta_avg_reward=delta,
+        decision={
+            "evidence_quality": {
+                "comparison_basis": comparison_basis,
+                "bounded_attribution_allowed": True,
+            }
+        },
+    )
+    return app_id
+
+
+def test_posterior_evidence_eligibility_requires_comparable_window():
+    """The posterior expansion brake may only consume attributable windows."""
+    from research.learning.effect_reconciliation import (
+        posterior_evidence_eligible,
+        posterior_evidence_stamp,
+    )
+
+    assert posterior_evidence_eligible(
+        {"comparison_basis": "exact_regime", "bounded_attribution_allowed": True}
+    ) == (True, "comparable:exact_regime")
+    assert posterior_evidence_eligible(
+        {"comparison_basis": "unstratified_no_regime", "bounded_attribution_allowed": True}
+    )[0] is True
+    # Sample-count-only attribution is not attributable to the application.
+    assert posterior_evidence_eligible(
+        {"comparison_basis": "unstratified_bounded", "bounded_attribution_allowed": True}
+    ) == (False, "comparison_basis_not_comparable:unstratified_bounded")
+    assert posterior_evidence_eligible(
+        {"comparison_basis": "exact_regime", "bounded_attribution_allowed": False}
+    )[0] is False
+    assert posterior_evidence_eligible(None)[0] is False
+    # A stamped verdict is honoured even if the raw fields would derive another
+    # answer, so later rule changes cannot reinterpret recorded evidence.
+    stamped = {
+        "comparison_basis": "unstratified_bounded",
+        "bounded_attribution_allowed": True,
+        "posterior_evidence_eligibility": posterior_evidence_stamp(
+            {"comparison_basis": "exact_regime", "bounded_attribution_allowed": True}
+        ),
+    }
+    assert posterior_evidence_eligible(stamped)[0] is True
+
+
+def test_non_comparable_effect_does_not_drive_the_posterior_brake(tmp_path):
+    """A regime-mismatched delta must not block or degrade an expansion."""
+    import backend.runtime.factor_governance_orchestrator as governance_module
+    from backend.services.runtime_config_overlay import RuntimeConfigOverlayService
+
+    db_path = tmp_path / "state.db"
+    conn = connect_sqlite(db_path)
+    try:
+        conn.executescript(STATE_DB_DDL)
+        ensure_sqlite_schema(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    _effect_row(
+        db_path,
+        factor="factor_incomparable",
+        comparison_basis="unstratified_bounded",
+        delta=-0.9,
+        observed=50,
+        app_suffix="incomparable",
+    )
+    _effect_row(
+        db_path,
+        factor="factor_comparable",
+        comparison_basis="exact_regime",
+        delta=-0.9,
+        observed=50,
+        app_suffix="comparable",
+    )
+
+    orch = governance_module.FactorGovernanceOrchestrator(
+        risk_policy=type("_Risk", (), {"evaluate": lambda *_a, **_k: None})()
+    )
+    orch.overlay = RuntimeConfigOverlayService(db_path)
+
+    assert orch._latest_posterior_effect("factor_incomparable") is None
+    comparable = orch._latest_posterior_effect("factor_comparable")
+    assert comparable is not None
+    assert comparable["delta_avg_reward"] == -0.9

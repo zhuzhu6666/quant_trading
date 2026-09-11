@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 
-from backend.api import ops as ops_api
 from backend.core.db import connect_sqlite
 from backend.services import mutation_audit
 from backend.services.autonomous_learning import _upsert_sample, ensure_autonomous_learning_tables
@@ -13,7 +12,6 @@ from backend.services.evolution_ledger import (
     record_evolution_decision,
     start_evolution_run,
 )
-from backend.services.v16_brain_planning import BrainActionPlanEvaluatorService
 from config.runtime_config import RuntimeConfig
 
 
@@ -60,71 +58,6 @@ def test_runtime_snapshot_mutation_id_is_idempotent(tmp_path) -> None:
     assert second["config_version"] == first["config_version"]
     assert second["source"] == "mutation"
     assert second["run_id"] == "run-1"
-
-
-def test_eval_payload_is_interned_and_run_id_is_idempotent(tmp_path) -> None:
-    db_path = tmp_path / "state.db"
-    service = BrainActionPlanEvaluatorService(db_path)
-    item = {
-        "eval_id": "eval-1",
-        "plan_id": "plan-1",
-        "snapshot_id": "snap-1",
-        "action_type": "shadow_context_policy_review",
-        "scope_type": "context_policy",
-        "status": "comparable",
-        "comparison_verdict": "supportive",
-        "coverage_score": 0.9,
-        "comparison": {"same": True, "score": 0.9},
-        "evidence_refs": {"source": "test"},
-        "boundary": {"read_only": True},
-        "created_at": 100.0,
-    }
-
-    service._persist([item], evaluation_run_id="eval-run-1")
-    service._persist([{**item, "eval_id": "eval-duplicate"}], evaluation_run_id="eval-run-1")
-    service._persist([{**item, "eval_id": "eval-2", "created_at": 101.0}], evaluation_run_id="eval-run-2")
-
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        assert conn.execute("SELECT COUNT(*) FROM brain_action_plan_eval").fetchone()[0] == 2
-        assert conn.execute("SELECT COUNT(*) FROM brain_action_plan_eval_payload").fetchone()[0] == 1
-        assert conn.execute(
-            "SELECT COUNT(*) FROM brain_action_plan_eval WHERE comparison_json='{}'"
-        ).fetchone()[0] == 2
-        assert {
-            row[0]
-            for row in conn.execute(
-                "SELECT eval_id FROM brain_action_plan_eval ORDER BY eval_id"
-            ).fetchall()
-        } == {"eval-1", "eval-2"}
-    finally:
-        conn.close()
-    latest = service.latest_evals(limit=2)
-    assert latest["evals"][0]["comparison"] == item["comparison"]
-
-
-def test_brain_get_refresh_flag_is_read_only(monkeypatch) -> None:
-    class FakePlanner:
-        def latest_plans(self, *, limit):
-            return {"ok": True, "plans": [], "limit": limit}
-
-        def build_plans(self, **_kwargs):
-            raise AssertionError("GET refresh must not persist action plans")
-
-    class FakeEvaluator:
-        def latest_evals(self, *, limit):
-            return {"ok": True, "evals": [], "limit": limit}
-
-        def evaluate_latest_plans(self, **_kwargs):
-            raise AssertionError("GET refresh must not persist evaluations")
-
-    monkeypatch.setattr(ops_api, "BrainActionPlannerService", FakePlanner)
-    monkeypatch.setattr(ops_api, "BrainActionPlanEvaluatorService", FakeEvaluator)
-
-    plans = ops_api.get_brain_action_plans(None, refresh=True, limit=3)
-    evals = ops_api.get_brain_action_plan_evals(None, refresh=True, limit=3)
-    assert plans["action_plans"]["limit"] == 3
-    assert evals["action_plan_evals"]["limit"] == 3
 
 
 def test_mutation_api_projection_keeps_canonical_lineage(tmp_path, monkeypatch) -> None:

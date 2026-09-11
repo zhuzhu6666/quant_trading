@@ -11,7 +11,7 @@
 > 本页只放稳定结论和指针。服务状态、PostgreSQL、`runtime_kv`、日志和 broker 的逐时事实一律现查（见 §4）。
 
 - **运行姿态**：三服务（`quant-backend` / `quant-learning-worker` / `quant-job-worker`）active。发布开关、release gate 顺序和 `supervisor -> governance -> pg_job_queue` 推进规则见 [system-source-of-truth.md](system-source-of-truth.md) §2。
-- **运行态与事实域**：运行态统一 PostgreSQL `runtime`，不可变事实与学习样本统一 `canonical_v2`；migration ledger 当前 v34（`0034_governance_mutation_intent_overlay_hash`）。旧 `state_v1` / `public` / `legacy_mapping` 和 SQLite `data/state.db` 运行路径已退役，磁盘上的 0 字节残留不是可用入口。
+- **运行态与事实域**：运行态统一 PostgreSQL `runtime`，不可变事实与学习样本统一 `canonical_v2`；migration ledger 当前 v35（`0035_retire_v16_cognition_ledgers`）。旧 `state_v1` / `public` / `legacy_mapping` 和 SQLite `data/state.db` 运行路径已退役，磁盘上的 0 字节残留不是可用入口。
 - **执行单轨**：`governed_execute -> RiskPolicy -> cTrader -> lifecycle -> fresh reconcile`。readiness 阻断只能来自实时 market/session、Safety、incident 或 broker 事实，不代表迁移回退或兼容路径仍在。
 - **闭环证据**：`open → protection → close → deal sync → review → sample` 持续产出。样本计数、门槛和未满足证据只在 [phased-repair-rollout-status.md](phased-repair-rollout-status.md) 与 [legacy-debt-register.md](legacy-debt-register.md) 维护，本页不复制。
 - **结构收敛**：db_helpers 公共层 + S2/S3 域清扫 + A1–A6 / B1–B5 结构修复已完成；D1–D13 缺陷批、减法批、meta shadow 批等历史流水由 Git 历史追溯。

@@ -8,6 +8,16 @@
 
 ## 1. 全局收敛
 
+### V16 认知层退役（2026-09-11 登记并当日完成）
+
+- 状态：`resolved`。执行顺序：停写（四张认知表增量归零）→ 载体解耦（扩张授权改由 `posterior_fingerprint` 且 `delegate_factor_governance_cycle` 自行重算校验）→ 代码删除（净 −5.8k 行、−9 个 `/api/ops/brain/*` 端点、`brain_action_plan` 提案来源、5 张表声明）→ 退役前 `pg_dump` 存档 `run_artifacts/v16_cognition_retirement_20260911.dump`（74.9 MB / 6 表）→ v35 迁移删除 6 张表（brain 家族 423MB → 15MB，`current 35 / minimum 35 / ok`）。
+- 保留（活路径，未删）：`v16_brain_command`（命令账本）、`brain_governance_candidate`(+`_review`)（桥接）、`brain_memory`（`agent_briefing.reconcile_trade_review` 在用）、`brain_live_ready_guardrail`（`live_autonomy` 的 `broker_local_divergence` 输入），以及 `backend/services/v16_posterior_arbitration.py`。
+- 退役前事实（只读）：`brain_action_plan_eval` 69,852 行 + payload 182MB、`brain_medium_impact_governance` 36,592 行/114MB、`brain_action_plan` 6,890 行/39MB、`brain_state_snapshot` 20 行、`brain_low_impact_execution` 0 行；每天新增 3–5 千行，消费者只有 `/api/ops/brain/*` 与前端 V16 页，无执行器。
+- 解耦的依赖（原缺口）：`delegate_factor_governance_cycle()` 原要求 `snapshot_id` 非空（由 `BrainStateService.build()` 产出、经 `evolution_orchestrator.factor_v16_handoff.snapshot_id` 传入），使认知快照成为扩张授权的唯一载体；现改为 canonical 推导的 `posterior_fingerprint`，`delegate_factor_governance_cycle` 自行重算并要求完全相等（比原信任调用方 id 更严），manifest 升为 `factor_governance_batch_manifest.v2`。附带修正：旧 handoff 取值键写错（读 `.posterior_fingerprint`，实际是 `.fingerprint`），历史上一直是空串。实测：匹配 → `delegated`；伪造 `0*24` → `posterior_arbitration_fingerprint_mismatch`。
+- 实例佐证：`tests/test_v16_brain_orchestrator.py` 中 6 个 bridge/reissue/cancel 测试在停写前就已空转（守卫 `v16_brain_command` 计数为 0 即 return 恒真：fixture 下物化只产出 3 plan / 3 eval / 2 candidate / 0 command），同批删除；生命周期覆盖由新增的 2 个测试 + `test_governance_contract_convergence.py` / `test_autonomous_evolution_cycle.py` 承担。
+- 未随之删除（历史契约）：`STATE_SCHEMA_LEGACY_BASELINE_TABLES` 仍列这些表名（历史 migration 8/14 会对它们 `ALTER TABLE`，见该常量旁注释），不随现状收缩。
+- 验证：`scripts/state_schema_migrate.py --check` = `current 35 / minimum 35 / ok / mismatches 0`；`pg_class` 中 brain 家族只剩 4 张活表；`/api/health` 200，已删端点 404、保留端点 401；重启后 supervisor_learning / autonomous_learning 正常 executed successfully，backend 与 learning worker 0 ERROR；508 + 578 项域测试全绿；只读探针确认扩张授权通道仍可用。
+
 ### demo CVaR overlay 覆盖持久性待复核（2026-09-11 登记并当日恢复）
 
 - 状态：`monitoring`（2026-09-11 01:16 经 Coordinator 恢复：`gmut_2212b60618aa48fc9b10359d51e2dc13`，actor=`operator:zhu`、source=`operator_demo_relaxation`、action=`adjust_demo_cvar_limit`、v16_authority=`operator_bounded_demo_control_exempt`、rollback=`{"risk_cvar_threshold_pct":2.5}`，intent committed / projection current。恢复前后：overlay 行无 cvar 键 → 现含 `risk_cvar_threshold_pct: 3.5`（overlay_hash 51eac920，长度 93,876→93,906）；backend 进程 01:18 起 `config_runtime_drift.drift=false` 且 `overlay_changed_keys` 含该键，readiness blockers 空、latch 清除。）
@@ -24,6 +34,7 @@
 - 退出：`≥10 笔 governance_eligible matured supervisor_execution_trace` 真实干预（close/tighten 均可，tighten 硬门 2026-09-08 已退役：executed correct close 经 keep→supportive 计入干预证据）+ 候选 review、V16/Coordinator application、effect observation 和 rollback 连续可追溯；selection projection 新鲜且可解释；任何单条记忆不得直接改模板或放大交易权限。
 
 ### V16 parameter_template 通道（V16 链存在代码死点；learning 链可达）
+
 - 状态：`active`（2026-09-05 路线②已执行：planner 目录移除 `shadow_parameter_template_review`，`_materialize_eval` 对该 scope 只观察不产候选——V16 链死点按路线②退役，learning 链成为唯一 owner；首个真实切换（`parameter_template_switch_log` 非空）后转 resolved。2026-09-05 复核修正：**V16 链存在代码级死点，仅注册模板不可达**；2026-09-02 登记：V16 因子通道已打通并落地首笔降权 stoch_k 0.35→0.3115）
 - canonical：`parameter_template_registry` 为模板唯一注册源；V16 经 `switch_parameter_template`（scope_key=online_light）切换，命令门已支持（`v16_scope_key=online_light`），应用端 `_auto_apply_parameter_template_suggestions` 与 governor 规则（需 `target_template_id` + `recommended_scope=online_light` + confidence≥0.55）已就绪。
 - 当前：`runtime.parameter_template_registry` 与 `runtime.parameter_template_active` 均为 0 行。**V16 链死点（2026-09-05 实证）**：`v16_brain_planning._map_action` 对 `scope=parameter_template` 硬编码 `target_template_id=""`，而 bridge 评审要求 mapped target 非空（`brain_governance_candidate_review` gap `missing_target_template_id`）——**仅注册模板不能解封该链**，planner 侧必须先填 target 或不再映射该 scope。备用活链：`autonomous_learning._build_recommendation` 从 `_MANUAL_TEMPLATE_LIBRARY`（rsi_14/macd_hist 各 default/conservative/aggressive）选真实 target，switch mutation 在同一 Coordinator 事务内物化 registry 行（`parameter_templates.py` switch 分支），**该链不需要预先注册**，只等因子卡片出现 primary responsibility=parameter（或 `factor_logic_ok_but_param_suspect` 标签）的归因证据。

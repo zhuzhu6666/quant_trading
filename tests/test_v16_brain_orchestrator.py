@@ -15,8 +15,11 @@ from backend.services.v16_brain_orchestrator import (
 from backend.services.brain_governance_candidate_review import (
     ensure_brain_governance_candidate_review_table,
 )
-from backend.services.brain_governance_candidates import ensure_policy_suggestion_table
-from backend.services.v16_brain_snapshot import build_posterior_arbitration
+from backend.services.brain_governance_candidates import (
+    BrainGovernanceCandidateService,
+    ensure_policy_suggestion_table,
+)
+from backend.services.v16_posterior_arbitration import build_posterior_arbitration
 from backend.services.learning_application_store import LearningApplicationStore
 from risk.policy_service import RiskPolicyService
 from tests.canonical_fixture import make_canonical_sqlite
@@ -43,33 +46,6 @@ def _governed_demo_bridge(monkeypatch):
         return original_evaluate(service, action, context)
 
     monkeypatch.setattr(RiskPolicyService, "evaluate", evaluate_with_demo_bridge)
-
-
-def _readiness() -> dict:
-    return {
-        "schema_version": "backend_readiness.v1",
-        "generated_at": time.time(),
-        "ready_for_frontend": True,
-        "market_session": {"status": "open"},
-        "live": {
-            "ctrader": {"status": "connected"},
-            "loop": {"running": True},
-            "readiness": {"ok": True},
-        },
-        "system_health": {"overall": "ok", "blocking_components": []},
-        "governance": {"status": "ok", "automatic_execution_enabled": True},
-        "governance_freshness": {"tables": {}},
-        "replay": {
-            "ok": True,
-            "status": "fresh",
-            "latest_report": {"replay_run_id": "replay-v16", "evidence_grade": "A"},
-        },
-        "incident_control": {"mode": "normal", "readiness_effect": {}},
-        "release": {"ok": True, "latest_release": {"run_id": "release-v16"}},
-        "autonomy_health": {"score": 0.9, "posture": "full", "blockers": []},
-        "blockers": [],
-        "known_observations": [],
-    }
 
 
 def _seed_posterior_facts(
@@ -311,398 +287,152 @@ def test_posterior_arbitration_aggregates_supervisor_evidence_not_single_max():
     assert result["supervisor_conclusion"]["conclusion"] == "over_protected"
 
 
-def test_v16_orchestrator_dispatches_without_direct_runtime_mutation(tmp_path):
+def test_v16_run_once_reconciles_commands_without_materialising_cognition(tmp_path):
+    """Run once no longer derives candidates, plans, evals or commands.
+
+    Cognition materialisation was stopped on 2026-09-11 and the arbitration
+    carrier no longer needs the snapshot table: commands are only issued by
+    their owning specialists through ``delegate_*`` and merely reconciled
+    here, while this cycle's posterior arbitration is derived from canonical
+    evidence and published as ``posterior_fingerprint``.
+    """
     db_path = tmp_path / "state.db"
     _seed_posterior_facts(db_path, time.time())
 
     service = V16BrainOrchestratorService(db_path)
-    result = service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
-
-    if result["delegated_count"] == 0:
-        assert result["status"] == "observing"
-        conn = connect_sqlite(db_path, read_only=True)
-        try:
-            assert conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 0
-        finally:
-            conn.close()
-        return
-    assert result["status"] == "delegated"
-    assert result["delegated_count"] == 1
-    command = next(item for item in result["commands"] if item["decision"] == "delegate")
-    assert command["target_agent"] == "position_supervisor_governance"
-    assert command["candidate_id"]
-    assert command["boundary"]["does_not_write"][0] == "policy_suggestion"
-    assert command["delegation"]["execution_owner"] == "position_supervisor_governance"
-    assert command["delegation"]["specialist_must_use"] == ["RiskPolicyService"]
+    result = service.run_once(limit=20, persist=True)
+    assert result["status"] == "observing"
+    assert result["delegated_count"] == 0
+    assert result["commands"] == []
+    assert result["posterior_fingerprint"]
+    assert "snapshot_id" not in result
+    assert "plan_count" not in result
+    assert "eval_count" not in result
+    assert "governance_count" not in result
 
     conn = connect_sqlite(db_path, read_only=True)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM policy_suggestion").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM runtime_config_overlay").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM brain_governance_candidate").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 1
-        assert conn.execute(
-            "SELECT COUNT(*) FROM v16_brain_command WHERE decision='observe'"
-        ).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM brain_governance_candidate").fetchone()[0] == 0
+        # The cognition ledgers were retired with their producers on
+        # 2026-09-11; the cycle must not recreate them.
+        for retired in (
+            "brain_state_snapshot",
+            "brain_action_plan",
+            "brain_action_plan_eval",
+            "brain_medium_impact_governance",
+        ):
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                (retired,),
+            ).fetchone()[0] == 0
     finally:
         conn.close()
 
-    status = service.status()
-    assert status["status"] == "healthy"
-    assert status["posterior_to_brain_closed"] is True
-    assert status["command_to_candidate_closed"] is True
-
-    # Re-running the same posterior is idempotent: V16 may re-audit, but it
-    # does not create duplicate specialist candidates or direct suggestions.
-    second = service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
-    assert second["delegated_count"] == 1
+    # Idempotent: a second run over unchanged facts still writes nothing.
+    second = service.run_once(limit=20, persist=True)
+    assert second["delegated_count"] == 0
     conn = connect_sqlite(db_path, read_only=True)
     try:
-        assert conn.execute("SELECT COUNT(*) FROM policy_suggestion").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM brain_governance_candidate").fetchone()[0] == 1
-        assert conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM brain_governance_candidate").fetchone()[0] == 0
     finally:
         conn.close()
 
 
-def test_bridge_pending_candidate_keeps_command_until_governor_review(tmp_path):
+def test_reviewed_expired_delegate_is_reissued_once(tmp_path):
+    """A cancelled delegate with a fresh reviewed bridge is reissued exactly once."""
     db_path = tmp_path / "state.db"
-    _seed_posterior_facts(db_path, time.time())
-    service = V16BrainOrchestratorService(db_path)
-    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
+    conn = make_canonical_sqlite(db_path)
+    conn.executescript(STATE_DB_DDL)
+    conn.commit()
+    conn.close()
+    ensure_v16_brain_command_table(db_path)
+    ensure_policy_suggestion_table(db_path)
+    ensure_brain_governance_candidate_review_table(db_path)
 
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        if conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 0:
-            return
-    finally:
-        conn.close()
-
-    from backend.services.autonomous_demo_apply_stepper import AutonomousDemoApplyStepper
-
-    dispatched = AutonomousDemoApplyStepper(db_path)._run_dispatch_v16_delegation()
-    assert dispatched["status"] == "submitted_to_policy_suggestion"
-
-    cancelled = service._cancel_non_actionable_commands(persist=True)
-    assert cancelled["stale_delegate_count"] == 0
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        command = conn.execute(
-            "SELECT claim_status FROM v16_brain_command WHERE decision='delegate'"
-        ).fetchone()
-        candidate = conn.execute(
-            "SELECT proposal_stage, status FROM brain_governance_candidate"
-        ).fetchone()
-    finally:
-        conn.close()
-    assert command[0] == "available"
-    assert candidate == ("bridge_pending", "bridge_pending")
-    from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
-
-    review_status = BrainGovernanceCandidateReviewService(db_path).review_latest(
-        limit=20,
-        persist=False,
+    candidate_id = "candidate_reissue"
+    BrainGovernanceCandidateService(db_path).create_candidate(
+        candidate_id=candidate_id,
+        source_agent="v16_brain",
+        source_kind="brain_medium_impact_governance",
+        source_ref_type="test",
+        source_ref_id="eval-reissue",
+        proposal_stage="governance_ready",
+        capability_scope="medium_impact_governance",
+        scope_type="factor",
+        scope_key="alpha_weight_policy",
+        action="downweight",
+        confidence=0.8,
+        evidence_score=0.8,
+        risk_class="medium",
+        max_impact="medium_impact",
+        risk_verdict={"allowed": True},
+        status="active",
+        persist=True,
     )
-    assert review_status["status"] == "execution_pending"
-
-
-def test_superseded_bridge_is_reconciled_without_reviving_candidate(tmp_path):
-    db_path = tmp_path / "state.db"
-    _seed_posterior_facts(db_path, time.time())
-    service = V16BrainOrchestratorService(db_path)
-    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
-
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        if conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 0:
-            return
-    finally:
-        conn.close()
-
-    from backend.services.autonomous_demo_apply_stepper import AutonomousDemoApplyStepper
-
-    dispatched = AutonomousDemoApplyStepper(db_path)._run_dispatch_v16_delegation()
-    suggestion_id = dispatched["suggestion_id"]
+    now = time.time()
     conn = connect_sqlite(db_path)
     try:
         conn.execute(
-            "UPDATE policy_suggestion SET status='superseded' WHERE suggestion_id=?",
-            (suggestion_id,),
+            "UPDATE brain_governance_candidate SET submitted_suggestion_id='sug-reissue' "
+            "WHERE candidate_id=?",
+            (candidate_id,),
+        )
+        conn.execute(
+            """INSERT INTO brain_governance_candidate_review
+               (review_id, candidate_id, review_status, bridge_ready,
+                bridge_reason, evidence_gaps_json, conflict_json,
+                bridge_preview_json, source_reliability_json,
+                llm_advisory_json, boundary_json, evidence_fingerprint, created_at)
+               VALUES (?, ?, 'bridge_ready', 1, '', '[]', '{}', '{}', '{}', '{}', '{}', ?, ?)""",
+            ("review-reissue", candidate_id, "e" * 64, now + 1.0),
         )
         conn.commit()
     finally:
         conn.close()
 
-    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        candidate = conn.execute(
-            "SELECT proposal_stage, status FROM brain_governance_candidate"
-        ).fetchone()
-        command = conn.execute(
-            "SELECT claim_status, failure_reason FROM v16_brain_command WHERE decision='delegate' ORDER BY created_at DESC LIMIT 1"
-        ).fetchone()
-    finally:
-        conn.close()
-    assert candidate == ("superseded_by_governance", "superseded")
-    assert command == ("cancelled", "candidate_not_active")
-
-
-def test_expired_delegate_gets_a_fresh_command_without_reviving_terminal_row(tmp_path):
-    db_path = tmp_path / "state.db"
-    now = time.time()
-    _seed_posterior_facts(db_path, now)
     service = V16BrainOrchestratorService(db_path)
-    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
-
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        if conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 0:
-            return
-    finally:
-        conn.close()
-
+    service._persist_commands(
+        [
+            {
+                "command_id": "cmd-expired",
+                "candidate_id": candidate_id,
+                "target_agent": "autonomous_learning",
+                "scope_type": "factor",
+                "scope_key": "alpha_weight_policy",
+                "action": "downweight",
+                "decision": "delegate",
+                "status": "delegated_to_specialist",
+                "evidence": {"candidate_id": candidate_id},
+                "delegation": {},
+                "posterior_fingerprint": "p" * 64,
+                "evidence_fingerprint": "e" * 64,
+                "max_apply_count": 1,
+                "created_at": now - 60.0,
+                "updated_at": now - 60.0,
+            }
+        ]
+    )
     conn = connect_sqlite(db_path)
     try:
-        old = conn.execute(
-            """SELECT command_id, authority_issued_at
-               FROM v16_brain_command WHERE decision='delegate'"""
-        ).fetchone()
         conn.execute(
             """UPDATE v16_brain_command
                SET claim_status='cancelled', failure_reason='authority_expired',
                    finalized_at=?, updated_at=?
-               WHERE command_id=?""",
-            (now, now, old[0]),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        rows = conn.execute(
-            """SELECT command_id, claim_status, failure_reason, authority_issued_at
-               FROM v16_brain_command WHERE decision='delegate'
-               ORDER BY created_at"""
-        ).fetchall()
-    finally:
-        conn.close()
-
-    assert len(rows) == 2
-    assert rows[0][0] != rows[1][0]
-    assert rows[0][1:] == ("cancelled", "authority_expired", rows[0][3])
-    assert rows[1][1] == "available"
-    assert rows[1][2] in (None, "")
-    assert rows[1][3] > rows[0][3]
-
-    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM v16_brain_command WHERE decision='delegate'"
-        ).fetchone()[0] == 2
-    finally:
-        conn.close()
-
-
-def test_reviewed_expired_delegate_reissues_when_bridge_becomes_ready(tmp_path):
-    db_path = tmp_path / "state.db"
-    _seed_posterior_facts(db_path, time.time())
-    service = V16BrainOrchestratorService(db_path)
-    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        if conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 0:
-            return
-    finally:
-        conn.close()
-    ensure_brain_governance_candidate_review_table(db_path)
-
-    cancelled_at = time.time()
-    conn = connect_sqlite(db_path)
-    try:
-        command = conn.execute(
-            "SELECT command_id, candidate_id FROM v16_brain_command WHERE decision='delegate'"
-        ).fetchone()
-        conn.execute(
-            """UPDATE v16_brain_command
-               SET claim_status='cancelled', failure_reason='authority_expired',
-                   updated_at=?
-               WHERE command_id=?""",
-            (cancelled_at, command[0]),
-        )
-        conn.execute(
-            """INSERT INTO brain_governance_candidate_review
-               (review_id, candidate_id, review_status, bridge_ready, created_at)
-               VALUES ('review_after_expiry', ?, 'bridge_ready', 1, ?)""",
-            (command[1], cancelled_at + 1.0),
+               WHERE command_id='cmd-expired'""",
+            (now - 30.0, now - 30.0),
         )
         conn.commit()
     finally:
         conn.close()
 
     reissues = service._reviewed_expired_delegate_reissues(limit=20)
-
-    assert len(reissues) == 1
-    assert reissues[0]["command_id"] == command[0]
+    assert [item["candidate_id"] for item in reissues] == [candidate_id]
     service._persist_commands(reissues)
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        rows = conn.execute(
-            """SELECT command_id, claim_status, failure_reason
-               FROM v16_brain_command WHERE decision='delegate'
-               ORDER BY created_at"""
-        ).fetchall()
-    finally:
-        conn.close()
-    assert rows[0][1:] == ("cancelled", "authority_expired")
-    assert rows[1][0] != rows[0][0]
-    assert rows[1][1:] == ("available", "")
+    # The fresh command is claimable, so the same candidate is not reissued again.
     assert service._reviewed_expired_delegate_reissues(limit=20) == []
 
-
-def test_cancelled_submitted_bridge_reissues_only_pending_approved_suggestion(tmp_path):
-    db_path = tmp_path / "state.db"
-    _seed_posterior_facts(db_path, time.time())
-    service = V16BrainOrchestratorService(db_path)
-    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        if conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 0:
-            return
-    finally:
-        conn.close()
-    ensure_brain_governance_candidate_review_table(db_path)
-    ensure_policy_suggestion_table(db_path)
-
-    cancelled_at = time.time()
-    suggestion_id = "suggestion-v16-recovery"
-    conn = connect_sqlite(db_path)
-    try:
-        command = conn.execute(
-            """SELECT command_id, candidate_id, scope_type, scope_key, action
-               FROM v16_brain_command WHERE decision='delegate'"""
-        ).fetchone()
-        conn.execute(
-            """INSERT INTO policy_suggestion
-               (suggestion_id, scope_type, scope_key, action, status,
-                governance_eligible, applied_mutation_id, created_at)
-               VALUES (?, ?, ?, ?, 'approved', 1, '', ?)""",
-            (
-                suggestion_id,
-                "position_supervisor_template",
-                "position_supervisor:conservative.v1",
-                command[4],
-                cancelled_at,
-            ),
-        )
-        conn.execute(
-            """UPDATE brain_governance_candidate
-               SET proposal_stage='submitted_to_policy_suggestion',
-                   status='submitted', submitted_suggestion_id=?,
-                   submitted_at=?, updated_at=?
-               WHERE candidate_id=?""",
-            (suggestion_id, cancelled_at, cancelled_at, command[1]),
-        )
-        conn.execute(
-            """UPDATE v16_brain_command
-               SET claim_status='cancelled', failure_reason='candidate_not_active',
-                   finalized_at=?, updated_at=?
-               WHERE command_id=?""",
-            (cancelled_at, cancelled_at, command[0]),
-        )
-        conn.execute(
-            """INSERT INTO brain_governance_candidate_review
-               (review_id, candidate_id, review_status, bridge_ready, created_at)
-               VALUES ('review_submitted_bridge', ?, 'bridge_ready', 1, ?)""",
-            (command[1], cancelled_at + 1.0),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    result = service.run_once(
-        readiness=_readiness(), limit=20, source="test", persist=True
-    )
-
-    assert result["delegated_count"] == 1
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        rows = conn.execute(
-            """SELECT command_id, claim_status, failure_reason
-               FROM v16_brain_command WHERE decision='delegate'
-               ORDER BY created_at"""
-        ).fetchall()
-        suggestion = conn.execute(
-            """SELECT status, governance_eligible, applied_mutation_id
-               FROM policy_suggestion WHERE suggestion_id=?""",
-            (suggestion_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    assert len(rows) == 2
-    assert rows[0][0] == command[0]
-    assert rows[0][1:] == ("cancelled", "candidate_not_active")
-    assert rows[1][0] != rows[0][0]
-    assert rows[1][1:] == ("available", "")
-    assert suggestion == ("approved", 1, "")
-
-    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM v16_brain_command WHERE decision='delegate'"
-        ).fetchone()[0] == 2
-    finally:
-        conn.close()
-
-
-def test_superseded_candidate_cancels_unclaimed_delegate(tmp_path):
-    db_path = tmp_path / "state.db"
-    _seed_posterior_facts(db_path, time.time())
-    service = V16BrainOrchestratorService(db_path)
-    service.run_once(readiness=_readiness(), limit=20, source="test", persist=True)
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        if conn.execute("SELECT COUNT(*) FROM v16_brain_command").fetchone()[0] == 0:
-            return
-    finally:
-        conn.close()
-    conn = connect_sqlite(db_path)
-    try:
-        conn.execute(
-            "UPDATE brain_governance_candidate SET status='superseded'"
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    result = service._cancel_non_actionable_commands(persist=True)
-
-    assert result["stale_delegate_count"] == 1
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        row = conn.execute(
-            """
-            SELECT claim_status, apply_count, failure_reason
-            FROM v16_brain_command
-            """
-        ).fetchone()
-    finally:
-        conn.close()
-    assert row[0] == "cancelled"
-    assert row[1] == 0
-    assert row[2] == "candidate_not_active"
-    rerun = service.run_once(
-        readiness=_readiness(), limit=20, source="test", persist=True
-    )
-    assert rerun["delegated_count"] == 0
-    current_status = service.status()
-    assert current_status["status"] == "no_actionable_command"
-    assert current_status["actionable_command_count"] == 0
 
 
 def test_v16_delegates_only_qualified_entry_quality_v2_evidence(tmp_path):

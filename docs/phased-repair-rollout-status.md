@@ -22,7 +22,7 @@
 ## 2. 最近一次只读核对（2026-09-10）
 
 - **服务**：`quant-backend` active since 2026-09-10 13:48、`quant-learning-worker` active since 2026-09-10 14:14、`quant-job-worker` active since 2026-09-08 18:49（`systemctl is-active` / `ActiveEnterTimestamp`）。
-- **状态库**：migration ledger `current 34 / minimum 34 / ok / mismatches 0`（`scripts/state_schema_migrate.py --check`），`0034_governance_mutation_intent_overlay_hash` 已应用。
+- **状态库**：migration ledger `current 35 / minimum 35 / ok / mismatches 0`（`scripts/state_schema_migrate.py --check`），`0035_retire_v16_cognition_ledgers` 已应用（2026-09-11，runner `v16-cognition-retirement-20260911`）。
 - **代码**：HEAD `ae7a2341`（2026-09-10 14:46）晚于最近一次生产重启；是否需要重启按实际 diff 与 release flags 判定，不引用本页快照。
 - **readiness**：`backend_readiness_snapshot.v1` `blocking_components` 为空；`runtime_health_projection.v1` ctrader connected。
 - 本轮为文档收敛批，未改代码、配置或运行态。
@@ -37,7 +37,8 @@
    - 这些行引用的 `decision_id` 在 `evolution_decision` 中不存在，窗口内无 `governance_mutation_intent`，evidence 无 `gmut_`；09-08 12:54 重启后不再新增（其后仍持续产生 decision）。
    - 影响面已 fail-closed：`live_committed_policy` 对空背书行只标 `legacy_quarantined`（且仅限非 strict + 收紧动作）；`brain_governance_candidate_review` 要求 `governance_eligible=1`；`proposal_registry` 中 `fgv*` 来源 0 条。
    - 处置：**裁定不清账、不新增守卫**（现状无授权影响）。旧口径"27 条无背书 applied 幽灵行"作废；`run_artifacts/policy_suggestion_ghost_cleanup.py`（D2 一次性脚本）从未以 `RUN=1` 执行，且快照序列化损坏（写出的是列名）、对象族标注错误，**不得直接复用**，如需清理必须重写。
-4. **索引/契约欠账**：依赖 `factor_name` / `lifecycle_stage` / `runtime_admission` 的 `idx_factor_lifecycle_*` 索引仍未建（0028 已补齐这些列，当前仅 `idx_factor_lifecycle_unique_name` 存在）；是否补建按后续性能证据决定。
+4. **V16 认知层退役（2026-09-11 完成）**：停写 → 载体解耦（`posterior_fingerprint` + 自校验）→ 代码删除（净 −5.8k 行、−9 端点、`brain_action_plan` 提案来源）→ `pg_dump` 存档（`run_artifacts/v16_cognition_retirement_20260911.dump`，74.9 MB/6 表）→ v35 迁移删除 6 张表（423MB → 15MB）。保留 `v16_brain_command`、`brain_governance_candidate`(+`_review`)、`brain_memory`、`brain_live_ready_guardrail`。详见 [legacy-debt-register.md](legacy-debt-register.md) §1。
+5. **索引/契约欠账**：依赖 `factor_name` / `lifecycle_stage` / `runtime_admission` 的 `idx_factor_lifecycle_*` 索引仍未建（0028 已补齐这些列，当前仅 `idx_factor_lifecycle_unique_name` 存在）；是否补建按后续性能证据决定。
 5. **每次发布门重取**：process-loaded flags、PID、fingerprint、release preflight 证据；当前源码绑定的 execution/safety fault matrix attestation；Safety 在 enforce 姿态下的连续性与完整 broker position lifecycle 证据。
 
 上述证据不能由单测、历史快照或 readiness 替代；未满足前不推进后续静态开关，也不把 readiness ready、单次 bridge 或单次 effect 解释为自治毕业。

@@ -20,9 +20,7 @@ AGENTS: dict[str, dict[str, Any]] = {
     "v16_brain": {
         "source_kind": "brain_medium_impact_governance",
         "capability_scope": "medium_impact_governance",
-        "allowed_writes": ["brain_action_plan", "brain_action_plan_eval",
-                           "brain_governance_candidate", "brain_medium_impact_governance", "brain_memory",
-                           "brain_state_snapshot", "v16_brain_command"],
+        "allowed_writes": ["brain_governance_candidate", "v16_brain_command"],
         "control_surfaces": ["proposal_governance", "entry_quality", "factor_weight", "parameter_template",
                              "position_supervisor_template", "context_policy", "replay", "memory"],
         # V16 can select and route a candidate, but the policy queue remains a

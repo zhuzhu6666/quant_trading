@@ -607,20 +607,6 @@ CREATE TABLE IF NOT EXISTS incident_playbook_event (
     created_at REAL NOT NULL DEFAULT 0.0
 );
 
-CREATE TABLE IF NOT EXISTS brain_state_snapshot (
-    snapshot_id TEXT PRIMARY KEY,
-    schema_version TEXT DEFAULT 'brain_state_snapshot.v1',
-    source TEXT DEFAULT '',
-    status TEXT DEFAULT 'computed',
-    world_model_json TEXT NOT NULL DEFAULT '{}',
-    perceptions_json TEXT NOT NULL DEFAULT '{}',
-    memory_json TEXT NOT NULL DEFAULT '{}',
-    hypotheses_json TEXT NOT NULL DEFAULT '[]',
-    critic_json TEXT NOT NULL DEFAULT '{}',
-    evidence_refs_json TEXT NOT NULL DEFAULT '{}',
-    boundary_json TEXT NOT NULL DEFAULT '{}',
-    created_at REAL NOT NULL DEFAULT 0.0
-);
 
 CREATE TABLE IF NOT EXISTS brain_memory (
     memory_id TEXT PRIMARY KEY,
@@ -639,82 +625,9 @@ CREATE TABLE IF NOT EXISTS brain_memory (
     last_used_at REAL NOT NULL DEFAULT 0.0
 );
 
-CREATE TABLE IF NOT EXISTS brain_action_plan (
-    plan_id TEXT PRIMARY KEY,
-    snapshot_id TEXT DEFAULT '',
-    hypothesis_id TEXT DEFAULT '',
-    action_type TEXT DEFAULT '',
-    status TEXT DEFAULT 'shadow_recorded',
-    scope_json TEXT NOT NULL DEFAULT '{}',
-    max_impact TEXT DEFAULT 'none_shadow_only',
-    risk_class TEXT DEFAULT '',
-    critic_verdict TEXT DEFAULT '',
-    validation_refs_json TEXT NOT NULL DEFAULT '{}',
-    rollback_plan_json TEXT NOT NULL DEFAULT '{}',
-    required_services_json TEXT NOT NULL DEFAULT '[]',
-    shadow_eval_json TEXT NOT NULL DEFAULT '{}',
-    boundary_json TEXT NOT NULL DEFAULT '{}',
-    created_at REAL NOT NULL DEFAULT 0.0
-);
 
-CREATE TABLE IF NOT EXISTS brain_action_plan_eval (
-    eval_id TEXT PRIMARY KEY,
-    plan_id TEXT NOT NULL,
-    snapshot_id TEXT DEFAULT '',
-    action_type TEXT DEFAULT '',
-    scope_type TEXT DEFAULT '',
-    status TEXT DEFAULT 'needs_evidence',
-    comparison_verdict TEXT DEFAULT 'needs_more_evidence',
-    coverage_score REAL NOT NULL DEFAULT 0.0,
-    comparison_json TEXT NOT NULL DEFAULT '{}',
-    evidence_refs_json TEXT NOT NULL DEFAULT '{}',
-    boundary_json TEXT NOT NULL DEFAULT '{}',
-    payload_hash TEXT NOT NULL DEFAULT '',
-    evaluation_run_id TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL DEFAULT 0.0
-);
 
-CREATE TABLE IF NOT EXISTS brain_low_impact_execution (
-    execution_id TEXT PRIMARY KEY,
-    plan_id TEXT DEFAULT '',
-    eval_id TEXT DEFAULT '',
-    action_type TEXT DEFAULT '',
-    execution_action TEXT DEFAULT '',
-    status TEXT DEFAULT '',
-    evidence_score REAL NOT NULL DEFAULT 0.0,
-    critic_verdict TEXT DEFAULT '',
-    comparison_verdict TEXT DEFAULT '',
-    risk_verdict_json TEXT NOT NULL DEFAULT '{}',
-    rollback_plan_json TEXT NOT NULL DEFAULT '{}',
-    result_json TEXT NOT NULL DEFAULT '{}',
-    posterior_monitor_json TEXT NOT NULL DEFAULT '{}',
-    boundary_json TEXT NOT NULL DEFAULT '{}',
-    created_at REAL NOT NULL DEFAULT 0.0,
-    updated_at REAL NOT NULL DEFAULT 0.0
-);
 
-CREATE TABLE IF NOT EXISTS brain_medium_impact_governance (
-    governance_id TEXT PRIMARY KEY,
-    plan_id TEXT DEFAULT '',
-    eval_id TEXT DEFAULT '',
-    governance_action TEXT DEFAULT '',
-    scope_type TEXT DEFAULT '',
-    scope_key TEXT DEFAULT '',
-    status TEXT DEFAULT '',
-    candidate_id TEXT DEFAULT '',
-    suggestion_id TEXT DEFAULT '',
-    evidence_score REAL NOT NULL DEFAULT 0.0,
-    critic_verdict TEXT DEFAULT '',
-    comparison_verdict TEXT DEFAULT '',
-    risk_verdict_json TEXT NOT NULL DEFAULT '{}',
-    decision_policy_json TEXT NOT NULL DEFAULT '{}',
-    rollback_plan_json TEXT NOT NULL DEFAULT '{}',
-    posterior_refs_json TEXT NOT NULL DEFAULT '{}',
-    autonomy_guard_json TEXT NOT NULL DEFAULT '{}',
-    boundary_json TEXT NOT NULL DEFAULT '{}',
-    created_at REAL NOT NULL DEFAULT 0.0,
-    updated_at REAL NOT NULL DEFAULT 0.0
-);
 
 CREATE TABLE IF NOT EXISTS brain_governance_candidate (
     candidate_id TEXT PRIMARY KEY,
@@ -1081,24 +994,9 @@ CREATE INDEX IF NOT EXISTS idx_incident_playbook_created ON incident_playbook_ru
 CREATE INDEX IF NOT EXISTS idx_incident_playbook_scenario ON incident_playbook_run(scenario, created_at);
 CREATE INDEX IF NOT EXISTS idx_incident_playbook_event_playbook ON incident_playbook_event(playbook_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_incident_playbook_event_type ON incident_playbook_event(event_type, created_at);
-CREATE INDEX IF NOT EXISTS idx_brain_state_snapshot_created ON brain_state_snapshot(created_at);
-CREATE INDEX IF NOT EXISTS idx_brain_state_snapshot_status ON brain_state_snapshot(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_memory_source ON brain_memory(source_table, source_id);
 CREATE INDEX IF NOT EXISTS idx_brain_memory_type ON brain_memory(memory_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_memory_score ON brain_memory(evidence_score, similarity_score);
-CREATE INDEX IF NOT EXISTS idx_brain_action_plan_created ON brain_action_plan(created_at);
-CREATE INDEX IF NOT EXISTS idx_brain_action_plan_snapshot ON brain_action_plan(snapshot_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_brain_action_plan_type ON brain_action_plan(action_type, status);
-CREATE INDEX IF NOT EXISTS idx_brain_action_plan_eval_created ON brain_action_plan_eval(created_at);
-CREATE INDEX IF NOT EXISTS idx_brain_action_plan_eval_plan ON brain_action_plan_eval(plan_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_brain_action_plan_eval_scope ON brain_action_plan_eval(scope_type, status, created_at);
-CREATE INDEX IF NOT EXISTS idx_brain_low_impact_execution_created ON brain_low_impact_execution(created_at);
-CREATE INDEX IF NOT EXISTS idx_brain_low_impact_execution_plan ON brain_low_impact_execution(plan_id, eval_id);
-CREATE INDEX IF NOT EXISTS idx_brain_low_impact_execution_status ON brain_low_impact_execution(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_created ON brain_medium_impact_governance(created_at);
-CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_plan ON brain_medium_impact_governance(plan_id, eval_id);
-CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_scope ON brain_medium_impact_governance(scope_type, status, created_at);
-CREATE INDEX IF NOT EXISTS idx_brain_medium_governance_candidate ON brain_medium_impact_governance(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_created ON brain_governance_candidate(created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_stage ON brain_governance_candidate(proposal_stage, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_brain_governance_candidate_scope ON brain_governance_candidate(scope_type, scope_key, action);

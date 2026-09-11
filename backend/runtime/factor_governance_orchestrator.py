@@ -421,7 +421,7 @@ def factor_batch_manifest_verdict(
     expected_fingerprint = hashlib.sha256(
         _dumps(dict(expansion_preflight or {})).encode("utf-8")
     ).hexdigest()
-    if str(manifest.get("schema_version") or "") != "factor_governance_batch_manifest.v1":
+    if str(manifest.get("schema_version") or "") != "factor_governance_batch_manifest.v2":
         return {
             "allowed": False,
             "status": "factor_batch_manifest_missing",
@@ -1861,12 +1861,15 @@ class FactorGovernanceOrchestrator:
         self,
         factor_id: str,
     ) -> dict[str, Any] | None:
-        """Latest measured posterior effect of the last autonomous factor action.
+        """Latest comparable posterior effect of the last autonomous factor action.
 
         Reuses the converged lean learning_application_effect store
         (scope=scope_key, posterior in effect_json) shared with the rollback
         path, so the expansion guard reads one fact source.  Returns None when
-        there is no applicable record.
+        there is no applicable record, or when the recorded window is not
+        comparable (regime-mismatched or sample-count-only attribution): a
+        delta that cannot be attributed to the application must not decide
+        whether the expansion is repeated.
         """
         if not factor_id:
             return None
@@ -1879,6 +1882,14 @@ class FactorGovernanceOrchestrator:
                 scope_key=str(factor_id), scope_type="factor"
             )
             if eff is None:
+                return None
+            from research.learning.effect_reconciliation import (
+                posterior_evidence_eligible,
+            )
+
+            quality = (eff.get("decision") or {}).get("evidence_quality") or {}
+            eligible, _reason = posterior_evidence_eligible(quality)
+            if not eligible:
                 return None
             return {
                 "observed_trade_count": int(eff.get("observed_trade_count") or 0),
@@ -2927,6 +2938,16 @@ class FactorGovernanceOrchestrator:
                         "prepared_max_age_hours": max_prepared_age_hours,
                     }
                     reason_code = "prepared_stale"
+                elif lifecycle_origin == "builtin":
+                    # Builtins hold a prepared lease on health evidence, never
+                    # on bar-class shadow performance; ask the same judge the
+                    # promote path asks, otherwise a healthy builtin is
+                    # demoted every cycle and re-prepared immediately after.
+                    evidence = self._builtin_promotion_evidence(item, cfg)
+                    blockers = list(evidence.get("blocker_codes") or [])
+                    if evidence.get("eligible") is True:
+                        continue
+                    reason_code = "builtin_promotion_evidence_invalidated"
                 else:
                     evidence = self._promotion_evidence(item, cfg)
                     blockers = list(evidence.get("blocker_codes") or [])
@@ -3672,6 +3693,102 @@ class FactorGovernanceOrchestrator:
             ))
         return actions
 
+    def _builtin_promotion_evidence(
+        self,
+        item: dict[str, Any],
+        cfg: Any,
+        *,
+        profile: FactorGovernanceProfile | None = None,
+        signal_cfg: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Single judge for builtin shadow -> live promotion eligibility.
+
+        The promote path and the prepared-lease invalidation sweep must ask the
+        same question.  Builtins are executable code with health rows instead
+        of bar-class shadow performance, so the dsl ``_promotion_evidence``
+        gate can never speak for them; asking it from the demote sweep is what
+        produced the prepare/demote ping-pong.
+        """
+        profile = profile or self._governance_profile(cfg)
+        if signal_cfg is None:
+            signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
+        factor_id = str(item.get("factor_id") or "")
+        entry = signal_cfg.get(factor_id)
+        blockers: list[str] = []
+        if not isinstance(entry, dict):
+            blockers.append("builtin_not_enrolled")
+        if self._factor_has_pending_effect(factor_id):
+            blockers.append("pending_effect")
+        origin = str(
+            item.get("lifecycle_origin") or item.get("source") or ""
+        ).lower()
+        if origin != "builtin" or item.get("role") != "alpha":
+            blockers.append("not_builtin_alpha")
+        stage = str(item.get("lifecycle_status") or "").upper()
+        if stage not in {
+            FactorLifecycleStage.SHADOW.value,
+            FactorLifecycleStage.PROMOTION_PREPARED.value,
+        }:
+            blockers.append("lifecycle_stage_not_preparable")
+        if isinstance(entry, dict) and not (
+            bool(entry.get("autonomous_activation"))
+            or int(item.get("lifecycle_generation") or 1) > 1
+        ):
+            blockers.append("autonomous_activation_not_enrolled")
+        if not bool(item.get("enabled")) or stage == "DEAD":
+            blockers.append("factor_disabled")
+        score = float(item.get("health_score") or 0.0)
+        n_obs = int(item.get("health_n_obs") or 0)
+        if score < profile.builtin_activation_min_health_score:
+            blockers.append("health_score_below_minimum")
+        if n_obs < profile.builtin_activation_min_n_obs:
+            blockers.append("health_observations_below_minimum")
+        health_status = str(item.get("health_status") or "").upper()
+        health_age = time.time() - float(item.get("health_updated_at") or 0.0)
+        if health_status not in {"HEALTHY", "WATCH"}:
+            blockers.append("health_status_not_promotable")
+        if health_age < -5.0 or health_age > profile.health_max_age_seconds:
+            blockers.append("health_stale")
+        if not self._activation_projection_ready(item):
+            blockers.append("activation_projection_not_ready")
+        if float(item.get("health_rolling_ic") or 0.0) <= 0.0:
+            blockers.append("rolling_ic_non_positive")
+        if float(item.get("health_recent_ic") or 0.0) <= 0.0:
+            blockers.append("recent_ic_non_positive")
+        model_evidence = self._model_governance_evidence(item, cfg)
+        model_samples = int(model_evidence.get("sample_count") or 0)
+        model_weak_samples = int(model_evidence.get("weak_sample_count") or 0)
+        if (
+            bool(model_evidence.get("mutation_eligible"))
+            and (model_samples or model_weak_samples)
+            and (
+                float(model_evidence.get("avg_weakness_score") or 0.0)
+                >= float(
+                    getattr(
+                        cfg, "factor_governance_builtin_activation_max_weakness", 0.65
+                    )
+                    or 0.65
+                )
+            )
+        ):
+            blockers.append("model_governance_weakness_above_maximum")
+        return {
+            "schema_version": "factor_builtin_promotion_evidence.v1",
+            "factor_id": factor_id,
+            "eligible": not blockers,
+            "blocker_codes": blockers,
+            "health_score": score,
+            "health_status": health_status,
+            "health_n_obs": n_obs,
+            "health_age_seconds": health_age,
+            "thresholds": {
+                "min_health_score": profile.builtin_activation_min_health_score,
+                "min_n_obs": profile.builtin_activation_min_n_obs,
+                "governance_profile": profile.name,
+            },
+            "model_governance": model_evidence,
+        }
+
     def _activate_healthy_builtin_shadow(
         self,
         catalog: list[dict[str, Any]],
@@ -3717,61 +3834,20 @@ class FactorGovernanceOrchestrator:
         signal_cfg = dict(getattr(cfg, "factor_signal_config", {}) or {})
         candidates: list[dict[str, Any]] = []
         for item in catalog:
-            factor_id = str(item.get("factor_id") or "")
-            entry = signal_cfg.get(factor_id)
-            if not isinstance(entry, dict):
+            evidence = self._builtin_promotion_evidence(
+                item,
+                cfg,
+                profile=profile,
+                signal_cfg=signal_cfg,
+            )
+            if not evidence["eligible"]:
                 continue
-            if self._factor_has_pending_effect(factor_id):
-                continue
-            if (
-                str(
-                    item.get("lifecycle_origin")
-                    or item.get("source")
-                    or ""
-                ).lower()
-                != "builtin"
-                or item.get("role") != "alpha"
-            ):
-                continue
-            if str(item.get("lifecycle_status") or "").upper() not in {
-                FactorLifecycleStage.SHADOW.value,
-                FactorLifecycleStage.PROMOTION_PREPARED.value,
-            }:
-                continue
-            if not (
-                bool(entry.get("autonomous_activation"))
-                or int(item.get("lifecycle_generation") or 1) > 1
-            ):
-                continue
-            if not bool(item.get("enabled")) or item.get("lifecycle_status") == "DEAD":
-                continue
-            score = float(item.get("health_score") or 0.0)
-            n_obs = int(item.get("health_n_obs") or 0)
-            if score < min_score or n_obs < min_n_obs:
-                continue
-            health_status = str(item.get("health_status") or "").upper()
-            health_age = time.time() - float(item.get("health_updated_at") or 0.0)
-            if (
-                health_status not in {"HEALTHY", "WATCH"}
-                or health_age < -5.0
-                or health_age > profile.health_max_age_seconds
-            ):
-                continue
-            if not self._activation_projection_ready(item):
-                continue
-            if float(item.get("health_rolling_ic") or 0.0) <= 0.0:
-                continue
-            if float(item.get("health_recent_ic") or 0.0) <= 0.0:
-                continue
-            model_evidence = self._model_governance_evidence(item, cfg)
-            model_samples = int(model_evidence.get("sample_count") or 0)
-            model_weak_samples = int(model_evidence.get("weak_sample_count") or 0)
-            if bool(model_evidence.get("mutation_eligible")) and (model_samples or model_weak_samples) and (
-                float(model_evidence.get("avg_weakness_score") or 0.0)
-                >= float(getattr(cfg, "factor_governance_builtin_activation_max_weakness", 0.65) or 0.65)
-            ):
-                continue
-            candidates.append({**item, "_model_governance": model_evidence})
+            candidates.append(
+                {
+                    **item,
+                    "_model_governance": evidence["model_governance"],
+                }
+            )
 
         candidates.sort(key=lambda item: (
             -float(item.get("health_score") or 0.0),

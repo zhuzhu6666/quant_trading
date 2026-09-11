@@ -8,7 +8,7 @@
 
 ## 1. 硬边界（不协商）
 
-1. **不可逆操作要口令**：任何不可逆操作必须等待用户回复确认口令后再执行；确认口令由用户指定，没有口令、口令错误或其他回复一律拒绝执行。
+1. **不可逆操作先确认再执行**：任何不可逆操作（删数据/删生产状态、覆盖未备份内容等）必须先把要动的东西列清楚，等用户明确回复确认后再执行；只做确认过的范围，不顺手扩大。没有明确确认时一律不执行。
 2. **默认可逆、直接执行**：Git 回滚/还原/切分支、把文件移到仓库备份目录、跑测试、看 diff、出计划、只读分析都不需要口令。
 3. **运行态只读 PostgreSQL `runtime` / `canonical_v2`**：本地 SQLite state 路径一律不用（磁盘上残留的 `data/state.db`、`./state.db` 不是可用入口）。只读查询统一 `.venv/bin/python scripts/state_query.py --sql "..."`；业务代码统一 `backend.core.db.get_state_pg_conn()` / `get_state_conn()`。
 4. **已退役链路不恢复**：历史 tick 采集（Dukascopy/cTrader 历史 tick、`ticks_monthly/`、tick timer/writer）、L2 collector（`data/l2_monthly/`、`quant-l2-collector.service`）、服务器端前端构建。

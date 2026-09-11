@@ -29,7 +29,6 @@ from backend.core.db_helpers import conn_is_pg as _is_pg
 
 
 RUNTIME_CONFIG_PAYLOAD_TABLE = "runtime_config_payload"
-BRAIN_ACTION_PLAN_EVAL_PAYLOAD_TABLE = "brain_action_plan_eval_payload"
 MUTATION_PAYLOAD_TABLE = "mutation_payload"
 
 
@@ -85,12 +84,6 @@ def _connect(db_path: str | Path = STATE_DB):
 def _require_pg_contract(conn: Any) -> None:
     required_tables = {
         RUNTIME_CONFIG_PAYLOAD_TABLE: {"payload_hash", "config_json"},
-        BRAIN_ACTION_PLAN_EVAL_PAYLOAD_TABLE: {
-            "payload_hash",
-            "comparison_json",
-            "evidence_refs_json",
-            "boundary_json",
-        },
         MUTATION_PAYLOAD_TABLE: {
             "payload_hash",
             "evidence_json",
@@ -103,7 +96,6 @@ def _require_pg_contract(conn: Any) -> None:
     }
     required_columns = {
         "runtime_config_snapshot": {"payload_hash"},
-        "brain_action_plan_eval": {"payload_hash", "evaluation_run_id"},
         "evolution_decision": {"payload_hash", "canonical_event_id", "projection_type"},
     }
     missing: list[str] = []
@@ -155,16 +147,6 @@ def ensure_state_payload_schema(db_path: str | Path = STATE_DB, conn: Any | None
             )"""
         )
         active.execute(
-            """CREATE TABLE IF NOT EXISTS brain_action_plan_eval_payload (
-                payload_hash TEXT PRIMARY KEY,
-                comparison_json TEXT NOT NULL DEFAULT '{}',
-                evidence_refs_json TEXT NOT NULL DEFAULT '{}',
-                boundary_json TEXT NOT NULL DEFAULT '{}',
-                byte_length INTEGER NOT NULL DEFAULT 0,
-                created_at REAL NOT NULL DEFAULT 0.0
-            )"""
-        )
-        active.execute(
             """CREATE TABLE IF NOT EXISTS mutation_payload (
                 payload_hash TEXT PRIMARY KEY,
                 evidence_json TEXT NOT NULL DEFAULT '{}',
@@ -179,9 +161,6 @@ def ensure_state_payload_schema(db_path: str | Path = STATE_DB, conn: Any | None
         )
         if state_table_exists(active, "runtime_config_snapshot"):
             _ensure_sqlite_column(active, "runtime_config_snapshot", "payload_hash", "TEXT NOT NULL DEFAULT ''")
-        if state_table_exists(active, "brain_action_plan_eval"):
-            _ensure_sqlite_column(active, "brain_action_plan_eval", "payload_hash", "TEXT NOT NULL DEFAULT ''")
-            _ensure_sqlite_column(active, "brain_action_plan_eval", "evaluation_run_id", "TEXT NOT NULL DEFAULT ''")
         if state_table_exists(active, "evolution_decision"):
             _ensure_sqlite_column(active, "evolution_decision", "payload_hash", "TEXT NOT NULL DEFAULT ''")
             _ensure_sqlite_column(active, "evolution_decision", "canonical_event_id", "TEXT NOT NULL DEFAULT ''")
@@ -190,20 +169,6 @@ def ensure_state_payload_schema(db_path: str | Path = STATE_DB, conn: Any | None
             active.execute(
                 "CREATE INDEX IF NOT EXISTS idx_runtime_config_snapshot_payload "
                 "ON runtime_config_snapshot(payload_hash, config_version)"
-            )
-        if state_table_exists(active, "brain_action_plan_eval"):
-            active.execute(
-                "CREATE INDEX IF NOT EXISTS idx_brain_action_plan_eval_payload "
-                "ON brain_action_plan_eval(payload_hash, created_at)"
-            )
-            active.execute(
-                "CREATE INDEX IF NOT EXISTS idx_brain_action_plan_eval_run_plan "
-                "ON brain_action_plan_eval(evaluation_run_id, plan_id)"
-            )
-            active.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_brain_action_plan_eval_run_plan_unique "
-                "ON brain_action_plan_eval(evaluation_run_id, plan_id) "
-                "WHERE evaluation_run_id <> ''"
             )
         if state_table_exists(active, "evolution_decision"):
             active.execute(
@@ -227,34 +192,6 @@ def put_runtime_config_payload(conn: Any, payload_hash_value: str, config_json: 
                ON CONFLICT(payload_hash) DO NOTHING""",
         ),
         (payload_hash_value, config_json, len(config_json.encode("utf-8")), float(created_at or time.time())),
-    )
-
-
-def put_brain_action_plan_eval_payload(
-    conn: Any,
-    payload_hash_value: str,
-    comparison_json: str,
-    evidence_refs_json: str,
-    boundary_json: str,
-    *,
-    created_at: float | None = None,
-) -> None:
-    conn.execute(
-        _sql(
-            conn,
-            """INSERT INTO brain_action_plan_eval_payload
-               (payload_hash, comparison_json, evidence_refs_json, boundary_json, byte_length, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(payload_hash) DO NOTHING""",
-        ),
-        (
-            payload_hash_value,
-            comparison_json,
-            evidence_refs_json,
-            boundary_json,
-            sum(len(item.encode("utf-8")) for item in (comparison_json, evidence_refs_json, boundary_json)),
-            float(created_at or time.time()),
-        ),
     )
 
 
@@ -295,26 +232,6 @@ def read_runtime_config_payload(conn: Any, payload_hash_value: str, fallback: st
         (payload_hash_value,),
     ).fetchone()
     return str(_row_value(row, "config_json", 0, fallback) or fallback)
-
-
-def read_brain_action_plan_eval_payload(conn: Any, payload_hash_value: str) -> dict[str, str]:
-    if not payload_hash_value:
-        return {}
-    row = conn.execute(
-        _sql(
-            conn,
-            """SELECT comparison_json, evidence_refs_json, boundary_json
-               FROM brain_action_plan_eval_payload WHERE payload_hash=? LIMIT 1""",
-        ),
-        (payload_hash_value,),
-    ).fetchone()
-    if not row:
-        return {}
-    return {
-        "comparison_json": str(_row_value(row, "comparison_json", 0, "{}") or "{}"),
-        "evidence_refs_json": str(_row_value(row, "evidence_refs_json", 1, "{}") or "{}"),
-        "boundary_json": str(_row_value(row, "boundary_json", 2, "{}") or "{}"),
-    }
 
 
 def read_mutation_payload(conn: Any, payload_hash_value: str) -> dict[str, str]:

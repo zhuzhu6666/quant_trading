@@ -2,9 +2,52 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from research.learning.application_effects import classify_effect, observation_window_expired
+
+# Comparison bases whose window is comparable enough to inform the posterior
+# expansion brake.  ``unstratified_bounded`` is deliberately excluded: it
+# matches on sample count alone, so a delta measured there is not attributable
+# to the application and must not decide whether an expansion is repeated.
+POSTERIOR_COMPARABLE_BASES = frozenset({"exact_regime", "unstratified_no_regime"})
+POSTERIOR_ELIGIBILITY_VERSION = "application_effect_posterior_eligibility.v1"
+
+
+def posterior_evidence_eligible(
+    evidence_quality: Mapping[str, Any] | None,
+) -> tuple[bool, str]:
+    """Whether one measured effect window may inform the posterior brake.
+
+    Single judge for both the effect writer and every consumer.  A versioned
+    stamped verdict is honoured when present so later rule changes cannot
+    silently reinterpret already-recorded evidence; legacy rows are derived
+    from the same fields the writer stamped from.
+    """
+    quality = dict(evidence_quality or {})
+    stamped = quality.get("posterior_evidence_eligibility")
+    if isinstance(stamped, Mapping) and str(
+        stamped.get("schema_version") or ""
+    ) == POSTERIOR_ELIGIBILITY_VERSION:
+        return bool(stamped.get("eligible")), str(stamped.get("reason") or "")
+    if not bool(quality.get("bounded_attribution_allowed")):
+        return False, "bounded_attribution_not_allowed"
+    basis = str(quality.get("comparison_basis") or "")
+    if basis not in POSTERIOR_COMPARABLE_BASES:
+        return False, f"comparison_basis_not_comparable:{basis or 'missing'}"
+    return True, f"comparable:{basis}"
+
+
+def posterior_evidence_stamp(
+    evidence_quality: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Versioned stamp written next to the effect evidence."""
+    eligible, reason = posterior_evidence_eligible(evidence_quality)
+    return {
+        "schema_version": POSTERIOR_ELIGIBILITY_VERSION,
+        "eligible": eligible,
+        "reason": reason,
+    }
 
 
 @dataclass(frozen=True)
@@ -132,6 +175,9 @@ def evaluate_application_effect(
     )
     bounded_attribution_allowed = exact_bounded or no_regime_bounded or fallback_bounded
     decision["evidence_quality"]["bounded_attribution_allowed"] = bounded_attribution_allowed
+    decision["evidence_quality"]["posterior_evidence_eligibility"] = (
+        posterior_evidence_stamp(decision["evidence_quality"])
+    )
     if status in {"effective", "ineffective", "mixed"} and not bounded_attribution_allowed:
         status = "inconclusive" if next_application else "observing"
         decision["evidence_quality"]["causal_status"] = "attribution_gate_insufficient_comparability"

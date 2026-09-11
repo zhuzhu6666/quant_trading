@@ -6,18 +6,16 @@ import time
 from backend.services.proposal_registry import ProposalRegistryService, ensure_proposal_registry_table
 from backend.services.policy_suggestion_context import attach_policy_suggestion_agent_context
 from backend.services.brain_governance_candidates import ensure_brain_governance_candidate_table
-from backend.services.v16_brain_planning import ensure_brain_action_plan_table
 from backend.services.autonomous_learning import ensure_autonomous_learning_tables
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.learning_application_store import LearningApplicationStore
 
 
-def test_proposal_registry_normalizes_policy_candidate_and_action_plan(tmp_path):
+def test_proposal_registry_normalizes_policy_and_candidate_sources(tmp_path):
     db_path = tmp_path / "state.db"
     now = time.time()
     ensure_proposal_registry_table(db_path)
     ensure_brain_governance_candidate_table(db_path)
-    ensure_brain_action_plan_table(db_path)
     conn = connect_sqlite(db_path)
     try:
         conn.execute(
@@ -92,22 +90,6 @@ def test_proposal_registry_normalizes_policy_candidate_and_action_plan(tmp_path)
                 now,
             ),
         )
-        conn.execute(
-            """
-            INSERT INTO brain_action_plan
-            (plan_id, action_type, status, scope_json, max_impact, required_services_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "plan1",
-                "shadow_supervisor_template_review",
-                "shadow_recorded",
-                json.dumps({"scope_type": "supervisor_template", "scope_key": "position_supervisor"}),
-                "none_shadow_only",
-                json.dumps(["ReplayHarnessService", "RiskPolicyService"]),
-                now,
-            ),
-        )
         conn.commit()
     finally:
         conn.close()
@@ -118,7 +100,6 @@ def test_proposal_registry_normalizes_policy_candidate_and_action_plan(tmp_path)
     ids = {item["proposal_id"] for item in listing["items"]}
     assert "policy_suggestion:ps1" in ids
     assert "brain_governance_candidate:bc1" in ids
-    assert "brain_action_plan:plan1" in ids
     policy = next(item for item in listing["items"] if item["proposal_id"] == "policy_suggestion:ps1")
     assert policy["control_surface"] == "factor_weight"
     assert policy["source_agent"] == "autonomous_learning"

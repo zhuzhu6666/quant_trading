@@ -707,9 +707,7 @@ class AutonomousEvolutionNurseryRunner:
         from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
 
         return V16BrainOrchestratorService(self.db_path).run_once(
-            readiness=self._build_readiness(),
             limit=max(4, min(int(limit or 20), 50)),
-            source="system:autonomous_evolution_nursery_runner.v16",
             persist=True,
         )
 

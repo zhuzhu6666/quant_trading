@@ -169,13 +169,19 @@ def _batch_ref(candidate_id, action="promote_factor"):
     }
 
 
+def _posterior_token(db_path) -> str:
+    from backend.services.v16_posterior_arbitration import load_posterior_arbitration
+
+    return str(load_posterior_arbitration(db_path).get("fingerprint") or "")
+
+
 def _delegate_batch(service, refs, **gate_extra):
     from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
 
     assert isinstance(service, V16BrainOrchestratorService)
     return service.delegate_factor_governance_cycle(
         {
-            "snapshot_id": "batch-1",
+            "posterior_fingerprint": _posterior_token(service.db_path),
             "health_cycle_id": "health-1",
             "expansion_preflight": {
                 "required": True,
@@ -413,7 +419,7 @@ def test_gate_reclaims_partial_batch_for_next_item(tmp_path):
     service = V16BrainOrchestratorService(db_path=db_path)
     delegated = service.delegate_factor_governance_cycle(
         {
-            "snapshot_id": "batch-1",
+            "posterior_fingerprint": _posterior_token(db_path),
             "health_cycle_id": "health-1",
             "expansion_preflight": {
                 "required": True,
@@ -844,7 +850,7 @@ def test_end_to_end_retire_revive_batch_loop(monkeypatch, tmp_path):
     ]
     delegated = delegator.delegate_factor_governance_cycle(
         {
-            "snapshot_id": "loop-1",
+            "posterior_fingerprint": _posterior_token(tmp_path / "state.db"),
             "health_cycle_id": "health-1",
             "expansion_preflight": {
                 "required": True,
@@ -940,7 +946,7 @@ def test_gate_claims_manifest_bound_candidate_id(tmp_path):
     def _delegate_persisted():
         return service.delegate_factor_governance_cycle(
             {
-                "snapshot_id": "batch-claim",
+                "posterior_fingerprint": _posterior_token(db_path),
                 "health_cycle_id": "health-claim",
                 "expansion_preflight": {
                     "required": True,

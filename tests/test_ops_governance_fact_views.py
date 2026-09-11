@@ -365,10 +365,6 @@ def test_v16_ops_routes_attach_endpoint_specific_facts(monkeypatch):
         def build(self):
             return {"generated_at": observed, "brain_state": {}}
 
-    class FakeBrainState:
-        def latest_snapshot(self):
-            return {"ok": True, "snapshot_id": "brain-1", "created_at": observed}
-
     class FakeMemory:
         def latest_indexed(self, *, limit):
             return {
@@ -383,48 +379,6 @@ def test_v16_ops_routes_attach_endpoint_specific_facts(monkeypatch):
                 "status": "healthy",
                 "observed_at": observed,
                 "boundary": {"read_only": True, "affects_trading": False},
-            }
-
-    class FakeActionPlans:
-        def latest_plans(self, *, limit):
-            return {
-                "ok": True,
-                "plans": [{"plan_id": "plan-1", "created_at": observed}],
-            }
-
-    class FakeActionPlanEvals:
-        def latest_evals(self, *, limit):
-            return {
-                "ok": True,
-                "evals": [{"eval_id": "eval-1", "created_at": observed}],
-            }
-
-    class FakeLowImpact:
-        def latest_executions(self, *, limit):
-            return {
-                "ok": True,
-                "executions": [{"execution_id": "exec-1", "created_at": observed}],
-            }
-
-        def execute_latest(self, **_kwargs):
-            return {
-                "ok": True,
-                "created_at": observed,
-                "executions": [{"execution_id": "exec-2", "created_at": observed}],
-            }
-
-    class FakeMediumImpact:
-        def latest_governance(self, *, limit):
-            return {
-                "ok": True,
-                "items": [{"governance_id": "gov-1", "created_at": observed}],
-            }
-
-        def materialize_latest(self, **_kwargs):
-            return {
-                "ok": True,
-                "created_at": observed,
-                "items": [{"governance_id": "gov-2", "created_at": observed}],
             }
 
     class FakeReviews:
@@ -468,13 +422,8 @@ def test_v16_ops_routes_attach_endpoint_specific_facts(monkeypatch):
             }
 
     monkeypatch.setattr(ops_api, "BackendReadinessService", FakeReadiness)
-    monkeypatch.setattr(ops_api, "BrainStateService", FakeBrainState)
     monkeypatch.setattr(ops_api, "BrainMemoryService", FakeMemory)
     monkeypatch.setattr(ops_api, "MemoryIntegrityReportService", FakeMemoryIntegrity)
-    monkeypatch.setattr(ops_api, "BrainActionPlannerService", FakeActionPlans)
-    monkeypatch.setattr(ops_api, "BrainActionPlanEvaluatorService", FakeActionPlanEvals)
-    monkeypatch.setattr(ops_api, "BrainLowImpactExecutorService", FakeLowImpact)
-    monkeypatch.setattr(ops_api, "BrainMediumImpactGovernanceService", FakeMediumImpact)
     monkeypatch.setattr(ops_api, "BrainGovernanceCandidateReviewService", FakeReviews)
     monkeypatch.setattr(ops_api, "BrainLiveReadyGuardrailService", FakeGuardrails)
     monkeypatch.setattr(
@@ -482,16 +431,7 @@ def test_v16_ops_routes_attach_endpoint_specific_facts(monkeypatch):
     )
 
     responses = [
-        ops_api.get_brain_state(None),
         ops_api.get_brain_memory(None),
-        ops_api.get_brain_action_plans(None),
-        ops_api.get_brain_action_plan_evals(None),
-        ops_api.get_brain_low_impact_executions(None),
-        ops_api.run_brain_low_impact_execution(ops_api.BrainLowImpactExecutionRequest(), None),
-        ops_api.get_brain_medium_impact_governance(None),
-        ops_api.materialize_brain_medium_impact_governance(
-            ops_api.BrainMediumImpactGovernanceRequest(), None
-        ),
         ops_api.get_brain_governance_candidate_reviews(None),
         ops_api.review_brain_governance_candidates(
             ops_api.BrainGovernanceCandidateReviewRequest(), None
@@ -508,13 +448,8 @@ def test_v16_ops_routes_attach_endpoint_specific_facts(monkeypatch):
     contracts = [response["_fact"]["contract"] for response in responses]
     assert len(set(contracts)) == len(contracts)
     assert all(response["_fact"]["state"] == "known" for response in responses)
-    assert contracts[:4] == [
-        "ops.v16-brain-state.v2",
-        "ops.v16-brain-memory.v2",
-        "ops.v16-action-plans.v2",
-        "ops.v16-action-plan-evals.v2",
-    ]
-    assert responses[1]["memory"]["integrity"]["status"] == "healthy"
+    assert contracts[0] == "ops.v16-brain-memory.v2"
+    assert responses[0]["memory"]["integrity"]["status"] == "healthy"
 
 
 def test_autonomy_proposal_routes_do_not_claim_unreconciled_refresh(monkeypatch):
@@ -743,8 +678,9 @@ def test_all_ops_route_return_paths_are_endpoint_fact_wrapped():
             endpoints.append(node)
 
     # The duplicate /api/ops/replay/parity-run route was removed when
-    # backtesting converged on POST /api/backtest/run.
-    assert len(endpoints) >= 67
+    # backtesting converged on POST /api/backtest/run; nine V16 cognition
+    # routes were removed on 2026-09-11 with the retired brain ledgers.
+    assert len(endpoints) >= 58
     for endpoint in endpoints:
         returns = [item for item in ast.walk(endpoint) if isinstance(item, ast.Return)]
         assert returns, endpoint.name

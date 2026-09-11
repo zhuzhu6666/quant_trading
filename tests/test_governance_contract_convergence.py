@@ -4,7 +4,6 @@ import time
 
 from backend.core.db import STATE_DB_DDL, connect_sqlite
 from backend.services.brain_governance_candidates import BrainGovernanceCandidateService
-from backend.services.v16_brain_planning import BrainMediumImpactGovernanceService
 from backend.services.brain_governance_candidate_review import BrainGovernanceCandidateReviewService
 from backend.services.v16_brain_orchestrator import (
     V16BrainOrchestratorService,
@@ -182,32 +181,6 @@ def test_parameter_scope_alias_is_canonicalized_without_widening_other_scopes():
         scope_type="parameter_template",
         scope_key="online_light",
     )
-
-
-def test_context_policy_without_runtime_writer_stays_observation_only(tmp_path):
-    db_path = _db(tmp_path)
-    result = BrainMediumImpactGovernanceService(db_path)._materialize_eval(
-        evaluation={
-            "eval_id": "context-eval",
-            "plan_id": "context-plan",
-            "scope_type": "context_policy",
-            "coverage_score": 0.9,
-            "comparison_verdict": "supported",
-            "comparison": {
-                "posterior_arbitration": {"selected_scope": "entry"},
-            },
-        },
-        now=time.time(),
-        autonomy_guard={},
-        persist_candidate=True,
-    )
-    assert result["status"] == "unsupported_governance_surface"
-    assert result["candidate_id"] == ""
-    conn = connect_sqlite(db_path, read_only=True)
-    try:
-        assert conn.execute("SELECT COUNT(*) FROM brain_governance_candidate").fetchone()[0] == 0
-    finally:
-        conn.close()
 
 
 def test_factor_apply_rejects_advisory_source_before_weight_writer(monkeypatch, tmp_path):

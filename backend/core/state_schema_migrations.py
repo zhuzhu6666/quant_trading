@@ -33,6 +33,12 @@ STATE_SCHEMA_MIGRATION_LOCK_ID: Final[int] = 0x5155414E54534D31  # ASCII: QUANTS
 # migration transaction.  A non-empty schema without the ledger must already
 # contain every dependency below; partial legacy databases are never guessed
 # into a deployable state.
+# NOTE: this tuple describes the historical pre-ledger shape that migrations
+# 0001-0018 were written against, and therefore still names tables retired on
+# 2026-09-11 (brain_state_snapshot, brain_action_plan*, brain_medium_impact_*,
+# brain_low_impact_execution).  It is only evaluated when a non-empty schema
+# arrives without the migration ledger; the current runtime schema no longer
+# creates those relations.  Do not shrink the list to match today's schema.
 STATE_SCHEMA_LEGACY_BASELINE_TABLES: Final[tuple[str, ...]] = (
     "autonomous_learning_sample",
     "autonomy_health_snapshot",
@@ -189,6 +195,7 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(32, "restore_jobs_primary_key", "0032_restore_jobs_primary_key.sql"),
     StateSchemaMigration(33, "factor_runtime_projection_primary_key", "0033_factor_runtime_projection_primary_key.sql"),
     StateSchemaMigration(34, "governance_mutation_intent_overlay_hash", "0034_governance_mutation_intent_overlay_hash.sql"),
+    StateSchemaMigration(35, "retire_v16_cognition_ledgers", "0035_retire_v16_cognition_ledgers.sql"),
 )
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
 # Runtime code consumes the complete checked-in state contract.  A process

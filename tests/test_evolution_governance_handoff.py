@@ -13,22 +13,16 @@ def test_health_commit_immediately_hands_off_to_factor_governance(monkeypatch):
     )
     calls = []
 
-    import backend.services.autonomous_evolution_runner as nursery
     import backend.services.v16_brain_orchestrator as v16
 
-    monkeypatch.setattr(
-        nursery.AutonomousEvolutionNurseryRunner,
-        "build_light_readiness",
-        lambda _self: {"schema_version": "test.readiness.v1"},
-    )
     monkeypatch.setattr(
         v16.V16BrainOrchestratorService,
         "run_once",
         lambda _self, **kwargs: (
-            calls.append(("v16", kwargs["source"]))
+            calls.append(("v16", kwargs.get("limit"), kwargs.get("persist")))
             or {
                 "status": "delegated",
-                "snapshot_id": "brain-1",
+                "posterior_fingerprint": "pf-handoff",
                 "delegated_count": 1,
                 "command_count": 1,
             }
@@ -52,27 +46,23 @@ def test_health_commit_immediately_hands_off_to_factor_governance(monkeypatch):
     result = evolution.scheduled_evolution_with_governance_handoff()
 
     assert calls == [
-        (
-            "v16",
-            "system:factor_health_handoff.v16:factor_health:100000",
-        ),
+        ("v16", 20, True),
         (
             "governance",
             "factor_health_handoff:factor_health:100000",
             {
                 "status": "delegated",
                 "health_cycle_id": "factor_health:100000",
-                "snapshot_id": "brain-1",
+                "posterior_fingerprint": "pf-handoff",
                 "delegated_count": 1,
                 "command_count": 1,
-                "posterior_fingerprint": "",
             },
         ),
     ]
     assert result.factor_v16_handoff == {
         "status": "delegated",
         "health_cycle_id": "factor_health:100000",
-        "snapshot_id": "brain-1",
+        "posterior_fingerprint": "pf-handoff",
         "delegated_count": 1,
         "command_count": 1,
     }

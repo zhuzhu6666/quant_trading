@@ -891,20 +891,16 @@ def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
             )
 
             logger.info("[Evolve] mem before v16handoff: %s", _mem_tag())
-            runner = AutonomousEvolutionNurseryRunner()
             v16_result = V16BrainOrchestratorService().run_once(
-                readiness=runner.build_light_readiness(),
                 limit=20,
-                source=(
-                    "system:factor_health_handoff.v16:"
-                    f"{report.factor_health_cycle_id}"
-                ),
                 persist=True,
             )
             report.factor_v16_handoff = {
                 "status": str(v16_result.get("status") or "unknown"),
                 "health_cycle_id": report.factor_health_cycle_id,
-                "snapshot_id": str(v16_result.get("snapshot_id") or ""),
+                "posterior_fingerprint": str(
+                    v16_result.get("posterior_fingerprint") or ""
+                ),
                 "delegated_count": int(v16_result.get("delegated_count") or 0),
                 "command_count": int(v16_result.get("command_count") or 0),
             }
@@ -938,7 +934,9 @@ def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
 
         logger.info("[Evolve] mem before governance: %s", _mem_tag())
         started_at = _time.time()
-        has_v16_handoff = bool(report.factor_v16_handoff.get("snapshot_id"))
+        has_v16_handoff = bool(
+            report.factor_v16_handoff.get("posterior_fingerprint")
+        )
         result = FactorGovernanceOrchestrator.shared().run_cycle(
             trigger_source=(
                 "factor_health_handoff:"
@@ -949,12 +947,6 @@ def scheduled_evolution_with_governance_handoff() -> EvolutionReport:
             v16_handoff={
                 **report.factor_v16_handoff,
                 "health_cycle_id": report.factor_health_cycle_id,
-                "posterior_fingerprint": str(
-                    (v16_result.get("posterior_arbitration") or {}).get(
-                        "posterior_fingerprint"
-                    )
-                    or ""
-                ),
             }
             if has_v16_handoff
             else None,

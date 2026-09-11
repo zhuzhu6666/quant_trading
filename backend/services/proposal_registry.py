@@ -62,7 +62,6 @@ HIGH_IMPACTS = {"high", "critical", "live", "live_trading", "high_impact"}
 SOURCE_BASE_RELIABILITY = {
     "policy_suggestion": 0.62,
     "brain_governance_candidate": 0.58,
-    "brain_action_plan": 0.42,
     "learning_application_log": 0.74,
     "evolution_decision": 0.66,
     "live_autonomy_unlock_event": 0.72,
@@ -1023,7 +1022,6 @@ class ProposalRegistryService:
             items: list[dict[str, Any]] = []
             items.extend(self._from_policy_suggestions(conn, limit=limit, now=now))
             items.extend(self._from_brain_governance_candidates(conn, limit=limit, now=now))
-            items.extend(self._from_brain_action_plans(conn, limit=limit, now=now))
             items.extend(self._from_learning_applications(conn, limit=limit, now=now))
             items.extend(self._from_evolution_decisions(conn, limit=limit, now=now))
             items.extend(self._from_live_autonomy_events(conn, limit=limit, now=now))
@@ -1241,66 +1239,6 @@ class ProposalRegistryService:
                 route_recommendation=_route(status, impact, False, gates),
                 created_at=_safe_float(row["created_at"], now),
                 updated_at=_safe_float(row["updated_at"], now),
-            ))
-        return items
-
-    def _from_brain_action_plans(self, conn: Any, *, limit: int, now: float) -> list[dict[str, Any]]:
-        if not state_table_exists(conn, "brain_action_plan"):
-            return []
-        rows = _execute(
-            conn,
-            """
-            SELECT plan_id, action_type, status, scope_json, max_impact, risk_class,
-                   validation_refs_json, rollback_plan_json, required_services_json,
-                   shadow_eval_json, boundary_json, created_at
-            FROM brain_action_plan
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        items = []
-        for row in rows:
-            scope = _loads(row["scope_json"], {})
-            scope_type = _text(scope.get("scope_type") or scope.get("type"), _text(row["action_type"]))
-            scope_key = _text(scope.get("scope_key") or scope.get("key"), "shadow")
-            action = _text(row["action_type"])
-            surface = _control_surface(scope_type, action)
-            status = _text(row["status"], "shadow_recorded")
-            impact = _impact_level(surface, status, row["max_impact"])
-            gates = _list(_loads(row["required_services_json"], []))
-            authority = AgentAuthorityRegistryService().evaluate(
-                "v16_brain",
-                surface,
-                action,
-                requested_writes=["brain_action_plan"],
-                status=status,
-                impact_level=impact,
-            )
-            gates = [str(item) for item in gates] or authority["required_gate"]
-            items.append(self._proposal(
-                proposal_id=f"brain_action_plan:{row['plan_id']}",
-                source_agent="v16_brain",
-                source_ref_type="brain_action_plan",
-                source_ref_id=_text(row["plan_id"]),
-                proposal_type=_proposal_type(scope_type, action),
-                proposal_action=action,
-                control_surface=surface,
-                target_scope=_scope(scope_type, scope_key),
-                impact_level=impact,
-                confidence=0.0,
-                evidence_refs={"validation_refs": _loads(row["validation_refs_json"], {}), "shadow_eval": _loads(row["shadow_eval_json"], {})},
-                counter_evidence_refs={},
-                required_gate=gates,
-                risk_verdict={},
-                decision_policy_preview={},
-                expected_effect={},
-                rollback_plan=_loads(row["rollback_plan_json"], {}),
-                status=status,
-                authority_state=authority["authority_state"],
-                route_recommendation=_route(status, impact, False, gates),
-                created_at=_safe_float(row["created_at"], now),
-                updated_at=_safe_float(row["created_at"], now),
             ))
         return items
 

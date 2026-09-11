@@ -749,8 +749,33 @@ def test_ci_postgres_bootstrap_is_test_only_and_database_name_guarded() -> None:
 
 
 def test_v34_migration_adds_committed_overlay_hash_to_mutation_intent() -> None:
-    sql = STATE_SCHEMA_MIGRATIONS[-1].sql()
+    migration = next(item for item in STATE_SCHEMA_MIGRATIONS if item.version == 34)
+    sql = migration.sql()
 
-    assert STATE_SCHEMA_MIGRATIONS[-1].version == 34
+    assert migration.version == 34
     assert "governance_mutation_intent" in sql
     assert "ADD COLUMN IF NOT EXISTS committed_overlay_hash" in sql
+
+
+def test_v35_migration_retires_only_the_v16_cognition_ledgers() -> None:
+    """v35 drops the retired cognition ledgers and keeps the live V16 tables."""
+    migration = next(item for item in STATE_SCHEMA_MIGRATIONS if item.version == 35)
+    sql = migration.sql()
+
+    assert migration.version == 35
+    for retired in (
+        "brain_action_plan_eval_payload",
+        "brain_medium_impact_governance",
+        "brain_action_plan_eval",
+        "brain_action_plan",
+        "brain_state_snapshot",
+        "brain_low_impact_execution",
+    ):
+        assert f"DROP TABLE IF EXISTS runtime.{retired};" in sql
+    for kept in (
+        "brain_memory",
+        "brain_live_ready_guardrail",
+        "brain_governance_candidate",
+        "v16_brain_command",
+    ):
+        assert f"runtime.{kept};" not in sql

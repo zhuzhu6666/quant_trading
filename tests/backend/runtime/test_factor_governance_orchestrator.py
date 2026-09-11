@@ -408,6 +408,12 @@ def test_orchestrator_ignores_shadow_without_durable_lifecycle_identity(monkeypa
     assert orch._promote_shadow_candidates(catalog, {"run_id": "test-run"}) == []
 
 
+def _posterior_token(db_path) -> str:
+    from backend.services.v16_posterior_arbitration import load_posterior_arbitration
+
+    return str(load_posterior_arbitration(db_path).get("fingerprint") or "")
+
+
 def test_v16_delegates_only_concrete_factor_expansion_preflight(tmp_path):
     from backend.services.v16_brain_orchestrator import (
         V16BrainOrchestratorService,
@@ -416,7 +422,7 @@ def test_v16_delegates_only_concrete_factor_expansion_preflight(tmp_path):
     service = V16BrainOrchestratorService(db_path=tmp_path / "state.db")
     missing = service.delegate_factor_governance_cycle(
         {
-            "snapshot_id": "brain-1",
+            "posterior_fingerprint": _posterior_token(tmp_path / "state.db"),
             "expansion_preflight": {
                 "required": False,
                 "candidate_count": 0,
@@ -426,7 +432,7 @@ def test_v16_delegates_only_concrete_factor_expansion_preflight(tmp_path):
     )
     missing_refs = service.delegate_factor_governance_cycle(
         {
-            "snapshot_id": "brain-1",
+            "posterior_fingerprint": _posterior_token(tmp_path / "state.db"),
             "health_cycle_id": "factor_health:1",
             "expansion_preflight": {
                 "required": True,
@@ -439,7 +445,7 @@ def test_v16_delegates_only_concrete_factor_expansion_preflight(tmp_path):
 
     delegated = service.delegate_factor_governance_cycle(
         {
-            "snapshot_id": "brain-1",
+            "posterior_fingerprint": _posterior_token(tmp_path / "state.db"),
             "health_cycle_id": "factor_health:1",
             "expansion_preflight": {
                 "required": True,
@@ -523,7 +529,56 @@ def test_audit_action_uses_overlay_db_for_snapshot_and_decision(
     assert decision_calls[0]["db_path"] == local_db
 
 
-def test_factor_batch_manifest_must_match_current_preflight():
+def test_factor_expansion_requires_current_posterior_arbitration(tmp_path):
+    """The expansion carrier is re-derived, so a caller cannot mint authority.
+
+    ``delegate_factor_governance_cycle`` must reject a missing or stale
+    posterior fingerprint instead of trusting the handoff, otherwise any caller
+    could obtain a factor-expansion command without a V16 arbitration.
+    """
+    from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
+
+    service = V16BrainOrchestratorService(db_path=tmp_path / "state.db")
+    preflight = {
+        "required": True,
+        "candidate_count": 1,
+        "reasons": {"shadow_promotion": ["shadow-alpha"]},
+        "candidate_refs": [
+            {
+                "candidate_id": "shadow-alpha",
+                "scope_type": "factor_weight",
+                "scope_key": "shadow-alpha",
+                "action": "promote_factor",
+                "execution_ready": True,
+                "blocker_codes": [],
+            }
+        ],
+    }
+
+    missing = service.delegate_factor_governance_cycle(
+        {"health_cycle_id": "h1", "expansion_preflight": preflight},
+        persist=False,
+    )
+    assert missing["status"] == "factor_expansion_evidence_not_ready"
+    assert missing["reason"] == "posterior_arbitration_fingerprint_missing"
+
+    stale = service.delegate_factor_governance_cycle(
+        {
+            "posterior_fingerprint": "0" * 24,
+            "health_cycle_id": "h1",
+            "expansion_preflight": preflight,
+        },
+        persist=False,
+    )
+    assert stale["status"] == "factor_expansion_evidence_not_ready"
+    assert stale["reason"] == "posterior_arbitration_fingerprint_mismatch"
+    assert stale["current_posterior_fingerprint"] == _posterior_token(
+        tmp_path / "state.db"
+    )
+    assert "command" not in stale
+
+
+def test_factor_batch_manifest_must_match_current_preflight(tmp_path):
     from backend.runtime.factor_governance_orchestrator import factor_batch_manifest_verdict
     from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
 
@@ -542,9 +597,11 @@ def test_factor_batch_manifest_must_match_current_preflight():
             }
         ],
     }
-    delegated = V16BrainOrchestratorService().delegate_factor_governance_cycle(
+    delegated = V16BrainOrchestratorService(
+        db_path=tmp_path / "state.db"
+    ).delegate_factor_governance_cycle(
         {
-            "snapshot_id": "brain-1",
+            "posterior_fingerprint": _posterior_token(tmp_path / "state.db"),
             "health_cycle_id": "factor_health:1",
             "expansion_preflight": preflight,
         },
@@ -835,7 +892,7 @@ def test_redundancy_preflight_satisfies_v16_fixed_manifest_contract(tmp_path):
     )
     delegated = V16BrainOrchestratorService(db_path=tmp_path / "state.db").delegate_factor_governance_cycle(
         {
-            "snapshot_id": "catalog-1",
+            "posterior_fingerprint": _posterior_token(tmp_path / "state.db"),
             "health_cycle_id": "health-1",
             "expansion_preflight": preflight,
         },
@@ -1807,6 +1864,160 @@ def test_expansion_preflight_hands_batch_in_priority_order(monkeypatch):
     ]
     assert result["candidate_refs"][0]["action"] == "promote_factor"
     assert result["deferred_candidates"] == []
+
+
+def test_prepared_builtin_lease_uses_the_same_judge_as_the_promote_path(tmp_path, monkeypatch):
+    """A healthy builtin must not be demoted by bar-class shadow evidence.
+
+    Regression: the prepared-lease sweep asked ``_promotion_evidence`` (bar
+    shadow performance + canary ladder) about builtin factors, which never
+    have either, so a healthy builtin was demoted every cycle and prepared
+    again by the builtin gate right after (~40 promote/demote pairs in 9 days
+    for ``htf_trend_alignment``).  Both sides now share
+    ``_builtin_promotion_evidence``; a genuinely degraded builtin is still
+    demoted, and the dsl branch keeps the bar-class judge.
+    """
+    rc.reset_for_tests()
+    rc.replace(
+        rc.RuntimeConfig(
+            factor_signal_config={
+                "healthy_builtin": {
+                    "enabled": True,
+                    "role": "alpha",
+                    "source": "builtin",
+                    "autonomous_activation": True,
+                    "lifecycle_status": "PROMOTION_PREPARED",
+                },
+                "degraded_builtin": {
+                    "enabled": True,
+                    "role": "alpha",
+                    "source": "builtin",
+                    "autonomous_activation": True,
+                    "lifecycle_status": "PROMOTION_PREPARED",
+                },
+            },
+            factor_portfolio_weights={
+                "healthy_builtin": 0.0,
+                "degraded_builtin": 0.0,
+            },
+        )
+    )
+    rc.patch({"factor_governance_promotion_prepared_max_age_hours": 168})
+    _init_state_db(tmp_path)
+    db = tmp_path / "state.db"
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(db)
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(orch, "_activation_projection_ready", lambda _item: True)
+    monkeypatch.setattr(orch, "_model_governance_evidence", lambda _item, _cfg: {})
+    monkeypatch.setattr(
+        orch,
+        "_promotion_evidence",
+        lambda _item, _cfg: {"eligible": False, "blocker_codes": ["bar_oos_below_minimum"]},
+    )
+
+    demoted = []
+
+    class _Lifecycle:
+        def __init__(self, _db_path, *, adapter=None, health_stale_after_sec=None):
+            pass
+
+        def demote_to_shadow(self, *, name, reason, **_kwargs):
+            demoted.append((name, reason))
+            return {"ok": True, "lifecycle_stage": "SHADOW"}
+
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _Lifecycle)
+
+    cfg = rc.shared()
+    profile = orch._governance_profile(cfg)
+    now = time.time()
+
+    def _builtin_item(factor_id: str, score: float) -> dict:
+        return {
+            "factor_id": factor_id,
+            "lifecycle_origin": "builtin",
+            "role": "alpha",
+            "enabled": True,
+            "lifecycle_status": "PROMOTION_PREPARED",
+            "lifecycle_updated_at": now,
+            "lifecycle_generation": 2,
+            "health_score": score,
+            "health_status": "WATCH",
+            "health_n_obs": profile.builtin_activation_min_n_obs + 1,
+            "health_updated_at": now,
+            "health_rolling_ic": 0.02,
+            "health_recent_ic": 0.02,
+            "factor_governance_shadow": {},
+        }
+
+    monkeypatch.setattr(
+        orch,
+        "_governance_profile",
+        lambda _cfg: profile,
+    )
+    healthy = _builtin_item(
+        "healthy_builtin", profile.builtin_activation_min_health_score + 1.0
+    )
+    degraded = _builtin_item(
+        "degraded_builtin", profile.builtin_activation_min_health_score - 1.0
+    )
+
+    assert orch._builtin_promotion_evidence(healthy, cfg)["eligible"] is True
+    degraded_evidence = orch._builtin_promotion_evidence(degraded, cfg)
+    assert degraded_evidence["eligible"] is False
+    assert "health_score_below_minimum" in degraded_evidence["blocker_codes"]
+
+    orch._demote_invalid_candidate_evidence(
+        [healthy, degraded],
+        {"run_id": "builtin-judge-run"},
+        cfg=cfg,
+    )
+
+    assert demoted == [
+        ("degraded_builtin", "builtin_promotion_evidence_invalidated")
+    ]
+
+
+def test_prepared_dsl_lease_still_uses_bar_class_promotion_evidence(tmp_path, monkeypatch):
+    """The dsl/discovered branch keeps the bar-class judge and its reason code."""
+    rc.reset_for_tests()
+    rc.patch({"factor_governance_promotion_prepared_max_age_hours": 168})
+    _init_state_db(tmp_path)
+    db = tmp_path / "state.db"
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(db)
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+
+    demoted = []
+
+    class _Lifecycle:
+        def __init__(self, _db_path, *, adapter=None, health_stale_after_sec=None):
+            pass
+
+        def demote_to_shadow(self, *, name, reason, **_kwargs):
+            demoted.append((name, reason))
+            return {"ok": True, "lifecycle_stage": "SHADOW"}
+
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _Lifecycle)
+
+    now = time.time()
+    catalog = [
+        {
+            "factor_id": "dsl_without_shadow_perf",
+            "lifecycle_origin": "dsl",
+            "lifecycle_status": "PROMOTION_PREPARED",
+            "lifecycle_updated_at": now,
+            "lifecycle_evidence": {},
+        }
+    ]
+
+    orch._demote_invalid_candidate_evidence(
+        catalog,
+        {"run_id": "dsl-judge-run"},
+        cfg=rc.shared(),
+    )
+
+    assert demoted == [("dsl_without_shadow_perf", "prepared_evidence_invalidated")]
 
 
 def test_prepared_lease_demotes_stale_builtin_and_spares_active_builtin(tmp_path, monkeypatch):

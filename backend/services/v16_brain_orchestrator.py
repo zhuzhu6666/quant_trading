@@ -1,17 +1,23 @@
 """V16 meta-brain command loop.
 
-V16 owns prioritisation and delegation.  It may persist its own snapshots,
-plans, evaluations, commands and governance candidates, but it never writes a
-policy suggestion, runtime overlay, factor weight, order, or broker state.
-Those mutations remain the responsibility of the existing downstream agent
-and governor services.
+V16 owns authorisation and delegation: it issues one-shot expansion commands
+and reconciles their lifecycle (claim, expiry, cancel, reissue).  It never
+writes a policy suggestion, runtime overlay, factor weight, order, or broker
+state; those mutations remain the responsibility of the existing downstream
+agent and governor services.
+
+Action plans, plan evaluations and medium-impact governance materialisation
+were stopped on 2026-09-11: those ledgers had no consumer outside their own
+API, produced 3-5k rows per day and are being retired.  The read-only brain
+snapshot is the one piece still written here, because its id is the
+"V16 arbitrated this cycle" carrier that ``delegate_factor_governance_cycle``
+requires before it will authorise a factor expansion cycle.
 """
 from __future__ import annotations
 
 import hashlib
 import os
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -30,12 +36,7 @@ from backend.services.canonical_v2_reader import (
     review_row,
 )
 from backend.services.review_contract import review_has_system_contamination
-from backend.services.v16_brain_planning import (
-    BrainActionPlanEvaluatorService,
-    BrainActionPlannerService,
-    BrainMediumImpactGovernanceService,
-)
-from backend.services.v16_brain_snapshot import BrainStateService
+from backend.services.v16_posterior_arbitration import load_posterior_arbitration
 from backend.services.v16_command_gate import V16CommandGate
 
 
@@ -180,11 +181,6 @@ class V16BrainOrchestratorService:
             "schema_version": "v16_brain_orchestrator_boundary.v1",
             "role": "meta_brain_command_and_delegation",
             "can_write": [
-                "brain_state_snapshot",
-                "brain_memory",
-                "brain_action_plan",
-                "brain_action_plan_eval",
-                "brain_medium_impact_governance",
                 "brain_governance_candidate",
                 "v16_brain_command",
             ],
@@ -216,11 +212,18 @@ class V16BrainOrchestratorService:
     def run_once(
         self,
         *,
-        readiness: dict[str, Any] | None = None,
         limit: int = 20,
-        source: str = "system:v16_brain_orchestrator",
         persist: bool = True,
     ) -> dict[str, Any]:
+        """Publish this cycle's posterior arbitration and reconcile commands.
+
+        The arbitration is derived from canonical evidence and its fingerprint
+        is the token a factor-expansion handoff carries; commands are issued
+        by their owning specialists through ``delegate_*`` and only reconciled
+        here: bridge reconciliation, expired reviewed delegates reissued once,
+        stale candidates superseded, and unclaimed commands that lost their
+        candidate cancelled.  No cognition ledger is written.
+        """
         ensure_v16_brain_command_table(self.db_path)
         bridge_reconciliation = (
             BrainGovernanceCandidateService(self.db_path).reconcile_submitted_bridges()
@@ -228,59 +231,13 @@ class V16BrainOrchestratorService:
             else {"reconciled_count": 0, "missing_bridge_count": 0}
         )
         limit = max(4, min(int(limit or 20), 50))
-        if readiness is None:
-            from backend.services.backend_readiness import BackendReadinessService
-
-            readiness = BackendReadinessService(db_path=self.db_path).build()
-        snapshot = BrainStateService(self.db_path).build(readiness=dict(readiness), persist=persist, source=source)
-        plans_run = BrainActionPlannerService(self.db_path).build_plans(
-            brain_state=snapshot,
-            persist=persist,
-            source=source,
-        )
-        evals_run = BrainActionPlanEvaluatorService(self.db_path).evaluate_latest_plans(
-            limit=limit,
-            persist=persist,
-            evaluation_run_id=(f"v16_eval_{uuid.uuid4().hex}" if persist else ""),
-        )
-        governance_run = BrainMediumImpactGovernanceService(self.db_path).materialize_latest(
-            limit=limit,
-            readiness=dict(readiness),
-            persist=persist,
-        )
-        plans = {str(item.get("plan_id") or ""): item for item in plans_run.get("plans") or []}
-        evals = list(evals_run.get("evals") or [])
-        governance = {str(item.get("eval_id") or ""): item for item in governance_run.get("items") or []}
-        evaluated_commands = [
-            self._command_for_evaluation(
-                snapshot=snapshot,
-                plan=plans.get(str(evaluation.get("plan_id") or ""), {}),
-                evaluation=evaluation,
-                governance=governance.get(str(evaluation.get("eval_id") or ""), {}),
-            )
-            for evaluation in evals[:limit]
-        ]
-        raw_commands = [
-            item for item in evaluated_commands if item.get("decision") == "delegate"
-        ]
-        if persist and raw_commands:
-            active_candidate_ids = self._active_candidate_ids(
-                [str(item.get("candidate_id") or "") for item in raw_commands]
-            )
-            raw_commands = [
-                item
-                for item in raw_commands
-                if str(item.get("candidate_id") or "") in active_candidate_ids
-            ]
+        arbitration = load_posterior_arbitration(self.db_path)
         reviewed_expired_reissues = (
             self._reviewed_expired_delegate_reissues(limit=limit) if persist else []
         )
-        raw_commands.extend(reviewed_expired_reissues)
-        # Plan/eval tables are append-only audit ledgers.  Re-running the
-        # coordinator therefore sees prior evaluations as well; the command
-        # identity is deliberately posterior/scope based so the specialist
-        # inbox remains idempotent.
-        commands = self._dedupe_command_surfaces(raw_commands, limit=limit)
+        commands = self._dedupe_command_surfaces(
+            list(reviewed_expired_reissues), limit=limit
+        )
         if persist:
             self._persist_commands(commands)
         superseded = self._reconcile_stale_candidates(commands=commands, persist=persist)
@@ -290,14 +247,10 @@ class V16BrainOrchestratorService:
             "ok": True,
             "schema_version": "v16_brain_orchestrator_run.v1",
             "status": "delegated" if delegated else "observing",
-            "snapshot_id": snapshot.get("snapshot_id", ""),
-            "plan_count": len(plans_run.get("plans") or []),
-            "eval_count": len(evals),
-            "governance_count": len(governance_run.get("items") or []),
+            "posterior_fingerprint": str(arbitration.get("fingerprint") or ""),
             "command_count": len(commands),
             "delegated_count": len(delegated),
             "reviewed_expired_reissue_count": len(reviewed_expired_reissues),
-            "observation_count": len(evaluated_commands) - len(raw_commands),
             "cancelled_command_count": int(cancelled.get("cancelled_count") or 0),
             "cancelled_observation_count": int(
                 cancelled.get("observation_count") or 0
@@ -309,38 +262,12 @@ class V16BrainOrchestratorService:
             "superseded_candidate_count": len(superseded),
             "superseded_candidate_ids": superseded,
             "commands": commands,
-            "posterior_arbitration": (snapshot.get("memory") or {}).get("posterior_arbitration") or {},
+            "posterior_arbitration": arbitration,
             "boundary": self.boundary(),
             "read_only_decision_layer": True,
             "direct_mutation": False,
             "created_at": time.time(),
         }
-
-    def _active_candidate_ids(self, candidate_ids: list[str]) -> set[str]:
-        candidate_ids = sorted({item for item in candidate_ids if item})
-        if not candidate_ids:
-            return set()
-        conn = connect(self.db_path, read_only=True)
-        try:
-            if not state_table_exists(conn, "brain_governance_candidate"):
-                return set()
-            placeholders = ",".join("?" for _ in candidate_ids)
-            candidate_statuses = "', '".join(
-                sorted(CANDIDATE_REVIEWABLE_STATUSES | CANDIDATE_EXECUTION_PENDING_STATUSES)
-            )
-            rows = execute(
-                conn,
-                f"""
-                SELECT candidate_id
-                FROM brain_governance_candidate
-                WHERE status IN ('{candidate_statuses}')
-                  AND candidate_id IN ({placeholders})
-                """,
-                tuple(candidate_ids),
-            ).fetchall()
-            return {str(row["candidate_id"] or "") for row in rows}
-        finally:
-            conn.close()
 
     def _candidate_review_ref(self, candidate_id: str) -> dict[str, Any]:
         """Read only the review identity needed for a V16 handoff.
@@ -674,15 +601,6 @@ class V16BrainOrchestratorService:
                     ),
                     default=0.0,
                 )
-            latest_brain_snapshot = 0.0
-            if state_table_exists(conn, "brain_state_snapshot"):
-                row = execute(
-                    conn,
-                    "SELECT MAX(created_at) AS latest FROM brain_state_snapshot",
-                ).fetchone()
-                latest_brain_snapshot = safe_float(
-                    row["latest"] if row else 0.0
-                )
             # Claim lifecycle timestamps are operational only. Closure uses
             # the evidence-bound V16 authority issuance time.
             latest_command = max(
@@ -693,10 +611,10 @@ class V16BrainOrchestratorService:
                 ),
                 default=0.0,
             )
-            posterior_closed = (
-                latest_cf <= 0.0
-                or max(latest_command, latest_brain_snapshot) >= latest_cf
-            )
+            # Posterior closure is measured against the V16 authority
+            # issuance time only; the retired snapshot ledger no longer
+            # contributes a timestamp.
+            posterior_closed = latest_cf <= 0.0 or latest_command >= latest_cf
             candidate_commands = [item for item in commands if item.get("decision") == "delegate"]
             candidate_closed = all(bool(item.get("candidate_id")) for item in candidate_commands)
             lifecycle_rows = execute(
@@ -755,7 +673,6 @@ class V16BrainOrchestratorService:
                 "latest_counterfactual_updated_at": latest_cf_updated,
                 "latest_counterfactual_event_at": latest_cf,
                 "latest_counterfactual_ledger_updated_at": latest_cf_updated,
-                "latest_brain_snapshot_created_at": latest_brain_snapshot,
                 "posterior_source_available": posterior_source_available,
                 "posterior_to_brain_closed": posterior_closed,
                 "command_to_candidate_closed": candidate_closed,
@@ -999,15 +916,22 @@ class V16BrainOrchestratorService:
         """
 
         preflight = dict(gate.get("expansion_preflight") or {})
-        snapshot_id = str(gate.get("snapshot_id") or "")
+        posterior_fingerprint = str(gate.get("posterior_fingerprint") or "")
         candidate_count = int(preflight.get("candidate_count") or 0)
         candidate_refs = [
             dict(item)
             for item in list(preflight.get("candidate_refs") or [])
             if isinstance(item, dict)
         ]
+        # The "V16 arbitrated this cycle" token is the posterior arbitration
+        # fingerprint derived from canonical evidence.  It is re-derived here
+        # instead of trusted, so a caller cannot mint expansion authority by
+        # passing an id; the cognition snapshot is not involved.
+        current_arbitration = load_posterior_arbitration(self.db_path)
+        current_fingerprint = str(current_arbitration.get("fingerprint") or "")
         qualified = (
-            bool(snapshot_id)
+            bool(posterior_fingerprint)
+            and posterior_fingerprint == current_fingerprint
             and bool(preflight.get("required"))
             and candidate_count > 0
         )
@@ -1015,7 +939,13 @@ class V16BrainOrchestratorService:
             return {
                 "ok": False,
                 "status": "factor_expansion_evidence_not_ready",
-                "snapshot_id": snapshot_id,
+                "reason": (
+                    "posterior_arbitration_fingerprint_mismatch"
+                    if posterior_fingerprint
+                    else "posterior_arbitration_fingerprint_missing"
+                ),
+                "posterior_fingerprint": posterior_fingerprint,
+                "current_posterior_fingerprint": current_fingerprint,
                 "candidate_count": candidate_count,
                 "boundary": self.boundary(),
             }
@@ -1032,7 +962,7 @@ class V16BrainOrchestratorService:
                 "ok": False,
                 "status": "factor_candidate_contract_not_ready",
                 "reason": "candidate_refs_must_be_frozen_and_execution_ready",
-                "snapshot_id": snapshot_id,
+                "posterior_fingerprint": posterior_fingerprint,
                 "candidate_count": candidate_count,
                 "candidate_ref_count": len(candidate_refs),
                 "boundary": self.boundary(),
@@ -1052,7 +982,7 @@ class V16BrainOrchestratorService:
                 "ok": False,
                 "status": "factor_candidate_contract_not_ready",
                 "reason": "candidate_batch_size_out_of_range",
-                "snapshot_id": snapshot_id,
+                "posterior_fingerprint": posterior_fingerprint,
                 "candidate_count": candidate_count,
                 "candidate_ref_count": len(candidate_refs),
                 "batch_max_candidates": max(1, batch_max),
@@ -1061,8 +991,8 @@ class V16BrainOrchestratorService:
 
         health_cycle_id = str(gate.get("health_cycle_id") or "")
         batch_manifest = {
-            "schema_version": "factor_governance_batch_manifest.v1",
-            "snapshot_id": snapshot_id,
+            "schema_version": "factor_governance_batch_manifest.v2",
+            "posterior_fingerprint": posterior_fingerprint,
             "health_cycle_id": health_cycle_id,
             "candidate_count": candidate_count,
             "preflight_fingerprint": hashlib.sha256(
@@ -1072,8 +1002,8 @@ class V16BrainOrchestratorService:
             "scope": "factor_governance_cycle",
         }
         evidence = {
-            "schema_version": "v16_factor_governance_preflight.v1",
-            "snapshot_id": snapshot_id,
+            "schema_version": "v16_factor_governance_preflight.v2",
+            "posterior_fingerprint": posterior_fingerprint,
             "health_cycle_id": health_cycle_id,
             "batch_manifest": batch_manifest,
             "expansion_preflight": preflight,
@@ -1090,7 +1020,7 @@ class V16BrainOrchestratorService:
                 ).hexdigest()[:20]
             ),
             "schema_version": "v16_brain_command.v1",
-            "snapshot_id": snapshot_id,
+            "snapshot_id": "",
             "plan_id": "",
             # Batch manifest literal format: ordered manifest ids joined by ",".
             # Single-candidate commands keep the bare id. The gate binds
@@ -1285,133 +1215,6 @@ class V16BrainOrchestratorService:
             "ok": True,
             "status": "delegated",
             "command": command,
-            "boundary": self.boundary(),
-        }
-
-    def _command_for_evaluation(
-        self,
-        *,
-        snapshot: dict[str, Any],
-        plan: dict[str, Any],
-        evaluation: dict[str, Any],
-        governance: dict[str, Any],
-    ) -> dict[str, Any]:
-        scope = dict(plan.get("scope") or {})
-        delegation = dict(scope.get("delegation") or {})
-        posterior = dict((evaluation.get("comparison") or {}).get("posterior_arbitration") or {})
-        correction_contract = dict(posterior.get("correction_contract") or {})
-        parent_policy_decision_id = str(
-            correction_contract.get("policy_decision_id") or ""
-        )
-        candidate_id = str(governance.get("candidate_id") or "")
-        candidate_review = self._candidate_review_ref(candidate_id)
-        # 'candidate_already_materialized' is the idempotent re-run of a
-        # materialization: the candidate exists and the delegation must stay
-        # live, otherwise a second cycle would downgrade an existing delegate
-        # command to a mere observation.
-        decision = (
-            "delegate"
-            if candidate_id
-            and governance.get("status")
-            in {"candidate_materialized", "candidate_already_materialized"}
-            and bool(candidate_review.get("bridge_ready"))
-            else "observe"
-        )
-        action = str(governance.get("governance_action") or evaluation.get("action_type") or "observe")
-        status = (
-            "delegated_to_specialist"
-            if decision == "delegate"
-            else "candidate_review_required"
-            if candidate_id
-            else str(governance.get("status") or evaluation.get("comparison_verdict") or "observing")
-        )
-        posterior_fingerprint = str(posterior.get("fingerprint") or "")
-        command_scope_type = str(governance.get("scope_type") or evaluation.get("scope_type") or "")
-        command_scope_key = str(governance.get("scope_key") or scope.get("scope_key") or "")
-        target_agent = self._target_agent(command_scope_type)
-        required_gates = required_gate(
-            control_surface(command_scope_type, action),
-            action,
-            target_agent,
-        )
-        # IDs and timestamps are audit coordinates, not new evidence. Hash only
-        # the substantive verdict so a periodic rerun updates one command
-        # instead of manufacturing a new command for the same posterior.
-        # 'candidate_already_materialized' must hash identically to
-        # 'candidate_materialized': it is the idempotent re-run of the same
-        # materialization, not new evidence.
-        governance_status = str(governance.get("status") or "")
-        if governance_status == "candidate_already_materialized":
-            governance_status = "candidate_materialized"
-        evidence_fingerprint = hashlib.sha256(dumps({
-            "posterior_fingerprint": posterior_fingerprint,
-            "selected_scope": posterior.get("selected_scope"),
-            "selected_conclusion": posterior.get("selected_conclusion"),
-            "comparison_verdict": evaluation.get("comparison_verdict"),
-            "coverage_score": round(safe_float(evaluation.get("coverage_score")), 6),
-            "governance_status": governance_status,
-            "candidate_id": candidate_id,
-            "scope_type": governance.get("scope_type") or evaluation.get("scope_type"),
-            "scope_key": governance.get("scope_key") or scope.get("scope_key"),
-            "action": action,
-            "candidate_review_fingerprint": str(
-                candidate_review.get("evidence_fingerprint") or ""
-            ),
-            "parent_policy_decision_id": parent_policy_decision_id,
-        }).encode("utf-8")).hexdigest()
-        identity = "|".join(
-            [
-                posterior_fingerprint or str(evaluation.get("eval_id") or ""),
-                evidence_fingerprint,
-                command_scope_type,
-                action,
-                command_scope_key,
-            ]
-        )
-        command_id = f"v16cmd_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:20]}"
-        return {
-            "command_id": command_id,
-            "schema_version": "v16_brain_command.v1",
-            "snapshot_id": str(snapshot.get("snapshot_id") or ""),
-            "plan_id": str(evaluation.get("plan_id") or ""),
-            "eval_id": str(evaluation.get("eval_id") or ""),
-            "candidate_id": candidate_id,
-            "target_agent": target_agent,
-            "scope_type": command_scope_type,
-            "scope_key": command_scope_key,
-            "action": action,
-            "decision": decision,
-            "status": status,
-            "evidence": {
-                "posterior_arbitration": posterior,
-                "correction_contract": correction_contract,
-                "parent_policy_decision_id": parent_policy_decision_id,
-                "evaluation": {
-                    "eval_id": evaluation.get("eval_id", ""),
-                    "comparison_verdict": evaluation.get("comparison_verdict", ""),
-                    "coverage_score": evaluation.get("coverage_score", 0.0),
-                    "evidence_refs": evaluation.get("evidence_refs") or {},
-                },
-                "governance": {
-                    "status": governance.get("status", ""),
-                    "candidate_id": candidate_id,
-                    "candidate_review": candidate_review,
-                },
-            },
-            "delegation": {
-                **delegation,
-                "target_agent": target_agent,
-                "delegated_by": "v16_brain",
-                "parent_policy_decision_id": parent_policy_decision_id,
-                "specialist_must_use": required_gates,
-                "specialist_must_not": ["bypass_risk_policy", "bypass_decision_policy", "write_broker_directly"],
-            },
-            "posterior_fingerprint": posterior_fingerprint,
-            "parent_policy_decision_id": parent_policy_decision_id,
-            "evidence_fingerprint": evidence_fingerprint,
-            "max_apply_count": 1,
-            "created_at": time.time(),
-            "updated_at": time.time(),
             "boundary": self.boundary(),
         }
 

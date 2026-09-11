@@ -780,7 +780,7 @@ class AgentScorecardService:
 
     def _posterior_arbitration(self, conn: Any, *, review_id: str, position_id: str, review: Any) -> dict[str, Any]:
         try:
-            from backend.services.v16_brain_snapshot import build_posterior_arbitration
+            from backend.services.v16_posterior_arbitration import build_posterior_arbitration
 
             if review_has_system_contamination(_review_payload(review)):
                 return {
