@@ -216,7 +216,7 @@ def run_live_decision_pipeline(
         )
         loss_streak_addon = 0.0
         try:
-            from backend.services.live_service import _loss_streak_ladder_facts as _ladder_facts
+            from backend.services.live_service import loss_streak_ladder_facts as _ladder_facts
 
             ladder = _ladder_facts()
         except Exception:

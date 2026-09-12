@@ -79,14 +79,13 @@
 3. **死 import 与 core 链退役 ✓**：`core.app`（core/state.py:398、core/event_bus.py:185）与 `research.factor_library`（report_generator.py:293）引用已删；`core/`（state+event_bus, 623 行）→ 仅被 `risk/circuit.py` 消费 → circuit 仅被 evolution `auto_tune_risk` 调用且效果是写**学习 worker 进程内存假 state**（equity 恒为默认 1000，不触达生产风控）、`risk_tuned` story 事件零消费者 → **整链退役**：删除 `core/`、`risk/circuit.py`、`risk/regime.py`（circuit 是其唯一消费者）及 `tests/test_state.py`、`tests/test_circuit_breaker.py`，evolution `update_weights` 内 auto_tune 块删除。净删除 ≈ 2,000 行生产 + 2 个测试文件。验收：全仓 grep `from core.state|from core.event_bus|from risk.circuit|from risk.regime|auto_tune_risk` = 0。
 4. **私有跨模块公共化 ✓（非 live_service 部分）**：`update_weights`（ex `_update_weights`）、`autonomy_mode`（ex `_autonomy_mode`）、`code_version`（ex `_code_version`）、canonical_v2 `sql`/`db_time`/`payload_text_cache_clear`、ws `position_to_dict`/`read_state_snapshot`、offline_trainer `factor_features`/`predict_score`、factor_governance_lightgbm `current_row_label`/`sample_from_row`、alpha `supertrend_strength_array`、attribution_engine `ensure_trades_duckdb_schema`、api/learning `require_governance_confirm` 全部去下划线成为显式 API；`compact_supervisor_mapping` 删除私有别名（真 owner = `supervisor_payload_contract`）。**附带修复一个潜伏 NameError**：`v16_posterior_arbitration.py:105` 使用 `_compact_supervisor_mapping` 但从未 import，该代码路径一执行即崩——已补 `from backend.services.live_position_lifecycle import compact_supervisor_mapping`（已确认无导入环、不引入 live_service）。验收：`import backend.services.v16_posterior_arbitration` 等导入冒烟通过；相关 90 测试绿。
 
-### B2 反向依赖修复
-1. `monitor/system_health.py` 改消费 `runtime_health_projection.v1` / 公共状态入口（字段缺失先在投影 owner 补投影，不在 monitor 重算）。
-2. `backend_runtime_lifecycle` ↔ `api.db_health` 钩子方向反转（owner 移入 lifecycle/core，api 只注册）。
-3. `data/live_sync/ctrader_puller.py` 不再 import live_service：bridge 访问器归位（execution 侧或注入）。
-4. `live_decision_pipeline.py:219` `_loss_streak_ladder_facts` 归位。
-5. `api/live.py`、`api/market.py`、`ws/endpoints.py` 改用 live_service 唯一公共只读快照入口；`live_service` 对 `ws.endpoints._position_to_dict` 的 4 处反向私有引用改为公共函数或本地化。
-6. 顶层 44 文件逐个清点：数据访问收敛进 backend 域 store；纯函数下沉；确需保留的登记于 §3 并给理由。
-   - 验收：`grep -rn 'live_service' monitor/ data/ --include='*.py'` = 0；`grep -rn 'from backend.api' backend/services backend/runtime` = 0；顶层→backend 边数与登记清单一致。
+### B2 反向依赖修复（done 2026-09-12）
+1. **monitor/system_health ✓**：`_get_ctrader`→`get_ctrader`、`_market_session_snapshot`→`market_session_snapshot` 公共化，monitor 改用公共访问器（`loop_status` 本就公共）。system_health 保留为 live 进程内 60s 主动探针（带错误细节诊断），不改为消费 runtime_health_projection——投影是只读事实投影，探针是本地 watchdog，角色不同；此决定登记于 §3。
+2. **services→api 倒置消除 ✓**：db-health 缓存机制（~410 行）从 `backend/api/db_health.py` 平移至新 owner `backend/services/db_health_service.py`（`start_background_refresh`/`stop_background_refresh`/`snapshot_or_compute` 公共入口）；api/db_health.py 只剩路由+注册；`backend_runtime_lifecycle` 改调 service。`tests/test_db_health_runtime_owner.py` 跟随新 owner。验收：`grep -rn 'from backend.api' backend/services backend/runtime` = 0。
+3. **data→live_service ✓**：`ctrader_puller.connect()` 改导入公共 `get_ctrader/wait_ctrader_ready`（原有独立桥回退路径保留）。验收：`grep -rn 'live_service import _' monitor/ data/` = 0。
+4. **live_decision_pipeline ✓**：改导入公共 `loss_streak_ladder_facts`。
+5. **lifecycle→live_service 私有 ✓**：`_stop_live_scheduler`→公共 `stop_live_scheduler`，lifecycle 与 2 个测试文件跟随。
+6. live_service 读投影私有消费（api/live、api/market、ws/endpoints 的 `_live_state*`/`_get_live_bars`）随 B3/B4 搬迁时改新 owner，不在本批重复碰。
 
 ### B3 live_service 拆分①读投影
 - `get_status/get_account/get_positions/get_live_readiness/_get_live_bars` + `_ACCOUNT_CACHE/_POSITIONS_CACHE/_CACHE_LOCK/_probe_ctrader_cache`(:5145-5154) → 读投影 owner 模块；调用方（api/market 等）改新 owner；测试 patch 点同批迁移。
@@ -116,10 +115,14 @@
 ### B8 观察项（沉底，不阻塞、不排期）
 - safety timing 5~122s 归因；学习 worker 内存 HWM；dsl_auto 积压排空；supervisor 证据积累；reason code 零发射统计；72 投影表并表评估；demo CVaR overlay 修复后下一次真实 autonomous 写入复核（B1 验收的运行态部分）。
 
-## 3. 顶层→backend 保留登记（B2 填写）
+## 3. 顶层→backend 保留登记（B2 决定）
 
-| 文件 | 依赖 | 决定 | 理由 |
-|---|---|---|---|
+**决定：接受包级依赖，登记豁免理由；逐条修复的只有私有名耦合与语义倒置（B2-1~5，已全部消除）。**
+
+- research(21)/alpha(8)/data(6)/execution(3)/monitor(3)/risk(2) 对 `backend.core.db`（连接与路径辅助，叶子模块）的依赖：这些包是 backend 应用的组成库而非独立框架消费方，状态库连接层是它们唯一的 backend 依赖面；把 ~40 个模块的数据访问搬进 backend 或造 repository 层属于"为拆而拆"的大 churn，且不能证明减少 authority。接受。
+- `config/runtime_config.py:28-29` 对 `backend.core.env`、`backend.runtime.runtime_state`（均验证为叶子，无环）的模块级依赖：接受；懒加载的 `backend.services.runtime_config_startup/live_safety_state/runtime_config_overlay` 是 overlay 恢复语义的既定 owner，方向为 config→services，属既定架构事实（system-source-of-truth §2）。
+- `monitor/system_health` 保留为 live 进程内主动探针（60s、带错误细节）：与 `runtime_health_projection.v1`（跨进程只读事实投影）角色不同，不是第二计算者——探针结果只进本地健康报告与告警，不授权交易、不进 readiness 裁决。
+- 其余零散边（scripts→backend 29 个）是入口脚本性质，天然依赖 backend，不登记为债务。
 
 ## 4. 测试裁剪记录（B7 填写）
 

@@ -906,7 +906,7 @@ def _build_open_trade_risk_context(
         event_sizing_context=event_sizing_context,
         event_filter_context=event_filter_context,
         decision_quality_context=decision_quality_context, decision_ts=decision_ts,
-        loss_streak_ladder_facts=_loss_streak_ladder_facts,
+        loss_streak_ladder_facts=loss_streak_ladder_facts,
     )
 
 
@@ -4832,7 +4832,7 @@ def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> di
 
 # ── Loss-streak probation ladder (risk/loss_streak.py owns the math) ──
 
-def _loss_streak_ladder_facts() -> dict[str, Any]:
+def loss_streak_ladder_facts() -> dict[str, Any]:
     """Assemble the observed facts the ladder needs, from live state.
 
     Session timestamps come from the broker schedule projection already
@@ -5138,7 +5138,7 @@ def schedule_auto_resume_loop(delay_sec: float = _AUTO_RESUME_DELAY_SEC) -> bool
 
 # ── cTrader 缓存 (防 WS 1s 推送反复击中 Twisted reactor)
 # audit 2026-06-08: WS read_state_snapshot 每 1s 调 get_account/get_positions,
-# 每次都走 _get_ctrader → bridge.account_info → _send (Twisted deferred) .
+# 每次都走 get_ctrader → bridge.account_info → _send (Twisted deferred) .
 # cTrader Open API 是顺序协议, 同时多个 _send 互等导致延迟/超时.
 # 加 5s TTL 缓存, WS 1s 推读缓存, 缓解 reactor 竞争.
 import time as _time
@@ -5298,7 +5298,7 @@ def _install_ctrader_live_listener(bridge) -> None:
 # 方案: 进程级长连接 bridge, 所有 cTrader API 复用同一个连接.
 # audit 2026-06-10: connect() 之前是同步阻塞 (reactor.startService 等回包 +
 # 3 次 _send 每次 10s, 总 5-50s), 切 cTrader broker 占满 FastAPI 线程池 40 线程
-# 之一, 全部其它 API 排队. 改造: _get_ctrader() 非阻塞 — 首次启动后台线程做
+# 之一, 全部其它 API 排队. 改造: get_ctrader() 非阻塞 — 首次启动后台线程做
 # 真 connect, 立刻返 (bridge, None, warming_up=True); 后续调用查 is_connected
 # 属性(瞬时), 连好了返 warming_up=False, 没好返 warming_up=True.
 _CTRADER_RUNTIME = CTraderRuntime(
@@ -5306,7 +5306,7 @@ _CTRADER_RUNTIME = CTraderRuntime(
 )
 
 
-def _get_ctrader():
+def get_ctrader():
     """返回进程级长连接 CTraderBridge (非阻塞版, audit 2026-06-10).
 
     Returns:
@@ -5338,7 +5338,7 @@ def _get_ctrader():
 def warmup_ctrader(timeout_sec: float = 0.0) -> None:
     """在 lifespan 启动时调 — 后台预热 cTrader 连接, 用户切 Live tab 时不卡.
     timeout_sec=0 立即返回 (后台线程继续); >0 则同步等最多 timeout_sec 秒."""
-    bridge, err, warming = _get_ctrader()
+    bridge, err, warming = get_ctrader()
     if err:
         logger.info(f"[ctrader] warmup skipped: {err}")
         return
@@ -5377,7 +5377,7 @@ def _quote_is_fresh(quote: dict | None, *, now_ts: float | None = None) -> bool:
     return age is not None and age <= _SPOT_QUOTE_STALE_SECONDS
 
 
-def _market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str, Any]:
+def market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str, Any]:
     quote = {}
     now_ts = time.time()
     if bridge is not None and hasattr(bridge, "get_spot_quote"):
@@ -5533,7 +5533,7 @@ def _ensure_spot_subscription(
         logger.debug("[market_session] spot subscription refresh failed: {}", exc)
 
 
-def _wait_ctrader_ready(bridge, timeout_sec: float = 30.0) -> str | None:
+def wait_ctrader_ready(bridge, timeout_sec: float = 30.0) -> str | None:
     """blocking 等待 bridge 真正连好. 用于 live loop body 这种已知在后台线程
     可以阻塞的场景. Returns error_msg | None."""
     if bridge is None:
@@ -5577,8 +5577,8 @@ def _probe_ctrader() -> tuple[str, str | None]:
     now = time.time()
     if _probe_ctrader_cache and (now - _probe_ctrader_cache[0]) < _CTRADER_PROBE_TTL:
         return _probe_ctrader_cache[1], _probe_ctrader_cache[2]
-    # audit 2026-06-10: _get_ctrader 现在返 3-tuple; warming_up 不算 error
-    bridge, err, warming = _get_ctrader()
+    # audit 2026-06-10: get_ctrader 现在返 3-tuple; warming_up 不算 error
+    bridge, err, warming = get_ctrader()
     if err:
         result = ("error", err) if "not installed" in err else \
                  ("no_token", err) if "no cTrader credentials" in err else \
@@ -5689,8 +5689,8 @@ def get_account(broker: str) -> dict:
         }
     if broker == "ctrader":
         def _fetch():
-            # audit 2026-06-10: _get_ctrader 返 3-tuple, warming_up 短路
-            bridge, err, warming = _get_ctrader()
+            # audit 2026-06-10: get_ctrader 返 3-tuple, warming_up 短路
+            bridge, err, warming = get_ctrader()
             if err:
                 return {"ok": False, "broker": "ctrader", "error": err}
             if warming or not bridge.is_connected:
@@ -5842,8 +5842,8 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
             return {"ok": True, "broker": "ctrader", "positions": _visible_positions(cached_positions), "readiness": readiness}
         # 缓存空 fallback
         def _fetch():
-            # audit 2026-06-10: _get_ctrader 返 3-tuple, warming_up 短路
-            bridge, err, warming = _get_ctrader()
+            # audit 2026-06-10: get_ctrader 返 3-tuple, warming_up 短路
+            bridge, err, warming = get_ctrader()
             if err:
                 return {"ok": False, "broker": "ctrader", "error": err, "positions": []}
             if warming or not bridge.is_connected:
@@ -6524,8 +6524,8 @@ def _start_live_scheduler():
         _make_data_sync_job(
             lock=_DATA_SYNC_LOCK,
             logger=logger,
-            get_ctrader=_get_ctrader,
-            market_session_snapshot=_market_session_snapshot,
+            get_ctrader=get_ctrader,
+            market_session_snapshot=market_session_snapshot,
         ),
     )
     _register_factor_selection_heartbeat_job(
@@ -6564,7 +6564,7 @@ def _start_live_scheduler():
     )
 
 
-def _stop_live_scheduler():
+def stop_live_scheduler():
     """停止 Scheduler. 幂等. wait=False 避免阻塞."""
     from backend.runtime.scheduler import InProcessScheduler
     sched = InProcessScheduler()
@@ -6675,7 +6675,7 @@ def _live_loop_start_runtime() -> LiveLoopStartRuntime:
         prime_live_loop_state=_prime_live_loop_state,
         start_safety_watchdog=_start_live_safety_watchdog,
         start_scheduler=_start_live_scheduler,
-        stop_scheduler=_stop_live_scheduler,
+        stop_scheduler=stop_live_scheduler,
         stop_safety_watchdog=_stop_live_safety_watchdog,
         thread_factory=threading.Thread,
         loop_target=_run_loop,
@@ -7014,7 +7014,7 @@ def _get_live_bars(
 ) -> "pd.DataFrame | None":
     """Read the in-memory cTrader trendbar feed without touching DuckDB."""
     try:
-        bridge, error, warming = _get_ctrader()
+        bridge, error, warming = get_ctrader()
     except Exception as exc:
         logger.debug("online trendbar bridge lookup failed: {}", exc)
         return None
@@ -7884,7 +7884,7 @@ def _attempt_generation_startup_barrier(
 
 def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
     return LiveLoopTickRuntime(
-        get_ctrader=_get_ctrader,
+        get_ctrader=get_ctrader,
         reconcile_positions=_explicit_position_reconcile,
         run_safety_cycle=_run_live_safety_cycle,
         persist_safety_fail_closed=_persist_safety_fail_closed,
@@ -7904,7 +7904,7 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
         restore_session_state=_restore_session_state_for_day,
         session_circuit_breaker_enforced=lambda: not bounded_demo_mode_active(),
         evaluate_daily_drawdown=_evaluate_daily_drawdown,
-        market_session_snapshot=_market_session_snapshot,
+        market_session_snapshot=market_session_snapshot,
         ensure_spot_subscription=_ensure_spot_subscription,
         get_live_bars=_get_live_bars,
         ensure_decision_bars_fresh=_ensure_live_decision_bars_fresh,
@@ -8231,7 +8231,7 @@ def _run_loop(
 
 def _startup_safety_runtime() -> StartupSafetyRuntime:
     return StartupSafetyRuntime(
-        get_ctrader=_get_ctrader,
+        get_ctrader=get_ctrader,
         reconcile_positions=_explicit_position_reconcile,
         run_safety_cycle=_run_live_safety_cycle,
         reconcile_account=_explicit_account_reconcile,
@@ -8244,8 +8244,8 @@ def _startup_safety_runtime() -> StartupSafetyRuntime:
 def _bar_warmup_runtime() -> BarWarmupRuntime:
     return BarWarmupRuntime(
         warmup_from_local_db=_warmup_from_local_db,
-        get_ctrader=_get_ctrader,
-        wait_ctrader_ready=_wait_ctrader_ready,
+        get_ctrader=get_ctrader,
+        wait_ctrader_ready=wait_ctrader_ready,
         fetch_bars_with_retry=_fetch_bars_with_retry,
         load_bar_cache=_load_bar_cache,
         publish_latest_price=_publish_latest_price,
@@ -8475,12 +8475,12 @@ def _run_loop_body_active(
         runtime=_factor_warmup_runtime(),
     )
 
-    # 订阅 cTrader 实时报价；warmup local_db 路径从 _get_ctrader() 拿真 bridge 并短等 ready.
+    # 订阅 cTrader 实时报价；warmup local_db 路径从 get_ctrader() 拿真 bridge 并短等 ready.
     if broker == "ctrader":
         try:
             _loop_subscribe_spot_once(
-                get_ctrader=_get_ctrader,
-                wait_ctrader_ready=_wait_ctrader_ready,
+                get_ctrader=get_ctrader,
+                wait_ctrader_ready=wait_ctrader_ready,
                 log=log,
                 timeout_sec=10.0, timeframe=TF, seed_frame=df,
             )
@@ -8703,7 +8703,7 @@ def get_latest_price() -> float | None:
         return _latest_price
     try:
         # audit 2026-06-10: 3-tuple; warming_up 时返旧价不阻塞
-        bridge, err, warming = _get_ctrader()
+        bridge, err, warming = get_ctrader()
         if bridge is None or err or warming or not bridge.is_connected:
             fallback = _latest_bar_close_from_store()
             return _publish_latest_price(fallback, source="bar_close") if fallback else _latest_price
@@ -8738,8 +8738,8 @@ def emergency_close(broker: str, symbol: str | None = None) -> dict:
         runtime=EmergencyCloseRuntime(
             update_live_state=_live_state_update,
             admission_lock=_OPEN_TRADE_ADMISSION_LOCK,
-            get_ctrader=_get_ctrader,
-            wait_ctrader_ready=_wait_ctrader_ready,
+            get_ctrader=get_ctrader,
+            wait_ctrader_ready=wait_ctrader_ready,
             reconcile_positions=_fresh_emergency_position_reconcile,
             position_volume=_position_api_volume,
             build_close_risk_context=_build_close_position_risk_context,

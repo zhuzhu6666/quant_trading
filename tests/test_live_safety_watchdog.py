@@ -664,7 +664,7 @@ def test_stale_watchdog_and_unknown_execution_block_open_but_protection_continue
 
 def test_safety_cycle_exception_retries_in_five_seconds_and_latches(monkeypatch):
     bridge = SimpleNamespace(is_connected=True)
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(live_service, "_explicit_position_reconcile", lambda _bridge: {})
     monkeypatch.setattr(
         live_service,

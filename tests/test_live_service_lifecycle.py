@@ -1471,7 +1471,7 @@ def test_run_live_loop_tick_body_returns_wait_when_market_closed(monkeypatch):
 
     monkeypatch.setattr(
         live_service,
-        "_market_session_snapshot",
+        "market_session_snapshot",
         lambda *_args, **_kwargs: {
             "status": "closed_confirmed",
             "reason": "weekend",
@@ -1480,7 +1480,7 @@ def test_run_live_loop_tick_body_returns_wait_when_market_closed(monkeypatch):
     )
     monkeypatch.setattr(
         live_service,
-        "_get_ctrader",
+        "get_ctrader",
         lambda: (SimpleNamespace(is_connected=False), None, True),
     )
     monkeypatch.setattr(
@@ -1636,7 +1636,7 @@ def test_spot_subscription_refresh_continues_during_maintenance(monkeypatch):
     monkeypatch.setattr(live_service, "_last_spot_subscription_attempt_ts", 0.0)
     monkeypatch.setattr(
         live_service,
-        "_market_session_snapshot",
+        "market_session_snapshot",
         lambda _bridge: {
             "status": "open_pending_quote",
             "api_available": True,
@@ -1746,7 +1746,7 @@ def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
 
     bridge = _Bridge()
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(
         live_service,
         "_recover_emergency_execution_intents",
@@ -1812,7 +1812,7 @@ def test_emergency_close_reports_close_failures(monkeypatch):
             )
 
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (_Bridge(), None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (_Bridge(), None, False))
 
     result = live_service.emergency_close("ctrader", "XAUUSD+")
 

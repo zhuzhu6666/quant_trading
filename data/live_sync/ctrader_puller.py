@@ -82,14 +82,14 @@ class CTraderPuller:
         if self._connected and self._bridge and self._bridge.is_connected:
             return True
         try:
-            from backend.services.live_service import _get_ctrader, _wait_ctrader_ready
+            from backend.services.live_service import get_ctrader, wait_ctrader_ready
 
-            bridge, err, warming = _get_ctrader()
+            bridge, err, warming = get_ctrader()
             if err:
                 logger.error(f"[CTraderPuller] shared bridge unavailable: {err}")
                 return False
             if warming:
-                wait_err = _wait_ctrader_ready(bridge, timeout_sec=30.0)
+                wait_err = wait_ctrader_ready(bridge, timeout_sec=30.0)
                 if wait_err:
                     logger.error(f"[CTraderPuller] shared bridge warmup failed: {wait_err}")
                     return False

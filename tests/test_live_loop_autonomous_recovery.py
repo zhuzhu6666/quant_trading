@@ -25,7 +25,7 @@ def test_loop_failure_keeps_process_scheduler_and_schedules_auto_resume(monkeypa
     )
     monkeypatch.setattr(
         live_service,
-        "_stop_live_scheduler",
+        "stop_live_scheduler",
         lambda: events.append("scheduler_stopped"),
     )
     monkeypatch.setattr(
@@ -51,7 +51,7 @@ def test_process_shutdown_does_not_schedule_loop_auto_resume(monkeypatch):
     monkeypatch.setattr(live_service, "_stop_live_safety_watchdog", lambda: None)
     monkeypatch.setattr(
         live_service,
-        "_stop_live_scheduler",
+        "stop_live_scheduler",
         lambda: events.append("scheduler_stopped"),
     )
     monkeypatch.setattr(

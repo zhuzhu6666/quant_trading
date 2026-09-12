@@ -159,7 +159,7 @@ def test_http_reads_preserve_fresh_broker_observation_timestamp(monkeypatch):
             )
 
     bridge = _Bridge()
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
 
     persist_values = []
 
@@ -445,7 +445,7 @@ def test_http_reads_do_not_rejuvenate_non_fresh_broker_cache(monkeypatch):
             raise AssertionError("HTTP fact reads must use explicit reconcile")
 
     bridge = _Bridge()
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(
         live_service,
         "_enrich_positions_with_path_metrics",

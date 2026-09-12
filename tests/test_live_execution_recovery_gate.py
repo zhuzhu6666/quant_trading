@@ -71,7 +71,7 @@ class _RecoveryBridge:
 
 
 def _install_tick_boundary(monkeypatch, bridge, order):
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
 
     def safety_cycle(*, reconcile_result, **_kwargs):
         positions = list(getattr(reconcile_result, "positions", ()) or ())
@@ -92,7 +92,7 @@ def _install_tick_boundary(monkeypatch, bridge, order):
     monkeypatch.setattr(live_service, "_run_live_safety_cycle", safety_cycle)
     monkeypatch.setattr(
         live_service,
-        "_market_session_snapshot",
+        "market_session_snapshot",
         lambda *_args, **_kwargs: order.append(("session",))
         or {"status": "open_confirmed"},
     )
@@ -191,7 +191,7 @@ def test_missing_recovery_contract_fails_closed_before_session(monkeypatch):
         observed_at=now,
         generated_at=now,
     )
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(live_service, "_explicit_position_reconcile", lambda _bridge: reconcile)
     monkeypatch.setattr(live_service, "_explicit_account_reconcile", lambda _bridge: account)
     monkeypatch.setattr(
@@ -207,7 +207,7 @@ def test_missing_recovery_contract_fails_closed_before_session(monkeypatch):
     )
     monkeypatch.setattr(
         live_service,
-        "_market_session_snapshot",
+        "market_session_snapshot",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("session must remain blocked")
         ),

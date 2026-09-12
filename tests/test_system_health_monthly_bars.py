@@ -36,7 +36,7 @@ def test_system_health_reads_previous_month_when_current_month_is_empty(
     monkeypatch.setattr(core_db, "DUCKDB_BARS_MONTHLY_DIR", monthly_dir)
     monkeypatch.setattr(core_db, "DUCKDB_BARS", current_path)
     monkeypatch.setattr(
-        live_service, "_market_session_snapshot", lambda _generation_id: {}
+        live_service, "market_session_snapshot", lambda _generation_id: {}
     )
     monkeypatch.setattr(
         system_health,
@@ -82,7 +82,7 @@ def test_system_health_passes_connected_bridge_to_market_session_authority(monke
     monkeypatch.setattr(system_health, "bars_monthly_read_paths", lambda **_: [])
     monkeypatch.setattr(
         live_service,
-        "_market_session_snapshot",
+        "market_session_snapshot",
         lambda passed_bridge: calls.append(passed_bridge) or authoritative_session,
     )
 

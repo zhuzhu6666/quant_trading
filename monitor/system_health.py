@@ -135,8 +135,8 @@ class SystemHealth:
         # 1. cTrader 桥连接
         bridge = None
         try:
-            from backend.services.live_service import _get_ctrader
-            bridge, err, warming = _get_ctrader()
+            from backend.services.live_service import get_ctrader
+            bridge, err, warming = get_ctrader()
             if err:
                 components["ctrader_bridge"] = ComponentStatus(
                     name="cTrader 桥",
@@ -333,13 +333,13 @@ class SystemHealth:
                         online_sources["M5"] = "monthly_replica"
 
             try:
-                from backend.services.live_service import _market_session_snapshot
+                from backend.services.live_service import market_session_snapshot
 
                 # Pass the connected bridge so the shared live authority can
                 # use cTrader's symbol schedule.  Passing None silently falls
                 # back to the static schedule and creates a second session
                 # truth source in monitoring.
-                report.market_session = dict(_market_session_snapshot(bridge) or {})
+                report.market_session = dict(market_session_snapshot(bridge) or {})
                 if bridge is not None:
                     report.market_session["broker_connected"] = bool(
                         getattr(bridge, "is_connected", False)

@@ -120,15 +120,15 @@ def _schedule_autonomous_learning(**kwargs: Any) -> bool:
 
 
 def _warm_db_health() -> None:
-    from backend.api.db_health import _on_startup
+    from backend.services.db_health_service import start_background_refresh
 
-    _on_startup()
+    start_background_refresh(initial_delay_sec=3.0)
 
 
 def _stop_db_health(*, timeout_sec: float) -> dict[str, Any]:
-    from backend.api.db_health import _on_shutdown
+    from backend.services.db_health_service import stop_background_refresh
 
-    return _on_shutdown(timeout_sec=timeout_sec)
+    return stop_background_refresh(timeout_sec=timeout_sec)
 
 
 def _refresh_backend_readiness(*, max_age_seconds: float) -> dict[str, Any]:
@@ -163,10 +163,10 @@ def _stop_live_loop_for_process_shutdown(*, timeout_sec: float) -> dict[str, Any
     return stop_loop_for_process_shutdown(timeout_sec=timeout_sec)
 
 
-def _stop_live_scheduler() -> None:
-    from backend.services.live_service import _stop_live_scheduler as stop_live_scheduler
+def stop_live_scheduler() -> None:
+    from backend.services import live_service
 
-    stop_live_scheduler()
+    live_service.stop_live_scheduler()
 
 
 
@@ -200,7 +200,7 @@ class BackendRuntimeLifecycleCallbacks:
     stop_live_loop_for_process_shutdown: Callable[..., dict[str, Any]] = (
         _stop_live_loop_for_process_shutdown
     )
-    stop_live_scheduler: Callable[[], Any] = _stop_live_scheduler
+    stop_live_scheduler: Callable[[], Any] = stop_live_scheduler
     stop_db_health: Callable[..., dict[str, Any]] = _stop_db_health
     stop_backend_readiness: Callable[..., dict[str, Any]] = _stop_backend_readiness
 

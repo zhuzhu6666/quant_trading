@@ -127,7 +127,7 @@ class _Policy:
 
 
 def _install(monkeypatch, bridge):
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
     monkeypatch.setattr(
         live_service,
@@ -307,7 +307,7 @@ def test_emergency_rejects_legacy_value_only_positions_contract(monkeypatch):
             raise AssertionError("emergency must not call refresh_positions")
 
     bridge = _LegacyBridge()
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
 
     result = live_service.emergency_close("ctrader")
 

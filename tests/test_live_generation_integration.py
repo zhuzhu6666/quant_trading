@@ -113,10 +113,10 @@ def test_phase2_runs_broker_snapshot_and_safety_before_missing_online_bars(monke
 
     bridge.reconcile_positions = _reconcile
     bridge.reconcile_account = _account
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(
         live_service,
-        "_market_session_snapshot",
+        "market_session_snapshot",
         lambda *_args, **_kwargs: order.append("session") or {"status": "open_confirmed"},
     )
     monkeypatch.setattr(
@@ -159,7 +159,7 @@ def test_phase2_circuit_blocks_alpha_only_after_safety(monkeypatch):
     _enable_phase2(monkeypatch)
     monkeypatch.setattr(live_service, "bounded_demo_mode_active", lambda: False)
     bridge = _SnapshotBridge()
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(
         live_service,
         "_evaluate_daily_drawdown",
@@ -207,7 +207,7 @@ def test_account_reconcile_failure_blocks_alpha_but_safety_still_runs_first(monk
         raise TimeoutError("account rpc timeout")
 
     bridge.reconcile_account = _account_failure
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(
         live_service,
         "_run_position_protection_cycle",
@@ -215,7 +215,7 @@ def test_account_reconcile_failure_blocks_alpha_but_safety_still_runs_first(monk
     )
     monkeypatch.setattr(
         live_service,
-        "_market_session_snapshot",
+        "market_session_snapshot",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("session/alpha must remain blocked")
         ),
@@ -248,7 +248,7 @@ def test_unknown_position_snapshot_retries_safety_in_five_seconds(monkeypatch):
         "reconcile_id": "positions-unknown",
         "observed_at": 0.0,
     }
-    monkeypatch.setattr(live_service, "_get_ctrader", lambda: (bridge, None, False))
+    monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(
         live_service,
         "_explicit_position_reconcile",
@@ -256,7 +256,7 @@ def test_unknown_position_snapshot_retries_safety_in_five_seconds(monkeypatch):
     )
     monkeypatch.setattr(
         live_service,
-        "_market_session_snapshot",
+        "market_session_snapshot",
         lambda *_args, **_kwargs: {"status": "closed_confirmed"},
     )
 
@@ -702,7 +702,7 @@ def test_stop_waits_for_admitted_open_rpc_then_keeps_generation_draining(monkeyp
     )
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: False)
     monkeypatch.setattr(live_service, "_runtime_kv_set", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(live_service, "_stop_live_scheduler", lambda: None)
+    monkeypatch.setattr(live_service, "stop_live_scheduler", lambda: None)
     # Earlier safety-cycle tests intentionally leave their fail-closed
     # projection in process state.  This case exercises controller/RPC
     # draining in isolation and does not model an already-running live loop.
