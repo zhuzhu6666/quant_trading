@@ -188,3 +188,19 @@ test_live_service_lifecycle(163) / test_factor_governance_orchestrator(96) / tes
 ### L3 开仓管线抽取（下一批，未开始）
 - 目标：candidate 准备/context 构建器/intent/submit 编排/filled+amended 处理家族（约 2,700 行）→ `live_open_pipeline.py` + 既有 `live_open_*` owner。
 - 已验证的可复用配方：AST 抽取 + 公共名 + owner 属性解析 + 惰性回引 + smoke/目标文件/全量三段验证。
+
+### L3a filled/amended 抽取（done, e164e7f9）+ L3b 开仓管线抽取（done, dd8b6b55）（2026-09-12 深夜，backend 已停批）
+- L3a：filled/amended 处理适配器 14 函数迁入既有 owner `live_open_processing`（1,270 行）；owner 的 request/runtime 引擎入口保留原名，生产适配器改名 `*_from_live`——两份合同不再共用一个名字。live_service 11,138 → 10,474。
+- L3b：开仓管线 29 函数迁入新 owner `live_open_pipeline.py`（1,694 行）：candidate 准备、context 构建器、risk verdict 序列化、intent/order 提交、admission 闸门、bar-open 去重、pending-open 重试。live_service 10,474 → **8,905 行**（今日累计 12,694 → 8,905，−30%）。
+- v2 通用抽取器固化完整配方：AST 节点级迁移（含 AnnAssign）、公共名改名后置断言、测试 patch 缝名（`live_service, "X"` 形式）自动惰性化不进 header、字符串字面量保护、kwarg 名修复、括号平衡的测试 import 插入。
+- 教训：惰性改写两次叠加会产生 `_live_service()._live_service().` 双写（脚本需幂等）；线级替换会损伤字符串字面量里的 reason code（`no_new_risk_latched` 作为 blocker 名一度变成代码字符串）——字面量必须保护。
+- 全量门 ×2 均 2975 passed / 11 skipped。门面边界/建接合同测试随结构演进同步更新。
+
+### live_service 拆分累计结果（2026-09-12）
+| 模块 | 行数 | 职责 |
+|---|---|---|
+| live_service.py | 8,905 | loop wiring、tick 决策引擎、scheduler、读投影、bridge 访问 |
+| live_close_settlement.py | 1,830 | 平仓结算/恢复/会话/kv |
+| live_open_pipeline.py | 1,694 | 开仓管线 |
+| live_position_protection_cycle.py | 1,159 | 保护执行/holding timeout |
+| live_open_processing.py | 1,270 | filled/amended 处理 |
