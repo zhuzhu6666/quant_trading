@@ -102,7 +102,7 @@ def _install_tick_boundary(monkeypatch, bridge, order):
         lambda *_args, **_kwargs: order.append(("bars",)) or None,
     )
     today = live_service.datetime.now(live_service.timezone.utc).strftime("%Y-%m-%d")
-    live_service._live_state_update(
+    live_service.live_state_update(
         trade_date=today,
         session_state_status="available",
         circuit_breaker=False,
@@ -212,7 +212,7 @@ def test_missing_recovery_contract_fails_closed_before_session(monkeypatch):
             AssertionError("session must remain blocked")
         ),
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         execution_recovery={"enabled": True, "ready": False},
     )
 

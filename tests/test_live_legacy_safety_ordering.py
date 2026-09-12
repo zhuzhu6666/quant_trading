@@ -71,7 +71,7 @@ def test_running_loop_enables_safety_watchdog(monkeypatch):
         generation.generation_id,
         SimpleNamespace(is_alive=lambda: True, ident=902),
     )
-    live_service._live_state_update(loop_running=True)
+    live_service.live_state_update(loop_running=True)
 
     snapshot = live_service._live_safety_watchdog_probe()
 

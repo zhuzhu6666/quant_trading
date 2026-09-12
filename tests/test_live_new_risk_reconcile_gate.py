@@ -8,6 +8,7 @@ import pytest
 
 from backend.services import live_service
 from backend.services.live_safety_state import no_new_risk_latch_status
+from backend.services import live_close_settlement
 
 
 @pytest.fixture(autouse=True)
@@ -20,7 +21,7 @@ def _isolated_open_admission(monkeypatch, tmp_path):
         lambda _generation_id: True,
     )
     live_service._process_shutdown_requested = False
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=True,
         accepting_new_risk=True,
         session_state_status="available",
@@ -37,7 +38,7 @@ def _isolated_open_admission(monkeypatch, tmp_path):
     )
     yield
     live_service._process_shutdown_requested = False
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=False,
         accepting_new_risk=False,
         session_state_status="unknown",
@@ -54,7 +55,7 @@ def _isolated_open_admission(monkeypatch, tmp_path):
 
 
 def _publish_fresh_reconciles(now: float) -> None:
-    live_service._live_state_update(
+    live_service.live_state_update(
         account_reconciled={"ok": True, "balance": 1000.0, "equity": 1000.0},
         account_updated_at=now,
         account_reconcile_id="account-fresh",
@@ -93,8 +94,7 @@ def test_fresh_empty_reconcile_conflicting_with_recovery_blocks_new_risk(monkeyp
         lambda positions, **_kwargs: positions,
     )
     monkeypatch.setattr(
-        live_service,
-        "_list_active_recovery_positions",
+        live_close_settlement, "list_active_recovery_positions",
         lambda _broker: [{"position_id": 101}],
     )
 
@@ -135,9 +135,9 @@ def test_purged_orphan_recovery_row_releases_only_its_session_latch(monkeypatch)
 
     store = MagicMock()
     store.purge_unbrokered.return_value = [902]
-    monkeypatch.setattr(live_service, "_list_active_recovery_positions", _active_rows)
-    monkeypatch.setattr(live_service, "_recovery_position_store", lambda: store)
-    live_service._live_state_update(
+    monkeypatch.setattr(live_close_settlement, "list_active_recovery_positions", _active_rows)
+    monkeypatch.setattr(live_close_settlement, "recovery_position_store", lambda: store)
+    live_service.live_state_update(
         session_state_status="unavailable",
         session_state_source="close_deal_pending",
         session_risk_blockers=["close_deal_pending:902", "session_not_restored"],
@@ -157,7 +157,7 @@ def test_purged_orphan_recovery_row_releases_only_its_session_latch(monkeypatch)
         bridge=SimpleNamespace(is_connected=True),
     )
 
-    assert 902 not in live_service._pending_session_close_causes()
+    assert 902 not in live_close_settlement._pending_session_close_causes()
     assert "close_deal_pending:902" not in live_service.live_state_get(
         "session_risk_blockers"
     )
@@ -176,8 +176,7 @@ def test_fresh_reconcile_keeps_multiple_aligned_recovery_positions_open(monkeypa
         lambda positions, **_kwargs: positions,
     )
     monkeypatch.setattr(
-        live_service,
-        "_list_active_recovery_positions",
+        live_close_settlement, "list_active_recovery_positions",
         lambda _broker: [{"position_id": 101}, {"position_id": 202}],
     )
 
@@ -203,8 +202,7 @@ def test_aligned_reconcile_releases_prior_recovery_conflict_latch(monkeypatch):
         lambda positions, **_kwargs: positions,
     )
     monkeypatch.setattr(
-        live_service,
-        "_list_active_recovery_positions",
+        live_close_settlement, "list_active_recovery_positions",
         lambda _broker: [{"position_id": 101}],
     )
 
@@ -239,13 +237,11 @@ def test_fresh_empty_reconcile_resolves_broker_close_before_conflict_latch(
         return [{"position_id": 101}] if active_calls["count"] == 1 else []
 
     monkeypatch.setattr(
-        live_service,
-        "_list_active_recovery_positions",
+        live_close_settlement, "list_active_recovery_positions",
         _active_rows,
     )
     monkeypatch.setattr(
-        live_service,
-        "_retire_broker_missing_position",
+        live_close_settlement, "retire_broker_missing_position",
         lambda *args, **kwargs: retired.append((args, kwargs)) or True,
     )
 
@@ -265,7 +261,7 @@ def test_fresh_empty_reconcile_resolves_broker_close_before_conflict_latch(
 def test_final_open_admission_blocks_missing_reconcile_identity():
     now = time.time()
     _publish_fresh_reconciles(now)
-    live_service._live_state_update(
+    live_service.live_state_update(
         account_reconcile_id=None,
         positions_reconcile_id=None,
     )
@@ -282,7 +278,7 @@ def test_final_open_admission_blocks_stale_or_newer_failed_reconcile():
     assert stale == ["account_reconcile_stale", "positions_reconcile_stale"]
 
     _publish_fresh_reconciles(now)
-    live_service._live_state_update(
+    live_service.live_state_update(
         account_reconcile_failed_at=now + 0.1,
         positions_reconcile_failed_at=now + 0.1,
     )

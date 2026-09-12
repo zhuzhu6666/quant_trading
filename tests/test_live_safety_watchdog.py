@@ -25,7 +25,7 @@ from backend.services.live_safety_planner import SafetyPlan, safety_candidate
 def _isolated_safety_state(monkeypatch, tmp_path):
     reset_safety_state_for_tests()
     monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path / "safety"))
-    live_service._live_state_update(
+    live_service.live_state_update(
         accepting_new_risk=True,
         safety_failure={},
         safety_plane={},
@@ -258,7 +258,7 @@ def test_live_loop_cause_requires_normal_cycle_and_reconciled_facts(monkeypatch)
         cause="safety_freshness",
         cause_id="live_loop",
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=True,
         session_state_status="available",
         account_reconciled={"ok": True, "account_id": "acct-1"},
@@ -312,7 +312,7 @@ def test_watchdog_recovery_does_not_authorize_without_owned_generation(monkeypat
         cause="safety_freshness",
         cause_id="safety_watchdog",
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=True,
         accepting_new_risk=False,
         session_state_status="available",
@@ -357,7 +357,7 @@ def test_live_loop_cause_stays_latched_when_safety_cycle_is_not_ready():
         cause="safety_freshness",
         cause_id="live_loop",
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=True,
         session_state_status="available",
         account_reconciled={"ok": True},
@@ -395,7 +395,7 @@ def test_live_loop_cause_stays_latched_while_safety_cycle_is_active(monkeypatch)
         cause="safety_freshness",
         cause_id="live_loop",
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=True,
         session_state_status="available",
         account_reconciled={"ok": True},
@@ -494,7 +494,7 @@ def test_watchdog_releases_missing_supervisor_position_after_fresh_reconcile():
         cause="safety_freshness",
         cause_id="supervisor_tighten",
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         positions_reconciled=[],
         positions_updated_at=now,
         positions_reconcile_id="reconcile-empty",
@@ -535,7 +535,7 @@ def test_watchdog_keeps_supervisor_cause_while_target_position_is_open():
         cause="safety_freshness",
         cause_id="supervisor_tighten",
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         positions_reconciled=[{"position_id": 74}],
         positions_updated_at=now,
         positions_reconcile_id="reconcile-open",
@@ -709,7 +709,7 @@ def test_v2_readiness_requires_fresh_account_positions_and_safety(monkeypatch):
             },
         },
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         _diag={"bridge_ready": True},
         account={"ok": True},
         account_reconciled={"ok": True},

@@ -84,6 +84,15 @@ _ISOLATED_STATE_DB.parent.mkdir(parents=True, exist_ok=True)
 _db.STATE_DB = _ISOLATED_STATE_DB
 _db._KNOWN_SQLITE_PATHS.add(_ISOLATED_STATE_DB)
 
+# Materialize the sandbox DB with the full runtime schema immediately:
+# read-only connects (mode=ro) fail on a missing file, and settlement/recovery
+# queries expect the runtime tables to exist.  STATE_DB_DDL is the SQLite
+# test-schema owner; production PG schema stays owned by migrations/state_pg.
+_conn = _db.connect_sqlite(_db.STATE_DB)
+_conn.executescript(_db.STATE_DB_DDL)
+_conn.commit()
+_conn.close()
+
 def pytest_configure(config):  # noqa: ARG001
     """Fail loudly if something re-points the suite at production.
 

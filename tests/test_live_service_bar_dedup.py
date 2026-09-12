@@ -33,7 +33,7 @@ def _reset_state(monkeypatch, tmp_path):
     live_service._live_state["spot_quote"] = None
     live_service._live_state["last_processed_decision_bar_ts"] = 0.0
     live_service._process_shutdown_requested = False
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=False,
         accepting_new_risk=False,
         session_state_status="unknown",
@@ -42,7 +42,7 @@ def _reset_state(monkeypatch, tmp_path):
     reset_safety_state_for_tests()
     live_service._local_positions.clear()
     live_service._process_shutdown_requested = False
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=False,
         accepting_new_risk=False,
         session_state_status="unknown",

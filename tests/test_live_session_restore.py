@@ -9,6 +9,7 @@ import pytest
 
 from backend.core import db as db_module
 from backend.services import live_service
+from backend.services import live_close_settlement
 from backend.services.session_restore import (
     authoritative_close_pnl,
     rebuild_session_risk_projection,
@@ -28,20 +29,18 @@ def _preserve_process_live_state():
 
 def _disable_restore_side_effects(monkeypatch) -> None:
     monkeypatch.setattr(
-        live_service,
-        "_persist_session_state",
+        live_close_settlement, "_persist_session_state",
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
-        live_service,
-        "_evaluate_daily_drawdown",
+        live_close_settlement, "evaluate_daily_drawdown",
         lambda *_args, **_kwargs: {"tripped": False},
     )
 
 
 def _publish_fresh_admission_reconciles() -> None:
     observed_at = live_service.time.time()
-    live_service._live_state_update(
+    live_service.live_state_update(
         account_reconciled={"ok": True, "balance": 1000.0},
         account_updated_at=observed_at,
         account_reconcile_id="account-admission-r1",
@@ -211,8 +210,7 @@ def test_authoritative_close_pnl_requires_concrete_deal_evidence(payload, expect
 def test_authoritative_restore_rebuilds_peak_and_history_instead_of_using_cache(monkeypatch):
     _disable_restore_side_effects(monkeypatch)
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_get",
+        live_close_settlement, "runtime_kv_get",
         lambda *_args, **_kwargs: {
             "trade_date": "2026-07-19",
             "session_pnl": -999.0,
@@ -223,8 +221,7 @@ def test_authoritative_restore_rebuilds_peak_and_history_instead_of_using_cache(
         },
     )
     monkeypatch.setattr(
-        live_service,
-        "_load_authoritative_session_deal_facts",
+        live_close_settlement, "_load_authoritative_session_deal_facts",
         lambda *_args, **_kwargs: {
             "completed_position_trades": [
                 {"position_id": 1, "net": 100.0, "exec_timestamp": 100.0},
@@ -241,9 +238,9 @@ def test_authoritative_restore_rebuilds_peak_and_history_instead_of_using_cache(
         "from_runtime_config",
         lambda: SimpleNamespace(max_consecutive_losses=8, max_daily_loss_pct=99.0),
     )
-    live_service._live_state_update(account={"balance": 1020.0})
+    live_service.live_state_update(account={"balance": 1020.0})
 
-    assert live_service._restore_session_state_for_day("2026-07-19") is True
+    assert live_close_settlement.restore_session_state_for_day("2026-07-19") is True
 
     assert live_service.live_state_get("session_state_status") == "available"
     assert live_service.live_state_get("session_start_balance") == 1000.0
@@ -288,9 +285,9 @@ def test_partial_close_legs_aggregate_by_position_and_open_position_is_excluded(
     finally:
         conn.close()
 
-    monkeypatch.setattr(live_service, "_get_state_read_conn", _conn)
+    monkeypatch.setattr(live_close_settlement, "get_state_read_conn", _conn)
 
-    trades = live_service._load_authoritative_session_trades(
+    trades = live_close_settlement._load_authoritative_session_trades(
         "2026-07-19",
         broker_open_position_ids={102},
     )
@@ -299,7 +296,7 @@ def test_partial_close_legs_aggregate_by_position_and_open_position_is_excluded(
     assert trades[1]["net"] == pytest.approx(20.0)
     assert trades[1]["close_deals_count"] == 2
 
-    facts = live_service._load_authoritative_session_deal_facts(
+    facts = live_close_settlement._load_authoritative_session_deal_facts(
         "2026-07-19",
         broker_open_position_ids={102},
     )
@@ -308,8 +305,8 @@ def test_partial_close_legs_aggregate_by_position_and_open_position_is_excluded(
     assert sum(leg["net"] for leg in facts["realized_close_legs"]) == pytest.approx(22.0)
 
     _disable_restore_side_effects(monkeypatch)
-    live_service._live_state_update(account={"balance": 1022.0})
-    assert live_service._restore_session_state_for_day(
+    live_service.live_state_update(account={"balance": 1022.0})
+    assert live_close_settlement.restore_session_state_for_day(
         "2026-07-19",
         broker_open_position_ids={102},
     ) is True
@@ -357,8 +354,8 @@ def test_cross_day_partial_leg_affects_only_its_realization_day(monkeypatch, tmp
     finally:
         conn.close()
 
-    monkeypatch.setattr(live_service, "_get_state_read_conn", _conn)
-    facts = live_service._load_authoritative_session_deal_facts(
+    monkeypatch.setattr(live_close_settlement, "get_state_read_conn", _conn)
+    facts = live_close_settlement._load_authoritative_session_deal_facts(
         "2026-07-19",
         broker_open_position_ids=set(),
     )
@@ -367,8 +364,8 @@ def test_cross_day_partial_leg_affects_only_its_realization_day(monkeypatch, tmp
     assert [item["net"] for item in facts["completed_position_trades"]] == [20.0]
     assert [item["net"] for item in facts["realized_close_legs"]] == [30.0]
 
-    live_service._live_state_update(account={"balance": 1030.0})
-    projection = live_service._build_session_state_from_authoritative_trades(
+    live_service.live_state_update(account={"balance": 1030.0})
+    projection = live_close_settlement._build_session_state_from_authoritative_trades(
         trade_date="2026-07-19",
         trades=facts["completed_position_trades"],
         realized_close_legs=facts["realized_close_legs"],
@@ -431,9 +428,9 @@ def test_authoritative_session_requires_close_deal_for_broker_missing_recovery_r
         conn.commit()
     finally:
         conn.close()
-    monkeypatch.setattr(live_service, "_get_state_read_conn", _conn)
+    monkeypatch.setattr(live_close_settlement, "get_state_read_conn", _conn)
 
-    assert live_service._load_authoritative_session_trades(
+    assert live_close_settlement._load_authoritative_session_trades(
         "2026-07-19",
         broker_open_position_ids=set(),
     ) is None
@@ -456,12 +453,12 @@ def test_authoritative_session_requires_close_deal_for_broker_missing_recovery_r
     # Deal presence alone cannot resolve an active recovery row: the current
     # close detector must first prove a new deal/volume delta for this broker
     # disappearance (or startup recovery must mark the row closed).
-    assert live_service._load_authoritative_session_trades(
+    assert live_close_settlement._load_authoritative_session_trades(
         "2026-07-19",
         broker_open_position_ids=set(),
     ) is None
 
-    trades = live_service._load_authoritative_session_trades(
+    trades = live_close_settlement._load_authoritative_session_trades(
         "2026-07-19",
         broker_open_position_ids=set(),
         confirmed_closed_position_ids={999},
@@ -494,16 +491,14 @@ def test_invalid_cache_never_zeros_last_known_risk_or_opens_new_risk(
     cached_state,
 ):
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_get",
+        live_close_settlement, "runtime_kv_get",
         lambda *_args, **_kwargs: cached_state,
     )
     monkeypatch.setattr(
-        live_service,
-        "_load_authoritative_session_deal_facts",
+        live_close_settlement, "_load_authoritative_session_deal_facts",
         lambda *_args, **_kwargs: None,
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         session_pnl=-8.0,
         session_trades=2,
         session_peak_equity=1000.0,
@@ -511,7 +506,7 @@ def test_invalid_cache_never_zeros_last_known_risk_or_opens_new_risk(
         accepting_new_risk=True,
     )
 
-    assert live_service._restore_session_state_for_day("2026-07-19") is False
+    assert live_close_settlement.restore_session_state_for_day("2026-07-19") is False
 
     assert live_service.live_state_get("session_state_status") == "unavailable"
     assert live_service.live_state_get("session_pnl") == -8.0
@@ -526,8 +521,7 @@ def test_invalid_cache_never_zeros_last_known_risk_or_opens_new_risk(
 
 def test_same_day_cache_is_degraded_and_cannot_authorize_new_risk(monkeypatch):
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_get",
+        live_close_settlement, "runtime_kv_get",
         lambda *_args, **_kwargs: {
             "trade_date": "2026-07-19",
             "session_pnl": -12.0,
@@ -546,13 +540,12 @@ def test_same_day_cache_is_degraded_and_cannot_authorize_new_risk(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        live_service,
-        "_load_authoritative_session_deal_facts",
+        live_close_settlement, "_load_authoritative_session_deal_facts",
         lambda *_args, **_kwargs: None,
     )
-    live_service._live_state_update(accepting_new_risk=True)
+    live_service.live_state_update(accepting_new_risk=True)
 
-    assert live_service._restore_session_state_for_day("2026-07-19") is True
+    assert live_close_settlement.restore_session_state_for_day("2026-07-19") is True
 
     assert live_service.live_state_get("session_state_status") == "degraded_cache"
     assert live_service.live_state_get("session_pnl") == -12.0
@@ -561,8 +554,7 @@ def test_same_day_cache_is_degraded_and_cannot_authorize_new_risk(monkeypatch):
 
 def test_deals_without_fresh_account_balance_cannot_borrow_cache_baseline(monkeypatch):
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_get",
+        live_close_settlement, "runtime_kv_get",
         lambda *_args, **_kwargs: {
             "trade_date": "2026-07-19",
             "session_pnl": -5.0,
@@ -571,8 +563,7 @@ def test_deals_without_fresh_account_balance_cannot_borrow_cache_baseline(monkey
         },
     )
     monkeypatch.setattr(
-        live_service,
-        "_load_authoritative_session_deal_facts",
+        live_close_settlement, "_load_authoritative_session_deal_facts",
         lambda *_args, **_kwargs: {
             "completed_position_trades": [
                 {"position_id": 1, "net": -5.0, "exec_timestamp": 100.0}
@@ -582,9 +573,9 @@ def test_deals_without_fresh_account_balance_cannot_borrow_cache_baseline(monkey
             ],
         },
     )
-    live_service._live_state_update(account={}, accepting_new_risk=True)
+    live_service.live_state_update(account={}, accepting_new_risk=True)
 
-    assert live_service._restore_session_state_for_day("2026-07-19") is True
+    assert live_close_settlement.restore_session_state_for_day("2026-07-19") is True
 
     assert live_service.live_state_get("session_state_status") == "degraded_cache"
     assert live_service.live_state_get("session_start_balance") == 1000.0
@@ -594,7 +585,7 @@ def test_deals_without_fresh_account_balance_cannot_borrow_cache_baseline(monkey
 def test_session_fact_observation_never_borrows_positions_timestamp():
     from backend.api import live as live_api
 
-    live_service._live_state_update(
+    live_service.live_state_update(
         positions_updated_at=9999.0,
         session_last_trade_ts=8888.0,
         session_observed_at=1234.0,
@@ -619,7 +610,7 @@ def test_current_final_open_boundary_blocks_non_authoritative_session(
     )
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: False)
     live_service._process_shutdown_requested = False
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=True,
         accepting_new_risk=True,
         session_state_status=status,
@@ -636,7 +627,7 @@ def test_current_final_open_boundary_allows_available_session(monkeypatch):
     )
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: False)
     live_service._process_shutdown_requested = False
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=True,
         accepting_new_risk=True,
         session_state_status="available",
@@ -655,7 +646,7 @@ def test_generation_open_boundary_also_requires_live_session_projection(monkeypa
     )
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: False)
     live_service._process_shutdown_requested = False
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=True,
         accepting_new_risk=False,
         session_state_status="unavailable",
@@ -664,7 +655,7 @@ def test_generation_open_boundary_also_requires_live_session_projection(monkeypa
 
     assert live_service._open_trade_draining(lambda: False) is True
 
-    live_service._live_state_update(
+    live_service.live_state_update(
         accepting_new_risk=True,
         session_state_status="available",
     )
@@ -673,25 +664,24 @@ def test_generation_open_boundary_also_requires_live_session_projection(monkeypa
 
 
 def test_fresh_open_position_ids_require_independent_position_fact():
-    live_service._live_state_update(
+    live_service.live_state_update(
         positions=[{"position_id": 101}, {"ticket": 102}],
         positions_reconciled=[{"position_id": 101}, {"ticket": 102}],
         positions_updated_at=100.0,
         positions_reconcile_id="positions-r1",
     )
 
-    assert live_service._fresh_cached_broker_open_position_ids(now_ts=114.0) == {
+    assert live_close_settlement.fresh_cached_broker_open_position_ids(now_ts=114.0) == {
         101,
         102,
     }
-    assert live_service._fresh_cached_broker_open_position_ids(now_ts=121.0) is None
+    assert live_close_settlement.fresh_cached_broker_open_position_ids(now_ts=121.0) is None
 
 
 def test_degraded_cache_retains_original_session_observation(monkeypatch):
     _disable_restore_side_effects(monkeypatch)
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_get",
+        live_close_settlement, "runtime_kv_get",
         lambda *_args, **_kwargs: {
             "trade_date": "2026-07-19",
             "session_pnl": -12.0,
@@ -701,12 +691,11 @@ def test_degraded_cache_retains_original_session_observation(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        live_service,
-        "_load_authoritative_session_deal_facts",
+        live_close_settlement, "_load_authoritative_session_deal_facts",
         lambda *_args, **_kwargs: None,
     )
 
-    assert live_service._restore_session_state_for_day("2026-07-19") is True
+    assert live_close_settlement.restore_session_state_for_day("2026-07-19") is True
 
     assert live_service.live_state_get("session_state_status") == "degraded_cache"
     assert live_service.live_state_get("session_observed_at") == 4321.0

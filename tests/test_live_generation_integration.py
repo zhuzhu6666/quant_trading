@@ -9,6 +9,7 @@ from backend.services.live_loop_controller import LiveLoopController
 from backend.services.live_loop_v2 import _build_safety_cycle_contract
 from backend.services.live_safety_plane import LiveSafetyPlane
 from backend.services.live_safety_planner import SafetyPlan, safety_candidate
+from backend.services import live_close_settlement
 
 
 class _SnapshotBridge:
@@ -81,7 +82,7 @@ def _enable_phase2(monkeypatch):
     live_service._live_safety_plane = None
     live_service._live_safety_plane_owner = ""
     today = live_service.datetime.now(live_service.timezone.utc).strftime("%Y-%m-%d")
-    live_service._live_state_update(
+    live_service.live_state_update(
         trade_date=today,
         session_state_status="available",
         circuit_breaker=False,
@@ -125,14 +126,12 @@ def test_phase2_runs_broker_snapshot_and_safety_before_missing_online_bars(monke
         lambda *_args, **_kwargs: order.append("bars") or None,
     )
     monkeypatch.setattr(
-        live_service,
-        "_bootstrap_position_recovery",
+        live_close_settlement, "bootstrap_position_recovery",
         lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
-        live_service,
-        "_restore_session_state_for_day",
-        lambda *_args, **_kwargs: live_service._live_state_update(
+        live_close_settlement, "restore_session_state_for_day",
+        lambda *_args, **_kwargs: live_service.live_state_update(
             session_state_status="available"
         ) or True,
     )
@@ -161,8 +160,7 @@ def test_phase2_circuit_blocks_alpha_only_after_safety(monkeypatch):
     bridge = _SnapshotBridge()
     monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(
-        live_service,
-        "_evaluate_daily_drawdown",
+        live_close_settlement, "evaluate_daily_drawdown",
         lambda: {"tripped": True, "dd_pct": 5.0},
     )
     monkeypatch.setattr(
@@ -289,13 +287,12 @@ def test_generation_startup_barrier_requires_all_authoritative_steps(monkeypatch
         {"engine": SimpleNamespace(is_warm=True)},
     )
     monkeypatch.setattr(
-        live_service,
-        "_restore_session_state_for_day",
-        lambda *_args, **_kwargs: live_service._live_state_update(
+        live_close_settlement, "restore_session_state_for_day",
+        lambda *_args, **_kwargs: live_service.live_state_update(
             session_state_status="available"
         ) or True,
     )
-    monkeypatch.setattr(live_service, "_bootstrap_position_recovery", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(live_close_settlement, "bootstrap_position_recovery", lambda *_args, **_kwargs: True)
 
     ready = live_service._attempt_generation_startup_barrier(
         generation_id=generation.generation_id,
@@ -332,13 +329,12 @@ def test_generation_startup_barrier_accepts_fresh_safety_with_admission_blocker(
         {"engine": SimpleNamespace(is_warm=True)},
     )
     monkeypatch.setattr(
-        live_service,
-        "_restore_session_state_for_day",
-        lambda *_args, **_kwargs: live_service._live_state_update(
+        live_close_settlement, "restore_session_state_for_day",
+        lambda *_args, **_kwargs: live_service.live_state_update(
             session_state_status="available"
         ) or True,
     )
-    monkeypatch.setattr(live_service, "_bootstrap_position_recovery", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(live_close_settlement, "bootstrap_position_recovery", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         live_service,
         "_run_live_safety_cycle",
@@ -384,11 +380,10 @@ def test_generation_startup_barrier_rejects_safety_cycle_failure(monkeypatch):
     bridge = _SnapshotBridge()
     positions = bridge.reconcile_positions()
     account = bridge.reconcile_account()
-    monkeypatch.setattr(live_service, "_bootstrap_position_recovery", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(live_close_settlement, "bootstrap_position_recovery", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        live_service,
-        "_restore_session_state_for_day",
-        lambda *_args, **_kwargs: live_service._live_state_update(
+        live_close_settlement, "restore_session_state_for_day",
+        lambda *_args, **_kwargs: live_service.live_state_update(
             session_state_status="available"
         ) or True,
     )
@@ -440,11 +435,10 @@ def test_generation_startup_barrier_rejects_unknown_safety_status_without_blocke
     bridge = _SnapshotBridge()
     positions = bridge.reconcile_positions()
     account = bridge.reconcile_account()
-    monkeypatch.setattr(live_service, "_bootstrap_position_recovery", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(live_close_settlement, "bootstrap_position_recovery", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
-        live_service,
-        "_restore_session_state_for_day",
-        lambda *_args, **_kwargs: live_service._live_state_update(
+        live_close_settlement, "restore_session_state_for_day",
+        lambda *_args, **_kwargs: live_service.live_state_update(
             session_state_status="available"
         ) or True,
     )
@@ -659,7 +653,7 @@ def test_draining_generation_keeps_thread_ownership_and_rejects_replacement(monk
     monkeypatch.setattr(live_service, "_start_live_safety_watchdog", lambda: False)
     monkeypatch.setattr(live_service.threading, "Thread", _OwnedThread)
     monkeypatch.setattr(live_service, "_process_shutdown_requested", False)
-    monkeypatch.setattr(live_service, "_runtime_kv_set", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(live_close_settlement, "runtime_kv_set", lambda *_args, **_kwargs: None)
 
     first = live_service.start_loop("ctrader", persist_desired=False)
     draining = live_service.stop_loop(persist_desired=False)
@@ -701,12 +695,12 @@ def test_stop_waits_for_admitted_open_rpc_then_keeps_generation_draining(monkeyp
         lambda **_kwargs: {"ok": True, "blockers": ()},
     )
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: False)
-    monkeypatch.setattr(live_service, "_runtime_kv_set", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(live_close_settlement, "runtime_kv_set", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(live_service, "stop_live_scheduler", lambda: None)
     # Earlier safety-cycle tests intentionally leave their fail-closed
     # projection in process state.  This case exercises controller/RPC
     # draining in isolation and does not model an already-running live loop.
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=False,
         accepting_new_risk=True,
         session_state_status="available",
@@ -892,7 +886,7 @@ def test_loop_status_merges_local_fail_closed_open_blockers(
         controller.complete_barrier_step(generation.generation_id, step)
     monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", controller)
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: latched)
-    live_service._live_state_update(**state_patch)
+    live_service.live_state_update(**state_patch)
 
     status = live_service.loop_status()
 
@@ -918,10 +912,9 @@ def test_missing_reconcile_timestamp_is_not_fresh(monkeypatch):
 
 
 def test_session_restore_queries_deals_even_when_runtime_cache_is_missing(monkeypatch):
-    monkeypatch.setattr(live_service, "_runtime_kv_get", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(live_close_settlement, "runtime_kv_get", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        live_service,
-        "_load_authoritative_session_deal_facts",
+        live_close_settlement, "_load_authoritative_session_deal_facts",
         lambda *_args, **_kwargs: {
             "completed_position_trades": [
                 {"position_id": 10, "net": -2.5, "exec_timestamp": 100.0}
@@ -931,15 +924,14 @@ def test_session_restore_queries_deals_even_when_runtime_cache_is_missing(monkey
             ],
         },
     )
-    monkeypatch.setattr(live_service, "_persist_session_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(live_close_settlement, "_persist_session_state", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        live_service,
-        "_evaluate_daily_drawdown",
+        live_close_settlement, "evaluate_daily_drawdown",
         lambda *_args, **_kwargs: {"tripped": False},
     )
-    live_service._live_state_update(account={"balance": 997.5})
+    live_service.live_state_update(account={"balance": 997.5})
 
-    restored = live_service._restore_session_state_for_day("2026-07-18")
+    restored = live_close_settlement.restore_session_state_for_day("2026-07-18")
 
     assert restored is True
     assert live_service.live_state_get("session_state_status") == "available"
@@ -980,7 +972,7 @@ def test_authoritative_deals_exclude_positions_still_open_at_broker(monkeypatch)
         def close(self):
             return None
 
-    monkeypatch.setattr(live_service, "_get_state_read_conn", lambda: _Connection())
+    monkeypatch.setattr(live_close_settlement, "get_state_read_conn", lambda: _Connection())
     def _execute(_conn, sql, *_args, **_kwargs):
         if "WITH final_close" in sql:
             return _Result(rows)
@@ -1011,9 +1003,9 @@ def test_authoritative_deals_exclude_positions_still_open_at_broker(monkeypatch)
             )
         return _Result([])
 
-    monkeypatch.setattr(live_service, "_state_execute", _execute)
+    monkeypatch.setattr(live_close_settlement, "_state_execute", _execute)
 
-    trades = live_service._load_authoritative_session_trades(
+    trades = live_close_settlement._load_authoritative_session_trades(
         "2026-07-18",
         broker_open_position_ids={12},
     )
@@ -1022,15 +1014,14 @@ def test_authoritative_deals_exclude_positions_still_open_at_broker(monkeypatch)
 
 
 def test_session_unavailable_never_zeros_last_known_risk(monkeypatch):
-    monkeypatch.setattr(live_service, "_runtime_kv_get", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(live_close_settlement, "runtime_kv_get", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        live_service,
-        "_load_authoritative_session_deal_facts",
+        live_close_settlement, "_load_authoritative_session_deal_facts",
         lambda *_args, **_kwargs: None,
     )
-    live_service._live_state_update(session_pnl=-8.0, session_trades=2)
+    live_service.live_state_update(session_pnl=-8.0, session_trades=2)
 
-    restored = live_service._restore_session_state_for_day("2026-07-18")
+    restored = live_close_settlement.restore_session_state_for_day("2026-07-18")
 
     assert restored is False
     assert live_service.live_state_get("session_state_status") == "unavailable"
@@ -1042,7 +1033,7 @@ def test_session_unavailable_never_zeros_last_known_risk(monkeypatch):
 def test_failed_position_reconcile_blocks_open_but_cached_position_protection_continues(monkeypatch):
     bridge = _SnapshotBridge()
     protected = []
-    live_service._live_state_update(
+    live_service.live_state_update(
         positions=[{
             "position_id": 901,
             "symbol": "XAUUSD+",
@@ -1180,11 +1171,10 @@ def test_position_without_stable_broker_identity_blocks_new_risk_without_index_e
 
 def test_phase2_session_restore_failure_is_not_reset_to_zero(monkeypatch):
     monkeypatch.setattr(
-        live_service,
-        "_restore_session_state_for_day",
+        live_close_settlement, "restore_session_state_for_day",
         lambda *_args, **_kwargs: False,
     )
-    live_service._live_state_update(session_pnl=-9.0, session_trades=3)
+    live_service.live_state_update(session_pnl=-9.0, session_trades=3)
 
     live_service._prime_live_loop_state(
         broker="ctrader",
@@ -1206,9 +1196,9 @@ def test_session_drawdown_is_peak_to_trough_not_only_loss_from_start(monkeypatch
         "from_runtime_config",
         lambda: SimpleNamespace(max_consecutive_losses=99, max_daily_loss_pct=99.0),
     )
-    live_service._live_state_update(account={"balance": 1020.0})
+    live_service.live_state_update(account={"balance": 1020.0})
 
-    restored = live_service._build_session_state_from_authoritative_trades(
+    restored = live_close_settlement._build_session_state_from_authoritative_trades(
         trade_date="2026-07-18",
         trades=[
             {"net": 100.0, "exec_timestamp": 1.0},

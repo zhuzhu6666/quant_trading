@@ -2,6 +2,7 @@ import sqlite3
 
 from backend.services import live_service
 from backend.services.canonical_v2 import ensure_sqlite_schema, record_review
+from backend.services import live_close_settlement
 
 
 def test_risk_inputs_use_clean_reviews_and_position_notional(monkeypatch, tmp_path):
@@ -24,7 +25,7 @@ def test_risk_inputs_use_clean_reviews_and_position_notional(monkeypatch, tmp_pa
         connection.row_factory = sqlite3.Row
         return connection
 
-    monkeypatch.setattr(live_service, "_get_state_pg_conn", connect)
+    monkeypatch.setattr(live_close_settlement, "get_state_pg_conn", connect)
     clean_pnls, positions = live_service._risk_metric_inputs(
         [
             {
@@ -56,16 +57,14 @@ def test_stale_broker_facts_replace_previous_known_snapshot(monkeypatch):
         "components": {"var": {"status": "known", "var_pct": 1.0}},
     }
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_get",
+        live_close_settlement, "runtime_kv_get",
         lambda *_args, **_kwargs: previous,
     )
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_set",
+        live_close_settlement, "runtime_kv_set",
         lambda _key, value: writes.append(value),
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         account_reconciled={"equity": 10_000.0},
         positions_reconciled=[],
         account_reconcile_id="account-old",

@@ -33,6 +33,7 @@ from backend.services.v16_brain_orchestrator import V16BrainOrchestratorService
 from backend.services.v16_command_gate import V16CommandGate
 from config.runtime_config import RuntimeConfig
 from risk.policy_service import RiskPolicyService
+from backend.services import live_close_settlement
 
 
 def _init_state(path):
@@ -487,13 +488,11 @@ def test_shadow_boundary_records_selection_trace_without_changing_binding(monkey
         },
     )
     monkeypatch.setattr(
-        live_service,
-        "_merge_recovery_position_meta",
+        live_close_settlement, "merge_recovery_position_meta",
         lambda position_id, payload: merges.append((position_id, payload)),
     )
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_get",
+        live_close_settlement, "runtime_kv_get",
         lambda *_args, **_kwargs: projection,
     )
     monkeypatch.setattr(

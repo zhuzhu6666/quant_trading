@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.services import live_service
+from backend.services import live_close_settlement
 from backend.services.live_safety_state import (
     activate_no_new_risk_latch,
     no_new_risk_latch_status,
@@ -23,7 +24,7 @@ def _isolated_safety_state(monkeypatch, tmp_path):
     monkeypatch.setenv("QUANT_SAFETY_STATE_DIR", str(tmp_path / "safety"))
     monkeypatch.setattr(live_service, "_process_shutdown_requested", False)
     monkeypatch.setattr(live_service, "_EMERGENCY_POST_RECONCILE_TIMEOUT_SEC", 0.0)
-    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(live_close_settlement, "merge_recovery_position_meta", lambda *_args, **_kwargs: None)
     yield
     reset_safety_state_for_tests()
 
@@ -133,8 +134,7 @@ def _install(monkeypatch, bridge):
     monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
     monkeypatch.setattr(
-        live_service,
-        "_lookup_open_decision_context",
+        live_close_settlement, "lookup_open_decision_context",
         lambda _pid: {"entry_ts": 1.0, "timeframe": "M5", "source": "decision_ledger"},
     )
 
@@ -331,13 +331,11 @@ def test_emergency_pg_and_audit_failures_do_not_change_broker_result(monkeypatch
     ])
     _install(monkeypatch, bridge)
     monkeypatch.setattr(
-        live_service,
-        "_lookup_open_decision_context",
+        live_close_settlement, "lookup_open_decision_context",
         lambda _pid: (_ for _ in ()).throw(RuntimeError("postgres unavailable")),
     )
     monkeypatch.setattr(
-        live_service,
-        "_merge_recovery_position_meta",
+        live_close_settlement, "merge_recovery_position_meta",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("audit unavailable")),
     )
 
@@ -449,8 +447,7 @@ def test_emergency_post_reconcile_failure_never_reports_success(monkeypatch):
 
 def test_broker_open_timestamp_is_primary_when_pg_metadata_exists(monkeypatch):
     monkeypatch.setattr(
-        live_service,
-        "_lookup_open_decision_context",
+        live_close_settlement, "lookup_open_decision_context",
         lambda _pid: {"entry_ts": 10.0, "timeframe": "M15", "source": "decision_ledger"},
     )
 

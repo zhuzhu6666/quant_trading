@@ -38,7 +38,7 @@ def _isolated_open_admission_state(monkeypatch, tmp_path):
         "_live_safety_watchdog_probe",
         lambda: {"unknown_execution_count": 0},
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=False,
         accepting_new_risk=True,
         session_state_status="available",
@@ -165,7 +165,7 @@ def test_pending_open_retry_reuses_same_bar_and_original_gate(monkeypatch):
         lambda **kwargs: calls.append(kwargs)
         or SimpleNamespace(passed=True, reason="passed"),
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         account={"balance": 10_000.0},
         positions=[],
     )

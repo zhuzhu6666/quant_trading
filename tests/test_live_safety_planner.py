@@ -594,7 +594,7 @@ def test_production_forced_shadow_persistence_records_dedicated_safety_cause(
     state_updates = []
     monkeypatch.setattr(
         live_service,
-        "_live_state_update",
+        "live_state_update",
         lambda **payload: state_updates.append(payload),
     )
 
@@ -641,7 +641,7 @@ def test_live_service_enforce_uses_single_supervisor_executor_exactly_once(
             {"balance": 1000.0} if key == "account" else default
         ),
     )
-    monkeypatch.setattr(live_service, "_live_state_update", lambda **_payload: None)
+    monkeypatch.setattr(live_service, "live_state_update", lambda **_payload: None)
     monkeypatch.setattr(live_service, "_safety_reference_price", lambda *_args: 100.0)
     monkeypatch.setattr(
         live_service,

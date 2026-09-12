@@ -255,7 +255,7 @@ def test_ctrader_events_never_rejuvenate_reconciled_account_or_positions(monkeyp
         "equity": 1000.0,
     }
     authoritative_positions = [{"position_id": 42, "symbol": "XAUUSD+"}]
-    live_service._live_state_update(
+    live_service.live_state_update(
         _diag={"bridge_ready": True},
         account=dict(authoritative_account),
         account_reconciled=dict(authoritative_account),
@@ -343,7 +343,7 @@ def test_readiness_cannot_be_green_when_loop_or_safety_blocks_new_risk(monkeypat
             },
         },
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         _diag={"bridge_ready": True},
         account={"ok": True, "broker": "ctrader", "balance": 1000.0},
         account_reconciled={"ok": True, "broker": "ctrader", "balance": 1000.0},
@@ -386,7 +386,7 @@ def test_readiness_recovers_missed_bridge_edge_from_accepting_generation(monkeyp
             },
         },
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         _diag={"bridge_ready": False},
         account_reconciled={"ok": True, "broker": "ctrader", "balance": 1000.0},
         account_updated_at=now,

@@ -10,6 +10,7 @@ import pytest
 from backend.ledger.service import DecisionLedger
 from backend.services import live_service
 from backend.services.live_loop_controller import LiveLoopController
+from backend.services import live_close_settlement
 
 
 class _IdleThread:
@@ -48,8 +49,9 @@ def _reset_loop_state(monkeypatch, tmp_path):
     live_service._process_shutdown_requested = False
     live_service._pending_close_reasons.clear()
     live_service._pending_close_verdicts.clear()
-    live_service._recovery_zero_confirmations.clear()
-    live_service._live_state_update(
+    live_close_settlement._recovery_zero_confirmations.clear()
+    live_service._prev_position_ids.clear()
+    live_service.live_state_update(
         broker=None,
         loop_running=False,
         loop_strategy=None,
@@ -73,7 +75,7 @@ def _reset_loop_state(monkeypatch, tmp_path):
         loop_shutdown=None,
     )
 
-    live_service._live_state_update(
+    live_service.live_state_update(
         circuit_breaker=False,
         circuit_reason="",
         session_pnl=0.0,
@@ -88,8 +90,9 @@ def _reset_loop_state(monkeypatch, tmp_path):
     live_service._process_shutdown_requested = False
     live_service._pending_close_reasons.clear()
     live_service._pending_close_verdicts.clear()
-    live_service._recovery_zero_confirmations.clear()
-    live_service._live_state_update(
+    live_close_settlement._recovery_zero_confirmations.clear()
+    live_service._prev_position_ids.clear()
+    live_service.live_state_update(
         broker=None,
         loop_running=False,
         loop_strategy=None,
@@ -112,7 +115,7 @@ def _reset_loop_state(monkeypatch, tmp_path):
         accepting_new_risk=False,
         loop_shutdown=None,
     )
-    live_service._live_state_update(
+    live_service.live_state_update(
         circuit_breaker=False,
         circuit_reason="",
         session_pnl=0.0,
@@ -128,7 +131,7 @@ def _reset_loop_state(monkeypatch, tmp_path):
 def test_missing_recovery_row_final_close_resets_stale_baseline():
     position_id = 284214987
 
-    result = live_service._pending_close_cursor_overrides(
+    result = live_close_settlement._pending_close_cursor_overrides(
         {position_id},
         active_rows_by_id={},
         pending_close_causes={
@@ -150,7 +153,7 @@ def test_missing_recovery_row_final_close_resets_stale_baseline():
 def test_missing_recovery_row_partial_close_keeps_incremental_baseline():
     position_id = 284214987
 
-    result = live_service._pending_close_cursor_overrides(
+    result = live_close_settlement._pending_close_cursor_overrides(
         {position_id},
         active_rows_by_id={},
         pending_close_causes={
@@ -174,18 +177,17 @@ def test_missing_recovery_row_partial_close_keeps_incremental_baseline():
 
 
 def _patch_live_state_conn(monkeypatch, conn_factory):
-    monkeypatch.setattr(live_service, "_get_state_pg_conn", conn_factory)
-    monkeypatch.setattr(live_service, "_get_state_read_conn", conn_factory)
+    monkeypatch.setattr(live_close_settlement, "get_state_pg_conn", conn_factory)
+    monkeypatch.setattr(live_close_settlement, "get_state_read_conn", conn_factory)
 
 
 def _patch_close_context_metadata(monkeypatch):
     """Keep broker-action unit tests independent from the PostgreSQL store."""
     monkeypatch.setattr(
-        live_service,
-        "_lookup_open_decision_context",
+        live_close_settlement, "lookup_open_decision_context",
         lambda _position_id: {"entry_ts": 0.0, "timeframe": "M5", "source": ""},
     )
-    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *args, **kwargs: None)
+    monkeypatch.setattr(live_close_settlement, "merge_recovery_position_meta", lambda *args, **kwargs: None)
 
 
 def _patch_fresh_projection_publish_without_state_store(monkeypatch):
@@ -261,7 +263,7 @@ def test_closed_position_handler_preserves_close_source_mapping(monkeypatch):
             "total_pnl": -1.0,
         },
     )
-    monkeypatch.setattr(live_service, "_lookup_recovery_context_integrity", lambda *args: "full")
+    monkeypatch.setattr(live_close_settlement, "lookup_recovery_context_integrity", lambda *args: "full")
 
     def _capture_ledger(**kwargs):
         captured["ledger_close_source"] = kwargs["close_source"]
@@ -302,7 +304,7 @@ def test_closed_position_handler_preserves_close_source_mapping(monkeypatch):
 
 def test_closed_position_without_deal_blocks_session_and_defers_all_consumers(monkeypatch):
     calls = []
-    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(live_close_settlement, "merge_recovery_position_meta", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         live_service,
         "_collect_closed_position_attribution",
@@ -350,13 +352,11 @@ def test_close_aux_failure_cannot_skip_same_tick_session_rebuild(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        live_service,
-        "_mark_recovery_position_closed",
+        live_close_settlement, "mark_recovery_position_closed",
         lambda *_args, **_kwargs: order.append("recovery_closed"),
     )
     monkeypatch.setattr(
-        live_service,
-        "_record_risk_reduction_aux_failure",
+        live_close_settlement, "record_risk_reduction_aux_failure",
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
@@ -377,13 +377,12 @@ def test_close_aux_failure_cannot_skip_same_tick_session_rebuild(monkeypatch):
         assert live_service.live_state_get("session_state_status") == (
             "unavailable"
         )
-        live_service._live_state_update(session_state_status="available")
+        live_service.live_state_update(session_state_status="available")
         return True
 
-    monkeypatch.setattr(live_service, "_restore_session_state_for_day", _restore)
+    monkeypatch.setattr(live_close_settlement, "restore_session_state_for_day", _restore)
     monkeypatch.setattr(
-        live_service,
-        "_release_session_close_deal_latch",
+        live_close_settlement, "release_session_close_deal_latch",
         lambda *_args, **_kwargs: order.append("latch_released"),
     )
 
@@ -416,7 +415,7 @@ def test_close_aux_failure_cannot_skip_same_tick_session_rebuild(monkeypatch):
 
 
 def test_session_trade_projection_is_idempotent_by_position_id():
-    live_service._live_state_update(
+    live_service.live_state_update(
         session_pnl=0.0,
         session_trades=0,
         session_winning=0,
@@ -429,23 +428,22 @@ def test_session_trade_projection_is_idempotent_by_position_id():
     # The authoritative projection rebuilds from deals; the live pending
     # set must likewise record each position once no matter how many
     # deal-wait defers fire for it.
-    live_service._live_state_update(session_pending_close_remove=[812])
-    live_service._live_state_update(session_pending_close_add=812)
-    live_service._live_state_update(session_pending_close_add=812)
+    live_service.live_state_update(session_pending_close_remove=[812])
+    live_service.live_state_update(session_pending_close_add=812)
+    live_service.live_state_update(session_pending_close_add=812)
     ids = live_service.live_state_get("session_pending_close_ids")
     assert ids.count(812) == 1
-    live_service._live_state_update(session_pending_close_remove=[812])
+    live_service.live_state_update(session_pending_close_remove=[812])
     assert 812 not in live_service.live_state_get("session_pending_close_ids")
 
 
 def test_prime_live_loop_state_preserves_session_when_restore_is_unavailable(monkeypatch):
     monkeypatch.setattr(
-        live_service,
-        "_restore_session_state_for_day",
+        live_close_settlement, "restore_session_state_for_day",
         lambda trade_date=None, **_kwargs: False,
     )
 
-    live_service._live_state_update(
+    live_service.live_state_update(
         positions=[],
         positions_updated_at=time.time(),
         session_pnl=88.0,
@@ -479,7 +477,7 @@ def test_prime_live_loop_state_preserves_session_when_restore_is_unavailable(mon
 
 def test_prime_live_loop_state_restores_existing_session_snapshot(monkeypatch):
     def _restore(trade_date=None, **_kwargs):
-        live_service._live_state_update(
+        live_service.live_state_update(
             session_pnl=2.75,
             session_trades=29,
             session_winning=8,
@@ -489,8 +487,8 @@ def test_prime_live_loop_state_restores_existing_session_snapshot(monkeypatch):
         )
         return True
 
-    monkeypatch.setattr(live_service, "_restore_session_state_for_day", _restore)
-    live_service._live_state_update(
+    monkeypatch.setattr(live_close_settlement, "restore_session_state_for_day", _restore)
+    live_service.live_state_update(
         positions=[],
         positions_reconciled=[],
         positions_updated_at=time.time(),
@@ -528,7 +526,7 @@ def test_restore_session_state_rebuilds_from_authoritative_close_deals(monkeypat
         conn.close()
 
     _patch_live_state_conn(monkeypatch, _conn)
-    live_service._live_state_update(
+    live_service.live_state_update(
         account={"balance": 1000.0},
         session_pnl=-0.17,
         session_trades=1,
@@ -536,7 +534,7 @@ def test_restore_session_state_rebuilds_from_authoritative_close_deals(monkeypat
         session_losing=1,
         session_trade_pnls=[-0.17],
     )
-    live_service._persist_session_state("2026-07-13")
+    live_close_settlement._persist_session_state("2026-07-13")
 
     day_start = datetime(2026, 7, 13, tzinfo=timezone.utc).timestamp()
     conn = _conn()
@@ -559,7 +557,7 @@ def test_restore_session_state_rebuilds_from_authoritative_close_deals(monkeypat
     finally:
         conn.close()
 
-    assert live_service._restore_session_state_for_day(
+    assert live_close_settlement.restore_session_state_for_day(
         "2026-07-13",
         broker_open_position_ids=set(),
     ) is True
@@ -574,8 +572,8 @@ def test_restore_session_state_rebuilds_from_authoritative_close_deals(monkeypat
 
 
 def test_session_windows_distinguish_utc_risk_day_from_beijing_calendar_day():
-    utc_start, utc_end = live_service._session_trade_window("2026-07-16", "UTC")
-    cn_start, cn_end = live_service._session_trade_window("2026-07-16", "Asia/Shanghai")
+    utc_start, utc_end = live_close_settlement._session_trade_window("2026-07-16", "UTC")
+    cn_start, cn_end = live_close_settlement._session_trade_window("2026-07-16", "Asia/Shanghai")
 
     assert utc_end - utc_start == 86400
     assert cn_end - cn_start == 86400
@@ -583,14 +581,14 @@ def test_session_windows_distinguish_utc_risk_day_from_beijing_calendar_day():
 
 
 def test_session_start_balance_is_repaired_after_late_broker_account(monkeypatch):
-    monkeypatch.setattr(live_service, "_persist_session_state", lambda trade_date=None: None)
-    live_service._live_state_update(
+    monkeypatch.setattr(live_close_settlement, "_persist_session_state", lambda trade_date=None: None)
+    live_service.live_state_update(
         account={"balance": 369.84},
         session_pnl=-5.40,
         session_start_balance=0.0,
     )
 
-    repaired = live_service._repair_session_start_balance_from_account()
+    repaired = live_close_settlement._repair_session_start_balance_from_account()
 
     assert repaired == pytest.approx(375.24)
     assert live_service.live_state_get("session_start_balance") == pytest.approx(375.24)
@@ -605,7 +603,7 @@ def test_floor_api_volume_to_step_skips_untradeable_partial_reduce():
 
 
 def test_kelly_sizing_outputs_api_volume_tiers():
-    live_service._live_state_update(risk={"kelly": {"kelly_fraction": 1.0}})
+    live_service.live_state_update(risk={"kelly": {"kelly_fraction": 1.0}})
     cfg = SimpleNamespace(
         kelly_enabled=True,
         kelly_fraction=1.0,
@@ -629,7 +627,7 @@ def test_kelly_sizing_outputs_api_volume_tiers():
 
 
 def test_kelly_sizing_respects_initial_dynamic_cap():
-    live_service._live_state_update(risk={"kelly": {"kelly_fraction": 1.0}})
+    live_service.live_state_update(risk={"kelly": {"kelly_fraction": 1.0}})
     cfg = SimpleNamespace(
         kelly_enabled=True,
         kelly_fraction=1.0,
@@ -749,12 +747,11 @@ def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
 
     monkeypatch.setattr(live_service, "_start_live_scheduler", lambda: scheduler_calls.append("started"))
     monkeypatch.setattr(
-        live_service,
-        "_restore_session_state_for_day",
+        live_close_settlement, "restore_session_state_for_day",
         lambda trade_date=None, **_kwargs: False,
     )
     monkeypatch.setattr(live_service.threading, "Thread", _IdleThread)
-    live_service._live_state_update(loop_shutdown={"status": "completed"})
+    live_service.live_state_update(loop_shutdown={"status": "completed"})
 
     result = live_service.start_loop("ctrader", strategy_name="smoke", persist_desired=False)
 
@@ -799,15 +796,13 @@ def test_process_shutdown_joins_loop_preserves_desired_and_releases_ownership(mo
     stop_flag = generation.stop_event
     runtime_writes = []
     desired_writes = []
-    live_service._live_state_update(loop_running=True, loop_strategy="smoke")
+    live_service.live_state_update(loop_running=True, loop_strategy="smoke")
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_set",
+        live_close_settlement, "runtime_kv_set",
         lambda key, value: runtime_writes.append((key, value)),
     )
     monkeypatch.setattr(
-        live_service,
-        "_persist_loop_desired_state",
+        live_close_settlement, "persist_loop_desired_state",
         lambda *args, **kwargs: desired_writes.append((args, kwargs)),
     )
 
@@ -836,10 +831,9 @@ def test_process_shutdown_timeout_keeps_thread_ownership_for_recovery(monkeypatc
     generation = _bind_generation(thread, strategy_name="smoke")
     stop_flag = generation.stop_event
     runtime_writes = []
-    live_service._live_state_update(loop_running=True, loop_strategy="smoke")
+    live_service.live_state_update(loop_running=True, loop_strategy="smoke")
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_set",
+        live_close_settlement, "runtime_kv_set",
         lambda key, value: runtime_writes.append((key, value)),
     )
 
@@ -863,15 +857,13 @@ def test_process_shutdown_timeout_keeps_thread_ownership_for_recovery(monkeypatc
 def test_process_shutdown_not_running_is_idempotent_and_preserves_desired(monkeypatch):
     runtime_writes = []
     desired_writes = []
-    live_service._live_state_update(loop_running=True, loop_strategy="stale")
+    live_service.live_state_update(loop_running=True, loop_strategy="stale")
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_set",
+        live_close_settlement, "runtime_kv_set",
         lambda key, value: runtime_writes.append((key, value)),
     )
     monkeypatch.setattr(
-        live_service,
-        "_persist_loop_desired_state",
+        live_close_settlement, "persist_loop_desired_state",
         lambda *args, **kwargs: desired_writes.append((args, kwargs)),
     )
 
@@ -903,10 +895,9 @@ def test_process_shutdown_latch_blocks_start_and_delayed_auto_resume(monkeypatch
                 self.target(*self.args)
 
     scheduler_starts = []
-    monkeypatch.setattr(live_service, "_runtime_kv_set", lambda _key, _value: None)
+    monkeypatch.setattr(live_close_settlement, "runtime_kv_set", lambda _key, _value: None)
     monkeypatch.setattr(
-        live_service,
-        "_read_loop_desired_state",
+        live_close_settlement, "read_loop_desired_state",
         lambda: {
             "enabled": True,
             "broker": "ctrader",
@@ -944,7 +935,7 @@ def test_process_shutdown_latch_rejects_new_loop_generation(monkeypatch):
 
 
 def test_mark_loop_stopped_for_display_preserves_cached_data():
-    live_service._live_state_update(
+    live_service.live_state_update(
         broker="ctrader",
         loop_running=True,
         loop_strategy="carry",
@@ -1012,8 +1003,7 @@ def test_record_filled_open_context_persists_even_before_amend_success(monkeypat
 
     monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
     monkeypatch.setattr(
-        live_service,
-        "_upsert_recovery_position_state",
+        live_close_settlement, "upsert_recovery_position_state",
         lambda raw, **kwargs: calls["upserts"].append((raw, kwargs)),
     )
 
@@ -1199,8 +1189,7 @@ def test_entry_protection_amend_requires_fresh_matching_projection(
         lambda **kwargs: calls["failure"].append(kwargs),
     )
     monkeypatch.setattr(
-        live_service,
-        "_record_risk_reduction_aux_failure",
+        live_close_settlement, "record_risk_reduction_aux_failure",
         lambda event_type, **kwargs: calls["aux"].append((event_type, kwargs)),
     )
     monkeypatch.setattr(
@@ -1317,8 +1306,7 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
         lambda key, *args, **kwargs: {"risk": "state"} if key == "risk" else 3.5 if key == "session_pnl" else None,
     )
     monkeypatch.setattr(
-        live_service,
-        "_upsert_recovery_position_state",
+        live_close_settlement, "upsert_recovery_position_state",
         lambda raw, **kwargs: calls["upserts"].append((raw, kwargs)),
     )
 
@@ -1769,8 +1757,8 @@ def test_emergency_close_evaluates_and_remembers_close_verdict(monkeypatch):
     assert close_calls == [(268, 100.0)]
     assert calls[0][0] == "close_position"
     assert calls[0][1]["close_reason"] == "emergency_close"
-    assert live_service._consume_close_reason(268) == "emergency_close"
-    verdict = live_service._consume_close_verdict(268, "emergency_close")
+    assert live_close_settlement.consume_close_reason(268) == "emergency_close"
+    verdict = live_close_settlement.consume_close_verdict(268, "emergency_close")
     assert verdict["allowed"] is True
     assert verdict["audit_payload"]["action"] == "close_position"
 
@@ -1844,15 +1832,15 @@ def test_upsert_recovery_position_state_preserves_valid_volume_on_zero_snapshot(
         conn.close()
 
     _patch_live_state_conn(monkeypatch, _conn)
-    monkeypatch.setattr(live_service, "_lookup_entry_decision_id", lambda position_id: "dec_open")
+    monkeypatch.setattr(live_close_settlement, "lookup_entry_decision_id", lambda position_id: "dec_open")
 
-    live_service._upsert_recovery_position_state(
+    live_close_settlement.upsert_recovery_position_state(
         {"position_id": 270, "symbol": "XAUUSD+", "direction": 1, "open_price": 4050.0, "volume": 100.0},
         broker="ctrader",
         strategy_name="factor_v4",
         status="open",
     )
-    live_service._upsert_recovery_position_state(
+    live_close_settlement.upsert_recovery_position_state(
         {"position_id": 270, "symbol": "XAUUSD+", "direction": 1, "open_price": 4051.0, "volume": 0.0},
         broker="ctrader",
         strategy_name="factor_v4",
@@ -1898,13 +1886,13 @@ def test_pending_close_intent_survives_memory_loss_via_recovery_meta(monkeypatch
 
     _patch_live_state_conn(monkeypatch, _conn)
 
-    live_service._remember_close_reason(271, "holding_timeout")
-    live_service._remember_close_verdict(271, SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"}))
+    live_close_settlement.remember_close_reason(271, "holding_timeout")
+    live_close_settlement.remember_close_verdict(271, SimpleNamespace(to_dict=lambda: {"allowed": True, "reason": "ok"}))
     live_service._pending_close_reasons.clear()
     live_service._pending_close_verdicts.clear()
 
-    assert live_service._consume_close_reason(271) == "holding_timeout"
-    assert live_service._consume_close_verdict(271, "holding_timeout")["allowed"] is True
+    assert live_close_settlement.consume_close_reason(271) == "holding_timeout"
+    assert live_close_settlement.consume_close_verdict(271, "holding_timeout")["allowed"] is True
 
 
 def test_session_risk_state_persists_and_restores(monkeypatch, tmp_path):
@@ -1925,7 +1913,7 @@ def test_session_risk_state_persists_and_restores(monkeypatch, tmp_path):
         conn.close()
 
     _patch_live_state_conn(monkeypatch, _conn)
-    live_service._live_state_update(
+    live_service.live_state_update(
         session_pnl=-18.5,
         session_trades=2,
         session_winning=0,
@@ -1938,10 +1926,10 @@ def test_session_risk_state_persists_and_restores(monkeypatch, tmp_path):
         circuit_reason="daily drawdown 5.1%",
         trade_equity_history=[1000.0, 981.5],
     )
-    live_service._persist_session_state("2026-06-29")
-    live_service._live_state_update(account={"balance": 1000.0})
+    live_close_settlement._persist_session_state("2026-06-29")
+    live_service.live_state_update(account={"balance": 1000.0})
 
-    assert live_service._restore_session_state_for_day(
+    assert live_close_settlement.restore_session_state_for_day(
         "2026-06-29",
         broker_open_position_ids=set(),
     ) is True
@@ -2058,7 +2046,7 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
 
     bridge = _Bridge()
     logs = []
-    live_service._live_state_update(positions=[{"position_id": 100301, "volume": 0.0}], positions_updated_at=time.time())
+    live_service.live_state_update(positions=[{"position_id": 100301, "volume": 0.0}], positions_updated_at=time.time())
     _patch_live_state_conn(monkeypatch, _conn)
     monkeypatch.setattr(live_service, "_LEDGER", None)
     sync_calls = 0
@@ -2100,13 +2088,13 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
         _delayed_close_deal,
     )
 
-    first = live_service._bootstrap_position_recovery(
+    first = live_close_settlement.bootstrap_position_recovery(
         bridge,
         broker="ctrader",
         strategy_name="factor_v4",
         log=logs.append,
     )
-    second = live_service._bootstrap_position_recovery(
+    second = live_close_settlement.bootstrap_position_recovery(
         bridge,
         broker="ctrader",
         strategy_name="factor_v4",
@@ -2130,7 +2118,7 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
     assert any("confirmation 1/2" in item for item in logs)
     assert any("waiting for authoritative close deals" in item for item in logs)
 
-    third = live_service._bootstrap_position_recovery(
+    third = live_close_settlement.bootstrap_position_recovery(
         bridge,
         broker="ctrader",
         strategy_name="factor_v4",
@@ -2151,9 +2139,9 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
     assert resolved_row["close_pnl"] == pytest.approx(-10.0)
     assert live_service.no_new_risk_latched(fail_closed=True) is False
 
-    live_service._live_state_update(account={"balance": 990.0})
+    live_service.live_state_update(account={"balance": 990.0})
     trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    assert live_service._restore_session_state_for_day(
+    assert live_close_settlement.restore_session_state_for_day(
         trade_date,
         broker_open_position_ids=set(),
     ) is True
@@ -2235,19 +2223,19 @@ def test_recovery_bootstrap_accepts_close_deal_before_last_seen_guard(
 
     _patch_live_state_conn(monkeypatch, _conn)
     monkeypatch.setattr(live_service, "_LEDGER", None)
-    live_service._live_state_update(
+    live_service.live_state_update(
         positions=[],
         positions_updated_at=time.time(),
     )
 
     bridge = _Bridge()
-    assert live_service._bootstrap_position_recovery(
+    assert live_close_settlement.bootstrap_position_recovery(
         bridge,
         broker="ctrader",
         strategy_name="factor_v4",
         log=lambda _message: None,
     ) is False
-    assert live_service._bootstrap_position_recovery(
+    assert live_close_settlement.bootstrap_position_recovery(
         bridge,
         broker="ctrader",
         strategy_name="factor_v4",
@@ -2284,21 +2272,19 @@ def test_replay_keeps_close_deal_latch_until_recovery_projection_commits(
         },
     )
     monkeypatch.setattr(
-        live_service,
-        "_mark_recovery_position_closed",
+        live_close_settlement, "mark_recovery_position_closed",
         lambda *_args, **_kwargs: (
             order.append("recovery_projection")
             or (_ for _ in ()).throw(RuntimeError("postgres unavailable"))
         ),
     )
     monkeypatch.setattr(
-        live_service,
-        "_release_session_close_deal_latch",
+        live_close_settlement, "release_session_close_deal_latch",
         lambda *_args, **_kwargs: order.append("latch_release"),
     )
 
     with pytest.raises(RuntimeError, match="postgres unavailable"):
-        live_service._replay_recovered_close(
+        live_close_settlement._replay_recovered_close(
             broker="ctrader",
             position_id=302,
             position_state={"position_id": 302},
@@ -2355,7 +2341,7 @@ def test_pending_close_latch_without_recovery_row_is_retried_and_released(
     monkeypatch.setattr(live_service, "_LEDGER", None)
     live_service._pos_open_prices[100777] = 2400.0
     live_service._pos_open_api_volume[100777] = 100.0
-    live_service._defer_close_until_authoritative_deal(
+    live_close_settlement.defer_close_until_authoritative_deal(
         100777,
         broker="ctrader",
         tick=9,
@@ -2393,7 +2379,7 @@ def test_pending_close_latch_without_recovery_row_is_retried_and_released(
     monkeypatch.setattr(deal_sync_module, "sync_close_deals_batch", _sync)
     logs: list[str] = []
 
-    assert live_service._bootstrap_position_recovery(
+    assert live_close_settlement.bootstrap_position_recovery(
         bridge,
         broker="ctrader",
         strategy_name="factor_v4",
@@ -2401,7 +2387,7 @@ def test_pending_close_latch_without_recovery_row_is_retried_and_released(
     ) is False
     assert live_service.no_new_risk_latched(fail_closed=True) is True
 
-    assert live_service._bootstrap_position_recovery(
+    assert live_close_settlement.bootstrap_position_recovery(
         bridge,
         broker="ctrader",
         strategy_name="factor_v4",
@@ -2409,9 +2395,9 @@ def test_pending_close_latch_without_recovery_row_is_retried_and_released(
     ) is True
     assert live_service.no_new_risk_latched(fail_closed=True) is False
 
-    live_service._live_state_update(account={"balance": 994.0})
+    live_service.live_state_update(account={"balance": 994.0})
     trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    assert live_service._restore_session_state_for_day(
+    assert live_close_settlement.restore_session_state_for_day(
         trade_date,
         broker_open_position_ids=set(),
     ) is True
@@ -2487,7 +2473,7 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
 
     bridge = _Bridge()
     _patch_live_state_conn(monkeypatch, _conn)
-    live_service._defer_close_until_authoritative_deal(
+    live_close_settlement.defer_close_until_authoritative_deal(
         100778,
         broker="ctrader",
         tick=10,
@@ -2533,7 +2519,7 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
     monkeypatch.setattr(deal_sync_module, "sync_close_deals_batch", _sync)
     logs: list[str] = []
 
-    assert live_service._bootstrap_position_recovery(
+    assert live_close_settlement.bootstrap_position_recovery(
         bridge,
         broker="ctrader",
         strategy_name="factor_v4",
@@ -2542,7 +2528,7 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
     assert live_service.no_new_risk_latched(fail_closed=True) is True
     assert any("realized partial-close deals" in item for item in logs)
 
-    assert live_service._bootstrap_position_recovery(
+    assert live_close_settlement.bootstrap_position_recovery(
         bridge,
         broker="ctrader",
         strategy_name="factor_v4",
@@ -2559,7 +2545,7 @@ def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path)
 def test_final_close_retry_does_not_treat_stored_deal_as_new_baseline():
     position_id = 779
 
-    assert live_service._pending_close_cursor_overrides(
+    assert live_close_settlement._pending_close_cursor_overrides(
         {position_id},
         active_rows_by_id={
             position_id: {
@@ -2589,7 +2575,7 @@ def test_final_close_ignores_stale_baseline_left_in_durable_latch():
     """
     position_id = 779
 
-    assert live_service._pending_close_cursor_overrides(
+    assert live_close_settlement._pending_close_cursor_overrides(
         {position_id},
         active_rows_by_id={
             position_id: {
@@ -2621,7 +2607,7 @@ def test_partial_close_still_passes_baseline_through():
     """partial_close 仍应透传 baseline(减仓 RPC 需证明新 leg)。"""
     position_id = 779
 
-    assert live_service._pending_close_cursor_overrides(
+    assert live_close_settlement._pending_close_cursor_overrides(
         {position_id},
         active_rows_by_id={
             position_id: {
@@ -2676,7 +2662,7 @@ def test_build_open_trade_risk_context_includes_runtime_health(monkeypatch):
             )
 
     now = time.time()
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=True,
         account_updated_at=now - 12,
         positions_updated_at=now - 34,
@@ -2729,7 +2715,7 @@ def test_open_trade_risk_context_separates_market_and_runtime_time(monkeypatch):
     market_ts = 1_782_979_200.0
     evaluated_at = market_ts + 900.0
     monkeypatch.setattr(live_service.time, "time", lambda: evaluated_at)
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=True,
         session_last_trade_ts=evaluated_at - 600.0,
         loop_started_at=evaluated_at - 3600.0,
@@ -2779,7 +2765,7 @@ def test_recovered_close_repairs_missing_open_ledger(monkeypatch, tmp_path):
     monkeypatch.setattr(live_service, "_LEDGER", ledger)
     # SQLite-only fixture scenario: the materialized canonical position index
     # must not answer for the fixture position.
-    monkeypatch.setattr(live_service, "_position_decision_index", lambda: None)
+    monkeypatch.setattr(live_close_settlement, "_position_decision_index", lambda: None)
 
     conn = _conn()
     try:
@@ -2811,7 +2797,7 @@ def test_recovered_close_repairs_missing_open_ledger(monkeypatch, tmp_path):
     finally:
         conn.close()
 
-    decision_id = live_service._ensure_open_ledger_for_recovered_close(
+    decision_id = live_close_settlement.ensure_open_ledger_for_recovered_close(
         268046003,
         broker="ctrader",
         close_ts=1_782_373_646.154,
@@ -2910,7 +2896,7 @@ def test_classify_close_source_infers_supervisor_tighten_stopout(monkeypatch, tm
         },
     )
 
-    result = live_service._classify_close_source(7001, "broker_close", close_ts)
+    result = live_close_settlement.classify_close_source(7001, "broker_close", close_ts)
 
     assert decision_id
     assert result["close_reason_source"] == "supervisor_tighten_stopout"
@@ -2956,7 +2942,7 @@ def test_classify_close_source_infers_legacy_awe_trailing_stopout_from_trace(mon
         execution={"target_stop_loss_sent": 4000.0},
     )
 
-    result = live_service._classify_close_source(7101, "broker_close", close_ts)
+    result = live_close_settlement.classify_close_source(7101, "broker_close", close_ts)
 
     assert result["close_reason_source"] == "legacy_awe_trailing_stopout"
     assert result["inferred_close_supervisor"]["event_type"] == "legacy_awe_trailing"
@@ -3896,11 +3882,10 @@ def test_holding_timeout_defers_when_market_closed(monkeypatch, tmp_path):
     sunday_1000 = datetime(2026, 8, 23, 10, 0, tzinfo=timezone.utc).timestamp()
 
     monkeypatch.setattr(
-        live_service,
-        "_lookup_open_decision_context",
+        live_close_settlement, "lookup_open_decision_context",
         lambda _pid: {"entry_ts": friday_2000, "timeframe": "M5", "source": "test"},
     )
-    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *a, **k: None)
+    monkeypatch.setattr(live_close_settlement, "merge_recovery_position_meta", lambda *a, **k: None)
 
     traces = []
     monkeypatch.setattr(
@@ -3965,11 +3950,10 @@ def test_holding_timeout_uses_ctrader_schedule_for_intraday_break(monkeypatch, t
     }
 
     monkeypatch.setattr(
-        live_service,
-        "_lookup_open_decision_context",
+        live_close_settlement, "lookup_open_decision_context",
         lambda _pid: {"entry_ts": thursday_1130, "timeframe": "M5", "source": "test"},
     )
-    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *a, **k: None)
+    monkeypatch.setattr(live_close_settlement, "merge_recovery_position_meta", lambda *a, **k: None)
     traces = []
     monkeypatch.setattr(
         live_service,
@@ -4015,11 +3999,10 @@ def test_holding_timeout_market_open_still_closes(monkeypatch, tmp_path):
     thursday = datetime(2026, 8, 20, 3, 0, tzinfo=timezone.utc).timestamp()
 
     monkeypatch.setattr(
-        live_service,
-        "_lookup_open_decision_context",
+        live_close_settlement, "lookup_open_decision_context",
         lambda _pid: {"entry_ts": wednesday, "timeframe": "M5", "source": "test"},
     )
-    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda *a, **k: None)
+    monkeypatch.setattr(live_close_settlement, "merge_recovery_position_meta", lambda *a, **k: None)
 
     close_calls = []
 
@@ -4028,8 +4011,8 @@ def test_holding_timeout_market_open_still_closes(monkeypatch, tmp_path):
             close_calls.append((pid, volume))
             return SimpleNamespace(success=True, outcome="confirmed", position_id=pid)
 
-    monkeypatch.setattr(live_service, "_remember_close_reason", lambda *a, **k: None)
-    monkeypatch.setattr(live_service, "_remember_close_verdict", lambda *a, **k: None)
+    monkeypatch.setattr(live_close_settlement, "remember_close_reason", lambda *a, **k: None)
+    monkeypatch.setattr(live_close_settlement, "remember_close_verdict", lambda *a, **k: None)
     monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: None)
     monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec-y")
 
@@ -4063,15 +4046,13 @@ def test_market_closed_rejection_records_suppression(monkeypatch, tmp_path):
     friday = datetime(2026, 8, 21, 3, 0, tzinfo=timezone.utc).timestamp()
 
     monkeypatch.setattr(
-        live_service,
-        "_lookup_open_decision_context",
+        live_close_settlement, "lookup_open_decision_context",
         lambda _pid: {"entry_ts": thursday, "timeframe": "M5", "source": "test"},
     )
 
     merged = []
     monkeypatch.setattr(
-        live_service,
-        "_merge_recovery_position_meta",
+        live_close_settlement, "merge_recovery_position_meta",
         lambda pid, meta: merged.append((pid, dict(meta))),
     )
     monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: None)

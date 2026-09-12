@@ -222,11 +222,15 @@ from backend.services.live_runtime_state import (
     state_set as _runtime_state_set,
     state_update as _runtime_state_update,
 )
+from backend.services import live_close_settlement
+from backend.services import live_state_store
 from backend.services.live_state_store import (
     _LIVE_STATE_LOCK,
     _live_state,
     live_state_get,
+    live_state_set,
     live_state_snapshot,
+    live_state_update,
 )
 from backend.services.session_restore import (
     PartialCloseSessionFactRuntime,
@@ -469,8 +473,6 @@ _POLICY_SUGGESTER: PolicySuggester | None = None
 _POSITION_QUALITY_ADVISOR: Any = None
 _OPEN_QUALITY_ADVISOR: Any = None
 _RISK_POLICY = RiskPolicyService.shared()
-_RUNTIME_KV_PENDING_PATH = Path("data/charts/runtime_kv.pending.jsonl")
-_RUNTIME_KV_PENDING_LOCK = threading.Lock()
 _ENTRY_CLUSTER_POLICY_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": {}}
 _ENTRY_CLUSTER_POLICY_CACHE_LOCK = threading.Lock()
 _EVENT_WINDOW_POLICY_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": {}}
@@ -479,27 +481,8 @@ _ENTRY_QUALITY_POLICY_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": {}}
 _ENTRY_QUALITY_POLICY_CACHE_LOCK = threading.Lock()
 
 
-def _append_runtime_kv_pending(key: str, value, error: str = "") -> None:
-    _RUNTIME_KV_PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "queued_at": time.time(),
-        "error": str(error or ""),
-        "key": str(key),
-        "value": value,
-    }
-    line = json.dumps(record, ensure_ascii=False, default=str)
-    with _RUNTIME_KV_PENDING_LOCK:
-        with _RUNTIME_KV_PENDING_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
 
 
-def _rewrite_runtime_kv_pending_unlocked(lines: list[str]) -> None:
-    if lines:
-        tmp_path = _RUNTIME_KV_PENDING_PATH.with_suffix(".pending.tmp")
-        tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        tmp_path.replace(_RUNTIME_KV_PENDING_PATH)
-    else:
-        _RUNTIME_KV_PENDING_PATH.unlink(missing_ok=True)
 
 # ── Local SL/TP tracking (live loop only) ──────────────────────────
 # audit 2026-06-10: 之前 SL/TP 完全靠本地 Python 监控 1 bar 延迟的
@@ -586,14 +569,10 @@ _pending_close_verdicts: dict[int, dict] = {}
 _supervisor_reentry_blocks: dict[str, dict[str, Any]] = {}
 _supervisor_reentry_blocks_lock = threading.Lock()
 
-_RUNTIME_KV_LOOP_DESIRED = "live.loop.desired_state"
 _RUNTIME_KV_LAST_SHUTDOWN = "live.loop.last_shutdown"
-_RUNTIME_KV_SESSION_STATE_PREFIX = "live.session_state."
 _RECOVERY_CONTEXT_PARTIAL = "partial"
 _RECOVERY_CONTEXT_FULL = "full"
-_RECOVERY_REPLAY_LOOKBACK_SEC = 7 * 24 * 3600
-_RECOVERY_ZERO_CONFIRMATIONS_REQUIRED = 2
-_recovery_zero_confirmations: dict[str, int] = {}
+recovery_zero_confirmations: dict[str, int] = {}
 _AUTO_RESUME_DELAY_SEC = 4.0
 
 
@@ -739,7 +718,7 @@ def _position_api_volume(pos: Any) -> float:
 
 
 def _estimate_close_pnl_from_cached_state(position_id: int, current_price: float) -> float:
-    recovery_row = _load_recovery_position_row(int(position_id))
+    recovery_row = live_close_settlement.load_recovery_position_row(int(position_id))
     return _lifecycle_estimate_close_pnl_from_state(
         position_id=position_id,
         current_price=current_price,
@@ -1053,7 +1032,7 @@ def _market_micro_context_snapshot(
             fresh_quote = bridge.get_spot_quote() or {}
             if fresh_quote:
                 quote = fresh_quote
-                _live_state_update(spot_quote=fresh_quote)
+                live_state_update(spot_quote=fresh_quote)
         except Exception:
             pass
     return _lifecycle_build_market_micro_context_payload(
@@ -1269,13 +1248,13 @@ def _risk_reduction_runtime() -> RiskReductionRuntime:
         now=time.time,
         config_factory=_runtime_config,
         position_open_timestamp=_position_open_timestamp,
-        lookup_open_decision_context=_lookup_open_decision_context,
+        lookup_open_decision_context=live_close_settlement.lookup_open_decision_context,
         temporal_context_for_trade=_temporal_context_for_trade,
         build_close_context_payload=(
             _lifecycle_build_close_position_risk_context_payload
         ),
-        load_recovery_position_row=_load_recovery_position_row,
-        lookup_entry_decision_id=_lookup_entry_decision_id,
+        load_recovery_position_row=live_close_settlement.load_recovery_position_row,
+        lookup_entry_decision_id=live_close_settlement.lookup_entry_decision_id,
         risk_policy=_RISK_POLICY,
     )
 
@@ -1314,22 +1293,6 @@ def _build_close_position_risk_context(
     )
 
 
-def _record_risk_reduction_aux_failure(
-    event_type: str,
-    *,
-    position_id: int = 0,
-    action: str = "",
-    error: Exception | str,
-    payload: dict[str, Any] | None = None,
-) -> None:
-    _risk_reduction_record_aux_failure(
-        event_type,
-        position_id=position_id,
-        action=action,
-        error=error,
-        payload=payload,
-        runtime=_risk_reduction_runtime(),
-    )
 
 
 def _load_recovery_row_for_risk_reduction(
@@ -1413,31 +1376,10 @@ def _position_unrealized_pnl(position: Any) -> float:
     return _lifecycle_position_unrealized_pnl(position)
 
 
-def _recovery_position_store() -> RecoveryPositionStore:
-    return RecoveryPositionStore(
-        RecoveryPositionStoreRuntime(
-            get_read_connection=_get_state_read_conn,
-            get_write_connection=_get_state_pg_conn,
-            execute=_state_execute,
-            normalize_position=_normalize_position_snapshot,
-            normalize_row=_lifecycle_normalize_recovery_position_row,
-            lookup_entry_decision_id=_lookup_entry_decision_id,
-            build_meta_update_payload=_lifecycle_build_recovery_meta_update_payload,
-            build_closed_update_payload=_lifecycle_build_recovery_closed_update_payload,
-            now=time.time,
-            local_open_volumes=_pos_open_api_volume,
-            full_context=_RECOVERY_CONTEXT_FULL,
-            partial_context=_RECOVERY_CONTEXT_PARTIAL,
-        )
-    )
 
 
-def _load_recovery_position_row(position_id: int) -> dict[str, Any]:
-    return _recovery_position_store().load(position_id)
 
 
-def _merge_recovery_position_meta(position_id: int, meta: dict[str, Any] | None) -> None:
-    _recovery_position_store().merge_meta(position_id, meta)
 
 
 def _replace_recovery_position_meta(
@@ -1446,7 +1388,7 @@ def _replace_recovery_position_meta(
     *,
     expected_meta: Mapping[str, Any] | None = None,
 ) -> bool:
-    return _recovery_position_store().replace_meta(
+    return live_close_settlement.recovery_position_store().replace_meta(
         position_id,
         meta,
         expected_meta=expected_meta,
@@ -1573,7 +1515,7 @@ def _select_position_supervisor_binding_for_open(
         static_binding["evidence_refs"]["selection_reason"] = "bounded_demo_required"
         return static_binding
     try:
-        projection = _runtime_kv_get(POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY, {})
+        projection = live_close_settlement.runtime_kv_get(POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY, {})
         selection = select_position_supervisor_binding(
             projection if isinstance(projection, dict) else {},
             **_position_supervisor_selection_key(cfg=cfg, composite=composite),
@@ -1942,7 +1884,7 @@ def _maybe_switch_position_supervisor_binding(
 
     def persist_state() -> None:
         if state_changed:
-            _merge_recovery_position_meta(
+            live_close_settlement.merge_recovery_position_meta(
                 position_id,
                 {"supervisor_switch_state": state},
             )
@@ -1960,7 +1902,7 @@ def _maybe_switch_position_supervisor_binding(
     if max_switches <= 0 or int(state["switch_count"] or 0) >= max_switches:
         state["last_selection_bar_key"] = closed_bar_key
         state["last_selection_reason"] = "max_switches_reached"
-        _merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
+        live_close_settlement.merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
         return verdict
     cooldown_bars = max(
         0,
@@ -1972,11 +1914,11 @@ def _maybe_switch_position_supervisor_binding(
     ):
         state["last_selection_bar_key"] = closed_bar_key
         state["last_selection_reason"] = "switch_cooldown"
-        _merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
+        live_close_settlement.merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
         return verdict
 
     try:
-        projection = _runtime_kv_get(POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY, {})
+        projection = live_close_settlement.runtime_kv_get(POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY, {})
         selection = select_position_supervisor_binding(
             projection if isinstance(projection, dict) else {},
             symbol=str(position.get("symbol") or "XAUUSD+"),
@@ -2007,7 +1949,7 @@ def _maybe_switch_position_supervisor_binding(
     if selection_mode == "shadow":
         if not _LEDGER:
             state["last_selection_reason"] = "supervisor_trace_sink_unavailable"
-            _merge_recovery_position_meta(
+            live_close_settlement.merge_recovery_position_meta(
                 position_id,
                 {"supervisor_switch_state": state},
             )
@@ -2060,7 +2002,7 @@ def _maybe_switch_position_supervisor_binding(
             if shadow_trace_id
             else "supervisor_trace_persist_failed"
         )
-        _merge_recovery_position_meta(
+        live_close_settlement.merge_recovery_position_meta(
             position_id,
             {"supervisor_switch_state": state},
         )
@@ -2073,12 +2015,12 @@ def _maybe_switch_position_supervisor_binding(
         or str(selected.get("template_hash") or "")
         == str(binding.get("template_hash") or "")
     ):
-        _merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
+        live_close_settlement.merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
         return verdict
 
     if not _LEDGER:
         state["last_selection_reason"] = "supervisor_trace_sink_unavailable"
-        _merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
+        live_close_settlement.merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
         return verdict
 
     new_template = dict(selected_check.get("template") or {})
@@ -2117,7 +2059,7 @@ def _maybe_switch_position_supervisor_binding(
             "regime": current_regime,
         },
     }
-    _merge_recovery_position_meta(position_id, next_meta)
+    live_close_settlement.merge_recovery_position_meta(position_id, next_meta)
 
     switch_evidence = dict(evidence)
     switch_evidence.update(
@@ -2170,7 +2112,7 @@ def _maybe_switch_position_supervisor_binding(
         # Do not leave a binding that cannot be proven by a trace.  Restore the
         # previous object and all switch-owned metadata with a CAS.  Do not
         # overwrite an unrelated concurrent recovery update.
-        latest_row = _load_recovery_position_row(position_id)
+        latest_row = live_close_settlement.load_recovery_position_row(position_id)
         latest_meta = copy.deepcopy(dict((latest_row or {}).get("recovery_meta") or {}))
         restored_meta = dict(latest_meta)
         for key in (
@@ -2210,7 +2152,7 @@ def _update_entry_protection_plan_status(
     applied_sl: float = 0.0,
     applied_tp: float = 0.0,
 ) -> None:
-    row = _load_recovery_position_row(int(position_id))
+    row = live_close_settlement.load_recovery_position_row(int(position_id))
     meta = dict((row or {}).get("recovery_meta") or {})
     plan = dict(meta.get("entry_protection_plan") or {})
     if not plan:
@@ -2226,7 +2168,7 @@ def _update_entry_protection_plan_status(
         applied_tp=applied_tp,
     )
     meta["entry_protection_plan"] = plan
-    _merge_recovery_position_meta(int(position_id), meta)
+    live_close_settlement.merge_recovery_position_meta(int(position_id), meta)
 
 
 def _remember_pending_open_attach(position_id: int) -> None:
@@ -2243,7 +2185,7 @@ def _entry_protection_latch_runtime() -> EntryProtectionLatchRuntime:
         release_latch_cause=release_no_new_risk_latch_cause,
         latch_status=no_new_risk_latch_status,
         append_safety_outbox=append_safety_outbox,
-        live_state_update=_live_state_update,
+        live_state_update=live_state_update,
         reconcile_value=_reconcile_value,
         pending_open_attach_until=_pending_open_attach_until,
         now=time.time,
@@ -2310,7 +2252,7 @@ def _restore_attribution_for_positions(attr_engine, positions: list[Any] | None)
     return _lifecycle_restore_attribution_for_positions(
         attr_engine,
         positions,
-        load_recovery_row=_load_recovery_position_row,
+        load_recovery_row=live_close_settlement.load_recovery_position_row,
         debug_log=lambda pid, exc: logger.debug(
             "[live] attribution restore skipped for pos {}: {}",
             pid,
@@ -2340,8 +2282,8 @@ def _position_path_metrics_runtime() -> PositionPathMetricsRuntime:
         build_update=_lifecycle_build_position_path_metrics_update,
         normalize_path_state=normalize_path_state,
         update_path_metrics=update_position_path_metrics,
-        upsert_recovery_position=_upsert_recovery_position_state,
-        record_aux_failure=_record_risk_reduction_aux_failure,
+        upsert_recovery_position=live_close_settlement.upsert_recovery_position_state,
+        record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
     )
 
 
@@ -2473,11 +2415,11 @@ def _evaluate_position_supervisor_for_position(
         model_influence_service=shared_model_influence_service,
         build_model_tighten_controls=build_model_tighten_controls,
         load_recovery_row=_load_recovery_row_for_risk_reduction,
-        upsert_recovery_position=_upsert_recovery_position_state,
+        upsert_recovery_position=live_close_settlement.upsert_recovery_position_state,
         build_state_upsert_payload=_lifecycle_build_supervisor_state_upsert_payload,
         loop_strategy_name=_current_loop_strategy_name(""),
         default_context_integrity=_RECOVERY_CONTEXT_PARTIAL,
-        record_aux_failure=_record_risk_reduction_aux_failure,
+        record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
         after_persist=after_persist,
     )
     verdict = _runtime_evaluate_position(
@@ -2556,7 +2498,7 @@ def _remember_supervisor_state(
     pid = int(position.get("position_id") or position.get("ticket") or 0)
     row = _load_recovery_row_for_risk_reduction(pid, operation="remember_supervisor_state")
     try:
-        _upsert_recovery_position_state(
+        live_close_settlement.upsert_recovery_position_state(
             position,
             **_lifecycle_build_supervisor_state_upsert_payload(
                 recovery_row=row,
@@ -2570,7 +2512,7 @@ def _remember_supervisor_state(
             ),
         )
     except Exception as exc:
-        _record_risk_reduction_aux_failure(
+        live_close_settlement.record_risk_reduction_aux_failure(
             "risk_reduction_state_persist_failed",
             position_id=pid,
             action="remember_supervisor_state",
@@ -2590,7 +2532,7 @@ def _remember_protection_state(
     pid = int(position.get("position_id") or position.get("ticket") or 0)
     row = _load_recovery_row_for_risk_reduction(pid, operation="remember_protection_state")
     try:
-        _upsert_recovery_position_state(
+        live_close_settlement.upsert_recovery_position_state(
             position,
             **_lifecycle_build_protection_state_upsert_payload(
                 recovery_row=row,
@@ -2605,7 +2547,7 @@ def _remember_protection_state(
             ),
         )
     except Exception as exc:
-        _record_risk_reduction_aux_failure(
+        live_close_settlement.record_risk_reduction_aux_failure(
             "risk_reduction_state_persist_failed",
             position_id=pid,
             action="remember_protection_state",
@@ -2685,7 +2627,7 @@ def _remember_supervisor_noop(position: dict[str, Any], verdict: dict[str, Any],
         broker="ctrader",
         strategy_name=_current_loop_strategy_name(),
     )
-    _merge_recovery_position_meta(
+    live_close_settlement.merge_recovery_position_meta(
         pid,
         {
             "last_supervisor_noop_fingerprint": str(fingerprint or ""),
@@ -2712,7 +2654,7 @@ def _log_supervisor_decision(
             **_lifecycle_build_supervisor_decision_ledger_payload(
                 position=position,
                 verdict=verdict,
-                risk_state=_risk_state_with_verdict_dict(risk_verdict or {}),
+                risk_state=live_close_settlement.risk_state_with_verdict_dict(risk_verdict or {}),
                 risk_verdict=risk_verdict,
                 account=acct,
                 cfg=cfg,
@@ -2977,7 +2919,7 @@ def _build_position_supervision_runtime(
             broker_schedule=broker_schedule,
             **kwargs,
         ),
-        record_aux_failure=_record_risk_reduction_aux_failure,
+        record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
         log_trace=_log_supervisor_trace,
         log_evaluation=_log_supervisor_evaluation,
         make_candidate=safety_candidate,
@@ -3013,8 +2955,8 @@ def _build_position_supervision_runtime(
         log_position_event=_log_supervisor_position_event,
         remember_reentry_block=_remember_supervisor_reentry_block,
         track_local_sl_tp=_track_local_sl_tp,
-        result_is_position_not_found=_result_is_position_not_found,
-        retire_broker_missing_position=_retire_broker_missing_position,
+        result_is_position_not_found=live_close_settlement.result_is_position_not_found,
+        retire_broker_missing_position=live_close_settlement.retire_broker_missing_position,
         reconcile_positions=_explicit_position_reconcile,
         verify_protection_projection=_verify_position_protection_projection,
         publish_fresh_positions=lambda result: _publish_fresh_position_reconcile(
@@ -3030,13 +2972,13 @@ def _build_position_supervision_runtime(
             ),
         ),
         normalize_reduce=_normalize_supervisor_reduce_verdict,
-        remember_close_reason=_remember_close_reason,
-        remember_close_verdict=_remember_close_verdict,
+        remember_close_reason=live_close_settlement.remember_close_reason,
+        remember_close_verdict=live_close_settlement.remember_close_verdict,
         capture_partial_close_session_cursor=lambda **kwargs: (
-            _capture_partial_close_deal_cursor(**kwargs)
+            live_close_settlement.capture_partial_close_deal_cursor(**kwargs)
         ),
         sync_partial_close_session_fact=lambda **kwargs: (
-            _sync_partial_close_session_fact(
+            live_close_settlement.sync_partial_close_session_fact(
                 bridge,
                 broker="ctrader",
                 tick=tick,
@@ -3132,69 +3074,14 @@ def _track_local_sl_tp(position_id: int, sl: float, tp: float) -> None:
 # mutation can race with iteration and yield torn reads.
 # live state container + lock are owned by backend.services.live_state_store
 # (imported above); live_service keeps the writer-side names bound to the same
-# objects.  _live_state_set/_live_state_update below are the single write path.
+# objects.  live_state_set/live_state_update below are the single write path.
 _DATA_SYNC_LOCK = threading.Lock()
 
 
-def _live_state_set(key: str, value) -> None:
-    _runtime_state_set(_live_state, _LIVE_STATE_LOCK, key, value)
-    _notify_live_state_change()
 
 
-def _live_state_update(**kwargs) -> None:
-    pending_add = kwargs.pop("session_pending_close_add", None)
-    pending_remove = kwargs.pop("session_pending_close_remove", None)
-    if pending_add is not None or pending_remove:
-        _track_pending_close_ids(pending_add, pending_remove)
-    _runtime_state_update(_live_state, _LIVE_STATE_LOCK, **kwargs)
-    _notify_live_state_change()
 
 
-def _track_pending_close_ids(pending_add: Any, pending_remove: Any) -> None:
-    """Track realized closes waiting for their authoritative deal.
-
-    Estimates must never advance the session-risk boundary, but risk
-    surfaces must see pending ids instead of silently operating on stale
-    pnl.  Entries are added on deal-wait defer and released on projection.
-    """
-    try:
-        add_ids: set[int] = set()
-        if pending_add is not None:
-            candidates = (
-                pending_add
-                if isinstance(pending_add, (list, tuple, set, frozenset))
-                else [pending_add]
-            )
-            for item in candidates:
-                try:
-                    pid = int(item or 0)
-                except (TypeError, ValueError):
-                    continue
-                if pid > 0:
-                    add_ids.add(pid)
-        drop_ids: set[int] = set()
-        if pending_remove:
-            for item in pending_remove:
-                try:
-                    pid = int(item or 0)
-                except (TypeError, ValueError):
-                    continue
-                if pid > 0:
-                    drop_ids.add(pid)
-        with _LIVE_STATE_LOCK:
-            current = [
-                int(item)
-                for item in list(_live_state.get("session_pending_close_ids") or [])
-                if int(item or 0) > 0
-            ]
-            merged = [pid for pid in current if pid not in drop_ids]
-            for pid in sorted(add_ids):
-                if pid not in merged:
-                    merged.append(pid)
-            _live_state["session_pending_close_ids"] = sorted(merged)[-50:]
-            _live_state["session_pending_close_observed_at"] = time.time()
-    except Exception:
-        return
 
 
 def _notify_live_state_change() -> None:
@@ -3210,29 +3097,21 @@ def _notify_live_state_change() -> None:
 
 
 def _mark_account_reconcile_failed(error: str) -> None:
-    _live_state_update(
+    live_state_update(
         account_reconcile_failed_at=time.time(),
         account_reconcile_error=str(error or "account_reconcile_failed")[:500],
     )
 
 
 def _mark_positions_reconcile_failed(error: str) -> None:
-    _live_state_update(
+    live_state_update(
         positions_reconcile_failed_at=time.time(),
         positions_reconcile_error=str(error or "positions_reconcile_failed")[:500],
     )
 
 
-def _get_state_pg_conn():
-    from backend.core.db import get_state_pg_conn
-
-    return get_state_pg_conn()
 
 
-def _get_state_read_conn():
-    from backend.core.db import get_state_pg_conn
-
-    return get_state_pg_conn(read_only=True)
 
 
 def _get_final_open_probe_conn():
@@ -3258,1565 +3137,124 @@ def _get_final_open_probe_conn():
     return connect_state_store(bounded_dsn, read_only=True)
 
 
-def _state_conn_is_pg(conn) -> bool:
-    return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
-
-
-def _state_sql(conn, sql: str) -> str:
-    return sql.replace("%", "%%").replace("?", "%s") if _state_conn_is_pg(conn) else sql
-
-
-def _state_execute(conn, sql: str, params=None):
-    if params is None:
-        return conn.execute(_state_sql(conn, sql))
-    return conn.execute(_state_sql(conn, sql), params)
-
-
-def _runtime_kv_get(key: str, default=None):
-    conn = _get_state_read_conn()
-    try:
-        row = _state_execute(
-            conn,
-            "SELECT value_json FROM runtime_kv WHERE key=?",
-            (key,),
-        ).fetchone()
-    except Exception:
-        return default
-    finally:
-        conn.close()
-    if row is None:
-        return default
-    try:
-        return json.loads(row["value_json"])
-    except Exception:
-        return default
-
-
-def _runtime_kv_write_on_conn(conn, key: str, value, updated_at: float | None = None) -> None:
-    from backend.services.runtime_kv_store import set_on_conn
-
-    set_on_conn(
-        conn,
-        key,
-        value,
-        updated_at=updated_at,
-        ensure=False,
-    )
-def _drain_runtime_kv_pending(conn, limit: int = 100) -> int:
-    if not _RUNTIME_KV_PENDING_PATH.exists():
-        return 0
-    with _RUNTIME_KV_PENDING_LOCK:
-        lines = _RUNTIME_KV_PENDING_PATH.read_text(
-            encoding="utf-8",
-            errors="replace",
-        ).splitlines()
-        if not lines:
-            _RUNTIME_KV_PENDING_PATH.unlink(missing_ok=True)
-            return 0
-        drained = 0
-        remaining: list[str] = []
-        for idx, raw in enumerate(lines):
-            if drained >= limit:
-                remaining.extend(lines[idx:])
-                break
-            try:
-                record = json.loads(raw)
-                key = str(record.get("key") or "")
-                if not key:
-                    remaining.append(raw)
-                    continue
-                _runtime_kv_write_on_conn(
-                    conn,
-                    key,
-                    record.get("value"),
-                    updated_at=float(record.get("queued_at") or time.time()),
-                )
-                drained += 1
-            except Exception:
-                remaining.append(raw)
-                remaining.extend(lines[idx + 1:])
-                break
-        _rewrite_runtime_kv_pending_unlocked(remaining)
-        return drained
-
-
-def _runtime_kv_set(key: str, value) -> None:
-    conn = _get_state_pg_conn()
-    try:
-        drained = _drain_runtime_kv_pending(conn)
-        if drained:
-            logger.info("[live] runtime_kv pending drained: {}", drained)
-        _runtime_kv_write_on_conn(conn, key, value)
-        conn.commit()
-    except Exception as exc:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        try:
-            _append_runtime_kv_pending(key, value, str(exc))
-            logger.warning("[live] runtime_kv write queued: {}", exc)
-        except Exception as queue_exc:
-            logger.error("[live] runtime_kv write failed and queue failed: write={} queue={}", exc, queue_exc)
-    finally:
-        conn.close()
-
-
-_POSITION_DECISION_INDEX_CACHE: dict[str, dict[str, Any]] | None | bool = False
-_POSITION_DECISION_INDEX_PATH = (
-    Path(__file__).resolve().parents[2] / "run_artifacts" / "canonical_v2_position_decision_index.json"
-)
-
-
-def _position_decision_index() -> dict[str, dict[str, Any]] | None:
-    """Lazily load the materialized position->entry decision index (once).
-
-    Returns None when the file is missing/invalid; never writes.  The
-    projection is rebuilt independently
-    (scripts/canonical_v2_position_decision_index.py) and is stale-tolerant:
-    a position missing from the index is resolved from the live recovery
-    snapshot, without consulting a retired fact store.
-    """
-    global _POSITION_DECISION_INDEX_CACHE
-    if _POSITION_DECISION_INDEX_CACHE is False:
-        _POSITION_DECISION_INDEX_CACHE = load_position_decision_index(_POSITION_DECISION_INDEX_PATH)
-    return _POSITION_DECISION_INDEX_CACHE  # type: ignore[return-value]
-
-
-def _lookup_entry_decision_id(position_id: int) -> str:
-    """Entry decision for a position via the canonical position-decision index.
-
-    The materialized index is a rebuildable file projection
-    (scripts/canonical_v2_position_decision_index.py); positions missing from
-    it (e.g. newer than the last rebuild) resolve to "".
-    """
-    index = _position_decision_index()
-    if index is None:
-        return ""
-    entry = index.get(str(position_id))
-    if entry is None:
-        return ""
-    return str(entry.get("parent_decision_id") or entry.get("decision_id") or "")
-
-
-def _lookup_open_decision_context(position_id: int) -> dict:
-    """Latest open decision context (canonical position-decision index first)."""
-    index = _position_decision_index()
-    if index is not None:
-        entry = index.get(str(position_id))
-        if entry is not None:
-            return {
-                "entry_ts": float(entry.get("decision_ts") or 0.0),
-                "timeframe": str(entry.get("timeframe") or ""),
-                "source": "canonical_position_decision_index",
-            }
-    conn = _get_state_read_conn()
-    try:
-        recovery = _state_execute(
-            conn,
-            """
-            SELECT first_seen_at FROM recovery_position_state
-            WHERE position_id=?
-            ORDER BY first_seen_at DESC LIMIT 1
-            """,
-            (str(int(position_id)),),
-        ).fetchone()
-        if recovery:
-            return {
-                "entry_ts": float(recovery["first_seen_at"] or 0.0),
-                "timeframe": "",
-                "source": "recovery_position_state",
-            }
-        return {"entry_ts": 0.0, "timeframe": "", "source": ""}
-    finally:
-        conn.close()
-
-
-def _ensure_open_ledger_for_recovered_close(
-    position_id: int,
-    *,
-    broker: str,
-    close_ts: float,
-    close_price: float,
-    real_pnl: dict | None = None,
-    close_reason: str = "broker_close",
-) -> str:
-    """Create minimal open evidence for a recovered broker position before close review."""
-    if position_id <= 0:
-        return ""
-    existing = _lookup_entry_decision_id(position_id)
-    if existing:
-        return existing
-    if not _LEDGER:
-        return ""
-
-    conn = _get_state_read_conn()
-    try:
-        row = _state_execute(
-            conn,
-            "SELECT * FROM recovery_position_state WHERE position_id=?",
-            (str(int(position_id)),),
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return ""
-
-    payloads = _lifecycle_build_recovered_open_ledger_payloads(
-        position_id=position_id,
-        recovery_row=row,
-        broker=broker,
-        close_ts=close_ts,
-        close_price=close_price,
-        risk_state=live_state_get("risk", {}, clone=True) or {},
-        real_pnl=real_pnl or {},
-        close_reason=close_reason,
-        fallback_strategy_name=_current_loop_strategy_name(),
-        context_integrity_default=_RECOVERY_CONTEXT_PARTIAL,
-        fallback_now_ts=time.time(),
-    )
-
-    try:
-        decision_id = _LEDGER.log_decision(**payloads["decision_payload"])
-        _LEDGER.log_position_event(
-            decision_id=decision_id,
-            **payloads["position_event_payload"],
-        )
-        recovery_state_payload = dict(payloads["recovery_state_payload"])
-        recovery_state_payload["entry_decision_id"] = decision_id
-        recovery_state_meta = dict(payloads["recovery_state_meta"])
-        recovery_state_meta["open_repair_decision_id"] = decision_id
-        _upsert_recovery_position_state(
-            recovery_state_payload,
-            **payloads["recovery_state_kwargs"],
-            meta=recovery_state_meta,
-        )
-        logger.info("[live] repaired missing open ledger before close pos={} decision={}", position_id, decision_id)
-        return decision_id
-    except Exception as exc:
-        logger.debug("[live] open ledger repair before close failed for pos {}: {}", position_id, exc)
-        return ""
-
-
-def _lookup_recovery_context_integrity(position_id: int, default: str = _RECOVERY_CONTEXT_PARTIAL) -> str:
-    return _recovery_position_store().context_integrity(
-        position_id,
-        default=default,
-    )
-
-
-def _persist_loop_desired_state(
-    enabled: bool,
-    *,
-    broker: str = "ctrader",
-    strategy_name: str = "factor_v4",
-    reason: str = "manual",
-) -> None:
-    _runtime_kv_set(
-        _RUNTIME_KV_LOOP_DESIRED,
-        {
-            "enabled": bool(enabled),
-            "broker": broker,
-            "strategy_name": strategy_name,
-            "reason": reason,
-            "updated_at": time.time(),
-        },
-    )
-
-
-def _read_loop_desired_state() -> dict:
-    state = _runtime_kv_get(_RUNTIME_KV_LOOP_DESIRED, {}) or {}
-    return state if isinstance(state, dict) else {}
-
-
-def _session_state_key(trade_date: str | None = None) -> str:
-    if not trade_date:
-        trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return f"{_RUNTIME_KV_SESSION_STATE_PREFIX}{trade_date}"
-
-
-def _session_state_snapshot(trade_date: str | None = None) -> dict:
-    if not trade_date:
-        trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    window_start, window_end = _session_trade_window(trade_date)
-    calendar_day = _calendar_day_trade_summary("Asia/Shanghai")
-    return {
-        "schema_version": "live_session_state.v3",
-        "trade_date": trade_date,
-        "session_date_basis": "utc_risk_day",
-        "session_timezone": "UTC",
-        "session_window_start": window_start,
-        "session_window_end": window_end,
-        "calendar_day": calendar_day,
-        "source": str(live_state_get("session_state_source", "runtime_incremental") or "runtime_incremental"),
-        "status": str(live_state_get("session_state_status", "unknown") or "unknown"),
-        "session_pnl": float(live_state_get("session_pnl", 0.0) or 0.0),
-        "session_trades": int(live_state_get("session_trades", 0) or 0),
-        "session_winning": int(live_state_get("session_winning", 0) or 0),
-        "session_losing": int(live_state_get("session_losing", 0) or 0),
-        "session_trade_pnls": list(live_state_get("session_trade_pnls", [], clone=True) or [])[-200:],
-        "session_realized_pnl_legs": list(
-            live_state_get("session_realized_pnl_legs", [], clone=True) or []
-        )[-500:],
-        "session_realized_legs": int(
-            live_state_get("session_realized_legs", 0) or 0
-        ),
-        "session_recorded_position_ids": list(
-            live_state_get("session_recorded_position_ids", [], clone=True) or []
-        )[-1000:],
-        "session_consecutive_loss": int(live_state_get("session_consecutive_loss", 0) or 0),
-        "session_max_drawdown_pct": float(live_state_get("session_max_drawdown_pct", 0.0) or 0.0),
-        "session_peak_equity": float(live_state_get("session_peak_equity", 0.0) or 0.0),
-        "session_start_balance": float(live_state_get("session_start_balance", 0.0) or 0.0),
-        "session_last_trade_ts": float(live_state_get("session_last_trade_ts", 0.0) or 0.0),
-        "session_observed_at": float(live_state_get("session_observed_at", 0.0) or 0.0),
-        "circuit_breaker": bool(live_state_get("circuit_breaker", False)),
-        "circuit_reason": str(live_state_get("circuit_reason", "") or ""),
-        "session_circuit_observation": dict(
-            live_state_get("session_circuit_observation", {}, clone=True) or {}
-        ),
-        "trade_equity_history": list(live_state_get("trade_equity_history", [], clone=True) or [])[-500:],
-        "updated_at": time.time(),
-    }
-
-
-def _persist_session_state(trade_date: str | None = None) -> None:
-    try:
-        snapshot = _session_state_snapshot(trade_date)
-        _runtime_kv_set(_session_state_key(snapshot["trade_date"]), snapshot)
-    except Exception as exc:
-        logger.debug("[live] session state persist failed: {}", exc)
-
-
-def _session_trade_window(trade_date: str, timezone_name: str = "UTC") -> tuple[float, float]:
-    return _session_restore_trade_window(trade_date, timezone_name)
-
-
-def _load_authoritative_session_trades(
-    trade_date: str,
-    timezone_name: str = "UTC",
-    *,
-    broker_open_position_ids: set[int] | None = None,
-    confirmed_closed_position_ids: set[int] | None = None,
-) -> list[dict] | None:
-    """Load one PnL row per position whose final close happened on a date.
-
-    ``runtime_kv`` is a recovery cache, not the trade fact source. Broker
-    deals are grouped by position so partial-close legs remain one trade and
-    their aggregate net PnL matches ``execution.deal_sync``.
-
-    ``None`` means the authoritative query or completeness proof failed and
-    callers may use the persisted cache only as a degraded display fallback.
-    An empty list is a valid no-trades result only when the broker-open set is
-    itself a fresh explicit fact and every system-tracked missing position has
-    a concrete close deal.
-    """
-    facts = _load_authoritative_session_deal_facts(
-        trade_date,
-        timezone_name,
-        broker_open_position_ids=broker_open_position_ids,
-        confirmed_closed_position_ids=confirmed_closed_position_ids,
-    )
-    if facts is None:
-        return None
-    return list(facts.get("completed_position_trades") or [])
-
-
-def _load_authoritative_session_deal_facts(
-    trade_date: str,
-    timezone_name: str = "UTC",
-    *,
-    broker_open_position_ids: set[int] | None = None,
-    confirmed_closed_position_ids: set[int] | None = None,
-) -> dict[str, Any] | None:
-    return _session_load_authoritative_deal_facts(
-        trade_date,
-        timezone_name,
-        broker_open_position_ids=broker_open_position_ids,
-        confirmed_closed_position_ids=confirmed_closed_position_ids,
-        connection_factory=_get_state_read_conn,
-        execute=_state_execute,
-        warning=logger.warning,
-    )
-
-
-def _calendar_day_trade_summary(timezone_name: str = "Asia/Shanghai") -> dict:
-    """Read-only operator-day view; never drives the UTC risk circuit."""
-    tz = ZoneInfo(timezone_name)
-    trade_date = datetime.now(tz).strftime("%Y-%m-%d")
-    open_position_ids = _fresh_cached_broker_open_position_ids()
-    trades = (
-        _load_authoritative_session_trades(
-            trade_date,
-            timezone_name,
-            broker_open_position_ids=open_position_ids,
-        )
-        if open_position_ids is not None
-        else None
-    )
-    if trades is None:
-        return {
-            "status": "unavailable",
-            "trade_date": trade_date,
-            "timezone": timezone_name,
-            "risk_authoritative": False,
-        }
-    pnls = [float(item.get("net", 0.0) or 0.0) for item in trades]
-    window_start, window_end = _session_trade_window(trade_date, timezone_name)
-    return {
-        "status": "available",
-        "trade_date": trade_date,
-        "timezone": timezone_name,
-        "window_start": window_start,
-        "window_end": window_end,
-        "trade_count": len(pnls),
-        "winning_count": sum(1 for pnl in pnls if pnl > 0),
-        "losing_count": sum(1 for pnl in pnls if pnl < 0),
-        "net_pnl": sum(pnls),
-        "risk_authoritative": False,
-        "source": "ctrader_deals.final_close_calendar_view.v1",
-    }
-
-
-def _build_session_state_from_authoritative_trades(
-    *,
-    trade_date: str,
-    trades: list[dict],
-    realized_close_legs: list[dict] | None = None,
-) -> dict:
-    """Project fresh broker account/deal facts into the live risk session.
-
-    Cache-derived peak/equity history is intentionally excluded: only fresh
-    broker account and deal facts may reconstruct the risk session.
-    """
-    account = live_state_get("account", {}, clone=True) or {}
-    limits = RiskLimitSnapshot.from_runtime_config()
-    return _session_build_authoritative_state(
-        trade_date=trade_date,
-        completed_position_trades=trades,
-        realized_close_legs=(
-            None if realized_close_legs is None else list(realized_close_legs)
-        ),
-        current_balance=float(account.get("balance", 0.0) or 0.0),
-        max_consecutive_losses=int(limits.max_consecutive_losses),
-        max_daily_loss_pct=float(limits.max_daily_loss_pct),
-        enforce_circuit_breaker=not bounded_demo_mode_active(),
-    )
-
-
-def _restore_session_state_for_day(
-    trade_date: str | None = None,
-    *,
-    broker_open_position_ids: set[int] | None = None,
-    confirmed_closed_position_ids: set[int] | None = None,
-) -> bool:
-    if not trade_date:
-        trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    raw_state = _runtime_kv_get(_session_state_key(trade_date), {}) or {}
-    authoritative_facts = _load_authoritative_session_deal_facts(
-        trade_date,
-        broker_open_position_ids=broker_open_position_ids,
-        confirmed_closed_position_ids=confirmed_closed_position_ids,
-    )
-    account = live_state_get("account", {}, clone=True) or {}
-    limits = RiskLimitSnapshot.from_runtime_config()
-    decision = _session_resolve_restore(
-        trade_date=trade_date,
-        raw_cache=raw_state,
-        authoritative_facts=authoritative_facts,
-        current_balance=account.get("balance", 0.0),
-        max_consecutive_losses=int(limits.max_consecutive_losses),
-        max_daily_loss_pct=float(limits.max_daily_loss_pct),
-        observed_at=time.time(),
-        enforce_circuit_breaker=not bounded_demo_mode_active(),
-    )
-    if decision.get("authoritative_error"):
-        logger.warning(
-            "[live] authoritative session projection unavailable for {}: {}",
-            trade_date,
-            decision["authoritative_error"],
-        )
-    if not decision.get("authoritative") and decision.get("restored"):
-        logger.warning(
-            "[live] restoring cached session projection for {} because broker close facts are unavailable",
-            trade_date,
-        )
-    _live_state_update(**dict(decision.get("state") or {}))
-    if decision.get("authoritative"):
-        _persist_session_state(trade_date)
-        _evaluate_daily_drawdown()
-    return bool(decision.get("restored"))
-
-
-def _defer_close_until_authoritative_deal(
-    position_id: int,
-    *,
-    broker: str,
-    tick: int,
-    reason: str = "close_deal_missing_or_delayed",
-    recovery_evidence: dict[str, Any] | None = None,
-) -> None:
-    """Keep broker-close evidence pending without inventing realized PnL."""
-
-    pid = int(position_id or 0)
-    detected_at = time.time()
-    evidence = {
-        "position_id": pid,
-        "broker": str(broker or ""),
-        "tick": int(tick),
-        "reason": str(reason or "close_deal_missing_or_delayed"),
-        "detected_at": detected_at,
-        "expected_position_volume": float(
-            _pos_open_api_volume.get(pid, 0.0) or 0.0
-        ),
-        **dict(recovery_evidence or {}),
-    }
-    try:
-        _merge_recovery_position_meta(
-            pid,
-            {
-                "close_deal_pending": {
-                    "status": "pending",
-                    **evidence,
-                }
-            },
-        )
-    except Exception as exc:
-        evidence["recovery_projection_error"] = f"{type(exc).__name__}:{exc}"
-
-    latch = no_new_risk_latch_status(fail_closed=True)
-    cause_key = ("session_risk_unavailable", str(pid))
-    active_causes = {
-        (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
-        for item in list(latch.get("causes") or [])
-        if isinstance(item, dict)
-    }
-    if cause_key not in active_causes:
-        try:
-            activate_no_new_risk_latch(
-                reason="session_risk_close_deal_unavailable",
-                actor="system:session_restore",
-                correlation_id=str(pid),
-                metadata=evidence,
-                cause=cause_key[0],
-                cause_id=cause_key[1],
-            )
-        except Exception as exc:
-            evidence["latch_error"] = f"{type(exc).__name__}:{exc}"
-    latch = no_new_risk_latch_status(fail_closed=True)
-    _live_state_update(
-        session_state_status="unavailable",
-        session_state_source="close_deal_pending",
-        session_risk_blockers=[f"close_deal_pending:{pid}"],
-        session_observed_at=0.0,
-        accepting_new_risk=False,
-        no_new_risk_latch=latch,
-    )
-    try:
-        append_safety_outbox(
-            event_type="session_close_deal_pending",
-            payload=evidence,
-            error=str(reason or "close_deal_missing_or_delayed"),
-        )
-    except Exception:
-        pass
-
-
-def _release_session_close_deal_latch(position_id: int, real_pnl: dict[str, Any]) -> None:
-    """Release one missing-deal cause only with concrete cTrader deal evidence."""
-
-    pid = int(position_id or 0)
-    if not _authoritative_close_pnl(real_pnl):
-        raise ValueError("authoritative_close_deal_required")
-    latch = no_new_risk_latch_status(fail_closed=True)
-    if ("session_risk_unavailable", str(pid)) not in {
-        (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
-        for item in list(latch.get("causes") or [])
-        if isinstance(item, dict)
-    }:
-        return
-    evidence = {
-        "position_id": pid,
-        "deal_id": real_pnl.get("deal_id"),
-        "deal_ids": list(real_pnl.get("deal_ids") or []),
-        "exec_timestamp": float(real_pnl.get("exec_timestamp") or 0.0),
-        "net": float(real_pnl.get("net") or 0.0),
-        "source": str(real_pnl.get("source") or "ctrader_deals"),
-    }
-    try:
-        release_no_new_risk_latch_cause(
-            cause="session_risk_unavailable",
-            cause_id=str(pid),
-            reason="authoritative_close_deal_recovered",
-            actor="system:session_restore",
-            correlation_id=str(real_pnl.get("deal_id") or pid),
-            evidence=evidence,
-        )
-    except Exception as exc:
-        # Broker/deal truth remains usable; a release write failure simply keeps
-        # the deployment conservatively latched until operator repair.
-        try:
-            append_safety_outbox(
-                event_type="session_close_deal_latch_release_failed",
-                payload=evidence,
-                error=f"{type(exc).__name__}:{exc}",
-            )
-        except Exception:
-            pass
-
-
-def _release_orphaned_recovery_session_latches(
-    position_ids: list[int] | set[int] | tuple[int, ...],
-    *,
-    broker: str,
-    broker_position_ids: set[int],
-    reconcile_id: str,
-    observed_at: float,
-) -> None:
-    """Release close-deal latches for recovery rows proven to be orphaned.
-
-    This is deliberately distinct from ``_release_session_close_deal_latch``:
-    no broker close deal is being asserted here.  The only fact used is that
-    ``RecoveryPositionStore.purge_unbrokered`` already verified that the row
-    had no entry lineage and was absent from the same fresh broker snapshot.
-    Keeping this release separate prevents a cleanup of synthetic/test state
-    from becoming a false close outcome or a supervisor learning sample.
-    """
-
-    normalized_ids = sorted({int(position_id) for position_id in position_ids if int(position_id) > 0})
-    if not normalized_ids:
-        return
-    active_causes = {
-        (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
-        for item in list(
-            no_new_risk_latch_status(fail_closed=True).get("causes") or []
-        )
-        if isinstance(item, dict)
-    }
-    for position_id in normalized_ids:
-        cause_key = ("session_risk_unavailable", str(position_id))
-        if cause_key not in active_causes:
-            continue
-        evidence = {
-            "position_id": position_id,
-            "broker": str(broker or "ctrader"),
-            "broker_position_ids": sorted(int(item) for item in broker_position_ids),
-            "reconcile_id": str(reconcile_id or ""),
-            "observed_at": float(observed_at or 0.0),
-            "source": "fresh_ctrader_reconcile",
-            "classification": "orphaned_or_test_recovery_state",
-            "broker_close_deal_asserted": False,
-        }
-        try:
-            release_no_new_risk_latch_cause(
-                cause=cause_key[0],
-                cause_id=cause_key[1],
-                reason="orphaned_recovery_row_purged",
-                actor="system:position_reconcile",
-                correlation_id=str(reconcile_id or position_id),
-                evidence=evidence,
-            )
-            logger.warning(
-                f"[live] released orphaned recovery latch for position {position_id} "
-                f"after fresh broker reconcile (no close-deal claim)"
-            )
-        except Exception as exc:
-            # A failed release must remain fail-closed.  The recovery row has
-            # already been purged, so surface the durable-latch repair issue
-            # loudly for the next operator/reconcile cycle.
-            logger.error(
-                f"[live] failed to release orphaned recovery latch for position "
-                f"{position_id}: {type(exc).__name__}: {exc}"
-            )
-
-    # Remove only the stale display blockers produced by the same synthetic
-    # rows.  Do not mark the session available here: session_restore owns that
-    # authority and may still have an independent session_not_restored cause.
-    stale_blockers = {
-        f"close_deal_pending:{position_id}" for position_id in normalized_ids
-    }
-    current_blockers = list(
-        live_state_get("session_risk_blockers", [], clone=True) or []
-    )
-    filtered_blockers = [
-        blocker for blocker in current_blockers if str(blocker) not in stale_blockers
-    ]
-    if filtered_blockers != current_blockers:
-        _live_state_update(session_risk_blockers=filtered_blockers)
-
-
-def _pending_session_close_causes() -> dict[int, dict[str, Any]]:
-    """Return durable/local close-deal cursors keyed by broker position."""
-
-    try:
-        causes = list(
-            no_new_risk_latch_status(fail_closed=True).get("causes") or []
-        )
-    except Exception:
-        return {}
-    result: dict[int, dict[str, Any]] = {}
-    for item in causes:
-        if not isinstance(item, dict) or str(item.get("cause") or "") != (
-            "session_risk_unavailable"
-        ):
-            continue
-        try:
-            position_id = int(item.get("cause_id") or 0)
-        except (TypeError, ValueError):
-            continue
-        # FIX 2026-09-01: filter synthetic/test positions (902/903) that have leaked into durable latch
-        # Real cTrader positions are >100k; synthetic IDs <1000 must not block recovery bootstrap
-        if position_id < 1000:
-            continue
-        if position_id > 0:
-            metadata = item.get("metadata")
-            result[position_id] = {
-                **(dict(metadata) if isinstance(metadata, dict) else {}),
-                "latch_created_at": float(item.get("created_at") or 0.0),
-            }
-    return result
-
-
-def _pending_session_close_position_ids() -> set[int]:
-    return set(_pending_session_close_causes())
-
-
-def _pending_close_fallback_state(
-    position_id: int,
-    *,
-    broker: str,
-    recovery_evidence: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    pid = int(position_id or 0)
-    evidence = dict(recovery_evidence or {})
-    return {
-        "position_id": pid,
-        "broker": str(broker or "ctrader"),
-        "symbol": "XAUUSD+",
-        "open_price": float(_pos_open_prices.get(pid, 0.0) or 0.0),
-        "volume": float(
-            _pos_open_api_volume.get(pid, 0.0)
-            or evidence.get("expected_position_volume", 0.0)
-            or 0.0
-        ),
-        "close_pnl": 0.0,
-        "context_integrity": _RECOVERY_CONTEXT_PARTIAL,
-    }
-
-
-def _pending_close_requirements(
-    position_state: dict[str, Any],
-    *,
-    latch_evidence: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    evidence = dict(latch_evidence or {})
-    raw_meta = position_state.get("recovery_meta_json")
-    try:
-        recovery_meta = (
-            json.loads(raw_meta)
-            if isinstance(raw_meta, str) and raw_meta
-            else dict(raw_meta or {})
-        )
-    except Exception:
-        recovery_meta = {}
-    pending = recovery_meta.get("close_deal_pending")
-    if isinstance(pending, dict):
-        evidence = {**evidence, **pending}
-    return evidence
-
-
-def _pending_close_cursor_overrides(
-    position_ids: set[int],
-    *,
-    active_rows_by_id: dict[int, dict[str, Any]],
-    pending_close_causes: dict[int, dict[str, Any]],
-    broker: str,
-) -> dict[int, dict[str, Any]]:
-    """Recover the original pre-RPC cursor for delayed-deal retries."""
-
-    result: dict[int, dict[str, Any]] = {}
-    for pid in position_ids:
-        state = active_rows_by_id.get(pid) or _pending_close_fallback_state(
-            pid,
-            broker=broker,
-            recovery_evidence=pending_close_causes.get(pid),
-        )
-        requirements = _pending_close_requirements(
-            state,
-            latch_evidence=pending_close_causes.get(pid),
-        )
-        pending_kind = str(requirements.get("pending_kind") or "")
-        pending_reason = str(requirements.get("reason") or "")
-        expected_volume = float(
-            requirements.get("expected_position_volume") or 0.0
-        )
-        is_fallback_final_close = bool(
-            not pending_kind
-            and pending_reason == "close_deal_missing_or_delayed"
-            and expected_volume > 0.0
-        )
-        if (
-            pending_kind != "partial_close"
-            and (
-                pid in active_rows_by_id
-                or pending_kind == "final_close"
-                or is_fallback_final_close
-            )
-        ):
-            # A durable position that has disappeared at the broker is a
-            # final-close recovery, not a new reduction RPC.  A close deal
-            # already fetched by an earlier retry remains valid evidence; do
-            # not promote it to the retry baseline and wait for a nonexistent
-            # second close leg.  Timestamp and required-volume checks still
-            # guard against accepting an old partial close.
-            #
-            # Must run BEFORE the generic baseline passthrough below: the
-            # no_new_risk_latch is durable and may still carry baseline_deal_ids
-            # captured by an earlier (pre-fix) defer that pointed at the very
-            # close deal now in the store.  Using that stale baseline makes
-            # observed_ids - baseline_ids empty forever and deadlocks close
-            # confirmation (281067702 stuck 2026-08-05).
-            result[pid] = {
-                "baseline_cursor_available": True,
-                "baseline_deal_ids": [],
-                "baseline_closed_volume": 0.0,
-            }
-        elif (
-            "baseline_deal_ids" in requirements
-            or "baseline_closed_volume" in requirements
-        ):
-            result[pid] = {
-                "baseline_cursor_available": requirements.get(
-                    "baseline_cursor_available",
-                    True,
-                ),
-                "baseline_deal_ids": list(
-                    requirements.get("baseline_deal_ids") or []
-                ),
-                "baseline_closed_volume": float(
-                    requirements.get("baseline_closed_volume") or 0.0
-                ),
-            }
-    return result
-
-
-def _pending_close_required_volume_delta(
-    position_id: int,
-    *,
-    active_rows_by_id: dict[int, dict[str, Any]],
-    pending_close_causes: dict[int, dict[str, Any]],
-    broker: str,
-) -> float:
-    state = active_rows_by_id.get(position_id) or _pending_close_fallback_state(
-        position_id,
-        broker=broker,
-        recovery_evidence=pending_close_causes.get(position_id),
-    )
-    requirements = _pending_close_requirements(
-        state,
-        latch_evidence=pending_close_causes.get(position_id),
-    )
-    return max(
-        0.0,
-        float(
-            requirements.get("required_closed_volume_delta")
-            or state.get("volume")
-            or 0.0
-        ),
-    )
-
-
-def _pending_close_result_complete(
-    real_pnl: dict[str, Any] | None,
-    *,
-    position_state: dict[str, Any],
-    require_volume_proof: bool,
-    recovery_requirements: dict[str, Any] | None = None,
-) -> bool:
-    """Reject an old partial leg as proof of a broker-missing final close."""
-
-    if not _authoritative_close_pnl(real_pnl):
-        return False
-    requirements = dict(recovery_requirements or {})
-    if str(requirements.get("pending_kind") or "") == "partial_close":
-        # When the pre-RPC cursor could not be captured, a close leg already
-        # present in PostgreSQL cannot be proven to belong to this reduction.
-        # Keep the cause latched instead of treating an arbitrary historical
-        # partial as recovery evidence.
-        if requirements.get("baseline_cursor_available") is False:
-            return False
-        baseline_ids = {
-            int(item)
-            for item in list(requirements.get("baseline_deal_ids") or [])
-            if int(item or 0) > 0
-        }
-        observed_ids = {
-            int(item)
-            for item in list((real_pnl or {}).get("deal_ids") or [])
-            if int(item or 0) > 0
-        }
-        required_delta = float(
-            requirements.get("required_closed_volume_delta") or 0.0
-        )
-        baseline_volume = float(
-            requirements.get("baseline_closed_volume") or 0.0
-        )
-        observed_volume = float((real_pnl or {}).get("closed_volume") or 0.0)
-        return bool(
-            required_delta > 0.0
-            and observed_ids - baseline_ids
-            and observed_volume - baseline_volume + 1e-9 >= required_delta
-        )
-    if not require_volume_proof:
-        return True
-    expected_volume = float(position_state.get("volume") or 0.0)
-    closed_volume = float((real_pnl or {}).get("closed_volume") or 0.0)
-    return bool(
-        expected_volume > 0.0
-        and closed_volume > 0.0
-        and closed_volume + 1e-9 >= expected_volume
-    )
-
-
-def _capture_partial_close_deal_cursor(position_id: int) -> dict[str, Any]:
-    """Capture the durable close-deal cursor immediately before broker RPC."""
-
-    pid = int(position_id or 0)
-    captured_at = time.time()
-    try:
-        from execution.deal_sync import find_close_deal
-
-        conn = _get_state_pg_conn()
-        try:
-            before = find_close_deal(conn, pid) or {}
-        finally:
-            conn.close()
-        return {
-            "status": "captured",
-            "captured_at": captured_at,
-            "baseline_cursor_available": True,
-            "baseline_deal_ids": sorted(
-                {
-                    int(item)
-                    for item in list(before.get("deal_ids") or [])
-                    if int(item or 0) > 0
-                }
-            ),
-            "baseline_closed_volume": float(
-                before.get("closed_volume") or 0.0
-            ),
-        }
-    except Exception as exc:
-        _record_risk_reduction_aux_failure(
-            "partial_close_deal_cursor_unavailable",
-            position_id=pid,
-            action="reduce_position",
-            error=exc,
-        )
-        return {
-            "status": "unavailable",
-            "captured_at": captured_at,
-            "baseline_cursor_available": False,
-            "baseline_deal_ids": [],
-            "baseline_closed_volume": 0.0,
-            "error": f"{type(exc).__name__}:{exc}",
-        }
-
-
-def _sync_partial_close_session_fact(
-    bridge: Any,
-    *,
-    broker: str,
-    position_id: int,
-    close_ts: float,
-    volume: float,
-    tick: int,
-    deal_cursor: dict[str, Any] | None = None,
-) -> bool:
-    from execution.deal_sync import (
-        fetch_deals_since_result,
-        find_close_deal,
-        store_deals,
-    )
-
-    runtime = PartialCloseSessionFactRuntime(
-        get_state_connection=_get_state_pg_conn,
-        fetch_deals_since_result=fetch_deals_since_result,
-        store_deals=store_deals,
-        find_close_deal=find_close_deal,
-        authoritative_close_pnl=_authoritative_close_pnl,
-        defer_close=_defer_close_until_authoritative_deal,
-        record_aux_failure=_record_risk_reduction_aux_failure,
-        release_close_latch=_release_session_close_deal_latch,
-        update_live_state=_live_state_update,
-        no_new_risk_latch_status=no_new_risk_latch_status,
-        open_api_volumes=_pos_open_api_volume,
-        now=time.time,
-    )
-    return _session_sync_partial_close_fact(
-        bridge,
-        broker=broker,
-        position_id=position_id,
-        close_ts=close_ts,
-        volume=volume,
-        tick=tick,
-        runtime=runtime,
-        deal_cursor=deal_cursor,
-    )
-
-
-def _fresh_cached_broker_open_position_ids(
-    *,
-    now_ts: float | None = None,
-    stale_after_sec: float = _LIVE_SAFETY_FRESHNESS_SEC,
-) -> set[int] | None:
-    """Return broker-open position IDs only from a fresh position fact.
-
-    ``None`` means the open-position set is unknown.  Passing an unknown set
-    into deals-first restore as an empty set could incorrectly classify a
-    partially closed, still-open broker position as a completed trade.
-    """
-
-    observed_at = float(live_state_get("positions_updated_at", 0.0) or 0.0)
-    reconcile_id = str(live_state_get("positions_reconcile_id", "") or "")
-    checked_at = float(time.time() if now_ts is None else now_ts)
-    if (
-        observed_at <= 0.0
-        or not reconcile_id
-        or checked_at < observed_at
-        or checked_at - observed_at > max(0.0, float(stale_after_sec))
-    ):
-        return None
-    positions = live_state_get("positions_reconciled", [], clone=True)
-    if not isinstance(positions, list):
-        return None
-    position_ids: set[int] = set()
-    for position in positions:
-        try:
-            position_id = int(
-                _payload_get(position, "position_id", 0)
-                or _payload_get(position, "ticket", 0)
-                or 0
-            )
-        except (TypeError, ValueError):
-            return None
-        if position_id > 0:
-            position_ids.add(position_id)
-    return position_ids
-
-
-def _remember_close_reason(position_id: int, reason: str) -> None:
-    try:
-        _lifecycle_remember_close_reason(
-            pending_reasons=_pending_close_reasons,
-            merge_recovery_meta=_merge_recovery_position_meta,
-            position_id=position_id,
-            reason=reason,
-        )
-    except Exception as exc:
-        # The lifecycle helper stores the process-local reason before PG
-        # projection.  Preserve that broker-adjacent fact and defer the audit.
-        _pending_close_reasons[int(position_id)] = str(reason or "")
-        _record_risk_reduction_aux_failure(
-            (
-                "emergency_close_audit_deferred"
-                if str(reason or "") == "emergency_close"
-                else "close_reason_projection_failed"
-            ),
-            position_id=position_id,
-            action="close_position",
-            error=exc,
-            payload={"reason": str(reason or "")},
-        )
-
-
-def _consume_close_reason(position_id: int, default: str = "broker_close") -> str:
-    return _lifecycle_consume_close_reason(
-        pending_reasons=_pending_close_reasons,
-        load_recovery_row=_load_recovery_position_row,
-        position_id=position_id,
-        default=default,
-    )
-
-
-def _remember_close_verdict(position_id: int, verdict) -> None:
-    try:
-        _lifecycle_remember_close_verdict(
-            pending_verdicts=_pending_close_verdicts,
-            merge_recovery_meta=_merge_recovery_position_meta,
-            position_id=position_id,
-            verdict=verdict,
-        )
-    except Exception as exc:
-        try:
-            from backend.services.live_position_lifecycle import serialize_close_verdict
-
-            _pending_close_verdicts[int(position_id)] = serialize_close_verdict(verdict)
-        except Exception:
-            pass
-        _record_risk_reduction_aux_failure(
-            "close_verdict_projection_failed",
-            position_id=position_id,
-            action="close_position",
-            error=exc,
-        )
-
-
-def _consume_close_verdict(position_id: int, close_reason: str) -> dict:
-    return _lifecycle_consume_close_verdict(
-        pending_verdicts=_pending_close_verdicts,
-        load_recovery_row=_load_recovery_position_row,
-        build_close_context=_build_close_position_risk_context,
-        risk_evaluate=_RISK_POLICY.evaluate,
-        position_id=int(position_id),
-        close_reason=close_reason,
-    )
-
-
-def _latest_supervisor_event_before_close(position_id: int, close_ts: float, lookback_sec: float = 3600.0) -> dict[str, Any]:
-    conn = _get_state_read_conn()
-    try:
-        # Bounded window scan (reverse keyset); canonical events carry the
-        # position inside the payload, so the filter is applied here.
-        lower = float(close_ts or time.time()) - max(1.0, lookback_sec)
-        upper = float(close_ts or time.time())
-        for candidate in iter_decision_rows(
-            conn,
-            min_observed_epoch=lower,
-            max_observed_epoch=upper,
-            reverse=True,
-        ):
-            if (
-                str(candidate.get("position_id") or "") == str(position_id)
-                and (
-                    str(candidate.get("event_type") or "").startswith("supervisor_")
-                    or str(candidate.get("event_type") or "") == "holding_timeout"
-                )
-            ):
-                return _lifecycle_normalize_supervisor_event_row(candidate, close_ts=close_ts)
-        return {}
-    finally:
-        conn.close()
-
-
-def _latest_protection_trace_before_close(position_id: int, close_ts: float, lookback_sec: float = 3600.0) -> dict[str, Any]:
-    conn = _get_state_read_conn()
-    try:
-        upper = float(close_ts or time.time())
-        lower = upper - max(1.0, lookback_sec)
-        rows = [
-            item
-            for item in iter_supervisor_trace_rows(
-                conn,
-                limit=0,
-                position_id=str(position_id),
-                reverse=True,
-            )
-            if lower <= float(item.get("event_ts") or item.get("observed_at") or 0.0) <= upper
-            and str(item.get("action") or "").strip().lower() in {"tighten", "reduce", "close"}
-        ]
-        row = rows[0] if rows else None
-        return _lifecycle_normalize_protection_trace_row(row, close_ts=close_ts)
-    finally:
-        conn.close()
-
-
-def _classify_close_source(position_id: int, close_reason: str, close_ts: float) -> dict[str, Any]:
-    ledger_latest = _latest_supervisor_event_before_close(position_id, close_ts)
-    trace_latest = _latest_protection_trace_before_close(position_id, close_ts)
-    latest = _lifecycle_latest_close_evidence(ledger_latest, trace_latest)
-    return _lifecycle_classify_close_source_from_evidence(
-        close_reason=close_reason,
-        evidence=latest,
-    )
-
-
-def _risk_state_with_verdict_dict(verdict: dict) -> dict:
-    state = live_state_get("risk", {}, clone=True) or {}
-    return _lifecycle_build_risk_state_with_policy_verdict(
-        state,
-        verdict,
-        serialized=True,
-    )
-
-
-def _normalize_position_snapshot(raw: Any) -> dict:
-    return _lifecycle_normalize_position_snapshot(raw)
-
-
-def _upsert_recovery_position_state(
-    raw_position: Any,
-    *,
-    broker: str,
-    strategy_name: str,
-    status: str = "open",
-    context_integrity: str | None = None,
-    meta: dict | None = None,
-) -> None:
-    _recovery_position_store().upsert(
-        raw_position,
-        broker=broker,
-        strategy_name=strategy_name,
-        status=status,
-        context_integrity=context_integrity,
-        meta=meta,
-    )
-
-
-def _list_active_recovery_positions(broker: str) -> list[dict]:
-    return _recovery_position_store().list_active(broker)
-
-
-def _active_recovery_position_ids_for_close_detection(broker: str) -> set[int]:
-    """Keep durable open rows in close detection even if memory lost the ID."""
-
-    try:
-        return _lifecycle_recovery_active_position_ids(
-            _list_active_recovery_positions(broker)
-        )
-    except Exception as exc:
-        logger.debug(
-            "[live] durable recovery IDs unavailable for close detection: {}",
-            exc,
-        )
-        return set()
-
-
-def _recovery_last_seen_by_position(position_ids: set[int]) -> dict[int, float]:
-    """Return the last broker-open observation used to reject stale partial deals."""
-    return _recovery_position_store().last_seen_by_position(position_ids)
-
-
-def _recovery_remaining_volume_by_position(
-    position_ids: set[int],
-) -> dict[int, float]:
-    """Return the last fresh broker-open volume for close completeness proof."""
-    return _recovery_position_store().remaining_volume_by_position(position_ids)
-
-
-def _sync_closed_position_deals_for_tick(
-    bridge: Any,
-    closed_pids: set[int],
-    *,
-    observed_close_cursor_out: dict[int, dict[str, Any]],
-) -> dict[int, dict]:
-    """Fetch authoritative deals for positions that disappeared this tick.
-
-    A broker position disappearing is a final-close observation, not a
-    partial-close retry.  The cursor baseline therefore has to be an explicit
-    empty cursor for every position.  Keeping this contract in one helper
-    prevents the duplicate-bar and new-bar paths from drifting apart.
-    """
-    if not closed_pids or bridge is None:
-        return {}
-
-    from execution.deal_sync import sync_close_deals_batch
-
-    conn = _get_state_pg_conn()
-    try:
-        return sync_close_deals_batch(
-            bridge,
-            conn,
-            closed_pids,
-            min_exec_timestamp_by_position=(
-                _recovery_last_seen_by_position(closed_pids)
-            ),
-            required_closed_volume_delta_by_position=(
-                _recovery_remaining_volume_by_position(closed_pids)
-            ),
-            baseline_close_cursor_by_position={
-                int(pid): {
-                    "baseline_cursor_available": True,
-                    "baseline_deal_ids": [],
-                    "baseline_closed_volume": 0.0,
-                }
-                for pid in closed_pids
-            },
-            observed_close_cursor_out=observed_close_cursor_out,
-        )
-    finally:
-        conn.close()
-
-
-def _mark_recovery_position_closed(
-    position_id: int,
-    *,
-    close_reason: str,
-    close_pnl: float,
-    closed_at: float,
-    meta: dict | None = None,
-) -> None:
-    _recovery_position_store().mark_closed(
-        position_id,
-        close_reason=close_reason,
-        close_pnl=close_pnl,
-        closed_at=closed_at,
-        meta=meta,
-    )
-
-
-def _replay_recovered_close(
-    *,
-    broker: str,
-    position_id: int,
-    position_state: dict,
-    real_pnl: dict | None,
-    strategy_name: str,
-) -> bool:
-    return _runtime_replay_recovered_close(
-        broker=broker,
-        position_id=position_id,
-        position_state=position_state,
-        real_pnl=real_pnl,
-        strategy_name=strategy_name,
-        runtime=RecoveredCloseReplayRuntime(
-            authoritative_close_pnl=_authoritative_close_pnl,
-            defer_close=_defer_close_until_authoritative_deal,
-            build_payloads=_lifecycle_build_replayed_close_payloads,
-            mark_recovery_closed=_mark_recovery_position_closed,
-            release_close_latch=_release_session_close_deal_latch,
-            get_risk_state=lambda: (
-                live_state_get("risk", {}, clone=True) or {}
-            ),
-            now=time.time,
-            partial_context=_RECOVERY_CONTEXT_PARTIAL,
-            ledger=_LEDGER,
-            trade_reviewer=_TRADE_REVIEWER,
-            experience_builder=_EXPERIENCE_BUILDER,
-            policy_suggester=_POLICY_SUGGESTER,
-            attr_engine=(_factor_pipeline or {}).get("attribution"),
-            debug=logger.debug,
-        ),
-    )
-
-
-def _result_is_position_not_found(result: Any) -> bool:
-    text = " ".join(
-        str(part or "")
-        for part in (
-            getattr(result, "error_code", ""),
-            getattr(result, "comment", ""),
-            getattr(result, "error", ""),
-        )
-    ).upper()
-    return "POSITION_NOT_FOUND" in text or "POSITION NOT FOUND" in text
-
-
-def _remove_live_position_state(position_id: int) -> None:
-    global _prev_position_ids
-    pid = int(position_id)
-    # The caller has already completed and published a fresh broker
-    # reconciliation.  Local cleanup may trim the advisory event projection,
-    # but must never advance the authoritative reconcile timestamp.
-    positions = live_state_get("positions_event", [], clone=True) or []
-    payload = _lifecycle_filter_removed_live_position(positions, position_id=pid)
-    if payload["removed"]:
-        _live_state_update(
-            positions_event=payload["positions"],
-            positions_event_reason="local_closed_position_cleanup",
-        )
-    _prev_position_ids.discard(pid)
-    _pos_open_prices.pop(pid, None)
-    _pos_open_api_volume.pop(pid, None)
-    _lifecycle_forget_pending_close_state(
-        pending_reasons=_pending_close_reasons,
-        pending_verdicts=_pending_close_verdicts,
-        position_id=pid,
-    )
-
-
-def _retire_broker_missing_position(
-    bridge,
-    position_id: int,
-    *,
-    broker: str,
-    strategy_name: str,
-    reason: str,
-    persist_reconcile: bool = True,
-    log=None,
-) -> bool:
-    from execution.deal_sync import sync_close_deals_batch
-
-    return _runtime_retire_missing_position(
-        bridge,
-        position_id,
-        broker=broker,
-        strategy_name=strategy_name,
-        reason=reason,
-        log=log,
-        runtime=MissingPositionRetirementRuntime(
-            read_positions=lambda current_bridge: _read_positions_for_recovery(
-                current_bridge,
-                persist=persist_reconcile,
-            ),
-            normalize_position=_normalize_position_snapshot,
-            load_recovery_position=_load_recovery_position_row,
-            open_prices=_pos_open_prices,
-            get_state_connection=_get_state_pg_conn,
-            sync_close_deals_batch=sync_close_deals_batch,
-            authoritative_close_pnl=_authoritative_close_pnl,
-            defer_close=_defer_close_until_authoritative_deal,
-            replay_close=_replay_recovered_close,
-            mark_recovery_closed=_mark_recovery_position_closed,
-            remove_live_position_state=_remove_live_position_state,
-            now=time.time,
-            replay_lookback_seconds=_RECOVERY_REPLAY_LOOKBACK_SEC,
-            partial_context=_RECOVERY_CONTEXT_PARTIAL,
-            debug=logger.debug,
-        ),
-    )
-
-
-def _read_positions_for_recovery(
-    bridge,
-    *,
-    persist: bool = True,
-) -> list[Any]:
-    result = _explicit_position_reconcile(bridge)
-    if str(_reconcile_value(result, "status", "failed") or "failed") != "fresh":
-        raise RuntimeError(
-            str(_reconcile_value(result, "error_code", "") or "fresh broker reconcile unavailable")
-        )
-    return list(
-        _publish_fresh_position_reconcile(
-            result,
-            broker="ctrader",
-            persist=persist,
-        )
-    )
-
-
-def _bootstrap_position_recovery(
-    bridge,
-    *,
-    broker: str,
-    strategy_name: str,
-    log,
-) -> bool:
-    from execution.deal_sync import sync_close_deals_batch
-
-    runtime = PositionRecoveryRuntime(
-        read_positions=_read_positions_for_recovery,
-        normalize_position=_normalize_position_snapshot,
-        list_active_positions=_list_active_recovery_positions,
-        pending_session_close_causes=_pending_session_close_causes,
-        pending_close_fallback_state=_pending_close_fallback_state,
-        pending_close_requirements=_pending_close_requirements,
-        get_state_connection=_get_state_pg_conn,
-        sync_close_deals_batch=sync_close_deals_batch,
-        pending_close_cursor_overrides=_pending_close_cursor_overrides,
-        pending_close_result_complete=_pending_close_result_complete,
-        release_session_close_latch=_release_session_close_deal_latch,
-        defer_close=_defer_close_until_authoritative_deal,
-        previous_position_ids=_prev_position_ids,
-        zero_confirmations=_recovery_zero_confirmations,
-        zero_confirmations_required=_RECOVERY_ZERO_CONFIRMATIONS_REQUIRED,
-        replay_lookback_seconds=_RECOVERY_REPLAY_LOOKBACK_SEC,
-        recovery_replay_lookback_from=_lifecycle_recovery_replay_lookback_from,
-        pending_close_required_volume_delta=(
-            _pending_close_required_volume_delta
-        ),
-        replay_recovered_close=_replay_recovered_close,
-        recovery_missing_position_ids=_lifecycle_recovery_missing_position_ids,
-        open_prices=_pos_open_prices,
-        open_api_volumes=_pos_open_api_volume,
-        upsert_recovery_position=_upsert_recovery_position_state,
-        now=time.time,
-    )
-    return _runtime_bootstrap_position_recovery(
-        bridge,
-        broker=broker,
-        strategy_name=strategy_name,
-        log=log,
-        runtime=runtime,
-    )
-
-
-def _repair_session_start_balance_from_account(*, persist: bool = True) -> float:
-    """Fill a startup-time zero baseline once broker balance becomes available."""
-    existing = float(live_state_get("session_start_balance", 0.0) or 0.0)
-    if existing > 0:
-        return existing
-    account = live_state_get("account", {}, clone=True) or {}
-    current_balance = float(account.get("balance", 0.0) or 0.0)
-    if current_balance <= 0:
-        return 0.0
-    session_pnl = float(live_state_get("session_pnl", 0.0) or 0.0)
-    reconstructed = current_balance - session_pnl
-    if reconstructed <= 0:
-        return 0.0
-    _live_state_update(session_start_balance=reconstructed)
-    if persist:
-        _persist_session_state()
-    return reconstructed
-
-
-def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> dict:
-    limits = risk_limits or RiskLimitSnapshot.from_runtime_config()
-    session_pnl = float(live_state_get("session_pnl", 0.0) or 0.0)
-    consecutive_loss = int(
-        live_state_get("session_consecutive_loss", 0) or 0
-    )
-    start_balance = float(live_state_get("session_start_balance", 0.0) or 0.0)
-    if start_balance <= 0:
-        return {
-            "tripped": False,
-            "dd_pct": 0.0,
-            "reason": "",
-            "session_pnl": session_pnl,
-            "start_balance": 0.0,
-            "risk_limits": limits.to_dict(),
-        }
-    # 回撤只统计亏损方向 — 盈利日不得把 abs(PnL) 写成回撤水位。
-    dd_pct = -min(session_pnl, 0.0) / start_balance * 100 if start_balance > 0 else 0.0
-    prev_dd = float(live_state_get("session_max_drawdown_pct", 0.0) or 0.0)
-    updates = {"session_max_drawdown_pct": max(prev_dd, dd_pct)}
-    consecutive_limit = int(limits.max_consecutive_losses)
-    consecutive_tripped = (
-        consecutive_limit > 0 and consecutive_loss >= consecutive_limit
-    )
-    drawdown_tripped = (
-        limits.max_daily_loss_pct > 0
-        and session_pnl < 0
-        and dd_pct >= limits.max_daily_loss_pct
-    )
-    observed_tripped = bool(consecutive_tripped or drawdown_tripped)
-    if consecutive_tripped:
-        observed_reason = f"consecutive losses {consecutive_loss}"
-    elif drawdown_tripped:
-        observed_reason = f"daily drawdown {dd_pct:.1f}%"
-    else:
-        observed_reason = ""
-    enforced = not bounded_demo_mode_active()
-    tripped = bool(observed_tripped and enforced)
-    reason = observed_reason if tripped else ""
-    updates["session_circuit_observation"] = {
-        "triggered": observed_tripped,
-        "reason": observed_reason,
-        "enforced": tripped,
-    }
-    if tripped:
-        updates["circuit_breaker"] = True
-        updates["circuit_reason"] = reason
-        _maybe_update_loss_streak_book(tripped=True, reason=reason)
-    elif not enforced:
-        updates["circuit_breaker"] = False
-        updates["circuit_reason"] = ""
-        _maybe_update_loss_streak_book(tripped=False)
-    _live_state_update(**updates)
-    if updates:
-        _persist_session_state()
-    return {
-        "tripped": tripped,
-        "dd_pct": dd_pct,
-        "reason": reason,
-        "observed_tripped": observed_tripped,
-        "observed_reason": observed_reason,
-        "enforced": tripped,
-        "session_pnl": session_pnl,
-        "start_balance": start_balance,
-        "risk_limits": limits.to_dict(),
-    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ── Loss-streak probation ladder (risk/loss_streak.py owns the math) ──
@@ -4887,7 +3325,7 @@ def _loss_streak_review_ready(book: dict[str, Any], *, now_ts: float) -> bool:
         if now_ts - tripped_at >= statement_grace_seconds():
             return True
         statement = load_loss_review_statement(
-            trip_date=trip_date, kv_reader=_runtime_kv_get
+            trip_date=trip_date, kv_reader=live_close_settlement.runtime_kv_get
         )
         return statement is not None
     except Exception:
@@ -4920,7 +3358,7 @@ def _maybe_update_loss_streak_book(*, tripped: bool, reason: str = "") -> None:
                 "probation_trade_count": 0,
                 "review_statement_ready": False,
             }
-            _live_state_update(loss_streak_book=book)
+            live_state_update(loss_streak_book=book)
             logger.info(
                 "[loss_streak] daily limit tripped: streak={} reason={}",
                 streak,
@@ -4929,7 +3367,7 @@ def _maybe_update_loss_streak_book(*, tripped: bool, reason: str = "") -> None:
     elif book and str(book.get("trip_date") or "") != today:
         # Broker day rolled over without a new trip: clear the ladder so a
         # fresh day starts unconditionally clean (legacy behaviour).
-        _live_state_update(loss_streak_book={})
+        live_state_update(loss_streak_book={})
 
 
 def _record_probation_trade_outcome(pnl: float, *, position_id: int = 0) -> None:
@@ -4974,7 +3412,7 @@ def _get_risk_state() -> dict:
 
 
 def _set_factor_snapshot(votes: dict, composite: dict) -> None:
-    _live_state_update(last_factor_votes=votes, last_composite=composite)
+    live_state_update(last_factor_votes=votes, last_composite=composite)
 
 
 def _set_loop_diagnostic(tick: int, bridge_status: str | None = None, *, bridge_ready: bool | None = None) -> None:
@@ -5008,7 +3446,7 @@ def _set_loop_diagnostic(tick: int, bridge_status: str | None = None, *, bridge_
         snapshot["bridge_ready"] = bridge_ready
     elif "bridge_ready" in previous:
         snapshot["bridge_ready"] = previous["bridge_ready"]
-    _live_state_set("_diag", snapshot)
+    live_state_set("_diag", snapshot)
 
 
 def _prime_live_loop_state(
@@ -5032,7 +3470,7 @@ def _prime_live_loop_state(
     account_payload = dict(account or {})
     if not account_observed:
         account_payload.update(ok=False, warming_up=True)
-    _live_state_update(
+    live_state_update(
         broker=broker,
         loop_running=True,
         loop_strategy=strategy_name,
@@ -5057,10 +3495,10 @@ def _prime_live_loop_state(
     )
     if restore_session:
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        open_position_ids = _fresh_cached_broker_open_position_ids()
+        open_position_ids = live_close_settlement.fresh_cached_broker_open_position_ids()
         restored = bool(
             open_position_ids is not None
-            and _restore_session_state_for_day(
+            and live_close_settlement.restore_session_state_for_day(
                 today_str,
                 broker_open_position_ids=open_position_ids,
             )
@@ -5072,7 +3510,7 @@ def _prime_live_loop_state(
             # Preserve the last known risk projection.  A missing/corrupt
             # cache or unavailable PostgreSQL deal stream is an explicit
             # authority failure, never evidence for a zero-risk new day.
-            _live_state_update(
+            live_state_update(
                 session_state_status=(
                     session_status
                     if session_status in {"unavailable", "degraded_cache"}
@@ -5089,11 +3527,11 @@ def _prime_live_loop_state(
 
 
 def _mark_loop_stopped_for_display() -> None:
-    _loop_mark_stopped_for_display(state_update=_live_state_update)
+    _loop_mark_stopped_for_display(state_update=live_state_update)
 
 
 def schedule_auto_resume_loop(delay_sec: float = _AUTO_RESUME_DELAY_SEC) -> bool:
-    desired = _read_loop_desired_state()
+    desired = live_close_settlement.read_loop_desired_state()
     if not desired or not desired.get("enabled"):
         return False
     if loop_status().get("running"):
@@ -5105,7 +3543,7 @@ def schedule_auto_resume_loop(delay_sec: float = _AUTO_RESUME_DELAY_SEC) -> bool
     def _resume():
         time.sleep(max(0.0, delay_sec))
         try:
-            latest_desired = _read_loop_desired_state()
+            latest_desired = live_close_settlement.read_loop_desired_state()
             if not latest_desired or not latest_desired.get("enabled"):
                 logger.info("[live] auto-resume cancelled: desired state disabled")
                 return
@@ -5229,7 +3667,7 @@ def _install_ctrader_live_listener(bridge) -> None:
                             patched_positions.append(item)
                         else:
                             patched_positions.append(item)
-                    _live_state_update(
+                    live_state_update(
                         spot_price=price,
                         spot_quote=quote,
                         spot_quote_changed_at=quote_changed_at,
@@ -5246,7 +3684,7 @@ def _install_ctrader_live_listener(bridge) -> None:
                     account = asdict(account)
                 account.setdefault("ok", True)
                 account.setdefault("broker", "ctrader")
-                _live_state_update(
+                live_state_update(
                     account_event=account,
                     account_event_updated_at=now_ts,
                     account_event_reason=str(payload.get("reason") or "account_event"),
@@ -5268,7 +3706,7 @@ def _install_ctrader_live_listener(bridge) -> None:
                     broker="ctrader",
                     strategy_name=_current_loop_strategy_name(),
                 )
-                _live_state_update(
+                live_state_update(
                     positions_event=enriched,
                     positions_event_updated_at=now_ts,
                     positions_event_reason=str(payload.get("reason") or "positions_event"),
@@ -5435,7 +3873,7 @@ def market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str,
         positions_api_ok=positions_api_ok,
         broker_schedule=broker_schedule if isinstance(broker_schedule, dict) else None,
     ).to_dict()
-    _live_state_update(
+    live_state_update(
         market_session=state,
         spot_quote=quote or live_state_get("spot_quote", None, clone=True),
     )
@@ -5726,7 +4164,7 @@ def get_account(broker: str) -> dict:
             info_dict["reconcile_status"] = "fresh"
             # Preserve the broker observation time. HTTP fetch time is not a
             # broker fact and must never rejuvenate an older cache projection.
-            _live_state_update(
+            live_state_update(
                 account=info_dict,
                 account_reconciled=copy.deepcopy(info_dict),
                 account_updated_at=observed_at,
@@ -6050,7 +4488,7 @@ def _persist_safety_fail_closed(
         "detected_at": time.time(),
         "latch": dict(latch or {}),
     }
-    _live_state_update(
+    live_state_update(
         accepting_new_risk=False,
         safety_failure=payload,
         no_new_risk_latch=latch,
@@ -6214,7 +4652,7 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
         and supervisor_error
         == "amend_projection_unverified:position_missing_after_amend"
     ):
-        open_position_ids = _fresh_cached_broker_open_position_ids()
+        open_position_ids = live_close_settlement.fresh_cached_broker_open_position_ids()
         try:
             target_position_id = int(
                 supervisor_metadata.get("position_id") or 0
@@ -6266,7 +4704,7 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
         and live_loop_cause not in remaining_causes
     ):
         updates["safety_failure"] = {}
-    _live_state_update(**updates)
+    live_state_update(**updates)
 
     # The watchdog owns the durable recovery edge, but the live loop owns a
     # separate in-memory admission projection.  Keep the two projections
@@ -6337,7 +4775,7 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
                 if recovery_ready
                 else ("safety_recovery_not_ready",),
             )
-            _live_state_update(
+            live_state_update(
                 accepting_new_risk=_LIVE_LOOP_CONTROLLER.accepting_new_risk(
                     current.generation_id
                 )
@@ -6624,7 +5062,7 @@ def loop_status(*, _state_snapshot: dict | None = None) -> dict:
                     blockers=tuple(local_blockers),
                 )
                 generation = _LIVE_LOOP_CONTROLLER.status()
-                _live_state_update(
+                live_state_update(
                     accepting_new_risk=_LIVE_LOOP_CONTROLLER.accepting_new_risk(
                         current.generation_id
                     )
@@ -6660,7 +5098,7 @@ def _live_loop_start_runtime() -> LiveLoopStartRuntime:
         sleep=time.sleep,
         logger_warning=logger.warning,
         logger_info=logger.info,
-        persist_desired_state=_persist_loop_desired_state,
+        persist_desired_state=live_close_settlement.persist_loop_desired_state,
         prime_live_loop_state=_prime_live_loop_state,
         start_safety_watchdog=_start_live_safety_watchdog,
         start_scheduler=_start_live_scheduler,
@@ -6668,7 +5106,7 @@ def _live_loop_start_runtime() -> LiveLoopStartRuntime:
         stop_safety_watchdog=_stop_live_safety_watchdog,
         thread_factory=threading.Thread,
         loop_target=_run_loop,
-        live_state_update=_live_state_update,
+        live_state_update=live_state_update,
     )
 
 
@@ -6775,7 +5213,7 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
             # an RPC arriving afterwards observes the latch/event and is blocked.
             with _OPEN_TRADE_ADMISSION_LOCK:
                 _process_shutdown_requested = True
-                _live_state_update(
+                live_state_update(
                     loop_shutdown=draining,
                     accepting_new_risk=False,
                 )
@@ -6784,8 +5222,8 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
             result = None
 
     if result is not None:
-        _live_state_update(loop_shutdown=result, accepting_new_risk=False)
-        _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
+        live_state_update(loop_shutdown=result, accepting_new_risk=False)
+        live_close_settlement.runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
         logger.info("[live] process shutdown: no running live loop")
         return result
 
@@ -6817,8 +5255,8 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
             "ts": finished_at,
             "trigger_reason": trigger_reason,
         }
-        _live_state_update(loop_shutdown=result, accepting_new_risk=False)
-        _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
+        live_state_update(loop_shutdown=result, accepting_new_risk=False)
+        live_close_settlement.runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
         return result
 
     thread.join(timeout=timeout)
@@ -6844,8 +5282,8 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
             "ts": finished_at,
             "trigger_reason": trigger_reason,
         }
-        _live_state_update(loop_shutdown=result, accepting_new_risk=False)
-        _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
+        live_state_update(loop_shutdown=result, accepting_new_risk=False)
+        live_close_settlement.runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
         logger.warning(
             f"[live] process shutdown timed out after {timeout:.1f}s; "
             "live loop recovery required"
@@ -6890,8 +5328,8 @@ def stop_loop_for_process_shutdown(timeout_sec: float = 30.0) -> dict[str, Any]:
         "ts": finished_at,
         "trigger_reason": trigger_reason,
     }
-    _live_state_update(loop_shutdown=result, accepting_new_risk=False)
-    _runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
+    live_state_update(loop_shutdown=result, accepting_new_risk=False)
+    live_close_settlement.runtime_kv_set(_RUNTIME_KV_LAST_SHUTDOWN, result)
     logger.info(
         f"[live] process shutdown completed; ownership_released={ownership_released}"
     )
@@ -6903,9 +5341,9 @@ def _live_loop_stop_runtime() -> LiveLoopStopRuntime:
         state_lock=_loop_state_lock,
         controller=_LIVE_LOOP_CONTROLLER,
         admission_lock=_OPEN_TRADE_ADMISSION_LOCK,
-        live_state_update=_live_state_update,
-        persist_desired_state=_persist_loop_desired_state,
-        runtime_kv_set=_runtime_kv_set,
+        live_state_update=live_state_update,
+        persist_desired_state=live_close_settlement.persist_loop_desired_state,
+        runtime_kv_set=live_close_settlement.runtime_kv_set,
         last_shutdown_key=_RUNTIME_KV_LAST_SHUTDOWN,
         now=time.time,
         thread_factory=threading.Thread,
@@ -7163,7 +5601,7 @@ def _decision_bar_freshness_snapshot(
 
 def _record_decision_bar_freshness(snapshot: dict[str, Any]) -> None:
     try:
-        _live_state_update(decision_bar_freshness=dict(snapshot or {}))
+        live_state_update(decision_bar_freshness=dict(snapshot or {}))
     except Exception:
         logger.debug("[live] decision bar freshness snapshot update failed", exc_info=True)
 
@@ -7366,7 +5804,7 @@ def _publish_fresh_position_reconcile(
         item if isinstance(item, dict) else {}
         for item in safe_positions
     ]
-    _live_state_update(
+    live_state_update(
         positions=positions,
         positions_reconciled=_safe_container_snapshot(positions),
         positions_updated_at=observed_at,
@@ -7388,7 +5826,7 @@ def _publish_fresh_position_reconcile(
     conflict_reason = ""
     try:
         recovery_ids = _lifecycle_recovery_active_position_ids(
-            _list_active_recovery_positions(broker)
+            live_close_settlement.list_active_recovery_positions(broker)
         )
         broker_ids = {
             int(position.get("position_id") or position.get("ticket") or 0)
@@ -7402,7 +5840,7 @@ def _publish_fresh_position_reconcile(
             # example synthetic three-digit IDs), not trades waiting for a
             # close deal.  Purge only that narrow class; rows with an entry
             # decision remain on the close-deal proof path below.
-            purged_ids = _recovery_position_store().purge_unbrokered(
+            purged_ids = live_close_settlement.recovery_position_store().purge_unbrokered(
                 set(missing_recovery_ids),
                 broker=broker,
                 broker_position_ids=broker_ids,
@@ -7412,7 +5850,7 @@ def _publish_fresh_position_reconcile(
                     f"[live] purged orphaned recovery rows absent from fresh broker "
                     f"snapshot: {sorted(purged_ids)}"
                 )
-                _release_orphaned_recovery_session_latches(
+                live_close_settlement.release_orphaned_recovery_session_latches(
                     purged_ids,
                     broker=broker,
                     broker_position_ids=broker_ids,
@@ -7420,7 +5858,7 @@ def _publish_fresh_position_reconcile(
                     observed_at=observed_at,
                 )
                 recovery_ids = _lifecycle_recovery_active_position_ids(
-                    _list_active_recovery_positions(broker)
+                    live_close_settlement.list_active_recovery_positions(broker)
                 )
                 missing_recovery_ids = sorted(recovery_ids - broker_ids)
             # A broker-side close can race this first fresh snapshot.  Resolve
@@ -7431,7 +5869,7 @@ def _publish_fresh_position_reconcile(
             retired_ids: list[int] = []
             for position_id in missing_recovery_ids:
                 try:
-                    if _retire_broker_missing_position(
+                    if live_close_settlement.retire_broker_missing_position(
                         bridge,
                         position_id,
                         broker=broker,
@@ -7449,7 +5887,7 @@ def _publish_fresh_position_reconcile(
                     )
             if retired_ids:
                 recovery_ids = _lifecycle_recovery_active_position_ids(
-                    _list_active_recovery_positions(broker)
+                    live_close_settlement.list_active_recovery_positions(broker)
                 )
                 missing_recovery_ids = sorted(recovery_ids - broker_ids)
         if missing_recovery_ids:
@@ -7495,7 +5933,7 @@ def _publish_fresh_position_reconcile(
                     "[live] failed to persist position reconcile conflict latch: {}",
                     exc,
                 )
-        _live_state_update(
+        live_state_update(
             accepting_new_risk=False,
             no_new_risk_latch=no_new_risk_latch_status(fail_closed=True),
         )
@@ -7519,7 +5957,7 @@ def _publish_fresh_position_reconcile(
                 "[live] failed to release resolved position reconcile conflict latch: {}",
                 exc,
             )
-        _live_state_update(no_new_risk_latch=no_new_risk_latch_status(fail_closed=True))
+        live_state_update(no_new_risk_latch=no_new_risk_latch_status(fail_closed=True))
     return positions
 
 
@@ -7527,7 +5965,7 @@ def _safety_reference_price(bridge: Any, positions: list[dict[str, Any]]) -> flo
     try:
         quote = bridge.get_spot_quote() if bridge is not None and hasattr(bridge, "get_spot_quote") else {}
         if quote:
-            _live_state_update(spot_quote=quote)
+            live_state_update(spot_quote=quote)
         if _quote_is_fresh(quote):
             price = float(quote.get("mid") or 0.0)
             if price > 0:
@@ -7574,7 +6012,7 @@ def _live_safety_planner_runtime(bridge: Any) -> SafetyPlannerRuntime:
 
     def load_entry_plan(position_id: int) -> dict[str, Any]:
         try:
-            row = _load_recovery_position_row(int(position_id))
+            row = live_close_settlement.load_recovery_position_row(int(position_id))
         except Exception:
             return {}
         meta = dict((row or {}).get("recovery_meta") or {})
@@ -7775,7 +6213,7 @@ def _run_live_safety_cycle(
                 bridge=bridge,
             ),
             get_live_state=live_state_get,
-            update_live_state=_live_state_update,
+            update_live_state=live_state_update,
             runtime_config=_runtime_config,
             safety_reference_price=_safety_reference_price,
             factor_pipeline=_factor_pipeline or {},
@@ -7818,7 +6256,7 @@ def _recover_execution_outcomes_before_alpha(
                 "execution_recovery", {}, clone=True
             )
             or {},
-            update_live_state=_live_state_update,
+            update_live_state=live_state_update,
             explicit_position_reconcile=_explicit_position_reconcile,
             run_safety_cycle=_run_live_safety_cycle,
             update_generation_health=_update_execution_recovery_generation_health,
@@ -7858,13 +6296,13 @@ def _attempt_generation_startup_barrier(
         safety_result=safety_result,
         runtime=StartupBarrierRuntime(
             controller=_LIVE_LOOP_CONTROLLER,
-            update_live_state=_live_state_update,
+            update_live_state=live_state_update,
             get_live_state=live_state_get,
             explicit_position_reconcile=_explicit_position_reconcile,
             publish_fresh_positions=_publish_fresh_position_reconcile,
             run_safety_cycle=_run_live_safety_cycle,
-            restore_session_state=_restore_session_state_for_day,
-            bootstrap_position_recovery=_bootstrap_position_recovery,
+            restore_session_state=live_close_settlement.restore_session_state_for_day,
+            bootstrap_position_recovery=live_close_settlement.bootstrap_position_recovery,
             factor_pipeline=_factor_pipeline or {},
             strategy_name=_current_loop_strategy_name(),
         ),
@@ -7880,7 +6318,7 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
         reconcile_account=_explicit_account_reconcile,
         reconcile_value=_reconcile_value,
         mark_account_reconcile_failed=_mark_account_reconcile_failed,
-        live_state_update=_live_state_update,
+        live_state_update=live_state_update,
         loop_controller=_LIVE_LOOP_CONTROLLER,
         set_loop_diagnostic=_set_loop_diagnostic,
         recover_execution_outcomes=(
@@ -7888,11 +6326,11 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
         ),
         attempt_startup_barrier=_attempt_generation_startup_barrier,
         live_state_get=live_state_get,
-        bootstrap_position_recovery=_bootstrap_position_recovery,
+        bootstrap_position_recovery=live_close_settlement.bootstrap_position_recovery,
         loop_strategy_name=_current_loop_strategy_name(),
-        restore_session_state=_restore_session_state_for_day,
+        restore_session_state=live_close_settlement.restore_session_state_for_day,
         session_circuit_breaker_enforced=lambda: not bounded_demo_mode_active(),
-        evaluate_daily_drawdown=_evaluate_daily_drawdown,
+        evaluate_daily_drawdown=live_close_settlement.evaluate_daily_drawdown,
         market_session_snapshot=market_session_snapshot,
         ensure_spot_subscription=_ensure_spot_subscription,
         get_live_bars=get_live_bars,
@@ -7940,7 +6378,7 @@ def _risk_metric_inputs(
     cfg = runtime_config()
     if str(getattr(cfg, "var_method", "historical")) != "historical":
         raise ValueError("risk_metrics_snapshot.v2 requires historical VaR")
-    conn = _get_state_pg_conn()
+    conn = live_close_settlement.get_state_pg_conn()
     try:
         rows = iter_review_rows(conn, limit=0)
         rows.sort(key=lambda row: float(row.get("created_at") or 0.0), reverse=True)
@@ -8089,7 +6527,7 @@ def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
             and positions_failed_at <= positions_at
         )
         if not facts_fresh:
-            previous = _runtime_kv_get(SNAPSHOT_KEY, {}) or {}
+            previous = live_close_settlement.runtime_kv_get(SNAPSHOT_KEY, {}) or {}
             snapshot = {
                 **previous,
                 "schema_version": SNAPSHOT_KEY,
@@ -8100,13 +6538,13 @@ def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
                 ) if account_at > 0 or positions_at > 0 else 0.0,
                 "blockers": ["broker_risk_facts_stale"],
             }
-            _live_state_update(
+            live_state_update(
                 risk={
                     **dict(previous.get("components") or {}),
                     "snapshot": snapshot,
                 }
             )
-            _runtime_kv_set(SNAPSHOT_KEY, snapshot)
+            live_close_settlement.runtime_kv_set(SNAPSHOT_KEY, snapshot)
             return
         observed_at = min(account_at, positions_at)
         clean_pnls, normalized_positions = _risk_metric_inputs(
@@ -8148,18 +6586,18 @@ def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
         # snapshot merely because serial reconciliation and risk math took
         # part of the 20-second input window.
         snapshot["published_at"] = time.time()
-        _live_state_update(
+        live_state_update(
             risk=attach_internal_forward_var_input(
                 {**snapshot["components"], "snapshot": snapshot},
                 forward_var_input,
             )
         )
-        _runtime_kv_set(SNAPSHOT_KEY, snapshot)
+        live_close_settlement.runtime_kv_set(SNAPSHOT_KEY, snapshot)
     except Exception as risk_e:
         try:
             from backend.risk.metrics_snapshot import SNAPSHOT_KEY
 
-            previous = _runtime_kv_get(SNAPSHOT_KEY, {}) or {}
+            previous = live_close_settlement.runtime_kv_get(SNAPSHOT_KEY, {}) or {}
             error_snapshot = {
                 **previous,
                 "schema_version": SNAPSHOT_KEY,
@@ -8167,13 +6605,13 @@ def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
                 "published_at": time.time(),
                 "blockers": ["risk_metrics_calculation_error"],
             }
-            _live_state_update(
+            live_state_update(
                 risk={
                     **dict(previous.get("components") or {}),
                     "snapshot": error_snapshot,
                 }
             )
-            _runtime_kv_set(SNAPSHOT_KEY, error_snapshot)
+            live_close_settlement.runtime_kv_set(SNAPSHOT_KEY, error_snapshot)
         except Exception:
             pass
         log(f"tick {tick}: risk calculation error (non-fatal): {risk_e}")
@@ -8193,7 +6631,7 @@ def _run_loop(
         logger.exception("[live] generation {} failed", generation_id or "unowned")
         raise
     finally:
-        _live_state_update(accepting_new_risk=False)
+        live_state_update(accepting_new_risk=False)
         if generation_id:
             try:
                 _LIVE_LOOP_CONTROLLER.acknowledge_exit(
@@ -8225,7 +6663,7 @@ def _startup_safety_runtime() -> StartupSafetyRuntime:
         run_safety_cycle=_run_live_safety_cycle,
         reconcile_account=_explicit_account_reconcile,
         reconcile_value=_reconcile_value,
-        live_state_update=_live_state_update,
+        live_state_update=live_state_update,
         persist_safety_fail_closed=_persist_safety_fail_closed,
     )
 
@@ -8347,7 +6785,7 @@ def _serial_live_tick_runtime() -> SerialLiveTickRuntime:
         acknowledge_factor_projections=(
             _loop_ack_prepared_factor_projections
         ),
-        live_state_update=_live_state_update,
+        live_state_update=live_state_update,
     )
 
 
@@ -8513,7 +6951,7 @@ def _set_alpha_runtime_status(
     }
     generation = _LIVE_LOOP_CONTROLLER.current()
     if generation is None:
-        _live_state_update(
+        live_state_update(
             alpha_runtime=payload,
             alpha_failed=normalized_status == "failed",
             accepting_new_risk=False,
@@ -8534,7 +6972,7 @@ def _set_alpha_runtime_status(
         # unwound.  Safety/stop ownership remains authoritative in that case.
         logger.debug("[live] alpha status update lost generation ownership")
         accepting = False
-    _live_state_update(
+    live_state_update(
         alpha_runtime=payload,
         alpha_failed=normalized_status == "failed",
         accepting_new_risk=bool(accepting) if normalized_status == "healthy" else False,
@@ -8637,7 +7075,7 @@ def _publish_latest_price(price: float | int | str | None, *, source: str = "unk
 
     quote = live_state_get("spot_quote", None, clone=True)
     if not _quote_is_fresh(quote):
-        _live_state_update(
+        live_state_update(
             spot_price=value,
             spot_quote={
                 "bid": 0.0,
@@ -8648,7 +7086,7 @@ def _publish_latest_price(price: float | int | str | None, *, source: str = "unk
             },
         )
     else:
-        _live_state_update(spot_price=value)
+        live_state_update(spot_price=value)
     return value
 
 
@@ -8699,7 +7137,7 @@ def get_latest_price() -> float | None:
         quote = bridge.get_spot_quote() if hasattr(bridge, "get_spot_quote") else {}
         spot = float((quote or {}).get("mid") or 0.0) if _quote_is_fresh(quote) else 0.0
         if spot > 0:
-            _live_state_update(spot_quote=quote)
+            live_state_update(spot_quote=quote)
             return spot
     except Exception as _e2:
         logger.debug("[live] get_latest_price spot query failed: {}", _e2)
@@ -8725,7 +7163,7 @@ def emergency_close(broker: str, symbol: str | None = None) -> dict:
         broker,
         symbol,
         runtime=EmergencyCloseRuntime(
-            update_live_state=_live_state_update,
+            update_live_state=live_state_update,
             admission_lock=_OPEN_TRADE_ADMISSION_LOCK,
             get_ctrader=get_ctrader,
             wait_ctrader_ready=wait_ctrader_ready,
@@ -8733,8 +7171,8 @@ def emergency_close(broker: str, symbol: str | None = None) -> dict:
             position_volume=_position_api_volume,
             build_close_risk_context=_build_close_position_risk_context,
             risk_policy=_RISK_POLICY,
-            remember_close_reason=_remember_close_reason,
-            remember_close_verdict=_remember_close_verdict,
+            remember_close_reason=live_close_settlement.remember_close_reason,
+            remember_close_verdict=live_close_settlement.remember_close_verdict,
             recover_execution_intents=_recover_emergency_execution_intents,
             post_reconcile_timeout_sec=_EMERGENCY_POST_RECONCILE_TIMEOUT_SEC,
             post_reconcile_interval_sec=_EMERGENCY_POST_RECONCILE_INTERVAL_SEC,
@@ -8927,7 +7365,7 @@ def _upsert_filled_open_recovery(
             requested_volume=requested_volume,
             actual_api_volume=actual_api_volume,
             tick=tick,
-            entry_decision_id=entry_decision_id or _lookup_entry_decision_id(int(pid)),
+            entry_decision_id=entry_decision_id or live_close_settlement.lookup_entry_decision_id(int(pid)),
             entry_protection_plan=entry_protection_plan,
             trade_attribution_payload=trade_attribution_payload,
             learning_context=learning_context,
@@ -8938,7 +7376,7 @@ def _upsert_filled_open_recovery(
             "parent_decision_id": str(entry_decision_id or ""),
             "execution_intent_id": str(execution_intent_id or ""),
         }
-        _upsert_recovery_position_state(
+        live_close_settlement.upsert_recovery_position_state(
             recovery_payloads["state_payload"],
             **recovery_payloads["state_kwargs"],
             meta=recovery_payloads["meta"],
@@ -9024,22 +7462,22 @@ def _record_filled_position_open_context(
 
 def _closed_position_processing_runtime() -> ClosedPositionProcessingRuntime:
     return ClosedPositionProcessingRuntime(
-        consume_close_reason=_consume_close_reason,
-        consume_close_verdict=_consume_close_verdict,
-        classify_close_source=_classify_close_source,
+        consume_close_reason=live_close_settlement.consume_close_reason,
+        consume_close_verdict=live_close_settlement.consume_close_verdict,
+        classify_close_source=live_close_settlement.classify_close_source,
         select_close_total_pnl=_tick_select_close_total_pnl,
         open_api_volumes=_pos_open_api_volume,
         ledger=_LEDGER,
-        ensure_open_ledger=_ensure_open_ledger_for_recovered_close,
-        lookup_context_integrity=_lookup_recovery_context_integrity,
+        ensure_open_ledger=live_close_settlement.ensure_open_ledger_for_recovered_close,
+        lookup_context_integrity=live_close_settlement.lookup_recovery_context_integrity,
         build_close_ledger_payloads=_tick_build_close_ledger_payloads,
         get_session_pnl=lambda: live_state_get("session_pnl", 0),
-        risk_state_with_verdict=_risk_state_with_verdict_dict,
+        risk_state_with_verdict=live_close_settlement.risk_state_with_verdict_dict,
         trade_reviewer=_TRADE_REVIEWER,
         experience_builder=_EXPERIENCE_BUILDER,
         policy_suggester=_POLICY_SUGGESTER,
         build_trade_review_payload=_tick_build_trade_review_payload,
-        mark_recovery_closed=_mark_recovery_position_closed,
+        mark_recovery_closed=live_close_settlement.mark_recovery_position_closed,
         entry_scores=_pos_entry_scores,
         entry_decisions=_pos_entry_decisions,
         pending_open_attach_until=_pending_open_attach_until,
@@ -9204,19 +7642,19 @@ def _handle_closed_positions_after_tick(
         close_deal_cursors=close_deal_cursors,
         runtime=ClosedPositionCycleRuntime(
             authoritative_close_pnl=_authoritative_close_pnl,
-            defer_close=_defer_close_until_authoritative_deal,
-            update_live_state=_live_state_update,
+            defer_close=live_close_settlement.defer_close_until_authoritative_deal,
+            update_live_state=live_state_update,
             collect_attribution=_collect_closed_position_attribution,
-            lookup_context_integrity=_lookup_recovery_context_integrity,
+            lookup_context_integrity=live_close_settlement.lookup_recovery_context_integrity,
             log_closed_position_ledger=_log_closed_position_ledger_after_tick,
             run_closed_position_learning=_run_closed_position_learning_after_tick,
             cleanup_closed_position=_cleanup_closed_position_after_tick,
-            record_aux_failure=_record_risk_reduction_aux_failure,
-            mark_recovery_closed=_mark_recovery_position_closed,
+            record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
+            mark_recovery_closed=live_close_settlement.mark_recovery_position_closed,
             reconcile_account=_explicit_account_reconcile,
             reconcile_value=_reconcile_value,
-            restore_session_state=_restore_session_state_for_day,
-            release_close_latch=_release_session_close_deal_latch,
+            restore_session_state=live_close_settlement.restore_session_state_for_day,
+            release_close_latch=live_close_settlement.release_session_close_deal_latch,
             trade_date=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             now=time.time,
             full_context=_RECOVERY_CONTEXT_FULL,
@@ -9451,7 +7889,7 @@ def _upsert_amended_open_recovery(
             requested_volume=float(requested_volume),
             actual_api_volume=float(actual_api_volume),
             tick=tick,
-            entry_decision_id=entry_decision_id or _lookup_entry_decision_id(int(pid)),
+            entry_decision_id=entry_decision_id or live_close_settlement.lookup_entry_decision_id(int(pid)),
             entry_protection_plan=_lifecycle_build_applied_entry_protection_plan_payload(
                 plan=entry_protection_plan,
                 updated_at=time.time(),
@@ -9471,7 +7909,7 @@ def _upsert_amended_open_recovery(
             "parent_decision_id": str(entry_decision_id or ""),
             "execution_intent_id": str(execution_intent_id or ""),
         }
-        _upsert_recovery_position_state(
+        live_close_settlement.upsert_recovery_position_state(
             recovery_payloads["state_payload"],
             **recovery_payloads["state_kwargs"],
             meta=recovery_payloads["meta"],
@@ -9569,7 +8007,7 @@ def _amend_failure_processing_runtime() -> AmendFailureRuntime:
     ledger = _LEDGER
     return AmendFailureRuntime(
         persist_fail_closed=_persist_safety_fail_closed,
-        record_aux_failure=_record_risk_reduction_aux_failure,
+        record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
         record_filled_context=lambda request: (
             _record_filled_position_open_context(**vars(request))
         ),
@@ -10468,7 +8906,7 @@ def _persist_pending_entry_protection_plan(
         # detect regime_shift (entry != current).  Without this snapshot the
         # supervisor's regime-shift evidence family is structurally dead.
         entry_regime = _current_regime_hint()
-        _upsert_recovery_position_state(
+        live_close_settlement.upsert_recovery_position_state(
             {
                 "position_id": position_id,
                 "symbol": "XAUUSD+",
@@ -10476,7 +8914,7 @@ def _persist_pending_entry_protection_plan(
                 "open_price": float(fill_price or current_price),
                 "volume": float(actual_api_volume),
                 "entry_decision_id": str(
-                    entry_decision_id or _lookup_entry_decision_id(int(position_id))
+                    entry_decision_id or live_close_settlement.lookup_entry_decision_id(int(position_id))
                 ),
             },
             broker=broker,
@@ -10571,7 +9009,7 @@ def _attach_open_trade_protection(
             release_pending_latch=_release_entry_protection_pending_latch,
             record_success=_record_amended_open_success_context,
             record_failure=_record_amend_failure_after_fill,
-            record_aux_failure=_record_risk_reduction_aux_failure,
+            record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
         ),
     )
 
@@ -10902,8 +9340,8 @@ def _probe_final_open_admission(
     # a transient bridge read failure after the broker accepts the order must
     # not erase the execution inputs already observed at the open boundary.
     if quote:
-        _live_state_update(spot_quote=quote)
-    _live_state_update(final_open_admission=result)
+        live_state_update(spot_quote=quote)
+    live_state_update(final_open_admission=result)
     return result
 
 
@@ -10943,7 +9381,7 @@ def _bar_open_already_recorded(bar_ts: float) -> bool:
 
     if not bar_ts or bar_ts <= 0:
         return False
-    conn = _get_state_read_conn()
+    conn = live_close_settlement.get_state_read_conn()
     try:
         # Bounded window around the bar time (reverse keyset); canonical
         # open decisions carry decision_ts == bar_ts for the same bar.
@@ -10986,7 +9424,7 @@ def _open_trade_admission_blockers(stop_requested=None) -> tuple[str, ...]:
         if bool(live_state_get("circuit_breaker", False)):
             blockers.append("session_circuit_breaker")
         reconcile_blockers = _new_risk_reconciliation_blockers()
-        _live_state_update(new_risk_reconcile_blockers=reconcile_blockers)
+        live_state_update(new_risk_reconcile_blockers=reconcile_blockers)
         blockers.extend(reconcile_blockers)
     if bool(stop_requested is not None and stop_requested()):
         blockers.append("loop_stop_requested")
@@ -11348,7 +9786,7 @@ def _process_tick_existing_decision_bar(
         current_position_ids=current_pids,
         positions_snapshot_ready=positions_snapshot_ready,
         tracked_position_ids=(
-            _active_recovery_position_ids_for_close_detection(broker)
+            live_close_settlement.active_recovery_position_ids_for_close_detection(broker)
         ),
     )
     if close_detection_deferred:
@@ -11361,7 +9799,7 @@ def _process_tick_existing_decision_bar(
     close_deal_cursors: dict[int, dict[str, Any]] = {}
     if closed_pids and bridge is not None:
         try:
-            real_pnls = _sync_closed_position_deals_for_tick(
+            real_pnls = live_close_settlement.sync_closed_position_deals_for_tick(
                 bridge,
                 closed_pids,
                 observed_close_cursor_out=close_deal_cursors,
@@ -11480,7 +9918,7 @@ def _process_tick_factor_pipeline(
         decision_frame=decision_frame,
         progress=bar_progress,
         pipeline=pipeline,
-        update_live_state=_live_state_update,
+        update_live_state=live_state_update,
         set_factor_snapshot=_set_factor_snapshot,
         tick=tick,
         log=log,
@@ -11570,7 +10008,7 @@ def _process_tick_factor_pipeline(
         current_position_ids=current_pids,
         positions_snapshot_ready=positions_snapshot_ready,
         tracked_position_ids=(
-            _active_recovery_position_ids_for_close_detection(broker)
+            live_close_settlement.active_recovery_position_ids_for_close_detection(broker)
         ),
     )
     if close_detection_deferred:
@@ -11584,7 +10022,7 @@ def _process_tick_factor_pipeline(
     _close_deal_cursors: dict[int, dict[str, Any]] = {}
     if closed_pids and bridge is not None:
         try:
-            _real_pnls = _sync_closed_position_deals_for_tick(
+            _real_pnls = live_close_settlement.sync_closed_position_deals_for_tick(
                 bridge,
                 closed_pids,
                 observed_close_cursor_out=_close_deal_cursors,
@@ -11721,7 +10159,7 @@ def _entry_protection_repair_candidates(
             pid = 0
         if pid <= 0:
             continue
-        row = _load_recovery_position_row(pid)
+        row = live_close_settlement.load_recovery_position_row(pid)
         meta = dict((row or {}).get("recovery_meta") or {})
         plan = dict(meta.get("entry_protection_plan") or {})
         if plan.get("schema_version") != _ENTRY_PROTECTION_PLAN_SCHEMA:
@@ -11751,7 +10189,7 @@ def _entry_protection_repair_candidates(
                         source="recovered_no_protection",
                     )
                     try:
-                        _merge_recovery_position_meta(pid, {"entry_protection_plan": recovery_plan})
+                        live_close_settlement.merge_recovery_position_meta(pid, {"entry_protection_plan": recovery_plan})
                         plan = dict(recovery_plan)
                     except Exception as exc:
                         logger.error(
@@ -12192,7 +10630,7 @@ def _execute_protection_candidate(
             verification.get("reason") or "position_reconcile_failed"
         )
         failure_reason = f"amend_projection_unverified:{projection_reason}"
-        _record_risk_reduction_aux_failure(
+        live_close_settlement.record_risk_reduction_aux_failure(
             "protection_amend_projection_unverified",
             position_id=pid,
             action=candidate.action,
@@ -12328,7 +10766,7 @@ def _defer_market_closed_holding_timeout(
         execution=execution,
     )
     try:
-        _merge_recovery_position_meta(
+        live_close_settlement.merge_recovery_position_meta(
             pid,
             {
                 MARKET_CLOSED_DEFER_REASON_KEY: "market_closed_pending",
@@ -12338,7 +10776,7 @@ def _defer_market_closed_holding_timeout(
             },
         )
     except Exception as exc:
-        _record_risk_reduction_aux_failure(
+        live_close_settlement.record_risk_reduction_aux_failure(
             "risk_reduction_state_persist_failed",
             position_id=pid,
             action="holding_timeout_defer",
@@ -12505,8 +10943,8 @@ def _enforce_holding_timeout(
             handled.add(pid)
             continue
         if getattr(result, "success", False):
-            _remember_close_reason(pid, "holding_timeout")
-            _remember_close_verdict(pid, close_verdict)
+            live_close_settlement.remember_close_reason(pid, "holding_timeout")
+            live_close_settlement.remember_close_verdict(pid, close_verdict)
             handled.add(pid)
             _log_supervisor_trace(
                 position=dict(p),
@@ -12532,7 +10970,7 @@ def _enforce_holding_timeout(
             rejection_text = f"{error_code} {failure_reason}"
             if is_deterministic_market_closed_rejection(rejection_text):
                 try:
-                    _merge_recovery_position_meta(
+                    live_close_settlement.merge_recovery_position_meta(
                         pid,
                         {
                             MARKET_CLOSED_DEFER_REASON_KEY: "market_closed_pending",
@@ -12541,7 +10979,7 @@ def _enforce_holding_timeout(
                         },
                     )
                 except Exception as exc:
-                    _record_risk_reduction_aux_failure(
+                    live_close_settlement.record_risk_reduction_aux_failure(
                         "risk_reduction_state_persist_failed",
                         position_id=pid,
                         action="holding_timeout_market_closed_rejection",
@@ -12583,7 +11021,7 @@ def _run_position_protection_cycle(
         run_position_supervision=_run_position_supervision,
         protection_candidate_to_safety=protection_candidate_to_safety,
         build_cycle_result=_lifecycle_build_position_protection_cycle_result,
-        record_aux_failure=_record_risk_reduction_aux_failure,
+        record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
         warning=logger.warning,
         now=time.time,
     )
@@ -12692,3 +11130,10 @@ def _check_business_alerts(tick: int, acct: dict, pos: list, log) -> None:
 
     except Exception as _e:
         logger.debug("[live] _check_business_alerts failed: {}", _e)
+
+# Live state writer hooks (registered once at import): WS wake after writes and
+# pending-close bookkeeping owned by the settlement module.
+live_state_store.set_update_hooks(
+    pre_update=live_close_settlement.consume_pending_close_kwargs,
+    post_update=_notify_live_state_change,
+)

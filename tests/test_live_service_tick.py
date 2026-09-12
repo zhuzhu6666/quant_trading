@@ -25,6 +25,7 @@ from backend.services.live_safety_state import reset_safety_state_for_tests
 from alpha.registry import factor_registry
 from alpha.registry_adapter import RegistryAdapter
 from config import runtime_config as rc
+from backend.services import live_close_settlement
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +43,7 @@ def _reset_state(monkeypatch, tmp_path):
     live_service._live_state["last_processed_decision_bar_ts"] = 0.0
     live_service._pos_open_api_volume.clear()
     live_service._process_shutdown_requested = False
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=False,
         accepting_new_risk=False,
         session_state_status="unknown",
@@ -58,7 +59,7 @@ def _reset_state(monkeypatch, tmp_path):
     live_service._live_state["last_processed_decision_bar_ts"] = 0.0
     live_service._pos_open_api_volume.clear()
     live_service._process_shutdown_requested = False
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=False,
         accepting_new_risk=False,
         session_state_status="unknown",
@@ -106,7 +107,7 @@ def _admitted_generation(thread=None):
     controller.heartbeat(generation.generation_id, "safety")
     for step in STARTUP_BARRIER_STEPS:
         controller.complete_barrier_step(generation.generation_id, step)
-    live_service._live_state_update(
+    live_service.live_state_update(
         loop_running=True,
         session_state_status="available",
         accepting_new_risk=True,
@@ -376,8 +377,7 @@ def test_entry_protection_repair_preserves_existing_sl_when_restoring_tp(monkeyp
         "attempts": 1,
     }
     monkeypatch.setattr(
-        live_service,
-        "_load_recovery_position_row",
+        live_close_settlement, "load_recovery_position_row",
         lambda pid: {"recovery_meta": {"entry_protection_plan": protection_plan}},
     )
 
@@ -438,8 +438,7 @@ def test_entry_protection_repair_preserves_existing_sl_when_restoring_tp(monkeyp
     )
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
     monkeypatch.setattr(
-        live_service,
-        "_lookup_open_decision_context",
+        live_close_settlement, "lookup_open_decision_context",
         lambda _position_id: {"entry_ts": 0.0, "timeframe": "M5", "source": ""},
     )
     monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec_repair")
@@ -739,8 +738,7 @@ def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
     monkeypatch.setattr(live_service, "_submit_open_trade_order", _order)
     monkeypatch.setattr(live_service, "_handle_open_trade_order_success", _post_fill)
     monkeypatch.setattr(
-        live_service,
-        "_runtime_kv_set",
+        live_close_settlement, "runtime_kv_set",
         lambda key, value: runtime_writes.append((key, value)),
     )
 
@@ -816,8 +814,8 @@ def test_entry_protection_failed_status_increments_attempt_and_remains_repairabl
         }
     }
     merged = []
-    monkeypatch.setattr(live_service, "_load_recovery_position_row", lambda pid: {"recovery_meta": meta})
-    monkeypatch.setattr(live_service, "_merge_recovery_position_meta", lambda pid, next_meta: merged.append((pid, next_meta)))
+    monkeypatch.setattr(live_close_settlement, "load_recovery_position_row", lambda pid: {"recovery_meta": meta})
+    monkeypatch.setattr(live_close_settlement, "merge_recovery_position_meta", lambda pid, next_meta: merged.append((pid, next_meta)))
 
     live_service._update_entry_protection_plan_status(
         12345,
@@ -833,8 +831,7 @@ def test_entry_protection_failed_status_increments_attempt_and_remains_repairabl
     updated_plan["last_attempt_ts"] = 0.0
 
     monkeypatch.setattr(
-        live_service,
-        "_load_recovery_position_row",
+        live_close_settlement, "load_recovery_position_row",
         lambda pid: {"recovery_meta": {"entry_protection_plan": updated_plan}},
     )
     candidates = live_service._entry_protection_repair_candidates(
@@ -1036,7 +1033,7 @@ def test_factor_pipeline_initializes_signal_decision_id_for_flat_signal(monkeypa
     monkeypatch.setattr(live_service, "_tick_normalize_live_positions_payload", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(live_service, "_tick_collect_position_ids", lambda _positions: set())
     monkeypatch.setattr(live_service, "_active_pending_open_attach_ids", lambda _ids: [])
-    monkeypatch.setattr(live_service, "_active_recovery_position_ids_for_close_detection", lambda _broker: set())
+    monkeypatch.setattr(live_close_settlement, "active_recovery_position_ids_for_close_detection", lambda _broker: set())
     monkeypatch.setattr(
         live_service,
         "_tick_resolve_closed_position_ids",
@@ -1128,8 +1125,7 @@ def test_factor_pipeline_final_close_sync_uses_empty_baseline(monkeypatch):
     monkeypatch.setattr(live_service, "_tick_collect_position_ids", lambda _positions: set())
     monkeypatch.setattr(live_service, "_active_pending_open_attach_ids", lambda _ids: [])
     monkeypatch.setattr(
-        live_service,
-        "_active_recovery_position_ids_for_close_detection",
+        live_close_settlement, "active_recovery_position_ids_for_close_detection",
         lambda _broker: set(),
     )
     monkeypatch.setattr(
@@ -1139,15 +1135,13 @@ def test_factor_pipeline_final_close_sync_uses_empty_baseline(monkeypatch):
     )
     monkeypatch.setattr(live_service, "_restore_attribution_for_positions", lambda *_args: 0)
     monkeypatch.setattr(live_service, "_LEDGER", None)
-    monkeypatch.setattr(live_service, "_get_state_pg_conn", lambda: _Conn())
+    monkeypatch.setattr(live_close_settlement, "get_state_pg_conn", lambda: _Conn())
     monkeypatch.setattr(
-        live_service,
-        "_recovery_last_seen_by_position",
+        live_close_settlement, "_recovery_last_seen_by_position",
         lambda _ids: {42: 100.0},
     )
     monkeypatch.setattr(
-        live_service,
-        "_recovery_remaining_volume_by_position",
+        live_close_settlement, "_recovery_remaining_volume_by_position",
         lambda _ids: {42: 100.0},
     )
 
