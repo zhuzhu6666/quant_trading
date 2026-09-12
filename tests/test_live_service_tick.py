@@ -26,6 +26,7 @@ from alpha.registry import factor_registry
 from alpha.registry_adapter import RegistryAdapter
 from config import runtime_config as rc
 from backend.services import live_close_settlement
+from backend.services import live_position_protection_cycle
 
 
 @pytest.fixture(autouse=True)
@@ -381,7 +382,7 @@ def test_entry_protection_repair_preserves_existing_sl_when_restoring_tp(monkeyp
         lambda pid: {"recovery_meta": {"entry_protection_plan": protection_plan}},
     )
 
-    candidates = live_service._entry_protection_repair_candidates(
+    candidates = live_position_protection_cycle._entry_protection_repair_candidates(
         [position],
         current_price=3976.5,
         tick=12,
@@ -834,7 +835,7 @@ def test_entry_protection_failed_status_increments_attempt_and_remains_repairabl
         live_close_settlement, "load_recovery_position_row",
         lambda pid: {"recovery_meta": {"entry_protection_plan": updated_plan}},
     )
-    candidates = live_service._entry_protection_repair_candidates(
+    candidates = live_position_protection_cycle._entry_protection_repair_candidates(
         [{"position_id": 12345, "direction": 1, "sl": 0.0, "tp": 0.0}],
         current_price=4000.0,
         tick=13,

@@ -195,7 +195,7 @@ def merge_recovery_position_meta(position_id: int, meta: dict[str, Any] | None) 
 _recovery_zero_confirmations: dict[str, int] = {}
 
 
-def _track_pending_close_ids(pending_add: Any, pending_remove: Any) -> None:
+def track_pending_close_ids(pending_add: Any, pending_remove: Any) -> None:
     """Track realized closes waiting for their authoritative deal.
 
     Estimates must never advance the session-risk boundary, but risk
@@ -1826,5 +1826,5 @@ def consume_pending_close_kwargs(kwargs: dict) -> dict:
     pending_add = kwargs.pop('session_pending_close_add', None)
     pending_remove = kwargs.pop('session_pending_close_remove', None)
     if pending_add is not None or pending_remove:
-        _track_pending_close_ids(pending_add, pending_remove)
+        track_pending_close_ids(pending_add, pending_remove)
     return kwargs

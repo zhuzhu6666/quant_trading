@@ -11,6 +11,7 @@ from backend.ledger.service import DecisionLedger
 from backend.services import live_service
 from backend.services.live_loop_controller import LiveLoopController
 from backend.services import live_close_settlement
+from backend.services import live_position_protection_cycle
 
 
 class _IdleThread:
@@ -3715,7 +3716,7 @@ def test_supervisor_dynamic_tpsl_sends_extended_take_profit(monkeypatch):
 def test_protection_cycle_does_not_collect_retired_trailing_when_supervisor_handles_position(monkeypatch):
     superseded = []
     monkeypatch.setattr(live_service, "_enforce_holding_timeout", lambda *args, **kwargs: set())
-    monkeypatch.setattr(live_service, "_entry_protection_repair_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(live_position_protection_cycle, "_entry_protection_repair_candidates", lambda *args, **kwargs: [])
     monkeypatch.setattr(live_service, "_run_position_supervision", lambda *args, **kwargs: {703})
     monkeypatch.setattr(
         live_service,
@@ -3774,7 +3775,7 @@ def test_protection_cycle_does_not_execute_retired_trailing_when_supervisor_stag
     executed = []
     outbox = []
     monkeypatch.setattr(live_service, "_enforce_holding_timeout", lambda *args, **kwargs: set())
-    monkeypatch.setattr(live_service, "_entry_protection_repair_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(live_position_protection_cycle, "_entry_protection_repair_candidates", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         live_service,
         "_run_position_supervision",
@@ -3826,8 +3827,7 @@ def test_retired_legacy_awe_candidate_cannot_enter_live_executor(monkeypatch):
     )
 
     monkeypatch.setattr(
-        live_service,
-        "_prepare_protection_candidate_execution",
+        live_position_protection_cycle, "_prepare_protection_candidate_execution",
         lambda *args, **kwargs: prepare_calls.append((args, kwargs)),
     )
 
@@ -4084,17 +4084,17 @@ def test_market_closed_rejection_records_suppression(monkeypatch, tmp_path):
     assert meta[live_service.MARKET_CLOSED_DEFER_REASON_KEY] == "market_closed_pending"
     assert meta[live_service.MARKET_CLOSED_DEFER_TS_KEY] == pytest.approx(friday)
     assert "MARKET_CLOSED" in meta["market_closed_close_rejection"]
-    assert live_service.market_closed_deferral_active(meta, friday + 60.0) is True
+    assert live_position_protection_cycle.market_closed_deferral_active(meta, friday + 60.0) is True
     assert (
-        live_service.market_closed_deferral_active(meta, friday + 3601.0) is False
+        live_position_protection_cycle.market_closed_deferral_active(meta, friday + 3601.0) is False
     )
 
 
 def test_market_closed_classifier_is_case_insensitive_but_not_overbroad():
-    assert live_service.is_deterministic_market_closed_rejection(
+    assert live_position_protection_cycle.is_deterministic_market_closed_rejection(
         "Trading is not available: MARKET IS CLOSED"
     ) is True
-    assert live_service.is_deterministic_market_closed_rejection(
+    assert live_position_protection_cycle.is_deterministic_market_closed_rejection(
         "Trading is not available: account permissions"
     ) is False
 
@@ -4105,4 +4105,4 @@ def test_market_closed_deferral_rejects_future_timestamp():
         live_service.MARKET_CLOSED_DEFER_TS_KEY: 200.0,
     }
 
-    assert live_service.market_closed_deferral_active(meta, 199.0) is False
+    assert live_position_protection_cycle.market_closed_deferral_active(meta, 199.0) is False

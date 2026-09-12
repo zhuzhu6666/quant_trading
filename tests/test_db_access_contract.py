@@ -278,6 +278,12 @@ def test_live_broker_mutations_are_confined_to_reviewed_execution_adapters():
     broker_methods = {"market_buy", "market_sell", "close_position", "amend_position_sltp"}
     approved_modules = {
         "backend/services/live_emergency.py": {"close_position"},
+        # protection cycle moved here from live_service (2026-09-12); it keeps
+        # the same reviewed amend adapter usage for SL/TP repairs
+        "backend/services/live_position_protection_cycle.py": {
+            "close_position",
+            "amend_position_sltp",
+        },
         "backend/services/live_service.py": broker_methods,
         "backend/services/live_supervision_actions.py": {
             "close_position",

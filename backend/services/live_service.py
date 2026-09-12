@@ -158,6 +158,7 @@ from backend.services.live_safety_candidate_execution import (
     execute_live_safety_candidate as _runtime_execute_safety_candidate,
 )
 from backend.services.live_position_protection_cycle import (
+    ProtectionCandidate,
     PositionProtectionCycleRuntime,
     run_position_protection_cycle as _runtime_run_position_protection_cycle,
 )
@@ -505,21 +506,6 @@ class _LocalSLTP:
     sl: float = 0.0
     tp: float = 0.0
     updated_at: float = 0.0  # epoch seconds
-
-
-@dataclass
-class ProtectionCandidate:
-    source: str
-    action: str
-    priority: int
-    position_id: int
-    risk_action: str
-    controls: dict[str, Any] = field(default_factory=dict)
-    evidence: dict[str, Any] = field(default_factory=dict)
-    reason: str = ""
-    position: dict[str, Any] = field(default_factory=dict)
-    config_version: int = 0
-    config_hash: str = ""
 
 
 @dataclass
@@ -3022,6 +3008,46 @@ def _run_position_supervision(
         planned_verdicts=planned_verdicts,
     )
 
+
+
+def _run_position_protection_cycle(
+    bridge,
+    pos: list,
+    *,
+    cfg,
+    acct: dict,
+    pipeline: dict,
+    current_price: float,
+    atr_price: float,
+    tick: int,
+    log,
+    decision_ts: float | None = None,
+) -> dict[str, Any]:
+    runtime = PositionProtectionCycleRuntime(
+        enforce_holding_timeout=live_position_protection_cycle.enforce_holding_timeout,
+        entry_protection_repair_candidates=live_position_protection_cycle.entry_protection_repair_candidates,
+        log_candidate_superseded=_live_service()._log_protection_candidate_superseded,
+        execute_candidate=live_position_protection_cycle.execute_protection_candidate,
+        run_position_supervision=_live_service()._run_position_supervision,
+        protection_candidate_to_safety=protection_candidate_to_safety,
+        build_cycle_result=_lifecycle_build_position_protection_cycle_result,
+        record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
+        warning=logger.warning,
+        now=time.time,
+    )
+    return _runtime_run_position_protection_cycle(
+        bridge,
+        pos,
+        cfg=cfg,
+        account=acct,
+        pipeline=pipeline,
+        current_price=current_price,
+        atr_price=atr_price,
+        tick=tick,
+        log=log,
+        runtime=runtime,
+        decision_ts=decision_ts,
+    )
 
 def _resolve_position_api_volume(
     position_id: int,
