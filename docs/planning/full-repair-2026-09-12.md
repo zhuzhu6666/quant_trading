@@ -165,3 +165,8 @@ test_live_service_lifecycle(163) / test_factor_governance_orchestrator(96) / tes
 - 重启：backend 20:45:27 → learning-worker/job-worker 20:46:12；三服务 active。
 - 验收：release_identity head=`25c35204`（版本对齐）；`/api/health` ok（db/ctrader connected）；启动即 `overlay restored hash=01e06d93`，无 `governance_authority` 闩；**overlay cvar 仍为 3.5**；loop 从持久化 desired state 自动恢复（generation 已签发）；readiness 快照 33s 新鲜；learning worker capability `boot_status=ready`；三服务 journal 零 ERROR（闭市 `closed_confirmed` 姿态正常）。
 - 待市场开盘后复核：`safety timing` p95（登记册 active 条目继续）。
+
+## 6. 后续批次 S1：测试工作流（smoke 选择集 + xdist）（done 2026-09-12）
+
+- **smoke 集合**：13 个核心 fail-closed 合同文件打模块级 `pytestmark = pytest.mark.smoke`：overlay authority、governance coordinator、RiskPolicyService、canonical_v2、backend runtime lifecycle、ws state snapshot、persistent job handlers、db access contract、learning eligibility、governance eligibility weighting、live loop controller、live open admission、live emergency safety。`pytest -m smoke` = **215 用例 / 33s**；日常改动先跑它，全量只留发布门（本文件 §B7）。
+- **xdist**：pytest-xdist 3.8.0 已装入 venv 并写入 requirements-dev——锁文件经 `scripts/compile_python_locks.py` 重生成（勿用裸 pip-compile，会丢 hash 格式）。`pytest -m smoke -n 2` = 28s，隔离验证通过（共享路径审计：无端口绑定；仅 2 个文件引用固定路径且为只读/负向断言；1 处 chdir 指向 tmp）。**全量并行在本机不启用**：3GB 内存、生产服务已占约 2.2GB，全量 worker RSS 增长会逼近 OOM 并可能波及 quant-backend；待内存升级或 CI 环境再开（命令 `pytest tests -n 2`）。

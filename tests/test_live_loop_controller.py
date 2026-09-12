@@ -4,6 +4,9 @@ import pytest
 
 from backend.services.live_loop_controller import LiveLoopController, STARTUP_BARRIER_STEPS
 
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
+
 
 class _Thread:
     def __init__(self, alive: bool = True):

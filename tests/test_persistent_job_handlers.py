@@ -4,6 +4,9 @@ from types import MappingProxyType, SimpleNamespace
 import pytest
 from backend.jobs.handlers import PERSISTENT_JOB_HANDLERS
 
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
+
 # Canonical mapping after glue removal (194 lines saved)
 # discover/tuning/ab now direct to scripts/*, external_refresh/factor_health inlined in handlers
 @pytest.mark.parametrize(

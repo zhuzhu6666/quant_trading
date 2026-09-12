@@ -1,3 +1,9 @@
+import pytest
+
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
+
+
 def test_state_snapshot_reports_consecutive_not_total_session_losses(monkeypatch):
     from backend.services import live_state_store
     from backend.ws import endpoints

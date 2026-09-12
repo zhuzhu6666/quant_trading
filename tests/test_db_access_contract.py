@@ -1,3 +1,4 @@
+import pytest
 import ast
 from pathlib import Path
 import sqlite3
@@ -15,6 +16,9 @@ _PRODUCTION_FOLDERS = (
     "data",
     "research",
 )
+
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
 
 
 def _python_files(repo: Path, folders: tuple[str, ...] = _PRODUCTION_FOLDERS):

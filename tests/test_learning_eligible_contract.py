@@ -4,7 +4,11 @@ Missing integrity fields are unknown, and unknown is refused instead of
 being treated as clean; the close_reason blacklist is defence in depth.
 """
 
+import pytest
 from backend.core.contracts import CONTAMINATED_CLOSE_REASONS, learning_eligible
+
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
 
 
 def test_learning_eligible_requires_explicit_full_integrity():

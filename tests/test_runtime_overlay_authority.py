@@ -17,6 +17,9 @@ from backend.services.runtime_config_overlay import (
 from config import runtime_config
 from config.runtime_config import RuntimeConfig
 
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
+
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_config():

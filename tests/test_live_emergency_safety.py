@@ -13,6 +13,9 @@ from backend.services.live_safety_state import (
     safety_outbox_path,
 )
 
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
+
 
 @pytest.fixture(autouse=True)
 def _isolated_safety_state(monkeypatch, tmp_path):

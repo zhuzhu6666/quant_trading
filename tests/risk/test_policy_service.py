@@ -1,5 +1,9 @@
+import pytest
 from risk.governor import RiskGovernor
 from risk.policy_service import RiskPolicyService
+
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
 
 
 def _service() -> RiskPolicyService:

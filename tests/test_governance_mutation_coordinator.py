@@ -25,6 +25,9 @@ from backend.services._brain_helpers import connect, execute
 from backend.services.v16_command_gate import V16CommandGate
 from config import runtime_config
 
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
+
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_config():

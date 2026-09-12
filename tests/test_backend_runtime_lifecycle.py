@@ -10,6 +10,9 @@ from backend.services.backend_runtime_lifecycle import (
     BackendRuntimeLifecycleCallbacks,
 )
 
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
+
 
 class _Logger:
     def __init__(self, events: list[Any]) -> None:

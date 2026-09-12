@@ -10,6 +10,9 @@ from backend.services import autonomous_learning as learning
 from research.learning.governor import RuleEvolutionGovernor
 from tests.canonical_fixture import seed_canonical_sqlite_file
 
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
+
 
 def _sample(index: int, *, integrity: str = "full", contaminated: bool = False) -> dict:
     decision_id = f"decision-{index}"

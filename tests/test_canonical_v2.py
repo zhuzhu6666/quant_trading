@@ -27,6 +27,9 @@ from backend.services.canonical_v2 import (
     start_projection_run,
 )
 
+# Smoke: core fail-closed contracts, run on every change (pytest -m smoke).
+pytestmark = pytest.mark.smoke
+
 
 def _canonical_sqlite() -> sqlite3.Connection:
     from tests.canonical_fixture import make_canonical_sqlite
