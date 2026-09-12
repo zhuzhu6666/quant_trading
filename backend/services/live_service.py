@@ -280,7 +280,6 @@ from backend.services.live_loop_shell import (
 from backend.services.live_risk_sizing import (
     apply_entry_event_sizing as _sizing_apply_entry_event_sizing,
     build_event_sizing_fallback_context as _sizing_build_event_sizing_fallback_context,
-    ceil_api_volume_to_step as _sizing_ceil_api_volume_to_step,
     floor_api_volume_to_step as _sizing_floor_api_volume_to_step,
     normalize_event_sizing_context as _sizing_normalize_event_sizing_context,
     protection_prices_from_reference as _sizing_protection_prices_from_reference,
@@ -533,16 +532,6 @@ recovery_zero_confirmations: dict[str, int] = {}
 _AUTO_RESUME_DELAY_SEC = 4.0
 
 
-def _risk_kelly_volume(
-    cfg, direction: int, current_price: float, sl_price: float,
-    bridge_meta: dict, acct: dict,
-) -> float:
-    """根据 Kelly 分数计算 API 原生开仓量。"""
-    return _risk_kelly_sizing(
-        cfg, direction, current_price, sl_price, bridge_meta, acct,
-    )["volume"]
-
-
 def _risk_kelly_sizing(
     cfg, direction: int, current_price: float, sl_price: float,
     bridge_meta: dict, acct: dict,
@@ -561,10 +550,6 @@ def _risk_kelly_sizing(
         account=acct,
         kelly_data=kelly_data,
     )
-
-
-def _ceil_api_volume_to_step(volume: float, bridge_meta: dict) -> float:
-    return _sizing_ceil_api_volume_to_step(volume, bridge_meta)
 
 
 def _round_api_volume_to_step(volume: float, bridge_meta: dict) -> float:
@@ -2228,21 +2213,6 @@ def _record_probation_trade_outcome(pnl: float, *, position_id: int = 0) -> None
         _live_state["loss_streak_book"] = book
 
 
-def _mark_loss_review_statement_ready(statement: dict[str, Any]) -> None:
-    """Learning loop hook: record the forced loss-review statement."""
-    with _LIVE_STATE_LOCK:
-        book = dict(_live_state.get("loss_streak_book", {}) or {})
-        if not book:
-            return
-        book["review_statement_ready"] = True
-        book["review_statement"] = {
-            "action": str(statement.get("action") or "unknown"),
-            "summary": str(statement.get("summary") or "")[:500],
-            "produced_at": time.time(),
-        }
-        _live_state["loss_streak_book"] = book
-
-
 def _get_risk_state() -> dict:
     return live_state_get("risk", {}, clone=True) or {}
 
@@ -3223,12 +3193,6 @@ def _scheduled_feature_engineering():
 def _env_enabled(name: str, default: str = "1") -> bool:
     value = str(os.getenv(name, default) or "").strip().lower()
     return value not in {"0", "false", "no", "off", "disabled"}
-
-
-def _offmarket_high_load_allowed(session: dict[str, Any]) -> tuple[bool, str]:
-    from backend.services.learning_research_jobs import offmarket_high_load_allowed
-
-    return offmarket_high_load_allowed(session)
 
 
 def _scheduled_offmarket_position_quality_lightgbm(
