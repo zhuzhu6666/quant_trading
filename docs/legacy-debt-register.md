@@ -21,6 +21,7 @@
 ### demo CVaR overlay 覆盖持久性待复核（2026-09-11 登记并当日恢复）
 
 - 状态：`monitoring`（2026-09-11 01:16 经 Coordinator 恢复：`gmut_2212b60618aa48fc9b10359d51e2dc13`，actor=`operator:zhu`、source=`operator_demo_relaxation`、action=`adjust_demo_cvar_limit`、v16_authority=`operator_bounded_demo_control_exempt`、rollback=`{"risk_cvar_threshold_pct":2.5}`，intent committed / projection current。恢复前后：overlay 行无 cvar 键 → 现含 `risk_cvar_threshold_pct: 3.5`（overlay_hash 51eac920，长度 93,876→93,906）；backend 进程 01:18 起 `config_runtime_drift.drift=false` 且 `overlay_changed_keys` 含该键，readiness blockers 空、latch 清除。）
+- 当前（2026-09-12 代码修复批）：`runtime_config_overlay` 的两条写路径已核实为同一 advisory lock + 事务内 merge；代码层可证明的丢键机制（行存在但 JSON 不可读时静默按空 overlay merge 写回）已 fail-closed（`overlay_json_unreadable`），`legacy_authority_json` 不再被 upsert 清空，overlay 表运行时 DDL 收敛到 `RuntimeConfigOverlayService.ensure_table`。运行态复核条件不变。
 - 根因未定：09-11 00:00 前后 cvar 从 overlay 消失，而 `overlay_authority_rebind` 的 patch 内仍带 3.5；Coordinator 为 merge-only（`target_overlay = _deep_merge(current_overlay, patch)`），消失机制尚未定位，不得假设为一次性事件。
 - 退出：下一次真实 autonomous overlay 写入（factor governance 提交）后复核 cvar 仍为 3.5；若再次丢失，改登记为 overlay 写入方缺陷（多写入者/整行覆盖）并按 §3 收敛到单一写入者。
 - 验证：`select substring(overlay_json from 'risk_cvar_threshold_pct[^,}]*') from runtime.runtime_config_overlay` 应为 3.5。
@@ -90,7 +91,7 @@
 
 - 状态：`migrating`
 - canonical 模块：reconciliation、serial loop、emergency、position protection、open submission/protection/processing、execution recovery 已分离；fresh position reconcile 是既有 `recovery_position_state.recovery_meta.position_path` 的唯一 live 累计写入边界，event/API 投影不写入。
-- 剩余：`live_service` 仍保留 process wiring、兼容状态发布和少量 lifecycle wiring；仓位路径持久化失败必须显式降级为 unknown，不得把单次观测伪装成累计 MFE/MAE。
+- 剩余：`live_service` 仍保留 process wiring、兼容状态发布和少量 lifecycle wiring；仓位路径持久化失败必须显式降级为 unknown，不得把单次观测伪装成累计 MFE/MAE。2026-09-12 修复批进展：live state 容器与只读访问器已迁至 `backend/services/live_state_store.py`（唯一写路径留在 live_service），`get_live_bars/get_ctrader/market_session_snapshot/loss_streak_ladder_facts/stop_live_scheduler` 等跨模块消费点全部公共化（30 处私有跨模块导入清零），`_live_state_*` 相关 131 个测试 patch 点部分消解；读投影（get_status/get_account/get_positions/get_live_readiness）与其缓存登记为状态 owner 的合法 HTTP 读边界（依据与清单见 docs/planning/full-repair-2026-09-12.md B3/B4/B5）。
 - 验证：启动暖机优先使用 cTrader 在线历史，月初当月月库为空或 broker history 不可用时再通过 `bars_monthly_read_paths()` 回读最近历史闭合 bar；live bar freshness、风险和 readiness 以 online trendbar frame 为准，月库只作低频副本与离线兜底。
 - 退出：只迁出真实决策/状态机；不为“拆文件”新增 wrapper。稳定发布后删除旧 globals 和 compatibility authority。
 

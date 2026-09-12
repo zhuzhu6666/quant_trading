@@ -47,7 +47,7 @@ def test_read_payload_cache_skips_sql_and_decodes_once(_sqlite_conn):
     set of blob decodes."""
     from backend.services import canonical_v2
 
-    canonical_v2._payload_text_cache_clear()
+    canonical_v2.payload_text_cache_clear()
     value = {"after": {"weight": 0.3}, "before": {"weight": 0.0}}
     ref = put_payload(
         _sqlite_conn, value, payload_kind="factor_state", schema_version="v1"
@@ -62,7 +62,7 @@ def test_read_payload_cache_skips_sql_and_decodes_once(_sqlite_conn):
 def test_read_payload_cache_never_serves_other_hashes(_sqlite_conn):
     from backend.services import canonical_v2
 
-    canonical_v2._payload_text_cache_clear()
+    canonical_v2.payload_text_cache_clear()
     first = put_payload(
         _sqlite_conn,
         {"v": 1},
@@ -88,7 +88,7 @@ def test_latest_trade_attributions_cache_collapses_repeat_scans(
     import backend.services.agent_scorecard as scorecard_module
 
     canonical_v2_module = pytest.importorskip("backend.services.canonical_v2")
-    canonical_v2_module._payload_text_cache_clear()
+    canonical_v2_module.payload_text_cache_clear()
 
     db_path = tmp_path / "state.db"
     now = time.time()

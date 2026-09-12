@@ -111,13 +111,19 @@
 5. **STATE_DB_DDL（审计修正：非死代码）**：是 SQLite 测试/兼容路径的 schema owner（PG 上被短路，PG schema 唯一 owner = migrations/state_pg）。删除迫使 278 个测试文件迁 PG fixture，属测试基建重建而非缺陷修复。保留。
 6. **小文件壳层（核实后不改）**：现存 <120 行 services 模块均为多消费者助手或承载真实逻辑的 API 伴随 service；旧债登记的"18 个转发壳"口径已过时。
 
-### B7 全量测试 + 冗余分析与裁剪（一次性）
-- `.venv/bin/python -m pytest tests -q`；失败三类：①本批引入→必修；②历史既有→发现问题必须修；③`postgres_integration` 环境门→单独报告。
-- 测试冗余分析（三维：被测对象已删 / 纯实现耦合无行为断言 / 同一生产路径重复覆盖）→ 直接裁剪，逐文件理由记录于 §4。
-- 同步 docs：system-source-of-truth 受影响小节、legacy-debt-register 对应条目（live_service 领域重力、平行 authority、overlay 条目等）、server-backend-sop 幻影引用。
+### B7 全量测试 + 冗余分析与裁剪（done 2026-09-12）
+1. **全量结果**：`pytest tests -q` → **2972 passed / 11 skipped（postgres_integration 环境门）/ 3 failed**，413.86s。3 个失败同根因：`test_governance_context_cache.py` 以**属性访问**引用 B1 改名前的 `_payload_text_cache_clear`——修复后 3 passed，全量有效结果 **2975 passed / 11 skipped**。首轮全量曾在收集阶段 11 ERROR（B6 误删暴露，见 B6-2），修复后完整重跑；最终状态绿。
+2. **冗余分析（回答"是否需要一半代码量的测试"）**：
+   - 规模：tests 97,069 行 ≈ 生产 193,900 行的 50%；2972 用例 / 414s，运行时长与规模成比例，不是病理信号。
+   - 耦合：130 个测试文件使用 monkeypatch；~638 个生产私有名被引用；patch 密度前五：test_live_service_lifecycle(163)、test_factor_governance_orchestrator(96)、test_ctrader_execution_outcome(92)、test_live_service_tick(84)、test_live_generation_integration(81)。高密度是 live_service 巨石的伴生现象——这些测试在本次修复中**真实捕获了 3 项生产破坏**（B6 误删×3），证明它们仍是串行 live 链路当前的回归网。
+   - 结论：**一半占比本身不构成裁剪依据**。可证明冗余只有"被测对象已删除"一类：`tests/test_state.py`、`tests/test_circuit_breaker.py` 已随 core 链退役删除（≈600 行）。"纯实现细节断言"类抽查结果主要为行为保护（patch 的是注入缝而非断言私有状态），本批不批量删除；高密度文件的简化随 live_service 后续收缩自然完成（本次 owner 迁移已消解 131 个 patch 点中的一部分），排序列表留档 §4。
+3. **P9 修正**：SOP 中 `record_windows_*` 是"已删除"的退役记录而非幻影引用，无需修改。
+4. **docs 同步**：legacy-debt-register 对应条目已更新；system-source-of-truth 未引用任何被改名的私有名，无需变更。
 
 ### B8 观察项（沉底，不阻塞、不排期）
-- safety timing 5~122s 归因；学习 worker 内存 HWM；dsl_auto 积压排空；supervisor 证据积累；reason code 零发射统计；72 投影表并表评估；demo CVaR overlay 修复后下一次真实 autonomous 写入复核（B1 验收的运行态部分）。
+- demo CVaR overlay：B1 已闭合代码层 fail-open 丢键机制（不可读行 fail-closed + 清单不再被清）；运行态根因复核 = 下一次真实 autonomous overlay 写入后确认 cvar 仍为 3.5（legacy-debt-register monitoring 条目继续跟踪）。
+- safety timing 5~122s 归因（broker RPC / Safety 计算 / 锁等待三段，登记册 active 条目继续）。
+- 学习 worker 内存 HWM、dsl_auto 积压排空、supervisor 证据积累、reason code 零发射统计、72 投影表并表评估——维持登记册既有口径。
 
 ## 3. 顶层→backend 保留登记（B2 决定）
 
@@ -128,21 +134,27 @@
 - `monitor/system_health` 保留为 live 进程内主动探针（60s、带错误细节）：与 `runtime_health_projection.v1`（跨进程只读事实投影）角色不同，不是第二计算者——探针结果只进本地健康报告与告警，不授权交易、不进 readiness 裁决。
 - 其余零散边（scripts→backend 29 个）是入口脚本性质，天然依赖 backend，不登记为债务。
 
-## 4. 测试裁剪记录（B7 填写）
+## 4. 测试裁剪记录（B7）
 
 | 测试文件 | 裁剪类别 | 理由 |
 |---|---|---|
+| tests/test_state.py | 被测对象已删 | `core/state.py` 随 core 链退役（B1-3） |
+| tests/test_circuit_breaker.py | 被测对象已删 | `risk/circuit.py` 随 core 链退役（B1-3） |
+
+后续可简化（非本批删除，随 live_service 收缩自然消化，按 patch 密度排序）：
+test_live_service_lifecycle(163) / test_factor_governance_orchestrator(96) / test_ctrader_execution_outcome(92) / test_live_service_tick(84) / test_live_generation_integration(81) / test_evolution_closure_fixes(68) / test_autonomous_learning(56)。裁剪判据：仅当对应 owner 迁移后 patch 点失效、或同路径存在更强断言的行为测试时删除。
 
 ## 5. 批次核销
 
 | 批次 | 状态 | commit | 核销时间 |
 |---|---|---|---|
-| B0 | done | 待填 | 2026-09-12 |
-| B1 | pending | | |
-| B2 | pending | | |
-| B3 | pending | | |
-| B4 | pending | | |
-| B5 | pending | | |
-| B6 | pending | | |
-| B7 | pending | | |
-| B8 | pending | | |
+| B0 | done | 353fb362 | 2026-09-12 |
+| B1 | done | fa520879 | 2026-09-12 |
+| B2 | done | c7603f6e | 2026-09-12 |
+| B3+B4 | done | de48b94c | 2026-09-12 |
+| B5 | done（决定：保留并登记，无代码改动） | de48b94c 附带记录 | 2026-09-12 |
+| B6 | done（含 3 项误删恢复） | 55c659a7 + a6537f91 | 2026-09-12 |
+| B7 | done | 本提交 | 2026-09-12 |
+| B8 | done（观察项登记于上节） | 本提交 | 2026-09-12 |
+
+**最终结果**：全量 2975 passed / 11 skipped（postgres_integration 环境门）；生产代码净变化：删除 core/（623 行）+ risk/circuit.py + risk/regime.py + mab_router 外的 11 个脚本 + 2 个测试文件，新增 live_state_store（37 行）+ db_health_service（平移）；分层违反 30 处私有跨模块导入全部消除或转为显式 API；overlay 丢键 fail-open 机制闭合；1 个潜伏 NameError 修复。运行态验收（重启/服务检查）按 server-backend-sop 由运维执行，不在本批范围。
