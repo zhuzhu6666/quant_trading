@@ -211,3 +211,21 @@ test_live_service_lifecycle(163) / test_factor_governance_orchestrator(96) / tes
   1. 先把共享缝中性化——`_risk_reduction_runtime`、`record_risk_reduction_aux_failure`、`_build_close_position_risk_context`、`_enrich_positions_with_path_metrics`、`upsert_recovery_position_state` 等被 ≥2 个家族消费的函数，迁入独立 `live_shared_risk_context.py`（或 supervision 内先建公共入口），四个家族统一改为 owner 属性调用；
   2. 再执行 supervisor 家族本体迁移（v2 脚本 + 同套验证）。
 - 验证配方不变：pyflakes 五模块清零 → 目标测试 → smoke → 全量门。
+
+### 运行态验收（2026-09-13 01:48 启动，全部 L 批次代码上线，done）
+- 重启：backend 01:48:59（head=19f84730，release_identity 对齐）→ workers 01:52 对齐（capability head 同步 19f84730，boot_status ready）。
+- 验收：`/api/health` ok（db/ctrader connected）；启动即 `overlay restored`、无 `governance_authority` 闩；loop 从持久化 desired state 自动恢复（generation 已签发）；overlay cvar=3.5 完好；readiness 快照新鲜；**三服务 journal 零 ERROR**（新增五个 owner 模块加载无导入错误）。
+- safety timing 新代码首样（闭市）：total=5.19s（positions=4.25s 主导，safety=0.04s）——无 safety 段病理；**p95 结论待周一开盘采样**。
+
+## 8. 剩余拆解清单（live_service 8,905 → 目标 ~6,000 行纯 loop 核心）
+
+| 批次 | 内容 | 规模 | 状态 |
+|---|---|---|---|
+| L4 | supervisor 裁决引擎（绑定选择/切换状态机/trace/path metrics/risk-reduction runtime） | 42 函数 / 1,629 行 | 回滚待重做：先中性化共享缝（`_risk_reduction_runtime`、`record_risk_reduction_aux_failure`、`_build_close_position_risk_context`、`_enrich_positions_with_path_metrics`、`upsert_recovery_position_state` → 独立公共入口），再迁家族本体 |
+| L5 | safety cycle + watchdog（planner runtime、probe、fail-closed 持久化、violation/recovery handler） | 16 函数 / 772 行 | 待拆 → live_safety_watchdog.py |
+| L6 | bar 预热/缓存/新鲜度 + factor 初始化 | 17 函数 / 479 行 | 待拆 → bar/factor warmup owner |
+| L7 | tick 风险指标更新（metric inputs、forward VAR、update loop） | 3 函数 / ~180 行 | 待拆 → backend/risk metrics owner |
+| 永驻 | 串行 tick 决策引擎、读投影、bridge 访问、进程生命周期、prime/诊断 | ~5,200 行 | 登记册口径的 loop 核心，不再拆 |
+
+- 每批配方不变：v2 抽取脚本（seam 惰性 + 字面量保护 + kwarg 修复）→ pyflakes 五模块清零 → 目标测试 → smoke → 全量门 → commit。
+- 观察项（不阻塞）：safety timing p95 待周一开盘；overlay cvar=3.5 已在 09-13 启动恢复后确认完好，待下一次真实 autonomous 写入再复核一次。
