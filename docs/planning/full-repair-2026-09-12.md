@@ -251,6 +251,13 @@ test_live_service_lifecycle(163) / test_factor_governance_orchestrator(96) / tes
 - 收口全量：**2,976 passed / 11 skipped（407s）**（postgres_integration 环境门），与 B7 基线一致 + 新增 1 个防腐测试。
 - 运行态：本次未重启、未改 systemd/数据库（硬边界）。**待用户授权后**按 §7 的验收清单做一次受控重启验收（含 safety timing p95 采样）。
 
+### 运行态验收（2026-09-13 03:09 受控重启，用户授权，done）
+- 只读预检：工作区干净 @11743f49；schema `current 37 / minimum 37 / ok`；`live.loop.desired_state enabled=true`（broker=ctrader）；`live.loop.last_shutdown` graceful=true / ownership_released=true / recovery_required=false；overlay `risk_cvar_threshold_pct=3.5`。
+- 重启：backend 03:09:24 → workers 03:10:06/03:10:07；三服务 active。
+- 验收：release_identity `head=11743f49`、`clean=true`（923 文件指纹）；`/api/health` ok（db/ctrader connected）；公网 `https://www.zhuzhu666.icu/api/health` 200；启动即 `RuntimeConfig autonomous overlay restored hash=57ad9b8c`、无 `governance_authority` 闩；governance projection recovery attempted=100 current=100 degraded=0；loop 自持久化 desired state 自动恢复（generation `74de8c5c-3b85-4c52-a1da-badf6b41208f`），factor warmup 501 bars、trendbar + spot 订阅完成、recovery bootstrap 确认无 broker 持仓；`backend_readiness_snapshot.v1` age <2s 且 `blockers=[]`；`runtime_health_projection.v1` live_loop running；learning worker `boot_status=ready`；**三服务 journal `ERROR|Traceback` 计数均为 0**（截至重启后 3 分钟）。
+- 对照项：monitor `system_health` 报 `live_loop=degraded score=0.4 errors=1`，但重启前（旧代码进程）连续采样同值同 detail，属闭市本地 tick 探针姿态，非本次改动回归；`market_session.can_open_positions=false`（周日闭市）。
+- 待周一开盘复核（不阻塞）：safety timing p95；overlay cvar=3.5 在下次真实 autonomous 写入后二次确认。
+
 ### 结论与残项
 - L4–L7 目标达成；ledger 原“先建 `live_shared_risk_context.py` 中性化共享缝”的判断作废：`build_close_position_risk_context`/`evaluate_risk_reduction_policy`/`load_recovery_row_*`/`record_risk_reduction_aux_failure` 早已在 `live_risk_reduction.py`，`upsert_recovery_position_state` 在 `live_close_settlement` → `live_recovery_position_store`，facade 只需保留组装 runtime 的薄包装，不需要新模块。
 - 永驻部分（串行 tick 决策引擎、读投影、bridge 访问、进程生命周期、prime/诊断）按登记册口径不再拆。
