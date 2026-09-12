@@ -42,9 +42,8 @@ from risk.runtime_policy import RiskLimitSnapshot
 from backend.services.incident_controls import RuntimeIncidentControlService
 from backend.core.static_feature_flags import shared_static_feature_flags
 from backend.services.live_loop_controller import LiveLoopController
-from backend.services.live_safety_plane import LiveSafetyPlane, SafetyCandidate
+from backend.services.live_safety_plane import SafetyCandidate
 from backend.services.live_safety_planner import (
-    SafetyPlannerRuntime,
     plan_live_safety_candidates,
     protection_candidate_to_safety,
     safety_candidate,
@@ -55,7 +54,6 @@ from backend.services.live_safety_state import (
     no_new_risk_latched,
     no_new_risk_latch_status,
     release_no_new_risk_latch_cause,
-    safety_v2_forced_shadow_status,
 )
 from backend.services.live_safety_shadow_observation import (
     build_safety_shadow_observer,
@@ -225,6 +223,8 @@ from backend.services import live_bar_warmup
 from backend.services import live_factor_bootstrap
 from backend.services import live_loop_tick_runtime
 from backend.services import live_safety_watchdog
+from backend.services import live_safety_plane
+from backend.services import live_safety_planner
 from backend.services import live_state_store
 from backend.services.live_state_store import (
     _LIVE_STATE_LOCK,
@@ -447,9 +447,6 @@ from backend.services.live_scheduler_jobs import (
     register_external_sync_jobs as _register_external_sync_jobs,
     register_factor_selection_heartbeat_job as _register_factor_selection_heartbeat_job,
     start_scheduler_catch_up as _start_scheduler_catch_up,
-)
-from backend.services.supervisor_payload_contract import (
-    compact_supervisor_mapping as _lifecycle_compact_supervisor_mapping,
 )
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
 from backend.services.position_supervisor import (
@@ -4326,8 +4323,6 @@ _loop_state_lock = threading.Lock()
 _OPEN_TRADE_ADMISSION_LOCK = threading.Lock()
 _process_shutdown_requested = False
 _LIVE_LOOP_CONTROLLER = LiveLoopController()
-_live_safety_plane: LiveSafetyPlane | None = None
-_live_safety_plane_owner: str = ""
 # Restart backoff, price-stuck detection, and bar cache.
 _MIN_RESTART_INTERVAL = 60  # 最小重启间隔 60s
 _BAR_CACHE_PATH = Path(__file__).resolve().parent.parent.parent / "logs" / ".bar_cache.pkl"
@@ -4350,29 +4345,6 @@ def _current_loop_strategy_name(default: str = "factor_v4") -> str:
     return str(current.strategy_name or default)
 
 
-def _get_live_safety_plane(generation_id: str = "") -> LiveSafetyPlane:
-    global _live_safety_plane, _live_safety_plane_owner
-    owner = str(generation_id or "unowned")
-    mode = str(_phase2_feature_flags().live_safety_plane_v2_mode)
-    if (
-        _live_safety_plane is None
-        or _live_safety_plane_owner != owner
-        or _live_safety_plane.mode != mode
-    ):
-        _live_safety_plane = LiveSafetyPlane(mode=mode)
-        _live_safety_plane_owner = owner
-    if mode == "enforce" and not _live_safety_plane.forced_shadow:
-        # Re-read the persisted fail-closed cause for an existing generation;
-        # a restart or another process must not silently clear it.
-        persisted_override = safety_v2_forced_shadow_status()
-        if bool(persisted_override.get("active")):
-            _live_safety_plane.force_shadow(
-                str(
-                    persisted_override.get("reason")
-                    or "persisted_safety_v2_forced_shadow"
-                )
-            )
-    return _live_safety_plane
 
 
 
@@ -5215,148 +5187,8 @@ def _publish_fresh_position_reconcile(
     return positions
 
 
-def _safety_reference_price(bridge: Any, positions: list[dict[str, Any]]) -> float:
-    try:
-        quote = bridge.get_spot_quote() if bridge is not None and hasattr(bridge, "get_spot_quote") else {}
-        if quote:
-            live_state_update(spot_quote=quote)
-        if _quote_is_fresh(quote):
-            price = float(quote.get("mid") or 0.0)
-            if price > 0:
-                return price
-    except Exception:
-        pass
-    for position in positions:
-        for field in ("current_price", "price_current", "entry_price", "price_open", "open_price"):
-            try:
-                price = float(position.get(field) or 0.0)
-            except (TypeError, ValueError):
-                price = 0.0
-            if price > 0:
-                return price
-    return float(get_latest_price() or 0.0)
 
 
-def _live_safety_planner_runtime(bridge: Any) -> SafetyPlannerRuntime:
-    """Build read-only adapters shared by two independent planning algorithms."""
-
-    broker_schedule = _broker_schedule_from_bridge(bridge)
-
-    def build_timeout_context(position, effective_cfg, now_ts):
-        pid = int(position.get("position_id") or position.get("ticket") or 0)
-        timeframe = str(getattr(effective_cfg, "timeframe", "M5") or "M5")
-        temporal = _temporal_context_for_trade(
-            decision_ts=float(now_ts),
-            timeframe=timeframe,
-        )
-        return _lifecycle_build_close_position_risk_context_payload(
-            position_id=pid,
-            close_reason="holding_timeout",
-            mode="live",
-            broker="ctrader",
-            symbol=str(position.get("symbol") or "XAUUSD+"),
-            entry_ts=float(_position_open_timestamp(position) or 0.0),
-            entry_ts_source="broker_position",
-            temporal_context=temporal,
-            max_holding_bars=int(
-                getattr(effective_cfg, "risk_max_holding_bars", 0) or 0
-            ),
-            broker_schedule=broker_schedule,
-        )
-
-    def load_entry_plan(position_id: int) -> dict[str, Any]:
-        try:
-            row = live_close_settlement.load_recovery_position_row(int(position_id))
-        except Exception:
-            return {}
-        meta = dict((row or {}).get("recovery_meta") or {})
-        return dict(meta.get("entry_protection_plan") or {})
-
-    def evaluate_supervisor_read_only(position, all_positions, effective_cfg, acct, now_ts):
-        existing = position.get("supervisor")
-        if isinstance(existing, dict) and existing.get("action"):
-            return _lifecycle_compact_supervisor_mapping(
-                existing,
-                nested_keys=frozenset({"evidence", "recommended_controls", "execution"}),
-            )
-        timeout_context = build_timeout_context(position, effective_cfg, now_ts)
-        planner_position = dict(position)
-        planner_position["max_holding_seconds"] = float(
-            timeout_context.get("max_holding_seconds", 0.0) or 0.0
-        )
-        planner_position["holding_timeout_ratio"] = float(
-            timeout_context.get("holding_timeout_ratio", 0.0) or 0.0
-        )
-        metric_names = {
-            "mfe",
-            "mae",
-            "giveback_ratio",
-            "profit_capture_ratio",
-            "time_in_profit",
-            "time_in_profit_seconds",
-            "holding_efficiency",
-            "time_decay_score",
-            "thesis_status",
-            "regime_shift",
-            "entry_regime",
-            "current_regime",
-        }
-        metrics = {
-            name: planner_position[name]
-            for name in metric_names
-            if name in planner_position
-        }
-        context_inputs = _lifecycle_build_position_supervisor_context_inputs(
-            position=planner_position,
-            cfg=effective_cfg,
-            positions=list(all_positions),
-            account=dict(acct or {}),
-            entry_decision_id="",
-            risk_snapshot=live_state_get("risk", {}, clone=True) or {},
-            total_api_volume=_tracked_total_api_volume(list(all_positions)),
-            market_context=live_state_get("last_composite", {}, clone=True) or {},
-            supervisor_state=dict(
-                (
-                    _load_recovery_row_for_risk_reduction(
-                        int(position.get("position_id") or position.get("ticket") or 0),
-                        operation="position_supervisor_safety_planner_context",
-                    )
-                    or {}
-                ).get("recovery_meta")
-                or {}
-            ),
-            loop_running=bool(live_state_get("loop_running", True)),
-        )
-        context = _lifecycle_build_position_supervisor_context_payload(
-            **context_inputs,
-            temporal_context=timeout_context,
-            position_metrics=metrics,
-        )
-        return evaluate_position_supervisor(context)
-
-    def normalize_supervisor_action(position, verdict):
-        payload = dict(verdict or {})
-        if str(payload.get("action") or "").strip().lower() != "reduce":
-            return payload
-        controls = dict(payload.get("recommended_controls") or {})
-        execution_plan = _plan_supervisor_reduce_action(
-            bridge=bridge,
-            position=dict(position or {}),
-            verdict=payload,
-            controls=controls,
-            floor_api_volume_to_step=_floor_api_volume_to_step,
-            should_full_close_untradeable_reduce=(
-                _should_full_close_untradeable_reduce
-            ),
-        )
-        return _normalize_supervisor_reduce_verdict(payload, execution_plan)
-
-    return SafetyPlannerRuntime(
-        build_timeout_context=build_timeout_context,
-        load_entry_protection_plan=load_entry_plan,
-        evaluate_supervisor=evaluate_supervisor_read_only,
-        normalize_supervisor_action=normalize_supervisor_action,
-    )
 
 
 def _plan_live_safety_candidates(
@@ -5379,7 +5211,7 @@ def _plan_live_safety_candidates(
         atr_price=atr_price,
         planned_at=planned_at,
         entry_repair_cooldown_seconds=_ENTRY_PROTECTION_REPAIR_COOLDOWN_SECONDS,
-        runtime=_live_safety_planner_runtime(bridge),
+        runtime=live_safety_planner.live_safety_planner_runtime(bridge),
     )
 
 
@@ -5460,7 +5292,7 @@ def _run_live_safety_cycle(
         reconcile_result=reconcile_result,
         force_full_cycle=force_full_cycle,
         runtime=LiveSafetyCycleRuntime(
-            get_safety_plane=_get_live_safety_plane,
+            get_safety_plane=live_safety_plane.get_live_safety_plane,
             explicit_position_reconcile=_explicit_position_reconcile,
             publish_fresh_positions=partial(
                 _publish_fresh_position_reconcile,
@@ -5469,7 +5301,7 @@ def _run_live_safety_cycle(
             get_live_state=live_state_get,
             update_live_state=live_state_update,
             runtime_config=_runtime_config,
-            safety_reference_price=_safety_reference_price,
+            safety_reference_price=live_safety_planner.safety_reference_price,
             factor_pipeline=_factor_pipeline or {},
             plan_safety_candidates=_plan_live_safety_candidates,
             execute_safety_candidate=_execute_live_safety_candidate,
@@ -5589,7 +5421,7 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
         ensure_spot_subscription=_ensure_spot_subscription,
         get_live_bars=get_live_bars,
         ensure_decision_bars_fresh=live_bar_warmup.ensure_live_decision_bars_fresh,
-        get_safety_plane=_get_live_safety_plane,
+        get_safety_plane=live_safety_plane.get_live_safety_plane,
         retry_pending_open=live_open_pipeline.retry_pending_open_trade,
         process_tick=_process_tick,
         update_risk_metrics=live_loop_tick_runtime.update_live_loop_risk_metrics,

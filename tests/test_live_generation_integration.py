@@ -13,6 +13,7 @@ from backend.services import live_close_settlement
 from backend.services import live_open_pipeline
 from backend.services import live_bar_warmup
 from backend.services import live_safety_watchdog
+from backend.services import live_safety_plane
 
 
 class _SnapshotBridge:
@@ -82,8 +83,8 @@ class _OwnedThread:
 
 
 def _enable_phase2(monkeypatch):
-    live_service._live_safety_plane = None
-    live_service._live_safety_plane_owner = ""
+    live_service.live_safety_plane._live_safety_plane = None
+    live_service.live_safety_plane._live_safety_plane_owner = ""
     today = live_service.datetime.now(live_service.timezone.utc).strftime("%Y-%m-%d")
     live_service.live_state_update(
         trade_date=today,
@@ -1044,8 +1045,7 @@ def test_failed_position_reconcile_blocks_open_but_cached_position_protection_co
         account={"balance": 1000.0, "equity": 1000.0},
     )
     monkeypatch.setattr(
-        live_service,
-        "_get_live_safety_plane",
+        live_safety_plane, "get_live_safety_plane",
         lambda _generation_id="": LiveSafetyPlane(mode="enforce", clock=lambda: 100.0),
     )
     monkeypatch.setattr(
@@ -1113,8 +1113,7 @@ def test_authoritative_protection_exception_blocks_new_risk_during_migration(mon
         )
     )
     monkeypatch.setattr(
-        live_service,
-        "_get_live_safety_plane",
+        live_safety_plane, "get_live_safety_plane",
         lambda _generation_id="": LiveSafetyPlane(mode=mode, clock=lambda: 100.0),
     )
     monkeypatch.setattr(
@@ -1139,8 +1138,7 @@ def test_authoritative_protection_exception_blocks_new_risk_during_migration(mon
 def test_position_without_stable_broker_identity_blocks_new_risk_without_index_error(monkeypatch):
     bridge = _SnapshotBridge()
     monkeypatch.setattr(
-        live_service,
-        "_get_live_safety_plane",
+        live_safety_plane, "get_live_safety_plane",
         lambda _generation_id="": LiveSafetyPlane(mode="off", clock=lambda: 100.0),
     )
     monkeypatch.setattr(

@@ -358,3 +358,174 @@ def plan_live_safety_candidates(
         arbitration=tuple(arbitration),
         planned_at=now_ts,
     )
+
+
+_ls_module = None
+
+
+def _live_service():
+    """Lazy handle to the live loop module (import-order-safe)."""
+    global _ls_module
+    if _ls_module is None:
+        from backend.services import live_service as _module
+        _ls_module = _module
+    return _ls_module
+
+
+from backend.services import live_close_settlement
+from backend.services.live_position_lifecycle import (
+    build_close_position_risk_context_payload as _lifecycle_build_close_position_risk_context_payload,
+    build_position_supervisor_context_inputs as _lifecycle_build_position_supervisor_context_inputs,
+)
+from backend.services.live_supervision_actions import (
+    normalize_supervisor_reduce_verdict as _normalize_supervisor_reduce_verdict,
+    plan_supervisor_reduce_action as _plan_supervisor_reduce_action,
+)
+from backend.services.supervisor_payload_contract import (
+    compact_supervisor_mapping as _lifecycle_compact_supervisor_mapping,
+)
+
+# moved from live_service (2026-09-12 structural repair)
+
+def safety_reference_price(bridge: Any, positions: list[dict[str, Any]]) -> float:
+    try:
+        quote = bridge.get_spot_quote() if bridge is not None and hasattr(bridge, "get_spot_quote") else {}
+        if quote:
+            _live_service().live_state_update(spot_quote=quote)
+        if _live_service()._quote_is_fresh(quote):
+            price = float(quote.get("mid") or 0.0)
+            if price > 0:
+                return price
+    except Exception:
+        pass
+    for position in positions:
+        for field in ("current_price", "price_current", "entry_price", "price_open", "open_price"):
+            try:
+                price = float(position.get(field) or 0.0)
+            except (TypeError, ValueError):
+                price = 0.0
+            if price > 0:
+                return price
+    return float(_live_service().get_latest_price() or 0.0)
+
+
+def live_safety_planner_runtime(bridge: Any) -> SafetyPlannerRuntime:
+    """Build read-only adapters shared by two independent planning algorithms."""
+
+    broker_schedule = _live_service()._broker_schedule_from_bridge(bridge)
+
+    def build_timeout_context(position, effective_cfg, now_ts):
+        pid = int(position.get("position_id") or position.get("ticket") or 0)
+        timeframe = str(getattr(effective_cfg, "timeframe", "M5") or "M5")
+        temporal = _live_service()._temporal_context_for_trade(
+            decision_ts=float(now_ts),
+            timeframe=timeframe,
+        )
+        return _lifecycle_build_close_position_risk_context_payload(
+            position_id=pid,
+            close_reason="holding_timeout",
+            mode="live",
+            broker="ctrader",
+            symbol=str(position.get("symbol") or "XAUUSD+"),
+            entry_ts=float(_live_service()._position_open_timestamp(position) or 0.0),
+            entry_ts_source="broker_position",
+            temporal_context=temporal,
+            max_holding_bars=int(
+                getattr(effective_cfg, "risk_max_holding_bars", 0) or 0
+            ),
+            broker_schedule=broker_schedule,
+        )
+
+    def load_entry_plan(position_id: int) -> dict[str, Any]:
+        try:
+            row = live_close_settlement.load_recovery_position_row(int(position_id))
+        except Exception:
+            return {}
+        meta = dict((row or {}).get("recovery_meta") or {})
+        return dict(meta.get("entry_protection_plan") or {})
+
+    def evaluate_supervisor_read_only(position, all_positions, effective_cfg, acct, now_ts):
+        existing = position.get("supervisor")
+        if isinstance(existing, dict) and existing.get("action"):
+            return _lifecycle_compact_supervisor_mapping(
+                existing,
+                nested_keys=frozenset({"evidence", "recommended_controls", "execution"}),
+            )
+        timeout_context = build_timeout_context(position, effective_cfg, now_ts)
+        planner_position = dict(position)
+        planner_position["max_holding_seconds"] = float(
+            timeout_context.get("max_holding_seconds", 0.0) or 0.0
+        )
+        planner_position["holding_timeout_ratio"] = float(
+            timeout_context.get("holding_timeout_ratio", 0.0) or 0.0
+        )
+        metric_names = {
+            "mfe",
+            "mae",
+            "giveback_ratio",
+            "profit_capture_ratio",
+            "time_in_profit",
+            "time_in_profit_seconds",
+            "holding_efficiency",
+            "time_decay_score",
+            "thesis_status",
+            "regime_shift",
+            "entry_regime",
+            "current_regime",
+        }
+        metrics = {
+            name: planner_position[name]
+            for name in metric_names
+            if name in planner_position
+        }
+        context_inputs = _lifecycle_build_position_supervisor_context_inputs(
+            position=planner_position,
+            cfg=effective_cfg,
+            positions=list(all_positions),
+            account=dict(acct or {}),
+            entry_decision_id="",
+            risk_snapshot=_live_service().live_state_get("risk", {}, clone=True) or {},
+            total_api_volume=_live_service()._tracked_total_api_volume(list(all_positions)),
+            market_context=_live_service().live_state_get("last_composite", {}, clone=True) or {},
+            supervisor_state=dict(
+                (
+                    _live_service()._load_recovery_row_for_risk_reduction(
+                        int(position.get("position_id") or position.get("ticket") or 0),
+                        operation="position_supervisor_safety_planner_context",
+                    )
+                    or {}
+                ).get("recovery_meta")
+                or {}
+            ),
+            loop_running=bool(_live_service().live_state_get("loop_running", True)),
+        )
+        context = _live_service()._lifecycle_build_position_supervisor_context_payload(
+            **context_inputs,
+            temporal_context=timeout_context,
+            position_metrics=metrics,
+        )
+        return _live_service().evaluate_position_supervisor(context)
+
+    def normalize_supervisor_action(position, verdict):
+        payload = dict(verdict or {})
+        if str(payload.get("action") or "").strip().lower() != "reduce":
+            return payload
+        controls = dict(payload.get("recommended_controls") or {})
+        execution_plan = _plan_supervisor_reduce_action(
+            bridge=bridge,
+            position=dict(position or {}),
+            verdict=payload,
+            controls=controls,
+            floor_api_volume_to_step=_live_service()._floor_api_volume_to_step,
+            should_full_close_untradeable_reduce=(
+                _live_service()._should_full_close_untradeable_reduce
+            ),
+        )
+        return _normalize_supervisor_reduce_verdict(payload, execution_plan)
+
+    return SafetyPlannerRuntime(
+        build_timeout_context=build_timeout_context,
+        load_entry_protection_plan=load_entry_plan,
+        evaluate_supervisor=evaluate_supervisor_read_only,
+        normalize_supervisor_action=normalize_supervisor_action,
+    )

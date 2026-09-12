@@ -390,3 +390,50 @@ class LiveSafetyPlane:
     @staticmethod
     def _candidate_key(candidate: SafetyCandidate) -> str:
         return candidate.fingerprint or f"{candidate.action}:{candidate.position_id}:{candidate.reason}"
+
+
+_ls_module = None
+
+
+def _live_service():
+    """Lazy handle to the live loop module (import-order-safe)."""
+    global _ls_module
+    if _ls_module is None:
+        from backend.services import live_service as _module
+        _ls_module = _module
+    return _ls_module
+
+
+from backend.services.live_safety_state import safety_v2_forced_shadow_status
+
+# moved from live_service (2026-09-12 structural repair)
+
+def get_live_safety_plane(generation_id: str = "") -> LiveSafetyPlane:
+    global _live_safety_plane, _live_safety_plane_owner
+    owner = str(generation_id or "unowned")
+    mode = str(_live_service()._phase2_feature_flags().live_safety_plane_v2_mode)
+    if (
+        _live_safety_plane is None
+        or _live_safety_plane_owner != owner
+        or _live_safety_plane.mode != mode
+    ):
+        _live_safety_plane = LiveSafetyPlane(mode=mode)
+        _live_safety_plane_owner = owner
+    if mode == "enforce" and not _live_safety_plane.forced_shadow:
+        # Re-read the persisted fail-closed cause for an existing generation;
+        # a restart or another process must not silently clear it.
+        persisted_override = safety_v2_forced_shadow_status()
+        if bool(persisted_override.get("active")):
+            _live_safety_plane.force_shadow(
+                str(
+                    persisted_override.get("reason")
+                    or "persisted_safety_v2_forced_shadow"
+                )
+            )
+    return _live_safety_plane
+
+
+_live_safety_plane: LiveSafetyPlane | None = None
+
+
+_live_safety_plane_owner: str = ""

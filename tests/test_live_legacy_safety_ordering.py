@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from backend.services import live_service
 from backend.services.live_loop_controller import LiveLoopController
 from backend.services import live_safety_watchdog
+from backend.services import live_safety_planner
 
 
 def test_off_mode_executes_governed_supervisor_cycle_once_per_due_cycle(monkeypatch):
@@ -30,7 +31,7 @@ def test_off_mode_executes_governed_supervisor_cycle_once_per_due_cycle(monkeypa
         "_publish_fresh_position_reconcile",
         lambda _result, **_kwargs: [position],
     )
-    monkeypatch.setattr(live_service, "_safety_reference_price", lambda *_args: 4000.0)
+    monkeypatch.setattr(live_safety_planner, "safety_reference_price", lambda *_args: 4000.0)
     monkeypatch.setattr(
         live_service,
         "_run_position_protection_cycle",

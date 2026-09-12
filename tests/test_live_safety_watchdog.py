@@ -21,6 +21,7 @@ from backend.services.live_safety_plane import LiveSafetyPlane
 from backend.services.live_safety_planner import SafetyPlan, safety_candidate
 from backend.services import live_open_pipeline
 from backend.services import live_safety_watchdog
+from backend.services import live_safety_plane
 
 
 @pytest.fixture(autouse=True)
@@ -626,8 +627,7 @@ def test_stale_watchdog_and_unknown_execution_block_open_but_protection_continue
         positions=(position,),
     )
     monkeypatch.setattr(
-        live_service,
-        "_get_live_safety_plane",
+        live_safety_plane, "get_live_safety_plane",
         lambda _generation_id="": LiveSafetyPlane(mode="enforce", clock=lambda: 100.0),
     )
     candidate = safety_candidate(

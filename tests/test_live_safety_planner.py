@@ -6,6 +6,8 @@ from backend.services.live_loop_v2 import LiveSafetyCycleRuntime, run_live_safet
 from backend.services import live_service
 from backend.services.live_safety_plane import LiveSafetyPlane
 from backend.services import live_safety_watchdog
+from backend.services import live_safety_plane
+from backend.services import live_safety_planner
 from backend.services.live_safety_planner import (
     SafetyPlan,
     SafetyPlannerRuntime,
@@ -538,9 +540,9 @@ def test_forced_shadow_authority_survives_plane_reconstruction(monkeypatch, tmp_
         "_phase2_feature_flags",
         lambda: SimpleNamespace(live_safety_plane_v2_mode="enforce"),
     )
-    monkeypatch.setattr(live_service, "_live_safety_plane", None)
-    monkeypatch.setattr(live_service, "_live_safety_plane_owner", "")
-    restored = live_service._get_live_safety_plane("generation-restarted")
+    monkeypatch.setattr(live_safety_plane, "_live_safety_plane", None)
+    monkeypatch.setattr(live_safety_plane, "_live_safety_plane_owner", "")
+    restored = live_service.live_safety_plane.get_live_safety_plane("generation-restarted")
 
     assert restored.mode == "enforce"
     assert restored.effective_mode == "shadow"
@@ -564,9 +566,9 @@ def test_existing_plane_observes_forced_shadow_written_by_another_process(
         "_phase2_feature_flags",
         lambda: SimpleNamespace(live_safety_plane_v2_mode="enforce"),
     )
-    monkeypatch.setattr(live_service, "_live_safety_plane", None)
-    monkeypatch.setattr(live_service, "_live_safety_plane_owner", "")
-    existing = live_service._get_live_safety_plane("generation-live")
+    monkeypatch.setattr(live_safety_plane, "_live_safety_plane", None)
+    monkeypatch.setattr(live_safety_plane, "_live_safety_plane_owner", "")
+    existing = live_service.live_safety_plane.get_live_safety_plane("generation-live")
     assert existing.forced_shadow is False
 
     activate_no_new_risk_latch(
@@ -574,7 +576,7 @@ def test_existing_plane_observes_forced_shadow_written_by_another_process(
         actor="system:other-process",
         metadata={"blockers": ["safety_v2_forced_shadow"]},
     )
-    observed = live_service._get_live_safety_plane("generation-live")
+    observed = live_service.live_safety_plane.get_live_safety_plane("generation-live")
 
     assert observed is existing
     assert observed.forced_shadow is True
@@ -626,8 +628,7 @@ def test_live_service_enforce_uses_single_supervisor_executor_exactly_once(
     v2 = safety_candidate(action="tighten", position_id=7, source="supervisor_tighten")
     calls = []
     monkeypatch.setattr(
-        live_service,
-        "_get_live_safety_plane",
+        live_safety_plane, "get_live_safety_plane",
         lambda _generation_id="": LiveSafetyPlane(mode="enforce", clock=lambda: 100.0),
     )
     monkeypatch.setattr(
@@ -643,7 +644,7 @@ def test_live_service_enforce_uses_single_supervisor_executor_exactly_once(
         ),
     )
     monkeypatch.setattr(live_service, "live_state_update", lambda **_payload: None)
-    monkeypatch.setattr(live_service, "_safety_reference_price", lambda *_args: 100.0)
+    monkeypatch.setattr(live_safety_planner, "safety_reference_price", lambda *_args: 100.0)
     monkeypatch.setattr(
         live_service,
         "_plan_live_safety_candidates",
