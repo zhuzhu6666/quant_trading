@@ -716,15 +716,15 @@ def _risk_metric_inputs(
         clean_pnls.append(float(row["pnl"] or 0.0))
 
     normalized_positions = [] if positions is not None else None
-    for _live_service().index, position in enumerate(positions or []):
+    for index, position in enumerate(positions or []):
         symbol = str(position.get("symbol") or "XAUUSD+")
         instrument = dict((cfg.multi_symbol_config or {}).get(symbol) or {})
         if not instrument:
             symbol_key = symbol.upper().rstrip("+")
             instrument = next(
                 (
-                    dict(_live_service().value or {})
-                    for name, _live_service().value in (cfg.multi_symbol_config or {}).items()
+                    dict(value or {})
+                    for name, value in (cfg.multi_symbol_config or {}).items()
                     if str(name).upper().rstrip("+") == symbol_key
                 ),
                 {},
@@ -736,7 +736,7 @@ def _risk_metric_inputs(
         )
         api_volume = float(position.get("volume") or 0.0)
         normalized = {
-            "position_id": position.get("position_id") or _live_service().index,
+            "position_id": position.get("position_id") or index,
             "symbol": symbol,
             "direction": position.get("direction", position.get("side")),
         }
@@ -772,10 +772,10 @@ def _closed_bar_forward_var_input(*, cfg, observed_at: float):
         )
         timestamps = (
             [
-                _live_service().index.isoformat()
-                if hasattr(_live_service().index, "isoformat")
-                else str(_live_service().index)
-                for _live_service().index in frame._live_service().index
+                index.isoformat()
+                if hasattr(index, "isoformat")
+                else str(index)
+                for index in frame.index
             ]
             if frame is not None and len(frame) > 0
             else []
@@ -842,7 +842,7 @@ def update_live_loop_risk_metrics(*, tick: int, log) -> None:
                 "status": "stale",
                 "published_at": time.time(),
                 "as_of": min(
-                    _live_service().value for _live_service().value in (account_at, positions_at) if _live_service().value > 0
+                    value for value in (account_at, positions_at) if value > 0
                 ) if account_at > 0 or positions_at > 0 else 0.0,
                 "blockers": ["broker_risk_facts_stale"],
             }

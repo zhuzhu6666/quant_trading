@@ -521,7 +521,7 @@ def _live_service():
 def factor_generation_active(generation_id: str) -> bool:
     if not generation_id:
         return True
-    current = _live_service()._live_service()._LIVE_LOOP_CONTROLLER.current()
+    current = _live_service()._LIVE_LOOP_CONTROLLER.current()
     return bool(
         current is not None
         and current.generation_id == generation_id

@@ -400,10 +400,10 @@ def _prepare_open_trade_candidate(
                 session=str(context_state.get("session_state") or ""),
                 event_state=str(context_state.get("event_window_state") or ""),
                 signal_score=float(composite.score or 0.0),
-                alpha_family=[str(_live_service().item.get("factor") or "") for _live_service().item in top_contributors],
+                alpha_family=[str(item.get("factor") or "") for item in top_contributors],
             )
             reservation = NurseryExplorationBudgetService().reserve(
-                reasons=[str(_live_service().item.get("reason") or "") for _live_service().item in observations],
+                reasons=[str(item.get("reason") or "") for item in observations],
                 setup_fingerprint=setup_fingerprint,
                 per_reason_limit=int(getattr(cfg, "nursery_exploration_per_reason_daily_limit", 5) or 5),
                 global_limit=int(getattr(cfg, "nursery_exploration_global_daily_limit", 15) or 15),
@@ -569,7 +569,7 @@ def _record_open_trade_admission_blocked(
     """Persist a signal-pass admission stop before RiskPolicy is reached.
 
     This is deliberately a ledger-only observation.  It does not invoke
-    RiskPolicy, create an execution intent, or turn the admission _live_service().blocker into
+    RiskPolicy, create an execution intent, or turn the admission blocker into
     a risk verdict.  The same decision ledger remains the audit authority used
     by later risk/order/position records.
     """
@@ -610,7 +610,7 @@ def _record_open_trade_admission_blocked(
         payload["action_json"].update(action_json)
         decision_id = _live_service()._LEDGER.log_composite_decision(**payload)
         _live_service().logger.debug(
-            "[live] open admission _live_service().blocker audited decision_id={} stage={} blockers={}",
+            "[live] open admission blocker audited decision_id={} stage={} blockers={}",
             decision_id,
             skip_stage,
             list(blockers),
@@ -619,7 +619,7 @@ def _record_open_trade_admission_blocked(
         # Admission remains fail-closed when the audit sink is unavailable;
         # the ledger is observability, never permission to submit an order.
         _live_service().logger.debug(
-            "[live] open admission _live_service().blocker ledger persist failed: {}",
+            "[live] open admission blocker ledger persist failed: {}",
             ledger_error,
         )
 
@@ -747,12 +747,12 @@ def _prepare_open_trade_intent(
         "config_hash": str(runtime_binding.get("config_hash") or ""),
         "policy_version": str(getattr(cfg, "policy_version", "") or ""),
         "evidence_refs": [
-            _live_service().ref
-            for _live_service().ref in (
+            ref
+            for ref in (
                 f"signal_decision:{signal_decision_id}" if signal_decision_id else "",
                 f"factor_selection:{factor_set_version}" if factor_set_version else "",
             )
-            if _live_service().ref
+            if ref
         ],
         "causal_timing": _open_causal_timing(
             decision_ts=decision_ts,
@@ -1278,7 +1278,7 @@ def _probe_final_open_admission(
 ) -> dict[str, Any]:
     """Collect fresh open-only facts before broker-mutation ownership.
 
-    PostgreSQL probing intentionally happens outside ``_live_service()._OPEN_TRADE_ADMISSION_LOCK``
+    PostgreSQL probing intentionally happens outside ``_OPEN_TRADE_ADMISSION_LOCK``
     so a database outage cannot delay emergency close/reduce/tighten ownership.
     The lock rechecks draining and the durable latch before using this result.
     """
@@ -1401,11 +1401,11 @@ def _open_admission_gate_reason(blockers: tuple[str, ...]) -> str:
         "generation_not_accepting_new_risk",
         "loop_stop_requested",
     }
-    if any(_live_service().blocker in draining for _live_service().blocker in blockers):
+    if any(blocker in draining for blocker in blockers):
         return "loop_draining"
-    for _live_service().blocker in blockers:
-        if _live_service().blocker != "accepting_new_risk_false":
-            return _live_service().blocker
+    for blocker in blockers:
+        if blocker != "accepting_new_risk_false":
+            return blocker
     return blockers[0] if blockers else "open_admission_blocked"
 
 
