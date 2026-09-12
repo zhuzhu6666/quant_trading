@@ -548,6 +548,7 @@ from execution.analytics import (
 from loguru import logger
 from typing import Any
 import time
+from backend.services import live_safety_watchdog
 
 # # moved from live_service (2026-09-12 structural repair)
 
@@ -1170,7 +1171,7 @@ def record_amended_open_success_context_from_live(
 def _amend_failure_processing_runtime() -> AmendFailureRuntime:
     ledger = _live_service()._LEDGER
     return AmendFailureRuntime(
-        persist_fail_closed=_live_service()._persist_safety_fail_closed,
+        persist_fail_closed=live_safety_watchdog.persist_safety_fail_closed,
         record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
         record_filled_context=lambda request: (
             _record_filled_position_open_context(**vars(request))

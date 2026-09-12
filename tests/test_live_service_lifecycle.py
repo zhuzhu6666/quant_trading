@@ -15,6 +15,7 @@ from backend.services import live_position_protection_cycle
 from backend.services import live_open_processing
 from backend.services import live_open_pipeline
 from backend.services import live_bar_warmup
+from backend.services import live_safety_watchdog
 
 
 class _IdleThread:
@@ -1079,8 +1080,7 @@ def test_record_amend_failure_after_fill_records_context_status_and_ledger(monke
         lambda key, *args, **kwargs: {"risk": "state"} if key == "risk" else 0,
     )
     monkeypatch.setattr(
-        live_service,
-        "_persist_safety_fail_closed",
+        live_safety_watchdog, "persist_safety_fail_closed",
         lambda **kwargs: calls["fail_closed"].append(kwargs),
     )
 

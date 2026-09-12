@@ -28,6 +28,7 @@ from config import runtime_config as rc
 from backend.services import live_close_settlement
 from backend.services import live_position_protection_cycle
 from backend.services import live_open_pipeline
+from backend.services import live_safety_watchdog
 
 
 @pytest.fixture(autouse=True)
@@ -719,8 +720,7 @@ def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
     # correctly fail closed; the test must not persist that synthetic safety
     # incident into the shared runtime safety ledger.
     monkeypatch.setattr(
-        live_service,
-        "_persist_safety_fail_closed",
+        live_safety_watchdog, "persist_safety_fail_closed",
         lambda **_kwargs: {"active": False, "state": "test_isolated"},
     )
     monkeypatch.setattr(live_service, "append_safety_outbox", lambda **_kwargs: {})

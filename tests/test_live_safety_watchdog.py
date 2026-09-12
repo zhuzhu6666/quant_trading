@@ -20,6 +20,7 @@ from backend.services.live_safety_watchdog import (
 from backend.services.live_safety_plane import LiveSafetyPlane
 from backend.services.live_safety_planner import SafetyPlan, safety_candidate
 from backend.services import live_open_pipeline
+from backend.services import live_safety_watchdog
 
 
 @pytest.fixture(autouse=True)
@@ -170,7 +171,7 @@ def test_watchdog_violation_durably_latches_no_new_risk():
             "positions_updated_at": 99.0,
             "unknown_execution_count": 0,
         },
-        on_violation=live_service._on_live_safety_watchdog_violation,
+        on_violation=live_service.live_safety_watchdog._on_live_safety_watchdog_violation,
         clock=lambda: 100.0,
     )
 
@@ -225,7 +226,7 @@ def test_watchdog_recovery_releases_only_its_own_latch_cause():
         cause="incident_control",
         cause_id="runtime_incident_mode",
     )
-    live_service._persist_safety_fail_closed(
+    live_service.live_safety_watchdog.persist_safety_fail_closed(
         blockers=["unresolved_execution_intent"],
         source="safety_watchdog",
     )
@@ -242,7 +243,7 @@ def test_watchdog_recovery_releases_only_its_own_latch_cause():
         now=100.0,
     )
 
-    live_service._on_live_safety_watchdog_recovery(result)
+    live_service.live_safety_watchdog._on_live_safety_watchdog_recovery(result)
 
     causes = {
         (item["cause"], item["cause_id"])
@@ -274,8 +275,7 @@ def test_live_loop_cause_requires_normal_cycle_and_reconciled_facts(monkeypatch)
         },
     )
     monkeypatch.setattr(
-        live_service,
-        "_live_safety_watchdog_probe",
+        live_safety_watchdog, "live_safety_watchdog_probe",
         lambda: {
             "enabled": True,
             "running": True,
@@ -299,7 +299,7 @@ def test_live_loop_cause_requires_normal_cycle_and_reconciled_facts(monkeypatch)
         now=now,
     )
 
-    live_service._on_live_safety_watchdog_recovery(result)
+    live_service.live_safety_watchdog._on_live_safety_watchdog_recovery(result)
 
     assert no_new_risk_latch_status()["active"] is False
     assert no_new_risk_latch_status()["causes"] == []
@@ -344,7 +344,7 @@ def test_watchdog_recovery_does_not_authorize_without_owned_generation(monkeypat
         now=now,
     )
 
-    live_service._on_live_safety_watchdog_recovery(result)
+    live_service.live_safety_watchdog._on_live_safety_watchdog_recovery(result)
 
     assert no_new_risk_latch_status()["active"] is False
     assert live_service.live_state_get("accepting_new_risk") is False
@@ -380,7 +380,7 @@ def test_live_loop_cause_stays_latched_when_safety_cycle_is_not_ready():
         now=now,
     )
 
-    live_service._on_live_safety_watchdog_recovery(result)
+    live_service.live_safety_watchdog._on_live_safety_watchdog_recovery(result)
 
     assert {
         (item["cause"], item["cause_id"])
@@ -407,8 +407,7 @@ def test_live_loop_cause_stays_latched_while_safety_cycle_is_active(monkeypatch)
         safety_cycle_active=True,
     )
     monkeypatch.setattr(
-        live_service,
-        "_live_safety_watchdog_probe",
+        live_safety_watchdog, "live_safety_watchdog_probe",
         lambda: {
             "enabled": True,
             "running": True,
@@ -434,7 +433,7 @@ def test_live_loop_cause_stays_latched_while_safety_cycle_is_active(monkeypatch)
         now=now,
     )
 
-    live_service._on_live_safety_watchdog_recovery(result)
+    live_service.live_safety_watchdog._on_live_safety_watchdog_recovery(result)
 
     assert {
         (item["cause"], item["cause_id"])
@@ -514,7 +513,7 @@ def test_watchdog_releases_missing_supervisor_position_after_fresh_reconcile():
         now=now,
     )
 
-    live_service._on_live_safety_watchdog_recovery(result)
+    live_service.live_safety_watchdog._on_live_safety_watchdog_recovery(result)
 
     causes = {
         (item["cause"], item["cause_id"])
@@ -554,7 +553,7 @@ def test_watchdog_keeps_supervisor_cause_while_target_position_is_open():
         now=now,
     )
 
-    live_service._on_live_safety_watchdog_recovery(result)
+    live_service.live_safety_watchdog._on_live_safety_watchdog_recovery(result)
 
     assert {
         (item["cause"], item["cause_id"])
@@ -570,7 +569,7 @@ def test_watchdog_records_its_own_cause_when_incident_latch_already_active():
         cause_id="runtime_incident_mode",
     )
 
-    live_service._persist_safety_fail_closed(
+    live_service.live_safety_watchdog.persist_safety_fail_closed(
         blockers=["safety_freshness_stale"],
         source="safety_watchdog",
     )
@@ -596,7 +595,7 @@ def test_stale_watchdog_and_unknown_execution_block_open_but_protection_continue
             "positions_updated_at": 99.0,
             "unknown_execution_count": 1,
         },
-        on_violation=live_service._on_live_safety_watchdog_violation,
+        on_violation=live_service.live_safety_watchdog._on_live_safety_watchdog_violation,
         clock=lambda: 100.0,
     )
     freshness = watchdog.run_once()

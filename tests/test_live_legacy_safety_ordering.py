@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from backend.services import live_service
 from backend.services.live_loop_controller import LiveLoopController
+from backend.services import live_safety_watchdog
 
 
 def test_off_mode_executes_governed_supervisor_cycle_once_per_due_cycle(monkeypatch):
@@ -73,7 +74,7 @@ def test_running_loop_enables_safety_watchdog(monkeypatch):
     )
     live_service.live_state_update(loop_running=True)
 
-    snapshot = live_service._live_safety_watchdog_probe()
+    snapshot = live_service.live_safety_watchdog.live_safety_watchdog_probe()
 
     assert snapshot["enabled"] is True
     assert snapshot["running"] is True

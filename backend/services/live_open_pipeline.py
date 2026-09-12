@@ -64,6 +64,7 @@ from risk.policy_service import INCIDENT_MODE_RANK
 from loguru import logger
 from typing import Any
 import time
+from backend.services import live_safety_watchdog
 
 
 def _resolve_open_trade_bridge_meta(bridge: Any) -> dict[str, Any]:
@@ -1069,7 +1070,7 @@ def _handle_open_trade_order_success(
     except Exception:
         pass
     if position_id <= 0:
-        failure = _live_service()._persist_safety_fail_closed(
+        failure = live_safety_watchdog.persist_safety_fail_closed(
             blockers=("confirmed_open_position_identity_missing",),
             source="entry_protection_initialization",
             error=(
@@ -1214,7 +1215,7 @@ def _open_submission_runtime(bridge: Any) -> OpenSubmissionRuntime:
         probe_final_admission=_probe_final_open_admission,
         admission_lock=_live_service()._OPEN_TRADE_ADMISSION_LOCK,
         open_trade_draining=_open_trade_draining,
-        persist_safety_fail_closed=_live_service()._persist_safety_fail_closed,
+        persist_safety_fail_closed=live_safety_watchdog.persist_safety_fail_closed,
         submit_order=_submit_open_trade_order,
         prepare_open_intent=_prepare_open_trade_intent,
         handle_order_success=_handle_open_trade_order_success,
@@ -1418,7 +1419,7 @@ def _watchdog_freshness_retry_eligible(
 
     if set(blockers) - {"no_new_risk_latched", "accepting_new_risk_false"}:
         return False
-    unknown_raw = _live_service()._live_safety_watchdog_probe().get("unknown_execution_count")
+    unknown_raw = live_safety_watchdog.live_safety_watchdog_probe().get("unknown_execution_count")
     try:
         if unknown_raw is None or int(unknown_raw) != 0:
             return False

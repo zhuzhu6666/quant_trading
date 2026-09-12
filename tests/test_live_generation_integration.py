@@ -12,6 +12,7 @@ from backend.services.live_safety_planner import SafetyPlan, safety_candidate
 from backend.services import live_close_settlement
 from backend.services import live_open_pipeline
 from backend.services import live_bar_warmup
+from backend.services import live_safety_watchdog
 
 
 class _SnapshotBridge:
@@ -650,7 +651,7 @@ def test_draining_generation_keeps_thread_ownership_and_rejects_replacement(monk
     controller = LiveLoopController()
     monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", controller)
     monkeypatch.setattr(live_service, "_start_live_scheduler", lambda: None)
-    monkeypatch.setattr(live_service, "_start_live_safety_watchdog", lambda: False)
+    monkeypatch.setattr(live_safety_watchdog, "start_live_safety_watchdog", lambda: False)
     monkeypatch.setattr(live_service.threading, "Thread", _OwnedThread)
     monkeypatch.setattr(live_service, "_process_shutdown_requested", False)
     monkeypatch.setattr(live_close_settlement, "runtime_kv_set", lambda *_args, **_kwargs: None)

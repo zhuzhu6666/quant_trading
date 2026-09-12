@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.services import live_service
+from backend.services import live_safety_watchdog
 
 
 def test_loop_failure_keeps_process_scheduler_and_schedules_auto_resume(monkeypatch):
@@ -19,8 +20,7 @@ def test_loop_failure_keeps_process_scheduler_and_schedules_auto_resume(monkeypa
         lambda **_kwargs: events.append("state_closed"),
     )
     monkeypatch.setattr(
-        live_service,
-        "_stop_live_safety_watchdog",
+        live_safety_watchdog, "stop_live_safety_watchdog",
         lambda: events.append("watchdog_stopped"),
     )
     monkeypatch.setattr(
@@ -48,7 +48,7 @@ def test_process_shutdown_does_not_schedule_loop_auto_resume(monkeypatch):
 
     monkeypatch.setattr(live_service, "_run_loop_body", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(live_service, "live_state_update", lambda **_kwargs: None)
-    monkeypatch.setattr(live_service, "_stop_live_safety_watchdog", lambda: None)
+    monkeypatch.setattr(live_safety_watchdog, "stop_live_safety_watchdog", lambda: None)
     monkeypatch.setattr(
         live_service,
         "stop_live_scheduler",

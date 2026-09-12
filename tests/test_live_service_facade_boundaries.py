@@ -305,3 +305,71 @@ def test_safety_reconciliation_modules_do_not_depend_on_postgres_or_legacy_refre
 
         assert not any(name.startswith("backend.core.db") for name in imports)
         assert "refresh_positions" not in called_attributes
+
+
+def _live_service_symbols() -> set[str]:
+    tree = ast.parse(LIVE_SERVICE.read_text(encoding="utf-8"))
+    symbols: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbols.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            symbols.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                symbols.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.Global):
+            symbols.update(node.names)
+    return symbols
+
+
+def test_owner_lazy_live_service_references_are_real_symbols():
+    """Extraction rewrites must not invent `_live_service().<local>` refs.
+
+    The text-regex extractor used for the live_service split once rewrote loop
+    and comprehension locals (and string literals) into `_live_service().name`,
+    which no behavioural test caught.  Every lazy reference must resolve to a
+    real live_service module-level symbol, and lazy calls never appear in
+    loop/comprehension targets.
+    """
+    import io
+    import tokenize
+
+    symbols = _live_service_symbols()
+    for path in sorted(Path("backend/services").glob("live_*.py")):
+        if path.name == "live_service.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "_live_service()" not in source:
+            continue
+
+        assert "_live_service()._live_service()" not in source, path.name
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type == tokenize.STRING and "_live_service()" in token.string:
+                # module docstring boilerplate written by the extractor itself
+                if "resolves lazily via _live_service()" in token.string:
+                    continue
+                assert False, f"{path.name}:{token.start[0]} lazy call inside string"
+
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and (
+                isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "_live_service"
+            ):
+                assert node.attr in symbols, f"{path.name}: _live_service().{node.attr}"
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                for child in ast.walk(node.target):
+                    assert not (
+                        isinstance(child, ast.Call)
+                        and isinstance(child.func, ast.Name)
+                        and child.func.id == "_live_service"
+                    ), f"{path.name}:{node.lineno} lazy call as loop target"
+            if isinstance(node, ast.comprehension):
+                for child in ast.walk(node.target):
+                    assert not (
+                        isinstance(child, ast.Call)
+                        and isinstance(child.func, ast.Name)
+                        and child.func.id == "_live_service"
+                    ), f"{path.name}:{node.target.lineno} lazy call as comprehension target"

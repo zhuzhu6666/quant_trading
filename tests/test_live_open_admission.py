@@ -10,6 +10,7 @@ import pytest
 
 from backend.services import live_service
 from backend.services import live_open_pipeline
+from backend.services import live_safety_watchdog
 from backend.services.live_open_admission import (
     evaluate_final_open_admission,
     probe_postgres_authority,
@@ -35,8 +36,7 @@ def _isolated_open_admission_state(monkeypatch, tmp_path):
         lambda _generation_id: True,
     )
     monkeypatch.setattr(
-        live_service,
-        "_live_safety_watchdog_probe",
+        live_safety_watchdog, "live_safety_watchdog_probe",
         lambda: {"unknown_execution_count": 0},
     )
     live_service.live_state_update(
@@ -108,8 +108,7 @@ def test_current_unknown_execution_projection_blocks_retry(monkeypatch):
         cause_id="safety_watchdog",
     )
     monkeypatch.setattr(
-        live_service,
-        "_live_safety_watchdog_probe",
+        live_safety_watchdog, "live_safety_watchdog_probe",
         lambda: {"unknown_execution_count": 1},
     )
 

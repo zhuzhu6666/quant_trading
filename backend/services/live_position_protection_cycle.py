@@ -271,6 +271,7 @@ from typing import Any, Mapping
 from typing import Any
 from loguru import logger
 import time
+from backend.services import live_safety_watchdog
 from backend.services.live_state_store import (
     _LIVE_STATE_LOCK,
     _live_state,
@@ -806,7 +807,7 @@ def execute_protection_candidate(
                 "verification": verification,
             },
         )
-        _live_service()._persist_safety_fail_closed(
+        live_safety_watchdog.persist_safety_fail_closed(
             blockers=("amend_projection_unverified",),
             source="protection_amend",
             error=failure_reason,

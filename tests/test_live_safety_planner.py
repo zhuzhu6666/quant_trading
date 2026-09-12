@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from backend.services.live_loop_v2 import LiveSafetyCycleRuntime, run_live_safety_cycle
 from backend.services import live_service
 from backend.services.live_safety_plane import LiveSafetyPlane
+from backend.services import live_safety_watchdog
 from backend.services.live_safety_planner import (
     SafetyPlan,
     SafetyPlannerRuntime,
@@ -598,7 +599,7 @@ def test_production_forced_shadow_persistence_records_dedicated_safety_cause(
         lambda **payload: state_updates.append(payload),
     )
 
-    result = live_service._persist_safety_fail_closed(
+    result = live_service.live_safety_watchdog.persist_safety_fail_closed(
         blockers=["safety_candidate_mismatch", "safety_v2_forced_shadow"],
         source="safety_v2_forced_shadow",
     )
