@@ -217,15 +217,43 @@ test_live_service_lifecycle(163) / test_factor_governance_orchestrator(96) / tes
 - 验收：`/api/health` ok（db/ctrader connected）；启动即 `overlay restored`、无 `governance_authority` 闩；loop 从持久化 desired state 自动恢复（generation 已签发）；overlay cvar=3.5 完好；readiness 快照新鲜；**三服务 journal 零 ERROR**（新增五个 owner 模块加载无导入错误）。
 - safety timing 新代码首样（闭市）：total=5.19s（positions=4.25s 主导，safety=0.04s）——无 safety 段病理；**p95 结论待周一开盘采样**。
 
-## 8. 剩余拆解清单（live_service 8,905 → 目标 ~6,000 行纯 loop 核心）
+## 8. L4–L7 收口（2026-09-13 接手批次，全部 done）
 
-| 批次 | 内容 | 规模 | 状态 |
-|---|---|---|---|
-| L4 | supervisor 裁决引擎（绑定选择/切换状态机/trace/path metrics/risk-reduction runtime） | 42 函数 / 1,629 行 | 回滚待重做：先中性化共享缝（`_risk_reduction_runtime`、`record_risk_reduction_aux_failure`、`_build_close_position_risk_context`、`_enrich_positions_with_path_metrics`、`upsert_recovery_position_state` → 独立公共入口），再迁家族本体 |
-| L5 | safety cycle + watchdog（planner runtime、probe、fail-closed 持久化、violation/recovery handler） | 16 函数 / 772 行 | 待拆 → live_safety_watchdog.py |
-| L6 | bar 预热/缓存/新鲜度 + factor 初始化 | 17 函数 / 479 行 | 待拆 → bar/factor warmup owner |
-| L7 | tick 风险指标更新（metric inputs、forward VAR、update loop） | 3 函数 / ~180 行 | 待拆 → backend/risk metrics owner |
-| 永驻 | 串行 tick 决策引擎、读投影、bridge 访问、进程生命周期、prime/诊断 | ~5,200 行 | 登记册口径的 loop 核心，不再拆 |
+### 批次结果
 
-- 每批配方不变：v2 抽取脚本（seam 惰性 + 字面量保护 + kwarg 修复）→ pyflakes 五模块清零 → 目标测试 → smoke → 全量门 → commit。
-- 观察项（不阻塞）：safety timing p95 待周一开盘；overlay cvar=3.5 已在 09-13 启动恢复后确认完好，待下一次真实 autonomous 写入再复核一次。
+| 批次 | 内容 | commit | 搬迁 | live_service |
+|---|---|---|---|---|
+| L6 | bar 预热/缓存/新鲜度 → 新 owner `live_bar_warmup.py`；factor 初始化适配器 → 既有 `live_factor_bootstrap.py` | 9c484780 | 12 函数 / 327 行 | 8,906 → 8,565 |
+| L7 | tick 风险指标（metric inputs / forward VAR / update loop）→ 既有 `live_loop_tick_runtime.py`（`update_risk_metrics` 步的 owner；纯风控数学仍留 `backend/risk/metrics_snapshot.py`） | cdfd6f5b | 3 函数 / 245 行 | 8,565 → 8,280 |
+| L5a | safety watchdog（probe / fail-closed 持久化 / violation+recovery handler / start+stop / watchdog 单例）→ 既有 `live_safety_watchdog.py` | 23016e66 | 6 函数 + 1 const / 406 行 | 8,280 → 7,872 |
+| L5b | safety plane accessor + plane 单例 → `live_safety_plane.py`；planner 只读 runtime + reference price → `live_safety_planner.py` | 6364baf5 | 3 函数 + 2 const / 187 行 | 7,872 → 7,704 |
+| L4 | supervisor 裁决族（绑定选择/切换状态机/context/noop 记忆/trace/tighten/delegate timeout/path metrics 富化/reentry cooldown）→ 既有 `live_supervision_runtime.py` | c6c8db6a | 24 函数 / 1,121 行 | 7,704 → 6,555 |
+| 清理 | 删 L2 遗留的坏重复 `_run_position_protection_cycle` + 4 个零引用残留 | 571161fb, c50d36af | −49 行 | → 6,519 |
+| 修正 | 提取器腐蚀修复（本地变量/字符串被 `_live_service()` 污染） | 32abcea5 | 3 模块 22 处 | — |
+
+**结果**：`live_service.py` 12,694 → **6,519 行**（−48.6%）；facade 契约测试钉住的薄 wiring 全部保留；owner 模块现状：`live_supervision_runtime` 2,173、`live_bar_warmup` 373、`live_safety_watchdog` 668、`live_safety_plane` 439、`live_safety_planner` 532、`live_loop_tick_runtime` 925、`live_factor_bootstrap` 536。
+
+### 为什么上次 L4 回滚（四个具体缺陷，均已修）
+1. **装饰器行不随函数移动**：`ast.FunctionDef.lineno` 指向 `def`，v2 按此切片会留下孤儿 `@record_timed`。
+2. **目标模块同名碰撞静默覆盖引擎**：`_run_position_supervision` / `_evaluate_position_supervisor_for_position` / `_position_path_metrics_for_position` 改名公名后与 `live_supervision_runtime` 既有 runtime 注入引擎同名，live_service 的 `_runtime_*` 别名将指向 wrapper 自身 → 递归。v3 现在遇到碰撞直接 abort；facade 契约钉住的 11 个名字改为常驻。
+3. **跨模块 `_live_service().X` 未重定向**：抽取器只改 live_service.py 和 tests，L4 的 9 个名字被 settlement/protection/pipeline/processing 回引。v3 自动把 `_live_service().X` 重写到新 owner。
+4. **文本正则污染局部变量与字符串**：v2 不知道 `for item in ...` 的 `item` 是局部名，也不知道字符串字面量，产生 `for _live_service().item in ...`、`frame._live_service().index`、`"_live_service().no_new_risk_latched"`。**该缺陷已在 L3b/L6/L7 落地过**（L7 让 `_closed_bar_forward_var_input` 静默降级为 invalid input，L6 让 `factor_generation_active` 必抛 AttributeError），一并修复。
+
+### v3 抽取器配方（本次固化）
+- 逐函数**作用域分析**求自由名（Store/参数/推导式与循环 target/嵌套 def/import/except-as 都算绑定；`global` 声明不算）→ 只有真正的 live_service 模块级符号才会被惰性化。
+- **token 级重写**：只替换 NAME token，字符串/注释/属性尾巴/import 语句一律不动；关键字参数名、`import` 绑定、`.` 后的属性名有显式排除规则；测试重定向用同一套 token 逻辑（含 `live_service._x` 属性形式）。
+- 装饰器行随函数迁移；目标模块同名碰撞 abort；目标模块模块级已有 import 不重复引入；`_live_service()` 惰性引用不再产生双前缀。
+- **防腐测试**：`tests/test_live_service_facade_boundaries.py::test_owner_lazy_live_service_references_are_real_symbols` 静态校验每个 owner 模块的 `_live_service().<name>` 必须是真实 live_service 符号，禁止惰性调用出现在字符串、循环/推导 target 中（这正是 846 个行为测试没能发现的那类回归）。
+- 测试 patch 面随结构走：被搬走的 seam（如 `_lifecycle_build_position_supervisor_context_payload`）改 patch 到新 owner；仍留在 facade 的 seam 由 `_live_service().X` 保持可注入。
+
+### 验证
+- 每批：touched owner + live_service pyflakes 零新增告警 → 目标测试 → `pytest -m smoke`（215 用例 / 33s）。
+- 收口全量：**2,976 passed / 11 skipped（407s）**（postgres_integration 环境门），与 B7 基线一致 + 新增 1 个防腐测试。
+- 运行态：本次未重启、未改 systemd/数据库（硬边界）。**待用户授权后**按 §7 的验收清单做一次受控重启验收（含 safety timing p95 采样）。
+
+### 结论与残项
+- L4–L7 目标达成；ledger 原“先建 `live_shared_risk_context.py` 中性化共享缝”的判断作废：`build_close_position_risk_context`/`evaluate_risk_reduction_policy`/`load_recovery_row_*`/`record_risk_reduction_aux_failure` 早已在 `live_risk_reduction.py`，`upsert_recovery_position_state` 在 `live_close_settlement` → `live_recovery_position_store`，facade 只需保留组装 runtime 的薄包装，不需要新模块。
+- 永驻部分（串行 tick 决策引擎、读投影、bridge 访问、进程生命周期、prime/诊断）按登记册口径不再拆。
+- 遗留观察项（不阻塞）：safety timing p95；overlay cvar=3.5 下一次真实 autonomous 写入复核；`live_open_pipeline.py` / `live_position_protection_cycle.py` 仍有历史 unused import（B7/L3 批次遗留，未在本批扩大范围）。
+
+- 每批配方（下一轮沿用）：v3 抽取脚本（token 重写 + 作用域 + 碰撞 abort + 跨模块重定向）→ pyflakes 零新增 → 目标测试 → smoke → 全量门 → commit。
