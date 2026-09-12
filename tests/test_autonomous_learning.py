@@ -1594,49 +1594,6 @@ def test_event_window_governance_ignores_legacy_gradient_samples(tmp_path):
     assert result["suggestions"] == 0
 
 
-def test_backfill_trade_review_close_sources_from_protection_trace(tmp_path):
-    db_path = tmp_path / "state.db"
-    _create_sample_db(db_path)
-    _record_review_revision(
-        db_path,
-        "rev1",
-        {
-            "symbol": "XAUUSD+",
-            "timeframe": "M5",
-            "close_ts": 180.0,
-            "close_reason": "broker_close",
-            "attribution_integrity": "recovered",
-        },
-        revision_tag="close_source_input",
-    )
-
-    result = al.backfill_trade_review_close_sources(db_path=db_path, limit=20)
-
-    assert result["updated"] == 1
-    assert result["by_source"]["supervisor_tighten_stopout"] == 1
-    conn = sqlite3.connect(str(db_path))
-    try:
-        decision = conn.execute(
-            """
-            SELECT decision_type, decision_json
-            FROM evolution_decision
-            WHERE decision_type='backfill_close_sources'
-            """
-        ).fetchone()
-    finally:
-        conn.close()
-    canonical_conn = _canonical_connection(db_path)
-    try:
-        repaired = _latest_review_row(canonical_conn, "rev1")["review_json"]
-    finally:
-        canonical_conn.close()
-    assert repaired["close_reason_source"] == "supervisor_tighten_stopout"
-    assert repaired["inferred_close_supervisor"]["event_type"] == "supervisor_tighten"
-    assert decision is not None
-    assert decision[0] == "backfill_close_sources"
-    assert json.loads(decision[1])["status"] == "completed"
-
-
 def test_backfill_trade_review_integrity_markers_prevents_legacy_full_training(tmp_path):
     db_path = tmp_path / "state.db"
     _create_sample_db(db_path)
@@ -3170,11 +3127,6 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     )
     monkeypatch.setattr(
         al,
-        "backfill_trade_review_close_sources",
-        lambda **kwargs: calls.append("backfill_close_sources") or {"updated": 1},
-    )
-    monkeypatch.setattr(
-        al,
         "materialize_autonomous_learning_samples",
         lambda **kwargs: calls.append("materialize_samples") or {"counts": {}, "total_changed": 1},
     )
@@ -3231,32 +3183,30 @@ def test_autonomous_learning_cycle_runs_counterfactual_then_trace_maturation(mon
     assert result["status"] == "completed"
     assert result["stages"]["counterfactuals"]["count"] == 1
     assert result["stages"]["trace_maturation"]["matured"] == 1
-    assert result["stages"]["close_source_backfill"]["updated"] == 1
     assert result["stages"]["entry_quality_governance"]["suggestions"] == 1
     assert result["stages"]["entry_cluster_governance"]["suggestions"] == 1
     assert result["stages"]["event_window_governance"]["suggestions"] == 1
     assert "position_supervisor_advisories" in result["stages"]
     assert result["stages"]["evidence_contract_repair"]["repaired"] == 1
     assert "position_supervisor_selection_projection" in result["stages"]
-    assert len(result["memory_profile"]) == 20
+    assert len(result["memory_profile"]) == 19
     assert result["stages"]["position_supervisor_auto_enable"]["status"] == (
         "waiting_for_selection_evidence"
     )
     assert "must-not-escape" not in json.dumps(result)
-    assert calls[:5] == [
+    assert calls[:4] == [
         "counterfactual",
         "mature_traces",
         "backfill_review_integrity",
-        "backfill_close_sources",
         "materialize_samples",
     ]
-    assert calls[5] == "portfolio_shadow"
-    assert calls[6] == "entry_quality_governance"
-    assert calls[7] == "entry_cluster_governance"
-    assert calls[8] == "event_window_governance"
-    assert calls[9] == "position_supervisor_advisories"
-    assert calls[10] == "repair_contracts"
-    assert calls[11] == "loss_streak_review"
+    assert calls[4] == "portfolio_shadow"
+    assert calls[5] == "entry_quality_governance"
+    assert calls[6] == "entry_cluster_governance"
+    assert calls[7] == "event_window_governance"
+    assert calls[8] == "position_supervisor_advisories"
+    assert calls[9] == "repair_contracts"
+    assert calls[10] == "loss_streak_review"
     assert calls[-1] == "demo_apply"
     conn = sqlite3.connect(str(db_path))
     try:

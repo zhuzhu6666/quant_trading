@@ -215,7 +215,8 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 | demo 探索最小单不变量（L1-1） | contracts 断言接入 event sizing，`event_mult<1` 不把探索最小单压成 0；`tests/test_live_risk_sizing.py` |
 | degraded voter 健康可见（M1-D5-B） | `factor_health` 读取失败 → `voting_factor_health` blocker 携带显式 `UNKNOWN` 条目，不静默清空；`tests/test_backend_readiness_contract.py` |
 | 守卫脚本删除（L0-0R-e） | `scripts/preflight_state_guard.py` 已删除，systemd 无 `ExecStartPre` 引用；`tests/conftest.py` 结构性隔离覆盖两条 PG 路由（S0-0） |
+| 猜归因生产线删除（L1-4，批 7 提前执行） | 删除 `classify_close_reason_from_recovery`、`_supervisor_close_evidence_from_recovery`、`_seed_caller_supervisor_evidence` + supervisor 词表、`_classify_review_close_source_from_evidence`、`backfill_trade_review_close_sources` 及其在学习循环的 stage 注册；恢复归因收敛为两值判断 `_resolve_replayed_close_reason`；验收 grep 无 supervisor 词表合成点；`tests/test_broker_sl_replay_classification.py`、`tests/test_live_recovery_close.py` 钉住两值契约 |
 
 本批定向测试基线：fail-closed 收口批 438 passed（learning_eligible/deal_sync/recovery/review/readiness/lifecycle/canonical_v2/position_supervisor 系列）。修复声明本身于 2026-09-12 经实库只读核对成立（`scripts/state_schema_migrate.py --check` current 37 / minimum 37 / ok）。
 
-仍未完成（依赖前置条件，见 planning 文档）：批 7 L1-4 删除猜归因生产线（需 ≥20 笔重标后平仓样本）、批 8（M5-D5 回滚回路压测、M1-D3 影子因子治理、M1-D5-A 健康度接线 shadow）、L1-3 监督器复盘闭环、M5-D6 悬空建议收敛、X2 三层 Kelly 新鲜度。
+仍未完成（依赖前置条件，见 planning 文档）：批 8（M5-D5 回滚回路压测、M1-D3 影子因子治理、M1-D5-A 健康度接线 shadow）、L1-3 监督器复盘闭环、M5-D6 悬空建议收敛、X2 三层 Kelly 新鲜度。

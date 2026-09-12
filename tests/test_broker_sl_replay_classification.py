@@ -1,10 +1,9 @@
-"""Broker stop-loss fill-match reclassification for replayed closes.
+"""Broker protective-fill match and the two-value recovery close contract.
 
-A recovery-replayed close (position vanished → reconciled from deals) used to
-be hard-labelled ``restart_replay`` and therefore excluded from learning.
-When the durable amend intent plus the authoritative close deal prove the fill
-matched our broker-side stop, the natural lifecycle holds and the review must
-say ``broker_close``.  These tests pin that contract.
+A recovery-replayed close (position vanished → reconciled from deals) carries
+no close reason by itself.  L0-0R: the only evidence that upgrades it to
+``broker_close`` is a fill matching the durable protective order; everything
+else stays ``chain_broken``.  These tests pin that contract.
 """
 
 from __future__ import annotations
@@ -13,11 +12,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.services.live_recovery_close import _resolve_replayed_close_reason
 from backend.services.review_contract import (
     BROKER_SL_HIT_TOLERANCE_RATIO,
     broker_stop_hit_evidence,
     build_system_issue_context,
-    classify_close_reason_from_recovery,
 )
 
 
@@ -79,16 +78,16 @@ def test_short_position_fill_at_sl_reclassifies_to_broker_close(_intent_store):
     assert evidence["decision_id"] == "dec-1"
     assert evidence["target_stop_loss"] == pytest.approx(4597.27)
 
-    resolution = classify_close_reason_from_recovery(
-        replayed=True,
-        real_pnl={
+    resolution = _resolve_replayed_close_reason(
+        {
             "net": -12.41,
             "exec_price": 4597.29,
             "price_quality": "broker_reported",
         },
-        position_state={"position_id": "284513709", "direction": -1},
+        {"position_id": "284513709", "direction": -1},
     )
-    assert resolution["close_reason"] == "broker_close"
+    assert resolution[0] == "broker_close"
+    assert resolution[1] == "external_broker_close"
 
 
 def test_short_position_fill_at_tp_reclassifies_to_broker_close(_intent_store):
@@ -110,16 +109,16 @@ def test_short_position_fill_at_tp_reclassifies_to_broker_close(_intent_store):
     assert evidence["matched"] is True
     assert evidence["hit"] == "tp"
 
-    resolution = classify_close_reason_from_recovery(
-        replayed=True,
-        real_pnl={
+    resolution = _resolve_replayed_close_reason(
+        {
             "net": 16.32,
             "exec_price": 4564.89,
             "price_quality": "broker_reported",
         },
-        position_state={"position_id": "284536615", "direction": -1},
+        {"position_id": "284536615", "direction": -1},
     )
-    assert resolution["close_reason"] == "broker_close"
+    assert resolution[0] == "broker_close"
+    assert resolution[1] == "external_broker_close"
 
 
 def test_long_position_fill_below_sl_matches(_intent_store):
@@ -136,9 +135,10 @@ def test_long_position_fill_below_sl_matches(_intent_store):
     assert evidence["matched"] is True
 
 
-def test_fill_far_from_sl_keeps_restart_replay(_intent_store):
+def test_fill_far_from_sl_stays_chain_broken(_intent_store):
     # Short with SL 4597.27 / TP 4561.60 but fill nowhere near either: no
-    # reclassification (e.g. manual close or liquidation at an odd price).
+    # upgrade (e.g. manual close or liquidation at an odd price) — the close
+    # stays chain_broken, never a supervisor-vocabulary guess.
     _set_intent(_intent_store, sl=4597.27, tp=4561.60)
     evidence = broker_stop_hit_evidence(
         real_pnl={
@@ -150,31 +150,36 @@ def test_fill_far_from_sl_keeps_restart_replay(_intent_store):
     )
     assert evidence["matched"] is False
 
-    resolution = classify_close_reason_from_recovery(
-        replayed=True,
-        real_pnl={
+    close_reason, close_reason_source, cited = _resolve_replayed_close_reason(
+        {
             "net": 3.3,
             "exec_price": 4580.0,
             "price_quality": "broker_reported",
         },
-        position_state={"position_id": "284513709", "direction": -1},
+        {"position_id": "284513709", "direction": -1},
     )
-    assert resolution["close_reason"] == "restart_replay"
+    assert close_reason == "chain_broken"
+    assert close_reason_source == "restart_replay"
     # The rejected candidate is still cited for auditability.
-    assert evidence.get("intent_id") == "int-1"
+    assert cited.get("intent_id") == "int-1"
 
 
-def test_durable_supervisor_close_reason_beats_restart_replay(_intent_store):
+def test_durable_supervisor_reason_is_never_recovery_attribution(_intent_store):
+    """L0-0R-b: recovery cannot upgrade a close from a supervisor record.
+
+    A durable ``pending_close_reason`` proves what the supervisor once
+    requested, not what executed the position — without a protective-fill
+    match the close stays ``chain_broken``.
+    """
     _set_intent(_intent_store, sl=4597.27, tp=4561.60)
 
-    resolution = classify_close_reason_from_recovery(
-        replayed=True,
-        real_pnl={
+    close_reason, close_reason_source, _evidence = _resolve_replayed_close_reason(
+        {
             "net": -4.10,
             "exec_price": 4588.0,
             "price_quality": "broker_reported",
         },
-        position_state={
+        {
             "position_id": "285092006",
             "direction": 1,
             "recovery_meta": {
@@ -184,9 +189,8 @@ def test_durable_supervisor_close_reason_beats_restart_replay(_intent_store):
         },
     )
 
-    assert resolution["close_reason"] == "thesis_broken"
-    assert resolution["close_reason_source"] == "supervisor_direct_close"
-    assert resolution["supervisor_close_evidence"]["source"] == "pending_close_reason"
+    assert close_reason == "chain_broken"
+    assert close_reason_source == "restart_replay"
 
 
 def test_missing_intent_or_untrusted_price_stays_conservative(_intent_store):

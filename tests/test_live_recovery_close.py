@@ -118,7 +118,9 @@ def test_replay_unknown_price_skips_audit_and_learning_but_commits_recovery():
     assert order == ["recovery", "release"]
 
 
-def test_replay_preserves_durable_supervisor_close_reason():
+def test_replay_ignores_durable_supervisor_reason_without_broker_evidence():
+    """L0-0R-b: a durable supervisor record never becomes recovery attribution."""
+
     marks = []
 
     replay_recovered_close(
@@ -181,7 +183,8 @@ def test_replay_preserves_durable_supervisor_close_reason():
         ),
     )
 
-    assert marks[0]["close_reason"] == "thesis_broken"
+    assert marks[0]["close_reason"] == "chain_broken"
+    assert marks[0]["meta"]["close_reason_source"] == "restart_replay"
 
 
 class _Connection:
@@ -326,7 +329,7 @@ def test_retirement_replays_then_marks_and_removes_missing_position():
     ]
 
 
-def test_retirement_seeds_caller_supervisor_reason_as_evidence():
+def test_retirement_supervisor_caller_reason_does_not_become_attribution():
     order = []
     real_pnl = {
         "net": -1.77,
@@ -357,13 +360,11 @@ def test_retirement_seeds_caller_supervisor_reason_as_evidence():
     )
     assert result is True
     assert order[0][0] == "mark"
-    assert order[0][1]["close_reason"] == "thesis_broken"
+    assert order[0][1]["close_reason"] == "chain_broken"
     assert order[0][1]["meta"]["trade_close_reason_source"] == (
-        "supervisor_direct_close"
+        "restart_replay"
     )
-    assert seen_states[0]["recovery_meta"]["pending_close_reason"] == (
-        "thesis_broken"
-    )
+    assert seen_states[0].get("recovery_meta") is None
 
 
 def test_retirement_ignores_non_supervisor_caller_reason():
@@ -394,7 +395,7 @@ def test_retirement_ignores_non_supervisor_caller_reason():
     assert order[0][1]["close_reason"] == "chain_broken"
 
 
-def test_retirement_keeps_durable_reason_over_caller_reason():
+def test_retirement_ignores_durable_supervisor_reason_in_recovery_meta():
     order = []
     real_pnl = {
         "net": -1.77,
@@ -426,4 +427,4 @@ def test_retirement_keeps_durable_reason_over_caller_reason():
         runtime=runtime,
     )
     assert result is True
-    assert order[0][1]["close_reason"] == "regime_shift_detected"
+    assert order[0][1]["close_reason"] == "chain_broken"

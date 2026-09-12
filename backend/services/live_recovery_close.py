@@ -6,63 +6,29 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.services.review_contract import (
-    classify_close_reason_from_recovery,
+    broker_stop_hit_evidence,
     trusted_broker_close_price,
 )
 
-# Supervisor verdict reasons that describe why a close was requested.  When a
-# broker-missing retirement carries one of these (e.g. the supervisor close
-# path hit "position not found" because the position had just vanished), it
-# is strictly more informative than the conservative replay fallback and is
-# seeded as recovery evidence below.  Broker error strings and reconcile
-# markers (e.g. "POSITION_NOT_FOUND") must never enter this set.
-_SUPERVISOR_CLOSE_REASONS = frozenset(
-    {
-        "thesis_broken",
-        "regime_shift_detected",
-        "holding_timeout_exceeded",
-        "near_stop_loss_preemptive_exit",
-        "hard_risk_active",
-        "profit_giveback_after_mfe",
-        "near_take_profit_protect",
-        "near_take_profit_capture",
-        "time_decay_and_low_efficiency",
-        "thesis_weakening",
-    }
-)
 
-
-def _seed_caller_supervisor_evidence(
+def _resolve_replayed_close_reason(
+    real_pnl: dict[str, Any] | None,
     position_state: dict[str, Any],
-    reason: str,
-    now_ts: float,
-) -> dict[str, Any]:
-    """Seed caller-provided supervisor reason as recovery close evidence.
+) -> tuple[str, str, dict[str, Any]]:
+    """L0-0R two-value attribution for recovery-replayed closes.
 
-    The durable ``pending_close_reason`` written by the live close path may
-    not have landed (or may predate) the retirement observation.  The caller
-    of a broker-missing retirement already knows why it was closing, so a
-    reason inside the supervisor vocabulary is attached as evidence without
-    clobbering richer durable facts.  Returns the (possibly new) state dict.
+    A fill matching the durable protective order is the only evidence that
+    upgrades the close to ``broker_close``; without it the close stays
+    ``chain_broken``.  Recovery never reuses the supervisor vocabulary: a
+    durable supervisor record cannot prove the deal was that decision's
+    execution (a protective order may have fired first).
     """
-    candidate = str(reason or "").strip()
-    if candidate not in _SUPERVISOR_CLOSE_REASONS:
-        return position_state
-    state = dict(position_state or {})
-    meta = state.get("recovery_meta")
-    meta = dict(meta) if isinstance(meta, Mapping) else {}
-    if str(meta.get("pending_close_reason") or "").strip():
-        return position_state
-    if str(meta.get("last_supervisor_applied_action") or "").strip().lower() in {
-        "close",
-        "close_position",
-    } and str(meta.get("last_supervisor_reason") or "").strip():
-        return position_state
-    meta["pending_close_reason"] = candidate
-    meta["pending_close_reason_ts"] = float(now_ts or 0.0)
-    meta["pending_close_reason_origin"] = "retire_caller_reason"
-    state["recovery_meta"] = meta
-    return state
+    evidence = broker_stop_hit_evidence(
+        real_pnl=real_pnl, position_state=position_state
+    )
+    if evidence.get("matched"):
+        return "broker_close", "external_broker_close", evidence
+    return "chain_broken", "restart_replay", evidence
 
 
 @dataclass(frozen=True)
@@ -123,21 +89,10 @@ def replay_recovered_close(
         return False
 
     # Why did this position close?  Reconciliation only knows that it is gone.
-    # A durable supervisor-close reason is authoritative for a direct action;
-    # a fill matching our broker-side protection is the next-best natural
-    # lifecycle proof; without either, L0-0R forbids guessing a supervisor
-    # vocabulary reason — the close stays chain_broken.
-    reason_resolution = classify_close_reason_from_recovery(
-        replayed=True,
-        real_pnl=real_pnl,
-        position_state=position_state,
-        fallback_reason="chain_broken",
-    )
-
-    resolved_close_reason = str(reason_resolution.get("close_reason") or "chain_broken")
-    resolved_close_reason_source = str(
-        reason_resolution.get("close_reason_source")
-        or ("external_broker_close" if resolved_close_reason == "broker_close" else "restart_replay")
+    # L0-0R: recovery attribution is two-valued — a protective-fill match is
+    # broker_close, everything else stays chain_broken.
+    resolved_close_reason, resolved_close_reason_source, sl_hit_evidence = (
+        _resolve_replayed_close_reason(real_pnl, position_state)
     )
     payloads = runtime.build_payloads(
         position_id=position_id,
@@ -146,7 +101,7 @@ def replay_recovered_close(
         strategy_name=strategy_name,
         now_ts=runtime.now(),
         context_integrity_default=runtime.partial_context,
-        sl_hit_evidence=reason_resolution.get("sl_hit_evidence"),
+        sl_hit_evidence=sl_hit_evidence,
         resolved_close_reason=resolved_close_reason,
         close_reason_source=resolved_close_reason_source,
         recovery_observation_reason="position_missing_after_recovery_reconcile",
@@ -214,9 +169,6 @@ def replay_recovered_close(
                 real_pnl=review_payload["real_pnl"],
                 close_reason=review_payload["close_reason"],
                 close_reason_source=str(review_payload.get("close_reason_source") or ""),
-                inferred_close_supervisor=dict(
-                    reason_resolution.get("supervisor_close_evidence") or {}
-                ),
                 context_integrity=review_payload["context_integrity"],
                 attribution_integrity=str(
                     review_payload.get("attribution_integrity")
@@ -277,13 +229,6 @@ def retire_broker_missing_position(
             "close_pnl": 0.0,
             "context_integrity": runtime.partial_context,
         }
-    # The caller (usually the supervisor close path hitting "position not
-    # found") already knows why it was closing.  Seed that as recovery
-    # evidence so the resolution below does not discard a known supervisor
-    # reason into the conservative replay fallback.  Durable facts win.
-    position_state = _seed_caller_supervisor_evidence(
-        position_state, reason, runtime.now()
-    )
 
     real_pnl = None
     try:
@@ -340,12 +285,6 @@ def retire_broker_missing_position(
             )
         return False
 
-    reason_resolution = classify_close_reason_from_recovery(
-        replayed=True,
-        real_pnl=real_pnl,
-        position_state=position_state,
-        fallback_reason="chain_broken",
-    )
     if not runtime.replay_close(
         broker=broker,
         position_id=pid,
@@ -356,9 +295,8 @@ def retire_broker_missing_position(
         return False
 
     now = runtime.now()
-    trade_close_reason = str(reason_resolution.get("close_reason") or "chain_broken")
-    trade_close_reason_source = str(
-        reason_resolution.get("close_reason_source") or "restart_replay"
+    trade_close_reason, trade_close_reason_source, _sl_hit_evidence = (
+        _resolve_replayed_close_reason(real_pnl, position_state)
     )
     runtime.mark_recovery_closed(
         pid,

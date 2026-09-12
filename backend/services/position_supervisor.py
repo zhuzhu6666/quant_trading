@@ -540,9 +540,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     regime_confirmations = max(
         0,
         _safe_int(
-            risk.get("regime_shift_confirmations")
-            or risk.get("consecutive_regime_shift_count")
-            or 0,
+            risk.get("regime_shift_confirmations") or 0,
             0,
         ),
     )

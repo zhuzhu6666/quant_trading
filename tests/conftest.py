@@ -54,7 +54,6 @@ os.environ.setdefault("QUANT_GOVERNANCE_MUTATION_COORDINATOR_V2_MODE", "enforce"
 # ``QUANT_TEST_STATE_DIR`` is set.  That single predicate drives
 # ``_use_pg()`` / ``is_sqlite_path()`` across the codebase, so all state
 # traffic falls back to the sandbox SQLite file.
-os.environ["QUANT_TEST_ISOLATED_STATE"] = "1"
 os.environ["QUANT_TEST_STATE_DIR"] = os.path.join(
     tempfile.gettempdir(), "quant-test-state-%d" % os.getpid()
 )
