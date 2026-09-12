@@ -170,3 +170,21 @@ test_live_service_lifecycle(163) / test_factor_governance_orchestrator(96) / tes
 
 - **smoke 集合**：13 个核心 fail-closed 合同文件打模块级 `pytestmark = pytest.mark.smoke`：overlay authority、governance coordinator、RiskPolicyService、canonical_v2、backend runtime lifecycle、ws state snapshot、persistent job handlers、db access contract、learning eligibility、governance eligibility weighting、live loop controller、live open admission、live emergency safety。`pytest -m smoke` = **215 用例 / 33s**；日常改动先跑它，全量只留发布门（本文件 §B7）。
 - **xdist**：pytest-xdist 3.8.0 已装入 venv 并写入 requirements-dev——锁文件经 `scripts/compile_python_locks.py` 重生成（勿用裸 pip-compile，会丢 hash 格式）。`pytest -m smoke -n 2` = 28s，隔离验证通过（共享路径审计：无端口绑定；仅 2 个文件引用固定路径且为只读/负向断言；1 处 chdir 指向 tmp）。**全量并行在本机不启用**：3GB 内存、生产服务已占约 2.2GB，全量 worker RSS 增长会逼近 OOM 并可能波及 quant-backend；待内存升级或 CI 环境再开（命令 `pytest tests -n 2`）。
+
+## 7. live_service 拆分批次（2026-09-12 下午，继续）
+
+### L1 close-settlement 抽取（done, c7f010b0）
+- 71 个函数迁入新 owner `backend/services/live_close_settlement.py`（1,830 行）：runtime_kv 管道、session state 恢复、deferred-close 闩、pending-close 记账、close reason/verdict 记忆、recovery 同步/回放/退休、日内回撤评估。live_service 12,694 → 11,138 行。
+- `live_state_store` 补齐写路径（`live_state_set/live_state_update`）+ pre/post 钩子：WS 通知与 pending-close 记账注册为钩子，store 成为唯一状态 owner。
+- 方法论：AST 精确节点抽取（不按行号）+ 迁移名公共化 + staying 代码经 `live_close_settlement.X` 属性调用 + 共享可变缝（recovery store、position 跟踪字典、单例）经 `_live_service()` 惰性回引保持测试注入语义。
+- 教训：AnnAssign（带注解赋值）不在 ast.Assign 里——`_POSITION_DECISION_INDEX_CACHE`/`recovery_zero_confirmations` 因此漏迁并自引用污染 pub 集合；抽取脚本必须同时遍历两种赋值节点。
+
+### L2 protection cycle 抽取（done, 01740bec）
+- 14 个函数迁入既有 owner `backend/services/live_position_protection_cycle.py`（1,159 行）：entry-protection 修复候选、保护执行 handler、holding timeout 强制、market-closed 顺延。`ProtectionCandidate` 数据类随迁。
+- 门面包装 `_run_position_protection_cycle` 留在 live_service（runtime 装配属 facade），handler 经 owner 模块属性解析——单一 patch 面。
+- broker 变更白名单批准 owner 使用 `amend_position_sltp`（SL/TP 修复）与 `close_position`（holding timeout 强制），语义不变、仅地址变更。
+- conftest 修复：sandbox 库现以 `STATE_DB_DDL` 物化 schema，消除"只读连接撞缺失文件"的顺序脆弱性（此前 bar_dedup 等单跑失败的根因）。
+
+### L3 开仓管线抽取（下一批，未开始）
+- 目标：candidate 准备/context 构建器/intent/submit 编排/filled+amended 处理家族（约 2,700 行）→ `live_open_pipeline.py` + 既有 `live_open_*` owner。
+- 已验证的可复用配方：AST 抽取 + 公共名 + owner 属性解析 + 惰性回引 + smoke/目标文件/全量三段验证。
