@@ -651,3 +651,275 @@ def _tick_result(
         "break_loop": break_loop,
         "safety": safety,
     }
+
+
+_ls_module = None
+
+
+def _live_service():
+    """Lazy handle to the live loop module (import-order-safe)."""
+    global _ls_module
+    if _ls_module is None:
+        from backend.services import live_service as _module
+        _ls_module = _module
+    return _ls_module
+
+
+from backend.services import live_bar_warmup, live_close_settlement
+from backend.services.canonical_v2_reader import iter_review_rows
+from backend.services.live_reconciliation import (
+    fresh_observation_timestamp as _fresh_observation_timestamp,
+)
+import json
+
+# moved from live_service (2026-09-12 structural repair)
+
+def _risk_metric_inputs(
+    positions: list[dict[str, Any]] | None,
+) -> tuple[
+    list[float],
+    list[dict[str, Any]] | None,
+]:
+    from backend.services.review_contract import review_has_system_contamination
+    from config.runtime_config import shared as runtime_config
+
+    cfg = runtime_config()
+    if str(getattr(cfg, "var_method", "historical")) != "historical":
+        raise ValueError("risk_metrics_snapshot.v2 requires historical VaR")
+    conn = live_close_settlement.get_state_pg_conn()
+    try:
+        rows = iter_review_rows(conn, limit=0)
+        rows.sort(key=lambda row: float(row.get("created_at") or 0.0), reverse=True)
+        rows = rows[:200]
+        review_rows = []
+        for row in rows:
+            review = row.get("review_json")
+            if isinstance(review, str):
+                try:
+                    review = json.loads(review)
+                except (TypeError, ValueError):
+                    review = {}
+            review_rows.append((row, review if isinstance(review, dict) else {}))
+        conn.commit()
+    finally:
+        conn.close()
+
+    clean_pnls: list[float] = []
+    seen_positions: set[str] = set()
+    for row, review in review_rows:
+        position_id = str(row["position_id"] or "")
+        if not isinstance(review, dict):
+            continue
+        if position_id in seen_positions or review_has_system_contamination(review):
+            continue
+        seen_positions.add(position_id)
+        clean_pnls.append(float(row["pnl"] or 0.0))
+
+    normalized_positions = [] if positions is not None else None
+    for _live_service().index, position in enumerate(positions or []):
+        symbol = str(position.get("symbol") or "XAUUSD+")
+        instrument = dict((cfg.multi_symbol_config or {}).get(symbol) or {})
+        if not instrument:
+            symbol_key = symbol.upper().rstrip("+")
+            instrument = next(
+                (
+                    dict(_live_service().value or {})
+                    for name, _live_service().value in (cfg.multi_symbol_config or {}).items()
+                    if str(name).upper().rstrip("+") == symbol_key
+                ),
+                {},
+            )
+        price = float(
+            position.get("current_price")
+            or position.get("price_current")
+            or 0.0
+        )
+        api_volume = float(position.get("volume") or 0.0)
+        normalized = {
+            "position_id": position.get("position_id") or _live_service().index,
+            "symbol": symbol,
+            "direction": position.get("direction", position.get("side")),
+        }
+        contract_size = float(instrument.get("contract_size") or 0.0)
+        if price > 0 and api_volume >= 0 and contract_size > 0:
+            normalized["notional_usd"] = (
+                    price
+                    * api_volume
+                    / 10_000.0
+                    * contract_size
+            )
+        normalized_positions.append(normalized)
+    return clean_pnls, normalized_positions
+
+
+def _closed_bar_forward_var_input(*, cfg, observed_at: float):
+    from backend.risk.metrics_snapshot import freeze_closed_bar_returns
+
+    symbol = str((getattr(cfg, "enabled_symbols", None) or ["XAUUSD+"])[0])
+    timeframe = str(getattr(cfg, "timeframe", "M5") or "M5")
+    lookback = max(2, int(getattr(cfg, "var_window", 500) or 500))
+    try:
+        frame = _live_service().get_live_bars(symbol, timeframe, lookback + 1)
+        frame = live_bar_warmup.closed_decision_bar_frame(
+            frame,
+            timeframe=timeframe,
+            now_ts=time.time(),
+        )
+        closes = (
+            list(frame["close"].tolist())
+            if frame is not None and len(frame) > 0
+            else []
+        )
+        timestamps = (
+            [
+                _live_service().index.isoformat()
+                if hasattr(_live_service().index, "isoformat")
+                else str(_live_service().index)
+                for _live_service().index in frame._live_service().index
+            ]
+            if frame is not None and len(frame) > 0
+            else []
+        )
+        return freeze_closed_bar_returns(
+            closes,
+            timestamps=timestamps,
+            symbol=symbol,
+            timeframe=timeframe,
+            as_of=observed_at,
+            lookback=lookback,
+        )
+    except Exception as exc:
+        return freeze_closed_bar_returns(
+            [],
+            symbol=symbol,
+            timeframe=timeframe,
+            as_of=observed_at,
+            lookback=lookback,
+            invalid_reason=(
+                f"online_closed_bar_return_input_error:{type(exc).__name__}"
+            ),
+        )
+
+
+def update_live_loop_risk_metrics(*, tick: int, log) -> None:
+    try:
+        from backend.risk.metrics_snapshot import (
+            SNAPSHOT_KEY,
+            attach_internal_forward_var_input,
+            build_risk_metrics_snapshot,
+        )
+        from config.runtime_config import shared as runtime_config
+
+        account = _live_service().live_state_get("account_reconciled", {}, clone=True) or {}
+        positions = _live_service().live_state_get("positions_reconciled", [], clone=True)
+        account_id = str(_live_service().live_state_get("account_reconcile_id", "") or "")
+        positions_id = str(
+            _live_service().live_state_get("positions_reconcile_id", "") or ""
+        )
+        account_at = float(_live_service().live_state_get("account_updated_at", 0.0) or 0.0)
+        positions_at = float(
+            _live_service().live_state_get("positions_updated_at", 0.0) or 0.0
+        )
+        account_failed_at = float(
+            _live_service().live_state_get("account_reconcile_failed_at", 0.0) or 0.0
+        )
+        positions_failed_at = float(
+            _live_service().live_state_get("positions_reconcile_failed_at", 0.0) or 0.0
+        )
+        facts_fresh = (
+            bool(account_id)
+            and bool(positions_id)
+            and _fresh_observation_timestamp(account_at)
+            and _fresh_observation_timestamp(positions_at)
+            and account_failed_at <= account_at
+            and positions_failed_at <= positions_at
+        )
+        if not facts_fresh:
+            previous = live_close_settlement.runtime_kv_get(SNAPSHOT_KEY, {}) or {}
+            snapshot = {
+                **previous,
+                "schema_version": SNAPSHOT_KEY,
+                "status": "stale",
+                "published_at": time.time(),
+                "as_of": min(
+                    _live_service().value for _live_service().value in (account_at, positions_at) if _live_service().value > 0
+                ) if account_at > 0 or positions_at > 0 else 0.0,
+                "blockers": ["broker_risk_facts_stale"],
+            }
+            _live_service().live_state_update(
+                risk={
+                    **dict(previous.get("components") or {}),
+                    "snapshot": snapshot,
+                }
+            )
+            live_close_settlement.runtime_kv_set(SNAPSHOT_KEY, snapshot)
+            return
+        observed_at = min(account_at, positions_at)
+        clean_pnls, normalized_positions = _risk_metric_inputs(
+            positions,
+        )
+        cfg = runtime_config()
+        forward_var_input = _closed_bar_forward_var_input(
+            cfg=cfg,
+            observed_at=observed_at,
+        )
+        snapshot = build_risk_metrics_snapshot(
+            forward_var_input=forward_var_input,
+            clean_trade_pnls=clean_pnls,
+            positions=normalized_positions,
+            account=account,
+            account_reconcile_id=account_id,
+            positions_reconcile_id=positions_id,
+            as_of=observed_at,
+            kelly_min_closed_trades=int(
+                getattr(cfg, "kelly_min_closed_trades", 20)
+                or 20
+            ),
+            kelly_multiplier=float(
+                getattr(cfg, "kelly_fraction", 0.5) or 0.5
+            ),
+            kelly_max_fraction=float(
+                getattr(cfg, "kelly_max_pct", 0.25) or 0.25
+            ),
+            var_confidence=float(
+                getattr(cfg, "var_alpha", 0.95) or 0.95
+            ),
+            var_lookback=max(
+                2,
+                int(getattr(cfg, "var_window", 500) or 500),
+            ),
+        ).to_dict()
+        # ``as_of`` is the oldest broker input used by the calculation.  Keep
+        # a separate publication clock so the API does not expire a valid
+        # snapshot merely because serial reconciliation and risk math took
+        # part of the 20-second input window.
+        snapshot["published_at"] = time.time()
+        _live_service().live_state_update(
+            risk=attach_internal_forward_var_input(
+                {**snapshot["components"], "snapshot": snapshot},
+                forward_var_input,
+            )
+        )
+        live_close_settlement.runtime_kv_set(SNAPSHOT_KEY, snapshot)
+    except Exception as risk_e:
+        try:
+            from backend.risk.metrics_snapshot import SNAPSHOT_KEY
+
+            previous = live_close_settlement.runtime_kv_get(SNAPSHOT_KEY, {}) or {}
+            error_snapshot = {
+                **previous,
+                "schema_version": SNAPSHOT_KEY,
+                "status": "error",
+                "published_at": time.time(),
+                "blockers": ["risk_metrics_calculation_error"],
+            }
+            _live_service().live_state_update(
+                risk={
+                    **dict(previous.get("components") or {}),
+                    "snapshot": error_snapshot,
+                }
+            )
+            live_close_settlement.runtime_kv_set(SNAPSHOT_KEY, error_snapshot)
+        except Exception:
+            pass
+        log(f"tick {tick}: risk calculation error (non-fatal): {risk_e}")
