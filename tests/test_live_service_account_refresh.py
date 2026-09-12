@@ -12,6 +12,7 @@ import pytest
 
 from backend.services import live_service
 from backend.services.live_loop_controller import LiveLoopController
+from backend.services import live_supervision_runtime
 
 
 def test_recent_review_reentry_block_uses_consecutive_conflicting_losses(monkeypatch):
@@ -168,8 +169,7 @@ def test_http_reads_preserve_fresh_broker_observation_timestamp(monkeypatch):
         return list(positions)
 
     monkeypatch.setattr(
-        live_service,
-        "_enrich_positions_with_path_metrics",
+        live_supervision_runtime, "enrich_positions_with_path_metrics",
         _enrich,
     )
     live_service._live_state["loop_running"] = False
@@ -204,8 +204,7 @@ def test_live_http_positions_read_existing_projection_without_recomputing(monkey
         }
     )
     monkeypatch.setattr(
-        live_service,
-        "_enrich_positions_with_path_metrics",
+        live_supervision_runtime, "enrich_positions_with_path_metrics",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("HTTP reads must not recompute live projections")
         ),
@@ -230,8 +229,7 @@ def test_ctrader_events_never_rejuvenate_reconciled_account_or_positions(monkeyp
 
     bridge = _Bridge()
     monkeypatch.setattr(
-        live_service,
-        "_enrich_positions_with_path_metrics",
+        live_supervision_runtime, "enrich_positions_with_path_metrics",
         lambda positions, **_kwargs: list(positions),
     )
     monkeypatch.setattr(live_service, "_probe_ctrader", lambda: ("connected", None))
@@ -447,8 +445,7 @@ def test_http_reads_do_not_rejuvenate_non_fresh_broker_cache(monkeypatch):
     bridge = _Bridge()
     monkeypatch.setattr(live_service, "get_ctrader", lambda: (bridge, None, False))
     monkeypatch.setattr(
-        live_service,
-        "_enrich_positions_with_path_metrics",
+        live_supervision_runtime, "enrich_positions_with_path_metrics",
         lambda positions, **_kwargs: list(positions),
     )
     live_service._live_state.update(

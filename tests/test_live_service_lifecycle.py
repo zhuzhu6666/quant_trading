@@ -16,6 +16,7 @@ from backend.services import live_open_processing
 from backend.services import live_open_pipeline
 from backend.services import live_bar_warmup
 from backend.services import live_safety_watchdog
+from backend.services import live_supervision_runtime
 
 
 class _IdleThread:
@@ -1391,8 +1392,7 @@ def test_position_supervisor_context_does_not_duplicate_template_arguments(monke
         lambda *_args, **_kwargs: {"recovery_meta": {}},
     )
     monkeypatch.setattr(
-        live_service,
-        "_position_supervisor_policy_for_position",
+        live_supervision_runtime, "_position_supervisor_policy_for_position",
         lambda **_kwargs: (template, policy),
     )
     monkeypatch.setattr(
@@ -1406,12 +1406,12 @@ def test_position_supervisor_context_does_not_duplicate_template_arguments(monke
         lambda _positions: 100.0,
     )
     monkeypatch.setattr(
-        live_service,
+        live_supervision_runtime,
         "_lifecycle_build_position_supervisor_context_payload",
         lambda **kwargs: captured.update(kwargs) or kwargs,
     )
 
-    live_service._build_position_supervisor_context(
+    live_service.live_supervision_runtime.build_position_supervisor_context(
         {"position_id": 285354691, "symbol": "XAUUSD+", "direction": -1},
         cfg=SimpleNamespace(risk_max_holding_bars=12),
         acct={"equity": 500.0},
@@ -1434,12 +1434,11 @@ def test_delegate_timeout_supervisor_close_logs_timeout_trace(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        live_service,
-        "_log_supervisor_trace",
+        live_supervision_runtime, "log_supervisor_trace",
         lambda **kwargs: traces.append(kwargs),
     )
 
-    delegated = live_service._delegate_timeout_supervisor_close(
+    delegated = live_service.live_supervision_runtime.delegate_timeout_supervisor_close(
         position={"position_id": 268, "symbol": "XAUUSD+"},
         verdict={"action": "close", "summary_reason": "holding_timeout_exceeded"},
         cfg=SimpleNamespace(),
@@ -3046,8 +3045,7 @@ def test_fresh_position_reconcile_is_canonical_path_metrics_writer(monkeypatch):
     observed_at = time.time()
 
     monkeypatch.setattr(
-        live_service,
-        "_enrich_positions_with_path_metrics",
+        live_supervision_runtime, "enrich_positions_with_path_metrics",
         lambda positions, **kwargs: (
             captured.update(kwargs) or [dict(item) for item in positions]
         ),
@@ -3163,8 +3161,8 @@ def test_supervisor_tighten_trace_keeps_decision_id(monkeypatch):
     monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
     monkeypatch.setattr(live_service, "_evaluate_position_supervisor_for_position", lambda *args, **kwargs: verdict)
-    monkeypatch.setattr(live_service, "_supervisor_recently_applied", lambda *args, **kwargs: False)
-    monkeypatch.setattr(live_service, "_remember_supervisor_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(live_supervision_runtime, "supervisor_recently_applied", lambda *args, **kwargs: False)
+    monkeypatch.setattr(live_supervision_runtime, "remember_supervisor_state", lambda *args, **kwargs: None)
 
     handled = live_service._run_position_supervision(
         _Bridge(),
@@ -3230,15 +3228,13 @@ def test_supervisor_tighten_noop_is_deduplicated_before_risk_policy(monkeypatch)
     monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
     monkeypatch.setattr(live_service, "_evaluate_position_supervisor_for_position", lambda *args, **kwargs: verdict)
-    monkeypatch.setattr(live_service, "_supervisor_recently_applied", lambda *args, **kwargs: False)
+    monkeypatch.setattr(live_supervision_runtime, "supervisor_recently_applied", lambda *args, **kwargs: False)
     monkeypatch.setattr(
-        live_service,
-        "_supervisor_noop_fingerprint_seen",
+        live_supervision_runtime, "supervisor_noop_fingerprint_seen",
         lambda _pid, fingerprint: fingerprint in remembered,
     )
     monkeypatch.setattr(
-        live_service,
-        "_remember_supervisor_noop",
+        live_supervision_runtime, "remember_supervisor_noop",
         lambda _position, _verdict, *, fingerprint, reason: remembered.add(fingerprint),
     )
     position = {
@@ -3311,13 +3307,11 @@ def test_supervisor_hold_trace_is_deduplicated_by_decision_evidence(monkeypatch)
         lambda *args, **kwargs: verdict,
     )
     monkeypatch.setattr(
-        live_service,
-        "_supervisor_noop_fingerprint_seen",
+        live_supervision_runtime, "supervisor_noop_fingerprint_seen",
         lambda _pid, fingerprint: fingerprint in remembered,
     )
     monkeypatch.setattr(
-        live_service,
-        "_remember_supervisor_noop",
+        live_supervision_runtime, "remember_supervisor_noop",
         lambda _position, _verdict, *, fingerprint, reason: remembered.add(fingerprint),
     )
     position = {
@@ -3427,8 +3421,8 @@ def test_demo_adaptive_supervisor_action_uses_governed_execution_chain(monkeypat
         "_evaluate_position_supervisor_for_position",
         lambda *args, **kwargs: verdict,
     )
-    monkeypatch.setattr(live_service, "_remember_supervisor_state", lambda *args, **kwargs: None)
-    monkeypatch.setattr(live_service, "_supervisor_adaptive_duplicate_seen", lambda *args, **kwargs: False)
+    monkeypatch.setattr(live_supervision_runtime, "remember_supervisor_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(live_supervision_runtime, "supervisor_adaptive_duplicate_seen", lambda *args, **kwargs: False)
 
     handled = live_service._run_position_supervision(
         _Bridge(),
@@ -3492,16 +3486,16 @@ def test_adaptive_duplicate_requires_same_bar_episode_posture_and_fingerprint(mo
         },
     }
 
-    assert live_service._supervisor_adaptive_duplicate_seen(42, verdict) is True
+    assert live_service.live_supervision_runtime.supervisor_adaptive_duplicate_seen(42, verdict) is True
 
     changed_target = dict(verdict, action_fingerprint="tighten:4006.0:4030.0")
-    assert live_service._supervisor_adaptive_duplicate_seen(42, changed_target) is False
+    assert live_service.live_supervision_runtime.supervisor_adaptive_duplicate_seen(42, changed_target) is False
 
     changed_bar = {
         **verdict,
         "evidence": {**verdict["evidence"], "closed_bar_key": "bar:43"},
     }
-    assert live_service._supervisor_adaptive_duplicate_seen(42, changed_bar) is False
+    assert live_service.live_supervision_runtime.supervisor_adaptive_duplicate_seen(42, changed_bar) is False
 
     hard_action = {
         **verdict,
@@ -3514,7 +3508,7 @@ def test_adaptive_duplicate_requires_same_bar_episode_posture_and_fingerprint(mo
             "hard_risk_active": True,
         },
     }
-    assert live_service._supervisor_adaptive_duplicate_seen(42, hard_action) is False
+    assert live_service.live_supervision_runtime.supervisor_adaptive_duplicate_seen(42, hard_action) is False
 
 
 def test_supervisor_minimum_position_reduce_is_deduplicated_before_policy(monkeypatch):
@@ -3566,16 +3560,14 @@ def test_supervisor_minimum_position_reduce_is_deduplicated_before_policy(monkey
         lambda *args, **kwargs: verdict,
     )
     monkeypatch.setattr(
-        live_service, "_supervisor_recently_applied", lambda *args, **kwargs: False
+        live_supervision_runtime, "supervisor_recently_applied", lambda *args, **kwargs: False
     )
     monkeypatch.setattr(
-        live_service,
-        "_supervisor_noop_fingerprint_seen",
+        live_supervision_runtime, "supervisor_noop_fingerprint_seen",
         lambda _pid, fingerprint: fingerprint in remembered,
     )
     monkeypatch.setattr(
-        live_service,
-        "_remember_supervisor_noop",
+        live_supervision_runtime, "remember_supervisor_noop",
         lambda _position, _verdict, *, fingerprint, reason: remembered.add(
             fingerprint
         ),
@@ -3682,8 +3674,8 @@ def test_supervisor_dynamic_tpsl_sends_extended_take_profit(monkeypatch):
     monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
     monkeypatch.setattr(live_service, "_RISK_POLICY", _Policy())
     monkeypatch.setattr(live_service, "_evaluate_position_supervisor_for_position", lambda *args, **kwargs: verdict)
-    monkeypatch.setattr(live_service, "_supervisor_recently_applied", lambda *args, **kwargs: False)
-    monkeypatch.setattr(live_service, "_remember_supervisor_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(live_supervision_runtime, "supervisor_recently_applied", lambda *args, **kwargs: False)
+    monkeypatch.setattr(live_supervision_runtime, "remember_supervisor_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(live_service, "_remember_supervisor_reentry_block", lambda *args, **kwargs: None)
 
     handled = live_service._run_position_supervision(
@@ -3719,8 +3711,7 @@ def test_protection_cycle_does_not_collect_retired_trailing_when_supervisor_hand
     monkeypatch.setattr(live_position_protection_cycle, "_entry_protection_repair_candidates", lambda *args, **kwargs: [])
     monkeypatch.setattr(live_service, "_run_position_supervision", lambda *args, **kwargs: {703})
     monkeypatch.setattr(
-        live_service,
-        "_log_protection_candidate_superseded",
+        live_supervision_runtime, "log_protection_candidate_superseded",
         lambda item, **kwargs: superseded.append((item.position_id, kwargs["reason"])),
     )
     monkeypatch.setattr(
@@ -3889,14 +3880,12 @@ def test_holding_timeout_defers_when_market_closed(monkeypatch, tmp_path):
 
     traces = []
     monkeypatch.setattr(
-        live_service,
-        "_log_supervisor_trace",
+        live_supervision_runtime, "log_supervisor_trace",
         lambda **kwargs: traces.append(kwargs),
     )
     decisions = []
     monkeypatch.setattr(
-        live_service,
-        "_log_supervisor_decision",
+        live_supervision_runtime, "log_supervisor_decision",
         lambda **kwargs: decisions.append(kwargs) or "dec-x",
     )
 
@@ -3956,8 +3945,7 @@ def test_holding_timeout_uses_ctrader_schedule_for_intraday_break(monkeypatch, t
     monkeypatch.setattr(live_close_settlement, "merge_recovery_position_meta", lambda *a, **k: None)
     traces = []
     monkeypatch.setattr(
-        live_service,
-        "_log_supervisor_trace",
+        live_supervision_runtime, "log_supervisor_trace",
         lambda **kwargs: traces.append(kwargs),
     )
 
@@ -4013,8 +4001,8 @@ def test_holding_timeout_market_open_still_closes(monkeypatch, tmp_path):
 
     monkeypatch.setattr(live_close_settlement, "remember_close_reason", lambda *a, **k: None)
     monkeypatch.setattr(live_close_settlement, "remember_close_verdict", lambda *a, **k: None)
-    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: None)
-    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec-y")
+    monkeypatch.setattr(live_supervision_runtime, "log_supervisor_trace", lambda **kwargs: None)
+    monkeypatch.setattr(live_supervision_runtime, "log_supervisor_decision", lambda **kwargs: "dec-y")
 
     handled = live_service._enforce_holding_timeout(
         _Bridge(),
@@ -4055,8 +4043,8 @@ def test_market_closed_rejection_records_suppression(monkeypatch, tmp_path):
         live_close_settlement, "merge_recovery_position_meta",
         lambda pid, meta: merged.append((pid, dict(meta))),
     )
-    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: None)
-    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec-z")
+    monkeypatch.setattr(live_supervision_runtime, "log_supervisor_trace", lambda **kwargs: None)
+    monkeypatch.setattr(live_supervision_runtime, "log_supervisor_decision", lambda **kwargs: "dec-z")
 
     class _RejectedBridge:
         def close_position(self, pid, volume=0.0):

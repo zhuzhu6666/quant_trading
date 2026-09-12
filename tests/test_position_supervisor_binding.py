@@ -34,6 +34,7 @@ from backend.services.v16_command_gate import V16CommandGate
 from config.runtime_config import RuntimeConfig
 from risk.policy_service import RiskPolicyService
 from backend.services import live_close_settlement
+from backend.services import live_supervision_runtime
 
 
 def _init_state(path):
@@ -506,12 +507,11 @@ def test_shadow_boundary_records_selection_trace_without_changing_binding(monkey
     )
     monkeypatch.setattr(live_service, "_LEDGER", object())
     monkeypatch.setattr(
-        live_service,
-        "_log_supervisor_trace",
+        live_supervision_runtime, "log_supervisor_trace",
         lambda **kwargs: traces.append(kwargs) or "trace-shadow-1",
     )
 
-    result = live_service._maybe_switch_position_supervisor_binding(
+    result = live_service.live_supervision_runtime.maybe_switch_position_supervisor_binding(
         position={"position_id": 7, "symbol": "XAUUSD+"},
         cfg=SimpleNamespace(
             position_supervisor_auto_selection_mode="shadow",

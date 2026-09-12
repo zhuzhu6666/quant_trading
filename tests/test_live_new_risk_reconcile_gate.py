@@ -10,6 +10,7 @@ from backend.services import live_service
 from backend.services.live_safety_state import no_new_risk_latch_status
 from backend.services import live_close_settlement
 from backend.services import live_open_pipeline
+from backend.services import live_supervision_runtime
 
 
 @pytest.fixture(autouse=True)
@@ -90,8 +91,7 @@ def test_fresh_empty_reconcile_conflicting_with_recovery_blocks_new_risk(monkeyp
     now = time.time()
     _publish_fresh_reconciles(now)
     monkeypatch.setattr(
-        live_service,
-        "_enrich_positions_with_path_metrics",
+        live_supervision_runtime, "enrich_positions_with_path_metrics",
         lambda positions, **_kwargs: positions,
     )
     monkeypatch.setattr(
@@ -124,8 +124,7 @@ def test_purged_orphan_recovery_row_releases_only_its_session_latch(monkeypatch)
     now = time.time()
     _publish_fresh_reconciles(now)
     monkeypatch.setattr(
-        live_service,
-        "_enrich_positions_with_path_metrics",
+        live_supervision_runtime, "enrich_positions_with_path_metrics",
         lambda positions, **_kwargs: positions,
     )
     active_calls = {"count": 0}
@@ -172,8 +171,7 @@ def test_fresh_reconcile_keeps_multiple_aligned_recovery_positions_open(monkeypa
     now = time.time()
     _publish_fresh_reconciles(now)
     monkeypatch.setattr(
-        live_service,
-        "_enrich_positions_with_path_metrics",
+        live_supervision_runtime, "enrich_positions_with_path_metrics",
         lambda positions, **_kwargs: positions,
     )
     monkeypatch.setattr(
@@ -198,8 +196,7 @@ def test_aligned_reconcile_releases_prior_recovery_conflict_latch(monkeypatch):
     now = time.time()
     _publish_fresh_reconciles(now)
     monkeypatch.setattr(
-        live_service,
-        "_enrich_positions_with_path_metrics",
+        live_supervision_runtime, "enrich_positions_with_path_metrics",
         lambda positions, **_kwargs: positions,
     )
     monkeypatch.setattr(
@@ -226,8 +223,7 @@ def test_fresh_empty_reconcile_resolves_broker_close_before_conflict_latch(
     now = time.time()
     _publish_fresh_reconciles(now)
     monkeypatch.setattr(
-        live_service,
-        "_enrich_positions_with_path_metrics",
+        live_supervision_runtime, "enrich_positions_with_path_metrics",
         lambda positions, **_kwargs: positions,
     )
     active_calls = {"count": 0}

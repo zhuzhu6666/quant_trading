@@ -19,6 +19,7 @@ from backend.services.live_safety_plane import LiveSafetyPlane
 from backend.services.position_supervisor import evaluate_position_supervisor
 from execution import ctrader_bridge as ctrader_module
 from execution.base import PositionInfo, PositionReconcileResult
+from backend.services import live_supervision_runtime
 
 
 def test_legacy_fresh_result_only_implies_identity_and_protection_authority():
@@ -408,8 +409,7 @@ def test_live_supervisor_does_not_score_model_with_unknown_components(monkeypatc
         "position_path_metrics_state": "unknown",
     }
     monkeypatch.setattr(
-        live_service,
-        "_build_position_supervisor_context",
+        live_supervision_runtime, "build_position_supervisor_context",
         lambda *_args, **_kwargs: {"position": dict(position), "risk": {}},
     )
     monkeypatch.setattr(

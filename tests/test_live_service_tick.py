@@ -29,6 +29,7 @@ from backend.services import live_close_settlement
 from backend.services import live_position_protection_cycle
 from backend.services import live_open_pipeline
 from backend.services import live_safety_watchdog
+from backend.services import live_supervision_runtime
 
 
 @pytest.fixture(autouse=True)
@@ -325,7 +326,7 @@ def test_live_autonomy_budget_breach_does_not_relax_stricter_incident(monkeypatc
 
 
 def test_supervisor_tighten_sl_plan_clips_long_stop_below_current_price():
-    plan = live_service._supervisor_tighten_sl_plan(
+    plan = live_service.live_supervision_runtime._supervisor_tighten_sl_plan(
         {"direction": 1, "current_price": 4100.0, "sl": 4088.0},
         4102.0,
         quote={"bid": 4099.50, "ask": 4100.20, "mid": 4099.85, "ts": time.time()},
@@ -338,7 +339,7 @@ def test_supervisor_tighten_sl_plan_clips_long_stop_below_current_price():
 
 
 def test_supervisor_tighten_sl_plan_clips_short_stop_above_current_price():
-    plan = live_service._supervisor_tighten_sl_plan(
+    plan = live_service.live_supervision_runtime._supervisor_tighten_sl_plan(
         {"direction": -1, "current_price": 4100.0, "sl": 4112.0},
         4098.0,
         quote={"bid": 4099.80, "ask": 4100.50, "mid": 4100.15, "ts": time.time()},
@@ -351,7 +352,7 @@ def test_supervisor_tighten_sl_plan_clips_short_stop_above_current_price():
 
 
 def test_supervisor_tighten_sl_plan_skips_when_not_more_protective():
-    plan = live_service._supervisor_tighten_sl_plan(
+    plan = live_service.live_supervision_runtime._supervisor_tighten_sl_plan(
         {"direction": 1, "current_price": 4100.0, "sl": 4099.9},
         4102.0,
         quote={"bid": 4099.8, "ask": 4100.2, "mid": 4100.0, "ts": time.time()},
@@ -444,9 +445,9 @@ def test_entry_protection_repair_preserves_existing_sl_when_restoring_tp(monkeyp
         live_close_settlement, "lookup_open_decision_context",
         lambda _position_id: {"entry_ts": 0.0, "timeframe": "M5", "source": ""},
     )
-    monkeypatch.setattr(live_service, "_log_supervisor_decision", lambda **kwargs: "dec_repair")
-    monkeypatch.setattr(live_service, "_log_supervisor_trace", lambda **kwargs: None)
-    monkeypatch.setattr(live_service, "_log_supervisor_position_event", lambda **kwargs: None)
+    monkeypatch.setattr(live_supervision_runtime, "log_supervisor_decision", lambda **kwargs: "dec_repair")
+    monkeypatch.setattr(live_supervision_runtime, "log_supervisor_trace", lambda **kwargs: None)
+    monkeypatch.setattr(live_supervision_runtime, "log_supervisor_position_event", lambda **kwargs: None)
     monkeypatch.setattr(live_service, "_remember_protection_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         live_service,

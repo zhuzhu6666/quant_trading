@@ -374,6 +374,7 @@ def _live_service():
 
 from backend.services import live_close_settlement
 from backend.services.live_position_lifecycle import (
+    build_position_supervisor_context_payload as _lifecycle_build_position_supervisor_context_payload,
     build_close_position_risk_context_payload as _lifecycle_build_close_position_risk_context_payload,
     build_position_supervisor_context_inputs as _lifecycle_build_position_supervisor_context_inputs,
 )
@@ -499,7 +500,7 @@ def live_safety_planner_runtime(bridge: Any) -> SafetyPlannerRuntime:
             ),
             loop_running=bool(_live_service().live_state_get("loop_running", True)),
         )
-        context = _live_service()._lifecycle_build_position_supervisor_context_payload(
+        context = _lifecycle_build_position_supervisor_context_payload(
             **context_inputs,
             temporal_context=timeout_context,
             position_metrics=metrics,

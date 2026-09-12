@@ -225,6 +225,7 @@ from backend.services import live_loop_tick_runtime
 from backend.services import live_safety_watchdog
 from backend.services import live_safety_plane
 from backend.services import live_safety_planner
+from backend.services import live_supervision_runtime
 from backend.services import live_state_store
 from backend.services.live_state_store import (
     _LIVE_STATE_LOCK,
@@ -366,33 +367,22 @@ from backend.services.live_position_lifecycle import (
     build_protection_execution_plan as _lifecycle_build_protection_execution_plan,
     build_protection_execution_result_payloads as _lifecycle_build_protection_execution_result_payloads,
     market_open_seconds_between as _lifecycle_market_open_seconds_between,
-    build_position_supervisor_context_inputs as _lifecycle_build_position_supervisor_context_inputs,
-    build_position_supervisor_context_payload as _lifecycle_build_position_supervisor_context_payload,
     build_position_protection_cycle_result as _lifecycle_build_position_protection_cycle_result,
     build_protection_candidate_verdict_payload as _lifecycle_build_protection_candidate_verdict_payload,
     build_protection_candidate_risk_context_from_candidate as _lifecycle_build_protection_candidate_risk_context_from_candidate,
     build_protection_execution_trace_fields as _lifecycle_build_protection_execution_trace_fields,
     build_protection_position_event_details as _lifecycle_build_protection_position_event_details,
     build_protection_state_upsert_payload as _lifecycle_build_protection_state_upsert_payload,
-    build_protection_superseded_trace_fields as _lifecycle_build_protection_superseded_trace_fields,
     build_recovery_closed_update_payload as _lifecycle_build_recovery_closed_update_payload,
     build_recovery_meta_update_payload as _lifecycle_build_recovery_meta_update_payload,
     build_risk_state_with_policy_verdict as _lifecycle_build_risk_state_with_policy_verdict,
     build_pending_supervisor_reentry_block_payload as _lifecycle_build_pending_supervisor_reentry_block_payload,
     build_supervisor_reentry_block_payload as _lifecycle_build_supervisor_reentry_block_payload,
-    build_supervisor_decision_ledger_payload as _lifecycle_build_supervisor_decision_ledger_payload,
-    build_supervisor_position_event_payload as _lifecycle_build_supervisor_position_event_payload,
     build_supervisor_state_upsert_payload as _lifecycle_build_supervisor_state_upsert_payload,
-    build_supervisor_trace_ledger_payload as _lifecycle_build_supervisor_trace_ledger_payload,
-    build_supervisor_close_context_inputs as _lifecycle_build_supervisor_close_context_inputs,
     build_supervisor_action_fingerprint as _lifecycle_build_supervisor_action_fingerprint,
-    build_supervisor_risk_context_payload as _lifecycle_build_supervisor_risk_context_payload,
     build_supervisor_runtime_risk_evaluation_inputs as _lifecycle_build_supervisor_runtime_risk_evaluation_inputs,
     build_supervisor_tighten_execution_plan as _lifecycle_build_supervisor_tighten_execution_plan,
     build_supervisor_tighten_result_payloads as _lifecycle_build_supervisor_tighten_result_payloads,
-    build_supervisor_tighten_sl_plan_inputs as _lifecycle_build_supervisor_tighten_sl_plan_inputs,
-    build_supervisor_tighten_sl_plan as _lifecycle_build_supervisor_tighten_sl_plan,
-    build_target_tp_extension_inputs as _lifecycle_build_target_tp_extension_inputs,
     build_trade_attribution_payload_from_composite as _lifecycle_build_trade_attribution_payload_from_composite,
     classify_close_source_from_evidence as _lifecycle_classify_close_source_from_evidence,
     classify_trading_session as _lifecycle_classify_trading_session,
@@ -400,7 +390,6 @@ from backend.services.live_position_lifecycle import (
     consume_close_verdict as _lifecycle_consume_close_verdict,
     current_regime_hint_from_composite as _lifecycle_current_regime_hint_from_composite,
     estimate_close_pnl_from_state as _lifecycle_estimate_close_pnl_from_state,
-    enrich_positions_with_lifecycle_metrics as _lifecycle_enrich_positions_with_lifecycle_metrics,
     entry_quality_gate_from_learning_policy as _lifecycle_entry_quality_gate_from_learning_policy,
     float_payload_value as _lifecycle_float_payload_value,
     filter_removed_live_position as _lifecycle_filter_removed_live_position,
@@ -430,13 +419,9 @@ from backend.services.live_position_lifecycle import (
     restore_attribution_for_positions as _lifecycle_restore_attribution_for_positions,
     same_symbol_position as _lifecycle_same_symbol_position,
     side_name as _lifecycle_side_name,
-    supervisor_recently_applied_from_meta as _lifecycle_supervisor_recently_applied_from_meta,
-    supervisor_noop_fingerprint_seen as _lifecycle_supervisor_noop_fingerprint_seen,
     supervisor_reentry_block_view as _lifecycle_supervisor_reentry_block_view,
-    supervisor_reentry_cooldown_seconds as _lifecycle_supervisor_reentry_cooldown_seconds,
     supervisor_reentry_key as _lifecycle_supervisor_reentry_key,
     supervisor_risk_action_for_action as _lifecycle_supervisor_risk_action_for_action,
-    target_tp_is_extension as _lifecycle_target_tp_is_extension,
     temporal_context_for_trade as _lifecycle_temporal_context_for_trade,
     timeframe_seconds as _lifecycle_timeframe_seconds,
     tracked_total_api_volume as _lifecycle_tracked_total_api_volume,
@@ -451,17 +436,6 @@ from backend.services.live_scheduler_jobs import (
 from backend.services.position_metrics import normalize_path_state, update_position_path_metrics
 from backend.services.position_supervisor import (
     evaluate_position_supervisor,
-    is_hard_supervisor_action,
-)
-from backend.services.position_supervisor_governance import (
-    POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY,
-    select_position_supervisor_binding,
-)
-from backend.services.position_supervisor_templates import (
-    build_legacy_position_supervisor_binding,
-    build_position_supervisor_binding,
-    get_position_supervisor_template,
-    verify_position_supervisor_binding,
 )
 from backend.services.stability import record_timed
 _LEDGER: DecisionLedger | None = None
@@ -735,12 +709,6 @@ _direction_from_position_payload = _lifecycle_position_direction_from_payload
 _supervisor_reentry_key = _lifecycle_supervisor_reentry_key
 
 
-def _supervisor_reentry_cooldown_seconds(cfg) -> float:
-    return _lifecycle_supervisor_reentry_cooldown_seconds(
-        cooldown_bars=getattr(cfg, "risk_supervisor_reentry_cooldown_bars", 3),
-        timeframe=str(getattr(cfg, "timeframe", "M5") or "M5"),
-        timeframe_seconds=_timeframe_seconds,
-    )
 
 
 def _reentry_guard_runtime() -> ReentryGuardRuntime:
@@ -755,7 +723,7 @@ def _reentry_guard_runtime() -> ReentryGuardRuntime:
         direction_from_position=_direction_from_position_payload,
         position_symbol=_position_symbol_value,
         payload_get=_payload_get,
-        cooldown_seconds=_supervisor_reentry_cooldown_seconds,
+        cooldown_seconds=live_supervision_runtime.supervisor_reentry_cooldown_seconds,
         build_pending_payload=_lifecycle_build_pending_supervisor_reentry_block_payload,
         state_connection_factory=get_state_pg_conn,
         warning=logger.warning,
@@ -1415,715 +1383,18 @@ def _entry_protection_plan_payload(
     )
 
 
-def _position_supervisor_selection_key(
-    *,
-    cfg: Any,
-    composite: Any,
-) -> dict[str, str]:
-    quality = _decision_quality_context(composite)
-    current_regime = str(
-        getattr(composite, "regime_id", "")
-        or quality.get("regime_id")
-        or _current_regime_hint()
-        or "unknown"
-    )
-    symbol = str(
-        getattr(composite, "symbol", "")
-        or live_state_get("symbol", "")
-        or "XAUUSD+"
-    )
-    timeframe = str(getattr(cfg, "timeframe", "") or "M5")
-    return {
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "entry_regime": current_regime,
-        "current_regime": current_regime,
-    }
 
 
-def _static_position_supervisor_binding(
-    *,
-    cfg: Any,
-    composite: Any,
-    reason: str,
-) -> dict[str, Any]:
-    template_id = str(
-        getattr(cfg, "position_supervisor_template_id", "")
-        or "position_supervisor:default.v1"
-    )
-    template = get_position_supervisor_template(template_id)
-    source = (
-        "static_baseline"
-        if template_id == "position_supervisor:default.v1"
-        else "governed_global_baseline"
-    )
-    return build_position_supervisor_binding(
-        template,
-        binding_source=source,
-        selection_status="bound",
-        selection_key=_position_supervisor_selection_key(
-            cfg=cfg,
-            composite=composite,
-        ),
-        evidence_refs={"reason": str(reason or "static_baseline")},
-    )
 
 
-def _select_position_supervisor_binding_for_open(
-    *,
-    cfg: Any,
-    composite: Any,
-) -> dict[str, Any]:
-    """Select once before an open, without creating a broker-side mutation."""
-
-    mode = str(
-        getattr(cfg, "position_supervisor_auto_selection_mode", "off") or "off"
-    ).strip().lower()
-    static_binding = _static_position_supervisor_binding(
-        cfg=cfg,
-        composite=composite,
-        reason=(
-            "selection_disabled"
-            if mode == "off"
-            else "selection_mode_not_executable"
-        ),
-    )
-    if mode not in {"shadow", "demo_execute"}:
-        static_binding["evidence_refs"]["selection_status"] = "no_change"
-        static_binding["evidence_refs"]["selection_reason"] = (
-            "selection_disabled"
-        )
-        return static_binding
-    if mode == "demo_execute" and not bounded_demo_mode_active(cfg):
-        static_binding["evidence_refs"]["selection_reason"] = "bounded_demo_required"
-        return static_binding
-    try:
-        projection = live_close_settlement.runtime_kv_get(POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY, {})
-        selection = select_position_supervisor_binding(
-            projection if isinstance(projection, dict) else {},
-            **_position_supervisor_selection_key(cfg=cfg, composite=composite),
-            current_binding=None,
-            max_age_seconds=float(
-                getattr(cfg, "position_supervisor_selection_max_age_seconds", 900.0)
-                or 900.0
-            ),
-        )
-    except Exception as exc:
-        static_binding["evidence_refs"]["selection_reason"] = (
-            f"selection_projection_unavailable:{type(exc).__name__}"
-        )
-        return static_binding
-    selected = dict(selection.get("binding") or {})
-    if mode == "shadow":
-        static_binding["evidence_refs"]["shadow_selection"] = {
-            "reason": str(selection.get("reason") or ""),
-            "ok": bool(selection.get("ok")),
-            "selection_event_id": str(selection.get("selection_event_id") or ""),
-            "template_id": str(selected.get("template_id") or ""),
-            "template_hash": str(selected.get("template_hash") or ""),
-        }
-        return static_binding
-    if (
-        not selection.get("ok")
-        or not selected
-        or str(selection.get("reason") or "")
-        != "selected_highest_positive_effect"
-    ):
-        static_binding["evidence_refs"]["selection_reason"] = str(
-            selection.get("reason") or "selection_not_available"
-        )
-        return static_binding
-    selected_check = verify_position_supervisor_binding(selected)
-    if not selected_check.get("valid"):
-        static_binding["evidence_refs"]["selection_reason"] = (
-            "selected_binding_invalid"
-        )
-        return static_binding
-    selected["evidence_refs"] = {
-        **dict(selected.get("evidence_refs") or {}),
-        "selection_event_id": str(selection.get("selection_event_id") or ""),
-    }
-    return selected
 
 
-def _position_supervisor_policy_for_position(
-    *,
-    cfg: Any,
-    supervisor_state: dict[str, Any],
-    position: dict[str, Any],
-    position_metrics: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Resolve one position's snapshot and its fail-closed policy state."""
-
-    plan = dict(supervisor_state.get("entry_protection_plan") or {})
-    raw_binding = plan.get("supervisor_binding")
-    symbol = str(position.get("symbol") or "XAUUSD+")
-    selection_key = {
-        "symbol": symbol,
-        "timeframe": str(getattr(cfg, "timeframe", "") or "M5"),
-        "entry_regime": str(
-            position_metrics.get("entry_regime")
-            or supervisor_state.get("entry_regime")
-            or ""
-        ),
-        "current_regime": str(
-            position_metrics.get("current_regime")
-            or supervisor_state.get("current_regime")
-            or ""
-        ),
-    }
-    if isinstance(raw_binding, dict):
-        checked = verify_position_supervisor_binding(raw_binding)
-        if checked.get("valid"):
-            binding = dict(checked.get("binding") or raw_binding)
-            template = dict(checked.get("template") or {})
-            return template, {
-                "schema_version": "position_supervisor_policy.v1",
-                "binding_state": "bound",
-                "binding_reason": "binding_verified",
-                "binding_source": str(binding.get("binding_source") or ""),
-                "template_id": str(binding.get("template_id") or ""),
-                "template_version": str(binding.get("template_version") or ""),
-                "template_hash": str(binding.get("template_hash") or ""),
-                "selection_event_id": str(
-                    dict(binding.get("evidence_refs") or {}).get(
-                        "selection_event_id", ""
-                    )
-                ),
-                "posterior_fingerprint": str(
-                    binding.get("posterior_fingerprint") or ""
-                ),
-                "selection_key": dict(binding.get("selection_key") or selection_key),
-                "binding": binding,
-            }
-        if checked.get("state") == "legacy":
-            template_id = str(
-                raw_binding.get("template_id")
-                or getattr(cfg, "position_supervisor_template_id", "")
-                or "position_supervisor:default.v1"
-            )
-            return get_position_supervisor_template(template_id), {
-                "schema_version": "position_supervisor_policy.v1",
-                "binding_state": "legacy",
-                "binding_reason": "legacy_global_fallback",
-                "binding_source": "legacy_global_fallback",
-                "template_id": template_id,
-                "template_version": "",
-                "template_hash": "",
-                "selection_event_id": "",
-                "posterior_fingerprint": "",
-                "selection_key": selection_key,
-                "binding": raw_binding,
-            }
-        # The template is deliberately not taken from a corrupted snapshot.
-        # Hard-risk evaluation still uses the safe built-in baseline, while
-        # the runtime evaluator blocks discretionary actions below.
-        return get_position_supervisor_template("position_supervisor:default.v1"), {
-            "schema_version": "position_supervisor_policy.v1",
-            "binding_state": "invalid",
-            "binding_reason": str(
-                checked.get("reason") or "binding_unverified"
-            ),
-            "binding_source": str(raw_binding.get("binding_source") or ""),
-            "template_id": str(raw_binding.get("template_id") or ""),
-            "template_version": str(raw_binding.get("template_version") or ""),
-            "template_hash": str(raw_binding.get("template_hash") or ""),
-            "selection_event_id": "",
-            "posterior_fingerprint": "",
-            "selection_key": selection_key,
-            "binding": raw_binding,
-        }
-    template_id = str(
-        getattr(cfg, "position_supervisor_template_id", "")
-        or "position_supervisor:default.v1"
-    )
-    legacy = build_legacy_position_supervisor_binding(
-        template_id,
-        selection_key=selection_key,
-    )
-    return get_position_supervisor_template(template_id), {
-        "schema_version": "position_supervisor_policy.v1",
-        "binding_state": "legacy",
-        "binding_reason": "legacy_global_fallback",
-        "binding_source": "legacy_global_fallback",
-        "template_id": template_id,
-        "template_version": "",
-        "template_hash": "",
-        "selection_event_id": "",
-        "posterior_fingerprint": "",
-        "selection_key": selection_key,
-        "binding": legacy,
-    }
 
 
-def _position_supervisor_switch_state_payload(
-    state: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    current = dict(state or {})
-    try:
-        switch_count = max(0, int(current.get("switch_count") or 0))
-    except (TypeError, ValueError):
-        switch_count = 0
-    try:
-        stable_bars = max(0, int(current.get("stable_bars") or 0))
-    except (TypeError, ValueError):
-        stable_bars = 0
-    try:
-        last_switch_bar_number = int(current.get("last_switch_bar_number"))
-    except (TypeError, ValueError):
-        last_switch_bar_number = -1
-    return {
-        "schema_version": "position_supervisor_switch.v1",
-        "candidate_regime": str(current.get("candidate_regime") or ""),
-        "candidate_bar_key": str(current.get("candidate_bar_key") or ""),
-        "last_seen_bar_key": str(current.get("last_seen_bar_key") or ""),
-        "stable_bars": stable_bars,
-        "switch_count": switch_count,
-        "last_switch_bar_number": last_switch_bar_number,
-        "last_switch_bar_key": str(current.get("last_switch_bar_key") or ""),
-        "last_switch_ts": float(current.get("last_switch_ts") or 0.0),
-        "last_selection_bar_key": str(current.get("last_selection_bar_key") or ""),
-        "last_selection_reason": str(current.get("last_selection_reason") or ""),
-    }
 
 
-def _position_supervisor_switch_block_reason(
-    *,
-    cfg: Any,
-    context: Mapping[str, Any],
-    verdict: Mapping[str, Any],
-    policy: Mapping[str, Any],
-) -> str:
-    """Return a conservative reason when a soft policy switch is unsafe."""
-
-    selection_mode = str(
-        getattr(cfg, "position_supervisor_auto_selection_mode", "off") or "off"
-    ).strip().lower()
-    if selection_mode not in {"shadow", "demo_execute"}:
-        return "selection_mode_not_demo_execute"
-    if selection_mode == "demo_execute" and not bounded_demo_mode_active(cfg):
-        return "bounded_demo_required"
-    if str(policy.get("binding_state") or "").strip().lower() != "bound":
-        return "position_binding_not_verified"
-    binding = policy.get("binding")
-    if not isinstance(binding, Mapping) or not verify_position_supervisor_binding(binding).get("valid"):
-        return "position_binding_not_verified"
-    evidence = dict(verdict.get("evidence") or {})
-    action = str(
-        verdict.get("requested_action")
-        or verdict.get("action")
-        or "hold"
-    ).strip().lower()
-    if action != "hold":
-        return "active_supervisor_action_has_priority"
-    if is_hard_supervisor_action(
-        action=action,
-        summary_reason=str(verdict.get("summary_reason") or ""),
-        evidence=evidence,
-    ):
-        return "hard_risk_has_priority"
-    if bool(evidence.get("hard_risk_active")):
-        return "hard_risk_has_priority"
-    blocked_tags = {
-        "hard_risk_active",
-        "holding_timeout_exceeded",
-        "near_stop_loss",
-        "thesis_broken",
-        "regime_shift_detected",
-    }
-    if blocked_tags.intersection(str(item) for item in evidence.get("trigger_tags") or []):
-        return "risk_reduction_has_priority"
-    position = dict(context.get("position") or {})
-    required_states = {
-        "price": str(
-            position.get("current_price_state") or position.get("price_state") or ""
-        ).strip().lower(),
-        "pnl": str(
-            position.get("pnl_state") or position.get("unrealized_pnl_state") or ""
-        ).strip().lower(),
-        "path_metrics": str(
-            position.get("position_path_metrics_state") or ""
-        ).strip().lower(),
-    }
-    if any(state != "known" for state in required_states.values()):
-        return "position_management_facts_unknown"
-    market = dict(context.get("market") or {})
-    if str(market.get("market_context_state") or "unknown").strip().lower() != "known":
-        return "market_context_unknown"
-    if not bool(evidence.get("market_dimensions_known")):
-        return "market_dimensions_unknown"
-    temporal = dict(context.get("temporal_context") or {})
-    if not str(
-        evidence.get("closed_bar_key")
-        or temporal.get("closed_bar_key")
-        or temporal.get("closed_bar_ts")
-        or ""
-    ):
-        return "closed_bar_unknown"
-    execution_recovery = live_state_get("execution_recovery", {}, clone=True) or {}
-    if not bool(execution_recovery.get("ready")):
-        return "execution_recovery_not_ready"
-    try:
-        unresolved_count = int(execution_recovery.get("unresolved_count"))
-    except (TypeError, ValueError):
-        return "execution_recovery_unknown"
-    if unresolved_count != 0:
-        return "unresolved_execution_intent"
-    safety = live_state_get("safety_plane", {}, clone=True) or {}
-    if str(safety.get("reconciliation_state") or "unknown").strip().lower() != "fresh":
-        return "positions_reconciliation_not_fresh"
-    if list(safety.get("blockers") or []):
-        return "safety_blocker_present"
-    if bool(live_state_get("safety_cycle_active", False)):
-        return "safety_cycle_in_progress"
-    return ""
 
 
-def _maybe_switch_position_supervisor_binding(
-    *,
-    position: dict[str, Any],
-    cfg: Any,
-    context: Mapping[str, Any],
-    verdict: dict[str, Any],
-    now_ts: float,
-) -> dict[str, Any]:
-    """Switch one bound position only after a stable, safe regime boundary."""
-
-    policy = context.get("position_supervisor_policy")
-    if not isinstance(policy, Mapping):
-        return verdict
-    block_reason = _position_supervisor_switch_block_reason(
-        cfg=cfg,
-        context=context,
-        verdict=verdict,
-        policy=policy,
-    )
-    if block_reason:
-        return verdict
-    evidence = dict(verdict.get("evidence") or {})
-    current_regime = str(
-        evidence.get("current_regime")
-        or (context.get("market") or {}).get("regime_id")
-        or (context.get("risk") or {}).get("current_regime")
-        or ""
-    ).strip()
-    if not current_regime or current_regime.lower() in {"unknown", "none", "unavailable"}:
-        return verdict
-    binding = dict(policy.get("binding") or {})
-    selection_key = dict(binding.get("selection_key") or {})
-    previous_regime = str(selection_key.get("current_regime") or "").strip()
-    if not previous_regime or previous_regime.lower() in {"unknown", "none", "unavailable"}:
-        return verdict
-    if current_regime == previous_regime:
-        return verdict
-
-    closed_bar_key = str(
-        evidence.get("closed_bar_key")
-        or (context.get("temporal_context") or {}).get("closed_bar_key")
-        or ""
-    )
-    try:
-        bar_number = int(evidence.get("completed_bars_after_entry"))
-    except (TypeError, ValueError):
-        return verdict
-    if not closed_bar_key or bar_number < 0:
-        return verdict
-    position_id = int(position.get("position_id") or position.get("ticket") or 0)
-    if position_id <= 0:
-        return verdict
-
-    row = _load_recovery_row_for_risk_reduction(
-        position_id,
-        operation="position_supervisor_binding_switch",
-    )
-    meta = copy.deepcopy(dict((row or {}).get("recovery_meta") or {}))
-    state = _position_supervisor_switch_state_payload(
-        meta.get("supervisor_switch_state")
-    )
-    if state["candidate_regime"] != current_regime:
-        state["candidate_regime"] = current_regime
-        state["candidate_bar_key"] = closed_bar_key
-        state["stable_bars"] = 1
-    elif state["last_seen_bar_key"] != closed_bar_key:
-        state["stable_bars"] = int(state["stable_bars"] or 0) + 1
-        state["candidate_bar_key"] = closed_bar_key
-    state["last_seen_bar_key"] = closed_bar_key
-    min_stable_bars = max(
-        1,
-        int(getattr(cfg, "position_supervisor_switch_min_stable_bars", 2) or 2),
-    )
-    plan = dict(meta.get("entry_protection_plan") or {})
-    persisted_binding = plan.get("supervisor_binding")
-    if not isinstance(persisted_binding, Mapping):
-        return verdict
-    persisted_check = verify_position_supervisor_binding(persisted_binding)
-    if not persisted_check.get("valid") or str(
-        persisted_binding.get("template_hash") or ""
-    ) != str(binding.get("template_hash") or ""):
-        return verdict
-    state_changed = state != _position_supervisor_switch_state_payload(
-        meta.get("supervisor_switch_state")
-    )
-
-    def persist_state() -> None:
-        if state_changed:
-            live_close_settlement.merge_recovery_position_meta(
-                position_id,
-                {"supervisor_switch_state": state},
-            )
-
-    if int(state["stable_bars"] or 0) < min_stable_bars:
-        persist_state()
-        return verdict
-    if state["last_selection_bar_key"] == closed_bar_key:
-        persist_state()
-        return verdict
-    max_switches = max(
-        0,
-        int(getattr(cfg, "position_supervisor_max_switches_per_position", 2) or 0),
-    )
-    if max_switches <= 0 or int(state["switch_count"] or 0) >= max_switches:
-        state["last_selection_bar_key"] = closed_bar_key
-        state["last_selection_reason"] = "max_switches_reached"
-        live_close_settlement.merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
-        return verdict
-    cooldown_bars = max(
-        0,
-        int(getattr(cfg, "position_supervisor_switch_cooldown_bars", 3) or 0),
-    )
-    if (
-        int(state["last_switch_bar_number"] or -1) >= 0
-        and bar_number - int(state["last_switch_bar_number"]) < cooldown_bars
-    ):
-        state["last_selection_bar_key"] = closed_bar_key
-        state["last_selection_reason"] = "switch_cooldown"
-        live_close_settlement.merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
-        return verdict
-
-    try:
-        projection = live_close_settlement.runtime_kv_get(POSITION_SUPERVISOR_SELECTION_PROJECTION_KEY, {})
-        selection = select_position_supervisor_binding(
-            projection if isinstance(projection, dict) else {},
-            symbol=str(position.get("symbol") or "XAUUSD+"),
-            timeframe=str(getattr(cfg, "timeframe", "M5") or "M5"),
-            entry_regime=str(selection_key.get("entry_regime") or ""),
-            current_regime=current_regime,
-            current_binding=binding,
-            now_ts=now_ts,
-            max_age_seconds=float(
-                getattr(cfg, "position_supervisor_selection_max_age_seconds", 900.0)
-                or 900.0
-            ),
-        )
-    except Exception as exc:
-        selection = {
-            "ok": False,
-            "changed": False,
-            "reason": f"selection_projection_unavailable:{type(exc).__name__}",
-        }
-    state["last_selection_bar_key"] = closed_bar_key
-    state["last_selection_reason"] = str(selection.get("reason") or "selection_not_available")
-    selected = dict(selection.get("selected_binding") or selection.get("binding") or {})
-    selected_check = verify_position_supervisor_binding(selected)
-    selection_event_id = str(selection.get("selection_event_id") or "")
-    selection_mode = str(
-        getattr(cfg, "position_supervisor_auto_selection_mode", "off") or "off"
-    ).strip().lower()
-    if selection_mode == "shadow":
-        if not _LEDGER:
-            state["last_selection_reason"] = "supervisor_trace_sink_unavailable"
-            live_close_settlement.merge_recovery_position_meta(
-                position_id,
-                {"supervisor_switch_state": state},
-            )
-            return verdict
-        shadow_verdict = copy.deepcopy(verdict)
-        shadow_evidence = dict(shadow_verdict.get("evidence") or {})
-        shadow_evidence.update(
-            {
-                "selection_event_id": selection_event_id,
-                "position_supervisor_selection": {
-                    "schema_version": "position_supervisor_selection_observation.v1",
-                    "ok": bool(selection.get("ok")),
-                    "changed": bool(selection.get("changed")),
-                    "reason": str(selection.get("reason") or "selection_not_available"),
-                    "selected_template_id": str(selected.get("template_id") or ""),
-                    "selected_template_version": str(
-                        selected.get("template_version") or ""
-                    ),
-                    "selected_template_hash": str(selected.get("template_hash") or ""),
-                    "selection_event_id": selection_event_id,
-                },
-            }
-        )
-        if selected_check.get("valid"):
-            shadow_evidence["position_supervisor_selection"]["selected_binding"] = selected
-        shadow_verdict["evidence"] = shadow_evidence
-        shadow_trace_id = _log_supervisor_trace(
-            position=position,
-            verdict=shadow_verdict,
-            cfg=cfg,
-            tick=int(evidence.get("tick") or 0),
-            stage="selection_shadow",
-            outcome="shadow",
-            execution_status="shadow_only",
-            execution_reason=str(
-                selection.get("reason") or "selection_not_available"
-            ),
-            execution={
-                "policy_switch_status": "shadow",
-                "selection_event_id": selection_event_id,
-                "selected_binding": selected if selected_check.get("valid") else {},
-                "broker_action_attempted": False,
-                "is_real_execution": False,
-                "no_change_reason": str(selection.get("reason") or ""),
-            },
-            acct=live_state_get("account", {}, clone=True) or {},
-        )
-        state["last_selection_reason"] = (
-            f"shadow:{selection.get('reason') or 'selection_not_available'}"
-            if shadow_trace_id
-            else "supervisor_trace_persist_failed"
-        )
-        live_close_settlement.merge_recovery_position_meta(
-            position_id,
-            {"supervisor_switch_state": state},
-        )
-        return verdict
-    if (
-        not selection.get("ok")
-        or not selection.get("changed")
-        or not selection_event_id
-        or not selected_check.get("valid")
-        or str(selected.get("template_hash") or "")
-        == str(binding.get("template_hash") or "")
-    ):
-        live_close_settlement.merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
-        return verdict
-
-    if not _LEDGER:
-        state["last_selection_reason"] = "supervisor_trace_sink_unavailable"
-        live_close_settlement.merge_recovery_position_meta(position_id, {"supervisor_switch_state": state})
-        return verdict
-
-    new_template = dict(selected_check.get("template") or {})
-    switch_ts = float(now_ts or time.time())
-    old_binding = dict(persisted_binding)
-    previous_history = [
-        dict(item)
-        for item in list(meta.get("position_supervisor_binding_history") or [])
-        if isinstance(item, Mapping)
-    ]
-    history = [old_binding, *previous_history][:3]
-    next_plan = dict(plan)
-    next_plan.update(
-        {
-            "supervisor_binding": selected,
-            "supervisor_binding_previous": old_binding,
-            "supervisor_binding_switched_at": switch_ts,
-        }
-    )
-    state["switch_count"] = int(state["switch_count"] or 0) + 1
-    state["last_switch_bar_number"] = bar_number
-    state["last_switch_bar_key"] = closed_bar_key
-    state["last_switch_ts"] = switch_ts
-    state["last_selection_reason"] = "selected_highest_positive_effect"
-    next_meta = {
-        "entry_protection_plan": next_plan,
-        "position_supervisor_binding_history": history,
-        "supervisor_switch_state": state,
-        "position_supervisor_last_switch": {
-            "selection_event_id": selection_event_id,
-            "previous_template_id": str(old_binding.get("template_id") or ""),
-            "previous_template_hash": str(old_binding.get("template_hash") or ""),
-            "template_id": str(selected.get("template_id") or ""),
-            "template_hash": str(selected.get("template_hash") or ""),
-            "switched_at": switch_ts,
-            "regime": current_regime,
-        },
-    }
-    live_close_settlement.merge_recovery_position_meta(position_id, next_meta)
-
-    switch_evidence = dict(evidence)
-    switch_evidence.update(
-        {
-            "position_supervisor_binding": selected,
-            "previous_position_supervisor_binding": old_binding,
-            "position_supervisor_binding_state": "bound",
-            "binding_source": str(selected.get("binding_source") or ""),
-            "supervisor_template_hash": str(selected.get("template_hash") or ""),
-            "selection_event_id": selection_event_id,
-            "current_regime": current_regime,
-            "policy_switch_status": "applied",
-        }
-    )
-    switch_verdict = copy.deepcopy(verdict)
-    switch_verdict["supervisor_template"] = new_template
-    switch_verdict["evidence"] = switch_evidence
-    switch_verdict["position_supervisor_policy"] = {
-        **dict(policy),
-        "binding_state": "bound",
-        "binding_reason": "policy_switch_applied",
-        "binding_source": str(selected.get("binding_source") or ""),
-        "template_id": str(selected.get("template_id") or ""),
-        "template_version": str(selected.get("template_version") or ""),
-        "template_hash": str(selected.get("template_hash") or ""),
-        "selection_event_id": selection_event_id,
-        "binding": selected,
-    }
-    trace_id = _log_supervisor_trace(
-        position=position,
-        verdict=switch_verdict,
-        cfg=cfg,
-        tick=int(evidence.get("tick") or 0),
-        stage="policy_switch",
-        outcome="applied",
-        execution_status="no_op",
-        execution_reason="position_supervisor_binding_switched",
-        execution={
-            "policy_switch_status": "applied",
-            "selection_event_id": selection_event_id,
-            "previous_binding": old_binding,
-            "binding": selected,
-            "broker_action_attempted": False,
-            "is_real_execution": False,
-            "no_change_reason": "",
-        },
-        acct=live_state_get("account", {}, clone=True) or {},
-    )
-    if not trace_id:
-        # Do not leave a binding that cannot be proven by a trace.  Restore the
-        # previous object and all switch-owned metadata with a CAS.  Do not
-        # overwrite an unrelated concurrent recovery update.
-        latest_row = live_close_settlement.load_recovery_position_row(position_id)
-        latest_meta = copy.deepcopy(dict((latest_row or {}).get("recovery_meta") or {}))
-        restored_meta = dict(latest_meta)
-        for key in (
-            "entry_protection_plan",
-            "position_supervisor_binding_history",
-            "supervisor_switch_state",
-            "position_supervisor_last_switch",
-        ):
-            if key in meta:
-                restored_meta[key] = copy.deepcopy(meta[key])
-            else:
-                restored_meta.pop(key, None)
-        restored = _replace_recovery_position_meta(
-            position_id,
-            restored_meta,
-            expected_meta=latest_meta,
-        )
-        if not restored:
-            logger.warning(
-                "position supervisor binding rollback CAS failed position_id={}",
-                position_id,
-            )
-        return verdict
-    switch_evidence.pop("policy_switch_status", None)
-    verdict["evidence"] = switch_evidence
-    verdict["position_supervisor_policy"] = switch_verdict["position_supervisor_policy"]
-    verdict["supervisor_template"] = new_template
-    return verdict
 
 
 def _update_entry_protection_plan_status(
@@ -2290,60 +1561,6 @@ def _position_path_metrics_for_position(
     )
 
 
-def _build_position_supervisor_context(
-    position: dict[str, Any],
-    *,
-    cfg=None,
-    acct: dict | None = None,
-    now_ts: float | None = None,
-    positions: list[Any] | None = None,
-    broker_schedule: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    now_ts = float(now_ts or time.time())
-    temporal_context = _build_close_position_risk_context(
-        position_id=int(position.get("position_id") or position.get("ticket") or 0),
-        close_reason="position_supervisor",
-        mode="supervisor",
-        symbol=str(position.get("symbol") or "XAUUSD+"),
-        position=position,
-        cfg=cfg,
-        decision_ts=now_ts,
-        broker_schedule=broker_schedule,
-    )
-    position_metrics = _position_path_metrics_for_position(position, cfg=cfg, now_ts=now_ts, persist=False)
-    supervisor_row = _load_recovery_row_for_risk_reduction(
-        int(position.get("position_id") or position.get("ticket") or 0),
-        operation="position_supervisor_context",
-    )
-    supervisor_state = dict((supervisor_row or {}).get("recovery_meta") or {})
-    supervisor_template, supervisor_policy = _position_supervisor_policy_for_position(
-        cfg=cfg,
-        supervisor_state=supervisor_state,
-        position=position,
-        position_metrics=position_metrics,
-    )
-    context_inputs = _lifecycle_build_position_supervisor_context_inputs(
-        position=position,
-        cfg=cfg,
-        positions=positions,
-        account=acct,
-        entry_decision_id=_lookup_entry_decision_for_risk_reduction(
-            int(position.get("position_id") or position.get("ticket") or 0),
-            operation="position_supervisor_context",
-        ),
-        risk_snapshot=live_state_get("risk", {}, clone=True) or {},
-        total_api_volume=_tracked_total_api_volume(positions or []),
-        market_context=live_state_get("last_composite", {}, clone=True) or {},
-        supervisor_state=supervisor_state,
-        loop_running=bool(live_state_get("loop_running", True)),
-        position_supervisor_template=supervisor_template,
-        position_supervisor_policy=supervisor_policy,
-    )
-    return _lifecycle_build_position_supervisor_context_payload(
-        **context_inputs,
-        temporal_context=temporal_context,
-        position_metrics=position_metrics,
-    )
 
 
 def _get_position_quality_advisor():
@@ -2377,14 +1594,14 @@ def _evaluate_position_supervisor_for_position(
     from backend.services.position_supervisor import build_model_tighten_controls
 
     def build_context(position_value: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-        return _build_position_supervisor_context(
+        return live_supervision_runtime.build_position_supervisor_context(
             position_value,
             broker_schedule=broker_schedule,
             **kwargs,
         )
 
     after_persist = (
-        partial(_maybe_switch_position_supervisor_binding, position=position, cfg=cfg,
+        partial(live_supervision_runtime.maybe_switch_position_supervisor_binding, position=position, cfg=cfg,
                 now_ts=float(now_ts or time.time()))
         if persist else None
     )
@@ -2419,88 +1636,10 @@ def _evaluate_position_supervisor_for_position(
     return verdict
 
 
-def _enrich_positions_with_path_metrics(
-    pos_list: list[Any],
-    *,
-    cfg=None,
-    now_ts: float | None = None,
-    persist: bool = False,
-    broker: str = "",
-    strategy_name: str = "",
-) -> list[dict]:
-    now_ts = float(now_ts or time.time())
-    return _lifecycle_enrich_positions_with_lifecycle_metrics(
-        pos_list,
-        cfg=cfg,
-        now_ts=now_ts,
-        persist=persist,
-        broker=broker,
-        strategy_name=strategy_name,
-        coerce_positions=_coerce_live_positions,
-        apply_unrealized_pnl_fields_fn=_apply_unrealized_pnl_fields,
-        holding_summary_for_position=_holding_summary_for_position,
-        position_path_metrics_for_position=_position_path_metrics_for_position,
-        evaluate_position_supervisor_for_position=_evaluate_position_supervisor_for_position,
-    )
 
 
-def _supervisor_risk_context(
-    position: dict[str, Any],
-    verdict: dict[str, Any],
-    *,
-    cfg=None,
-    mode: str = "live",
-    broker_schedule: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    close_inputs = _lifecycle_build_supervisor_close_context_inputs(
-        position=position,
-        verdict=verdict,
-        mode=mode,
-        broker="ctrader",
-    )
-    close_context = _build_close_position_risk_context(
-        **close_inputs,
-        cfg=cfg,
-        broker_schedule=broker_schedule,
-    )
-    return _lifecycle_build_supervisor_risk_context_payload(
-        close_context=close_context,
-        position=position,
-        verdict=verdict,
-    )
 
 
-def _remember_supervisor_state(
-    position: dict[str, Any],
-    verdict: dict[str, Any],
-    *,
-    action_applied: str = "",
-    broker: str = "ctrader",
-    strategy_name: str = "",
-) -> None:
-    pid = int(position.get("position_id") or position.get("ticket") or 0)
-    row = _load_recovery_row_for_risk_reduction(pid, operation="remember_supervisor_state")
-    try:
-        live_close_settlement.upsert_recovery_position_state(
-            position,
-            **_lifecycle_build_supervisor_state_upsert_payload(
-                recovery_row=row,
-                verdict=verdict,
-                broker=broker,
-                strategy_name=strategy_name,
-                loop_strategy_name=_current_loop_strategy_name(),
-                default_context_integrity=_RECOVERY_CONTEXT_PARTIAL,
-                action_applied=action_applied,
-                applied_ts=time.time() if action_applied else 0.0,
-            ),
-        )
-    except Exception as exc:
-        live_close_settlement.record_risk_reduction_aux_failure(
-            "risk_reduction_state_persist_failed",
-            position_id=pid,
-            action="remember_supervisor_state",
-            error=exc,
-        )
 
 
 def _remember_protection_state(
@@ -2538,118 +1677,14 @@ def _remember_protection_state(
         )
 
 
-def _supervisor_recently_applied(position_id: int, action: str, cooldown_seconds: float = 300.0) -> bool:
-    row = _load_recovery_row_for_risk_reduction(
-        position_id,
-        operation="supervisor_cooldown",
-    )
-    meta = dict((row or {}).get("recovery_meta") or {})
-    return _lifecycle_supervisor_recently_applied_from_meta(
-        recovery_meta=meta,
-        action=action,
-        now_ts=time.time(),
-        cooldown_seconds=cooldown_seconds,
-    )
 
 
-def _supervisor_noop_fingerprint_seen(position_id: int, fingerprint: str) -> bool:
-    row = _load_recovery_row_for_risk_reduction(
-        position_id,
-        operation="supervisor_noop_fingerprint",
-    )
-    return _lifecycle_supervisor_noop_fingerprint_seen(
-        recovery_meta=dict((row or {}).get("recovery_meta") or {}),
-        fingerprint=fingerprint,
-    )
 
 
-def _supervisor_adaptive_duplicate_seen(
-    position_id: int,
-    verdict: dict[str, Any],
-) -> bool:
-    """Suppress repeated discretionary recommendations in one bar/episode."""
-
-    evidence = dict(verdict.get("evidence") or {})
-    closed_bar_key = str(evidence.get("closed_bar_key") or "")
-    trigger_key = "|".join(
-        sorted({str(item) for item in evidence.get("trigger_tags") or [] if str(item)})
-    )
-    if not closed_bar_key or not trigger_key:
-        return False
-    if is_hard_supervisor_action(
-        action=str(verdict.get("requested_action") or verdict.get("action") or ""),
-        summary_reason=str(verdict.get("summary_reason") or ""),
-        evidence=evidence,
-    ):
-        return False
-    fingerprint = str(verdict.get("action_fingerprint") or "")
-    if not fingerprint:
-        return False
-    row = _load_recovery_row_for_risk_reduction(
-        int(position_id or 0),
-        operation="supervisor_adaptive_duplicate",
-    )
-    meta = dict((row or {}).get("recovery_meta") or {})
-    return bool(
-        str(meta.get("supervisor_last_adaptive_closed_bar_key") or "")
-        == closed_bar_key
-        and str(meta.get("supervisor_last_adaptive_trigger_key") or "")
-        == trigger_key
-        and str(meta.get("supervisor_last_adaptive_fingerprint") or "")
-        == fingerprint
-        and str(meta.get("supervisor_posture") or "")
-        == str(evidence.get("supervisor_posture") or "")
-    )
 
 
-def _remember_supervisor_noop(position: dict[str, Any], verdict: dict[str, Any], *, fingerprint: str, reason: str) -> None:
-    pid = int(position.get("position_id") or position.get("ticket") or 0)
-    _remember_supervisor_state(
-        position,
-        verdict,
-        broker="ctrader",
-        strategy_name=_current_loop_strategy_name(),
-    )
-    live_close_settlement.merge_recovery_position_meta(
-        pid,
-        {
-            "last_supervisor_noop_fingerprint": str(fingerprint or ""),
-            "last_supervisor_noop_reason": str(reason or ""),
-            "last_supervisor_noop_ts": time.time(),
-        },
-    )
 
 
-def _log_supervisor_decision(
-    *,
-    position: dict[str, Any],
-    verdict: dict[str, Any],
-    risk_verdict: dict[str, Any] | None,
-    acct: dict | None,
-    cfg,
-    event_type: str,
-    tick: int,
-) -> str:
-    if not _LEDGER:
-        return ""
-    try:
-        return _LEDGER.log_decision(
-            **_lifecycle_build_supervisor_decision_ledger_payload(
-                position=position,
-                verdict=verdict,
-                risk_state=live_close_settlement.risk_state_with_verdict_dict(risk_verdict or {}),
-                risk_verdict=risk_verdict,
-                account=acct,
-                cfg=cfg,
-                event_type=event_type,
-                tick=tick,
-                session_pnl=live_state_get("session_pnl", 0.0),
-                fallback_decision_ts=time.time(),
-            )
-        )
-    except Exception as exc:
-        logger.warning("[live] supervisor ledger failed for pos {}: {}", position.get("position_id"), exc)
-        return ""
 
 
 _float_payload_value = _lifecycle_float_payload_value
@@ -2686,205 +1721,21 @@ def _candidate_verdict(candidate: ProtectionCandidate) -> dict[str, Any]:
     )
 
 
-def _log_protection_candidate_superseded(
-    candidate: ProtectionCandidate,
-    *,
-    cfg,
-    tick: int,
-    reason: str,
-    acct: dict | None = None,
-) -> None:
-    if not candidate.position:
-        return
-    trace_fields = _lifecycle_build_protection_superseded_trace_fields(
-        candidate_payload=asdict(candidate),
-        risk_action=candidate.risk_action,
-        reason=reason,
-    )
-    _log_supervisor_trace(
-        position=candidate.position,
-        verdict=_candidate_verdict(candidate),
-        cfg=cfg,
-        tick=tick,
-        **trace_fields,
-        acct=acct,
-    )
 
 
-def _supervisor_tighten_sl_plan(position: dict[str, Any], target_sl: float, quote: dict[str, Any] | None = None) -> dict[str, Any]:
-    try:
-        from config.runtime_config import shared as _runtime_cfg
-
-        cfg = _runtime_cfg()
-        policy = {
-            "min_stop_distance_points": getattr(cfg, "supervisor_min_stop_distance_points", 0.20),
-            "stop_safety_buffer_ratio": getattr(cfg, "supervisor_stop_safety_buffer_ratio", 0.00008),
-            "min_tighten_delta_points": getattr(cfg, "supervisor_min_tighten_delta_points", 0.01),
-            "quote_max_age_seconds": getattr(cfg, "supervisor_quote_max_age_seconds", 10.0),
-        }
-    except Exception:
-        policy = {}
-    return _lifecycle_build_supervisor_tighten_sl_plan(
-        **_lifecycle_build_supervisor_tighten_sl_plan_inputs(
-            position=position,
-            target_sl=target_sl,
-            quote=quote,
-            policy=policy,
-        ),
-    )
 
 
-def _target_tp_is_extension(position: dict[str, Any], target_tp: float) -> bool:
-    return _lifecycle_target_tp_is_extension(
-        **_lifecycle_build_target_tp_extension_inputs(
-            position=position,
-            target_tp=target_tp,
-        ),
-    )
 
 
-def _log_supervisor_position_event(
-    *,
-    position: dict[str, Any],
-    event_type: str,
-    details: dict[str, Any],
-    realized_pnl: float = 0.0,
-) -> None:
-    if not _LEDGER:
-        return
-    try:
-        _LEDGER.log_position_event(
-            **_lifecycle_build_supervisor_position_event_payload(
-                position=position,
-                event_type=event_type,
-                details=details,
-                realized_pnl=realized_pnl,
-            )
-        )
-    except Exception as exc:
-        logger.debug("[live] supervisor position event {} failed for pos {}: {}", event_type, position.get("position_id"), exc)
 
 
-def _log_supervisor_trace(
-    *,
-    position: dict[str, Any],
-    verdict: dict[str, Any],
-    cfg,
-    tick: int,
-    stage: str,
-    outcome: str,
-    decision_id: str = "",
-    risk_action: str = "",
-    risk_verdict: dict[str, Any] | None = None,
-    execution_status: str = "",
-    execution_reason: str = "",
-    execution: dict[str, Any] | None = None,
-    acct: dict | None = None,
-) -> str:
-    if not _LEDGER:
-        return ""
-    try:
-        return _LEDGER.log_position_supervisor_trace(
-            **_lifecycle_build_supervisor_trace_ledger_payload(
-                position=position,
-                verdict=verdict,
-                cfg=cfg,
-                tick=tick,
-                stage=stage,
-                outcome=outcome,
-                decision_id=decision_id,
-                risk_action=risk_action,
-                risk_verdict=risk_verdict,
-                execution_status=execution_status,
-                execution_reason=execution_reason,
-                execution=execution,
-                account=acct,
-                fallback_event_ts=time.time(),
-            )
-        )
-    except Exception as exc:
-        logger.opt(exception=True).warning(
-            "[live] supervisor trace failed for pos {}: {}",
-            position.get("position_id"),
-            exc,
-        )
-        return ""
 
 
 _supervisor_evaluation_bars: dict[int, str] = {}
 
 
-def _log_supervisor_evaluation(
-    *,
-    position_id: int,
-    verdict: dict[str, Any],
-    tick: int,
-    decision_ts: float | None = None,
-) -> str:
-    """Bar-deduplicated lean evaluation ledger row (see ledger method)."""
-    if not _LEDGER:
-        return ""
-    try:
-        evidence = dict((verdict or {}).get("evidence") or {})
-        bar_key = str(evidence.get("closed_bar_key") or "")
-        if not bar_key:
-            return ""
-        pid = int(position_id or 0)
-        if _supervisor_evaluation_bars.get(pid) == bar_key:
-            return ""
-        _supervisor_evaluation_bars[pid] = bar_key
-        return _LEDGER.log_position_supervisor_evaluation(
-            position_id=str(pid),
-            event_ts=float(decision_ts if decision_ts is not None else time.time()),
-            verdict=verdict,
-        )
-    except Exception as exc:
-        logger.opt(exception=True).warning(
-            "[live] supervisor evaluation ledger failed for pos {}: {}",
-            position_id,
-            exc,
-        )
-        return ""
 
 
-def _delegate_timeout_supervisor_close(
-    *,
-    position: dict[str, Any],
-    verdict: dict[str, Any],
-    cfg: Any,
-    tick: int,
-    acct: dict[str, Any],
-    broker_schedule: dict[str, Any] | None = None,
-) -> bool:
-    pid = int(position.get("position_id") or position.get("ticket") or 0)
-    timeout_context = _build_close_position_risk_context(
-        position_id=pid,
-        close_reason="holding_timeout",
-        mode="live",
-        broker="ctrader",
-        symbol=str(position.get("symbol") or "XAUUSD+"),
-        position=position,
-        cfg=cfg,
-        broker_schedule=broker_schedule,
-    )
-    timeout_holding_seconds = float(timeout_context.get("holding_seconds", 0.0) or 0.0)
-    timeout_limit_seconds = float(timeout_context.get("max_holding_seconds", 0.0) or 0.0)
-    _log_supervisor_trace(
-        position=position,
-        verdict=verdict,
-        cfg=cfg,
-        tick=tick,
-        stage="timeout_delegated",
-        outcome="skipped",
-        execution_status="delegated",
-        execution_reason="main_timeout_path",
-        execution={"timeout_context": timeout_context},
-        acct=acct,
-    )
-    return bool(
-        timeout_limit_seconds > 0
-        and _lifecycle_holding_timeout_is_expired(timeout_context)
-    )
 
 
 def _build_position_supervision_runtime(
@@ -2903,23 +1754,23 @@ def _build_position_supervision_runtime(
             **kwargs,
         ),
         record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
-        log_trace=_log_supervisor_trace,
-        log_evaluation=_log_supervisor_evaluation,
+        log_trace=live_supervision_runtime.log_supervisor_trace,
+        log_evaluation=live_supervision_runtime.log_supervisor_evaluation,
         make_candidate=safety_candidate,
-        recently_applied=_supervisor_recently_applied,
-        delegate_timeout_close=lambda **kwargs: _delegate_timeout_supervisor_close(
+        recently_applied=live_supervision_runtime.supervisor_recently_applied,
+        delegate_timeout_close=lambda **kwargs: live_supervision_runtime.delegate_timeout_supervisor_close(
             broker_schedule=broker_schedule,
             **kwargs,
         ),
         build_tighten_execution_plan=_lifecycle_build_supervisor_tighten_execution_plan,
         build_action_fingerprint=_lifecycle_build_supervisor_action_fingerprint,
-        noop_fingerprint_seen=_supervisor_noop_fingerprint_seen,
-        remember_noop=_remember_supervisor_noop,
+        noop_fingerprint_seen=live_supervision_runtime.supervisor_noop_fingerprint_seen,
+        remember_noop=live_supervision_runtime.remember_supervisor_noop,
         risk_action_for_action=_lifecycle_supervisor_risk_action_for_action,
         build_risk_evaluation_inputs=(
             _lifecycle_build_supervisor_runtime_risk_evaluation_inputs
         ),
-        supervisor_risk_context=lambda position, verdict, **kwargs: _supervisor_risk_context(
+        supervisor_risk_context=lambda position, verdict, **kwargs: live_supervision_runtime.supervisor_risk_context(
             position,
             verdict,
             broker_schedule=broker_schedule,
@@ -2927,15 +1778,15 @@ def _build_position_supervision_runtime(
         ),
         live_state_get=live_state_get,
         evaluate_risk_policy=_evaluate_risk_reduction_policy,
-        log_decision=_log_supervisor_decision,
-        remember_state=_remember_supervisor_state,
+        log_decision=live_supervision_runtime.log_supervisor_decision,
+        remember_state=live_supervision_runtime.remember_supervisor_state,
         execute_tighten=_execute_supervisor_tighten_action,
         execute_reduce=_execute_supervisor_reduce_action,
         execute_close=_execute_supervisor_close_action,
         build_tighten_result_payloads=(
             _lifecycle_build_supervisor_tighten_result_payloads
         ),
-        log_position_event=_log_supervisor_position_event,
+        log_position_event=live_supervision_runtime.log_supervisor_position_event,
         remember_reentry_block=_remember_supervisor_reentry_block,
         track_local_sl_tp=_track_local_sl_tp,
         result_is_position_not_found=live_close_settlement.result_is_position_not_found,
@@ -2968,7 +1819,7 @@ def _build_position_supervision_runtime(
                 **kwargs,
             )
         ),
-        adaptive_duplicate_seen=_supervisor_adaptive_duplicate_seen,
+        adaptive_duplicate_seen=live_supervision_runtime.supervisor_adaptive_duplicate_seen,
     )
 
 
@@ -3683,7 +2534,7 @@ def _install_ctrader_live_listener(bridge) -> None:
                     cfg = _rc()
                 except Exception:
                     cfg = None
-                enriched = _enrich_positions_with_path_metrics(
+                enriched = live_supervision_runtime.enrich_positions_with_path_metrics(
                     positions,
                     cfg=cfg,
                     now_ts=now_ts,
@@ -4182,7 +3033,7 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
         cfg = None
 
     def _enrich_positions(pos_list: list[Any]) -> list[dict]:
-        return _enrich_positions_with_path_metrics(
+        return live_supervision_runtime.enrich_positions_with_path_metrics(
             pos_list,
             cfg=cfg,
             now_ts=time.time(),
@@ -5011,7 +3862,7 @@ def _publish_fresh_position_reconcile(
     try:
         from config.runtime_config import shared as _rc
 
-        positions = _enrich_positions_with_path_metrics(
+        positions = live_supervision_runtime.enrich_positions_with_path_metrics(
             positions,
             cfg=_rc(),
             now_ts=observed_at,
@@ -6843,12 +5694,12 @@ def _log_protection_execution_payloads(
     log_position_event: bool = True,
 ) -> None:
     if log_position_event and result_payloads.get("position_event_type"):
-        _log_supervisor_position_event(
+        live_supervision_runtime.log_supervisor_position_event(
             position=position,
             event_type=result_payloads["position_event_type"],
             details=result_payloads["position_event_details"],
         )
-    _log_supervisor_trace(
+    live_supervision_runtime.log_supervisor_trace(
         position=position,
         verdict=verdict_payload,
         cfg=cfg,
@@ -7062,7 +5913,7 @@ def _prepare_protection_candidate_execution(
         bridge_connected=bool(getattr(bridge, "is_connected", False)),
     )
     risk_verdict = _evaluate_risk_reduction_policy(candidate.risk_action, risk_context).to_dict()
-    decision_id = _log_supervisor_decision(
+    decision_id = live_supervision_runtime.log_supervisor_decision(
         position=position,
         verdict=verdict_payload,
         risk_verdict=risk_verdict,
@@ -7319,7 +6170,7 @@ def _defer_market_closed_holding_timeout(
         "applied_controls": {"close_reason": "holding_timeout"},
         "duplicate_audit": False,
     }
-    _log_supervisor_trace(
+    live_supervision_runtime.log_supervisor_trace(
         position=position,
         verdict=verdict_payload,
         cfg=cfg,
@@ -7459,7 +6310,7 @@ def _enforce_holding_timeout(
             holding_seconds=holding_seconds,
             max_holding_seconds=max_holding_seconds,
         )
-        decision_id = _log_supervisor_decision(
+        decision_id = live_supervision_runtime.log_supervisor_decision(
             position=dict(p),
             verdict=verdict_payload,
             risk_verdict=close_verdict.to_dict(),
@@ -7470,7 +6321,7 @@ def _enforce_holding_timeout(
         )
         if not close_verdict.allowed:
             logger.warning("[live] holding timeout close blocked pos={} reason={}", pid, close_verdict.reason)
-            _log_supervisor_trace(
+            live_supervision_runtime.log_supervisor_trace(
                 position=dict(p),
                 verdict=verdict_payload,
                 cfg=cfg,
@@ -7494,7 +6345,7 @@ def _enforce_holding_timeout(
             )
         except Exception as exc:
             logger.warning("[live] holding timeout close exception pos={}: {}", pid, exc)
-            _log_supervisor_trace(
+            live_supervision_runtime.log_supervisor_trace(
                 position=dict(p),
                 verdict=verdict_payload,
                 cfg=cfg,
@@ -7512,7 +6363,7 @@ def _enforce_holding_timeout(
             live_close_settlement.remember_close_reason(pid, "holding_timeout")
             live_close_settlement.remember_close_verdict(pid, close_verdict)
             handled.add(pid)
-            _log_supervisor_trace(
+            live_supervision_runtime.log_supervisor_trace(
                 position=dict(p),
                 verdict=verdict_payload,
                 cfg=cfg,
@@ -7551,7 +6402,7 @@ def _enforce_holding_timeout(
                         action="holding_timeout_market_closed_rejection",
                         error=exc,
                     )
-            _log_supervisor_trace(
+            live_supervision_runtime.log_supervisor_trace(
                 position=dict(p),
                 verdict=verdict_payload,
                 cfg=cfg,
@@ -7582,7 +6433,7 @@ def _run_position_protection_cycle(
     runtime = PositionProtectionCycleRuntime(
         enforce_holding_timeout=_enforce_holding_timeout,
         entry_protection_repair_candidates=_entry_protection_repair_candidates,
-        log_candidate_superseded=_log_protection_candidate_superseded,
+        log_candidate_superseded=live_supervision_runtime.log_protection_candidate_superseded,
         execute_candidate=_execute_protection_candidate,
         run_position_supervision=_run_position_supervision,
         protection_candidate_to_safety=protection_candidate_to_safety,

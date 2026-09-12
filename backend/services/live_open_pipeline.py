@@ -65,6 +65,7 @@ from loguru import logger
 from typing import Any
 import time
 from backend.services import live_safety_watchdog
+from backend.services import live_supervision_runtime
 
 
 def _resolve_open_trade_bridge_meta(bridge: Any) -> dict[str, Any]:
@@ -294,7 +295,7 @@ def _prepare_open_trade_candidate(
             "block_reason": "no_positive_edge_after_costs",
             "skip_stage": "entry_cost_edge",
         }
-    position_supervisor_binding = _live_service()._select_position_supervisor_binding_for_open(
+    position_supervisor_binding = live_supervision_runtime.select_position_supervisor_binding_for_open(
         cfg=cfg,
         composite=composite,
     )

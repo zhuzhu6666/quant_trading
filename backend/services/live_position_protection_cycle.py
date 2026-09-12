@@ -272,6 +272,7 @@ from typing import Any
 from loguru import logger
 import time
 from backend.services import live_safety_watchdog
+from backend.services import live_supervision_runtime
 from backend.services.live_state_store import (
     _LIVE_STATE_LOCK,
     _live_state,
@@ -444,12 +445,12 @@ def _log_protection_execution_payloads(
     log_position_event: bool = True,
 ) -> None:
     if log_position_event and result_payloads.get("position_event_type"):
-        _live_service()._log_supervisor_position_event(
+        live_supervision_runtime.log_supervisor_position_event(
             position=position,
             event_type=result_payloads["position_event_type"],
             details=result_payloads["position_event_details"],
         )
-    _live_service()._log_supervisor_trace(
+    live_supervision_runtime.log_supervisor_trace(
         position=position,
         verdict=verdict_payload,
         cfg=cfg,
@@ -663,7 +664,7 @@ def _prepare_protection_candidate_execution(
         bridge_connected=bool(getattr(bridge, "is_connected", False)),
     )
     risk_verdict = _live_service()._evaluate_risk_reduction_policy(candidate.risk_action, risk_context).to_dict()
-    decision_id = _live_service()._log_supervisor_decision(
+    decision_id = live_supervision_runtime.log_supervisor_decision(
         position=position,
         verdict=verdict_payload,
         risk_verdict=risk_verdict,
@@ -904,7 +905,7 @@ def _defer_market_closed_holding_timeout(
         "applied_controls": {"close_reason": "holding_timeout"},
         "duplicate_audit": False,
     }
-    _live_service()._log_supervisor_trace(
+    live_supervision_runtime.log_supervisor_trace(
         position=position,
         verdict=verdict_payload,
         cfg=cfg,
@@ -1044,7 +1045,7 @@ def enforce_holding_timeout(
             holding_seconds=holding_seconds,
             max_holding_seconds=max_holding_seconds,
         )
-        decision_id = _live_service()._log_supervisor_decision(
+        decision_id = live_supervision_runtime.log_supervisor_decision(
             position=dict(p),
             verdict=verdict_payload,
             risk_verdict=close_verdict.to_dict(),
@@ -1055,7 +1056,7 @@ def enforce_holding_timeout(
         )
         if not close_verdict.allowed:
             logger.warning("[live] holding timeout close blocked pos={} reason={}", pid, close_verdict.reason)
-            _live_service()._log_supervisor_trace(
+            live_supervision_runtime.log_supervisor_trace(
                 position=dict(p),
                 verdict=verdict_payload,
                 cfg=cfg,
@@ -1079,7 +1080,7 @@ def enforce_holding_timeout(
             )
         except Exception as exc:
             logger.warning("[live] holding timeout close exception pos={}: {}", pid, exc)
-            _live_service()._log_supervisor_trace(
+            live_supervision_runtime.log_supervisor_trace(
                 position=dict(p),
                 verdict=verdict_payload,
                 cfg=cfg,
@@ -1097,7 +1098,7 @@ def enforce_holding_timeout(
             live_close_settlement.remember_close_reason(pid, "holding_timeout")
             live_close_settlement.remember_close_verdict(pid, close_verdict)
             handled.add(pid)
-            _live_service()._log_supervisor_trace(
+            live_supervision_runtime.log_supervisor_trace(
                 position=dict(p),
                 verdict=verdict_payload,
                 cfg=cfg,
@@ -1136,7 +1137,7 @@ def enforce_holding_timeout(
                         action="holding_timeout_market_closed_rejection",
                         error=exc,
                     )
-            _live_service()._log_supervisor_trace(
+            live_supervision_runtime.log_supervisor_trace(
                 position=dict(p),
                 verdict=verdict_payload,
                 cfg=cfg,

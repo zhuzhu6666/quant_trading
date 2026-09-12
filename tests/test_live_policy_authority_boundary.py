@@ -21,6 +21,7 @@ from backend.services.position_supervisor_governance import (
     materialize_position_supervisor_candidate_observations,
 )
 from tests.canonical_fixture import make_canonical_sqlite
+from backend.services import live_supervision_runtime
 
 
 def _seed_candidate_observation_facts(db_path: Path) -> None:
@@ -100,8 +101,7 @@ def test_live_service_has_no_approved_supervisor_candidate_dependency() -> None:
 def test_frozen_live_supervision_only_evaluates_projected_template(monkeypatch) -> None:
     traces: list[dict] = []
     monkeypatch.setattr(
-        live_service,
-        "_log_supervisor_trace",
+        live_supervision_runtime, "log_supervisor_trace",
         lambda **kwargs: traces.append(kwargs),
     )
     # Isolate the shared recovery-store boundaries: the noop dedup is
@@ -109,13 +109,11 @@ def test_frozen_live_supervision_only_evaluates_projected_template(monkeypatch) 
     # same deterministic hold fingerprint would suppress the evaluation
     # trace and the test would also upsert production state.
     monkeypatch.setattr(
-        live_service,
-        "_supervisor_noop_fingerprint_seen",
+        live_supervision_runtime, "supervisor_noop_fingerprint_seen",
         lambda *_args, **_kwargs: False,
     )
     monkeypatch.setattr(
-        live_service,
-        "_remember_supervisor_noop",
+        live_supervision_runtime, "remember_supervisor_noop",
         lambda *_args, **_kwargs: None,
     )
     cfg = SimpleNamespace(
