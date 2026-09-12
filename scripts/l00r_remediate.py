@@ -9,7 +9,14 @@ Facts re-verified before this script was written (read-only, 2026-09-12):
 
 The canonical event stream is immutable, so re-tagging writes a learning
 revision (new latest event per review id).  experience_memory rows whose
-review is no longer learning-eligible are deleted after a JSON backup.
+review is no longer learning-eligible are RETAGGED in place with the new
+attribution_integrity after a JSON backup.
+
+Correction 2026-09-12 (v1.10): the first run deleted those rows instead.
+Principle 4 (data is not reproducible, structure is) and section 5.3 of the
+repair plan both forbid dropping samples; L0-0R asks for a fact-based retag,
+not a purge.  The 86 deleted rows were restored from the backup and this
+script now retags instead of deleting.
 """
 
 from __future__ import annotations
@@ -71,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="report only (default)")
-    mode.add_argument("--apply", action="store_true", help="write revisions and prune")
+    mode.add_argument("--apply", action="store_true", help="write revisions and retag")
     args = parser.parse_args(argv)
 
     conn = get_state_pg_conn(read_only=not args.apply)
@@ -91,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             sum(1 for t in revision_targets if t["new_integrity"] == RESTART_AFFECTED),
         )
         print(f"pool_only (no retag)  : {len(pool_only)}")
-        print(f"review ids to prune   : {len(target_ids)}")
+        print(f"review ids to retag   : {len(target_ids)}")
 
         placeholders = ", ".join("?" for _ in target_ids)
         memory_rows = _execute(
@@ -157,12 +164,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         print("recovery rows retagged:", getattr(retagged, "rowcount", "?"))
 
-        deleted = _execute(
-            conn,
-            f"DELETE FROM experience_memory WHERE source_id IN ({placeholders})",
-            tuple(target_ids),
-        )
-        print("experience_memory rows deleted:", getattr(deleted, "rowcount", "?"))
+        retagged_rows = 0
+        for target in revision_targets + pool_only:
+            new_integrity = target["new_integrity"] or target.get("attribution_integrity")
+            if not new_integrity:
+                continue
+            target_rows = _execute(
+                conn,
+                "SELECT experience_id, decision_context_json FROM experience_memory WHERE source_id = ?",
+                (target["review_id"],),
+            ).fetchall()
+            for memory_row in target_rows:
+                ctx = json.loads(memory_row["decision_context_json"] or "{}")
+                ctx["attribution_integrity"] = new_integrity
+                _execute(
+                    conn,
+                    "UPDATE experience_memory SET decision_context_json = ? WHERE experience_id = ?",
+                    (json.dumps(ctx, ensure_ascii=False), memory_row["experience_id"]),
+                )
+                retagged_rows += 1
+        print("experience_memory rows retagged (never deleted):", retagged_rows)
 
         conn.commit()
         print("committed")
