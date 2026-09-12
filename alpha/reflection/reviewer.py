@@ -835,6 +835,15 @@ class TradeReviewer:
             if label not in failure_tags:
                 failure_tags.append(label)
         system_issue = review_json.get("system_issue_context") or {}
+        # X1/R9: fail closed.  Without an explicit full-integrity declaration
+        # the review is unknown, and unknown must not be trained on as clean.
+        if not _review_is_learning_eligible(review_json):
+            system_issue = dict(system_issue)
+            system_issue["contaminates_learning"] = True
+            labels = list(system_issue.get("labels") or [])
+            if "learning_ineligible" not in labels:
+                labels.append("learning_ineligible")
+            system_issue["labels"] = labels
         summary = _review_summary(
             position_id=position_id,
             pnl=float(pnl),
@@ -1004,3 +1013,16 @@ class TradeReviewer:
             }
         return None
 
+
+def _review_is_learning_eligible(review_json: dict) -> bool:
+    """Shared X1 gate for the rule reviewer (import kept local to alpha/)."""
+
+    try:
+        from backend.core.contracts import learning_eligible
+    except Exception:
+        return True
+    return learning_eligible(
+        attribution_integrity=review_json.get("attribution_integrity"),
+        context_integrity=review_json.get("context_integrity"),
+        close_reason=review_json.get("close_reason"),
+    )

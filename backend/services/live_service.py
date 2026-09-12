@@ -2330,7 +2330,7 @@ def _position_path_metrics_runtime() -> PositionPathMetricsRuntime:
         position_unrealized_pnl=_position_unrealized_pnl,
         now=time.time,
         loop_strategy_name=_current_loop_strategy_name("factor_pipeline_v4"),
-        default_context_integrity=_RECOVERY_CONTEXT_FULL,
+        default_context_integrity=_RECOVERY_CONTEXT_PARTIAL,
         build_update=_lifecycle_build_position_path_metrics_update,
         normalize_path_state=normalize_path_state,
         update_path_metrics=update_position_path_metrics,
@@ -2470,7 +2470,7 @@ def _evaluate_position_supervisor_for_position(
         upsert_recovery_position=_upsert_recovery_position_state,
         build_state_upsert_payload=_lifecycle_build_supervisor_state_upsert_payload,
         loop_strategy_name=_current_loop_strategy_name(""),
-        default_context_integrity=_RECOVERY_CONTEXT_FULL,
+        default_context_integrity=_RECOVERY_CONTEXT_PARTIAL,
         record_aux_failure=_record_risk_reduction_aux_failure,
         after_persist=after_persist,
     )
@@ -2558,7 +2558,7 @@ def _remember_supervisor_state(
                 broker=broker,
                 strategy_name=strategy_name,
                 loop_strategy_name=_current_loop_strategy_name(),
-                default_context_integrity=_RECOVERY_CONTEXT_FULL,
+                default_context_integrity=_RECOVERY_CONTEXT_PARTIAL,
                 action_applied=action_applied,
                 applied_ts=time.time() if action_applied else 0.0,
             ),
@@ -2593,7 +2593,7 @@ def _remember_protection_state(
                 broker=broker,
                 strategy_name=strategy_name,
                 loop_strategy_name=_current_loop_strategy_name(),
-                default_context_integrity=_RECOVERY_CONTEXT_FULL,
+                default_context_integrity=_RECOVERY_CONTEXT_PARTIAL,
                 action_applied=action_applied,
                 applied_ts=time.time() if action_applied else 0.0,
             ),
@@ -3509,7 +3509,7 @@ def _ensure_open_ledger_for_recovered_close(
         return ""
 
 
-def _lookup_recovery_context_integrity(position_id: int, default: str = _RECOVERY_CONTEXT_FULL) -> str:
+def _lookup_recovery_context_integrity(position_id: int, default: str = _RECOVERY_CONTEXT_PARTIAL) -> str:
     return _recovery_position_store().context_integrity(
         position_id,
         default=default,

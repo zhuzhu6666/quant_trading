@@ -197,6 +197,7 @@ STATE_SCHEMA_MIGRATIONS: Final[tuple[StateSchemaMigration, ...]] = (
     StateSchemaMigration(34, "governance_mutation_intent_overlay_hash", "0034_governance_mutation_intent_overlay_hash.sql"),
     StateSchemaMigration(35, "retire_v16_cognition_ledgers", "0035_retire_v16_cognition_ledgers.sql"),
     StateSchemaMigration(36, "execution_provenance", "0036_execution_provenance.sql"),
+    StateSchemaMigration(37, "recovery_attribution_integrity", "0037_recovery_attribution_integrity.sql"),
 )
 STATE_SCHEMA_LATEST_VERSION: Final[int] = STATE_SCHEMA_MIGRATIONS[-1].version
 # Runtime code consumes the complete checked-in state contract.  A process

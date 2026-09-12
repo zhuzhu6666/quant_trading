@@ -30,7 +30,7 @@ from backend.services.review_contract import (
     build_execution_quality_evidence,
     classify_4label_outcome,
     normalize_trade_review_contract,
-    review_has_system_contamination,
+    review_learning_eligible,
 )
 from backend.services.trade_lesson_memory import trade_review_payload_from_row
 from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
@@ -735,7 +735,9 @@ def rebuild_learning_state(conn: sqlite3.Connection) -> tuple[int, int]:
 
     for row in reviews:
         review_json = _review_payload(conn, row)
-        if review_has_system_contamination(review_json):
+        # X1/R9: fail closed.  A review without an explicit full-integrity
+        # declaration is unknown, and unknown is refused rather than rebuilt.
+        if not review_learning_eligible(review_json):
             continue
         experience_builder.build_from_review(
             trade_review_payload_from_row(row, conn=conn),
