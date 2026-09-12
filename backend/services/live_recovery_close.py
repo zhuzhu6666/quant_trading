@@ -125,15 +125,16 @@ def replay_recovered_close(
     # Why did this position close?  Reconciliation only knows that it is gone.
     # A durable supervisor-close reason is authoritative for a direct action;
     # a fill matching our broker-side protection is the next-best natural
-    # lifecycle proof; everything else stays conservatively labelled.
+    # lifecycle proof; without either, L0-0R forbids guessing a supervisor
+    # vocabulary reason — the close stays chain_broken.
     reason_resolution = classify_close_reason_from_recovery(
         replayed=True,
         real_pnl=real_pnl,
         position_state=position_state,
-        fallback_reason="restart_replay",
+        fallback_reason="chain_broken",
     )
 
-    resolved_close_reason = str(reason_resolution.get("close_reason") or "restart_replay")
+    resolved_close_reason = str(reason_resolution.get("close_reason") or "chain_broken")
     resolved_close_reason_source = str(
         reason_resolution.get("close_reason_source")
         or ("external_broker_close" if resolved_close_reason == "broker_close" else "restart_replay")
@@ -343,7 +344,7 @@ def retire_broker_missing_position(
         replayed=True,
         real_pnl=real_pnl,
         position_state=position_state,
-        fallback_reason="restart_replay",
+        fallback_reason="chain_broken",
     )
     if not runtime.replay_close(
         broker=broker,
@@ -355,7 +356,7 @@ def retire_broker_missing_position(
         return False
 
     now = runtime.now()
-    trade_close_reason = str(reason_resolution.get("close_reason") or "restart_replay")
+    trade_close_reason = str(reason_resolution.get("close_reason") or "chain_broken")
     trade_close_reason_source = str(
         reason_resolution.get("close_reason_source") or "restart_replay"
     )

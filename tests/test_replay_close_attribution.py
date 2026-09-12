@@ -143,8 +143,8 @@ def test_build_replayed_payloads_carries_attribution_into_review():
     review = payload["review"]
     assert review["contributions"] == {"momentum": 0.4}
     assert review["attribution_integrity"] == "full"
-    # Without SL-hit evidence the close reason stays conservative.
-    assert review["close_reason"] == "restart_replay"
+    # Without SL-hit evidence the close stays chain_broken (L0-0R: no guess).
+    assert review["close_reason"] == "chain_broken"
 
 
 def test_build_replayed_payloads_without_engine_keeps_legacy_contract():

@@ -1015,12 +1015,16 @@ class TradeReviewer:
 
 
 def _review_is_learning_eligible(review_json: dict) -> bool:
-    """Shared X1 gate for the rule reviewer (import kept local to alpha/)."""
+    """Shared X1 gate for the rule reviewer (import kept local to alpha/).
+
+    Fails closed: if the contract module cannot be imported, the review is
+    not learning-eligible — unknown integrity must never read as clean.
+    """
 
     try:
         from backend.core.contracts import learning_eligible
     except Exception:
-        return True
+        return False
     return learning_eligible(
         attribution_integrity=review_json.get("attribution_integrity"),
         context_integrity=review_json.get("context_integrity"),

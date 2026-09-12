@@ -1662,11 +1662,11 @@ def test_build_replayed_close_payloads_prefers_real_pnl_and_preserves_contracts(
         "decision_ts": 456.7,
         "portfolio_state": {},
         "action_score": 12.5,
-        "action_reason": "restart_replay_close",
+        "action_reason": "chain_broken",
         "action_json": {
             "position_id": 301,
             "replayed": True,
-            "close_reason": "restart_replay",
+            "close_reason": "chain_broken",
             "real_pnl": {
                 "net": 12.5,
                 "exec_price": 1.2345,
@@ -1684,7 +1684,7 @@ def test_build_replayed_close_payloads_prefers_real_pnl_and_preserves_contracts(
         "realized_pnl": 12.5,
         "details": {
             "replayed": True,
-            "close_reason": "restart_replay",
+            "close_reason": "chain_broken",
             "real_pnl": {
                 "net": 12.5,
                 "exec_price": 1.2345,
@@ -1707,7 +1707,7 @@ def test_build_replayed_close_payloads_prefers_real_pnl_and_preserves_contracts(
             "exec_timestamp": 456.7,
             "price_quality": "broker_reported",
         },
-        "close_reason": "restart_replay",
+        "close_reason": "chain_broken",
         "context_integrity": "complete",
     }
 

@@ -1828,7 +1828,11 @@ class BackendReadinessService:
                     finally:
                         conn.close()
                 except Exception:
-                    voting_factors_degraded = []
+                    # An unreadable factor_health table leaves voter health
+                    # unknown, and unknown must not read as clean.
+                    voting_factors_degraded = [
+                        {"factor": "unknown", "status": "UNKNOWN", "score": 0.0}
+                    ]
             return {
                 "ok": healthy,
                 "schema_version": "factor_blend_health.v1",

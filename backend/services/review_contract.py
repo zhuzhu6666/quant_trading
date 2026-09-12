@@ -206,7 +206,7 @@ def classify_close_reason_from_recovery(
     replayed: bool,
     real_pnl: dict[str, Any] | None,
     position_state: dict[str, Any] | None,
-    fallback_reason: str = "restart_replay",
+    fallback_reason: str = "chain_broken",
 ) -> dict[str, Any]:
     """Resolve the close reason for a recovery-replayed close.
 
@@ -216,11 +216,12 @@ def classify_close_reason_from_recovery(
     that caused the close.  Otherwise, when the durable amend intent plus the
     authoritative deal prove the fill matched our broker-side stop-loss, the
     strategy's natural lifecycle holds and the review must say
-    ``broker_close`` — otherwise keep the conservative replay label.
+    ``broker_close`` — otherwise the close stays ``chain_broken`` (L0-0R:
+    no evidence, no guess from the supervisor vocabulary).
     """
 
     base = "broker_close" if str(fallback_reason or "") == "broker_close" else str(
-        fallback_reason or "restart_replay"
+        fallback_reason or "chain_broken"
     )
     if not replayed:
         return {"close_reason": base, "sl_hit_evidence": None}

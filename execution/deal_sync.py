@@ -22,6 +22,8 @@ import math
 import time
 from typing import Any, Mapping, MutableMapping
 
+from backend.core.pnl import net_pnl
+
 logger = logging.getLogger(__name__)
 
 # ── 常量 ─────────────────────────────────────────────────────────
@@ -566,7 +568,7 @@ def _cd_to_real_pnl(cd: dict) -> dict:
         "gross": gross,
         "swap": swap,
         "commission": commission,
-        "net": gross + swap + commission,
+        "net": net_pnl(gross, swap, commission),
         "entry_price": cd.get("entry_price", 0.0),
         "exec_price": cd.get("exec_price", 0.0),
         "price_contract": cd.get("price_contract", "unknown"),

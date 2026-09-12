@@ -65,7 +65,6 @@ for row, old, new_int, new_ctx in plan:
 conn.commit()
 cur.execute('SELECT count(*) FROM runtime.experience_memory')
 after = cur.fetchone()[0]
-cur.execute(chr(34) + 'x' + chr(34)) if False else None
 cur.execute("SELECT count(*) FROM runtime.experience_memory WHERE decision_context_json::jsonb->>'attribution_integrity' = 'full'")
 full = cur.fetchone()[0]
 print()

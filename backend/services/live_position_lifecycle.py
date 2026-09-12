@@ -1770,7 +1770,7 @@ def build_replayed_close_payloads(
     evidence = dict(sl_hit_evidence or {})
     close_reason = str(
         resolved_close_reason
-        or ("broker_close" if evidence.get("matched") else "restart_replay")
+        or ("broker_close" if evidence.get("matched") else "chain_broken")
     )
     # Attribution: prefer the live engine context, then the durable open
     # snapshot already stored in this row's recovery metadata.  Both are
@@ -1867,7 +1867,7 @@ def classify_close_source_from_evidence(
         source = "restart_replay"
     elif latest:
         event_type = str(latest.get("event_type") or "")
-        if reason not in {"broker_close", "restart_replay"} and event_type == "supervisor_close":
+        if reason not in {"broker_close", "restart_replay", "chain_broken"} and event_type == "supervisor_close":
             source = "supervisor_direct_close"
         elif reason == "broker_close" and event_type == "supervisor_tighten":
             source = "supervisor_tighten_stopout"

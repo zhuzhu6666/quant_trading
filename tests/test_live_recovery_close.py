@@ -315,7 +315,7 @@ def test_retirement_replays_then_marks_and_removes_missing_position():
     ]
     assert order[0] == "replay"
     assert order[1][0] == "mark"
-    assert order[1][1]["close_reason"] == "restart_replay"
+    assert order[1][1]["close_reason"] == "chain_broken"
     assert order[1][1]["meta"]["recovery_observation_reason"] == (
         "broker_position_not_found"
     )
@@ -391,7 +391,7 @@ def test_retirement_ignores_non_supervisor_caller_reason():
         runtime=runtime,
     )
     assert result is True
-    assert order[0][1]["close_reason"] == "restart_replay"
+    assert order[0][1]["close_reason"] == "chain_broken"
 
 
 def test_retirement_keeps_durable_reason_over_caller_reason():

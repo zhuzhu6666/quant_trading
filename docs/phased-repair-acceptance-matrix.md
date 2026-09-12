@@ -1,7 +1,7 @@
 # 分期修复故障与验收矩阵
 
 > Status: active acceptance index
-> Snapshot: 2026-09-10 (Safety/governance enforce active；矩阵仍引用 2026-08 批次的验收证据，最新运行计数以 phased-repair-rollout-status.md 为准)
+> Snapshot: 2026-09-12 (新增 §11 L0 事实层修复批；§2-§10 仍引用各自批次的验收证据，最新运行计数以 phased-repair-rollout-status.md 为准)
 > Scope: reproducible acceptance evidence and unresolved live evidence
 
 本文只记录“如何证明”和当前未满足的运行证据。架构事实见 `system-source-of-truth.md`，实施阶段见 `planning/production-autonomy-repair-optimization-plan.md`，当前状态见 `phased-repair-rollout-status.md`。已完成批次的详细流水通过 Git 历史追溯，不在本矩阵重复保存。
@@ -200,3 +200,22 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 - 四个静态发布目标逐项通过 release gate、受控重启和观察窗口。
 
 这些证据完成前，P6 和后续静态开关保持关闭；历史缺失 intent/lineage 保持显式缺失，不回填猜测值。
+
+## 11. L0 事实层修复批（2026-09-12，commits 9ea0f22d / 6e33ae66 / e64dae4d + 后续 fail-closed 收口）
+
+| 合同 | 权威 / 针对性证据 |
+|---|---|
+| 学习准入单一谓词（X1/L0-0R） | `backend.core.contracts.learning_eligible` + `CONTAMINATED_CLOSE_REASONS`；`tests/test_learning_eligible_contract.py`；入口 experience_builder / autonomous_learning / learning_backfill / reviewer / trade_lesson_memory 只复用谓词，缺显式 `full` 一律拒绝 |
+| 恢复关闭去猜测化（L0-0R-b） | 无证据 recovery close 一律 `chain_broken`，恢复路径不再新产 `restart_replay`（读取侧兼容保留）；`tests/test_live_recovery_close.py`、`tests/test_live_service_lifecycle.py`、`tests/test_replay_close_attribution.py`、`tests/test_live_position_lifecycle.py` |
+| recovery 归因存量重标（migration 0037） | `runtime.recovery_position_state.attribution_integrity`：234 行 = 88 `chain_broken` + 146 `restart_affected` + 0 `unknown`；`context_integrity` 232 full / 2 partial；`scripts/l00r_remediate.py` 只重标不删除，86 条误删 experience 行已从备份恢复（236 行 / 学习池 150） |
+| 统一净额（L0-2） | `backend.core.pnl.net_pnl` / `net_pnl_sql`；计算点收敛于 realized_pnl / session_restore / learning_backfill / deal_sync；`tests/test_deal_sync.py` |
+| 执行 provenance（L0-4，migration 0036） | `ctrader_deals`/`broker_execution_intent`.`origin`（autonomous 462 / legacy 51 / unknown 0）+ canonical event `provenance` 列；`tests/test_canonical_v2.py` |
+| review 写入幂等（L0-3） | `_review_event_for_position` 一仓一 review，重复写入返回既有事件；唯一索引方案撤销（121 条为学习层 revision，非重复数据），读取口径按 position 去重 |
+| 阈值 fail-closed（L1-5/L1-6/L1-7） | `min_thesis_break_seconds` 缺失回退 900；efficiency 阈值 0.20；regime 证据门 c=0.6/n=2 进模板 `learning_bounds`；置信度改实测 `_dimension_confidence`（`tests/test_position_supervisor.py`、`tests/test_market_regime.py`、`tests/test_readiness_dimensions_v2.py`） |
+| demo 探索最小单不变量（L1-1） | contracts 断言接入 event sizing，`event_mult<1` 不把探索最小单压成 0；`tests/test_live_risk_sizing.py` |
+| degraded voter 健康可见（M1-D5-B） | `factor_health` 读取失败 → `voting_factor_health` blocker 携带显式 `UNKNOWN` 条目，不静默清空；`tests/test_backend_readiness_contract.py` |
+| 守卫脚本删除（L0-0R-e） | `scripts/preflight_state_guard.py` 已删除，systemd 无 `ExecStartPre` 引用；`tests/conftest.py` 结构性隔离覆盖两条 PG 路由（S0-0） |
+
+本批定向测试基线：fail-closed 收口批 438 passed（learning_eligible/deal_sync/recovery/review/readiness/lifecycle/canonical_v2/position_supervisor 系列）。修复声明本身于 2026-09-12 经实库只读核对成立（`scripts/state_schema_migrate.py --check` current 37 / minimum 37 / ok）。
+
+仍未完成（依赖前置条件，见 planning 文档）：批 7 L1-4 删除猜归因生产线（需 ≥20 笔重标后平仓样本）、批 8（M5-D5 回滚回路压测、M1-D3 影子因子治理、M1-D5-A 健康度接线 shadow）、L1-3 监督器复盘闭环、M5-D6 悬空建议收敛、X2 三层 Kelly 新鲜度。

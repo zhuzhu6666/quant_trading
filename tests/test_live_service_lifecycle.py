@@ -2147,7 +2147,7 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
 
     assert third is True
     assert resolved_row["status"] == "closed_replayed"
-    assert resolved_row["close_reason"] == "restart_replay"
+    assert resolved_row["close_reason"] == "chain_broken"
     assert resolved_row["close_pnl"] == pytest.approx(-10.0)
     assert live_service.no_new_risk_latched(fail_closed=True) is False
 
@@ -2264,7 +2264,7 @@ def test_recovery_bootstrap_accepts_close_deal_before_last_seen_guard(
         conn.close()
 
     assert row["status"] == "closed_replayed"
-    assert row["close_reason"] == "restart_replay"
+    assert row["close_reason"] == "chain_broken"
     assert row["close_pnl"] == pytest.approx(-1.1)
 
 
