@@ -18,7 +18,7 @@ def list_strategies(_user: RequireUser) -> dict:
     """
     out: list[dict] = []
     for name in strategy_registry.list():
-        cls = strategy_registry._strategies.get(name)
+        cls = strategy_registry.get(name)
         timeframes = getattr(cls, "_reg_timeframes", ["H1"]) if cls else ["H1"]
         out.append({
             "id": name,

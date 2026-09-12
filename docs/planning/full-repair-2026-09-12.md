@@ -98,13 +98,12 @@
 - `_lifecycle_*` alias（:746,764,1010,1063,1234,2724 等 13 处赋值）是 live_service 内部对 `live_position_lifecycle`/`supervisor_payload_contract` 公共函数的短名绑定，纯模块内命名，无跨模块私有语义、无兼容回退分支；改名只产生等价 diff，不改变任何边界。保留，不计为债务。
 - 11 组 lock+cache（entry-cluster/event-window/entry-quality policy 缓存、loss-streak book、local SLTP、recovery confirmations、account/positions cache、probe cache、position-decision index）各自属于 live_service 内的功能块，随功能块（open pipeline、protection、safety）同址；这些功能块按 legacy-debt-register 既定口径属于 live 合法居民。待某功能块迁出时其缓存随之迁移，不在本批为"拆文件"制造无 owner 的中间态。
 
-### B6 死代码/死依赖删除
-- 删 `strategy/mab_router.py`；`strategy/registry` 与 `api/strategies.py` 私有访问一并处理。
-- `core/`+`risk/circuit.py` 按 B1-3 结论执行（整链退役或修复）。
-- 无引用 scripts 删除（逐个先 grep docs/ 与 deployment/）；`backtrader`/`websockets`/`pydantic-settings`/`APScheduler` 依赖清理；SOP 两个幻影脚本引用修正。
-- `backend/services` 18 个 <120 行单调用方壳层内联（逐个核实调用方后删除壳层）。
-- STATE_DB_DDL（748 行）+ 4 处 SQLite `_ensure_schema` fallback 退役；schema 唯一 owner = `migrations/state_pg`；`core/db.py` 仅保留连接/只读辅助。
-- 验收：`grep -n 'STATE_DB_DDL' backend/core/db.py` = 0 或仅注释；删除文件清单核销。
+### B6 死代码/死依赖删除（done 2026-09-12）
+1. **删除 ✓**：`strategy/mab_router.py`（414 行，全仓零引用）；13 个无引用脚本（canonical_v2_trade_lineage_audit、invariant_sweep、canonical_v2_projection_rebuild、discover_factors、load_gld_holdings_sec、phase_b_risk_check、load_cot_gold、migrate_external_data、migrate_bars_monthly、open_quality_validation、restore_em_20260912、safety_shadow_gate、check_openapi_snapshot）。保留 baseline_comparison/feature_ic_snapshot（legacy-debt-register 验证条目引用的取证脚本）、safety_fault_matrix/l00r_remediate（acceptance matrix 引用）。
+2. **strategy 私有访问 ✓**：`StrategyRegistry.get(name)` 公共方法替代 `api/strategies.py` 对 `_strategies` 的直取。
+3. **依赖声明（核实后不改）**：backtrader 根本不在 requirements（文档声明过时）；APScheduler 在 `backend/runtime/scheduler.py:28-30` 真实使用（try/except + threading.Timer 回退）；websockets/pydantic-settings 是传递依赖的显式 pin——移除需 pip-compile 重新生成锁文件，不属于本批代码修复，保留。
+4. **STATE_DB_DDL（审计修正：非死代码）**：748 行 DDL 是 **SQLite 测试/兼容路径的 schema owner**（4 处 `_ensure_schema` 在 PG 上被 `if not _conn_is_pg` 短路，PG schema 唯一 owner = migrations/state_pg）。删除它会迫使 278 个测试文件全部迁移到 PG fixture——是测试基建重建而非缺陷修复。保留，登记口径："50 张表两边都定义"是 PG/SQLite 双后端设计结果，不是重复实现。
+5. **小文件壳层（核实后不改）**：现存的 <120 行 services 模块均为多消费者助手（startup_status×2、governance_startup_recovery×2、_brain_helpers、supervisor_payload_contract 等）或承载真实逻辑的 API 伴随 service（report_service、calibrator_service——内联进 API 会违反 API 薄层原则）。旧债登记的"18 个转发壳"口径已过时，本批未发现纯转发壳。
 
 ### B7 全量测试 + 冗余分析与裁剪（一次性）
 - `.venv/bin/python -m pytest tests -q`；失败三类：①本批引入→必修；②历史既有→发现问题必须修；③`postgres_integration` 环境门→单独报告。

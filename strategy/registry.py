@@ -50,6 +50,10 @@ class StrategyRegistry:
     def list(self) -> list[str]:
         return list(self._strategies.keys())
 
+    def get(self, name: str) -> type | None:
+        """Registered strategy class, or None."""
+        return self._strategies.get(name)
+
     def is_active(self, name: str) -> bool:
         return name in self._active
 
