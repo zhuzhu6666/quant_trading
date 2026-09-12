@@ -1,5 +1,6 @@
 import ast
 from pathlib import Path
+from backend.services import live_open_processing
 
 
 LIVE_SERVICE = Path("backend/services/live_service.py")
@@ -193,16 +194,18 @@ def test_open_post_fill_processing_lives_outside_facade():
         "backend/services/live_open_processing.py"
     ).read_text(encoding="utf-8")
 
+    processing_definitions = _definitions(ast.parse(processing_source))
+    # The post-fill wiring moved out of the facade entirely: live_service must
+    # not define these names, and the processing module owns both the engine
+    # and the production adapters.
+    facade_definitions = _definitions(tree)
     for name in (
         "_record_filled_position_open_context",
-        "_record_amended_open_success_context",
-        "_record_amend_failure_after_fill",
+        "record_amended_open_success_context",
+        "record_amend_failure_after_fill",
     ):
-        node = _definitions(tree)[name]
-        assert not any(
-            isinstance(child, (ast.For, ast.While, ast.If, ast.Try, ast.With))
-            for child in ast.walk(node)
-        )
+        assert name not in facade_definitions
+        assert name in processing_definitions
     assert "entry_protection_fail_closed_unavailable" not in source
     assert "entry_protection_fail_closed_unavailable" in processing_source
     assert "def record_filled_position_open_context(" in processing_source

@@ -12,6 +12,7 @@ from backend.services import live_service
 from backend.services.live_loop_controller import LiveLoopController
 from backend.services import live_close_settlement
 from backend.services import live_position_protection_cycle
+from backend.services import live_open_processing
 
 
 class _IdleThread:
@@ -1008,7 +1009,7 @@ def test_record_filled_open_context_persists_even_before_amend_success(monkeypat
         lambda raw, **kwargs: calls["upserts"].append((raw, kwargs)),
     )
 
-    decision_id = live_service._record_filled_position_open_context(
+    decision_id = live_open_processing._record_filled_position_open_context(
         attr_engine=_Attr(),
         broker="ctrader",
         cfg=cfg,
@@ -1062,8 +1063,7 @@ def test_record_amend_failure_after_fill_records_context_status_and_ledger(monke
 
     monkeypatch.setattr(live_service, "_LEDGER", _Ledger())
     monkeypatch.setattr(
-        live_service,
-        "_record_filled_position_open_context",
+        live_open_processing, "_record_filled_position_open_context",
         lambda **kwargs: calls["open_context"].append(kwargs),
     )
     monkeypatch.setattr(
@@ -1086,7 +1086,7 @@ def test_record_amend_failure_after_fill_records_context_status_and_ledger(monke
     composite = SimpleNamespace(direction=1)
     gate = SimpleNamespace(passed=True, reason="passed")
 
-    live_service._record_amend_failure_after_fill(
+    live_open_processing.record_amend_failure_after_fill_from_live(
         attr_engine=SimpleNamespace(),
         bridge=SimpleNamespace(),
         broker="ctrader",
@@ -1180,13 +1180,11 @@ def test_entry_protection_amend_requires_fresh_matching_projection(
         order_block={},
     )
     monkeypatch.setattr(
-        live_service,
-        "_record_amended_open_success_context",
+        live_open_processing, "record_amended_open_success_context",
         lambda **kwargs: calls["success"].append(kwargs),
     )
     monkeypatch.setattr(
-        live_service,
-        "_record_amend_failure_after_fill",
+        live_open_processing, "record_amend_failure_after_fill",
         lambda **kwargs: calls["failure"].append(kwargs),
     )
     monkeypatch.setattr(
@@ -1302,7 +1300,7 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        live_service,
+        live_open_processing,
         "live_state_get",
         lambda key, *args, **kwargs: {"risk": "state"} if key == "risk" else 3.5 if key == "session_pnl" else None,
     )
@@ -1316,7 +1314,7 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
         "schema_version": "position_supervisor_binding.v1",
         "template_id": "position_supervisor:default.v1",
     }
-    live_service._record_amended_open_success_context(
+    live_open_processing.record_amended_open_success_context_from_live(
         attr_engine=_Attr(),
         bridge=SimpleNamespace(),
         broker="ctrader",
