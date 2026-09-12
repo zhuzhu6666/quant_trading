@@ -17,7 +17,7 @@ def test_state_snapshot_reports_consecutive_not_total_session_losses(monkeypatch
     monkeypatch.setattr(endpoints, "_live_get_latest_price", lambda: 3300.0)
     monkeypatch.setattr(endpoints, "_read_closed_loop_status", lambda *_args: {})
 
-    snapshot = endpoints._read_state_snapshot()
+    snapshot = endpoints.read_state_snapshot()
 
     assert snapshot["daily"]["loss"] == 17
     assert snapshot["risk"]["consecutive_loss"] == 2

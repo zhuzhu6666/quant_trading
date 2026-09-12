@@ -158,7 +158,7 @@ def _dependency_error() -> str:
     return ""
 
 
-def _current_row_label(item: dict[str, Any]) -> int:
+def current_row_label(item: dict[str, Any]) -> int:
     outcome = str(item.get("outcome_label") or "").lower()
     pnl = _safe_float(item.get("pnl"))
     net = _safe_float(item.get("net_contribution"))
@@ -216,19 +216,19 @@ def _rolling_factor_features(history: list[dict[str, Any]], *, window: int = 5) 
     )
     sr_n = len(same_regime_items)
     if sr_n >= 3:
-        same_regime_positive_rate = sum(_current_row_label(item) for item in same_regime_items) / sr_n
+        same_regime_positive_rate = sum(current_row_label(item) for item in same_regime_items) / sr_n
         same_regime_pnl_avg = sum(_safe_float(item.get("pnl")) for item in same_regime_items) / sr_n
     else:
         # 样本不足(<3)时退化为全局滚动值,不引入误导信号;
         # sample_count 字段保留实际值,模型可学到置信度。
-        same_regime_positive_rate = sum(_current_row_label(item) for item in items) / n
+        same_regime_positive_rate = sum(current_row_label(item) for item in items) / n
         same_regime_pnl_avg = sum(_safe_float(item.get("pnl")) for item in items) / n
     return {
         "current_entry_contribution": _safe_float(current.get("entry_contribution")),
         "current_net_contribution": _safe_float(current.get("net_contribution")),
         "current_confidence": _safe_float(current.get("confidence")),
         "rolling_sample_count": float(n),
-        "rolling_positive_rate": sum(_current_row_label(item) for item in items) / n,
+        "rolling_positive_rate": sum(current_row_label(item) for item in items) / n,
         "rolling_entry_contribution_avg": sum(_safe_float(item.get("entry_contribution")) for item in items) / n,
         "rolling_net_contribution_avg": sum(_safe_float(item.get("net_contribution")) for item in items) / n,
         "rolling_confidence_avg": sum(_safe_float(item.get("confidence")) for item in items) / n,
@@ -250,7 +250,7 @@ def _rolling_factor_features(history: list[dict[str, Any]], *, window: int = 5) 
     }
 
 
-def _sample_from_row(
+def sample_from_row(
     row: Any,
     *,
     label: int | None = None,
@@ -262,7 +262,7 @@ def _sample_from_row(
     pnl = _safe_float(item.get("pnl"))
     net = _safe_float(item.get("net_contribution"))
     confidence = _safe_float(item.get("confidence"))
-    target_label = _current_row_label(item) if label is None else int(label)
+    target_label = current_row_label(item) if label is None else int(label)
     features = _rolling_factor_features(list(rolling_history or [item]))
     return {
         "sample_id": f"{item.get('review_id') or ''}:{item.get('factor') or ''}",
@@ -490,9 +490,9 @@ class FactorGovernanceLightGBMService:
                         continue
                     future = ordered[idx + 1]
                     samples.append(
-                        _sample_from_row(
+                        sample_from_row(
                             item,
-                            label=_current_row_label(future),
+                            label=current_row_label(future),
                             label_source="next_same_factor_outcome_from_rolling_history",
                             rolling_history=ordered[max(0, idx - 4):idx + 1],
                         )
@@ -1330,9 +1330,9 @@ class FactorGovernanceLightGBMService:
                     continue
                 future = ordered[idx + 1]
                 samples.append(
-                    _sample_from_row(
+                    sample_from_row(
                         item,
-                        label=_current_row_label(future),
+                        label=current_row_label(future),
                         label_source="next_same_factor_outcome_from_rolling_history",
                         rolling_history=ordered[max(0, idx - 4):idx + 1],
                     )

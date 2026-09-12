@@ -9,7 +9,7 @@ from decimal import Decimal
 from fastapi import APIRouter
 
 from backend.core.auth import RequireUser
-from backend.ws.endpoints import _read_state_snapshot
+from backend.ws.endpoints import read_state_snapshot
 
 router = APIRouter(prefix="/api", tags=["state"])
 
@@ -40,4 +40,4 @@ def _json_safe(value):
 @router.get("/state")
 def get_full_state(_user: RequireUser) -> dict:
     """返回完整状态快照，同 WebSocket /ws/state 推送的内容。"""
-    return _json_safe(_read_state_snapshot())
+    return _json_safe(read_state_snapshot())

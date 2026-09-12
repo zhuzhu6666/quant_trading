@@ -3,7 +3,7 @@
 职责:
   1. 从 cTrader get_deals() 拉原始成交记录
   2. 写入 PostgreSQL runtime.ctrader_deals 表 (原始数据锚点)
-  3. 按 position_id 匹配平仓成交, 提取真实 PnL (gross_profit + swap + signed commission)
+  3. 按 position_id 匹配平仓成交, 提取真实 PnL (统一走 backend.core.pnl.net_pnl)
   4. 供 live_service.py 平仓检测后调用
 
 用法:
@@ -377,7 +377,7 @@ def sync_close_deal(
 
     Returns:
         {"gross": gross_profit, "swap": swap, "commission": close_commission,
-         "net": gross_profit + swap + close_commission,
+         "net": net_pnl(gross_profit, swap, close_commission),
          "entry_price": ..., "exec_price": ..., "balance": ...}
         或 None (获取失败).
     """

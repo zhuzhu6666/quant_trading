@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 from backend.core.db import get_state_pg_conn
 from backend.core.state_store import RuntimeStateSchemaError, validate_runtime_state_schema
 
-from backend.services.autonomous_learning import _autonomy_mode
+from backend.services.autonomous_learning import autonomy_mode
 from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 
 
@@ -225,7 +225,7 @@ def _evolution_input_watermark(
     symbol: str,
     timeframe: str,
 ) -> dict[str, Any]:
-    from backend.services.replay_harness import _code_version
+    from backend.services.replay_harness import code_version
     from config import runtime_config
 
     cfg = runtime_config.shared()
@@ -281,7 +281,7 @@ def _evolution_input_watermark(
         "last_closed_bar": last_closed_bar,
         "input_fingerprint": digest.hexdigest(),
         "config_hash": config_hash,
-        "code_version": _code_version(),
+        "code_version": code_version(),
     }
     payload["watermark_fingerprint"] = hashlib.sha256(
         _json.dumps(
@@ -804,7 +804,7 @@ def scheduled_evolution_cycle(
 
         # ── Step 6: 权重更新 (推送到 AWE 消费同一字段) ──
         cb("weights", 88, "recomputing factor weights")
-        report.weights_updated = _update_weights(df=df, apply=False)
+        report.weights_updated = update_weights(df=df, apply=False)
         cb("weights_done", 95, "weights updated" if report.weights_updated else "weights unchanged")
         logger.info("[Evolve] mem after weights: %s", _mem_tag())
 
@@ -1806,7 +1806,7 @@ def _apply_model_governed_downweights(
         return {"attempted": 0, "applied": False, "applications": {}, "error": str(exc)}
 
 
-def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bool:
+def update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bool:
     """计算动态权重并推入 factor_portfolio_weights (AWE 同一字段).
 
     从健康报告读取分数 → WeightPolicy + Shadow OOS → DecisionPolicy → RuntimeConfig.patch.
@@ -1842,7 +1842,7 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
                     "max_observation_age_seconds": 86400.0,
                     "terminalize_mixed_after_recheck": True,
                 }
-                if _autonomy_mode() in {"demo_autonomous", "demo_nursery"}
+                if autonomy_mode() in {"demo_autonomous", "demo_nursery"}
                 else {}
             )
             governance_result["reconcile_application_effects"] = _gov.reconcile_application_effects(
@@ -1988,16 +1988,6 @@ def _update_weights(df: pd.DataFrame | None = None, *, apply: bool = True) -> bo
         })
         logger.info("[Evolve] weights: %d factors → factor_portfolio_weights (via governed service)",
                     len(new_weights))
-
-        if df is not None:
-            try:
-                from core.state import state as _state
-                equity = getattr(_state, "equity", None) or 1000.0
-                from risk.circuit import auto_tune_risk
-                risk_cfg = auto_tune_risk(df, equity)
-                _emit_evolution_story("risk_tuned", risk_cfg)
-            except Exception as e:
-                logger.debug("[Evolve] auto_tune_risk: %s", e)
 
         return True
     except Exception as e:

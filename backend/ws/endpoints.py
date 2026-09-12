@@ -23,7 +23,7 @@ router = APIRouter()
 setup_logging()
 
 
-def _position_to_dict(p: object) -> dict:
+def position_to_dict(p: object) -> dict:
     """统一 PositionInfo dataclass 或 dict → 字典 (含所有字段, 兼容旧 key 名)"""
     if isinstance(p, dict):
         return p
@@ -149,7 +149,7 @@ def _read_closed_loop_status(
     }
 
 
-def _read_state_snapshot() -> dict:
+def read_state_snapshot() -> dict:
     """返回 cTrader 实时快照。live 在跑→实时; 停止→冻结最后数据。
 
     只有从未连接过 cTrader 时才返回全零占位。
@@ -256,7 +256,7 @@ def _read_state_snapshot() -> dict:
         if isinstance(positions, dict) and positions.get("ok"):
             pos_list = positions.get("positions") or []
             if pos_list:
-                p = _position_to_dict(pos_list[0])
+                p = position_to_dict(pos_list[0])
                 pos_data = {
                     "dir": "LONG" if p.get("type") == "buy" else "SHORT",
                     "entry": p.get("price_open", 0.0),
@@ -264,7 +264,7 @@ def _read_state_snapshot() -> dict:
                     "unrealized": p.get("profit") or 0.0,
                 }
         elif isinstance(positions, list) and positions:
-            p = _position_to_dict(positions[0])
+            p = position_to_dict(positions[0])
             pos_data = {
                 "dir": "LONG" if p.get("type") == "buy" else "SHORT",
                 "entry": p.get("price_open", 0.0),
@@ -287,7 +287,7 @@ def _read_state_snapshot() -> dict:
         raw_list = positions.get("positions") if isinstance(positions, dict) else positions if isinstance(positions, list) else []
         if raw_list:
             for p_raw in raw_list:
-                p_dict = _position_to_dict(p_raw)
+                p_dict = position_to_dict(p_raw)
                 positions_list.append({
                     "symbol": p_dict.get("symbol") or "",
                     "type": p_dict.get("type") or "buy",
@@ -415,7 +415,7 @@ async def ws_state(ws: WebSocket) -> None:
     change_task: asyncio.Task | None = None
     try:
         generation = mgr.current_generation(channel)
-        await ws.send_text(json.dumps(_read_state_snapshot(), default=str))
+        await ws.send_text(json.dumps(read_state_snapshot(), default=str))
         # Keep one receive waiter so a client that closes while the state is
         # quiet is removed without requiring a fake heartbeat/poll message.
         disconnect_task = asyncio.create_task(ws.receive())
@@ -437,7 +437,7 @@ async def ws_state(ws: WebSocket) -> None:
                 # State writers are coalesced by the manager's generation
                 # event.  Serialize one complete snapshot per change batch;
                 # there is no per-client timer and no broker/API read here.
-                await ws.send_text(json.dumps(_read_state_snapshot(), default=str))
+                await ws.send_text(json.dumps(read_state_snapshot(), default=str))
             else:
                 change_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

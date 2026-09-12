@@ -44,7 +44,7 @@ from backend.services.v16_posterior_arbitration import (
     build_posterior_arbitration,
 )
 from backend.services.supervisor_payload_contract import (
-    compact_supervisor_mapping as _compact_supervisor_mapping,
+    compact_supervisor_mapping as compact_supervisor_mapping,
 )
 
 

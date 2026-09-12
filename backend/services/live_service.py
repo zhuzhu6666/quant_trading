@@ -5137,7 +5137,7 @@ def schedule_auto_resume_loop(delay_sec: float = _AUTO_RESUME_DELAY_SEC) -> bool
     return True
 
 # ── cTrader 缓存 (防 WS 1s 推送反复击中 Twisted reactor)
-# audit 2026-06-08: WS _read_state_snapshot 每 1s 调 get_account/get_positions,
+# audit 2026-06-08: WS read_state_snapshot 每 1s 调 get_account/get_positions,
 # 每次都走 _get_ctrader → bridge.account_info → _send (Twisted deferred) .
 # cTrader Open API 是顺序协议, 同时多个 _send 互等导致延迟/超时.
 # 加 5s TTL 缓存, WS 1s 推读缓存, 缓解 reactor 竞争.
@@ -5598,8 +5598,8 @@ def _coerce_live_positions(raw_positions) -> list[dict]:
     if isinstance(pos_list, dict):
         pos_list = pos_list.get("positions", []) or []
     if pos_list and not isinstance(pos_list[0], dict):
-        from backend.ws.endpoints import _position_to_dict
-        pos_list = [_position_to_dict(p) for p in pos_list]
+        from backend.ws.endpoints import position_to_dict
+        pos_list = [position_to_dict(p) for p in pos_list]
     # Broker snapshots are JSON projections.  Copy them at this boundary so a
     # stale/enriched compatibility dict cannot retain a recursive nested
     # reference and poison every readiness/API response built from it.
@@ -8626,7 +8626,7 @@ def _should_send_orders(broker: str, *, log_blocking: bool = True) -> bool:
     return False
 
 
-# 模块级,供 _read_state_snapshot 读
+# 模块级,供 read_state_snapshot 读
 _latest_price: float | None = None
 _latest_price_updated_at: float = 0.0
 _latest_bar_price_cache: tuple[float, float] | None = None
@@ -11250,12 +11250,12 @@ def _retry_pending_open_trade(
         else positions_payload
     )
     if positions_probe and not isinstance(positions_probe[0], dict):
-        from backend.ws.endpoints import _position_to_dict
+        from backend.ws.endpoints import position_to_dict
     else:
-        _position_to_dict = None
+        position_to_dict = None
     positions = _tick_normalize_live_positions_payload(
         positions_payload,
-        position_to_dict=_position_to_dict,
+        position_to_dict=position_to_dict,
     )
     current_price = float(last_bar["close"])
     if bridge is not None and hasattr(bridge, "get_spot_quote"):
@@ -11331,12 +11331,12 @@ def _process_tick_existing_decision_bar(
         else positions_payload
     )
     if _positions_probe and not isinstance(_positions_probe[0], dict):
-        from backend.ws.endpoints import _position_to_dict
+        from backend.ws.endpoints import position_to_dict
     else:
-        _position_to_dict = None
+        position_to_dict = None
     pos = _tick_normalize_live_positions_payload(
         positions_payload,
-        position_to_dict=_position_to_dict,
+        position_to_dict=position_to_dict,
     )
 
     current_price = float(last_bar["close"])
@@ -11515,12 +11515,12 @@ def _process_tick_factor_pipeline(
         else positions_payload
     )
     if _positions_probe and not isinstance(_positions_probe[0], dict):
-        from backend.ws.endpoints import _position_to_dict
+        from backend.ws.endpoints import position_to_dict
     else:
-        _position_to_dict = None
+        position_to_dict = None
     pos = _tick_normalize_live_positions_payload(
         positions_payload,
-        position_to_dict=_position_to_dict,
+        position_to_dict=position_to_dict,
     )
     current_price = float(last_bar["close"])
     signal_decision_id = ""

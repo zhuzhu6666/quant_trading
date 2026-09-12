@@ -591,9 +591,9 @@ class StreamingFactorEngine:
         atr_length: int = 10,
         multiplier: float = 3.0,
     ):
-        from alpha.registry import _supertrend_strength_array
+        from alpha.registry import supertrend_strength_array
 
-        return _supertrend_strength_array(
+        return supertrend_strength_array(
             df["high"].values,
             df["low"].values,
             df["close"].values,

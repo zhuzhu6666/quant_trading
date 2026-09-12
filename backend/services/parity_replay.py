@@ -403,15 +403,15 @@ def _build_learning_bundle(report: Mapping[str, Any]) -> dict[str, Any]:
 
     factor_candidates: list[dict[str, Any]] = []
     if factor_rows:
-        from research.factor_governance_lightgbm import _current_row_label, _sample_from_row
+        from research.factor_governance_lightgbm import current_row_label, sample_from_row
 
         for factor_id, rows in sorted(factor_rows.items()):
             for index, row in enumerate(rows[:-1]):
                 if index < 2:
                     continue
-                sample = _sample_from_row(
+                sample = sample_from_row(
                     row,
-                    label=_current_row_label(rows[index + 1]),
+                    label=current_row_label(rows[index + 1]),
                     label_source="next_same_factor_outcome_from_replay_history",
                     rolling_history=rows[max(0, index - 4):index + 1],
                 )

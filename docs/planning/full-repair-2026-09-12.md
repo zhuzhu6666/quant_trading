@@ -18,7 +18,7 @@
 ### P1 overlay 双写者竞态（资金风险面，最高优先级）
 - `backend/services/governance_mutation_coordinator.py:1702-1738` `_persist_overlay`：`INSERT ... ON CONFLICT(overlay_id) DO UPDATE` **整行覆盖** overlay_json/overlay_hash/source/run_id/mutation_id，并把 `legacy_authority_json` 无条件清为 `'{}'`。
 - `backend/services/runtime_config_overlay.py:862-906` `_mutate_overlay`：`_begin_serialized_write`（PG advisory lock / SQLite BEGIN IMMEDIATE）→ 事务内读当前 → `_deep_merge`（:887，replace_overlay=False 时）→ 写行 + snapshot → commit。自带 `expected_overlay_hash` 乐观校验（:879-886）。
-- 两条写路径串行化原语不同；Coordinator 若在事务外/更早时点读 overlay 再整行写回，与 apply_patch 交错即丢键——2026-09-11 `risk_cvar_threshold_pct: 3.5` 消失事件与此机制吻合（legacy-debt-register §1 monitoring 条目）。
+- **B1 修正后的结论**：两条写路径实际使用**同一把** advisory lock（`hashtext('quant_runtime_config_overlay')`，coordinator `_lock_overlay` :1676 与 overlay service `_begin_serialized_write` :816），且 Coordinator 在事务内重读当前 overlay 后 deep merge——"不同锁竞态丢键"的初判不成立。代码层面可证明的真实缺陷是：①两个 `_read_overlay` 在**行存在但 JSON 不可读/非 dict 时静默返回 `{}`**（runtime_config_overlay `_read_overlay_in_transaction`、coordinator `_read_overlay`），随后 patch merge 到空 overlay 上整行写回，其余键全部丢失——这是唯一可复现的丢键机制（fail-open）；②两个 upsert 无条件清空 `legacy_authority_json`，销毁 operator 复核清单的审计证据（校验本身按 overlay_hash 绑定 fail-closed，清空不必要）；③overlay 表运行时 DDL 存在 evolution_ledger/runtime_config_overlay 两份副本。09-11 CVaR 消失的运行态根因仍待 B8 观察复核。
 - 第三份 runtime_config_overlay DDL：`backend/services/evolution_ledger.py:192`（与 `runtime_config_overlay.py:213`、migrations/state_pg/0009 重复）。
 
 ### P2 分层违反
@@ -73,13 +73,11 @@
 - 本文档落盘；git 基线 commit。
 - 验收：`git log -1 --stat` 含本文档。
 
-### B1 逻辑链修正
-1. **overlay 单写者收敛**：`GovernanceMutationCoordinator._persist_overlay` 不再整行覆盖——在 Coordinator 提交事务内以与 `_mutate_overlay` 相同的 serialized 写锁重读当前 overlay 行，对 plan patch 做 `_deep_merge` 后写回；`legacy_authority_json` 不再无条件清空（无显式迁移则保留原值）；删除 `evolution_ledger.py:192` 第三份 DDL，`ensure_evolution_ledger_tables` 对 overlay 表改为复用 `RuntimeConfigOverlayService.ensure_table`。
-   - 验收：`grep -c "legacy_authority_json='{}'" backend/services/governance_mutation_coordinator.py` = 0；新增/改造针对性测试模拟 apply_patch 与 coordinator mutation 交错，键不丢；`tests/test_db_access_contract.py` 等相关测试绿。
-2. **PnL 单公式**：`execution/deal_sync.py:380` 改用 `net_pnl(...)`。验收：`grep -n 'gross_profit + swap' execution/deal_sync.py` = 0。
-3. **死 import**：删 `core/state.py:398`、`core/event_bus.py:185` 的 `core.app` 死分支；删 `research/report_generator.py:293` 的 `factor_library` 死分支；`core/`+`risk/circuit.py` 链条以代码核实 `auto_tune_risk` 调用后决定整链退役或就地修复（结论记录于此）。
-4. **私有跨模块公共化（非 live_service 部分）**：`_update_weights`、`_autonomy_mode`、`_code_version`、`_position_to_dict`、`_read_state_snapshot`、canonical_v2 三私有、`_compact_supervisor_mapping`、`_supertrend_strength_array`、`_atr`、`_factor_features/_predict_score`、`_current_row_label/_sample_from_row`、`_ensure_trades_duckdb_schema`——能搬家的搬到唯一 owner，其余去下划线成为显式 API；同批删除旧私有引用。
-   - 验收：§1 P2 表中非 live_service 边全部消失（grep 断言逐条记录）。
+### B1 逻辑链修正（done 2026-09-12）
+1. **overlay 单写者收敛 ✓**：①`runtime_config_overlay._read_overlay_in_transaction` 与 coordinator `_read_overlay` 改为 fail-closed——行存在但 payload 空/非字符串/不可解析/非 dict 时抛 `overlay_json_unreadable`，不再静默按空 overlay merge 写回；②两个 upsert（overlay service `_persist_overlay_row`、coordinator `_persist_overlay`）的 DO UPDATE 不再触碰 `legacy_authority_json`，保留 operator 清单审计证据；③`evolution_ledger.ensure_evolution_ledger_tables` 删除 runtime_config_overlay 建表副本，overlay 表运行时唯一 owner = `RuntimeConfigOverlayService.ensure_table`（coordinator `_prepare_storage` SQLite 分支补调用）。验收：`tests/test_runtime_overlay_authority.py`+`test_governance_mutation_coordinator.py`+`test_db_access_contract.py` 52 passed，含 2 个新增失败路径测试；`grep -c "legacy_authority_json='{}'" governance_mutation_coordinator.py` = 0。
+2. **PnL 单公式 ✓（审计误报修正）**：`deal_sync.py:380` 经核实是**docstring**，真实代码路径 `_cd_to_real_pnl` 已使用 `net_pnl`；全仓扫描无第二公式。已修正模块与函数 docstring 指向唯一公式。验收：`grep -rn 'gross_profit +' --include='*.py'` 仅剩注释且已指向 net_pnl。
+3. **死 import 与 core 链退役 ✓**：`core.app`（core/state.py:398、core/event_bus.py:185）与 `research.factor_library`（report_generator.py:293）引用已删；`core/`（state+event_bus, 623 行）→ 仅被 `risk/circuit.py` 消费 → circuit 仅被 evolution `auto_tune_risk` 调用且效果是写**学习 worker 进程内存假 state**（equity 恒为默认 1000，不触达生产风控）、`risk_tuned` story 事件零消费者 → **整链退役**：删除 `core/`、`risk/circuit.py`、`risk/regime.py`（circuit 是其唯一消费者）及 `tests/test_state.py`、`tests/test_circuit_breaker.py`，evolution `update_weights` 内 auto_tune 块删除。净删除 ≈ 2,000 行生产 + 2 个测试文件。验收：全仓 grep `from core.state|from core.event_bus|from risk.circuit|from risk.regime|auto_tune_risk` = 0。
+4. **私有跨模块公共化 ✓（非 live_service 部分）**：`update_weights`（ex `_update_weights`）、`autonomy_mode`（ex `_autonomy_mode`）、`code_version`（ex `_code_version`）、canonical_v2 `sql`/`db_time`/`payload_text_cache_clear`、ws `position_to_dict`/`read_state_snapshot`、offline_trainer `factor_features`/`predict_score`、factor_governance_lightgbm `current_row_label`/`sample_from_row`、alpha `supertrend_strength_array`、attribution_engine `ensure_trades_duckdb_schema`、api/learning `require_governance_confirm` 全部去下划线成为显式 API；`compact_supervisor_mapping` 删除私有别名（真 owner = `supervisor_payload_contract`）。**附带修复一个潜伏 NameError**：`v16_posterior_arbitration.py:105` 使用 `_compact_supervisor_mapping` 但从未 import，该代码路径一执行即崩——已补 `from backend.services.live_position_lifecycle import compact_supervisor_mapping`（已确认无导入环、不引入 live_service）。验收：`import backend.services.v16_posterior_arbitration` 等导入冒烟通过；相关 90 测试绿。
 
 ### B2 反向依赖修复
 1. `monitor/system_health.py` 改消费 `runtime_health_projection.v1` / 公共状态入口（字段缺失先在投影 owner 补投影，不在 monitor 重算）。

@@ -11,7 +11,7 @@ from typing import Any
 from backend.core.db import EXPERIMENTS_DB, prepare_experiments_store
 from research.features.evidence_contract import stable_hash
 from research.model_shadow_queue import ModelShadowQueue
-from research.offline_trainer import _factor_features, _predict_score
+from research.offline_trainer import factor_features, predict_score
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -105,7 +105,7 @@ class ModelInferenceContract:
             "factor_values": factor_values,
             "composite_score": composite_score,
         }
-        features = _factor_features(sample) if sample else self._features_from_live_context(
+        features = factor_features(sample) if sample else self._features_from_live_context(
             factor_signals=factor_signals or {},
             factor_values=factor_values or {},
             composite_score=composite_score,
@@ -117,7 +117,7 @@ class ModelInferenceContract:
                 "candidate": candidate,
                 "capabilities": {"live_trading": False, "advisory_only": True},
             }
-        score = _predict_score(features, weights, bias)
+        score = predict_score(features, weights, bias)
         prediction = 1 if score >= 0.5 else 0
         top_terms = sorted(
             (

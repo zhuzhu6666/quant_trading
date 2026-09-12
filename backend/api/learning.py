@@ -127,7 +127,7 @@ def _state_db_path():
     return core_db.STATE_DB
 
 
-def _require_governance_confirm(
+def require_governance_confirm(
     *,
     user: str,
     endpoint: str,
@@ -1803,7 +1803,7 @@ def review_suggestion(
     req: ReviewRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
-    _require_governance_confirm(
+    require_governance_confirm(
         user=_user,
         endpoint="/api/learning/review",
         action="review_suggestion",
@@ -1847,7 +1847,7 @@ def run_governance(
     _user: RequireUser,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
-    _require_governance_confirm(
+    require_governance_confirm(
         user=_user,
         endpoint="/api/learning/govern/run",
         action="run_governance",
@@ -1895,8 +1895,8 @@ def run_governance(
     if after_summary["approved"] > 0 or auto_actions > 0:
         if weight_risk_verdict.get("allowed", False):
             try:
-                from backend.runtime.evolution_orchestrator import _update_weights
-                weights_synced = bool(_update_weights())
+                from backend.runtime.evolution_orchestrator import update_weights
+                weights_synced = bool(update_weights())
             except Exception:
                 weights_synced = False
     message = (
@@ -2345,7 +2345,7 @@ def apply_position_supervisor_template_switch(
     req: PositionSupervisorTemplateApplySwitchRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
-    _require_governance_confirm(
+    require_governance_confirm(
         user=_user,
         endpoint="/api/learning/position-supervisor/templates/apply-switch",
         action="apply_position_supervisor_template_switch",
@@ -2914,7 +2914,7 @@ def apply_parameter_template_switch(
     req: ParameterTemplateApplySwitchRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
-    _require_governance_confirm(
+    require_governance_confirm(
         user=_user,
         endpoint="/api/learning/parameter-templates/apply-switch",
         action="apply_parameter_template_switch",
@@ -3075,7 +3075,7 @@ def review_parameter_template_offline_candidate(
     req: ParameterTemplateOfflineCandidateReviewRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
-    _require_governance_confirm(
+    require_governance_confirm(
         user=_user,
         endpoint="/api/learning/parameter-templates/offline-candidates/review",
         action="review_parameter_template_offline_candidate",
@@ -3124,7 +3124,7 @@ def release_parameter_template_offline_candidate(
     req: ParameterTemplateOfflineCandidateActionRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
-    _require_governance_confirm(
+    require_governance_confirm(
         user=_user,
         endpoint="/api/learning/parameter-templates/offline-candidates/release",
         action="release_parameter_template_offline_candidate",
@@ -3185,7 +3185,7 @@ def rollback_parameter_template_offline_candidate(
     req: ParameterTemplateOfflineCandidateActionRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
-    _require_governance_confirm(
+    require_governance_confirm(
         user=_user,
         endpoint="/api/learning/parameter-templates/offline-candidates/rollback",
         action="rollback_parameter_template_offline_candidate",
@@ -3571,7 +3571,7 @@ def update_learning_model_shadow_candidate(
     req: ModelShadowStatusRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
-    _require_governance_confirm(
+    require_governance_confirm(
         user=_user,
         endpoint="/api/learning/model/shadow-queue/status",
         action="update_model_shadow_queue_status",
@@ -3616,7 +3616,7 @@ def review_learning_model_canary(
     req: ModelCanaryReviewRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
-    _require_governance_confirm(
+    require_governance_confirm(
         user=_user,
         endpoint="/api/learning/model/canary-review",
         action="review_model_canary",

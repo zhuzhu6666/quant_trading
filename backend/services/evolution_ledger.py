@@ -189,20 +189,6 @@ def ensure_evolution_ledger_tables(db_path: str | Path = STATE_DB) -> None:
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS runtime_config_overlay (
-                overlay_id TEXT PRIMARY KEY,
-                overlay_json TEXT NOT NULL DEFAULT '{}',
-                overlay_hash TEXT DEFAULT '',
-                source TEXT DEFAULT '',
-                run_id TEXT DEFAULT '',
-                mutation_id TEXT NOT NULL DEFAULT '',
-                legacy_authority_json TEXT NOT NULL DEFAULT '{}',
-                updated_at REAL NOT NULL DEFAULT 0.0
-            )
-            """
-        )
-        conn.execute(
-            """
             CREATE TABLE IF NOT EXISTS factor_catalog_snapshot (
                 snapshot_id TEXT PRIMARY KEY,
                 run_id TEXT DEFAULT '',

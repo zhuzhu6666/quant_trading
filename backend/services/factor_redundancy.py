@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 from backend.core.db import STATE_DB, connect_sqlite, get_state_pg_conn, is_state_db_path
-from backend.services.canonical_v2 import _payload_text_cache_clear
+from backend.services.canonical_v2 import payload_text_cache_clear
 from backend.services.canonical_v2_reader import iter_decision_factor_values_by_factors
 from backend.services.evolution_work_coordinator import release_free_memory
 
@@ -86,7 +86,7 @@ class RedundancyDetector:
         # learning stages).
         del arrays
         gc.collect()
-        _payload_text_cache_clear()
+        payload_text_cache_clear()
         release_free_memory()
         return {
             "schema_version": "factor_redundancy_report.v1",

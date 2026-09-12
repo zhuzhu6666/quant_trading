@@ -2930,13 +2930,13 @@ def test_sync_factor_weights_uses_current_autonomy_mode(monkeypatch):
     from backend.runtime import evolution_orchestrator
 
     monkeypatch.setattr(policy_service.RiskPolicyService, "shared", staticmethod(lambda: _Policy()))
-    monkeypatch.setattr(evolution_orchestrator, "_update_weights", lambda: True)
+    monkeypatch.setattr(evolution_orchestrator, "update_weights", lambda: True)
     monkeypatch.setattr(
         al,
         "_apply_approved_factor_suggestions_for_demo",
         lambda **_kwargs: {"attempted": 0, "applied": False, "items": []},
     )
-    monkeypatch.setattr(al, "_autonomy_mode", lambda: "demo_nursery")
+    monkeypatch.setattr(al, "autonomy_mode", lambda: "demo_nursery")
 
     result = al._sync_factor_weights_for_demo(experiment_id="exp_demo")
 
@@ -2970,7 +2970,7 @@ def test_sync_factor_weights_does_not_bypass_blocked_approved_suggestion(monkeyp
     )
     monkeypatch.setattr(
         evolution_orchestrator,
-        "_update_weights",
+        "update_weights",
         lambda: (_ for _ in ()).throw(AssertionError("broad updater must not run")),
     )
 
@@ -3029,7 +3029,7 @@ def test_demo_factor_apply_supersedes_missing_runtime_downweight(monkeypatch):
 
 def test_demo_autonomy_respects_non_demo_mode(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
-    monkeypatch.setattr(al, "_autonomy_mode", lambda: "manual")
+    monkeypatch.setattr(al, "autonomy_mode", lambda: "manual")
 
     result = al.apply_demo_autonomy(db_path=db_path)
 
@@ -3038,13 +3038,13 @@ def test_demo_autonomy_respects_non_demo_mode(monkeypatch, tmp_path):
 
 
 def test_demo_autonomous_enabled_accepts_demo_nursery(monkeypatch):
-    monkeypatch.setattr(al, "_autonomy_mode", lambda: "demo_nursery")
+    monkeypatch.setattr(al, "autonomy_mode", lambda: "demo_nursery")
 
     assert al._demo_autonomous_enabled() is True
 
 
 def test_factor_model_bridge_runs_in_demo_autonomous(monkeypatch, tmp_path):
-    monkeypatch.setattr(al, "_autonomy_mode", lambda: "demo_autonomous")
+    monkeypatch.setattr(al, "autonomy_mode", lambda: "demo_autonomous")
 
     class _FactorModel:
         def __init__(self, db_path=None):

@@ -194,7 +194,7 @@ def factor_supertrend_str(df, period: int = 10, multiplier: float = 3.0):
     正值 = 价格在上轨上方, 趋势强; 负值 = 价格在下轨下方, 跌势强。
     0 = 价格在通道内, 趋势不明。
     """
-    return _supertrend_strength_array(
+    return supertrend_strength_array(
         df["high"].values,
         df["low"].values,
         df["close"].values,
@@ -203,7 +203,7 @@ def factor_supertrend_str(df, period: int = 10, multiplier: float = 3.0):
     )
 
 
-def _supertrend_strength_array(
+def supertrend_strength_array(
     high: np.ndarray,
     low: np.ndarray,
     close: np.ndarray,

@@ -96,7 +96,7 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _code_version() -> str:
+def code_version() -> str:
     """Content binding for replay reports.
 
     Historical binding used the git HEAD hash, which invalidated every replay
@@ -559,7 +559,7 @@ class ReplayHarnessService:
                     }
                 ),
                 "runtime_config_hash": str(current_runtime_config_snapshot(db_path=self.db_path).get("config_hash") or ""),
-                "code_version": _code_version(),
+                "code_version": code_version(),
                 "decision_count": decision_count,
                 "matched_live_count": _safe_int(bar_metrics.get("aligned_decision_count")),
                 "mismatch_count": mismatch_count,
@@ -577,7 +577,7 @@ class ReplayHarnessService:
                 "scope": scope,
                 "input_dataset_hash": "",
                 "runtime_config_hash": "",
-                "code_version": _code_version(),
+                "code_version": code_version(),
                 "decision_count": 0,
                 "matched_live_count": 0,
                 "mismatch_count": 0,
@@ -737,8 +737,8 @@ class ReplayHarnessService:
         )
         expected_config_hash = str(snapshot.get("config_hash") or "")
         replay_config_hash = str(latest.get("runtime_config_hash") or "")
-        expected_code_version = _code_version()
-        replay_code_version = str(latest.get("code_version") or "")
+        expectedcode_version = code_version()
+        replaycode_version = str(latest.get("code_version") or "")
         input_dataset_hash = str(latest.get("input_dataset_hash") or "")
         artifact_hash = str(latest.get("artifact_hash") or "")
         blockers: list[str] = []
@@ -758,11 +758,11 @@ class ReplayHarnessService:
             blockers.append("input_dataset_hash_missing")
         if not artifact_hash:
             blockers.append("artifact_hash_missing")
-        if not replay_code_version:
+        if not replaycode_version:
             blockers.append("code_version_missing")
-        elif not expected_code_version or expected_code_version == "unknown":
+        elif not expectedcode_version or expectedcode_version == "unknown":
             blockers.append("code_version_unavailable")
-        elif replay_code_version != expected_code_version:
+        elif replaycode_version != expectedcode_version:
             blockers.append("code_version_mismatch")
         ok = not blockers
         return {
@@ -783,12 +783,12 @@ class ReplayHarnessService:
                 ),
                 "input_dataset_hash": input_dataset_hash,
                 "artifact_hash": artifact_hash,
-                "code_version": replay_code_version,
-                "expected_code_version": expected_code_version,
+                "code_version": replaycode_version,
+                "expectedcode_version": expectedcode_version,
                 "code_version_matches": bool(
-                    expected_code_version
-                    and expected_code_version != "unknown"
-                    and replay_code_version == expected_code_version
+                    expectedcode_version
+                    and expectedcode_version != "unknown"
+                    and replaycode_version == expectedcode_version
                 ),
             },
         }
@@ -2773,7 +2773,7 @@ class ReplayHarnessService:
             "scope": scope,
             "input_dataset_hash": _hash(dataset_fingerprint),
             "runtime_config_hash": str(snapshot.get("config_hash") or ""),
-            "code_version": _code_version(),
+            "code_version": code_version(),
             "decision_count": decision_count,
             "matched_live_count": matched,
             "mismatch_count": mismatch_count,

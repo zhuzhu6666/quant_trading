@@ -20,7 +20,7 @@ from typing import Any, Mapping, Sequence
 
 import backend.core.db as core_db
 from backend.core.db_helpers import row_value as _row_value
-from backend.services.canonical_v2 import _sql
+from backend.services.canonical_v2 import sql
 from backend.services.canonical_v2_reader import canonical_fact_observation
 from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC, attach_fact, observed_epoch
 
@@ -495,7 +495,7 @@ def observe_learning_dataset_source(
             projections = ["COUNT(*) AS record_count"]
             projections.extend(f"MAX({column}) AS max_{column}" for column in timestamp_columns)
             row = conn.execute(
-                _sql(conn, f"SELECT {', '.join(projections)} FROM {table}")  # noqa: S608 - fixed internal identifiers
+                sql(conn, f"SELECT {', '.join(projections)} FROM {table}")  # noqa: S608 - fixed internal identifiers
             ).fetchone()
             record_count += int(_row_value(row, "record_count", 0) or 0)
             for index, column in enumerate(timestamp_columns, start=1):

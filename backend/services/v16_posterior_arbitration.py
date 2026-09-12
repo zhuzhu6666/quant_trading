@@ -20,6 +20,7 @@ from backend.services.canonical_v2_reader import (
     iter_counterfactual_rows,
     iter_review_rows,
 )
+from backend.services.live_position_lifecycle import compact_supervisor_mapping
 from backend.services.position_supervisor_templates import (
     resolve_position_supervisor_binding_lineage,
 )
@@ -102,7 +103,7 @@ def _review_fact_projection(
             projected["failure_taxonomy"] = {"primary_responsibility": primary}
     inferred = raw.get("inferred_close_supervisor")
     if isinstance(inferred, dict):
-        projected["inferred_close_supervisor"] = _compact_supervisor_mapping(
+        projected["inferred_close_supervisor"] = compact_supervisor_mapping(
             inferred,
             nested_keys=frozenset({"evidence", "recommended_controls", "execution", "risk_state"}),
         )

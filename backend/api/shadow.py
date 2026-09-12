@@ -7,7 +7,7 @@ from fastapi import APIRouter, Header, HTTPException
 from backend.core.auth import RequireUser
 from pydantic import BaseModel, Field
 
-from backend.api.learning import _require_governance_confirm
+from backend.api.learning import require_governance_confirm
 from backend.services.shadow_service import demote, list_shadows, promote
 from backend.services.factor_lifecycle_service import FactorV16Binding
 from backend.services.mutation_audit import record_api_mutation
@@ -61,7 +61,7 @@ def promote_factor(
     req: PromoteRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
-    _require_governance_confirm(
+    require_governance_confirm(
         user=_user,
         endpoint="/api/shadow/promote",
         action="promote_shadow_factor",
@@ -101,7 +101,7 @@ def demote_factor(
     req: DemoteRequest,
     x_confirm: str | None = Header(default=None),
 ) -> dict:
-    _require_governance_confirm(
+    require_governance_confirm(
         user=_user,
         endpoint="/api/shadow/demote",
         action="demote_shadow_factor",

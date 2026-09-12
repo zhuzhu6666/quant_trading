@@ -89,7 +89,7 @@ def _isolate_cycle(monkeypatch, counters: dict[str, int]) -> None:
     )
     monkeypatch.setattr(
         evolution,
-        "_update_weights",
+        "update_weights",
         lambda **_kwargs: counters.__setitem__(
             "weights",
             counters.get("weights", 0) + 1,

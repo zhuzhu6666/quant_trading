@@ -55,7 +55,7 @@ def _label_from_trade(item: dict) -> int | None:
     return None
 
 
-def _factor_features(item: dict) -> dict[str, float]:
+def factor_features(item: dict) -> dict[str, float]:
     features: dict[str, float] = {}
     contract = item.get("evidence_contract") or {}
     for factor in item.get("factor_outcomes") or []:
@@ -121,7 +121,7 @@ def _train_weights(rows: list[tuple[dict[str, float], int]], min_feature_count: 
     return dict(sorted(weights.items(), key=lambda kv: (-abs(kv[1]), kv[0])))
 
 
-def _predict_score(features: dict[str, float], weights: dict[str, float], bias: float) -> float:
+def predict_score(features: dict[str, float], weights: dict[str, float], bias: float) -> float:
     raw = bias
     for key, value in features.items():
         raw += value * weights.get(key, 0.0)
@@ -135,7 +135,7 @@ def _evaluate(rows: list[tuple[dict[str, float], int]], weights: dict[str, float
     correct = 0
     positives = 0
     for features, label in rows:
-        score = _predict_score(features, weights, bias)
+        score = predict_score(features, weights, bias)
         pred = 1 if score >= 0.5 else 0
         correct += 1 if pred == label else 0
         positives += 1 if label == 1 else 0
@@ -194,7 +194,7 @@ class LearningStatisticalTrainer:
         skipped = 0
         for item in trade_items:
             label = _label_from_trade(item)
-            features = _factor_features(item)
+            features = factor_features(item)
             if label is None or not features:
                 skipped += 1
                 continue

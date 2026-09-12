@@ -31,8 +31,8 @@ class _LargeWeightReductionPolicy:
     fast_decide = decide
 
 
-def _current_code_version() -> str:
-    return replay_harness_module._code_version()
+def _currentcode_version() -> str:
+    return replay_harness_module.code_version()
 
 
 def _init_state(db_path, *, config_hash: str = "cfg-current") -> None:
@@ -82,7 +82,7 @@ def _insert_replay(
                 json.dumps({"schema_version": "replay_scope.v1", "kind": kind}),
                 dataset_hash,
                 config_hash,
-                _current_code_version() if code_version is None else code_version,
+                _currentcode_version() if code_version is None else code_version,
                 grade,
                 artifact_hash,
                 status,

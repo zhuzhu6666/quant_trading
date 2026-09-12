@@ -11,9 +11,9 @@ from research.features.evidence_contract import stable_hash
 from research.features.snapshot_validator import LearningDatasetValidator
 from research.model_shadow_queue import ModelShadowQueue
 from research.offline_trainer import (
-    _factor_features,
+    factor_features,
     _label_from_trade,
-    _predict_score,
+    predict_score,
     _read_jsonl,
 )
 
@@ -106,11 +106,11 @@ class ModelShadowRunner:
         positives = 0
         for item in trade_items:
             label = _label_from_trade(item)
-            features = _factor_features(item)
+            features = factor_features(item)
             if label is None or not features:
                 skipped += 1
                 continue
-            score = _predict_score(features, weights, bias)
+            score = predict_score(features, weights, bias)
             pred = 1 if score >= 0.5 else 0
             correct += 1 if pred == label else 0
             positives += 1 if label == 1 else 0

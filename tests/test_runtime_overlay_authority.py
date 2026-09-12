@@ -10,6 +10,7 @@ from backend.services.governance_mutation_coordinator import (
     GovernanceMutationPlan,
 )
 from backend.services.runtime_config_overlay import (
+    OVERLAY_ID,
     RuntimeConfigOverlayAuthorityError,
     RuntimeConfigOverlayService,
 )
@@ -22,6 +23,72 @@ def _reset_runtime_config():
     runtime_config.reset_for_tests()
     yield
     runtime_config.reset_for_tests()
+
+
+def _overlay_row(db_path, column):
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(
+            f"SELECT {column} FROM runtime_config_overlay WHERE overlay_id=?",
+            (OVERLAY_ID,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_unreadable_overlay_row_blocks_patch_without_wiping_payload(tmp_path):
+    db_path = tmp_path / "state.db"
+    service = RuntimeConfigOverlayService(db_path)
+    service.apply_patch(
+        {"runtime_incident_mode": "no_new_risk"},
+        source="test_seed",
+        run_id="seed_1",
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE runtime_config_overlay SET overlay_json='not-json' WHERE overlay_id=?",
+            (OVERLAY_ID,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(RuntimeConfigOverlayAuthorityError) as caught:
+        service.apply_patch(
+            {"runtime_incident_mode": "normal"},
+            source="test_patch",
+            run_id="patch_1",
+        )
+    assert caught.value.report["reason"] == "overlay_json_unreadable"
+    assert _overlay_row(db_path, "overlay_json") == "not-json"
+
+
+def test_patch_preserves_existing_legacy_authority_manifest(tmp_path):
+    db_path = tmp_path / "state.db"
+    service = RuntimeConfigOverlayService(db_path)
+    service.apply_patch(
+        {"runtime_incident_mode": "no_new_risk"},
+        source="test_seed",
+        run_id="seed_1",
+    )
+    manifest = '{"schema_version": "runtime_overlay_legacy_authority.v1", "overlay_hash": "h1"}'
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE runtime_config_overlay SET legacy_authority_json=? WHERE overlay_id=?",
+            (manifest, OVERLAY_ID),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    service.apply_patch(
+        {"runtime_incident_mode": "normal"},
+        source="test_patch",
+        run_id="patch_1",
+    )
+    assert _overlay_row(db_path, "legacy_authority_json") == manifest
 
 
 def _set_mode(monkeypatch, mode: str) -> None:

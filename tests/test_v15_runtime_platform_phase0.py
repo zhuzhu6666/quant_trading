@@ -1023,7 +1023,7 @@ def test_release_control_records_start_and_finish_evidence(tmp_path):
             """,
             (
                 json.dumps({"schema_version": "replay_scope.v1", "kind": "bar_replay_evidence"}),
-                replay_harness_module._code_version(),
+                replay_harness_module.code_version(),
                 now,
             ),
         )

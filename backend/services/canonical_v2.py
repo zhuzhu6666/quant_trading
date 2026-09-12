@@ -264,7 +264,7 @@ def _is_pg(conn: Any) -> bool:
     return conn.__class__.__module__.split(".", 1)[0] == "psycopg"
 
 
-def _sql(conn: Any, statement: str) -> str:
+def sql(conn: Any, statement: str) -> str:
     if _is_pg(conn):
         return statement.replace("?", "%s")
     # SQLite fixtures keep canonical tables as bare names in the main database,
@@ -306,7 +306,7 @@ def _utc(value: Any | None) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _db_time(conn: Any, value: Any | None) -> Any:
+def db_time(conn: Any, value: Any | None) -> Any:
     timestamp = _utc(value)
     return timestamp if _is_pg(conn) else timestamp.isoformat()
 
@@ -382,7 +382,7 @@ def put_payload(
         schema_version=schema_version,
     )
     conn.execute(
-        _sql(
+        sql(
             conn,
             """
             INSERT INTO canonical_v2.payload_blob
@@ -401,7 +401,7 @@ def put_payload(
             ref.raw_sha256,
             ref.raw_bytes,
             ref.compressed_bytes,
-            _db_time(conn, created_at),
+            db_time(conn, created_at),
         ),
     )
     return ref
@@ -433,7 +433,7 @@ def _payload_text_cache_put(payload_hash: str, text: str) -> None:
             _PAYLOAD_TEXT_CACHE.popitem(last=False)
 
 
-def _payload_text_cache_clear() -> None:
+def payload_text_cache_clear() -> None:
     with _PAYLOAD_TEXT_CACHE_LOCK:
         _PAYLOAD_TEXT_CACHE.clear()
 
@@ -489,7 +489,7 @@ def read_payload(conn: Any, payload_hash: str) -> Any:
 
 
     row = conn.execute(
-        _sql(
+        sql(
             conn,
             """
             SELECT payload_kind, schema_version, canonical_bytes, codec,
@@ -534,7 +534,7 @@ def read_payloads(conn: Any, payload_hashes: Iterable[str]) -> dict[str, Any]:
         chunk = missing[start : start + _PAYLOAD_READ_CHUNK]
         placeholders = ", ".join("?" for _ in chunk)
         rows = conn.execute(
-            _sql(
+            sql(
                 conn,
                 # payload_hash last: _row_dict maps positionally for non-mapping
                 # rows (sqlite3.Row), so the ordered fields must come first.
@@ -635,8 +635,8 @@ def append_event(
         "event_type": str(event_type or ""),
         "entity_type": str(entity_type or ""),
         "entity_id": str(entity_id or ""),
-        "observed_at": _db_time(conn, observed_at),
-        "recorded_at": _db_time(conn, recorded_at),
+        "observed_at": db_time(conn, observed_at),
+        "recorded_at": db_time(conn, recorded_at),
         "producer": str(producer or ""),
         "producer_version": str(producer_version or ""),
         "schema_version": str(schema_version or ""),
@@ -646,7 +646,7 @@ def append_event(
         "idempotency_key": str(idempotency_key or ""),
         "payload_hash": str(payload_hash or ""),
         "status": str(status or ""),
-        "created_at": _db_time(conn, None),
+        "created_at": db_time(conn, None),
         "provenance": _provenance_tag(),
     }
     if values["event_type"] not in EVENT_TYPES:
@@ -658,7 +658,7 @@ def append_event(
     existing = None
     if values["idempotency_key"]:
         existing = conn.execute(
-            _sql(
+            sql(
                 conn,
                 """
                 SELECT event_id, event_type, entity_type, entity_id, observed_at,
@@ -674,7 +674,7 @@ def append_event(
         ).fetchone()
     if existing is None and values["event_id"]:
         existing = conn.execute(
-            _sql(
+            sql(
                 conn,
                 """
                 SELECT event_id, event_type, entity_type, entity_id, observed_at,
@@ -719,7 +719,7 @@ def append_event(
     else:
         conflict = "ON CONFLICT (event_id) DO NOTHING"
     conn.execute(
-        _sql(
+        sql(
             conn,
             f"""
             INSERT INTO canonical_v2.event ({', '.join(columns)})
@@ -739,7 +739,7 @@ def append_event(
         if values["idempotency_key"]
         else (values["event_id"],)
     )
-    row = conn.execute(_sql(conn, lookup), lookup_params).fetchone()
+    row = conn.execute(sql(conn, lookup), lookup_params).fetchone()
     if row is None:
         raise CanonicalV2Error("canonical event insert did not return a row")
     result = _row_dict(row, _EVENT_COLUMNS)
@@ -761,7 +761,7 @@ def append_relation(
     if relation_type not in RELATION_TYPES:
         raise CanonicalV2Error(f"unsupported canonical relation_type: {relation_type}")
     cursor = conn.execute(
-        _sql(
+        sql(
             conn,
             """
             INSERT INTO canonical_v2.event_relation
@@ -770,7 +770,7 @@ def append_relation(
             ON CONFLICT(from_event_id, to_event_id, relation_type) DO NOTHING
             """,
         ),
-        (str(from_event_id), str(to_event_id), relation_type, _db_time(conn, created_at)),
+        (str(from_event_id), str(to_event_id), relation_type, db_time(conn, created_at)),
     )
     return bool(getattr(cursor, "rowcount", 1))
 
@@ -809,7 +809,7 @@ def _link_trade_lineage(
     # generic append_relation contract remains unchanged; this stricter check
     # is local to the live trade chain and prevents guessed parent IDs.
     endpoint_count = conn.execute(
-        _sql(
+        sql(
             conn,
             "SELECT COUNT(*) AS n FROM canonical_v2.event "
             "WHERE event_id IN (?, ?)",
@@ -848,7 +848,7 @@ def _lineage_existing_status(
     """Describe an idempotent existing event without mutating its lineage."""
     relation_type = TRADE_LINEAGE_RELATION_TYPES[relation_key]
     linked = conn.execute(
-        _sql(
+        sql(
             conn,
             "SELECT 1 FROM canonical_v2.event_relation "
             "WHERE from_event_id=? AND to_event_id=? AND relation_type=? LIMIT 1",
@@ -969,7 +969,7 @@ def record_supervisor_trace_event(
         causation_id=(f"live_decision_{decision_id}" if decision_id else ""),
     )
     if decision_id and conn.execute(
-        _sql(conn, "SELECT 1 FROM canonical_v2.event WHERE event_id=? LIMIT 1"),
+        sql(conn, "SELECT 1 FROM canonical_v2.event WHERE event_id=? LIMIT 1"),
         (f"live_decision_{str(decision_id)}",),
     ).fetchone() is not None:
         append_relation(
@@ -1014,7 +1014,7 @@ def record_supervisor_evaluation_event(
         causation_id=(f"live_decision_{decision_id}" if decision_id else ""),
     )
     if decision_id and conn.execute(
-        _sql(conn, "SELECT 1 FROM canonical_v2.event WHERE event_id=? LIMIT 1"),
+        sql(conn, "SELECT 1 FROM canonical_v2.event WHERE event_id=? LIMIT 1"),
         (f"live_decision_{str(decision_id)}",),
     ).fetchone() is not None:
         append_relation(
@@ -1069,7 +1069,7 @@ def record_counterfactual_event(
     for source_event_id, relation_type in source_ids:
         if not source_event_id.endswith("_"):
             exists = conn.execute(
-                _sql(conn, "SELECT 1 FROM canonical_v2.event WHERE event_id=? LIMIT 1"),
+                sql(conn, "SELECT 1 FROM canonical_v2.event WHERE event_id=? LIMIT 1"),
                 (source_event_id,),
             ).fetchone()
             if exists is not None:
@@ -1582,7 +1582,7 @@ def record_sample_row(
     placeholders = ", ".join("%s" if _is_pg(conn) else "?" for _ in SAMPLE_ROW_COLUMNS)
     update_cols = [c for c in SAMPLE_ROW_COLUMNS if c != "sample_id"]
     cur = conn.execute(
-        _sql(
+        sql(
             conn,
             f"""
             INSERT INTO canonical_v2.training_sample_row ({', '.join(SAMPLE_ROW_COLUMNS)})
@@ -1616,7 +1616,7 @@ def purge_sample_rows_without_source(
         f"WHERE s.{source_key_col} = canonical_v2.training_sample_row.source_id"
     )
     cur = conn.execute(
-        _sql(
+        sql(
             conn,
             "DELETE FROM canonical_v2.training_sample_row "
             "WHERE sample_type=? AND source_table=? AND NOT EXISTS (" + sub_select + ")",
@@ -1636,7 +1636,7 @@ def _review_event_for_position(conn: Any, position_id: str) -> dict[str, Any] | 
     """
 
     rows = conn.execute(
-        _sql(
+        sql(
             conn,
             """
             SELECT event_id, event_type, entity_type, entity_id, observed_at,
@@ -1831,18 +1831,18 @@ def put_state_version(
         "entity_type": str(entity_type or ""),
         "entity_id": str(entity_id or ""),
         "version": int(version),
-        "valid_from": _db_time(conn, valid_from),
-        "valid_to": _db_time(conn, valid_to) if valid_to is not None else None,
+        "valid_from": db_time(conn, valid_from),
+        "valid_to": db_time(conn, valid_to) if valid_to is not None else None,
         "source_event_id": str(source_event_id or ""),
         "payload_hash": str(payload_hash or ""),
-        "created_at": _db_time(conn, created_at),
+        "created_at": db_time(conn, created_at),
     }
     if not values["state_version_id"] or not values["entity_type"] or not values["entity_id"]:
         raise CanonicalV2Error("state version identity must not be empty")
     if values["version"] <= 0:
         raise CanonicalV2Error("state version must be positive")
     existing = conn.execute(
-        _sql(
+        sql(
             conn,
             """
             SELECT state_version_id, entity_type, entity_id, version, valid_from,
@@ -1882,7 +1882,7 @@ def put_state_version(
         result["created"] = False
         return result
     conn.execute(
-        _sql(
+        sql(
             conn,
             """
             INSERT INTO canonical_v2.state_version
@@ -1938,8 +1938,8 @@ def put_training_sample(
         "horizon_minutes": int(horizon_minutes),
         "target_source": str(target_source or ""),
         "sample_status": str(sample_status or ""),
-        "created_at": _db_time(conn, created_at),
-        "updated_at": _db_time(conn, updated_at or created_at),
+        "created_at": db_time(conn, created_at),
+        "updated_at": db_time(conn, updated_at or created_at),
     }
     for field in (
         "sample_id",
@@ -1973,7 +1973,7 @@ def put_training_sample(
         "updated_at",
     )
     existing = conn.execute(
-        _sql(
+        sql(
             conn,
             "SELECT " + ", ".join(columns) + " FROM canonical_v2.training_sample WHERE sample_id=?",
         ),
@@ -1990,7 +1990,7 @@ def put_training_sample(
         result["created"] = False
         return result
     conn.execute(
-        _sql(
+        sql(
             conn,
             f"""
             INSERT INTO canonical_v2.training_sample
@@ -2047,7 +2047,7 @@ def put_dataset_manifest(
         "code_commit": str(code_commit or ""),
         "artifact_hash": str(artifact_hash or ""),
         "status": str(status or ""),
-        "created_at": _db_time(conn, created_at),
+        "created_at": db_time(conn, created_at),
     }
     for field in (
         "dataset_id",
@@ -2084,7 +2084,7 @@ def put_dataset_manifest(
         "created_at",
     )
     existing = conn.execute(
-        _sql(
+        sql(
             conn,
             "SELECT " + ", ".join(columns) + " FROM canonical_v2.dataset_manifest WHERE dataset_id=?",
         ),
@@ -2101,7 +2101,7 @@ def put_dataset_manifest(
         result["created"] = False
         return result
     conn.execute(
-        _sql(
+        sql(
             conn,
             "INSERT INTO canonical_v2.dataset_manifest (" + ", ".join(columns) + ") VALUES (" + ", ".join("?" for _ in columns) + ")",
         ),
@@ -2131,7 +2131,7 @@ def put_dataset_members(
         if not normalized[0] or not normalized[1] or not normalized[3] or normalized[2] < 0:
             raise CanonicalV2Error("dataset membership fields are invalid")
         existing = conn.execute(
-            _sql(
+            sql(
                 conn,
                 """
                 SELECT sample_order, sample_digest
@@ -2151,7 +2151,7 @@ def put_dataset_members(
                 )
             continue
         cursor = conn.execute(
-            _sql(
+            sql(
                 conn,
                 """
                 INSERT INTO canonical_v2.dataset_manifest_member
@@ -2205,7 +2205,7 @@ def start_projection_run(
         "error_code",
     )
     existing = conn.execute(
-        _sql(
+        sql(
             conn,
             "SELECT " + ", ".join(columns) + " FROM canonical_v2.projection_run "
             "WHERE projection_run_id=?",
@@ -2214,7 +2214,7 @@ def start_projection_run(
     ).fetchone()
     if existing is None:
         existing = conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT " + ", ".join(columns) + " FROM canonical_v2.projection_run "
                 "WHERE run_kind=? AND projection_name=? AND source_watermark=? "
@@ -2252,10 +2252,10 @@ def start_projection_run(
         normalized["source_watermark"],
         normalized["code_version"],
         normalized["input_digest"],
-        _db_time(conn, started_at),
+        db_time(conn, started_at),
     )
     conn.execute(
-        _sql(
+        sql(
             conn,
             """
             INSERT INTO canonical_v2.projection_run
@@ -2268,7 +2268,7 @@ def start_projection_run(
         values,
     )
     row = conn.execute(
-        _sql(
+        sql(
             conn,
             """
             SELECT projection_run_id, run_kind, projection_name, source_watermark,
@@ -2309,7 +2309,7 @@ def finish_projection_run(
     output_digest = str(output_digest or "")
     error_code = str(error_code or "")
     existing = conn.execute(
-        _sql(
+        sql(
             conn,
             "SELECT status, output_digest, error_code FROM canonical_v2.projection_run "
             "WHERE projection_run_id=?",
@@ -2330,7 +2330,7 @@ def finish_projection_run(
             f"immutable terminal projection run conflict: {projection_run_id}"
         )
     conn.execute(
-        _sql(
+        sql(
             conn,
             """
             UPDATE canonical_v2.projection_run
@@ -2338,7 +2338,7 @@ def finish_projection_run(
             WHERE projection_run_id=? AND status='running'
             """,
         ),
-        (status, output_digest, error_code, _db_time(conn, finished_at), projection_run_id),
+        (status, output_digest, error_code, db_time(conn, finished_at), projection_run_id),
     )
 
 

@@ -19,7 +19,7 @@ from backend.services.trade_lesson_memory import (
     ensure_trade_lesson_memory_schema,
     upsert_trade_lesson_memory,
 )
-from backend.services.live_position_lifecycle import _compact_supervisor_mapping
+from backend.services.live_position_lifecycle import compact_supervisor_mapping
 from backend.services.position_supervisor_templates import (
     resolve_position_supervisor_binding_lineage,
 )
@@ -118,7 +118,7 @@ class ExperienceBuilder:
         close_reason = str(review_json.get("close_reason", "") or "")
         context_integrity = str(review_json.get("context_integrity", "full") or "full")
         attribution_integrity = str(review_json.get("attribution_integrity", "full") or "full")
-        inferred_supervisor = _compact_supervisor_mapping(
+        inferred_supervisor = compact_supervisor_mapping(
             review_json.get("inferred_close_supervisor"),
             nested_keys=frozenset({"evidence", "recommended_controls", "execution", "risk_state"}),
         )

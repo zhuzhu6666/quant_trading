@@ -1580,6 +1580,7 @@ class GovernanceMutationCoordinator:
                 conn.close()
             return
         ensure_evolution_ledger_tables(self.db_path)
+        RuntimeConfigOverlayService(self.db_path).ensure_table()
         conn = self._connect()
         try:
             conn.execute(
@@ -1696,8 +1697,16 @@ class GovernanceMutationCoordinator:
             return {}
         item = _row_dict(row)
         raw = item.get("overlay_json") if item else row[0]
-        parsed = _loads(raw, {})
-        return parsed if isinstance(parsed, dict) else {}
+        # An existing row with an unreadable payload must fail closed instead
+        # of merging the patch onto a silently-empty overlay.
+        if not isinstance(raw, str) or not raw.strip():
+            raise GovernanceMutationError(
+                "overlay_json_unreadable:empty_or_non_string_payload"
+            )
+        parsed = _loads(raw, None)
+        if not isinstance(parsed, dict):
+            raise GovernanceMutationError("overlay_json_unreadable:payload_not_a_dict")
+        return parsed
 
     def _persist_overlay(
         self,
@@ -1723,7 +1732,6 @@ class GovernanceMutationCoordinator:
                        source=excluded.source,
                        run_id=excluded.run_id,
                        mutation_id=excluded.mutation_id,
-                       legacy_authority_json='{}',
                        updated_at=excluded.updated_at""",
             ),
             (

@@ -31,7 +31,7 @@ def _next_db_id() -> int:
     return int(time.time()) + next(_DB_ID_SEQ)
 
 
-def _ensure_trades_duckdb_schema() -> None:
+def ensure_trades_duckdb_schema() -> None:
     """Ensure trades.duckdb uses the current volume-based schema.
 
     Older deployments created `lots` columns manually and never migrated them.
@@ -455,7 +455,7 @@ class AttributionEngine:
         self._partial_closes.pop(position_id, None)
         # 写入 trades.duckdb
         try:
-            _ensure_trades_duckdb_schema()
+            ensure_trades_duckdb_schema()
             _tdb = connect_duckdb(DUCKDB_TRADES)
             _tdb.execute("""
                 INSERT OR REPLACE INTO trades
@@ -520,7 +520,7 @@ class AttributionEngine:
         }
         self._partial_closes.setdefault(position_id, []).append(partial)
         try:
-            _ensure_trades_duckdb_schema()
+            ensure_trades_duckdb_schema()
             tdb = connect_duckdb(DUCKDB_TRADES)
             try:
                 tdb.execute(
@@ -802,7 +802,7 @@ class AttributionEngine:
 
         # ── 写入 trades.duckdb ──
         try:
-            _ensure_trades_duckdb_schema()
+            ensure_trades_duckdb_schema()
             _tdb = connect_duckdb(DUCKDB_TRADES)
             # 更新 trade 主表
             pnl_pct = round(trade_pnl / attrib.open_price * 100, 4) if attrib.open_price else 0.0
@@ -849,7 +849,7 @@ class AttributionEngine:
     def _load_partial_close_executions(self, position_id: int) -> list[dict[str, Any]]:
         """Reload reduce executions after a process restart."""
         try:
-            _ensure_trades_duckdb_schema()
+            ensure_trades_duckdb_schema()
             tdb = connect_duckdb(DUCKDB_TRADES)
             try:
                 rows = tdb.execute(

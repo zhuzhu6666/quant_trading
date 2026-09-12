@@ -807,11 +807,26 @@ class RuntimeConfigOverlayService:
         if not row:
             return {}
         raw = row["overlay_json"] if hasattr(row, "keys") else row[0]
+        # An existing row with an unreadable payload must fail closed: merging
+        # a patch onto a silently-empty overlay would wipe every other key.
+        if not isinstance(raw, str) or not raw.strip():
+            raise RuntimeConfigOverlayAuthorityError(
+                {
+                    "reason": "overlay_json_unreadable",
+                    "detail": "empty_or_non_string_payload",
+                }
+            )
         try:
-            parsed = json.loads(raw or "{}")
-        except Exception:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
+            parsed = json.loads(raw)
+        except Exception as exc:
+            raise RuntimeConfigOverlayAuthorityError(
+                {"reason": "overlay_json_unreadable", "detail": str(exc)}
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeConfigOverlayAuthorityError(
+                {"reason": "overlay_json_unreadable", "detail": "payload_not_a_dict"}
+            )
+        return parsed
 
     def _begin_serialized_write(self, conn: Any) -> None:
         if is_state_db_path(self.db_path):
@@ -846,7 +861,6 @@ class RuntimeConfigOverlayService:
                 source=excluded.source,
                 run_id=excluded.run_id,
                 mutation_id='',
-                legacy_authority_json='{}',
                 updated_at=excluded.updated_at
             """),
             (

@@ -33,7 +33,7 @@ from backend.core.db import (  # noqa: E402
     init_state_db,
     state_table_columns,
 )
-from alpha.attribution_engine import _ensure_trades_duckdb_schema  # noqa: E402
+from alpha.attribution_engine import ensure_trades_duckdb_schema  # noqa: E402
 
 
 def _check_duckdb(path: Path, required: dict[str, set[str]]) -> list[str]:
@@ -130,7 +130,7 @@ def main() -> int:
     if args.repair:
         init_state_db()
         init_experiments_db()
-        _ensure_trades_duckdb_schema()
+        ensure_trades_duckdb_schema()
 
     checks: list[tuple[str, list[str]]] = [
         (

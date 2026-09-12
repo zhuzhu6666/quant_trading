@@ -63,7 +63,7 @@ from backend.services.position_supervisor_templates import (
 from backend.services.runtime_kv_store import set_on_conn as set_runtime_kv_on_conn
 from research.features.evidence_contract import build_evidence_contract
 from backend.services.supervisor_payload_contract import (
-    compact_supervisor_mapping as _compact_supervisor_mapping,
+    compact_supervisor_mapping as compact_supervisor_mapping,
 )
 
 from backend.core.db_helpers import (
@@ -970,7 +970,7 @@ def _insert_evolution_event(conn, event_type: str, payload: dict[str, Any]) -> N
         """,
         (now, event_type, payload_json),
     )
-def _autonomy_mode() -> str:
+def autonomy_mode() -> str:
     try:
         from config.runtime_config import shared as runtime_config
 
@@ -981,7 +981,7 @@ def _autonomy_mode() -> str:
 
 
 def _demo_autonomous_enabled() -> bool:
-    return _autonomy_mode() in {"demo_autonomous", "demo_nursery"}
+    return autonomy_mode() in {"demo_autonomous", "demo_nursery"}
 
 
 def _demo_autonomy_mutation_enabled() -> bool:
@@ -5360,7 +5360,7 @@ def _sync_factor_weights_for_demo(*, experiment_id: str) -> dict[str, Any]:
                 "required_mode": "governed",
                 "governance": {
                     "experiment_id": experiment_id,
-                    "autonomy_mode": _autonomy_mode(),
+                    "autonomy_mode": autonomy_mode(),
                 },
             },
         ).to_dict()
@@ -5385,10 +5385,10 @@ def _sync_factor_weights_for_demo(*, experiment_id: str) -> dict[str, Any]:
                 "risk_verdict": verdict,
                 "approved_factor_suggestions": approved,
             }
-        from backend.runtime.evolution_orchestrator import _update_weights
+        from backend.runtime.evolution_orchestrator import update_weights
 
         return {
-            "synced": bool(_update_weights()),
+            "synced": bool(update_weights()),
             "blocked": False,
             "risk_verdict": verdict,
             "approved_factor_suggestions": approved,
@@ -6081,7 +6081,7 @@ def _auto_rollback_position_supervisor_template(
 
 
 def _run_demo_nursery_factor_pruning_governance(*, db_path: str | Path, bridge_limit: int = 5) -> dict[str, Any]:
-    mode = _autonomy_mode()
+    mode = autonomy_mode()
     from config.runtime_config import DEMO_AUTONOMY_MODES
 
     if mode not in DEMO_AUTONOMY_MODES:
@@ -6154,7 +6154,7 @@ def apply_demo_autonomy(
         payload = {
             "schema_version": "demo_autonomy_apply.v1",
             "enabled": False,
-            "mode": _autonomy_mode(),
+            "mode": autonomy_mode(),
             "experiment_id": experiment_id,
             "reason": (
                 "autonomy_demo_auto_apply_disabled"
@@ -6167,7 +6167,7 @@ def apply_demo_autonomy(
     demo_effect_reconcile = {}
     from config.runtime_config import DEMO_AUTONOMY_MODES
 
-    if _autonomy_mode() in DEMO_AUTONOMY_MODES:
+    if autonomy_mode() in DEMO_AUTONOMY_MODES:
         from research.learning.governor import RuleEvolutionGovernor
 
         # Demo nursery must not let an old observation-only window occupy a
@@ -6224,7 +6224,7 @@ def apply_demo_autonomy(
     payload = {
         "schema_version": "demo_autonomy_apply.v1",
         "enabled": True,
-        "mode": _autonomy_mode(),
+        "mode": autonomy_mode(),
         "experiment_id": experiment_id,
         "demo_effect_reconcile": demo_effect_reconcile,
         "factor_pruning_governance": factor_pruning_governance,
@@ -6612,7 +6612,7 @@ def run_autonomous_learning_cycle(
             "max_observation_age_seconds": 86400.0,
             "terminalize_mixed_after_recheck": True,
         }
-        if _autonomy_mode() in {"demo_autonomous", "demo_nursery"}
+        if autonomy_mode() in {"demo_autonomous", "demo_nursery"}
         else {}
     )
     governance = {
@@ -6653,7 +6653,7 @@ def run_autonomous_learning_cycle(
             else (lambda: {
                 "schema_version": "demo_autonomy_apply.v1",
                 "enabled": False,
-                "mode": _autonomy_mode(),
+                "mode": autonomy_mode(),
                 "status": (
                     str(mutation_block["status"])
                     if not mutation_allowed

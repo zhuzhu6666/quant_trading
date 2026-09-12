@@ -26,7 +26,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
-from backend.services.canonical_v2 import _db_time, _payload_text_cache_clear, _sql, read_payload, read_payloads  # noqa: E402
+from backend.services.canonical_v2 import db_time, payload_text_cache_clear, sql, read_payload, read_payloads  # noqa: E402
 from backend.services.fact_envelope import observed_epoch
 
 EVENT_TYPE = {
@@ -65,7 +65,7 @@ def _is_missing_schema(exc: BaseException) -> bool:
 def _canonical_ready(conn: Any) -> bool:
     """Return True when the canonical_v2 schema/event table is reachable."""
     try:
-        conn.execute(_sql(conn, "SELECT 1 FROM canonical_v2.event LIMIT 1")).fetchone()
+        conn.execute(sql(conn, "SELECT 1 FROM canonical_v2.event LIMIT 1")).fetchone()
         return True
     except Exception as exc:
         if not _is_missing_schema(exc):
@@ -109,7 +109,7 @@ def _event_row(conn: Any, event_id: str) -> dict[str, Any] | None:
     if not _canonical_ready(conn):
         return None
     row = conn.execute(
-        _sql(
+        sql(
             conn,
             "SELECT event_id, event_type, entity_type, entity_id, payload_hash, observed_at "
             "FROM canonical_v2.event WHERE event_id=?",
@@ -224,7 +224,7 @@ def _review_event_rows(
         ranked += " LIMIT ?"
         params.append(int(limit))
     rows = conn.execute(
-        _sql(
+        sql(
             conn,
             ranked,
         ),
@@ -251,7 +251,7 @@ def latest_review_observed_at_by_id(
     placeholders = ",".join("?" for _ in ids)
     try:
         rows = conn.execute(
-            _sql(
+            sql(
                 conn,
                 f"""
                 SELECT entity_id, MAX(observed_at) AS observed_at
@@ -480,16 +480,16 @@ def iter_decisions(
     params: list[Any] = []
     if min_observed_epoch is not None:
         clauses.append("e.observed_at >= ?")
-        params.append(_db_time(conn, float(min_observed_epoch)))
+        params.append(db_time(conn, float(min_observed_epoch)))
     if max_observed_epoch is not None:
         clauses.append("e.observed_at <= ?")
-        params.append(_db_time(conn, float(max_observed_epoch)))
+        params.append(db_time(conn, float(max_observed_epoch)))
     where = " WHERE " + " AND ".join(clauses)
     direction = "DESC" if reverse else "ASC"
     order_sql = f" ORDER BY e.observed_at {direction}, e.event_id {direction}"
     if limit and int(limit) > 0:
         rows = conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT e.event_id, e.entity_id, e.payload_hash, e.observed_at "
                 "FROM canonical_v2.event e" + where + order_sql + " LIMIT ?",
@@ -509,7 +509,7 @@ def iter_decisions(
             cursor_clauses.append(f"(e.observed_at, e.event_id) {operator} (?, ?)")
             cursor_params.extend([last_observed_at, last_event_id])
         rows = conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT e.event_id, e.entity_id, e.payload_hash, e.observed_at "
                 "FROM canonical_v2.event e WHERE "
@@ -575,7 +575,7 @@ def canonical_fact_observation(
     event_type = EVENT_TYPE[kind]
     try:
         row = conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT COUNT(*) AS n, MAX(observed_at) AS m "
                 "FROM canonical_v2.event WHERE event_type=?",
@@ -612,7 +612,7 @@ def read_trade_chain(conn: Any, review_id: str) -> dict[str, Any] | None:
     derived: list[Any] = []
     for review_event_id in review_event_ids:
         derived = conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT to_event_id FROM canonical_v2.event_relation "
                 "WHERE from_event_id=? AND relation_type='derived_from' "
@@ -627,7 +627,7 @@ def read_trade_chain(conn: Any, review_id: str) -> dict[str, Any] | None:
         chain["decision"] = _related_payload(conn, decision_event_id, "risk_decision")
     if decision_event_id:
         for rel in conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT from_event_id FROM canonical_v2.event_relation "
                 "WHERE to_event_id=? AND relation_type='caused_by'",
@@ -816,7 +816,7 @@ def iter_fact_events(
     event_type = EVENT_TYPE[kind]
     bound = f" LIMIT {int(limit)}" if limit and int(limit) > 0 and not entity_id else ""
     rows = conn.execute(
-        _sql(
+        sql(
             conn,
             "SELECT e.event_id, e.event_type, e.entity_type, e.entity_id, "
             "e.payload_hash, e.observed_at FROM canonical_v2.event e "
@@ -921,7 +921,7 @@ def _iter_canonical_payload_events(
     if entity_type:
         query_params.append(str(entity_type))
     rows = conn.execute(
-        _sql(
+        sql(
             conn,
             "SELECT e.event_id, e.event_type, e.entity_type, e.entity_id, "
             "e.payload_hash, e.observed_at, e.created_at "
@@ -1235,7 +1235,7 @@ def iter_training_sample_rows(
     if limit and int(limit) > 0:
         q += f" LIMIT {int(limit)}"
     try:
-        rows = conn.execute(_sql(conn, q), tuple(params)).fetchall()
+        rows = conn.execute(sql(conn, q), tuple(params)).fetchall()
         return [r for r in (_dict_row(x, TRAINING_SAMPLE_COLUMNS) for x in rows) if r]
     except Exception as exc:
         if not _is_missing_schema(exc):
@@ -1247,7 +1247,7 @@ def get_training_sample_row(conn: Any, sample_id: str) -> dict[str, Any] | None:
     """Get a single training_sample_row by sample_id (canonical only)."""
     try:
         row = conn.execute(
-            _sql(conn, f"SELECT {', '.join(TRAINING_SAMPLE_COLUMNS)} FROM canonical_v2.training_sample_row WHERE sample_id=? LIMIT 1"),
+            sql(conn, f"SELECT {', '.join(TRAINING_SAMPLE_COLUMNS)} FROM canonical_v2.training_sample_row WHERE sample_id=? LIMIT 1"),
             (str(sample_id),),
         ).fetchone()
     except Exception as exc:
@@ -1315,7 +1315,7 @@ def iter_decision_factor_snapshots(
         return []
     try:
         row = conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT payload_hash FROM canonical_v2.event"
                 " WHERE entity_id=? AND event_type='risk_decision'"
@@ -1355,7 +1355,7 @@ def iter_decision_factor_snapshots_by_factor(
     try:
         limit_clause = f" LIMIT {max(1, int(limit)) * 5}" if limit and int(limit) > 0 else ""
         rows = conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT e.payload_hash"
                 " FROM canonical_v2.event e"
@@ -1400,7 +1400,7 @@ def iter_decision_factor_snapshots_by_factors(
     try:
         limit_clause = f" LIMIT {max(1, int(limit)) * 5}" if limit and int(limit) > 0 else ""
         rows = conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT e.payload_hash"
                 " FROM canonical_v2.event e"
@@ -1465,7 +1465,7 @@ def iter_decision_factor_values_by_factors(
     try:
         limit_clause = f" LIMIT {max(1, int(limit)) * 5}" if limit and int(limit) > 0 else ""
         rows = conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT e.payload_hash"
                 " FROM canonical_v2.event e"
@@ -1504,7 +1504,7 @@ def iter_decision_factor_values_by_factors(
             # process-global text cache is pure retention here. Dropped
             # entries re-fetch transparently on later misses.
             if (event_index + 1) % 500 == 0:
-                _payload_text_cache_clear()
+                payload_text_cache_clear()
                 gc.collect()
         if limit and int(limit) > 0:
             return {factor: values[: int(limit)] for factor, values in result.items()}
@@ -1521,7 +1521,7 @@ def count_decision_factor_snapshots(conn: Any, decision_id: str) -> int:
         return 0
     try:
         row = conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT payload_hash FROM canonical_v2.event"
                 " WHERE entity_id=? AND event_type='risk_decision'"
@@ -1551,7 +1551,7 @@ def iter_all_decision_factor_snapshots(
     try:
         placeholders = ",".join(["?"] * len(decision_ids))
         rows = conn.execute(
-            _sql(
+            sql(
                 conn,
                 "SELECT entity_id, payload_hash FROM canonical_v2.event"
                 f" WHERE entity_id IN ({placeholders})"

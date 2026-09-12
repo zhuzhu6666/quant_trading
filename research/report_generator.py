@@ -281,21 +281,15 @@ class WeeklyReport:
 
     def _section_factor_library(self) -> str:
         """
-        Import evolution_story entries from the FactorLibrary and summarise
-        any new or updated factors this week.
+        Summarise evolution_story entries from an injected factor library.
 
-        If no library was provided, attempts to import ``FactorLibrary``
-        from ``research.factor_library``.  Falls back to N/A gracefully.
+        ``research.factor_library`` was retired with the pre-convergence
+        research line; without an explicitly injected library the section
+        reports N/A instead of pretending a default source exists.
         """
         library = self._library
         if library is None:
-            try:
-                from research.factor_library import FactorLibrary
-
-                library = FactorLibrary()
-            except (ImportError, Exception) as exc:
-                logger.warning(f"Cannot load FactorLibrary: {exc}")
-                return self._na("因子库不可用")
+            return self._na("因子库未注入")
 
         try:
             if hasattr(library, "get_evolution_story"):
