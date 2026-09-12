@@ -108,3 +108,6 @@ web_frontend/src-tauri/target-pnl-fix/
 
 # Canonical_v2 migration run manifests / checkpoints (not source, not committed)
 run_artifacts/
+
+# ZCode agent session artifacts (plans, exec logs) — never source
+.zcode/

@@ -157,4 +157,11 @@ test_live_service_lifecycle(163) / test_factor_governance_orchestrator(96) / tes
 | B7 | done | 本提交 | 2026-09-12 |
 | B8 | done（观察项登记于上节） | 本提交 | 2026-09-12 |
 
-**最终结果**：全量 2975 passed / 11 skipped（postgres_integration 环境门）；生产代码净变化：删除 core/（623 行）+ risk/circuit.py + risk/regime.py + mab_router 外的 11 个脚本 + 2 个测试文件，新增 live_state_store（37 行）+ db_health_service（平移）；分层违反 30 处私有跨模块导入全部消除或转为显式 API；overlay 丢键 fail-open 机制闭合；1 个潜伏 NameError 修复。运行态验收（重启/服务检查）按 server-backend-sop 由运维执行，不在本批范围。
+**最终结果**：全量 2975 passed / 11 skipped（postgres_integration 环境门）；生产代码净变化：删除 core/（623 行）+ risk/circuit.py + risk/regime.py + mab_router 外的 11 个脚本 + 2 个测试文件，新增 live_state_store（37 行）+ db_health_service（平移）；分层违反 30 处私有跨模块导入全部消除或转为显式 API；overlay 丢键 fail-open 机制闭合；1 个潜伏 NameError 修复。
+
+### 运行态验收（2026-09-12 20:45 受控重启，done）
+
+- 预检：工作区干净 @25c35204；schema `current 37 / minimum 37 / ok`；loop desired=enabled；上次关闭 graceful。
+- 重启：backend 20:45:27 → learning-worker/job-worker 20:46:12；三服务 active。
+- 验收：release_identity head=`25c35204`（版本对齐）；`/api/health` ok（db/ctrader connected）；启动即 `overlay restored hash=01e06d93`，无 `governance_authority` 闩；**overlay cvar 仍为 3.5**；loop 从持久化 desired state 自动恢复（generation 已签发）；readiness 快照 33s 新鲜；learning worker capability `boot_status=ready`；三服务 journal 零 ERROR（闭市 `closed_confirmed` 姿态正常）。
+- 待市场开盘后复核：`safety timing` p95（登记册 active 条目继续）。
