@@ -1,9 +1,9 @@
 def test_state_snapshot_reports_consecutive_not_total_session_losses(monkeypatch):
-    from backend.services import live_service
+    from backend.services import live_state_store
     from backend.ws import endpoints
 
     monkeypatch.setattr(
-        live_service,
+        live_state_store,
         "_live_state",
         {
             "account": {"equity": 1000.0, "balance": 1000.0},

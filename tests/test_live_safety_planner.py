@@ -636,7 +636,7 @@ def test_live_service_enforce_uses_single_supervisor_executor_exactly_once(
     )
     monkeypatch.setattr(
         live_service,
-        "_live_state_get",
+        "live_state_get",
         lambda key, default=None, **_kwargs: (
             {"balance": 1000.0} if key == "account" else default
         ),

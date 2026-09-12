@@ -222,6 +222,12 @@ from backend.services.live_runtime_state import (
     state_set as _runtime_state_set,
     state_update as _runtime_state_update,
 )
+from backend.services.live_state_store import (
+    _LIVE_STATE_LOCK,
+    _live_state,
+    live_state_get,
+    live_state_snapshot,
+)
 from backend.services.session_restore import (
     PartialCloseSessionFactRuntime,
     authoritative_close_pnl as _authoritative_close_pnl,
@@ -609,7 +615,7 @@ def _risk_kelly_sizing(
 
     返回值使用 cTrader API volume unit；XAUUSD 常见最小开仓量约为 100 API units。
     """
-    kelly_data = _live_state_get("risk", {}, clone=True).get("kelly", {})
+    kelly_data = live_state_get("risk", {}, clone=True).get("kelly", {})
     return _sizing_risk_kelly_sizing(
         cfg=cfg,
         direction=direction,
@@ -870,10 +876,10 @@ def _build_open_trade_risk_context(
     decision_ts: float | None = None,
 ) -> dict:
     runtime = OpenRiskContextRuntime(
-        state_get=_live_state_get,
+        state_get=live_state_get,
         collect_runtime_health=partial(
             _loop_collect_open_risk_runtime_health,
-            decision_freshness_provider=partial(_live_state_get, "decision_bar_freshness", {}, clone=True),
+            decision_freshness_provider=partial(live_state_get, "decision_bar_freshness", {}, clone=True),
         ),
         temporal_context_for_trade=_temporal_context_for_trade,
         active_supervisor_reentry_block=_active_supervisor_reentry_block,
@@ -1003,7 +1009,7 @@ def _active_event_window_learning_policy(
 
 
 def _risk_state_with_verdict(verdict) -> dict:
-    state = _live_state_get("risk", {}, clone=True) or {}
+    state = live_state_get("risk", {}, clone=True) or {}
     return _lifecycle_build_risk_state_with_policy_verdict(state, verdict)
 
 
@@ -1041,7 +1047,7 @@ def _market_micro_context_snapshot(
     now_ts: float | None = None,
 ) -> dict[str, Any]:
     now_ts = float(now_ts or time.time())
-    quote = _live_state_get("spot_quote", None, clone=True) or {}
+    quote = live_state_get("spot_quote", None, clone=True) or {}
     if bridge is not None and hasattr(bridge, "get_spot_quote"):
         try:
             fresh_quote = bridge.get_spot_quote() or {}
@@ -1199,7 +1205,7 @@ def _open_learning_context_payload(
     runtime = OpenLearningContextRuntime(
         build_entry_cluster_context=_build_entry_cluster_context,
         market_micro_context_snapshot=_market_micro_context_snapshot,
-        state_get=_live_state_get,
+        state_get=live_state_get,
         build_entry_timing_context=build_entry_timing_context,
         build_payload=_lifecycle_build_open_learning_context_payload,
         tracked_total_api_volume=_tracked_total_api_volume,
@@ -1498,7 +1504,7 @@ def _position_supervisor_selection_key(
     )
     symbol = str(
         getattr(composite, "symbol", "")
-        or _live_state_get("symbol", "")
+        or live_state_get("symbol", "")
         or "XAUUSD+"
     )
     timeframe = str(getattr(cfg, "timeframe", "") or "M5")
@@ -1829,7 +1835,7 @@ def _position_supervisor_switch_block_reason(
         or ""
     ):
         return "closed_bar_unknown"
-    execution_recovery = _live_state_get("execution_recovery", {}, clone=True) or {}
+    execution_recovery = live_state_get("execution_recovery", {}, clone=True) or {}
     if not bool(execution_recovery.get("ready")):
         return "execution_recovery_not_ready"
     try:
@@ -1838,12 +1844,12 @@ def _position_supervisor_switch_block_reason(
         return "execution_recovery_unknown"
     if unresolved_count != 0:
         return "unresolved_execution_intent"
-    safety = _live_state_get("safety_plane", {}, clone=True) or {}
+    safety = live_state_get("safety_plane", {}, clone=True) or {}
     if str(safety.get("reconciliation_state") or "unknown").strip().lower() != "fresh":
         return "positions_reconciliation_not_fresh"
     if list(safety.get("blockers") or []):
         return "safety_blocker_present"
-    if bool(_live_state_get("safety_cycle_active", False)):
+    if bool(live_state_get("safety_cycle_active", False)):
         return "safety_cycle_in_progress"
     return ""
 
@@ -2047,7 +2053,7 @@ def _maybe_switch_position_supervisor_binding(
                 "is_real_execution": False,
                 "no_change_reason": str(selection.get("reason") or ""),
             },
-            acct=_live_state_get("account", {}, clone=True) or {},
+            acct=live_state_get("account", {}, clone=True) or {},
         )
         state["last_selection_reason"] = (
             f"shadow:{selection.get('reason') or 'selection_not_available'}"
@@ -2158,7 +2164,7 @@ def _maybe_switch_position_supervisor_binding(
             "is_real_execution": False,
             "no_change_reason": "",
         },
-        acct=_live_state_get("account", {}, clone=True) or {},
+        acct=live_state_get("account", {}, clone=True) or {},
     )
     if not trace_id:
         # Do not leave a binding that cannot be proven by a trace.  Restore the
@@ -2315,7 +2321,7 @@ def _restore_attribution_for_positions(attr_engine, positions: list[Any] | None)
 
 def _current_regime_hint() -> str:
     return _lifecycle_current_regime_hint_from_composite(
-        _live_state_get("last_composite", clone=True) or {}
+        live_state_get("last_composite", clone=True) or {}
     )
 
 
@@ -2400,11 +2406,11 @@ def _build_position_supervisor_context(
             int(position.get("position_id") or position.get("ticket") or 0),
             operation="position_supervisor_context",
         ),
-        risk_snapshot=_live_state_get("risk", {}, clone=True) or {},
+        risk_snapshot=live_state_get("risk", {}, clone=True) or {},
         total_api_volume=_tracked_total_api_volume(positions or []),
-        market_context=_live_state_get("last_composite", {}, clone=True) or {},
+        market_context=live_state_get("last_composite", {}, clone=True) or {},
         supervisor_state=supervisor_state,
-        loop_running=bool(_live_state_get("loop_running", True)),
+        loop_running=bool(live_state_get("loop_running", True)),
         position_supervisor_template=supervisor_template,
         position_supervisor_policy=supervisor_policy,
     )
@@ -2712,7 +2718,7 @@ def _log_supervisor_decision(
                 cfg=cfg,
                 event_type=event_type,
                 tick=tick,
-                session_pnl=_live_state_get("session_pnl", 0.0),
+                session_pnl=live_state_get("session_pnl", 0.0),
                 fallback_decision_ts=time.time(),
             )
         )
@@ -2994,7 +3000,7 @@ def _build_position_supervision_runtime(
             broker_schedule=broker_schedule,
             **kwargs,
         ),
-        live_state_get=_live_state_get,
+        live_state_get=live_state_get,
         evaluate_risk_policy=_evaluate_risk_reduction_policy,
         log_decision=_log_supervisor_decision,
         remember_state=_remember_supervisor_state,
@@ -3124,27 +3130,10 @@ def _track_local_sl_tp(position_id: int, sl: float, tp: float) -> None:
 # (pos.append(item)). Readers run on different threads (loop tick +
 # HTTP handlers in get_account / get_positions / start_loop); in-place
 # mutation can race with iteration and yield torn reads.
-_live_state: dict = default_live_state()
-
-# ★ 保护 _live_state 的读-改-写操作 (多线程: HTTP handler + live loop + scheduler)
-_LIVE_STATE_LOCK = threading.Lock()
+# live state container + lock are owned by backend.services.live_state_store
+# (imported above); live_service keeps the writer-side names bound to the same
+# objects.  _live_state_set/_live_state_update below are the single write path.
 _DATA_SYNC_LOCK = threading.Lock()
-
-
-def _live_state_get(key: str, default=None, *, clone: bool = False):
-    return _runtime_state_get(_live_state, _LIVE_STATE_LOCK, key, default, clone=clone)
-
-
-def _live_state_snapshot() -> dict:
-    """Return one immutable projection for API/WS serialization.
-
-    Related fields are published in one locked state update. API readers must
-    copy that projection once; reading ``_live_state`` field by field can
-    otherwise combine the previous value with the next update and manufacture
-    a mixed freshness envelope.
-    """
-    with _LIVE_STATE_LOCK:
-        return _safe_container_snapshot(_live_state)
 
 
 def _live_state_set(key: str, value) -> None:
@@ -3479,7 +3468,7 @@ def _ensure_open_ledger_for_recovered_close(
         broker=broker,
         close_ts=close_ts,
         close_price=close_price,
-        risk_state=_live_state_get("risk", {}, clone=True) or {},
+        risk_state=live_state_get("risk", {}, clone=True) or {},
         real_pnl=real_pnl or {},
         close_reason=close_reason,
         fallback_strategy_name=_current_loop_strategy_name(),
@@ -3559,34 +3548,34 @@ def _session_state_snapshot(trade_date: str | None = None) -> dict:
         "session_window_start": window_start,
         "session_window_end": window_end,
         "calendar_day": calendar_day,
-        "source": str(_live_state_get("session_state_source", "runtime_incremental") or "runtime_incremental"),
-        "status": str(_live_state_get("session_state_status", "unknown") or "unknown"),
-        "session_pnl": float(_live_state_get("session_pnl", 0.0) or 0.0),
-        "session_trades": int(_live_state_get("session_trades", 0) or 0),
-        "session_winning": int(_live_state_get("session_winning", 0) or 0),
-        "session_losing": int(_live_state_get("session_losing", 0) or 0),
-        "session_trade_pnls": list(_live_state_get("session_trade_pnls", [], clone=True) or [])[-200:],
+        "source": str(live_state_get("session_state_source", "runtime_incremental") or "runtime_incremental"),
+        "status": str(live_state_get("session_state_status", "unknown") or "unknown"),
+        "session_pnl": float(live_state_get("session_pnl", 0.0) or 0.0),
+        "session_trades": int(live_state_get("session_trades", 0) or 0),
+        "session_winning": int(live_state_get("session_winning", 0) or 0),
+        "session_losing": int(live_state_get("session_losing", 0) or 0),
+        "session_trade_pnls": list(live_state_get("session_trade_pnls", [], clone=True) or [])[-200:],
         "session_realized_pnl_legs": list(
-            _live_state_get("session_realized_pnl_legs", [], clone=True) or []
+            live_state_get("session_realized_pnl_legs", [], clone=True) or []
         )[-500:],
         "session_realized_legs": int(
-            _live_state_get("session_realized_legs", 0) or 0
+            live_state_get("session_realized_legs", 0) or 0
         ),
         "session_recorded_position_ids": list(
-            _live_state_get("session_recorded_position_ids", [], clone=True) or []
+            live_state_get("session_recorded_position_ids", [], clone=True) or []
         )[-1000:],
-        "session_consecutive_loss": int(_live_state_get("session_consecutive_loss", 0) or 0),
-        "session_max_drawdown_pct": float(_live_state_get("session_max_drawdown_pct", 0.0) or 0.0),
-        "session_peak_equity": float(_live_state_get("session_peak_equity", 0.0) or 0.0),
-        "session_start_balance": float(_live_state_get("session_start_balance", 0.0) or 0.0),
-        "session_last_trade_ts": float(_live_state_get("session_last_trade_ts", 0.0) or 0.0),
-        "session_observed_at": float(_live_state_get("session_observed_at", 0.0) or 0.0),
-        "circuit_breaker": bool(_live_state_get("circuit_breaker", False)),
-        "circuit_reason": str(_live_state_get("circuit_reason", "") or ""),
+        "session_consecutive_loss": int(live_state_get("session_consecutive_loss", 0) or 0),
+        "session_max_drawdown_pct": float(live_state_get("session_max_drawdown_pct", 0.0) or 0.0),
+        "session_peak_equity": float(live_state_get("session_peak_equity", 0.0) or 0.0),
+        "session_start_balance": float(live_state_get("session_start_balance", 0.0) or 0.0),
+        "session_last_trade_ts": float(live_state_get("session_last_trade_ts", 0.0) or 0.0),
+        "session_observed_at": float(live_state_get("session_observed_at", 0.0) or 0.0),
+        "circuit_breaker": bool(live_state_get("circuit_breaker", False)),
+        "circuit_reason": str(live_state_get("circuit_reason", "") or ""),
         "session_circuit_observation": dict(
-            _live_state_get("session_circuit_observation", {}, clone=True) or {}
+            live_state_get("session_circuit_observation", {}, clone=True) or {}
         ),
-        "trade_equity_history": list(_live_state_get("trade_equity_history", [], clone=True) or [])[-500:],
+        "trade_equity_history": list(live_state_get("trade_equity_history", [], clone=True) or [])[-500:],
         "updated_at": time.time(),
     }
 
@@ -3700,7 +3689,7 @@ def _build_session_state_from_authoritative_trades(
     Cache-derived peak/equity history is intentionally excluded: only fresh
     broker account and deal facts may reconstruct the risk session.
     """
-    account = _live_state_get("account", {}, clone=True) or {}
+    account = live_state_get("account", {}, clone=True) or {}
     limits = RiskLimitSnapshot.from_runtime_config()
     return _session_build_authoritative_state(
         trade_date=trade_date,
@@ -3729,7 +3718,7 @@ def _restore_session_state_for_day(
         broker_open_position_ids=broker_open_position_ids,
         confirmed_closed_position_ids=confirmed_closed_position_ids,
     )
-    account = _live_state_get("account", {}, clone=True) or {}
+    account = live_state_get("account", {}, clone=True) or {}
     limits = RiskLimitSnapshot.from_runtime_config()
     decision = _session_resolve_restore(
         trade_date=trade_date,
@@ -3947,7 +3936,7 @@ def _release_orphaned_recovery_session_latches(
         f"close_deal_pending:{position_id}" for position_id in normalized_ids
     }
     current_blockers = list(
-        _live_state_get("session_risk_blockers", [], clone=True) or []
+        live_state_get("session_risk_blockers", [], clone=True) or []
     )
     filtered_blockers = [
         blocker for blocker in current_blockers if str(blocker) not in stale_blockers
@@ -4288,8 +4277,8 @@ def _fresh_cached_broker_open_position_ids(
     partially closed, still-open broker position as a completed trade.
     """
 
-    observed_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
-    reconcile_id = str(_live_state_get("positions_reconcile_id", "") or "")
+    observed_at = float(live_state_get("positions_updated_at", 0.0) or 0.0)
+    reconcile_id = str(live_state_get("positions_reconcile_id", "") or "")
     checked_at = float(time.time() if now_ts is None else now_ts)
     if (
         observed_at <= 0.0
@@ -4298,7 +4287,7 @@ def _fresh_cached_broker_open_position_ids(
         or checked_at - observed_at > max(0.0, float(stale_after_sec))
     ):
         return None
-    positions = _live_state_get("positions_reconciled", [], clone=True)
+    positions = live_state_get("positions_reconciled", [], clone=True)
     if not isinstance(positions, list):
         return None
     position_ids: set[int] = set()
@@ -4443,7 +4432,7 @@ def _classify_close_source(position_id: int, close_reason: str, close_ts: float)
 
 
 def _risk_state_with_verdict_dict(verdict: dict) -> dict:
-    state = _live_state_get("risk", {}, clone=True) or {}
+    state = live_state_get("risk", {}, clone=True) or {}
     return _lifecycle_build_risk_state_with_policy_verdict(
         state,
         verdict,
@@ -4587,7 +4576,7 @@ def _replay_recovered_close(
             mark_recovery_closed=_mark_recovery_position_closed,
             release_close_latch=_release_session_close_deal_latch,
             get_risk_state=lambda: (
-                _live_state_get("risk", {}, clone=True) or {}
+                live_state_get("risk", {}, clone=True) or {}
             ),
             now=time.time,
             partial_context=_RECOVERY_CONTEXT_PARTIAL,
@@ -4619,7 +4608,7 @@ def _remove_live_position_state(position_id: int) -> None:
     # The caller has already completed and published a fresh broker
     # reconciliation.  Local cleanup may trim the advisory event projection,
     # but must never advance the authoritative reconcile timestamp.
-    positions = _live_state_get("positions_event", [], clone=True) or []
+    positions = live_state_get("positions_event", [], clone=True) or []
     payload = _lifecycle_filter_removed_live_position(positions, position_id=pid)
     if payload["removed"]:
         _live_state_update(
@@ -4745,14 +4734,14 @@ def _bootstrap_position_recovery(
 
 def _repair_session_start_balance_from_account(*, persist: bool = True) -> float:
     """Fill a startup-time zero baseline once broker balance becomes available."""
-    existing = float(_live_state_get("session_start_balance", 0.0) or 0.0)
+    existing = float(live_state_get("session_start_balance", 0.0) or 0.0)
     if existing > 0:
         return existing
-    account = _live_state_get("account", {}, clone=True) or {}
+    account = live_state_get("account", {}, clone=True) or {}
     current_balance = float(account.get("balance", 0.0) or 0.0)
     if current_balance <= 0:
         return 0.0
-    session_pnl = float(_live_state_get("session_pnl", 0.0) or 0.0)
+    session_pnl = float(live_state_get("session_pnl", 0.0) or 0.0)
     reconstructed = current_balance - session_pnl
     if reconstructed <= 0:
         return 0.0
@@ -4764,11 +4753,11 @@ def _repair_session_start_balance_from_account(*, persist: bool = True) -> float
 
 def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> dict:
     limits = risk_limits or RiskLimitSnapshot.from_runtime_config()
-    session_pnl = float(_live_state_get("session_pnl", 0.0) or 0.0)
+    session_pnl = float(live_state_get("session_pnl", 0.0) or 0.0)
     consecutive_loss = int(
-        _live_state_get("session_consecutive_loss", 0) or 0
+        live_state_get("session_consecutive_loss", 0) or 0
     )
-    start_balance = float(_live_state_get("session_start_balance", 0.0) or 0.0)
+    start_balance = float(live_state_get("session_start_balance", 0.0) or 0.0)
     if start_balance <= 0:
         return {
             "tripped": False,
@@ -4780,7 +4769,7 @@ def _evaluate_daily_drawdown(risk_limits: RiskLimitSnapshot | None = None) -> di
         }
     # 回撤只统计亏损方向 — 盈利日不得把 abs(PnL) 写成回撤水位。
     dd_pct = -min(session_pnl, 0.0) / start_balance * 100 if start_balance > 0 else 0.0
-    prev_dd = float(_live_state_get("session_max_drawdown_pct", 0.0) or 0.0)
+    prev_dd = float(live_state_get("session_max_drawdown_pct", 0.0) or 0.0)
     updates = {"session_max_drawdown_pct": max(prev_dd, dd_pct)}
     consecutive_limit = int(limits.max_consecutive_losses)
     consecutive_tripped = (
@@ -4839,10 +4828,10 @@ def loss_streak_ladder_facts() -> dict[str, Any]:
     published by market_session (single session authority); the review
     statement flag is written by the learning loop's forced review step.
     """
-    book = dict(_live_state_get("loss_streak_book", {}, clone=True) or {})
+    book = dict(live_state_get("loss_streak_book", {}, clone=True) or {})
     if not book:
         return {}
-    session = _live_state_get("market_session", {}, clone=True) or {}
+    session = live_state_get("market_session", {}, clone=True) or {}
     now_ts = time.time()
     seconds_to_open = session.get("seconds_to_open")
     seconds_to_close = session.get("seconds_to_close")
@@ -4909,7 +4898,7 @@ def _loss_streak_review_ready(book: dict[str, Any], *, now_ts: float) -> bool:
 
 def _maybe_update_loss_streak_book(*, tripped: bool, reason: str = "") -> None:
     """Track the daily-loss trip and reset the ladder on broker-day rollover."""
-    book = dict(_live_state_get("loss_streak_book", {}, clone=True) or {})
+    book = dict(live_state_get("loss_streak_book", {}, clone=True) or {})
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if tripped:
         if not book or str(book.get("trip_date") or "") != today:
@@ -4981,7 +4970,7 @@ def _mark_loss_review_statement_ready(statement: dict[str, Any]) -> None:
 
 
 def _get_risk_state() -> dict:
-    return _live_state_get("risk", {}, clone=True) or {}
+    return live_state_get("risk", {}, clone=True) or {}
 
 
 def _set_factor_snapshot(votes: dict, composite: dict) -> None:
@@ -4995,7 +4984,7 @@ def _set_loop_diagnostic(tick: int, bridge_status: str | None = None, *, bridge_
     after the serial tick has completed.  Phase updates are useful diagnostics
     but must not keep ``live.loop.v2`` green while a broker/RPC call is stuck.
     """
-    previous = _live_state_get("_diag", {}, clone=True) or {}
+    previous = live_state_get("_diag", {}, clone=True) or {}
     now = time.time()
     snapshot = {
         "tick": tick,
@@ -5077,7 +5066,7 @@ def _prime_live_loop_state(
             )
         )
         session_status = str(
-            _live_state_get("session_state_status", "unknown") or "unknown"
+            live_state_get("session_state_status", "unknown") or "unknown"
         )
         if not restored or session_status != "available":
             # Preserve the last known risk projection.  A missing/corrupt
@@ -5090,7 +5079,7 @@ def _prime_live_loop_state(
                     else "unavailable"
                 ),
                 session_state_source=(
-                    _live_state_get("session_state_source", "unavailable")
+                    live_state_get("session_state_source", "unavailable")
                     if session_status == "degraded_cache"
                     else "unavailable"
                 ),
@@ -5200,8 +5189,8 @@ def _install_ctrader_live_listener(bridge) -> None:
                     global _latest_price, _latest_price_updated_at
                     _latest_price = price
                     _latest_price_updated_at = float(payload.get("ts") or now_ts)
-                    previous_quote = _live_state_get("spot_quote", None, clone=True) or {}
-                    previous_changed_at = float(_live_state_get("spot_quote_changed_at", 0.0) or 0.0)
+                    previous_quote = live_state_get("spot_quote", None, clone=True) or {}
+                    previous_changed_at = float(live_state_get("spot_quote_changed_at", 0.0) or 0.0)
                     bid = float(payload.get("bid") or 0.0)
                     ask = float(payload.get("ask") or 0.0)
                     previous_values = (
@@ -5228,8 +5217,8 @@ def _install_ctrader_live_listener(bridge) -> None:
                     # dedicated event view and leave the authoritative
                     # position snapshot/timestamp untouched.
                     positions = (
-                        _live_state_get("positions_event", [], clone=True)
-                        or _live_state_get("positions_reconciled", [], clone=True)
+                        live_state_get("positions_event", [], clone=True)
+                        or live_state_get("positions_reconciled", [], clone=True)
                         or []
                     )
                     patched_positions = []
@@ -5386,17 +5375,17 @@ def market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str,
         except Exception:
             quote = {}
     if not quote:
-        stored_quote = _live_state_get("spot_quote", None, clone=True)
+        stored_quote = live_state_get("spot_quote", None, clone=True)
         if isinstance(stored_quote, dict):
             quote = stored_quote
-    quote_changed_at = float((quote or {}).get("changed_at") or _live_state_get("spot_quote_changed_at", 0.0) or 0.0)
+    quote_changed_at = float((quote or {}).get("changed_at") or live_state_get("spot_quote_changed_at", 0.0) or 0.0)
     if quote:
         quote = {**quote, "changed_at": quote_changed_at}
-    positions = _live_state_get("positions_reconciled", [], clone=True) or []
+    positions = live_state_get("positions_reconciled", [], clone=True) or []
     if isinstance(positions, dict):
         positions = positions.get("positions", []) or []
-    account_updated_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
-    positions_updated_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
+    account_updated_at = float(live_state_get("account_updated_at", 0.0) or 0.0)
+    positions_updated_at = float(live_state_get("positions_updated_at", 0.0) or 0.0)
     account_api_ok = bool(account_updated_at > 0 and now_ts - account_updated_at <= 180.0)
     positions_api_ok = bool(positions_updated_at > 0 and now_ts - positions_updated_at <= 180.0)
     broker_connected = bool(getattr(bridge, "is_connected", False)) if bridge is not None else None
@@ -5448,7 +5437,7 @@ def market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str,
     ).to_dict()
     _live_state_update(
         market_session=state,
-        spot_quote=quote or _live_state_get("spot_quote", None, clone=True),
+        spot_quote=quote or live_state_get("spot_quote", None, clone=True),
     )
     try:
         from backend.services.runtime_health_projection import RuntimeHealthProjectionService
@@ -5456,7 +5445,7 @@ def market_session_snapshot(bridge=None, *, broker_error: str = "") -> dict[str,
         RuntimeHealthProjectionService().publish(
             market_session=state,
             ctrader_connected=broker_connected,
-            live_loop_running=bool(_live_state_get("loop_running", False)),
+            live_loop_running=bool(live_state_get("loop_running", False)),
             source="live_market_session",
         )
     except Exception as projection_exc:
@@ -5556,7 +5545,7 @@ def get_status() -> dict:
     """Report current broker connection status (best-effort, no broker call)."""
     ctrader_status, ctrader_error = _probe_ctrader()
     get_latest_price()
-    state_snapshot = _live_state_snapshot()
+    state_snapshot = live_state_snapshot()
     loop = loop_status(_state_snapshot=state_snapshot)
     readiness = get_live_readiness(
         "ctrader",
@@ -5620,7 +5609,7 @@ def get_live_readiness(
     state_snapshot = (
         _state_snapshot
         if isinstance(_state_snapshot, dict)
-        else _live_state_snapshot()
+        else live_state_snapshot()
     )
     state = {
         "diag": state_snapshot.get("_diag", {}) or {},
@@ -5670,8 +5659,8 @@ def get_account(broker: str) -> dict:
     直接卡前端 HTTP 请求). Loop 自己的 tick 已经每 60s 刷新 _live_state."""
     readiness = get_live_readiness(broker)
     # ── 缓存短路: loop 在跑 → 只读 _live_state ──
-    if _live_state_get("loop_running") and _live_state_get("broker") == broker:
-        acct = _live_state_get("account_reconciled", clone=True)
+    if live_state_get("loop_running") and live_state_get("broker") == broker:
+        acct = live_state_get("account_reconciled", clone=True)
         if acct and acct.get("ok"):
             result = dict(acct)
             result["reconcile_status"] = (
@@ -5703,9 +5692,9 @@ def get_account(broker: str) -> dict:
                 }
             reconcile = _explicit_account_reconcile(bridge)
             if reconcile is None:
-                cached = _live_state_get("account_reconciled", {}, clone=True) or {}
-                cached_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
-                cached_id = str(_live_state_get("account_reconcile_id", "") or "")
+                cached = live_state_get("account_reconciled", {}, clone=True) or {}
+                cached_at = float(live_state_get("account_updated_at", 0.0) or 0.0)
+                cached_id = str(live_state_get("account_reconcile_id", "") or "")
                 if cached and cached_at > 0 and cached_id:
                     return {
                         **dict(cached),
@@ -5785,8 +5774,8 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
         # lifecycle and supervisor evaluation per browser poll creates extra
         # DB work and lets concurrent requests amplify memory/CPU usage.
         loop_projection_ready = bool(
-            _live_state_get("loop_running")
-            and _live_state_get("broker") == broker
+            live_state_get("loop_running")
+            and live_state_get("broker") == broker
         )
         cached_projection_ready = bool(
             projected
@@ -5813,9 +5802,9 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
             ]
         return visible
 
-    if _live_state_get("loop_running") and _live_state_get("broker") == broker:
-        cached_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
-        cached_id = str(_live_state_get("positions_reconcile_id", "") or "")
+    if live_state_get("loop_running") and live_state_get("broker") == broker:
+        cached_at = float(live_state_get("positions_updated_at", 0.0) or 0.0)
+        cached_id = str(live_state_get("positions_reconcile_id", "") or "")
         if cached_at > 0 and cached_id:
             return {
                 "ok": True,
@@ -5837,8 +5826,8 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
     if broker == "ctrader":
         # 缓存短路: live loop 在跑 → 只读 _live_state (跟上面 if 分支等价,
         # 保留是为了 cache_fallback 的 robustness — 上层分支没匹配时这里兜底)
-        cached_positions = _live_state_get("positions_reconciled", clone=True)
-        if cached_positions is not None and _live_state_get("loop_running"):
+        cached_positions = live_state_get("positions_reconciled", clone=True)
+        if cached_positions is not None and live_state_get("loop_running"):
             return {"ok": True, "broker": "ctrader", "positions": _visible_positions(cached_positions), "readiness": readiness}
         # 缓存空 fallback
         def _fetch():
@@ -5856,10 +5845,10 @@ def get_positions(broker: str, symbol: str | None = None) -> dict:
                 }
             reconcile = _explicit_position_reconcile(bridge)
             if str(_reconcile_value(reconcile, "status", "failed") or "failed") != "fresh":
-                cached_at = float(_live_state_get("positions_updated_at", 0.0) or 0.0)
-                cached_id = str(_live_state_get("positions_reconcile_id", "") or "")
+                cached_at = float(live_state_get("positions_updated_at", 0.0) or 0.0)
+                cached_id = str(live_state_get("positions_reconcile_id", "") or "")
                 cached = _coerce_live_positions(
-                    _live_state_get("positions_reconciled", [], clone=True)
+                    live_state_get("positions_reconciled", [], clone=True)
                 )
                 if cached_at > 0 and cached_id:
                     visible = _visible_positions(cached)
@@ -5964,7 +5953,7 @@ def _get_live_safety_plane(generation_id: str = "") -> LiveSafetyPlane:
 def _live_safety_watchdog_probe() -> dict[str, Any]:
     """Return process facts only; the watchdog never calls the broker."""
 
-    safety = _live_state_get("safety_plane", {}, clone=True) or {}
+    safety = live_state_get("safety_plane", {}, clone=True) or {}
     heartbeat_at = float(safety.get("heartbeat_at", 0.0) or 0.0)
     controller = _LIVE_LOOP_CONTROLLER.status()
     thread_alive = bool(controller.get("thread_alive"))
@@ -5984,13 +5973,13 @@ def _live_safety_watchdog_probe() -> dict[str, Any]:
         # a completed Safety fact and is never used by the open admission
         # boundary as proof of fresh account/positions.
         "safety_cycle_active": bool(
-            _live_state_get("safety_cycle_active", False)
+            live_state_get("safety_cycle_active", False)
         ),
         "safety_cycle_progress_at": float(
-            _live_state_get("safety_cycle_progress_at", 0.0) or 0.0
+            live_state_get("safety_cycle_progress_at", 0.0) or 0.0
         ),
-        "account_updated_at": float(_live_state_get("account_updated_at", 0.0) or 0.0),
-        "positions_updated_at": float(_live_state_get("positions_updated_at", 0.0) or 0.0),
+        "account_updated_at": float(live_state_get("account_updated_at", 0.0) or 0.0),
+        "positions_updated_at": float(live_state_get("positions_updated_at", 0.0) or 0.0),
         "unknown_execution_count": unknown_raw,
     }
 
@@ -6151,26 +6140,26 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
         try:
             live_loop_probe = dict(_live_safety_watchdog_probe() or {})
             safety_payload = dict(
-                _live_state_get("safety_plane", {}, clone=True) or {}
+                live_state_get("safety_plane", {}, clone=True) or {}
             )
             account_snapshot = dict(
-                _live_state_get("account_reconciled", {}, clone=True) or {}
+                live_state_get("account_reconciled", {}, clone=True) or {}
             )
-            positions_snapshot = _live_state_get(
+            positions_snapshot = live_state_get(
                 "positions_reconciled", None, clone=True
             )
             reconciliation_blockers = _new_risk_reconciliation_blockers()
             account_id = str(
-                _live_state_get("account_reconcile_id", "") or ""
+                live_state_get("account_reconcile_id", "") or ""
             )
             positions_id = str(
-                _live_state_get("positions_reconcile_id", "") or ""
+                live_state_get("positions_reconcile_id", "") or ""
             )
             live_loop_recovered = bool(
                 live_loop_probe.get("running")
-                and bool(_live_state_get("loop_running", False))
+                and bool(live_state_get("loop_running", False))
                 and str(
-                    _live_state_get("session_state_status", "unknown")
+                    live_state_get("session_state_status", "unknown")
                     or "unknown"
                 )
                 == "available"
@@ -6202,13 +6191,13 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
                     "safety_heartbeat_at"
                 ),
                 "account_reconcile_id": str(
-                    _live_state_get("account_reconcile_id", "") or ""
+                    live_state_get("account_reconcile_id", "") or ""
                 ),
                 "positions_reconcile_id": str(
-                    _live_state_get("positions_reconcile_id", "") or ""
+                    live_state_get("positions_reconcile_id", "") or ""
                 ),
                 "session_state_status": str(
-                    _live_state_get("session_state_status", "unknown")
+                    live_state_get("session_state_status", "unknown")
                     or "unknown"
                 ),
                 "safety_status": str(safety_payload.get("status") or ""),
@@ -6251,12 +6240,12 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
                     "position_id": target_position_id or None,
                     "open_position_ids": sorted(open_position_ids),
                     "positions_reconcile_id": str(
-                        _live_state_get("positions_reconcile_id", "") or ""
+                        live_state_get("positions_reconcile_id", "") or ""
                     ),
                 },
             )
 
-    safety_failure = _live_state_get("safety_failure", {}, clone=True) or {}
+    safety_failure = live_state_get("safety_failure", {}, clone=True) or {}
     updates: dict[str, Any] = {"no_new_risk_latch": released}
     remaining_causes = {
         (str(item.get("cause") or ""), str(item.get("cause_id") or ""))
@@ -6313,7 +6302,7 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
                     f"safety_failure:{failure_source or 'unknown'}"
                 )
 
-        safety_payload = _live_state_get("safety_plane", {}, clone=True) or {}
+        safety_payload = live_state_get("safety_plane", {}, clone=True) or {}
         if not isinstance(safety_payload, dict) or not bool(
             safety_payload.get("accepting_new_risk")
         ):
@@ -6331,11 +6320,11 @@ def _on_live_safety_watchdog_recovery(result: SafetyFreshnessResult) -> None:
 
         recovery_blockers.extend(_new_risk_reconciliation_blockers())
         if (
-            str(_live_state_get("session_state_status", "unknown") or "unknown")
+            str(live_state_get("session_state_status", "unknown") or "unknown")
             != "available"
         ):
             recovery_blockers.append("session_state_unavailable")
-        if bool(_live_state_get("circuit_breaker", False)):
+        if bool(live_state_get("circuit_breaker", False)):
             recovery_blockers.append("session_circuit_breaker")
 
     normalized_recovery_blockers = sorted(set(recovery_blockers))
@@ -6406,7 +6395,7 @@ def _scheduled_offmarket_position_quality_lightgbm(
 ) -> dict[str, Any]:
     from backend.services.learning_research_jobs import run_offmarket_position_quality_job
 
-    session = _live_state_get("market_session", {}, clone=True) or {}
+    session = live_state_get("market_session", {}, clone=True) or {}
     # Let the quality job consume runtime_health_projection.v1 when this
     # process has not published an in-memory session yet.  Recomputing with a
     # None bridge would silently fall back to the static schedule and create
@@ -6580,7 +6569,7 @@ def loop_status(*, _state_snapshot: dict | None = None) -> dict:
     state_snapshot = (
         _state_snapshot
         if isinstance(_state_snapshot, dict)
-        else _live_state_snapshot()
+        else live_state_snapshot()
     )
     with _loop_state_lock:
         generation = _LIVE_LOOP_CONTROLLER.status()
@@ -7007,7 +6996,7 @@ def _fetch_bars_with_retry(bridge, timeframe: str, n_bars: int, max_retries: int
 
 
 
-def _get_live_bars(
+def get_live_bars(
     symbol: str = "XAUUSD+",
     timeframe: str = "M5",
     n_bars: int = 500,
@@ -7389,7 +7378,7 @@ def _publish_fresh_position_reconcile(
     # HTTP/compatibility reads may publish a broker fact without owning the
     # durable recovery/lifecycle write. Only the Safety and execution paths
     # pass persist=True; a loop-running flag is not an ownership boundary.
-    if not bool(_live_state_get("loop_running", False)) or not persist:
+    if not bool(live_state_get("loop_running", False)) or not persist:
         return positions
     # A successful Reconcile response is authoritative only when it agrees
     # with broker-confirmed opens that have not yet received a complete close
@@ -7631,9 +7620,9 @@ def _live_safety_planner_runtime(bridge: Any) -> SafetyPlannerRuntime:
             positions=list(all_positions),
             account=dict(acct or {}),
             entry_decision_id="",
-            risk_snapshot=_live_state_get("risk", {}, clone=True) or {},
+            risk_snapshot=live_state_get("risk", {}, clone=True) or {},
             total_api_volume=_tracked_total_api_volume(list(all_positions)),
-            market_context=_live_state_get("last_composite", {}, clone=True) or {},
+            market_context=live_state_get("last_composite", {}, clone=True) or {},
             supervisor_state=dict(
                 (
                     _load_recovery_row_for_risk_reduction(
@@ -7644,7 +7633,7 @@ def _live_safety_planner_runtime(bridge: Any) -> SafetyPlannerRuntime:
                 ).get("recovery_meta")
                 or {}
             ),
-            loop_running=bool(_live_state_get("loop_running", True)),
+            loop_running=bool(live_state_get("loop_running", True)),
         )
         context = _lifecycle_build_position_supervisor_context_payload(
             **context_inputs,
@@ -7767,7 +7756,7 @@ def _run_live_safety_cycle(
         generation_id=generation_id,
         broker=broker,
         tick=tick,
-        get_live_state=_live_state_get,
+        get_live_state=live_state_get,
     )
 
     payload = _loop_v2_run_safety_cycle(
@@ -7785,7 +7774,7 @@ def _run_live_safety_cycle(
                 _publish_fresh_position_reconcile,
                 bridge=bridge,
             ),
-            get_live_state=_live_state_get,
+            get_live_state=live_state_get,
             update_live_state=_live_state_update,
             runtime_config=_runtime_config,
             safety_reference_price=_safety_reference_price,
@@ -7825,7 +7814,7 @@ def _recover_execution_outcomes_before_alpha(
         ),
         safety_result=safety_result,
         runtime=ExecutionRecoveryRuntime(
-            get_cached_recovery=lambda: _live_state_get(
+            get_cached_recovery=lambda: live_state_get(
                 "execution_recovery", {}, clone=True
             )
             or {},
@@ -7870,7 +7859,7 @@ def _attempt_generation_startup_barrier(
         runtime=StartupBarrierRuntime(
             controller=_LIVE_LOOP_CONTROLLER,
             update_live_state=_live_state_update,
-            get_live_state=_live_state_get,
+            get_live_state=live_state_get,
             explicit_position_reconcile=_explicit_position_reconcile,
             publish_fresh_positions=_publish_fresh_position_reconcile,
             run_safety_cycle=_run_live_safety_cycle,
@@ -7898,7 +7887,7 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
             _recover_execution_outcomes_before_alpha
         ),
         attempt_startup_barrier=_attempt_generation_startup_barrier,
-        live_state_get=_live_state_get,
+        live_state_get=live_state_get,
         bootstrap_position_recovery=_bootstrap_position_recovery,
         loop_strategy_name=_current_loop_strategy_name(),
         restore_session_state=_restore_session_state_for_day,
@@ -7906,7 +7895,7 @@ def _live_loop_tick_runtime() -> LiveLoopTickRuntime:
         evaluate_daily_drawdown=_evaluate_daily_drawdown,
         market_session_snapshot=market_session_snapshot,
         ensure_spot_subscription=_ensure_spot_subscription,
-        get_live_bars=_get_live_bars,
+        get_live_bars=get_live_bars,
         ensure_decision_bars_fresh=_ensure_live_decision_bars_fresh,
         get_safety_plane=_get_live_safety_plane,
         retry_pending_open=_retry_pending_open_trade,
@@ -8024,7 +8013,7 @@ def _closed_bar_forward_var_input(*, cfg, observed_at: float):
     timeframe = str(getattr(cfg, "timeframe", "M5") or "M5")
     lookback = max(2, int(getattr(cfg, "var_window", 500) or 500))
     try:
-        frame = _get_live_bars(symbol, timeframe, lookback + 1)
+        frame = get_live_bars(symbol, timeframe, lookback + 1)
         frame = _closed_decision_bar_frame(
             frame,
             timeframe=timeframe,
@@ -8075,21 +8064,21 @@ def _update_live_loop_risk_metrics(*, tick: int, log) -> None:
         )
         from config.runtime_config import shared as runtime_config
 
-        account = _live_state_get("account_reconciled", {}, clone=True) or {}
-        positions = _live_state_get("positions_reconciled", [], clone=True)
-        account_id = str(_live_state_get("account_reconcile_id", "") or "")
+        account = live_state_get("account_reconciled", {}, clone=True) or {}
+        positions = live_state_get("positions_reconciled", [], clone=True)
+        account_id = str(live_state_get("account_reconcile_id", "") or "")
         positions_id = str(
-            _live_state_get("positions_reconcile_id", "") or ""
+            live_state_get("positions_reconcile_id", "") or ""
         )
-        account_at = float(_live_state_get("account_updated_at", 0.0) or 0.0)
+        account_at = float(live_state_get("account_updated_at", 0.0) or 0.0)
         positions_at = float(
-            _live_state_get("positions_updated_at", 0.0) or 0.0
+            live_state_get("positions_updated_at", 0.0) or 0.0
         )
         account_failed_at = float(
-            _live_state_get("account_reconcile_failed_at", 0.0) or 0.0
+            live_state_get("account_reconcile_failed_at", 0.0) or 0.0
         )
         positions_failed_at = float(
-            _live_state_get("positions_reconcile_failed_at", 0.0) or 0.0
+            live_state_get("positions_reconcile_failed_at", 0.0) or 0.0
         )
         facts_fresh = (
             bool(account_id)
@@ -8646,7 +8635,7 @@ def _publish_latest_price(price: float | int | str | None, *, source: str = "unk
     _latest_price = value
     _latest_price_updated_at = now_ts
 
-    quote = _live_state_get("spot_quote", None, clone=True)
+    quote = live_state_get("spot_quote", None, clone=True)
     if not _quote_is_fresh(quote):
         _live_state_update(
             spot_price=value,
@@ -8687,12 +8676,12 @@ def _latest_bar_close_from_store() -> float | None:
 
 def get_latest_price() -> float | None:
     """返回最新价. 优先共享缓存 (live loop 写), 其次 bridge spot, 最后本地 bar close."""
-    quote = _live_state_get("spot_quote", None, clone=True)
+    quote = live_state_get("spot_quote", None, clone=True)
     if _quote_is_fresh(quote):
         spot = float((quote or {}).get("mid") or 0.0)
         if spot > 0:
             return spot
-    cached_spot = _live_state_get("spot_price", None)
+    cached_spot = live_state_get("spot_price", None)
     try:
         if cached_spot is not None and float(cached_spot or 0.0) > 0:
             return float(cached_spot)
@@ -8833,9 +8822,9 @@ def _log_filled_open_ledger(
             risk_state=(
                 _risk_state_with_verdict(risk_verdict)
                 if risk_verdict is not None
-                else (_live_state_get("risk", {}, clone=True) or {})
+                else (live_state_get("risk", {}, clone=True) or {})
             ),
-            session_pnl=float(_live_state_get("session_pnl", 0) or 0.0),
+            session_pnl=float(live_state_get("session_pnl", 0) or 0.0),
             risk_verdict=risk_verdict,
             decision_ts_fallback=time.time(),
             event_ts=time.time(),
@@ -9044,7 +9033,7 @@ def _closed_position_processing_runtime() -> ClosedPositionProcessingRuntime:
         ensure_open_ledger=_ensure_open_ledger_for_recovered_close,
         lookup_context_integrity=_lookup_recovery_context_integrity,
         build_close_ledger_payloads=_tick_build_close_ledger_payloads,
-        get_session_pnl=lambda: _live_state_get("session_pnl", 0),
+        get_session_pnl=lambda: live_state_get("session_pnl", 0),
         risk_state_with_verdict=_risk_state_with_verdict_dict,
         trade_reviewer=_TRADE_REVIEWER,
         experience_builder=_EXPERIENCE_BUILDER,
@@ -9357,7 +9346,7 @@ def _log_amended_open_ledger(
             bar=bar,
             account=acct,
             positions_before=pos,
-            session_pnl=_live_state_get("session_pnl", 0),
+            session_pnl=live_state_get("session_pnl", 0),
             risk_state=_risk_state_with_verdict(risk_verdict),
             risk_verdict=risk_verdict,
             pid=int(pid),
@@ -9588,7 +9577,7 @@ def _amend_failure_processing_runtime() -> AmendFailureRuntime:
         ledger_available=bool(ledger),
         build_failed_payloads=_tick_build_amend_failed_ledger_payloads,
         get_risk_state=lambda: (
-            _live_state_get("risk", {}, clone=True) or {}
+            live_state_get("risk", {}, clone=True) or {}
         ),
         log_composite_decision=(
             ledger.log_composite_decision if ledger else lambda **_kwargs: ""
@@ -9783,7 +9772,7 @@ def _prepare_open_trade_candidate(
     sl_price = float(preflight["sl_price"])
     tp_price = float(preflight["tp_price"])
 
-    account_for_risk = _live_state_get("account", {}, clone=True) or {}
+    account_for_risk = live_state_get("account", {}, clone=True) or {}
     sizing_result = _risk_kelly_sizing(
         cfg,
         composite.direction,
@@ -9857,12 +9846,12 @@ def _prepare_open_trade_candidate(
         decision_ts=float(bar.get("time", time.time()) or time.time()),
     )
     risk_verdict = _RISK_POLICY.evaluate("open_trade", risk_context)
-    market_session = _live_state_get("market_session", {}, clone=True) or {}
+    market_session = live_state_get("market_session", {}, clone=True) or {}
     order_block = _tick_build_market_order_block(
         market_session=market_session,
         risk_verdict=risk_verdict,
     )
-    quote = _live_state_get("spot_quote", {}, clone=True) or {}
+    quote = live_state_get("spot_quote", {}, clone=True) or {}
     bid = float(quote.get("bid") or 0.0)
     ask = float(quote.get("ask") or 0.0)
     spread_points = max(0.0, ask - bid) if bid > 0 and ask > 0 else 0.0
@@ -10209,13 +10198,13 @@ def _record_open_trade_admission_blocked(
             bar=bar,
             account=account,
             positions_before=positions,
-            risk_state=_live_state_get("risk", {}, clone=True) or {},
+            risk_state=live_state_get("risk", {}, clone=True) or {},
             risk_verdict=None,
             block_reason=block_reason,
             skip_stage=skip_stage,
             tick=tick,
             sizing_trace={},
-            market_session=_live_state_get("market_session", {}, clone=True) or {},
+            market_session=live_state_get("market_session", {}, clone=True) or {},
             event_sizing_context={},
             learning_context={},
             decision_ts_fallback=time.time(),
@@ -10412,7 +10401,7 @@ def _prepare_open_trade_intent(
             "balance": (account or {}).get("balance", 0),
             "equity": (account or {}).get("equity", 0),
             "n_positions": len(positions or []),
-            "session_pnl": _live_state_get("session_pnl", 0),
+            "session_pnl": live_state_get("session_pnl", 0),
         },
         risk_state=_risk_state_with_verdict(candidate.risk_verdict),
         policy_version=str(getattr(cfg, "policy_version", "") or ""),
@@ -10616,7 +10605,7 @@ def _record_open_trade_order_failure(
             bar=bar,
             account=account,
             positions_before=positions,
-            risk_state=_live_state_get("risk", {}, clone=True) or {},
+            risk_state=live_state_get("risk", {}, clone=True) or {},
             requested_volume=float(candidate.volume),
             current_price=float(current_price),
             sl_price=float(candidate.sl_price),
@@ -10922,19 +10911,19 @@ def _new_risk_reconciliation_blockers(*, now_ts: float | None = None) -> list[st
     """Validate broker facts at the final open-order admission boundary."""
 
     checked_at = float(time.time() if now_ts is None else now_ts)
-    account = _live_state_get("account_reconciled", {}, clone=True) or {}
-    positions = _live_state_get("positions_reconciled", None, clone=True)
+    account = live_state_get("account_reconciled", {}, clone=True) or {}
+    positions = live_state_get("positions_reconciled", None, clone=True)
     result = _evaluate_reconciliation_snapshot(
         account=account,
-        account_updated_at=_live_state_get("account_updated_at", 0.0),
-        account_reconcile_id=_live_state_get("account_reconcile_id", ""),
-        account_reconcile_failed_at=_live_state_get(
+        account_updated_at=live_state_get("account_updated_at", 0.0),
+        account_reconcile_id=live_state_get("account_reconcile_id", ""),
+        account_reconcile_failed_at=live_state_get(
             "account_reconcile_failed_at", 0.0
         ),
         positions=positions,
-        positions_updated_at=_live_state_get("positions_updated_at", 0.0),
-        positions_reconcile_id=_live_state_get("positions_reconcile_id", ""),
-        positions_reconcile_failed_at=_live_state_get(
+        positions_updated_at=live_state_get("positions_updated_at", 0.0),
+        positions_reconcile_id=live_state_get("positions_reconcile_id", ""),
+        positions_reconcile_failed_at=live_state_get(
             "positions_reconcile_failed_at", 0.0
         ),
         checked_at=checked_at,
@@ -10986,15 +10975,15 @@ def _open_trade_admission_blockers(stop_requested=None) -> tuple[str, ...]:
         blockers.append("no_new_risk_latched")
     if not _LIVE_LOOP_CONTROLLER.accepting_new_risk(_current_generation_id()):
         blockers.append("generation_not_accepting_new_risk")
-    if bool(_live_state_get("loop_running", False)):
+    if bool(live_state_get("loop_running", False)):
         # The controller is the only lifecycle/admission authority.  The
         # shared value is a projection for APIs and WebSocket consumers, never
         # an independent gate that can diverge from the generation.
         if str(
-            _live_state_get("session_state_status", "unknown") or "unknown"
+            live_state_get("session_state_status", "unknown") or "unknown"
         ) != "available":
             blockers.append("session_state_unavailable")
-        if bool(_live_state_get("circuit_breaker", False)):
+        if bool(live_state_get("circuit_breaker", False)):
             blockers.append("session_circuit_breaker")
         reconcile_blockers = _new_risk_reconciliation_blockers()
         _live_state_update(new_risk_reconcile_blockers=reconcile_blockers)
@@ -11242,8 +11231,8 @@ def _retry_pending_open_trade(
         log(f"tick {tick}: discarded stale pending open retry")
         return
 
-    acct = _live_state_get("account", {}, clone=True) or {}
-    positions_payload = _live_state_get("positions", [], clone=True) or []
+    acct = live_state_get("account", {}, clone=True) or {}
+    positions_payload = live_state_get("positions", [], clone=True) or []
     positions_probe = (
         (positions_payload.get("positions", []) or [])
         if isinstance(positions_payload, dict)
@@ -11323,8 +11312,8 @@ def _process_tick_existing_decision_bar(
     """Run observe/protection work without feeding a duplicate decision bar."""
     global _prev_position_ids
 
-    acct = _live_state_get("account", {}, clone=True) or {}
-    positions_payload = _live_state_get("positions", [], clone=True) or []
+    acct = live_state_get("account", {}, clone=True) or {}
+    positions_payload = live_state_get("positions", [], clone=True) or []
     _positions_probe = (
         (positions_payload.get("positions", []) or [])
         if isinstance(positions_payload, dict)
@@ -11353,7 +11342,7 @@ def _process_tick_existing_decision_bar(
 
     current_pids = _tick_collect_position_ids(pos)
     attr_engine = pipeline.get("attribution")
-    positions_snapshot_ready = bool(_live_state_get("positions_updated_at", 0.0))
+    positions_snapshot_ready = bool(live_state_get("positions_updated_at", 0.0))
     closed_pids, current_pids, close_detection_deferred = _tick_resolve_closed_position_ids(
         previous_position_ids=_prev_position_ids,
         current_position_ids=current_pids,
@@ -11423,7 +11412,7 @@ def _process_tick_existing_decision_bar(
         f"balance={acct.get('balance', 0):.2f} "
         f"equity={acct.get('equity', 0):.2f} "
         f"pos={len(pos)} "
-        f"pnl_session={_live_state_get('session_pnl', 0):.2f}")
+        f"pnl_session={live_state_get('session_pnl', 0):.2f}")
     _check_business_alerts(tick, acct, pos, log)
     _prev_position_ids = current_pids
     _publish_latest_price(current_price, source="loop_tick")
@@ -11452,7 +11441,7 @@ def _process_tick_factor_pipeline(
     bar = _tick_build_factor_bar(last_bar, df_new, _tf)
     bar_progress = _factor_state_resolve_bar_progress(
         bar,
-        _live_state_get("last_processed_decision_bar_ts", 0.0),
+        live_state_get("last_processed_decision_bar_ts", 0.0),
     )
     if bar_progress.already_processed:
         _process_tick_existing_decision_bar(
@@ -11506,8 +11495,8 @@ def _process_tick_factor_pipeline(
     signal_str = _tick_build_signal_log_suffix(composite, gate_result)
 
     # ── 读 account/positions 缓存 ──
-    acct = _live_state_get("account", {}, clone=True) or {}
-    positions_payload = _live_state_get("positions", [], clone=True) or []
+    acct = live_state_get("account", {}, clone=True) or {}
+    positions_payload = live_state_get("positions", [], clone=True) or []
     # ★ P0 fix: 统一转 dict — 支持 dataclass / protobuf / 任意非 dict
     _positions_probe = (
         (positions_payload.get("positions", []) or [])
@@ -11546,9 +11535,9 @@ def _process_tick_factor_pipeline(
                     "balance": acct.get("balance", 0),
                     "equity": acct.get("equity", 0),
                     "n_positions": len(pos),
-                    "session_pnl": _live_state_get("session_pnl", 0),
+                    "session_pnl": live_state_get("session_pnl", 0),
                 },
-                risk_state=_live_state_get("risk", {}, clone=True) or {},
+                risk_state=live_state_get("risk", {}, clone=True) or {},
                 policy_version=policy_version,
                 factor_set_version=factor_set_version,
                 action_reason="signal_detected",
@@ -11575,7 +11564,7 @@ def _process_tick_factor_pipeline(
     current_pids = _tick_collect_position_ids(pos)
     pending_open_attach_ids = _active_pending_open_attach_ids(current_pids)
     attr_engine = pipeline.get("attribution")
-    positions_snapshot_ready = bool(_live_state_get("positions_updated_at", 0.0))
+    positions_snapshot_ready = bool(live_state_get("positions_updated_at", 0.0))
     closed_pids, current_pids, close_detection_deferred = _tick_resolve_closed_position_ids(
         previous_position_ids=_prev_position_ids,
         current_position_ids=current_pids,
@@ -11688,7 +11677,7 @@ def _process_tick_factor_pipeline(
         f"balance={acct.get('balance', 0):.2f} "
         f"equity={acct.get('equity', 0):.2f} "
         f"pos={len(pos)} "
-        f"pnl_session={_live_state_get('session_pnl', 0):.2f}"
+        f"pnl_session={live_state_get('session_pnl', 0):.2f}"
         f"{signal_str}")
 
     # ── 业务告警检查 ──
@@ -12065,7 +12054,7 @@ def _prepare_protection_candidate_execution(
         close_context=close_context,
         position=position,
         candidate=candidate,
-        loop_running=bool(_live_state_get("loop_running", True)),
+        loop_running=bool(live_state_get("loop_running", True)),
         bridge_connected=bool(getattr(bridge, "is_connected", False)),
     )
     risk_verdict = _evaluate_risk_reduction_policy(candidate.risk_action, risk_context).to_dict()
@@ -12644,7 +12633,7 @@ def _check_business_alerts(tick: int, acct: dict, pos: list, log) -> None:
 
         # 规则 1: 连亏 — 边沿触发且按笔数升级: 进入连亏状态发一次,
         # 连亏加深(3→4→5)每档再发一次; 回落到 <3 后重新武装。
-        consec = int(_live_state_get("session_consecutive_loss", 0))
+        consec = int(live_state_get("session_consecutive_loss", 0))
         if consec >= 3:
             with _BUSINESS_ALERT_ARM_LOCK:
                 _last_notified = _business_alert_armed.get(
@@ -12654,7 +12643,7 @@ def _check_business_alerts(tick: int, acct: dict, pos: list, log) -> None:
             if _last_notified != consec:
                 _alerter.send("WARNING", f"⚠️ 连续亏损 {consec} 笔",
                               f"Tick: {tick}\nConsecutive Loss: {consec}\n"
-                              f"Session PnL: ${_live_state_get('session_pnl', 0):.2f}")
+                              f"Session PnL: ${live_state_get('session_pnl', 0):.2f}")
                 log(f"[alerts] consecutive-loss warning sent: streak={consec}")
         else:
             with _BUSINESS_ALERT_ARM_LOCK:
@@ -12663,7 +12652,7 @@ def _check_business_alerts(tick: int, acct: dict, pos: list, log) -> None:
         # 规则 2: 当日回撤 — 水位只涨不降, 按水位抬升分级:
         #   首次越过 5% → ERROR; 已在 ERROR 区间内继续抬高不重发;
         #   回落到 <3% 后重新武装。
-        dd_pct = float(_live_state_get("session_max_drawdown_pct", 0))
+        dd_pct = float(live_state_get("session_max_drawdown_pct", 0))
         balance = float(acct.get("balance", 0))
         if dd_pct >= 5.0:
             # 水位进入 ERROR 区: 发一次升级告警, 并解除 WARNING 武装
@@ -12672,7 +12661,7 @@ def _check_business_alerts(tick: int, acct: dict, pos: list, log) -> None:
                 _alerter.send("ERROR", f"🔴 当日回撤 {dd_pct:.1f}%",
                               f"Tick: {tick}\nDrawdown: {dd_pct:.1f}%\n"
                               f"Balance: ${balance:.2f}\n"
-                              f"Session PnL: ${_live_state_get('session_pnl', 0):.2f}")
+                              f"Session PnL: ${live_state_get('session_pnl', 0):.2f}")
                 log(f"[alerts] drawdown ERROR sent: dd={dd_pct:.1f}%")
             _business_alert_should_send("dd_warn", False)
         elif 3.0 <= dd_pct < 5.0 and _business_alert_should_send("dd_warn", True):
@@ -12688,12 +12677,12 @@ def _check_business_alerts(tick: int, acct: dict, pos: list, log) -> None:
         # 规则 3: 熔断确认
         if _business_alert_should_send(
             "circuit_breaker",
-            bool(_live_state_get("circuit_breaker")),
+            bool(live_state_get("circuit_breaker")),
         ):
-            reason = _live_state_get("circuit_reason", "unknown")
+            reason = live_state_get("circuit_reason", "unknown")
             _alerter.send("CRITICAL", "🔴 熔断触发",
                           f"Tick: {tick}\nReason: {reason}\n"
-                          f"Session PnL: ${_live_state_get('session_pnl', 0):.2f}")
+                          f"Session PnL: ${live_state_get('session_pnl', 0):.2f}")
 
         # 每 50 tick 输出执行质量摘要
         if tick > 0 and tick % 50 == 0:

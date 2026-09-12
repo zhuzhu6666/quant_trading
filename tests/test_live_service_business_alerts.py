@@ -49,7 +49,7 @@ def _run(acct=None, log=lambda _msg: None, tick=1):
 def test_drawdown_sent_once_not_every_10_ticks(fake_alerter, monkeypatch):
     """回撤 4.9% 水位持续存在时只发一次, 不再每 5 分钟刷屏."""
     monkeypatch.setattr(
-        live_service, "_live_state_get",
+        live_service, "live_state_get",
         lambda key, default=None, clone=False: {
             "session_max_drawdown_pct": 4.95,
             "session_consecutive_loss": 0,
@@ -67,7 +67,7 @@ def test_drawdown_escalates_to_error_exactly_once(fake_alerter, monkeypatch):
     """水位从 WARNING 区抬到 ERROR 区: 升级补发一次, 之后不再重复."""
     state = {"session_max_drawdown_pct": 3.5, "session_consecutive_loss": 0}
     monkeypatch.setattr(
-        live_service, "_live_state_get",
+        live_service, "live_state_get",
         lambda key, default=None, clone=False: state.get(key, default),
     )
     _run(tick=1)
@@ -87,7 +87,7 @@ def test_consecutive_loss_rearms_when_streak_resets(fake_alerter, monkeypatch):
     """连亏告警: 进入状态发一次, 加深(3→4)每档再发一次, 回落重新武装."""
     state = {"session_consecutive_loss": 4, "session_max_drawdown_pct": 0.0}
     monkeypatch.setattr(
-        live_service, "_live_state_get",
+        live_service, "live_state_get",
         lambda key, default=None, clone=False: state.get(key, default),
     )
     _run(tick=1)
@@ -114,7 +114,7 @@ def test_circuit_breaker_edge_triggered_once(fake_alerter, monkeypatch):
     state = {"circuit_breaker": True, "circuit_reason": "daily_loss",
              "session_consecutive_loss": 0}
     monkeypatch.setattr(
-        live_service, "_live_state_get",
+        live_service, "live_state_get",
         lambda key, default=None, clone=False: state.get(key, default),
     )
     for tick in (1, 11, 21):

@@ -106,9 +106,9 @@ def test_fresh_empty_reconcile_conflicting_with_recovery_blocks_new_risk(monkeyp
     assert live_service._new_risk_reconciliation_blockers(now_ts=now) == [
         "positions_reconcile_failed"
     ]
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("accepting_new_risk") is False
     assert "broker_recovery_position_conflict:101" in str(
-        live_service._live_state_get("positions_reconcile_error")
+        live_service.live_state_get("positions_reconcile_error")
     )
     assert (
         "position_reconcile_conflict",
@@ -158,10 +158,10 @@ def test_purged_orphan_recovery_row_releases_only_its_session_latch(monkeypatch)
     )
 
     assert 902 not in live_service._pending_session_close_causes()
-    assert "close_deal_pending:902" not in live_service._live_state_get(
+    assert "close_deal_pending:902" not in live_service.live_state_get(
         "session_risk_blockers"
     )
-    assert "session_not_restored" in live_service._live_state_get(
+    assert "session_not_restored" in live_service.live_state_get(
         "session_risk_blockers"
     )
     assert no_new_risk_latch_status(fail_closed=True)["active"] is False
@@ -191,7 +191,7 @@ def test_fresh_reconcile_keeps_multiple_aligned_recovery_positions_open(monkeypa
 
     assert [item["position_id"] for item in positions] == [101, 202]
     assert live_service._new_risk_reconciliation_blockers(now_ts=now) == []
-    assert live_service._live_state_get("positions_reconcile_error") is None
+    assert live_service.live_state_get("positions_reconcile_error") is None
 
 
 def test_aligned_reconcile_releases_prior_recovery_conflict_latch(monkeypatch):

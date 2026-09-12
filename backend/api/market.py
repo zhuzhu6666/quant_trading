@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.core.auth import RequireUser
 from backend.services.fact_envelope import DEFAULT_STALE_AFTER_SEC, attach_fact
-from backend.services.live_service import _get_live_bars
+from backend.services.live_service import get_live_bars
 from data.duckdb_store import DuckDBDataStore as DataStore
 
 router = APIRouter(prefix="/api/market", tags=["market"])
@@ -135,7 +135,7 @@ def _get_live_bars_response(
     # The bridge retains at most 5,000 bars. Pull the whole retained window when
     # a range is requested, then apply the existing HTTP range/limit semantics.
     requested = 5000 if from_ts is not None or to_ts is not None else max(1, min(int(limit), 5000))
-    frame = _get_live_bars(symbol=symbol, timeframe=timeframe, n_bars=requested)
+    frame = get_live_bars(symbol=symbol, timeframe=timeframe, n_bars=requested)
     if frame is None or frame.empty:
         return _empty_live_bars("ctrader_live_trendbar_unavailable")
 

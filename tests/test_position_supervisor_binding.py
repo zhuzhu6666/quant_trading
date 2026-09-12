@@ -498,7 +498,7 @@ def test_shadow_boundary_records_selection_trace_without_changing_binding(monkey
     )
     monkeypatch.setattr(
         live_service,
-        "_live_state_get",
+        "live_state_get",
         lambda key, default=None, clone=False: {
             "execution_recovery": {"ready": True, "unresolved_count": 0},
             "safety_plane": {"reconciliation_state": "fresh", "blockers": []},

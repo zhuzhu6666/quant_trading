@@ -34,8 +34,8 @@ def _reset_session_state() -> None:
 
 
 def test_circuit_breaker_starts_false():
-    assert live_service._live_state_get("circuit_breaker") is False
-    assert live_service._live_state_get("circuit_reason") == ""
+    assert live_service.live_state_get("circuit_breaker") is False
+    assert live_service.live_state_get("circuit_reason") == ""
 
 
 def test_circuit_breaker_triggers_at_5_percent_drawdown():
@@ -47,8 +47,8 @@ def test_circuit_breaker_triggers_at_5_percent_drawdown():
 
     assert result["tripped"] is True
     assert result["dd_pct"] == 5.0
-    assert live_service._live_state_get("circuit_breaker") is True
-    assert "daily drawdown" in live_service._live_state_get("circuit_reason")
+    assert live_service.live_state_get("circuit_breaker") is True
+    assert "daily drawdown" in live_service.live_state_get("circuit_reason")
 
 
 def test_circuit_breaker_uses_risk_limit_snapshot_threshold():
@@ -60,7 +60,7 @@ def test_circuit_breaker_uses_risk_limit_snapshot_threshold():
 
     assert result["tripped"] is True
     assert result["risk_limits"]["max_daily_loss_pct"] == 4.0
-    assert live_service._live_state_get("circuit_breaker") is True
+    assert live_service.live_state_get("circuit_breaker") is True
 
 
 def test_demo_drawdown_is_observed_without_tripping_circuit(monkeypatch):
@@ -79,8 +79,8 @@ def test_demo_drawdown_is_observed_without_tripping_circuit(monkeypatch):
     assert result["tripped"] is False
     assert result["observed_tripped"] is True
     assert result["observed_reason"] == "daily drawdown 50.0%"
-    assert live_service._live_state_get("circuit_breaker") is False
-    assert live_service._live_state_get("circuit_reason") == ""
+    assert live_service.live_state_get("circuit_breaker") is False
+    assert live_service.live_state_get("circuit_reason") == ""
 
 
 def test_demo_consecutive_loss_observation_survives_tick_evaluation(monkeypatch):
@@ -101,7 +101,7 @@ def test_demo_consecutive_loss_observation_survives_tick_evaluation(monkeypatch)
     assert result["tripped"] is False
     assert result["observed_tripped"] is True
     assert result["observed_reason"] == "consecutive losses 8"
-    assert live_service._live_state_get("session_circuit_observation") == {
+    assert live_service.live_state_get("session_circuit_observation") == {
         "triggered": True,
         "reason": "consecutive losses 8",
         "enforced": False,
@@ -114,7 +114,7 @@ def test_circuit_breaker_does_not_trip_below_5_percent():
     result = live_service._evaluate_daily_drawdown()
 
     assert result["tripped"] is False
-    assert live_service._live_state_get("circuit_breaker") is False
+    assert live_service.live_state_get("circuit_breaker") is False
 
 
 def test_positive_pnl_does_not_trigger_breaker():
@@ -123,7 +123,7 @@ def test_positive_pnl_does_not_trigger_breaker():
     result = live_service._evaluate_daily_drawdown()
 
     assert result["tripped"] is False
-    assert live_service._live_state_get("circuit_breaker") is False
+    assert live_service.live_state_get("circuit_breaker") is False
 
 
 def test_breaker_resets_on_new_day():
@@ -139,11 +139,11 @@ def test_breaker_resets_on_new_day():
 
     _reset_session_state()
 
-    assert live_service._live_state_get("circuit_breaker") is False
-    assert live_service._live_state_get("circuit_reason") == ""
-    assert live_service._live_state_get("session_pnl") == 0.0
-    assert live_service._live_state_get("session_trades") == 0
-    assert live_service._live_state_get("session_max_drawdown_pct") == 0.0
+    assert live_service.live_state_get("circuit_breaker") is False
+    assert live_service.live_state_get("circuit_reason") == ""
+    assert live_service.live_state_get("session_pnl") == 0.0
+    assert live_service.live_state_get("session_trades") == 0
+    assert live_service.live_state_get("session_max_drawdown_pct") == 0.0
 
 
 
@@ -153,22 +153,22 @@ def test_set_factor_snapshot_writes_both_views():
 
     live_service._set_factor_snapshot(votes, composite)
 
-    assert live_service._live_state_get("last_factor_votes", clone=True) == votes
-    assert live_service._live_state_get("last_composite", clone=True) == composite
+    assert live_service.live_state_get("last_factor_votes", clone=True) == votes
+    assert live_service.live_state_get("last_composite", clone=True) == composite
 
 
 def test_pending_close_ids_track_deal_wait_without_touching_pnl():
-    before = live_service._live_state_get("session_pnl")
+    before = live_service.live_state_get("session_pnl")
     live_service._live_state_update(session_pending_close_add=99001)
     live_service._live_state_update(session_pending_close_add=[99002, 99001])
-    ids = live_service._live_state_get("session_pending_close_ids")
+    ids = live_service.live_state_get("session_pending_close_ids")
     assert ids.count(99001) == 1
     assert ids.count(99002) == 1
-    assert live_service._live_state_get("session_pnl") == before
-    assert live_service._live_state_get("session_consecutive_loss") == 0
+    assert live_service.live_state_get("session_pnl") == before
+    assert live_service.live_state_get("session_consecutive_loss") == 0
     live_service._live_state_update(session_pending_close_remove=[99001])
-    ids = live_service._live_state_get("session_pending_close_ids")
+    ids = live_service.live_state_get("session_pending_close_ids")
     assert 99001 not in ids
     assert 99002 in ids
     live_service._live_state_update(session_pending_close_remove=[99002])
-    assert 99002 not in live_service._live_state_get("session_pending_close_ids")
+    assert 99002 not in live_service.live_state_get("session_pending_close_ids")

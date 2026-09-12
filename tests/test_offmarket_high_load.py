@@ -39,7 +39,7 @@ def test_offmarket_quality_uses_projection_when_live_session_is_missing(monkeypa
 
     monkeypatch.setattr(
         live_service,
-        "_live_state_get",
+        "live_state_get",
         lambda key, default=None, clone=False: {},
     )
 

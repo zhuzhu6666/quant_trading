@@ -245,10 +245,10 @@ def test_authoritative_restore_rebuilds_peak_and_history_instead_of_using_cache(
 
     assert live_service._restore_session_state_for_day("2026-07-19") is True
 
-    assert live_service._live_state_get("session_state_status") == "available"
-    assert live_service._live_state_get("session_start_balance") == 1000.0
-    assert live_service._live_state_get("session_peak_equity") == 1100.0
-    assert live_service._live_state_get("trade_equity_history", clone=True) == [
+    assert live_service.live_state_get("session_state_status") == "available"
+    assert live_service.live_state_get("session_start_balance") == 1000.0
+    assert live_service.live_state_get("session_peak_equity") == 1100.0
+    assert live_service.live_state_get("trade_equity_history", clone=True) == [
         1000.0,
         1100.0,
         1020.0,
@@ -315,13 +315,13 @@ def test_partial_close_legs_aggregate_by_position_and_open_position_is_excluded(
     ) is True
     # The open position's -5 partial leg affects realized PnL/drawdown, but it
     # is not a completed trade for win/loss or consecutive-loss accounting.
-    assert live_service._live_state_get("session_pnl") == pytest.approx(22.0)
-    assert live_service._live_state_get("session_trades") == 2
-    assert live_service._live_state_get("session_trade_pnls", clone=True) == [
+    assert live_service.live_state_get("session_pnl") == pytest.approx(22.0)
+    assert live_service.live_state_get("session_trades") == 2
+    assert live_service.live_state_get("session_trade_pnls", clone=True) == [
         7.0,
         20.0,
     ]
-    assert live_service._live_state_get("session_realized_pnl_legs", clone=True) == [
+    assert live_service.live_state_get("session_realized_pnl_legs", clone=True) == [
         -10.0,
         -5.0,
         7.0,
@@ -513,15 +513,15 @@ def test_invalid_cache_never_zeros_last_known_risk_or_opens_new_risk(
 
     assert live_service._restore_session_state_for_day("2026-07-19") is False
 
-    assert live_service._live_state_get("session_state_status") == "unavailable"
-    assert live_service._live_state_get("session_pnl") == -8.0
-    assert live_service._live_state_get("session_trades") == 2
-    assert live_service._live_state_get("session_peak_equity") == 1000.0
-    assert live_service._live_state_get("trade_equity_history", clone=True) == [
+    assert live_service.live_state_get("session_state_status") == "unavailable"
+    assert live_service.live_state_get("session_pnl") == -8.0
+    assert live_service.live_state_get("session_trades") == 2
+    assert live_service.live_state_get("session_peak_equity") == 1000.0
+    assert live_service.live_state_get("trade_equity_history", clone=True) == [
         1000.0,
         992.0,
     ]
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("accepting_new_risk") is False
 
 
 def test_same_day_cache_is_degraded_and_cannot_authorize_new_risk(monkeypatch):
@@ -554,9 +554,9 @@ def test_same_day_cache_is_degraded_and_cannot_authorize_new_risk(monkeypatch):
 
     assert live_service._restore_session_state_for_day("2026-07-19") is True
 
-    assert live_service._live_state_get("session_state_status") == "degraded_cache"
-    assert live_service._live_state_get("session_pnl") == -12.0
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("session_state_status") == "degraded_cache"
+    assert live_service.live_state_get("session_pnl") == -12.0
+    assert live_service.live_state_get("accepting_new_risk") is False
 
 
 def test_deals_without_fresh_account_balance_cannot_borrow_cache_baseline(monkeypatch):
@@ -586,9 +586,9 @@ def test_deals_without_fresh_account_balance_cannot_borrow_cache_baseline(monkey
 
     assert live_service._restore_session_state_for_day("2026-07-19") is True
 
-    assert live_service._live_state_get("session_state_status") == "degraded_cache"
-    assert live_service._live_state_get("session_start_balance") == 1000.0
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("session_state_status") == "degraded_cache"
+    assert live_service.live_state_get("session_start_balance") == 1000.0
+    assert live_service.live_state_get("accepting_new_risk") is False
 
 
 def test_session_fact_observation_never_borrows_positions_timestamp():
@@ -708,5 +708,5 @@ def test_degraded_cache_retains_original_session_observation(monkeypatch):
 
     assert live_service._restore_session_state_for_day("2026-07-19") is True
 
-    assert live_service._live_state_get("session_state_status") == "degraded_cache"
-    assert live_service._live_state_get("session_observed_at") == 4321.0
+    assert live_service.live_state_get("session_state_status") == "degraded_cache"
+    assert live_service.live_state_get("session_observed_at") == 4321.0

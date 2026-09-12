@@ -57,16 +57,16 @@ class EmergencyCloseRequest(BaseModel):
 
 def _fact_runtime_observation() -> dict:
     """Read only timestamps/provenance needed by the API fact boundary."""
-    from backend.services.live_service import _live_state_get
+    from backend.services.live_state_store import live_state_get
 
-    diag = _live_state_get("_diag", {}, clone=True) or {}
+    diag = live_state_get("_diag", {}, clone=True) or {}
     return {
         "diagnostic_ts": diag.get("ts"),
-        "session_source": _live_state_get("session_state_source", "none"),
+        "session_source": live_state_get("session_state_source", "none"),
         # Session freshness is independent from broker position/account
         # freshness.  A successful position poll must not make a failed or
         # cached session-risk restore appear current.
-        "session_observed_at": _live_state_get("session_observed_at", 0.0),
+        "session_observed_at": live_state_get("session_observed_at", 0.0),
     }
 
 
@@ -535,7 +535,7 @@ def strategy_status_endpoint(_user: RequireUser) -> dict:
 @router.get("/session-stats")
 def session_stats_endpoint(_user: RequireUser) -> dict:
     """今日会话统计: 盈亏/交易笔数/胜率/回撤. HTTP 后备, 不依赖 WS."""
-    from backend.services.live_service import _live_state
+    from backend.services.live_state_store import _live_state
     payload = {
         "pnl_today": float(_live_state.get("session_pnl", 0)),
         "trades": int(_live_state.get("session_trades", 0)),

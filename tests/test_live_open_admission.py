@@ -374,9 +374,9 @@ def test_runtime_postgres_failure_latches_no_new_risk_and_skips_open_rpc(monkeyp
     assert submitted is False
     order.assert_not_called()
     assert no_new_risk_latch_status()["active"] is True
-    admission = live_service._live_state_get("final_open_admission")
+    admission = live_service.live_state_get("final_open_admission")
     assert "state_pg_unavailable" in admission["blockers"]
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("accepting_new_risk") is False
     assert any("final_open_admission" in item for item in logs)
 
 

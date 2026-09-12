@@ -177,7 +177,7 @@ def test_watchdog_violation_durably_latches_no_new_risk():
 
     assert result.ok is False
     assert no_new_risk_latch_status()["active"] is True
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("accepting_new_risk") is False
     assert safety_outbox_path().exists()
 
 
@@ -346,7 +346,7 @@ def test_watchdog_recovery_does_not_authorize_without_owned_generation(monkeypat
     live_service._on_live_safety_watchdog_recovery(result)
 
     assert no_new_risk_latch_status()["active"] is False
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("accepting_new_risk") is False
 
 
 def test_live_loop_cause_stays_latched_when_safety_cycle_is_not_ready():
@@ -520,7 +520,7 @@ def test_watchdog_releases_missing_supervisor_position_after_fresh_reconcile():
         for item in no_new_risk_latch_status()["causes"]
     }
     assert causes == {("incident_control", "runtime_incident_mode")}
-    assert live_service._live_state_get("safety_failure", clone=True) == {}
+    assert live_service.live_state_get("safety_failure", clone=True) == {}
 
 
 def test_watchdog_keeps_supervisor_cause_while_target_position_is_open():

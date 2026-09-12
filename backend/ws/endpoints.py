@@ -72,9 +72,9 @@ def _read_closed_loop_status(
     state-store query for the durable attribution summary; this function never
     calls the broker.
     """
-    from backend.services.live_service import _live_state_snapshot
+    from backend.services.live_state_store import live_state_snapshot
 
-    live_state = state if state is not None else _live_state_snapshot()
+    live_state = state if state is not None else live_state_snapshot()
 
     # ── Attribution ──
     attr_status = "no_data"
@@ -156,11 +156,11 @@ def read_state_snapshot() -> dict:
     """
     from backend.services.live_service import (
         _factor_pipeline,
-        _live_state_snapshot,
+        live_state_snapshot,
         _should_send_orders,
     )
 
-    live_state = _live_state_snapshot()
+    live_state = live_state_snapshot()
     loop = _live_loop_status()
     live_running = loop.get("running", False)
 

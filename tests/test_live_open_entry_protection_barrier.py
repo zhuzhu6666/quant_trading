@@ -69,7 +69,7 @@ def test_confirmed_open_latches_before_fallible_position_refresh(monkeypatch):
         (item["cause"], item["cause_id"]) for item in latch["causes"]
     }
     assert 501 in live_service._pending_open_attach_until
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("accepting_new_risk") is False
 
 
 def test_missing_result_price_uses_fresh_broker_entry(monkeypatch):
@@ -212,7 +212,7 @@ def test_submit_contains_confirmed_open_post_fill_exception(monkeypatch):
     assert submitted is True
     assert published == ["post-fill-reconcile"]
     assert no_new_risk_latch_status()["active"] is True
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("accepting_new_risk") is False
     assert any("confirmed open post-fill processing failed closed" in item for item in logs)
 
 

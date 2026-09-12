@@ -57,10 +57,6 @@ def get_state_conn():
     return get_state_pg_conn()
 
 
-def _connect_state():
-    return get_state_conn()
-
-
 def _review_payload(conn: Any, row: Any) -> dict[str, Any]:
     del conn
     if isinstance(row, dict):
@@ -836,7 +832,7 @@ def run_learning_backfill(
     allow_partial: bool = False,
     rebuild_learning: bool = True,
 ) -> dict:
-    conn = _connect_state()
+    conn = get_state_conn()
     try:
         if not canonical_ready(conn):
             return {

@@ -234,7 +234,7 @@ def test_account_reconcile_failure_blocks_alpha_but_safety_still_runs_first(monk
     assert bridge.calls[:2] == ["positions", "account"]
     assert result["safety"]["reconciliation_state"] == "fresh"
     assert result["safety"]["heartbeat_at"] > 0
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("accepting_new_risk") is False
     assert [item["position_id"] for item in protected] == [903]
 
 
@@ -850,7 +850,7 @@ def test_status_builds_loop_readiness_and_market_from_one_live_snapshot(monkeypa
 
     monkeypatch.setattr(live_service, "_probe_ctrader", lambda: ("connected", None))
     monkeypatch.setattr(live_service, "get_latest_price", lambda: None)
-    monkeypatch.setattr(live_service, "_live_state_snapshot", _read_snapshot)
+    monkeypatch.setattr(live_service, "live_state_snapshot", _read_snapshot)
     monkeypatch.setattr(live_service, "loop_status", _loop_status)
     monkeypatch.setattr(live_service, "get_live_readiness", _readiness)
 
@@ -942,9 +942,9 @@ def test_session_restore_queries_deals_even_when_runtime_cache_is_missing(monkey
     restored = live_service._restore_session_state_for_day("2026-07-18")
 
     assert restored is True
-    assert live_service._live_state_get("session_state_status") == "available"
-    assert live_service._live_state_get("session_pnl") == -2.5
-    assert live_service._live_state_get("session_trades") == 1
+    assert live_service.live_state_get("session_state_status") == "available"
+    assert live_service.live_state_get("session_pnl") == -2.5
+    assert live_service.live_state_get("session_trades") == 1
 
 
 def test_authoritative_deals_exclude_positions_still_open_at_broker(monkeypatch):
@@ -1033,10 +1033,10 @@ def test_session_unavailable_never_zeros_last_known_risk(monkeypatch):
     restored = live_service._restore_session_state_for_day("2026-07-18")
 
     assert restored is False
-    assert live_service._live_state_get("session_state_status") == "unavailable"
-    assert live_service._live_state_get("session_pnl") == -8.0
-    assert live_service._live_state_get("session_trades") == 2
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("session_state_status") == "unavailable"
+    assert live_service.live_state_get("session_pnl") == -8.0
+    assert live_service.live_state_get("session_trades") == 2
+    assert live_service.live_state_get("accepting_new_risk") is False
 
 
 def test_failed_position_reconcile_blocks_open_but_cached_position_protection_continues(monkeypatch):
@@ -1196,8 +1196,8 @@ def test_phase2_session_restore_failure_is_not_reset_to_zero(monkeypatch):
         account_observed=False,
     )
 
-    assert live_service._live_state_get("session_pnl") == -9.0
-    assert live_service._live_state_get("session_trades") == 3
+    assert live_service.live_state_get("session_pnl") == -9.0
+    assert live_service.live_state_get("session_trades") == 3
 
 
 def test_session_drawdown_is_peak_to_trough_not_only_loss_from_start(monkeypatch):

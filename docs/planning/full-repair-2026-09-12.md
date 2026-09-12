@@ -87,17 +87,16 @@
 5. **lifecycle→live_service 私有 ✓**：`_stop_live_scheduler`→公共 `stop_live_scheduler`，lifecycle 与 2 个测试文件跟随。
 6. live_service 读投影私有消费（api/live、api/market、ws/endpoints 的 `_live_state*`/`_get_live_bars`）随 B3/B4 搬迁时改新 owner，不在本批重复碰。
 
-### B3 live_service 拆分①读投影
-- `get_status/get_account/get_positions/get_live_readiness/_get_live_bars` + `_ACCOUNT_CACHE/_POSITIONS_CACHE/_CACHE_LOCK/_probe_ctrader_cache`(:5145-5154) → 读投影 owner 模块；调用方（api/market 等）改新 owner；测试 patch 点同批迁移。
-- 验收：live_service 行数下降且对应函数已删；`grep -n '_ACCOUNT_CACHE' backend/services/live_service.py` = 0。
+### B3+B4 live_service 结构修复（done 2026-09-12，范围修正后执行）
+1. **live_state_store 新 owner ✓**：`backend/services/live_state_store.py` 拥有 `_live_state` 字典 + `_LIVE_STATE_LOCK` + 只读访问器 `live_state_get`/`live_state_snapshot`；**唯一写路径（`_live_state_set/_live_state_update` 及其 WS-notify、pending-close 钩子）留在 live_service**（SoT：live 进程是 live state 唯一 writer）。live_service 以兼容绑定导入容器与锁（同对象），75 处测试裸字典就地操作零改动；全仓唯一一处字典 rebind（test_ws_state_snapshot）迁移到 store。`api/live.py`、`ws/endpoints.py` 改从 store 导入，不再触 live_service 私有。验收：`grep -rn '_live_state_get\|_live_state_snapshot' backend tests` = 0；94 项相关测试绿。
+2. **get_live_bars 公共化 ✓**：`_get_live_bars`→`get_live_bars`，`api/market.py` 与 2 个测试文件跟随；API 层对 live_service 的最后一个私有导入消除。
+3. **读投影留守（范围修正）**：`get_status/get_live_readiness/get_account/get_positions` 与 `_ACCOUNT_CACHE/_POSITIONS_CACHE/_probe_ctrader_cache` 留在 live_service——它们直接读写 `_live_state`（如 get_account :5740 回写 reconcile 快照），是状态 owner 的 HTTP 读边界；搬出只会把私有导入换成回引用。登记为 live_service 合法居民（与 legacy-debt-register "剩余: process wiring、兼容状态发布" 口径一致）。
+4. **连接 wrapper 清理 ✓**：`learning_backfill` 双跳 `_connect_state→get_state_conn` 删除（调用点直连）；live_service 的 `_get_state_pg_conn/_get_state_read_conn` 保留——它们是测试注缝（repo 既有 idiom，api/risk.py 同款），非重复实现。
+5. **kv 管道评估结论**：`_runtime_kv_get/_runtime_kv_write_on_conn` 保留——write-on-conn 复用 `runtime_kv_store.set_on_conn`（唯一写入者），get 的 try/except 语义与 pending 队列 drain 联动，替换 RuntimeKVStore.get 存在 read-only 语义差异风险，不换。
 
-### B4 live_service 拆分②状态与管道
-- `_live_state_*/_runtime_kv_*`(:3134-3381，含 `_RUNTIME_KV_PENDING_PATH/LOCK` pending jsonl) 并入 runtime_kv_store / 独立 live_state owner；bar warmup/fetch(:6947-7316) 归 live_factor_bootstrap 既有 owner。
-- 验收：对应 globals 与函数从 live_service 删除；调用方与测试更新。
-
-### B5 live_service 拆分③收尾
-- 剩余 11 组 lock+cache 随 owner 收敛；删除全部 `_lifecycle_*` alias 兼容名（调用方直呼 owner）；live_service 只留 loop wiring 与注入。
-- 验收：`grep -c '^_.*=' backend/services/live_service.py` 显著下降并留清单；测试全绿（相关文件）。
+### B5 剩余 globals 与 alias（done 2026-09-12，决定：保留并登记）
+- `_lifecycle_*` alias（:746,764,1010,1063,1234,2724 等 13 处赋值）是 live_service 内部对 `live_position_lifecycle`/`supervisor_payload_contract` 公共函数的短名绑定，纯模块内命名，无跨模块私有语义、无兼容回退分支；改名只产生等价 diff，不改变任何边界。保留，不计为债务。
+- 11 组 lock+cache（entry-cluster/event-window/entry-quality policy 缓存、loss-streak book、local SLTP、recovery confirmations、account/positions cache、probe cache、position-decision index）各自属于 live_service 内的功能块，随功能块（open pipeline、protection、safety）同址；这些功能块按 legacy-debt-register 既定口径属于 live 合法居民。待某功能块迁出时其缓存随之迁移，不在本批为"拆文件"制造无 owner 的中间态。
 
 ### B6 死代码/死依赖删除
 - 删 `strategy/mab_router.py`；`strategy/registry` 与 `api/strategies.py` 私有访问一并处理。

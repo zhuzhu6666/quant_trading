@@ -784,10 +784,10 @@ def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
     allow_rpc_return.set()
     assert post_fill_entered.wait(1.0)
     deadline = time.time() + 1.0
-    while live_service._live_state_get("loop_shutdown") is None and time.time() < deadline:
+    while live_service.live_state_get("loop_shutdown") is None and time.time() < deadline:
         time.sleep(0.01)
-    assert live_service._live_state_get("loop_shutdown")["status"] == "draining"
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("loop_shutdown")["status"] == "draining"
+    assert live_service.live_state_get("accepting_new_risk") is False
     assert shutdown_finished.is_set() is False
     assert runtime_writes == []
 
@@ -933,12 +933,12 @@ def test_process_tick_marks_alpha_failure_and_recovers_on_success(monkeypatch):
         log=lambda _message: None,
     )
 
-    failed = live_service._live_state_get("alpha_runtime", {}, clone=True)
+    failed = live_service.live_state_get("alpha_runtime", {}, clone=True)
     status = live_service._LIVE_LOOP_CONTROLLER.status()
     assert failed["schema_version"] == "alpha_runtime.v1"
     assert failed["status"] == "failed"
     assert failed["admission"] == "blocked"
-    assert live_service._live_state_get("alpha_failed") is True
+    assert live_service.live_state_get("alpha_failed") is True
     assert status["phase"] == "degraded"
     assert status["accepting_new_risk"] is False
     assert "alpha_failed" in status["blockers"]
@@ -958,11 +958,11 @@ def test_process_tick_marks_alpha_failure_and_recovers_on_success(monkeypatch):
         log=lambda _message: None,
     )
 
-    recovered = live_service._live_state_get("alpha_runtime", {}, clone=True)
+    recovered = live_service.live_state_get("alpha_runtime", {}, clone=True)
     status = live_service._LIVE_LOOP_CONTROLLER.status()
     assert recovered["status"] == "healthy"
     assert recovered["admission"] == "allowed"
-    assert live_service._live_state_get("alpha_failed") is False
+    assert live_service.live_state_get("alpha_failed") is False
     assert status["phase"] == "running"
     assert status["accepting_new_risk"] is True
 

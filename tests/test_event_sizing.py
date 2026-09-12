@@ -346,7 +346,7 @@ class TestLiveServiceAuditContext:
         from types import SimpleNamespace
         from backend.services import live_service
 
-        monkeypatch.setattr(live_service, "_live_state_get", lambda key, default=None, clone=False: default)
+        monkeypatch.setattr(live_service, "live_state_get", lambda key, default=None, clone=False: default)
 
         ctx = live_service._build_open_trade_risk_context(
             cfg=SimpleNamespace(

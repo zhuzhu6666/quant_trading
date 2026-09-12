@@ -244,7 +244,7 @@ def test_prime_resets_execution_recovery_to_pending(monkeypatch):
         account_observed=False,
     )
 
-    recovery = live_service._live_state_get("execution_recovery", {}, clone=True)
+    recovery = live_service.live_state_get("execution_recovery", {}, clone=True)
     assert recovery["enabled"] is True
     assert recovery["ready"] is False
     assert recovery["unresolved_count"] is None

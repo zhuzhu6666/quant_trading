@@ -333,8 +333,8 @@ def test_closed_position_without_deal_blocks_session_and_defers_all_consumers(mo
     )
 
     assert calls == []
-    assert live_service._live_state_get("session_state_status") == "unavailable"
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("session_state_status") == "unavailable"
+    assert live_service.live_state_get("accepting_new_risk") is False
     assert live_service.no_new_risk_latched(fail_closed=True) is True
     assert any("deferred until authoritative" in item for item in logs)
 
@@ -374,7 +374,7 @@ def test_close_aux_failure_cannot_skip_same_tick_session_rebuild(monkeypatch):
         order.append("session_rebuilt")
         assert kwargs["broker_open_position_ids"] == set()
         assert kwargs["confirmed_closed_position_ids"] == {125}
-        assert live_service._live_state_get("session_state_status") == (
+        assert live_service.live_state_get("session_state_status") == (
             "unavailable"
         )
         live_service._live_state_update(session_state_status="available")
@@ -412,7 +412,7 @@ def test_close_aux_failure_cannot_skip_same_tick_session_rebuild(monkeypatch):
     )
 
     assert order == ["recovery_closed", "session_rebuilt", "latch_released"]
-    assert live_service._live_state_get("session_state_status") == "available"
+    assert live_service.live_state_get("session_state_status") == "available"
 
 
 def test_session_trade_projection_is_idempotent_by_position_id():
@@ -432,10 +432,10 @@ def test_session_trade_projection_is_idempotent_by_position_id():
     live_service._live_state_update(session_pending_close_remove=[812])
     live_service._live_state_update(session_pending_close_add=812)
     live_service._live_state_update(session_pending_close_add=812)
-    ids = live_service._live_state_get("session_pending_close_ids")
+    ids = live_service.live_state_get("session_pending_close_ids")
     assert ids.count(812) == 1
     live_service._live_state_update(session_pending_close_remove=[812])
-    assert 812 not in live_service._live_state_get("session_pending_close_ids")
+    assert 812 not in live_service.live_state_get("session_pending_close_ids")
 
 
 def test_prime_live_loop_state_preserves_session_when_restore_is_unavailable(monkeypatch):
@@ -463,18 +463,18 @@ def test_prime_live_loop_state_preserves_session_when_restore_is_unavailable(mon
         account={"ok": True, "broker": "ctrader", "balance": 1000.0, "equity": 1000.0},
     )
 
-    assert live_service._live_state_get("broker") == "ctrader"
-    assert live_service._live_state_get("loop_running") is True
-    assert live_service._live_state_get("loop_strategy") == "test_strategy"
-    assert live_service._live_state_get("loop_started_at") == 123.0
-    assert live_service._live_state_get("account", clone=True) is None
-    assert live_service._live_state_get("account_reconciled", clone=True) is None
-    assert live_service._live_state_get("account_event", clone=True)["balance"] == 1000.0
-    assert live_service._live_state_get("session_pnl") == 88.0
-    assert live_service._live_state_get("session_trades") == 3
-    assert live_service._live_state_get("session_max_drawdown_pct") == 4.1
-    assert live_service._live_state_get("session_state_status") == "unavailable"
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("broker") == "ctrader"
+    assert live_service.live_state_get("loop_running") is True
+    assert live_service.live_state_get("loop_strategy") == "test_strategy"
+    assert live_service.live_state_get("loop_started_at") == 123.0
+    assert live_service.live_state_get("account", clone=True) is None
+    assert live_service.live_state_get("account_reconciled", clone=True) is None
+    assert live_service.live_state_get("account_event", clone=True)["balance"] == 1000.0
+    assert live_service.live_state_get("session_pnl") == 88.0
+    assert live_service.live_state_get("session_trades") == 3
+    assert live_service.live_state_get("session_max_drawdown_pct") == 4.1
+    assert live_service.live_state_get("session_state_status") == "unavailable"
+    assert live_service.live_state_get("accepting_new_risk") is False
 
 
 def test_prime_live_loop_state_restores_existing_session_snapshot(monkeypatch):
@@ -504,9 +504,9 @@ def test_prime_live_loop_state_restores_existing_session_snapshot(monkeypatch):
         account={"ok": True, "broker": "ctrader", "balance": 1000.0, "equity": 1000.0},
     )
 
-    assert live_service._live_state_get("loop_running") is True
-    assert live_service._live_state_get("session_pnl") == pytest.approx(2.75)
-    assert live_service._live_state_get("session_trades") == 29
+    assert live_service.live_state_get("loop_running") is True
+    assert live_service.live_state_get("session_pnl") == pytest.approx(2.75)
+    assert live_service.live_state_get("session_trades") == 29
 
 
 def test_restore_session_state_rebuilds_from_authoritative_close_deals(monkeypatch, tmp_path):
@@ -563,14 +563,14 @@ def test_restore_session_state_rebuilds_from_authoritative_close_deals(monkeypat
         "2026-07-13",
         broker_open_position_ids=set(),
     ) is True
-    assert live_service._live_state_get("session_pnl") == pytest.approx(1.9)
-    assert live_service._live_state_get("session_trades") == 2
-    assert live_service._live_state_get("session_winning") == 1
-    assert live_service._live_state_get("session_losing") == 1
-    assert live_service._live_state_get("session_trade_pnls", clone=True) == pytest.approx([-1.1, 3.0])
-    assert live_service._live_state_get("session_consecutive_loss") == 0
-    assert live_service._live_state_get("session_state_source") == "ctrader_deals.final_close_rebuild.v1"
-    assert live_service._live_state_get("session_start_balance") == pytest.approx(998.1)
+    assert live_service.live_state_get("session_pnl") == pytest.approx(1.9)
+    assert live_service.live_state_get("session_trades") == 2
+    assert live_service.live_state_get("session_winning") == 1
+    assert live_service.live_state_get("session_losing") == 1
+    assert live_service.live_state_get("session_trade_pnls", clone=True) == pytest.approx([-1.1, 3.0])
+    assert live_service.live_state_get("session_consecutive_loss") == 0
+    assert live_service.live_state_get("session_state_source") == "ctrader_deals.final_close_rebuild.v1"
+    assert live_service.live_state_get("session_start_balance") == pytest.approx(998.1)
 
 
 def test_session_windows_distinguish_utc_risk_day_from_beijing_calendar_day():
@@ -593,7 +593,7 @@ def test_session_start_balance_is_repaired_after_late_broker_account(monkeypatch
     repaired = live_service._repair_session_start_balance_from_account()
 
     assert repaired == pytest.approx(375.24)
-    assert live_service._live_state_get("session_start_balance") == pytest.approx(375.24)
+    assert live_service.live_state_get("session_start_balance") == pytest.approx(375.24)
 
 
 def test_floor_api_volume_to_step_skips_untradeable_partial_reduce():
@@ -773,23 +773,23 @@ def test_start_loop_primes_shared_state_and_scheduler(monkeypatch):
     assert ownership.broker == "ctrader"
     assert ownership.strategy_name == "smoke"
     assert live_service._LIVE_LOOP_CONTROLLER.status()["thread_id"] == 12345
-    assert live_service._live_state_get("loop_running") is True
-    assert live_service._live_state_get("broker") == "ctrader"
-    assert live_service._live_state_get("loop_strategy") == "smoke"
-    assert live_service._live_state_get("loop_shutdown") is None
-    assert live_service._live_state_get("session_state_status") == "unavailable"
-    assert live_service._live_state_get("accepting_new_risk") is False
+    assert live_service.live_state_get("loop_running") is True
+    assert live_service.live_state_get("broker") == "ctrader"
+    assert live_service.live_state_get("loop_strategy") == "smoke"
+    assert live_service.live_state_get("loop_shutdown") is None
+    assert live_service.live_state_get("session_state_status") == "unavailable"
+    assert live_service.live_state_get("accepting_new_risk") is False
 
-    assert live_service._live_state_get("account", clone=True) is None
-    assert live_service._live_state_get("account_reconciled", clone=True) is None
-    acct = live_service._live_state_get("account_event", clone=True)
+    assert live_service.live_state_get("account", clone=True) is None
+    assert live_service.live_state_get("account_reconciled", clone=True) is None
+    acct = live_service.live_state_get("account_event", clone=True)
     assert acct["ok"] is False
     assert acct["broker"] == "ctrader"
     assert acct["balance"] == 0
     assert acct["warming_up"] is True
-    assert not live_service._live_state_get("account_updated_at")
-    assert live_service._live_state_get("session_trades") == 0
-    assert live_service._live_state_get("session_pnl") == 0.0
+    assert not live_service.live_state_get("account_updated_at")
+    assert live_service.live_state_get("session_trades") == 0
+    assert live_service.live_state_get("session_pnl") == 0.0
 
 
 def test_process_shutdown_joins_loop_preserves_desired_and_releases_ownership(monkeypatch):
@@ -820,8 +820,8 @@ def test_process_shutdown_joins_loop_preserves_desired_and_releases_ownership(mo
     assert stop_flag.is_set() is True
     assert live_service._LIVE_LOOP_CONTROLLER.ownership_snapshot().thread is None
     assert live_service._LIVE_LOOP_CONTROLLER.status()["phase"] == "stopped"
-    assert live_service._live_state_get("loop_running") is False
-    assert live_service._live_state_get("loop_shutdown") == result
+    assert live_service.live_state_get("loop_running") is False
+    assert live_service.live_state_get("loop_shutdown") == result
     assert desired_writes == []
     assert runtime_writes == [(live_service._RUNTIME_KV_LAST_SHUTDOWN, result)]
 
@@ -855,8 +855,8 @@ def test_process_shutdown_timeout_keeps_thread_ownership_for_recovery(monkeypatc
     assert ownership.stop_flag is stop_flag
     assert ownership.broker == "ctrader"
     assert ownership.strategy_name == "smoke"
-    assert live_service._live_state_get("loop_running") is True
-    assert live_service._live_state_get("loop_shutdown") == result
+    assert live_service.live_state_get("loop_running") is True
+    assert live_service.live_state_get("loop_shutdown") == result
     assert runtime_writes == [(live_service._RUNTIME_KV_LAST_SHUTDOWN, result)]
 
 
@@ -884,7 +884,7 @@ def test_process_shutdown_not_running_is_idempotent_and_preserves_desired(monkey
     assert second["desired_state_preserved"] is True
     assert first["accepting_new_risk"] is False
     assert second["accepting_new_risk"] is False
-    assert live_service._live_state_get("loop_running") is False
+    assert live_service.live_state_get("loop_running") is False
     assert desired_writes == []
     assert [key for key, _value in runtime_writes] == [
         live_service._RUNTIME_KV_LAST_SHUTDOWN,
@@ -953,10 +953,10 @@ def test_mark_loop_stopped_for_display_preserves_cached_data():
 
     live_service._mark_loop_stopped_for_display()
 
-    assert live_service._live_state_get("loop_running") is False
-    assert live_service._live_state_get("loop_strategy") is None
-    assert live_service._live_state_get("broker") == "ctrader"
-    assert live_service._live_state_get("account", clone=True)["balance"] == 999.0
+    assert live_service.live_state_get("loop_running") is False
+    assert live_service.live_state_get("loop_strategy") is None
+    assert live_service.live_state_get("broker") == "ctrader"
+    assert live_service.live_state_get("account", clone=True)["balance"] == 999.0
 
 
 def test_protection_prices_from_reference_use_direction_and_digits():
@@ -1082,7 +1082,7 @@ def test_record_amend_failure_after_fill_records_context_status_and_ledger(monke
     )
     monkeypatch.setattr(
         live_service,
-        "_live_state_get",
+        "live_state_get",
         lambda key, *args, **kwargs: {"risk": "state"} if key == "risk" else 0,
     )
     monkeypatch.setattr(
@@ -1313,7 +1313,7 @@ def test_record_amended_open_success_records_all_contexts(monkeypatch):
     )
     monkeypatch.setattr(
         live_service,
-        "_live_state_get",
+        "live_state_get",
         lambda key, *args, **kwargs: {"risk": "state"} if key == "risk" else 3.5 if key == "session_pnl" else None,
     )
     monkeypatch.setattr(
@@ -1565,7 +1565,7 @@ def test_ensure_live_decision_bars_waits_for_live_trendbar_without_history_rpc(m
 
     assert len(result) == 0
     assert fetch_calls == []
-    snapshot = live_service._live_state_get("decision_bar_freshness", {}, clone=True)
+    snapshot = live_service.live_state_get("decision_bar_freshness", {}, clone=True)
     assert snapshot["fresh"] is False
     assert snapshot["repair_attempted"] is False
     assert snapshot["repair_status"] == "stale_waiting_for_live_trendbar"
@@ -1612,7 +1612,7 @@ def test_ensure_live_decision_bars_suppresses_repair_during_maintenance(monkeypa
 
     assert len(result) == 0
     assert fetch_calls == []
-    snapshot = live_service._live_state_get("decision_bar_freshness", {}, clone=True)
+    snapshot = live_service.live_state_get("decision_bar_freshness", {}, clone=True)
     assert snapshot["repair_attempted"] is False
     assert snapshot["repair_status"] == "maintenance_wait"
 
@@ -1674,7 +1674,7 @@ def test_ensure_live_decision_bars_does_not_fallback_to_current_partial(monkeypa
         log=lambda _msg: None,
     )
 
-    snapshot = live_service._live_state_get("decision_bar_freshness", {}, clone=True)
+    snapshot = live_service.live_state_get("decision_bar_freshness", {}, clone=True)
     assert len(repaired) == 0
     assert snapshot["fresh"] is False
     assert snapshot["latest_bar_ts"] == 0.0
@@ -1948,14 +1948,14 @@ def test_session_risk_state_persists_and_restores(monkeypatch, tmp_path):
     # Broker deals are authoritative even when the compatibility cache still
     # contains an older non-zero snapshot.  A confirmed empty deal set heals
     # that cache instead of reopening risk from stale values.
-    assert live_service._live_state_get("session_pnl") == pytest.approx(0.0)
-    assert live_service._live_state_get("session_consecutive_loss") == 0
-    assert live_service._live_state_get("circuit_breaker") is False
-    assert live_service._live_state_get("session_state_status") == "available"
+    assert live_service.live_state_get("session_pnl") == pytest.approx(0.0)
+    assert live_service.live_state_get("session_consecutive_loss") == 0
+    assert live_service.live_state_get("circuit_breaker") is False
+    assert live_service.live_state_get("session_state_status") == "available"
     # A confirmed empty broker-deal set rebuilds the equity path from the
     # fresh account balance; the cached prior-day path is never authoritative.
-    assert live_service._live_state_get("session_peak_equity") == pytest.approx(1000.0)
-    assert live_service._live_state_get("trade_equity_history", clone=True) == [1000.0]
+    assert live_service.live_state_get("session_peak_equity") == pytest.approx(1000.0)
+    assert live_service.live_state_get("trade_equity_history", clone=True) == [1000.0]
 
 
 def test_close_pnl_fallback_reads_recovery_when_memory_cache_missing(monkeypatch, tmp_path):
@@ -2122,10 +2122,10 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
     assert first is False
     assert second is False
     assert bridge.calls == [(True, False), (True, False)]
-    assert live_service._live_state_get("positions", clone=True) == []
+    assert live_service.live_state_get("positions", clone=True) == []
     assert row["status"] == "open"
     assert row["close_reason"] == ""
-    assert live_service._live_state_get("session_state_status") == "unavailable"
+    assert live_service.live_state_get("session_state_status") == "unavailable"
     assert live_service.no_new_risk_latched(fail_closed=True) is True
     assert any("confirmation 1/2" in item for item in logs)
     assert any("waiting for authoritative close deals" in item for item in logs)
@@ -2157,8 +2157,8 @@ def test_recovery_bootstrap_blocks_when_confirmed_broker_zero_lacks_close_deal(
         trade_date,
         broker_open_position_ids=set(),
     ) is True
-    assert live_service._live_state_get("session_state_status") == "available"
-    assert live_service._live_state_get("session_pnl") == pytest.approx(-10.0)
+    assert live_service.live_state_get("session_state_status") == "available"
+    assert live_service.live_state_get("session_pnl") == pytest.approx(-10.0)
 
 
 def test_recovery_bootstrap_accepts_close_deal_before_last_seen_guard(
@@ -2415,8 +2415,8 @@ def test_pending_close_latch_without_recovery_row_is_retried_and_released(
         trade_date,
         broker_open_position_ids=set(),
     ) is True
-    assert live_service._live_state_get("session_pnl") == pytest.approx(-6.0)
-    assert live_service._live_state_get("session_trades") == 1
+    assert live_service.live_state_get("session_pnl") == pytest.approx(-6.0)
+    assert live_service.live_state_get("session_trades") == 1
 
 
 def test_open_partial_close_retry_requires_new_deal_delta(monkeypatch, tmp_path):

@@ -294,12 +294,12 @@ def test_ctrader_events_never_rejuvenate_reconciled_account_or_positions(monkeyp
         {"positions": [{"position_id": 99}], "reason": "execution_event"},
     )
 
-    assert live_service._live_state_get("account", clone=True) == authoritative_account
-    assert live_service._live_state_get("positions", clone=True) == authoritative_positions
-    assert live_service._live_state_get("account_updated_at") == broker_observed_at
-    assert live_service._live_state_get("positions_updated_at") == broker_observed_at
-    assert live_service._live_state_get("account_event", clone=True)["equity"] == 0.0
-    assert live_service._live_state_get("positions_event", clone=True)[0]["position_id"] == 99
+    assert live_service.live_state_get("account", clone=True) == authoritative_account
+    assert live_service.live_state_get("positions", clone=True) == authoritative_positions
+    assert live_service.live_state_get("account_updated_at") == broker_observed_at
+    assert live_service.live_state_get("positions_updated_at") == broker_observed_at
+    assert live_service.live_state_get("account_event", clone=True)["equity"] == 0.0
+    assert live_service.live_state_get("positions_event", clone=True)[0]["position_id"] == 99
 
     readiness = live_service.get_live_readiness("ctrader")
     assert readiness["ok"] is False

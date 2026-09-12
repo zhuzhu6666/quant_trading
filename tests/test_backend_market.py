@@ -38,7 +38,7 @@ def test_get_bars_live_source_uses_ctrader_trendbar(monkeypatch):
         },
         index=pd.to_datetime([1787220000, 1787220300], unit="s", utc=True),
     )
-    monkeypatch.setattr(market_api, "_get_live_bars", lambda **_: frame)
+    monkeypatch.setattr(market_api, "get_live_bars", lambda **_: frame)
 
     response = client.get("/api/market/bars?source=live&timeframe=M5&limit=120")
 
