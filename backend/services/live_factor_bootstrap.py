@@ -500,3 +500,37 @@ def _publish_initial_factor_signal(
             "reason": f"initial_signal_failed:{type(exc).__name__}",
             "error": f"{type(exc).__name__}: {exc}",
         }
+
+
+_ls_module = None
+
+
+def _live_service():
+    """Lazy handle to the live loop module (import-order-safe)."""
+    global _ls_module
+    if _ls_module is None:
+        from backend.services import live_service as _module
+        _ls_module = _module
+    return _ls_module
+
+
+
+
+# # moved from live_service (2026-09-12 structural repair)
+
+def factor_generation_active(generation_id: str) -> bool:
+    if not generation_id:
+        return True
+    current = _live_service()._live_service()._LIVE_LOOP_CONTROLLER.current()
+    return bool(
+        current is not None
+        and current.generation_id == generation_id
+        and not current.stop_event.is_set()
+    )
+
+
+def factor_event_sizing_factory():
+    from backend.core.db import DUCKDB_EVENTS
+    from execution.event_sizing import EventSizing
+
+    return EventSizing(db_path=str(DUCKDB_EVENTS), enabled=True)

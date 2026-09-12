@@ -24,6 +24,7 @@ from backend.services import live_service
 from execution import ctrader_bridge as ctrader_module
 from execution.ctrader_bridge import CTraderBridge
 from backend.services.live_data_sync_job import make_data_sync_job
+from backend.services import live_bar_warmup
 
 
 pytestmark = pytest.mark.skipif(
@@ -145,7 +146,7 @@ class TestClampLastClosedBarCloseToSpot:
         df = self._degenerate_df()
         quote = {"bid": 21.0, "ask": 21.02, "ts": now_ts - 1.0}
 
-        out, info = live_service._clamp_last_closed_bar_close_to_spot(
+        out, info = live_bar_warmup._clamp_last_closed_bar_close_to_spot(
             df,
             timeframe=self.timeframe,
             now_ts=now_ts,
@@ -161,7 +162,7 @@ class TestClampLastClosedBarCloseToSpot:
         now_ts = self.start + self.period + 30.0
         df = _closed_bar_frame([10.0, 20.0], start_epoch=self.start - self.period)
 
-        out, info = live_service._clamp_last_closed_bar_close_to_spot(
+        out, info = live_bar_warmup._clamp_last_closed_bar_close_to_spot(
             df,
             timeframe=self.timeframe,
             now_ts=now_ts,
@@ -175,7 +176,7 @@ class TestClampLastClosedBarCloseToSpot:
         now_ts = self.start + self.period + 30.0
         df = self._degenerate_df()
 
-        out, info = live_service._clamp_last_closed_bar_close_to_spot(
+        out, info = live_bar_warmup._clamp_last_closed_bar_close_to_spot(
             df,
             timeframe=self.timeframe,
             now_ts=now_ts,
@@ -189,7 +190,7 @@ class TestClampLastClosedBarCloseToSpot:
         now_ts = self.start + self.period + 30.0
         df = self._degenerate_df()
 
-        out, info = live_service._clamp_last_closed_bar_close_to_spot(
+        out, info = live_bar_warmup._clamp_last_closed_bar_close_to_spot(
             df,
             timeframe=self.timeframe,
             now_ts=now_ts,
@@ -207,7 +208,7 @@ class TestClampLastClosedBarCloseToSpot:
         now_ts = self.start + self.period + 30.0
         df = self._degenerate_df()
 
-        out, info = live_service._clamp_last_closed_bar_close_to_spot(
+        out, info = live_bar_warmup._clamp_last_closed_bar_close_to_spot(
             df,
             timeframe=self.timeframe,
             now_ts=now_ts,
@@ -224,7 +225,7 @@ class TestClampLastClosedBarCloseToSpot:
         df = _closed_bar_frame([10.0, 20.0], start_epoch=self.start - self.period)
         df.loc[df.index[0], "close"] = df.loc[df.index[0], "low"]
 
-        out, info = live_service._clamp_last_closed_bar_close_to_spot(
+        out, info = live_bar_warmup._clamp_last_closed_bar_close_to_spot(
             df,
             timeframe=self.timeframe,
             now_ts=now_ts,

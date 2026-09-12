@@ -14,6 +14,7 @@ from backend.services import live_close_settlement
 from backend.services import live_position_protection_cycle
 from backend.services import live_open_processing
 from backend.services import live_open_pipeline
+from backend.services import live_bar_warmup
 
 
 class _IdleThread:
@@ -237,7 +238,7 @@ def test_warmup_reads_previous_month_when_current_month_is_empty(monkeypatch, tm
     monkeypatch.setattr(core_db, "DUCKDB_BARS_MONTHLY_DIR", monthly_dir)
     monkeypatch.setattr(core_db, "DUCKDB_BARS", current_path)
 
-    frame = live_service._warmup_from_local_db("XAUUSD+", "M5", 3)
+    frame = live_bar_warmup.warmup_from_local_db("XAUUSD+", "M5", 3)
 
     assert frame is not None
     assert len(frame) == 3
@@ -1516,7 +1517,7 @@ def test_closed_decision_bar_frame_drops_current_partial_bar():
         ),
     )
 
-    closed = live_service._closed_decision_bar_frame(df, timeframe="M5", now_ts=now_ts)
+    closed = live_bar_warmup.closed_decision_bar_frame(df, timeframe="M5", now_ts=now_ts)
 
     assert list(closed.index) == list(pd.to_datetime(["2026-07-07T03:40:00Z", "2026-07-07T03:45:00Z"]))
 
@@ -1541,7 +1542,7 @@ def test_ensure_live_decision_bars_waits_for_live_trendbar_without_history_rpc(m
     monkeypatch.setattr(live_service.time, "time", lambda: now_ts)
 
     logs: list[str] = []
-    result = live_service._ensure_live_decision_bars_fresh(
+    result = live_bar_warmup.ensure_live_decision_bars_fresh(
         bridge=_Bridge(),
         symbol="XAUUSD+",
         timeframe="M5",
@@ -1583,7 +1584,7 @@ def test_ensure_live_decision_bars_suppresses_repair_during_maintenance(monkeypa
         lambda: SimpleNamespace(market_open_pending_quote_grace_seconds=4500.0),
     )
 
-    result = live_service._ensure_live_decision_bars_fresh(
+    result = live_bar_warmup.ensure_live_decision_bars_fresh(
         bridge=_Bridge(),
         symbol="XAUUSD+",
         timeframe="M5",
@@ -1653,7 +1654,7 @@ def test_ensure_live_decision_bars_does_not_fallback_to_current_partial(monkeypa
 
     monkeypatch.setattr(live_service.time, "time", lambda: now_ts)
 
-    repaired = live_service._ensure_live_decision_bars_fresh(
+    repaired = live_bar_warmup.ensure_live_decision_bars_fresh(
         bridge=None,
         symbol="XAUUSD+",
         timeframe="M5",

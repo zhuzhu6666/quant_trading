@@ -11,6 +11,7 @@ from backend.services.live_safety_plane import LiveSafetyPlane
 from backend.services.live_safety_planner import SafetyPlan, safety_candidate
 from backend.services import live_close_settlement
 from backend.services import live_open_pipeline
+from backend.services import live_bar_warmup
 
 
 class _SnapshotBridge:
@@ -122,8 +123,7 @@ def test_phase2_runs_broker_snapshot_and_safety_before_missing_online_bars(monke
         lambda *_args, **_kwargs: order.append("session") or {"status": "open_confirmed"},
     )
     monkeypatch.setattr(
-        live_service,
-        "_warmup_from_local_db",
+        live_bar_warmup, "warmup_from_local_db",
         lambda *_args, **_kwargs: order.append("bars") or None,
     )
     monkeypatch.setattr(
@@ -165,8 +165,7 @@ def test_phase2_circuit_blocks_alpha_only_after_safety(monkeypatch):
         lambda: {"tripped": True, "dd_pct": 5.0},
     )
     monkeypatch.setattr(
-        live_service,
-        "_warmup_from_local_db",
+        live_bar_warmup, "warmup_from_local_db",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("alpha bars must not run")),
     )
 

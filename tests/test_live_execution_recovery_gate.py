@@ -2,6 +2,7 @@ from types import SimpleNamespace
 import time
 
 from backend.services import live_service
+from backend.services import live_bar_warmup
 
 
 def _flags(*, generation=False, safety="off"):
@@ -97,8 +98,7 @@ def _install_tick_boundary(monkeypatch, bridge, order):
         or {"status": "open_confirmed"},
     )
     monkeypatch.setattr(
-        live_service,
-        "_warmup_from_local_db",
+        live_bar_warmup, "warmup_from_local_db",
         lambda *_args, **_kwargs: order.append(("bars",)) or None,
     )
     today = live_service.datetime.now(live_service.timezone.utc).strftime("%Y-%m-%d")
