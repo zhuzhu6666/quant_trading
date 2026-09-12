@@ -204,3 +204,10 @@ test_live_service_lifecycle(163) / test_factor_governance_orchestrator(96) / tes
 | live_open_pipeline.py | 1,694 | 开仓管线 |
 | live_position_protection_cycle.py | 1,159 | 保护执行/holding timeout |
 | live_open_processing.py | 1,270 | filled/amended 处理 |
+
+### L4 supervisor 裁决引擎抽取（尝试后回滚，待重做，2026-09-13）
+- 42 函数 / 1,629 行（绑定选择、切换状态机、trace 日志、path metrics、risk-reduction runtime）已迁入 `live_supervision_runtime.py` 草稿并回滚：跨家族回调链（settlement 的 `_risk_reduction_runtime`/`record_risk_reduction_aux_failure`/`_build_close_position_risk_context` 等被 supervision 引用，protection/pipeline 亦然）在一次性迁移中产生回调签名与 patch 面连锁错位。
+- 重做路径（下一批，两阶段）：
+  1. 先把共享缝中性化——`_risk_reduction_runtime`、`record_risk_reduction_aux_failure`、`_build_close_position_risk_context`、`_enrich_positions_with_path_metrics`、`upsert_recovery_position_state` 等被 ≥2 个家族消费的函数，迁入独立 `live_shared_risk_context.py`（或 supervision 内先建公共入口），四个家族统一改为 owner 属性调用；
+  2. 再执行 supervisor 家族本体迁移（v2 脚本 + 同套验证）。
+- 验证配方不变：pyflakes 五模块清零 → 目标测试 → smoke → 全量门。
