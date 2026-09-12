@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.services import live_service
+from backend.services import live_open_pipeline
 from backend.services.live_safety_state import (
     no_new_risk_latch_status,
     reset_safety_state_for_tests,
@@ -39,7 +40,7 @@ def test_confirmed_open_latches_before_fallible_position_refresh(monkeypatch):
             raise RuntimeError("position refresh failed after confirmed fill")
 
     with pytest.raises(RuntimeError, match="position refresh failed"):
-        live_service._handle_open_trade_order_success(
+        live_open_pipeline._handle_open_trade_order_success(
             result=SimpleNamespace(success=True, outcome="confirmed", position_id=501),
             bridge=_Bridge(),
             attr_engine=None,
@@ -95,13 +96,11 @@ def test_missing_result_price_uses_fresh_broker_entry(monkeypatch):
     persisted = []
     attached = []
     monkeypatch.setattr(
-        live_service,
-        "_persist_pending_entry_protection_plan",
+        live_open_pipeline, "_persist_pending_entry_protection_plan",
         lambda **kwargs: persisted.append(kwargs),
     )
     monkeypatch.setattr(
-        live_service,
-        "_attach_open_trade_protection",
+        live_open_pipeline, "_attach_open_trade_protection",
         lambda **kwargs: attached.append(kwargs),
     )
 
@@ -114,7 +113,7 @@ def test_missing_result_price_uses_fresh_broker_entry(monkeypatch):
                 positions=[SimpleNamespace(position_id=501, entry_price=4001.25)],
             )
 
-    live_service._handle_open_trade_order_success(
+    live_open_pipeline._handle_open_trade_order_success(
         result=SimpleNamespace(success=True, outcome="confirmed", position_id=501, price=0.0),
         bridge=_Bridge(),
         attr_engine=None,
@@ -152,24 +151,20 @@ def test_submit_contains_confirmed_open_post_fill_exception(monkeypatch):
     published = []
     logs = []
     monkeypatch.setattr(
-        live_service,
-        "_probe_final_open_admission",
+        live_open_pipeline, "_probe_final_open_admission",
         lambda **_kwargs: {"ok": True, "blockers": ()},
     )
-    monkeypatch.setattr(live_service, "_open_trade_draining", lambda _stop: False)
+    monkeypatch.setattr(live_open_pipeline, "_open_trade_draining", lambda _stop: False)
     monkeypatch.setattr(
-        live_service,
-        "_prepare_open_trade_intent",
+        live_open_pipeline, "_prepare_open_trade_intent",
         lambda **_kwargs: "decision-open-777",
     )
     monkeypatch.setattr(
-        live_service,
-        "_submit_open_trade_order",
+        live_open_pipeline, "_submit_open_trade_order",
         lambda *_args, **_kwargs: result,
     )
     monkeypatch.setattr(
-        live_service,
-        "_handle_open_trade_order_success",
+        live_open_pipeline, "_handle_open_trade_order_success",
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("post-fill exploded")),
     )
     monkeypatch.setattr(
@@ -189,7 +184,7 @@ def test_submit_contains_confirmed_open_post_fill_exception(monkeypatch):
         lambda reconcile, **_kwargs: published.append(reconcile["reconcile_id"]),
     )
 
-    submitted = live_service._submit_open_trade_candidate(
+    submitted = live_open_pipeline._submit_open_trade_candidate(
         bridge=object(),
         attr_engine=None,
         broker="ctrader",

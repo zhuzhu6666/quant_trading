@@ -14,6 +14,7 @@ import pytest
 from backend.services import live_service
 from backend.services.live_safety_state import reset_safety_state_for_tests
 from config import runtime_config as rc
+from backend.services import live_open_pipeline
 
 
 @pytest.fixture(autouse=True)
@@ -89,12 +90,12 @@ def test_open_pipeline_blocks_same_bar_second_open(monkeypatch):
     logs = []
     bar_ts = time.time()
     monkeypatch.setattr(
-        live_service, "_bar_open_already_recorded", lambda ts: ts == bar_ts
+        live_open_pipeline, "_bar_open_already_recorded", lambda ts: ts == bar_ts
     )
     prepare = MagicMock()
-    monkeypatch.setattr(live_service, "_prepare_open_trade_candidate", prepare)
+    monkeypatch.setattr(live_open_pipeline, "_prepare_open_trade_candidate", prepare)
 
-    gate = live_service._run_open_trade_pipeline(
+    gate = live_open_pipeline.run_open_trade_pipeline(
         **_open_pipeline_kwargs(bridge, logs, bar_ts=bar_ts)
     )
 
@@ -114,15 +115,14 @@ def test_open_pipeline_allows_distinct_bar_without_open_record(monkeypatch):
     prepare = MagicMock(
         return_value=SimpleNamespace(order_block={"order_blocked": False})
     )
-    monkeypatch.setattr(live_service, "_bar_open_already_recorded", lambda ts: False)
-    monkeypatch.setattr(live_service, "_prepare_open_trade_candidate", prepare)
+    monkeypatch.setattr(live_open_pipeline, "_bar_open_already_recorded", lambda ts: False)
+    monkeypatch.setattr(live_open_pipeline, "_prepare_open_trade_candidate", prepare)
     monkeypatch.setattr(
-        live_service,
-        "_submit_open_trade_candidate",
+        live_open_pipeline, "_submit_open_trade_candidate",
         lambda **_kwargs: False,
     )
 
-    gate = live_service._run_open_trade_pipeline(
+    gate = live_open_pipeline.run_open_trade_pipeline(
         **_open_pipeline_kwargs(bridge, logs)
     )
 
@@ -144,7 +144,7 @@ def test_bar_open_already_recorded_queries_canonical_decision_stream(monkeypatch
     monkeypatch.setattr(live_service, "iter_decision_rows", _fake_scan)
     monkeypatch.setattr(live_service, "logger", MagicMock())
 
-    assert live_service._bar_open_already_recorded(1786383900.0) is True
+    assert live_open_pipeline._bar_open_already_recorded(1786383900.0) is True
 
 
 def test_bar_open_already_recorded_canonical_window(monkeypatch):
@@ -160,7 +160,7 @@ def test_bar_open_already_recorded_canonical_window(monkeypatch):
     monkeypatch.setattr(live_service, "iter_decision_rows", _fake_scan)
     monkeypatch.setattr(live_service, "logger", MagicMock())
 
-    assert live_service._bar_open_already_recorded(1786383900.0) is True
+    assert live_open_pipeline._bar_open_already_recorded(1786383900.0) is True
 
 
 def test_bar_open_already_recorded_canonical_no_open(monkeypatch):
@@ -172,7 +172,7 @@ def test_bar_open_already_recorded_canonical_no_open(monkeypatch):
     monkeypatch.setattr(live_service, "iter_decision_rows", _fake_scan)
     monkeypatch.setattr(live_service, "logger", MagicMock())
 
-    assert live_service._bar_open_already_recorded(1786383900.0) is False
+    assert live_open_pipeline._bar_open_already_recorded(1786383900.0) is False
 
 
 def test_bar_open_already_recorded_fail_open_on_error(monkeypatch):
@@ -183,9 +183,9 @@ def test_bar_open_already_recorded_fail_open_on_error(monkeypatch):
     monkeypatch.setattr(live_service, "iter_decision_rows", _boom)
     monkeypatch.setattr(live_service, "logger", MagicMock())
 
-    assert live_service._bar_open_already_recorded(1786383900.0) is False
-    assert live_service._bar_open_already_recorded(0.0) is False
-    assert live_service._bar_open_already_recorded(None) is False
+    assert live_open_pipeline._bar_open_already_recorded(1786383900.0) is False
+    assert live_open_pipeline._bar_open_already_recorded(0.0) is False
+    assert live_open_pipeline._bar_open_already_recorded(None) is False
 
 
 def test_bar_open_already_recorded_fail_open_on_canonical_error(monkeypatch):
@@ -197,4 +197,4 @@ def test_bar_open_already_recorded_fail_open_on_canonical_error(monkeypatch):
     monkeypatch.setattr(live_service, "iter_decision_rows", _boom_scan)
     monkeypatch.setattr(live_service, "logger", MagicMock())
 
-    assert live_service._bar_open_already_recorded(1786383900.0) is False
+    assert live_open_pipeline._bar_open_already_recorded(1786383900.0) is False

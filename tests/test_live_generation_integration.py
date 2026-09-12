@@ -10,6 +10,7 @@ from backend.services.live_loop_v2 import _build_safety_cycle_contract
 from backend.services.live_safety_plane import LiveSafetyPlane
 from backend.services.live_safety_planner import SafetyPlan, safety_candidate
 from backend.services import live_close_settlement
+from backend.services import live_open_pipeline
 
 
 class _SnapshotBridge:
@@ -690,8 +691,7 @@ def test_stop_waits_for_admitted_open_rpc_then_keeps_generation_draining(monkeyp
     monkeypatch.setattr(live_service, "_LIVE_LOOP_CONTROLLER", controller)
     monkeypatch.setattr(live_service, "_process_shutdown_requested", False)
     monkeypatch.setattr(
-        live_service,
-        "_probe_final_open_admission",
+        live_open_pipeline, "_probe_final_open_admission",
         lambda **_kwargs: {"ok": True, "blockers": ()},
     )
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: False)
@@ -717,13 +717,12 @@ def test_stop_waits_for_admitted_open_rpc_then_keeps_generation_draining(monkeyp
         assert release_rpc.wait(timeout=2.0)
         return SimpleNamespace(success=False, outcome="rejected", comment="test rejection")
 
-    monkeypatch.setattr(live_service, "_submit_open_trade_order", _rpc)
+    monkeypatch.setattr(live_open_pipeline, "_submit_open_trade_order", _rpc)
     monkeypatch.setattr(
-        live_service,
-        "_prepare_open_trade_intent",
+        live_open_pipeline, "_prepare_open_trade_intent",
         lambda **_kwargs: "decision-draining-open",
     )
-    monkeypatch.setattr(live_service, "_record_open_trade_order_failure", lambda **_kwargs: None)
+    monkeypatch.setattr(live_open_pipeline, "_record_open_trade_order_failure", lambda **_kwargs: None)
     candidate = live_service._OpenTradeCandidate(
         direction_name="LONG",
         bridge_meta={},
@@ -746,7 +745,7 @@ def test_stop_waits_for_admitted_open_rpc_then_keeps_generation_draining(monkeyp
     submit_thread = threading.Thread(
         target=lambda: submit_result.setdefault(
             "admitted",
-            live_service._submit_open_trade_candidate(
+            live_open_pipeline._submit_open_trade_candidate(
                 bridge=SimpleNamespace(),
                 attr_engine=None,
                 broker="ctrader",

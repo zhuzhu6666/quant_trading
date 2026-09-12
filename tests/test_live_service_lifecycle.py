@@ -13,6 +13,7 @@ from backend.services.live_loop_controller import LiveLoopController
 from backend.services import live_close_settlement
 from backend.services import live_position_protection_cycle
 from backend.services import live_open_processing
+from backend.services import live_open_pipeline
 
 
 class _IdleThread:
@@ -1197,7 +1198,7 @@ def test_entry_protection_amend_requires_fresh_matching_projection(
         lambda result, *, broker: calls["published"].append((result, broker)),
     )
 
-    live_service._attach_open_trade_protection(
+    live_open_pipeline._attach_open_trade_protection(
         bridge=_Bridge(),
         attr_engine=None,
         broker="ctrader",

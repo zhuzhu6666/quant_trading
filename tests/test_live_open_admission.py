@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from backend.services import live_service
+from backend.services import live_open_pipeline
 from backend.services.live_open_admission import (
     evaluate_final_open_admission,
     probe_postgres_authority,
@@ -75,7 +76,7 @@ def test_watchdog_stale_facts_are_the_only_retryable_latch():
         cause_id="safety_watchdog",
     )
 
-    assert live_service._watchdog_freshness_retry_eligible(
+    assert live_open_pipeline._watchdog_freshness_retry_eligible(
         ("no_new_risk_latched", "accepting_new_risk_false")
     )
 
@@ -93,7 +94,7 @@ def test_watchdog_execution_uncertainty_is_never_retryable(safety_blocker):
         cause_id="safety_watchdog",
     )
 
-    assert not live_service._watchdog_freshness_retry_eligible(
+    assert not live_open_pipeline._watchdog_freshness_retry_eligible(
         ("no_new_risk_latched", "accepting_new_risk_false")
     )
 
@@ -112,7 +113,7 @@ def test_current_unknown_execution_projection_blocks_retry(monkeypatch):
         lambda: {"unknown_execution_count": 1},
     )
 
-    assert not live_service._watchdog_freshness_retry_eligible(
+    assert not live_open_pipeline._watchdog_freshness_retry_eligible(
         ("no_new_risk_latched", "accepting_new_risk_false")
     )
 
@@ -132,7 +133,7 @@ def test_watchdog_freshness_is_not_retryable_with_an_incident_cause():
         cause_id="runtime_incident_mode",
     )
 
-    assert not live_service._watchdog_freshness_retry_eligible(
+    assert not live_open_pipeline._watchdog_freshness_retry_eligible(
         ("no_new_risk_latched", "accepting_new_risk_false")
     )
 
@@ -160,8 +161,7 @@ def test_pending_open_retry_reuses_same_bar_and_original_gate(monkeypatch):
     monkeypatch.setattr(live_service, "_factor_pipeline", pipeline)
     monkeypatch.setattr(live_service, "_should_send_orders", lambda _broker: True)
     monkeypatch.setattr(
-        live_service,
-        "_run_open_trade_pipeline",
+        live_open_pipeline, "run_open_trade_pipeline",
         lambda **kwargs: calls.append(kwargs)
         or SimpleNamespace(passed=True, reason="passed"),
     )
@@ -170,7 +170,7 @@ def test_pending_open_retry_reuses_same_bar_and_original_gate(monkeypatch):
         positions=[],
     )
 
-    live_service._retry_pending_open_trade(
+    live_open_pipeline.retry_pending_open_trade(
         bridge=SimpleNamespace(),
         frame=frame,
         last_bar=frame.iloc[-1],
@@ -198,7 +198,7 @@ def test_pending_open_retry_is_discarded_when_closed_bar_advances(monkeypatch):
     )
     monkeypatch.setattr(live_service, "_factor_pipeline", pipeline)
 
-    live_service._retry_pending_open_trade(
+    live_open_pipeline.retry_pending_open_trade(
         bridge=SimpleNamespace(),
         frame=frame,
         last_bar=frame.iloc[-1],
@@ -351,9 +351,9 @@ def test_runtime_postgres_failure_latches_no_new_risk_and_skips_open_rpc(monkeyp
         "_get_final_open_probe_conn",
         lambda: (_ for _ in ()).throw(RuntimeError("postgres offline")),
     )
-    monkeypatch.setattr(live_service, "_submit_open_trade_order", order)
+    monkeypatch.setattr(live_open_pipeline, "_submit_open_trade_order", order)
 
-    submitted = live_service._submit_open_trade_candidate(
+    submitted = live_open_pipeline._submit_open_trade_candidate(
         bridge=SimpleNamespace(get_spot_quote=lambda: _fresh_quote(now_ts)),
         attr_engine=None,
         broker="ctrader",
@@ -398,12 +398,12 @@ def test_postgres_probe_never_holds_broker_admission_lock(monkeypatch):
             "spot_quote": {},
         }
 
-    monkeypatch.setattr(live_service, "_probe_final_open_admission", _probe)
-    monkeypatch.setattr(live_service, "_submit_open_trade_order", MagicMock())
+    monkeypatch.setattr(live_open_pipeline, "_probe_final_open_admission", _probe)
+    monkeypatch.setattr(live_open_pipeline, "_submit_open_trade_order", MagicMock())
 
     def _submit():
         try:
-            live_service._submit_open_trade_candidate(
+            live_open_pipeline._submit_open_trade_candidate(
                 bridge=SimpleNamespace(),
                 attr_engine=None,
                 broker="ctrader",

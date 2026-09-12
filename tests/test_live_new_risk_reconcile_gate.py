@@ -9,6 +9,7 @@ import pytest
 from backend.services import live_service
 from backend.services.live_safety_state import no_new_risk_latch_status
 from backend.services import live_close_settlement
+from backend.services import live_open_pipeline
 
 
 @pytest.fixture(autouse=True)
@@ -81,8 +82,8 @@ def test_final_open_admission_allows_only_fresh_identified_reconciles():
     now = time.time()
     _publish_fresh_reconciles(now)
 
-    assert live_service._new_risk_reconciliation_blockers(now_ts=now) == []
-    assert live_service._open_trade_draining() is False
+    assert live_open_pipeline.new_risk_reconciliation_blockers(now_ts=now) == []
+    assert live_open_pipeline._open_trade_draining() is False
 
 
 def test_fresh_empty_reconcile_conflicting_with_recovery_blocks_new_risk(monkeypatch):
@@ -103,7 +104,7 @@ def test_fresh_empty_reconcile_conflicting_with_recovery_blocks_new_risk(monkeyp
         broker="ctrader",
     )
 
-    assert live_service._new_risk_reconciliation_blockers(now_ts=now) == [
+    assert live_open_pipeline.new_risk_reconciliation_blockers(now_ts=now) == [
         "positions_reconcile_failed"
     ]
     assert live_service.live_state_get("accepting_new_risk") is False
@@ -189,7 +190,7 @@ def test_fresh_reconcile_keeps_multiple_aligned_recovery_positions_open(monkeypa
     )
 
     assert [item["position_id"] for item in positions] == [101, 202]
-    assert live_service._new_risk_reconciliation_blockers(now_ts=now) == []
+    assert live_open_pipeline.new_risk_reconciliation_blockers(now_ts=now) == []
     assert live_service.live_state_get("positions_reconcile_error") is None
 
 
@@ -216,7 +217,7 @@ def test_aligned_reconcile_releases_prior_recovery_conflict_latch(monkeypatch):
     )
 
     assert no_new_risk_latch_status(fail_closed=True)["active"] is False
-    assert live_service._new_risk_reconciliation_blockers(now_ts=now + 1.0) == []
+    assert live_open_pipeline.new_risk_reconciliation_blockers(now_ts=now + 1.0) == []
 
 
 def test_fresh_empty_reconcile_resolves_broker_close_before_conflict_latch(
@@ -255,7 +256,7 @@ def test_fresh_empty_reconcile_resolves_broker_close_before_conflict_latch(
     assert retired and retired[0][0][1] == 101
     assert retired[0][1]["persist_reconcile"] is False
     assert no_new_risk_latch_status(fail_closed=True)["active"] is False
-    assert live_service._new_risk_reconciliation_blockers(now_ts=now) == []
+    assert live_open_pipeline.new_risk_reconciliation_blockers(now_ts=now) == []
 
 
 def test_final_open_admission_blocks_missing_reconcile_identity():
@@ -266,15 +267,15 @@ def test_final_open_admission_blocks_missing_reconcile_identity():
         positions_reconcile_id=None,
     )
 
-    blockers = live_service._new_risk_reconciliation_blockers(now_ts=now)
+    blockers = live_open_pipeline.new_risk_reconciliation_blockers(now_ts=now)
 
     assert blockers == ["account_reconcile_unknown", "positions_reconcile_unknown"]
-    assert live_service._open_trade_draining() is True
+    assert live_open_pipeline._open_trade_draining() is True
 
 def test_final_open_admission_blocks_stale_or_newer_failed_reconcile():
     now = time.time()
     _publish_fresh_reconciles(now - 21.0)
-    stale = live_service._new_risk_reconciliation_blockers(now_ts=now)
+    stale = live_open_pipeline.new_risk_reconciliation_blockers(now_ts=now)
     assert stale == ["account_reconcile_stale", "positions_reconcile_stale"]
 
     _publish_fresh_reconciles(now)
@@ -282,24 +283,24 @@ def test_final_open_admission_blocks_stale_or_newer_failed_reconcile():
         account_reconcile_failed_at=now + 0.1,
         positions_reconcile_failed_at=now + 0.1,
     )
-    failed = live_service._new_risk_reconciliation_blockers(now_ts=now + 0.2)
+    failed = live_open_pipeline.new_risk_reconciliation_blockers(now_ts=now + 0.2)
 
     assert failed == ["account_reconcile_failed", "positions_reconcile_failed"]
-    assert live_service._open_trade_draining() is True
+    assert live_open_pipeline._open_trade_draining() is True
 
 
 def test_final_open_admission_preserves_specific_reconcile_reason():
     now = time.time()
     _publish_fresh_reconciles(now - 21.0)
 
-    blockers = live_service._open_trade_admission_blockers()
+    blockers = live_open_pipeline._open_trade_admission_blockers()
 
     assert blockers == (
         "account_reconcile_stale",
         "positions_reconcile_stale",
     )
     assert (
-        live_service._open_admission_gate_reason(blockers)
+        live_open_pipeline._open_admission_gate_reason(blockers)
         == "account_reconcile_stale"
     )
 
@@ -310,12 +311,11 @@ def test_open_pipeline_blocks_stale_reconcile_without_same_tick_broker_refresh(m
     logs: list[str] = []
     candidate = SimpleNamespace(order_block={"order_blocked": True})
     monkeypatch.setattr(
-        live_service,
-        "_prepare_open_trade_candidate",
+        live_open_pipeline, "_prepare_open_trade_candidate",
         lambda **_kwargs: candidate,
     )
 
-    result = live_service._run_open_trade_pipeline(
+    result = live_open_pipeline.run_open_trade_pipeline(
         bridge=SimpleNamespace(is_connected=True),
         pipeline={},
         broker="ctrader",
@@ -345,8 +345,7 @@ def test_signal_pass_admission_block_is_audited_without_risk_verdict(monkeypatch
     _publish_fresh_reconciles(now)
     monkeypatch.setattr(live_service, "no_new_risk_latched", lambda **_kwargs: True)
     monkeypatch.setattr(
-        live_service,
-        "_watchdog_freshness_retry_eligible",
+        live_open_pipeline, "_watchdog_freshness_retry_eligible",
         lambda _blockers: False,
     )
 
@@ -361,9 +360,9 @@ def test_signal_pass_admission_block_is_audited_without_risk_verdict(monkeypatch
     ledger = _Ledger()
     monkeypatch.setattr(live_service, "_LEDGER", ledger)
     prepare = MagicMock()
-    monkeypatch.setattr(live_service, "_prepare_open_trade_candidate", prepare)
+    monkeypatch.setattr(live_open_pipeline, "_prepare_open_trade_candidate", prepare)
 
-    result = live_service._run_open_trade_pipeline(
+    result = live_open_pipeline.run_open_trade_pipeline(
         bridge=SimpleNamespace(is_connected=True),
         pipeline={},
         broker="ctrader",

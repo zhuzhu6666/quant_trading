@@ -7,6 +7,7 @@ import pytest
 
 from backend.services import live_service
 from backend.services import live_close_settlement
+from backend.services import live_open_pipeline
 from backend.services.live_safety_state import (
     activate_no_new_risk_latch,
     no_new_risk_latch_status,
@@ -40,7 +41,7 @@ def test_latch_persistence_failure_blocks_new_risk_in_process(monkeypatch):
 
     assert no_new_risk_latch_status()["active"] is True
     assert no_new_risk_latch_status()["state"] == "persistence_failed_fail_closed"
-    assert live_service._open_trade_draining() is True
+    assert live_open_pipeline._open_trade_draining() is True
 
 
 def test_latch_and_outbox_persistence_failure_still_allows_emergency_close(monkeypatch):
@@ -164,7 +165,7 @@ def test_emergency_latches_before_waiting_for_admitted_open_rpc(monkeypatch):
         time.sleep(0.01)
 
     assert no_new_risk_latch_status()["active"] is True
-    assert live_service._open_trade_draining() is True
+    assert live_open_pipeline._open_trade_draining() is True
     assert emergency_thread.is_alive()
     assert not bridge.close_calls
 

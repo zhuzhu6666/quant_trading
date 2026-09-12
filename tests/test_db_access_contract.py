@@ -284,6 +284,11 @@ def test_live_broker_mutations_are_confined_to_reviewed_execution_adapters():
             "close_position",
             "amend_position_sltp",
         },
+        "backend/services/live_open_pipeline.py": {
+            "market_buy",
+            "market_sell",
+            "amend_position_sltp",
+        },
         "backend/services/live_service.py": broker_methods,
         "backend/services/live_supervision_actions.py": {
             "close_position",

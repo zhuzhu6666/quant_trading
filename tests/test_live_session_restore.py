@@ -10,6 +10,7 @@ import pytest
 from backend.core import db as db_module
 from backend.services import live_service
 from backend.services import live_close_settlement
+from backend.services import live_open_pipeline
 from backend.services.session_restore import (
     authoritative_close_pnl,
     rebuild_session_risk_projection,
@@ -616,7 +617,7 @@ def test_current_final_open_boundary_blocks_non_authoritative_session(
         session_state_status=status,
     )
 
-    assert live_service._open_trade_draining(lambda: False) is True
+    assert live_open_pipeline._open_trade_draining(lambda: False) is True
 
 
 def test_current_final_open_boundary_allows_available_session(monkeypatch):
@@ -634,7 +635,7 @@ def test_current_final_open_boundary_allows_available_session(monkeypatch):
     )
     _publish_fresh_admission_reconciles()
 
-    assert live_service._open_trade_draining(lambda: False) is False
+    assert live_open_pipeline._open_trade_draining(lambda: False) is False
 
 
 def test_generation_open_boundary_also_requires_live_session_projection(monkeypatch):
@@ -653,14 +654,14 @@ def test_generation_open_boundary_also_requires_live_session_projection(monkeypa
         circuit_breaker=False,
     )
 
-    assert live_service._open_trade_draining(lambda: False) is True
+    assert live_open_pipeline._open_trade_draining(lambda: False) is True
 
     live_service.live_state_update(
         accepting_new_risk=True,
         session_state_status="available",
     )
     _publish_fresh_admission_reconciles()
-    assert live_service._open_trade_draining(lambda: False) is False
+    assert live_open_pipeline._open_trade_draining(lambda: False) is False
 
 
 def test_fresh_open_position_ids_require_independent_position_fact():

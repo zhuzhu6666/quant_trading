@@ -27,6 +27,7 @@ from alpha.registry_adapter import RegistryAdapter
 from config import runtime_config as rc
 from backend.services import live_close_settlement
 from backend.services import live_position_protection_cycle
+from backend.services import live_open_pipeline
 
 
 @pytest.fixture(autouse=True)
@@ -260,7 +261,7 @@ def test_live_autonomy_budget_breach_tightens_incident(monkeypatch):
             )
             return {"ok": True, "status": "applied", "target_mode": mode}
 
-    monkeypatch.setattr(live_service, "RuntimeIncidentControlService", lambda: _IncidentControl())
+    monkeypatch.setattr(live_open_pipeline, "RuntimeIncidentControlService", lambda: _IncidentControl())
     logs = []
     verdict = SimpleNamespace(
         to_dict=lambda: {
@@ -273,7 +274,7 @@ def test_live_autonomy_budget_breach_tightens_incident(monkeypatch):
         }
     )
 
-    result = live_service._maybe_tighten_incident_for_live_autonomy_budget_breach(
+    result = live_open_pipeline._maybe_tighten_incident_for_live_autonomy_budget_breach(
         verdict,
         tick=7,
         log=logs.append,
@@ -302,7 +303,7 @@ def test_live_autonomy_budget_breach_does_not_relax_stricter_incident(monkeypatc
             calls.append((args, kwargs))
             return {"ok": True, "status": "applied"}
 
-    monkeypatch.setattr(live_service, "RuntimeIncidentControlService", lambda: _IncidentControl())
+    monkeypatch.setattr(live_open_pipeline, "RuntimeIncidentControlService", lambda: _IncidentControl())
     verdict = SimpleNamespace(
         to_dict=lambda: {
             "allowed": False,
@@ -311,7 +312,7 @@ def test_live_autonomy_budget_breach_does_not_relax_stricter_incident(monkeypatc
         }
     )
 
-    result = live_service._maybe_tighten_incident_for_live_autonomy_budget_breach(
+    result = live_open_pipeline._maybe_tighten_incident_for_live_autonomy_budget_breach(
         verdict,
         tick=7,
         log=lambda _: None,
@@ -480,7 +481,7 @@ def test_pending_open_attach_blocks_until_position_is_confirmed():
 
 
 def test_open_trade_context_sizing_floors_to_broker_step():
-    volume, trace = live_service._apply_context_position_sizing(
+    volume, trace = live_open_pipeline._apply_context_position_sizing(
         volume=123.0,
         sizing_trace={"schema_version": "position_sizing_trace.v1"},
         composite=SimpleNamespace(
@@ -500,7 +501,7 @@ def test_open_trade_context_sizing_floors_to_broker_step():
 
 
 def test_open_trade_context_sizing_rounds_reduction_to_nearest_broker_step():
-    volume, trace = live_service._apply_context_position_sizing(
+    volume, trace = live_open_pipeline._apply_context_position_sizing(
         volume=300.0,
         sizing_trace={"schema_version": "position_sizing_trace.v1"},
         composite=SimpleNamespace(
@@ -519,7 +520,7 @@ def test_open_trade_context_sizing_rounds_reduction_to_nearest_broker_step():
 
 
 def test_open_trade_context_sizing_blocks_when_reduction_below_broker_min():
-    volume, trace = live_service._apply_context_position_sizing(
+    volume, trace = live_open_pipeline._apply_context_position_sizing(
         volume=100.0,
         sizing_trace={"schema_version": "position_sizing_trace.v1"},
         composite=SimpleNamespace(
@@ -540,7 +541,7 @@ def test_open_trade_context_sizing_blocks_when_reduction_below_broker_min():
 
 
 def test_open_trade_context_sizing_preserves_demo_nursery_exploration_min_volume():
-    volume, trace = live_service._apply_context_position_sizing(
+    volume, trace = live_open_pipeline._apply_context_position_sizing(
         volume=100.0,
         sizing_trace={
             "schema_version": "position_sizing_trace.v1",
@@ -564,7 +565,7 @@ def test_open_trade_context_sizing_preserves_demo_nursery_exploration_min_volume
 
 
 def test_open_trade_context_sizing_does_not_lift_non_positive_upstream_size():
-    volume, trace = live_service._apply_context_position_sizing(
+    volume, trace = live_open_pipeline._apply_context_position_sizing(
         volume=0.0,
         sizing_trace={
             "schema_version": "position_sizing_trace.v1",
@@ -592,9 +593,9 @@ def test_open_trade_pipeline_stops_before_broker_order_when_attach_pending(monke
     logs: list[str] = []
     gate_result = SimpleNamespace(passed=True, reason="pass")
     _admitted_generation()
-    monkeypatch.setattr(live_service, "_new_risk_reconciliation_blockers", lambda: [])
+    monkeypatch.setattr(live_open_pipeline, "new_risk_reconciliation_blockers", lambda: [])
 
-    returned_gate = live_service._run_open_trade_pipeline(
+    returned_gate = live_open_pipeline.run_open_trade_pipeline(
         bridge=bridge,
         pipeline={},
         broker="ctrader",
@@ -649,9 +650,9 @@ def test_open_trade_pipeline_blocks_draining_before_candidate(monkeypatch):
     stop_flag = threading.Event()
     stop_flag.set()
     prepare = MagicMock()
-    monkeypatch.setattr(live_service, "_prepare_open_trade_candidate", prepare)
+    monkeypatch.setattr(live_open_pipeline, "_prepare_open_trade_candidate", prepare)
 
-    gate = live_service._run_open_trade_pipeline(
+    gate = live_open_pipeline.run_open_trade_pipeline(
         **_open_pipeline_kwargs(bridge, logs, stop_requested=stop_flag.is_set)
     )
 
@@ -668,7 +669,7 @@ def test_open_trade_pipeline_blocks_draining_after_candidate_before_submit(monke
     logs = []
     generation = _admitted_generation()
     stop_flag = generation.stop_event
-    monkeypatch.setattr(live_service, "_new_risk_reconciliation_blockers", lambda: [])
+    monkeypatch.setattr(live_open_pipeline, "new_risk_reconciliation_blockers", lambda: [])
     candidate = SimpleNamespace(
         direction_name="LONG",
         volume=100.0,
@@ -679,9 +680,9 @@ def test_open_trade_pipeline_blocks_draining_after_candidate_before_submit(monke
         stop_flag.set()
         return candidate
 
-    monkeypatch.setattr(live_service, "_prepare_open_trade_candidate", _prepare)
+    monkeypatch.setattr(live_open_pipeline, "_prepare_open_trade_candidate", _prepare)
 
-    gate = live_service._run_open_trade_pipeline(
+    gate = live_open_pipeline.run_open_trade_pipeline(
         **_open_pipeline_kwargs(bridge, logs, stop_requested=stop_flag.is_set)
     )
 
@@ -705,14 +706,12 @@ def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
     candidate = SimpleNamespace(direction_name="LONG", volume=100.0)
     result = SimpleNamespace(success=True)
     monkeypatch.setattr(
-        live_service,
-        "_probe_final_open_admission",
+        live_open_pipeline, "_probe_final_open_admission",
         lambda **_kwargs: {"ok": True, "blockers": ()},
     )
-    monkeypatch.setattr(live_service, "_new_risk_reconciliation_blockers", lambda: [])
+    monkeypatch.setattr(live_open_pipeline, "new_risk_reconciliation_blockers", lambda: [])
     monkeypatch.setattr(
-        live_service,
-        "_prepare_open_trade_intent",
+        live_open_pipeline, "_prepare_open_trade_intent",
         lambda **_kwargs: "decision-test",
     )
     # This concurrency test intentionally forces the post-fill callback to
@@ -736,8 +735,8 @@ def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
         post_fill_entered.set()
         assert allow_post_fill_return.wait(2.0)
 
-    monkeypatch.setattr(live_service, "_submit_open_trade_order", _order)
-    monkeypatch.setattr(live_service, "_handle_open_trade_order_success", _post_fill)
+    monkeypatch.setattr(live_open_pipeline, "_submit_open_trade_order", _order)
+    monkeypatch.setattr(live_open_pipeline, "_handle_open_trade_order_success", _post_fill)
     monkeypatch.setattr(
         live_close_settlement, "runtime_kv_set",
         lambda key, value: runtime_writes.append((key, value)),
@@ -745,7 +744,7 @@ def test_process_shutdown_waits_for_admitted_order_post_fill(monkeypatch):
 
     def _run_order():
         try:
-            live_service._submit_open_trade_candidate(
+            live_open_pipeline._submit_open_trade_candidate(
                 bridge=object(),
                 attr_engine=None,
                 broker="ctrader",
@@ -1049,8 +1048,8 @@ def test_factor_pipeline_initializes_signal_decision_id_for_flat_signal(monkeypa
         captured.update(kwargs)
         return gate_result
 
-    monkeypatch.setattr(live_service, "_run_open_trade_pipeline", _capture_open_pipeline)
-    monkeypatch.setattr(live_service, "_remember_or_clear_pending_open_retry", lambda **_kwargs: None)
+    monkeypatch.setattr(live_open_pipeline, "run_open_trade_pipeline", _capture_open_pipeline)
+    monkeypatch.setattr(live_open_pipeline, "remember_or_clear_pending_open_retry", lambda **_kwargs: None)
     monkeypatch.setattr(live_service, "_check_business_alerts", lambda *_args: None)
     monkeypatch.setattr(live_service, "_publish_latest_price", lambda *_args, **_kwargs: None)
 
@@ -1153,8 +1152,8 @@ def test_factor_pipeline_final_close_sync_uses_empty_baseline(monkeypatch):
     monkeypatch.setattr(deal_sync_module, "sync_close_deals_batch", _sync)
     monkeypatch.setattr(live_service, "_handle_closed_positions_after_tick", lambda **_kwargs: None)
     monkeypatch.setattr(live_service, "_should_send_orders", lambda _broker: False)
-    monkeypatch.setattr(live_service, "_run_open_trade_pipeline", lambda **_kwargs: gate_result)
-    monkeypatch.setattr(live_service, "_remember_or_clear_pending_open_retry", lambda **_kwargs: None)
+    monkeypatch.setattr(live_open_pipeline, "run_open_trade_pipeline", lambda **_kwargs: gate_result)
+    monkeypatch.setattr(live_open_pipeline, "remember_or_clear_pending_open_retry", lambda **_kwargs: None)
     monkeypatch.setattr(live_service, "_check_business_alerts", lambda *_args: None)
     monkeypatch.setattr(live_service, "_publish_latest_price", lambda *_args, **_kwargs: None)
 

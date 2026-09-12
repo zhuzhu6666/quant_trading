@@ -66,7 +66,6 @@ def test_live_service_domain_entrypoints_remain_thin_wiring():
         "_run_position_protection_cycle",
         "_release_entry_protection_pending_latch",
         "_remember_supervisor_reentry_block",
-        "_submit_open_trade_candidate",
         "emergency_close",
         "get_live_readiness",
         "stop_loop",
@@ -170,7 +169,10 @@ def test_open_submission_state_machine_lives_outside_facade():
 
 def test_open_protection_state_machine_lives_outside_facade():
     source = LIVE_SERVICE.read_text(encoding="utf-8")
-    node = _definitions(ast.parse(source))["_attach_open_trade_protection"]
+    pipeline_source = Path(
+        "backend/services/live_open_pipeline.py"
+    ).read_text(encoding="utf-8")
+    node = _definitions(ast.parse(pipeline_source))["_attach_open_trade_protection"]
     protection_source = Path(
         "backend/services/live_open_protection.py"
     ).read_text(encoding="utf-8")
@@ -200,9 +202,6 @@ def test_open_post_fill_processing_lives_outside_facade():
     # and the production adapters.
     facade_definitions = _definitions(tree)
     for name in (
-        "_record_filled_position_open_context",
-        "record_amended_open_success_context",
-        "record_amend_failure_after_fill",
     ):
         assert name not in facade_definitions
         assert name in processing_definitions

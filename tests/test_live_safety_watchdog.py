@@ -19,6 +19,7 @@ from backend.services.live_safety_watchdog import (
 )
 from backend.services.live_safety_plane import LiveSafetyPlane
 from backend.services.live_safety_planner import SafetyPlan, safety_candidate
+from backend.services import live_open_pipeline
 
 
 @pytest.fixture(autouse=True)
@@ -656,7 +657,7 @@ def test_stale_watchdog_and_unknown_execution_block_open_but_protection_continue
 
     assert freshness.ok is False
     assert no_new_risk_latch_status()["active"] is True
-    assert live_service._open_trade_draining() is True
+    assert live_open_pipeline._open_trade_draining() is True
     assert safety["accepting_new_risk"] is False
     assert "unknown_execution" in safety["blockers"]
     assert [item["position_id"] for item in protected] == [904]
