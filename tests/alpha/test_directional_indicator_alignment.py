@@ -3,8 +3,8 @@ import pandas as pd
 
 from alpha.registry import factor_adx, factor_atr_ratio, factor_di_spread, factor_rsi_14
 from alpha.streaming_factor_engine import StreamingFactorEngine
-from alpha.technical_indicators import rsi_wilder
-from risk import regime
+from alpha.technical_indicators import adx_wilder, atr_wilder, rsi_wilder
+
 
 
 def _ohlc_frame(n: int = 80) -> pd.DataFrame:
@@ -24,9 +24,9 @@ def _ohlc_frame(n: int = 80) -> pd.DataFrame:
     )
 
 
-def test_alpha_adx_and_di_spread_match_risk_regime_wilder_adx():
+def test_alpha_adx_and_di_spread_match_wilder_adx():
     df = _ohlc_frame()
-    adx, plus_di, minus_di = regime._adx(
+    adx, plus_di, minus_di = adx_wilder(
         df["high"].values,
         df["low"].values,
         df["close"].values,
@@ -39,7 +39,7 @@ def test_alpha_adx_and_di_spread_match_risk_regime_wilder_adx():
 
 def test_alpha_atr_ratio_matches_risk_regime_wilder_atr():
     df = _ohlc_frame()
-    atr = regime._atr(
+    atr = atr_wilder(
         df["high"].values,
         df["low"].values,
         df["close"].values,
@@ -52,7 +52,7 @@ def test_alpha_atr_ratio_matches_risk_regime_wilder_atr():
 
 def test_streaming_adx_override_matches_risk_regime_wilder_adx():
     df = _ohlc_frame()
-    expected, _, _ = regime._adx(
+    expected, _, _ = adx_wilder(
         df["high"].values,
         df["low"].values,
         df["close"].values,
