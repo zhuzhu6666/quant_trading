@@ -16,6 +16,15 @@ POSITION_SUPERVISOR_BINDING_SCHEMA_VERSION = "position_supervisor_binding.v1"
 DEFAULT_TEMPLATE_ID = "position_supervisor:default.v1"
 CONSERVATIVE_TEMPLATE_ID = "position_supervisor:conservative.v1"
 PROFIT_PROTECTION_TEMPLATE_ID = "position_supervisor:profit_protection.v1"
+
+# Single source of truth for the fail-closed fallback used when a
+# template or frozen binding snapshot omits min_thesis_break_seconds.
+# Matches default.v1.thresholds.min_thesis_break_seconds.
+MIN_THESIS_BREAK_SECONDS_FALLBACK = 900.0
+
+# L1-6 quality gate for the regime_shift evidence family.
+REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK = 0.6
+REGIME_EVIDENCE_MIN_OBSERVATIONS_FALLBACK = 2
 POSITION_SUPERVISOR_BINDING_SOURCES = frozenset(
     {
         "static_baseline",
@@ -308,12 +317,12 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
         "status": "active",
         "description": "Delay early thesis-broken full exits past normal M5 noise and prefer tighten evidence first.",
         "thresholds": {
-            "min_thesis_break_seconds": 900.0,
+            "min_thesis_break_seconds": MIN_THESIS_BREAK_SECONDS_FALLBACK,
             "min_closed_bars_high_vol_or_weak_trend": 1,
             "min_closed_bars_default": 2,
             "hard_risk_bypass": True,
             "min_independent_thesis_break_evidence": 2,
-            "broken_holding_efficiency_threshold": 1.00,
+            "broken_holding_efficiency_threshold": 0.20,
             "giveback_reduce_threshold": 0.70,
             "giveback_tighten_threshold": 0.35,
             "profit_capture_min_threshold": 0.35,
@@ -348,6 +357,8 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "max_tp_extension_factor": 0.50,
             "min_profit_lock_multiplier": 0.35,
             "max_profit_lock_multiplier": 0.85,
+            "regime_evidence_min_confidence": REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK,
+            "regime_evidence_min_observations": REGIME_EVIDENCE_MIN_OBSERVATIONS_FALLBACK,
         },
         "risk_boundary": {
             "approval_path": "built_in_default",
@@ -409,6 +420,8 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "max_tp_extension_factor": 0.35,
             "min_profit_lock_multiplier": 0.30,
             "max_profit_lock_multiplier": 0.75,
+            "regime_evidence_min_confidence": REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK,
+            "regime_evidence_min_observations": REGIME_EVIDENCE_MIN_OBSERVATIONS_FALLBACK,
         },
         "risk_boundary": {
             "approval_path": "offline_replay_then_governed_release",
@@ -466,6 +479,8 @@ _TEMPLATES: dict[str, dict[str, Any]] = {
             "max_tp_extension_factor": 0.45,
             "min_profit_lock_multiplier": 0.45,
             "max_profit_lock_multiplier": 0.90,
+            "regime_evidence_min_confidence": REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK,
+            "regime_evidence_min_observations": REGIME_EVIDENCE_MIN_OBSERVATIONS_FALLBACK,
         },
         "risk_boundary": {
             "approval_path": "offline_replay_then_governed_release",

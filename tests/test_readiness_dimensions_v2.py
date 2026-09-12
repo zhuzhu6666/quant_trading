@@ -268,3 +268,75 @@ def test_global_operator_pause_blocks_all_mode_autonomous_expansion() -> None:
         item["reason"] for item in result["blockers"]["autonomous_mutation"]
     }
     assert "operator_pause_active" in reasons
+
+
+def test_degraded_voting_factors_block_only_live_alpha() -> None:
+    rc.reset_for_tests()
+    try:
+        result = _dimensions(
+            factor_blend_health={
+                "ok": True,
+                "status": "healthy",
+                "voting_factors_degraded": [
+                    {"factor": "macd_hist", "status": "DECAYING", "score": 31.63},
+                ],
+            }
+        )
+    finally:
+        rc.reset_for_tests()
+
+    assert result["ready_for_frontend"] is True
+    assert result["ready_for_live_execution"] is True
+    assert result["ready_for_live_alpha"] is False
+    assert result["ready_for_release"] is True
+    blockers = result["blockers"]["live_alpha"]
+    assert any(
+        item["component"] == "voting_factor_health"
+        and item["reason"] == "voting_factors_degraded"
+        for item in blockers
+    )
+
+
+def test_factor_blend_health_surfaces_degraded_voters(tmp_path, monkeypatch) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "CREATE TABLE factor_health (factor TEXT, status TEXT, score REAL)"
+        )
+        conn.execute("INSERT INTO factor_health VALUES ('macd_hist', 'DECAYING', 31.63)")
+        conn.execute("INSERT INTO factor_health VALUES ('obv_slope', 'WATCH', 30.28)")
+        conn.execute("INSERT INTO factor_health VALUES ('ema_slope', 'WATCH', 42.28)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    from backend.services.runtime_factor_selection_projection import (
+        RuntimeFactorSelectionProjectionService,
+    )
+
+    projection = {
+        "ok": True,
+        "status": "ok",
+        "configured_directional_factor_ids": ["macd_hist", "obv_slope", "ema_slope"],
+        "directional_portfolio_guard": {
+            "status": "healthy",
+            "voter_ids": ["macd_hist", "obv_slope", "ema_slope"],
+        },
+        "age_seconds": 1.0,
+    }
+
+    monkeypatch.setattr(
+        RuntimeFactorSelectionProjectionService,
+        "latest",
+        lambda self, max_age_seconds=900.0: dict(projection),
+    )
+
+    status = BackendReadinessService(db_path=db_path)._factor_blend_health_status()
+    degraded = {item["factor"]: item for item in status["voting_factors_degraded"]}
+    assert set(degraded) == {"macd_hist", "obv_slope"}
+    assert degraded["macd_hist"]["score"] == 31.63
+    assert degraded["macd_hist"]["status"] == "DECAYING"
+    assert degraded["obv_slope"]["status"] == "WATCH"

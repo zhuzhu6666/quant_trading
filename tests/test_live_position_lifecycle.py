@@ -2232,7 +2232,8 @@ def test_build_position_supervisor_context_payload_uses_canonical_market_dimensi
     )
 
     assert payload["market"]["regime_id"] == "trend=strong|volatility=high"
-    assert payload["market"]["regime_confidence"] == 0.8
+    # L1-7: confidence is measured from the dimension scores (0.8, 0.7).
+    assert payload["market"]["regime_confidence"] == 0.75
     assert payload["market"]["trend_strength_state"] == "strong"
     assert payload["market"]["volatility_state"] == "high"
     assert payload["market_space_context"]["state"] == "known"

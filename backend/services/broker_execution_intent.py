@@ -102,11 +102,11 @@ class BrokerExecutionIntentStore:
                     broker, account_id, symbol, action, side,
                     requested_volume, requested_price, target_stop_loss,
                     target_take_profit, status, attempt_count, request_json,
-                    risk_verdict_json, config_version, config_hash,
+                    risk_verdict_json, config_version, config_hash, origin,
                     prepared_at, created_at, updated_at
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, 'prepared', 0, %s, %s, %s, %s,
+                    %s, %s, %s, %s, 'prepared', 0, %s, %s, %s, %s, %s,
                     %s, %s, %s
                 )
                 ON CONFLICT (idempotency_key) DO NOTHING
@@ -117,7 +117,8 @@ class BrokerExecutionIntentStore:
                     float(requested_volume or 0.0), float(requested_price or 0.0),
                     float(target_stop_loss or 0.0), float(target_take_profit or 0.0),
                     _json(dict(request or {})), _json(dict(risk_verdict or {})),
-                    int(config_version or 0), str(config_hash or ""), now, now, now,
+                    int(config_version or 0), str(config_hash or ""), "autonomous",
+                    now, now, now,
                 ),
             )
             row = conn.execute(

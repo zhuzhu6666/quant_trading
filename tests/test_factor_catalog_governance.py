@@ -41,6 +41,9 @@ def test_shadow_perf_catalog_read_uses_one_batch_query(monkeypatch):
         "_connect_state",
         lambda _db_path, *, read_only=False: conn,
     )
+    # The batch path is PG-only; pin it on so the test exercises the query
+    # shape regardless of the suite isolation escape hatch.
+    monkeypatch.setattr(factor_catalog, "is_state_db_path", lambda _p: True)
 
     result = factor_catalog._shadow_perf_by_factor(
         ["shadow_a", "shadow_b", "shadow_a"],

@@ -191,7 +191,11 @@ def test_trade_attribution_links_review_to_agents_and_lesson_memory(tmp_path):
             outcome_label="bad_loss",
             failure_tags=["weak_entry_signal"],
             summary_text="weak entry",
-            review={"primary_responsibility": "signal_quality"},
+            review={
+                "primary_responsibility": "signal_quality",
+                "attribution_integrity": "full",
+                "context_integrity": "full",
+            },
             created_at=now,
         )
         conn.execute(
@@ -246,7 +250,11 @@ def test_trade_attribution_counts_lesson_memory_participants_as_linked(tmp_path)
             outcome_label="bad_loss",
             failure_tags=["weak_entry_signal"],
             summary_text="lesson only",
-            review={"primary_responsibility": "signal_quality"},
+            review={
+                "primary_responsibility": "signal_quality",
+                "attribution_integrity": "full",
+                "context_integrity": "full",
+            },
             created_at=now,
         )
         row = review_row(conn, "review_lesson_only")
@@ -579,7 +587,11 @@ def test_agent_generation_context_does_not_promote_raw_entry_action_after_superv
             pnl=-1.0,
             outcome_label="bad_loss",
             failure_tags=["weak_entry_signal"],
-            review={"primary_responsibility": "signal_quality"},
+            review={
+                "primary_responsibility": "signal_quality",
+                "attribution_integrity": "full",
+                "context_integrity": "full",
+            },
             created_at=now,
         )
         conn.execute(

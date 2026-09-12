@@ -19,6 +19,37 @@ def _known(value: Any) -> str:
     return "" if normalized in _UNKNOWN else normalized
 
 
+def _dimension_confidence(
+    context: Mapping[str, Any],
+    *,
+    known_dimensions: int,
+    total_dimensions: int = 2,
+) -> float:
+    """Measured confidence for the market-dimension regime projection.
+
+    The previous constants (0.8 / 0.55) carried no information: every
+    decision with two known dimensions received the same score, so a
+    confidence gate could never discriminate.  The score now combines the
+    completeness of the dimensions with the mean strength score of the
+    present dimensions, which is the same fact the compositor used to derive
+    the states (L1-7).
+    """
+
+    completeness = min(1.0, max(0.0, known_dimensions / max(1, total_dimensions)))
+    scores: list[float] = []
+    for score_key in ("trend_strength_score", "volatility_score"):
+        try:
+            score = float(context.get(score_key))
+        except (TypeError, ValueError):
+            continue
+        scores.append(min(1.0, abs(score)))
+    if not scores:
+        # No measured strength: completeness alone stays below any gate.
+        return round(0.5 * completeness, 4)
+    mean_score = sum(scores) / len(scores)
+    return round(min(0.99, max(0.0, mean_score * completeness)), 4)
+
+
 def project_current_market_regime(
     experience_rows: Sequence[Mapping[str, Any]],
     *,
@@ -86,11 +117,11 @@ def resolve_market_regime(composite: Any) -> dict[str, Any]:
             regime_id = _known(_field(container, key, ""))
             if not regime_id:
                 continue
-            confidence = _field(container, "regime_confidence", 1.0)
+            confidence = _field(container, "regime_confidence", 0.5)
             try:
                 confidence = max(0.0, min(1.0, float(confidence)))
             except (TypeError, ValueError):
-                confidence = 1.0
+                confidence = 0.5
             return {
                 "regime_id": regime_id,
                 "confidence": round(confidence, 4),
@@ -107,7 +138,10 @@ def resolve_market_regime(composite: Any) -> dict[str, Any]:
     }
     if dimensions:
         regime_id = "|".join(f"{key}={value}" for key, value in dimensions.items())
-        confidence = 0.8 if len(dimensions) == 2 else 0.55
+        confidence = _dimension_confidence(
+            context,
+            known_dimensions=len(dimensions),
+        )
         return {
             "regime_id": regime_id,
             "confidence": confidence,

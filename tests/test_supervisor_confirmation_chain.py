@@ -50,7 +50,12 @@ def _base_context(**overrides):
             "regime_shift": "none",
         },
         "temporal_context": {"holding_seconds": 600.0, "completed_bars_after_entry": 3},
-        "market": {"trend_strength_state": "normal", "volatility_state": "normal"},
+        "market": {
+            "trend_strength_state": "normal",
+            "volatility_state": "normal",
+            "regime_source": "context_state.market_dimensions",
+            "regime_confidence": 0.8,
+        },
         "market_space_context": {},
         "entry_context": {},
     }
@@ -100,6 +105,43 @@ def test_normalize_path_state_defaults_counter():
 
 
 # ── F5: transition_confirming profit-protection tighten ────────────────────
+
+
+def test_update_position_path_metrics_counts_consecutive_regime_shift():
+    """L1-6 producer: consecutive confirmed regime shifts are counted and
+    reset when the regime returns to the entry regime."""
+
+    state, metrics = update_position_path_metrics(
+        previous_state=None,
+        current_pnl=-1.0,
+        now_ts=100.0,
+        holding_seconds=100.0,
+        entry_regime="trend=strong|volatility=high",
+        current_regime="trend=weak|volatility=high",
+    )
+    assert metrics["regime_shift"] == "confirmed"
+    assert metrics["regime_shift_confirmations"] == 1
+
+    state, metrics = update_position_path_metrics(
+        previous_state=state,
+        current_pnl=-1.0,
+        now_ts=200.0,
+        holding_seconds=200.0,
+        entry_regime="trend=strong|volatility=high",
+        current_regime="trend=weak|volatility=high",
+    )
+    assert metrics["regime_shift_confirmations"] == 2
+
+    state, metrics = update_position_path_metrics(
+        previous_state=state,
+        current_pnl=-1.0,
+        now_ts=300.0,
+        holding_seconds=300.0,
+        entry_regime="trend=strong|volatility=high",
+        current_regime="trend=strong|volatility=high",
+    )
+    assert metrics["regime_shift"] == "none"
+    assert metrics["regime_shift_confirmations"] == 0
 
 
 def test_transition_confirming_profitable_giveback_yields_tighten():

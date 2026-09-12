@@ -11,6 +11,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import threading
 import uuid
 from collections import OrderedDict
@@ -66,6 +67,7 @@ CREATE TABLE IF NOT EXISTS event (
     idempotency_key TEXT NOT NULL DEFAULT '',
     payload_hash TEXT NOT NULL REFERENCES payload_blob(payload_hash),
     status TEXT NOT NULL DEFAULT 'recorded' CHECK (status <> ''),
+    provenance TEXT NOT NULL DEFAULT 'unknown',
     created_at TEXT NOT NULL,
     FOREIGN KEY (parent_event_id) REFERENCES event(event_id)
         DEFERRABLE INITIALLY DEFERRED
@@ -551,6 +553,19 @@ def read_payloads(conn: Any, payload_hashes: Iterable[str]) -> dict[str, Any]:
     return payloads
 
 
+def _provenance_tag() -> str:
+    """Distinguish suite writes from production writes (L3-5).
+
+    The S0-0 isolation keeps the suite inside the sandbox store, but if that
+    isolation ever regresses this tag makes the leak identifiable instead of
+    indistinguishable.
+    """
+
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("QUANT_TEST_RUN"):
+        return "test"
+    return "production"
+
+
 _EVENT_COLUMNS = (
     "event_id",
     "event_type",
@@ -568,6 +583,7 @@ _EVENT_COLUMNS = (
     "payload_hash",
     "status",
     "created_at",
+    "provenance",
 )
 
 
@@ -631,6 +647,7 @@ def append_event(
         "payload_hash": str(payload_hash or ""),
         "status": str(status or ""),
         "created_at": _db_time(conn, None),
+        "provenance": _provenance_tag(),
     }
     if values["event_type"] not in EVENT_TYPES:
         raise CanonicalV2Error(f"unsupported canonical event_type: {values['event_type']}")
@@ -647,7 +664,7 @@ def append_event(
                 SELECT event_id, event_type, entity_type, entity_id, observed_at,
                        recorded_at, producer, producer_version, schema_version,
                        correlation_id, causation_id, parent_event_id,
-                       idempotency_key, payload_hash, status, created_at
+                       idempotency_key, payload_hash, status, created_at, provenance
                 FROM canonical_v2.event
                 WHERE producer=? AND idempotency_key<>'' AND idempotency_key=?
                 LIMIT 1
@@ -663,7 +680,7 @@ def append_event(
                 SELECT event_id, event_type, entity_type, entity_id, observed_at,
                        recorded_at, producer, producer_version, schema_version,
                        correlation_id, causation_id, parent_event_id,
-                       idempotency_key, payload_hash, status, created_at
+                       idempotency_key, payload_hash, status, created_at, provenance
                 FROM canonical_v2.event
                 WHERE event_id=?
                 LIMIT 1
@@ -694,6 +711,7 @@ def append_event(
         "payload_hash",
         "status",
         "created_at",
+        "provenance",
     )
     placeholders = ", ".join("?" for _ in columns)
     if values["idempotency_key"]:
@@ -1608,6 +1626,47 @@ def purge_sample_rows_without_source(
     return int(getattr(cur, "rowcount", 0))
 
 
+def _review_event_for_position(conn: Any, position_id: str) -> dict[str, Any] | None:
+    """Return the existing canonical review event for one broker position.
+
+    The review stream is immutable and holds exactly one review per position,
+    so a second review that carries a fresh ``review_id`` is not a revision.
+    Position identity lives in the payload blob, which is why the candidate
+    rows are resolved through the payload cache instead of a column.
+    """
+
+    rows = conn.execute(
+        _sql(
+            conn,
+            """
+            SELECT event_id, event_type, entity_type, entity_id, observed_at,
+                   recorded_at, producer, producer_version, schema_version,
+                   correlation_id, causation_id, parent_event_id,
+                   idempotency_key, payload_hash, status, created_at, provenance
+            FROM canonical_v2.event
+            WHERE event_type='trade_review'
+            ORDER BY observed_at DESC, event_id DESC
+            """,
+        )
+    ).fetchall()
+    if not rows:
+        return None
+    payloads = read_payloads(
+        conn,
+        [str(_row_value(row, "payload_hash", 13) or "") for row in rows],
+    )
+    for row in rows:
+        item = _row_dict(row, _EVENT_COLUMNS)
+        payload = payloads.get(str(item.get("payload_hash") or ""))
+        if (
+            isinstance(payload, dict)
+            and str(payload.get("position_id") or "") == str(position_id)
+        ):
+            item["created"] = False
+            return item
+    return None
+
+
 def record_review(
     conn: Any,
     *,
@@ -1646,6 +1705,10 @@ def record_review(
     """
     if not review_id:
         raise CanonicalV2Error("canonical trade review requires review_id")
+    if position_id:
+        existing_for_position = _review_event_for_position(conn, str(position_id))
+        if existing_for_position is not None:
+            return existing_for_position
     payload: dict[str, Any] = {
         "review_id": str(review_id or ""),
         "trade_id": str(trade_id or ""),

@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from backend.core.pnl import net_pnl, net_pnl_sql
+
 
 @dataclass(frozen=True)
 class PartialCloseSessionFactRuntime:
@@ -94,9 +96,11 @@ def sync_partial_close_session_fact(
             "gross": float(after.get("gross_profit") or 0.0),
             "swap": float(after.get("swap") or 0.0),
             "commission": float(after.get("close_commission") or 0.0),
-            "net": float(after.get("gross_profit") or 0.0)
-            + float(after.get("swap") or 0.0)
-            + float(after.get("close_commission") or 0.0),
+            "net": net_pnl(
+                after.get("gross_profit"),
+                after.get("swap"),
+                after.get("close_commission"),
+            ),
             "exec_timestamp": float(after.get("exec_timestamp") or 0.0),
             "closed_volume": float(after.get("closed_volume") or 0.0),
             "deal_id": after.get("deal_id"),
@@ -197,7 +201,7 @@ def load_authoritative_session_deal_facts(
         try:
             completed_rows = execute(
                 conn,
-                """
+                f"""
                 WITH final_close AS (
                     SELECT position_id, MAX(exec_timestamp) AS final_close_ts
                     FROM ctrader_deals
@@ -212,9 +216,7 @@ def load_authoritative_session_deal_facts(
                        SUM(COALESCE(d.gross_profit, 0.0)) AS gross_profit,
                        SUM(COALESCE(d.swap, 0.0)) AS swap,
                        SUM(COALESCE(d.close_commission, 0.0)) AS close_commission,
-                       SUM(COALESCE(d.gross_profit, 0.0)
-                           + COALESCE(d.swap, 0.0)
-                           + COALESCE(d.close_commission, 0.0)) AS net,
+                       SUM({net_pnl_sql(prefix="d.")}) AS net,
                        MAX(d.exec_timestamp) AS exec_timestamp,
                        COUNT(*) AS close_deals_count
                 FROM ctrader_deals d
@@ -227,14 +229,12 @@ def load_authoritative_session_deal_facts(
             ).fetchall()
             realized_rows = execute(
                 conn,
-                """
+                f"""
                 SELECT deal_id, position_id,
                        COALESCE(gross_profit, 0.0) AS gross_profit,
                        COALESCE(swap, 0.0) AS swap,
                        COALESCE(close_commission, 0.0) AS close_commission,
-                       COALESCE(gross_profit, 0.0)
-                           + COALESCE(swap, 0.0)
-                           + COALESCE(close_commission, 0.0) AS net,
+                       {net_pnl_sql()} AS net,
                        exec_timestamp,
                        COALESCE(closed_volume, 0.0) AS closed_volume
                 FROM ctrader_deals

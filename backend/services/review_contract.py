@@ -813,6 +813,19 @@ def review_has_system_contamination(review_payload: dict[str, Any] | None) -> bo
     return bool(labels & SYSTEM_CONTAMINATION_LABELS)
 
 
+def review_learning_eligible(review_payload: dict[str, Any] | None) -> bool:
+    """Shared learning-pool gate for one trade review (X1/L0-0R)."""
+
+    from backend.core.contracts import learning_eligible
+
+    review = _as_dict(review_payload)
+    return learning_eligible(
+        attribution_integrity=review.get("attribution_integrity"),
+        context_integrity=review.get("context_integrity"),
+        close_reason=review.get("close_reason"),
+    )
+
+
 def review_execution_evidence_is_trainable(review_payload: dict[str, Any] | None) -> bool:
     """Return whether a matured review has a complete execution chain.
 

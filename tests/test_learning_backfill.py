@@ -263,7 +263,11 @@ def test_rebuild_learning_state_does_not_write_factor_pattern_stats(tmp_path):
             pnl=-1.5,
             outcome_label="bad_loss",
             failure_tags=[],
-            review={"worst_factor": "rsi_14"},
+            review={
+                "worst_factor": "rsi_14",
+                "attribution_integrity": "full",
+                "context_integrity": "full",
+            },
             created_at=10.0,
         )
         learning_backfill.rebuild_learning_state(conn)
@@ -317,7 +321,11 @@ def test_rebuild_learning_state_excludes_contaminated_review_lineage(tmp_path):
             pnl=1.0,
             outcome_label="good_win",
             failure_tags=[],
-            review={"worst_factor": "adx"},
+            review={
+                "worst_factor": "adx",
+                "attribution_integrity": "full",
+                "context_integrity": "full",
+            },
             created_at=20.0,
         )
 
@@ -355,7 +363,11 @@ def test_learning_backfill_refreshes_trade_lesson_memory_without_new_reviews(mon
             outcome_label="bad_loss",
             failure_tags=["weak_entry_signal"],
             summary_text="refresh existing lesson",
-            review={"primary_responsibility": "signal_quality"},
+            review={
+                "primary_responsibility": "signal_quality",
+                "attribution_integrity": "full",
+                "context_integrity": "full",
+            },
             created_at=100.0,
         )
         conn.commit()

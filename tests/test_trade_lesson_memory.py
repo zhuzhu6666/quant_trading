@@ -34,6 +34,8 @@ def test_trade_lesson_memory_upserts_stable_experience_and_brain_reads_it(tmp_pa
                 "signal_score": 0.21,
                 "demo_nursery_observations": [{"reason": "var_gate", "source": "var_gate"}],
                 "temporal_context": {"timeframe": "M5"},
+                "attribution_integrity": "full",
+                "context_integrity": "full",
             },
             created_at=now,
         )

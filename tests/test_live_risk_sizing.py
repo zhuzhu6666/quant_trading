@@ -463,7 +463,9 @@ def test_apply_entry_event_sizing_floors_reduced_volume_without_lifting_to_min()
     assert tradeable["blocked_reason"] == ""
 
 
-def test_apply_entry_event_sizing_does_not_lift_demo_exploration_back_to_minimum():
+def test_apply_entry_event_sizing_preserves_demo_exploration_minimum():
+    """L1-1 / docs:219: soft event sizing must not zero the demo lot."""
+
     result = apply_entry_event_sizing(
         base_volume=100.0,
         event_multiplier=0.2,
@@ -472,6 +474,19 @@ def test_apply_entry_event_sizing_does_not_lift_demo_exploration_back_to_minimum
             "base_api_volume": 100.0,
             "demo_nursery_exploration": True,
         },
+    )
+
+    assert result["volume"] == 100.0
+    assert result["trace"]["event_sizing_demo_min_preserved"] is True
+    assert result["blocked_reason"] == ""
+
+
+def test_apply_entry_event_sizing_does_not_preserve_non_demo_zero():
+    result = apply_entry_event_sizing(
+        base_volume=100.0,
+        event_multiplier=0.2,
+        bridge_meta={"api_min_volume": 100, "api_step_volume": 100},
+        sizing_trace={"base_api_volume": 100.0},
     )
 
     assert result["volume"] == 0.0

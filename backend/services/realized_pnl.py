@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from backend.core.db import get_state_pg_conn
 from backend.core.db_helpers import conn_is_pg as _conn_is_pg, execute as _execute
+from backend.core.pnl import net_pnl
 
 _DEFAULT_TZ = "Asia/Shanghai"
 _VALID_SCOPES = {"today", "24h", "7d", "30d", "all"}
@@ -33,10 +34,11 @@ def _scope_window(scope: str, *, now_ts: float, tz_name: str) -> tuple[float | N
 
 
 def _net_from_close_row(row) -> float:
-    gross = float(row["gross_profit"] or 0.0)
-    swap = float(row["swap"] or 0.0)
-    close_commission = float(row["close_commission"] or 0.0)
-    return gross + swap + close_commission
+    return net_pnl(
+        row["gross_profit"],
+        row["swap"],
+        row["close_commission"],
+    )
 
 
 def _connect_state():

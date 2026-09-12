@@ -153,6 +153,30 @@ def fetch_deals_since(
     )
 
 
+def _positions_with_intent(conn: Any, position_ids: list[int]) -> set[str]:
+    """Return broker positions that already carry an execution intent (M3-D2).
+
+    Deal sync runs after the intent ledger in the normal flow, so a missing
+    intent means the fill is not an autonomous entry/reduce of ours.
+    """
+
+    ids = sorted({str(int(pid)) for pid in position_ids if int(pid or 0) > 0})
+    if not ids:
+        return set()
+    placeholders = ", ".join("?" for _ in ids)
+    try:
+        rows = _execute(
+            conn,
+            "SELECT DISTINCT position_id FROM broker_execution_intent "
+            f"WHERE position_id IN ({placeholders})",
+            tuple(ids),
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("[DealSync] intent origin lookup skipped: %s", exc)
+        return set()
+    return {str(row["position_id"] or "") for row in rows}
+
+
 def store_deals(
     conn: Any,
     deals: list[dict],
@@ -170,8 +194,17 @@ def store_deals(
         return 0
     count = 0
     now = time.time()
+    positions_with_intent = _positions_with_intent(
+        conn,
+        [int(d.get("position_id") or 0) for d in deals],
+    )
     for d in deals:
         cd = d.get("close_detail", {}) or {}
+        origin = (
+            "autonomous"
+            if str(int(d.get("position_id") or 0)) in positions_with_intent
+            else "unknown"
+        )
         try:
             execution_price = float(d.get("execution_price", 0.0) or 0.0)
         except (TypeError, ValueError):
@@ -195,13 +228,13 @@ def store_deals(
                  entry_price, gross_profit, swap,
                  close_commission, balance, closed_volume,
                  is_close, fetched_at, raw_execution_price,
-                 price_contract, price_quality, repair_run_id)
+                 price_contract, price_quality, repair_run_id, origin)
                 VALUES (?, ?, ?, ?,
                         ?, ?, ?, ?,
                         ?, ?, ?,
                         ?, ?, ?,
                         ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(deal_id) DO UPDATE SET
                     exec_price=excluded.exec_price,
                     raw_execution_price=excluded.raw_execution_price,
@@ -241,6 +274,7 @@ def store_deals(
                     else "unknown"
                 ),
                 "",
+                origin,
             ])
             count += 1
         except Exception as e:

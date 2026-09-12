@@ -26,6 +26,8 @@ def _seed_review(db_path, *, review_id="review-1", contaminated=False):
             summary_text="weak entry failed during noisy range",
             review={
                 "regime": "noisy_range",
+                "attribution_integrity": "full",
+                "context_integrity": "full",
                 "system_issue_context": {
                     "contaminates_learning": contaminated,
                 },

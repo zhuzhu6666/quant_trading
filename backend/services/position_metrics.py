@@ -36,6 +36,11 @@ def normalize_path_state(raw: dict[str, Any] | None) -> dict[str, Any]:
         "thesis_broken_confirmations": max(
             0, int(_safe_float(state.get("thesis_broken_confirmations")))
         ),
+        # Consecutive observations with regime_shift confirmed.  Producer
+        # for the supervisor's regime evidence quality gate (L1-6).
+        "regime_shift_confirmations": max(
+            0, int(_safe_float(state.get("regime_shift_confirmations")))
+        ),
     }
 
 
@@ -89,6 +94,11 @@ def update_position_path_metrics(
     else:
         regime_shift = "none"
 
+    if regime_shift == "confirmed":
+        regime_shift_confirmations = state["regime_shift_confirmations"] + 1
+    else:
+        regime_shift_confirmations = 0
+
     min_thesis_break_seconds = max(0.0, _safe_float(min_thesis_break_seconds))
     thesis_break_ready = holding_seconds >= min_thesis_break_seconds
 
@@ -131,6 +141,7 @@ def update_position_path_metrics(
         "thesis_status": thesis_status,
         "regime_shift": regime_shift,
         "thesis_broken_confirmations": thesis_broken_confirmations,
+        "regime_shift_confirmations": regime_shift_confirmations,
     }
     metrics = {
         "mfe": round(mfe, 6),
@@ -144,5 +155,6 @@ def update_position_path_metrics(
         "thesis_status": thesis_status,
         "regime_shift": regime_shift,
         "thesis_broken_confirmations": thesis_broken_confirmations,
+        "regime_shift_confirmations": regime_shift_confirmations,
     }
     return next_state, metrics

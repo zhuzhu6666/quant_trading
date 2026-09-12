@@ -28,7 +28,7 @@ from backend.core.db import (
     is_state_db_path,
     state_table_exists,
 )
-from backend.core.db_helpers import load_json as _loads
+from backend.core.db_helpers import load_json as _loads, pg_sql as _pg_sql
 from backend.services.learning_application_store import LearningApplicationStore
 from backend.services.factor_catalog import build_factor_catalog, persist_factor_catalog_snapshot
 from backend.services.factor_cards import build_factor_admission_evidence
@@ -359,7 +359,9 @@ def posterior_degraded_target_weight(
     return min(0.50, max(0.0, float(target_weight or 0.0)) * max(0.1, float(scale or 0.5)))
 
 
-def _p(sql: str) -> str:
+def _p(sql: str, conn: Any = None) -> str:
+    if conn is not None:
+        return _pg_sql(conn, sql)
     return sql.replace("?", "%s")
 
 
@@ -2456,7 +2458,11 @@ class FactorGovernanceOrchestrator:
         conn = get_state_pg_conn(read_only=True)
         try:
             record = conn.execute(
-                _p("SELECT evidence_json FROM policy_suggestion WHERE suggestion_id=? LIMIT 1"),
+                _p(
+                    "SELECT evidence_json FROM policy_suggestion "
+                    "WHERE suggestion_id=? LIMIT 1",
+                    conn,
+                ),
                 (suggestion_ids[0],),
             ).fetchone()
             evidence = self._loads_dict(record["evidence_json"] if record else "{}")
@@ -2474,7 +2480,8 @@ class FactorGovernanceOrchestrator:
                     """SELECT p.rollback_json AS rollback_json
                       FROM evolution_decision d
                       LEFT JOIN mutation_payload p ON p.payload_hash=d.payload_hash
-                      WHERE d.decision_id=? LIMIT 1"""
+                      WHERE d.decision_id=? LIMIT 1""",
+                    conn,
                 ),
                 (decision_id,),
             ).fetchone()
@@ -2497,11 +2504,14 @@ class FactorGovernanceOrchestrator:
         try:
             for suggestion_id in suggestion_ids:
                 conn.execute(
-                    _p("""
+                    _p(
+                        """
                     UPDATE policy_suggestion
                     SET status='rolled_back', reviewed_at=?, review_note=?
                     WHERE suggestion_id=?
-                    """),
+                    """,
+                        conn,
+                    ),
                     (now, "auto rollback by factor governance posterior effect", suggestion_id),
                 )
             conn.commit()
@@ -5287,13 +5297,16 @@ class FactorGovernanceOrchestrator:
         conn = get_state_pg_conn()
         try:
             conn.execute(
-                _p("""
+                _p(
+                    """
                 INSERT INTO policy_suggestion
                 (suggestion_id, scope_type, scope_key, action, confidence, reason,
                  evidence_json, status, reviewed_at, review_note, created_at)
                 VALUES (?, 'factor', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(suggestion_id) DO NOTHING
-                """),
+                """,
+                    conn,
+                ),
                 (
                     suggestion_id,
                     factor_id,

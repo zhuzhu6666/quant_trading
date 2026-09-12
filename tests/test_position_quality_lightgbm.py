@@ -2,6 +2,9 @@ import json
 import sqlite3
 
 from backend.services.canonical_v2 import (
+    CANONICAL_PAYLOAD_SCHEMA,
+    append_event,
+    put_payload,
     record_review,
     record_supervisor_trace_event,
 )
@@ -227,15 +230,33 @@ def test_multiple_reviews_for_one_position_fail_closed(tmp_path):
                 "evidence_state": "full",
             },
         }
-        record_review(
+        # L0-3 refuses a second record_review for the same position, so the
+        # ambiguous-history fixture is written directly at the event layer.
+        ref = put_payload(
             conn,
-            review_id="rev_0_duplicate",
-            trade_id="trade_0",
-            position_id="pos_0",
-            outcome_label="small_win",
-            failure_tags=[],
-            review=payload,
+            {
+                "review_id": "rev_0_duplicate",
+                "trade_id": "trade_0",
+                "position_id": "pos_0",
+                "outcome_label": "small_win",
+                "failure_tags": [],
+                "review": payload,
+                "created_at": 2000.0,
+            },
+            payload_kind="trade_review",
+            schema_version=CANONICAL_PAYLOAD_SCHEMA,
             created_at=2000.0,
+        )
+        append_event(
+            conn,
+            event_id="rev_0_duplicate_event",
+            event_type="trade_review",
+            entity_type="review",
+            entity_id="rev_0_duplicate",
+            payload_hash=ref.payload_hash,
+            producer="test-ambiguous-history",
+            idempotency_key="rev_0_duplicate",
+            observed_at=2000.0,
         )
         conn.commit()
     finally:

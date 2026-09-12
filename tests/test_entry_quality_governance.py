@@ -166,7 +166,9 @@ def test_demo_applies_one_entry_quality_control_as_committed_mutation(tmp_path, 
     observed = int((effect or {}).get("observed_trade_count") or 0)
     decision = dict((effect or {}).get("decision") or {})
     assert observed == 5
-    assert decision["evidence_quality"]["raw_post_count"] == 6
+    # L0-3: the duplicate write for post-pos-0 is refused at the writer, so
+    # only the five stored post reviews exist.
+    assert decision["evidence_quality"]["raw_post_count"] == 5
     assert decision["entry_quality_effect"]["post"]["distinct_positions"] == 5
     assert (
         decision["entry_quality_effect"]["post"]["below_applied_threshold_open_count"]

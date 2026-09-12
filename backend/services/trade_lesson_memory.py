@@ -19,6 +19,7 @@ from backend.services.canonical_v2_reader import canonical_ready, iter_review_ro
 from backend.services.position_supervisor_templates import (
     resolve_position_supervisor_binding_lineage,
 )
+from backend.services.review_contract import review_learning_eligible
 
 
 APPEND_SOURCE = "trade_lesson_memory.v1"
@@ -309,6 +310,14 @@ def upsert_trade_lesson_memory(
     lesson = dict(lesson or build_trade_lesson(row, conn=conn))
     if not lesson["source_id"]:
         raise ValueError("trade lesson requires review_id")
+    if lesson.get("learning_ineligible") or not review_learning_eligible(
+        _review_payload(conn, row)
+    ):
+        return {
+            "experience_id": str(lesson.get("experience_id") or ""),
+            "source_id": str(lesson.get("source_id") or ""),
+            "skipped": "learning_ineligible",
+        }
     context = _loads(lesson["decision_context_json"], {})
     if isinstance(context, dict):
         attribution = _agent_attribution_for_review(conn, row)

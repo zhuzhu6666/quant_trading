@@ -6,7 +6,9 @@ Factor Registry — 因子注册表
 """
 
 from collections.abc import Callable
+import inspect
 import logging
+import re
 
 import numpy as np
 import pandas as pd
@@ -16,15 +18,59 @@ from alpha.technical_indicators import adx_wilder, atr_wilder, rsi_wilder
 logger = logging.getLogger(__name__)
 
 
+_PERIOD_TOKEN_RE = re.compile(r"\d+")
+
+
+def _assert_name_period_consistent(
+    name: str, func: Callable, period_mismatch_reason: str
+) -> None:
+    """Fail fast when a factor name and its ``period`` default disagree.
+
+    A mismatch is only tolerated when the registration site explicitly
+    acknowledges it via ``period_mismatch_reason``.  Names carry first-hand
+    semantics for humans and tooling; a silent mismatch makes every later
+    reading of the name wrong.
+    """
+    if period_mismatch_reason:
+        return
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return
+    period = signature.parameters.get("period")
+    if period is None or period.default is inspect.Parameter.empty:
+        return
+    name_tokens = _PERIOD_TOKEN_RE.findall(str(name))
+    if not name_tokens:
+        return
+    try:
+        default_token = str(int(period.default))
+    except (TypeError, ValueError):
+        return
+    if default_token not in name_tokens:
+        raise ValueError(
+            f"factor {name!r} declares period default {default_token} which does "
+            f"not match its name; rename the factor or pass an explicit "
+            f"period_mismatch_reason"
+        )
+
+
 class FactorRegistry:
     """因子注册表"""
 
     def __init__(self):
         self._factors: dict[str, Callable] = {}
 
-    def register(self, name: str, description: str = ""):
+    def register(
+        self,
+        name: str,
+        description: str = "",
+        *,
+        period_mismatch_reason: str = "",
+    ):
         """装饰器：注册因子函数"""
         def decorator(func):
+            _assert_name_period_consistent(name, func, period_mismatch_reason)
             self._factors[name] = func
             func._factor_name = name
             func._factor_desc = description
@@ -474,7 +520,14 @@ def factor_htf_trend_alignment(df):
     return _higher_timeframe_alignment(df)
 
 
-@factor_registry.register("donchian_breakout_20", "Donchian(20) 突破压力 (-1 ~ +1)")
+@factor_registry.register(
+    "donchian_breakout_20",
+    "Donchian(50) 突破压力 (-1 ~ +1)",
+    period_mismatch_reason=(
+        "period 20 -> 50 in 6b282a07 to cut false breakouts; the registered "
+        "name is kept for config/weight/sample compatibility"
+    ),
+)
 def factor_donchian_breakout_20(df, period: int = 50):
     """Directional breakout pressure, excluding the current bar's range."""
     high = np.asarray(df["high"], dtype=float)

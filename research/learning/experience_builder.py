@@ -26,6 +26,7 @@ from backend.services.position_supervisor_templates import (
 from backend.services.review_contract import (
     NON_FACTOR_RESPONSIBILITIES,
     review_consumer_eligibility,
+    review_learning_eligible,
 )
 
 
@@ -82,6 +83,24 @@ class ExperienceBuilder:
 
     def build_from_review(self, review: dict, *, conn: Any | None = None) -> dict:
         review_json = review.get("review_json", {}) or {}
+        if not review_learning_eligible(review_json):
+            # L0-0R/X1: broken or contaminated chains never become experience.
+            return {
+                "learning_ineligible": True,
+                "source_id": str(
+                    review.get("review_id")
+                    or review_json.get("review_id")
+                    or review.get("trade_id")
+                    or ""
+                ),
+                "close_reason": str(review_json.get("close_reason") or ""),
+                "attribution_integrity": str(
+                    review_json.get("attribution_integrity") or ""
+                ),
+                "context_integrity": str(
+                    review_json.get("context_integrity") or ""
+                ),
+            }
         binding_lineage = resolve_position_supervisor_binding_lineage(
             review,
             review_json,

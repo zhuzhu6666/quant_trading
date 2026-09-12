@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from backend.core.contracts import assert_exploration_min_preserved
+
 
 def ceil_api_volume_to_step(volume: float, bridge_meta: dict[str, Any] | None) -> float:
     meta = bridge_meta or {}
@@ -345,6 +347,25 @@ def apply_entry_event_sizing(
         blocked_reason = upstream_blocked_reason or "non_positive_base_volume"
     elif multiplier < 1.0:
         final_volume = floor_api_volume_to_step(raw_after_event, bridge_meta)
+        if (
+            final_volume <= 0
+            and base >= min_vol
+            and (
+                trace.get("demo_exploration")
+                or trace.get("demo_nursery_exploration")
+            )
+        ):
+            # L1-1 / docs:219: soft event sizing may not zero the demo
+            # exploration minimum lot; keep the lot and let upstream hard
+            # gates decide.
+            final_volume = base
+            trace["event_sizing_demo_min_preserved"] = True
+        assert_exploration_min_preserved(
+            base,
+            final_volume,
+            trace,
+            min_lot=min_vol,
+        )
         blocked_reason = upstream_blocked_reason
         if final_volume <= 0:
             blocked_reason = (

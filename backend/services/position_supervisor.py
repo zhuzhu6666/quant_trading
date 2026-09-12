@@ -4,6 +4,9 @@ from typing import Any
 
 from backend.services.position_supervisor_templates import (
     DEFAULT_TEMPLATE_ID,
+    MIN_THESIS_BREAK_SECONDS_FALLBACK,
+    REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK,
+    REGIME_EVIDENCE_MIN_OBSERVATIONS_FALLBACK,
     normalize_position_supervisor_template,
     position_supervisor_template_hash,
 )
@@ -15,7 +18,9 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value or 0.0)
+        if value is None or value == "":
+            return float(default)
+        return float(value)
     except Exception:
         return float(default)
 
@@ -183,6 +188,7 @@ def resolve_supervisor_posture(
     thesis_break_ready: bool,
     thesis_break_confirmed: bool,
     closed_bar_window_ready: bool,
+    regime_min_confidence: float = REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK,
 ) -> dict[str, Any]:
     """Resolve one explainable management posture from existing market facts.
 
@@ -208,6 +214,7 @@ def resolve_supervisor_posture(
         trend_state in _KNOWN_MARKET_STATES
         and volatility_state in _KNOWN_MARKET_STATES
         and not regime_source.endswith("session_fallback")
+        and regime_confidence >= max(0.0, float(regime_min_confidence or 0.0))
     )
     hard_exit = bool(
         hard_risk_active
@@ -386,7 +393,22 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     action = "hold"
     summary_reason = "position_healthy"
     severity = "info"
-    min_thesis_break_seconds = _safe_float(thresholds.get("min_thesis_break_seconds"))
+    min_thesis_break_seconds = _safe_float(
+        thresholds.get("min_thesis_break_seconds"),
+        MIN_THESIS_BREAK_SECONDS_FALLBACK,
+    )
+    learning_bounds = template.get("learning_bounds") or {}
+    regime_evidence_min_confidence = _safe_float(
+        learning_bounds.get("regime_evidence_min_confidence"),
+        REGIME_EVIDENCE_MIN_CONFIDENCE_FALLBACK,
+    )
+    regime_evidence_min_observations = max(
+        1,
+        _safe_int(
+            learning_bounds.get("regime_evidence_min_observations"),
+            REGIME_EVIDENCE_MIN_OBSERVATIONS_FALLBACK,
+        ),
+    )
     min_closed_bars_fast = max(1, _safe_int(thresholds.get("min_closed_bars_high_vol_or_weak_trend"), 1))
     min_closed_bars_default = max(min_closed_bars_fast, _safe_int(thresholds.get("min_closed_bars_default"), 2))
     hard_risk_bypass = bool(thresholds.get("hard_risk_bypass", True))
@@ -514,6 +536,20 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
     profit_protection_window_ready = bool(
         management_evidence_ready and mfe >= capture_mfe_floor
     )
+    regime_confidence = _safe_float(market.get("regime_confidence"), 0.0)
+    regime_confirmations = max(
+        0,
+        _safe_int(
+            risk.get("regime_shift_confirmations")
+            or risk.get("consecutive_regime_shift_count")
+            or 0,
+            0,
+        ),
+    )
+    regime_evidence_ready = bool(
+        regime_confidence >= regime_evidence_min_confidence
+        and regime_confirmations >= regime_evidence_min_observations
+    )
     thesis_break_evidence_families: list[str] = []
     if signal_reversal:
         thesis_break_evidence_families.append("signal_reversal")
@@ -547,9 +583,14 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         and path_metrics_known
         and holding_efficiency <= broken_holding_efficiency_threshold
     )
+    independent_evidence_families = [
+        family
+        for family in thesis_break_evidence_families
+        if family != "regime_shift" or regime_evidence_ready
+    ]
     thesis_break_confirmed = (
         (hard_risk_bypass and hard_risk_active)
-        or len(thesis_break_evidence_families) >= min_independent_evidence
+        or len(independent_evidence_families) >= min_independent_evidence
     )
 
     posture_info = resolve_supervisor_posture(
@@ -562,6 +603,7 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         thesis_break_ready=thesis_break_ready,
         thesis_break_confirmed=thesis_break_confirmed,
         closed_bar_window_ready=closed_bar_window_ready,
+        regime_min_confidence=regime_evidence_min_confidence,
     )
     supervisor_posture = str(posture_info.get("posture") or "unknown_observe")
     if supervisor_posture != "range_capture":
@@ -882,6 +924,9 @@ def evaluate_position_supervisor(position_context: dict[str, Any]) -> dict[str, 
         "market_context_state": str(market.get("market_context_state") or "unknown"),
         "market_regime_id": str(market.get("regime_id") or ""),
         "market_regime_confidence": round(_safe_float(market.get("regime_confidence")), 6),
+        "regime_evidence_ready": bool(regime_evidence_ready),
+        "regime_shift_confirmations": int(regime_confirmations),
+        "independent_evidence_count": int(len(independent_evidence_families)),
         "market_regime_source": str(market.get("regime_source") or "unavailable"),
         "market_regime_dimensions": dict(market.get("regime_dimensions") or {}),
         "trend_strength_state": str(market.get("trend_strength_state") or "unknown"),

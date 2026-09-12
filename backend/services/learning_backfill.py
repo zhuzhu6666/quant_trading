@@ -10,6 +10,7 @@ import uuid
 from typing import Any
 
 from backend.core.db import get_state_pg_conn, state_table_columns
+from backend.core.pnl import net_pnl_sql
 from backend.core.state_store import (
     RuntimeStateSchemaMissingError,
     validate_runtime_state_schema,
@@ -365,11 +366,11 @@ def fetch_missing_positions(
     """
     if not canonical_ready(conn):
         return []
-    sql = """
+    sql = f"""
         SELECT
             position_id,
             MAX(exec_timestamp) AS close_ts,
-            SUM(COALESCE(gross_profit, 0) + COALESCE(swap, 0) + COALESCE(close_commission, 0)) AS net_pnl,
+            SUM({net_pnl_sql()}) AS net_pnl,
             MAX(entry_price) AS entry_price,
             MAX(exec_price) AS exec_price,
             MAX(balance) AS balance,

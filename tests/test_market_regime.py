@@ -27,11 +27,51 @@ def _composite(**overrides):
         "context_state": {
             "trend_strength_state": "strong",
             "volatility_state": "high",
+            "trend_strength_score": 0.8,
+            "volatility_score": 0.8,
             "session_state": "us",
         },
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_resolve_market_regime_confidence_tracks_measured_scores():
+    """L1-7: confidence is measured from dimension scores, not a constant."""
+
+    weak = resolve_market_regime(
+        _composite(
+            context_state={
+                "trend_strength_state": "strong",
+                "volatility_state": "high",
+                "trend_strength_score": 0.2,
+                "volatility_score": 0.3,
+            }
+        )
+    )
+    strong = resolve_market_regime(
+        _composite(
+            context_state={
+                "trend_strength_state": "strong",
+                "volatility_state": "high",
+                "trend_strength_score": 0.9,
+                "volatility_score": 0.9,
+            }
+        )
+    )
+    missing = resolve_market_regime(
+        _composite(
+            context_state={
+                "trend_strength_state": "strong",
+                "volatility_state": "high",
+            }
+        )
+    )
+
+    assert weak["confidence"] == 0.25
+    assert strong["confidence"] == 0.9
+    assert missing["confidence"] == 0.5
+    assert weak["confidence"] < strong["confidence"]
 
 
 def test_resolve_market_regime_prefers_explicit_fact():

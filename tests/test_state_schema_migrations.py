@@ -779,3 +779,15 @@ def test_v35_migration_retires_only_the_v16_cognition_ledgers() -> None:
         "v16_brain_command",
     ):
         assert f"runtime.{kept};" not in sql
+
+
+def test_execution_provenance_migration_is_additive_and_backfills() -> None:
+    migration = next(item for item in STATE_SCHEMA_MIGRATIONS if item.version == 36)
+
+    sql = migration.sql()
+
+    assert "ADD COLUMN IF NOT EXISTS origin" in sql
+    assert "ADD COLUMN IF NOT EXISTS provenance" in sql
+    assert "legacy_pre_convergence" in sql
+    assert "autonomous" in sql
+    assert "1787241600" in sql

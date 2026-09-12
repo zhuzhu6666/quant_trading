@@ -993,6 +993,86 @@ def test_record_review_mirrors_live_review_idempotently_and_readable() -> None:
         conn.close()
 
 
+def test_record_review_refuses_second_review_for_same_position() -> None:
+    """L0-3: one canonical review per broker position.
+
+    A retry that carries a fresh review_id must return the first event
+    instead of appending a duplicate.
+    """
+
+    conn = _canonical_sqlite()
+    try:
+        first = record_review(
+            conn,
+            review_id="rv_pos_1",
+            trade_id="trade_p1",
+            position_id="pos_p1",
+            pnl=1.0,
+            outcome_label="good_win",
+            summary_text="first",
+            created_at=1_728_500_100.0,
+        )
+        duplicate = record_review(
+            conn,
+            review_id="rv_pos_1_retry",
+            trade_id="trade_p1",
+            position_id="pos_p1",
+            pnl=1.0,
+            outcome_label="good_win",
+            summary_text="retry",
+            created_at=1_728_500_200.0,
+        )
+        assert first["created"] is True
+        assert duplicate["created"] is False
+        assert duplicate["event_id"] == first["event_id"]
+        assert duplicate["entity_id"] == "rv_pos_1"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM event WHERE event_type='trade_review'"
+        ).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM payload_blob").fetchone()[0] == 1
+
+        other = record_review(
+            conn,
+            review_id="rv_pos_2",
+            trade_id="trade_p2",
+            position_id="pos_p2",
+            pnl=-1.0,
+            outcome_label="bad_loss",
+            summary_text="other position",
+            created_at=1_728_500_300.0,
+        )
+        assert other["created"] is True
+        assert conn.execute(
+            "SELECT COUNT(*) FROM event WHERE event_type='trade_review'"
+        ).fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_event_provenance_marks_suite_writers() -> None:
+    """L3-5: suite writes are distinguishable from production writes."""
+
+    conn = _canonical_sqlite()
+    try:
+        evt = record_review(
+            conn,
+            review_id="rv_prov",
+            trade_id="t_prov",
+            position_id="p_prov",
+            pnl=0.5,
+            outcome_label="good_win",
+            summary_text="provenance",
+            created_at=1_728_510_000.0,
+        )
+        assert evt["provenance"] == "test"
+        row = conn.execute(
+            "SELECT provenance FROM event WHERE event_id=?", (evt["event_id"],)
+        ).fetchone()
+        assert row["provenance"] == "test"
+    finally:
+        conn.close()
+
+
 def _append_review_revision_for_reader_test(
     conn: sqlite3.Connection,
     *,

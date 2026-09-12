@@ -1064,7 +1064,8 @@ CREATE TABLE IF NOT EXISTS ctrader_deals (
     raw_execution_price REAL DEFAULT 0.0,
     price_contract TEXT NOT NULL DEFAULT 'unknown',
     price_quality TEXT NOT NULL DEFAULT 'unknown',
-    repair_run_id TEXT NOT NULL DEFAULT ''
+    repair_run_id TEXT NOT NULL DEFAULT '',
+    origin TEXT NOT NULL DEFAULT 'unknown'
 );
 CREATE INDEX IF NOT EXISTS idx_ctrader_deals_pos ON ctrader_deals(position_id);
 CREATE INDEX IF NOT EXISTS idx_ctrader_deals_ts  ON ctrader_deals(exec_timestamp);

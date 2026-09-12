@@ -430,7 +430,32 @@ def ensure_autonomous_learning_tables(db_path: str | Path = STATE_DB) -> None:
         conn.close()
 
 
-def _sample_is_system_contaminated(item: dict[str, Any]) -> bool:
+def _has_explicit_contamination_declaration(
+    item: dict[str, Any],
+    label: dict[str, Any],
+    verdict: dict[str, Any],
+    features: dict[str, Any],
+) -> bool:
+    """X1: a sample must declare its contamination state explicitly.
+
+    Missing declaration means unknown, and unknown must not be treated as
+    clean.  The declaration locations mirror the reader below.
+    """
+
+    for container in (item, label, verdict, features):
+        if "system_contaminated" in container or "system_contamination" in container:
+            return True
+    if "system_issue_context" in features:
+        return True
+    open_target = label.get("open_target_v2")
+    return isinstance(open_target, dict) and "contaminated" in open_target
+
+
+def _sample_is_system_contaminated(
+    item: dict[str, Any],
+    *,
+    stored_declaration: Any = None,
+) -> bool:
     def _contaminated(value: Any) -> bool:
         if isinstance(value, dict):
             return bool(value.get("contaminated") or value.get("contaminates_learning"))
@@ -439,6 +464,10 @@ def _sample_is_system_contaminated(item: dict[str, Any]) -> bool:
     label = item.get("label") if isinstance(item.get("label"), dict) else {}
     verdict = item.get("verdict") if isinstance(item.get("verdict"), dict) else {}
     features = item.get("features") if isinstance(item.get("features"), dict) else {}
+    if stored_declaration is None and not _has_explicit_contamination_declaration(
+        item, label, verdict, features
+    ):
+        return True
     return any(
         _contaminated(value)
         for value in (
@@ -700,7 +729,10 @@ def _canonical_sample_evidence_inputs(
         }
     )
 
-    contaminated = _sample_is_system_contaminated(normalized)
+    contaminated = _sample_is_system_contaminated(
+        normalized,
+        stored_declaration=stored_system_contaminated,
+    )
     if not contaminated and stored_system_contaminated is not None:
         # A legacy row can have lost its nested contamination marker.  Never
         # turn an already-blocked stored row into an executable sample during

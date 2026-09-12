@@ -9,6 +9,61 @@ from backend.services.position_supervisor_templates import CONSERVATIVE_TEMPLATE
 from tests.canonical_fixture import make_canonical_sqlite
 
 
+def test_regime_evidence_gate_needs_confidence_and_persistence():
+    """L1-6: regime_shift counts as independent evidence only when the
+    measured confidence and the consecutive-observation gates are met."""
+
+    def _context(*, regime_confidence, regime_confirmations):
+        return {
+            "position": {
+                "position_id": "regime-gate",
+                "direction": 1,
+                "entry_price": 3000.0,
+                "current_price": 2992.0,
+                "volume": 100.0,
+                "unrealized_pnl": -8.0,
+                "current_price_state": "known",
+                "pnl_state": "known",
+                "sl": 2985.0,
+                "tp": 3040.0,
+            },
+            "risk": {
+                "thesis_status": "broken",
+                "regime_shift": "confirmed",
+                "thesis_broken_confirmations": 3,
+                "regime_shift_confirmations": regime_confirmations,
+                "holding_efficiency": 0.10,
+                "giveback_ratio": 0.5,
+                "profit_capture_ratio": 0.1,
+                "time_decay_score": 0.9,
+            },
+            "market": {
+                "trend_strength_state": "strong",
+                "volatility_state": "high",
+                "regime_source": "context_state.market_dimensions",
+                "regime_id": "trend=strong|volatility=high",
+                "regime_dimensions": {"trend": "strong", "volatility": "high"},
+                "regime_confidence": regime_confidence,
+            },
+            "temporal_context": {"holding_seconds": 1200.0},
+        }
+
+    weak = evaluate_position_supervisor(
+        _context(regime_confidence=0.4, regime_confirmations=5)
+    )
+    assert weak["evidence"]["regime_evidence_ready"] is False
+    assert weak["evidence"]["thesis_break_confirmed"] is False
+    assert weak["evidence"]["supervisor_posture"] != "exit_commit"
+    assert weak["evidence"]["independent_evidence_count"] == 1
+
+    strong = evaluate_position_supervisor(
+        _context(regime_confidence=0.8, regime_confirmations=2)
+    )
+    assert strong["evidence"]["regime_evidence_ready"] is True
+    assert strong["evidence"]["independent_evidence_count"] == 2
+    assert strong["evidence"]["thesis_break_confirmed"] is True
+
+
 def test_position_supervisor_derives_completed_bars_when_temporal_value_is_missing():
     verdict = evaluate_position_supervisor({
         "position": {
@@ -52,6 +107,7 @@ def test_position_supervisor_strong_trend_captures_near_take_profit():
                 "trend_strength_state": "strong",
                 "volatility_state": "high",
                 "regime_source": "context_state.market_dimensions",
+                "regime_confidence": 0.8,
                 "regime_id": "trend=strong|volatility=high",
                 "regime_dimensions": {"trend": "strong", "volatility": "high"},
             },
@@ -100,6 +156,7 @@ def test_position_supervisor_strong_trend_profit_protection_tightens_near_take_p
                 "trend_strength_state": "strong",
                 "volatility_state": "high",
                 "regime_source": "context_state.market_dimensions",
+                "regime_confidence": 0.8,
                 "regime_id": "trend=strong|volatility=high",
                 "regime_dimensions": {"trend": "strong", "volatility": "high"},
             },
@@ -146,6 +203,7 @@ def test_position_supervisor_range_capture_allows_mature_giveback_recommendation
                 "trend_strength_state": "normal",
                 "volatility_state": "normal",
                 "regime_source": "context_state.market_dimensions",
+                "regime_confidence": 0.8,
                 "regime_id": "trend=normal|volatility=normal",
                 "regime_dimensions": {"trend": "normal", "volatility": "normal"},
             },
@@ -216,6 +274,7 @@ def test_position_supervisor_hard_risk_overrides_trend_hold():
                 "trend_strength_state": "strong",
                 "volatility_state": "normal",
                 "regime_source": "context_state.market_dimensions",
+                "regime_confidence": 0.8,
             },
             "temporal_context": {"holding_seconds": 600.0},
         }
@@ -260,6 +319,7 @@ def test_position_supervisor_holds_while_transition_confirming_despite_giveback(
                 "trend_strength_state": "normal",
                 "volatility_state": "normal",
                 "regime_source": "context_state.market_dimensions",
+                "regime_confidence": 0.8,
             },
             "entry_context": {},
             "runtime": {},
@@ -563,6 +623,7 @@ def test_position_supervisor_captures_when_near_take_profit():
                 "trend_strength_state": "normal",
                 "volatility_state": "normal",
                 "regime_source": "context_state.market_dimensions",
+                "regime_confidence": 0.8,
             },
             "temporal_context": {"decision_ts": time.time(), "holding_seconds": 180.0},
         }
@@ -603,6 +664,7 @@ def test_profit_protection_template_outputs_dynamic_tpsl_candidate_near_take_pro
                 "trend_strength_state": "normal",
                 "volatility_state": "normal",
                 "regime_source": "context_state.market_dimensions",
+                "regime_confidence": 0.8,
             },
             "temporal_context": {"decision_ts": time.time(), "holding_seconds": 240.0},
             "position_supervisor_template": PROFIT_PROTECTION_TEMPLATE_ID,

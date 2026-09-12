@@ -500,3 +500,33 @@ def test_close_deal_already_in_store_resolves_with_empty_baseline(tmp_path):
     assert 7501 in resolved
     assert resolved[7501]["net"] == pytest.approx(8.21)
     assert resolved[7501]["deal_ids"] == [9502]
+
+
+def test_store_deals_marks_origin_from_execution_intent(tmp_path):
+    conn = _conn(tmp_path / "state.db")
+    try:
+        conn.executescript(STATE_DB_DDL)
+        conn.execute(
+            "CREATE TABLE broker_execution_intent ("
+            "intent_id TEXT PRIMARY KEY, position_id TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute(
+            "INSERT INTO broker_execution_intent (intent_id, position_id) "
+            "VALUES ('intent-1', '8001')"
+        )
+        store_deals(
+            conn,
+            [
+                {"deal_id": 11, "position_id": 8001, "volume": 100},
+                {"deal_id": 12, "position_id": 9002, "volume": 100},
+            ],
+        )
+        rows = {
+            row["deal_id"]: row["origin"]
+            for row in conn.execute(
+                "SELECT deal_id, origin FROM ctrader_deals ORDER BY deal_id"
+            ).fetchall()
+        }
+        assert rows == {11: "autonomous", 12: "unknown"}
+    finally:
+        conn.close()

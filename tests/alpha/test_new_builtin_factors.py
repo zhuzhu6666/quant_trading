@@ -5,7 +5,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from alpha.registry import factor_registry
+from alpha.registry import FactorRegistry, factor_registry
 from alpha.streaming_factor_engine import StreamingFactorEngine
 
 
@@ -145,3 +145,26 @@ def test_streaming_integer_volume_does_not_break_existing_volume_factor():
     for row in frame.to_dict("records"):
         result = engine.append_bar(row)
     assert result["vol_ma_ratio"] is not None
+
+
+def test_factor_registry_rejects_name_period_mismatch() -> None:
+    registry = FactorRegistry()
+
+    @registry.register("sample_factor_20", "consistent")
+    def _consistent(df, period: int = 20):
+        return None
+
+    try:
+        @registry.register("sample_factor_20", "mismatched")
+        def _mismatched(df, period: int = 50):
+            return None
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("name/period mismatch must fail registration")
+
+    @registry.register("sample_factor_20", "acknowledged", period_mismatch_reason="test")
+    def _acknowledged(df, period: int = 50):
+        return None
+
+    assert "sample_factor_20" in registry

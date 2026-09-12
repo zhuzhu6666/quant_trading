@@ -1469,6 +1469,17 @@ class BackendReadinessService:
                     directional_portfolio_guard=directional_guard,
                 )
             )
+        degraded_voters = list(
+            factor_blend_health.get("voting_factors_degraded") or []
+        )
+        if degraded_voters:
+            live_alpha_blockers.append(
+                blocker(
+                    "voting_factor_health",
+                    "voting_factors_degraded",
+                    factors=degraded_voters,
+                )
+            )
 
         mutation_blockers: list[dict[str, Any]] = []
         from config.runtime_config import governance_expansion_is_paused
@@ -1776,6 +1787,48 @@ class BackendReadinessService:
                 directional_guard.get("status") or "unavailable"
             ).lower()
             healthy = bool(projection.get("ok")) and guard_status == "healthy"
+            voting_factors_degraded: list[dict[str, Any]] = []
+            voter_ids = [
+                str(item)
+                for item in (directional_guard.get("voter_ids") or [])
+                if str(item or "").strip()
+            ]
+            if not voter_ids:
+                voter_ids = [
+                    str(item)
+                    for item in (
+                        projection.get("configured_directional_factor_ids") or []
+                    )
+                    if str(item or "").strip()
+                ]
+            if voter_ids:
+                voter_set = set(voter_ids)
+                try:
+                    conn = _connect_state(self.db_path)
+                    try:
+                        if _table_exists(conn, "factor_health"):
+                            rows = _execute(
+                                conn,
+                                "SELECT factor, status, score FROM factor_health",
+                            ).fetchall()
+                            for row in rows:
+                                factor_name = str(row["factor"] or "")
+                                if factor_name not in voter_set:
+                                    continue
+                                status_text = str(row["status"] or "").upper()
+                                score = _safe_float(row["score"], 0.0)
+                                if status_text == "DECAYING" or score < 40.0:
+                                    voting_factors_degraded.append(
+                                        {
+                                            "factor": factor_name,
+                                            "status": status_text or "UNKNOWN",
+                                            "score": round(score, 2),
+                                        }
+                                    )
+                    finally:
+                        conn.close()
+                except Exception:
+                    voting_factors_degraded = []
             return {
                 "ok": healthy,
                 "schema_version": "factor_blend_health.v1",
@@ -1803,6 +1856,7 @@ class BackendReadinessService:
                     projection.get("alpha_voter_count") or 0
                 ),
                 "directional_portfolio_guard": directional_guard,
+                "voting_factors_degraded": voting_factors_degraded,
             }
         except Exception as exc:
             return {

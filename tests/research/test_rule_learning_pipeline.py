@@ -1413,7 +1413,7 @@ def test_policy_suggester_skips_watch_and_promotes_fast_positive_factor(tmp_path
     assert rows[0]["governance_eligibility_version"] == "governance_eligibility.v1"
 
 
-def test_rule_learning_pipeline_deweights_recovery_replay_samples(tmp_path):
+def test_experience_builder_refuses_recovery_replay_samples(tmp_path):
     db_path = str(tmp_path / "state.db")
     ledger = DecisionLedger(db_path)
     reviewer = TradeReviewer(db_path)
@@ -1459,11 +1459,12 @@ def test_rule_learning_pipeline_deweights_recovery_replay_samples(tmp_path):
     )
     experience = builder.build_from_review(review)
 
-    assert "partial_context" in experience["failure_tags"]
-    assert "restart_replay" in experience["failure_tags"]
-    assert experience["recommended_action"] == "watch"
-    assert float(experience["reward_score"]) < 0.3
-    assert float(experience["evidence_strength"]) < 0.2
+    # L0-0R/X1: recovery-replay samples are refused, not downweighted.
+    assert experience.get("learning_ineligible") is True
+    assert experience["close_reason"] == "restart_replay"
+    assert experience["context_integrity"] == "partial"
+    assert experience["attribution_integrity"] == "full"
+
 
 
 def test_experience_builder_does_not_downweight_alpha_for_exit_failure(tmp_path):
@@ -1508,6 +1509,8 @@ def test_experience_builder_drops_recursive_review_payload(tmp_path):
             "summary_text": "recursive supervisor payload",
             "review_json": {
                 "close_ts": 200.0,
+                "attribution_integrity": "full",
+                "context_integrity": "full",
                 "inferred_close_supervisor": {
                     "event_type": "supervisor_tighten",
                     "evidence": {

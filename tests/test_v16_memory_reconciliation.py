@@ -26,7 +26,11 @@ def _seed_review_and_counterfactual(db_path):
         outcome_label="good_loss",
         failure_tags=["good_loss", "thesis_broken"],
         summary_text="current trade",
-        review={"primary_responsibility": "thesis"},
+        review={
+            "primary_responsibility": "thesis",
+            "attribution_integrity": "full",
+            "context_integrity": "full",
+        },
         created_at=2000.0,
     )
     row = next(
