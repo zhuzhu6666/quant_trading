@@ -3012,44 +3012,6 @@ def _run_position_supervision(
 
 
 
-def _run_position_protection_cycle(
-    bridge,
-    pos: list,
-    *,
-    cfg,
-    acct: dict,
-    pipeline: dict,
-    current_price: float,
-    atr_price: float,
-    tick: int,
-    log,
-    decision_ts: float | None = None,
-) -> dict[str, Any]:
-    runtime = PositionProtectionCycleRuntime(
-        enforce_holding_timeout=live_position_protection_cycle.enforce_holding_timeout,
-        entry_protection_repair_candidates=live_position_protection_cycle.entry_protection_repair_candidates,
-        log_candidate_superseded=_live_service()._log_protection_candidate_superseded,
-        execute_candidate=live_position_protection_cycle.execute_protection_candidate,
-        run_position_supervision=_live_service()._run_position_supervision,
-        protection_candidate_to_safety=protection_candidate_to_safety,
-        build_cycle_result=_lifecycle_build_position_protection_cycle_result,
-        record_aux_failure=live_close_settlement.record_risk_reduction_aux_failure,
-        warning=logger.warning,
-        now=time.time,
-    )
-    return _runtime_run_position_protection_cycle(
-        bridge,
-        pos,
-        cfg=cfg,
-        account=acct,
-        pipeline=pipeline,
-        current_price=current_price,
-        atr_price=atr_price,
-        tick=tick,
-        log=log,
-        runtime=runtime,
-        decision_ts=decision_ts,
-    )
 
 def _resolve_position_api_volume(
     position_id: int,
