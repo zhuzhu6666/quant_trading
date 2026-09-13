@@ -234,4 +234,11 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 
 运行态验收（2026-09-13 17:37 受控重启，用户授权）：只读预检 schema `current 37 / minimum 37 / ok`、`live.loop.desired_state enabled=true`、`last_shutdown` graceful/ownership_released/recovery_required=false、无未平仓。重启 backend 17:37:41 → workers 17:39:11/17:39:19，三服务 active；release_identity `head=0d77157d`、`clean=true`；overlay restored `hash=57ad9b8c`、无 `governance_authority` 闩；loop 自持久化状态自动恢复（generation `fe0fb383`）；`backend_readiness_snapshot.v1` `blockers=[]`；`runtime_health_projection.v1` live_loop running / ctrader connected；`/api/health` ok、公网 200；三服务 journal `ERROR|Traceback` 计数均为 0；`system_health` degraded score=0.90 errors=1 为闭市 tick 探针姿态（与重启前同值同 detail）。
 
-仍未完成运行证据：首个 `advisory → candidate → command → bridge suggestion → application` 链未观测到——闭市周期在 watermark 当前时直接跳过（17:42 `autonomous_learning` 0.2s skip）；最近带证据的回放日是 2026-09-10（1 条 eligible counterfactual / 1 capture failure），在闭市日人工回放历史日会真实触发模板切换，故不做；等待下一个带新事实的周期（开盘后）验收。
+人工回放验证（2026-09-13，用户授权，`day=2026-09-10`）：
+
+- ✅ 首跳：advisory → candidate `brain_candidate_psv_28f1c69b85d44d32`（`v16_brain`/`governance_ready`/risk `allowed`）+ command `v16cmd_a0cc2028721b4c62c038`（`delegate`/`available`）；enrollment committed。
+- ❌→✅ 复审：首次 review 返回 `needs_evidence:agent_reliability_low_requires_extra_evidence`（v16_brain `quality_score 0.488596`，源于已退役产线 62 条 `superseded_by_newer_candidate` 轮换被当失败）；`6ed0d878` 把轮换豁免扩展到两阶段后，复审 `bridge_ready=true`、score `0.542982`。
+- ❌→✅ bridge 证据：首个 bridge 建议被 apply 侧以 "missing single-control generation contract" superseded（bridge evidence 只有 `candidate_template_ref`）；`6ed0d878` 补齐 `candidate_template` + `generation_context` 后由单元测试钉住证据形状。
+- ⏳ 最后一跳 application 未在本日完成：09-10 回放身份已被前一次 supersede 消耗（advisory 建议 deterministic id 已终态，`ON CONFLICT` 不复活），复审后 `target_template_not_registered`；等待下一个带新事实的周期（开盘后）用新证据完成 `bridge → approved → RiskPolicy → V16 claim → Coordinator → application`。
+
+回放写入均为惰性治理事实（candidate/command/review/suggestion，无 application；候选 24h 过期），不影响交易链。

@@ -103,8 +103,7 @@ R2 的反事实证据由未来价格路径直接分类（`supervisor_counterfact
   当前断在首跳：32 条治理合格 advisory 建议全部 `superseded`（`autonomous_learning.py:5079` 要求 V16 bridge 证据），
   `position_supervisor_template` 的 application/effect=0，`f16024bb`（09-11）删除 medium-impact 产线后该 scope
   无 `brain_governance_candidate` 生产者。修链属生产修复项，研究批只交付证据与评估，不闭环进 Demo。
-  2026-09-13 该产线已按选项① 补入（`0d77157d`：专员 `delegate_supervisor_template_switch` 产出 candidate+command），
-  首条 application 待下一个带新事实的周期做运行态验收。
+  2026-09-13 该产线已按选项① 补入（`0d77157d`：专员 `delegate_supervisor_template_switch` 产出 candidate+command）；同日人工回放 09-10 又发现两个门定义缺陷并修复（`6ed0d878`：轮换记分豁免、bridge 补齐 `candidate_template`+`generation_context`）；首条 application 待开盘新证据验收。
 - 门槛：每候选单 regime stratum、完整成熟反事实、无污染（position-supervisor-contract §8，成熟化口径 §7.4）；
   分层前先声明各 stratum 可用样本，样本不足的 stratum 只报观察不产候选（binding invalid 25.3% 先排除或标注）。
 
