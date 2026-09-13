@@ -330,3 +330,94 @@ def test_factor_catalog_never_marks_prepared_builtin_live_eligible(tmp_path):
     assert catalog["rsi_14"]["lifecycle_status"] == "PROMOTION_PREPARED"
     assert catalog["rsi_14"]["eligible_for_live"] is False
     assert catalog["rsi_14"]["used_in_score"] is False
+
+
+def test_catalog_projects_candidate_direction_from_lifecycle_evidence(tmp_path):
+    """A discovered candidate declares its direction at registration (signed-IC
+    validation), while runtime config only carries direction for configured
+    factors.  The catalog must project the registration fact: reading config
+    alone marked 1,239/1,239 candidates `direction_contract_invalid` and no
+    discovered factor ever reached ACTIVE."""
+    import json
+
+    from backend.services.factor_cards import build_factor_admission_evidence
+
+    runtime_config.reset_for_tests()
+    runtime_config.replace(RuntimeConfig(factor_signal_config={}, factor_portfolio_weights={}))
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE factor_lifecycle_state (
+                factor_id TEXT PRIMARY KEY,
+                factor_name TEXT,
+                origin TEXT,
+                lifecycle_stage TEXT,
+                runtime_admission TEXT,
+                mutation_id TEXT,
+                generation INTEGER,
+                definition_fingerprint TEXT,
+                artifact_hash TEXT,
+                config_version INTEGER,
+                config_hash TEXT,
+                evidence_json TEXT,
+                metadata_json TEXT,
+                activated_at REAL,
+                retired_at REAL,
+                updated_at REAL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO factor_lifecycle_state VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "dsl:abc",
+                "dsl_auto_abc",
+                "dsl",
+                "SHADOW",
+                "blocked",
+                "m1",
+                1,
+                "abc",
+                "abc",
+                0,
+                "",
+                json.dumps(
+                    {
+                        "direction": -1,
+                        "polarity": "negative",
+                        "candidate_validation": {
+                            "direction": -1,
+                            "signed_ic_mean": -0.03,
+                            "polarity": "negative",
+                        },
+                    }
+                ),
+                json.dumps({"expression": "rank(close)"}),
+                0.0,
+                0.0,
+                1.0,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    try:
+        catalog = {row["factor_id"]: row for row in build_factor_catalog(db_path)}
+    finally:
+        runtime_config.reset_for_tests()
+
+    item = catalog["dsl_auto_abc"]
+    assert item["role"] == "alpha"
+    assert item["direction"] == -1
+    assert item["polarity"] == "negative"
+
+    evidence = build_factor_admission_evidence(
+        factor_id="dsl_auto_abc",
+        catalog_item=item,
+        evidence_counts={},
+        governance={},
+    )
+    assert evidence["direction"]["status"] == "validated"
+    assert "direction_contract_invalid" not in evidence["preflight_blocker_codes"]

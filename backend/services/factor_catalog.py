@@ -924,7 +924,15 @@ def build_factor_catalog(db_path: str | Path = STATE_DB) -> list[dict[str, Any]]
                 reason = "observe_only"
         h = health.get(name, {})
         fg_shadow = factor_governance_shadow.get(name, {})
+        # Direction is a definition fact: the signed-IC validation performed at
+        # registration (FactorScoreEvaluator) persists it in the lifecycle
+        # evidence.  Runtime config only carries direction for factors that are
+        # already configured, and a discovered candidate is not configured, so
+        # reading config alone marked every candidate
+        # `direction_contract_invalid` for its whole life.
         direction = cfg_dict.get("direction")
+        if direction is None:
+            direction = (lifecycle_fact.get("evidence") or {}).get("direction")
         try:
             direction = 1 if float(direction) > 0 else -1 if float(direction) < 0 else 0
         except (TypeError, ValueError):

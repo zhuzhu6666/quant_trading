@@ -978,3 +978,81 @@ def test_gate_claims_manifest_bound_candidate_id(tmp_path):
 
     manifest_bound = claim(_delegate_persisted(), "alpha_a,alpha_b")
     assert manifest_bound.get("status") == "v16_command_claimed", manifest_bound
+
+
+def test_fast_lane_uses_evidence_clock_not_rotation_timestamp(monkeypatch, tmp_path):
+    """Retirement staleness must follow the evidence window, never the canary
+    rotation's ``updated_at``: re-reading the same OOS window is not progress,
+    and treating it as progress left every rotated candidate permanently
+    unretirable (2026-09-13: 1,239 candidates, only 16 reachable)."""
+    rc.reset_for_tests()
+    rc.patch({"factor_governance_fast_retire_per_cycle": 10})
+    orch = FactorGovernanceOrchestrator(risk_policy=_AllowRisk())
+    orch.overlay = RuntimeConfigOverlayService(tmp_path / "state.db")
+    retired = []
+
+    class _Adapter:
+        def get_meta(self, name):
+            return {"source": "shadow", "description": f"rank({name})"}
+
+    class _Lifecycle:
+        def __init__(self, _db_path, adapter):
+            self.adapter = adapter
+
+        def retire(self, **kwargs):
+            retired.append(kwargs)
+            return {"ok": True, "lifecycle_stage": "RETIRED", "mutation_id": "m-fast"}
+
+    monkeypatch.setattr(
+        "alpha.registry_adapter.RegistryAdapter.shared",
+        classmethod(lambda cls: _Adapter()),
+    )
+    monkeypatch.setattr(governance_module, "FactorLifecycleService", _Lifecycle)
+    monkeypatch.setattr(orch, "_factor_has_pending_effect", lambda _factor_id: False)
+    monkeypatch.setattr(
+        orch,
+        "_current_market_regime_projection",
+        lambda: {"regime_id": "trend", "confidence": 0.8, "source": "test"},
+    )
+    monkeypatch.setattr(
+        orch,
+        "_audit_action",
+        lambda run, item, action, status, evidence, verdict, **kwargs: {
+            "factor_id": item["factor_id"],
+            "action": action,
+            "status": status,
+            "evidence": evidence,
+        },
+    )
+    monkeypatch.setattr(
+        orch, "_promotion_evidence", lambda item, cfg: {"eligible": False}
+    )
+
+    now = time.time()
+    stale_window = (now - 500 * 3600.0)
+    stale_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(stale_window))
+    fresh_iso = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 3600.0))
+
+    rotated = _stale_shadow("rotated_stalled", 400)
+    rotated["lifecycle_updated_at"] = now
+    rotated["canary"] = {
+        "stage": "SHADOW",
+        "fresh_evidence_bars": 12,
+        "updated_at": now,
+        "evidence_end_at": stale_iso,
+    }
+    progressing = _stale_shadow("still_progressing", 400)
+    progressing["lifecycle_updated_at"] = stale_window
+    progressing["canary"] = {
+        "stage": "SHADOW",
+        "fresh_evidence_bars": 0,
+        "updated_at": stale_window,
+        "evidence_end_at": fresh_iso,
+    }
+
+    actions = orch._retire_zero_progress_shadow(
+        [rotated, progressing], {"run_id": "flow-evidence-clock"}, cfg=rc.shared()
+    )
+
+    assert [kwargs["name"] for kwargs in retired] == ["rotated_stalled"]
+    assert actions[0]["status"] == "applied"

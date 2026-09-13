@@ -439,22 +439,24 @@ def evaluate_shadow_factors(
     timeframe: str = "",
     sources: Iterable[str] = ("shadow", "discovered"),
     persist: bool = True,
+    expressions: dict[str, str] | None = None,
 ) -> dict[str, ShadowPerf]:
-    """Evaluate all registered shadow/discovered factors and optionally persist."""
+    """Evaluate registered shadow/discovered factors plus explicit candidates.
+
+    ``expressions`` evaluates canonical lifecycle candidates whose DSL callable
+    is not projected into this process registry.  The definition authority
+    stays the committed lifecycle row, so evaluation coverage no longer depends
+    on which callables a process happens to hold.
+    """
     from alpha.registry import factor_registry
     from alpha.registry_adapter import RegistryAdapter
 
     allowed = set(sources)
     adapter = RegistryAdapter.shared()
     results: dict[str, ShadowPerf] = {}
+    evaluated: set[str] = set()
 
-    for name, meta in list(adapter._meta.items()):
-        source = str(meta.get("source", ""))
-        if source not in allowed:
-            continue
-        fn = factor_registry.get(name)
-        if fn is None:
-            continue
+    def _run(name: str, fn, source: str) -> None:
         previous_perf = None
         if persist:
             try:
@@ -470,10 +472,33 @@ def evaluate_shadow_factors(
             timeframe=timeframe,
             previous_perf=previous_perf,
         )
+        evaluated.add(name)
         if perf is None:
-            continue
+            return
         results[name] = perf
         if persist:
             persist_shadow_perf(perf)
+
+    for name, meta in list(adapter._meta.items()):
+        source = str(meta.get("source", ""))
+        if source not in allowed:
+            continue
+        fn = factor_registry.get(name)
+        if fn is None:
+            continue
+        _run(name, fn, source)
+
+    for name, expression in (expressions or {}).items():
+        if name in evaluated:
+            continue
+        expression = str(expression or "").strip()
+        if not expression:
+            continue
+        from alpha.factor_dsl import evaluate_dsl
+
+        def _shadow_fn(frame, _expression: str = expression):
+            return evaluate_dsl(_expression, frame)
+
+        _run(name, _shadow_fn, "shadow")
 
     return results

@@ -19,13 +19,14 @@
 
 静态发布开关（`config/settings.yaml[features]`，operator-only、随重启生效）：`live_safety_plane_v2_mode=enforce`、`governance_mutation_coordinator_v2_mode=enforce`；PG job queue 状态见 [legacy-debt-register.md](legacy-debt-register.md) 与 SSoT §2。
 
-## 2. 最近一次只读核对（2026-09-10）
+## 2. 最近一次只读核对（2026-09-13 22:59 受控重启）
 
-- **服务**：`quant-backend` active since 2026-09-10 13:48、`quant-learning-worker` active since 2026-09-10 14:14、`quant-job-worker` active since 2026-09-08 18:49（`systemctl is-active` / `ActiveEnterTimestamp`）。
-- **状态库**：migration ledger `current 35 / minimum 35 / ok / mismatches 0`（`scripts/state_schema_migrate.py --check`），`0035_retire_v16_cognition_ledgers` 已应用（2026-09-11，runner `v16-cognition-retirement-20260911`）。
-- **代码**：HEAD `ae7a2341`（2026-09-10 14:46）晚于最近一次生产重启；是否需要重启按实际 diff 与 release flags 判定，不引用本页快照。
-- **readiness**：`backend_readiness_snapshot.v1` `blocking_components` 为空；`runtime_health_projection.v1` ctrader connected。
-- 本轮为文档收敛批，未改代码、配置或运行态。
+- **服务**：`quant-backend` active since 2026-09-13 22:59:52、`quant-learning-worker` active since 2026-09-13 22:59:33、`quant-job-worker` active since 2026-09-13 18:47:50（`systemctl is-active` / `ActiveEnterTimestamp`）。
+- **状态库**：migration ledger `current 37 / minimum 37 / ok / mismatches 0`（`scripts/state_schema_migrate.py --check`）；`0036_execution_provenance`、`0037_recovery_attribution_integrity` 已应用。
+- **代码**：本批提交（因子发现闭环修复：`factor_catalog` 方向契约投影、`evolution_orchestrator` 单一轮转选择 + 表达式求值入口、`factor_governance_orchestrator` 证据时钟退役判据）；进程已随 22:59 受控重启加载，启动日志无 warning。
+- **readiness**：`backend_readiness_snapshot.v1` `ok=true`、`blockers=[]`、`ready_for_live_execution=false`（休市 `market_session_blocks_open`）；`runtime_health_projection.v1` ctrader connected、无持仓。
+- **本批验证**：`tests/backend/runtime/` 55 passed、`tests/test_factor_catalog_governance.py` 7 passed、`tests/test_factor_governance_acceleration_flow.py` 18 passed、`pytest -m smoke` 215 passed；migration/OpenAPI 无变更。
+- 本批另修正 `docs/README.md` migration ledger v35→v37 与 SSoT header 的 schema 核对版本。
 
 ## 3. 未完成 / 待复核证据
 
@@ -40,6 +41,7 @@
 4. **V16 认知层退役（2026-09-11 完成）**：停写 → 载体解耦（`posterior_fingerprint` + 自校验）→ 代码删除（净 −5.8k 行、−9 端点、`brain_action_plan` 提案来源）→ `pg_dump` 存档（`run_artifacts/v16_cognition_retirement_20260911.dump`，74.9 MB/6 表）→ v35 迁移删除 6 张表（423MB → 15MB）。保留 `v16_brain_command`、`brain_governance_candidate`(+`_review`)、`brain_memory`、`brain_live_ready_guardrail`。详见 [legacy-debt-register.md](legacy-debt-register.md) §1。
 5. **索引/契约欠账**：依赖 `factor_name` / `lifecycle_stage` / `runtime_admission` 的 `idx_factor_lifecycle_*` 索引仍未建（0028 已补齐这些列，当前仅 `idx_factor_lifecycle_unique_name` 存在）；是否补建按后续性能证据决定。
 5. **每次发布门重取**：process-loaded flags、PID、fingerprint、release preflight 证据；当前源码绑定的 execution/safety fault matrix attestation；Safety 在 enforce 姿态下的连续性与完整 broker position lifecycle 证据。
+6. **因子发现闭环（2026-09-13 修复批，待开盘验证）**：五处结构缺陷已修（方向契约投影、轮转饿死、退役人口判据、证据时钟、评估覆盖），积压 1,239 未动；只读探针：CANARY_50 样本 6/25 `_promotion_evidence` eligible、退役扫描 711/1,896 行可达、轮转选择含 SHADOW 135 行（修复前分别为 0、16、0）。首条 `prepare/activate` 或 `retire` 动作与退出条件见 [legacy-debt-register.md](legacy-debt-register.md)。
 
 上述证据不能由单测、历史快照或 readiness 替代；未满足前不推进后续静态开关，也不把 readiness ready、单次 bridge 或单次 effect 解释为自治毕业。
 

@@ -734,7 +734,22 @@ def scheduled_evolution_cycle(
 
         # ── Step 3: Shadow 绩效刷新 + Canary 候选评估 ──
         cb("shadow_perf", 52, "refreshing shadow factor performance")
-        shadow_count = _update_shadow_performance(shadow_oos_df, symbol, timeframe)
+        from alpha.registry_adapter import RegistryAdapter
+
+        selection, candidate_definitions, _evaluable_total = _selected_canary_candidates(
+            RegistryAdapter.shared(),
+            _load_canary_states(),
+        )
+        shadow_count = _update_shadow_performance(
+            shadow_oos_df,
+            symbol,
+            timeframe,
+            expressions={
+                name: candidate_definitions[name]
+                for name, _, _ in selection
+                if name in candidate_definitions
+            },
+        )
         if shadow_count:
             logger.info("[Evolve] shadow perf refreshed: %d factors", shadow_count)
 
@@ -1183,14 +1198,14 @@ def _run_canary_evaluation(
         # 加载持久化状态
         saved_states = _load_canary_states()
 
-        # 收集所有影子 + 已发现因子
-        candidates: list[tuple[str, float, str]] = []
-        for name in list(adapter._meta.keys()):
-            meta = adapter.get_meta(name) or {}
-            source = meta.get("source", "")
-            score = float(meta.get("score", 0.0))
-            if source in ("shadow", "discovered"):
-                candidates.append((name, score, source))
+        # 收集候选：进程 registry 投影 + 规范化生命周期候选，轮转顺序与
+        # shadow 绩效刷新共用同一选择（见 _selected_canary_candidates）。
+        selected_candidates, _definitions, evaluable_total = _selected_canary_candidates(
+            adapter, saved_states
+        )
+        candidates = [
+            (name, score, source) for name, score, source in selected_candidates
+        ]
 
         if not candidates:
             return promotions, rollbacks, stay
@@ -1219,41 +1234,12 @@ def _run_canary_evaluation(
                 dir_state.fresh_evidence_bars = int(state.get("fresh_evidence_bars", 0) or 0)
                 dir_state.history = [dict(event) for event in state.get("events", []) if isinstance(event, dict)]
 
-        stage_priority = {
-            "PROBATION": 0,
-            "CANARY_50": 1,
-            "CANARY_20": 2,
-            "CANARY_5": 3,
-            SHADOW: 4,
-        }
-        evaluation_limit = max(
-            10,
-            min(int(os.getenv("QUANT_CANARY_EVALUATION_LIMIT", "500") or 500), 1000),
-        )
-        evaluable_candidates = [
-            item
-            for item in candidates
-            if str((saved_states.get(item[0]) or {}).get("stage") or SHADOW).upper()
-            not in TERMINAL_STAGES | {ACTIVE}
-        ]
-        evaluable_candidates.sort(
-            key=lambda item: (
-                stage_priority.get(
-                    str((saved_states.get(item[0]) or {}).get("stage") or SHADOW).upper(),
-                    5,
-                ),
-                float((saved_states.get(item[0]) or {}).get("updated_at") or 0.0),
-                -float(item[1]),
-                item[0],
-            )
-        )
-        selected_candidates = evaluable_candidates[:evaluation_limit]
-        if len(evaluable_candidates) > len(selected_candidates):
+        if evaluable_total > len(selected_candidates):
             _emit_evolution_story("canary_evaluation_bounded", {
-                "candidate_count": len(evaluable_candidates),
-                "evaluation_limit": evaluation_limit,
-                "deferred_count": len(evaluable_candidates) - len(selected_candidates),
-                "selection_policy": "advanced_stage_then_oldest_evaluation_then_score",
+                "candidate_count": evaluable_total,
+                "evaluation_limit": len(selected_candidates),
+                "deferred_count": evaluable_total - len(selected_candidates),
+                "selection_policy": "oldest_evaluation_then_score",
             })
 
         for name, score, source in selected_candidates:
@@ -1353,16 +1339,111 @@ def _run_canary_evaluation(
     return promotions, rollbacks, stay
 
 
-def _update_shadow_performance(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
+def _load_lifecycle_candidate_definitions() -> dict[str, str]:
+    """Committed candidate definitions from the canonical lifecycle ledger.
+
+    ``metadata_json.expression`` is the definition authority for discovered
+    candidates; the process registry is only a projection of it.  Evaluating
+    from the ledger keeps canary coverage independent of which callables a
+    process happens to hold.
+    """
+    definitions: dict[str, str] = {}
+    try:
+        conn = _state_conn(read_only=True)
+        try:
+            rows = conn.execute(
+                _sql(
+                    conn,
+                    """
+                    SELECT factor_name, metadata_json
+                    FROM factor_lifecycle_state
+                    WHERE origin IN ('dsl', 'shadow', 'discovered')
+                      AND lifecycle_stage NOT IN ('RETIRED', 'QUARANTINED', 'ACTIVE')
+                    """,
+                )
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("[Evolve] lifecycle candidate definitions unavailable: %s", exc)
+        return definitions
+    for row in rows:
+        name = str(row["factor_name"] or "")
+        try:
+            metadata = _json.loads(row["metadata_json"] or "{}")
+        except Exception:
+            metadata = {}
+        expression = str((metadata or {}).get("expression") or "").strip()
+        if name and expression:
+            definitions[name] = expression
+    return definitions
+
+
+def _selected_canary_candidates(
+    adapter: Any,
+    saved_states: dict[str, dict[str, Any]],
+) -> tuple[list[tuple[str, float, str]], dict[str, str], int]:
+    """Ordered canary candidates (least recently evaluated first) + definitions.
+
+    A strict stage priority under a fixed cap starved the SHADOW cohort: rows
+    whose evidence never advanced were never re-evaluated, so they could
+    neither climb nor qualify for retirement.  Rotation is therefore ordered
+    by evaluation age; the cap (``QUANT_CANARY_EVALUATION_LIMIT``) still shares
+    the same budget that gates GP registration.
+    """
+    from deployment.canary import ACTIVE, SHADOW, TERMINAL_STAGES
+
+    definitions = _load_lifecycle_candidate_definitions()
+    candidates: list[tuple[str, float, str]] = []
+    seen: set[str] = set()
+    for name in list(adapter._meta.keys()):
+        meta = adapter.get_meta(name) or {}
+        source = str(meta.get("source", ""))
+        if source in ("shadow", "discovered") and name not in seen:
+            candidates.append((name, float(meta.get("score", 0.0)), source))
+            seen.add(name)
+    for name in definitions:
+        if name not in seen:
+            candidates.append((name, 0.0, "shadow"))
+            seen.add(name)
+    evaluation_limit = max(
+        10,
+        min(int(os.getenv("QUANT_CANARY_EVALUATION_LIMIT", "500") or 500), 1000),
+    )
+    evaluable = [
+        item
+        for item in candidates
+        if str((saved_states.get(item[0]) or {}).get("stage") or SHADOW).upper()
+        not in TERMINAL_STAGES | {ACTIVE}
+    ]
+    evaluable.sort(
+        key=lambda item: (
+            float((saved_states.get(item[0]) or {}).get("updated_at") or 0.0),
+            -float(item[1]),
+            item[0],
+        )
+    )
+    return evaluable[:evaluation_limit], definitions, len(evaluable)
+
+
+def _update_shadow_performance(
+    df: pd.DataFrame,
+    symbol: str,
+    timeframe: str,
+    *,
+    expressions: dict[str, str] | None = None,
+) -> int:
     """Refresh shadow/discovered virtual performance for Canary."""
     try:
         from alpha.shadow_trader import evaluate_shadow_factors
+
         results = evaluate_shadow_factors(
             df,
             symbol=symbol,
             timeframe=timeframe,
             sources=("shadow", "discovered"),
             persist=True,
+            expressions=expressions,
         )
         if results:
             _emit_evolution_story("shadow_perf_updated", {

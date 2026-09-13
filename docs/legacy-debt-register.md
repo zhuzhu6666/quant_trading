@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-13 (清理批：删除 5 条退出条件已满足的旧账——V16 认知层退役/表已不在且 schema 37/37 ok、CVaR overlay 经 18:00 真实 autonomous 写入后仍为 3.5、emergency close 旧兼容入口零调用方且 20 项严格语义测试绿、live_service 领域重力 L 系列收口（12,694→6,519 行、防腐测试绿）、因子治理重复重算已落地（生产轮次 78–84s vs 历史 697s，V16 claim/finalize+Coordinator effect 证据在案）；21→15 条。同日 dsl_auto 积压复核 1,239 并修正退出预算口径为当前默认 500；supervisor 治理链首跳缺口已补入专员产线（`0d77157d`/`6ed0d878`），首条 application 待开盘验收；CVaR 原始丢失根因未定，作为残余风险留观、无动作)
+> Last verified: 2026-09-13 (闭环修复批：`dsl_auto` 积压条目重写为“因子发现闭环缺陷”——方向契约投影、轮转饿死、退役人口判据、证据时钟五处结构缺陷同批修复并留探针证据；同批删除 catalog config-only direction、轮转阶段优先级、快车道 `fresh_evidence_bars`/`updated_at` 判据与 `source=='discovered'` 人口判据。同日早前：清理批删除 5 条退出条件已满足的旧账（V16 认知层退役/schema 37-37 ok、CVaR overlay 3.5、emergency close 旧入口零调用方、live_service L 系列收口、因子治理重复重算落地），21→15 条；dsl_auto 积压复核 1,239 并修正退出预算口径；supervisor 治理链首跳缺口已补入专员产线（`0d77157d`/`6ed0d878`），首条 application 待开盘验收；CVaR 原始丢失根因未定，留观无动作)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归（active / migrating / monitoring / quarantined / regressed）。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -31,18 +31,34 @@
 - 当前：① near_tp tighten 分支要求模板 `near_take_profit_action=protect`，default 模板配置 close（有意策略，protect 留作模板能力）；② trend_hold 回吐只打标签无动作——已修：`trend_hold_giveback_intervention_requested` 标记进评估事件；真 reduce 因最小手数不可减，按用户决定关闭（2026-09-02）；③ trend_hold 截胡 near_tp——已修：trend_hold 盈利仓 ≥92% 到止盈时走模板驱动路径（default close / protect tighten），与其它 posture 同语义
 - 退出：评估事件积累 ≥1 周后验证复盘可用性；真实 trend_hold 盈利仓 near-TP 动作样本 ≥10 后从 monitoring 转 resolved
 
-### dsl_auto SHADOW 积压 1,239（2026-09-13 复核；2026-09-08：1838→1712，源头节流持续生效，排空中）
+### 因子发现闭环缺陷（dsl_auto 积压 1,239；2026-09-13 定位并同批修复）
 
-- 状态：`active`（2026-09-13 只读：非终态 1,239、`can_register=false`；GP 注册持续停止直到积压低于 `QUANT_CANARY_EVALUATION_LIMIT`，当前代码默认 500、生产无 env 覆盖）
-- 问题事实：旧背压口径走 registry/canary_state 窄投影长期误报 0，dsl_auto 生成侧持续注册（每周期最多 10 个），
-  积压峰值 1838（09-03）→ 1,712（09-08）且 shadow 晋升门因 OOS PnL 全负实质关闭——队列只进不出。
-- canonical：入册节流唯一口径 = `factor_lifecycle_state` origin `dsl/shadow/discovered` 非终态行数；
-  消化侧 = 治理周期收紧动作（2026-09-05 提额：retire ≤15/周期、disable ≤9/周期，此前 5/3——
-  09-03~05 实测排空 14-80/天，提额后预期约 3 倍，退出线（当时预算 200）预计 ~12 天可达）+ canary 晋升/退休。
-- 退出条件：`nonterminal_candidate_count < QUANT_CANARY_EVALUATION_LIMIT`（当前默认 500；旧预算 200 已随 `a8eaade1` 上调，旧口径作废）且连续一周 GP 注册可正常进行。
-- 剩余观察：09-03~08实测约25/天（1838→1712），低于提额后3倍预期；`canary SHADOW 925/CANARY_* 897/QUARANTINED 54`。已知约束：`_retire_quarantined_discovered` 要求 `0 < health_score < 30`，
-  积压中健康分为 0（UNKNOWN）的因子不满足该条件，只能依赖模型 `weak_for_disable` 判定进入候选——这是排空速度的
-  最大不确定项；若 1,239 → 退出线 500 耗时不可接受，再评估批量退休通道（需另行确认）。
+- 状态：`monitoring`（本批修复五处结构缺陷；积压行数未动，改由修复后的晋升/退役路径消化）
+- 事实：历史上 0 个 dsl 因子到过 ACTIVE（`factor_lifecycle_state` origin=dsl：RETIRED 594 / QUARANTINED 5 / SHADOW 1,239），
+  `canary_promotion_blocked_unbacked` 115 条——晋升门与退役门同时不可达，队列只进不出。
+- 根因（只读探针 + 代码定位，全部有据）：
+  1. 方向契约投影丢失：catalog 的 `direction` 只读 runtime config，注册期写进 `evidence_json.candidate_validation` 的
+     signed-IC/方向从不进入 catalog → 1,239/1,239 候选判 `direction_contract_invalid`（探针 59/59，CANARY_50 档除该码外无其他 blocker）。
+  2. 轮转饿死：候选按阶段优先级排序 + 500 硬截断，897 行排在 SHADOW 之前 → 496 个 SHADOW 永不评估；
+     `_update_shadow_performance` 只覆盖进程 registry 的 ~42 个 callable（09-08~09-11 日志实测）。
+  3. 退役不可达：`_retire_quarantined_discovered` / `_rollback_canary_regressions` 的人口判据是 catalog `source=='discovered'`，
+     而 dsl+SHADOW 投影为 `source=='shadow'`；快车道要求 `fresh_evidence_bars==0` 且以轮转会刷新的 `updated_at` 为年龄口径；
+     健康窗要求 `0<health_score<30`，而 SHADOW 候选不进健康评估集（`runtime.factor_health` 52 行、dsl 0 行）。
+  4. 门槛三套（阶梯 `deployment/canary.py`、治理 config `factor_governance_shadow_*`、准入卡），无单一终审。
+  5. 自锁：PROBATION→ACTIVE 要求 lifecycle 已有 committed ACTIVE backing，而 lifecycle ACTIVE 又只能由依赖准入卡的晋升路径产出。
+- canonical：候选定义/方向 = `factor_lifecycle_state`（`metadata_json.expression`、`evidence_json.candidate_validation`）；
+  OOS 证据 = `shadow_factor_perf`（唯一）；阶梯状态 = `canary_state`；退役执行 = `FactorLifecycleService.retire`（唯一写者）。
+- 本批删除/替换：catalog 的 config-only direction（改 candidate_validation 优先）；轮转阶段优先级（改
+  `_selected_canary_candidates` 按评估年龄单一选择，shadow 刷新与 canary 轮转共用）；快车道 `fresh_evidence_bars`+`updated_at`
+  判据（改 `_shadow_evidence_clock` 读 `evidence_end_at`，并豁免当前晋升合格者）；`source=='discovered'` 人口判据（改 durable
+  lifecycle origin）；`evaluate_shadow_factors` 增 `expressions=` 入口，评估不再依赖进程 registry 覆盖面。
+- 退出条件：(a) 开盘后首批真实 `prepare/activate` 或 `retire` 动作落地且无 `blocked_by_evidence` 洪泛；
+  (b) `nonterminal_candidate_count < QUANT_CANARY_EVALUATION_LIMIT` 且连续一周 GP 注册正常；
+  (c) 首个 `origin=dsl` 因子在 `factor_lifecycle_state` 达到 ACTIVE。
+- 验证：修复后只读探针——CANARY_50 样本 25 中 6 个 `_promotion_evidence` eligible（修复前 0）；退役扫描 711/1,896 行满足
+  证据停滞判据（修复前 16）；轮转选择 500/1,234 且含 SHADOW 135 行（修复前 0）；`evaluate_shadow_factors(expressions=…)`
+  实测 oos_bars 249。针对性测试 `tests/test_factor_catalog_governance.py`、`tests/test_factor_governance_acceleration_flow.py`、
+  `tests/test_evolution_closure_fixes.py`、`tests/backend/runtime/`（55 passed）+ `pytest -m smoke`（215 passed）。
 
 ### 平行 authority、重复门控和无退出兼容层
 
@@ -137,7 +153,7 @@
 - 状态：`active`（A3 盘点草案；学习主环切换为开仓证据 meta-labeling 后，以下对象失去存在理由，按批次退役）
 - canonical：本清单为唯一退役对象列表；替代对象为 3–6 个生产信号的最小健康监控 + `open_quality_lightgbm` live shadow 链（本批已接入 `live_service._evaluate_open_quality_model_veto` 无策略分支，mode=`live_shadow`，纯观察 fail-open）。
 - 剩余（按退役顺序）：
-  1. GP/canary 因子工厂宽度机器——`dsl_auto` SHADOW 积压（2026-09-13为1,239）排空后，退役 GP 注册、canary 阶梯批量评估、DSL 批量准入路径；supervisor出生钩（`register_supervisor_shadow`，origin=supervisor隔离alpha/背压）已真实产出（2026-09-13 advisory 回放 committed `auto_overprotection_relief.bfabfc4bed.v1`）；
+  1. GP/canary 因子发现产线**保留**（2026-09-13 用户裁定：让发现链路完整走通到实盘或正常退役，不以削宽度为目标；同日闭环修复批见上方“因子发现闭环缺陷”）；本项退役对象改为产线内的重复实现本身（stage-priority 轮转、`source=='discovered'` 人口判据、config-only direction 已删）。supervisor 出生钩（`register_supervisor_shadow`，origin=supervisor隔离alpha/背压）保持，已真实产出（2026-09-13 advisory 回放 committed `auto_overprotection_relief.bfabfc4bed.v1`）；
   2. `backtrader` / `APScheduler` 依赖声明（各仅 1 处引用）——二选一：删除声明或真实启用，不得长期双挂；
   3. `backend/services/` 中 18 个 <120 行单调用方壳层——内联；
   4. 451 个 reason code 收敛与 72 张 runtime 投影表并表——生产因子收缩后审计面同步收敛。

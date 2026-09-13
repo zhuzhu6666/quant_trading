@@ -68,7 +68,7 @@ def _isolate_cycle(monkeypatch, counters: dict[str, int]) -> None:
     monkeypatch.setattr(
         evolution,
         "_update_shadow_performance",
-        lambda *_args: counters.__setitem__(
+        lambda *_args, **_kwargs: counters.__setitem__(
             "shadow",
             counters.get("shadow", 0) + 1,
         )

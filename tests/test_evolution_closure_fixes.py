@@ -808,7 +808,10 @@ def test_canary_evaluation_is_bounded_and_rotates_oldest_candidates(monkeypatch)
     assert promotions == []
     assert rollbacks == []
     assert len(stay) == 10
-    assert set(saved) == {"factor_11", *(f"factor_{idx:02d}" for idx in range(9))}
+    # Rotation is ordered by evaluation age with no stage priority: a fixed cap
+    # below the population size must not starve the SHADOW cohort (the
+    # advanced-stage-first policy left 1,239 candidates unevaluated forever).
+    assert set(saved) == {f"factor_{idx:02d}" for idx in range(10)}
 
 
 def test_canary_registration_backpressure_counts_lifecycle_backlog(tmp_path, monkeypatch):

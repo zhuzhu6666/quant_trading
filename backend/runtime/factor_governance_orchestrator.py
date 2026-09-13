@@ -15,6 +15,7 @@ import sqlite3
 import time
 from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -61,6 +62,36 @@ from risk.policy_service import RiskPolicyService, RiskVerdict
 logger = logging.getLogger(__name__)
 
 _EVIDENCE_STREAK_KEY = "factor_governance_evidence_streak.v1"
+
+
+def _parse_iso_ts(value: str) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _shadow_evidence_clock(item: Mapping[str, Any]) -> float:
+    """Latest evidence-advance time of a SHADOW candidate.
+
+    ``canary.evidence_end_at`` is the last market bar of the evaluated OOS
+    window and only moves when genuinely new evidence is consumed; the canary
+    rotation's ``updated_at`` bumps on every re-read of the same window and is
+    therefore not a progress clock.  Candidates that were never evaluated fall
+    back to their lifecycle write time (when they entered the stage).
+    """
+    canary = dict(item.get("canary") or {})
+    parsed = _parse_iso_ts(str(canary.get("evidence_end_at") or ""))
+    if parsed > 0.0:
+        return parsed
+    return float(item.get("lifecycle_updated_at") or 0.0)
+
 
 # One-way adjudication markers for rollback candidates that can never be
 # executed (missing decision payload / no factor-scoped rollback config).
@@ -4428,13 +4459,18 @@ class FactorGovernanceOrchestrator:
     def _retire_zero_progress_shadow(
         self, catalog: list[dict[str, Any]], run: dict[str, Any], *, cfg: Any
     ) -> list[dict[str, Any]]:
-        """Fast lane: retire over-age SHADOW rows with zero fresh evidence.
+        """Fast lane: retire SHADOW candidates whose evidence stopped moving.
 
-        Risk-reducing direction only: candidates hold no weight and produced
-        no evidence for longer than the stale-evidence window, so retirement
-        shrinks the review surface instead of expanding risk. Consumes its own
-        budget (`factor_governance_fast_retire_per_cycle`), never the normal
-        retire quota. Builtins excluded (Batch-D restore owns them).
+        Risk-reducing direction only: candidates hold no weight and their OOS
+        evidence window has not advanced for longer than the stale-evidence
+        window, so retirement shrinks the review surface instead of expanding
+        risk.  Consumes its own budget (`factor_governance_fast_retire_per_cycle`),
+        never the normal retire quota.  Builtins excluded (Batch-D restore owns
+        them).
+
+        The stall clock is the evidence window end, never the rotation's
+        ``updated_at``: re-reading the same window is not progress, and treating
+        it as progress left every rotated candidate permanently unretirable.
         """
         max_actions = int(getattr(cfg, "factor_governance_fast_retire_per_cycle", 10) or 0)
         if max_actions <= 0:
@@ -4456,15 +4492,8 @@ class FactorGovernanceOrchestrator:
                 continue
             if str(item.get("lifecycle_origin") or item.get("source") or "") == "builtin":
                 continue
-            canary = item.get("canary") or {}
-            if int(canary.get("fresh_evidence_bars") or 0) != 0:
-                continue
-            seen_at = max(
-                float(canary.get("updated_at") or 0.0),
-                float(item.get("last_action_ts") or 0.0),
-                float(item.get("lifecycle_updated_at") or 0.0),
-            )
-            if seen_at <= 0 or (now - seen_at) <= max_age_hours * 3600.0:
+            stalled_since = _shadow_evidence_clock(item)
+            if stalled_since <= 0 or (now - stalled_since) <= max_age_hours * 3600.0:
                 continue
             if str(item.get("health_status") or "UNKNOWN").upper() != "UNKNOWN" and float(
                 item.get("health_score") or 0.0
@@ -4472,14 +4501,21 @@ class FactorGovernanceOrchestrator:
                 continue
             if self._factor_has_pending_effect(str(item.get("factor_id") or "")):
                 continue
-            candidates.append((seen_at, item))
+            candidates.append((stalled_since, item))
         candidates.sort(key=lambda pair: pair[0])
         actions: list[dict[str, Any]] = []
         from alpha.registry_adapter import RegistryAdapter
 
         adapter = RegistryAdapter.shared()
         lifecycle = FactorLifecycleService(self.overlay.db_path, adapter=adapter)
-        for _, item in candidates[:max_actions]:
+        for stalled_since, item in candidates:
+            if len(actions) >= max_actions:
+                break
+            # A stalled candidate that still satisfies the promotion evidence
+            # bar is waiting for an expansion slot, not dead: the stall clock
+            # alone must never delete promotable work.
+            if self._promotion_evidence(item, cfg).get("eligible"):
+                continue
             factor_name = str(item["factor_id"])
             meta = adapter.get_meta(factor_name) or {}
             evidence = {
@@ -4487,7 +4523,8 @@ class FactorGovernanceOrchestrator:
                 "health_status": item.get("health_status"),
                 "source": item.get("source"),
                 "enabled": item.get("enabled"),
-                "fresh_evidence_bars": 0,
+                "stalled_since": stalled_since,
+                "stalled_hours": round((now - stalled_since) / 3600.0, 1),
                 "stale_evidence_max_age_hours": max_age_hours,
                 "retire_cause": "dead",
                 "regime_id": current_regime_id,
@@ -4531,7 +4568,16 @@ class FactorGovernanceOrchestrator:
         regime_fit_ok = float(getattr(cfg, "factor_governance_regime_fit_ok_threshold", 0.5) or 0.5)
         candidates = []
         for item in catalog:
-            if item.get("source") != "discovered" or item.get("enabled"):
+            # Population is decided by the durable lifecycle origin, not by the
+            # mutable catalog label: dsl/shadow rows project as ``source:
+            # shadow`` while they are SHADOW-stage, so a ``source ==
+            # 'discovered'`` test could never see the candidates this path
+            # exists to retire.
+            if str(
+                item.get("lifecycle_origin") or item.get("source") or ""
+            ).lower() not in {"dsl", "shadow", "discovered"}:
+                continue
+            if item.get("enabled"):
                 continue
             if self._factor_has_pending_effect(str(item.get("factor_id") or "")):
                 continue
