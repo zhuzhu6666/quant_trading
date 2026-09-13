@@ -1275,7 +1275,12 @@ class RiskPolicyService:
     def _evaluate_position_supervisor_template_switch(self, context: dict[str, Any]) -> RiskVerdict:
         target_template_id = str(context.get("target_template_id") or "").strip()
         suggestion_status = str(context.get("suggestion_status") or "").strip().lower()
-        if suggestion_status != "approved":
+        # Candidate materialization (V16 bridge producer) proves the same
+        # substantive evidence before a governor approval exists; the
+        # executable release binding is still proven later at the V16 command
+        # claim / apply path, which continues to require ``approved`` here.
+        candidate_stage = bool(context.get("candidate_stage")) and suggestion_status == "candidate"
+        if suggestion_status != "approved" and not candidate_stage:
             return RiskVerdict(
                 allowed=False,
                 reason="suggestion_not_approved",
@@ -1291,7 +1296,11 @@ class RiskPolicyService:
         try:
             from backend.services.position_supervisor_templates import list_position_supervisor_templates
 
-            templates = list_position_supervisor_templates()
+            # Validate against the state the caller commits to; omitting the
+            # binding keeps the legacy default-state behavior for apply paths.
+            templates = list_position_supervisor_templates(
+                db_path=context.get("db_path")
+            )
             valid_templates = {str(item.get("template_id") or "") for item in templates}
             template_meta = next((item for item in templates if str(item.get("template_id") or "") == target_template_id), {})
         except Exception:
@@ -1382,7 +1391,7 @@ class RiskPolicyService:
             or bridge.get("bridge_ready")
             or bridge.get("automatic_demo")
         )
-        if not release_bound:
+        if not release_bound and not candidate_stage:
             return RiskVerdict(
                 allowed=False,
                 reason="adaptive_execution_release_not_governed",
@@ -1432,6 +1441,7 @@ class RiskPolicyService:
                 "target_template_id": target_template_id,
                 "previous_template_id": context.get("previous_template_id", ""),
                 "suggestion_id": context.get("suggestion_id", ""),
+                "candidate_stage": candidate_stage,
             },
         )
 

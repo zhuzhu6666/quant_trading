@@ -901,6 +901,308 @@ class V16BrainOrchestratorService:
             "boundary": self.boundary(),
         }
 
+    def delegate_supervisor_template_switch(
+        self,
+        suggestion: dict[str, Any],
+        *,
+        day: str = "",
+        persist: bool = True,
+    ) -> dict[str, Any]:
+        """Issue one supervisor template switch command from advisory evidence.
+
+        The supervisor advisory remains the evidence producer; this method only
+        revalidates its single-control contract, replay/counterfactual evidence
+        and the RiskPolicy candidate-stage verdict, then materializes the bridge
+        candidate and the delegate command as one deterministic pair.  It never
+        applies the switch: bridge -> governor -> RiskPolicy(approved) ->
+        Coordinator still gate the runtime mutation.
+        """
+        item = dict(suggestion or {})
+        evidence = dict(item.get("evidence") or {})
+        action = str(item.get("action") or "")
+        if action != "switch_position_supervisor_template":
+            return {
+                "ok": False,
+                "status": "unsupported_supervisor_action",
+                "action": action,
+                "boundary": self.boundary(),
+            }
+        if int(item.get("governance_eligible") or 0) != 1:
+            return {
+                "ok": False,
+                "status": "advisory_not_governance_eligible",
+                "suggestion_id": str(item.get("suggestion_id") or ""),
+                "boundary": self.boundary(),
+            }
+        confidence = safe_float(item.get("confidence"))
+        if confidence < 0.5:
+            return {
+                "ok": False,
+                "status": "evidence_below_bridge_threshold",
+                "confidence": confidence,
+                "boundary": self.boundary(),
+            }
+        candidate_template = dict(evidence.get("candidate_template") or {})
+        from backend.services.position_supervisor_governance import (
+            _single_control_candidate_contract,
+        )
+
+        contract = _single_control_candidate_contract(candidate_template)
+        if not contract.get("ok"):
+            return {
+                "ok": False,
+                "status": "candidate_contract_not_ready",
+                "reason": str(contract.get("reason") or ""),
+                "contract": contract,
+                "boundary": self.boundary(),
+            }
+        target_template_id = str(candidate_template.get("template_id") or "")
+        if not target_template_id or target_template_id != str(item.get("scope_key") or ""):
+            return {
+                "ok": False,
+                "status": "target_template_mismatch",
+                "target_template_id": target_template_id,
+                "scope_key": str(item.get("scope_key") or ""),
+                "boundary": self.boundary(),
+            }
+        from backend.services.position_supervisor_templates import (
+            list_position_supervisor_templates,
+        )
+
+        registered = {
+            str(template.get("template_id") or "")
+            for template in list_position_supervisor_templates(db_path=self.db_path)
+        }
+        if target_template_id not in registered:
+            return {
+                "ok": False,
+                "status": "target_template_not_registered",
+                "target_template_id": target_template_id,
+                "boundary": self.boundary(),
+            }
+        try:
+            from config.runtime_config import shared as _rc_shared
+
+            previous_template_id = str(
+                getattr(_rc_shared(), "position_supervisor_template_id", "")
+                or "position_supervisor:default.v1"
+            )
+        except Exception:
+            previous_template_id = "position_supervisor:default.v1"
+        if target_template_id == previous_template_id:
+            return {
+                "ok": False,
+                "status": "already_active",
+                "target_template_id": target_template_id,
+                "boundary": self.boundary(),
+            }
+        counterfactual_summary = dict(evidence.get("counterfactual_summary") or {})
+        trace_count = int(safe_float(counterfactual_summary.get("total")))
+        if trace_count <= 0:
+            return {
+                "ok": False,
+                "status": "missing_supervisor_trace_evidence",
+                "target_template_id": target_template_id,
+                "boundary": self.boundary(),
+            }
+        replay_summary = dict(evidence.get("replay_summary") or {})
+        source_suggestion_id = str(item.get("suggestion_id") or "")
+        evidence_fingerprint = hashlib.sha256(
+            dumps(
+                {
+                    "schema_version": "v16_supervisor_template_switch_evidence.v1",
+                    "scope_type": "supervisor_template",
+                    "scope_key": "position_supervisor",
+                    "action": "switch_position_supervisor_template",
+                    "target_template_id": target_template_id,
+                    "candidate_patch": dict(contract.get("candidate_patch") or {}),
+                    "day": str(day or evidence.get("day") or ""),
+                    "source_suggestion_id": source_suggestion_id,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        candidate_id = f"brain_candidate_psv_{evidence_fingerprint[:16]}"
+        command_id = "v16cmd_" + hashlib.sha1(
+            ("supervisor-template-switch|" + evidence_fingerprint).encode("utf-8")
+        ).hexdigest()[:20]
+        service = BrainGovernanceCandidateService(self.db_path)
+        for row in list(
+            service.latest_candidates(limit=200, status="active").get("items") or []
+        ):
+            mapped = dict((row.get("lineage") or {}).get("mapped_action") or {})
+            if (
+                str(row.get("scope_type") or "") == "supervisor_template"
+                and str(mapped.get("target_template_id") or "") == target_template_id
+            ):
+                return {
+                    "ok": True,
+                    "status": "candidate_already_active",
+                    "candidate_id": str(row.get("candidate_id") or ""),
+                    "target_template_id": target_template_id,
+                    "boundary": self.boundary(),
+                }
+        existing = service.load_candidate(candidate_id)
+        if existing and str(existing.get("status") or "") not in {
+            "superseded",
+            "expired",
+            "rejected",
+        }:
+            return {
+                "ok": True,
+                "status": "already_delegated",
+                "candidate_id": candidate_id,
+                "command_id": command_id,
+                "target_template_id": target_template_id,
+                "boundary": self.boundary(),
+            }
+        from risk.policy_service import RiskPolicyService
+
+        risk_verdict = RiskPolicyService.shared().evaluate(
+            "switch_position_supervisor_template",
+            {
+                "suggestion_id": source_suggestion_id,
+                "suggestion_status": "candidate",
+                "candidate_stage": True,
+                "target_template_id": target_template_id,
+                "previous_template_id": previous_template_id,
+                "db_path": self.db_path,
+                "evidence": evidence,
+            },
+        ).to_dict()
+        if not bool(risk_verdict.get("allowed")):
+            return {
+                "ok": False,
+                "status": "risk_blocked",
+                "risk_verdict": risk_verdict,
+                "target_template_id": target_template_id,
+                "boundary": self.boundary(),
+            }
+        replay_run_id = (
+            f"supervisor_advisory_{str(day or evidence.get('day') or 'unknown')}"
+            f"_{evidence_fingerprint[:12]}"
+        )
+        expected_effect = {
+            "schema_version": "v16_supervisor_template_expected_effect.v1",
+            "replay": {**replay_summary, "replay_run_id": replay_run_id},
+            "supervisor": {
+                "trace_count": trace_count,
+                "day": str(day or evidence.get("day") or ""),
+                "labels": dict(counterfactual_summary.get("labels") or {}),
+            },
+            "counterfactual": counterfactual_summary,
+            "candidate_template": candidate_template,
+            "source_presence": {
+                "position_supervisor_trace": True,
+                "replay_report": True,
+                "supervisor_counterfactual_review": True,
+            },
+        }
+        created = service.create_candidate(
+            candidate_id=candidate_id,
+            source_agent="v16_brain",
+            source_kind="v16_supervisor_template_bridge",
+            source_ref_type="position_supervisor_advisory",
+            source_ref_id=source_suggestion_id,
+            proposal_stage="governance_ready",
+            capability_scope="supervisor_template_governance",
+            scope_type="supervisor_template",
+            scope_key="position_supervisor",
+            action="switch_position_supervisor_template",
+            confidence=confidence,
+            evidence_score=confidence,
+            risk_class="medium",
+            max_impact="medium_impact",
+            expected_effect=expected_effect,
+            evidence_refs={
+                "schema_version": "v16_supervisor_template_evidence_refs.v1",
+                "suggestion_id": source_suggestion_id,
+                "day": str(day or evidence.get("day") or ""),
+                "candidate_patch": dict(contract.get("candidate_patch") or {}),
+            },
+            risk_verdict=risk_verdict,
+            lineage={
+                "mapped_action": {
+                    "schema_version": "v16_supervisor_template_mapped_action.v1",
+                    "target_template_id": target_template_id,
+                    "base_template_id": str(contract.get("base_template_id") or ""),
+                    "candidate_template": candidate_template,
+                },
+                "suggestion_id": source_suggestion_id,
+            },
+            rollback_plan={
+                "schema_version": "v16_supervisor_template_rollback.v1",
+                "action": "switch_position_supervisor_template",
+                "previous_template_id": previous_template_id,
+                "target_template_id": target_template_id,
+            },
+            persist=persist,
+        )
+        if not created.get("candidate_id") or str(created.get("status") or "") == "authority_denied":
+            return {
+                "ok": False,
+                "status": "candidate_create_blocked",
+                "candidate": created,
+                "target_template_id": target_template_id,
+                "boundary": self.boundary(),
+            }
+        now = time.time()
+        command = {
+            "command_id": command_id,
+            "schema_version": "v16_brain_command.v1",
+            "snapshot_id": "",
+            "plan_id": "",
+            "eval_id": "",
+            "candidate_id": candidate_id,
+            "target_agent": "position_supervisor_governance",
+            "scope_type": "supervisor_template",
+            "scope_key": "position_supervisor",
+            "action": "switch_position_supervisor_template",
+            "decision": "delegate",
+            "status": "delegated_to_specialist",
+            "evidence": {
+                "schema_version": "v16_supervisor_template_switch_evidence.v1",
+                "target_template_id": target_template_id,
+                "base_template_id": str(contract.get("base_template_id") or ""),
+                "candidate_patch": dict(contract.get("candidate_patch") or {}),
+                "replay_run_id": replay_run_id,
+                "trace_count": trace_count,
+                "source_suggestion_id": source_suggestion_id,
+            },
+            "delegation": {
+                "target_agent": "position_supervisor_governance",
+                "delegated_by": "v16_brain",
+                "specialist_must_use": [
+                    "RiskPolicyService",
+                    "RuntimeConfigMutationService",
+                    "GovernanceMutationCoordinator",
+                ],
+                "specialist_must_not": [
+                    "submit_order",
+                    "bypass_risk_policy",
+                    "expand_hard_risk_limits",
+                ],
+            },
+            "posterior_fingerprint": "",
+            "evidence_fingerprint": evidence_fingerprint,
+            "max_apply_count": 1,
+            "authority_issued_at": now,
+            "created_at": now,
+            "updated_at": now,
+            "boundary": self.boundary(),
+        }
+        if persist:
+            ensure_v16_brain_command_table(self.db_path)
+            self._persist_commands([command])
+        return {
+            "ok": True,
+            "status": "delegated",
+            "candidate_id": candidate_id,
+            "command_id": command_id,
+            "target_template_id": target_template_id,
+            "evidence_fingerprint": evidence_fingerprint,
+            "boundary": self.boundary(),
+        }
+
     def delegate_factor_governance_cycle(
         self,
         gate: dict[str, Any],

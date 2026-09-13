@@ -2138,6 +2138,24 @@ def replay_position_supervisor_templates(
         conn.close()
 
 
+def _supervisor_switch_delegation_enabled() -> bool:
+    """Whether the specialist may materialize a V16 supervisor switch command.
+
+    Delegation is a Demo-governed action; other postures only produce the
+    advisory evidence and never mint a command.
+    """
+
+    try:
+        from config.runtime_config import shared as _rc_shared
+
+        return str(getattr(_rc_shared(), "autonomy_mode", "") or "") in {
+            "demo_nursery",
+            "demo_autonomous",
+        }
+    except Exception:
+        return False
+
+
 def build_position_supervisor_advisories(
     *,
     day: str = "2026-06-26",
@@ -2649,12 +2667,65 @@ def build_position_supervisor_advisories(
         except Exception:
             pass
 
+    # The advisory remains the evidence producer; the V16 bridge candidate and
+    # its delegate command are materialized by the supervisor specialist so
+    # the governed chain (bridge -> governor -> RiskPolicy -> Coordinator)
+    # exists.  Delegation is bounded to the Demo nursery posture.
+    delegated: list[dict[str, Any]] = []
+    if materialize and suggestions and _supervisor_switch_delegation_enabled():
+        switch_items = [
+            item
+            for item in suggestions
+            if str(item.get("action") or "") == "switch_position_supervisor_template"
+            and int(item.get("governance_eligible") or 0) == 1
+        ]
+        switch_items.sort(
+            key=lambda item: (
+                -float(item.get("confidence") or 0.0),
+                str(item.get("scope_key") or ""),
+                str(item.get("suggestion_id") or ""),
+            )
+        )
+        if switch_items:
+            try:
+                from backend.services.v16_brain_orchestrator import (
+                    V16BrainOrchestratorService,
+                )
+
+                outcome = V16BrainOrchestratorService(
+                    db_path
+                ).delegate_supervisor_template_switch(
+                    switch_items[0],
+                    day=day,
+                )
+            except Exception as exc:
+                outcome = {
+                    "ok": False,
+                    "status": "delegate_failed",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
+            delegated.append(
+                {
+                    "suggestion_id": str(switch_items[0].get("suggestion_id") or ""),
+                    "target_template_id": str(switch_items[0].get("scope_key") or ""),
+                    "status": str(outcome.get("status") or ""),
+                    "candidate_id": str(outcome.get("candidate_id") or ""),
+                    "command_id": str(outcome.get("command_id") or ""),
+                    "reason": str(
+                        outcome.get("reason")
+                        or (outcome.get("risk_verdict") or {}).get("reason")
+                        or ""
+                    ),
+                }
+            )
+
     return {
         "schema_version": "position_supervisor_advisory.v1",
         "day": day,
         "advisory_only": True,
         "materialized": bool(materialize),
         "enrolled": enrolled,
+        "delegated": delegated,
         "replay_summary": {
             **replay_summary,
             "counterfactual_summary": counterfactual_summary,

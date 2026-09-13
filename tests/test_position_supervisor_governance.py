@@ -550,6 +550,193 @@ def test_position_supervisor_advisories_materialize_mfe_capture_failure_template
     assert templates[generated["scope_key"]]["source"] == "generated_from_supervisor_learning"
 
 
+def test_position_supervisor_advisories_delegate_v16_switch_candidate(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    _create_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        base_ts = 1782439300.0
+        for idx in range(2):
+            position_id = f"cap_{idx}"
+            review = {
+                "position_id": position_id,
+                "entry_ts": base_ts + idx - 90,
+                "close_ts": base_ts + idx,
+                "holding_seconds": 90.0,
+                "mfe": 2.0 + idx,
+                "mae": 1.0,
+                "giveback_ratio": 0.96,
+                "profit_capture_ratio": 0.02,
+                "holding_efficiency": 0.1,
+                "time_decay_score": 0.4,
+                "thesis_status": "weakening",
+                "thesis_status_at_exit": "weakening",
+                "regime_shift": "none",
+                "close_price": 2999.0,
+                "close_reason": "broker_close",
+                "close_reason_source": "supervisor_tighten_stopout",
+                "inferred_close_supervisor": {
+                    "event_type": "supervisor_tighten",
+                    "action": "tighten",
+                    "action_reason": "profit_giveback_after_mfe",
+                },
+                "real_pnl": {"gross": -1.0, "net": -1.0, "entry_price": 3000.0},
+            }
+            record_review(
+                conn,
+                review_id=f"cap_rev_{idx}",
+                trade_id=position_id,
+                position_id=position_id,
+                pnl=-1.0,
+                mae=1.0,
+                mfe=2.0 + idx,
+                outcome_label="bad_loss",
+                failure_tags=[],
+                summary_text="capture failed",
+                review=review,
+                created_at=base_ts + idx,
+            )
+            record_position_event(
+                conn,
+                event_id=f"cap_open_{idx}",
+                position_id=position_id,
+                trade_id=position_id,
+                symbol="XAUUSD+",
+                event_type="opened",
+                event_ts=base_ts + idx - 90,
+                details={"sl": 2980.0, "tp": 3040.0},
+            )
+        record_counterfactual_event(
+            conn,
+            counterfactual_id="cf_psv_1",
+            review_id="cap_rev_0",
+            event_ts=base_ts + 2,
+            payload={
+                "counterfactual_id": "cf_psv_1",
+                "review_id": "cap_rev_0",
+                "trade_id": "cap_0",
+                "position_id": "cap_0",
+                "close_ts": base_ts + 2,
+                "close_reason": "thesis_broken",
+                "supervisor_event_type": "supervisor_close",
+                "supervisor_reason": "thesis_broken",
+                "label": "protection_too_tight",
+                "confidence": 0.72,
+                "horizons": [],
+                "evidence": {"maturity": {"governance_eligible": True}},
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    from backend.services import position_supervisor_governance as psg
+
+    monkeypatch.setattr(psg, "_supervisor_switch_delegation_enabled", lambda: True)
+
+    result = build_position_supervisor_advisories(
+        day="2026-06-26",
+        db_path=db_path,
+        materialize=True,
+    )
+
+    delegated = result["delegated"]
+    assert len(delegated) == 1
+    assert delegated[0]["status"] == "delegated", delegated
+    candidate_id = delegated[0]["candidate_id"]
+    command_id = delegated[0]["command_id"]
+    target_template_id = delegated[0]["target_template_id"]
+    assert target_template_id.startswith("position_supervisor:auto_")
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        candidate = conn.execute(
+            """SELECT source_agent, scope_type, proposal_stage, status,
+                      expected_effect_json, risk_verdict_json, lineage_json
+               FROM brain_governance_candidate WHERE candidate_id=?""",
+            (candidate_id,),
+        ).fetchone()
+        command = conn.execute(
+            """SELECT target_agent, scope_type, scope_key, action, decision, status,
+                      claim_status, candidate_id, max_apply_count
+               FROM v16_brain_command WHERE command_id=?""",
+            (command_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert candidate["source_agent"] == "v16_brain"
+    assert candidate["scope_type"] == "supervisor_template"
+    assert candidate["proposal_stage"] == "governance_ready"
+    assert candidate["status"] == "active"
+    expected_effect = json.loads(candidate["expected_effect_json"])
+    assert expected_effect["replay"]["replay_run_id"]
+    assert int(expected_effect["supervisor"]["trace_count"]) >= 1
+    assert expected_effect["source_presence"]["position_supervisor_trace"] is True
+    risk_verdict = json.loads(candidate["risk_verdict_json"])
+    assert risk_verdict["allowed"] is True
+    lineage = json.loads(candidate["lineage_json"])
+    assert lineage["mapped_action"]["target_template_id"] == target_template_id
+
+    assert command["target_agent"] == "position_supervisor_governance"
+    assert command["scope_type"] == "supervisor_template"
+    assert command["scope_key"] == "position_supervisor"
+    assert command["action"] == "switch_position_supervisor_template"
+    assert command["decision"] == "delegate"
+    assert command["claim_status"] == "available"
+    assert command["candidate_id"] == candidate_id
+    assert command["max_apply_count"] == 1
+
+    from backend.services.brain_governance_candidate_review import (
+        BrainGovernanceCandidateReviewService,
+    )
+
+    reviewed = BrainGovernanceCandidateReviewService(db_path).review_candidate(
+        candidate_id,
+        run_llm=False,
+        llm_dry_run=True,
+        persist=True,
+    )
+    review = dict(reviewed.get("review") or {})
+    assert review.get("bridge_ready") is True, review.get("evidence_gaps")
+
+    from unittest.mock import patch
+
+    from backend.services.brain_governance_candidates import (
+        BrainGovernanceCandidateService,
+        is_v16_candidate_bridge_evidence,
+    )
+
+    service = BrainGovernanceCandidateService(db_path)
+    with patch.object(
+        BrainGovernanceCandidateService,
+        "_automatic_demo_bridge_enabled",
+        staticmethod(lambda: True),
+    ):
+        submitted = service.submit_candidate_to_policy_suggestion(
+            candidate_id,
+            actor="system:autonomous_demo_nursery.brain_bridge",
+        )
+    assert submitted.get("status") == "submitted_to_policy_suggestion", submitted
+    suggestion_id = str(submitted.get("suggestion_id") or "")
+    assert suggestion_id
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        bridge_row = conn.execute(
+            "SELECT status, evidence_json FROM policy_suggestion WHERE suggestion_id=?",
+            (suggestion_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert bridge_row[0] == "proposed"
+    bridge_evidence = json.loads(bridge_row[1])
+    assert is_v16_candidate_bridge_evidence(bridge_evidence) is True
+    assert bridge_evidence["replay_summary"]["replay_run_id"]
+    assert int(bridge_evidence["counterfactual_summary"]["trace_count"]) >= 1
+
+
 def test_counterfactual_overprotection_blocks_tighter_generated_template(tmp_path):
     db_path = tmp_path / "state.db"
     _create_db(db_path)
