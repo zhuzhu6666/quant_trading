@@ -452,7 +452,7 @@ Coordinator 进入有界 Demo；`live_execute` 仍不准入。这里保留的是
 - `FactorGovernanceLightGBMService.materialize_demo_governance_advisories` 只有在对应 PIT v2 工件已晋级时，才为当前 `used_in_score=true` 的 alpha 生成 `downweight` suggestion；实际权重变化仍经过 Governor、DecisionPolicy、RiskPolicy、FactorWeightChangeService、overlay/snapshot 和 learning effect。目标失活时旧建议自动 supersede。
 - open quality 晋级后位于 RiskPolicy 与成本边际检查之后，只能额外 veto；position quality 只能在仓位监督边界内收紧或有限减仓；factor governance 只能生成治理建议。模型不得计算最终仓位、修改硬风控或绕过 RiskPolicy。
 - canonical trade_review events 会成熟 supervisor trajectory；成熟 open outcome 同步进入 `shadow_trades.factor='__portfolio_shadow__'`，用于组合级而非单因子级后验统计。
-- 因子权重单次最大变化达到 `0.10` 时，`FactorWeightChangeService` 只复用 `ReplayHarnessService.status()`：要求最近完整 `bar_replay_evidence` 为 `completed`、24 小时内、无错误、A/B，且 runtime-config/code/input-dataset/artifact 绑定完整一致；任意 freshness/preview/旧配置报告均不合格，变更停在应用账本写入之前。
+- 因子权重单次最大变化达到 `0.10` 时，`FactorWeightChangeService` 只复用 `ReplayHarnessService.status()`：要求最近完整 `bar_replay_evidence` 为 `completed`、24 小时内、无错误、A/B，且 runtime-config/code/input-dataset/artifact 绑定完整一致；任意 freshness/preview/旧配置报告均不合格，变更停在应用账本写入之前。报告分级只统计**可比**决策：live 因只存在于 live 的闸门（supervisor 再入场冷却、session 连亏冷却、学习到的入场阈值）拒绝而重算允许时，记 `live_state_gap_count`，不是 disagreement（2026-09-13 前按 disagreement 统计，使每份治理 replay 恒为 C，全部权重变更被 `blocked_by_replay` 拦住）。
 - 上述最终动作仍必须经过 `RiskPolicyService`、runtime mutation overlay/snapshot 和 learning application effect observation，不允许模型或经验直接绕过权力边界。
 
 ## 9. 冲突处理顺序

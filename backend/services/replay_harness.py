@@ -190,6 +190,32 @@ def _verdict_signature(verdict: dict[str, Any]) -> tuple[Any, str]:
     return verdict.get("allowed"), str(verdict.get("reason") or "")
 
 
+# Live verdicts denied by gates that depend on live-only state which the replay
+# cannot reconstruct: the supervisor reentry cooldown clock, the session loss
+# streak and the learned entry threshold.  A live denial from one of these is
+# missing state, not evidence that the offline recompute diverges.  Counting it
+# as a disagreement forced every governance replay to grade C (2026-09-13:
+# 39 cooldown + 5 threshold + 3 loss-streak denials out of 80 decisions), which
+# in turn left `replay_admission.allowed=false` and blocked the application of
+# every approved factor weight suggestion with `blocked_by_replay`.
+LIVE_STATE_ONLY_DENIAL_REASONS = frozenset(
+    {
+        "supervisor_reentry_cooldown",
+        "loss_cooldown_active",
+        "learning_weak_signal_threshold",
+    }
+)
+
+
+def _is_live_state_only_denial(live_sig: tuple[Any, str], replay_sig: tuple[Any, str]) -> bool:
+    """True when live denied through a live-only gate and the recompute allowed."""
+    return bool(
+        not live_sig[0]
+        and replay_sig[0]
+        and str(live_sig[1] or "") in LIVE_STATE_ONLY_DENIAL_REASONS
+    )
+
+
 def _timeframe_seconds(timeframe: str) -> int:
     tf = str(timeframe or "M5").strip().upper()
     if not tf:
@@ -2011,6 +2037,7 @@ class ReplayHarnessService:
         attempted = 0
         agreements = 0
         disagreements = 0
+        live_state_gaps = 0
         input_gaps = 0
         errors = 0
         action_counts: dict[str, int] = {}
@@ -2053,8 +2080,21 @@ class ReplayHarnessService:
                     live_sig = _verdict_signature(live_verdict)
                     replay_sig = _verdict_signature(replay_verdict)
                     agreed = live_sig == replay_sig
+                    live_state_only = (not agreed) and _is_live_state_only_denial(live_sig, replay_sig)
                     if agreed:
                         agreements += 1
+                    elif live_state_only:
+                        live_state_gaps += 1
+                        if len(gaps) < 50:
+                            gaps.append(
+                                {
+                                    "trace_id": trace_id,
+                                    "decision_id": decision_id,
+                                    "risk_action": action,
+                                    "issues": ["live_state_only_denial"],
+                                    "live_reason": live_sig[1],
+                                }
+                            )
                     else:
                         disagreements += 1
                         if len(examples) < 50:
@@ -2076,6 +2116,7 @@ class ReplayHarnessService:
                             "live": {"allowed": live_sig[0], "reason": live_sig[1]},
                             "recomputed": {"allowed": replay_sig[0], "reason": replay_sig[1]},
                             "agreed": agreed,
+                            "live_state_only": live_state_only,
                         }
                     )
                 except Exception as exc:
@@ -2103,6 +2144,7 @@ class ReplayHarnessService:
             "attempted_count": attempted,
             "agreement_count": agreements,
             "disagreement_count": disagreements,
+            "live_state_gap_count": live_state_gaps,
             "input_gap_count": input_gaps,
             "error_count": errors,
             "coverage": round(coverage, 6),
@@ -2263,6 +2305,7 @@ class ReplayHarnessService:
         attempted = 0
         agreements = 0
         disagreements = 0
+        live_state_gaps = 0
         input_gaps = 0
         errors = 0
         for row in rows:
@@ -2297,8 +2340,19 @@ class ReplayHarnessService:
                 live_sig = _verdict_signature(live_verdict)
                 replay_sig = _verdict_signature(replay_verdict)
                 agreed = live_sig == replay_sig
+                live_state_only = (not agreed) and _is_live_state_only_denial(live_sig, replay_sig)
                 if agreed:
                     agreements += 1
+                elif live_state_only:
+                    live_state_gaps += 1
+                    if len(gaps) < 50:
+                        gaps.append(
+                            {
+                                "decision_id": decision_id,
+                                "issues": ["live_state_only_denial"],
+                                "live_reason": live_sig[1],
+                            }
+                        )
                 else:
                     disagreements += 1
                     if len(examples) < 50:
@@ -2316,6 +2370,7 @@ class ReplayHarnessService:
                         "live": {"allowed": live_sig[0], "reason": live_sig[1]},
                         "recomputed": {"allowed": replay_sig[0], "reason": replay_sig[1]},
                         "agreed": agreed,
+                        "live_state_only": live_state_only,
                     }
                 )
             except Exception as exc:
@@ -2340,6 +2395,7 @@ class ReplayHarnessService:
             "attempted_count": attempted,
             "agreement_count": agreements,
             "disagreement_count": disagreements,
+            "live_state_gap_count": live_state_gaps,
             "input_gap_count": input_gaps,
             "error_count": errors,
             "coverage": round(coverage, 6),

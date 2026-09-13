@@ -5275,13 +5275,6 @@ def _apply_approved_factor_suggestions_for_demo(*, experiment_id: str, limit: in
                 }
             )
             continue
-        # A permanently blocked head item (e.g. an expansion awaiting a V16
-        # command that never arrives) must not starve ready followers: keep
-        # scanning until one applies or the rows run out.  At most
-        # action_limit applications per run, oldest first.
-        if applied_this_run >= action_limit:
-            break
-        actionable_attempted += 1
         old_weight = float(current_weights.get(factor) or 0.0)
         target_weight = float(expected.get("suggested_target_weight") or 0.0)
         if action == "downweight":
@@ -5292,16 +5285,37 @@ def _apply_approved_factor_suggestions_for_demo(*, experiment_id: str, limit: in
             if target_weight <= old_weight:
                 target_weight = old_weight * 1.05
         if old_weight <= 0.0 or abs(target_weight - old_weight) < 1e-9:
+            # A suggestion that can never move a live weight must not stay
+            # `approved` forever: the learning workload gate treats any
+            # approved-but-unapplied suggestion as pending governance, so an
+            # unactionable row silently blocks the whole maintenance loop
+            # (2026-08-31 stoch_k boost_small held weight 0.0 until the factor
+            # was quarantined).  Close it with the reason on record; a fresh
+            # suggestion is produced by the next learning cycle if the factor
+            # is re-enrolled.  It is not an actionable attempt: nothing was
+            # blocked, so the sync must not report a blocker for it.
+            note = (
+                "superseded without apply: no actionable live weight "
+                f"(old_weight={old_weight}, target_weight={target_weight})"
+            )
+            governor.set_status(suggestion_id, "superseded", note)
             items.append(
                 {
                     "suggestion_id": suggestion_id,
                     "factor": factor,
-                    "status": "skipped_non_actionable_weight",
+                    "status": "superseded_non_actionable_weight",
                     "old_weight": old_weight,
                     "target_weight": target_weight,
                 }
             )
             continue
+        # A permanently blocked head item (e.g. an expansion awaiting a V16
+        # command that never arrives) must not starve ready followers: keep
+        # scanning until one applies or the rows run out.  At most
+        # action_limit applications per run, oldest first.
+        if applied_this_run >= action_limit:
+            break
+        actionable_attempted += 1
         result = FactorWeightChangeService().execute(
             source="demo_approved_factor_suggestion",
             producer="autonomous_demo_apply_stepper",
@@ -5345,7 +5359,7 @@ def _apply_approved_factor_suggestions_for_demo(*, experiment_id: str, limit: in
         "attempted": len(items),
         "actionable_attempted": actionable_attempted,
         "superseded": sum(
-            item.get("status") == "superseded_stale_runtime_target" for item in items
+            str(item.get("status") or "").startswith("superseded") for item in items
         ),
         "applied": any(item.get("status") == "applied" for item in items),
         "items": items,

@@ -1,7 +1,7 @@
 # Active Legacy Debt Register
 
 > Status: active
-> Last verified: 2026-09-13 (闭环修复批：`dsl_auto` 积压条目重写为“因子发现闭环缺陷”——方向契约投影、轮转饿死、退役人口判据、证据时钟五处结构缺陷同批修复并留探针证据；同批删除 catalog config-only direction、轮转阶段优先级、快车道 `fresh_evidence_bars`/`updated_at` 判据与 `source=='discovered'` 人口判据。同日早前：清理批删除 5 条退出条件已满足的旧账（V16 认知层退役/schema 37-37 ok、CVaR overlay 3.5、emergency close 旧入口零调用方、live_service L 系列收口、因子治理重复重算落地），21→15 条；dsl_auto 积压复核 1,239 并修正退出预算口径；supervisor 治理链首跳缺口已补入专员产线（`0d77157d`/`6ed0d878`），首条 application 待开盘验收；CVaR 原始丢失根因未定，留观无动作)
+> Last verified: 2026-09-13 (深夜第二批：学习建议应用闭环两处修复——治理 replay 报告分级不再把 live-only 闸门拒绝（reentry cooldown/连亏冷却/学习阈值）计为 disagreement（此前 80 决策中 47 条，使报告恒为 C、全部权重变更 `blocked_by_replay`），新报告 grade A 且 admission fresh；不可执行 approved 建议（`old_weight<=0`）改为 supersede 收口；`entry_cluster` 缺 actuator 登记待裁。同日闭环修复批：`dsl_auto` 积压条目重写为“因子发现闭环缺陷”——方向契约投影、轮转饿死、退役人口判据、证据时钟五处结构缺陷同批修复并留探针证据；同批删除 catalog config-only direction、轮转阶段优先级、快车道 `fresh_evidence_bars`/`updated_at` 判据与 `source=='discovered'` 人口判据。同日早前：清理批删除 5 条退出条件已满足的旧账（V16 认知层退役/schema 37-37 ok、CVaR overlay 3.5、emergency close 旧入口零调用方、live_service L 系列收口、因子治理重复重算落地），21→15 条；dsl_auto 积压复核 1,239 并修正退出预算口径；supervisor 治理链首跳缺口已补入专员产线（`0d77157d`/`6ed0d878`），首条 application 待开盘验收；CVaR 原始丢失根因未定，留观无动作)
 > Scope: 只登记尚未退出的兼容、重复 authority、隔离数据和回归（active / migrating / monitoring / quarantined / regressed）。
 
 已完成旧债不在本文保留；Git 历史和测试是追溯依据。新增条目必须写清 canonical 路径、剩余旧路径、退出条件和验证。
@@ -59,6 +59,29 @@
   证据停滞判据（修复前 16）；轮转选择 500/1,234 且含 SHADOW 135 行（修复前 0）；`evaluate_shadow_factors(expressions=…)`
   实测 oos_bars 249。针对性测试 `tests/test_factor_catalog_governance.py`、`tests/test_factor_governance_acceleration_flow.py`、
   `tests/test_evolution_closure_fixes.py`、`tests/backend/runtime/`（55 passed）+ `pytest -m smoke`（215 passed）。
+
+### 学习建议应用闭环（approved 建议不落地；2026-09-13 定位，两处已修、一处待裁）
+
+- 状态：`monitoring`（replay 准入语义与不可执行建议收口已修；`entry_cluster` 缺 actuator 待用户裁定）
+- 事实（2026-09-13 只读）：5 条 `approved` 且 `governance_eligible=1` 的建议长期没有 `applied_mutation_id`（最早 2026-08-31 `stoch_k boost_small`），
+  且 `learning_workload_gate` 因此把每轮休市维护判为 `run_pending_governance` 而跳过。
+- 根因：
+  1. **replay 准入门不可达**：`FactorWeightChangeService._replay_admission` 要求 `ReplayHarnessService.status()` ok，而治理 replay 报告连续 6 份全为 C——
+     80 个决策的 47 个 disagreement 全是「live 因 live-only 闸门拒绝（39× `supervisor_reentry_cooldown`、5× `learning_weak_signal_threshold`、
+     3× `loss_cooldown_active`）、离线重算允许」。这是缺失 live 状态（input gap），不是重算分歧；按 disagreement 统计使 grade 恒为 C，
+     于是 rsi_14 / macd_hist / di_spread 三条降权建议每次都被 `blocked_by_replay` 拦在应用账本之前。
+  2. **不可执行建议永不收口**：`_apply_approved_factor_suggestions_for_demo` 对 `old_weight<=0`（如已隔离的 `stoch_k`）只记 `skipped_non_actionable_weight`、
+     不 supersede → 该行永久 `approved` → workload gate 永久 pending。
+  3. **（未修，待裁）** `entry_cluster`（`increase_same_direction_cooldown`）没有 actuator：stepper 的 step 与 pending 口径都不含该 scope，
+     批准后无人应用；live 侧 `_active_entry_cluster_learning_policy` 只能读到已应用控制，所以该建议永远不生效。
+- canonical：replay readiness = `ReplayHarnessService.status()`（唯一）；建议状态机 = `policy_suggestion.status` + `applied_mutation_id`；
+  应用写入者 = `FactorWeightChangeService`（因子权重）与各 scope 的 typed mutation/Coordinator。
+- 本批替换/删除：replay 比较语义（live-only 拒绝改记 `live_state_gap_count`，不进 grade；真正分歧仍记 disagreement）；非可执行建议从 `skipped` 改为 supersede 并保留原因；`superseded` 计数覆盖两类收口。
+- 现查证据（修复后）：新报告 `bar_replay_90cfb475bdb242fe` grade A、`status ok=True fresh blockers=[]`、config/code 绑定一致、risk disagreement 0 / live_state_gap 47、sub-action 0。
+- 退出：(a) 开盘后首个 stepper 周期内三条因子降权落到 `applied_mutation_id`（或按审批口径 superseded），`stoch_k` 行被 supersede；
+  (b) `entry_cluster` 要么补 actuator 并落地首个真实控制，要么明确退役该 surface。
+- 验证：`tests/test_replay_release_evidence_contract.py`、`tests/test_autonomous_learning.py`、`tests/test_governance_contract_convergence.py`、
+  `tests/test_factor_weight_change_service.py`、`tests/test_replay_gate_downstream_block.py` + `pytest -m smoke`。
 
 ### 平行 authority、重复门控和无退出兼容层
 

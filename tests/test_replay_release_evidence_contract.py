@@ -385,3 +385,42 @@ def test_v15_phase0_does_not_treat_failed_release_id_as_evidence():
 
     assert result["operationally_ready"] is False
     assert "release_run_ledger_v1" in result["evidence_gaps"]
+
+
+def test_live_state_only_denial_is_not_a_replay_disagreement():
+    """A live denial from a live-only gate is missing state, not divergence.
+
+    Counting the supervisor reentry cooldown / session loss streak / learned
+    entry threshold denials as risk-policy disagreements forced every
+    governance replay to grade C, which left replay admission blocked and
+    every approved factor weight suggestion unapplied (`blocked_by_replay`).
+    """
+    from backend.services.replay_harness import (
+        ReplayHarnessService,
+        _is_live_state_only_denial,
+        _verdict_signature,
+    )
+
+    live = _verdict_signature({"allowed": False, "reason": "supervisor_reentry_cooldown"})
+    replay = _verdict_signature({"allowed": True, "reason": "ok"})
+    assert _is_live_state_only_denial(live, replay) is True
+
+    # A genuine divergence still counts as a disagreement, in both directions.
+    assert _is_live_state_only_denial(
+        _verdict_signature({"allowed": True, "reason": "ok"}),
+        _verdict_signature({"allowed": False, "reason": "max_exposure"}),
+    ) is False
+    assert _is_live_state_only_denial(
+        _verdict_signature({"allowed": False, "reason": "unknown_live_gate"}),
+        _verdict_signature({"allowed": True, "reason": "ok"}),
+    ) is False
+
+    grade = ReplayHarnessService._p1_replay_grade(
+        "A",
+        {"bar_window_coverage": 1.0, "stale_bar_alignment_count": 0},
+        {"factor_frame_coverage": 1.0},
+        {"disagreement_count": 0, "error_count": 0},
+        {"disagreement_count": 0, "error_count": 0},
+        80,
+    )
+    assert grade == "A"

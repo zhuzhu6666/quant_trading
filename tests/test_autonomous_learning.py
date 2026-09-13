@@ -3027,6 +3027,65 @@ def test_demo_factor_apply_supersedes_missing_runtime_downweight(monkeypatch):
     assert reviewed[0][0:2] == ("ps_stale", "superseded")
 
 
+def test_demo_factor_apply_supersedes_non_actionable_weight(monkeypatch):
+    """An approved suggestion that cannot move a live weight must be closed.
+
+    The learning workload gate treats every approved-but-unapplied suggestion
+    as pending governance, so a row that can never apply (zero live weight)
+    silently blocks the whole maintenance loop.
+    """
+
+    class _Rows:
+        def fetchall(self):
+            return [
+                {
+                    "suggestion_id": "ps_flat",
+                    "scope_key": "flat_factor",
+                    "action": "boost_small",
+                    "evidence_json": json.dumps({"source_agent": "autonomous_learning"}),
+                }
+            ]
+
+    class _Conn:
+        def close(self):
+            pass
+
+    class _Config:
+        autonomy_mode = "demo_nursery"
+        factor_portfolio_weights = {"flat_factor": 0.0}
+        factor_signal_config = {}
+
+    class _Authority:
+        def evaluate_scope_write(self, *args, **kwargs):
+            return {"allowed": True}
+
+    reviewed = []
+
+    class _Governor:
+        def set_status(self, suggestion_id, status, note=""):
+            reviewed.append((suggestion_id, status, note))
+            return True
+
+    monkeypatch.setattr(al, "_connect", lambda *_args, **_kwargs: _Conn())
+    monkeypatch.setattr(al, "_execute", lambda *_args, **_kwargs: _Rows())
+    monkeypatch.setattr(rc, "shared", lambda: _Config())
+    monkeypatch.setattr(
+        "research.learning.governor.RuleEvolutionGovernor",
+        _Governor,
+    )
+    monkeypatch.setattr(
+        "backend.services.agent_authority.AgentAuthorityRegistryService",
+        lambda *args, **kwargs: _Authority(),
+    )
+
+    result = al._apply_approved_factor_suggestions_for_demo(experiment_id="exp_flat")
+
+    assert result["actionable_attempted"] == 0
+    assert result["superseded"] == 1
+    assert result["items"][0]["status"] == "superseded_non_actionable_weight"
+    assert reviewed[0][0:2] == ("ps_flat", "superseded")
+
+
 def test_demo_autonomy_respects_non_demo_mode(monkeypatch, tmp_path):
     db_path = tmp_path / "state.db"
     monkeypatch.setattr(al, "autonomy_mode", lambda: "manual")
