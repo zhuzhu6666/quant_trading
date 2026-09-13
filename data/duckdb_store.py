@@ -13,8 +13,10 @@ DuckDB 优势:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
@@ -34,6 +36,55 @@ from backend.core.db import (
 from data.external_schema import cb_release_at, cot_release_at, ensure_external_schema, etf_release_at, macro_release_at
 
 logger = logging.getLogger(__name__)
+
+_MONTHLY_BARS_NAME = re.compile(r"^bars_(\d{4})_(\d{2})\.duckdb$")
+# One monthly database holds one UTC month of bars, so a ranged read only has
+# to open the months it can touch.  Keep one month of slack on each side: a
+# row written slightly outside its month bucket must never be skipped.
+_RANGE_MONTH_MARGIN = 1
+
+
+def _month_ordinal(year: int, month: int) -> int:
+    return year * 12 + (month - 1)
+
+
+def _paths_overlapping_bar_range(
+    paths: list[Path],
+    start_ts: int | None,
+    end_ts: int | None,
+    *,
+    margin_months: int = _RANGE_MONTH_MARGIN,
+) -> list[Path]:
+    """Keep monthly bar databases whose UTC month can contain rows in range.
+
+    Walking every monthly database since 2006 costs ~15 ms per file; filtering
+    by month first takes a 7-day read from 239 opens down to 1-2.  Names that
+    do not follow ``bars_YYYY_MM.duckdb`` are always kept: an unknown file may
+    hold rows for any period and dropping it silently would lose bars.
+    """
+    if start_ts is None and end_ts is None:
+        return paths
+    low: int | None = None
+    high: int | None = None
+    if start_ts is not None:
+        start = datetime.fromtimestamp(float(start_ts), tz=timezone.utc)
+        low = _month_ordinal(start.year, start.month) - int(margin_months)
+    if end_ts is not None:
+        end = datetime.fromtimestamp(float(end_ts), tz=timezone.utc)
+        high = _month_ordinal(end.year, end.month) + int(margin_months)
+    kept: list[Path] = []
+    for path in paths:
+        match = _MONTHLY_BARS_NAME.match(path.name)
+        if match is None:
+            kept.append(path)
+            continue
+        ordinal = _month_ordinal(int(match.group(1)), int(match.group(2)))
+        if low is not None and ordinal < low:
+            continue
+        if high is not None and ordinal > high:
+            continue
+        kept.append(path)
+    return kept
 
 
 class DuckDBDataStore:
@@ -232,6 +283,8 @@ class DuckDBDataStore:
         paths = self._bar_read_paths()
         if limit is not None and start_ts is None and end_ts is None:
             paths = list(reversed(paths))
+        else:
+            paths = _paths_overlapping_bar_range(paths, start_ts, end_ts)
 
         remaining = int(limit) if limit is not None else None
         for path in paths:

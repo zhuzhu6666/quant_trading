@@ -494,6 +494,9 @@ class FactorGovernanceOrchestrator:
         self.risk_policy = risk_policy or RiskPolicyService.shared()
         self.overlay = RuntimeConfigOverlayService()
         self._admission_evidence_count_cache: dict[str, dict[str, Any]] = {}
+        # factor_id -> carries an active learning experiment; built once per
+        # cycle because the per-factor lookup rescans the application ledger.
+        self._pending_effect_index: dict[str, bool] | None = None
         self._active_audit_writer: _GovernanceCycleAuditWriter | None = None
 
     @staticmethod
@@ -540,6 +543,7 @@ class FactorGovernanceOrchestrator:
     ) -> dict[str, Any]:
         cfg = runtime_config.shared()
         self._admission_evidence_count_cache = {}
+        self._pending_effect_index = None
         profile = self._governance_profile(cfg)
         if not bool(getattr(cfg, "factor_governance_enabled", True)):
             return {"status": "disabled", "actions": []}
@@ -577,6 +581,18 @@ class FactorGovernanceOrchestrator:
                 "[governance] mem after catalog: %s catalog=%d",
                 self._mem_tag(), len(catalog),
             )
+            # One projection of the admission counts covers every candidate the
+            # tightening sweep evaluates below.  Looking each candidate up one
+            # at a time rescans the entire decision history (~7s per factor);
+            # the batch call returns the same per-factor projection for the
+            # whole catalog in ~9s.
+            self._prime_admission_evidence_count_cache(
+                [str(item.get("factor_id") or "") for item in catalog]
+            )
+            # Same for the active-experiment gate: the tightening sweep checks
+            # it once per candidate, which used to rescan the application
+            # ledger each time (~68 ms x 711 candidates).
+            self._prime_pending_effect_index()
             rollback_actions = self._rollback_failed_actions(run)
             actions.extend(rollback_actions)
             catalog_snapshot = persist_factor_catalog_snapshot(
@@ -981,6 +997,7 @@ class FactorGovernanceOrchestrator:
             return {"status": status, "error": str(exc), "actions": actions}
         finally:
             self._active_audit_writer = None
+            self._pending_effect_index = None
 
     def _execute_expansion_stages(
         self,
@@ -1866,6 +1883,21 @@ class FactorGovernanceOrchestrator:
         return True
 
     def _factor_has_pending_effect(self, factor_id: str) -> bool:
+        """True while the factor still carries an active learning experiment.
+
+        Inside a governance cycle the sweep answers this from one scoped index
+        (``_prime_pending_effect_index``); outside a cycle it reads the live
+        ledger, so callers keep read-your-writes on the application log.
+        """
+        if not factor_id:
+            return False
+        index = self._pending_effect_index
+        if index is not None:
+            return bool(index.get(str(factor_id), False))
+        return self._read_pending_effect(factor_id)
+
+    def _read_pending_effect(self, factor_id: str) -> bool:
+        """Per-factor ledger lookup used when no cycle index is primed."""
         if not factor_id:
             return False
         db_path = self.overlay.db_path
@@ -1889,6 +1921,51 @@ class FactorGovernanceOrchestrator:
             # isolated test/research store has no live authority and may treat
             # a missing ledger as no pending experiment.
             return bool(production_state)
+
+    def _prime_pending_effect_index(self) -> None:
+        """Index factor-scope experiments once for the running cycle.
+
+        The per-factor lookup rescans the whole application ledger and opens
+        its own connection (~68 ms), which the SHADOW retire sweep pays once
+        per candidate (711 candidates ≈ 43 s).  A production ledger that cannot
+        be read leaves the index unprimed so the direct lookup keeps failing
+        closed.
+        """
+        self._pending_effect_index = self._load_pending_effect_index()
+
+    def _load_pending_effect_index(self) -> dict[str, bool] | None:
+        """Return factor_id -> active experiment, or None when unreadable."""
+        db_path = self.overlay.db_path
+        production_state = is_state_db_path(db_path)
+        if not production_state and not Path(db_path).exists():
+            return {}
+        try:
+            store = LearningApplicationStore(str(db_path))
+            latest_application: dict[str, dict[str, Any]] = {}
+            for application in store.iter_applications(scope_type="factor"):
+                key = str(application.get("scope_key") or "")
+                if key and key not in latest_application:
+                    latest_application[key] = application
+            latest_effect: dict[str, dict[str, Any]] = {}
+            for effect in store.iter_effects(scope_type="factor"):
+                key = str(effect.get("scope") or "")
+                if key and key not in latest_effect:
+                    latest_effect[key] = effect
+        except Exception:
+            return None
+        index: dict[str, bool] = {}
+        for key in set(latest_application) | set(latest_effect):
+            application = latest_application.get(key) or {}
+            effect = latest_effect.get(key) or {}
+            index[key] = bool(
+                LearningExperimentAdmissionService.row_is_active(
+                    {
+                        "application_status": str(application.get("status") or ""),
+                        "effect_status": str(effect.get("status") or ""),
+                    }
+                )
+            )
+        return index
 
     def _latest_posterior_effect(
         self,

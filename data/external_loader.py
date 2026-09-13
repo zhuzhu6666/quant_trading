@@ -31,6 +31,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import time as _time
+from bisect import bisect_right, insort
+from collections import deque
 
 import numpy as np
 import pandas as pd
@@ -44,6 +46,38 @@ DEFAULT_EVENT_TIMES: dict[str, str] = {
     "CPI": "13:30",
     "PCE": "13:30",
 }
+
+
+def _trailing_rank(
+    series: pd.Series,
+    *,
+    window: int,
+    min_observations: int,
+) -> np.ndarray:
+    """Share of trailing non-NaN observations at or below each value.
+
+    Returns what ``series.iloc[i-window+1:i+1].dropna()`` then
+    ``(hist <= cur).mean()`` yields for every row, with the values counted
+    exactly.  The sliding window and sorted list keep it linear: the slice
+    version runs once per point-in-time bundle over ~6.8k rows and cost ~1.7s
+    per call, which the replay pays once per decision.
+    """
+    values = series.to_numpy(dtype=float)
+    ranks = np.full(len(values), np.nan, dtype=float)
+    recent: deque[float] = deque()
+    ordered: list[float] = []
+    for index, current in enumerate(values):
+        if not np.isnan(current):
+            insort(ordered, float(current))
+        recent.append(float(current))
+        if len(recent) > window:
+            dropped = recent.popleft()
+            if not np.isnan(dropped):
+                ordered.remove(dropped)
+        if np.isnan(current) or len(ordered) < min_observations:
+            continue
+        ranks[index] = bisect_right(ordered, float(current)) / len(ordered)
+    return ranks
 
 
 class ExternalDataLoader:
@@ -423,15 +457,9 @@ class ExternalDataLoader:
         ry = out["real_yield_10y"]
         out["real_yield_chg_5d"] = ry.diff(5) * 100.0
         out["real_yield_chg"] = out["real_yield_chg_5d"]
-        ranks: list[float] = []
-        for i in range(len(ry)):
-            hist = ry.iloc[max(0, i - 1260 + 1): i + 1].dropna()
-            cur = ry.iloc[i]
-            if pd.isna(cur) or len(hist) < 60:
-                ranks.append(np.nan)
-            else:
-                ranks.append(float((hist <= cur).mean()))
-        out["real_yield_pct_rank_5y"] = ranks
+        out["real_yield_pct_rank_5y"] = _trailing_rank(
+            ry, window=1260, min_observations=60
+        )
         out["real_yield_pct_rank"] = out["real_yield_pct_rank_5y"]
         return out
 
