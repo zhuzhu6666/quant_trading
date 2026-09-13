@@ -90,6 +90,7 @@ learning worker
 ### 当前工程收口
 
 - [planning/production-autonomy-repair-optimization-plan.md](planning/production-autonomy-repair-optimization-plan.md)：唯一活动实施计划；
+- [planning/systematic-research-roadmap.md](planning/systematic-research-roadmap.md)：研究领域活动计划（因子 × 持仓监督 × 复盘归因的系统研究路线与合作地图）；
 - [phased-repair-rollout-status.md](phased-repair-rollout-status.md)：当前阶段、运行姿态和未完成证据；
 - [phased-repair-acceptance-matrix.md](phased-repair-acceptance-matrix.md)：可重复验收门和发布证据。
 
