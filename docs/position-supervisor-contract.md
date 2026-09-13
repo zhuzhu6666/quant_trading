@@ -729,7 +729,7 @@ no-op/cooldown/失败/superseded。至少保留 `template_id/template_version/te
 后续扩展优先顺序建议为：
 
 1. 为每个新仓位绑定可恢复的监督策略快照
-2. 增加真实 `tighten / reduce / timeout` 样本覆盖
+2. 增加真实 `tighten / timeout` 样本覆盖（`reduce` 已按用户决定永久关闭，不作为验收项）
 3. 提升 canonical `counterfactual_review` event 的标签置信度并闭合 application/effect
 4. 增加受控 rollback / gray-release 展示
 5. `time_decay_score / thesis_status / regime_shift`

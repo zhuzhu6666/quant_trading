@@ -47,7 +47,7 @@ learning worker
 ## 3. 当前主线
 
 1. 继续收集 `open → protection → close → deal sync → review → sample` 完整生命周期证据；S7.6 终验标准已达成并持续。当前计数、skip/rejected 双轨（full/1.0 与 full/0.35）和 supervisor trace 分级只在 [phased-repair-rollout-status.md](phased-repair-rollout-status.md) 现查。
-2. 监督治理闭环：需要 `≥10 笔 matured` 监督样本与 `tighten` 真实执行覆盖，模板治理闭环才会自动进有界 Demo；此前 `position_supervisor_selection.v1` 保持无候选/`off` 是安全基线，开启不需要人工改模式开关。门槛与关闭项见 [legacy-debt-register.md](legacy-debt-register.md)。
+2. 监督治理闭环：`≥10 笔 governance_eligible matured` 监督样本已满足，`tighten` 覆盖门 2026-09-08 已退役；当前缺口是候选链（advisory→V16 bridge→Coordinator，见 [legacy-debt-register.md](legacy-debt-register.md)），`position_supervisor_selection.v1` 保持无候选/`off` 是安全基线，开启不需要人工改模式开关。
 3. 对 `legacy-debt-register.md` 中仍处于 `active`、`migrating` 或 `monitoring` 的路径逐条收集退出证据，同批删除旧 authority、旧重算、旧字段回退或无意义 wrapper；所有过渡态/双记录模式须登记退役条件与期限，不允许无限期双轨。
 4. 不扩展新的 V16 调度层，不新增 Brain、PosteriorService、FactorCardV2、表、线程、调度器或平行生产 writer；治理底盘已领先策略内容，工程精力优先投向 alpha 研究与真实闭环数据积累，暂停新增基础设施。
 5. 按前端重构文档继续完成真实接口和个人本机桌面验收；公网浏览器静态入口已退出并验证根路径 404，

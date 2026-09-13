@@ -154,7 +154,7 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 
 ## 8. 当前未完成证据（2026-08-31 13:42 复核）
 
-2026-08-31 只读：`quant-backend`、`quant-learning-worker`、`quant-job-worker` 均 `active`，三项静态 flags 均加载 `live_safety_plane_v2_mode=enforce`、`governance_mutation_coordinator_v2_mode=enforce`、`pg_job_queue_v2_enabled=true`；worker capability 的八类 handler 与 30 秒心跳门通过；schema current/minimum version 均为 33；`factor_health` smoke job 已完成且无 error。本批未执行人工 broker mutation；受控重启期间由既有 live auto-resume 完成恢复并产生当前持仓，执行意图当前无未决项。
+2026-08-31 只读：`quant-backend`、`quant-learning-worker`、`quant-job-worker` 均 `active`，三项静态 flags 均加载 `live_safety_plane_v2_mode=enforce`、`governance_mutation_coordinator_v2_mode=enforce`、`pg_job_queue_v2_enabled=true`；worker capability 的八类 handler 与 30 秒心跳门通过；schema current/minimum version 均为 33；`factor_health` smoke job 已完成且无 error。本批未执行人工 broker mutation；受控重启期间由既有 live auto-resume 完成恢复并产生当前持仓，执行意图当前无未决项。（历史快照：“八类 handler”口径已于 2026-09-06 `99c9c327` 删除 backtest/tuning/ab_test 后变为五类，本行保留为当时证据。）
 
 已满足：
 - P1 runtime acceptance ✅（价格合同 + lifecycle 闭环）

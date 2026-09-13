@@ -22,7 +22,7 @@
 ## 1. 归因质量（R1 输入）
 
 **结果标签（357 复盘）**：`bad_loss` **50.1%**、`good_loss` 21.8%、`good_win` 18.8%、`lucky_win` 9.2%。
-一半交易被判为"坏亏损"——入场质量或退出质量是系统的主要亏损来源。
+一半交易被判为“坏亏损”（`bad_loss` 是入场侧标签，解读修正见 §6）。
 
 **污染与责任域**：
 - `system_issue_context.contaminates_learning=true` 占 **35.3%**（126 事件；去重后 **59 对唯一 (review, trade)**，
@@ -48,7 +48,7 @@
   trade_review_outcome matured 241、shadow_open_decision matured 243。
 
 **MFE 捕捉率（pnl/MFE，n=322）**：p25=0.0、**median=0.0**、p75=0.996——双峰分布，
-一半以上交易 MFE 完全回吐，顶部四分之一几乎吃满。退出行为呈"要么满吃要么全吐"的二元形态。
+一半以上交易 MFE 完全回吐，顶部四分之一几乎吃满（该比值与输赢分布高度同义，独立解读见 §6）。
 
 ## 2. 监督有效性（R2 输入）
 
@@ -70,9 +70,10 @@
 close（85.7%）**——**tighten 从未执行过、reduce 未出现在执行 trace**；触发原因 98.1% 是
 `thesis_broken`；模板分布 default.v1 80.8% / profit_protection.v1 19.2%。
 
-**解释力**：单一 close 路径 + thesis_broken 单一触发 + MFE 双峰 + 43.4% 过紧后验，四者互为印证——
-监督器目前是"一刀切止损器"，缺少渐进保护中间态（tighten/profit-protection 路径没有真实执行覆盖，
-这正是监督治理进有界 Demo 门槛所要求的证据）。
+**解释力**：单一 close 路径 + thesis_broken 单一触发 + 43.4% 过紧后验，三者指向同一结论——监督器目前是
+“一刀切止损器”，缺少渐进保护中间态（tighten/profit-protection 路径没有真实执行覆盖）。注意：`pnl/mfe` 捕获率
+双峰主要是输赢分布本身（亏损恒 ≤0），不作为独立证据；`tighten` 也**不是**进有界 Demo 的门槛——该门禁已于
+2026-09-08 `ca23580e` 退役为“close 经 keep→supportive”，实际缺口是候选链（见 §6）。
 
 ## 3. 因子贡献（R3 输入）
 
@@ -120,3 +121,33 @@ binding hash mismatch 率的持续观察。
 | 5 | 贡献表 entry/hold/exit 分解从未投产 | 写入口 = 09-12 17:10 删除的 guess-attribution 产线；现仅存读取方（market_regime / factor_cards / factor_counter_evidence / api/learning）与污染注记 UPDATE | 当前零写入、表冻结。**遗留项（转 R1）**：market_regime 的因子 regime-fit 聚合与 counter_evidence 仍消费冻结数据，"当前 regime 适合度"判据部分基于已停产的归因——需在 R1 评估是否切到 `factor_attribution.v1` 口径 |
 
 复查方法：数据侧（按月分布 / 去重 / 与修复 commit 时间线对齐）+ 代码侧（全仓 grep 产生口 + payload 合同字段断代）。
+
+## 6. 责任域补充测量与解读修正（2026-09-13）
+
+R0 方法第 1 项（entry/hold/exit/data_quality/parameter 的亏损责任占比）未在 §1–§5 交付；本节用 review payload
+顶层字段（`entry_quality/hold_quality/exit_quality/failure_tags`，357 笔）补齐，并修正三处解读。
+
+**质量中位（亏损 257 / 盈利 100）**：
+
+| 口径 | 亏损 | 盈利 |
+|---|---|---|
+| entry_quality | 0.506 | 0.697 |
+| hold_quality | 0.366 | 0.941 |
+| exit_quality | **0.25（构造性地板）** | 0.95 |
+| MFE>0（曾浮盈） | 222/257（86.4%） | — |
+| 利润回吐标签（`profit_giveback`/`alpha_correct_but_capture_failed`） | 139（54.1%） | 12 |
+| 入场侧标签（`weak_entry_loss`/`avoidable_loss`/`factor_conflict`/`overweight_noise_factor` 并集） | 181（70.4%） | — |
+
+亏损交叉表（入场侧标签 × 退出侧标签）：仅入场 84（32.7%）、仅退出 42（16.3%）、两者 97（37.7%）、两者都无 34（13.2%）。
+35 笔 `mfe<=0` 亏损的 entry_quality 中位 0.328（最低），是“从未走对”的入场失败。
+
+**解读修正**：
+1. `exit_quality = 0.25 + 0.7×capture`，亏损单 capture 恒 0 → 该字段对亏损无区分度；亏损的退出侧证据只能看
+   `profit_giveback`/MFE>0，不能引用 exit_quality 分位。
+2. `bad_loss`（179 笔）是入场侧标签（`review_contract.classify_4label_outcome`：`conviction≥0.55 or avoidable_entry`），
+   不携带退出责任；§1“入场质量或退出质量是系统的主要亏损来源”应读作“两者都在场”（重叠 37.7%）。
+3. `pnl/mfe` 捕获率双峰不作为独立证据；独立的退出侧事实是 222/257 曾浮盈与 139 笔利润回吐标签。
+
+**监督治理链定位（供 R2/R4）**：样本门已过（55 笔 governance_eligible matured）；32 条治理合格 advisory 建议全部
+`superseded`（缺 V16 bridge 证据）；`position_supervisor_template` application/effect=0；`f16024bb` 删除 medium-impact
+产线后该 scope 无候选生产者；`selection.v1 candidate_count=0`。详见 `docs/legacy-debt-register.md` 监督治理条目。
