@@ -1,7 +1,7 @@
 # System Source Of Truth
 
 > Status: active
-> Last verified: 2026-09-13 (状态 schema 引用核对至 v37；V16 认知层退役与扩张载体改为 posterior fingerprint；其余主体最后复核仍为 2026-08-28 f2eb9c9；2026-09-13 修正持久化研究任务为五类口径、parity 学习样本 `causal_level=replay` 与 factor lineage schema)
+> Last verified: 2026-09-13 (状态 schema 引用核对至 v37；V16 认知层退役与扩张载体改为 posterior fingerprint；其余主体最后复核仍为 2026-08-28 f2eb9c9；2026-09-13 修正持久化研究任务为五类口径、parity 学习样本 `causal_level=replay` 与 factor lineage schema；2026-09-13 补记 `entry_cluster` control surface 补 actuator 后的 canonical 写入链与 live 消费口径)
 > Scope: authoritative sources for runtime state, configuration, governance, data, and frontend contracts.
 
 本文回答一个问题：当文档、注释、接口、数据库和历史理解冲突时，到底以哪里为准。
@@ -160,7 +160,7 @@ Coordinator 进入有界 Demo；`live_execute` 仍不准入。这里保留的是
 - canonical_v2 training_sample_row 的 eligibility version/fingerprint/weight 是 durable fact；entry cluster、event window、entry quality materializer 只消费当前 version 且 weight > 0 的样本。`PolicySuggester` 的 factor experience 路径也必须按同一 eligibility contract 写 `experience_pattern_stats` 的 raw/effective/weighted 指标，并把当前 version/fingerprint 原样绑定到 `policy_suggestion`；不完整、污染或 lineage 缺失的经验只增加 raw 观察，不得生成可执行建议。Governor 遇到 suggestion/stats fingerprint 缺失或不一致必须拒绝，不能回退使用 raw count。
 - entry-quality 的 `weak_signal` 控制只允许当前治理版本、当前 eligibility fingerprint、成熟且无污染的独立 position 样本生成；旧的无资格、旧版本或 fingerprint 失效建议保留审计并转为 `invalidated_evidence`，不能占用当前 scope/action。建议 ID 必须包含 eligibility fingerprint。
 - `activate_entry_quality_control` 是 `entry_quality` control surface 的 typed domain-only mutation：Coordinator 不伪造 RuntimeConfig 字段，在同一事务内提交 suggestion=`applied`、`learning_application_log/effect` 和 committed mutation。Demo 每周期最多应用一个 weak-signal 控制；激活属于风险收紧，删除、降低阈值或放宽仍按扩张经过 V16、DecisionPolicy 与 RiskPolicy。live loader 只读取 `applied + committed mutation`。
-- 污染证据导致的 entry-quality 回滚必须复用同一 Coordinator：以原 mutation 的 `rollback_json` 和 predecessor lineage 为唯一目标，在一个事务内终止污染 suggestion/application/effect、恢复 predecessor suggestion 并绑定新的 committed risk-tightening mutation，随后将原 mutation 标为 `rolled_back`。禁止直接改 RuntimeConfig，也禁止只改状态后退回静态基础阈值。
+- `activate_entry_cluster_control` 是 `entry_cluster` control surface 的 typed domain-only mutation：批准的同向开仓冷却建议（`increase_same_direction_cooldown`）由 `EntryClusterGovernanceService` 应用——RiskPolicy(`activate_entry_cluster_control`) → Coordinator 同一事务提交 suggestion=`applied`、`learning_application_log/effect`（observing）和 committed mutation；domain diff 落在 `same_direction_cooldown` 叶子上使其分类为 `risk_tightening`，走收紧豁免（不需 V16 claim）。live 只读 committed 控制：`risk.policy_service` 用 `entry_cluster_learning_policy.min_same_direction_open_count` 触发 `learning_same_direction_cooldown`（时间戳未知时 `entry_cluster_timestamp_unknown` fail-closed），bucket 阈值由 `live_learning_policy.entry_cluster_threshold` 单一解码。2026-09-13 前该 surface 只有消费面没有写入者，批准的建议永不生效。
 - disabled/DEAD 因子应被 engine、compositor、AWE、readiness 一致排除。
 - 因子组合体检只能产生 `issues` 和 `recommendations`；默认 `build()` / readiness 使用 Factor Catalog `used_in_score=true` 统计当前实际参与评分的 alpha，显式传入 runtime config 的测试/分析可保留配置全量口径；后续 pruning、降权、禁用或晋升仍必须走 `DecisionPolicy`、`RiskPolicyService`、runtime overlay/snapshot 和治理审计。
 - 因子裁剪候选只能作为多智能体复盘、反证和治理提案草稿输入；任何实际权重变更仍必须先形成受控提案，再经过 `DecisionPolicy` 和 `RiskPolicyService`。没有近期 canonical factor_snapshots 参与记录、或近期平均贡献接近 0 的因子不能占用 demo governance 桥接名额；`dsl_auto` / `pca` 若不在 runtime config 但曾在真实决策快照中以非零权重/贡献参与，只能保留 snapshot-only research 观察，不能物化/晋级为可执行 downweight 候选。已经从当前 RuntimeConfig 权重事实源移除或权重为 0 的因子，其旧候选和旧建议必须 supersede，不能借历史权重重新启用。

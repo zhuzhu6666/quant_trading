@@ -1,7 +1,7 @@
 # 全项目分期修复发布状态
 
 > Status: active current-state index
-> Last verified: 2026-09-10 (文档收敛批：删除已完成批次流水；补入 2026-09-10 只读核对；§3.3 无背书 applied 行查证结案、用户裁定不处置)
+> Last verified: 2026-09-14 (entry_cluster 补 actuator 批：stepper/runner/Coordinator/live 路由与单一 bucket 解码，生产落地首条同向冷却控制并做 live 路径 A/B 探针；第三次受控重启后重取 replay 准入；§3.7 更新)
 > Scope: current phase, last verified evidence, next batch, and unresolved runtime acceptance
 > Source of truth: 运行状态必须在每次实施前重新读取服务、PostgreSQL、`runtime_kv`、日志和 broker
 
@@ -19,15 +19,15 @@
 
 静态发布开关（`config/settings.yaml[features]`，operator-only、随重启生效）：`live_safety_plane_v2_mode=enforce`、`governance_mutation_coordinator_v2_mode=enforce`；PG job queue 状态见 [legacy-debt-register.md](legacy-debt-register.md) 与 SSoT §2。
 
-## 2. 最近一次只读核对（2026-09-13 23:53 第二次受控重启）
+## 2. 最近一次只读核对（2026-09-14 00:21 第三次受控重启）
 
-- **服务**：`quant-backend` active since 2026-09-13 23:53:30、`quant-learning-worker` active since 2026-09-13 23:53:22、`quant-job-worker` active since 2026-09-13 18:47:50（`systemctl is-active` / `ActiveEnterTimestamp`）。
-- **状态库**：migration ledger `current 37 / minimum 37 / ok / mismatches 0`（`scripts/state_schema_migrate.py --check`）；`0036_execution_provenance`、`0037_recovery_attribution_integrity` 已应用。
-- **代码**：两批提交——①因子发现闭环修复（`factor_catalog` 方向契约投影、`evolution_orchestrator` 单一轮转选择 + 表达式求值入口、`factor_governance_orchestrator` 证据时钟退役判据）；②学习建议应用闭环修复（`replay_harness` live-only 拒绝改记 `live_state_gap_count`、`autonomous_learning` 不可执行建议 supersede 收口）。进程已随 23:53 受控重启加载，启动无 warning。
-- **readiness**：`backend_readiness_snapshot.v1` `ok=true`、`blockers=[]`、`ready_for_live_execution=false`（休市 `market_session_blocks_open`）；`runtime_health_projection.v1` ctrader connected、无持仓。
-- **本批验证**：`tests/backend/runtime/` 55 passed、因子治理/目录/进化套件、`tests/test_autonomous_learning.py`、`tests/test_replay_*` 等 100+ passed、`pytest -m smoke` 215 passed；migration/OpenAPI 无变更。
-- **replay 准入**：新报告 `bar_replay_90cfb475bdb242fe` grade A，`ReplayHarnessService.status()` `ok=True / fresh / blockers=[]`（修复前恒 C 且 `blocked_by_replay`）。
-- 本批另修正 `docs/README.md` migration ledger v35→v37 与 SSoT header 的 schema 核对版本。
+- **服务**：`quant-backend` active since 2026-09-14 00:21:26、`quant-learning-worker` active since 2026-09-14 00:21:17、`quant-job-worker` active since 2026-09-13 18:47:50（`systemctl is-active` / `ActiveEnterTimestamp`；`NRestarts=0`）。
+- **状态库**：migration ledger `current 37 / minimum 37 / ok / mismatches 0`（`scripts/state_schema_migrate.py --check`）。
+- **代码**：`entry_cluster` 补 actuator——`backend/services/entry_cluster_governance.py`（新增）、stepper step `apply_entry_cluster_control` 与 pending 口径、runner allowlist、Coordinator 对 `same_direction_cooldown` 的收紧分类、`risk.policy_service` 的 `activate_entry_cluster_control` 路由、`live_learning_policy.entry_cluster_threshold` 单一解码。进程已随 00:21 受控重启加载。
+- **readiness**：`backend_readiness_snapshot.v1` `ok=true`、`blockers=[]`、`ready_for_live_execution=false`（休市 `market_session_blocks_open`）；`runtime_health_projection.v1` ctrader connected、无持仓；`market_session_status=closed_confirmed`（休市窗口 open 预期被阻断）。
+- **本批验证**：`tests/test_entry_cluster_governance.py` 2 passed、`tests/test_governance_mutation_coordinator.py` + `tests/test_entry_quality_governance.py` + `tests/test_governance_runtime_controls.py` + `tests/test_governance_control_plans.py` + `tests/backend/runtime/` 113 passed、`pytest -m smoke` 215 passed；migration/OpenAPI 无变更。
+- **生产应用与 live 消费**：`psg_entry_cluster_7a728f32…` → mutation `gmut_5c0b3daa78954bc39be13698d17f8544`（`committed` / `risk_class=risk_tightening` / `control_surface=entry_cluster` / `scope_key=same_direction_ge_1`）、`learning_application_log` `observing`；live 投影 `active=True min_same_direction_open_count=1`；只读探针 A/B：同一方向第 2 笔在首笔后 30s 时 `learning_same_direction_cooldown`（`blocked_by=entry_cluster_learning_policy`），关闭该控制后同一上下文 `ok`。
+- **replay 准入**：代码变更后重取报告 `bar_replay_88ffb032b1044dfb` grade A（decisions 80 / matched 80 / bar-window mismatch 12），`ReplayHarnessService.status()` `ok=True / fresh / blockers=[]`、config/code 绑定一致、`risk_policy_recompute` disagreement 0 / live_state_gap 47，与上一份报告指标逐项相同。
 
 ## 3. 未完成 / 待复核证据
 
@@ -43,7 +43,7 @@
 5. **索引/契约欠账**：依赖 `factor_name` / `lifecycle_stage` / `runtime_admission` 的 `idx_factor_lifecycle_*` 索引仍未建（0028 已补齐这些列，当前仅 `idx_factor_lifecycle_unique_name` 存在）；是否补建按后续性能证据决定。
 5. **每次发布门重取**：process-loaded flags、PID、fingerprint、release preflight 证据；当前源码绑定的 execution/safety fault matrix attestation；Safety 在 enforce 姿态下的连续性与完整 broker position lifecycle 证据。
 6. **因子发现闭环（2026-09-13 修复批，待开盘验证）**：五处结构缺陷已修（方向契约投影、轮转饿死、退役人口判据、证据时钟、评估覆盖），积压 1,239 未动；只读探针：CANARY_50 样本 6/25 `_promotion_evidence` eligible、退役扫描 711/1,896 行可达、轮转选择含 SHADOW 135 行（修复前分别为 0、16、0）。首条 `prepare/activate` 或 `retire` 动作与退出条件见 [legacy-debt-register.md](legacy-debt-register.md)。
-7. **学习建议应用闭环（2026-09-13 修复批，待开盘验证）**：replay 报告分级改为只统计可比决策（live-only 闸门拒绝记 `live_state_gap_count`），新报告 grade A 且 admission fresh；不可执行 approved 建议改 supersede 收口；`entry_cluster` 缺 actuator 待用户裁定。开盘后首个 stepper 周期应把 rsi_14 / macd_hist / di_spread 降权落账、supersede `stoch_k` 行，并让 `learning_workload_gate` 不再恒 pending。详见 [legacy-debt-register.md](legacy-debt-register.md)。
+7. **学习建议应用闭环（2026-09-13 修复批，待开盘验证）**：replay 报告分级改为只统计可比决策（live-only 闸门拒绝记 `live_state_gap_count`），新报告 grade A 且 admission fresh；不可执行 approved 建议改 supersede 收口；`entry_cluster` 已补 actuator（stepper step `apply_entry_cluster_control` + runner allowlist + Coordinator 对 `same_direction_cooldown` 的收紧分类），生产验证首条控制 `psg_entry_cluster_7a728f32…` → `gmut_5c0b3daa78954bc39be13698d17f8544`（`committed`/`risk_tightening`）、application `observing`、live 投影 `active=True min_same_direction_open_count=1`。开盘后首个 stepper 周期应把 rsi_14 / macd_hist / di_spread 降权落账、supersede `stoch_k` 行，并让 `learning_workload_gate` 不再恒 pending；届时确认 `learning_same_direction_cooldown` 在真实重开仓路径上触发。详见 [legacy-debt-register.md](legacy-debt-register.md)。
 
 上述证据不能由单测、历史快照或 readiness 替代；未满足前不推进后续静态开关，也不把 readiness ready、单次 bridge 或单次 effect 解释为自治毕业。
 

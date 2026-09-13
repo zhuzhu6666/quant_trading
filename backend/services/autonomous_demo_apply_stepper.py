@@ -20,6 +20,7 @@ from backend.services.autonomous_learning import (
     ensure_autonomous_learning_tables,
     materialize_entry_quality_governance_suggestions,
 )
+from backend.services.entry_cluster_governance import EntryClusterGovernanceService
 from backend.services.entry_quality_governance import EntryQualityGovernanceService
 from backend.services.evolution_ledger import finish_evolution_run, start_evolution_run
 from backend.services.governance_eligibility import GOVERNANCE_ELIGIBILITY_VERSION
@@ -39,6 +40,7 @@ class AutonomousDemoApplyStepper:
         "governor_review",
         "resolve_conflicts",
         "apply_entry_quality_control",
+        "apply_entry_cluster_control",
         "sync_factor_weights",
         "apply_parameter_templates",
         "release_parameter_candidates",
@@ -56,6 +58,7 @@ class AutonomousDemoApplyStepper:
         "governor_review": 5,
         "resolve_conflicts": 20,
         "apply_entry_quality_control": 1,
+        "apply_entry_cluster_control": 1,
         "sync_factor_weights": 1,
         "apply_parameter_templates": 2,
         "release_parameter_candidates": 1,
@@ -474,6 +477,9 @@ class AutonomousDemoApplyStepper:
             "apply_entry_quality_control": lambda: self._run_apply_entry_quality_control(
                 run_id=run_id
             ),
+            "apply_entry_cluster_control": lambda: self._run_apply_entry_cluster_control(
+                run_id=run_id
+            ),
             "sync_factor_weights": lambda: _sync_factor_weights_for_demo(experiment_id=experiment_id),
             "apply_parameter_templates": lambda: _auto_apply_parameter_template_suggestions(
                 db_path=self.db_path,
@@ -532,6 +538,17 @@ class AutonomousDemoApplyStepper:
             actor="system:autonomous_demo_apply_stepper.entry_quality",
         )
         return {**result, "v16_delegation": delegated}
+
+    def _run_apply_entry_cluster_control(self, *, run_id: str) -> dict[str, Any]:
+        # Activating a cluster cooldown control is risk-tightening, which the
+        # governance classifier exempts from the V16 claim (same exemption the
+        # coordinator applies to rollback/reduce/tighten actions), so this step
+        # needs no separate delegation.
+        service = EntryClusterGovernanceService(self.db_path)
+        return service.apply_next_cooldown(
+            run_id=run_id,
+            actor="system:autonomous_demo_apply_stepper.entry_cluster",
+        )
 
     def _factor_pruning_service(self):
         from backend.services.factor_pruning_governance import FactorPruningGovernanceService
@@ -791,6 +808,15 @@ class AutonomousDemoApplyStepper:
                     "AND COALESCE(governance_eligibility_fingerprint, '') <> ''",
                 ),
                 "apply_parameter_templates": self._count_policy(conn, "status='approved' AND scope_type='parameter_template' AND action='switch_parameter_template'"),
+                "apply_entry_cluster_control": self._count_policy(
+                    conn,
+                    "status='approved' AND scope_type='entry_cluster' "
+                    "AND action='increase_same_direction_cooldown' "
+                    "AND governance_eligible=1 "
+                    f"AND governance_eligibility_version='{GOVERNANCE_ELIGIBILITY_VERSION}' "
+                    "AND COALESCE(governance_eligibility_fingerprint, '') <> '' "
+                    "AND COALESCE(applied_mutation_id, '') = ''",
+                ),
                 "release_parameter_candidates": self._count_table(conn, "parameter_template_release_candidate", "status IN ('pending_review','approved')"),
                 "apply_supervisor_templates": self._count_policy(conn, "status='approved' AND scope_type='position_supervisor_template'"),
                 "rollback_supervisor_templates": self._count_supervisor_rollbacks(conn),

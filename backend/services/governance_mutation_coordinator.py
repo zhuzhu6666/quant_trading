@@ -403,6 +403,10 @@ def classify_governance_risk(before: Mapping[str, Any], target: Mapping[str, Any
                     "min_health",
                     "min_abs_signal_score",
                     "strong_signal_override",
+                    # Raising an entry-cluster same-direction cooldown control
+                    # (learning control activation, 0 -> 1) only removes
+                    # clustered entries, so an increase is tightening.
+                    "same_direction_cooldown",
                 )
             )
             if decreasing_tightens:

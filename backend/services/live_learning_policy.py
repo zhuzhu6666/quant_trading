@@ -68,13 +68,32 @@ def _common(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def entry_cluster_threshold(scope_key: str) -> int:
+    """Same-direction cluster size encoded by an ``entry_cluster`` scope key.
+
+    ``same_direction_ge_3`` -> 3, ``_ge_2`` -> 2, ``_ge_1`` -> 1.  An unknown
+    bucket returns 0 so callers treat it as "no applicable control" instead of
+    guessing a threshold; this is the single decoder shared by the live
+    projection and the governance writer.
+    """
+    key = str(scope_key or "").strip()
+    prefix = "same_direction_ge_"
+    if not key.startswith(prefix):
+        return 0
+    try:
+        value = int(key[len(prefix):])
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
 def _project_control(kind: str, row: Any) -> dict[str, Any]:
     item = dict(row)
     evidence = _evidence(item.get("evidence_json") or {})
     projected = _common(item)
     if kind == "entry_cluster":
         scope_key = projected["scope_key"]
-        threshold = 3 if scope_key.endswith("_ge_3") else 2 if scope_key.endswith("_ge_2") else 1
+        threshold = entry_cluster_threshold(scope_key)
         projected.update(
             min_same_direction_open_count=threshold,
             evidence={

@@ -35,6 +35,7 @@ INCIDENT_CONTROLLED_ACTIONS = {
     "retire_factor",
     "enable_context_policy",
     "activate_entry_quality_control",
+    "activate_entry_cluster_control",
     "rollback_factor_action",
     "switch_position_supervisor_template",
     "switch_position_supervisor_selection_mode",
@@ -54,6 +55,7 @@ LIVE_AUTONOMY_EXPANSION_ACTIONS = {
     "retire_factor",
     "enable_context_policy",
     "activate_entry_quality_control",
+    "activate_entry_cluster_control",
     "switch_position_supervisor_template",
     "switch_position_supervisor_selection_mode",
     "promote_factor",
@@ -141,6 +143,8 @@ class RiskPolicyService:
         if action == "enable_context_policy":
             return self._evaluate_governor_action(action, context, "allow_context_policy")
         if action == "activate_entry_quality_control":
+            return self._evaluate_governor_action(action, context, "allow_context_policy")
+        if action == "activate_entry_cluster_control":
             return self._evaluate_governor_action(action, context, "allow_context_policy")
         if action == "rollback_factor_action":
             return self._evaluate_governor_action(action, context, "allow_factor_rollback")
