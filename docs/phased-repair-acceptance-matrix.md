@@ -220,3 +220,18 @@ Safety enforce 之前必须满足二选一：连续 24 小时 broker-confirmed �
 本批定向测试基线：fail-closed 收口批 438 passed（learning_eligible/deal_sync/recovery/review/readiness/lifecycle/canonical_v2/position_supervisor 系列）。修复声明本身于 2026-09-12 经实库只读核对成立（`scripts/state_schema_migrate.py --check` current 37 / minimum 37 / ok）。
 
 仍未完成（依赖前置条件，见 planning 文档）：批 8（M5-D5 回滚回路压测、M1-D3 影子因子治理、M1-D5-A 健康度接线 shadow）、L1-3 监督器复盘闭环、M5-D6 悬空建议收敛、X2 三层 Kelly 新鲜度。
+
+## 12. supervisor 模板治理首跳修复（2026-09-13，commit 0d77157d）
+
+| 合同 | 权威 / 针对性证据 |
+|---|---|
+| bridge 候选生产者（首跳） | `V16BrainOrchestratorService.delegate_supervisor_template_switch`：从 advisory 证据重建 single-control 契约 + replay/counterfactual 证据 + RiskPolicy candidate-stage 裁决，确定性产出 `brain_governance_candidate`（`source_agent=v16_brain`、`proposal_stage=governance_ready`）+ `delegate` 命令；同 target 守卫与幂等；不 apply |
+| 专员自发命令 | `position_supervisor_governance` materialize 在 demo 姿态下把最高置信度治理合格 switch 建议交给 delegate（每周期 1 条，响应新增 `delegated`）；advisory 建议写入保留为 observation-only 证据记录 |
+| candidate 阶段风控语义 | `risk/policy_service._evaluate_position_supervisor_template_switch` 新增显式 `candidate_stage` 上下文（apply 仍要求 `approved`）；模板校验绑定调用方 `db_path`，不传时保持旧行为 |
+| 主路径测试 | `tests/test_position_supervisor_governance.py::test_position_supervisor_advisories_delegate_v16_switch_candidate`：fixture → candidate+command → review `bridge_ready=True` → nursery bridge 产出带 V16 bridge 证据的建议（`is_v16_candidate_bridge_evidence` True） |
+
+定向验证：197 passed（supervisor governance / v16 orchestrator / binding / autonomous learning / tests/risk）+ smoke 215 passed；pyflakes 零新增告警；无 schema 变更、无新表/线程/调度器、API 签名未变。
+
+运行态验收（2026-09-13 17:37 受控重启，用户授权）：只读预检 schema `current 37 / minimum 37 / ok`、`live.loop.desired_state enabled=true`、`last_shutdown` graceful/ownership_released/recovery_required=false、无未平仓。重启 backend 17:37:41 → workers 17:39:11/17:39:19，三服务 active；release_identity `head=0d77157d`、`clean=true`；overlay restored `hash=57ad9b8c`、无 `governance_authority` 闩；loop 自持久化状态自动恢复（generation `fe0fb383`）；`backend_readiness_snapshot.v1` `blockers=[]`；`runtime_health_projection.v1` live_loop running / ctrader connected；`/api/health` ok、公网 200；三服务 journal `ERROR|Traceback` 计数均为 0；`system_health` degraded score=0.90 errors=1 为闭市 tick 探针姿态（与重启前同值同 detail）。
+
+仍未完成运行证据：首个 `advisory → candidate → command → bridge suggestion → application` 链未观测到——闭市周期在 watermark 当前时直接跳过（17:42 `autonomous_learning` 0.2s skip）；最近带证据的回放日是 2026-09-10（1 条 eligible counterfactual / 1 capture failure），在闭市日人工回放历史日会真实触发模板切换，故不做；等待下一个带新事实的周期（开盘后）验收。

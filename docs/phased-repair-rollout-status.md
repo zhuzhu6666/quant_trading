@@ -30,7 +30,7 @@
 ## 3. 未完成 / 待复核证据
 
 1. **完整生命周期闭环**：S7.6 终验标准已达成并持续（基准 `trade_review_outcome full/1.0 46`，`2026-08-21 → 08-28`）；后续只做常态观察，当前计数、skip/rejected 双轨与 supervisor trace 分级以现查 `canonical_v2` 为准。
-2. **监督治理闭环**：`supervisor_execution_trace` 合格成熟样本 ≥10 笔已满足（2026-09-13 现查 55 笔）；`tighten` 覆盖门 2026-09-08 `ca23580e` 已退役（`close` 经 keep→supportive 计入干预证据；`reduce` 永久关闭）。剩余缺口是候选链：32 条治理合格 advisory 建议因缺 V16 bridge 证据全部 `superseded`，`position_supervisor_template` 的 application/effect=0，`f16024bb`（09-11）删除 medium-impact 产线后该 scope 无候选生产者；退出条件见 [legacy-debt-register.md](legacy-debt-register.md)。
+2. **监督治理闭环**：`supervisor_execution_trace` 合格成熟样本 ≥10 笔已满足（2026-09-13 现查 55 笔）；`tighten` 覆盖门 2026-09-08 `ca23580e` 已退役（`close` 经 keep→supportive 计入干预证据；`reduce` 永久关闭）。剩余缺口是候选链：32 条治理合格 advisory 建议因缺 V16 bridge 证据全部 `superseded`，`position_supervisor_template` 的 application/effect=0，`f16024bb`（09-11）删除 medium-impact 产线后该 scope 无候选生产者；2026-09-13 `0d77157d` 已补入专员产线（`delegate_supervisor_template_switch` 产出 candidate+`delegate` 命令），首条 application 待运行态验收；退出条件见 [legacy-debt-register.md](legacy-debt-register.md)。
 3. **`policy_suggestion` 无背书 applied 行（2026-09-10 查证结案，用户裁定不处置）**：112 条 `status=applied` 且 `applied_mutation_id=''`（factor `update_weight` 102、`rollback_factor_action` 10，`created_at` 2026-08-23 20:31 → 09-08 12:43），全部 `governance_eligible=0`。查证结论：
    - 该族行只可能由 `FactorGovernanceOrchestrator._record_policy_suggestion()` 写出（`reason` / `review_note` / `fgv` 前缀全仓唯一），但**当前代码写不出**：它在算 `suggestion_id` 之前就对 `applied` 早退（探针实测 `applied → ''` 且 0 次 DB 调用，`proposed` 才触达 DB；该守卫自 2026-07-19 起存在于该文件全部 67 个修订）。
    - `suggestion_id` 是 `(writer, scope, key, action, evidence, status)` 的 sha256，按库里 evidence 重算只与 `status='applied'` 命中 → 写入发生在带守卫之前的代码变体（工作区长期未提交，历史差异不可复原）。
